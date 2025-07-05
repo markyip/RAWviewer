@@ -12,6 +12,7 @@ RAWviewer is a lightweight desktop application for quickly viewing and navigatin
 
 ## ✨ Features
 - ✅ Wide RAW format support (Canon, Nikon, Sony, Fujifilm, Panasonic, Olympus, and more)
+- 💡 Despite the name *RAWviewer*, the application also supports standard image formats such as **JPEG**, **JPG**, and **HEIF**.
 - ⚡ Fast image loading with rawpy and numpy
 - 🎹 Keyboard shortcuts for speed and efficiency
 - 🔗 File association for opening RAWs directly via double-click
