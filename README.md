@@ -11,7 +11,7 @@
 
 
 
-A fast, modern image viewer for Windows, built with PyQt6. It supports advanced zooming, panning, and direct file association, allowing RAW files to be opened with a double-click.
+A fast, modern cross-platform image viewer for Windows and macOS, built with PyQt6. It supports advanced zooming, panning, and direct file association, allowing RAW files to be opened with a double-click.
 
 ## Description
 RAWviewer is a lightweight desktop application for quickly viewing and navigating image files from a wide range of cameras. It is designed for photographers who need a simple, fast, and user-friendly tool to browse, zoom, and inspect images without the overhead of a full photo editor.
@@ -39,10 +39,18 @@ RAWviewer is a lightweight desktop application for quickly viewing and navigatin
 - Storage: ~200MB for app; additional space for image files
 - Display: Minimum 1024×768 resolution
 
-### Option 1: Download Executable (Windows - Recommended)
+### macOS (Supported)
+- OS: macOS 11.0 (Big Sur) or later
+- Architecture: Intel x64 or Apple Silicon (M1/M2/M3)
+- RAM: 4GB minimum (8GB recommended)
+- Storage: ~200MB for app; additional space for image files
+
+### Option 1: Download Executable (Recommended)
 1. Download the latest release from the [Releases Page](https://github.com/markyip/RAWviewer/releases/latest)
 2. Extract the ZIP file
-3. Run `RAWviewer.exe`
+3. Run:
+   - **Windows**: `RAWviewer.exe`
+   - **macOS**: Double-click `RAWviewer.app` or run `./RAWviewer`
 
 ### Option 2: Install from Source
 1. Clone or download this repository
@@ -50,6 +58,7 @@ RAWviewer is a lightweight desktop application for quickly viewing and navigatin
    ```bash
    python -m venv .venv
    .venv\Scripts\activate    # Windows
+   source .venv/bin/activate  # macOS/Linux
    ```
 3. Install dependencies:
    ```bash
@@ -62,14 +71,31 @@ RAWviewer is a lightweight desktop application for quickly viewing and navigatin
 
 ---
 
-## 🛠️ Building the Executable (Windows)
+## 🛠️ Building the Executable
 
+### Windows
 1. Ensure your virtual environment is activated.
 2. Run:
    ```bash
    python build.py
    ```
 3. The standalone executable will appear at `dist/RAWviewer.exe`.
+
+### macOS
+1. Run the build script:
+   ```bash
+   ./build_macos.sh
+   ```
+   Or manually:
+   ```bash
+   python3 -m venv rawviewer_env
+   source rawviewer_env/bin/activate
+   pip install PyQt6 rawpy send2trash pyinstaller natsort exifread
+   python build.py
+   ```
+2. The executable will appear at:
+   - **App Bundle**: `dist/RAWviewer.app` (double-click to run)
+   - **Command Line**: `dist/RAWviewer`
 
 ---
 
