@@ -77,11 +77,15 @@ RAWviewer is a lightweight desktop application for quickly viewing and navigatin
   - `Ctrl + O`: Open file
   - `Space` / Double-click: Toggle zoom
   - `←` / `→`: Previous / Next image
+  - `↓` (Down arrow): Move current image to "Discard" folder (non-destructive)
   - `Delete`: Delete current image
   - `Ctrl + Q`: Quit app
+> 💡 The "Discard" folder allows you to filter out unwanted images for later review, without permanently deleting them.
+> 
+> 🔍 Zoom in with Space to center the view, or double-click any spot to zoom in right where you clicked.
+> 
+> ↔️ Switch images with the arrow keys even while zoomed in — no need to reset the zoom.
 
-- **Film Strip View**
-  - Toggle thumbnail bar via status bar button
 
 ---
 
