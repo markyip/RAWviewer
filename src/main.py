@@ -59,6 +59,9 @@ class RAWImageViewer(QMainWindow):
         self.image_files = []  # List of all image files in current folder
         self.current_file_index = -1  # Index of current file in the list
         self.current_file_path = None  # Path of currently loaded file
+        self.thumbnail_cache = {}  # Cache for thumbnails
+        self.film_strip_visible = False
+        self.thumbnail_threads = []  # Track running thumbnail threads
         
         self.init_ui()
     
@@ -66,17 +69,7 @@ class RAWImageViewer(QMainWindow):
     def init_ui(self):
         """Initialize the user interface"""
         self.setWindowTitle('RAW Image Viewer')
-        # Platform-agnostic icon loading
-        icon_path = None
-        if platform.system() == 'Windows':
-            icon_path = os.path.join(os.path.dirname(__file__), '..', 'appicon.ico')
-        elif platform.system() == 'Darwin':
-            icon_path = os.path.join(os.path.dirname(__file__), '..', 'appicon.icns')
-        else:
-            icon_path = os.path.join(os.path.dirname(__file__), '..', 'appicon.ico')  # fallback
-        icon_path = os.path.abspath(icon_path)
-        if os.path.exists(icon_path):
-            self.setWindowIcon(QIcon(icon_path))
+        self.setWindowIcon(QIcon(r"D:\Development\RAWviewer\appicon.ico"))
         self.setGeometry(100, 100, 1200, 800)
         self.setMinimumSize(800, 600)
         self.setAcceptDrops(True)
@@ -486,31 +479,8 @@ class RAWImageViewer(QMainWindow):
         
         # Update status
         self.status_bar.showMessage(f"Loading {filename}...")
-        self.image_label.setText("Processing image...\nPlease wait...")
+        self.image_label.setText("Processing RAW image...\nPlease wait...")
         
-        # Determine file type by extension
-        ext = os.path.splitext(file_path)[1].lower()
-        standard_image_exts = ['.jpg', '.jpeg', '.heif']
-        if ext in standard_image_exts:
-            # Load standard image formats directly
-            image = QImage(file_path)
-            if image.isNull():
-                self.show_error("Image Load Error", f"Could not load image: {filename}\nThis format may not be supported by your Qt installation.")
-                return
-            pixmap = QPixmap.fromImage(image)
-            self.current_pixmap = pixmap
-            self.fit_to_window = True
-            self.current_zoom_level = 1.0
-            self.zoom_center_point = None
-            self.scale_image_to_fit()
-            # Scan folder for all image files after successful loading
-            if self.current_file_path:
-                self.scan_folder_for_images(self.current_file_path)
-            # Update status bar with comprehensive information
-            self.update_status_bar(pixmap.width(), pixmap.height())
-            self.setFocus()
-            return
-        # Otherwise, treat as RAW file
         # Start RAW processing in separate thread
         self.raw_processor = RAWProcessor(file_path)
         self.raw_processor.image_processed.connect(self.on_image_processed)
@@ -598,7 +568,7 @@ class RAWImageViewer(QMainWindow):
             self.navigate_to_next_image()
             event.accept()  # Mark event as handled
         elif event.key() == Qt.Key.Key_Down:
-            self.discard_current_image()
+            self.move_current_image_to_discard()
             event.accept()  # Mark event as handled
         elif event.key() == Qt.Key.Key_Up:
             # Prevent up arrow from moving the scroll area
@@ -1066,25 +1036,33 @@ class RAWImageViewer(QMainWindow):
                 # Ignore up/down arrows to prevent panning
                 return True
         return super().eventFilter(obj, event)
-    
-    def discard_current_image(self):
-        """Move the current image to a 'Discard' folder and load the next image."""
+
+    def move_current_image_to_discard(self):
+        """Move the current image to a 'Discard' folder in the same directory"""
         if not self.current_file_path or not os.path.exists(self.current_file_path):
-            self.show_error("Discard Error", "No image file to discard.")
+            self.show_error("Discard Error", "No image file to move.")
             return
-
-        discard_dir = os.path.join(os.path.dirname(self.current_file_path), "Discard")
-        os.makedirs(discard_dir, exist_ok=True)
-        target_path = os.path.join(discard_dir, os.path.basename(self.current_file_path))
-
         try:
+            folder_path = os.path.dirname(self.current_file_path)
+            discard_folder = os.path.join(folder_path, "Discard")
+            os.makedirs(discard_folder, exist_ok=True)
+            filename = os.path.basename(self.current_file_path)
+            target_path = os.path.join(discard_folder, filename)
+            # If file with same name exists in Discard, add a suffix
+            base, ext = os.path.splitext(filename)
+            counter = 1
+            while os.path.exists(target_path):
+                target_path = os.path.join(discard_folder, f"{base}_discarded_{counter}{ext}")
+                counter += 1
             os.rename(self.current_file_path, target_path)
+            # Remove from image files list
             if self.current_file_path in self.image_files:
                 self.image_files.remove(self.current_file_path)
-            self.status_bar.showMessage(f"Discarded: {os.path.basename(self.current_file_path)}")
+            self.status_bar.showMessage(f"Moved to Discard: {filename}")
             self.handle_post_deletion_navigation()
         except Exception as e:
-            self.show_error("Discard Error", f"Could not move file:\n{str(e)}")
+            error_msg = f"Could not move file to Discard folder:\n{str(e)}"
+            self.show_error("Discard Error", error_msg)
 
 
 def main():
