@@ -3,7 +3,7 @@ import os
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QLabel, QFileDialog,
                              QMessageBox, QScrollArea, QSizePolicy, QHBoxLayout, QPushButton, QFrame)
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QPoint, QEvent
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QPoint, QEvent, QSettings
 from PyQt6.QtGui import (QPixmap, QImage, QAction, QKeySequence,
                          QDragEnterEvent, QDropEvent, QCursor, QIcon)
 import rawpy
@@ -147,9 +147,12 @@ class RAWImageViewer(QMainWindow):
         shortcuts_action.triggered.connect(self.show_keyboard_shortcuts)
         help_menu.addAction(shortcuts_action)
     
+    def get_settings(self):
+        return QSettings("markyip", "RAWviewer")
+
     def open_file(self):
-        """Open file dialog and load RAW image"""
-        # Define RAW file filters
+        settings = self.get_settings()
+        last_dir = settings.value("last_opened_dir", "")
         file_filters = (
             "Image Files (*.cr2 *.cr3 *.nef *.arw *.dng *.orf *.rw2 "
             "*.pef *.srw *.x3f *.raf *.3fr *.fff *.iiq *.cap *.erf "
@@ -175,16 +178,16 @@ class RAWImageViewer(QMainWindow):
             "Leica RAW (*.rwl);;"
             "All Files (*)"
         )
-        
         file_path, _ = QFileDialog.getOpenFileName(
             self,
             "Open RAW Image",
-            "",
+            last_dir,  # Use last opened directory
             file_filters
         )
-        
         if file_path:
             self.load_raw_image(file_path)
+            # Save the directory for next time
+            settings.setValue("last_opened_dir", os.path.dirname(file_path))
     
     def show_keyboard_shortcuts(self):
         """Show keyboard shortcuts dialog"""
