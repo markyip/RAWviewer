@@ -1,8 +1,14 @@
 # RAWviewer
 
-![Version](https://img.shields.io/badge/version-0.2.0-blue) 
+<p align="center">
+  <img src="appicon.png" alt="RAWviewer Icon" width="500">
+</p>
+
+  
+![Version](https://img.shields.io/badge/version-0.2.0-blue)
 ![Downloads](https://img.shields.io/github/downloads/markyip/RAWviewer/total) 
 ![License](https://img.shields.io/badge/license-MIT-green)
+
 
 
 A fast, modern image viewer for Windows, built with PyQt6. It supports advanced zooming, panning, and direct file association, allowing RAW files to be opened with a double-click.
@@ -44,7 +50,6 @@ RAWviewer is a lightweight desktop application for quickly viewing and navigatin
    ```bash
    python -m venv .venv
    .venv\Scripts\activate    # Windows
-   source .venv/bin/activate # macOS/Linux
    ```
 3. Install dependencies:
    ```bash
@@ -128,7 +133,7 @@ RAWviewer is a lightweight desktop application for quickly viewing and navigatin
 - **Casio**: `.nrw`
 - **Leica**: `.rwl`
 
-###🖼️ Standard Formats:
+### 🖼️ Standard Formats:
 - **JPEG / JPG
 - **HEIF / HEIC (if supported by the system's image codecs)
 
