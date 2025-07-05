@@ -5,7 +5,7 @@
 ![License](https://img.shields.io/badge/license-MIT-green)
 
 
-A fast, modern RAW image viewer for Windows, built with PyQt6. It supports advanced zooming, panning, and direct file association, allowing RAW files to be opened with a double-click.
+A fast, modern image viewer for Windows, built with PyQt6. It supports advanced zooming, panning, and direct file association, allowing RAW files to be opened with a double-click.
 
 ## Description
 RAWviewer is a lightweight desktop application for quickly viewing and navigating image files from a wide range of cameras. It is designed for photographers who need a simple, fast, and user-friendly tool to browse, zoom, and inspect images without the overhead of a full photo editor.
@@ -89,16 +89,16 @@ RAWviewer is a lightweight desktop application for quickly viewing and navigatin
 
 ---
 
-## 📁 Set as Default App for RAW Files
+## 📁 Set as Default App for Image Files
 
-1. Right-click a RAW file (e.g., `.cr2`, `.arw`)
+1. Right-click a Image file (e.g., `.cr2`, `.arw`)
 2. Select **Open with → Choose another app**
 3. Browse to `RAWviewer.exe`
 4. Enable **Always use this app to open .___ files**
 
 ---
 
-## 📸 Supported RAW Formats
+## 📸 Supported Image Formats
 
 ### ✅ Primary Support (Extensively Tested)
 - **Canon**: `.cr2`, `.cr3`
@@ -120,6 +120,10 @@ RAWviewer is a lightweight desktop application for quickly viewing and navigatin
 - **Leaf**: `.mos`
 - **Casio**: `.nrw`
 - **Leica**: `.rwl`
+
+###🖼️ Standard Formats:
+- **JPEG / JPG
+- **HEIF / HEIC (if supported by the system’s image codecs)
 
 ---
 
