@@ -1,7 +1,9 @@
 # RAWviewer
+
 <p align="center">
-  <img src="app_icon.png" alt="RAWviewer Icon" width="500">
+  <img src="appicon.png" alt="RAWviewer Icon" width="500">
 </p>
+
 ![Version](https://img.shields.io/badge/version-0.2.0-blue) 
 ![Downloads](https://img.shields.io/github/downloads/markyip/RAWviewer/total) 
 ![License](https://img.shields.io/badge/license-MIT-green)
