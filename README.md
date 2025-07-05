@@ -4,9 +4,11 @@
   <img src="appicon.png" alt="RAWviewer Icon" width="500">
 </p>
 
-![Version](https://img.shields.io/badge/version-0.2.0-blue) 
+  
+![Version](https://img.shields.io/badge/version-0.2.0-blue)
 ![Downloads](https://img.shields.io/github/downloads/markyip/RAWviewer/total) 
 ![License](https://img.shields.io/badge/license-MIT-green)
+
 
 
 A fast, modern image viewer for Windows, built with PyQt6. It supports advanced zooming, panning, and direct file association, allowing RAW files to be opened with a double-click.
