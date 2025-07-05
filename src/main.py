@@ -19,19 +19,23 @@ import platform
 
 class RAWProcessor(QThread):
     """Thread for processing RAW images to avoid UI blocking"""
-    image_processed = pyqtSignal(np.ndarray)
+    image_processed = pyqtSignal(object)  # Accepts np.ndarray or None
     error_occurred = pyqtSignal(str)
     
-    def __init__(self, file_path):
+    def __init__(self, file_path, is_raw):
         super().__init__()
         self.file_path = file_path
+        self.is_raw = is_raw
     
     def run(self):
         try:
-            with rawpy.imread(self.file_path) as raw:
-                # Process RAW image with default settings
-                rgb_image = raw.postprocess()
+            if self.is_raw:
+                with rawpy.imread(self.file_path) as raw:
+                    rgb_image = raw.postprocess()
                 self.image_processed.emit(rgb_image)
+            else:
+                # For non-RAW, emit None (handled in main thread)
+                self.image_processed.emit(None)
         except Exception as e:
             self.error_occurred.emit(str(e))
 
@@ -469,81 +473,78 @@ class RAWImageViewer(QMainWindow):
             error_msg = f"The file {file_path} does not exist."
             self.show_error("File not found", error_msg)
             return
-        
-        # Store current file path
         self.current_file_path = file_path
-        
-        # Update window title with filename
         filename = os.path.basename(file_path)
         self.setWindowTitle(f"RAW Image Viewer - {filename}")
-        
-        # Update status
         self.status_bar.showMessage(f"Loading {filename}...")
-        self.image_label.setText("Processing RAW image...\nPlease wait...")
-        
-        # Start RAW processing in separate thread
-        self.raw_processor = RAWProcessor(file_path)
+        self.image_label.setText("Processing image...\nPlease wait...")
+        ext = os.path.splitext(file_path)[1].lower()
+        raw_exts = [
+            '.cr2', '.cr3', '.nef', '.arw', '.dng', '.orf', '.rw2', '.pef',
+            '.srw', '.x3f', '.raf', '.3fr', '.fff', '.iiq', '.cap', '.erf',
+            '.mef', '.mos', '.nrw', '.rwl', '.srf'
+        ]
+        is_raw = ext in raw_exts
+        self._is_loading_raw = is_raw  # Track for on_image_processed
+        self.raw_processor = RAWProcessor(file_path, is_raw)
         self.raw_processor.image_processed.connect(self.on_image_processed)
         self.raw_processor.error_occurred.connect(self.on_processing_error)
         self.raw_processor.start()
-        self.setFocus()  # Ensure main window gets focus for keyboard events
+        self.setFocus()
     
     def on_image_processed(self, rgb_image):
         print("[DEBUG] on_image_processed called (restoration check)")
         try:
-            # Convert numpy array to QImage
-            height, width, channels = rgb_image.shape
-            bytes_per_line = channels * width
-            
-            # Convert to QImage
-            q_image = QImage(rgb_image.data, width, height, bytes_per_line,
-                           QImage.Format.Format_RGB888)
-            
-            # Convert to QPixmap
-            pixmap = QPixmap.fromImage(q_image)
-            self.current_pixmap = pixmap
-            
-            # Initialize zoom state - maintain current zoom if navigating
-            if not hasattr(self, '_maintain_zoom_on_navigation'):
-                # First image load or not navigating - reset to fit-to-window
+            if rgb_image is None and not getattr(self, '_is_loading_raw', False):
+                # Non-RAW: load with QPixmap
+                pixmap = QPixmap(self.current_file_path)
+                if pixmap.isNull():
+                    self.show_error("Display Error", "Could not load image file.")
+                    return
+                self.current_pixmap = pixmap
                 self.fit_to_window = True
                 self.current_zoom_level = 1.0
                 self.zoom_center_point = None
                 self.scale_image_to_fit()
+                if self.current_file_path:
+                    self.scan_folder_for_images(self.current_file_path)
+                self.update_status_bar(pixmap.width(), pixmap.height())
             else:
-                # Navigation - maintain zoom state
-                if self.fit_to_window:
+                # RAW: existing logic
+                height, width, channels = rgb_image.shape
+                bytes_per_line = channels * width
+                q_image = QImage(rgb_image.data, width, height, bytes_per_line, QImage.Format.Format_RGB888)
+                pixmap = QPixmap.fromImage(q_image)
+                self.current_pixmap = pixmap
+                if not hasattr(self, '_maintain_zoom_on_navigation'):
+                    self.fit_to_window = True
+                    self.current_zoom_level = 1.0
+                    self.zoom_center_point = None
                     self.scale_image_to_fit()
                 else:
+                    if self.fit_to_window:
+                        self.scale_image_to_fit()
+                    else:
+                        self.apply_zoom_and_pan()
+                    delattr(self, '_maintain_zoom_on_navigation')
+                if self.current_file_path:
+                    self.scan_folder_for_images(self.current_file_path)
+                self.update_status_bar(width, height)
+                if hasattr(self, '_restore_zoom_center') and self._restore_zoom_center is not None:
+                    self.fit_to_window = False
+                    self.current_zoom_level = self._restore_zoom_level or 1.0
+                    self.zoom_center_point = self._restore_zoom_center
+                    self.start_scroll_x = self.scroll_area.horizontalScrollBar().value()
+                    self.start_scroll_y = self.scroll_area.verticalScrollBar().value()
                     self.apply_zoom_and_pan()
-                # Reset the flag
-                delattr(self, '_maintain_zoom_on_navigation')
-            
-            # Scan folder for all image files after successful loading
-            if self.current_file_path:
-                self.scan_folder_for_images(self.current_file_path)
-            
-            # Update status bar with comprehensive information
-            self.update_status_bar(width, height)
-            
-            # Restore zoom/pan state if available
-            if hasattr(self, '_restore_zoom_center') and self._restore_zoom_center is not None:
-                self.fit_to_window = False
-                self.current_zoom_level = self._restore_zoom_level or 1.0
-                self.zoom_center_point = self._restore_zoom_center
-                self.start_scroll_x = self.scroll_area.horizontalScrollBar().value()
-                self.start_scroll_y = self.scroll_area.verticalScrollBar().value()
-                self.apply_zoom_and_pan()
-                # Clean up
-                self._restore_zoom_center = None
-                self._restore_zoom_level = None
-                self._restore_start_scroll_x = None
-                self._restore_start_scroll_y = None
-            
+                    self._restore_zoom_center = None
+                    self._restore_zoom_level = None
+                    self._restore_start_scroll_x = None
+                    self._restore_start_scroll_y = None
         except Exception as e:
             error_msg = f"Error displaying image: {str(e)}"
             self.show_error("Display Error", error_msg)
-        self.setFocus()  # Ensure main window gets focus for keyboard events
+        self.setFocus()
     
     def on_processing_error(self, error_message):
         """Handle RAW processing errors"""

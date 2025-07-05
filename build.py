@@ -8,6 +8,8 @@ import os
 import subprocess
 import platform
 from pathlib import Path
+import sys
+import PyQt6
 
 def run_command(cmd):
     result = subprocess.run(cmd, shell=True)
@@ -34,8 +36,21 @@ def main():
         icon_arg = ''
     else:
         icon_arg = f'--icon "{icon_path}"'
+    # Find PyQt6 imageformats plugin path
+    pyqt_path = os.path.dirname(PyQt6.__file__)
+    if platform.system() == 'Windows':
+        imageformats_src = os.path.join(pyqt_path, 'Qt6', 'plugins', 'imageformats')
+        add_data_sep = ';'
+    elif platform.system() == 'Darwin':
+        imageformats_src = os.path.join(pyqt_path, 'Qt6', 'plugins', 'imageformats')
+        add_data_sep = ':'
+    else:
+        imageformats_src = os.path.join(pyqt_path, 'Qt6', 'plugins', 'imageformats')
+        add_data_sep = ':'
+    # Add --add-data for imageformats
+    add_data_arg = f'--add-data "{imageformats_src}{add_data_sep}imageformats"'
     # Minimal PyInstaller command
-    build_command = f'pyinstaller --onefile --windowed {icon_arg} src/main.py --name RAWviewer'
+    build_command = f'pyinstaller --onefile --windowed {icon_arg} {add_data_arg} src/main.py --name RAWviewer'
     print(f"Running: {build_command}")
     if not run_command(build_command):
         print("[ERROR] Build failed.")
