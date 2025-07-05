@@ -121,7 +121,7 @@ RAWviewer is a lightweight desktop application for quickly viewing and navigatin
 - **Casio**: `.nrw`
 - **Leica**: `.rwl`
 
-###🖼️ Standard Formats:
+### 🖼️ Standard Formats:
 - **JPEG / JPG
 - **HEIF / HEIC (if supported by the system’s image codecs)
 
