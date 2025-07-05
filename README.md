@@ -139,11 +139,11 @@ RAWviewer is a lightweight desktop application for quickly viewing and navigatin
   - `↓` (Down arrow): Move current image to "Discard" folder (non-destructive)
   - `Delete`: Delete current image
   - `Cmd + Q`: Quit app
-> 💡 The "Discard" folder allows you to filter out unwanted images for later review, without permanently deleting them.
-> 
-> 🔍 Zoom in with Space to center the view, or double-click any spot to zoom in right where you clicked.
-> 
-> ↔️ Switch images with the arrow keys even while zoomed in — no need to reset the zoom.
+💡 The "Discard" folder allows you to filter out unwanted images for later review, without permanently deleting them.
+
+🔍 Zoom in with Space to center the view, or double-click any spot to zoom in right where you clicked.
+
+↔️ Switch images with the arrow keys even while zoomed in — no need to reset the zoom.
 
 
 ---
