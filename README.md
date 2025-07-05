@@ -4,6 +4,7 @@
 ![Downloads](https://img.shields.io/github/downloads/markyip/RAWviewer/total) 
 ![License](https://img.shields.io/badge/license-MIT-green)
 
+
 A fast, modern RAW image viewer for Windows, built with PyQt6. Supports advanced zoom, pan, film strip (thumbnail bar), and direct file association for double-click opening of RAW files.
 
 ## Description
@@ -30,7 +31,8 @@ RAWviewer is a lightweight desktop application for quickly viewing and navigatin
 - Display: Minimum 1024×768 resolution
 
 ### Option 1: Download Executable (Windows - Recommended)
-1. Download the latest release from the [Releases Page](https://github.com/yourusername/rawviewer/releases)
+1. Download the latest release from the [Releases Page](https://github.com/markyip/RAWviewer/releases/latest)
+)
 2. Extract the ZIP file
 3. Run `RAWviewer.exe`
 
