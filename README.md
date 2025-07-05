@@ -48,7 +48,6 @@ RAWviewer is a lightweight desktop application for quickly viewing and navigatin
    ```bash
    python -m venv .venv
    .venv\Scripts\activate    # Windows
-   source .venv/bin/activate # macOS/Linux
    ```
 3. Install dependencies:
    ```bash
