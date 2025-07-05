@@ -66,7 +66,17 @@ class RAWImageViewer(QMainWindow):
     def init_ui(self):
         """Initialize the user interface"""
         self.setWindowTitle('RAW Image Viewer')
-        self.setWindowIcon(QIcon(r"D:\Development\RAWviewer\appicon.ico"))
+        # Platform-agnostic icon loading
+        icon_path = None
+        if platform.system() == 'Windows':
+            icon_path = os.path.join(os.path.dirname(__file__), '..', 'appicon.ico')
+        elif platform.system() == 'Darwin':
+            icon_path = os.path.join(os.path.dirname(__file__), '..', 'appicon.icns')
+        else:
+            icon_path = os.path.join(os.path.dirname(__file__), '..', 'appicon.ico')  # fallback
+        icon_path = os.path.abspath(icon_path)
+        if os.path.exists(icon_path):
+            self.setWindowIcon(QIcon(icon_path))
         self.setGeometry(100, 100, 1200, 800)
         self.setMinimumSize(800, 600)
         self.setAcceptDrops(True)
