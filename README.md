@@ -87,6 +87,7 @@ RAWviewer is a lightweight desktop application for quickly viewing and navigatin
 
 - **Keyboard Shortcuts**
   - `Ctrl + O`: Open file
+  - `Ctrl + Shift + O`: Open folder
   - `Space` / Double-click: Toggle zoom
   - `←` / `→`: Previous / Next image
   - `↓` (Down arrow): Move current image to "Discard" folder (non-destructive)
