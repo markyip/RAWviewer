@@ -1,0 +1,8 @@
+PyQt6
+rawpy
+send2trash
+pyinstaller
+natsort
+psutil
+numpy
+exifread
