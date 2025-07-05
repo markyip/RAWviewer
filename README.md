@@ -32,7 +32,6 @@ RAWviewer is a lightweight desktop application for quickly viewing and navigatin
 
 ### Option 1: Download Executable (Windows - Recommended)
 1. Download the latest release from the [Releases Page](https://github.com/markyip/RAWviewer/releases/latest)
-)
 2. Extract the ZIP file
 3. Run `RAWviewer.exe`
 
