@@ -115,8 +115,6 @@ RAWviewer is a lightweight desktop application for quickly viewing and navigatin
 - **Casio**: `.nrw`
 - **Leica**: `.rwl`
 
-> For full compatibility details, see [`SUPPORTED_FORMATS.md`](SUPPORTED_FORMATS.md)
-
 ---
 
 ## 📜 License
