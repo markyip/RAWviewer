@@ -1,7 +1,7 @@
 # RAWviewer
 
 ![Version](https://img.shields.io/badge/version-0.2.0-blue) 
-![Downloads](https://img.shields.io/github/downloads/markyip/Rawviewer/total) 
+![Downloads](https://img.shields.io/github/downloads/markyip/RAWviewer/total) 
 ![License](https://img.shields.io/badge/license-MIT-green)
 
 A fast, modern RAW image viewer for Windows, built with PyQt6. Supports advanced zoom, pan, film strip (thumbnail bar), and direct file association for double-click opening of RAW files.
