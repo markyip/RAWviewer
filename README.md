@@ -20,6 +20,8 @@ RAWviewer is a lightweight desktop application for quickly viewing and navigatin
 - 📦 Portable executable – No Python installation required for users
 - 🗑️ Safe image deletion (with confirmation)
 - 🧵 Threaded processing for smooth, non-blocking UI
+- 📂 **Open entire folders**: Browse and view all supported images in a selected folder, starting from the first image.
+- ⏸️ **Session resume**: Automatically restores your last viewed folder and image when you reopen the app (if they still exist).
 
 ---
 
@@ -72,6 +74,11 @@ RAWviewer is a lightweight desktop application for quickly viewing and navigatin
   - File → Open
   - Drag & drop
   - Double-click from File Explorer (after setting default association)
+- **Open a folder of images**:
+  - File → Open Folder (or `Ctrl + Shift + O`)
+  - The app will display the first image in the folder and allow navigation with arrow keys.
+- **Session resume**:
+  - When you close and reopen RAWviewer, it will automatically restore the last folder and image you were viewing (as long as they still exist).
 
 - **Keyboard Shortcuts**
   - `Ctrl + O`: Open file
@@ -123,7 +130,7 @@ RAWviewer is a lightweight desktop application for quickly viewing and navigatin
 
 ###🖼️ Standard Formats:
 - **JPEG / JPG
-- **HEIF / HEIC (if supported by the system’s image codecs)
+- **HEIF / HEIC (if supported by the system's image codecs)
 
 ---
 

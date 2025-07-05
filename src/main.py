@@ -68,6 +68,10 @@ class RAWImageViewer(QMainWindow):
         self.thumbnail_threads = []  # Track running thumbnail threads
         
         self.init_ui()
+        # Try to restore previous session
+        if not self.restore_session_state():
+            # If no session, show default message
+            pass
     
     
     def init_ui(self):
@@ -130,6 +134,13 @@ class RAWImageViewer(QMainWindow):
         open_action.triggered.connect(self.open_file)
         file_menu.addAction(open_action)
         
+        # Open Folder action
+        open_folder_action = QAction('Open Folder', self)
+        open_folder_action.setShortcut('Ctrl+Shift+O')
+        open_folder_action.setStatusTip('Open a folder of images')
+        open_folder_action.triggered.connect(self.open_folder)
+        file_menu.addAction(open_folder_action)
+        
         file_menu.addSeparator()
         
         # Exit action
@@ -187,6 +198,14 @@ class RAWImageViewer(QMainWindow):
             # Save the directory for next time
             settings.setValue("last_opened_dir", os.path.dirname(file_path))
     
+    def open_folder(self):
+        settings = self.get_settings()
+        last_dir = settings.value("last_opened_dir", "")
+        folder_path = QFileDialog.getExistingDirectory(self, "Open Folder", last_dir)
+        if folder_path:
+            self.load_folder_images(folder_path)
+            settings.setValue("last_opened_dir", folder_path)
+
     def show_keyboard_shortcuts(self):
         """Show keyboard shortcuts dialog"""
         msg_box = QMessageBox()
@@ -195,6 +214,7 @@ class RAWImageViewer(QMainWindow):
         msg_box.setText("Available Keyboard Shortcuts:")
         msg_box.setInformativeText(
             "- Ctrl+O - Open image file\n"
+            "- Ctrl+Shift+O - Open folder of images\n"
             "- Space - Toggle between fit-to-window and 100% zoom\n"
             "- Double-click - Toggle between fit-to-window and 100% zoom\n"
             "- Click and drag - Pan around zoomed image\n"
@@ -208,7 +228,6 @@ class RAWImageViewer(QMainWindow):
         msg_box.exec()
     
     def image_mouse_press_event(self, event):
-        print(f"[DEBUG] image_mouse_press_event: {event.pos()}")
         if event.button() == Qt.MouseButton.LeftButton and self.current_pixmap:
             if not self.fit_to_window and self._can_pan():
                 self.panning = True
@@ -218,7 +237,6 @@ class RAWImageViewer(QMainWindow):
                 self.image_label.setCursor(QCursor(Qt.CursorShape.ClosedHandCursor))
     
     def image_mouse_move_event(self, event):
-        print(f"[DEBUG] image_mouse_move_event: {event.pos()}")
         if self.panning and self.current_pixmap and self._can_pan():
             delta = event.pos() - self.last_pan_point
             self.last_pan_point = event.pos()
@@ -234,7 +252,6 @@ class RAWImageViewer(QMainWindow):
             self.image_label.setCursor(QCursor(Qt.CursorShape.ArrowCursor))
     
     def image_mouse_release_event(self, event):
-        print(f"[DEBUG] image_mouse_release_event: {event.pos()}")
         if event.button() == Qt.MouseButton.LeftButton:
             self.panning = False
             if self.current_pixmap and not self.fit_to_window:
@@ -243,7 +260,6 @@ class RAWImageViewer(QMainWindow):
                 self.image_label.setCursor(QCursor(Qt.CursorShape.ArrowCursor))
     
     def image_double_click_event(self, event):
-        print(f"[DEBUG] image_double_click_event: {event.pos()}")
         if not self.current_pixmap:
             return
         if event.button() == Qt.MouseButton.LeftButton:
@@ -288,8 +304,6 @@ class RAWImageViewer(QMainWindow):
         self.image_label.adjustSize()  # Ensure label is resized to pixmap
         self.scroll_area.widget().adjustSize()  # Force scroll area to update
         self.scroll_area.updateGeometry()
-        from PyQt6.QtCore import QTimer
-        QTimer.singleShot(0, self._complete_zoom_to_point)
         self.image_label.setCursor(QCursor(Qt.CursorShape.OpenHandCursor))
     
     def _complete_zoom_to_point(self):
@@ -470,7 +484,6 @@ class RAWImageViewer(QMainWindow):
         event.ignore()
     
     def load_raw_image(self, file_path):
-        print(f"[DEBUG] load_raw_image called with: {file_path}")
         if not os.path.exists(file_path):
             error_msg = f"The file {file_path} does not exist."
             self.show_error("File not found", error_msg)
@@ -493,9 +506,10 @@ class RAWImageViewer(QMainWindow):
         self.raw_processor.error_occurred.connect(self.on_processing_error)
         self.raw_processor.start()
         self.setFocus()
+        # Save session state when image changes
+        self.save_session_state()
     
     def on_image_processed(self, rgb_image):
-        print("[DEBUG] on_image_processed called (restoration check)")
         try:
             if rgb_image is None and not getattr(self, '_is_loading_raw', False):
                 # Non-RAW: load with QPixmap
@@ -578,7 +592,6 @@ class RAWImageViewer(QMainWindow):
         self.setWindowTitle('RAW Image Viewer')
     
     def keyPressEvent(self, event):
-        print(f"[DEBUG] keyPressEvent: {event.key()}")
         if event.key() == Qt.Key.Key_Space:
             self.toggle_zoom()
             event.accept()  # Mark event as handled
@@ -601,7 +614,6 @@ class RAWImageViewer(QMainWindow):
             super().keyPressEvent(event)
     
     def navigate_to_previous_image(self):
-        print("[DEBUG] navigate_to_previous_image called")
         if not self.image_files or len(self.image_files) <= 1:
             return
         
@@ -629,9 +641,9 @@ class RAWImageViewer(QMainWindow):
             self._restore_zoom_level = None
             self._restore_start_scroll_x = None
             self._restore_start_scroll_y = None
+        self.save_session_state()
     
     def navigate_to_next_image(self):
-        print("[DEBUG] navigate_to_next_image called")
         if not self.image_files or len(self.image_files) <= 1:
             return
         
@@ -659,6 +671,7 @@ class RAWImageViewer(QMainWindow):
             self._restore_zoom_level = None
             self._restore_start_scroll_x = None
             self._restore_start_scroll_y = None
+        self.save_session_state()
     
     def delete_current_image(self):
         """Delete the current image after confirmation"""
@@ -670,6 +683,7 @@ class RAWImageViewer(QMainWindow):
         # Show confirmation dialog
         if self.confirm_deletion():
             self.perform_deletion()
+        self.save_session_state()
     
     def confirm_deletion(self):
         """Show confirmation dialog for file deletion"""
@@ -1081,9 +1095,56 @@ class RAWImageViewer(QMainWindow):
                 self.image_files.remove(self.current_file_path)
             self.status_bar.showMessage(f"Moved to Discard: {filename}")
             self.handle_post_deletion_navigation()
+            self.save_session_state()
         except Exception as e:
             error_msg = f"Could not move file to Discard folder:\n{str(e)}"
             self.show_error("Discard Error", error_msg)
+
+    def load_folder_images(self, folder_path, start_file=None):
+        # Scan for images in the folder
+        extensions = self.get_supported_extensions()
+        files = [f for f in natsorted(os.listdir(folder_path))
+                 if os.path.splitext(f)[1].lower() in extensions]
+        if not files:
+            self.show_error("No images found", f"No supported images found in {folder_path}")
+            return
+        self.current_folder = folder_path
+        self.image_files = files
+        # Determine which image to start with
+        if start_file and start_file in files:
+            idx = files.index(start_file)
+        else:
+            idx = 0
+        self.current_file_index = idx
+        self.current_file_path = os.path.join(folder_path, files[idx])
+        self.load_raw_image(self.current_file_path)
+        self.save_session_state()
+
+    def save_session_state(self):
+        settings = self.get_settings()
+        if self.current_folder and self.current_file_index >= 0 and self.image_files:
+            filename = os.path.basename(self.image_files[self.current_file_index])
+            settings.setValue("last_session_folder", self.current_folder)
+            settings.setValue("last_session_file", filename)
+        else:
+            settings.remove("last_session_folder")
+            settings.remove("last_session_file")
+
+    def restore_session_state(self):
+        settings = self.get_settings()
+        folder = settings.value("last_session_folder", None)
+        file = settings.value("last_session_file", None)
+        if folder and file and os.path.isdir(folder):
+            files = [f for f in natsorted(os.listdir(folder))
+                     if os.path.splitext(f)[1].lower() in self.get_supported_extensions()]
+            if file in files:
+                self.load_folder_images(folder, start_file=file)
+                return True
+        return False
+
+    def closeEvent(self, event):
+        self.save_session_state()
+        super().closeEvent(event)
 
 
 def main():
