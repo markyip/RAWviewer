@@ -92,7 +92,8 @@ class RAWImageViewer(QMainWindow):
             "Press Space to toggle between fit-to-window and 100% zoom\n"
             "Double-click image to zoom in/out\n"
             "Click and drag to pan when zoomed\n"
-            "Use Left/Right arrow keys to navigate between images\n"
+            "Use Left/Right arrow keys to navigate between images (preserves zoom if zoomed in)\n"
+            "Press Down Arrow to move the current image to Discard folder\n"
             "Press Delete to delete the current image"
         )
         self.image_label.setStyleSheet(
@@ -116,7 +117,7 @@ class RAWImageViewer(QMainWindow):
         self.image_label.installEventFilter(self)
     
     def create_menu_bar(self):
-        """Create the menu bar with File and Help menus"""
+        """Create the menu bar with File and Keyboard Shortcuts action"""
         menubar = self.menuBar()
         
         # File menu
@@ -138,17 +139,14 @@ class RAWImageViewer(QMainWindow):
         exit_action.triggered.connect(self.close)
         file_menu.addAction(exit_action)
         
-        # Help menu
-        help_menu = menubar.addMenu('Help')
-        
-        # Keyboard shortcuts action
+        # Keyboard Shortcuts action (direct in menu bar)
         shortcuts_action = QAction('Keyboard Shortcuts', self)
         shortcuts_action.setStatusTip('Show keyboard shortcuts')
         shortcuts_action.triggered.connect(self.show_keyboard_shortcuts)
-        help_menu.addAction(shortcuts_action)
+        menubar.addAction(shortcuts_action)
     
     def get_settings(self):
-        return QSettings("markyip", "RAWviewer")
+        return QSettings("RAWviewer", "RAWviewer")
 
     def open_file(self):
         settings = self.get_settings()
@@ -200,8 +198,9 @@ class RAWImageViewer(QMainWindow):
             "- Space - Toggle between fit-to-window and 100% zoom\n"
             "- Double-click - Toggle between fit-to-window and 100% zoom\n"
             "- Click and drag - Pan around zoomed image\n"
-            "- Left Arrow - Previous image (maintains zoom)\n"
-            "- Right Arrow - Next image (maintains zoom)\n"
+            "- Left Arrow - Previous image (preserves zoom if zoomed in)\n"
+            "- Right Arrow - Next image (preserves zoom if zoomed in)\n"
+            "- Down Arrow - Move current image to Discard folder\n"
             "- Delete - Delete current image\n"
             "- Ctrl+Q - Exit application\n\n"
             "You can also drag and drop image files onto the window."
@@ -505,13 +504,31 @@ class RAWImageViewer(QMainWindow):
                     self.show_error("Display Error", "Could not load image file.")
                     return
                 self.current_pixmap = pixmap
-                self.fit_to_window = True
-                self.current_zoom_level = 1.0
-                self.zoom_center_point = None
-                self.scale_image_to_fit()
+                if not hasattr(self, '_maintain_zoom_on_navigation'):
+                    self.fit_to_window = True
+                    self.current_zoom_level = 1.0
+                    self.zoom_center_point = None
+                    self.scale_image_to_fit()
+                else:
+                    if self.fit_to_window:
+                        self.scale_image_to_fit()
+                    else:
+                        self.apply_zoom_and_pan()
+                    delattr(self, '_maintain_zoom_on_navigation')
                 if self.current_file_path:
                     self.scan_folder_for_images(self.current_file_path)
                 self.update_status_bar(pixmap.width(), pixmap.height())
+                if hasattr(self, '_restore_zoom_center') and self._restore_zoom_center is not None:
+                    self.fit_to_window = False
+                    self.current_zoom_level = self._restore_zoom_level or 1.0
+                    self.zoom_center_point = self._restore_zoom_center
+                    self.start_scroll_x = self.scroll_area.horizontalScrollBar().value()
+                    self.start_scroll_y = self.scroll_area.verticalScrollBar().value()
+                    self.apply_zoom_and_pan()
+                    self._restore_zoom_center = None
+                    self._restore_zoom_level = None
+                    self._restore_start_scroll_x = None
+                    self._restore_start_scroll_y = None
             else:
                 # RAW: existing logic
                 height, width, channels = rgb_image.shape
