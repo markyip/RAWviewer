@@ -5,7 +5,7 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QMessageBox, QScrollArea, QSizePolicy, QHBoxLayout, QPushButton, QFrame)
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QPoint, QEvent, QSettings
 from PyQt6.QtGui import (QPixmap, QImage, QAction, QKeySequence,
-                         QDragEnterEvent, QDropEvent, QCursor, QIcon)
+                         QDragEnterEvent, QDropEvent, QCursor, QIcon, QTransform)
 import rawpy
 import numpy as np
 from natsort import natsorted
@@ -19,23 +19,148 @@ class RAWProcessor(QThread):
     """Thread for processing RAW images to avoid UI blocking"""
     image_processed = pyqtSignal(object)  # Accepts np.ndarray or None
     error_occurred = pyqtSignal(str)
+    # Signal when thumbnail fallback is used
+    thumbnail_fallback_used = pyqtSignal(str)
 
     def __init__(self, file_path, is_raw):
         super().__init__()
         self.file_path = file_path
         self.is_raw = is_raw
 
+    def get_orientation_from_exif(self, file_path):
+        """Extract orientation from EXIF data"""
+        try:
+            with open(file_path, 'rb') as f:
+                tags = exifread.process_file(f, details=False)
+
+                # Check for orientation tag
+                orientation_tag = tags.get('Image Orientation')
+                if orientation_tag:
+                    orientation_str = str(orientation_tag)
+
+                    # Map orientation descriptions to numeric values
+                    orientation_map = {
+                        'Horizontal (normal)': 1,
+                        'Mirrored horizontal': 2,
+                        'Rotated 180': 3,
+                        'Mirrored vertical': 4,
+                        'Mirrored horizontal then rotated 90 CCW': 5,
+                        'Rotated 90 CW': 6,
+                        'Mirrored horizontal then rotated 90 CW': 7,
+                        'Rotated 90 CCW': 8
+                    }
+
+                    return orientation_map.get(orientation_str, 1)
+
+                return 1  # Default orientation (no rotation needed)
+        except Exception:
+            return 1  # Default orientation if EXIF reading fails
+
+    def apply_orientation_correction(self, image_array, orientation):
+        """Apply orientation correction to numpy array"""
+        if orientation == 1:
+            # Normal orientation, no changes needed
+            return image_array
+        elif orientation == 2:
+            # Mirrored horizontal
+            return np.fliplr(image_array)
+        elif orientation == 3:
+            # Rotated 180 degrees
+            return np.rot90(image_array, 2)
+        elif orientation == 4:
+            # Mirrored vertical
+            return np.flipud(image_array)
+        elif orientation == 5:
+            # Mirrored horizontal then rotated 90 CCW
+            return np.rot90(np.fliplr(image_array), 1)
+        elif orientation == 6:
+            # Rotated 90 CW
+            return np.rot90(image_array, 3)
+        elif orientation == 7:
+            # Mirrored horizontal then rotated 90 CW
+            return np.rot90(np.fliplr(image_array), 3)
+        elif orientation == 8:
+            # Rotated 90 CCW
+            return np.rot90(image_array, 1)
+        else:
+            return image_array
+
     def run(self):
         try:
             if self.is_raw:
-                with rawpy.imread(self.file_path) as raw:
-                    rgb_image = raw.postprocess()
-                self.image_processed.emit(rgb_image)
+                # Get orientation from EXIF data
+                orientation = self.get_orientation_from_exif(self.file_path)
+
+                try:
+                    # First try to open the RAW file
+                    with rawpy.imread(self.file_path) as raw:
+                        # Extract thumbnail first as a potential fallback
+                        thumbnail_data = None
+                        try:
+                            thumb = raw.extract_thumb()
+                            if thumb.format == rawpy.ThumbFormat.JPEG:
+                                # For JPEG thumbnails, decode the JPEG data
+                                import io
+                                from PIL import Image
+                                import numpy as np
+
+                                # Convert JPEG bytes to PIL Image
+                                jpeg_image = Image.open(io.BytesIO(thumb.data))
+                                # Convert to RGB if needed
+                                if jpeg_image.mode != 'RGB':
+                                    jpeg_image = jpeg_image.convert('RGB')
+                                # Convert to numpy array
+                                thumbnail_data = np.array(jpeg_image)
+                                # Apply orientation correction to thumbnail
+                                thumbnail_data = self.apply_orientation_correction(
+                                    thumbnail_data, orientation)
+                            elif thumb.format == rawpy.ThumbFormat.BITMAP:
+                                # Bitmap thumbnail is already in array format
+                                thumbnail_data = thumb.data
+                                # Apply orientation correction to thumbnail
+                                thumbnail_data = self.apply_orientation_correction(
+                                    thumbnail_data, orientation)
+                        except Exception:
+                            # Thumbnail extraction failed, continue without fallback
+                            pass
+
+                        # Now try full RAW processing
+                        try:
+                            rgb_image = raw.postprocess()
+                            # Apply orientation correction to processed RAW image
+                            rgb_image = self.apply_orientation_correction(
+                                rgb_image, orientation)
+                            self.image_processed.emit(rgb_image)
+                            return  # Success, exit early
+                        except Exception as processing_error:
+                            # If RAW processing fails and we have a thumbnail, use it
+                            if thumbnail_data is not None:
+                                self.thumbnail_fallback_used.emit(
+                                    "Using embedded thumbnail due to LibRaw compatibility issue")
+                                self.image_processed.emit(thumbnail_data)
+                                return  # Success with thumbnail
+                            else:
+                                # No thumbnail available, re-raise the processing error
+                                raise processing_error
+                except Exception as e:
+                    # Handle file opening errors
+                    raise e
             else:
                 # For non-RAW, emit None (handled in main thread)
                 self.image_processed.emit(None)
         except Exception as e:
-            self.error_occurred.emit(str(e))
+            # Provide more specific error messages
+            error_msg = str(e)
+            if "data corrupted" in error_msg.lower():
+                error_msg = f"RAW processing failed due to LibRaw compatibility issue.\n\nThis is a known issue with LibRaw 0.21.3 and certain NEF files.\nTry using a different RAW processor or contact the developer for updates.\n\nOriginal error: {error_msg}"
+            elif "unsupported file format" in error_msg.lower():
+                error_msg = f"This RAW file format may not be supported by your LibRaw version.\n\nOriginal error: {error_msg}"
+            elif "input/output error" in error_msg.lower():
+                error_msg = f"Cannot read the file. It may be corrupted or in use by another program.\n\nOriginal error: {error_msg}"
+            elif "cannot allocate memory" in error_msg.lower():
+                error_msg = f"Not enough memory to process this large RAW file.\n\nOriginal error: {error_msg}"
+
+            self.error_occurred.emit(error_msg)
 
 
 class RAWImageViewer(QMainWindow):
@@ -70,6 +195,69 @@ class RAWImageViewer(QMainWindow):
         if not self.restore_session_state():
             # If no session, show default message
             pass
+
+    def get_orientation_from_exif(self, file_path):
+        """Extract orientation from EXIF data for non-RAW files"""
+        try:
+            with open(file_path, 'rb') as f:
+                tags = exifread.process_file(f, details=False)
+
+                # Check for orientation tag
+                orientation_tag = tags.get('Image Orientation')
+                if orientation_tag:
+                    orientation_str = str(orientation_tag)
+
+                    # Map orientation descriptions to numeric values
+                    orientation_map = {
+                        'Horizontal (normal)': 1,
+                        'Mirrored horizontal': 2,
+                        'Rotated 180': 3,
+                        'Mirrored vertical': 4,
+                        'Mirrored horizontal then rotated 90 CCW': 5,
+                        'Rotated 90 CW': 6,
+                        'Mirrored horizontal then rotated 90 CW': 7,
+                        'Rotated 90 CCW': 8
+                    }
+
+                    return orientation_map.get(orientation_str, 1)
+
+                return 1  # Default orientation (no rotation needed)
+        except Exception:
+            return 1  # Default orientation if EXIF reading fails
+
+    def apply_orientation_to_pixmap(self, pixmap, orientation):
+        """Apply orientation correction to QPixmap"""
+        if orientation == 1:
+            # Normal orientation, no changes needed
+            return pixmap
+
+        transform = QTransform()
+
+        if orientation == 2:
+            # Mirrored horizontal
+            transform.scale(-1, 1)
+        elif orientation == 3:
+            # Rotated 180 degrees
+            transform.rotate(180)
+        elif orientation == 4:
+            # Mirrored vertical
+            transform.scale(1, -1)
+        elif orientation == 5:
+            # Mirrored horizontal then rotated 90 CCW
+            transform.scale(-1, 1)
+            transform.rotate(-90)
+        elif orientation == 6:
+            # Rotated 90 CW
+            transform.rotate(90)
+        elif orientation == 7:
+            # Mirrored horizontal then rotated 90 CW
+            transform.scale(-1, 1)
+            transform.rotate(90)
+        elif orientation == 8:
+            # Rotated 90 CCW
+            transform.rotate(-90)
+
+        return pixmap.transformed(transform)
 
     def init_ui(self):
         """Initialize the user interface"""
@@ -557,20 +745,33 @@ class RAWImageViewer(QMainWindow):
         self.raw_processor = RAWProcessor(file_path, is_raw)
         self.raw_processor.image_processed.connect(self.on_image_processed)
         self.raw_processor.error_occurred.connect(self.on_processing_error)
+        self.raw_processor.thumbnail_fallback_used.connect(
+            self.on_thumbnail_fallback)
         self.raw_processor.start()
         self.setFocus()
         # Save session state when image changes
         self.save_session_state()
 
+    def on_thumbnail_fallback(self, message):
+        """Handle when thumbnail fallback is used"""
+        self.status_bar.showMessage(
+            f"⚠️ {message} - Image quality may be reduced")
+
     def on_image_processed(self, rgb_image):
         try:
-            if rgb_image is None and not getattr(self, '_is_loading_raw', False):
-                # Non-RAW: load with QPixmap
+            if rgb_image is None:
+                # Non-RAW or RAW with thumbnail fallback: load with QPixmap
                 pixmap = QPixmap(self.current_file_path)
                 if pixmap.isNull():
                     self.show_error("Display Error",
                                     "Could not load image file.")
                     return
+
+                # Apply orientation correction for non-RAW files
+                orientation = self.get_orientation_from_exif(
+                    self.current_file_path)
+                pixmap = self.apply_orientation_to_pixmap(pixmap, orientation)
+
                 self.current_pixmap = pixmap
                 if not hasattr(self, '_maintain_zoom_on_navigation'):
                     self.fit_to_window = True
@@ -598,10 +799,19 @@ class RAWImageViewer(QMainWindow):
                     self._restore_start_scroll_x = None
                     self._restore_start_scroll_y = None
             else:
-                # RAW: existing logic
+                # RAW: successful processing with numpy array
                 height, width, channels = rgb_image.shape
                 bytes_per_line = channels * width
-                q_image = QImage(rgb_image.data, width, height,
+
+                # Ensure the data is contiguous and convert to bytes for PyQt6 compatibility
+                if not rgb_image.flags['C_CONTIGUOUS']:
+                    rgb_image = np.ascontiguousarray(rgb_image)
+
+                # Convert to bytes if needed (PyQt6 compatibility)
+                image_data = rgb_image.data.tobytes() if hasattr(
+                    rgb_image.data, 'tobytes') else bytes(rgb_image.data)
+
+                q_image = QImage(image_data, width, height,
                                  bytes_per_line, QImage.Format.Format_RGB888)
                 pixmap = QPixmap.fromImage(q_image)
                 self.current_pixmap = pixmap

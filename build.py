@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Minimal build script for RAW Image Viewer Windows/macOS executable
-Only outputs the path to the created executable.
+Build script for RAW Image Viewer Windows/macOS executable
+Handles dependency installation and executable creation.
 """
 
 import os
@@ -9,14 +9,56 @@ import subprocess
 import platform
 from pathlib import Path
 import sys
-import PyQt6
+
 
 def run_command(cmd):
     result = subprocess.run(cmd, shell=True)
     return result.returncode == 0
 
+
+def install_dependencies():
+    """Install required dependencies"""
+    print("Installing/upgrading dependencies...")
+    dependencies = [
+        'PyQt6',
+        'rawpy',
+        'send2trash',
+        'pyinstaller',
+        'natsort',
+        'exifread',
+        'Pillow'  # Added for NEF thumbnail fallback
+    ]
+
+    for dep in dependencies:
+        print(f"Installing {dep}...")
+        if not run_command(f'pip install --upgrade {dep}'):
+            print(f"[ERROR] Failed to install {dep}")
+            return False
+
+    print("Dependencies installed successfully!")
+    return True
+
+
 def main():
+    print("RAWviewer Windows Build Script")
+    print("==============================")
+    print("")
+
+    # Install dependencies first
+    if not install_dependencies():
+        print("[ERROR] Dependency installation failed.")
+        return
+
+    print("")
     print("Building RAWviewer executable...")
+
+    # Import PyQt6 after installation
+    try:
+        import PyQt6
+    except ImportError:
+        print("[ERROR] PyQt6 not available after installation")
+        return
+
     # Clean previous builds
     for directory in ['build', 'dist']:
         if os.path.exists(directory):
@@ -39,13 +81,16 @@ def main():
     # Find PyQt6 imageformats plugin path
     pyqt_path = os.path.dirname(PyQt6.__file__)
     if platform.system() == 'Windows':
-        imageformats_src = os.path.join(pyqt_path, 'Qt6', 'plugins', 'imageformats')
+        imageformats_src = os.path.join(
+            pyqt_path, 'Qt6', 'plugins', 'imageformats')
         add_data_sep = ';'
     elif platform.system() == 'Darwin':
-        imageformats_src = os.path.join(pyqt_path, 'Qt6', 'plugins', 'imageformats')
+        imageformats_src = os.path.join(
+            pyqt_path, 'Qt6', 'plugins', 'imageformats')
         add_data_sep = ':'
     else:
-        imageformats_src = os.path.join(pyqt_path, 'Qt6', 'plugins', 'imageformats')
+        imageformats_src = os.path.join(
+            pyqt_path, 'Qt6', 'plugins', 'imageformats')
         add_data_sep = ':'
     # Add --add-data for imageformats
     add_data_arg = f'--add-data "{imageformats_src}{add_data_sep}imageformats"'
@@ -55,11 +100,13 @@ def main():
     if not run_command(build_command):
         print("[ERROR] Build failed.")
         return
-    exe_path = Path('dist/RAWviewer.exe') if platform.system() == 'Windows' else Path('dist/RAWviewer')
+    exe_path = Path(
+        'dist/RAWviewer.exe') if platform.system() == 'Windows' else Path('dist/RAWviewer')
     if exe_path.exists():
         print(f"[SUCCESS] Executable created: {exe_path}")
     else:
         print("[ERROR] Executable was not created!")
+
 
 if __name__ == '__main__':
     main()

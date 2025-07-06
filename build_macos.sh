@@ -17,7 +17,7 @@ source rawviewer_env/bin/activate
 
 # Install/upgrade dependencies
 echo "Installing dependencies..."
-pip install --upgrade PyQt6 rawpy send2trash pyinstaller natsort exifread
+pip install --upgrade PyQt6 rawpy send2trash pyinstaller natsort exifread Pillow
 
 # Clean previous builds
 echo "Cleaning previous builds..."

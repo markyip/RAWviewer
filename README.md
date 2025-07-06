@@ -1,16 +1,13 @@
-# RAWviewer
+# RAWviewer v0.4.0
 
 <p align="center">
   <img src="appicon.png" alt="RAWviewer Icon" width="500">
 </p>
 
-  
 ![Version](https://img.shields.io/badge/version-0.4.0-blue)
 ![Downloads](https://img.shields.io/github/downloads/markyip/RAWviewer/total) 
 ![License](https://img.shields.io/badge/license-MIT-green)
 [![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-Donate-orange?logo=buy-me-a-coffee)](https://www.buymeacoffee.com/markyip)
-
-
 
 ## ✈️ Why This Exists
 You're an aviation photographer who just returned from RIAT or spent a day at the Mach Loop. You took thousands of RAW shots of fast jets, helicopters, and flybys — and now you're facing the real challenge:
@@ -18,12 +15,11 @@ You're an aviation photographer who just returned from RIAT or spent a day at th
 - You want to **sort through all your photos** and identify the best shots.
 - Tools like **Lightroom** or **Capture One** are powerful, but importing and checking each image is **time-consuming**.
 - The default **Windows Photos** viewer lets you browse, but:
-  - It’s clunky with RAW files.
+  - It's clunky with RAW files.
   - You have to zoom in manually to check sharpness.
-  - There’s no easy way to filter out blurry images.
+  - There's no easy way to filter out blurry images.
 
-I’ve been there myself — I still haven’t finished editing my **500GB of RIAT 2024 photos** because of how tedious this process is. That frustration is exactly what inspired me to build **RAWviewer**.
-
+I've been there myself — I still haven't finished editing my **500GB of RIAT 2024 photos** because of how tedious this process is. That frustration is exactly what inspired me to build **RAWviewer**.
 
 ### 💡 The Solution: RAWviewer
 RAWviewer is a lightweight, focused image viewer built specifically for photographers who shoot a lot — especially in aviation, wildlife, or sports.
@@ -36,27 +32,36 @@ RAWviewer is a lightweight, focused image viewer built specifically for photogra
 
 This is a **pre-filtering tool**, letting you go through hundreds of RAW files efficiently **before** committing to editing them in Lightroom or Photoshop.
 
-
 ## 🔍 What is RAWviewer?
 **RAWviewer** is a fast, modern, cross-platform image viewer for Windows and macOS, built with PyQt6. It supports advanced zooming, panning, and direct file association, allowing RAW files to be opened with a double-click.
 
-
 ## ✨ Features
-- ✅ Wide RAW format support (Canon, Nikon, Sony, Fujifilm, Panasonic, Olympus, and more)
-- 💡 Supports standard image formats such as **JPEG**, **JPG**, and **HEIF**
-- ⚡ Fast image loading with rawpy and numpy
-- 🎹 Keyboard shortcuts for speed and efficiency
-- 🔗 File association for opening RAWs directly via double-click
-- 📝 EXIF display in the status bar
-- 📦 Portable executable – No Python installation required for users
-- 🗑️ Safe image deletion (with confirmation)
-- 🧵 Threaded processing for smooth, non-blocking UI
-- 📂 Open entire folders and navigate easily
-- ⏸️ Session resume to restore last-viewed folder and image
-- 🎯 Smart zoom with double-click or `Space`
 
+- **Cross-platform support**: Windows and macOS
+- **Wide RAW format support**: Canon (CR2, CR3), Nikon (NEF), Sony (ARW), Adobe DNG, and many more
+- **Smart NEF compatibility**: Automatic thumbnail fallback for problematic NEF files
+- **Automatic orientation correction**: Reads EXIF orientation data and displays images correctly (portrait/landscape)
+- **Intuitive navigation**: Keyboard shortcuts and mouse controls
+- **Zoom functionality**: Fit-to-window and 100% zoom modes with smooth panning
+- **File management**: Move images to discard folder or delete permanently
+- **EXIF data display**: View camera settings and capture information
+- **Session persistence**: Remembers your last opened folder and image
+- **Portable executable**: No Python installation required for users
+- **Threaded processing**: Smooth, non-blocking UI
 
-## 🚀 Getting Started
+## 🔧 NEF File Compatibility
+
+RAWviewer includes advanced compatibility features for Nikon NEF files:
+
+- **Full RAW processing** for most NEF files
+- **Automatic thumbnail fallback** for NEF files with LibRaw compatibility issues
+- **Smart error handling** with informative status messages
+- **High-quality thumbnails** extracted directly from NEF files when needed
+
+> **Note**: Some newer NEF files may trigger the thumbnail fallback due to LibRaw 0.21.3 compatibility issues. This is a known limitation that provides excellent image quality through embedded thumbnails while maintaining full functionality.
+
+## 🚀 Quick Start
+
 ### Option 1: Download Executable (Recommended)
 #### Windows
 1. Download the latest release from the [Releases Page](https://github.com/markyip/RAWviewer/releases/latest)
@@ -75,80 +80,173 @@ This is a **pre-filtering tool**, letting you go through hundreds of RAW files e
 
 ```bash
 # Clone and install
-python -m venv .venv
-source .venv/bin/activate
+git clone https://github.com/markyip/RAWviewer.git
+cd RAWviewer
+
+# Create virtual environment
+python -m venv rawviewer_env
+
+# Activate virtual environment
+# Windows:
+rawviewer_env\Scripts\activate
+# macOS/Linux:
+source rawviewer_env/bin/activate
+
+# Install dependencies
 pip install -r requirements.txt
+
+# Run RAWviewer
 python src/main.py
 ```
 
+## ⌨️ Keyboard Shortcuts
 
-## 🧭 Usage Guide
+### Windows
+- **Ctrl+O**: Open image file
+- **Ctrl+Shift+O**: Open folder of images
+- **Space**: Toggle between fit-to-window and 100% zoom
+- **Left/Right arrows**: Navigate between images
+- **Down arrow**: Move current image to Discard folder
+- **Delete**: Delete current image (with confirmation)
 
-- **Drag & Drop** an image to open it
-- **Keyboard Navigation**:
-  - `←` / `→`: Previous / Next image
-  - `Space`: Zoom in/out
-  - `↓`: Move image to discard folder
-  - `Delete`: Delete image
+### macOS
+- **Cmd+O**: Open image file
+- **Cmd+Shift+O**: Open folder of images
+- **Space**: Toggle between fit-to-window and 100% zoom
+- **Left/Right arrows**: Navigate between images
+- **Down arrow**: Move current image to Discard folder
+- **Delete**: Delete current image (with confirmation)
 
+## 🖱️ Mouse Controls
+
+- **Double-click**: Toggle zoom mode
+- **Click and drag**: Pan image when zoomed in
+- **Drag and drop**: Open images or folders
+
+## 📁 Supported Formats
+
+### RAW Formats
+- **Canon**: CR2, CR3
+- **Nikon**: NEF (with smart compatibility features)
+- **Sony**: ARW, SRF
+- **Adobe**: DNG
+- **Olympus**: ORF
+- **Panasonic**: RW2
+- **Pentax**: PEF
+- **Samsung**: SRW
+- **Sigma**: X3F
+- **Fujifilm**: RAF
+- **Hasselblad**: 3FR, FFF
+- **Phase One**: IIQ, CAP
+- **Epson**: ERF
+- **Mamiya**: MEF
+- **Leaf**: MOS
+- **Casio**: NRW
+- **Leica**: RWL
+
+### Standard Formats
+- **JPEG**: JPG, JPEG
+- **HEIF**: HEIF
 
 ## 📁 Set as Default Viewer
 
 ### Windows:
-
 Right-click a RAW file → Open with → Choose another app → Select `RAWviewer.exe`
 
 ### macOS:
-
 Right-click a RAW file → Open with → Other... → Select `RAWviewer.app`
 
+## 🏗️ Building
 
-## 📸 Supported Image Formats
-### RAW:
-
-`.cr2`, `.cr3`, `.nef`, `.arw`, `.raf`, `.rw2`, `.orf`, `.dng`, `.pef`, `.srw`, `.x3f`, and more
-
-### Standard:
-
-`.jpg`, `.jpeg`, `.heif`, `.heic`
-
-
-## ⚙️ Build Instructions
 ### Windows
+**Option 1: Using batch script (recommended)**
+```batch
+# Run the automated build script
+build_windows.bat
+```
 
+**Option 2: Manual build**
 ```bash
+# Activate virtual environment
+rawviewer_env\Scripts\activate
+
+# Install dependencies
+pip install --upgrade PyQt6 rawpy send2trash pyinstaller natsort exifread Pillow
+
+# Build executable
 python build.py
 ```
 
 ### macOS
-
 ```bash
+# Run the automated build script
 ./build_macos.sh
 ```
 
+## 🐛 Troubleshooting
 
-## 🆘 Troubleshooting
 ### Windows
-- **App won't open**: Try running as administrator (right-click → "Run as administrator")
-- **Windows SmartScreen warning**: Click "More info" → "Run anyway"
-- **Antivirus blocking**: Add RAWviewer.exe to your antivirus whitelist
+- **"Windows protected your PC"**: Click "More info" → "Run anyway"
+- **Antivirus warnings**: Add RAWviewer to your antivirus exclusions
+- **Performance issues**: Try running as administrator
 
 ### macOS
-- **App won't open**: Right-click `RAWviewer.app` → "Open", then click "Open" in the security dialog
 - **"App is damaged" error**: Go to System Preferences → Security & Privacy → Allow
-- **Gatekeeper issues**: Run `sudo xattr -rd com.apple.quarantine /Applications/RAWviewer.app` in Terminal
+- **Gatekeeper warnings**: Right-click the app → Open → Open anyway
+- **Performance issues**: Grant Full Disk Access in Privacy settings
 
-### General
-- **Poor performance**: Ensure you have sufficient RAM (8GB+ recommended)
-- **Large RAW files slow**: Close other memory-intensive applications
-- **File won't open**: Check if the file format is supported in the list above
+### NEF File Issues
+- **"LibRaw compatibility issue" message**: This is normal for some NEF files - thumbnail fallback provides excellent quality
+- **No thumbnail available**: The NEF file may be corrupted or use an unsupported compression method
+- **Slow loading**: Large NEF files may take longer to process thumbnails
 
+## 📋 System Requirements
 
-## 📜 License
-This project is licensed under the [MIT License](LICENSE).
+### Minimum
+- **OS**: Windows 10 or macOS 10.15
+- **RAM**: 4GB
+- **Storage**: 100MB free space
 
+### Recommended
+- **OS**: Windows 11 or macOS 12+
+- **RAM**: 8GB or more
+- **Storage**: 500MB free space for large RAW files
 
+## 🔄 Version History
+
+### v0.4.0 (Current)
+- ✅ Full cross-platform support (Windows + macOS)
+- ✅ Smart NEF compatibility with thumbnail fallback
+- ✅ Automatic orientation correction
+- ✅ Enhanced zoom functionality with proper centering
+- ✅ Improved error handling and user feedback
+- ✅ Session state persistence
+- ✅ Comprehensive keyboard shortcuts
+
+### v0.2.0
+- Initial Windows-only release
+- Basic RAW file support
+- Simple zoom and navigation
+
+## 📄 License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+## 🤝 Contributing
+
+Contributions are welcome! Please feel free to submit a Pull Request.
+
+## 📞 Support
+
+If you encounter any issues:
+1. Check the troubleshooting section above
+2. Search existing GitHub issues
+3. Create a new issue with detailed information about your problem
 
 ## ☕ Thank You / Buy Me a Coffee
 
-If you find RAWviewer useful and it’s become part of your workflow, feel free to **buy me a coffee** ☕ or chip in to help fund my **RIAT tickets for next year**
+If you find RAWviewer useful and it's become part of your workflow, feel free to **buy me a coffee** ☕ or chip in to help fund my **RIAT tickets for next year**
+
+---
+
+**Enjoy viewing your RAW photos with RAWviewer!** 📸

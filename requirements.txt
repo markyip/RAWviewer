@@ -6,3 +6,4 @@ natsort
 psutil
 numpy
 exifread
+Pillow
