@@ -142,14 +142,6 @@ python src/main.py
 - **JPEG**: JPG, JPEG
 - **HEIF**: HEIF
 
-## 📁 Set as Default Viewer
-
-### Windows:
-Right-click a RAW file → Open with → Choose another app → Select `RAWviewer.exe`
-
-### macOS:
-Right-click a RAW file → Open with → Other... → Select `RAWviewer.app`
-
 ## 🏗️ Building
 
 ### Windows
@@ -217,18 +209,6 @@ RAWviewer is designed as a **pre-filtering tool**. For final image processing, w
 
 > **💡 Tip**: Use RAWviewer to quickly sort through hundreds of photos, then process your selected images in your preferred RAW editor for final output.
 
-## 📋 System Requirements
-
-### Minimum
-- **OS**: Windows 10 or macOS 10.15
-- **RAM**: 4GB
-- **Storage**: 100MB free space
-
-### Recommended
-- **OS**: Windows 11 or macOS 12+
-- **RAM**: 8GB or more
-- **Storage**: 500MB free space for large RAW files
-
 ## 🔄 Version History
 
 ### v0.4.1 (Current)
@@ -249,9 +229,9 @@ RAWviewer is designed as a **pre-filtering tool**. For final image processing, w
 - ✅ Comprehensive keyboard shortcuts
 
 ### v0.2.0
-- Initial Windows-only release
-- Basic RAW file support
-- Simple zoom and navigation
+- ✅ Initial Windows-only release
+- ✅ Basic RAW file support
+- ✅ Simple zoom and navigation
 
 ## 📄 License
 
