@@ -20,4 +20,10 @@
 ### Changed
 - **Cross-platform compatibility**: Updated application to work on both Windows and macOS
 - **Build system**: Enhanced build script to detect platform and use appropriate icons
-- **Documentation**: Updated README to reflect cross-platform support 
+- **Documentation**: Updated README to reflect cross-platform support
+- **Icon management**: Moved all icon files to an `icons/` folder; updated all code and build scripts to use the new location.
+- **.gitignore updates**: Added `icon.iconset/` and `tests/` directories to `.gitignore` to keep the repository clean.
+- **Test and asset cleanup**: Removed `icon.iconset/` and `tests/` from the repository; they are now ignored by git.
+- **Zoom/pan state preservation**: After deleting or discarding an image, the next image now preserves the previous zoom and pan state for a smoother workflow.
+
+## [Unreleased] 
