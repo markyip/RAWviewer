@@ -8,6 +8,7 @@
 ![Version](https://img.shields.io/badge/version-0.4.0-blue)
 ![Downloads](https://img.shields.io/github/downloads/markyip/RAWviewer/total) 
 ![License](https://img.shields.io/badge/license-MIT-green)
+[![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-Donate-orange?logo=buy-me-a-coffee)](https://www.buymeacoffee.com/markyip)
 
 
 
@@ -145,3 +146,10 @@ python build.py
 
 ## 📜 License
 This project is licensed under the [MIT License](LICENSE).
+
+
+---
+
+## ☕ Thank You / Buy Me a Coffee
+
+If you find RAWviewer useful and it’s become part of your workflow, feel free to **buy me a coffee** ☕ or chip in to help fund my **RIAT tickets for next year**
