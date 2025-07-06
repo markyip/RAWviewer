@@ -8,7 +8,6 @@ import os
 import subprocess
 import platform
 from pathlib import Path
-import sys
 
 
 def run_command(cmd):
@@ -92,16 +91,26 @@ def main():
         imageformats_src = os.path.join(
             pyqt_path, 'Qt6', 'plugins', 'imageformats')
         add_data_sep = ':'
-    # Add --add-data for imageformats
-    add_data_arg = f'--add-data "{imageformats_src}{add_data_sep}imageformats"'
+    # Add --add-data for imageformats and icons directory
+    add_data_args = [
+        f'--add-data "{imageformats_src}{add_data_sep}imageformats"',
+        f'--add-data "icons{add_data_sep}icons"'
+    ]
+    add_data_arg_str = " ".join(add_data_args)
+
     # Minimal PyInstaller command
-    build_command = f'pyinstaller --onefile --windowed {icon_arg} {add_data_arg} src/main.py --name RAWviewer'
+    build_command = (
+        f'pyinstaller --onefile --windowed {icon_arg} '
+        f'{add_data_arg_str} src/main.py --name RAWviewer'
+    )
     print(f"Running: {build_command}")
     if not run_command(build_command):
         print("[ERROR] Build failed.")
         return
-    exe_path = Path(
-        'dist/RAWviewer.exe') if platform.system() == 'Windows' else Path('dist/RAWviewer')
+    if platform.system() == 'Windows':
+        exe_path = Path('dist/RAWviewer.exe')
+    else:
+        exe_path = Path('dist/RAWviewer')
     if exe_path.exists():
         print(f"[SUCCESS] Executable created: {exe_path}")
     else:

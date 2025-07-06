@@ -2,10 +2,11 @@ import sys
 import os
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QLabel, QFileDialog,
-                             QMessageBox, QScrollArea, QSizePolicy, QHBoxLayout, QPushButton, QFrame)
+                             QMessageBox, QScrollArea, QSizePolicy)
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QPoint, QEvent, QSettings
 from PyQt6.QtGui import (QPixmap, QImage, QAction, QKeySequence,
-                         QDragEnterEvent, QDropEvent, QCursor, QIcon, QTransform)
+                         QDragEnterEvent, QDropEvent, QCursor, QIcon,
+                         QTransform)
 import rawpy
 import numpy as np
 from natsort import natsorted
@@ -13,6 +14,18 @@ from send2trash import send2trash
 import exifread
 from datetime import datetime
 import platform
+import ctypes
+
+
+def resource_path(relative_path):
+    """ Get absolute path to resource, works for dev and for PyInstaller """
+    try:
+        # PyInstaller creates a temp folder and stores path in _MEIPASS
+        base_path = sys._MEIPASS
+    except Exception:
+        # The script is in src/, so we go one level up to the project root
+        base_path = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+    return os.path.join(base_path, relative_path)
 
 
 class RAWProcessor(QThread):
@@ -264,12 +277,17 @@ class RAWImageViewer(QMainWindow):
         self.setWindowTitle('RAW Image Viewer')
         # Set icon based on platform and available files
         icon_path = None
-        if platform.system() == 'Windows' and os.path.exists(os.path.join('icons', 'appicon.ico')):
-            icon_path = os.path.join('icons', 'appicon.ico')
-        elif platform.system() == 'Darwin' and os.path.exists(os.path.join('icons', 'appicon.icns')):
-            icon_path = os.path.join('icons', 'appicon.icns')
-        elif os.path.exists(os.path.join('icons', 'appicon.png')):
-            icon_path = os.path.join('icons', 'appicon.png')
+        # Use resource_path to find icons, ensuring it works when bundled
+        ico_path = resource_path(os.path.join('icons', 'appicon.ico'))
+        icns_path = resource_path(os.path.join('icons', 'appicon.icns'))
+        png_path = resource_path(os.path.join('icons', 'appicon.png'))
+
+        if platform.system() == 'Windows' and os.path.exists(ico_path):
+            icon_path = ico_path
+        elif platform.system() == 'Darwin' and os.path.exists(icns_path):
+            icon_path = icns_path
+        elif os.path.exists(png_path):
+            icon_path = png_path
 
         if icon_path:
             self.setWindowIcon(QIcon(icon_path))
@@ -1444,6 +1462,11 @@ class RAWImageViewer(QMainWindow):
 
 def main():
     """Main function to run the application"""
+    # Set AppUserModelID to ensure the icon is displayed correctly on the taskbar on Windows
+    if platform.system() == 'Windows':
+        myappid = 'RAWviewer.1.0'
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
+
     app = QApplication(sys.argv)
 
     # Set application properties
