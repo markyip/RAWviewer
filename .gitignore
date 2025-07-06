@@ -30,3 +30,18 @@ desktop.ini
 # Test files
 test_images/
 sample_images/
+
+# Virtual environments
+rawviewer_env/
+.venv/
+venv/
+
+# Distribution packages
+*.zip
+*.tar.gz
+*.dmg
+*.exe
+
+# Documentation that should be in releases
+*_TESTING_GUIDE.md
+*_BUILD_UPDATE.md
