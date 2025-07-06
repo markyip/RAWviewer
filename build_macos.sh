@@ -24,8 +24,16 @@ echo "Cleaning previous builds..."
 rm -rf build dist *.spec
 
 # Build the application
+# Use the new icon path
+ICON_PATH="icons/appicon.icns"
+if [ -f "$ICON_PATH" ]; then
+    ICON_ARG="--icon $ICON_PATH"
+else
+    ICON_ARG=""
+fi
+
 echo "Building RAWviewer..."
-python build.py
+pyinstaller --onefile --windowed $ICON_ARG src/main.py --name RAWviewer
 
 echo ""
 echo "Build completed!"

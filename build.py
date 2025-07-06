@@ -67,11 +67,11 @@ def main():
             shutil.rmtree(directory)
     # Platform-agnostic icon
     if platform.system() == 'Windows':
-        icon_file = 'appicon.ico'
+        icon_file = os.path.join('icons', 'appicon.ico')
     elif platform.system() == 'Darwin':
-        icon_file = 'appicon.icns'
+        icon_file = os.path.join('icons', 'appicon.icns')
     else:
-        icon_file = 'appicon.ico'  # fallback
+        icon_file = os.path.join('icons', 'appicon.ico')  # fallback
     icon_path = os.path.abspath(icon_file)
     if not os.path.exists(icon_path):
         print(f"[WARNING] Icon file not found: {icon_path}")

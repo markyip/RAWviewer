@@ -264,12 +264,12 @@ class RAWImageViewer(QMainWindow):
         self.setWindowTitle('RAW Image Viewer')
         # Set icon based on platform and available files
         icon_path = None
-        if platform.system() == 'Windows' and os.path.exists('appicon.ico'):
-            icon_path = 'appicon.ico'
-        elif platform.system() == 'Darwin' and os.path.exists('appicon.icns'):
-            icon_path = 'appicon.icns'
-        elif os.path.exists('appicon.png'):
-            icon_path = 'appicon.png'
+        if platform.system() == 'Windows' and os.path.exists(os.path.join('icons', 'appicon.ico')):
+            icon_path = os.path.join('icons', 'appicon.ico')
+        elif platform.system() == 'Darwin' and os.path.exists(os.path.join('icons', 'appicon.icns')):
+            icon_path = os.path.join('icons', 'appicon.icns')
+        elif os.path.exists(os.path.join('icons', 'appicon.png')):
+            icon_path = os.path.join('icons', 'appicon.png')
 
         if icon_path:
             self.setWindowIcon(QIcon(icon_path))
@@ -1363,6 +1363,18 @@ class RAWImageViewer(QMainWindow):
             if self.current_file_path in self.image_files:
                 self.image_files.remove(self.current_file_path)
             self.status_bar.showMessage(f"Moved to Discard: {filename}")
+            # --- Preserve zoom/pan state for next image (like navigation) ---
+            self._maintain_zoom_on_navigation = True
+            if not self.fit_to_window:
+                self._restore_zoom_center = self.zoom_center_point
+                self._restore_zoom_level = self.current_zoom_level
+                self._restore_start_scroll_x = self.start_scroll_x
+                self._restore_start_scroll_y = self.start_scroll_y
+            else:
+                self._restore_zoom_center = None
+                self._restore_zoom_level = None
+                self._restore_start_scroll_x = None
+                self._restore_start_scroll_y = None
             self.handle_post_deletion_navigation()
             self.save_session_state()
         except Exception as e:
