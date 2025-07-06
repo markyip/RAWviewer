@@ -49,6 +49,17 @@ This is a **pre-filtering tool**, letting you go through hundreds of RAW files e
 - **Portable executable**: No Python installation required for users
 - **Threaded processing**: Smooth, non-blocking UI
 
+## 🔧 NEF File Compatibility
+
+RAWviewer includes advanced compatibility features for Nikon NEF files:
+
+- **Full RAW processing** for most NEF files
+- **Automatic thumbnail fallback** for NEF files with LibRaw compatibility issues
+- **Smart error handling** with informative status messages
+- **High-quality thumbnails** extracted directly from NEF files when needed
+
+> **Note**: Some newer NEF files may trigger the thumbnail fallback due to LibRaw 0.21.3 compatibility issues. This is a known limitation that provides excellent image quality through embedded thumbnails while maintaining full functionality.
+
 ## 🚀 Quick Start
 
 ### Option 1: Download Executable (Recommended)
@@ -121,7 +132,6 @@ python src/main.py
 - **Adobe**: DNG
 - **Olympus**: ORF
 - **Panasonic**: RW2
-- **Pentax**: PEF
 - **Fujifilm**: RAF
 - **Hasselblad**: 3FR, FFF
 - **Phase One**: IIQ, CAP
@@ -132,6 +142,13 @@ python src/main.py
 - **JPEG**: JPG, JPEG
 - **HEIF**: HEIF
 
+## 📁 Set as Default Viewer
+
+### Windows:
+Right-click a RAW file → Open with → Choose another app → Select `RAWviewer.exe`
+
+### macOS:
+Right-click a RAW file → Open with → Other... → Select `RAWviewer.app`
 
 ## 🏗️ Building
 
@@ -176,6 +193,29 @@ python build.py
 - **"LibRaw compatibility issue" message**: This is normal for some NEF files - thumbnail fallback provides excellent quality
 - **No thumbnail available**: The NEF file may be corrupted or use an unsupported compression method
 - **Slow loading**: Large NEF files may take longer to process thumbnails
+
+## ⚠️ Known Issues
+
+### Camera Compatibility
+- **Newer camera models**: Support for the latest camera releases may be limited due to LibRaw library compatibility
+- **Proprietary RAW formats**: Some manufacturers' newest RAW formats may not be fully supported immediately after camera release
+- **Firmware updates**: Camera firmware updates may introduce RAW format changes that require LibRaw updates
+
+### Image Processing Trade-offs
+RAWviewer prioritizes **speed over perfect color accuracy** to enable rapid photo sorting and culling:
+
+- **Minimal RAW preprocessing**: To maintain fast loading times, RAW processing is kept to essential operations only
+- **Color accuracy**: Some images may display with **incorrect colors** or appear **washed out** compared to dedicated RAW processors like Lightroom or Capture One
+- **White balance**: While Canon and Fujifilm files receive automatic white balance correction, other manufacturers may show color casts
+- **Exposure/contrast**: No automatic exposure or contrast adjustments are applied
+
+### When to Use Dedicated RAW Processors
+RAWviewer is designed as a **pre-filtering tool**. For final image processing, we recommend:
+- **Adobe Lightroom** or **Capture One** for professional color grading and exposure adjustments
+- **Dedicated RAW processors** for critical color accuracy and fine-tuning
+- **RAWviewer** for fast culling, sorting, and identifying your best shots before detailed editing
+
+> **💡 Tip**: Use RAWviewer to quickly sort through hundreds of photos, then process your selected images in your preferred RAW editor for final output.
 
 ## 📋 System Requirements
 
