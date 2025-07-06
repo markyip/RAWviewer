@@ -1,7 +1,7 @@
 # RAWviewer v0.4.1
 
 <p align="center">
-  <img src="icons/appicon.png" alt="RAWviewer Icon" width="500">
+  <img src="icons/appicon.ico" alt="RAWviewer Icon" width="256">
 </p>
 
 ![Version](https://img.shields.io/badge/version-0.4.1-blue)
