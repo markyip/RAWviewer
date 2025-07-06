@@ -21,7 +21,6 @@ You're an aviation photographer who just returned from RIAT or spent a day at th
 
 I've been there myself — I still haven't finished editing my **500GB of RIAT 2024 photos** because of how tedious this process is. That frustration is exactly what inspired me to build **RAWviewer**.
 
-### 💡 The Solution: RAWviewer
 RAWviewer is a lightweight, focused image viewer built specifically for photographers who shoot a lot — especially in aviation, wildlife, or sports.
 
 - Instant file previewing: No import steps — just drag & drop.
