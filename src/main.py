@@ -24,7 +24,8 @@ def resource_path(relative_path):
         base_path = sys._MEIPASS
     except Exception:
         # The script is in src/, so we go one level up to the project root
-        base_path = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+        base_path = os.path.abspath(os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), ".."))
     return os.path.join(base_path, relative_path)
 
 
@@ -71,6 +72,12 @@ class RAWProcessor(QThread):
 
     def apply_orientation_correction(self, image_array, orientation):
         """Apply orientation correction to numpy array"""
+        # Check if this is a camera that stores RAW data pre-rotated
+        # Some cameras (like Sony) store RAW data in the correct orientation
+        # and the EXIF orientation tag may be misleading
+        if self.is_raw_data_pre_rotated():
+            return image_array
+
         if orientation == 1:
             # Normal orientation, no changes needed
             return image_array
@@ -87,16 +94,156 @@ class RAWProcessor(QThread):
             # Mirrored horizontal then rotated 90 CCW
             return np.rot90(np.fliplr(image_array), 1)
         elif orientation == 6:
-            # Rotated 90 CW
-            return np.rot90(image_array, 3)
+            # Rotated 90 CW - need to rotate 90 CCW to correct
+            return np.rot90(image_array, -1)
         elif orientation == 7:
             # Mirrored horizontal then rotated 90 CW
-            return np.rot90(np.fliplr(image_array), 3)
+            return np.rot90(np.fliplr(image_array), -1)
         elif orientation == 8:
-            # Rotated 90 CCW
+            # Rotated 90 CCW - need to rotate 90 CCW to correct
             return np.rot90(image_array, 1)
         else:
             return image_array
+
+    def is_raw_data_pre_rotated(self):
+        """Check if this camera/file stores RAW data pre-rotated"""
+        try:
+            # Read camera make from EXIF
+            with open(self.file_path, 'rb') as f:
+                tags = exifread.process_file(f, details=False)
+                make = tags.get('Image Make')
+                model = tags.get('Image Model')
+
+                if make:
+                    make_str = str(make).upper()
+                    # Sony cameras often store RAW data pre-rotated
+                    if 'SONY' in make_str:
+                        return True
+
+                    # Leica cameras also store RAW data pre-rotated
+                    if 'LEICA' in make_str:
+                        return True
+
+                    # Hasselblad cameras also store RAW data pre-rotated
+                    if 'HASSELBLAD' in make_str:
+                        return True
+
+                    # Add other camera makes that exhibit this behavior
+                    # if 'CANON' in make_str:
+                    #     return True
+
+        except Exception:
+            pass
+
+        return False
+
+    def is_canon_camera(self):
+        """Check if this is a Canon camera that needs special white balance processing"""
+        try:
+            # First try to detect by file extension (more reliable for CR3)
+            file_ext = os.path.splitext(self.file_path)[1].lower()
+            if file_ext in ['.cr2', '.cr3']:
+                return True
+
+            # Fallback to EXIF detection for other formats
+            with open(self.file_path, 'rb') as f:
+                tags = exifread.process_file(f, details=False)
+                make = tags.get('Image Make')
+
+                if make:
+                    make_str = str(make).upper()
+                    # Canon cameras need special white balance processing
+                    if 'CANON' in make_str:
+                        return True
+
+        except Exception:
+            pass
+
+        return False
+
+    def is_fujifilm_camera(self):
+        """Check if this is a Fujifilm camera that needs special white balance processing"""
+        try:
+            # First try to detect by file extension (more reliable for RAF)
+            file_ext = os.path.splitext(self.file_path)[1].lower()
+            if file_ext in ['.raf']:
+                return True
+
+            # Fallback to EXIF detection for other formats
+            with open(self.file_path, 'rb') as f:
+                tags = exifread.process_file(f, details=False)
+                make = tags.get('Image Make')
+
+                if make:
+                    make_str = str(make).upper()
+                    # Fujifilm cameras need special white balance processing
+                    if 'FUJIFILM' in make_str or 'FUJI' in make_str:
+                        return True
+
+        except Exception:
+            pass
+
+        return False
+
+    def process_raw_with_camera_specific_settings(self, raw):
+        """Process RAW data with camera-specific settings"""
+        try:
+            # Check file size to determine if we should use faster processing
+            file_size_mb = os.path.getsize(self.file_path) / (1024 * 1024)
+            use_fast_processing = file_size_mb > 80  # Use fast processing for files > 80MB
+
+            # Check if this is a Canon camera
+            if self.is_canon_camera():
+                # Canon cameras (especially CR3) need proper white balance correction
+                # to avoid red hue issues. Try camera white balance first.
+                print(f"Applying Canon-specific white balance correction...")
+                try:
+                    rgb_image = raw.postprocess(
+                        use_camera_wb=True, half_size=use_fast_processing)
+                    return rgb_image
+                except Exception:
+                    # If camera WB fails, try auto white balance
+                    try:
+                        rgb_image = raw.postprocess(
+                            use_auto_wb=True, half_size=use_fast_processing)
+                        return rgb_image
+                    except Exception:
+                        # If both fail, use default processing
+                        rgb_image = raw.postprocess(
+                            half_size=use_fast_processing)
+                        return rgb_image
+            # Check if this is a Fujifilm camera
+            elif self.is_fujifilm_camera():
+                # Fujifilm cameras (especially RAF) need proper white balance correction
+                # to avoid green hue issues and improve processing speed
+                if use_fast_processing:
+                    print(
+                        f"Applying Fujifilm-specific processing with fast mode for large file ({file_size_mb:.1f}MB)...")
+                else:
+                    print(f"Applying Fujifilm-specific white balance correction...")
+                try:
+                    rgb_image = raw.postprocess(
+                        use_camera_wb=True, half_size=use_fast_processing)
+                    return rgb_image
+                except Exception:
+                    # If camera WB fails, try auto white balance
+                    try:
+                        rgb_image = raw.postprocess(
+                            use_auto_wb=True, half_size=use_fast_processing)
+                        return rgb_image
+                    except Exception:
+                        # If both fail, use default processing
+                        rgb_image = raw.postprocess(
+                            half_size=use_fast_processing)
+                        return rgb_image
+            else:
+                # For other cameras, use default processing
+                rgb_image = raw.postprocess(half_size=use_fast_processing)
+                return rgb_image
+        except Exception:
+            # Fallback to default processing if anything fails
+            rgb_image = raw.postprocess()
+            return rgb_image
 
     def run(self):
         try:
@@ -139,7 +286,8 @@ class RAWProcessor(QThread):
 
                         # Now try full RAW processing
                         try:
-                            rgb_image = raw.postprocess()
+                            rgb_image = self.process_raw_with_camera_specific_settings(
+                                raw)
                             # Apply orientation correction to processed RAW image
                             rgb_image = self.apply_orientation_correction(
                                 rgb_image, orientation)
@@ -240,6 +388,12 @@ class RAWImageViewer(QMainWindow):
 
     def apply_orientation_to_pixmap(self, pixmap, orientation):
         """Apply orientation correction to QPixmap"""
+        # Check if this is a camera that stores image data pre-rotated
+        # Some cameras (like Sony, Leica) store image data in the correct orientation
+        # and the EXIF orientation tag may be misleading
+        if self.is_camera_pre_rotated():
+            return pixmap
+
         if orientation == 1:
             # Normal orientation, no changes needed
             return pixmap
@@ -260,17 +414,44 @@ class RAWImageViewer(QMainWindow):
             transform.scale(-1, 1)
             transform.rotate(-90)
         elif orientation == 6:
-            # Rotated 90 CW
+            # Rotated 90 CW - need to rotate 90 CCW to correct
             transform.rotate(90)
         elif orientation == 7:
             # Mirrored horizontal then rotated 90 CW
             transform.scale(-1, 1)
             transform.rotate(90)
         elif orientation == 8:
-            # Rotated 90 CCW
+            # Rotated 90 CCW - need to rotate 90 CCW to correct
             transform.rotate(-90)
 
         return pixmap.transformed(transform)
+
+    def is_camera_pre_rotated(self):
+        """Check if this camera stores image data pre-rotated for non-RAW files"""
+        try:
+            # Read camera make from EXIF
+            with open(self.current_file_path, 'rb') as f:
+                tags = exifread.process_file(f, details=False)
+                make = tags.get('Image Make')
+
+                if make:
+                    make_str = str(make).upper()
+                    # Sony cameras often store image data pre-rotated
+                    if 'SONY' in make_str:
+                        return True
+
+                    # Leica cameras also store image data pre-rotated
+                    if 'LEICA' in make_str:
+                        return True
+
+                    # Hasselblad cameras also store image data pre-rotated
+                    if 'HASSELBLAD' in make_str:
+                        return True
+
+        except Exception:
+            pass
+
+        return False
 
     def init_ui(self):
         """Initialize the user interface"""
