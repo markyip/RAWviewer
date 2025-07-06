@@ -48,3 +48,6 @@ venv/
 
 # Ignore icon.iconset directory (icon source assets)
 icon.iconset/
+
+# Ignore tests directory (test scripts and reports)
+tests/
