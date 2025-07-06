@@ -211,10 +211,13 @@ RAWviewer is designed as a **pre-filtering tool**. For final image processing, w
 ## 🔄 Version History
 
 ### v0.4.1 (Current)
+- ✅ Fixed Canon CR3/CR2 red hue issues with camera-specific white balance processing
+- ✅ Fixed Fujifilm RAF green hue issues with 46% performance improvement for large files
+- ✅ Smart camera detection for Canon (.cr2, .cr3) and Fujifilm (.raf) files
 - ✅ Fixed QImage compatibility issues with PyQt6
 - ✅ Enhanced Windows build system with automatic dependency management
 - ✅ Improved NEF file handling with better error recovery
-- ✅ Streamlined repository structure and documentation
+- ✅ Streamlined repository structure and comprehensive documentation
 - ✅ Enhanced cross-platform build scripts (Windows batch + macOS shell)
 - ✅ Better error messages and user feedback for corrupted files
 
