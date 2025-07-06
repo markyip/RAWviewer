@@ -1,10 +1,10 @@
-# RAWviewer v0.4.0
+# RAWviewer v0.4.1
 
 <p align="center">
   <img src="appicon.png" alt="RAWviewer Icon" width="500">
 </p>
 
-![Version](https://img.shields.io/badge/version-0.4.0-blue)
+![Version](https://img.shields.io/badge/version-0.4.1-blue)
 ![Downloads](https://img.shields.io/github/downloads/markyip/RAWviewer/total) 
 ![License](https://img.shields.io/badge/license-MIT-green)
 [![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-Donate-orange?logo=buy-me-a-coffee)](https://www.buymeacoffee.com/markyip)
@@ -71,7 +71,7 @@ RAWviewer includes advanced compatibility features for Nikon NEF files:
 
 #### macOS
 1. Download the latest release from the [Releases Page](https://github.com/markyip/RAWviewer/releases/latest)
-2. Download and extract `RAWviewer-v0.4.0-macOS.zip`
+2. Download and extract `RAWviewer-v0.4.1-macOS.zip`
 3. Drag `RAWviewer.app` to your Applications folder
 4. Double-click to launch from Applications or Launchpad
 5. **First launch**: Right-click → "Open" if blocked by Gatekeeper
@@ -214,7 +214,15 @@ python build.py
 
 ## 🔄 Version History
 
-### v0.4.0 (Current)
+### v0.4.1 (Current)
+- ✅ Fixed QImage compatibility issues with PyQt6
+- ✅ Enhanced Windows build system with automatic dependency management
+- ✅ Improved NEF file handling with better error recovery
+- ✅ Streamlined repository structure and documentation
+- ✅ Enhanced cross-platform build scripts (Windows batch + macOS shell)
+- ✅ Better error messages and user feedback for corrupted files
+
+### v0.4.0
 - ✅ Full cross-platform support (Windows + macOS)
 - ✅ Smart NEF compatibility with thumbnail fallback
 - ✅ Automatic orientation correction
