@@ -133,15 +133,10 @@ python src/main.py
 - **Olympus**: ORF
 - **Panasonic**: RW2
 - **Pentax**: PEF
-- **Samsung**: SRW
-- **Sigma**: X3F
 - **Fujifilm**: RAF
 - **Hasselblad**: 3FR, FFF
 - **Phase One**: IIQ, CAP
-- **Epson**: ERF
-- **Mamiya**: MEF
 - **Leaf**: MOS
-- **Casio**: NRW
 - **Leica**: RWL
 
 ### Standard Formats
