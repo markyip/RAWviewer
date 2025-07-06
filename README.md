@@ -148,7 +148,6 @@ python build.py
 This project is licensed under the [MIT License](LICENSE).
 
 
----
 
 ## ☕ Thank You / Buy Me a Coffee
 
