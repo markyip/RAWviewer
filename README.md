@@ -49,17 +49,6 @@ This is a **pre-filtering tool**, letting you go through hundreds of RAW files e
 - **Portable executable**: No Python installation required for users
 - **Threaded processing**: Smooth, non-blocking UI
 
-## 🔧 NEF File Compatibility
-
-RAWviewer includes advanced compatibility features for Nikon NEF files:
-
-- **Full RAW processing** for most NEF files
-- **Automatic thumbnail fallback** for NEF files with LibRaw compatibility issues
-- **Smart error handling** with informative status messages
-- **High-quality thumbnails** extracted directly from NEF files when needed
-
-> **Note**: Some newer NEF files may trigger the thumbnail fallback due to LibRaw 0.21.3 compatibility issues. This is a known limitation that provides excellent image quality through embedded thumbnails while maintaining full functionality.
-
 ## 🚀 Quick Start
 
 ### Option 1: Download Executable (Recommended)
@@ -143,13 +132,6 @@ python src/main.py
 - **JPEG**: JPG, JPEG
 - **HEIF**: HEIF
 
-## 📁 Set as Default Viewer
-
-### Windows:
-Right-click a RAW file → Open with → Choose another app → Select `RAWviewer.exe`
-
-### macOS:
-Right-click a RAW file → Open with → Other... → Select `RAWviewer.app`
 
 ## 🏗️ Building
 
