@@ -45,3 +45,6 @@ venv/
 # Documentation that should be in releases
 *_TESTING_GUIDE.md
 *_BUILD_UPDATE.md
+
+# Ignore icon.iconset directory (icon source assets)
+icon.iconset/
