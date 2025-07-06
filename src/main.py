@@ -947,6 +947,18 @@ class RAWImageViewer(QMainWindow):
 
         # Show confirmation dialog
         if self.confirm_deletion():
+            # --- Preserve zoom/pan state for next image (like navigation/discard) ---
+            self._maintain_zoom_on_navigation = True
+            if not self.fit_to_window:
+                self._restore_zoom_center = self.zoom_center_point
+                self._restore_zoom_level = self.current_zoom_level
+                self._restore_start_scroll_x = self.start_scroll_x
+                self._restore_start_scroll_y = self.start_scroll_y
+            else:
+                self._restore_zoom_center = None
+                self._restore_zoom_level = None
+                self._restore_start_scroll_x = None
+                self._restore_start_scroll_y = None
             self.perform_deletion()
         self.save_session_state()
 
