@@ -51,6 +51,14 @@ class RAWProcessor(QThread):
             with open(file_path, 'rb') as f:
                 tags = exifread.process_file(f, details=False)
 
+                # Debug: Print EXIF orientation, make, and model
+                orientation_tag = tags.get('Image Orientation')
+                make_tag = tags.get('Image Make')
+                model_tag = tags.get('Image Model')
+                print(f"[DEBUG] EXIF Orientation: {orientation_tag}")
+                print(f"[DEBUG] EXIF Make: {make_tag}")
+                print(f"[DEBUG] EXIF Model: {model_tag}")
+
                 # Check for orientation tag
                 orientation_tag = tags.get('Image Orientation')
                 if orientation_tag:
@@ -394,6 +402,14 @@ class RAWImageViewer(QMainWindow):
         try:
             with open(file_path, 'rb') as f:
                 tags = exifread.process_file(f, details=False)
+
+                # Debug: Print EXIF orientation, make, and model
+                orientation_tag = tags.get('Image Orientation')
+                make_tag = tags.get('Image Make')
+                model_tag = tags.get('Image Model')
+                print(f"[DEBUG] EXIF Orientation: {orientation_tag}")
+                print(f"[DEBUG] EXIF Make: {make_tag}")
+                print(f"[DEBUG] EXIF Model: {model_tag}")
 
                 # Check for orientation tag
                 orientation_tag = tags.get('Image Orientation')
@@ -1338,28 +1354,26 @@ class RAWImageViewer(QMainWindow):
 
         # Calculate previous index with wraparound
         if self.current_file_index <= 0:
-            # Wrap to last image
             self.current_file_index = len(self.image_files) - 1
         else:
             self.current_file_index -= 1
 
-        # Set flag to maintain zoom state when navigating
-        self._maintain_zoom_on_navigation = True
-
-        # Load the previous image
-        self.load_raw_image(self.image_files[self.current_file_index])
-
-        # Save current zoom/pan state for restoration
+        # Only maintain zoom state if not in fit-to-window mode
         if not self.fit_to_window:
+            self._maintain_zoom_on_navigation = True
             self._restore_zoom_center = self.zoom_center_point
             self._restore_zoom_level = self.current_zoom_level
             self._restore_start_scroll_x = self.start_scroll_x
             self._restore_start_scroll_y = self.start_scroll_y
         else:
+            if hasattr(self, '_maintain_zoom_on_navigation'):
+                delattr(self, '_maintain_zoom_on_navigation')
             self._restore_zoom_center = None
             self._restore_zoom_level = None
             self._restore_start_scroll_x = None
             self._restore_start_scroll_y = None
+
+        self.load_raw_image(self.image_files[self.current_file_index])
         self.save_session_state()
 
     def navigate_to_next_image(self):
@@ -1368,47 +1382,44 @@ class RAWImageViewer(QMainWindow):
 
         # Calculate next index with wraparound
         if self.current_file_index >= len(self.image_files) - 1:
-            # Wrap to first image
             self.current_file_index = 0
         else:
             self.current_file_index += 1
 
-        # Set flag to maintain zoom state when navigating
-        self._maintain_zoom_on_navigation = True
-
-        # Load the next image
-        self.load_raw_image(self.image_files[self.current_file_index])
-
-        # Save current zoom/pan state for restoration
+        # Only maintain zoom state if not in fit-to-window mode
         if not self.fit_to_window:
+            self._maintain_zoom_on_navigation = True
             self._restore_zoom_center = self.zoom_center_point
             self._restore_zoom_level = self.current_zoom_level
             self._restore_start_scroll_x = self.start_scroll_x
             self._restore_start_scroll_y = self.start_scroll_y
         else:
+            if hasattr(self, '_maintain_zoom_on_navigation'):
+                delattr(self, '_maintain_zoom_on_navigation')
             self._restore_zoom_center = None
             self._restore_zoom_level = None
             self._restore_start_scroll_x = None
             self._restore_start_scroll_y = None
+
+        self.load_raw_image(self.image_files[self.current_file_index])
         self.save_session_state()
 
     def delete_current_image(self):
-        """Delete the current image after confirmation"""
-        if (not self.current_file_path or
-                not os.path.exists(self.current_file_path)):
+        if (not self.current_file_path or not os.path.exists(self.current_file_path)):
             self.show_error("Delete Error", "No image file to delete.")
             return
 
-        # Show confirmation dialog
         if self.confirm_deletion():
-            # --- Preserve zoom/pan state for next image (like navigation/discard) ---
-            self._maintain_zoom_on_navigation = True
+            # Only maintain zoom state if not in fit-to-window mode
             if not self.fit_to_window:
+                self._maintain_zoom_on_navigation = True
                 self._restore_zoom_center = self.zoom_center_point
                 self._restore_zoom_level = self.current_zoom_level
                 self._restore_start_scroll_x = self.start_scroll_x
                 self._restore_start_scroll_y = self.start_scroll_y
             else:
+                if hasattr(self, '_maintain_zoom_on_navigation'):
+                    delattr(self, '_maintain_zoom_on_navigation')
                 self._restore_zoom_center = None
                 self._restore_zoom_level = None
                 self._restore_start_scroll_x = None
@@ -1886,7 +1897,7 @@ class RAWImageViewer(QMainWindow):
             if self.current_file_path in self.image_files:
                 self.image_files.remove(self.current_file_path)
             self.status_bar.showMessage(f"Moved to Discard: {filename}")
-            # --- Preserve zoom/pan state for next image (like navigation) ---
+            # --- Preserve zoom/pan state for next image (like navigation/discard) ---
             self._maintain_zoom_on_navigation = True
             if not self.fit_to_window:
                 self._restore_zoom_center = self.zoom_center_point
