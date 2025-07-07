@@ -25,7 +25,8 @@ def install_dependencies():
         'pyinstaller',
         'natsort',
         'exifread',
-        'Pillow'  # Added for NEF thumbnail fallback
+        'Pillow',  # Added for NEF thumbnail fallback
+        'psutil'   # Added for system memory info in image_cache
     ]
 
     for dep in dependencies:

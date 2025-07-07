@@ -209,8 +209,8 @@ class OptimizedRAWProcessor(QObject):
             'no_auto_bright': False,
             'gamma': (2.222, 4.5),  # Standard sRGB gamma
             'bright': 1.0,
-            'highlight': 0,
-            'shadow': 0
+            # 'highlight': 0,  # Removed for rawpy 0.25.0 compatibility
+            # 'shadow': 0,  # Removed for rawpy 0.25.0 compatibility
         }
 
         # Get file size for processing decisions
@@ -283,7 +283,7 @@ class OptimizedRAWProcessor(QObject):
                 if self.is_canon_camera(file_path, exif_data):
                     params.update({
                         'use_camera_wb': True,
-                        'highlight': 1,  # Better highlight recovery
+                        # 'highlight': 1,  # Removed for rawpy 0.25.0 compatibility
                     })
                 elif self.is_fujifilm_camera(file_path, exif_data):
                     params.update({
