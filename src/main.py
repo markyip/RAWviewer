@@ -106,13 +106,15 @@ class RAWProcessor(QThread):
             # Mirrored horizontal then rotated 90 CCW
             return np.rot90(np.fliplr(image_array), 1)
         elif orientation == 6:
-            # Rotated 90 CW - need to rotate 90 CCW to correct
-            return np.rot90(image_array, -1)
+            # Rotated 90 CW - need to rotate 90 CW to correct (same as QPixmap transform.rotate(90))
+            # np.rot90 with k=3 rotates 270° CCW = 90° CW
+            return np.rot90(image_array, 3)
         elif orientation == 7:
             # Mirrored horizontal then rotated 90 CW
             return np.rot90(np.fliplr(image_array), -1)
         elif orientation == 8:
-            # Rotated 90 CCW - need to rotate 90 CCW to correct
+            # Rotated 90 CCW - need to rotate 90 CCW to correct (same as QPixmap transform.rotate(-90))
+            # np.rot90 with k=1 rotates 90° CCW
             return np.rot90(image_array, 1)
         else:
             return image_array
