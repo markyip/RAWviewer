@@ -156,7 +156,3 @@ If you encounter any issues:
 ## ☕ Thank You / Buy Me a Coffee
 
 If you find RAWviewer useful and it's become part of your workflow, feel free to **buy me a coffee** ☕ or chip in to help fund my **RIAT tickets for next year**
-
----
-
-**Enjoy viewing your RAW photos with RAWviewer!** 📸
