@@ -1,10 +1,10 @@
-# RAWviewer v0.4.1
+# RAWviewer v0.5
 
 <p align="center">
   <img src="icons/appicon.ico" alt="RAWviewer Icon" width="256">
 </p>
 
-![Version](https://img.shields.io/badge/version-0.4.1-blue)
+![Version](https://img.shields.io/badge/version-0.5-blue)
 ![Downloads](https://img.shields.io/github/downloads/markyip/RAWviewer/total) 
 ![License](https://img.shields.io/badge/license-MIT-green)
 [![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-Donate-orange?logo=buy-me-a-coffee)](https://www.buymeacoffee.com/markyip)
@@ -38,7 +38,6 @@ This is a **pre-filtering tool**, letting you go through hundreds of RAW files e
 
 - **Cross-platform support**: Windows and macOS
 - **Wide RAW format support**: Canon (CR2, CR3), Nikon (NEF), Sony (ARW), Adobe DNG, and many more
-- **Smart NEF compatibility**: Automatic thumbnail fallback for problematic NEF files
 - **Automatic orientation correction**: Reads EXIF orientation data and displays images correctly (portrait/landscape)
 - **Intuitive navigation**: Keyboard shortcuts and mouse controls
 - **Zoom functionality**: Fit-to-window and 100% zoom modes with smooth panning
@@ -48,20 +47,9 @@ This is a **pre-filtering tool**, letting you go through hundreds of RAW files e
 - **Portable executable**: No Python installation required for users
 - **Threaded processing**: Smooth, non-blocking UI
 
-## 🔧 NEF File Compatibility
-
-RAWviewer includes advanced compatibility features for Nikon NEF files:
-
-- **Full RAW processing** for most NEF files
-- **Automatic thumbnail fallback** for NEF files with LibRaw compatibility issues
-- **Smart error handling** with informative status messages
-- **High-quality thumbnails** extracted directly from NEF files when needed
-
-> **Note**: Some newer NEF files may trigger the thumbnail fallback due to LibRaw 0.21.3 compatibility issues. This is a known limitation that provides excellent image quality through embedded thumbnails while maintaining full functionality.
-
 ## 🚀 Quick Start
 
-### Option 1: Download Executable (Recommended)
+Download Executable
 #### Windows
 1. Download the latest release from the [Releases Page](https://github.com/markyip/RAWviewer/releases/latest)
 2. Download `RAWviewer.exe` directly (no zip extraction needed)
@@ -70,50 +58,16 @@ RAWviewer includes advanced compatibility features for Nikon NEF files:
 
 #### macOS
 1. Download the latest release from the [Releases Page](https://github.com/markyip/RAWviewer/releases/latest)
-2. Download and extract `RAWviewer-v0.4.1-macOS.zip`
+2. Download and extract `RAWviewer-v0.5-macOS.zip`
 3. Drag `RAWviewer.app` to your Applications folder
 4. Double-click to launch from Applications or Launchpad
 5. **First launch**: Right-click → "Open" if blocked by Gatekeeper
 
-### Option 2: Run from Source
-
-```bash
-# Clone and install
-git clone https://github.com/markyip/RAWviewer.git
-cd RAWviewer
-
-# Create virtual environment
-python -m venv rawviewer_env
-
-# Activate virtual environment
-# Windows:
-rawviewer_env\Scripts\activate
-# macOS/Linux:
-source rawviewer_env/bin/activate
-
-# Install dependencies
-pip install -r requirements.txt
-
-# Run RAWviewer
-python src/main.py
-```
-
 ## ⌨️ Keyboard Shortcuts
 
-### Windows
-- **Ctrl+O**: Open image file
-- **Ctrl+Shift+O**: Open folder of images
 - **Space**: Toggle between fit-to-window and 100% zoom
-- **Left/Right arrows**: Navigate between images
-- **Down arrow**: Move current image to Discard folder
-- **Delete**: Delete current image (with confirmation)
-
-### macOS
-- **Cmd+O**: Open image file
-- **Cmd+Shift+O**: Open folder of images
-- **Space**: Toggle between fit-to-window and 100% zoom
-- **Left/Right arrows**: Navigate between images
-- **Down arrow**: Move current image to Discard folder
+- **`←`/`→` arrows**: Navigate between images
+- **`↓`**: Move current image to Discard folder
 - **Delete**: Delete current image (with confirmation)
 
 ## 🖱️ Mouse Controls
@@ -125,17 +79,14 @@ python src/main.py
 ## 📁 Supported Formats
 
 ### RAW Formats
-- **Canon**: CR2, CR3
-- **Nikon**: NEF (with smart compatibility features)
-- **Sony**: ARW, SRF
+- **Canon**: CR3
+- **Nikon**: NEF
+- **Sony**: ARW
 - **Adobe**: DNG
 - **Olympus**: ORF
 - **Panasonic**: RW2
 - **Fujifilm**: RAF
-- **Hasselblad**: 3FR, FFF
-- **Phase One**: IIQ, CAP
-- **Leaf**: MOS
-- **Leica**: RWL
+- **Hasselblad**: 3FR
 
 ### Standard Formats
 - **JPEG**: JPG, JPEG
@@ -180,60 +131,12 @@ python build.py
 - **Gatekeeper warnings**: Right-click the app → Open → Open anyway
 - **Performance issues**: Grant Full Disk Access in Privacy settings
 
-### NEF File Issues
-- **"LibRaw compatibility issue" message**: This is normal for some NEF files - thumbnail fallback provides excellent quality
-- **No thumbnail available**: The NEF file may be corrupted or use an unsupported compression method
-- **Slow loading**: Large NEF files may take longer to process thumbnails
-
 ## ⚠️ Known Issues
 
 ### Camera Compatibility
 - **Newer camera models**: Support for the latest camera releases may be limited due to LibRaw library compatibility
 - **Proprietary RAW formats**: Some manufacturers' newest RAW formats may not be fully supported immediately after camera release
 - **Firmware updates**: Camera firmware updates may introduce RAW format changes that require LibRaw updates
-
-### Image Processing Trade-offs
-RAWviewer prioritizes **speed over perfect color accuracy** to enable rapid photo sorting and culling:
-
-- **Minimal RAW preprocessing**: To maintain fast loading times, RAW processing is kept to essential operations only
-- **Color accuracy**: Some images may display with **incorrect colors** or appear **washed out** compared to dedicated RAW processors like Lightroom or Capture One
-- **White balance**: While Canon and Fujifilm files receive automatic white balance correction, other manufacturers may show color casts
-- **Exposure/contrast**: No automatic exposure or contrast adjustments are applied
-
-### When to Use Dedicated RAW Processors
-RAWviewer is designed as a **pre-filtering tool**. For final image processing, we recommend:
-- **Adobe Lightroom** or **Capture One** for professional color grading and exposure adjustments
-- **Dedicated RAW processors** for critical color accuracy and fine-tuning
-- **RAWviewer** for fast culling, sorting, and identifying your best shots before detailed editing
-
-> **💡 Tip**: Use RAWviewer to quickly sort through hundreds of photos, then process your selected images in your preferred RAW editor for final output.
-
-## 🔄 Version History
-
-### v0.4.1 (Current)
-- ✅ Fixed Canon CR3/CR2 red hue issues with camera-specific white balance processing
-- ✅ Fixed Fujifilm RAF green hue issues with 46% performance improvement for large files
-- ✅ Smart camera detection for Canon (.cr2, .cr3) and Fujifilm (.raf) files
-- ✅ Fixed QImage compatibility issues with PyQt6
-- ✅ Enhanced Windows build system with automatic dependency management
-- ✅ Improved NEF file handling with better error recovery
-- ✅ Streamlined repository structure and comprehensive documentation
-- ✅ Enhanced cross-platform build scripts (Windows batch + macOS shell)
-- ✅ Better error messages and user feedback for corrupted files
-
-### v0.4.0
-- ✅ Full cross-platform support (Windows + macOS)
-- ✅ Smart NEF compatibility with thumbnail fallback
-- ✅ Automatic orientation correction
-- ✅ Enhanced zoom functionality with proper centering
-- ✅ Improved error handling and user feedback
-- ✅ Session state persistence
-- ✅ Comprehensive keyboard shortcuts
-
-### v0.2.0
-- ✅ Initial Windows-only release
-- ✅ Basic RAW file support
-- ✅ Simple zoom and navigation
 
 ## 📄 License
 
