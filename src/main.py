@@ -16,6 +16,10 @@ from datetime import datetime
 import platform
 import ctypes
 
+# Import enhanced performance modules
+from image_cache import get_image_cache, initialize_cache
+from enhanced_raw_processor import EnhancedRAWProcessor, PreloadManager
+
 
 def resource_path(relative_path):
     """ Get absolute path to resource, works for dev and for PyInstaller """
@@ -351,7 +355,35 @@ class RAWImageViewer(QMainWindow):
         self.film_strip_visible = False
         self.thumbnail_threads = []  # Track running thumbnail threads
 
+        # Initialize enhanced performance components
+        self.image_cache = get_image_cache()
+        self.preload_manager = PreloadManager(max_preload_threads=2)
+        self.current_processor = None
+        self._pending_thumbnail = None  # Store thumbnail when not immediately displayed
+        self._exif_data_ready = False  # Flag to track if EXIF data is available
+
+        # Thumbnail display preferences
+        # User preference: show thumbnails even at 100% zoom
+        self.show_thumbnails_when_zoomed = False
+
+        # Connect cache signals for performance monitoring
+        self.image_cache.cache_hit.connect(self.on_cache_hit)
+        self.image_cache.memory_warning.connect(self.on_memory_warning)
+
         self.init_ui()
+
+        # Display cache initialization message
+        cache_stats = self.image_cache.get_cache_stats()
+        memory_info = cache_stats['memory_info']
+        print(f"✓ Enhanced image cache initialized")
+        print(f"  Cache budget: {cache_stats['cache_budget_mb']}MB")
+        print(
+            f"  Max full images: {cache_stats['full_image_cache']['max_size']}")
+        print(
+            f"  Max thumbnails: {cache_stats['thumbnail_cache']['max_size']}")
+        print(
+            f"  Available memory: {memory_info['system_available_gb']:.1f}GB")
+
         # Try to restore previous session
         if not self.restore_session_state():
             # If no session, show default message
@@ -928,25 +960,55 @@ class RAWImageViewer(QMainWindow):
             error_msg = f"The file {file_path} does not exist."
             self.show_error("File not found", error_msg)
             return
+
+        # Stop any current processing
+        if self.current_processor is not None:
+            self.current_processor.stop_processing()
+            self.current_processor.wait(1000)
+
         self.current_file_path = file_path
         filename = os.path.basename(file_path)
         self.setWindowTitle(f"RAW Image Viewer - {filename}")
+
+        # Reset EXIF data ready flag for new image
+        self._exif_data_ready = False
+
+        # Check if we have a cached full image first
+        cached_image = self.image_cache.get_full_image(file_path)
+        if cached_image is not None:
+            self.status_bar.showMessage(f"Loaded {filename} from cache")
+            self.display_numpy_image(cached_image)
+            self.setFocus()
+            self.save_session_state()
+            self._start_preloading()
+            return
+
+        # Check if we have a cached pixmap for non-RAW files
+        cached_pixmap = self.image_cache.get_pixmap(file_path)
+        if cached_pixmap is not None:
+            self.status_bar.showMessage(f"Loaded {filename} from cache")
+            self.display_pixmap(cached_pixmap)
+            self.setFocus()
+            self.save_session_state()
+            self._start_preloading()
+            return
+
+        # No cache hit, start enhanced processing
         self.status_bar.showMessage(f"Loading {filename}...")
-        self.image_label.setText("Processing image...\nPlease wait...")
-        ext = os.path.splitext(file_path)[1].lower()
-        raw_exts = [
-            '.cr2', '.cr3', '.nef', '.arw', '.dng', '.orf', '.rw2', '.pef',
-            '.srw', '.x3f', '.raf', '.3fr', '.fff', '.iiq', '.cap', '.erf',
-            '.mef', '.mos', '.nrw', '.rwl', '.srf'
-        ]
-        is_raw = ext in raw_exts
-        self._is_loading_raw = is_raw  # Track for on_image_processed
-        self.raw_processor = RAWProcessor(file_path, is_raw)
-        self.raw_processor.image_processed.connect(self.on_image_processed)
-        self.raw_processor.error_occurred.connect(self.on_processing_error)
-        self.raw_processor.thumbnail_fallback_used.connect(
-            self.on_thumbnail_fallback)
-        self.raw_processor.start()
+        self.image_label.setText("Loading preview...\nPlease wait...")
+
+        # Start enhanced processor
+        self.current_processor = EnhancedRAWProcessor(
+            file_path, use_quality_processing=False)
+        self.current_processor.thumbnail_ready.connect(self.on_thumbnail_ready)
+        self.current_processor.image_processed.connect(
+            self.on_image_processed_enhanced)
+        self.current_processor.error_occurred.connect(self.on_processing_error)
+        self.current_processor.processing_progress.connect(
+            self.on_processing_progress)
+        self.current_processor.exif_data_ready.connect(self.on_exif_data_ready)
+        self.current_processor.start()
+
         self.setFocus()
         # Save session state when image changes
         self.save_session_state()
@@ -955,6 +1017,191 @@ class RAWImageViewer(QMainWindow):
         """Handle when thumbnail fallback is used"""
         self.status_bar.showMessage(
             f"⚠️ {message} - Image quality may be reduced")
+
+    def on_thumbnail_ready(self, thumbnail):
+        """Handle when thumbnail is ready for immediate display."""
+        if thumbnail is not None:
+            # Smart thumbnail display: only show thumbnail if it makes sense
+            if self._should_show_thumbnail():
+                self.display_numpy_image(thumbnail)
+                self.status_bar.showMessage(
+                    "Preview loaded - processing full image...")
+            else:
+                # Store thumbnail but don't display it yet
+                self._pending_thumbnail = thumbnail
+                self.status_bar.showMessage(
+                    "Processing full image for quality evaluation...")
+
+    def on_image_processed_enhanced(self, rgb_image):
+        """Handle enhanced image processing results."""
+        try:
+            if rgb_image is None:
+                # Non-RAW file - load with QPixmap and cache it
+                pixmap = QPixmap(self.current_file_path)
+                if pixmap.isNull():
+                    self.show_error("Display Error",
+                                    "Could not load image file.")
+                    return
+
+                # Apply orientation correction for non-RAW files
+                cached_exif = self.image_cache.get_exif(self.current_file_path)
+                orientation = cached_exif.get(
+                    'orientation', 1) if cached_exif else 1
+                pixmap = self.apply_orientation_to_pixmap(pixmap, orientation)
+
+                # Cache the pixmap
+                self.image_cache.put_pixmap(self.current_file_path, pixmap)
+
+                self.display_pixmap(pixmap)
+            else:
+                # RAW file - processed numpy array
+                self.display_numpy_image(rgb_image)
+
+            # Update UI state
+            if self.current_file_path:
+                self.scan_folder_for_images(self.current_file_path)
+
+            # Update status bar with EXIF data instead of just showing "Loaded"
+            self.update_status_bar()
+
+            # Start preloading adjacent images
+            self._start_preloading()
+
+            # Clear any pending thumbnail since we now have the full image
+            self._pending_thumbnail = None
+
+        except Exception as e:
+            error_msg = f"Error displaying image: {str(e)}"
+            self.show_error("Display Error", error_msg)
+
+        self.setFocus()
+
+    def on_processing_progress(self, message):
+        """Handle processing progress updates."""
+        filename = os.path.basename(self.current_file_path)
+        self.status_bar.showMessage(f"{filename}: {message}")
+
+    def on_exif_data_ready(self, exif_data):
+        """Handle when EXIF data becomes available."""
+        # Update status bar immediately with EXIF data when it becomes available
+        # This ensures EXIF data is shown even in fit-to-window mode
+        if self.current_file_path:
+            # Set a flag to indicate EXIF data is ready
+            self._exif_data_ready = True
+            # Update status bar if we have image dimensions, otherwise it will be updated when image is displayed
+            if self.current_pixmap:
+                self.update_status_bar()
+            else:
+                # If no pixmap yet, just update with basic info
+                filename = os.path.basename(self.current_file_path)
+                self.status_bar.showMessage(f"{filename}: EXIF data loaded...")
+
+    def on_cache_hit(self, file_path, cache_type):
+        """Handle cache hit events for performance monitoring."""
+        # Could be used for performance analytics
+        pass
+
+    def on_memory_warning(self, memory_percent):
+        """Handle memory warning events."""
+        print(f"⚠️ Memory usage high: {memory_percent:.1f}%")
+
+    def _should_show_thumbnail(self):
+        """Determine if we should show thumbnail immediately or wait for full image."""
+        # If user explicitly wants thumbnails even when zoomed, always show
+        if self.show_thumbnails_when_zoomed:
+            return True
+
+        # Don't show thumbnail if user is in 100% zoom mode (checking sharpness)
+        if not self.fit_to_window:
+            return False
+
+        # Don't show thumbnail if we're maintaining zoom state from navigation
+        # (user was previously at 100% zoom checking sharpness)
+        if hasattr(self, '_maintain_zoom_on_navigation'):
+            return False
+
+        # Don't show thumbnail if we're restoring zoom state to 100%
+        if (hasattr(self, '_restore_zoom_center') and
+                self._restore_zoom_center is not None):
+            return False
+
+        # Show thumbnail in fit-to-window mode for quick overview
+        return True
+
+    def display_numpy_image(self, rgb_image):
+        """Display a numpy image array."""
+        try:
+            height, width, channels = rgb_image.shape
+            bytes_per_line = channels * width
+
+            # Ensure the data is contiguous
+            if not rgb_image.flags['C_CONTIGUOUS']:
+                rgb_image = np.ascontiguousarray(rgb_image)
+
+            # Convert to bytes for PyQt6 compatibility
+            image_data = rgb_image.data.tobytes() if hasattr(
+                rgb_image.data, 'tobytes') else bytes(rgb_image.data)
+
+            q_image = QImage(image_data, width, height,
+                             bytes_per_line, QImage.Format.Format_RGB888)
+            pixmap = QPixmap.fromImage(q_image)
+
+            self.display_pixmap(pixmap)
+
+        except Exception as e:
+            error_msg = f"Error displaying numpy image: {str(e)}"
+            self.show_error("Display Error", error_msg)
+
+    def display_pixmap(self, pixmap):
+        """Display a QPixmap."""
+        self.current_pixmap = pixmap
+
+        if not hasattr(self, '_maintain_zoom_on_navigation'):
+            self.fit_to_window = True
+            self.current_zoom_level = 1.0
+            self.zoom_center_point = None
+            self.scale_image_to_fit()
+        else:
+            if self.fit_to_window:
+                self.scale_image_to_fit()
+            else:
+                self.apply_zoom_and_pan()
+            delattr(self, '_maintain_zoom_on_navigation')
+
+        # Handle zoom restoration
+        if hasattr(self, '_restore_zoom_center') and self._restore_zoom_center is not None:
+            self.fit_to_window = False
+            self.current_zoom_level = self._restore_zoom_level or 1.0
+            self.zoom_center_point = self._restore_zoom_center
+            self.start_scroll_x = self.scroll_area.horizontalScrollBar().value()
+            self.start_scroll_y = self.scroll_area.verticalScrollBar().value()
+            self.apply_zoom_and_pan()
+            self._restore_zoom_center = None
+            self._restore_zoom_level = None
+
+        # Update status bar immediately with EXIF data
+        self.update_status_bar(pixmap.width(), pixmap.height())
+
+    def _start_preloading(self):
+        """Start preloading adjacent images for fast navigation."""
+        if not self.image_files or self.current_file_index < 0:
+            return
+
+        # Determine adjacent images to preload
+        preload_files = []
+
+        # Next images (higher priority)
+        for i in range(1, 4):  # Preload next 3 images
+            next_index = (self.current_file_index + i) % len(self.image_files)
+            preload_files.append(self.image_files[next_index])
+
+        # Previous images (lower priority)
+        for i in range(1, 3):  # Preload previous 2 images
+            prev_index = (self.current_file_index - i) % len(self.image_files)
+            preload_files.append(self.image_files[prev_index])
+
+        # Start preloading
+        self.preload_manager.preload_images(preload_files, preload_files[:2])
 
     def on_image_processed(self, rgb_image):
         try:
@@ -1046,6 +1293,14 @@ class RAWImageViewer(QMainWindow):
 
     def on_processing_error(self, error_message):
         """Handle RAW processing errors"""
+        # If we have a pending thumbnail and full processing failed, show it as fallback
+        if hasattr(self, '_pending_thumbnail') and self._pending_thumbnail is not None:
+            self.display_numpy_image(self._pending_thumbnail)
+            self.status_bar.showMessage(
+                "⚠️ Using preview - full processing failed")
+            self._pending_thumbnail = None
+            return
+
         error_msg = f"Error processing RAW file:\n{error_message}"
         self.show_error("RAW Processing Error", error_msg)
         self.image_label.setText(
@@ -1490,19 +1745,76 @@ class RAWImageViewer(QMainWindow):
             current_pos = self.current_file_index + 1
             file_position = f" - {current_pos} of {total_files}"
 
-        # Extract EXIF data
-        exif_data = self.extract_exif_data(self.current_file_path)
-
-        # Build EXIF info string
+        # Try to get EXIF data from cache first (faster)
         exif_info = []
-        if exif_data['focal_length']:
-            exif_info.append(exif_data['focal_length'])
-        if exif_data['aperture']:
-            exif_info.append(exif_data['aperture'])
-        if exif_data['iso']:
-            exif_info.append(exif_data['iso'])
-        if exif_data['capture_time']:
-            exif_info.append(exif_data['capture_time'])
+        cached_exif = self.image_cache.get_exif(self.current_file_path)
+        if cached_exif and cached_exif.get('exif_data'):
+            # Use cached EXIF data to build info string
+            exif_tags = cached_exif['exif_data']
+
+            # Extract focal length
+            if 'EXIF FocalLength' in exif_tags:
+                focal_length_raw = exif_tags['EXIF FocalLength']
+                try:
+                    focal_str = str(focal_length_raw)
+                    if '/' in focal_str:
+                        num, den = focal_str.split('/')
+                        focal_length = round(float(num) / float(den))
+                    else:
+                        focal_length = round(float(focal_str))
+                    exif_info.append(f"{focal_length}mm")
+                except (ValueError, AttributeError, ZeroDivisionError):
+                    pass
+
+            # Extract aperture
+            if 'EXIF FNumber' in exif_tags:
+                aperture_raw = exif_tags['EXIF FNumber']
+                try:
+                    aperture_str = str(aperture_raw)
+                    if '/' in aperture_str:
+                        num, den = aperture_str.split('/')
+                        aperture = float(num) / float(den)
+                    else:
+                        aperture = float(aperture_str)
+                    exif_info.append(f"f/{aperture:.1f}")
+                except (ValueError, AttributeError, ZeroDivisionError):
+                    pass
+
+            # Extract ISO
+            if 'EXIF ISOSpeedRatings' in exif_tags:
+                iso_raw = exif_tags['EXIF ISOSpeedRatings']
+                try:
+                    iso = int(str(iso_raw))
+                    exif_info.append(f"ISO {iso}")
+                except (ValueError, AttributeError):
+                    pass
+
+            # Extract capture time
+            datetime_tags = ['EXIF DateTimeOriginal',
+                             'Image DateTime', 'EXIF DateTime']
+            for tag_name in datetime_tags:
+                if tag_name in exif_tags:
+                    datetime_raw = exif_tags[tag_name]
+                    try:
+                        datetime_str = str(datetime_raw)
+                        from datetime import datetime
+                        dt = datetime.strptime(
+                            datetime_str, "%Y:%m:%d %H:%M:%S")
+                        exif_info.append(dt.strftime("%H:%M:%S %Y-%m-%d"))
+                        break
+                    except (ValueError, AttributeError):
+                        continue
+        else:
+            # Fallback to direct EXIF extraction (slower, but ensures data is available)
+            exif_data = self.extract_exif_data(self.current_file_path)
+            if exif_data['focal_length']:
+                exif_info.append(exif_data['focal_length'])
+            if exif_data['aperture']:
+                exif_info.append(exif_data['aperture'])
+            if exif_data['iso']:
+                exif_info.append(exif_data['iso'])
+            if exif_data['capture_time']:
+                exif_info.append(exif_data['capture_time'])
 
         # Construct status message
         status_parts = []
