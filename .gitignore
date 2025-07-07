@@ -30,6 +30,7 @@ desktop.ini
 # Test files
 test_images/
 sample_images/
+test_*.py
 
 # Virtual environments
 rawviewer_env/
@@ -45,6 +46,15 @@ venv/
 # Documentation that should be in releases
 *_TESTING_GUIDE.md
 *_BUILD_UPDATE.md
+
+# Development documentation (not for end users)
+*_IMPLEMENTATION*.md
+*_PERFORMANCE*.md
+*_OPTIMIZATION*.md
+*_SOLUTION*.md
+*_INSTRUCTIONS*.md
+*_SUMMARY*.md
+*_FIX*.md
 
 # Ignore icon.iconset directory (icon source assets)
 icon.iconset/
