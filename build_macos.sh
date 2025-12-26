@@ -17,23 +17,15 @@ source rawviewer_env/bin/activate
 
 # Install/upgrade dependencies
 echo "Installing dependencies..."
-pip install --upgrade PyQt6 rawpy send2trash pyinstaller natsort exifread Pillow
+pip install --upgrade PyQt6 rawpy send2trash pyinstaller natsort exifread Pillow psutil numpy
 
 # Clean previous builds
 echo "Cleaning previous builds..."
 rm -rf build dist *.spec
 
-# Build the application
-# Use the new icon path
-ICON_PATH="icons/appicon.icns"
-if [ -f "$ICON_PATH" ]; then
-    ICON_ARG="--icon $ICON_PATH"
-else
-    ICON_ARG=""
-fi
-
+# Build the application using build.py for consistency
 echo "Building RAWviewer..."
-pyinstaller --onefile --windowed $ICON_ARG src/main.py --name RAWviewer
+python3 build.py
 
 echo ""
 echo "Build completed!"

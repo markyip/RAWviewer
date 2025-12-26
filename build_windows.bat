@@ -16,7 +16,7 @@ call rawviewer_env\Scripts\activate.bat
 
 REM Install/upgrade dependencies
 echo Installing dependencies...
-pip install --upgrade PyQt6 rawpy send2trash pyinstaller natsort exifread Pillow psutil
+pip install --upgrade PyQt6 rawpy send2trash pyinstaller natsort exifread Pillow psutil numpy
 
 REM Clean previous builds
 echo Cleaning previous builds...

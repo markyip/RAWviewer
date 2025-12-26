@@ -26,7 +26,8 @@ def install_dependencies():
         'natsort',
         'exifread',
         'Pillow',  # Added for NEF thumbnail fallback
-        'psutil'   # Added for system memory info in image_cache
+        'psutil',  # Added for system memory info in image_cache
+        'numpy'    # Required for image processing (used in all modules)
     ]
 
     for dep in dependencies:
