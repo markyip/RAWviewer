@@ -53,7 +53,7 @@ print("Basic imports done, importing PyQt6...", flush=True)
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QLabel, QFileDialog,
                              QMessageBox, QScrollArea, QSizePolicy, QPushButton, QFrame,
-                             QGridLayout, QScrollBar, QDialog, QSplashScreen, QSizeGrip)
+                             QGridLayout, QScrollBar, QDialog, QSplashScreen)
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QPoint, QEvent, QSettings, QSize, QRect, QObject, QRunnable, QThreadPool
 from PyQt6.QtGui import (QPixmap, QImage, QAction, QKeySequence,
                          QDragEnterEvent, QDropEvent, QCursor, QIcon,
@@ -398,19 +398,18 @@ class RAWProcessor(QThread):
             # Mirrored vertical
             return np.flipud(image_array)
         elif orientation == 5:
-            # Mirrored horizontal then rotated 90 CCW
+            # Mirrored horizontal + Rotated 270° CW (k=1 CCW)
             return np.rot90(np.fliplr(image_array), 1)
         elif orientation == 6:
-            # Rotated 90 CW - need to rotate 90 CW to correct (same as QPixmap transform.rotate(90))
-            # np.rot90 with k=3 rotates 270° CCW = 90° CW
+            # Rotate 90° CW (k=3 CCW)
             return np.rot90(image_array, 3)
         elif orientation == 7:
-            # Mirrored horizontal then rotated 90 CW
-            return np.rot90(np.fliplr(image_array), -1)
+            # Mirror LR + rotate 90° CW
+            return np.rot90(np.fliplr(image_array), 3)
         elif orientation == 8:
-            # Rotated 90 CCW - need to rotate 90 CW (270 CCW) to correct
-            # np.rot90 with k=3 rotates 270° CCW = 90° CW
-            return np.rot90(image_array, 3)
+            # Rotate 270° CW (90° CCW) - need to rotate 90° CW to correct
+            # np.rot90 with k=1 rotates 90° CCW
+            return np.rot90(image_array, 1)
         else:
             return image_array
 
@@ -1481,10 +1480,22 @@ class ImageLoadTask(QRunnable):
                             if thumb.format == rawpy.ThumbFormat.JPEG:
                                 # Thumbnail is JPEG - load it directly
                                 from io import BytesIO
+                                from PIL import Image, ImageOps
                                 jpeg_data = thumb.data
                                 
-                                # Create QImage from JPEG data
-                                qimage = QImage.fromData(jpeg_data)
+                                # Use PIL to load JPEG and apply EXIF orientation
+                                pil_image = Image.open(BytesIO(jpeg_data))
+                                # Apply EXIF orientation correction
+                                pil_image = ImageOps.exif_transpose(pil_image)
+                                # Convert to RGB if needed
+                                if pil_image.mode != 'RGB':
+                                    pil_image = pil_image.convert('RGB')
+                                
+                                # Convert PIL image to QImage
+                                width, height = pil_image.size
+                                image_bytes = pil_image.tobytes('raw', 'RGB')
+                                bytes_per_line = 3 * width
+                                qimage = QImage(image_bytes, width, height, bytes_per_line, QImage.Format.Format_RGB888)
                                 
                                 if not qimage.isNull():
                                     # Scale to target size
@@ -3045,93 +3056,6 @@ class JustifiedGallery(QWidget):
         logger.debug(f"[JUSTIFIED_GALLERY] ========== set_images() COMPLETED in {total_time:.3f}s ==========")  # Issue #9
 
 
-class MinimalSizeGrip(QSizeGrip):
-    """Minimal size grip that integrates with deferred layout updates"""
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        # Set a fixed size to ensure it's visible and clickable
-        self.setFixedSize(16, 16)
-        # Ensure it's visible
-        self.setVisible(True)
-        # Set cursor to indicate it's resizable
-        self.setCursor(Qt.CursorShape.SizeFDiagCursor)
-        # Set a subtle style
-        self.setStyleSheet("""
-            QSizeGrip {
-                background: transparent;
-                border: none;
-            }
-        """)
-        # Set tooltip to indicate it's resizable
-        self.setToolTip("Drag to resize window")
-    
-    def paintEvent(self, event):
-        """Override paintEvent to draw a visible grip pattern on dark background"""
-        from PyQt6.QtGui import QPainter, QColor
-        from PyQt6.QtCore import Qt
-        
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        
-        # Draw minimal diagonal lines pattern (visible on dark background)
-        # Use a subtle gray color that's visible on #1E1E1E background
-        color = QColor(150, 150, 150, 200)  # Light gray with some transparency
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(color)
-        
-        # Draw small diagonal dots/rectangles in a pattern
-        # Bottom-right corner pattern: 3 dots in a diagonal line
-        size = 2  # Size of each dot
-        spacing = 4  # Spacing between dots
-        start_x = self.width() - 2
-        start_y = self.height() - 2
-        
-        # Draw 3 dots going diagonally up-left
-        for i in range(3):
-            x = start_x - (i * spacing)
-            y = start_y - (i * spacing)
-            if x >= 0 and y >= 0:
-                painter.drawEllipse(int(x - size/2), int(y - size/2), size, size)
-    
-    def mousePressEvent(self, event):
-        """Handle mouse press to start resizing"""
-        if event.button() == Qt.MouseButton.LeftButton:
-            window = self.window()
-            if window:
-                window._is_resizing = True  # Mark that window is being actively resized
-                
-                # Ignore resize events during drag for gallery mode
-                if hasattr(window, 'view_mode') and window.view_mode == 'gallery':
-                    if hasattr(window, 'gallery_justified') and window.gallery_justified:
-                        window.gallery_justified._ignore_resize_events = True
-        
-        # Let QSizeGrip handle the actual resizing
-        super().mousePressEvent(event)
-    
-    def mouseReleaseEvent(self, event):
-        """Handle mouse release to stop resizing"""
-        window = self.window()
-        if window:
-            window._is_resizing = False  # Mark that resizing has ended
-            
-            # Re-enable resize events and trigger layout update
-            if hasattr(window, 'view_mode') and window.view_mode == 'gallery':
-                if hasattr(window, 'gallery_justified') and window.gallery_justified:
-                    window.gallery_justified._ignore_resize_events = False
-                    # Trigger layout update with new window size
-                    from PyQt6.QtCore import QTimer
-                    QTimer.singleShot(100, window.gallery_justified.force_layout_update)
-            
-            # Scale image to fit after resize completes (for single view mode)
-            if hasattr(window, 'view_mode') and window.view_mode == 'single':
-                if hasattr(window, 'current_pixmap') and window.current_pixmap and hasattr(window, 'fit_to_window') and window.fit_to_window:
-                    from PyQt6.QtCore import QTimer
-                    QTimer.singleShot(100, window.scale_image_to_fit)
-        
-        # Let QSizeGrip handle the actual resizing
-        super().mouseReleaseEvent(event)
-
-
 class CustomTitleBar(QFrame):
     """Material Design 3 style custom title bar for frameless window."""
     def __init__(self, parent=None, title="RAW Image Viewer"):
@@ -3497,7 +3421,10 @@ class RAWImageViewer(QMainWindow):
                     thumb = raw.extract_thumb()
                     if thumb is not None:
                         if thumb.format == rawpy.ThumbFormat.JPEG:
+                            from PIL import ImageOps
                             jpeg_image = Image.open(io.BytesIO(thumb.data))
+                            # Apply EXIF orientation correction
+                            jpeg_image = ImageOps.exif_transpose(jpeg_image)
                             if jpeg_image.mode != 'RGB':
                                 jpeg_image = jpeg_image.convert('RGB')
                             width, height = jpeg_image.size
@@ -3549,8 +3476,11 @@ class RAWImageViewer(QMainWindow):
         # For TIFF files, use PIL to avoid Qt TIFF plugin warnings
         if is_tiff:
             try:
-                from PIL import Image
+                from PIL import Image, ImageOps
                 with Image.open(file_path) as pil_image:
+                    # Apply EXIF orientation correction
+                    pil_image = ImageOps.exif_transpose(pil_image)
+                    
                     # Convert to RGB if necessary
                     if pil_image.mode not in ('RGB', 'L'):
                         pil_image = pil_image.convert('RGB')
@@ -3574,7 +3504,21 @@ class RAWImageViewer(QMainWindow):
                 # Return empty QPixmap instead
                 return QPixmap()
         
-        # For other formats, use QPixmap directly
+        # For other formats (JPEG, PNG, etc.), use QImageReader with setAutoTransform
+        # This automatically applies EXIF orientation
+        try:
+            from PyQt6.QtGui import QImageReader
+            reader = QImageReader(file_path)
+            reader.setAutoTransform(True)  # Apply EXIF orientation automatically
+            pixmap = QPixmap.fromImageReader(reader)
+            if not pixmap.isNull():
+                return pixmap
+        except Exception as e:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.debug(f"[LOAD] QImageReader failed for {os.path.basename(file_path)}: {e}")
+        
+        # Fallback to QPixmap (won't apply orientation, but better than nothing)
         return QPixmap(file_path)
     
     def __init__(self):
@@ -3683,7 +3627,12 @@ class RAWImageViewer(QMainWindow):
 
         # Try to restore previous session
         print("  [RAWImageViewer] Restoring session state...", flush=True)
-        if not self.restore_session_state():
+        if self.restore_session_state():
+            # If session was restored, check if we need to show gallery view
+            if hasattr(self, 'view_mode') and self.view_mode == 'gallery':
+                # Show gallery view if it was the last view mode
+                self._show_gallery_view()
+        else:
             # If no session, show default message
             pass
         print("  [RAWImageViewer] Initialization complete!", flush=True)
@@ -3740,9 +3689,12 @@ class RAWImageViewer(QMainWindow):
         # Mark that orientation is already applied (UnifiedImageProcessor applies it)
         logger.debug(f"[MANAGER] Setting _orientation_already_applied = True before display_numpy_image")
         self._orientation_already_applied = True
+        # Console log: _orientation_already_applied value
+        print(f"[ORIENTATION] _orientation_already_applied = {self._orientation_already_applied} (before display_numpy_image)")
         self.display_numpy_image(image)
         logger.debug(f"[MANAGER] Resetting _orientation_already_applied = False after display_numpy_image")
         self._orientation_already_applied = False  # Reset flag
+        print(f"[ORIENTATION] _orientation_already_applied = {self._orientation_already_applied} (after display_numpy_image, reset)")
         self.status_bar.showMessage(f"Loaded {os.path.basename(file_path)}")
         self.setFocus()
         self.save_session_state()
@@ -3758,10 +3710,33 @@ class RAWImageViewer(QMainWindow):
             logger.debug(f"[MANAGER] Pixmap for different file: {os.path.basename(file_path)}")
             return
         
-        logger.info(f"[MANAGER] Pixmap ready for {os.path.basename(file_path)}")
-        # 應用方向校正
-        orientation = self.get_orientation_from_exif(file_path)
-        pixmap = self.apply_orientation_to_pixmap(pixmap, orientation)
+        # Check if this is actually a RAW file (shouldn't happen, but log it)
+        raw_extensions = {'.cr2', '.cr3', '.nef', '.arw', '.dng', '.orf', '.rw2', 
+                         '.pef', '.srw', '.x3f', '.raf', '.3fr', '.fff', '.iiq', 
+                         '.cap', '.erf', '.mef', '.mos', '.nrw', '.rwl', '.srf'}
+        file_ext = os.path.splitext(file_path)[1].lower()
+        is_raw_file = file_ext in raw_extensions
+        
+        if is_raw_file:
+            print(f"[ORIENTATION] WARNING: RAW file {os.path.basename(file_path)} received as pixmap! This should not happen.")
+            # Get orientation and log it
+            orientation = self.get_orientation_from_exif(file_path)
+            print(f"[ORIENTATION] RAW Image (via pixmap path): {os.path.basename(file_path)}, Original EXIF Orientation: {orientation}")
+            # Apply orientation correction manually
+            if orientation != 1:
+                print(f"[ORIENTATION] Applying orientation correction to RAW pixmap: {orientation}")
+                pixmap = self.apply_orientation_to_pixmap(pixmap, orientation)
+                self._orientation_already_applied = True
+            else:
+                self._orientation_already_applied = True
+        else:
+            logger.info(f"[MANAGER] Pixmap ready for {os.path.basename(file_path)}")
+            # load_pixmap_safe in common_image_loader.py now uses QImageReader with setAutoTransform(True)
+            # which automatically applies EXIF orientation. Orientation is already applied.
+            # Set flag so display_pixmap doesn't apply it again
+            self._orientation_already_applied = True
+        
+        print(f"[ORIENTATION] on_manager_pixmap_ready: _orientation_already_applied = {self._orientation_already_applied}")
         self.display_pixmap(pixmap)
         self.status_bar.showMessage(f"Loaded {os.path.basename(file_path)}")
         self.setFocus()
@@ -3871,19 +3846,20 @@ class RAWImageViewer(QMainWindow):
             # Mirrored vertical
             transform.scale(1, -1)
         elif orientation == 5:
-            # Mirrored horizontal then rotated 90 CCW
+            # Mirrored horizontal + Rotated 270° CW (k=1 CCW)
             transform.scale(-1, 1)
             transform.rotate(-90)
         elif orientation == 6:
-            # Rotated 90 CW - need to rotate 90 CCW to correct
-            transform.rotate(90)
-        elif orientation == 7:
-            # Mirrored horizontal then rotated 90 CW
-            transform.scale(-1, 1)
-            transform.rotate(90)
-        elif orientation == 8:
-            # Rotated 90 CCW - need to rotate 90 CW to correct
+            # Rotate 90° CW (k=3 CCW)
             transform.rotate(-90)
+        elif orientation == 7:
+            # Mirror LR + rotate 90° CW
+            transform.scale(-1, 1)
+            transform.rotate(-90)
+        elif orientation == 8:
+            # Rotate 270° CW (90° CCW) - need to rotate 90° CW to correct
+            # k=1 rotates 90° CCW
+            transform.rotate(90)
 
         return pixmap.transformed(transform)
 
@@ -4315,10 +4291,6 @@ class RAWImageViewer(QMainWindow):
         # Add custom widget to status bar
         self.status_bar.addPermanentWidget(status_widget, 1)
         
-        # Add minimal size grip in lower right corner (standard QSizeGrip)
-        size_grip = MinimalSizeGrip(self)
-        self.status_bar.addPermanentWidget(size_grip, 0)
-        
         # Status bar created - no rounded corners to update
         
         self.setSizePolicy(QSizePolicy.Policy.Expanding,
@@ -4488,6 +4460,13 @@ class RAWImageViewer(QMainWindow):
                     cached_pixmap = self.image_cache.get_pixmap(self.current_file_path)
                     if cached_pixmap and not cached_pixmap.isNull():
                         logger.info(f"[VIEW_MODE] Using cached pixmap from image cache for instant display")
+                        # Apply orientation correction to cached pixmap if needed
+                        orientation = self.get_orientation_from_exif(self.current_file_path)
+                        if orientation != 1:
+                            cached_pixmap = self.apply_orientation_to_pixmap(cached_pixmap, orientation)
+                            self._orientation_already_applied = True
+                        else:
+                            self._orientation_already_applied = True
                         self.display_pixmap(cached_pixmap)
             except Exception as e:
                 logger.debug(f"[VIEW_MODE] Error using cached pixmap: {e}")
@@ -6611,8 +6590,14 @@ class RAWImageViewer(QMainWindow):
                         # Cached pixmaps should already have orientation applied, but we apply it again
                         # to ensure consistency, especially if orientation was cached incorrectly
                         orientation = self.get_orientation_from_exif(requested_file_path)
-                        cached_pixmap = self.apply_orientation_to_pixmap(cached_pixmap, orientation)
-                        logger.info(f"[LOAD] Applied orientation correction to cached pixmap: {orientation}")
+                        if orientation != 1:
+                            cached_pixmap = self.apply_orientation_to_pixmap(cached_pixmap, orientation)
+                            logger.info(f"[LOAD] Applied orientation correction to cached pixmap: {orientation}")
+                            # Set flag so display_pixmap doesn't apply orientation again
+                            self._orientation_already_applied = True
+                        else:
+                            # Orientation is 1 (normal), no correction needed
+                            self._orientation_already_applied = True
                         
                         logger.info(f"[LOAD] Displaying cached pixmap")
                         display_start = time.time()
@@ -6730,13 +6715,12 @@ class RAWImageViewer(QMainWindow):
                                     "Could not load image file.")
                     return
 
-                # Apply orientation correction for non-RAW files
-                cached_exif = self.image_cache.get_exif(self.current_file_path)
-                orientation = cached_exif.get(
-                    'orientation', 1) if cached_exif else 1
-                pixmap = self.apply_orientation_to_pixmap(pixmap, orientation)
+                # _load_pixmap_safe now uses QImageReader with setAutoTransform(True) for regular images
+                # which automatically applies EXIF orientation. Orientation is already applied.
+                # Set flag so display_pixmap doesn't apply it again
+                self._orientation_already_applied = True
 
-                # Cache the pixmap
+                # Cache the pixmap (already has correct orientation)
                 self.image_cache.put_pixmap(self.current_file_path, pixmap)
 
                 self.display_pixmap(pixmap)
@@ -6846,6 +6830,13 @@ class RAWImageViewer(QMainWindow):
                     cached_pixmap = self.image_cache.get_pixmap(self.current_file_path)
                     if cached_pixmap is not None:
                         logger.info(f"[DISPLAY] Using cached pixmap for {width}x{height} image")
+                        # Apply orientation correction to cached pixmap if needed
+                        orientation = self.get_orientation_from_exif(self.current_file_path)
+                        if orientation != 1:
+                            cached_pixmap = self.apply_orientation_to_pixmap(cached_pixmap, orientation)
+                            self._orientation_already_applied = True
+                        else:
+                            self._orientation_already_applied = True
                         self.display_pixmap(cached_pixmap)
                         return
                     else:
@@ -6879,7 +6870,10 @@ class RAWImageViewer(QMainWindow):
             # Images from old RAWProcessor path need orientation correction here
             if hasattr(self, 'current_file_path') and self.current_file_path:
                 # Check if orientation was already applied (e.g., by UnifiedImageProcessor)
-                if not getattr(self, '_orientation_already_applied', False):
+                orientation_already_applied = getattr(self, '_orientation_already_applied', False)
+                # Console log: _orientation_already_applied value in display_numpy_image
+                print(f"[ORIENTATION] display_numpy_image: _orientation_already_applied = {orientation_already_applied}")
+                if not orientation_already_applied:
                     orientation = self.get_orientation_from_exif(self.current_file_path)
                     if orientation != 1:
                         logger.info(f"[DISPLAY] Applying orientation correction: {orientation}")
@@ -6888,6 +6882,7 @@ class RAWImageViewer(QMainWindow):
                         logger.debug(f"[DISPLAY] Orientation is 1 (normal), no correction needed")
                 else:
                     logger.debug(f"[DISPLAY] Orientation already applied by processor, skipping")
+                    print(f"[ORIENTATION] display_numpy_image: Skipping orientation correction (already applied)")
             
             # Cache the pixmap for future use (after orientation correction)
             if hasattr(self, 'current_file_path') and self.current_file_path:
@@ -7337,13 +7332,11 @@ class RAWImageViewer(QMainWindow):
                                     "Could not load image file.")
                     return
 
-                # Apply orientation correction for non-RAW files
-                # CRITICAL: Always get orientation from EXIF, even if cached
-                # This ensures orientation is correct on first load and after zoom
-                orientation = self.get_orientation_from_exif(
-                    self.current_file_path)
-                logger.debug(f"[PROCESS] Applying orientation correction to JPEG: {orientation}")
-                pixmap = self.apply_orientation_to_pixmap(pixmap, orientation)
+                # _load_pixmap_safe now uses QImageReader with setAutoTransform(True) for regular images
+                # and ImageOps.exif_transpose for TIFF/RAW JPEG thumbnails, which automatically applies EXIF orientation.
+                # Orientation is already applied, so set flag so display_pixmap doesn't apply it again
+                self._orientation_already_applied = True
+                logger.debug(f"[PROCESS] Orientation already applied by _load_pixmap_safe (QImageReader/PIL)")
 
                 self.current_pixmap = pixmap
                 
@@ -9294,9 +9287,11 @@ class RAWImageViewer(QMainWindow):
             if self.gallery_widget and self.gallery_widget.isVisible():
                 self._update_gallery_view()
                 self._gallery_update_needed = False
+            # Note: Don't load image in gallery mode - user can click on image to view it
         else:
-            # Load the first image in single view mode
-            self.load_raw_image(self.current_file_path)
+            # Load the image in single view mode (current_file_path is already set to start_file)
+            if self.current_file_path:
+                self.load_raw_image(self.current_file_path)
         self.save_session_state()
 
     def save_session_state(self):
@@ -9306,9 +9301,13 @@ class RAWImageViewer(QMainWindow):
                 self.image_files[self.current_file_index])
             settings.setValue("last_session_folder", self.current_folder)
             settings.setValue("last_session_file", filename)
+            # Save view mode so we can restore it
+            if hasattr(self, 'view_mode'):
+                settings.setValue("last_session_view_mode", self.view_mode)
         else:
             settings.remove("last_session_folder")
             settings.remove("last_session_file")
+            settings.remove("last_session_view_mode")
 
     def restore_session_state(self):
         """Restore the last session's folder and file, with error handling for unavailable drives"""
@@ -9345,6 +9344,11 @@ class RAWImageViewer(QMainWindow):
                 
                 if file in files:
                     try:
+                        # Restore view mode before loading folder
+                        view_mode = settings.value("last_session_view_mode", "single")
+                        if view_mode in ('single', 'gallery'):
+                            self.view_mode = view_mode
+                        
                         self.load_folder_images(folder, start_file=file)
                         return True
                     except (PermissionError, OSError) as e:
