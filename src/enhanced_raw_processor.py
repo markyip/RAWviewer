@@ -8,6 +8,7 @@ intelligent caching, and progressive image loading for maximum performance.
 import os
 import time
 import threading
+import warnings
 import numpy as np
 import rawpy
 import exifread
@@ -16,6 +17,9 @@ from PyQt6.QtCore import QThread, pyqtSignal, QObject
 from PyQt6.QtGui import QPixmap, QImage
 from PIL import Image
 import io
+
+# Suppress exifread warnings for unsupported file formats (e.g., video files)
+warnings.filterwarnings('ignore', category=UserWarning, module='exifread')
 
 from image_cache import get_image_cache
 
@@ -44,7 +48,7 @@ class ThumbnailExtractor(QObject):
 
         except Exception as e:
             # Log the error for debugging
-            print(f"Thumbnail extraction error: {str(e)}")
+            # print(f"Thumbnail extraction error: {str(e)}")
             pass
 
         return None
@@ -263,7 +267,7 @@ class OptimizedRAWProcessor(QObject):
 
         except Exception as e:
             # Log the actual error for debugging
-            print(f"RAW processing error in process_raw_fast: {str(e)}")
+            # print(f"RAW processing error in process_raw_fast: {str(e)}")
             return None
 
     def process_raw_quality(self, file_path: str, exif_data: Dict[str, Any] = None) -> Optional[np.ndarray]:
@@ -301,7 +305,7 @@ class OptimizedRAWProcessor(QObject):
 
         except Exception as e:
             # Log the actual error for debugging
-            print(f"RAW processing error in process_raw_quality: {str(e)}")
+            # print(f"RAW processing error in process_raw_quality: {str(e)}")
             return None
 
 
@@ -523,9 +527,9 @@ class EnhancedRAWProcessor(QThread):
         elif orientation == 7:
             return np.rot90(np.fliplr(image_array), -1)
         elif orientation == 8:
-            # Rotated 90 CCW - need to rotate 90 CCW to correct (same as QPixmap transform.rotate(-90))
-            # np.rot90 with k=1 rotates 90° CCW
-            return np.rot90(image_array, 1)
+            # Rotated 90 CCW - need to rotate 90 CW (270 CCW) to correct
+            # np.rot90 with k=3 rotates 270° CCW = 90° CW
+            return np.rot90(image_array, 3)
         else:
             return image_array
 
@@ -540,21 +544,38 @@ class EnhancedRAWProcessor(QThread):
 
 
 class PreloadManager(QObject):
-    """Manages preloading of adjacent images for fast navigation."""
+    """Manages preloading of adjacent images for fast navigation using RAWProcessor (v0.5 style)."""
 
-    def __init__(self, max_preload_threads: int = 2):
+    def __init__(self, max_preload_threads: int = 2, processor_class=None):
         super().__init__()
         self.max_preload_threads = max_preload_threads
         self.active_threads = {}
         self.cache = get_image_cache()
+        # Accept processor class as parameter to avoid circular imports
+        # If None, will use EnhancedRAWProcessor as fallback
+        self.processor_class = processor_class
+
+    def _is_raw_file(self, file_path: str) -> bool:
+        """Check if file is a RAW format."""
+        raw_exts = {
+            '.cr2', '.cr3', '.nef', '.arw', '.dng', '.orf', '.rw2', '.pef',
+            '.srw', '.x3f', '.raf', '.3fr', '.fff', '.iiq', '.cap', '.erf',
+            '.mef', '.mos', '.nrw', '.rwl', '.srf'
+        }
+        ext = os.path.splitext(file_path)[1].lower()
+        return ext in raw_exts
 
     def preload_images(self, file_paths: list, priority_order: list = None):
-        """Preload images in background threads."""
+        """Preload images in background threads using RAWProcessor (v0.5 style)."""
         if priority_order is None:
             priority_order = file_paths
 
         # Cancel existing preload threads
         self.cancel_all_preloads()
+
+        # Use provided processor class or fallback to EnhancedRAWProcessor
+        ProcessorClass = self.processor_class if self.processor_class else EnhancedRAWProcessor
+        use_raw_processor = (self.processor_class is not None)
 
         # Start preloading up to max_preload_threads images
         for i, file_path in enumerate(priority_order[:self.max_preload_threads]):
@@ -564,21 +585,87 @@ class PreloadManager(QObject):
                     continue
 
                 # Start preload thread
-                thread = EnhancedRAWProcessor(
-                    file_path, use_quality_processing=False)
+                if use_raw_processor:
+                    # Use RAWProcessor (v0.5 style)
+                    is_raw = self._is_raw_file(file_path)
+                    thread = ProcessorClass(
+                        file_path, is_raw=is_raw, use_full_resolution=False)
+                    # Connect signals - RAWProcessor uses image_processed signal
+                    thread.image_processed.connect(
+                        lambda img, fp=file_path: self._on_preload_complete(fp, img))
+                    thread.error_occurred.connect(
+                        lambda err, fp=file_path: self._on_preload_error(fp, err))
+                else:
+                    # Fallback to EnhancedRAWProcessor
+                    thread = ProcessorClass(
+                        file_path, use_quality_processing=False)
+                    thread.image_processed.connect(
+                        lambda img, fp=file_path: self._on_preload_complete(fp, img))
+                
                 thread.finished.connect(
                     lambda fp=file_path: self._cleanup_thread(fp))
+                
                 self.active_threads[file_path] = thread
                 thread.start()
 
+    def _on_preload_complete(self, file_path: str, rgb_image):
+        """Handle preloaded image completion."""
+        # Image is automatically cached by RAWProcessor/EnhancedRAWProcessor
+        # Just clean up the thread reference
+        if file_path in self.active_threads:
+            # Thread will be cleaned up by finished signal
+            pass
+
+    def _on_preload_error(self, file_path: str, error_msg: str):
+        """Handle preload error."""
+        # Log error but don't show to user (preloading is background operation)
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.debug(f"Preload error for {os.path.basename(file_path)}: {error_msg}")
+        # Clean up thread on error
+        if file_path in self.active_threads:
+            self._cleanup_thread(file_path)
+
     def cancel_all_preloads(self):
         """Cancel all active preload threads."""
-        for file_path, thread in list(self.active_threads.items()):
-            thread.stop_processing()
-            thread.wait(1000)  # Wait up to 1 second
-            if thread.isRunning():
-                thread.terminate()
+        import logging
+        logger = logging.getLogger(__name__)
+        
+        threads_to_cleanup = list(self.active_threads.items())
+        logger.debug(f"cancel_all_preloads(): Cancelling {len(threads_to_cleanup)} preload threads")
+        
+        for file_path, thread in threads_to_cleanup:
+            try:
+                file_basename = os.path.basename(file_path)
+                # Use cleanup() if available (RAWProcessor), otherwise use stop_processing()
+                if hasattr(thread, 'cleanup'):
+                    # cleanup() will handle thread stopping and rawpy handle closing safely
+                    logger.debug(f"cancel_all_preloads(): Calling cleanup() for {file_basename}")
+                    thread.cleanup()
+                else:
+                    # For EnhancedRAWProcessor, use stop_processing and wait
+                    logger.debug(f"cancel_all_preloads(): Using stop_processing() for {file_basename}")
+                    if hasattr(thread, 'stop_processing'):
+                        thread.stop_processing()
+                    
+                    # OPTIMIZED: Use shorter initial wait, but allow longer if needed
+                    # Preload threads are lower priority, so we can be more aggressive
+                    if hasattr(thread, 'wait'):
+                        wait_result = thread.wait(100)  # Initial 100ms wait (fast path)
+                        logger.debug(f"cancel_all_preloads(): wait(100) returned {wait_result} for {file_basename}")
+                        if not wait_result and hasattr(thread, 'isRunning') and thread.isRunning():
+                            # Thread still running, wait longer for rawpy operations
+                            additional_wait = thread.wait(200)  # Additional 200ms for rawpy operations
+                            logger.debug(f"cancel_all_preloads(): Additional wait(200) returned {additional_wait} for {file_basename}")
+                            if not additional_wait and thread.isRunning():
+                                logger.debug(f"cancel_all_preloads(): Terminating thread for {file_basename}")
+                                thread.terminate()
+                                thread.wait(50)  # Short wait after terminate
+            except Exception as e:
+                logger.warning(f"cancel_all_preloads(): Error cleaning up thread for {os.path.basename(file_path)}: {e}", exc_info=True)
+        
         self.active_threads.clear()
+        logger.debug(f"cancel_all_preloads(): All preload threads cancelled")
 
     def _cleanup_thread(self, file_path: str):
         """Clean up finished thread."""

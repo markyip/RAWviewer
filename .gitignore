@@ -2,6 +2,15 @@
 build/
 dist/
 *.spec
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# PyInstaller specific
+*.spec
+build/
+dist/
 
 # Python cache
 __pycache__/
@@ -26,11 +35,27 @@ desktop.ini
 
 # Log files
 *.log
+rawviewer_debug_*.log
+debug_*.log
 
 # Test files
 test_images/
 sample_images/
 test_*.py
+*_test.py
+*_tests.py
+
+# Debug and development files
+debug_*.py
+*_debug.py
+*_debug_*.py
+*_debug_*.bat
+*_debug_*.sh
+*_debug_*.md
+DEBUG_*.md
+*_OPTIMIZATION.md
+*_CLEANUP_FIX.md
+*_NAVIGATION_FIX.md
 
 # Virtual environments
 rawviewer_env/

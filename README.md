@@ -45,11 +45,13 @@ This is a **pre-filtering tool**, letting you go through hundreds of RAW files e
 - **EXIF data display**: View camera settings and capture information
 - **Session persistence**: Remembers your last opened folder and image
 - **Portable executable**: No Python installation required for users
-- **Threaded processing**: Smooth, non-blocking UI
+- **Threaded processing**: Smooth, non-blocking UI with optimized image loading architecture
+- **Smart caching**: Efficient image and thumbnail caching for faster navigation
 
 ## 🚀 Quick Start
 
-Download Executable
+### Download Executable
+
 #### Windows
 1. Download the latest release from the [Releases Page](https://github.com/markyip/RAWviewer/releases/latest)
 2. Download `RAWviewer.exe` directly (no zip extraction needed)
@@ -79,7 +81,7 @@ Download Executable
 ## 📁 Supported Formats
 
 ### RAW Formats
-- **Canon**: CR3
+- **Canon**: CR2, CR3
 - **Nikon**: NEF
 - **Sony**: ARW
 - **Adobe**: DNG
@@ -87,12 +89,21 @@ Download Executable
 - **Panasonic**: RW2
 - **Fujifilm**: RAF
 - **Hasselblad**: 3FR
+- **Pentax**: PEF
+- **Samsung**: SRW
+- **Sigma**: X3F
+- And many more supported by LibRaw
 
 ### Standard Formats
 - **JPEG**: JPG, JPEG
+- **TIFF**: TIF, TIFF
 - **HEIF**: HEIF
 
-## 🏗️ Building
+## 🏗️ Building from Source
+
+### Prerequisites
+- Python 3.8 or higher
+- pip (Python package manager)
 
 ### Windows
 **Option 1: Using batch script (recommended)**
@@ -103,11 +114,11 @@ build_windows.bat
 
 **Option 2: Manual build**
 ```bash
-# Activate virtual environment
+# Activate virtual environment (if using one)
 rawviewer_env\Scripts\activate
 
 # Install dependencies
-pip install --upgrade PyQt6 rawpy send2trash pyinstaller natsort exifread Pillow
+pip install -r requirements.txt
 
 # Build executable
 python build.py
@@ -119,12 +130,26 @@ python build.py
 ./build_macos.sh
 ```
 
+### Dependencies
+All dependencies are listed in `requirements.txt`:
+- PyQt6 >= 6.6.0
+- rawpy >= 0.25.0
+- numpy >= 2.0.0
+- Pillow >= 10.0.0
+- send2trash >= 1.8.0
+- pyinstaller >= 6.0.0
+- natsort >= 8.4.0
+- exifread >= 3.0.0
+- psutil >= 5.9.0
+- pyqtgraph >= 0.13.0
+
 ## 🐛 Troubleshooting
 
 ### Windows
 - **"Windows protected your PC"**: Click "More info" → "Run anyway"
 - **Antivirus warnings**: Add RAWviewer to your antivirus exclusions
 - **Performance issues**: Try running as administrator
+- **AttributeError with stdout**: This is normal for windowed builds - the application runs without a console window
 
 ### macOS
 - **"App is damaged" error**: Go to System Preferences → Security & Privacy → Allow
@@ -137,6 +162,16 @@ python build.py
 - **Newer camera models**: Support for the latest camera releases may be limited due to LibRaw library compatibility
 - **Proprietary RAW formats**: Some manufacturers' newest RAW formats may not be fully supported immediately after camera release
 - **Firmware updates**: Camera firmware updates may introduce RAW format changes that require LibRaw updates
+
+## 🏛️ Architecture
+
+RAWviewer uses a modern, optimized architecture:
+
+- **ImageLoadManager**: Manages all image loading tasks using a thread pool and priority queue
+- **UnifiedImageProcessor**: Handles all image types (RAW, JPEG, TIFF, etc.) with a unified interface
+- **Smart Caching**: Efficient image and thumbnail caching for faster navigation
+- **Thread Pool**: Reuses threads to avoid creation/destruction overhead
+- **Event-Driven**: Permanent signal connections for better performance
 
 ## 📄 License
 
