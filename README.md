@@ -1,4 +1,4 @@
-# RAWviewer v0.5
+# RAWviewer v1.0
 
 <p align="center">
   <img src="icons/appicon.ico" alt="RAWviewer Icon" width="256">
@@ -156,7 +156,19 @@ All dependencies are listed in `requirements.txt`:
 - **Gatekeeper warnings**: Right-click the app → Open → Open anyway
 - **Performance issues**: Grant Full Disk Access in Privacy settings
 
+## 🚧 Upcoming Features
+
+We're continuously working to improve RAWviewer. Here are some features planned for future releases:
+
+- **Gallery View**: Browse multiple images in a grid layout with adaptive justified gallery for efficient space utilization
+- **Histogram Display**: View RGB and luminance histograms to analyze exposure and color distribution
+- **Batch Operations**: Select and process multiple images at once
+
+
 ## ⚠️ Known Issues
+
+### Performance
+- **Large folder loading**: When loading a large folder, the application launch speed may become slower as it scans and indexes all image files in the directory
 
 ### Camera Compatibility
 - **Newer camera models**: Support for the latest camera releases may be limited due to LibRaw library compatibility

@@ -53,7 +53,7 @@ print("Basic imports done, importing PyQt6...", flush=True)
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QLabel, QFileDialog,
                              QMessageBox, QScrollArea, QSizePolicy, QPushButton, QFrame,
-                             QGridLayout, QScrollBar, QDialog)
+                             QGridLayout, QScrollBar, QDialog, QSplashScreen)
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QPoint, QEvent, QSettings, QSize, QRect, QObject, QRunnable, QThreadPool
 from PyQt6.QtGui import (QPixmap, QImage, QAction, QKeySequence,
                          QDragEnterEvent, QDropEvent, QCursor, QIcon,
@@ -8737,6 +8737,34 @@ def main():
         app.setApplicationName("RAW Image Viewer")
         app.setApplicationVersion("1.0")
 
+        # Create and show splash screen
+        print("Creating splash screen...", flush=True)
+        splash_pixmap = None
+        # Use resource_path to find icon, ensuring it works when bundled
+        splash_path = resource_path(os.path.join('icons', 'appicon.png'))
+        if os.path.exists(splash_path):
+            splash_pixmap = QPixmap(splash_path)
+            # Scale to a reasonable size for splash screen (e.g., 400x400)
+            if not splash_pixmap.isNull():
+                splash_pixmap = splash_pixmap.scaled(400, 400, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+        else:
+            # Create a simple splash screen if icon not found
+            splash_pixmap = QPixmap(400, 400)
+            splash_pixmap.fill(QColor(173, 216, 230))  # Light blue background
+            painter = QPainter(splash_pixmap)
+            painter.setPen(QPen(QColor(70, 130, 180), 4))  # Darker blue
+            font = painter.font()
+            font.setPointSize(48)
+            font.setBold(True)
+            painter.setFont(font)
+            painter.drawText(splash_pixmap.rect(), Qt.AlignmentFlag.AlignCenter, "RAW")
+            painter.end()
+        
+        splash = QSplashScreen(splash_pixmap, Qt.WindowType.WindowStaysOnTopHint)
+        splash.show()
+        app.processEvents()  # Process events to show splash screen immediately
+        print("Splash screen displayed", flush=True)
+
         # Create and show main window
         print("Creating RAWImageViewer...", flush=True)
         viewer = RAWImageViewer()
@@ -8750,7 +8778,11 @@ def main():
             elif os.path.isdir(path):
                 # If it's a folder, load the folder
                 viewer.load_folder_images(path)
+        
+        # Show main window and close splash screen
         viewer.show()
+        splash.finish(viewer)  # Close splash screen when main window is ready
+        print("Splash screen closed, main window displayed", flush=True)
 
         # Run application
         logger.info(f"[MAIN] Starting Qt event loop")
