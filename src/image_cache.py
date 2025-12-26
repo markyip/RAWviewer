@@ -148,6 +148,18 @@ class PersistentEXIFCache:
 
         return None
 
+    def remove(self, file_path: str) -> bool:
+        """Remove cached EXIF data for a file."""
+        with self.lock:
+            try:
+                conn = sqlite3.connect(self.db_path)
+                cursor = conn.execute("DELETE FROM exif_cache WHERE file_path = ?", (file_path,))
+                conn.commit()
+                conn.close()
+                return cursor.rowcount > 0
+            except Exception:
+                return False
+
     def put(self, file_path: str, exif_info: Dict[str, Any]) -> None:
         """Cache EXIF data."""
         file_size, file_mtime = self._get_file_hash(file_path)
