@@ -57,6 +57,12 @@ class ThumbnailExtractor(QObject):
         """Extract thumbnail from regular image file."""
         try:
             with Image.open(file_path) as img:
+                # PIL automatically handles EXIF orientation when using ImageOps.exif_transpose
+                # However, we need to explicitly apply it to ensure orientation is correct
+                from PIL import ImageOps
+                # Apply EXIF orientation correction
+                img = ImageOps.exif_transpose(img)
+                
                 # Calculate thumbnail size maintaining aspect ratio
                 img.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
 
@@ -84,14 +90,45 @@ class EXIFExtractor(QObject):
         # Check cache first
         cached_exif = self.cache.get_exif(file_path)
         if cached_exif is not None:
-            return cached_exif
+            cached_orientation = cached_exif.get('orientation', 'unknown')
+            print(f"[ORIENTATION] EXIFExtractor: Using cached EXIF for {os.path.basename(file_path)}, cached orientation = {cached_orientation}")
+            
+            # Verify cached orientation by doing a quick fresh read of just the orientation tag
+            # This helps catch cases where the cache has wrong orientation
+            try:
+                with open(file_path, 'rb') as f:
+                    tags = exifread.process_file(f, details=False, stop_tag='Image Orientation')
+                    orientation_tag = tags.get('Image Orientation')
+                    if orientation_tag:
+                        fresh_orientation_str = str(orientation_tag)
+                        # Quick check: if cached is 1 but fresh says rotated, re-extract
+                        if cached_orientation == 1 and 'Rotated' in fresh_orientation_str:
+                            print(f"[ORIENTATION] EXIFExtractor: WARNING - Cached orientation=1 but fresh EXIF shows '{fresh_orientation_str}', re-extracting...")
+                            # Clear cache by removing from persistent cache
+                            try:
+                                if hasattr(self.cache, 'exif_cache') and hasattr(self.cache.exif_cache, 'remove'):
+                                    self.cache.exif_cache.remove(file_path)
+                                    print(f"[ORIENTATION] EXIFExtractor: Cleared incorrect cached EXIF for {os.path.basename(file_path)}")
+                                # Force re-extraction
+                                cached_exif = None
+                            except Exception as cache_error:
+                                print(f"[ORIENTATION] EXIFExtractor: Could not clear cache: {cache_error}")
+                                cached_exif = None
+            except Exception as e:
+                print(f"[ORIENTATION] EXIFExtractor: Error verifying cached orientation: {e}")
+            
+            if cached_exif is not None:
+                return cached_exif
 
         # Extract fresh EXIF data
+        print(f"[ORIENTATION] EXIFExtractor: Extracting fresh EXIF from {os.path.basename(file_path)}")
         exif_data = self._extract_exif_from_file(file_path)
 
         # Cache the result
         if exif_data:
             self.cache.put_exif(file_path, exif_data)
+            extracted_orientation = exif_data.get('orientation', 'unknown')
+            print(f"[ORIENTATION] EXIFExtractor: Cached fresh EXIF for {os.path.basename(file_path)}, orientation = {extracted_orientation}")
 
         return exif_data
 
@@ -110,6 +147,8 @@ class EXIFExtractor(QObject):
                 orientation_tag = tags.get('Image Orientation')
                 if orientation_tag:
                     orientation_str = str(orientation_tag)
+                    # Console log: Show what orientation string we got
+                    print(f"[ORIENTATION] EXIFExtractor: Raw orientation tag string = '{orientation_str}'")
                     orientation_map = {
                         'Horizontal (normal)': 1,
                         'Mirrored horizontal': 2,
@@ -121,6 +160,11 @@ class EXIFExtractor(QObject):
                         'Rotated 90 CCW': 8
                     }
                     orientation = orientation_map.get(orientation_str, 1)
+                    print(f"[ORIENTATION] EXIFExtractor: Mapped orientation value = {orientation}")
+                    if orientation == 1 and orientation_str not in orientation_map:
+                        print(f"[ORIENTATION] EXIFExtractor: WARNING - Orientation string '{orientation_str}' not in map, defaulting to 1")
+                else:
+                    print(f"[ORIENTATION] EXIFExtractor: No 'Image Orientation' tag found, defaulting to 1")
 
                 # Get camera info
                 make_tag = tags.get('Image Make')
@@ -519,17 +563,18 @@ class EnhancedRAWProcessor(QThread):
         elif orientation == 4:
             return np.flipud(image_array)
         elif orientation == 5:
+            # Mirrored horizontal + Rotated 270° CW (k=1 CCW)
             return np.rot90(np.fliplr(image_array), 1)
         elif orientation == 6:
-            # Rotated 90 CW - need to rotate 90 CW to correct (same as QPixmap transform.rotate(90))
-            # np.rot90 with k=3 rotates 270° CCW = 90° CW
+            # Rotate 90° CW (k=3 CCW)
             return np.rot90(image_array, 3)
         elif orientation == 7:
-            return np.rot90(np.fliplr(image_array), -1)
+            # Mirror LR + rotate 90° CW
+            return np.rot90(np.fliplr(image_array), 3)
         elif orientation == 8:
-            # Rotated 90 CCW - need to rotate 90 CW (270 CCW) to correct
-            # np.rot90 with k=3 rotates 270° CCW = 90° CW
-            return np.rot90(image_array, 3)
+            # Rotate 270° CW (90° CCW) - need to rotate 90° CW to correct
+            # np.rot90 with k=1 rotates 90° CCW
+            return np.rot90(image_array, 1)
         else:
             return image_array
 

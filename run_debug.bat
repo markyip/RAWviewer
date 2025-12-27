@@ -35,6 +35,3 @@ echo.
 
 REM Always pause to keep window open so user can see any error messages
 pause
-
-
-

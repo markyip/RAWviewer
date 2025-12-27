@@ -220,8 +220,25 @@ class ImageLoadManager(QObject):
     
     def _check_cache(self, file_path: str, use_full_resolution: bool) -> bool:
         """檢查快取，如果存在則直接發送信號"""
-        # 使用統一的快取檢查函數
-        from common_image_loader import check_cache_for_image
+        # CRITICAL: For RAW files, only use full_image cache, not pixmap cache
+        # This ensures RAW files go through proper processing with orientation correction
+        from common_image_loader import check_cache_for_image, is_raw_file
+        
+        is_raw = is_raw_file(file_path)
+        
+        # For RAW files, only check full_image cache
+        if is_raw and use_full_resolution:
+            from image_cache import get_image_cache
+            cache = get_image_cache()
+            cached_image = cache.get_full_image(file_path)
+            if cached_image is not None:
+                print(f"[ORIENTATION] ImageLoadManager: Using cached full_image for RAW file {os.path.basename(file_path)}")
+                self.image_ready.emit(file_path, cached_image)
+                return True
+            # Don't check pixmap cache for RAW files
+            return False
+        
+        # For non-RAW files or when not using full resolution, use normal cache check
         cached_item, cache_type = check_cache_for_image(file_path, use_full_resolution)
         
         if cached_item is not None:
@@ -229,8 +246,14 @@ class ImageLoadManager(QObject):
                 self.image_ready.emit(file_path, cached_item)
                 return True
             elif cache_type == 'pixmap':
-                self.pixmap_ready.emit(file_path, cached_item)
-                return True
+                # Only emit pixmap_ready for non-RAW files
+                if not is_raw:
+                    self.pixmap_ready.emit(file_path, cached_item)
+                    return True
+                else:
+                    # RAW file with cached pixmap - skip it, process as RAW instead
+                    print(f"[ORIENTATION] ImageLoadManager: RAW file {os.path.basename(file_path)} has cached pixmap, but will process as RAW")
+                    return False
             elif cache_type == 'thumbnail':
                 self.thumbnail_ready.emit(file_path, cached_item)
             elif cache_type == 'exif':
