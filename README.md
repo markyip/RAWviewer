@@ -1,10 +1,10 @@
-# RAWviewer v1.1
+# RAWviewer v1.2
 
 <p align="center">
   <img src="icons/appicon.ico" alt="RAWviewer Icon" width="256">
 </p>
 
-![Version](https://img.shields.io/badge/version-1.1-blue)
+![Version](https://img.shields.io/badge/version-1.2-blue)
 ![Downloads](https://img.shields.io/github/downloads/markyip/RAWviewer/total) 
 ![License](https://img.shields.io/badge/license-MIT-green)
 [![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-Donate-orange?logo=buy-me-a-coffee)](https://www.buymeacoffee.com/markyip)
@@ -37,17 +37,18 @@ This is a **pre-filtering tool**, letting you go through hundreds of RAW files e
 ## ✨ Features
 
 - **Cross-platform support**: Windows and macOS
-- **Gallery View**: Browse multiple images in a justified grid layout with efficient space utilization and virtualized rendering for large folders
+- **Ultra-Fast Performance**: Instant folder loading (scans thousands of images in milliseconds) using optimized algorithms
+- **Smart Prefetching**: Predictively loads relevant images in the background for zero-latency navigation
+- **Gallery View**: Justified grid layout with virtualized rendering for smooth scrolling through massive collections
 - **Wide RAW format support**: Canon (CR2, CR3), Nikon (NEF), Sony (ARW), Adobe DNG, and many more
 - **Automatic orientation correction**: Reads EXIF orientation data and displays images correctly (portrait/landscape)
-- **Intuitive navigation**: Keyboard shortcuts and mouse controls
+- **Intuitive navigation**: Keyboard shortcuts, mouse controls, and scroll wheel support
 - **Zoom functionality**: Fit-to-window and 100% zoom modes with smooth panning
 - **File management**: Move images to discard folder or delete permanently
 - **EXIF data display**: View camera settings and capture information
-- **Session persistence**: Remembers your last opened folder and image
+- **Session persistence**: Remembers your last opened folder, image, and view mode
 - **Portable executable**: No Python installation required for users
-- **Threaded processing**: Smooth, non-blocking UI with optimized image loading architecture
-- **Smart caching**: Efficient image and thumbnail caching for faster navigation
+- **Modern UI**: Material Design 3 aesthetics with non-intrusive loading indicators
 
 ## 🚀 Quick Start
 
@@ -69,6 +70,8 @@ This is a **pre-filtering tool**, letting you go through hundreds of RAW files e
 ## ⌨️ Keyboard Shortcuts
 
 - **Space**: Toggle between fit-to-window and 100% zoom
+- **`G`**: Toggle between Gallery View and Single Image View
+- **`Esc`**: Return to Gallery View (from Single View)
 - **`←`/`→` arrows**: Navigate between images
 - **`↓`**: Move current image to Discard folder
 - **Delete**: Delete current image (with confirmation)
@@ -78,6 +81,7 @@ This is a **pre-filtering tool**, letting you go through hundreds of RAW files e
 - **Double-click**: Toggle zoom mode
 - **Click and drag**: Pan image when zoomed in
 - **Drag and drop**: Open images or folders
+- **Scroll Wheel**: Navigate images (Single View) or scroll grid (Gallery View)
 
 ## 📁 Supported Formats
 
@@ -93,7 +97,7 @@ This is a **pre-filtering tool**, letting you go through hundreds of RAW files e
 - **Pentax**: PEF
 - **Samsung**: SRW
 - **Sigma**: X3F
-- And many more supported by LibRaw
+- **And many more supported by LibRaw**
 
 ### Standard Formats
 - **JPEG**: JPG, JPEG
@@ -166,9 +170,6 @@ We're continuously working to improve RAWviewer. Here are some features planned 
 
 
 ## ⚠️ Known Issues
-
-### Performance
-- **Large folder loading**: When loading a large folder, the application launch speed may become slower as it scans and indexes all image files in the directory
 
 ### Camera Compatibility
 - **Newer camera models**: Support for the latest camera releases may be limited due to LibRaw library compatibility

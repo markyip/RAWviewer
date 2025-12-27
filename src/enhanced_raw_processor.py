@@ -177,9 +177,25 @@ class EXIFExtractor(QObject):
 
                 # Convert all tags to serializable format
                 exif_dict = {}
+                original_width = None
+                original_height = None
+                
                 for key, value in tags.items():
                     try:
-                        exif_dict[key] = str(value)
+                        str_val = str(value)
+                        exif_dict[key] = str_val
+                        
+                        # Extract dimensions
+                        if key in ('Image ImageWidth', 'EXIF ExifImageWidth', 'Image Width'):
+                            try:
+                                original_width = int(str_val)
+                            except:
+                                pass
+                        elif key in ('Image ImageLength', 'EXIF ExifImageLength', 'Image Height', 'Image Length'):
+                            try:
+                                original_height = int(str_val)
+                            except:
+                                pass
                     except:
                         pass
 
@@ -187,9 +203,10 @@ class EXIFExtractor(QObject):
                     'orientation': orientation,
                     'camera_make': camera_make,
                     'camera_model': camera_model,
-                    'exif_data': exif_dict
+                    'exif_data': exif_dict,
+                    'original_width': original_width,
+                    'original_height': original_height
                 }
-
         except Exception:
             pass
 
