@@ -29,6 +29,10 @@ class LRUCache:
         self.hits = 0
         self.misses = 0
 
+    def __contains__(self, key: str) -> bool:
+        with self.lock:
+            return key in self.cache
+
     def get(self, key: str) -> Optional[Any]:
         with self.lock:
             if key in self.cache:
@@ -203,6 +207,43 @@ class PersistentEXIFCache:
                 conn.close()
             except Exception:
                 pass
+
+    def get_multiple(self, file_paths: list) -> Dict[str, Dict[str, Any]]:
+        """Get cached EXIF data for multiple files at once."""
+        if not file_paths:
+            return {}
+
+        results = {}
+        with self.lock:
+            try:
+                conn = sqlite3.connect(self.db_path)
+                # sqlite has a limit on the number of variables in a query
+                # Process in chunks of 500
+                for i in range(0, len(file_paths), 500):
+                    chunk = file_paths[i:i+500]
+                    placeholders = ','.join(['?'] * len(chunk))
+                    query = f"SELECT file_path, file_size, file_mtime, orientation, camera_make, camera_model, exif_data FROM exif_cache WHERE file_path IN ({placeholders})"
+                    cursor = conn.execute(query, chunk)
+                    
+                    for row in cursor.fetchall():
+                        path = row[0]
+                        file_size, file_mtime = self._get_file_hash(path)
+                        
+                        if row[1] == file_size and row[2] == file_mtime:
+                            # Cache is valid
+                            exif_data = pickle.loads(row[6]) if row[6] else {}
+                            results[path] = {
+                                'orientation': row[3],
+                                'camera_make': row[4],
+                                'camera_model': row[5],
+                                'exif_data': exif_data,
+                                'original_width': exif_data.get('original_width'),
+                                'original_height': exif_data.get('original_height')
+                            }
+                conn.close()
+            except Exception:
+                pass
+        return results
 
 
 class MemoryMonitor:
@@ -398,6 +439,11 @@ class ImageCache(QObject):
         """Cache EXIF data."""
         if exif_data:
             self.exif_cache.put(file_path, exif_data)
+
+    def get_multiple_exif(self, file_paths: list) -> Dict[str, Dict[str, Any]]:
+        """Get cached EXIF data for multiple files at once."""
+        self.stats['exif_requests'] += len(file_paths)
+        return self.exif_cache.get_multiple(file_paths)
 
     def invalidate_file(self, file_path: str) -> None:
         """Remove all cached data for a specific file."""

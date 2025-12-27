@@ -41,7 +41,13 @@ def install_dependencies():
 
 
 def main():
-    print("RAWviewer Windows Build Script")
+    system_name = platform.system()
+    if system_name == 'Windows':
+        print("RAWviewer Windows Build Script")
+    elif system_name == 'Darwin':
+        print("RAWviewer macOS Build Script")
+    else:
+        print(f"RAWviewer Build Script ({system_name})")
     print("==============================")
     print("")
 
