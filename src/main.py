@@ -1451,6 +1451,19 @@ class ImageLoadTask(QRunnable):
         self.signal = signal
         self.parent_viewer = parent_viewer
         self.generation = generation  # Track which folder generation this task belongs to
+        self._cancelled = False
+        self._lock = threading.Lock()
+
+    def cancel(self):
+        """Cancel the task"""
+        with self._lock:
+            self._cancelled = True
+
+    def is_cancelled(self):
+        """Check if task is cancelled"""
+        with self._lock:
+            return self._cancelled
+
     
     def run(self):
         """Load and scale image in worker thread - returns QImage, not QPixmap"""
@@ -1459,6 +1472,9 @@ class ImageLoadTask(QRunnable):
         import time
         logger = logging.getLogger(__name__)
         
+        if self.is_cancelled():
+            return
+            
         task_start = time.time()
         file_basename = os.path.basename(self.file_path) if self.file_path else 'unknown'
         
@@ -1478,9 +1494,71 @@ class ImageLoadTask(QRunnable):
                 try:
                     import rawpy
                     import numpy as np
+                    from image_cache import get_image_cache
                     
+                    # Check disk cache first (much faster than extracting from RAW)
+                    cache = get_image_cache()
+                    disk_cache_start = time.time()
+                    jpeg_data = cache.disk_thumbnail_cache.get(self.file_path)
+                    if jpeg_data is not None:
+                        disk_cache_time = time.time() - disk_cache_start
+                        logger.debug(f"[IMAGE_LOAD_TASK] Disk cache hit in {disk_cache_time:.3f}s: {file_basename}")
+                        try:
+                            from io import BytesIO
+                            from PIL import Image, ImageOps
+                            
+                            # Load JPEG from disk cache
+                            pil_image = Image.open(BytesIO(jpeg_data))
+                            # Apply EXIF orientation correction
+                            pil_image = ImageOps.exif_transpose(pil_image)
+                            # Convert to RGB if needed
+                            if pil_image.mode != 'RGB':
+                                pil_image = pil_image.convert('RGB')
+                            
+                            # Convert PIL image to QImage
+                            width, height = pil_image.size
+                            image_bytes = pil_image.tobytes('raw', 'RGB')
+                            bytes_per_line = 3 * width
+                            qimage = QImage(image_bytes, width, height, bytes_per_line, QImage.Format.Format_RGB888)
+                            
+                            if not qimage.isNull():
+                                # Scale to target size
+                                aspect = qimage.width() / qimage.height() if qimage.height() > 0 else 1.0
+                                scaled_width = int(self.target_height * aspect)
+                                scaled_height = self.target_height
+                                
+                                # Ensure we don't exceed target width
+                                if scaled_width > self.target_width:
+                                    scaled_width = self.target_width
+                                    scaled_height = int(self.target_width / aspect) if aspect > 0 else self.target_height
+                                
+                                scaled_image = qimage.scaled(
+                                    scaled_width, 
+                                    scaled_height,
+                                    Qt.AspectRatioMode.KeepAspectRatio,
+                                    Qt.TransformationMode.SmoothTransformation
+                                )
+                                
+                                if not scaled_image.isNull():
+                                    total_time = time.time() - task_start
+                                    logger.info(f"[IMAGE_LOAD_TASK] Loaded thumbnail from disk cache for {file_basename} in {total_time:.3f}s (size: {scaled_width}x{scaled_height})")
+                                    self.signal.loaded.emit(self.index, scaled_image, self.generation)
+                                    return
+                                else:
+                                    logger.warning(f"[IMAGE_LOAD_TASK] Failed to scale QImage from disk cache for {file_basename}")
+                            else:
+                                logger.warning(f"[IMAGE_LOAD_TASK] Failed to create QImage from disk cache JPEG for {file_basename}")
+                        except Exception as e:
+                            logger.warning(f"[IMAGE_LOAD_TASK] Failed to load from disk cache, will extract from RAW: {e}")
+                            # Remove invalid cache entry
+                            cache.disk_thumbnail_cache.remove(self.file_path)
+                    
+                    if self.is_cancelled(): return
+                    
+                    # Disk cache miss, extract from RAW
                     raw_open_start = time.time()
                     with rawpy.imread(self.file_path) as raw:
+                        if self.is_cancelled(): return
                         raw_open_time = time.time() - raw_open_start
                         logger.debug(f"[IMAGE_LOAD_TASK] RAW file opened in {raw_open_time:.3f}s: {file_basename}")
                         # Try to extract embedded JPEG thumbnail
@@ -1496,6 +1574,13 @@ class ImageLoadTask(QRunnable):
                                 from io import BytesIO
                                 from PIL import Image, ImageOps
                                 jpeg_data = thumb.data
+                                
+                                # Save to disk cache for future use
+                                try:
+                                    cache.disk_thumbnail_cache.put(self.file_path, jpeg_data)
+                                    logger.debug(f"[IMAGE_LOAD_TASK] Saved thumbnail to disk cache: {file_basename}")
+                                except Exception as e:
+                                    logger.debug(f"[IMAGE_LOAD_TASK] Failed to save to disk cache: {e}")
                                 
                                 # Use PIL to load JPEG and apply EXIF orientation
                                 pil_image = Image.open(BytesIO(jpeg_data))
@@ -1592,6 +1677,7 @@ class ImageLoadTask(QRunnable):
                                             return
                         except Exception as thumb_error:
                             logger.debug(f"[IMAGE_LOAD_TASK] Could not extract thumbnail from RAW file {os.path.basename(self.file_path)}: {thumb_error}")
+                            if self.is_cancelled(): return
                             # Fall through to regular loading
                 
                 except Exception as raw_error:
@@ -1686,10 +1772,9 @@ class ImageLoadTask(QRunnable):
                 except Exception as pil_err:
                     logger.debug(f"[IMAGE_LOAD_TASK] PIL fallback failed for {os.path.basename(self.file_path)}: {pil_err}")
 
-            if scaled_image.isNull():
-                logger.debug(f"[IMAGE_LOAD_TASK] Failed to load: {os.path.basename(self.file_path)}")
+            if self.is_cancelled():
                 return
-            
+                
             # Emit QImage to UI thread (will convert to QPixmap there)
             total_time = time.time() - task_start
             if is_raw:
@@ -1762,6 +1847,7 @@ class JustifiedGallery(QWidget):
         
         # Generation counter
         self._gallery_generation = 0
+        self._active_tasks = {} # Track active tasks for cancellation
         
         # Monitoring and Batching
         self._load_timer = None
@@ -1779,6 +1865,15 @@ class JustifiedGallery(QWidget):
         self._batch_size = 8  # For background images
         self._priority_batch_size = 20  # Larger batch for visible images
         
+        # Scroll Optimization
+        self._last_scroll_y = -1
+        self._last_scroll_time = 0
+        self._current_scroll_speed = 0 # pixels per second
+        self._scroll_check_timer = None
+        self._is_scrolling_fast = False
+        self._scroll_optimize_threshold = 2000 # pixels/sec - threshold for "fast" scrolling
+        self._scroll_settle_timer = None # Timer to detect when scrolling stops
+        
         # Cache - Uses specialized LRU to keep thousands of thumbnails responsive
         from image_cache import LRUCache
         self._thumbnail_cache = LRUCache(2000)
@@ -1794,9 +1889,77 @@ class JustifiedGallery(QWidget):
         
         from PyQt6.QtCore import QTimer
         QTimer.singleShot(100, self._delayed_build)
+        
+    def _setup_scroll_tracking(self):
+        """Connect to parent scrollbar for speed tracking"""
+        try:
+            parent_scroll = self.parent_viewer.scroll_area if hasattr(self.parent_viewer, 'scroll_area') else None
+            if parent_scroll:
+                scrollbar = parent_scroll.verticalScrollBar()
+                # Disconnect first to avoid duplicates
+                try: scrollbar.valueChanged.disconnect(self._on_scroll)
+                except: pass
+                scrollbar.valueChanged.connect(self._on_scroll)
+                self.logger.info("[GALLERY] Scroll tracking connected")
+        except Exception as e:
+            self.logger.error(f"[GALLERY] Failed to setup scroll tracking: {e}")
+
+    def _on_scroll(self, value):
+        """Track scroll speed and optimize loading"""
+        import time
+        now = time.time()
+        
+        # Update loading label position if visible
+        if self._loading_label and self._loading_label.isVisible():
+             self._update_loading_label_geometry()
+        
+        if self._last_scroll_y >= 0:
+            dy = abs(value - self._last_scroll_y)
+            dt = now - self._last_scroll_time
+            
+            if dt > 0.01: # Avoid division by zero
+                current_speed = dy / dt
+                # Smoothing
+                self._current_scroll_speed = (self._current_scroll_speed * 0.3) + (current_speed * 0.7)
+                
+                # Check threshold
+                was_fast = self._is_scrolling_fast
+                self._is_scrolling_fast = self._current_scroll_speed > self._scroll_optimize_threshold
+                
+                if self._is_scrolling_fast != was_fast:
+                    if self._is_scrolling_fast:
+                        # self.logger.debug(f"[GALLERY] Fast scrolling started: {self._current_scroll_speed:.0f} px/s")
+                        pass
+                    else:
+                        # self.logger.debug(f"[GALLERY] Fast scrolling stopped")
+                        # Trigger load immediately when dropping below threshold
+                        from PyQt6.QtCore import QTimer
+                        QTimer.singleShot(50, self.load_visible_images)
+        
+        self._last_scroll_y = value
+        self._last_scroll_time = now
+        
+        # Reset settle timer
+        from PyQt6.QtCore import QTimer
+        if self._scroll_settle_timer:
+            self._scroll_settle_timer.stop()
+        
+        self._scroll_settle_timer = QTimer()
+        self._scroll_settle_timer.setSingleShot(True)
+        self._scroll_settle_timer.timeout.connect(self._on_scroll_settled)
+        self._scroll_settle_timer.start(150) # 150ms settle time
+        
+    def _on_scroll_settled(self):
+        """Called when scrolling stops"""
+        self._current_scroll_speed = 0
+        self._is_scrolling_fast = False
+        # self.logger.debug("[GALLERY] Scroll settled, loading images")
+        self.load_visible_images()
+
     
     def _delayed_build(self):
         """Delayed initial build to ensure widget has proper size"""
+        self._setup_scroll_tracking() # Ensure scroll tracking is set up
         if self.width() > 0:
             self.build_gallery()
         else:
@@ -1805,46 +1968,64 @@ class JustifiedGallery(QWidget):
             QTimer.singleShot(100, self._delayed_build)
     
     def show_loading_message(self, message="Loading gallery..."):
-        """Show loading message overlay"""
+        """Show loading message overlay - Simplified for better performance"""
         from PyQt6.QtWidgets import QLabel
         from PyQt6.QtCore import Qt
         from PyQt6.QtGui import QFont
         
         # Remove existing loading label if any
         if self._loading_label:
-            self._loading_label.hide()
-            self._loading_label.deleteLater()
+            # Update text if already visible
+            self._loading_label.setText(message)
+            self._loading_label.adjustSize()
+            self._update_loading_label_geometry()
+            return
         
-        # Create loading label
+        # Create loading label - smaller, bottom-right toast style
         self._loading_label = QLabel(message, self)
         self._loading_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._loading_label.setStyleSheet("""
             QLabel {
-                background-color: rgba(30, 30, 30, 200);
-                color: white;
-                border-radius: 8px;
-                padding: 20px;
+                background-color: rgba(20, 20, 20, 200);
+                color: rgba(255, 255, 255, 220);
+                border-radius: 4px;
+                padding: 8px 16px;
+                font-size: 12px;
             }
         """)
         font = QFont()
-        font.setPointSize(14)
-        font.setBold(True)
+        font.setPointSize(10)
         self._loading_label.setFont(font)
-        self._loading_label.setWordWrap(True)
         self._loading_label.show()
         self._loading_label.raise_()  # Bring to front
         
-        # Update geometry to center the label
+        # Update geometry
         self._update_loading_label_geometry()
     
     def _update_loading_label_geometry(self):
-        """Update loading label geometry to center it"""
-        if self._loading_label:
-            label_width = 300
-            label_height = 80
-            x = (self.width() - label_width) // 2
-            y = (self.height() - label_height) // 2
-            self._loading_label.setGeometry(x, y, label_width, label_height)
+        """Update loading label geometry - Bottom Center"""
+        if self._loading_label and self.parent_viewer and self.parent_viewer.width() > 0:
+            self._loading_label.adjustSize()
+            w = self._loading_label.width()
+            h = self._loading_label.height()
+            
+            # Position at bottom center of the viewport
+            parent_scroll = self.parent_viewer.scroll_area if hasattr(self.parent_viewer, 'scroll_area') else None
+            if parent_scroll:
+                 # Calculate relative position in the viewport
+                 viewport_h = parent_scroll.viewport().height()
+                 scroll_y = parent_scroll.verticalScrollBar().value()
+                 
+                 # Stick to bottom of viewport
+                 y = scroll_y + viewport_h - h - 20
+                 x = (self.width() - w) // 2
+                 
+                 self._loading_label.move(x, int(y))
+            else:
+                 # Fallback
+                 x = (self.width() - w) // 2
+                 y = self.height() - h - 20
+                 self._loading_label.move(x, y)
     
     def hide_loading_message(self):
         """Hide loading message overlay"""
@@ -1881,7 +2062,7 @@ class JustifiedGallery(QWidget):
         # Fallback to widget width
         return max(300, self.width() - 16)
     
-    def build_gallery(self):
+    def build_gallery(self, bulk_metadata=None):
         """Build true justified layout (Google Photos style) - virtualized version"""
         import logging
         import time
@@ -1902,13 +2083,17 @@ class JustifiedGallery(QWidget):
             self._visible_widgets = {}
             self._gallery_layout_items = []
             
-            # 2. Bulk fetch metadata (dimensions)
+            # 2. Metadata handling
             metadata_start = time.time()
-            file_paths = [img for img in self.images if isinstance(img, str)]
-            cached_metadata = {}
-            if self.parent_viewer and hasattr(self.parent_viewer, 'image_cache'):
+            cached_metadata = bulk_metadata if bulk_metadata is not None else {}
+            
+            # If not passed in, bulk fetch from cache (slower than pass-through but faster than individual)
+            if not cached_metadata and self.parent_viewer and hasattr(self.parent_viewer, 'image_cache'):
+                file_paths = [img for img in self.images if isinstance(img, str)]
                 cached_metadata = self.parent_viewer.image_cache.get_multiple_exif(file_paths)
-            logger.info(f"[JUSTIFIED_GALLERY] Metadata bulk fetch took {time.time() - metadata_start:.3f}s")
+                logger.info(f"[JUSTIFIED_GALLERY] Metadata bulk fetch (local) took {time.time() - metadata_start:.3f}s")
+            else:
+                logger.info(f"[JUSTIFIED_GALLERY] Metadata reused from pipeline (fetch skipped)")
             
             # 3. Layout Constants
             viewport_width = self._get_viewport_width()
@@ -1958,7 +2143,14 @@ class JustifiedGallery(QWidget):
                 current_y += row_h + self.MIN_SPACING
 
             # 4. Greedy Row Partitioning
-            for item in self.images:
+            # OPTIMIZATION: Throttled processEvents frequency for Windows performance
+            PROCESS_BATCH_SIZE = 1000 
+            
+            for idx, item in enumerate(self.images):
+                # Process events periodically to keep UI responsive
+                if idx > 0 and idx % PROCESS_BATCH_SIZE == 0:
+                    QApplication.processEvents()
+                
                 aspect = 1.333  # Default fallback
                 
                 if isinstance(item, str):
@@ -1974,7 +2166,6 @@ class JustifiedGallery(QWidget):
                         aspect = w / h
                     else:
                         # Fallback for images not in DB/cache
-                        # EXTREMELY IMPORTANT: Skip heavy extraction for videos
                         if hasattr(self.parent_viewer, 'is_video_file') and self.parent_viewer.is_video_file(item):
                             aspect = 1.333
                         else:
@@ -1987,7 +2178,6 @@ class JustifiedGallery(QWidget):
                 current_aspect_sum += aspect
                 
                 # Check if adding this image made the row height go below target
-                # Ideal row fills width at TARGET_ROW_HEIGHT
                 ideal_width_at_target = current_aspect_sum * self.TARGET_ROW_HEIGHT + (len(current_row)-1)*self.MIN_SPACING
                 
                 if ideal_width_at_target >= net_width:
@@ -2000,10 +2190,12 @@ class JustifiedGallery(QWidget):
             if current_row:
                 commit_row(current_row, current_aspect_sum, True)
             
-            # Add bottom padding (matching top/left 8px margin)
+            # Add bottom padding
             self._total_content_height = int(current_y + 8)
             self.setMinimumHeight(self._total_content_height)
             self.update() 
+            
+            QApplication.processEvents() # Final flush
 
             logger.info(f"[JUSTIFIED_GALLERY] Layout built in {time.time() - start_time:.3f}s. Items: {len(self._gallery_layout_items)}")
             
@@ -2026,194 +2218,58 @@ class JustifiedGallery(QWidget):
     
     def _apply_cached_thumbnails(self):
         """Apply cached thumbnails immediately after layout is built for faster display"""
-        import logging
-        logger = logging.getLogger(__name__)
-        
-        if not hasattr(self, 'tiles') or not self.tiles:
-            return
-        
-        applied_count = 0
-        for index, (label, file_path, target_width, target_height) in enumerate(self.tiles):
-            if not file_path:
-                continue  # No file path, skip
-            
-            # Check if label already has a pixmap
-            try:
-                if label and hasattr(label, 'pixmap'):
-                    pixmap = label.pixmap()
-                    if pixmap and not pixmap.isNull():
-                        continue  # Already has pixmap, skip
-            except (RuntimeError, AttributeError):
-                continue
-            
-            # Check cache for this file and row height
-            cache_key = self._get_cache_key(file_path, target_height)
-            if cache_key and cache_key in self._thumbnail_cache:
-                cached_pixmap = self._thumbnail_cache[cache_key]
-                
-                # Scale to exact size if needed
-                if cached_pixmap.height() != target_height:
-                    from PyQt6.QtGui import QPixmap
-                    from PyQt6.QtCore import Qt
-                    scaled = cached_pixmap.scaled(
-                        target_width,
-                        target_height,
-                        Qt.AspectRatioMode.KeepAspectRatio,
-                        Qt.TransformationMode.SmoothTransformation
-                    )
-                    try:
-                        label.setPixmap(scaled)
-                        label.setFixedSize(scaled.size())
-                        label.setText("")
-                        applied_count += 1
-                    except (RuntimeError, AttributeError):
-                        # Label was deleted, skip
-                        continue
-                else:
-                    try:
-                        label.setPixmap(cached_pixmap)
-                        label.setFixedSize(cached_pixmap.size())
-                        label.setText("")
-                        applied_count += 1
-                    except (RuntimeError, AttributeError):
-                        # Label was deleted, skip
-                        continue
-        
-        if applied_count > 0:
-            logger.info(f"[JUSTIFIED_GALLERY] Applied {applied_count} cached thumbnails immediately")
-            # Update progress count for cached thumbnails
-            if hasattr(self, '_images_loaded_count') and hasattr(self, '_total_images_to_load'):
-                self._images_loaded_count = min(self._images_loaded_count + applied_count, self._total_images_to_load)
-                # No need to update loading message with progress - just keep it simple
+        # Virtualized version: This is handled by load_visible_images() which checks cache
+        # We don't need to iterate all items here as we only create widgets for visible ones
+        pass
     
     def _check_and_hide_loading_if_visible_loaded(self):
         """Check if all visible images are loaded and hide loading message if so"""
+        # Virtualized version
         import logging
         logger = logging.getLogger(__name__)
         
-        if not hasattr(self, 'tiles') or not self.tiles:
+        if not self._gallery_layout_items:
+            # Empty gallery - hide loading
+            self.hide_loading_message()
             return
+
+        # Simple check: if we have visible widgets and they all have pixmaps, hide
         
-        # Get visible region from parent scroll area
-        visible_rect = None
-        from PyQt6.QtWidgets import QScrollArea
-        from PyQt6.QtCore import QRect
+        all_loaded = True
+        has_visible = False
         
-        if self.parent():
-            scroll_area = None
-            parent = self.parent()
-            while parent:
-                if isinstance(parent, QScrollArea):
-                    scroll_area = parent
-                    break
-                parent = parent.parent()
-            
-            if scroll_area and scroll_area.isVisible():
-                try:
-                    viewport = scroll_area.viewport()
-                    if viewport:
-                        scroll_y = scroll_area.verticalScrollBar().value()
-                        scroll_x = scroll_area.horizontalScrollBar().value()
-                        viewport_width = viewport.width()
-                        viewport_height = viewport.height()
-                        
-                        if viewport_width > 0 and viewport_height > 0:
-                            visible_rect = QRect(
-                                scroll_x,
-                                scroll_y,
-                                viewport_width,
-                                viewport_height
-                            )
-                except Exception as e:
-                    logger.debug(f"[JUSTIFIED_GALLERY] Error calculating visible rect: {e}")
-                    visible_rect = None
-        
-        # If no visible rect, check first row
-        if not visible_rect or visible_rect.isEmpty():
-            # Check first row
-            first_row_count = 0
-            for index, (label, file_path, target_width, target_height) in enumerate(self.tiles):
-                try:
-                    if not label or not hasattr(label, 'y'):
-                        continue
-                    if index > 0:
-                        prev_label = self.tiles[index - 1][0]
-                        try:
-                            if label.y() != prev_label.y():
-                                break
-                        except RuntimeError:
-                            continue
-                    first_row_count += 1
-                except (RuntimeError, AttributeError):
-                    all_loaded = False
-                    break
-            
-            # Check if first row is loaded
-            all_loaded = True
-            for index in range(min(first_row_count, len(self.tiles))):
-                try:
-                    label, file_path, target_width, target_height = self.tiles[index]
-                    if not file_path:
-                        continue  # No file path, skip
-                    
-                    if not label or not hasattr(label, 'pixmap'):
-                        all_loaded = False
-                        break
-                    
-                    try:
-                        pixmap = label.pixmap()
-                        if not pixmap or pixmap.isNull():
-                            all_loaded = False
-                            break
-                    except RuntimeError:
-                        all_loaded = False
-                        break
-                except (RuntimeError, AttributeError, IndexError):
-                    all_loaded = False
-                    break
-            
-            if all_loaded and first_row_count > 0:
-                logger.debug(f"[JUSTIFIED_GALLERY] First row ({first_row_count} images) loaded, hiding loading message")
-                self.hide_loading_message()
-            return
-        
-        # Check visible tiles
-        visible_loaded = True
-        visible_count = 0
-        
-        for index, (label, file_path, target_width, target_height) in enumerate(self.tiles):
-            if not file_path:
-                continue  # No file path, skip
-            
-            try:
-                if not label or not hasattr(label, 'geometry'):
+        # Check if visible widgets have content
+        if self._visible_widgets:
+            for file_path, widget in self._visible_widgets.items():
+                if not widget.isVisible():
                     continue
                 
-                label_rect = label.geometry()
-                is_visible = visible_rect.intersects(label_rect)
-                
-                if is_visible:
-                    visible_count += 1
-                    try:
-                        pixmap = label.pixmap()
-                        if not pixmap or pixmap.isNull():
-                            visible_loaded = False
-                            break
-                    except RuntimeError:
-                        visible_loaded = False
-                        break
-            except (RuntimeError, AttributeError):
-                visible_loaded = False
-                break
+                has_visible = True
+                # Check if widget has pixmap (we assume if it has pixmap, it's loaded)
+                # Text check is a proxy: if text is empty, it usually has an image
+                if widget.text() != "":
+                    all_loaded = False
+                    break
+        else:
+             # No visible widgets yet - might be building or scrolled away
+             # If we have items but no widgets, we are not loaded
+             if self._gallery_layout_items:
+                 all_loaded = False
         
-        if visible_loaded and visible_count > 0:
-            logger.debug(f"[JUSTIFIED_GALLERY] All visible images ({visible_count}) loaded, hiding loading message")
+        if all_loaded:
+            if has_visible:
+                logger.debug("[JUSTIFIED_GALLERY] All visible images loaded, hiding message")
+            else:
+                logger.debug("[JUSTIFIED_GALLERY] No visible widgets needed, hiding message")
             self.hide_loading_message()
     
     def _continue_loading_remaining_images(self):
         """Continue loading remaining images in background (scroll-aware)"""
         import logging
         logger = logging.getLogger(__name__)
+        
+        # Store current generation at start - if folder changes during execution, we'll detect it
+        current_generation = self._gallery_generation
         
         # Use _gallery_layout_items (virtualized) instead of legacy self.tiles
         if not self._gallery_layout_items:
@@ -2222,6 +2278,12 @@ class JustifiedGallery(QWidget):
         
         # Prevent concurrent calls
         if self._background_loading_active:
+            return
+        
+        # Check if generation changed (folder switched) - if so, abort immediately
+        if current_generation != self._gallery_generation:
+            logger.debug(f"[JUSTIFIED_GALLERY] Folder changed during background loading (gen {current_generation} -> {self._gallery_generation}), aborting")
+            self._background_loading_active = False
             return
         
         try:
@@ -2249,6 +2311,12 @@ class JustifiedGallery(QWidget):
             unloaded_indices = []
             
             for i in indices:
+                # Check if generation changed during iteration
+                if current_generation != self._gallery_generation:
+                    logger.debug(f"[JUSTIFIED_GALLERY] Folder changed during background loading iteration, aborting")
+                    self._background_loading_active = False
+                    return
+                
                 item = self._gallery_layout_items[i]
                 file_path = item['file_path']
                 rect = item['rect']
@@ -2268,11 +2336,23 @@ class JustifiedGallery(QWidget):
                         unloaded_indices.append((i, file_path, rect.width(), rect.height(), False))
             
             # 2. Add a batch of background images to the END of the queue
+            # Check generation again before adding to queue
+            if current_generation != self._gallery_generation:
+                logger.debug(f"[JUSTIFIED_GALLERY] Folder changed before adding to queue, aborting")
+                self._background_loading_active = False
+                return
+                
             if unloaded_indices:
                 # Sort by proximity to current scroll position if possible, 
                 # but for background loading, just adding a batch is fine
                 batch_size = 30
                 batch = unloaded_indices[:batch_size]
+                
+                # Final generation check before modifying queue
+                if current_generation != self._gallery_generation:
+                    logger.debug(f"[JUSTIFIED_GALLERY] Folder changed before adding batch to queue, aborting")
+                    self._background_loading_active = False
+                    return
                 
                 for entry in batch:
                     self._load_queue.append(entry)
@@ -2285,7 +2365,12 @@ class JustifiedGallery(QWidget):
                 # Continue loading even if fewer than 30 remain (was causing early stop)
                 if len(unloaded_indices) > 0:
                     from PyQt6.QtCore import QTimer
-                    QTimer.singleShot(2000, self._continue_loading_remaining_images)
+                    # Check if generation changed (folder switched) before scheduling next batch
+                    if current_generation == self._gallery_generation:
+                        QTimer.singleShot(2000, self._continue_loading_remaining_images)
+                    else:
+                        logger.debug(f"[JUSTIFIED_GALLERY] Folder changed during background loading, stopping background load cycle")
+                        self._background_loading_active = False
                 else:
                     # No more images to load, reset flag
                     self._background_loading_active = False
@@ -2439,6 +2524,15 @@ class JustifiedGallery(QWidget):
         # Buffer zone: pre-instantiate widgets for 1.5 screen heights above/below
         buffer_rect = visible_rect.adjusted(0, -int(v_height * 1.5), 0, int(v_height * 1.5))
         
+        
+        # SCROLL OPTIMIZATION: Check for fast scrolling
+        if self._is_scrolling_fast:
+            # If scrolling fast, ONLY load recycled widgets to clear them
+            # But DO NOT start new heavy loads
+            # Just instantiate placeholders
+            logger.debug(f"[GALLERY] Fast scrolling detected ({self._current_scroll_speed:.0f} px/s) - deferring image loads")
+            return
+            
         current_visible_paths = set()
         to_instantiate = [] # Items that need a widget
         load_start_time = time.time()
@@ -2484,36 +2578,70 @@ class JustifiedGallery(QWidget):
             # Check cache and apply immediately - check all buckets for better cache hit rate
             cache_hit = False
             cached_pixmap = None
+            cache_bucket = None
             for bucket in self._row_height_buckets:
-                cache_key = self._get_cache_key(file_path, bucket)
-                if cache_key in self._thumbnail_cache:
-                    cached_pixmap = self._thumbnail_cache.get(cache_key)
-                    if cached_pixmap and not cached_pixmap.isNull():
-                        cache_hit = True
-                        break
+                # Use bucket directly (not _get_cache_key which finds closest bucket)
+                cache_key = (file_path, bucket)
+                # Use get() instead of checking __contains__ first, as get() is more reliable
+                cached_pixmap = self._thumbnail_cache.get(cache_key)
+                if cached_pixmap and not cached_pixmap.isNull():
+                    cache_hit = True
+                    cache_bucket = bucket
+                    logger.debug(f"[GALLERY] Cache hit for {os.path.basename(file_path)} in bucket {bucket} (pixmap size: {cached_pixmap.width()}x{cached_pixmap.height()})")
+                    break
             
             if cache_hit and cached_pixmap:
+                logger.info(f"[GALLERY] Applying cached thumbnail to widget: {os.path.basename(file_path)} (from bucket {cache_bucket})")
                 # Scale to exact widget size if needed
                 widget_h = widget.height()
                 widget_w = widget.width()
-                if cached_pixmap.height() != widget_h or cached_pixmap.width() != widget_w:
-                    from PyQt6.QtCore import Qt
-                    scaled = cached_pixmap.scaled(
-                        widget_w, widget_h,
-                        Qt.AspectRatioMode.KeepAspectRatio,
-                        Qt.TransformationMode.SmoothTransformation
-                    )
-                    if not scaled.isNull():
-                        widget.setPixmap(scaled)
+                if widget_h > 0 and widget_w > 0:
+                    # Ensure widget is visible and properly configured before setting pixmap
+                    widget.show()
+                    widget.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                    
+                    if cached_pixmap.height() != widget_h or cached_pixmap.width() != widget_w:
+                        scaled = cached_pixmap.scaled(
+                            widget_w, widget_h,
+                            Qt.AspectRatioMode.KeepAspectRatio,
+                            Qt.TransformationMode.SmoothTransformation
+                        )
+                        if not scaled.isNull():
+                            widget.setPixmap(scaled)
+                            logger.debug(f"[GALLERY] Scaled cached pixmap from {cached_pixmap.width()}x{cached_pixmap.height()} to {widget_w}x{widget_h}")
+                        else:
+                            widget.setPixmap(cached_pixmap)
+                            logger.debug(f"[GALLERY] Scaling failed, using original cached pixmap")
                     else:
                         widget.setPixmap(cached_pixmap)
+                    widget.setText("")  # Clear loading text
+                    
+                    # Force widget update to ensure display
+                    widget.update()
+                    widget.repaint()
+                    
+                    # Also update parent and gallery widget to ensure visibility
+                    if widget.parent():
+                        widget.parent().update()
+                        widget.parent().repaint()
+                    
+                    # Update the gallery widget itself
+                    self.update()
+                    self.repaint()  # Force repaint of entire gallery
+                    
+                    # Process events to ensure UI updates immediately
+                    from PyQt6.QtWidgets import QApplication
+                    QApplication.processEvents()
+                    
+                    # Count cached images as loaded
+                    if hasattr(self, '_visible_images_loaded'):
+                        self._visible_images_loaded += 1
+                    logger.info(f"[GALLERY] Successfully applied cached thumbnail to widget: {os.path.basename(file_path)}")
                 else:
-                    widget.setPixmap(cached_pixmap)
-                widget.setText("")
-                # Count cached images as loaded
-                if hasattr(self, '_visible_images_loaded'):
-                    self._visible_images_loaded += 1
+                    logger.warning(f"[GALLERY] Widget has invalid size {widget_w}x{widget_h} for {os.path.basename(file_path)}, cannot apply cached pixmap")
+                    widget.setText("Loading...")
             else:
+                logger.debug(f"[GALLERY] Cache miss for {os.path.basename(file_path)}, will load from disk (checked {len(self._row_height_buckets)} buckets)")
                 widget.setText("Loading...")
                 # Track images that need loading
                 if hasattr(self, '_visible_images_to_load'):
@@ -2592,6 +2720,12 @@ class JustifiedGallery(QWidget):
         tasks_started = 0
         
         for index, file_path, target_width, target_height, is_priority in batch:
+            # Verify this file is still in the current gallery layout (folder might have changed)
+            if index >= len(self._gallery_layout_items):
+                continue  # Index out of range, folder probably changed
+            if self._gallery_layout_items[index]['file_path'] != file_path:
+                continue  # File path mismatch, folder changed
+            
             if file_path in self._loading_tiles:
                 continue  # Already loading
             
@@ -2628,6 +2762,7 @@ class JustifiedGallery(QWidget):
                 parent_viewer=self.parent_viewer,
                 generation=self._gallery_generation
             )
+            self._active_tasks[file_path] = task # Track for cancellation
             self.thread_pool.start(task)
             tasks_started += 1
         
@@ -2661,6 +2796,12 @@ class JustifiedGallery(QWidget):
         self._load_queue = self._load_queue[self._batch_size:]
         
         for index, file_path, target_width, target_height, is_priority in batch:
+            # Verify this file is still in the current gallery layout (folder might have changed)
+            if index >= len(self._gallery_layout_items):
+                continue  # Index out of range, folder probably changed
+            if self._gallery_layout_items[index]['file_path'] != file_path:
+                continue  # File path mismatch, folder changed
+            
             if file_path in self._loading_tiles:
                 continue  # Already loading
             
@@ -2697,6 +2838,7 @@ class JustifiedGallery(QWidget):
                 parent_viewer=self.parent_viewer,
                 generation=self._gallery_generation  # Pass current generation to ignore old folder's tasks
             )
+            self._active_tasks[file_path] = task # Track for cancellation
             self.thread_pool.start(task)
         
         # Schedule the next batch if the queue isn't empty
@@ -2722,22 +2864,36 @@ class JustifiedGallery(QWidget):
         import os
         logger = logging.getLogger(__name__)
         
+        # CRITICAL: Check generation first - reject any tasks from old folders
         if generation != self._gallery_generation:
-            logger.debug(f"[APPLY_THUMB] Generation mismatch: {generation} != {self._gallery_generation}, ignoring")
+            # Only log first few rejections to avoid log spam, then use debug level
+            if not hasattr(self, '_rejection_count'):
+                self._rejection_count = 0
+            self._rejection_count += 1
+            if self._rejection_count <= 5:
+                logger.info(f"[APPLY_THUMB] Generation mismatch: {generation} != {self._gallery_generation}, rejecting old folder image (index: {index})")
+            else:
+                logger.debug(f"[APPLY_THUMB] Generation mismatch: {generation} != {self._gallery_generation}, rejecting old folder image (index: {index})")
             return
             
-        # 1. Get metadata from index
+        # 1. Get metadata from index - verify index is still valid
         if index >= len(self._gallery_layout_items):
-            logger.debug(f"[APPLY_THUMB] Index {index} out of range (max: {len(self._gallery_layout_items)})")
+            logger.debug(f"[APPLY_THUMB] Index {index} out of range (max: {len(self._gallery_layout_items)}), folder probably changed")
             return
+        
+        # 2. Verify the layout item exists and has a file path
         layout_item = self._gallery_layout_items[index]
-        file_path = layout_item['file_path']
+        file_path = layout_item.get('file_path') if layout_item else None
         if not file_path:
-            logger.debug(f"[APPLY_THUMB] No file_path for index {index}")
+            logger.debug(f"[APPLY_THUMB] No file_path for index {index}, folder probably changed")
             return
 
         file_basename = os.path.basename(file_path)
-        logger.debug(f"[APPLY_THUMB] Processing {file_basename} (index: {index})")
+        
+        # 3. Additional safety: If the file_path is not in visible_widgets and we're not in the middle of a rebuild,
+        # this might be from an old folder. However, we can't be 100% sure without storing the expected file_path
+        # in the task. The generation check above should be sufficient, but we log for debugging.
+        logger.info(f"[APPLY_THUMB] Processing {file_basename} (index: {index}, generation: {generation}, visible widgets: {len(self._visible_widgets)})")
 
         # 2. Convert and Cache
         pixmap = None
@@ -2747,10 +2903,12 @@ class JustifiedGallery(QWidget):
             pixmap = self.parent_viewer._numpy_to_qpixmap(image)
             
         if pixmap and not pixmap.isNull():
-            cache_key = self._get_cache_key(file_path, pixmap.height())
-            if cache_key:
+            # Cache in all relevant buckets to maximize cache hits when widgets are created later
+            # This is important because widgets might be created after the thumbnail is loaded
+            for bucket in self._row_height_buckets:
+                cache_key = (file_path, bucket)
                 self._thumbnail_cache.put(cache_key, pixmap)
-                logger.debug(f"[APPLY_THUMB] Cached {file_basename} with key height: {pixmap.height()}")
+            logger.debug(f"[APPLY_THUMB] Cached {file_basename} in all buckets (pixmap height: {pixmap.height()})")
         else:
             logger.debug(f"[APPLY_THUMB] Failed to create pixmap for {file_basename}")
 
@@ -2759,22 +2917,31 @@ class JustifiedGallery(QWidget):
             logger.debug(f"[APPLY_THUMB] Widget found for {file_basename}, updating...")
             label = self._visible_widgets[file_path]
             try:
-                # Ensure widget is visible
+                # Ensure widget is visible and has valid geometry
                 if not label.isVisible():
                     label.show()
+                # Ensure widget has valid size
+                if label.width() <= 0 or label.height() <= 0:
+                    logger.debug(f"[APPLY_THUMB] Widget has invalid size for {file_basename}: {label.width()}x{label.height()}, skipping update")
+                    return
                 
                 # First try to use the pixmap we just cached (if available)
                 if pixmap and not pixmap.isNull():
+                    # Ensure widget is visible and properly configured
+                    label.show()
+                    label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                    
                     # Scale to label size if needed
                     label_h = label.height()
                     label_w = label.width()
                     if label_h > 0 and label_w > 0:
                         if pixmap.height() != label_h or pixmap.width() != label_w:
-                            from PyQt6.QtCore import Qt
+                            # Use FastTransformation in UI thread to avoid stutters
+                            # The background thread should have already scaled it correctly anyway
                             scaled_pixmap = pixmap.scaled(
                                 label_w, label_h,
                                 Qt.AspectRatioMode.KeepAspectRatio,
-                                Qt.TransformationMode.SmoothTransformation
+                                Qt.TransformationMode.FastTransformation
                             )
                             if not scaled_pixmap.isNull():
                                 label.setPixmap(scaled_pixmap)
@@ -2787,6 +2954,17 @@ class JustifiedGallery(QWidget):
                         # Force widget update to ensure display
                         label.update()
                         label.repaint()
+                        # Also update parent and gallery widget to ensure visibility
+                        if label.parent():
+                            label.parent().update()
+                            label.parent().repaint()
+                        # Update the gallery widget itself
+                        self.update()
+                        self.repaint()
+                        
+                        # Process events to ensure UI updates immediately
+                        QApplication.processEvents()
+                        
                         # Track loaded images
                         if hasattr(self, '_visible_images_loaded'):
                             self._visible_images_loaded += 1
@@ -2810,11 +2988,26 @@ class JustifiedGallery(QWidget):
                         if key in self._thumbnail_cache:
                             cached_pixmap = self._thumbnail_cache.get(key)
                             if not cached_pixmap.isNull():
+                                # Ensure widget is visible and properly configured
+                                label.show()
+                                label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                                
                                 label.setPixmap(cached_pixmap)
                                 label.setText("")
                                 # Force widget update
                                 label.update()
                                 label.repaint()
+                                # Also update parent and gallery widget to ensure visibility
+                                if label.parent():
+                                    label.parent().update()
+                                    label.parent().repaint()
+                                # Update the gallery widget itself
+                                self.update()
+                                self.repaint()
+                                
+                                # Process events to ensure UI updates immediately
+                                QApplication.processEvents()
+                                
                                 # Track loaded images
                                 if hasattr(self, '_visible_images_loaded'):
                                     self._visible_images_loaded += 1
@@ -2844,13 +3037,14 @@ class JustifiedGallery(QWidget):
                     if widget_basename_lower == file_basename_lower:
                         logger.debug(f"[APPLY_THUMB] Found widget by basename match: {file_basename}")
                         try:
-                            if not widget.isVisible():
-                                widget.show()
+                            # Ensure widget is visible and properly configured
+                            widget.show()
+                            widget.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                            
                             label_h = widget.height()
                             label_w = widget.width()
                             if label_h > 0 and label_w > 0:
                                 if pixmap.height() != label_h or pixmap.width() != label_w:
-                                    from PyQt6.QtCore import Qt
                                     scaled_pixmap = pixmap.scaled(
                                         label_w, label_h,
                                         Qt.AspectRatioMode.KeepAspectRatio,
@@ -2865,6 +3059,18 @@ class JustifiedGallery(QWidget):
                                 widget.setText("")
                                 widget.update()
                                 widget.repaint()
+                                
+                                # Also update parent and gallery widget to ensure visibility
+                                if widget.parent():
+                                    widget.parent().update()
+                                    widget.parent().repaint()
+                                # Update the gallery widget itself
+                                self.update()
+                                self.repaint()
+                                
+                                # Process events to ensure UI updates immediately
+                                QApplication.processEvents()
+                                
                                 if hasattr(self, '_visible_images_loaded'):
                                     self._visible_images_loaded += 1
                                 if hasattr(self, '_gallery_load_start_time') and self._gallery_load_start_time:
@@ -2876,6 +3082,10 @@ class JustifiedGallery(QWidget):
         
         if file_path in self._loading_tiles:
             self._loading_tiles.remove(file_path)
+            
+        # Remove from active tasks
+        if file_path in self._active_tasks:
+            del self._active_tasks[file_path]
             
         self._check_and_hide_loading_if_visible_loaded()
 
@@ -3057,46 +3267,75 @@ class JustifiedGallery(QWidget):
         
         super().wheelEvent(event)
     
-    def set_images(self, images):
+    def set_images(self, images, bulk_metadata=None):
         """Update the images list and rebuild"""
         import logging
         import time
+        from collections import deque
+        from PyQt6.QtCore import QTimer
         logger = logging.getLogger(__name__)
         start_time = time.time()
         logger.info(f"[JUSTIFIED_GALLERY] ========== set_images() STARTED ==========")
         logger.info(f"[JUSTIFIED_GALLERY] New image count: {len(images)}")
         
-        # Show loading message or hide if empty (no progress shown)
-        if len(images) > 0:
-            self.show_loading_message("Loading images...")
-        else:
-            self.hide_loading_message()
+        # 1. Store images
+        self.images = images
         
-        # Prevent building if already building
-        if self._building:
-            logger.warning("[JUSTIFIED_GALLERY] set_images() called while building, will rebuild after current build completes")
-            # Use QTimer to retry after current build
-            from PyQt6.QtCore import QTimer
+        # 2. Reset scroll position and selection for new folder
+        if hasattr(self, 'parent_scroll_area') and self.parent_scroll_area:
+            self.parent_scroll_area.verticalScrollBar().setValue(0)
+            self.parent_scroll_area.horizontalScrollBar().setValue(0)
+            
+        # 3. Increase generation to invalidate pending loads
+        self._gallery_generation += 1
+        
+        # 4. Cancel active tasks
+        active_indices = list(self._active_tasks.keys())
+        cancelled_count = 0
+        for idx in active_indices:
+            task = self._active_tasks.get(idx)
+            if task:
+                task.cancel()
+                cancelled_count += 1
+        
+        # Clear priority queue
+        items_cleared = len(self._priority_queue)
+        self._priority_queue = []
+        
+        logger.info(f"[JUSTIFIED_GALLERY] Folder switch detected, new generation: {self._gallery_generation} "
+                   f"(clearing {items_cleared} regular and {cancelled_count} priority queued items)")
+        
+        self._active_tasks = {}
+        self._load_queue = [] # Use list instead of deque for slicing support
+        self._loaded_indices = set()
+        
+        # 5. Build layout
+        # If no width yet, we might need a retry
+        if self.width() <= 0:
             def retry_set_images():
-                if not self._building:
-                    self.set_images(images)
+                if self.width() > 0:
+                    self.build_gallery(bulk_metadata)
                 else:
                     QTimer.singleShot(100, retry_set_images)
             QTimer.singleShot(100, retry_set_images)
-            return
+        else:
+            self.build_gallery(bulk_metadata)
+            
+        logger.info(f"[JUSTIFIED_GALLERY] ========== set_images() COMPLETED in {time.time() - start_time:.3f}s ==========")
         
-        self.images = images
-        
-        # Increment generation counter to invalidate old loading tasks
-        self._gallery_generation += 1
-        current_generation = self._gallery_generation
-        logger.debug(f"[JUSTIFIED_GALLERY] Folder switch detected, new generation: {current_generation}")
-        
-        # Cancel all pending loading tasks
         # Stop any pending load timers
         if self._load_timer:
             self._load_timer.stop()
             self._load_timer = None
+            
+        # Explicitly cancel all active worker tasks
+        if hasattr(self, '_active_tasks'):
+            active_count = len(self._active_tasks)
+            for task in self._active_tasks.values():
+                task.cancel()
+            self._active_tasks.clear()
+            if active_count > 0:
+                logger.info(f"[JUSTIFIED_GALLERY] Cancelled {active_count} active web worker tasks")
         
         # Clear the load queues to prevent old folder's images from loading
         old_queue_size = len(self._load_queue)
@@ -3114,11 +3353,33 @@ class JustifiedGallery(QWidget):
         # Clear loading tracking
         self._loading_tiles.clear()
         
+        # Stop background loading cycle
+        self._background_loading_active = False
+        
         # 1. Clear existing widgets and move to pool instead of deleting
         for label in self._visible_widgets.values():
             label.hide()
             self._widget_pool.append(label)
         self._visible_widgets = {}
+        
+        # ROBUST CLEANUP: Check for any orphaned thumbnail labels
+        # Use findChildren to catch any widgets that were tracked incorrectly
+        # This fixes the "ghost image" bug where an image persists after folder switch
+        try:
+            # ThumbnailLabel is defined in this file (main.py)
+            orphans_found = 0
+            for child in self.findChildren(ThumbnailLabel):
+                if not child.isHidden():
+                    child.hide()
+                    # Use careful add to pool - only if not already in it (though pool is list)
+                    if child not in self._widget_pool:
+                         self._widget_pool.append(child)
+                    orphans_found += 1
+            if orphans_found > 0:
+                logger.debug(f"[JUSTIFIED_GALLERY] Cleaned up {orphans_found} orphan gallery widgets")
+        except Exception as e:
+            logger.error(f"[JUSTIFIED_GALLERY] Error cleaning up orphans: {e}")
+        
         self._gallery_layout_items = []
         
         logger.debug(f"[JUSTIFIED_GALLERY] Cleared visible widgets and reset layout state")
@@ -3485,6 +3746,62 @@ class CustomConfirmDialog(QDialog):
         super().mouseReleaseEvent(event)
 
 
+# -----------------------------
+# Loading Overlay for Single View
+# -----------------------------
+class LoadingOverlay(QWidget):
+    """Semi-transparent loading overlay with spinner-like message"""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.setVisible(False)
+        self._message = "Loading Image..."
+        
+    def set_message(self, message):
+        self._message = message
+        self.update()
+        
+    def show_loading(self, message=None):
+        if message:
+            self._message = message
+        self.setVisible(True)
+        self.raise_()
+        self.update()
+        
+    def hide_loading(self):
+        self.setVisible(False)
+        
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        
+        # Draw semi-transparent background
+        painter.setBrush(QColor(0, 0, 0, 120))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.drawRect(self.rect())
+        
+        # Draw loading box
+        box_width = 240
+        box_height = 80
+        x = (self.width() - box_width) // 2
+        y = (self.height() - box_height) // 2
+        
+        painter.setBrush(QColor(40, 40, 40, 230))
+        painter.setPen(QPen(QColor(100, 100, 100), 1))
+        painter.drawRoundedRect(x, y, box_width, box_height, 10, 10)
+        
+        # Draw text
+        painter.setPen(QColor(255, 255, 255))
+        font = painter.font()
+        font.setPointSize(12)
+        font.setBold(True)
+        painter.setFont(font)
+        painter.drawText(x, y, box_width, box_height, Qt.AlignmentFlag.AlignCenter, self._message)
+
+    def resizeEvent(self, event):
+        # Already covers parent because we resize it in parent's resizeEvent
+        super().resizeEvent(event)
+
 class RAWImageViewer(QMainWindow):
     def _load_pixmap_safe(self, file_path):
         """Safely load QPixmap, using rawpy for RAW files and PIL for TIFF files to avoid Qt warnings"""
@@ -3740,8 +4057,18 @@ class RAWImageViewer(QMainWindow):
         # 進度更新
         self.image_manager.progress_updated.connect(self.on_manager_progress)
 
+    def _hide_all_loading_indicators(self):
+        """Helper to hide all loading indicators across modes"""
+        if hasattr(self, 'view_mode') and self.view_mode == 'gallery' and self.gallery_justified:
+            self.gallery_justified.hide_loading_message()
+        if hasattr(self, 'loading_overlay'):
+            self.loading_overlay.hide_loading()
+
     def on_manager_thumbnail_ready(self, file_path: str, thumbnail):
         """處理 ImageLoadManager 的縮圖就緒信號"""
+        if hasattr(self, 'loading_overlay'):
+            self.loading_overlay.hide_loading()
+            
         import logging
         logger = logging.getLogger(__name__)
         
@@ -3765,6 +4092,9 @@ class RAWImageViewer(QMainWindow):
 
     def on_manager_image_ready(self, file_path: str, image):
         """處理 ImageLoadManager 的完整圖像就緒信號"""
+        if hasattr(self, 'loading_overlay'):
+            self.loading_overlay.hide_loading()
+            
         import logging
         logger = logging.getLogger(__name__)
         
@@ -3819,8 +4149,8 @@ class RAWImageViewer(QMainWindow):
                 self._orientation_already_applied = True
         else:
             logger.info(f"[MANAGER] Pixmap ready for {os.path.basename(file_path)}")
-            # load_pixmap_safe in common_image_loader.py now uses QImageReader with setAutoTransform(True)
-            # which automatically applies EXIF orientation. Orientation is already applied.
+            # load_pixmap_safe in common_image_loader.py now uses QImageReader with setAutoTransform
+            # This automatically applies EXIF orientation. Orientation is already applied.
             # Set flag so display_pixmap doesn't apply it again
             self._orientation_already_applied = True
         
@@ -3851,6 +4181,9 @@ class RAWImageViewer(QMainWindow):
 
     def on_manager_error(self, file_path: str, error_message: str):
         """處理 ImageLoadManager 的錯誤信號"""
+        if hasattr(self, 'loading_overlay'):
+            self.loading_overlay.hide_loading()
+            
         import logging
         logger = logging.getLogger(__name__)
         
@@ -4052,6 +4385,10 @@ class RAWImageViewer(QMainWindow):
         # Create custom title bar
         self.title_bar = CustomTitleBar(self, title="RAW Image Viewer")
         
+        # Initialize loading overlay for single view
+        self.loading_overlay = LoadingOverlay(self)
+        self.loading_overlay.hide()
+        
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         main_layout = QVBoxLayout(central_widget)
@@ -4171,8 +4508,8 @@ class RAWImageViewer(QMainWindow):
         # Create status bar
         self.status_bar = self.statusBar()
         self.status_bar.showMessage("")  # Empty message when no image loaded
-        # Disable resize grip (dotted triangle in bottom-right corner)
-        self.status_bar.setSizeGripEnabled(False)
+        # Enable resize grip (dotted triangle in bottom-right corner)
+        self.status_bar.setSizeGripEnabled(True)
         # Set simple status bar style (no rounded corners)
         self.status_bar.setStyleSheet("""
             QStatusBar {
@@ -4203,8 +4540,15 @@ class RAWImageViewer(QMainWindow):
         # Add 12px spacing between buttons (🗁 and Gallery)
         left_buttons_layout.setSpacing(12)
         
-        # Open button (left side) - Material Design 3 text button style with folder icon
-        self.open_button = QPushButton("🗁")  # U+1F5C1 folder icon
+        # Open button (left side) - Material Design 3 icon button
+        folder_icon_path = resource_path(os.path.join('icons', 'folder_open_md3.svg'))
+        self.open_button = QPushButton()
+        if os.path.exists(folder_icon_path):
+             self.open_button.setIcon(QIcon(folder_icon_path))
+             self.open_button.setIconSize(QSize(20, 20))
+        else:
+             self.open_button.setText("🗁") # Fallback
+        
         self.open_button.setFlat(True)
         self.open_button.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         self.open_button.clicked.connect(self.open_file)
@@ -5882,7 +6226,7 @@ class RAWImageViewer(QMainWindow):
             old_index = self.current_file_index
             
             # Resort the files
-            self.image_files = self.sort_image_files(self.image_files)
+            self.image_files, bulk_metadata = self.sort_image_files(self.image_files)
             
             # Find the current file in the new order
             if current_file in self.image_files:
@@ -5895,18 +6239,18 @@ class RAWImageViewer(QMainWindow):
                 logger.debug(f"[SORT] Resorted folder: {os.path.basename(current_file)}")
                 logger.debug(f"[SORT] Old index: {old_index}, New index: {self.current_file_index}")
                 logger.debug(f"[SORT] Total files: {len(self.image_files)}")
-                logger.debug(f"[SORT] Old position: {old_index + 1}/{len(self.image_files)}")
-                logger.debug(f"[SORT] New position: {self.current_file_index + 1}/{len(self.image_files)}")
                 
                 # Update status bar to reflect new position
                 self.update_status_bar()
                 
                 # Update gallery view if in gallery mode
                 if self.view_mode == 'gallery' and hasattr(self, 'gallery_widget') and self.gallery_widget.isVisible():
+                    if self.gallery_justified:
+                        self.gallery_justified.set_images(self.image_files.copy(), bulk_metadata)
                     if hasattr(self, 'gallery_justified') and self.gallery_justified:
                         # Sync gallery image list with new sorted order
-                        self.gallery_justified.images = self.image_files.copy()
-                        self.gallery_justified.build_gallery()
+                        # Use set_images() to properly handle folder changes
+                        self.gallery_justified.set_images(self.image_files.copy())
                         self._gallery_update_needed = False
     
     def get_image_capture_time(self, file_path):
@@ -5965,62 +6309,68 @@ class RAWImageViewer(QMainWindow):
             except (OSError, AttributeError):
                 return 0
     
-    def sort_files_by_capture_time(self, file_paths, newest_first=True):
-        """Sort files by image capture time (EXIF DateTimeOriginal) - Optimized with bulk fetch"""
+    def sort_files_by_capture_time(self, file_paths, newest_first=True, file_stats=None):
+        """Sort files by capture time according to user preference (Newest/Oldest)"""
         import time
         import logging
+        from datetime import datetime
         logger = logging.getLogger(__name__)
         
         if not file_paths:
-            return []
+            return [], {}
 
         sort_start = time.time()
         
         # 1. Bulk fetch metadata for all files at once (MUCH faster than individual calls)
         from image_cache import get_image_cache
         cache = get_image_cache()
-        bulk_metadata = cache.get_multiple_exif(file_paths)
+        # Pass the pre-collected file stats to avoid redundant os.stat calls
+        bulk_metadata = cache.get_multiple_exif(file_paths, file_stats)
         
-        def get_capture_time(file_path):
-            # 2. Use bulk metadata if available
-            if file_path in bulk_metadata:
-                m = bulk_metadata[file_path]
+        # 2. Pre-calculate sorting keys to avoid repeated strptime calls
+        # This is a MASSIVE optimization for thousands of files
+        sort_keys = {}
+        for fp in file_paths:
+            timestamp = 0
+            if fp in bulk_metadata:
+                m = bulk_metadata[fp]
                 if 'capture_time' in m and m['capture_time']:
                     try:
                         time_str = m['capture_time']
-                        from datetime import datetime
                         # Format is "HH:MM:SS YYYY-MM-DD" in cache
                         dt = datetime.strptime(time_str, "%H:%M:%S %Y-%m-%d")
-                        return dt.timestamp()
-                    except (ValueError, AttributeError):
+                        timestamp = dt.timestamp()
+                    except:
                         pass
             
-            # 3. Fallback to individual cache/file (rarely needed now)
-            # But skip exifread for videos even in fallback
-            if self.is_video_file(file_path):
+            # Fallback to file mtime if no capture time
+            if timestamp == 0:
                 try:
-                    return os.path.getmtime(file_path)
+                    if file_stats and fp in file_stats:
+                        timestamp = file_stats[fp][1]
+                    else:
+                        timestamp = os.path.getmtime(fp)
                 except:
-                    return 0
-                    
-            return self.get_image_capture_time(file_path)
+                    timestamp = 0
+            
+            sort_keys[fp] = (timestamp, os.path.basename(fp).lower())
         
-        # Use stable sort with secondary key (filename)
+        # 3. Perform the sort using pre-calculated keys
         sorted_files = sorted(
             file_paths, 
-            key=lambda fp: (get_capture_time(fp), os.path.basename(fp).lower()),
+            key=lambda fp: sort_keys[fp],
             reverse=newest_first
         )
         
         sort_time = time.time() - sort_start
         logger.info(f"[SORT] Bulk metadata fetch & sort of {len(file_paths)} files took {sort_time:.3f}s")
         print(f"[PERF] 🔄 Sorted {len(file_paths)} files in {sort_time*1000:.1f}ms")
-        return sorted_files
+        return sorted_files, bulk_metadata
     
-    def sort_image_files(self, file_paths):
+    def sort_image_files(self, file_paths, file_stats=None):
         """Sort files by capture time according to user preference (Newest/Oldest)"""
         newest_first = self.get_sort_preference()  # True = Newest first, False = Oldest first
-        return self.sort_files_by_capture_time(file_paths, newest_first=newest_first)
+        return self.sort_files_by_capture_time(file_paths, newest_first=newest_first, file_stats=file_stats)
 
     def open_file(self):
         """Open a folder containing images"""
@@ -6679,10 +7029,15 @@ class RAWImageViewer(QMainWindow):
                         logger.info(f"[LOAD] Displaying cached full image")
                         display_start = time.time()
                         self.display_numpy_image(cached_image)
-                        display_time = time.time() - display_start
                         logger.info(f"[LOAD] Cached image displayed in {display_time:.3f}s")
                         self.setFocus()
                         self.save_session_state()
+                        # Update index for preloading
+                        try:
+                            if self.image_files and requested_file_path in self.image_files:
+                                self.current_file_index = self.image_files.index(requested_file_path)
+                        except ValueError:
+                            pass
                         self._start_preloading()
                         logger.info(f"[LOAD] Successfully displayed cached full image for {filename} (total: {time.time() - load_start:.3f}s)")
                         return
@@ -6719,7 +7074,7 @@ class RAWImageViewer(QMainWindow):
                         if orientation != 1:
                             cached_pixmap = self.apply_orientation_to_pixmap(cached_pixmap, orientation)
                             logger.info(f"[LOAD] Applied orientation correction to cached pixmap: {orientation}")
-                            # Set flag so display_pixmap doesn't apply orientation again
+                            # Set flag so display_pixmap doesn't apply it again
                             self._orientation_already_applied = True
                         else:
                             # Orientation is 1 (normal), no correction needed
@@ -6732,6 +7087,12 @@ class RAWImageViewer(QMainWindow):
                         logger.info(f"[LOAD] Cached pixmap displayed in {display_time:.3f}s")
                         self.setFocus()
                         self.save_session_state()
+                        # Update index for preloading
+                        try:
+                            if self.image_files and requested_file_path in self.image_files:
+                                self.current_file_index = self.image_files.index(requested_file_path)
+                        except ValueError:
+                            pass
                         self._start_preloading()
                         logger.info(f"[LOAD] Successfully displayed cached pixmap for {filename} (total: {time.time() - load_start:.3f}s)")
                         return
@@ -6750,9 +7111,10 @@ class RAWImageViewer(QMainWindow):
             # Set loading message with proper alignment (centered both vertically and horizontally)
             # Ensure label fills the viewport for proper centering
             self.image_label.setAlignment(Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter)
-            self.image_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-            self.image_label.setText("Loading preview...\nPlease wait...")
-
+            # Show loading overlay
+            if hasattr(self, 'loading_overlay'):
+                self.loading_overlay.show_loading("Loading Image...")
+            
             # Use new unified image load manager (non-blocking, thread pool based)
             manager_start = time.time()
             logger.info(f"[LOAD] Requesting image load via ImageLoadManager for: {requested_file_path}")
@@ -6791,6 +7153,16 @@ class RAWImageViewer(QMainWindow):
             self.setFocus()
             # Save session state when image changes
             self.save_session_state()
+            
+            # Start preloading adjacent images immediately
+            # This allows background threads to work while we might be waiting for the current image
+            try:
+                if self.image_files and requested_file_path in self.image_files:
+                    self.current_file_index = self.image_files.index(requested_file_path)
+            except ValueError:
+                pass
+            self._start_preloading()
+            
             total_time = time.time() - load_start
             logger.info(f"[LOAD] ========== load_raw_image() COMPLETED for {filename} in {total_time:.3f}s ==========")
             print(f"[PERF] ✅ LOAD COMPLETE: {os.path.basename(requested_file_path)} in {total_time*1000:.1f}ms")
@@ -6956,13 +7328,22 @@ class RAWImageViewer(QMainWindow):
                     cached_pixmap = self.image_cache.get_pixmap(self.current_file_path)
                     if cached_pixmap is not None:
                         logger.info(f"[DISPLAY] Using cached pixmap for {width}x{height} image")
-                        # Apply orientation correction to cached pixmap if needed
-                        orientation = self.get_orientation_from_exif(self.current_file_path)
-                        if orientation != 1:
-                            cached_pixmap = self.apply_orientation_to_pixmap(cached_pixmap, orientation)
-                            self._orientation_already_applied = True
-                        else:
-                            self._orientation_already_applied = True
+                        # Orientation check for cached pixmap
+                        # NOTE: If _orientation_already_applied is True, it means either:
+                        # 1. We just processed it from raw/pil (and it's now in memory)
+                        # 2. Or we just loaded it from CACHE and it was ALREADY rotated there.
+                        # Since put_pixmap() is called AFTER rotation, our cache contains rotated pixmaps.
+                        
+                        # Double rotation fix: only apply if NOT already applies
+                        if not getattr(self, '_orientation_already_applied', False):
+                            orientation = self.get_orientation_from_exif(self.current_file_path)
+                            if orientation != 1:
+                                logger.info(f"[DISPLAY] Applying orientation {orientation} to cached pixmap")
+                                cached_pixmap = self.apply_orientation_to_pixmap(cached_pixmap, orientation)
+                                self._orientation_already_applied = True
+                            else:
+                                self._orientation_already_applied = True
+                        
                         self.display_pixmap(cached_pixmap)
                         return
                     else:
@@ -7110,8 +7491,6 @@ class RAWImageViewer(QMainWindow):
                             self.display_numpy_image(cached_full)
                             self._is_half_size_displayed = False
                             self._full_resolution_loading = False
-                            # Update pixmap reference for zoom calculation
-                            self.current_pixmap = self.image_label.pixmap()
                             return # Zoom restoration handled by display_numpy_image
                         else:
                             # Start loading full resolution in background
@@ -7221,6 +7600,10 @@ class RAWImageViewer(QMainWindow):
     
     def _on_full_resolution_ready(self, rgb_image):
         """Handle full resolution image ready"""
+        if hasattr(self, 'loading_overlay'):
+            self.loading_overlay.hide_loading()
+            
+        import time
         import logging
         logger = logging.getLogger(__name__)
         
@@ -7432,6 +7815,9 @@ class RAWImageViewer(QMainWindow):
             logger.debug(f"Error in _on_preloaded_image_ready: {e}")
 
     def on_image_processed(self, rgb_image):
+        if hasattr(self, 'loading_overlay'):
+            self.loading_overlay.hide_loading()
+            
         import logging
         import traceback
         import time
@@ -7746,6 +8132,9 @@ class RAWImageViewer(QMainWindow):
 
     def on_processing_error(self, error_message):
         """Handle RAW processing errors"""
+        if hasattr(self, 'loading_overlay'):
+            self.loading_overlay.hide_loading()
+            
         import logging
         import traceback
         logger = logging.getLogger(__name__)
@@ -8486,10 +8875,15 @@ class RAWImageViewer(QMainWindow):
         old_size = self.size()
         new_size = event.size()
         
+        # Call base class implementation
         super().resizeEvent(event)
         
+        # Update loading overlay geometry to cover the window
+        if hasattr(self, 'loading_overlay') and self.loading_overlay:
+            self.loading_overlay.setGeometry(self.rect())
+        
         # Skip logging and scaling during active resize to prevent intermediate updates
-        if self._is_resizing:
+        if getattr(self, '_is_resizing', False):
             return
         
         # Log window size change
@@ -9360,6 +9754,33 @@ class RAWImageViewer(QMainWindow):
             error_msg = f"Could not move file to Discard folder:\n{str(e)}"
             self.show_error("Discard Error", error_msg)
 
+    def _scan_folder_generator(self, folder_path, extensions, discard_folder='Discard'):
+        """Recursively scan folder using os.scandir for better performance."""
+        try:
+            with os.scandir(folder_path) as it:
+                for entry in it:
+                    if entry.name.startswith('.'):
+                        continue
+                        
+                    if entry.is_dir():
+                        if entry.name == discard_folder:
+                            continue
+                        # Recursive yield
+                        yield from self._scan_folder_generator(entry.path, extensions, discard_folder)
+                    
+                    elif entry.is_file():
+                        ext = os.path.splitext(entry.name)[1].lower()
+                        if ext in extensions:
+                            try:
+                                # entry.stat() is fast/cached on Windows
+                                stat = entry.stat()
+                                if stat.st_size > 0:
+                                    yield entry.path, stat
+                            except OSError:
+                                pass
+        except (OSError, PermissionError):
+            pass
+
     def load_folder_images(self, folder_path, start_file=None):
         """Load images from a folder"""
         import logging
@@ -9369,146 +9790,212 @@ class RAWImageViewer(QMainWindow):
         logger.info(f"[FOLDER] ========== load_folder_images() STARTED at {load_start:.3f} ==========")
         print(f"[PERF] 📁 Loading folder: {os.path.basename(folder_path)}")
         
-        # Clear gallery and show loading message if in gallery mode
-        if hasattr(self, 'view_mode') and self.view_mode == 'gallery':
-            if self.gallery_justified:
-                # Clear the gallery immediately
-                self.gallery_justified.set_images([])
-                # Show loading message
-                self.gallery_justified.show_loading_message("Scanning folder...")
-        
-        # Validate folder path
-        if not folder_path:
-            self.show_error("Invalid Folder", "No folder path provided")
-            # Hide loading message on error
-            if hasattr(self, 'view_mode') and self.view_mode == 'gallery' and self.gallery_justified:
-                self.gallery_justified.hide_loading_message()
-            return
-        
-        if not os.path.exists(folder_path):
-            self.show_error("Folder Not Found", 
-                          f"The folder does not exist:\n{folder_path}")
-            # Hide loading message on error
-            if hasattr(self, 'view_mode') and self.view_mode == 'gallery' and self.gallery_justified:
-                self.gallery_justified.hide_loading_message()
-            return
-        
-        if not os.path.isdir(folder_path):
-            self.show_error("Invalid Path", 
-                          f"The path is not a folder:\n{folder_path}")
-            # Hide loading message on error
-            if hasattr(self, 'view_mode') and self.view_mode == 'gallery' and self.gallery_justified:
-                self.gallery_justified.hide_loading_message()
-            return
-        
-        # Scan for images in the folder and all subfolders (recursive)
-        scan_start = time.time()
-        extensions = self.get_supported_extensions()
-        # Get all image files with full paths
-        image_files = []
-        
         try:
-            # Use os.walk() to recursively scan all subfolders
-            for root, dirs, files in os.walk(folder_path):
-                # Skip "Discard" folder and its subfolders
-                if 'Discard' in dirs:
-                    dirs.remove('Discard')
+            # IMMEDIATE UI FEEDBACK: Clear current state and show loading
+            if hasattr(self, 'view_mode'):
+                if self.view_mode == 'gallery' and self.gallery_justified:
+                    # Clear the gallery immediately
+                    self.gallery_justified.set_images([])
+                    # Show loading message
+                    self.gallery_justified.show_loading_message("Scanning folder...")
+                elif self.view_mode == 'single' or (hasattr(self, 'scroll_area') and self.scroll_area.isVisible()):
+                    # Show overlay for single image view or if scroll area is visible
+                    if hasattr(self, 'loading_overlay'):
+                        self.loading_overlay.show_loading("Scanning folder...")
+                    # Visually clear current image to show we are switching
+                    if hasattr(self, 'image_label'):
+                        self.image_label.clear()
+                    # Ensure UI updates immediately
+                    from PyQt6.QtWidgets import QApplication
+                    QApplication.processEvents()
+            
+            # Validate folder path
+            if not folder_path:
+                self.show_error("Invalid Folder", "No folder path provided")
+                # Hide loading message on error
+                self._hide_all_loading_indicators()
+                return
+            
+            if not os.path.exists(folder_path):
+                self.show_error("Folder Not Found", 
+                              f"The folder does not exist:\n{folder_path}")
+                # Hide loading message on error
+                self._hide_all_loading_indicators()
+                return
+            
+            if not os.path.isdir(folder_path):
+                self.show_error("Invalid Path", 
+                              f"The path is not a folder:\n{folder_path}")
+                # Hide loading message on error
+                self._hide_all_loading_indicators()
+                return
+            
+            # Scan for images in the folder and all subfolders (recursive)
+            scan_start = time.time()
+            extensions = self.get_supported_extensions()
+            # Get all image files with full paths
+            image_files = []
+            file_stats = {} # Cache stats during scan to avoid redundant calls later
+            
+            early_load_triggered = False
+            
+            try:
+                # Use os.scandir generator for faster scanning
+                for full_path, stat_info in self._scan_folder_generator(folder_path, extensions):
+                    image_files.append(full_path)
+                    file_stats[full_path] = (stat_info.st_size, stat_info.st_mtime)
+                    
+                    # EARLY LOAD: If this is the start_file or the first file found,
+                    # trigger an early load for better perceived performance
+                    if not early_load_triggered:
+                        is_start_file = start_file and (os.path.basename(full_path) == start_file or full_path == start_file)
+                        if is_start_file or (not start_file and len(image_files) == 1):
+                            logger.info(f"[FOLDER] Early load triggered for: {os.path.basename(full_path)}")
+                            self.current_file_path = full_path
+                            # If not in gallery mode, load immediately
+                            if not (hasattr(self, 'view_mode') and self.view_mode == 'gallery'):
+                                # Temporarily set images so navigation works if needed
+                                self.image_files = [full_path]
+                                self.current_file_index = 0
+                                # Use QTimer to avoid blocking the scan
+                                from PyQt6.QtCore import QTimer
+                                QTimer.singleShot(0, lambda p=full_path: self.load_raw_image(p))
+                            early_load_triggered = True
+            except OSError as e:
+                error_msg = f"Cannot read folder contents:\n{str(e)}"
+                logger.error(f"Error reading folder {folder_path}: {e}")
+                self.show_error("Folder Access Error", error_msg)
+                # Hide loading message on error
+                self._hide_all_loading_indicators()
+                return
+            except Exception as e:
+                error_msg = f"Unexpected error while scanning folder:\n{str(e)}"
+                logger.error(f"Unexpected error scanning folder {folder_path}: {e}", exc_info=True)
+                self.show_error("Scan Error", error_msg)
+                # Hide loading message on error
+                self._hide_all_loading_indicators()
+                return
+            
+            scan_time = time.time() - scan_start
+            logger.info(f"[FOLDER] Scanned {len(image_files)} images in {scan_time:.3f}s")
+            print(f"[PERF] 📁 Scanned {len(image_files)} images in {scan_time*1000:.1f}ms")
+            
+            # Update loading message with scan results (no progress)
+            if hasattr(self, 'view_mode') and self.view_mode == 'gallery' and self.gallery_justified:
+                if len(image_files) > 0:
+                    self.gallery_justified.show_loading_message("Loading gallery...")
+                else:
+                    self._hide_all_loading_indicators()
+            
+            if not image_files:
+                # Display message in main viewing area instead of popup
+                self.show_no_images_message(extensions)
+                # Reset folder state
+                self.current_folder = None
+                self.image_files = []
+                self.current_file_index = -1
+                self.current_file_path = None
+                return
+        
+            # Sort files according to user preference
+            sort_start = time.time()
+            try:
+                # Process events periodically during sorting to keep UI responsive
+                from PyQt6.QtWidgets import QApplication
+                QApplication.processEvents()
                 
-                for filename in files:
-                    # Skip macOS resource fork files (._filename)
-                    if filename.startswith('._'):
-                        continue
-                    file_ext = os.path.splitext(filename)[1].lower()
-                    if file_ext in extensions:
-                        full_path = os.path.join(root, filename)
-                        if os.path.isfile(full_path):
-                            image_files.append(full_path)
-        except OSError as e:
-            error_msg = f"Cannot read folder contents:\n{str(e)}"
-            logger.error(f"Error reading folder {folder_path}: {e}")
-            self.show_error("Folder Access Error", error_msg)
-            return
-        except Exception as e:
-            error_msg = f"Unexpected error while scanning folder:\n{str(e)}"
-            logger.error(f"Unexpected error scanning folder {folder_path}: {e}", exc_info=True)
-            self.show_error("Scan Error", error_msg)
-            return
-        
-        scan_time = time.time() - scan_start
-        logger.info(f"[FOLDER] Scanned {len(image_files)} images in {scan_time:.3f}s")
-        print(f"[PERF] 📁 Scanned {len(image_files)} images in {scan_time*1000:.1f}ms")
-        
-        # Update loading message with scan results (no progress)
-        if hasattr(self, 'view_mode') and self.view_mode == 'gallery' and self.gallery_justified:
-            if len(image_files) > 0:
-                self.gallery_justified.show_loading_message("Loading gallery...")
-            else:
-                self.gallery_justified.hide_loading_message()
-        
-        if not image_files:
-            # Display message in main viewing area instead of popup
-            self.show_no_images_message(extensions)
-            # Reset folder state
-            self.current_folder = None
-            self.image_files = []
-            self.current_file_index = -1
-            self.current_file_path = None
-            return
-        
-        # Sort files according to user preference
-        sort_start = time.time()
-        self.current_folder = folder_path
-        self.image_files = self.sort_image_files(image_files)
-        sort_time = time.time() - sort_start
-        logger.info(f"[FOLDER] Sorted {len(image_files)} images in {sort_time:.3f}s")
-        print(f"[PERF] 📁 Sorted {len(image_files)} images in {sort_time*1000:.1f}ms")
-        
-        # Update loading message after sorting (no progress)
-        if hasattr(self, 'view_mode') and self.view_mode == 'gallery' and self.gallery_justified:
-            self.gallery_justified.show_loading_message("Preparing gallery...")
-        
-        # Determine which image to start with
-        if start_file:
-            # Find the full path of start_file
-            start_file_path = None
-            for img_file in self.image_files:
-                if os.path.basename(img_file) == start_file or img_file == start_file:
-                    start_file_path = img_file
-                    break
-            if start_file_path and start_file_path in self.image_files:
-                idx = self.image_files.index(start_file_path)
-            else:
+                self.current_folder = folder_path
+                # Pass file_stats to avoid redundant os.stat calls during sorting
+                # Capture bulk_metadata for reuse in gallery layout
+                self.image_files, bulk_metadata = self.sort_image_files(image_files, file_stats=file_stats)
+                sort_time = time.time() - sort_start
+                logger.info(f"[FOLDER] Sorted {len(image_files)} images in {sort_time:.3f}s")
+                print(f"[PERF] 🔄 Sorted {len(image_files)} images in {sort_time*1000:.1f}ms")
+            except Exception as e:
+                error_msg = f"Error sorting images:\n{str(e)}"
+                logger.error(f"Error sorting images in folder {folder_path}: {e}", exc_info=True)
+                self.show_error("Sort Error", error_msg)
+                # Hide loading message on error
+                self._hide_all_loading_indicators()
+                return
+            
+            # Update loading message after sorting (no progress)
+            if hasattr(self, 'view_mode') and self.view_mode == 'gallery' and self.gallery_justified:
+                self.gallery_justified.show_loading_message("Preparing gallery...")
+            
+            # Determine which image to start with
+            try:
+                if start_file:
+                    # Find the full path of start_file
+                    start_file_path = None
+                    for img_file in self.image_files:
+                        if os.path.basename(img_file) == start_file or img_file == start_file:
+                            start_file_path = img_file
+                            break
+                    if start_file_path and start_file_path in self.image_files:
+                        idx = self.image_files.index(start_file_path)
+                    else:
+                        idx = 0
+                else:
+                    idx = 0
+                    
+                self.current_file_index = idx
+                self.current_file_path = self.image_files[idx]
+            except Exception as e:
+                logger.error(f"Error determining start file: {e}", exc_info=True)
                 idx = 0
-        else:
-            idx = 0
+                self.current_file_index = idx
+                if self.image_files:
+                    self.current_file_path = self.image_files[idx]
+                else:
+                    self.current_file_path = None
             
-        self.current_file_index = idx
-        self.current_file_path = self.image_files[idx]
-        
-        total_time = time.time() - load_start
-        logger.info(f"[FOLDER] ========== load_folder_images() COMPLETED in {total_time:.3f}s ==========")
-        print(f"[PERF] 📁 Folder loaded in {total_time*1000:.1f}ms (scan: {scan_time*1000:.1f}ms, sort: {sort_time*1000:.1f}ms)")
-        
-        # BACKGROUND LOADING: Ensure gallery is ready and starts populating in the background
-        if not hasattr(self, 'gallery_widget') or not self.gallery_widget:
-            self._create_gallery_widget()
+            total_time = time.time() - load_start
+            logger.info(f"[FOLDER] ========== load_folder_images() COMPLETED in {total_time:.3f}s ==========")
+            print(f"[PERF] 📁 Folder loaded in {total_time*1000:.1f}ms (scan: {scan_time*1000:.1f}ms, sort: {sort_time*1000:.1f}ms)")
             
-        # Ensure correct view is shown and others are hidden
-        # This handles UI state consistency during startup/session restoration
-        if hasattr(self, 'view_mode') and self.view_mode == 'gallery':
-            self._show_gallery_view()
-        else:
-            self._show_single_view()
-            
-        if self.gallery_justified:
-            # Sync image list and start background loading cycle
-            self.gallery_justified.images = self.image_files.copy()
-            # Trigger build and background process
-            self.gallery_justified.build_gallery()
-            from PyQt6.QtCore import QTimer
-            QTimer.singleShot(1000, self.gallery_justified._continue_loading_remaining_images)
-            
-        self.save_session_state()
+            # BACKGROUND LOADING: Ensure gallery is ready and starts populating in the background
+            try:
+                if not hasattr(self, 'gallery_widget') or not self.gallery_widget:
+                    self._create_gallery_widget()
+                    
+                # Ensure correct view is shown and others are hidden
+                # This handles UI state consistency during startup/session restoration
+                if hasattr(self, 'view_mode') and self.view_mode == 'gallery':
+                    self._show_gallery_view()
+                else:
+                    self._show_single_view()
+                    
+                if self.gallery_justified:
+                    # Use set_images() to properly handle folder changes:
+                    # - Increments generation counter to invalidate old tasks
+                    # - Clears load queues
+                    # - Resets background loading state
+                    # - Properly rebuilds gallery
+                    # Process events before setting images to keep UI responsive
+                    from PyQt6.QtWidgets import QApplication
+                    QApplication.processEvents()
+                    self.gallery_justified.set_images(self.image_files.copy(), bulk_metadata)
+                    
+                self.save_session_state()
+            except Exception as e:
+                error_msg = f"Error updating gallery view:\n{str(e)}"
+                logger.error(f"Error updating gallery view for folder {folder_path}: {e}", exc_info=True)
+                self.show_error("Gallery Update Error", error_msg)
+                # Hide loading message on error
+                if hasattr(self, 'view_mode') and self.view_mode == 'gallery' and self.gallery_justified:
+                    self.gallery_justified.hide_loading_message()
+                return
+                
+        except Exception as e:
+            # Catch any other unexpected errors
+            error_msg = f"Unexpected error loading folder:\n{str(e)}"
+            logger.error(f"Unexpected error in load_folder_images for {folder_path}: {e}", exc_info=True)
+            self.show_error("Folder Load Error", error_msg)
+            # Hide loading message on error
+            if hasattr(self, 'view_mode') and self.view_mode == 'gallery' and self.gallery_justified:
+                self.gallery_justified.hide_loading_message()
+            return
 
     def save_session_state(self):
         settings = self.get_settings()
