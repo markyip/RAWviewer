@@ -158,7 +158,10 @@ class UnifiedImageProcessor:
         try:
             # 使用共用載入函數
             pixmap = load_pixmap_safe(file_path)
-            return pixmap if not pixmap.isNull() else None
+            if not pixmap.isNull():
+                self.cache.put_pixmap(file_path, pixmap)
+                return pixmap
+            return None
                 
         except Exception as e:
             import logging

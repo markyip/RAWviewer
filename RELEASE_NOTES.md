@@ -1,5 +1,39 @@
 # RAWviewer Release Notes
 
+## 🚀 Version 1.2 - Performance Revolution
+**Release Date: December 27, 2025**
+
+### 🎯 What's New
+**Massive performance overhaul, instant folder loading, and UI modernization.**
+
+This release focuses on eliminating bottlenecks. Large folders now load instantly, gallery scrolling is buttery smooth, and navigation is faster than ever thanks to intelligent prefetching. We've also updated the UI with modern Material Design elements.
+
+### ✨ Key Features
+
+#### ⚡ Ultra-Fast Performance
+✅ **Instant Folder Loading** – Replaced `os.walk` with `os.scandir` and optimized metadata gathering. Scanning 7,000+ images is now nearly instant (down from minutes).
+✅ **Fixed "Long Loading Time"** – identifying and fixing a 60s freeze caused by missing cache metadata.
+✅ **Smart Prefetching** – intelligently pre-loads the next 3 and previous 2 images in background threads, making single-image navigation instant.
+✅ **Gallery Scroll Improvements** – Implemented "scroll speed detection". Fast scrolling now defers heavy image loading, keeping the UI responsive even in massive galleries.
+
+#### 🎨 Modernized UI/UX
+✅ **Material Design 3 Icons** – Updated the "Open Folder" button with a modern vector icon.
+✅ **Window Size Grip** – Added a minimalistic resize grip to the bottom-right corner for easier window management.
+✅ **Refined Loading Indicators** – Loading messages are now non-intrusive "toasts" at the bottom of the screen, instead of blocking overlays.
+
+### 🐛 Bug Fixes
+- **Fixed "Ghost Image" Bug**: Resolved an issue where an image from the previous folder would persist in the bottom-right corner after switching folders.
+- **Fixed Persistent Loading Overlay**: The "Preparing gallery" message no longer gets stuck when switching folders.
+- **Fixed Navigation Bugs**: Resolved issues where key navigation could get stuck or behave inconsistently.
+- **Fixed Zoom/View Overlaps**: Corrected issues where single view and gallery view could overlap.
+
+### 📦 Technical Details
+- **Unified Caching**: All image processing now routes through a central thread-safe cache.
+- **Virtualized Gallery**: The gallery widget now strictly recycles widgets, significantly transforming memory usage.
+- **Robust Cleanup**: Implemented aggressive widget cleanup to prevent UI artifacts.
+
+---
+
 ## 🚀 Version 1.1 - Gallery View Release
 
 ### 🎯 What's New
@@ -119,9 +153,3 @@ Check out the "Upcoming Features" section in the README for a preview of:
 ---
 
 **Thank you for using RAWviewer!** 📸
-
-
-
-
-
-
