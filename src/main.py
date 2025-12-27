@@ -4544,9 +4544,11 @@ class RAWImageViewer(QMainWindow):
         folder_icon_path = resource_path(os.path.join('icons', 'folder_open_md3.svg'))
         self.open_button = QPushButton()
         if os.path.exists(folder_icon_path):
+             print(f"[DEBUG] Using SVG icon: {folder_icon_path}", flush=True)
              self.open_button.setIcon(QIcon(folder_icon_path))
              self.open_button.setIconSize(QSize(20, 20))
         else:
+             print(f"[DEBUG] SVG icon not found at: {folder_icon_path}, using Unicode fallback", flush=True)
              self.open_button.setText("🗁") # Fallback
         
         self.open_button.setFlat(True)
