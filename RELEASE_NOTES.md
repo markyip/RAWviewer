@@ -1,5 +1,54 @@
 # RAWviewer Release Notes
 
+## 🚀 Version 1.1 - Gallery View Release
+
+### 🎯 What's New
+**Major Feature Release: Gallery View with Optimized Performance**
+
+### ✨ Key Features
+
+#### 🖼️ Gallery View (NEW!)
+✅ **Justified Gallery Layout** – Browse multiple images in an adaptive, justified grid layout that efficiently utilizes screen space
+✅ **Virtualized Rendering** – Smooth performance even with thousands of images by rendering only visible items
+✅ **Smart Image Loading** – Priority-based loading system that loads visible images first, then preloads adjacent images in the background
+✅ **Seamless View Switching** – Toggle between single image view and gallery view with a single keypress (G key)
+✅ **Scroll Wheel Navigation** – Navigate between images in single view using mouse scroll wheel
+✅ **Session Persistence** – Remembers your view mode preference and automatically opens in the appropriate view
+
+#### 🚀 Performance Improvements
+✅ **Optimized Loading Pipeline** – Reduced initial gallery loading delay with priority queue system
+✅ **Multi-threaded Thumbnail Loading** – Up to 16 parallel threads for faster thumbnail generation
+✅ **Intelligent Caching** – Bucket-based thumbnail caching system for efficient memory usage
+✅ **Background Preloading** – Continuously loads images in the background while you browse
+
+#### 🎨 User Experience Enhancements
+✅ **Title Bar Updates** – Gallery mode shows folder name in title bar instead of current file
+✅ **Keyboard Shortcuts** – Press 'G' to toggle between gallery and single image view, 'Esc' to return to gallery from single view
+✅ **Loading Indicators** – Visual feedback during image loading with progress tracking
+✅ **Smooth Transitions** – Optimized view switching with minimal delay
+
+### 🐛 Bug Fixes
+- Fixed persistent loading message when returning to gallery view
+- Fixed gallery loading stopping after ~228 images - now continues loading all images
+- Fixed images not displaying in gallery view after loading
+- Improved cache key matching for better thumbnail display
+- Fixed widget visibility issues in gallery view
+
+### 📦 Technical Details
+- Implemented `JustifiedGallery` widget with virtualization support
+- Added priority queue system for visible image loading
+- Enhanced `ImageLoadTask` with detailed performance logging
+- Improved cache management with bucket-based height matching
+- Optimized thread pool configuration (16 threads, batch size 8)
+
+### 🎯 What's Coming Next
+Check out the "Upcoming Features" section in the README for a preview of:
+- Histogram Display for exposure analysis
+- Batch Operations for multiple image processing
+- And more exciting features in development!
+
+---
+
 ## 🚀 Version 0.5.1 - Stability & Polish Update
 
 ### 🎯 What's New
@@ -70,6 +119,7 @@ Check out the "Upcoming Features" section in the README for a preview of:
 ---
 
 **Thank you for using RAWviewer!** 📸
+
 
 
 
