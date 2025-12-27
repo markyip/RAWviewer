@@ -7,6 +7,8 @@ Handles dependency installation and executable creation.
 import os
 import subprocess
 import platform
+import shutil
+import time
 from pathlib import Path
 
 
@@ -67,11 +69,60 @@ def main():
         return
 
     # Clean previous builds
-    for directory in ['build', 'dist']:
-        if os.path.exists(directory):
-            print(f"Cleaning previous {directory} directory...")
-            import shutil
-            shutil.rmtree(directory)
+    print("Cleaning previous builds...")
+    
+    # Try to kill any running RAWviewer.exe processes on Windows
+    if platform.system() == 'Windows':
+        try:
+            result = subprocess.run(
+                ['taskkill', '/F', '/IM', 'RAWviewer.exe', '/T'],
+                capture_output=True,
+                text=True
+            )
+            if result.returncode == 0:
+                print("Closed running RAWviewer.exe instances")
+                time.sleep(1)  # Wait a moment for file handles to release
+        except Exception as e:
+            print(f"[WARNING] Could not close running instances: {e}")
+    
+    # Clean build directory
+    if os.path.exists('build'):
+        try:
+            print("Cleaning build directory...")
+            shutil.rmtree('build')
+        except PermissionError as e:
+            print(f"[WARNING] Could not delete build directory: {e}")
+            print("  Continuing anyway...")
+        except Exception as e:
+            print(f"[WARNING] Error cleaning build directory: {e}")
+    
+    # Clean dist directory (try to delete specific files first)
+    if os.path.exists('dist'):
+        try:
+            print("Cleaning dist directory...")
+            # Try to delete the exe file specifically first
+            exe_name = 'RAWviewer.exe' if platform.system() == 'Windows' else 'RAWviewer'
+            exe_path = os.path.join('dist', exe_name)
+            if os.path.exists(exe_path):
+                try:
+                    os.remove(exe_path)
+                    print(f"  Removed {exe_name}")
+                except PermissionError:
+                    print(f"[ERROR] Cannot delete {exe_name} - it may be running.")
+                    print("  Please close RAWviewer and try again.")
+                    return
+                except Exception as e:
+                    print(f"[WARNING] Could not delete {exe_name}: {e}")
+            
+            # Try to remove the entire dist directory
+            try:
+                shutil.rmtree('dist')
+            except PermissionError:
+                print("[WARNING] Some files in dist directory are locked, but continuing...")
+            except Exception as e:
+                print(f"[WARNING] Could not fully clean dist directory: {e}")
+        except Exception as e:
+            print(f"[WARNING] Error cleaning dist directory: {e}")
     # Platform-agnostic icon
     if platform.system() == 'Windows':
         icon_file = os.path.join('icons', 'appicon.ico')
