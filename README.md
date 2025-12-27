@@ -1,10 +1,10 @@
-# RAWviewer v1.0
+# RAWviewer v1.1
 
 <p align="center">
   <img src="icons/appicon.ico" alt="RAWviewer Icon" width="256">
 </p>
 
-![Version](https://img.shields.io/badge/version-0.5-blue)
+![Version](https://img.shields.io/badge/version-1.1-blue)
 ![Downloads](https://img.shields.io/github/downloads/markyip/RAWviewer/total) 
 ![License](https://img.shields.io/badge/license-MIT-green)
 [![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-Donate-orange?logo=buy-me-a-coffee)](https://www.buymeacoffee.com/markyip)
@@ -37,6 +37,7 @@ This is a **pre-filtering tool**, letting you go through hundreds of RAW files e
 ## ✨ Features
 
 - **Cross-platform support**: Windows and macOS
+- **Gallery View**: Browse multiple images in a justified grid layout with efficient space utilization and virtualized rendering for large folders
 - **Wide RAW format support**: Canon (CR2, CR3), Nikon (NEF), Sony (ARW), Adobe DNG, and many more
 - **Automatic orientation correction**: Reads EXIF orientation data and displays images correctly (portrait/landscape)
 - **Intuitive navigation**: Keyboard shortcuts and mouse controls
@@ -160,7 +161,6 @@ All dependencies are listed in `requirements.txt`:
 
 We're continuously working to improve RAWviewer. Here are some features planned for future releases:
 
-- **Gallery View**: Browse multiple images in a grid layout with adaptive justified gallery for efficient space utilization
 - **Histogram Display**: View RGB and luminance histograms to analyze exposure and color distribution
 - **Batch Operations**: Select and process multiple images at once
 

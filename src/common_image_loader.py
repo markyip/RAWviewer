@@ -53,8 +53,11 @@ def load_pixmap_safe(file_path: str) -> QPixmap:
     # 對於 TIFF 文件，使用 PIL 避免 Qt 警告
     if is_tiff_file(file_path):
         try:
-            from PIL import Image
+            from PIL import Image, ImageOps
             with Image.open(file_path) as pil_image:
+                # Apply EXIF orientation correction
+                pil_image = ImageOps.exif_transpose(pil_image)
+                
                 if pil_image.mode not in ('RGB', 'L'):
                     pil_image = pil_image.convert('RGB')
                 
@@ -84,7 +87,21 @@ def load_pixmap_safe(file_path: str) -> QPixmap:
             # 對於 TIFF 文件，永遠不要使用 QPixmap(file_path)，因為會觸發警告
             return QPixmap()
     
-    # 對於其他格式，直接使用 QPixmap
+    # 對於其他格式（JPEG, PNG, etc.），使用 QImageReader 並啟用自動方向轉換
+    try:
+        from PyQt6.QtGui import QImageReader
+        reader = QImageReader(file_path)
+        reader.setAutoTransform(True)  # 自動應用 EXIF 方向
+        pixmap = QPixmap.fromImageReader(reader)
+        if not pixmap.isNull():
+            cache.put_pixmap(file_path, pixmap)
+            return pixmap
+    except Exception as e:
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.debug(f"QImageReader failed for {os.path.basename(file_path)}: {e}")
+    
+    # 回退到直接使用 QPixmap（不會應用方向，但比沒有好）
     pixmap = QPixmap(file_path)
     if not pixmap.isNull():
         cache.put_pixmap(file_path, pixmap)
@@ -119,6 +136,8 @@ def get_image_aspect_ratio(file_path: str) -> float:
         try:
             from PyQt6.QtGui import QImageReader
             reader = QImageReader(file_path)
+            # Enable automatic EXIF orientation transformation
+            reader.setAutoTransform(True)
             size = reader.size()
             if size.isValid() and size.height() > 0:
                 return size.width() / size.height()

@@ -67,17 +67,28 @@ class UnifiedImageProcessor:
                           use_full_resolution: bool = False) -> Optional[Union[np.ndarray, QPixmap]]:
         """處理完整圖像（統一接口）"""
         # 檢查快取
+        # CRITICAL: For RAW files, only check full_image cache, not pixmap cache
+        # This ensures RAW files always go through proper processing with orientation correction
+        is_raw = self._is_raw_file(file_path)
+        
         if use_full_resolution:
             cached_image = self.cache.get_full_image(file_path)
             if cached_image is not None:
+                print(f"[ORIENTATION] Using cached full_image for {os.path.basename(file_path)} (RAW file)")
                 return cached_image
         
-        cached_pixmap = self.cache.get_pixmap(file_path)
-        if cached_pixmap is not None:
-            return cached_pixmap
+        # Only check pixmap cache for non-RAW files
+        if not is_raw:
+            cached_pixmap = self.cache.get_pixmap(file_path)
+            if cached_pixmap is not None:
+                print(f"[ORIENTATION] Using cached pixmap for {os.path.basename(file_path)} (non-RAW file)")
+                return cached_pixmap
+        else:
+            # For RAW files, don't use cached pixmap - always process fresh
+            print(f"[ORIENTATION] RAW file {os.path.basename(file_path)} - skipping pixmap cache, will process as RAW")
         
         # 處理圖像
-        if self._is_raw_file(file_path):
+        if is_raw:
             return self._process_raw_image(file_path, use_full_resolution)
         else:
             return self._process_regular_image(file_path)
@@ -119,6 +130,8 @@ class UnifiedImageProcessor:
                 file_basename = os.path.basename(file_path)
                 original_shape = rgb_image.shape if rgb_image is not None else None
                 logger.info(f"[UNIFIED_PROC] Processing file: {file_basename}, Original shape: {original_shape}, Orientation: {orientation}")
+                # Console log: RAW image original orientation
+                print(f"[ORIENTATION] RAW Image: {file_basename}, Original EXIF Orientation: {orientation}")
                 if orientation != 1:
                     logger.info(f"[UNIFIED_PROC] Applying orientation correction: {orientation}")
                     rgb_image = self._apply_orientation_correction(rgb_image, orientation, exif_data)
@@ -126,6 +139,7 @@ class UnifiedImageProcessor:
                     logger.info(f"[UNIFIED_PROC] File: {file_basename}, Orientation correction applied, Final shape: {final_shape}")
                 else:
                     logger.debug(f"[UNIFIED_PROC] File: {file_basename}, Orientation is 1 (normal), no correction needed")
+                    print(f"[ORIENTATION] RAW Image: {file_basename}, No correction needed (orientation = 1)")
                 
                 # 快取完整圖像
                 if rgb_image is not None:
@@ -186,32 +200,47 @@ class UnifiedImageProcessor:
         7 = Mirrored horizontal + Rotated 90° CW
         8 = Rotated 270° CW (i.e., 90° CCW)
         """
+        original_shape = image_array.shape
+        print(f"[ORIENTATION] Before correction: shape = {original_shape}")
+        
         if orientation == 1:
-            return image_array
+            print(f"[ORIENTATION] Numpy operation: No operation (orientation = 1)")
+            result = image_array
         elif orientation == 2:
             # Mirror left-right
-            return np.fliplr(image_array)
+            print(f"[ORIENTATION] Numpy operation: np.fliplr(image_array) - Mirror left-right")
+            result = np.fliplr(image_array)
         elif orientation == 3:
             # Rotate 180°
-            return np.rot90(image_array, 2)
+            print(f"[ORIENTATION] Numpy operation: np.rot90(image_array, 2) - Rotate 180°")
+            result = np.rot90(image_array, 2)
         elif orientation == 4:
             # Mirror top-bottom
-            return np.flipud(image_array)
+            print(f"[ORIENTATION] Numpy operation: np.flipud(image_array) - Mirror top-bottom")
+            result = np.flipud(image_array)
         elif orientation == 5:
             # Mirror LR + rotate 270° CW (k=1 CCW)
-            return np.rot90(np.fliplr(image_array), 1)
+            print(f"[ORIENTATION] Numpy operation: np.rot90(np.fliplr(image_array), 1) - Mirror LR + rotate 90° CCW")
+            result = np.rot90(np.fliplr(image_array), 1)
         elif orientation == 6:
             # Rotate 90° CW (k=3 CCW)
-            return np.rot90(image_array, 3)
+            print(f"[ORIENTATION] Numpy operation: np.rot90(image_array, 3) - Rotate 270° CCW (90° CW)")
+            result = np.rot90(image_array, 3)
         elif orientation == 7:
             # Mirror LR + rotate 90° CW
-            return np.rot90(np.fliplr(image_array), 3)
+            print(f"[ORIENTATION] Numpy operation: np.rot90(np.fliplr(image_array), 3) - Mirror LR + rotate 270° CCW (90° CW)")
+            result = np.rot90(np.fliplr(image_array), 3)
         elif orientation == 8:
             # Rotate 270° CW (90° CCW) - need to rotate 90° CW to correct
-            # np.rot90 with k=3 rotates 270° CCW = 90° CW
-            return np.rot90(image_array, 1)
+            # np.rot90 with k=1 rotates 90° CCW
+            print(f"[ORIENTATION] Numpy operation: np.rot90(image_array, 1) - Rotate 90° CCW")
+            result = np.rot90(image_array, 1)
+        else:
+            # Unknown orientation
+            result = image_array
         
-        # Unknown orientation
-        return image_array
+        final_shape = result.shape
+        print(f"[ORIENTATION] After correction: shape = {final_shape}")
+        return result
 
 
