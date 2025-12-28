@@ -82,6 +82,7 @@ PERFORMANCE_ANALYSIS.md
 *_INSTRUCTIONS*.md
 *_SUMMARY*.md
 *_FIX*.md
+METADATA_DISPLAY_STRATEGY.md
 
 # Ignore icon.iconset directory (icon source assets)
 icon.iconset/
