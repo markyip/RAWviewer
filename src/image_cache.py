@@ -365,6 +365,51 @@ class PersistentEXIFCache:
                 pass
         return results
 
+        return results
+
+
+class PersistentPreviewCache(PersistentThumbnailCache):
+    """Persistent disk cache for larger JPEG previews (e.g., 2048px)."""
+    
+    def __init__(self, cache_dir: str = None):
+        if cache_dir is None:
+            cache_dir = os.path.expanduser("~/.rawviewer_cache")
+        # Use 'previews' subdirectory
+        self.base_cache_dir = cache_dir 
+        super().__init__(cache_dir) # Init with base dir, will setup 'thumbnails'
+        
+        # Override cache_dir and db_path for previews
+        self.cache_dir = os.path.join(self.base_cache_dir, "previews")
+        os.makedirs(self.cache_dir, exist_ok=True)
+        self.db_path = os.path.join(self.base_cache_dir, "preview_cache.db")
+        self._init_db() # Re-init DB with new path
+        
+    def _init_db(self):
+        """Initialize preview cache database."""
+        with self.lock:
+            try:
+                # Reset thread-local connection for new DB path
+                if hasattr(self._local, 'conn'):
+                    del self._local.conn
+                    
+                conn = self._get_connection()
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS thumbnail_cache (
+                        file_path TEXT PRIMARY KEY,
+                        file_size INTEGER,
+                        file_mtime REAL,
+                        cache_file TEXT,
+                        cached_time REAL
+                    )
+                """)
+                # Create index for faster lookups
+                conn.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_file_path ON thumbnail_cache(file_path)
+                """)
+                conn.commit()
+            except Exception:
+                pass
+
 
 class PersistentThumbnailCache:
     """Persistent disk cache for JPEG thumbnails extracted from RAW files."""
@@ -642,15 +687,19 @@ class ImageCache(QObject):
         cache_sizes = self.memory_monitor.get_recommended_cache_sizes()
 
         # Initialize caches
+        # Initialize caches
         self.thumbnail_cache = LRUCache(max_size=cache_sizes['thumbnails'])
+        self.preview_cache = LRUCache(max_size=10) # Keep a few high-res previews in memory
         self.full_image_cache = LRUCache(max_size=cache_sizes['full_images'])
         self.pixmap_cache = LRUCache(max_size=cache_sizes['full_images'])
         self.exif_cache = PersistentEXIFCache(cache_dir)
         self.disk_thumbnail_cache = PersistentThumbnailCache(cache_dir)
+        self.disk_preview_cache = PersistentPreviewCache(cache_dir)
 
         # Cache statistics
         self.stats = {
             'thumbnail_requests': 0,
+            'preview_requests': 0,
             'full_image_requests': 0,
             'pixmap_requests': 0,
             'exif_requests': 0
@@ -743,6 +792,44 @@ class ImageCache(QObject):
             # If JPEG data is provided, also cache to disk
             if jpeg_data is not None:
                 self.disk_thumbnail_cache.put(file_path, jpeg_data)
+
+    def get_preview(self, file_path: str) -> Optional[np.ndarray]:
+        """Get cached preview (screen size) or return None."""
+        self.stats['preview_requests'] += 1
+        self._check_memory_pressure()
+
+        # Check in-memory cache
+        preview = self.preview_cache.get(file_path)
+        if preview is not None:
+            self.cache_hit.emit(file_path, 'preview')
+            return preview
+        
+        # Check disk cache
+        jpeg_data = self.disk_preview_cache.get(file_path)
+        if jpeg_data is not None:
+            try:
+                from PIL import Image
+                import io
+                pil_image = Image.open(io.BytesIO(jpeg_data))
+                if pil_image.mode != 'RGB':
+                    pil_image = pil_image.convert('RGB')
+                preview = np.array(pil_image)
+                # Cache in RAM
+                self.preview_cache.put(file_path, preview.copy())
+                self.cache_hit.emit(file_path, 'preview')
+                return preview
+            except Exception:
+                self.disk_preview_cache.remove(file_path)
+        
+        self.cache_miss.emit(file_path, 'preview')
+        return None
+
+    def put_preview(self, file_path: str, preview: np.ndarray, jpeg_data: bytes = None) -> None:
+        """Cache a preview image."""
+        if preview is not None:
+            self.preview_cache.put(file_path, preview.copy())
+            if jpeg_data is not None:
+                self.disk_preview_cache.put(file_path, jpeg_data)
 
     def get_full_image(self, file_path: str) -> Optional[np.ndarray]:
         """Get cached full image or return None if not cached."""

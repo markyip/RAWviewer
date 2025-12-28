@@ -40,11 +40,11 @@ class UnifiedImageProcessor:
         if cached is not None:
             return cached
         
-        # 提取縮圖
+        # 提取縮圖 (Max 512px for Gallery)
         if self._is_raw_file(file_path):
-            thumbnail = self.thumbnail_extractor.extract_thumbnail_from_raw(file_path)
+            thumbnail = self.thumbnail_extractor.extract_thumbnail_from_raw(file_path, max_size=512)
         else:
-            thumbnail = self.thumbnail_extractor.extract_thumbnail_from_image(file_path)
+            thumbnail = self.thumbnail_extractor.extract_thumbnail_from_image(file_path, max_size=512)
         
         # 應用方向校正到縮圖
         if thumbnail is not None:
@@ -105,9 +105,37 @@ class UnifiedImageProcessor:
             use_fast_processing = file_size_mb > 20 and not use_full_resolution
             
             # 處理 RAW 文件
+            # Check if we should use Preview (embedded JPEG) instead of processing RAW
+            if not use_full_resolution:
+               # OPTIMIZATION: Try to get/create a high-quality preview (e.g. 1920px) 
+               # instead of processing the RAW data (even at half size, raw processing is slow/heavy)
+               
+               # Check Preview Cache
+               cached_preview = self.cache.get_preview(file_path)
+               if cached_preview is not None:
+                   print(f"[PREVIEW] Using cached preview for {os.path.basename(file_path)}")
+                   return cached_preview
+               
+               # Extract Preview
+               print(f"[PREVIEW] Extracting preview from RAW for {os.path.basename(file_path)}")
+               preview = self.thumbnail_extractor.extract_preview_from_raw(file_path, max_size=1920)
+               
+               if preview is not None:
+                   # Apply Orientation to Preview
+                   orientation = exif_data.get('orientation', 1) if exif_data else 1
+                   if orientation != 1:
+                       preview = self._apply_orientation_correction(preview, orientation, exif_data)
+                   
+                   # Cache Preview
+                   self.cache.put_preview(file_path, preview)
+                   return preview
+               
+               # Fallback to RAW processing if preview extraction fails
+               print(f"[PREVIEW] Preview extraction failed, falling back to RAW processing")
+
             import rawpy
             with rawpy.imread(file_path) as raw:
-                # 獲取處理參數
+                # 獲取處理器參數
                 params = self.raw_processor.get_optimized_processing_params(
                     file_path, exif_data
                 )
@@ -129,19 +157,15 @@ class UnifiedImageProcessor:
                 logger = logging.getLogger(__name__)
                 file_basename = os.path.basename(file_path)
                 original_shape = rgb_image.shape if rgb_image is not None else None
-                logger.info(f"[UNIFIED_PROC] Processing file: {file_basename}, Original shape: {original_shape}, Orientation: {orientation}")
-                # Console log: RAW image original orientation
-                print(f"[ORIENTATION] RAW Image: {file_basename}, Original EXIF Orientation: {orientation}")
+                # logger.info(f"[UNIFIED_PROC] Processing file: {file_basename}, Original shape: {original_shape}, Orientation: {orientation}")
+                
                 if orientation != 1:
-                    logger.info(f"[UNIFIED_PROC] Applying orientation correction: {orientation}")
+                    # logger.info(f"[UNIFIED_PROC] Applying orientation correction: {orientation}")
                     rgb_image = self._apply_orientation_correction(rgb_image, orientation, exif_data)
                     final_shape = rgb_image.shape if rgb_image is not None else None
-                    logger.info(f"[UNIFIED_PROC] File: {file_basename}, Orientation correction applied, Final shape: {final_shape}")
-                else:
-                    logger.debug(f"[UNIFIED_PROC] File: {file_basename}, Orientation is 1 (normal), no correction needed")
-                    print(f"[ORIENTATION] RAW Image: {file_basename}, No correction needed (orientation = 1)")
+                    # logger.info(f"[UNIFIED_PROC] File: {file_basename}, Orientation correction applied, Final shape: {final_shape}")
                 
-                # 快取完整圖像
+                # 快取完整圖像 (Only cache full resolution RAWs in memory, never to disk)
                 if rgb_image is not None:
                     self.cache.put_full_image(file_path, rgb_image)
                 

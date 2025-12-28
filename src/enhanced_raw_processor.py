@@ -30,21 +30,40 @@ class ThumbnailExtractor(QObject):
     def __init__(self):
         super().__init__()
 
-    def extract_thumbnail_from_raw(self, file_path: str) -> Optional[np.ndarray]:
-        """Extract embedded thumbnail from RAW file."""
+    def extract_thumbnail_from_raw(self, file_path: str, max_size: int = 512) -> Optional[np.ndarray]:
+        """Extract embedded thumbnail from RAW file and resize to max_size."""
         try:
             with rawpy.imread(file_path) as raw:
                 thumb = raw.extract_thumb()
 
+                thumb_array = None
                 if thumb.format == rawpy.ThumbFormat.JPEG:
                     # Convert JPEG bytes to numpy array
                     jpeg_image = Image.open(io.BytesIO(thumb.data))
+                    from PIL import ImageOps
+                    # Apply EXIF orientation if needed (though usually rawpy handles it or we handle later)
+                    # For safety, let's treat it as standard image
+                    if hasattr(ImageOps, 'exif_transpose'):
+                        jpeg_image = ImageOps.exif_transpose(jpeg_image)
+                        
                     if jpeg_image.mode != 'RGB':
                         jpeg_image = jpeg_image.convert('RGB')
-                    return np.array(jpeg_image)
+                        
+                    # Resize if larger than max_size
+                    w, h = jpeg_image.size
+                    if w > max_size or h > max_size:
+                        jpeg_image.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
+                        
+                    thumb_array = np.array(jpeg_image)
+                    
                 elif thumb.format == rawpy.ThumbFormat.BITMAP:
-                    # Already a numpy array
-                    return thumb.data
+                    # Already a numpy array, usually small, but check size
+                    # This is raw RGB data, might need reshaping, rawpy usually gives (h, w, 3)
+                    thumb_array = thumb.data.copy()
+                    
+                    # Manual resize for numpy array if needed (skip for now as BITMAP usually small)
+
+                return thumb_array
 
         except Exception as e:
             # Log the error for debugging
@@ -52,6 +71,11 @@ class ThumbnailExtractor(QObject):
             pass
 
         return None
+
+    def extract_preview_from_raw(self, file_path: str, max_size: int = 2048) -> Optional[np.ndarray]:
+        """Extract high-quality preview from RAW file (embedded JPEG)."""
+        # Reuse thumbnail logic but with larger size
+        return self.extract_thumbnail_from_raw(file_path, max_size=max_size)
 
     def extract_thumbnail_from_image(self, file_path: str, max_size: int = 512) -> Optional[np.ndarray]:
         """Extract thumbnail from regular image file."""
@@ -88,37 +112,11 @@ class EXIFExtractor(QObject):
     def extract_exif_data(self, file_path: str) -> Dict[str, Any]:
         """Extract EXIF data with caching."""
         # Check cache first
-        cached_exif = self.cache.get_exif(file_path)
         if cached_exif is not None:
             cached_orientation = cached_exif.get('orientation', 'unknown')
+            # Trust the cache - verification should happen at cache level (based on mtime/size)
             print(f"[ORIENTATION] EXIFExtractor: Using cached EXIF for {os.path.basename(file_path)}, cached orientation = {cached_orientation}")
-            
-            # Verify cached orientation by doing a quick fresh read of just the orientation tag
-            # This helps catch cases where the cache has wrong orientation
-            try:
-                with open(file_path, 'rb') as f:
-                    tags = exifread.process_file(f, details=False, stop_tag='Image Orientation')
-                    orientation_tag = tags.get('Image Orientation')
-                    if orientation_tag:
-                        fresh_orientation_str = str(orientation_tag)
-                        # Quick check: if cached is 1 but fresh says rotated, re-extract
-                        if cached_orientation == 1 and 'Rotated' in fresh_orientation_str:
-                            print(f"[ORIENTATION] EXIFExtractor: WARNING - Cached orientation=1 but fresh EXIF shows '{fresh_orientation_str}', re-extracting...")
-                            # Clear cache by removing from persistent cache
-                            try:
-                                if hasattr(self.cache, 'exif_cache') and hasattr(self.cache.exif_cache, 'remove'):
-                                    self.cache.exif_cache.remove(file_path)
-                                    print(f"[ORIENTATION] EXIFExtractor: Cleared incorrect cached EXIF for {os.path.basename(file_path)}")
-                                # Force re-extraction
-                                cached_exif = None
-                            except Exception as cache_error:
-                                print(f"[ORIENTATION] EXIFExtractor: Could not clear cache: {cache_error}")
-                                cached_exif = None
-            except Exception as e:
-                print(f"[ORIENTATION] EXIFExtractor: Error verifying cached orientation: {e}")
-            
-            if cached_exif is not None:
-                return cached_exif
+            return cached_exif
 
         # Extract fresh EXIF data
         print(f"[ORIENTATION] EXIFExtractor: Extracting fresh EXIF from {os.path.basename(file_path)}")

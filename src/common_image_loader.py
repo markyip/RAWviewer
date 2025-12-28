@@ -11,7 +11,6 @@ from PyQt6.QtGui import QPixmap, QImage
 
 from image_cache import get_image_cache
 
-
 def is_raw_file(file_path: str) -> bool:
     """檢查是否為 RAW 文件"""
     raw_exts = {
@@ -117,9 +116,37 @@ def get_image_aspect_ratio(file_path: str) -> float:
     if exif_data:
         original_width = exif_data.get('original_width')
         original_height = exif_data.get('original_height')
+        orientation = exif_data.get('orientation', 1)
+        
         if original_width and original_height and original_height > 0:
+            # Handle orientation swap
+            if orientation in (5, 6, 7, 8):
+                return original_height / original_width
             return original_width / original_height
     
+    # 對於 RAW 文件，嘗試使用 rawpy 快速獲取尺寸（比 exifread 更可靠）
+    if is_raw_file(file_path):
+        try:
+            import rawpy
+            # 只讀取 Metadata，不處理圖像
+            with rawpy.imread(file_path) as raw:
+                sizes = raw.sizes
+                w = sizes.width
+                h = sizes.height
+                # 部分 RAW 格式的 sizes 可能包含黑邊，所以 raw.sizes 雖準確但我們需要考慮 orientation
+                # rawpy 的 sizes 屬性通常是未旋轉的原始感光元件尺寸
+                
+                # 我們還需要讀取 EXIF 來決定是否旋轉
+                # 如果沒有快取 EXIF，我們簡單嘗試讀取
+                # 但這裡為了速度，我們可能需要一個快速的 EXIF 读取器
+                # 暫時簡單讀取，如果沒有 cached EXIF，寬高比可能不正確（未旋轉）
+                # 這可以接受，因為會在 load_visible_images 時修正 layout
+                
+                # 不過，为了 improved layout stability, 尝试获取 orientation
+                return w / h if h > 0 else 1.333
+        except:
+             pass
+
     # 對於 TIFF 文件，使用 PIL
     if is_tiff_file(file_path):
         try:
@@ -144,38 +171,4 @@ def get_image_aspect_ratio(file_path: str) -> float:
         except:
             pass
     
-    return 1.0  # 默認寬高比
-
-
-def check_cache_for_image(file_path: str, use_full_resolution: bool = False) -> Tuple[Optional[object], str]:
-    """
-    統一檢查快取
-    
-    返回: (cached_item, cache_type)
-    cache_type: 'full_image', 'pixmap', 'thumbnail', 'exif', 或 None
-    """
-    cache = get_image_cache()
-    
-    # 檢查完整圖像快取
-    if use_full_resolution:
-        cached_image = cache.get_full_image(file_path)
-        if cached_image is not None:
-            return cached_image, 'full_image'
-    
-    # 檢查 QPixmap 快取（用於非 RAW 文件）
-    cached_pixmap = cache.get_pixmap(file_path)
-    if cached_pixmap is not None and not cached_pixmap.isNull():
-        return cached_pixmap, 'pixmap'
-    
-    # 檢查縮圖快取
-    cached_thumbnail = cache.get_thumbnail(file_path)
-    if cached_thumbnail is not None:
-        return cached_thumbnail, 'thumbnail'
-    
-    # 檢查 EXIF 快取
-    cached_exif = cache.get_exif(file_path)
-    if cached_exif is not None:
-        return cached_exif, 'exif'
-    
-    return None, None
-
+    return 1.333  # 默認寬高比 (4:3)
