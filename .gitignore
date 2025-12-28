@@ -71,6 +71,8 @@ venv/
 # Documentation that should be in releases
 *_TESTING_GUIDE.md
 *_BUILD_UPDATE.md
+METADATA_DISPLAY_STRATEGY.md
+PERFORMANCE_ANALYSIS.md
 
 # Development documentation (not for end users)
 *_IMPLEMENTATION*.md

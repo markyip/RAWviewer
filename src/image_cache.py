@@ -380,13 +380,38 @@ class PersistentThumbnailCache:
         
         # SQLite database to track cache entries
         self.db_path = os.path.join(cache_dir, "thumbnail_cache.db")
+        
+        # Use thread-local storage for database connections to avoid connection overhead
+        self._local = threading.local()
+        
+        # Cache for file stats to avoid repeated os.stat() calls
+        self._file_stats_cache = {}
+        self._file_stats_cache_lock = threading.RLock()
+        self._file_stats_cache_max_size = 1000
+        
         self._init_db()
+    
+    def _get_connection(self):
+        """Get thread-local database connection."""
+        if not hasattr(self._local, 'conn'):
+            conn = sqlite3.connect(
+                self.db_path,
+                check_same_thread=False,
+                timeout=30.0
+            )
+            # Enable WAL mode for better concurrent performance
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=NORMAL")
+            conn.execute("PRAGMA cache_size=10000")
+            conn.execute("PRAGMA temp_store=MEMORY")
+            self._local.conn = conn
+        return self._local.conn
     
     def _init_db(self):
         """Initialize the SQLite database for tracking cache entries."""
         with self.lock:
             try:
-                conn = sqlite3.connect(self.db_path)
+                conn = self._get_connection()
                 conn.execute("""
                     CREATE TABLE IF NOT EXISTS thumbnail_cache (
                         file_path TEXT PRIMARY KEY,
@@ -396,16 +421,35 @@ class PersistentThumbnailCache:
                         cached_time REAL
                     )
                 """)
+                # Create index for faster lookups
+                conn.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_file_path ON thumbnail_cache(file_path)
+                """)
                 conn.commit()
-                conn.close()
             except Exception:
                 pass
     
     def _get_file_hash(self, file_path: str) -> Tuple[int, float]:
         """Get file size and modification time for cache validation."""
+        # Check cache first to avoid repeated os.stat() calls
+        with self._file_stats_cache_lock:
+            if file_path in self._file_stats_cache:
+                return self._file_stats_cache[file_path]
+        
         try:
             stat = os.stat(file_path)
-            return stat.st_size, stat.st_mtime
+            result = (stat.st_size, stat.st_mtime)
+            
+            # Cache the result
+            with self._file_stats_cache_lock:
+                if len(self._file_stats_cache) >= self._file_stats_cache_max_size:
+                    # Clear half of the cache (simple FIFO-like eviction)
+                    keys_to_remove = list(self._file_stats_cache.keys())[:self._file_stats_cache_max_size // 2]
+                    for key in keys_to_remove:
+                        del self._file_stats_cache[key]
+                self._file_stats_cache[file_path] = result
+            
+            return result
         except OSError:
             return 0, 0
     
@@ -421,27 +465,26 @@ class PersistentThumbnailCache:
         if file_size == 0:
             return None
         
-        with self.lock:
-            try:
-                conn = sqlite3.connect(self.db_path)
-                cursor = conn.execute(
-                    "SELECT file_size, file_mtime, cache_file FROM thumbnail_cache WHERE file_path = ?",
-                    (file_path,)
-                )
-                row = cursor.fetchone()
-                conn.close()
-                
-                if row and row[0] == file_size and row[1] == file_mtime:
-                    # Cache is valid, check if file exists
-                    cache_file = row[2]
-                    if os.path.exists(cache_file):
-                        with open(cache_file, 'rb') as f:
-                            return f.read()
-                    else:
-                        # Cache file missing, remove from database
-                        self.remove(file_path)
-            except Exception:
-                pass
+        try:
+            # Use persistent connection instead of creating new one each time
+            conn = self._get_connection()
+            cursor = conn.execute(
+                "SELECT file_size, file_mtime, cache_file FROM thumbnail_cache WHERE file_path = ?",
+                (file_path,)
+            )
+            row = cursor.fetchone()
+            
+            if row and row[0] == file_size and row[1] == file_mtime:
+                # Cache is valid, check if file exists
+                cache_file = row[2]
+                if os.path.exists(cache_file):
+                    with open(cache_file, 'rb') as f:
+                        return f.read()
+                else:
+                    # Cache file missing, remove from database
+                    self.remove(file_path)
+        except Exception:
+            pass
         
         return None
     
@@ -459,8 +502,8 @@ class PersistentThumbnailCache:
                 with open(cache_file, 'wb') as f:
                     f.write(jpeg_data)
                 
-                # Update database
-                conn = sqlite3.connect(self.db_path)
+                # Update database using persistent connection
+                conn = self._get_connection()
                 conn.execute(
                     "INSERT OR REPLACE INTO thumbnail_cache "
                     "(file_path, file_size, file_mtime, cache_file, cached_time) "
@@ -468,7 +511,6 @@ class PersistentThumbnailCache:
                     (file_path, file_size, file_mtime, cache_file, time.time())
                 )
                 conn.commit()
-                conn.close()
                 return True
             except Exception as e:
                 # Clean up on error
@@ -483,7 +525,7 @@ class PersistentThumbnailCache:
         """Remove cached thumbnail for a file."""
         with self.lock:
             try:
-                conn = sqlite3.connect(self.db_path)
+                conn = self._get_connection()
                 cursor = conn.execute(
                     "SELECT cache_file FROM thumbnail_cache WHERE file_path = ?",
                     (file_path,)
@@ -502,7 +544,6 @@ class PersistentThumbnailCache:
                 # Remove from database
                 cursor = conn.execute("DELETE FROM thumbnail_cache WHERE file_path = ?", (file_path,))
                 conn.commit()
-                conn.close()
                 return cursor.rowcount > 0
             except Exception:
                 return False
@@ -513,7 +554,7 @@ class PersistentThumbnailCache:
         
         with self.lock:
             try:
-                conn = sqlite3.connect(self.db_path)
+                conn = self._get_connection()
                 cursor = conn.execute(
                     "SELECT file_path, cache_file FROM thumbnail_cache WHERE cached_time < ?",
                     (cutoff_time,)
@@ -531,7 +572,6 @@ class PersistentThumbnailCache:
                 # Remove from database
                 conn.execute("DELETE FROM thumbnail_cache WHERE cached_time < ?", (cutoff_time,))
                 conn.commit()
-                conn.close()
             except Exception:
                 pass
 
