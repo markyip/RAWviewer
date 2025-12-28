@@ -95,6 +95,13 @@ import platform
 import ctypes
 import time
 
+try:
+    import qtawesome as qta
+    print("  - qtawesome: OK", flush=True)
+except Exception as e:
+    print(f"  - qtawesome: ERROR - {e}", file=sys.stderr, flush=True)
+    qta = None  # Set to None if import fails
+
 print("Third-party imports done, importing local modules...", flush=True)
 
 # Import enhanced performance modules
@@ -2075,6 +2082,9 @@ class JustifiedGallery(QWidget):
         """Delayed initial build to ensure widget has proper size"""
         self._setup_scroll_tracking() # Ensure scroll tracking is set up
         if self.width() > 0:
+            # Process events once to ensure viewport has correct size, then build
+            from PyQt6.QtWidgets import QApplication
+            QApplication.processEvents()
             self.build_gallery()
         else:
             # If still no width, try again
@@ -2247,11 +2257,11 @@ class JustifiedGallery(QWidget):
                 
                 curr_x = 8
                 for i, (item, aspect) in enumerate(row):
-                    if i == len(row) - 1 and not is_last:
-                        # Last item in non-last row: fill remaining width exactly to avoid pillarbox
+                    w = int(row_h * aspect)
+                    
+                    # For non-last rows, slightly adjust width of last item to avoid rounding gaps
+                    if not is_last and i == len(row) - 1:
                         w = net_width - (curr_x - 8)
-                    else:
-                        w = int(row_h * aspect)
                     
                     rect = QRect(curr_x, int(current_y), int(w), int(row_h))
                     self._gallery_layout_items.append({
@@ -2259,12 +2269,9 @@ class JustifiedGallery(QWidget):
                         'file_path': item if isinstance(item, str) else None,
                         'aspect': aspect
                     })
-                    if i < len(row) - 1:
-                        curr_x += w + self.MIN_SPACING
-                    else:
-                        curr_x += w  # Last item, no spacing after
+                    curr_x += w + self.MIN_SPACING
                 
-                # Move to next row
+                # Move to next row with proper spacing
                 current_y += row_h + self.MIN_SPACING
 
             # 4. Greedy Row Partitioning
@@ -2290,9 +2297,16 @@ class JustifiedGallery(QWidget):
                             w, h = h, w
                         aspect = w / h
                     else:
-                        # NON-BLOCKING FALLBACK: Use default aspect ratio to prevent UI hang.
-                        # Real aspect ratio will be picked up when images actually load or metadata is background-fetched.
-                        aspect = 1.333
+                        # Try to get aspect ratio from image file without loading full image
+                        # This prevents pillarbox issues by using correct aspect ratios
+                        try:
+                            from common_image_loader import get_image_aspect_ratio
+                            aspect = get_image_aspect_ratio(item)
+                            if aspect <= 0 or aspect > 10:  # Sanity check
+                                aspect = 1.333
+                        except Exception:
+                            # Final fallback: Use default aspect ratio to prevent UI hang
+                            aspect = 1.333
                 else:
                     # Pixmap object
                     aspect = item.width() / item.height() if item.height() > 0 else 1.333
@@ -3465,6 +3479,10 @@ class JustifiedGallery(QWidget):
                     QTimer.singleShot(100, retry_set_images)
             QTimer.singleShot(100, retry_set_images)
         else:
+            # Process events once to ensure viewport has correct size, then build
+            # This fixes the pillarbox issue by ensuring viewport width is calculated correctly
+            from PyQt6.QtWidgets import QApplication
+            QApplication.processEvents()
             self.build_gallery(bulk_metadata)
             
         logger.debug(f"[JUSTIFIED_GALLERY] ========== set_images() COMPLETED in {time.time() - start_time:.3f}s ==========")
@@ -3538,7 +3556,15 @@ class JustifiedGallery(QWidget):
         
         # Rebuild - but only if widget has proper size
         if self.width() > 0:
-            self.build_gallery()
+            # Ensure viewport width is calculated correctly before building
+            viewport_width = self._get_viewport_width()
+            # Only build if viewport width is reasonable (at least 300px)
+            if viewport_width >= 300:
+                self.build_gallery()
+            else:
+                logger.warning(f"[JUSTIFIED_GALLERY] Viewport width too small ({viewport_width}), delaying build")
+                from PyQt6.QtCore import QTimer
+                QTimer.singleShot(100, self._delayed_build)
         else:
             logger.warning("[JUSTIFIED_GALLERY] Widget has no width yet, delaying build")
             from PyQt6.QtCore import QTimer
@@ -4526,6 +4552,8 @@ class RAWImageViewer(QMainWindow):
 
     def init_ui(self):
         """Initialize the user interface"""
+        # qtawesome doesn't require initialization - can be used directly
+        
         # Set window to frameless for custom title bar
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint)
         self.setWindowTitle('RAW Image Viewer')
@@ -4670,15 +4698,19 @@ class RAWImageViewer(QMainWindow):
         self.image_label = QLabel()
         # Center the label in viewport, but left-align the text content
         self.image_label.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
+        # Create instruction text with modern folder icon
+        # Use modern folder icon (📁) instead of old style (🗁)
         self.image_label.setText(
             "No image loaded\n\n"
-            "Click 🗁 or drag and drop a folder or image to load it\n"
+            "Click 📁 or drag and drop a folder or image to load it\n"
             "Press Space to toggle between fit-to-window and 100% zoom\n"
             "Double-click image to zoom in/out\n"
             "Click and drag to pan when zoomed\n"
             "Use Left/Right arrow keys to navigate between images (preserves zoom if zoomed in)\n"
             "Press Down Arrow to move the current image to Discard folder\n"
-            "Press Delete to remove the current image"
+            "Press Delete to remove the current image\n"
+            "Scroll wheel (fit-to-window): Scroll down = previous image, Scroll up = next image\n"
+            "Horizontal wheel (zoom mode): Scroll left/right to pan the image"
         )
         self.image_label.setStyleSheet(
             "QLabel { color: #666; font-size: 14px; }")
@@ -4802,7 +4834,18 @@ class RAWImageViewer(QMainWindow):
         self.sort_toggle_button.hide()  # Hidden by default (single view)
         
         # Gallery view toggle button
-        self.view_mode_button = QPushButton("Gallery")
+        self.view_mode_button = QPushButton()
+        # Use qtawesome icon if available, otherwise fallback to text
+        if qta is not None:
+            try:
+                gallery_icon = qta.icon('fa5s.th', color='#B0B0B0')
+                self.view_mode_button.setIcon(gallery_icon)
+                self.view_mode_button.setIconSize(QSize(18, 18))
+            except Exception as e:
+                print(f"[WARNING] Failed to set qtawesome icon: {e}, using text fallback", flush=True)
+                self.view_mode_button.setText("Gallery")
+        else:
+            self.view_mode_button.setText("Gallery")
         self.view_mode_button.setFlat(True)
         self.view_mode_button.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         self.view_mode_button.clicked.connect(self.toggle_view_mode)
@@ -4811,7 +4854,7 @@ class RAWImageViewer(QMainWindow):
                 color: #B0B0B0;
                 font-size: 13px;
                 font-weight: 500;
-                padding: 0px;
+                padding: 4px 8px;
                 border: none;
                 background: transparent;
                 text-align: center;
@@ -5078,7 +5121,17 @@ class RAWImageViewer(QMainWindow):
             self.sort_toggle_button.hide()
         if hasattr(self, 'view_mode_button'):
             self.view_mode_button.show()
-            self.view_mode_button.setText("Gallery")
+            # Update icon if using qtawesome
+            if qta is not None:
+                try:
+                    gallery_icon = qta.icon('fa5s.th', color='#B0B0B0')
+                    self.view_mode_button.setIcon(gallery_icon)
+                    self.view_mode_button.setIconSize(QSize(18, 18))
+                    self.view_mode_button.setText("")  # Clear text if using icon
+                except Exception:
+                    self.view_mode_button.setText("Gallery")
+            else:
+                self.view_mode_button.setText("Gallery")
         
         ui_time = time.time() - ui_start
         logger.info(f"[VIEW_MODE] Step 3: UI elements shown (elapsed: {ui_time:.3f}s)")
@@ -5315,9 +5368,19 @@ class RAWImageViewer(QMainWindow):
                 logger.info(f"[GALLERY] Gallery widget or image files not available, returning")
                 return
             
-            # Update JustifiedGallery with file paths
-            # The gallery will load pixmaps as needed
-            self.gallery_justified.set_images(self.image_files)
+            # Get bulk_metadata if available (stored during folder load)
+            # This ensures aspect ratios are correct and prevents pillarbox issues
+            bulk_metadata = getattr(self, '_gallery_bulk_metadata', None)
+            if not bulk_metadata:
+                # Fallback: fetch metadata if not available
+                from image_cache import get_image_cache
+                cache = get_image_cache()
+                bulk_metadata = cache.get_multiple_exif(self.image_files)
+                logger.info(f"[GALLERY] Fetched metadata for {len(bulk_metadata)} images")
+            
+            # Update JustifiedGallery with file paths and metadata
+            # Passing metadata ensures correct aspect ratios are used in layout calculation
+            self.gallery_justified.set_images(self.image_files, bulk_metadata)
             
             total_time = time.time() - start_time
             logger.info(f"[GALLERY] ========== GALLERY LAYOUT COMPLETED in {total_time:.3f}s ==========")
@@ -6409,7 +6472,17 @@ class RAWImageViewer(QMainWindow):
             
         self.view_mode = 'single'
         if hasattr(self, 'view_mode_button'):
-            self.view_mode_button.setText("Gallery")
+            # Update icon if using qtawesome
+            if qta is not None:
+                try:
+                    gallery_icon = qta.icon('fa5s.th', color='#B0B0B0')
+                    self.view_mode_button.setIcon(gallery_icon)
+                    self.view_mode_button.setIconSize(QSize(18, 18))
+                    self.view_mode_button.setText("")  # Clear text if using icon
+                except Exception:
+                    self.view_mode_button.setText("Gallery")
+            else:
+                self.view_mode_button.setText("Gallery")
         self._show_single_view()
         
         # Ensure loading overlay is ready and visible when loading from gallery
@@ -6467,6 +6540,8 @@ class RAWImageViewer(QMainWindow):
             
             # Resort the files
             self.image_files, bulk_metadata = self.sort_image_files(self.image_files)
+            # Store bulk_metadata for use in gallery updates
+            self._gallery_bulk_metadata = bulk_metadata
             
             # Find the current file in the new order
             if current_file in self.image_files:
@@ -10361,35 +10436,74 @@ class RAWImageViewer(QMainWindow):
     def eventFilter(self, obj, event):
         if event.type() == QEvent.Type.KeyPress:
             key = event.key()
-            if key == Qt.Key.Key_Left:
-                self.navigate_to_previous_image()
-                return True
-            elif key == Qt.Key.Key_Right:
-                self.navigate_to_next_image()
-                return True
-            elif key == Qt.Key.Key_Up or key == Qt.Key.Key_Down:
-                # Ignore up/down arrows to prevent panning
-                return True
+            # Only handle keys in single view mode
+            if hasattr(self, 'view_mode') and self.view_mode == 'single':
+                if key == Qt.Key.Key_Left:
+                    self.navigate_to_previous_image()
+                    return True
+                elif key == Qt.Key.Key_Right:
+                    self.navigate_to_next_image()
+                    return True
+                elif key == Qt.Key.Key_Down:
+                    # Move current image to Discard folder in single view
+                    self.move_current_image_to_discard()
+                    return True
+                elif key == Qt.Key.Key_Up:
+                    # Ignore up arrow to prevent panning
+                    return True
         
         # Handle wheel events for navigation in single image view when fit-to-window
         if event.type() == QEvent.Type.Wheel:
             # Check if we're in single view mode and the event is from scroll area viewport
             if (hasattr(self, 'view_mode') and self.view_mode == 'single' and
                 hasattr(self, 'scroll_area') and obj == self.scroll_area.viewport()):
+                from PyQt6.QtGui import QWheelEvent
+                wheel_event = event
+                
+                # Check vertical wheel (up/down scroll)
+                vertical_delta = wheel_event.angleDelta().y()
+                # Check horizontal wheel (left/right scroll)
+                horizontal_delta = wheel_event.angleDelta().x()
+                
                 # Only navigate if image is fit-to-window (not zoomed)
                 if hasattr(self, 'fit_to_window') and self.fit_to_window:
-                    from PyQt6.QtGui import QWheelEvent
-                    wheel_event = event
-                    # Get wheel delta (positive = scroll down/forward, negative = scroll up/back)
-                    delta = wheel_event.angleDelta().y()
-                    if delta > 0:
-                        # Scroll down = next image
-                        self._debounced_navigate('next')
+                    # In fit-to-window mode: only use vertical wheel for navigation
+                    # Horizontal wheel is disabled for navigation
+                    if abs(vertical_delta) > 0:
+                        if vertical_delta > 0:
+                            # Scroll down = previous image (like going back in history)
+                            self._debounced_navigate('prev')
+                            return True  # Event handled
+                        elif vertical_delta < 0:
+                            # Scroll up = next image (like going forward)
+                            self._debounced_navigate('next')
+                            return True  # Event handled
+                else:
+                    # In zoom mode: handle horizontal wheel for panning with reversed direction
+                    # Vertical wheel is used for normal scrolling (panning)
+                    if abs(horizontal_delta) > 0:
+                        # Manually handle horizontal wheel to reverse direction
+                        # In Qt: angleDelta().x() > 0 = scroll left, < 0 = scroll right
+                        # Standard QScrollArea behavior:
+                        #   - delta > 0 (left scroll) -> increase scroll value -> viewport right -> image moves left
+                        #   - delta < 0 (right scroll) -> decrease scroll value -> viewport left -> image moves right
+                        # We want intuitive behavior:
+                        #   - Right scroll (delta < 0) -> image moves right -> decrease scroll value (same as standard)
+                        #   - Left scroll (delta > 0) -> image moves left -> increase scroll value (same as standard)
+                        # But user reports it's reversed, so we reverse it:
+                        #   - Right scroll (delta < 0) -> image moves right -> increase scroll value (reversed)
+                        #   - Left scroll (delta > 0) -> image moves left -> decrease scroll value (reversed)
+                        h_scroll = self.scroll_area.horizontalScrollBar()
+                        if h_scroll:
+                            scroll_amount = horizontal_delta // 8  # Convert to pixels (standard conversion)
+                            current_value = h_scroll.value()
+                            # Reverse: add instead of subtract to flip the direction
+                            new_value = current_value + scroll_amount  # Reversed: add instead of subtract
+                            h_scroll.setValue(max(h_scroll.minimum(), min(new_value, h_scroll.maximum())))
                         return True  # Event handled
-                    elif delta < 0:
-                        # Scroll up = previous image
-                        self._debounced_navigate('prev')
-                        return True  # Event handled
+                    # For vertical wheel in zoom mode, allow normal scrolling
+                    if abs(vertical_delta) > 0:
+                        return False  # Let the event pass through for normal vertical panning
         
         return super().eventFilter(obj, event)
 
@@ -10619,6 +10733,8 @@ class RAWImageViewer(QMainWindow):
                 # Pass file_stats to avoid redundant os.stat calls during sorting
                 # Capture bulk_metadata for reuse in gallery layout
                 self.image_files, bulk_metadata = self.sort_image_files(image_files, file_stats=file_stats)
+                # Store bulk_metadata for use in gallery updates
+                self._gallery_bulk_metadata = bulk_metadata
                 sort_time = time.time() - sort_start
                 logger.info(f"[FOLDER] Sorted {len(image_files)} images in {sort_time:.3f}s")
                 print(f"[PERF] 🔄 Sorted {len(image_files)} images in {sort_time*1000:.1f}ms")

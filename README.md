@@ -45,10 +45,10 @@ This is a **pre-filtering tool**, letting you go through hundreds of RAW files e
 - **Intuitive navigation**: Keyboard shortcuts, mouse controls, and scroll wheel support
 - **Zoom functionality**: Fit-to-window and 100% zoom modes with smooth panning
 - **File management**: Move images to discard folder or delete permanently
-- **EXIF data display**: View camera settings and capture information
+- **EXIF data display**: View camera settings, focal length, ISO, aperture, and capture information with robust metadata extraction
 - **Session persistence**: Remembers your last opened folder, image, and view mode
 - **Portable executable**: No Python installation required for users
-- **Modern UI**: Material Design 3 aesthetics with non-intrusive loading indicators
+- **Modern UI**: Material Design 3 aesthetics with Font Awesome icons (via qtawesome) and non-intrusive loading indicators
 
 ## 🚀 Quick Start
 
@@ -81,7 +81,10 @@ This is a **pre-filtering tool**, letting you go through hundreds of RAW files e
 - **Double-click**: Toggle zoom mode
 - **Click and drag**: Pan image when zoomed in
 - **Drag and drop**: Open images or folders
-- **Scroll Wheel**: Navigate images (Single View) or scroll grid (Gallery View)
+- **Scroll Wheel (fit-to-window)**: Navigate images - Scroll down = previous, Scroll up = next
+- **Scroll Wheel (zoom mode)**: Pan image vertically
+- **Horizontal Wheel (zoom mode)**: Pan image horizontally (left/right)
+- **Scroll Wheel (Gallery View)**: Scroll through the image grid
 
 ## 📁 Supported Formats
 
@@ -147,6 +150,7 @@ All dependencies are listed in `requirements.txt`:
 - exifread >= 3.0.0
 - psutil >= 5.9.0
 - pyqtgraph >= 0.13.0
+- qtawesome >= 1.2.0
 
 ## 🐛 Troubleshooting
 
