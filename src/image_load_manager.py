@@ -175,11 +175,16 @@ class ImageLoadManager(QObject):
         self._active_tasks: Dict[str, ImageLoadTask] = {}
         self._cache = get_image_cache()
         self._queue_lock = threading.Lock()
+        self._stopped = False  # Flag to stop scheduling new tasks
         self._initialized = True
     
     def load_image(self, file_path: str, priority: Priority = Priority.CURRENT, 
                    cancel_existing: bool = True, use_full_resolution: bool = False):
         """請求加載圖像"""
+        # Don't accept new tasks if stopped
+        if self._stopped:
+            return
+            
         # 取消現有任務（如果需要）
         if cancel_existing:
             self.cancel_task(file_path)
@@ -206,6 +211,9 @@ class ImageLoadManager(QObject):
     
     def cancel_all_tasks(self):
         """取消所有任務"""
+        # Set stopped flag to prevent new tasks from being scheduled
+        self._stopped = True
+        
         with self._queue_lock:
             for task in self._active_tasks.values():
                 task.cancel()
@@ -263,6 +271,10 @@ class ImageLoadManager(QObject):
     
     def _schedule_next_task(self):
         """調度下一個任務到線程池"""
+        # Don't schedule new tasks if stopped
+        if self._stopped:
+            return
+            
         with self._queue_lock:
             if self._work_queue.empty():
                 return
