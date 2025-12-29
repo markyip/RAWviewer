@@ -46,7 +46,6 @@ class UnifiedImageProcessor:
         else:
             thumbnail = self.thumbnail_extractor.extract_thumbnail_from_image(file_path, max_size=512)
         
-        # 應用方向校正到縮圖
         if thumbnail is not None:
             # 獲取 EXIF 數據以獲取 orientation
             exif_data = self.exif_extractor.extract_exif_data(file_path)
@@ -54,13 +53,66 @@ class UnifiedImageProcessor:
             if orientation != 1:
                 import logging
                 logger = logging.getLogger(__name__)
-                logger.debug(f"[UNIFIED_PROC] Applying orientation correction {orientation} to thumbnail for {os.path.basename(file_path)}")
+                # Apply orientation correction
                 thumbnail = self._apply_orientation_correction(thumbnail, orientation, exif_data)
         
-        # 快取縮圖（已應用 orientation）
+        # 快取縮圖（優化：Resize & Encode to JPEG）
         if thumbnail is not None:
-            self.cache.put_thumbnail(file_path, thumbnail)
-        
+            try:
+                from PIL import Image
+                import io
+                
+                # Convert numpy array to PIL Image
+                # Handle different array types
+                if thumbnail.dtype != np.uint8:
+                    thumbnail = thumbnail.astype(np.uint8)
+                
+                # Check channel count
+                if len(thumbnail.shape) == 2:
+                    # Grayscale
+                    pil_img = Image.fromarray(thumbnail, 'L')
+                elif len(thumbnail.shape) == 3:
+                     # RGB
+                    pil_img = Image.fromarray(thumbnail, 'RGB')
+                else:
+                    # Unknown format
+                    return thumbnail
+
+                # 1. Resize efficient usage (max 512px)
+                w, h = pil_img.size
+                max_dim = 512
+                scale = min(max_dim / w, max_dim / h)
+                
+                if scale < 1.0:
+                    new_w = max(1, int(w * scale))
+                    new_h = max(1, int(h * scale))
+                    thumbnail_small_pil = pil_img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+                    # Convert back to numpy for return
+                    thumbnail_small = np.array(thumbnail_small_pil)
+                else:
+                    thumbnail_small_pil = pil_img
+                    thumbnail_small = thumbnail
+                
+                # 2. Encode to JPEG for efficient disk caching
+                # We cache the PROCESSED (Oriented + Resized) thumbnail
+                # This ensures next load is fast and correct
+                buffer = io.BytesIO()
+                thumbnail_small_pil.save(buffer, format='JPEG', quality=85)
+                jpeg_data_optimized = buffer.getvalue()
+                
+                self.cache.put_thumbnail(file_path, thumbnail_small, jpeg_data_optimized)
+                
+                # Return the resized version for immediate display
+                return thumbnail_small
+                
+            except Exception as e:
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.warning(f"Error processing thumbnail with PIL: {e}")
+                # Fallback: cache original in memory only
+                self.cache.put_thumbnail(file_path, thumbnail)
+                return thumbnail
+            
         return thumbnail
     
     def process_full_image(self, file_path: str, 
@@ -74,8 +126,20 @@ class UnifiedImageProcessor:
         if use_full_resolution:
             cached_image = self.cache.get_full_image(file_path)
             if cached_image is not None:
-                print(f"[ORIENTATION] Using cached full_image for {os.path.basename(file_path)} (RAW file)")
-                return cached_image
+                # Orientation verification for cache hit
+                exif_data = self.exif_extractor.extract_exif_data(file_path)
+                orientation = exif_data.get('orientation', 1) if exif_data else 1
+                h, w = cached_image.shape[:2]
+                
+                # Check for orientation mismatch (Portrait metadata but Landscape cached image)
+                if orientation in (6, 8) and w > h:
+                    print(f"[ORIENTATION] UnifiedImageProcessor: Cached full_image for {os.path.basename(file_path)} is UNROTATED (stale). Re-processing.")
+                    cached_image = None
+                
+                if cached_image is not None:
+                    print(f"[ORIENTATION] Using VALID cached full_image for {os.path.basename(file_path)}. Shape: {w}x{h}")
+                    return cached_image
+
         
         # Only check pixmap cache for non-RAW files
         if not is_raw:
@@ -147,6 +211,11 @@ class UnifiedImageProcessor:
                 if use_full_resolution:
                     params['half_size'] = False
                     params['output_bps'] = 8  # 8-bit 足夠顯示
+                
+                # CRITICAL: Force rawpy to ignore EXIF orientation
+                # This ensures we get the RAW sensor data (usually Landscape)
+                # and can apply our own consistent orientation correction
+                params['user_flip'] = 0
                 
                 # 處理 RAW
                 rgb_image = raw.postprocess(**params)
@@ -232,8 +301,11 @@ class UnifiedImageProcessor:
         
         if orientation == 1:
             print(f"[ORIENTATION] Numpy operation: No operation (orientation = 1)")
-            result = image_array
-        elif orientation == 2:
+        # Rotation needed?
+        import logging
+        logger = logging.getLogger(__name__)
+
+        if orientation == 2:
             # Mirror left-right
             print(f"[ORIENTATION] Numpy operation: np.fliplr(image_array) - Mirror left-right")
             result = np.fliplr(image_array)
@@ -250,16 +322,17 @@ class UnifiedImageProcessor:
             print(f"[ORIENTATION] Numpy operation: np.rot90(np.fliplr(image_array), 1) - Mirror LR + rotate 90° CCW")
             result = np.rot90(np.fliplr(image_array), 1)
         elif orientation == 6:
-            # Rotate 90° CW (k=3 CCW)
-            print(f"[ORIENTATION] Numpy operation: np.rot90(image_array, 3) - Rotate 270° CCW (90° CW)")
+            # Orientation 6: Image is rotated 90° CW.
+            # We need to rotate it 90° CW (k=3) to fix it.
+            print(f"[ORIENTATION] Numpy operation: np.rot90(image_array, 3) - Rotate 90° CW")
             result = np.rot90(image_array, 3)
         elif orientation == 7:
             # Mirror LR + rotate 90° CW
             print(f"[ORIENTATION] Numpy operation: np.rot90(np.fliplr(image_array), 3) - Mirror LR + rotate 270° CCW (90° CW)")
             result = np.rot90(np.fliplr(image_array), 3)
         elif orientation == 8:
-            # Rotate 270° CW (90° CCW) - need to rotate 90° CW to correct
-            # np.rot90 with k=1 rotates 90° CCW
+            # Orientation 8: Image is rotated 270° CW (90° CCW).
+            # We need to rotate it 90° CCW (k=1) to fix it.
             print(f"[ORIENTATION] Numpy operation: np.rot90(image_array, 1) - Rotate 90° CCW")
             result = np.rot90(image_array, 1)
         else:

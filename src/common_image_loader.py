@@ -166,9 +166,49 @@ def get_image_aspect_ratio(file_path: str) -> float:
             # Enable automatic EXIF orientation transformation
             reader.setAutoTransform(True)
             size = reader.size()
+            
             if size.isValid() and size.height() > 0:
-                return size.width() / size.height()
-        except:
+                width = size.width()
+                height = size.height()
+                
+                # Check transformation to see if dimensions need swapping
+                # QImageReader.size() returns the size *before* transformation in some versions,
+                # so we need to manually swap if the transformation involves 90 degree rotation.
+                transformation = reader.transformation()
+                from PyQt6.QtGui import QImageIOHandler
+                
+                # Check for 90 or 270 degree rotation
+                # QImageIOHandler.Transformation.TransformationRotate90 = 2
+                # QImageIOHandler.Transformation.TransformationRotate270 = 4
+                # We also need to consider mirrored versions if they involve 90 deg rotation
+                # TransformationMirrorAndRotate90 = 6, TransformationMirrorAndRotate270 = 8 is not a standard enum value in older Qt?
+                # Let's stick to the basic check:
+                
+                # Simple check: if orientation is 5, 6, 7, 8 (which correspond to rotations), we swap.
+                # However, QImageReader.transformation() returns a Transformation enum.
+                # TransformationRotate90 (2), TransformationRotate270 (4), 
+                # TransformationMirrorAndRotate90 (6), TransformationFlipAndRotate90 (6?)
+                
+                t_val = transformation.value
+                
+                # Qt::ImageTransformation:
+                # 0: None
+                # 1: Mirror
+                # 2: Flip
+                # 3: Rotate180
+                # 4: Rotate90
+                # 5: MirrorAndRotate90
+                # 6: FlipAndRotate90
+                # 7: Rotate270
+                
+                # So 4, 5, 6, 7 imply 90 degree component (swapped dimensions)
+                if t_val >= 4:
+                    width, height = height, width
+                    
+                return width / height
+        except Exception as e:
+            # import logging
+            # logging.getLogger(__name__).debug(f"Aspect ratio check failed: {e}")
             pass
     
     return 1.333  # 默認寬高比 (4:3)
