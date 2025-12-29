@@ -81,11 +81,9 @@ class ThumbnailExtractor(QObject):
         """Extract thumbnail from regular image file."""
         try:
             with Image.open(file_path) as img:
-                # PIL automatically handles EXIF orientation when using ImageOps.exif_transpose
-                # However, we need to explicitly apply it to ensure orientation is correct
-                from PIL import ImageOps
-                # Apply EXIF orientation correction
-                img = ImageOps.exif_transpose(img)
+                # UnifiedImageProcessor will handle EXIF orientation correction
+                # consistently across all paths. We remove redundant correct here
+                # to prevent "double-rotation" for JPEGs.
                 
                 # Calculate thumbnail size maintaining aspect ratio
                 img.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
@@ -94,12 +92,12 @@ class ThumbnailExtractor(QObject):
                 if img.mode != 'RGB':
                     img = img.convert('RGB')
 
-                return np.array(img)
+                return np.array(img), None
 
         except Exception:
             pass
 
-        return None
+        return None, None
 
 
 class EXIFExtractor(QObject):
@@ -456,16 +454,17 @@ class EnhancedRAWProcessor(QThread):
 
         # Extract thumbnail
         thumbnail = None
+        jpeg_data = None
         if self.is_raw_file:
-            thumbnail = self.thumbnail_extractor.extract_thumbnail_from_raw(
+            thumbnail, jpeg_data = self.thumbnail_extractor.extract_thumbnail_from_raw(
                 self.file_path)
         else:
-            thumbnail = self.thumbnail_extractor.extract_thumbnail_from_image(
+            thumbnail, _ = self.thumbnail_extractor.extract_thumbnail_from_image(
                 self.file_path)
 
         if thumbnail is not None:
             # Cache the thumbnail
-            self.cache.put_thumbnail(self.file_path, thumbnail)
+            self.cache.put_thumbnail(self.file_path, thumbnail, jpeg_data)
 
             # Emit thumbnail
             self.thumbnail_ready.emit(thumbnail)
@@ -487,7 +486,7 @@ class EnhancedRAWProcessor(QThread):
         # Try to extract thumbnail as fallback first
         thumbnail_fallback = None
         try:
-            thumbnail_fallback = self.thumbnail_extractor.extract_thumbnail_from_raw(
+            thumbnail_fallback, _ = self.thumbnail_extractor.extract_thumbnail_from_raw(
                 self.file_path)
         except Exception:
             pass
@@ -581,15 +580,16 @@ class EnhancedRAWProcessor(QThread):
             # Mirrored horizontal + Rotated 270° CW (k=1 CCW)
             return np.rot90(np.fliplr(image_array), 1)
         elif orientation == 6:
-            # Rotate 90° CW (k=3 CCW)
-            return np.rot90(image_array, 3)
+            # Orientation 6: Image is rotated 90° CW.
+            # We need to rotate it 90° CCW (k=1) to fix it.
+            return np.rot90(image_array, 1)
         elif orientation == 7:
             # Mirror LR + rotate 90° CW
             return np.rot90(np.fliplr(image_array), 3)
         elif orientation == 8:
-            # Rotate 270° CW (90° CCW) - need to rotate 90° CW to correct
-            # np.rot90 with k=1 rotates 90° CCW
-            return np.rot90(image_array, 1)
+            # Orientation 8: Image is rotated 270° CW (90° CCW).
+            # We need to rotate it 90° CW (k=3) to fix it.
+            return np.rot90(image_array, 3)
         else:
             return image_array
 
