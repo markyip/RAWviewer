@@ -87,21 +87,22 @@ class ImageLoadWorker(QRunnable):
             # 獲取處理器（延遲初始化）
             processor = self._get_processor()
             
-            # 處理縮圖
-            if not self.task.is_cancelled():
-                self.manager.progress_updated.emit(file_path, "Extracting preview...")
-                thumbnail = processor.process_thumbnail(file_path)
-                if thumbnail is not None:
-                    self.manager.thumbnail_ready.emit(file_path, thumbnail)
-            
-            # 處理 EXIF 數據（在處理完整圖像之前）
+            # 1. 處理 EXIF 數據 (CRITICAL OPTIMIZATION: Extract ONCE and pass through)
+            exif_data = None
             if not self.task.is_cancelled():
                 self.manager.progress_updated.emit(file_path, "Reading metadata...")
                 exif_data = processor.process_exif(file_path)
                 if exif_data:
                     self.manager.exif_data_ready.emit(file_path, exif_data)
             
-            # 處理完整圖像
+            # 2. 處理縮圖 (Pass exif_data to avoid redundant lookup)
+            if not self.task.is_cancelled():
+                self.manager.progress_updated.emit(file_path, "Extracting preview...")
+                thumbnail = processor.process_thumbnail(file_path, exif_data=exif_data)
+                if thumbnail is not None:
+                    self.manager.thumbnail_ready.emit(file_path, thumbnail)
+            
+            # 3. 處理完整圖像 (Pass exif_data to avoid redundant lookup)
             if not self.task.is_cancelled():
                 if self.task.use_full_resolution:
                     self.manager.progress_updated.emit(file_path, "Loading full resolution...")
@@ -109,7 +110,8 @@ class ImageLoadWorker(QRunnable):
                     self.manager.progress_updated.emit(file_path, "Processing image...")
                 result = processor.process_full_image(
                     file_path, 
-                    use_full_resolution=self.task.use_full_resolution
+                    use_full_resolution=self.task.use_full_resolution,
+                    exif_data=exif_data
                 )
                 if isinstance(result, np.ndarray):
                     self.manager.image_ready.emit(file_path, result)

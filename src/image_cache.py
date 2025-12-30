@@ -169,6 +169,15 @@ class PersistentEXIFCache:
                     
                     # Ensure consistent data (DB columns override/augment blob)
                     result_capture_time = row[6]
+                    if not result_capture_time:
+                         result_capture_time = exif_data.get('capture_time')
+                         if not result_capture_time:
+                              for tag in ['EXIF DateTimeOriginal', 'Image DateTime', 'EXIF DateTimeDigitized', 'DateTimeOriginal', 'DateTime']:
+                                   val = exif_data.get(tag)
+                                   if val:
+                                       result_capture_time = str(val)
+                                       break
+
                     if result_capture_time and 'capture_time' not in exif_data:
                          exif_data['capture_time'] = result_capture_time
                     
@@ -320,6 +329,14 @@ class PersistentEXIFCache:
                                 # SLOW PATH: Unpickle blob
                                 exif_data = pickle.loads(row[6]) if row[6] else {}
                                 result_capture_time = row[7] if row[7] else exif_data.get('capture_time')
+                                
+                                # Capture Time fallback
+                                if result_capture_time is None:
+                                    for tag in ['EXIF DateTimeOriginal', 'Image DateTime', 'EXIF DateTimeDigitized', 'DateTimeOriginal', 'DateTime']:
+                                        val = exif_data.get(tag)
+                                        if val:
+                                            result_capture_time = str(val)
+                                            break
                                 
                                 # Width fallback
                                 result_width = row[8]

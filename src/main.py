@@ -1161,7 +1161,7 @@ class RAWProcessor(QThread):
                                     
                                     # Cache the thumbnail
                                     cache.put_thumbnail(self.file_path, thumbnail_data)
-                                    logger.info(f"Thumbnail extracted and cached: {os.path.basename(self.file_path)} ({thumbnail_data.shape[1]}x{thumbnail_data.shape[0]})")
+                                    logger.debug(f"Thumbnail extracted and cached: {os.path.basename(self.file_path)} ({thumbnail_data.shape[1]}x{thumbnail_data.shape[0]})")
                                     
                                     # Emit thumbnail immediately for fast display (only if not loading full resolution only)
                                     if not self.use_full_resolution:
@@ -1253,7 +1253,7 @@ class RAWProcessor(QThread):
                                         
                                         # Cache the thumbnail
                                         cache.put_thumbnail(self.file_path, thumbnail_data)
-                                        logger.info(f"Thumbnail generated from RAW with auto-brightness: {os.path.basename(self.file_path)} ({thumbnail_data.shape[1]}x{thumbnail_data.shape[0]})")
+                                        logger.debug(f"Thumbnail generated from RAW with auto-brightness: {os.path.basename(self.file_path)} ({thumbnail_data.shape[1]}x{thumbnail_data.shape[0]})")
                                         
                                         # Emit thumbnail immediately for fast display (only if not loading full resolution only)
                                         if not self.use_full_resolution:
@@ -1353,7 +1353,7 @@ class RAWProcessor(QThread):
                             
                             # Mark if this is half_size or full resolution
                             is_half_size = self._use_fast_processing if hasattr(self, '_use_fast_processing') else False
-                            logger.info(f"Full image processed and cached: {os.path.basename(self.file_path)} ({rgb_image.shape[1]}x{rgb_image.shape[0]}) {'[half_size]' if is_half_size else '[full_resolution]'}")
+                            logger.debug(f"Full image processed and cached: {os.path.basename(self.file_path)} ({rgb_image.shape[1]}x{rgb_image.shape[0]}) {'[half_size]' if is_half_size else '[full_resolution]'}")
                             # Emit the full quality image (only once)
                             if not self._should_stop:
                                 logger.info(f"[RAW_PROC] Emitting processing_progress signal: Processing complete")
@@ -1648,7 +1648,7 @@ class ImageLoadTask(QRunnable):
                     jpeg_data = cache.disk_thumbnail_cache.get(self.file_path)
                     if jpeg_data is not None:
                         disk_cache_time = time.time() - disk_cache_start
-                        logger.info(f"[IMAGE_LOAD_TASK] Disk cache hit in {disk_cache_time:.3f}s: {file_basename}")
+                        logger.debug(f"[IMAGE_LOAD_TASK] Disk cache hit in {disk_cache_time:.3f}s: {file_basename}")
                         try:
                             from io import BytesIO
                             from PIL import Image, ImageOps
@@ -1687,7 +1687,7 @@ class ImageLoadTask(QRunnable):
                                 
                                 if not scaled_image.isNull():
                                     total_time = time.time() - task_start
-                                    logger.info(f"[IMAGE_LOAD_TASK] Loaded thumbnail from disk cache for {file_basename} in {total_time:.3f}s (size: {scaled_width}x{scaled_height})")
+                                    logger.debug(f"[IMAGE_LOAD_TASK] Loaded thumbnail from disk cache for {file_basename} in {total_time:.3f}s (size: {scaled_width}x{scaled_height})")
                                     self.signal.loaded.emit(self.index, scaled_image, self.generation)
                                     return
                                 else:
@@ -2807,6 +2807,9 @@ class JustifiedGallery(QWidget):
                 widget = self._visible_widgets.pop(file_path)
                 widget.hide()
                 self._widget_pool.append(widget)
+        
+        # Performance: Keep track if we applied any cached pixmaps
+        cached_pixmaps_applied = False
 
         # 2. Instantiate/Recycle widgets for new visible items
         for i, item in to_instantiate:
@@ -2843,11 +2846,11 @@ class JustifiedGallery(QWidget):
                 if cached_pixmap and not cached_pixmap.isNull():
                     cache_hit = True
                     cache_bucket = bucket
-                    logger.info(f"[GALLERY] Cache hit for {os.path.basename(file_path)} in bucket {bucket} (pixmap size: {cached_pixmap.width()}x{cached_pixmap.height()})")
+                    logger.debug(f"[GALLERY] Cache hit for {os.path.basename(file_path)} in bucket {bucket} (pixmap size: {cached_pixmap.width()}x{cached_pixmap.height()})")
                     break
             
             if cache_hit and cached_pixmap:
-                logger.info(f"[GALLERY] Applying cached thumbnail to widget: {os.path.basename(file_path)} (from bucket {cache_bucket})")
+                logger.debug(f"[GALLERY] Applying cached thumbnail to widget: {os.path.basename(file_path)} (from bucket {cache_bucket})")
                 # Scale to exact widget size if needed
                 widget_h = widget.height()
                 widget_w = widget.width()
@@ -2874,30 +2877,29 @@ class JustifiedGallery(QWidget):
                     
                     # Force widget update to ensure display
                     widget.update()
-                    widget.repaint()
+                    # widget.repaint() # Removed individual repaint for performance
+
+                    # PERFORMANCE: Set flag to update parent once later
+                    cached_pixmaps_applied = True
                     
-                    # Also update parent and gallery widget to ensure visibility
-                    if widget.parent():
-                        widget.parent().update()
-                        widget.parent().repaint()
-                    
-                    # Update the gallery widget itself
-                    self.update()
-                    self.repaint()  # Force repaint of entire gallery
-                    
-                    # Process events to ensure UI updates immediately
-                    from PyQt6.QtWidgets import QApplication
-                    QApplication.processEvents()
+                    # Process events to ensure UI updates immediately (throttled)
+                    if not hasattr(self, '_process_events_counter'):
+                        self._process_events_counter = 0
+                    self._process_events_counter += 1
+                    if self._process_events_counter % 5 == 0:
+                        from PyQt6.QtWidgets import QApplication
+                        QApplication.processEvents()
                     
                     # Count cached images as loaded
                     if hasattr(self, '_visible_images_loaded'):
                         self._visible_images_loaded += 1
-                    logger.info(f"[GALLERY] Successfully applied cached thumbnail to widget: {os.path.basename(file_path)}")
+                    logger.debug(f"[GALLERY] Successfully applied cached thumbnail to widget: {os.path.basename(file_path)}")
                 else:
                     logger.warning(f"[GALLERY] Widget has invalid size {widget_w}x{widget_h} for {os.path.basename(file_path)}, cannot apply cached pixmap")
                     widget.setText("Loading...")
             else:
-                logger.info(f"[GALLERY] Cache miss for {os.path.basename(file_path)}, will load from disk (checked {len(self._row_height_buckets)} buckets)")
+                # Log cache miss for debugging
+                logger.debug(f"[GALLERY] Cache miss for {os.path.basename(file_path)}, will load from disk (checked {len(self._row_height_buckets)} buckets)")
                 widget.setText("Loading...")
                 # Track images that need loading
                 if hasattr(self, '_visible_images_to_load'):
@@ -2911,6 +2913,11 @@ class JustifiedGallery(QWidget):
                         self._priority_queue = [x for x in self._priority_queue if x[1] != file_path]
                     except: pass
                     self._priority_queue.append(entry)
+
+        # PERFORMANCE: Call update/repaint once after applying multiple cached pixmaps
+        if cached_pixmaps_applied:
+            self.update()
+            # self.repaint() # Only update is usually enough, repaint is heavy
 
         # Log loading start information
         if hasattr(self, '_gallery_load_start_time') and self._gallery_load_start_time:
@@ -3225,8 +3232,12 @@ class JustifiedGallery(QWidget):
                         self.update()
                         self.repaint()
                         
-                        # Process events to ensure UI updates immediately
-                        QApplication.processEvents()
+                        # Process events to ensure UI updates immediately (throttled)
+                        if not hasattr(self, '_process_events_counter'):
+                            self._process_events_counter = 0
+                        self._process_events_counter += 1
+                        if self._process_events_counter % 5 == 0:
+                            QApplication.processEvents()
                         
                         # Track loaded images
                         if hasattr(self, '_visible_images_loaded'):
@@ -3264,12 +3275,15 @@ class JustifiedGallery(QWidget):
                                 if label.parent():
                                     label.parent().update()
                                     label.parent().repaint()
-                                # Update the gallery widget itself
-                                self.update()
-                                self.repaint()
+                                # self.update()
+                                # self.repaint()
                                 
-                                # Process events to ensure UI updates immediately
-                                QApplication.processEvents()
+                                # Process events to ensure UI updates immediately (throttled)
+                                if not hasattr(self, '_process_events_counter'):
+                                    self._process_events_counter = 0
+                                self._process_events_counter += 1
+                                if self._process_events_counter % 5 == 0:
+                                    QApplication.processEvents()
                                 
                                 # Track loaded images
                                 if hasattr(self, '_visible_images_loaded'):
@@ -3327,12 +3341,15 @@ class JustifiedGallery(QWidget):
                                 if widget.parent():
                                     widget.parent().update()
                                     widget.parent().repaint()
-                                # Update the gallery widget itself
-                                self.update()
-                                self.repaint()
+                                # self.update()
+                                # self.repaint()
                                 
-                                # Process events to ensure UI updates immediately
-                                QApplication.processEvents()
+                                # Process events to ensure UI updates immediately (throttled)
+                                if not hasattr(self, '_process_events_counter'):
+                                    self._process_events_counter = 0
+                                self._process_events_counter += 1
+                                if self._process_events_counter % 5 == 0:
+                                    QApplication.processEvents()
                                 
                                 if hasattr(self, '_visible_images_loaded'):
                                     self._visible_images_loaded += 1
@@ -3552,9 +3569,23 @@ class JustifiedGallery(QWidget):
         self._metadata_cache = {}
         
         # 2. Reset scroll position and selection for new folder
-        if hasattr(self, 'parent_scroll_area') and self.parent_scroll_area:
-            self.parent_scroll_area.verticalScrollBar().setValue(0)
-            self.parent_scroll_area.horizontalScrollBar().setValue(0)
+        from PyQt6.QtWidgets import QScrollArea
+        # Robustly find parent scroll area using parent_viewer reference or hierarchy
+        parent_scroll = None
+        if hasattr(self, 'parent_viewer') and self.parent_viewer and hasattr(self.parent_viewer, 'gallery_scroll'):
+            parent_scroll = self.parent_viewer.gallery_scroll
+        
+        if not parent_scroll:
+            # Fallback: traverse up
+            parent = self.parent()
+            if parent and isinstance(parent, QScrollArea):
+                parent_scroll = parent
+            elif parent and parent.parent() and isinstance(parent.parent(), QScrollArea):
+                parent_scroll = parent.parent()
+                
+        if parent_scroll and isinstance(parent_scroll, QScrollArea):
+            parent_scroll.verticalScrollBar().setValue(0)
+            parent_scroll.horizontalScrollBar().setValue(0)
             
         # 3. Increase generation to invalidate pending loads
         self._gallery_generation += 1
@@ -5543,7 +5574,7 @@ class RAWImageViewer(QMainWindow):
             self.gallery_justified.set_images(self.image_files, bulk_metadata)
             
             total_time = time.time() - start_time
-            logger.info(f"[GALLERY] ========== GALLERY LAYOUT COMPLETED in {total_time:.3f}s ==========")
+            logger.debug(f"[GALLERY] ========== GALLERY LAYOUT COMPLETED in {total_time:.3f}s ==========")
     
     def _add_gallery_row(self, row_items, available_width, content_width, row_height, row_spacing):
             """Add a single row - based on reference code add_row method"""
@@ -5606,7 +5637,13 @@ class RAWImageViewer(QMainWindow):
             """Load thumbnail simply - based on reference code"""
             from PyQt6.QtWidgets import QApplication
             from PyQt6.QtCore import QTimer
-            QApplication.processEvents()
+            
+            # Throttling processEvents to prevent stack overflow
+            if not hasattr(self, '_gallery_simple_load_counter'):
+                self._gallery_simple_load_counter = 0
+            self._gallery_simple_load_counter += 1
+            if self._gallery_simple_load_counter % 5 == 0:
+                QApplication.processEvents()
             
             pixmap = self._get_gallery_pixmap(file_path)
             if not pixmap or pixmap.isNull():
@@ -6218,9 +6255,14 @@ class RAWImageViewer(QMainWindow):
         final_target_height = target_height
         
         def load_thumbnail():
-            # Process events at start to keep UI responsive
-            from PyQt6.QtWidgets import QApplication
-            QApplication.processEvents()
+            # Throttling processEvents to prevent stack overflow
+            if not hasattr(self, '_gallery_load_counter'):
+                self._gallery_load_counter = 0
+            self._gallery_load_counter += 1
+            if self._gallery_load_counter % 5 == 0:
+                from PyQt6.QtWidgets import QApplication
+                QApplication.processEvents()
+            
             load_start = time.time()
             # Use local variables for target dimensions
             local_target_width = final_target_width
@@ -6245,7 +6287,7 @@ class RAWImageViewer(QMainWindow):
                 if file_path in self._gallery_load_tracking:
                     self._gallery_load_tracking[file_path]['loaded'] = True
                     self._gallery_load_tracking[file_path]['load_time'] = load_time
-                logger.info(f"[GALLERY] [PIXMAP] {os.path.basename(file_path)} - Loaded from cache in {load_time:.3f}s")
+                logger.debug(f"[GALLERY] [PIXMAP] {os.path.basename(file_path)} - Loaded from cache in {load_time:.3f}s")
                 
                 # Get actual image dimensions
                 pixmap_width = pixmap.width()
@@ -6316,7 +6358,7 @@ class RAWImageViewer(QMainWindow):
                     self._gallery_load_tracking[file_path]['displayed'] = True
                     self._gallery_load_tracking[file_path]['display_time'] = display_time
                     total_time = time.time() - self._gallery_load_tracking[file_path]['start_time']
-                    logger.info(f"[GALLERY] [IMAGE] {os.path.basename(file_path)} - Loaded in {load_time:.3f}s, Displayed in {display_time:.3f}s, Total: {total_time:.3f}s")
+                    logger.debug(f"[GALLERY] [IMAGE] {os.path.basename(file_path)} - Loaded in {load_time:.3f}s, Displayed in {display_time:.3f}s, Total: {total_time:.3f}s")
             except Exception as e:
                 logger.warning(f"Error loading justified thumbnail for {os.path.basename(file_path)}: {e}")
                 import traceback
@@ -6382,10 +6424,16 @@ class RAWImageViewer(QMainWindow):
                         file_ext = os.path.splitext(file_path)[1].lower()
                         raw_extensions = ['.arw', '.cr2', '.nef', '.raf', '.orf', '.dng', '.cr3', '.rw2', '.rwl', '.srw']
                         
+                        # Throttling processEvents to prevent stack overflow
+                        if not hasattr(self, '_gallery_pixmap_load_counter'):
+                            self._gallery_pixmap_load_counter = 0
+                        self._gallery_pixmap_load_counter += 1
+                        do_process = (self._gallery_pixmap_load_counter % 5 == 0)
+
                         # For RAW files, try to extract embedded JPEG preview (fast)
                         if file_ext in raw_extensions:
                             # Process events before file I/O to keep UI responsive
-                            QApplication.processEvents()
+                            if do_process: QApplication.processEvents()
                             try:
                                 pixmap = self._extract_embedded_preview(file_path)
                                 if pixmap and not pixmap.isNull():
@@ -6397,13 +6445,13 @@ class RAWImageViewer(QMainWindow):
                         # For non-RAW files, try direct QPixmap load
                         if (not pixmap or pixmap.isNull()) and file_ext not in raw_extensions:
                             # Process events before file I/O to keep UI responsive
-                            QApplication.processEvents()
+                            if do_process: QApplication.processEvents()
                             pixmap = self._load_pixmap_safe(file_path)
                             if pixmap.isNull():
                                 # If QPixmap fails, try PIL Image
                                 try:
                                     # Process events before PIL operations
-                                    QApplication.processEvents()
+                                    if do_process: QApplication.processEvents()
                                     pil_image = Image.open(file_path)
                                     if pil_image.mode != 'RGB':
                                         pil_image = pil_image.convert('RGB')
@@ -6425,13 +6473,13 @@ class RAWImageViewer(QMainWindow):
                         if (not pixmap or pixmap.isNull()) and hasattr(self, 'image_cache'):
                             try:
                                 # Process events before cache access
-                                QApplication.processEvents()
+                                if do_process: QApplication.processEvents()
                                 thumbnail_data = self.image_cache.get_thumbnail(file_path)
                                 if thumbnail_data is not None:
                                     # Use unified conversion method
                                     pixmap = self._numpy_to_qpixmap(thumbnail_data)
                                     # Process events after conversion
-                                    QApplication.processEvents()
+                                    if do_process: QApplication.processEvents()
                             except Exception as thumb_error:
                                 logger.debug(f"Error getting thumbnail from cache for {os.path.basename(file_path)}: {thumb_error}")
                                 import traceback
@@ -6828,14 +6876,29 @@ class RAWImageViewer(QMainWindow):
                 except:
                     timestamp = 0
             
-            sort_keys[fp] = (timestamp, os.path.basename(fp).lower())
+            # Use natural sort for filename tie-breaking (e.g. IMG_9 before IMG_10)
+            import re
+            def natural_key(text):
+                return [int(c) if c.isdigit() else c.lower() for c in re.split(r'(\d+)', text)]
+            
+            sort_keys[fp] = (timestamp, natural_key(os.path.basename(fp)))
         
-        # 3. Perform the sort using pre-calculated keys
-        sorted_files = sorted(
-            file_paths, 
-            key=lambda fp: sort_keys[fp],
-            reverse=newest_first
-        )
+        # 3. Perform the sort
+        if newest_first:
+            # For newest first, we want: High Timestamp -> Low Timestamp. Tie: A -> Z Filename.
+            # Python's sort is stable. We can sort by filename (Asc) then by timestamp (Desc).
+            # OR we can use a key that negates the timestamp.
+            
+            sorted_files = sorted(
+                file_paths,
+                key=lambda fp: (-sort_keys[fp][0], sort_keys[fp][1])
+            )
+        else:
+            # Oldest first: Low Timestamp -> High Timestamp. Tie: A -> Z Filename.
+            sorted_files = sorted(
+                file_paths,
+                key=lambda fp: sort_keys[fp]
+            )
         
         sort_time = time.time() - sort_start
         logger.info(f"[SORT] Bulk metadata fetch & sort of {len(file_paths)} files took {sort_time:.3f}s")
@@ -7399,6 +7462,10 @@ class RAWImageViewer(QMainWindow):
         import traceback
         logger = logging.getLogger(__name__)
         load_start = time.time()
+        
+        # Robust initialization to prevent UnboundLocalError in exception handler
+        requested_file_path = file_path
+        
         logger.info(f"[LOAD] ========== load_raw_image() STARTED at {load_start:.3f} ==========")
         logger.info(f"[LOAD] File path: {file_path}")
         logger.info(f"[LOAD] Previous file: {getattr(self, 'current_file_path', 'None')}")
@@ -7414,7 +7481,6 @@ class RAWImageViewer(QMainWindow):
 
             # Store the requested file path for later comparison (after cleanup)
             # This allows us to detect if file changed during cleanup due to rapid navigation
-            requested_file_path = file_path
             
             logger.info(f"[LOAD] File exists, proceeding with load")
             print(f"[PERF] Loading image: {os.path.basename(requested_file_path)}")
@@ -7659,8 +7725,13 @@ class RAWImageViewer(QMainWindow):
             logger.error(f"[LOAD] ========== CRITICAL ERROR in load_raw_image (at {time.time():.3f}, duration: {total_time:.3f}s) ==========")
             logger.error(f"[LOAD] Exception type: {type(e).__name__}, message: {e}", exc_info=True)
             logger.error(f"[LOAD] Full traceback:\n{traceback.format_exc()}")
-            requested_file_name = requested_file_path if 'requested_file_path' in locals() else (file_path if 'file_path' in locals() else 'unknown')
-            print(f"[PERF] ❌ LOAD ERROR: {os.path.basename(requested_file_name)} failed after {total_time*1000:.1f}ms - {type(e).__name__}: {e}")
+            # Safe extraction of filename for error logging
+            try:
+                err_file_path = requested_file_path if 'requested_file_path' in locals() else (file_path if 'file_path' in locals() else 'unknown')
+                err_filename = os.path.basename(err_file_path)
+            except:
+                err_filename = "unknown"
+            print(f"[PERF] ❌ LOAD ERROR: {err_filename} failed after {total_time*1000:.1f}ms - {type(e).__name__}: {e}")
             # Try to show error to user
             try:
                 self.show_error("Load Error", f"Failed to load image: {str(e)}")
@@ -10027,6 +10098,8 @@ class RAWImageViewer(QMainWindow):
             height: Image height (optional)
             exif_data: Direct EXIF data dict to use instead of cache (optional)
         """
+        import warnings
+        
         if not hasattr(self, 'status_metadata_label') or not hasattr(self, 'status_counter_label'):
             # Fallback to old method if UI components not initialized
             if not self.current_file_path:
@@ -10367,8 +10440,6 @@ class RAWImageViewer(QMainWindow):
         if not exif_info and self.current_file_path:
             logger.warning(f"[STATUS] No metadata extracted from cache or fallback. Attempting direct file read with exifread.")
             try:
-                import exifread
-                import warnings
                 with warnings.catch_warnings():
                     warnings.filterwarnings('ignore', category=UserWarning, module='exifread')
                     with open(self.current_file_path, 'rb') as f:
@@ -10780,9 +10851,13 @@ class RAWImageViewer(QMainWindow):
             # Sort files according to user preference
             sort_start = time.time()
             try:
-                # Process events periodically during sorting to keep UI responsive
+                # Process events periodically during sorting to keep UI responsive (throttled)
                 from PyQt6.QtWidgets import QApplication
-                QApplication.processEvents()
+                if not hasattr(self, '_folder_load_process_counter'):
+                    self._folder_load_process_counter = 0
+                self._folder_load_process_counter += 1
+                if self._folder_load_process_counter % 5 == 0:
+                    QApplication.processEvents()
                 
                 self.current_folder = folder_path
                 # Pass file_stats to avoid redundant os.stat calls during sorting
@@ -10851,10 +10926,14 @@ class RAWImageViewer(QMainWindow):
                         # - Increments generation counter to invalidate old tasks
                         # - Clears load queues
                         # - Resets background loading state
-                        # - Properly rebuilds gallery
-                        # Process events before setting images to keep UI responsive
+                        # Properly rebuilds gallery
+                        # Process events before setting images to keep UI responsive (throttled)
                         from PyQt6.QtWidgets import QApplication
-                        QApplication.processEvents()
+                        if not hasattr(self, '_gallery_set_images_process_counter'):
+                            self._gallery_set_images_process_counter = 0
+                        self._gallery_set_images_process_counter += 1
+                        if self._gallery_set_images_process_counter % 5 == 0:
+                            QApplication.processEvents()
                         self.gallery_justified.set_images(self.image_files.copy(), bulk_metadata)
                 else:
                     # Single view mode - just show single view, don't load gallery

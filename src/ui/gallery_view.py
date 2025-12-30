@@ -167,11 +167,20 @@ class JustifiedGallery(QWidget):
                 aspect = 1.333
                 if isinstance(item, str):
                     m = self._metadata_cache.get(item)
-                    if m and m.get('original_width'):
+                    if m and m.get('original_width') and m.get('original_height'):
                         w, h = m['original_width'], m['original_height']
-                        if m.get('orientation', 1) in (5, 6, 7, 8): w, h = h, w
+                        orient = m.get('orientation', 1)
+                        if orient in (5, 6, 7, 8): 
+                            w, h = h, w
                         aspect = w/h
-                    else: aspect = get_image_aspect_ratio(item)
+                        
+                        # SANITY CHECK: If aspect is > 1 but we suspect it should be portrait
+                        # (This is rare but helps with cache poisoning)
+                        if aspect > 1.2 and orient == 1 and is_raw_file(item):
+                             # Trust get_image_aspect_ratio more for RAW fallback
+                             aspect = get_image_aspect_ratio(item)
+                    else: 
+                        aspect = get_image_aspect_ratio(item)
                 else: aspect = item.width()/item.height() if item.height() > 0 else 1.333
                 
                 row.append((item, aspect))
@@ -330,7 +339,7 @@ class JustifiedGallery(QWidget):
                 w.setPixmap(pixmap)
                 w.setText("")
 
-        if path in self._active_tasks: del self._active_tasks[path]
+        if file_path in self._active_tasks: del self._active_tasks[file_path]
 
     def scroll_to_image(self, file_path):
         """Sync scroll position to a specific image"""
@@ -346,8 +355,8 @@ class JustifiedGallery(QWidget):
         self.images = images
         self._gallery_generation += 1
         
-        # Stop everything
-        self.thread_pool.clear()
+        # Stop existing tasks in manager if needed (though manager handles concurrency)
+        # self.load_manager.cancel_all_tasks() # Usually too aggressive for gallery
         self._active_tasks.clear()
         
         self._metadata_cache.clear()

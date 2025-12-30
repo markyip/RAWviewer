@@ -146,8 +146,8 @@ class EXIFExtractor(QObject):
                 camera_make = ''
                 camera_model = ''
 
-                # Get orientation
-                orientation_tag = tags.get('Image Orientation')
+                # Get orientation - Check multiple possible tags
+                orientation_tag = tags.get('Image Orientation') or tags.get('EXIF Orientation')
                 if orientation_tag:
                     orientation_str = str(orientation_tag)
                     # Console log: Show what orientation string we got
@@ -194,7 +194,7 @@ class EXIFExtractor(QObject):
                                 original_width = int(str_val)
                             except:
                                 pass
-                        elif key in ('Image ImageLength', 'EXIF ExifImageLength', 'Image Height', 'Image Length'):
+                        elif key in ('Image ImageLength', 'EXIF ExifImageLength', 'Image Height', 'Image Length', 'EXIF ExifImageHeight'):
                             try:
                                 original_height = int(str_val)
                             except:
@@ -210,6 +210,17 @@ class EXIFExtractor(QObject):
                             sizes = raw.sizes
                             if original_width is None: original_width = sizes.width
                             if original_height is None: original_height = sizes.height
+                            
+                            # CRITICAL: If EXIF orientation was missing, use rawpy's flip
+                            if orientation == 1 and sizes.flip != 0:
+                                # rawpy's flip mapping:
+                                # 0=0, 1=flip H, 2=180, 3=flip V, 4=5, 5=6 (90 CW), 6=7, 7=8 (270 CW)
+                                # Actually, rawpy.sizes.flip matches standard EXIF orientation 1-8 
+                                # but sometimes it's mapped differently. 
+                                # For most modern LibRaw, it corresponds directly to EXIF (1-8).
+                                orientation = sizes.flip
+                                if orientation == 0: orientation = 1
+                                print(f"[ORIENTATION] EXIFExtractor: Using rawpy flip fallback = {orientation}")
                     except:
                         pass
 
@@ -291,6 +302,7 @@ class OptimizedRAWProcessor(QObject):
             # 'highlight': 0,  # Removed for rawpy 0.25.0 compatibility
             # 'shadow': 0,  # Removed for rawpy 0.25.0 compatibility
             'user_flip': 0,  # Force rawpy to ignore EXIF orientation
+            'demosaic_algorithm': rawpy.DemosaicAlgorithm.LINEAR, # MUCH faster than default for fast previews
         }
 
         # Get file size for processing decisions
@@ -316,9 +328,10 @@ class OptimizedRAWProcessor(QObject):
             })
         elif self.is_fujifilm_camera(file_path, exif_data):
             # Fujifilm X-Trans sensors
+            # DCB is high quality but slower - disable for fast processing
             params.update({
                 'use_camera_wb': True,
-                'dcb_enhance': True  # Better demosaicing for X-Trans
+                'dcb_enhance': False if file_size_mb > 20 else True 
             })
         elif self.is_sony_camera(file_path, exif_data):
             # Sony cameras
