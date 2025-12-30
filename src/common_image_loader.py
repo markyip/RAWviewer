@@ -153,6 +153,7 @@ def get_image_aspect_ratio(file_path: str) -> float:
         
         if original_width and original_height and original_height > 0:
             # Handle orientation swap
+            # EXIF tags like ExifImageWidth often refer to the SENSOR width
             if orientation in (5, 6, 7, 8):
                 return original_height / original_width
             return original_width / original_height
@@ -174,25 +175,16 @@ def get_image_aspect_ratio(file_path: str) -> float:
             # 只讀取 Metadata，不處理圖像
             with rawpy.imread(file_path) as raw:
                 sizes = raw.sizes
+                # Use iwidth and iheight as they already account for orientation (rotation)
+                # sizes.iwidth and iheight are internal dimensions after rotation
+                # HOWEVER, for absolute safety with all rawpy versions, 
+                # let's check flip and swap sensor dimensions manually if needed.
                 w = sizes.width
                 h = sizes.height
+                flip = sizes.flip
                 
-                # Consider orientation for RAW files
-                # raw.sizes.flip is the orientation (same as EXIF)
-                # 0: normal, 1: flip horizontal, 2: rotate 180, 3: flip vertical,
-                # 4: mirror horizontal + rotate 270 CW, 5: rotate 90 CW, 
-                # 6: mirror horizontal + rotate 90 CW, 7: rotate 270 CW
-                
-                # However, rawpy's flip mapping is slightly different or can be used with postprocess(user_flip=X)
-                # For aspect ratio, we just need to know if it's 90/270 rotated.
-                # raw.sizes.iwidth and iheight are the dimensions AFTER rotation if flip != 0?
-                # Actually, raw.sizes.width/height is sensor.
-                # Let's use the same logic as EXIF orientation if we can get it.
-                
-                # Try to use rawpy's own orientation (flip)
-                flip = raw.sizes.flip
-                if flip in (5, 6, 7): # 90 or 270 degree rotations in rawpy
-                    if w > 0: return h / w
+                if flip in (5, 6, 7, 8):
+                    w, h = h, w
                 
                 if h > 0:
                     return w / h

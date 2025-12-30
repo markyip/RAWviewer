@@ -33,13 +33,15 @@ class UnifiedImageProcessor:
         """檢查是否為 RAW 文件"""
         return is_raw_file(file_path)
     
-    def process_thumbnail(self, file_path: str) -> Optional[np.ndarray]:
+    def process_thumbnail(self, file_path: str, exif_data: Optional[Dict[str, Any]] = None) -> Optional[np.ndarray]:
         """處理縮圖（統一接口）"""
         # 檢查快取
         cached = self.cache.get_thumbnail(file_path)
         if cached is not None:
             # Self-healing check: verify if cached thumbnail orientation matches shape
-            exif_data = self.exif_extractor.extract_exif_data(file_path)
+            if exif_data is None:
+                exif_data = self.exif_extractor.extract_exif_data(file_path)
+            
             orientation = exif_data.get('orientation', 1) if exif_data else 1
             if orientation in (6, 8):
                 h, w = cached.shape[:2]
@@ -61,7 +63,9 @@ class UnifiedImageProcessor:
         
         if thumbnail is not None:
             # 獲取 EXIF 數據以獲取 orientation
-            exif_data = self.exif_extractor.extract_exif_data(file_path)
+            if exif_data is None:
+                exif_data = self.exif_extractor.extract_exif_data(file_path)
+            
             orientation = exif_data.get('orientation', 1) if exif_data else 1
             if orientation != 1:
                 import logging
@@ -103,9 +107,22 @@ class UnifiedImageProcessor:
                     scale = min(max_dim / w, max_dim / h)
                     new_w = max(1, int(w * scale))
                     new_h = max(1, int(h * scale))
-                    # Use Bilinear for better speed vs Lanczos for thumbnails
-                    thumbnail_small_pil = pil_img.resize((new_w, new_h), Image.Resampling.BILINEAR)
-                    thumbnail_small = np.array(thumbnail_small_pil)
+                    
+                    # OPTIMIZATION: Use OpenCV for much faster resizing if available
+                    cv_resized = False
+                    try:
+                        import cv2
+                        # INTER_AREA is best for shrinking
+                        thumbnail_small = cv2.resize(thumbnail, (new_w, new_h), interpolation=cv2.INTER_AREA)
+                        thumbnail_small_pil = Image.fromarray(thumbnail_small)
+                        cv_resized = True
+                    except ImportError:
+                        pass
+                        
+                    if not cv_resized:
+                        # Use Bilinear for better speed vs Lanczos for thumbnails
+                        thumbnail_small_pil = pil_img.resize((new_w, new_h), Image.Resampling.BILINEAR)
+                        thumbnail_small = np.array(thumbnail_small_pil)
                 
                 # 2. Encode to JPEG for efficient disk caching
                 # We cache the PROCESSED (Oriented + Resized) thumbnail
@@ -130,7 +147,8 @@ class UnifiedImageProcessor:
         return thumbnail
     
     def process_full_image(self, file_path: str, 
-                          use_full_resolution: bool = False) -> Optional[Union[np.ndarray, QPixmap]]:
+                          use_full_resolution: bool = False,
+                          exif_data: Optional[Dict[str, Any]] = None) -> Optional[Union[np.ndarray, QPixmap]]:
         """處理完整圖像（統一接口）"""
         # 檢查快取
         # CRITICAL: For RAW files, only check full_image cache, not pixmap cache
@@ -141,7 +159,9 @@ class UnifiedImageProcessor:
             cached_image = self.cache.get_full_image(file_path)
             if cached_image is not None:
                 # Orientation verification for cache hit
-                exif_data = self.exif_extractor.extract_exif_data(file_path)
+                if exif_data is None:
+                    exif_data = self.exif_extractor.extract_exif_data(file_path)
+                
                 orientation = exif_data.get('orientation', 1) if exif_data else 1
                 h, w = cached_image.shape[:2]
                 
@@ -167,16 +187,18 @@ class UnifiedImageProcessor:
         
         # 處理圖像
         if is_raw:
-            return self._process_raw_image(file_path, use_full_resolution)
+            return self._process_raw_image(file_path, use_full_resolution, exif_data)
         else:
             return self._process_regular_image(file_path)
     
     def _process_raw_image(self, file_path: str, 
-                          use_full_resolution: bool = False) -> Optional[np.ndarray]:
+                          use_full_resolution: bool = False,
+                          exif_data: Optional[Dict[str, Any]] = None) -> Optional[np.ndarray]:
         """處理 RAW 圖像"""
         try:
             # 獲取 EXIF 數據（用於處理參數）
-            exif_data = self.exif_extractor.extract_exif_data(file_path)
+            if exif_data is None:
+                exif_data = self.exif_extractor.extract_exif_data(file_path)
             
             # 檢查文件大小以決定處理策略
             file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
