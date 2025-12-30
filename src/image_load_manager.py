@@ -14,6 +14,7 @@ import numpy as np
 from PyQt6.QtCore import QObject, pyqtSignal, QRunnable, QThreadPool
 from PyQt6.QtGui import QPixmap
 
+import concurrent.futures
 from image_cache import get_image_cache
 # UnifiedImageProcessor will be imported lazily to avoid circular import issues
 
@@ -171,7 +172,19 @@ class ImageLoadManager(QObject):
         
         self._work_queue = queue.PriorityQueue()
         self._thread_pool = QThreadPool()
+        
+        # INCREASED CONCURRENCY: Scale with CPU cores
+        # For I/O bound tasks (thumbnails), we can have many threads
+        core_count = os.cpu_count() or 4
+        default_workers = max(12, core_count * 2) 
+        if max_workers == 4: # If default was used, upgrade it
+            max_workers = default_workers
+            
         self._thread_pool.setMaxThreadCount(max_workers)
+        
+        # PROCESS POOL: For heavy RAW processing to bypass GIL
+        self._process_pool = concurrent.futures.ProcessPoolExecutor(max_workers=max(2, core_count // 2))
+        
         self._active_tasks: Dict[str, ImageLoadTask] = {}
         self._cache = get_image_cache()
         self._queue_lock = threading.Lock()
@@ -225,6 +238,15 @@ class ImageLoadManager(QObject):
                 self._work_queue.get_nowait()
             except queue.Empty:
                 break
+        
+        # Shutdown process pool
+        self.shutdown()
+
+    def shutdown(self):
+        """關閉管理器並清理資源"""
+        self._stopped = True
+        if hasattr(self, '_process_pool') and self._process_pool:
+            self._process_pool.shutdown(wait=False)
     
     def _check_cache(self, file_path: str, use_full_resolution: bool) -> bool:
         """檢查快取，如果存在則直接發送信號"""

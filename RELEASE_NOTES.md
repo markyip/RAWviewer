@@ -1,5 +1,31 @@
 # RAWviewer Release Notes
 
+## 🚀 Version 12.2 - Orientation & Build Optimization
+**Release Date: December 30, 2025**
+
+### 🎯 What's New
+**Definitive fixes for RAW orientation, gallery layout consistency, and build process reliability.**
+
+This release addresses critical issues with RAW file rotation (especially Sony ARW), resolves pillarboxing in the gallery view, and ensures a seamless build process across Windows and macOS by synchronizing dependencies.
+
+### ✨ Key Features
+
+#### 📸 Perfect RAW Orientation
+✅ **Sony ARW Fix** – Resolved inconsistencies where some Sony RAW files appeared sideways despite correct EXIF data.
+✅ **Smart Rotation Logic** – Improved orientation handling for all RAW formats, ensuring images are always displayed upright without double-correction.
+✅ **Self-Healing Cache** – Implemented logic to detect and re-process cached thumbnails if their orientation doesn't match the source file.
+
+#### 🖼️ Gallery Improvements
+✅ **No More Pillarboxes** – Fixed incorrect aspect ratio calculations that caused black bars (pillarboxing) in the gallery view for portrait-oriented RAW files.
+✅ **Optimized Dimension Extraction** – Enhanced EXIF extraction logic with a fast `rawpy` fallback for accurate image dimensions.
+✅ **BITMAP Thumbnail Safety** – Enforced size limits on BITMAP-format thumbnails to prevent cache corruption.
+
+#### 🛠️ Build & Dependency Sync
+✅ **Unified Dependencies** – Synchronized `requirements.txt`, `build.py`, and platform-specific build scripts (`build_windows.bat`, `build_macos.sh`).
+✅ **Reliable Executables** – Ensured `qtawesome` and `pyqtgraph` are correctly bundled in all builds.
+
+---
+
 ## 🚀 Version 1.2 - Performance Revolution
 **Release Date: December 27, 2025**
 

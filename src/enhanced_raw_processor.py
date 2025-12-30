@@ -36,15 +36,15 @@ class ThumbnailExtractor(QObject):
             with rawpy.imread(file_path) as raw:
                 thumb = raw.extract_thumb()
 
-                thumb_array = None
                 if thumb.format == rawpy.ThumbFormat.JPEG:
                     # Convert JPEG bytes to numpy array
+                    from PIL import Image
                     jpeg_image = Image.open(io.BytesIO(thumb.data))
-                    from PIL import ImageOps
-                    # Apply EXIF orientation if needed (though usually rawpy handles it or we handle later)
-                    # For safety, let's treat it as standard image
-                    if hasattr(ImageOps, 'exif_transpose'):
-                        jpeg_image = ImageOps.exif_transpose(jpeg_image)
+                    
+                    # We NO LONGER use exif_transpose here because orientation correction
+                    # is handled consistently by the caller (UnifiedImageProcessor) 
+                    # using the manual _apply_orientation_correction method.
+                    # This prevents double-rotation issues.
                         
                     if jpeg_image.mode != 'RGB':
                         jpeg_image = jpeg_image.convert('RGB')
@@ -57,11 +57,17 @@ class ThumbnailExtractor(QObject):
                     thumb_array = np.array(jpeg_image)
                     
                 elif thumb.format == rawpy.ThumbFormat.BITMAP:
-                    # Already a numpy array, usually small, but check size
-                    # This is raw RGB data, might need reshaping, rawpy usually gives (h, w, 3)
+                    # Already a numpy array, but some cameras provide full-size bitmaps (e.g. Sony A7 IV)
+                    # We MUST respect max_size to avoid poisoning the cache with huge images
                     thumb_array = thumb.data.copy()
+                    h, w = thumb_array.shape[:2]
                     
-                    # Manual resize for numpy array if needed (skip for now as BITMAP usually small)
+                    if w > max_size or h > max_size:
+                         from PIL import Image
+                         pil_thumb = Image.fromarray(thumb_array)
+                         pil_thumb.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
+                         thumb_array = np.array(pil_thumb)
+                         # logger.debug(f"Resized BITMAP thumbnail from {w}x{h} to {thumb_array.shape[1]}x{thumb_array.shape[0]}")
 
                 return thumb_array
 
@@ -110,6 +116,7 @@ class EXIFExtractor(QObject):
     def extract_exif_data(self, file_path: str) -> Dict[str, Any]:
         """Extract EXIF data with caching."""
         # Check cache first
+        cached_exif = self.cache.get_exif(file_path)
         if cached_exif is not None:
             cached_orientation = cached_exif.get('orientation', 'unknown')
             # Trust the cache - verification should happen at cache level (based on mtime/size)
@@ -181,7 +188,7 @@ class EXIFExtractor(QObject):
                         str_val = str(value)
                         exif_dict[key] = str_val
                         
-                        # Extract dimensions
+                        # Extract dimensions from tags
                         if key in ('Image ImageWidth', 'EXIF ExifImageWidth', 'Image Width'):
                             try:
                                 original_width = int(str_val)
@@ -192,6 +199,17 @@ class EXIFExtractor(QObject):
                                 original_height = int(str_val)
                             except:
                                 pass
+                    except:
+                        pass
+
+                # Fallback to rawpy for dimensions if exifread failed (common for some RAW formats)
+                if (original_width is None or original_height is None) and self._is_raw_file(file_path):
+                    try:
+                        import rawpy
+                        with rawpy.imread(file_path) as raw:
+                            sizes = raw.sizes
+                            if original_width is None: original_width = sizes.width
+                            if original_height is None: original_height = sizes.height
                     except:
                         pass
 
@@ -272,6 +290,7 @@ class OptimizedRAWProcessor(QObject):
             'bright': 1.0,
             # 'highlight': 0,  # Removed for rawpy 0.25.0 compatibility
             # 'shadow': 0,  # Removed for rawpy 0.25.0 compatibility
+            'user_flip': 0,  # Force rawpy to ignore EXIF orientation
         }
 
         # Get file size for processing decisions
@@ -581,15 +600,15 @@ class EnhancedRAWProcessor(QThread):
             return np.rot90(np.fliplr(image_array), 1)
         elif orientation == 6:
             # Orientation 6: Image is rotated 90° CW.
-            # We need to rotate it 90° CCW (k=1) to fix it.
-            return np.rot90(image_array, 1)
+            # We need to rotate it 90° CW (k=3) to fix it.
+            return np.rot90(image_array, 3)
         elif orientation == 7:
             # Mirror LR + rotate 90° CW
             return np.rot90(np.fliplr(image_array), 3)
         elif orientation == 8:
             # Orientation 8: Image is rotated 270° CW (90° CCW).
-            # We need to rotate it 90° CW (k=3) to fix it.
-            return np.rot90(image_array, 3)
+            # We need to rotate it 90° CCW (k=1) to fix it.
+            return np.rot90(image_array, 1)
         else:
             return image_array
 

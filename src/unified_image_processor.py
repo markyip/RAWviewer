@@ -38,13 +38,26 @@ class UnifiedImageProcessor:
         # 檢查快取
         cached = self.cache.get_thumbnail(file_path)
         if cached is not None:
-            return cached
+            # Self-healing check: verify if cached thumbnail orientation matches shape
+            exif_data = self.exif_extractor.extract_exif_data(file_path)
+            orientation = exif_data.get('orientation', 1) if exif_data else 1
+            if orientation in (6, 8):
+                h, w = cached.shape[:2]
+                if w > h:
+                    # Mismatch: Portrait metadata but Landscape cached image
+                    print(f"[ORIENTATION] UnifiedImageProcessor: Cached thumbnail for {os.path.basename(file_path)} is UNROTATED (stale). Invalidating caches.")
+                    # Also invalidate EXIF cache to ensure consistent metadata (prevents pillarboxes in gallery)
+                    self.cache.exif_cache.remove(file_path)
+                    cached = None # Force re-processing
+            
+            if cached is not None:
+                return cached
         
         # 提取縮圖 (Max 512px for Gallery)
         if self._is_raw_file(file_path):
             thumbnail = self.thumbnail_extractor.extract_thumbnail_from_raw(file_path, max_size=512)
         else:
-            thumbnail = self.thumbnail_extractor.extract_thumbnail_from_image(file_path, max_size=512)
+            thumbnail, _ = self.thumbnail_extractor.extract_thumbnail_from_image(file_path, max_size=512)
         
         if thumbnail is not None:
             # 獲取 EXIF 數據以獲取 orientation
@@ -81,17 +94,18 @@ class UnifiedImageProcessor:
                 # 1. Resize efficient usage (max 512px)
                 w, h = pil_img.size
                 max_dim = 512
-                scale = min(max_dim / w, max_dim / h)
                 
-                if scale < 1.0:
-                    new_w = max(1, int(w * scale))
-                    new_h = max(1, int(h * scale))
-                    thumbnail_small_pil = pil_img.resize((new_w, new_h), Image.Resampling.LANCZOS)
-                    # Convert back to numpy for return
-                    thumbnail_small = np.array(thumbnail_small_pil)
-                else:
+                # OPTIMIZATION: If already smaller than max_dim, skip resize
+                if w <= max_dim and h <= max_dim:
                     thumbnail_small_pil = pil_img
                     thumbnail_small = thumbnail
+                else:
+                    scale = min(max_dim / w, max_dim / h)
+                    new_w = max(1, int(w * scale))
+                    new_h = max(1, int(h * scale))
+                    # Use Bilinear for better speed vs Lanczos for thumbnails
+                    thumbnail_small_pil = pil_img.resize((new_w, new_h), Image.Resampling.BILINEAR)
+                    thumbnail_small = np.array(thumbnail_small_pil)
                 
                 # 2. Encode to JPEG for efficient disk caching
                 # We cache the PROCESSED (Oriented + Resized) thumbnail

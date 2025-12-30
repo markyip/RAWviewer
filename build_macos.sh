@@ -44,7 +44,7 @@ pip install --upgrade pip
 
 # Install/upgrade dependencies
 echo "Installing dependencies..."
-pip install --upgrade PyQt6 rawpy send2trash pyinstaller natsort exifread Pillow psutil numpy
+pip install --upgrade PyQt6 rawpy send2trash pyinstaller natsort exifread Pillow psutil numpy qtawesome pyqtgraph
 
 # Clean previous builds
 echo "Cleaning previous builds..."
