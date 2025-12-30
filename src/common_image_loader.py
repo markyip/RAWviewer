@@ -5,11 +5,44 @@
 """
 
 import os
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Any
 from PyQt6.QtGui import QPixmap, QImage
 # PIL Image will be imported lazily to avoid import delays
 
 from image_cache import get_image_cache
+
+def check_cache_for_image(file_path: str, use_full_resolution: bool = False) -> Tuple[Optional[Any], Optional[str]]:
+    """
+    檢查快取中是否存在圖像或相關數據。
+    
+    返回: (數據, 快取類型) 或 (None, None)
+    類型包括: 'full_image', 'pixmap', 'thumbnail', 'exif'
+    """
+    cache = get_image_cache()
+    
+    # 1. 如果請求全解析度，優先檢查全圖像快取
+    if use_full_resolution:
+        full_image = cache.get_full_image(file_path)
+        if full_image is not None:
+            return full_image, 'full_image'
+            
+    # 2. 檢查 Pixmap 快取 (常用於 QSS/一般顯示)
+    pixmap = cache.get_pixmap(file_path)
+    if pixmap is not None and not pixmap.isNull():
+        return pixmap, 'pixmap'
+        
+    # 3. 如果不是必須全解析度，檢查記憶體縮圖快取
+    if not use_full_resolution:
+        thumbnail = cache.get_thumbnail(file_path)
+        if thumbnail is not None:
+            return thumbnail, 'thumbnail'
+            
+    # 4. 檢查 EXIF 元數據快取
+    exif_data = cache.get_exif(file_path)
+    if exif_data:
+        return exif_data, 'exif'
+        
+    return None, None
 
 def is_raw_file(file_path: str) -> bool:
     """檢查是否為 RAW 文件"""
@@ -124,8 +157,18 @@ def get_image_aspect_ratio(file_path: str) -> float:
                 return original_height / original_width
             return original_width / original_height
     
-    # 對於 RAW 文件，嘗試使用 rawpy 快速獲取尺寸（比 exifread 更可靠）
+    # 對於 RAW 文件，嘗試從快取獲取尺寸，否則使用 rawpy 快速獲取
     if is_raw_file(file_path):
+        # 優先嘗試 EXIF 快取（最快且包含方向）
+        if exif_data:
+            orig_w = exif_data.get('original_width')
+            orig_h = exif_data.get('original_height')
+            orient = exif_data.get('orientation', 1)
+            if orig_w and orig_h and orig_h > 0:
+                if orient in (5, 6, 7, 8):
+                    return orig_h / orig_w
+                return orig_w / orig_h
+                
         try:
             import rawpy
             # 只讀取 Metadata，不處理圖像
@@ -133,17 +176,27 @@ def get_image_aspect_ratio(file_path: str) -> float:
                 sizes = raw.sizes
                 w = sizes.width
                 h = sizes.height
-                # 部分 RAW 格式的 sizes 可能包含黑邊，所以 raw.sizes 雖準確但我們需要考慮 orientation
-                # rawpy 的 sizes 屬性通常是未旋轉的原始感光元件尺寸
                 
-                # 我們還需要讀取 EXIF 來決定是否旋轉
-                # 如果沒有快取 EXIF，我們簡單嘗試讀取
-                # 但這裡為了速度，我們可能需要一個快速的 EXIF 读取器
-                # 暫時簡單讀取，如果沒有 cached EXIF，寬高比可能不正確（未旋轉）
-                # 這可以接受，因為會在 load_visible_images 時修正 layout
+                # Consider orientation for RAW files
+                # raw.sizes.flip is the orientation (same as EXIF)
+                # 0: normal, 1: flip horizontal, 2: rotate 180, 3: flip vertical,
+                # 4: mirror horizontal + rotate 270 CW, 5: rotate 90 CW, 
+                # 6: mirror horizontal + rotate 90 CW, 7: rotate 270 CW
                 
-                # 不過，为了 improved layout stability, 尝试获取 orientation
-                return w / h if h > 0 else 1.333
+                # However, rawpy's flip mapping is slightly different or can be used with postprocess(user_flip=X)
+                # For aspect ratio, we just need to know if it's 90/270 rotated.
+                # raw.sizes.iwidth and iheight are the dimensions AFTER rotation if flip != 0?
+                # Actually, raw.sizes.width/height is sensor.
+                # Let's use the same logic as EXIF orientation if we can get it.
+                
+                # Try to use rawpy's own orientation (flip)
+                flip = raw.sizes.flip
+                if flip in (5, 6, 7): # 90 or 270 degree rotations in rawpy
+                    if w > 0: return h / w
+                
+                if h > 0:
+                    return w / h
+                return 1.333
         except:
              pass
 

@@ -250,6 +250,9 @@ def resource_path(relative_path):
         base_path = os.path.abspath(os.path.join(
             os.path.dirname(os.path.abspath(__file__)), ".."))
     return os.path.join(base_path, relative_path)
+
+
+class RAWProcessor(QThread):
     """Thread for processing RAW images to avoid UI blocking"""
     image_processed = pyqtSignal(object)  # Accepts np.ndarray or None
     error_occurred = pyqtSignal(str)
@@ -791,7 +794,8 @@ def resource_path(relative_path):
                     'half_size': use_fast_processing,
                     'output_bps': 8,  # Use 8-bit for faster processing
                     'no_auto_bright': not use_auto_bright,  # Use auto-brightness for full resolution
-                    'gamma': (2.222, 4.5)  # Standard sRGB gamma
+                    'gamma': (2.222, 4.5),  # Standard sRGB gamma
+                    'user_flip': 0
                 }
                 # Add performance optimizations if available
                 try:
@@ -815,7 +819,8 @@ def resource_path(relative_path):
             postprocess_params = {
                 'output_bps': 8,  # Use 8-bit for faster processing
                 'no_auto_bright': not use_auto_bright_fallback,  # Use auto-brightness for full resolution
-                'gamma': (2.222, 4.5)  # Standard sRGB gamma
+                'gamma': (2.222, 4.5),  # Standard sRGB gamma
+                'user_flip': 0
             }
             # Add performance optimizations if available
             try:
@@ -4273,6 +4278,7 @@ class RAWImageViewer(QMainWindow):
         self._gallery_thumb_labels = {}  # Store thumbnail labels
         self._gallery_load_tracking = {}  # Track loading status
         self._gallery_load_start_time = None  # Track loading start time
+        self._loading_from_gallery = False  # Flag for gallery loading
 
         # Navigation rate limiting and concurrency control
         self._navigation_in_progress = False  # Flag to prevent overlapping navigations
@@ -7524,9 +7530,9 @@ class RAWImageViewer(QMainWindow):
                              '.pef', '.srw', '.x3f', '.raf', '.3fr', '.fff', '.iiq', 
                              '.cap', '.erf', '.mef', '.mos', '.nrw', '.rwl', '.srf'}
             file_ext = os.path.splitext(file_path)[1].lower()
-            is_raw_file = file_ext in raw_extensions
+            is_raw_ext = file_ext in raw_extensions
             
-            if not is_raw_file:
+            if not is_raw_ext:
                 # Only check pixmap cache for non-RAW files (JPEG, PNG, etc.)
                 logger.info(f"[LOAD] Checking for cached pixmap (non-RAW file)")
                 cache_check_start = time.time()
@@ -7595,7 +7601,7 @@ class RAWImageViewer(QMainWindow):
                 request_full_res = False
                 logger.info(f"[LOAD] Requesting Preview resolution (use_full_resolution=False) for fast display")
                 
-                if loading_from_gallery:
+                if self._loading_from_gallery:
                     # Clear the flag after using it
                     self._loading_from_gallery = False
                 
@@ -7809,25 +7815,33 @@ class RAWImageViewer(QMainWindow):
                     logger.info(f"[DISPLAY] Checking for cached pixmap")
                     cached_pixmap = self.image_cache.get_pixmap(self.current_file_path)
                     if cached_pixmap is not None:
-                        logger.info(f"[DISPLAY] Using cached pixmap for {width}x{height} image")
-                        # Orientation check for cached pixmap
-                        # NOTE: If _orientation_already_applied is True, it means either:
-                        # 1. We just processed it from raw/pil (and it's now in memory)
-                        # 2. Or we just loaded it from CACHE and it was ALREADY rotated there.
-                        # Since put_pixmap() is called AFTER rotation, our cache contains rotated pixmaps.
+                        # Aspect ratio validation: ensure the cached pixmap orientation matches the new image
+                        # If input is Portrait (h > w) but cache is Landscape (w > h), ignore cache
+                        input_aspect = width / height
+                        cached_aspect = cached_pixmap.width() / cached_pixmap.height()
                         
-                        # Double rotation fix: only apply if NOT already applies
-                        if not getattr(self, '_orientation_already_applied', False):
-                            orientation = self.get_orientation_from_exif(self.current_file_path)
-                            if orientation != 1:
-                                logger.info(f"[DISPLAY] Applying orientation {orientation} to cached pixmap")
-                                cached_pixmap = self.apply_orientation_to_pixmap(cached_pixmap, orientation)
-                                self._orientation_already_applied = True
-                            else:
-                                self._orientation_already_applied = True
+                        # Use a small tolerance for floating point comparison
+                        aspect_mismatch = (input_aspect > 1.0 and cached_aspect < 1.0) or (input_aspect < 1.0 and cached_aspect > 1.0)
                         
-                        self.display_pixmap(cached_pixmap)
-                        return
+                        if aspect_mismatch:
+                            logger.warning(f"[DISPLAY] Cache aspect mismatch! Input: {width}x{height}, Cache: {cached_pixmap.width()}x{cached_pixmap.height()}. Ignoring cache.")
+                            cached_pixmap = None
+                        
+                        if cached_pixmap is not None:
+                            logger.info(f"[DISPLAY] Using cached pixmap for {width}x{height} image")
+                            # Orientation check for cached pixmap
+                            # ... (rest of the logic)
+                            if not getattr(self, '_orientation_already_applied', False):
+                                orientation = self.get_orientation_from_exif(self.current_file_path)
+                                if orientation != 1:
+                                    logger.info(f"[DISPLAY] Applying orientation {orientation} to cached pixmap")
+                                    cached_pixmap = self.apply_orientation_to_pixmap(cached_pixmap, orientation)
+                                    self._orientation_already_applied = True
+                                else:
+                                    self._orientation_already_applied = True
+                            
+                            self.display_pixmap(cached_pixmap)
+                            return
                     else:
                         logger.info(f"[DISPLAY] No cached pixmap found, will convert")
             

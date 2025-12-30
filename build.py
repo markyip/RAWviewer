@@ -29,7 +29,9 @@ def install_dependencies():
         'exifread',
         'Pillow',  # Added for NEF thumbnail fallback
         'psutil',  # Added for system memory info in image_cache
-        'numpy'    # Required for image processing (used in all modules)
+        'numpy',   # Required for image processing (used in all modules)
+        'qtawesome', # Required for icons in main.py
+        'pyqtgraph'  # Optional/Future dependency included in requirements.txt
     ]
 
     for dep in dependencies:
