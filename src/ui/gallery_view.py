@@ -38,19 +38,23 @@ class JustifiedGallery(QWidget):
         self._visible_widgets = {}  # {file_path: ThumbnailLabel}
         self._widget_pool = []
         self._total_content_height = 0
+        self._loading_label = None
         
         # State Management
         self._building = False
         self._gallery_generation = 0
-        self._active_tasks = {}
-        self._metadata_cache = {}
-        self._thumbnail_cache = LRUCache(10000) # Increased for smoother scrolling
-        self._row_height_buckets = [180, 220, 260, 300, 340]
-        self._path_to_index = {} # For faster lookup from signal
+        self._metadata_cache = {}    # path -> {width, height, aspect, orientation}
+        self._path_to_index = {}
+        
+        # Performance/Caching
+        self._thumbnail_cache = LRUCache(max_size=300) 
+        self._row_height_buckets = [150, 200, 250, 300, 400] # Standard height buckets for caching
+        self._active_tasks = set()
         
         # Threading: Use global manager
         self.load_manager = get_image_load_manager()
         self.load_manager.thumbnail_ready.connect(self.on_thumbnail_ready)
+        self.load_manager.error_occurred.connect(self.on_load_error)
         
         # Timer Management (Reused to avoid GC)
         self._load_timer = QTimer(self)
@@ -61,12 +65,22 @@ class JustifiedGallery(QWidget):
         self._resize_timer.setSingleShot(True)
         self._resize_timer.timeout.connect(self._handle_resize_rebuild)
         
+        # Metadata update rebuild timer
+        self._rebuild_timer = QTimer(self)
+        self._rebuild_timer.setSingleShot(True)
+        self._rebuild_timer.timeout.connect(lambda: self.build_gallery())
+        
         # Scroll Performance
         self._last_scroll_y = -1
         self._last_scroll_time = 0
         self._current_scroll_speed = 0
         self._is_scrolling_fast = False
         self._scroll_optimize_threshold = 3000 # px/s
+        
+        # Performance Tracking
+        self._gallery_init_time = None
+        self._gallery_build_time = None
+        self._first_widget_time = None
         
         # Setup UI
         self.setMouseTracking(True)
@@ -110,17 +124,18 @@ class JustifiedGallery(QWidget):
         self._last_scroll_y = value
         self._last_scroll_time = now
         
-        # CRITICAL: Always run recycling, even if fast scrolling
-        # but defer heavy image loading
-        self._load_timer.start(50 if not self._is_scrolling_fast else 150)
+        # OPTIMIZATION: Use shorter delays for smoother scrolling
+        # 16ms = ~60fps, 50ms for fast scrolling to reduce load
+        self._load_timer.start(16 if not self._is_scrolling_fast else 50)
 
     def build_gallery(self, bulk_metadata=None):
         """Build layout coordinates for all images (Justified)"""
         if self._building or not self.images: return
         self._building = True
+        _actual_build_start = time.time()
         
         try:
-            # Cleanup current state
+            # POOLING FIX: Return current visible widgets to pool before clearing dict
             for w in self._visible_widgets.values():
                 w.hide()
                 self._widget_pool.append(w)
@@ -136,7 +151,11 @@ class JustifiedGallery(QWidget):
 
             viewport_width = self._get_viewport_width()
             net_width = viewport_width - (self.MIN_SPACING * 2) - 16
-            if net_width <= 0: return
+            
+            # Debug removed
+            
+            if net_width <= 0: 
+                return
 
             current_y = 10
             row = []
@@ -152,6 +171,8 @@ class JustifiedGallery(QWidget):
                 curr_x = 10
                 for i, (item, aspect) in enumerate(r):
                     w = int(row_h * aspect)
+                    # MINIMUM WIDTH: Ensure even portrait images are visible
+                    w = max(80, w)  # Minimum 80px width for visibility
                     if not is_last and i == len(r) - 1: w = net_width - (curr_x - 10)
                     
                     self._gallery_layout_items.append({
@@ -164,7 +185,7 @@ class JustifiedGallery(QWidget):
 
             # Layout Loop
             for item in self.images:
-                aspect = 1.333
+                aspect = 1.5  # Default 3:2 aspect ratio (common for cameras)
                 if isinstance(item, str):
                     m = self._metadata_cache.get(item)
                     if m and m.get('original_width') and m.get('original_height'):
@@ -174,14 +195,14 @@ class JustifiedGallery(QWidget):
                             w, h = h, w
                         aspect = w/h
                         
-                        # SANITY CHECK: If aspect is > 1 but we suspect it should be portrait
-                        # (This is rare but helps with cache poisoning)
-                        if aspect > 1.2 and orient == 1 and is_raw_file(item):
-                             # Trust get_image_aspect_ratio more for RAW fallback
-                             aspect = get_image_aspect_ratio(item)
-                    else: 
-                        aspect = get_image_aspect_ratio(item)
-                else: aspect = item.width()/item.height() if item.height() > 0 else 1.333
+                        # CONSTRAINT: Limit extreme aspect ratios for proper layout
+                        aspect = max(0.33, min(3.0, aspect))
+                    # OPTIMIZATION: Don't call get_image_aspect_ratio() if no metadata
+                    # This would block for every image without cached metadata
+                    # Instead, use default and let thumbnails adjust when they load
+                else: 
+                    aspect = item.width()/item.height() if item.height() > 0 else 1.5
+                    aspect = max(0.33, min(3.0, aspect))  # Apply constraint to QPixmap items too
                 
                 row.append((item, aspect))
                 aspect_sum += aspect
@@ -197,10 +218,20 @@ class JustifiedGallery(QWidget):
             self._total_content_height = int(current_y + 20)
             self.setMinimumHeight(self._total_content_height)
             self.update()
-            self.load_visible_images()
+            
+            # PERFORMANCE: Track build completion time
+            actual_build_duration = (time.time() - _actual_build_start) * 1000
+            print(f"[PERF][GALLERY] Gallery layout built in {actual_build_duration:.1f}ms", flush=True)
+            
+            if self._gallery_init_time:
+                self._gallery_build_time = time.time()
+                total_duration = (self._gallery_build_time - self._gallery_init_time) * 1000
+                # logger.debug(f"[PERF][GALLERY] Time since folder load: {total_duration:.1f}ms")
             
         finally:
             self._building = False
+            # Call this AFTER clearing building flag, otherwise it returns early
+            self.load_visible_images()
 
     def _get_visible_range(self, buffer_rect):
         """High-performance binary search for visible range in layout items"""
@@ -218,6 +249,8 @@ class JustifiedGallery(QWidget):
         
         # Find first item where bottom > buffer.top
         y_top = buffer_rect.top()
+        # BOUNDARY FIX: Ensure we don't skip items at the very top
+        y_top = max(0, y_top - 50)  # Larger buffer to catch edge cases and prevent blank views
         while low <= high:
             mid = (low + high) // 2
             if items[mid]['rect'].bottom() < y_top:
@@ -234,114 +267,168 @@ class JustifiedGallery(QWidget):
             visible.append((i, item))
         return visible
 
-    def load_visible_images(self):
-        """Virtualized loading with priority for scrolling smoothness and aggressive pre-fetching"""
-        if self._building: return
+    def _get_cache_key(self, file_path, height):
+        """Map height to closest bucket for better cache hit rate"""
+        bucket = min(self._row_height_buckets, key=lambda x: abs(x - height))
+        return (file_path, bucket)
+
+    def load_visible_images(self, force_all=False):
+        """Create/update widgets for visible area and request image loads"""
+        if self._building and not force_all: return # Fast return during construction
         
         # Find Scroll Area Parent
         p = self.parent()
         while p and not isinstance(p, QScrollArea): p = p.parent()
-        if not p: return
-
+        if not p: return # No scroll area parent found
+        
         v_port = p.viewport()
+        v_w = v_port.width() if v_port and v_port.width() > 0 else self.width()
+        v_h = v_port.height() if v_port and v_port.height() > 0 else 800
+        
         scroll_y = p.verticalScrollBar().value()
-        v_h = v_port.height()
+        visible_rect = QRect(0, scroll_y, v_w, v_h)
         
-        # 1. VISIBLE RANGE: What's on screen now
-        buffer_rect = QRect(0, scroll_y, v_port.width(), v_h)
-        visible_indices_items = self._get_visible_range(buffer_rect)
-        visible_paths = {item['file_path'] for idx, item in visible_indices_items}
+        # Buffer: Instantiate widgets for 50px (boundary safety)
+        # Prefetch: Identify images to load for 2.0 screen heights
+        buffer_rect = visible_rect.adjusted(0, -50, 0, 50) 
+        prefetch_rect = visible_rect.adjusted(0, -v_h, 0, v_h * 2) 
         
-        # 2. PRE-FETCH RANGE: Aggressive look-ahead
-        # Buffer 2 screens below and 1 screen above
-        prefetch_rect = QRect(0, scroll_y - v_h, v_port.width(), v_h * 4)
-        prefetch_indices_items = self._get_visible_range(prefetch_rect)
+        visible_items = self._get_visible_range(buffer_rect)
+        prefetch_items = self._get_visible_range(prefetch_rect)
         
-        # 3. Recycling Phase: Remove widgets far from view
-        for path in list(self._visible_widgets.keys()):
+        visible_paths = {item['file_path'] for idx, item in visible_items}
+        
+        # 1. Recycling: Hide widgets that are no longer in buffer
+        to_remove = []
+        for path, w in self._visible_widgets.items():
             if path not in visible_paths:
-                # Keep a small buffer of widgets near the screen
-                w = self._visible_widgets.pop(path)
-                w.hide()
-                self._widget_pool.append(w)
-                
-        # 4. Defer heavy work if scrolling TOO fast, but still recycle
-        if self._is_scrolling_fast:
-            return
-
-        # 5. Activation Phase for VISIBLE items
-        load_tasks = []
-        for idx, item in visible_indices_items:
-            path = item['file_path']
-            rect = item['rect']
-            if not path: continue
+                to_remove.append(path)
+        
+        for path in to_remove:
+            w = self._visible_widgets.pop(path)
+            w.hide()
+            self._widget_pool.append(w)
             
-            if path not in self._visible_widgets:
-                w = self._widget_pool.pop() if self._widget_pool else ThumbnailLabel(self)
-                w.file_path = path
+        # 2. Display: Ensure widgets exist and are correctly positioned
+        self.setUpdatesEnabled(False)
+        try:
+            for idx, item in visible_items:
+                path = item['file_path']
+                rect = item['rect']
+                h = rect.height()
+                
+                if not path: continue
+                
+                if path not in self._visible_widgets:
+                    w = self._widget_pool.pop() if self._widget_pool else ThumbnailLabel(self)
+                    w.file_path = path
+                    w.mousePressEvent = lambda e, p=path: self.parent_viewer._gallery_item_clicked(p)
+                    self._visible_widgets[path] = w
+                else:
+                    w = self._visible_widgets[path]
+                
+                # Common update for both new and existing
                 w.setGeometry(rect)
                 w.setFixedSize(rect.size())
-                w.mousePressEvent = lambda e, p=path: self.parent_viewer._gallery_item_clicked(p)
+                if not w.isVisible():
+                    w.show()
                 
-                cache_hit = False
-                closest_bucket = min(self._row_height_buckets, key=lambda x: abs(x - rect.height()))
-                cached = self._thumbnail_cache.get((path, closest_bucket))
-                
+                # Apply cached image immediately if available
+                cache_key = self._get_cache_key(path, h)
+                cached = self._thumbnail_cache.get(cache_key)
                 if cached:
                     w.setPixmap(cached)
                     w.setText("")
-                    cache_hit = True
                 else:
                     w.setText("Loading...")
                 
-                w.show()
-                self._visible_widgets[path] = w
-                
-                if not cache_hit:
-                    load_tasks.append((path, Priority.CURRENT))
-
-        # 6. Aggressive Pre-fetch Phase
-        for idx, item in prefetch_indices_items:
-            path = item['file_path']
-            if not path or path in visible_paths: continue
+                # PERFORMANCE: Track first widget display time (Time-to-Interactive)
+                if self._gallery_init_time and not self._first_widget_time:
+                    self._first_widget_time = time.time()
+                    tti_duration = (self._first_widget_time - self._gallery_init_time) * 1000
+                    print(f"[PERF][GALLERY] ✅ First widget displayed in {tti_duration:.1f}ms (TTI: folder load -> visible)", flush=True)
+                    self.hide_loading_message()
+        finally:
+            self.setUpdatesEnabled(True)
             
-            # Only pre-fetch if not already in cache
-            closest_bucket = min(self._row_height_buckets, key=lambda x: abs(x - item['rect'].height()))
-            if not self._thumbnail_cache.get((path, closest_bucket)):
-                load_tasks.append((path, Priority.PRELOAD_NEXT))
-
-        # Start loading through central manager
-        for path, priority in load_tasks[:48]: # Batch size
-            self.load_manager.load_image(path, priority=priority, cancel_existing=False)
+        # 3. Loading: Prioritized background load for prefetch area
+        manager = get_image_load_manager()
+        for idx, item in prefetch_items:
+            file_path = item['file_path']
+            rect = item['rect']
+            h = rect.height()
+            
+            cache_key = self._get_cache_key(file_path, h)
+            if file_path not in self._active_tasks and not self._thumbnail_cache.get(cache_key):
+                self._active_tasks.add(file_path)
+                # PRIORITY: Visible images get high priority
+                priority = Priority.CURRENT if visible_rect.intersects(rect) else Priority.BACKGROUND
+                manager.load_image(file_path, priority, load_thumbnail_only=True)
 
     def on_thumbnail_ready(self, file_path, thumbnail_data):
         """Handle thumbnail signal from central manager"""
-        if file_path not in self._path_to_index: return
+        # CRITICAL SAFEGARD: Ensure widget is still valid and image is relevant
+        if not hasattr(self, '_path_to_index') or self._path_to_index is None:
+            return
+        if file_path not in self._path_to_index:
+            return
         
-        # Convert numpy to QPixmap if needed
-        if isinstance(thumbnail_data, np.ndarray):
-            h, w = thumbnail_data.shape[:2]
-            qimg = QImage(thumbnail_data.data, w, h, w * 3, QImage.Format.Format_RGB888)
-            pixmap = QPixmap.fromImage(qimg)
-        else:
-            pixmap = thumbnail_data # Assume already QPixmap
+        # Guard against processing if the widget is being destroyed
+        try:
+            # Convert numpy to QPixmap if needed
+            if isinstance(thumbnail_data, np.ndarray):
+                h, w = thumbnail_data.shape[:2]
+                # CRITICAL FIX: Convert memoryview to bytes for QImage constructor and ensure 24-bit RGB
+                bytes_per_line = 3 * w
+                qimg = QImage(thumbnail_data.data.tobytes(), w, h, bytes_per_line, QImage.Format.Format_RGB888).copy()
+                pixmap = QPixmap.fromImage(qimg)
+            else:
+                pixmap = thumbnail_data # Assume already QPixmap
+                
+            if not pixmap or pixmap.isNull(): return
             
-        if not pixmap: return
-        
-        # Cache for all buckets to reduce future loads
-        for b in self._row_height_buckets:
-            self._thumbnail_cache.put((file_path, b), pixmap)
+            # ASPECT RATIO UPDATE: Use thumbnail as the source of truth
+            pix_w, pix_h = pixmap.width(), pixmap.height()
+            if pix_h > 0:
+                new_aspect = pix_w / pix_h
+                old_m = self._metadata_cache.get(file_path, {})
+                old_aspect = old_m.get('aspect', 1.5)
+                
+                # If aspect ratio changed significantly (e.g. from 1.5 landscape guess to 0.66 portrait)
+                if abs(new_aspect - old_aspect) > 0.1:
+                    self._metadata_cache[file_path] = {
+                        'original_width': pix_w,
+                        'original_height': pix_h,
+                        'aspect': new_aspect,
+                        'orientation': 1
+                    }
+                    self._rebuild_timer.start(300)
             
-        # Update widget if visible
-        if file_path in self._visible_widgets:
-            w = self._visible_widgets[file_path]
-            if w.file_path == file_path:
-                w.setPixmap(pixmap)
-                w.setText("")
+            # Cache for all buckets
+            for b in self._row_height_buckets:
+                self._thumbnail_cache.put((file_path, b), pixmap)
+                
+            # Update widget if visible
+            if hasattr(self, '_visible_widgets') and file_path in self._visible_widgets:
+                w = self._visible_widgets[file_path]
+                if w and w.file_path == file_path:
+                    w.setPixmap(pixmap)
+                    w.setText("")
+        except RuntimeException:
+            # Widget might be deleted
+            return
+        except Exception as e:
+            logger.debug(f"[GALLERY] Error in on_thumbnail_ready: {e}")
+        finally:
+            if hasattr(self, '_active_tasks') and file_path in self._active_tasks: 
+                self._active_tasks.discard(file_path)
 
-        if file_path in self._active_tasks: del self._active_tasks[file_path]
-
-    def scroll_to_image(self, file_path):
+    def on_load_error(self, file_path, error_msg):
+        """Handle failure to load an image"""
+        if file_path in self._active_tasks:
+            self._active_tasks.discard(file_path)
+            
+    def center_on_image(self, file_path):
         """Sync scroll position to a specific image"""
         item = next((x for x in self._gallery_layout_items if x['file_path'] == file_path), None)
         if item:
@@ -352,23 +439,58 @@ class JustifiedGallery(QWidget):
 
     def set_images(self, images, bulk_metadata=None):
         """Update image list and force rebuild"""
+        print(f"[DEBUG][JustifiedGallery] set_images called with {len(images)} images", flush=True)
+        
+        # PERFORMANCE: Track gallery initialization time
+        self._gallery_init_time = time.time()
+        print(f"[PERF][GALLERY] Gallery view initiated at {self._gallery_init_time:.3f}", flush=True)
+        
         self.images = images
         self._gallery_generation += 1
         
-        # Stop existing tasks in manager if needed (though manager handles concurrency)
-        # self.load_manager.cancel_all_tasks() # Usually too aggressive for gallery
+        # Stop existing tasks in manager to prioritize new folder
+        manager = get_image_load_manager()
+        manager.cancel_all_tasks()
         self._active_tasks.clear()
         
-        self._metadata_cache.clear()
-        if hasattr(self.parent_viewer, 'scroll_area'):
-             self.parent_viewer.scroll_area.verticalScrollBar().setValue(0)
-             
+        # OPTIMIZATION: Don't clear metadata cache - we want to preserve it for fast rebuilds
+        # self._metadata_cache.clear()  # REMOVED - this was causing slow rebuilds
+        
+        # Reset performance tracking for new gallery view
+        self._gallery_build_time = None
+        self._first_widget_time = None
+        
+        # REMOVED: Don't reset scroll position when returning to gallery
+        # This preserves the user's viewing position when switching between views
+        # Robustly find parent scroll area using parent_viewer reference or hierarchy
+        # parent_scroll = None
+        # if hasattr(self, 'parent_viewer') and self.parent_viewer and hasattr(self.parent_viewer, 'gallery_scroll'):
+        #     parent_scroll = self.parent_viewer.gallery_scroll
+        # 
+        # if not parent_scroll:
+        #     try:
+        #         # Fallback: traverse up
+        #         p = self.parent()
+        #         while p and not isinstance(p, QScrollArea): p = p.parent()
+        #         if p: parent_scroll = p
+        #     except: pass
+        #         
+        # if parent_scroll and isinstance(parent_scroll, QScrollArea):
+        #     parent_scroll.verticalScrollBar().setValue(0)
+        #     parent_scroll.horizontalScrollBar().setValue(0)
+        #     print(f"[DEBUG][JustifiedGallery] Scroll reset complete", flush=True)
+        # else:
+        #     print(f"[DEBUG][JustifiedGallery] Scroll reset SKIPPED (parent_scroll={parent_scroll})", flush=True)
+              
+        print(f"[DEBUG][JustifiedGallery] Calling build_gallery...", flush=True)
         self.build_gallery(bulk_metadata)
 
     def _get_viewport_width(self):
         p = self.parent()
         while p and not isinstance(p, QScrollArea): p = p.parent()
-        return p.viewport().width() if p else self.width()
+        w = p.viewport().width() if p else self.width()
+        print(f"[DEBUG][JustifiedGallery] _get_viewport_width: {w} (parent={bool(p)}, self.width={self.width()})", flush=True)
+        return w
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -390,3 +512,52 @@ class JustifiedGallery(QWidget):
     def wheelEvent(self, event):
         super().wheelEvent(event)
         self._load_timer.start(50)
+
+    # -----------------------------
+    # Loading Overlay
+    # -----------------------------
+    def show_loading_message(self, message):
+        """Show loading overlay with robustness"""
+        try:
+            if not hasattr(self, '_loading_label') or not self._loading_label:
+                self._loading_label = QLabel(self)
+                self._loading_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                self._loading_label.setStyleSheet("""
+                    QLabel {
+                        background-color: rgba(30, 30, 30, 220);
+                        color: white;
+                        border-radius: 8px;
+                        padding: 15px 25px;
+                        font-size: 14px;
+                        font-weight: bold;
+                        border: 1px solid rgba(255, 255, 255, 0.1);
+                    }
+                """)
+                self._loading_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+            
+            self._loading_label.setText(message)
+            self._loading_label.adjustSize()
+            
+            # Center the label relative to visible area or widget
+            x = (self.width() - self._loading_label.width()) // 2
+            
+            # Use visible region for better vertical centering in large scroll area
+            v_rect = self.visibleRegion().boundingRect()
+            if not v_rect.isEmpty():
+                y = v_rect.y() + (v_rect.height() - self._loading_label.height()) // 2
+            else:
+                y = (self.height() - self._loading_label.height()) // 2
+                
+            self._loading_label.move(x, max(0, y))
+            self._loading_label.show()
+            self._loading_label.raise_()
+        except Exception as e:
+            print(f"[GALLERY] Error showing loading message: {e}")
+
+    def hide_loading_message(self):
+        """Hide loading overlay safely"""
+        try:
+            if hasattr(self, '_loading_label') and self._loading_label:
+                self._loading_label.hide()
+        except:
+            pass

@@ -35,10 +35,15 @@ class UnifiedImageProcessor:
     
     def process_thumbnail(self, file_path: str, exif_data: Optional[Dict[str, Any]] = None) -> Optional[np.ndarray]:
         """處理縮圖（統一接口）"""
-        # 檢查快取
         cached = self.cache.get_thumbnail(file_path)
         if cached is not None:
             # Self-healing check: verify if cached thumbnail orientation matches shape
+            
+            # VALIDATION: Check if passed exif_data is suspicious (stale cache)
+            # If so, force re-extraction to get verified orientation
+            if exif_data and self._is_raw_file(file_path) and exif_data.get('orientation', 1) == 1 and not exif_data.get('verified_orientation'):
+                exif_data = None
+            
             if exif_data is None:
                 exif_data = self.exif_extractor.extract_exif_data(file_path)
             
@@ -47,10 +52,13 @@ class UnifiedImageProcessor:
                 h, w = cached.shape[:2]
                 if w > h:
                     # Mismatch: Portrait metadata but Landscape cached image
-                    print(f"[ORIENTATION] UnifiedImageProcessor: Cached thumbnail for {os.path.basename(file_path)} is UNROTATED (stale). Invalidating caches.")
+                    import logging
+                    logger = logging.getLogger(__name__)
+                    logger.info(f"[ORIENTATION] UnifiedImageProcessor: Cached thumbnail for {os.path.basename(file_path)} is UNROTATED (stale). Invalidating caches.")
                     # Also invalidate EXIF cache to ensure consistent metadata (prevents pillarboxes in gallery)
                     self.cache.exif_cache.remove(file_path)
                     cached = None # Force re-processing
+                    exif_data = None # Force fresh EXIF extraction too
             
             if cached is not None:
                 return cached
@@ -63,6 +71,11 @@ class UnifiedImageProcessor:
         
         if thumbnail is not None:
             # 獲取 EXIF 數據以獲取 orientation
+            
+            # VALIDATION: Check for suspicious EXIF again (if we didn't check above)
+            if exif_data and self._is_raw_file(file_path) and exif_data.get('orientation', 1) == 1 and not exif_data.get('verified_orientation'):
+                exif_data = None
+                
             if exif_data is None:
                 exif_data = self.exif_extractor.extract_exif_data(file_path)
             
@@ -160,6 +173,12 @@ class UnifiedImageProcessor:
             if cached_image is not None:
                 # Orientation verification for cache hit
                 if exif_data is None:
+                    # PERFORMANCE: Only fetch EXIF if we don't have it and NEED to verify orientation
+                    exif_data = self.exif_extractor.extract_exif_data(file_path)
+                
+                # VALIDATION: Check for suspicious EXIF
+                if self._is_raw_file(file_path) and exif_data.get('orientation', 1) == 1 and not exif_data.get('verified_orientation'):
+                    # Force refresh
                     exif_data = self.exif_extractor.extract_exif_data(file_path)
                 
                 orientation = exif_data.get('orientation', 1) if exif_data else 1
@@ -167,11 +186,13 @@ class UnifiedImageProcessor:
                 
                 # Check for orientation mismatch (Portrait metadata but Landscape cached image)
                 if orientation in (6, 8) and w > h:
-                    print(f"[ORIENTATION] UnifiedImageProcessor: Cached full_image for {os.path.basename(file_path)} is UNROTATED (stale). Re-processing.")
+                    import logging
+                    logger = logging.getLogger(__name__)
+                    logger.info(f"[ORIENTATION] UnifiedImageProcessor: Cached full_image for {os.path.basename(file_path)} is UNROTATED (stale). Re-processing.")
                     cached_image = None
                 
                 if cached_image is not None:
-                    print(f"[ORIENTATION] Using VALID cached full_image for {os.path.basename(file_path)}. Shape: {w}x{h}")
+                    # logger.debug(f"[ORIENTATION] Using VALID cached full_image for {os.path.basename(file_path)}. Shape: {w}x{h}")
                     return cached_image
 
         
@@ -179,11 +200,8 @@ class UnifiedImageProcessor:
         if not is_raw:
             cached_pixmap = self.cache.get_pixmap(file_path)
             if cached_pixmap is not None:
-                print(f"[ORIENTATION] Using cached pixmap for {os.path.basename(file_path)} (non-RAW file)")
+                # logger.debug(f"[ORIENTATION] Using cached pixmap for {os.path.basename(file_path)} (non-RAW file)")
                 return cached_pixmap
-        else:
-            # For RAW files, don't use cached pixmap - always process fresh
-            print(f"[ORIENTATION] RAW file {os.path.basename(file_path)} - skipping pixmap cache, will process as RAW")
         
         # 處理圖像
         if is_raw:
@@ -200,6 +218,10 @@ class UnifiedImageProcessor:
             if exif_data is None:
                 exif_data = self.exif_extractor.extract_exif_data(file_path)
             
+            # VALIDATION: Check for suspicious EXIF (stale cache)
+            if exif_data.get('orientation', 1) == 1 and not exif_data.get('verified_orientation'):
+                 exif_data = self.exif_extractor.extract_exif_data(file_path)
+            
             # 檢查文件大小以決定處理策略
             file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
             use_fast_processing = file_size_mb > 20 and not use_full_resolution
@@ -207,17 +229,13 @@ class UnifiedImageProcessor:
             # 處理 RAW 文件
             # Check if we should use Preview (embedded JPEG) instead of processing RAW
             if not use_full_resolution:
-               # OPTIMIZATION: Try to get/create a high-quality preview (e.g. 1920px) 
-               # instead of processing the RAW data (even at half size, raw processing is slow/heavy)
-               
                # Check Preview Cache
                cached_preview = self.cache.get_preview(file_path)
                if cached_preview is not None:
-                   print(f"[PREVIEW] Using cached preview for {os.path.basename(file_path)}")
+                   # logger.debug(f"[PREVIEW] Using cached preview for {os.path.basename(file_path)}")
                    return cached_preview
                
                # Extract Preview
-               print(f"[PREVIEW] Extracting preview from RAW for {os.path.basename(file_path)}")
                preview = self.thumbnail_extractor.extract_preview_from_raw(file_path, max_size=1920)
                
                if preview is not None:
@@ -303,6 +321,8 @@ class UnifiedImageProcessor:
         # 檢查快取
         cached_exif = self.cache.get_exif(file_path)
         if cached_exif is not None:
+            # cached_orientation = cached_exif.get('orientation', 'unknown')
+            # logger.debug(f"[ORIENTATION] EXIFExtractor: Using cached EXIF for {os.path.basename(file_path)}, orientation = {cached_orientation}")
             return cached_exif
         
         # 提取 EXIF 數據
@@ -333,7 +353,7 @@ class UnifiedImageProcessor:
         8 = Rotated 270° CW (i.e., 90° CCW)
         """
         original_shape = image_array.shape
-        print(f"[ORIENTATION] Before correction: shape = {original_shape}")
+        # logger.debug(f"[ORIENTATION] Before correction: shape = {original_shape}")
         
         if orientation == 1:
             print(f"[ORIENTATION] Numpy operation: No operation (orientation = 1)")
@@ -376,7 +396,7 @@ class UnifiedImageProcessor:
             result = image_array
         
         final_shape = result.shape
-        print(f"[ORIENTATION] After correction: shape = {final_shape}")
+        # logger.debug(f"[ORIENTATION] After correction: shape = {final_shape}")
         return result
 
 

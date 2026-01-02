@@ -117,23 +117,44 @@ class EXIFExtractor(QObject):
         """Extract EXIF data with caching."""
         # Check cache first
         cached_exif = self.cache.get_exif(file_path)
+        
+        # Validate cache for stale orientation 1 on RAW files
         if cached_exif is not None:
-            cached_orientation = cached_exif.get('orientation', 'unknown')
-            # Trust the cache - verification should happen at cache level (based on mtime/size)
-            print(f"[ORIENTATION] EXIFExtractor: Using cached EXIF for {os.path.basename(file_path)}, cached orientation = {cached_orientation}")
+             # Fix for stuck orientation 1:
+             # If cached orientation is 1 and it's a RAW file, but missing 'verified_orientation' flag,
+             # we force a re-check because it might be a stale bad read.
+             is_raw = self._is_raw_file(file_path)
+             orientation = cached_exif.get('orientation', 1)
+             is_verified = cached_exif.get('verified_orientation', False)
+             
+             if is_raw and orientation == 1 and not is_verified:
+                 # INVALIDATE CACHE - Force fresh extraction with new logic
+                 import logging
+                 logger = logging.getLogger(__name__)
+                 logger.info(f"[EXIF] Found potentially stale orientation 1 for {os.path.basename(file_path)}, forcing re-check.")
+                 cached_exif = None
+        
+        if cached_exif is not None:
+            # logger.debug(f"[EXIF] Using cached EXIF for {os.path.basename(file_path)}")
             return cached_exif
 
         # Extract fresh EXIF data
-        print(f"[ORIENTATION] EXIFExtractor: Extracting fresh EXIF from {os.path.basename(file_path)}")
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.info(f"[EXIF] EXIFExtractor: Extracting fresh EXIF from {os.path.basename(file_path)}")
         exif_data = self._extract_exif_from_file(file_path)
 
         # Cache the result
         if exif_data:
             self.cache.put_exif(file_path, exif_data)
-            extracted_orientation = exif_data.get('orientation', 'unknown')
-            print(f"[ORIENTATION] EXIFExtractor: Cached fresh EXIF for {os.path.basename(file_path)}, orientation = {extracted_orientation}")
+            # logger.debug(f"[EXIF] Cached fresh EXIF for {os.path.basename(file_path)}")
 
         return exif_data
+
+    def _is_raw_file(self, file_path: str) -> bool:
+        """Helper to check if file is raw."""
+        raw_map = {'.arw', '.cr2', '.cr3', '.nef', '.dng', '.raf', '.orf', '.rw2'}
+        return os.path.splitext(file_path)[1].lower() in raw_map
 
     def _extract_exif_from_file(self, file_path: str) -> Dict[str, Any]:
         """Extract EXIF data from file."""
@@ -160,14 +181,24 @@ class EXIFExtractor(QObject):
                         'Mirrored horizontal then rotated 90 CCW': 5,
                         'Rotated 90 CW': 6,
                         'Mirrored horizontal then rotated 90 CW': 7,
-                        'Rotated 90 CCW': 8
+                        'Rotated 90 CCW': 8,
+                        # Add numeric string support
+                        '1': 1, '2': 2, '3': 3, '4': 4,
+                        '5': 5, '6': 6, '7': 7, '8': 8
                     }
                     orientation = orientation_map.get(orientation_str, 1)
-                    print(f"[ORIENTATION] EXIFExtractor: Mapped orientation value = {orientation}")
+                    # print(f"[ORIENTATION] EXIFExtractor: Mapped orientation value = {orientation}")
                     if orientation == 1 and orientation_str not in orientation_map:
-                        print(f"[ORIENTATION] EXIFExtractor: WARNING - Orientation string '{orientation_str}' not in map, defaulting to 1")
+                        # Try to parse as int just in case
+                        try:
+                            orientation = int(orientation_str)
+                            if orientation < 1 or orientation > 8:
+                                orientation = 1
+                        except ValueError:
+                            print(f"[ORIENTATION] EXIFExtractor: WARNING - Orientation string '{orientation_str}' not in map, defaulting to 1")
                 else:
-                    print(f"[ORIENTATION] EXIFExtractor: No 'Image Orientation' tag found, defaulting to 1")
+                    # logger.debug(f"[ORIENTATION] EXIFExtractor: No 'Image Orientation' tag found, defaulting to 1")
+                    pass
 
                 # Get camera info
                 make_tag = tags.get('Image Make')
@@ -202,8 +233,22 @@ class EXIFExtractor(QObject):
                     except:
                         pass
 
-                # Fallback to rawpy for dimensions if exifread failed (common for some RAW formats)
-                if (original_width is None or original_height is None) and self._is_raw_file(file_path):
+                # Determine if we need to fall back to rawpy
+                # 1. Dimensions are missing
+                # 2. OR (Orientation is 1/Default AND we didn't find a valid tag AND it's a RAW file)
+                should_check_rawpy = (original_width is None or original_height is None)
+                
+                # OPTIMIZATION: Only check rawpy for orientation if potentially missing
+                # If we have explicit '1' from EXIF, we generally trust it, BUT some cameras (Sony)
+                # write '1' in EXIF but rely on rawpy logic for rotation.
+                # So for RAW files, if orientation is 1, we MUST verify with rawpy to be sure.
+                if not should_check_rawpy and self._is_raw_file(file_path):
+                    if orientation == 1:
+                        should_check_rawpy = True
+                        # logger.debug(f"[ORIENTATION] EXIFExtractor: Orientation is 1 for RAW, forcing rawpy check to verify")
+
+                # Fallback to rawpy for dimensions/orientation if needed
+                if should_check_rawpy and self._is_raw_file(file_path):
                     try:
                         import rawpy
                         with rawpy.imread(file_path) as raw:
@@ -211,18 +256,58 @@ class EXIFExtractor(QObject):
                             if original_width is None: original_width = sizes.width
                             if original_height is None: original_height = sizes.height
                             
-                            # CRITICAL: If EXIF orientation was missing, use rawpy's flip
+                            # CRITICAL: If EXIF orientation was missing/default, use rawpy's flip
                             if orientation == 1 and sizes.flip != 0:
-                                # rawpy's flip mapping:
-                                # 0=0, 1=flip H, 2=180, 3=flip V, 4=5, 5=6 (90 CW), 6=7, 7=8 (270 CW)
-                                # Actually, rawpy.sizes.flip matches standard EXIF orientation 1-8 
-                                # but sometimes it's mapped differently. 
-                                # For most modern LibRaw, it corresponds directly to EXIF (1-8).
+                                # rawpy's flip mapping corresponds to EXIF
                                 orientation = sizes.flip
-                                if orientation == 0: orientation = 1
                                 print(f"[ORIENTATION] EXIFExtractor: Using rawpy flip fallback = {orientation}")
-                    except:
+                    except Exception as e:
+                        # logger.warning(f"Failed to read rawpy metadata: {e}")
                         pass
+
+                # Extract technical metadata for top-level cache columns
+                focal_length = None
+                aperture = None
+                iso = None
+                
+                # Focal Length
+                for tag in ('EXIF FocalLength', 'EXIF FocalLengthIn35mmFilm'):
+                    if tag in exif_dict:
+                        try:
+                            val = exif_dict[tag]
+                            if '/' in val:
+                                num, den = val.split('/')
+                                focal_length = f"{round(float(num) / float(den))}mm"
+                            else:
+                                focal_length = f"{round(float(val))}mm"
+                            break
+                        except: pass
+                
+                # Aperture
+                for tag in ('EXIF FNumber', 'EXIF ApertureValue'):
+                    if tag in exif_dict:
+                        try:
+                            val = exif_dict[tag]
+                            if '/' in val:
+                                num, den = val.split('/')
+                                aperture = f"f/{float(num) / float(den):.1f}"
+                            else:
+                                aperture = f"f/{float(val):.1f}"
+                            break
+                        except: pass
+                
+                # ISO
+                for tag in ('EXIF ISOSpeedRatings', 'EXIF ISO', 'EXIF PhotographicSensitivity'):
+                    if tag in exif_dict:
+                        try:
+                            val = exif_dict[tag]
+                            if '/' in val:
+                                num, den = val.split('/')
+                                iso = f"ISO {int(float(num) / float(den))}"
+                            else:
+                                iso = f"ISO {val}"
+                            break
+                        except: pass
 
                 return {
                     'orientation': orientation,
@@ -230,7 +315,12 @@ class EXIFExtractor(QObject):
                     'camera_model': camera_model,
                     'exif_data': exif_dict,
                     'original_width': original_width,
-                    'original_height': original_height
+                    'original_height': original_height,
+                    'capture_time': exif_dict.get('EXIF DateTimeOriginal') or exif_dict.get('Image DateTime'),
+                    'focal_length': focal_length,
+                    'aperture': aperture,
+                    'iso': iso,
+                    'verified_orientation': True  # Mark this extraction as verified with new logic
                 }
         except Exception:
             pass
@@ -239,7 +329,8 @@ class EXIFExtractor(QObject):
             'orientation': 1,
             'camera_make': '',
             'camera_model': '',
-            'exif_data': {}
+            'exif_data': {},
+            'verified_orientation': True  # Even failed extractions are "verified" to prevent loops
         }
 
 
