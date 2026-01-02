@@ -9,7 +9,7 @@ import os
 import threading
 import queue
 from enum import Enum
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Tuple
 import numpy as np
 from PyQt6.QtCore import QObject, pyqtSignal, QRunnable, QThreadPool
 from PyQt6.QtGui import QPixmap
@@ -31,10 +31,13 @@ class ImageLoadTask:
     """圖像加載任務"""
     
     def __init__(self, file_path: str, priority: Priority = Priority.CURRENT, 
-                 use_full_resolution: bool = False):
+                 use_full_resolution: bool = False, load_thumbnail_only: bool = False,
+                 cached_exif: Optional[Dict[str, Any]] = None):
         self.file_path = file_path
         self.priority = priority
         self.use_full_resolution = use_full_resolution
+        self.load_thumbnail_only = load_thumbnail_only
+        self.cached_exif = cached_exif
         self._cancelled = False
         self._lock = threading.Lock()
     
@@ -87,13 +90,16 @@ class ImageLoadWorker(QRunnable):
             # 獲取處理器（延遲初始化）
             processor = self._get_processor()
             
-            # 1. 處理 EXIF 數據 (CRITICAL OPTIMIZATION: Extract ONCE and pass through)
-            exif_data = None
-            if not self.task.is_cancelled():
+            # 1. 處理 EXIF 數據 (CRITICAL OPTIMIZATION: Use pass-through EXIF if available)
+            exif_data = self.task.cached_exif
+            if exif_data is None and not self.task.is_cancelled():
                 self.manager.progress_updated.emit(file_path, "Reading metadata...")
                 exif_data = processor.process_exif(file_path)
                 if exif_data:
                     self.manager.exif_data_ready.emit(file_path, exif_data)
+            elif exif_data and not self.task.is_cancelled():
+                # Even if we have cached EXIF, emit signal so UI can update (e.g. status bar)
+                self.manager.exif_data_ready.emit(file_path, exif_data)
             
             # 2. 處理縮圖 (Pass exif_data to avoid redundant lookup)
             if not self.task.is_cancelled():
@@ -102,8 +108,10 @@ class ImageLoadWorker(QRunnable):
                 if thumbnail is not None:
                     self.manager.thumbnail_ready.emit(file_path, thumbnail)
             
+            
             # 3. 處理完整圖像 (Pass exif_data to avoid redundant lookup)
-            if not self.task.is_cancelled():
+            # OPTIMIZATION: Skip full image processing if only thumbnail is needed (e.g., for gallery)
+            if not self.task.is_cancelled() and not self.task.load_thumbnail_only:
                 if self.task.use_full_resolution:
                     self.manager.progress_updated.emit(file_path, "Loading full resolution...")
                 else:
@@ -126,7 +134,11 @@ class ImageLoadWorker(QRunnable):
             if not self.task.is_cancelled():
                 self.manager.error_occurred.emit(file_path, str(e))
         finally:
-            # 任務完成，調度下一個
+            # 任務完成，從活動列表移除
+            with self.manager._queue_lock:
+                if file_path in self.manager._active_tasks:
+                    del self.manager._active_tasks[file_path]
+            # 調度下一個
             self.manager._schedule_next_task()
 
 
@@ -177,9 +189,13 @@ class ImageLoadManager(QObject):
         
         # INCREASED CONCURRENCY: Scale with CPU cores
         # For I/O bound tasks (thumbnails), we can have many threads
+        # BUT for RAW processing, memory is a major bottleneck. 
+        # Capping at 4 to prevent crash (0xCFFFFFFF) during gallery loading.
         core_count = os.cpu_count() or 4
-        default_workers = max(12, core_count * 2) 
-        if max_workers == 4: # If default was used, upgrade it
+        default_workers = 4 # Force safe limit for debugging/stability
+        # default_workers = max(12, core_count * 2) # OLD UNSAFE VALUE
+        
+        if max_workers == 4: # If default was used, use our safe default
             max_workers = default_workers
             
         self._thread_pool.setMaxThreadCount(max_workers)
@@ -194,45 +210,47 @@ class ImageLoadManager(QObject):
         self._initialized = True
     
     def load_image(self, file_path: str, priority: Priority = Priority.CURRENT, 
-                   cancel_existing: bool = True, use_full_resolution: bool = False):
+                   cancel_existing: bool = True, use_full_resolution: bool = False,
+                   load_thumbnail_only: bool = False):
         """請求加載圖像"""
-        # Don't accept new tasks if stopped
-        if self._stopped:
-            return
-            
         # 取消現有任務（如果需要）
         if cancel_existing:
             self.cancel_task(file_path)
         
         # 檢查快取
-        if self._check_cache(file_path, use_full_resolution):
+        is_hit, cached_exif = self._check_cache(file_path, use_full_resolution)
+        if is_hit:
             return
         
         # 創建任務
-        task = ImageLoadTask(file_path, priority, use_full_resolution)
+        task = ImageLoadTask(file_path, priority, use_full_resolution, load_thumbnail_only, cached_exif=cached_exif)
         with self._queue_lock:
             self._active_tasks[file_path] = task
+            self._work_queue.put(task)
+            q_size = self._work_queue.qsize()
         
-        # 添加到工作隊列
-        self._work_queue.put(task)
+        # print(f"[ImageLoadManager] Task enqueued: {os.path.basename(file_path)} (priority={priority.name}, queue={q_size})")
         self._schedule_next_task()
     
     def cancel_task(self, file_path: str):
         """取消任務（非阻塞）"""
         with self._queue_lock:
             if file_path in self._active_tasks:
+                print(f"[ImageLoadManager] Cancelling task for {os.path.basename(file_path)}")
                 self._active_tasks[file_path].cancel()
                 del self._active_tasks[file_path]
+            else:
+                # Silent discard for common non-task cancellations
+                pass
     
     def cancel_all_tasks(self):
         """取消所有任務"""
-        # Set stopped flag to prevent new tasks from being scheduled
-        self._stopped = True
-        
         with self._queue_lock:
             for task in self._active_tasks.values():
                 task.cancel()
             self._active_tasks.clear()
+            # Clear the queue - since PriorityQueue doesn't have clear(), we recreate it
+            self._work_queue = queue.PriorityQueue()
         
         # 清空工作隊列
         while not self._work_queue.empty():
@@ -240,9 +258,6 @@ class ImageLoadManager(QObject):
                 self._work_queue.get_nowait()
             except queue.Empty:
                 break
-        
-        # Shutdown process pool
-        self.shutdown()
 
     def shutdown(self):
         """關閉管理器並清理資源"""
@@ -250,13 +265,17 @@ class ImageLoadManager(QObject):
         if hasattr(self, '_process_pool') and self._process_pool:
             self._process_pool.shutdown(wait=False)
     
-    def _check_cache(self, file_path: str, use_full_resolution: bool) -> bool:
-        """檢查快取，如果存在則直接發送信號"""
+    def _check_cache(self, file_path: str, use_full_resolution: bool) -> Tuple[bool, Optional[Dict[str, Any]]]:
+        """檢查快取，如果存在則直接發送信號。
+        
+        返回: (是否為圖像命中, 快取的 EXIF 數據)
+        """
         # CRITICAL: For RAW files, only use full_image cache, not pixmap cache
         # This ensures RAW files go through proper processing with orientation correction
         from common_image_loader import check_cache_for_image, is_raw_file
         
         is_raw = is_raw_file(file_path)
+        cached_exif = None
         
         # For RAW files, only check full_image cache
         if is_raw and use_full_resolution:
@@ -264,34 +283,49 @@ class ImageLoadManager(QObject):
             cache = get_image_cache()
             cached_image = cache.get_full_image(file_path)
             if cached_image is not None:
-                print(f"[ORIENTATION] ImageLoadManager: Using cached full_image for RAW file {os.path.basename(file_path)}")
+                # Still try to get EXIF for return value even on hit
+                cached_exif = cache.get_exif(file_path)
+                # logger.debug(f"[ORIENTATION] Using cached full_image for RAW file {os.path.basename(file_path)}")
                 self.image_ready.emit(file_path, cached_image)
-                return True
-            # Don't check pixmap cache for RAW files
-            return False
+                return True, cached_exif
+            
+            # Check for EXIF even if image is not cached to pass to worker
+            cached_exif = cache.get_exif(file_path)
+            return False, cached_exif
         
         # For non-RAW files or when not using full resolution, use normal cache check
         cached_item, cache_type = check_cache_for_image(file_path, use_full_resolution)
         
         if cached_item is not None:
             if cache_type == 'full_image':
+                # Try to get EXIF for return value
+                from image_cache import get_image_cache
+                cached_exif = get_image_cache().get_exif(file_path)
                 self.image_ready.emit(file_path, cached_item)
-                return True
+                return True, cached_exif
             elif cache_type == 'pixmap':
                 # Only emit pixmap_ready for non-RAW files
                 if not is_raw:
+                    from image_cache import get_image_cache
+                    cached_exif = get_image_cache().get_exif(file_path)
                     self.pixmap_ready.emit(file_path, cached_item)
-                    return True
+                    return True, cached_exif
                 else:
                     # RAW file with cached pixmap - skip it, process as RAW instead
-                    print(f"[ORIENTATION] ImageLoadManager: RAW file {os.path.basename(file_path)} has cached pixmap, but will process as RAW")
-                    return False
+                    # logger.debug(f"[ORIENTATION] RAW file {os.path.basename(file_path)} has cached pixmap, skipping for proper processing")
+                    # Still keep EXIF if we found it
+                    # (Note: check_cache_for_image returns EXIF if nothing else is found)
+                    pass
             elif cache_type == 'thumbnail':
+                from image_cache import get_image_cache
+                cached_exif = get_image_cache().get_exif(file_path)
                 self.thumbnail_ready.emit(file_path, cached_item)
+                return True, cached_exif
             elif cache_type == 'exif':
-                self.exif_data_ready.emit(file_path, cached_item)
+                cached_exif = cached_item
+                self.exif_data_ready.emit(file_path, cached_exif)
         
-        return cache_type in ('full_image', 'pixmap')
+        return False, cached_exif
     
     def _schedule_next_task(self):
         """調度下一個任務到線程池"""
@@ -300,26 +334,24 @@ class ImageLoadManager(QObject):
             return
             
         with self._queue_lock:
-            if self._work_queue.empty():
-                return
-            
-            if self._thread_pool.activeThreadCount() >= self._thread_pool.maxThreadCount():
-                return  # 線程池已滿
-            
-            try:
-                task = self._work_queue.get_nowait()
+            # PERFORMANCE: Fill the pool entirely
+            while not self._work_queue.empty() and \
+                  self._thread_pool.activeThreadCount() < self._thread_pool.maxThreadCount():
                 
-                # 檢查任務是否已取消
-                if task.is_cancelled():
-                    if task.file_path in self._active_tasks:
-                        del self._active_tasks[task.file_path]
-                    return
-                
-                # 創建工作線程並提交到線程池
-                worker = ImageLoadWorker(task, self)
-                self._thread_pool.start(worker)
-            except queue.Empty:
-                pass
+                try:
+                    task = self._work_queue.get_nowait()
+                    
+                    # 檢查任務是否已取消
+                    if task.is_cancelled():
+                        if task.file_path in self._active_tasks:
+                            del self._active_tasks[task.file_path]
+                        continue # Check next
+                    
+                    # 創建工作線程並提交到線程池
+                    worker = ImageLoadWorker(task, self)
+                    self._thread_pool.start(worker)
+                except queue.Empty:
+                    break
     
     def get_stats(self) -> Dict[str, Any]:
         """獲取管理器統計信息"""

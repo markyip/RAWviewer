@@ -92,6 +92,12 @@ class PersistentEXIFCache:
 
         self.db_path = os.path.join(cache_dir, "exif_cache.db")
         self.lock = threading.RLock()
+        
+        # Cache for file stats to avoid repeated os.stat() calls
+        self._file_stats_cache = {}
+        self._file_stats_cache_lock = threading.RLock()
+        self._file_stats_cache_max_size = 2000 # Larger than thumbnails because we use it for sorting
+        
         self._init_db()
 
     def _init_db(self):
@@ -110,7 +116,10 @@ class PersistentEXIFCache:
                     cached_time REAL,
                     capture_time TEXT,
                     original_width INTEGER,
-                    original_height INTEGER
+                    original_height INTEGER,
+                    focal_length TEXT,
+                    aperture TEXT,
+                    iso TEXT
                 )
             """)
             
@@ -130,6 +139,18 @@ class PersistentEXIFCache:
                 if 'original_height' not in columns:
                     print("[CACHE] Migrating database: adding original_height column")
                     conn.execute("ALTER TABLE exif_cache ADD COLUMN original_height INTEGER")
+
+                if 'focal_length' not in columns:
+                    print("[CACHE] Migrating database: adding focal_length column")
+                    conn.execute("ALTER TABLE exif_cache ADD COLUMN focal_length TEXT")
+
+                if 'aperture' not in columns:
+                    print("[CACHE] Migrating database: adding aperture column")
+                    conn.execute("ALTER TABLE exif_cache ADD COLUMN aperture TEXT")
+
+                if 'iso' not in columns:
+                    print("[CACHE] Migrating database: adding iso column")
+                    conn.execute("ALTER TABLE exif_cache ADD COLUMN iso TEXT")
                     
             except Exception as e:
                 print(f"[CACHE] Error checking/migrating schema: {e}")
@@ -138,10 +159,33 @@ class PersistentEXIFCache:
             conn.close()
 
     def _get_file_hash(self, file_path: str) -> Tuple[int, float]:
-        """Get file size and modification time for cache validation."""
+        """Get file size and modification time for cache validation.
+        
+        Note: We round mtime to 4 decimal places to ensure consistent behavior
+        between Python and SQLite storage/comparison.
+        """
+        # Check cache first to avoid repeated os.stat() calls
+        with self._file_stats_cache_lock:
+            if file_path in self._file_stats_cache:
+                return self._file_stats_cache[file_path]
+
         try:
             stat = os.stat(file_path)
-            return stat.st_size, stat.st_mtime
+            # CRITICAL: Round mtime to 4 decimal places for consistent SQLite comparison
+            # SQLite may lose precision when storing REAL values, and Python's float is high-precision.
+            mtime = round(stat.st_mtime, 4)
+            result = (stat.st_size, mtime)
+
+            # Cache the result
+            with self._file_stats_cache_lock:
+                if len(self._file_stats_cache) >= self._file_stats_cache_max_size:
+                    # Simple FIFO-like eviction
+                    keys_to_remove = list(self._file_stats_cache.keys())[:self._file_stats_cache_max_size // 2]
+                    for key in keys_to_remove:
+                        del self._file_stats_cache[key]
+                self._file_stats_cache[file_path] = result
+                
+            return result
         except OSError:
             return 0, 0
 
@@ -156,14 +200,14 @@ class PersistentEXIFCache:
                 conn = sqlite3.connect(self.db_path)
                 cursor = conn.execute(
                     "SELECT file_size, file_mtime, orientation, camera_make, camera_model, exif_data, "
-                    "capture_time, original_width, original_height "
+                    "capture_time, original_width, original_height, focal_length, aperture, iso "
                     "FROM exif_cache WHERE file_path = ?",
                     (file_path,)
                 )
                 row = cursor.fetchone()
                 conn.close()
 
-                if row and row[0] == file_size and row[1] == file_mtime:
+                if row and row[0] == file_size and abs(row[1] - file_mtime) < 0.0001:
                     # Cache is valid
                     exif_data = pickle.loads(row[5]) if row[5] else {}
                     
@@ -186,6 +230,11 @@ class PersistentEXIFCache:
                     if result_width: exif_data['original_width'] = result_width
                     if result_height: exif_data['original_height'] = result_height
                     
+                    # Store new columns in exif_data if not present
+                    if row[9] and 'focal_length' not in exif_data: exif_data['focal_length'] = row[9]
+                    if row[10] and 'aperture' not in exif_data: exif_data['aperture'] = row[10]
+                    if row[11] and 'iso' not in exif_data: exif_data['iso'] = row[11]
+                    
                     return {
                         'orientation': row[2],
                         'camera_make': row[3],
@@ -193,7 +242,10 @@ class PersistentEXIFCache:
                         'exif_data': exif_data,
                         'capture_time': result_capture_time,
                         'original_width': result_width if result_width else exif_data.get('original_width'),
-                        'original_height': result_height if result_height else exif_data.get('original_height')
+                        'original_height': result_height if result_height else exif_data.get('original_height'),
+                        'focal_length': row[9] if row[9] else exif_data.get('focal_length'),
+                        'aperture': row[10] if row[10] else exif_data.get('aperture'),
+                        'iso': row[11] if row[11] else exif_data.get('iso')
                     }
             except Exception:
                 pass
@@ -243,8 +295,8 @@ class PersistentEXIFCache:
                 conn.execute(
                     "INSERT OR REPLACE INTO exif_cache "
                     "(file_path, file_size, file_mtime, orientation, camera_make, camera_model, exif_data, "
-                    "cached_time, capture_time, original_width, original_height) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "cached_time, capture_time, original_width, original_height, focal_length, aperture, iso) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         file_path,
                         file_size,
@@ -256,7 +308,10 @@ class PersistentEXIFCache:
                         time.time(),
                         capture_time,
                         width,
-                        height
+                        height,
+                        exif_info.get('focal_length'),
+                        exif_info.get('aperture'),
+                        exif_info.get('iso')
                     )
                 )
                 conn.commit()
@@ -299,7 +354,7 @@ class PersistentEXIFCache:
                     
                     # Fetch all optimized columns
                     query = f"SELECT file_path, file_size, file_mtime, orientation, camera_make, camera_model, " \
-                            f"exif_data, capture_time, original_width, original_height " \
+                            f"exif_data, capture_time, original_width, original_height, focal_length, aperture, iso " \
                             f"FROM exif_cache WHERE file_path IN ({placeholders})"
                             
                     cursor = conn.execute(query, chunk)
@@ -312,7 +367,7 @@ class PersistentEXIFCache:
                         else:
                             file_size, file_mtime = self._get_file_hash(path)
                         
-                        if row[1] == file_size and row[2] == file_mtime:
+                        if row[1] == file_size and abs(row[2] - file_mtime) < 0.0001:
                             # Cache is valid
                             
                             # Fast Mode Optimization: Skip unpickling if we have all needed data
@@ -325,6 +380,21 @@ class PersistentEXIFCache:
                                 result_capture_time = row[7]
                                 result_width = row[8]
                                 result_height = row[9]
+                                
+                                # SYNTHESIZE EXIF tags for main.py to find without unpickling
+                                # This avoids Disk I/O fallback in main.py status bar update
+                                if row[10]: # focal_length
+                                    exif_data['EXIF FocalLength'] = row[10]
+                                    exif_data['focal_length'] = row[10]
+                                if row[11]: # aperture
+                                    exif_data['EXIF FNumber'] = row[11]
+                                    exif_data['aperture'] = row[11]
+                                if row[12]: # iso
+                                    exif_data['EXIF ISOSpeedRatings'] = row[12]
+                                    exif_data['iso'] = row[12]
+                                if result_capture_time:
+                                    exif_data['EXIF DateTimeOriginal'] = result_capture_time
+                                    exif_data['capture_time'] = result_capture_time
                             else:
                                 # SLOW PATH: Unpickle blob
                                 exif_data = pickle.loads(row[6]) if row[6] else {}
@@ -375,7 +445,10 @@ class PersistentEXIFCache:
                                 'exif_data': exif_data,
                                 'capture_time': result_capture_time,
                                 'original_width': result_width,
-                                'original_height': result_height
+                                'original_height': result_height,
+                                'focal_length': row[10],
+                                'aperture': row[11],
+                                'iso': row[12]
                             }
                 conn.close()
             except Exception:
@@ -457,7 +530,9 @@ class PersistentThumbnailCache:
         
         try:
             stat = os.stat(file_path)
-            result = (stat.st_size, stat.st_mtime)
+            # CRITICAL: Round mtime to 4 decimal places for consistent SQLite comparison
+            mtime = round(stat.st_mtime, 4)
+            result = (stat.st_size, mtime)
             
             # Cache the result
             with self._file_stats_cache_lock:
@@ -493,7 +568,7 @@ class PersistentThumbnailCache:
             )
             row = cursor.fetchone()
             
-            if row and row[0] == file_size and row[1] == file_mtime:
+            if row and row[0] == file_size and abs(row[1] - file_mtime) < 0.0001:
                 # Cache is valid, check if file exists
                 cache_file = row[2]
                 if os.path.exists(cache_file):
