@@ -368,49 +368,6 @@ class PersistentEXIFCache:
         return results
 
 
-class PersistentPreviewCache(PersistentThumbnailCache):
-    """Persistent disk cache for larger JPEG previews (e.g., 2048px)."""
-    
-    def __init__(self, cache_dir: str = None):
-        if cache_dir is None:
-            cache_dir = os.path.expanduser("~/.rawviewer_cache")
-        # Use 'previews' subdirectory
-        self.base_cache_dir = cache_dir 
-        super().__init__(cache_dir) # Init with base dir, will setup 'thumbnails'
-        
-        # Override cache_dir and db_path for previews
-        self.cache_dir = os.path.join(self.base_cache_dir, "previews")
-        os.makedirs(self.cache_dir, exist_ok=True)
-        self.db_path = os.path.join(self.base_cache_dir, "preview_cache.db")
-        self._init_db() # Re-init DB with new path
-        
-    def _init_db(self):
-        """Initialize preview cache database."""
-        with self.lock:
-            try:
-                # Reset thread-local connection for new DB path
-                if hasattr(self._local, 'conn'):
-                    del self._local.conn
-                    
-                conn = self._get_connection()
-                conn.execute("""
-                    CREATE TABLE IF NOT EXISTS thumbnail_cache (
-                        file_path TEXT PRIMARY KEY,
-                        file_size INTEGER,
-                        file_mtime REAL,
-                        cache_file TEXT,
-                        cached_time REAL
-                    )
-                """)
-                # Create index for faster lookups
-                conn.execute("""
-                    CREATE INDEX IF NOT EXISTS idx_file_path ON thumbnail_cache(file_path)
-                """)
-                conn.commit()
-            except Exception:
-                pass
-
-
 class PersistentThumbnailCache:
     """Persistent disk cache for JPEG thumbnails extracted from RAW files."""
     
@@ -616,6 +573,50 @@ class PersistentThumbnailCache:
                 
                 # Remove from database
                 conn.execute("DELETE FROM thumbnail_cache WHERE cached_time < ?", (cutoff_time,))
+                conn.commit()
+            except Exception:
+                pass
+
+
+
+class PersistentPreviewCache(PersistentThumbnailCache):
+    """Persistent disk cache for larger JPEG previews (e.g., 2048px)."""
+    
+    def __init__(self, cache_dir: str = None):
+        if cache_dir is None:
+            cache_dir = os.path.expanduser("~/.rawviewer_cache")
+        # Use 'previews' subdirectory
+        self.base_cache_dir = cache_dir 
+        super().__init__(cache_dir) # Init with base dir, will setup 'thumbnails'
+        
+        # Override cache_dir and db_path for previews
+        self.cache_dir = os.path.join(self.base_cache_dir, "previews")
+        os.makedirs(self.cache_dir, exist_ok=True)
+        self.db_path = os.path.join(self.base_cache_dir, "preview_cache.db")
+        self._init_db() # Re-init DB with new path
+        
+    def _init_db(self):
+        """Initialize preview cache database."""
+        with self.lock:
+            try:
+                # Reset thread-local connection for new DB path
+                if hasattr(self._local, 'conn'):
+                    del self._local.conn
+                    
+                conn = self._get_connection()
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS thumbnail_cache (
+                        file_path TEXT PRIMARY KEY,
+                        file_size INTEGER,
+                        file_mtime REAL,
+                        cache_file TEXT,
+                        cached_time REAL
+                    )
+                """)
+                # Create index for faster lookups
+                conn.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_file_path ON thumbnail_cache(file_path)
+                """)
                 conn.commit()
             except Exception:
                 pass

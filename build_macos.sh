@@ -1,16 +1,20 @@
 #!/bin/bash
 
 # Exit on any error
-set -e
+# set -e  <-- Disabled to allow error handling with pause
 
 echo "RAWviewer macOS Build Script"
 echo "==========================="
 echo ""
 
+# Ensure we are in the script's directory
+cd "$(dirname "$0")"
+
 # Check if running on macOS
 if [[ "$OSTYPE" != "darwin"* ]]; then
     echo "[ERROR] This script is designed for macOS only."
     echo "Current OS: $OSTYPE"
+    read -p "Press Enter to exit..."
     exit 1
 fi
 
@@ -18,6 +22,7 @@ fi
 if ! command -v python3 &> /dev/null; then
     echo "[ERROR] python3 is not installed or not in PATH"
     echo "Please install Python 3.8 or higher from https://www.python.org/"
+    read -p "Press Enter to exit..."
     exit 1
 fi
 
@@ -44,7 +49,7 @@ pip install --upgrade pip
 
 # Install/upgrade dependencies
 echo "Installing dependencies..."
-pip install --upgrade PyQt6 rawpy send2trash pyinstaller natsort exifread Pillow psutil numpy
+pip install --upgrade PyQt6 send2trash pyinstaller natsort exifread Pillow psutil numpy
 
 # Clean previous builds
 echo "Cleaning previous builds..."
@@ -77,6 +82,8 @@ if python3 build.py; then
     fi
 else
     echo ""
+    echo ""
     echo "[ERROR] Build failed. Check the error messages above."
+    read -p "Press Enter to exit..."
     exit 1
 fi 

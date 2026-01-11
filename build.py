@@ -12,7 +12,11 @@ import time
 from pathlib import Path
 
 
+import sys
+
 def run_command(cmd):
+    # Use explicit shell execution
+    print(f"Running command: {cmd}")
     result = subprocess.run(cmd, shell=True)
     return result.returncode == 0
 
@@ -22,7 +26,6 @@ def install_dependencies():
     print("Installing/upgrading dependencies...")
     dependencies = [
         'PyQt6',
-        'rawpy',
         'send2trash',
         'pyinstaller',
         'natsort',
@@ -32,9 +35,13 @@ def install_dependencies():
         'numpy'    # Required for image processing (used in all modules)
     ]
 
+    python_exe = sys.executable
+    print(f"Using Python: {python_exe}")
+    
     for dep in dependencies:
         print(f"Installing {dep}...")
-        if not run_command(f'pip install --upgrade {dep}'):
+        # Use sys.executable to ensure we install to the running python environment
+        if not run_command(f'"{python_exe}" -m pip install --upgrade {dep}'):
             print(f"[ERROR] Failed to install {dep}")
             return False
 
@@ -157,10 +164,18 @@ def main():
     ]
     add_data_arg_str = " ".join(add_data_args)
 
-    # Minimal PyInstaller command
+    # Minimal PyInstaller command using python module to ensure correct environment
     build_command = (
-        f'pyinstaller --onefile --windowed {icon_arg} '
-        f'{add_data_arg_str} src/main.py --name RAWviewer'
+        f'"{sys.executable}" -m PyInstaller --onefile --windowed {icon_arg} '
+        f'{add_data_arg_str} '
+        f'--hidden-import=enhanced_raw_processor '
+        f'--hidden-import=image_cache '
+        f'--hidden-import=image_load_manager '
+        f'--hidden-import=unified_image_processor '
+        f'--hidden-import=common_image_loader '
+        f'--hidden-import=ui.widgets '
+        f'--hidden-import=ui.gallery_view '
+        f'src/main.py --name RAWviewer --paths src'
     )
     print(f"Running: {build_command}")
     if not run_command(build_command):

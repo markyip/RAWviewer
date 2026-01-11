@@ -16,7 +16,7 @@ call rawviewer_env\Scripts\activate.bat
 
 REM Install/upgrade dependencies
 echo Installing dependencies...
-pip install --upgrade PyQt6 rawpy send2trash pyinstaller natsort exifread Pillow psutil numpy
+pip install --upgrade PyQt6 send2trash pyinstaller natsort exifread Pillow psutil numpy
 
 REM Try to close any running RAWviewer.exe instances
 echo Checking for running RAWviewer instances...

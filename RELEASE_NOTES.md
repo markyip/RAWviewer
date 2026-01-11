@@ -1,3 +1,23 @@
+# RAWviewer Lite Release Notes
+
+## 🚀 RAWviewer Lite
+**Release Date: January 11, 2026**
+
+### 🎯 What's New
+**A leaner, faster version focused on standard formats.**
+
+This "Lite" release strips away the complexity of RAW processing and gallery management to deliver an ultra-lightweight experience for browsing JPEG, PNG, and WebP collections.
+
+### ✨ Changes
+- **REMOVED**: RAW file support (LibRaw dependency removed).
+- **REMOVED**: Gallery View mode.
+- **REMOVED**: Zoom functionality.
+- **REMOVED**: Metadata/EXIF display.
+- **ADDED**: Random navigation mode.
+- **ADDED**: Simplified caching mechanism.
+
+---
+
 # RAWviewer Release Notes
 
 ## 🚀 Version 1.2 - Performance Revolution

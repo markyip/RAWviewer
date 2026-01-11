@@ -9,10 +9,12 @@ import os
 import threading
 import queue
 from enum import Enum
-from typing import Optional, Dict, Any
-import numpy as np
+from typing import Optional, Dict, Any, TYPE_CHECKING
 from PyQt6.QtCore import QObject, pyqtSignal, QRunnable, QThreadPool
 from PyQt6.QtGui import QPixmap
+
+if TYPE_CHECKING:
+    import numpy as np
 
 from image_cache import get_image_cache
 # UnifiedImageProcessor will be imported lazily to avoid circular import issues
@@ -67,8 +69,33 @@ class ImageLoadWorker(QRunnable):
         """獲取處理器實例（延遲初始化）"""
         if self._processor is None:
             # Lazy import to avoid circular import issues
-            from unified_image_processor import UnifiedImageProcessor
-            self._processor = UnifiedImageProcessor()
+            try:
+                import unified_image_processor
+                self._processor = unified_image_processor.UnifiedImageProcessor()
+            except ImportError:
+                import sys
+                import os
+                
+                # Development / Source mode fallback
+                current_dir = os.path.dirname(os.path.abspath(__file__))
+                if current_dir.endswith('__pycache__'):
+                    current_dir = os.path.dirname(current_dir)
+
+                if current_dir not in sys.path:
+                    sys.path.append(current_dir)
+                
+                # Also try adding src from CWD if different
+                cwd_src = os.path.join(os.getcwd(), 'src')
+                if os.path.exists(cwd_src) and cwd_src not in sys.path:
+                     sys.path.append(cwd_src)
+
+                try:
+                    import unified_image_processor
+                    self._processor = unified_image_processor.UnifiedImageProcessor()
+                except ImportError as e:
+                    print(f"Failed to import UnifiedImageProcessor (even after path patch): {e}", file=sys.stderr)
+                    # Re-raise to prevent silent failure
+                    raise
         return self._processor
     
     def run(self):
@@ -106,14 +133,21 @@ class ImageLoadWorker(QRunnable):
                     self.manager.progress_updated.emit(file_path, "Loading full resolution...")
                 else:
                     self.manager.progress_updated.emit(file_path, "Processing image...")
+                
                 result = processor.process_full_image(
                     file_path, 
                     use_full_resolution=self.task.use_full_resolution
                 )
-                if isinstance(result, np.ndarray):
-                    self.manager.image_ready.emit(file_path, result)
-                elif isinstance(result, QPixmap):
-                    self.manager.pixmap_ready.emit(file_path, result)
+                
+                # Check result type - import numpy locally for check / thread safety
+                import numpy as np
+                
+                # FINAL CHECK: Ensure task wasn't cancelled during processing
+                if not self.task.is_cancelled():
+                    if isinstance(result, np.ndarray):
+                        self.manager.image_ready.emit(file_path, result)
+                    elif isinstance(result, QPixmap):
+                        self.manager.pixmap_ready.emit(file_path, result)
             
             # 發送完成信號
             if not self.task.is_cancelled():
@@ -131,8 +165,10 @@ class ImageLoadManager(QObject):
     """統一管理所有圖像加載任務的工作隊列管理器（單例模式）"""
     
     # 信號定義
-    thumbnail_ready = pyqtSignal(str, np.ndarray)  # file_path, thumbnail
-    image_ready = pyqtSignal(str, np.ndarray)  # file_path, full_image
+    # Signal definitions
+    # Use 'object' instead of 'np.ndarray' to avoid top-level numpy import
+    thumbnail_ready = pyqtSignal(str, object)  # file_path, thumbnail (np.ndarray)
+    image_ready = pyqtSignal(str, object)  # file_path, full_image (np.ndarray)
     pixmap_ready = pyqtSignal(str, QPixmap)  # file_path, pixmap
     error_occurred = pyqtSignal(str, str)  # file_path, error_message
     progress_updated = pyqtSignal(str, str)  # file_path, status_message
@@ -225,6 +261,23 @@ class ImageLoadManager(QObject):
                 self._work_queue.get_nowait()
             except queue.Empty:
                 break
+                
+    def cancel_all_tasks_except(self, keep_file_path: str):
+        """Cancel all tasks except for the specified file path"""
+        with self._queue_lock:
+            # Create a list of paths to remove to avoid modifying dict while iterating
+            paths_to_remove = []
+            for file_path, task in self._active_tasks.items():
+                if file_path != keep_file_path:
+                    task.cancel()
+                    paths_to_remove.append(file_path)
+            
+            # Remove cancelled tasks from tracking
+            for file_path in paths_to_remove:
+                del self._active_tasks[file_path]
+        
+        # We don't clear the work queue directly as it's a PriorityQueue without easy removal
+        # But cancelled tasks in the queue will be skipped by the worker when they are popped
     
     def _check_cache(self, file_path: str, use_full_resolution: bool) -> bool:
         """檢查快取，如果存在則直接發送信號"""

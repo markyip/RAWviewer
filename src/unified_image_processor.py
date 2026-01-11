@@ -6,18 +6,135 @@
 """
 
 import os
-import numpy as np
-from typing import Optional, Dict, Any, Union
+from typing import Optional, Dict, Any, Union, TYPE_CHECKING
 from PyQt6.QtGui import QPixmap, QImage
-# PIL Image, rawpy, and exifread will be imported lazily to avoid import delays
+from PyQt6.QtCore import QObject
+
+# Lazy imports for optional heavy dependencies
+if TYPE_CHECKING:
+    import numpy as np
+    from PIL import Image
+    import exifread
 
 from image_cache import get_image_cache
-from enhanced_raw_processor import (
-    ThumbnailExtractor, 
-    EXIFExtractor, 
-    OptimizedRAWProcessor
-)
 from common_image_loader import is_raw_file, is_tiff_file, load_pixmap_safe
+
+
+class ThumbnailExtractor(QObject):
+    """Fast thumbnail extractor for immediate display."""
+
+    def __init__(self):
+        super().__init__()
+
+    def extract_thumbnail_from_raw(self, file_path: str, max_size: int = 512) -> Optional['np.ndarray']:
+        """Extract embedded thumbnail from RAW file and resize to max_size."""
+        return None
+
+    def extract_preview_from_raw(self, file_path: str, max_size: int = 2048) -> Optional['np.ndarray']:
+        """Extract high-quality preview from RAW file (embedded JPEG)."""
+        return None
+
+    def extract_thumbnail_from_image(self, file_path: str, max_size: int = 512) -> Optional['np.ndarray']:
+        """Extract thumbnail from regular image file."""
+        try:
+            from PIL import Image
+            # Enable lazy loading for JPEGs - use draft mode for faster decoding
+            # This significantly speeds up thumbnail generation
+            with Image.open(file_path) as img:
+                # Use draft mode only for JPEG images and if the image is larger than thumbnail
+                if img.format == 'JPEG' and min(img.size) > max_size * 2:
+                     try:
+                         img.draft('RGB', (max_size, max_size))
+                     except Exception:
+                         pass
+
+                # PIL automatically handles EXIF orientation when using ImageOps.exif_transpose
+                # However, we need to explicitly apply it to ensure orientation is correct
+                from PIL import ImageOps
+                # Apply EXIF orientation correction
+                img = ImageOps.exif_transpose(img)
+                
+                # Calculate thumbnail size maintaining aspect ratio
+                img.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
+
+                # Convert to RGB if needed
+                if img.mode != 'RGB':
+                    img = img.convert('RGB')
+
+                import numpy as np
+                return np.array(img)
+
+        except Exception:
+            pass
+
+        return None
+
+
+class EXIFExtractor(QObject):
+    """Fast EXIF data extractor with caching."""
+
+    def __init__(self):
+        super().__init__()
+        self.cache = get_image_cache()
+
+    def extract_exif_data(self, file_path: str) -> Dict[str, Any]:
+        """Extract EXIF data with caching."""
+        # Check cache first
+        cached_exif = self.cache.get_exif(file_path)
+        if cached_exif is not None:
+            cached_orientation = cached_exif.get('orientation', 'unknown')
+            # Trust the cache - verification should happen at cache level (based on mtime/size)
+            # print(f"[ORIENTATION] EXIFExtractor: Using cached EXIF for {os.path.basename(file_path)}, cached orientation = {cached_orientation}")
+            return cached_exif
+
+        # Extract fresh EXIF data
+        # print(f"[ORIENTATION] EXIFExtractor: Extracting fresh EXIF from {os.path.basename(file_path)}")
+        exif_data = self._extract_exif_from_file(file_path)
+
+        # Cache the result
+        if exif_data:
+            self.cache.put_exif(file_path, exif_data)
+            extracted_orientation = exif_data.get('orientation', 'unknown')
+            # print(f"[ORIENTATION] EXIFExtractor: Cached fresh EXIF for {os.path.basename(file_path)}, orientation = {extracted_orientation}")
+
+        return exif_data
+
+    def _extract_exif_from_file(self, file_path: str) -> Dict[str, Any]:
+        """Extract EXIF data from file."""
+        try:
+            import exifread
+            with open(file_path, 'rb') as f:
+                tags = exifread.process_file(f, details=False)
+
+                # Extract key information - ONLY orientation needed for special version
+                orientation = 1
+
+                # Get orientation
+                orientation_tag = tags.get('Image Orientation')
+                if orientation_tag:
+                    orientation_str = str(orientation_tag)
+                    orientation_map = {
+                        'Horizontal (normal)': 1,
+                        'Mirrored horizontal': 2,
+                        'Rotated 180': 3,
+                        'Mirrored vertical': 4,
+                        'Mirrored horizontal then rotated 90 CCW': 5,
+                        'Rotated 90 CW': 6,
+                        'Mirrored horizontal then rotated 90 CW': 7,
+                        'Rotated 90 CCW': 8
+                    }
+                    orientation = orientation_map.get(orientation_str, 1)
+                
+                return {
+                    'orientation': orientation,
+                    # Other fields removed for special version
+                }
+        except Exception:
+            pass
+
+        return {
+            'orientation': 1
+        }
 
 
 class UnifiedImageProcessor:
@@ -27,13 +144,13 @@ class UnifiedImageProcessor:
         self.cache = get_image_cache()
         self.thumbnail_extractor = ThumbnailExtractor()
         self.exif_extractor = EXIFExtractor()
-        self.raw_processor = OptimizedRAWProcessor()
+        # self.raw_processor = OptimizedRAWProcessor()
     
     def _is_raw_file(self, file_path: str) -> bool:
         """檢查是否為 RAW 文件"""
         return is_raw_file(file_path)
     
-    def process_thumbnail(self, file_path: str) -> Optional[np.ndarray]:
+    def process_thumbnail(self, file_path: str) -> Optional['np.ndarray']:
         """處理縮圖（統一接口）"""
         # 檢查快取
         cached = self.cache.get_thumbnail(file_path)
@@ -64,7 +181,7 @@ class UnifiedImageProcessor:
         return thumbnail
     
     def process_full_image(self, file_path: str, 
-                          use_full_resolution: bool = False) -> Optional[Union[np.ndarray, QPixmap]]:
+                          use_full_resolution: bool = False) -> Optional[Union['np.ndarray', QPixmap]]:
         """處理完整圖像（統一接口）"""
         # 檢查快取
         # CRITICAL: For RAW files, only check full_image cache, not pixmap cache
@@ -94,7 +211,7 @@ class UnifiedImageProcessor:
             return self._process_regular_image(file_path)
     
     def _process_raw_image(self, file_path: str, 
-                          use_full_resolution: bool = False) -> Optional[np.ndarray]:
+                          use_full_resolution: bool = False) -> Optional['np.ndarray']:
         """處理 RAW 圖像"""
         try:
             # 獲取 EXIF 數據（用於處理參數）
@@ -130,46 +247,9 @@ class UnifiedImageProcessor:
                    self.cache.put_preview(file_path, preview)
                    return preview
                
-               # Fallback to RAW processing if preview extraction fails
+                # Fallback to RAW processing if preview extraction fails
                print(f"[PREVIEW] Preview extraction failed, falling back to RAW processing")
-
-            import rawpy
-            with rawpy.imread(file_path) as raw:
-                # 獲取處理器參數
-                params = self.raw_processor.get_optimized_processing_params(
-                    file_path, exif_data
-                )
-                
-                # 根據需求調整參數
-                if use_fast_processing:
-                    params['half_size'] = True
-                
-                if use_full_resolution:
-                    params['half_size'] = False
-                    params['output_bps'] = 8  # 8-bit 足夠顯示
-                
-                # 處理 RAW
-                rgb_image = raw.postprocess(**params)
-                
-                # 應用方向校正
-                orientation = exif_data.get('orientation', 1) if exif_data else 1
-                import logging
-                logger = logging.getLogger(__name__)
-                file_basename = os.path.basename(file_path)
-                original_shape = rgb_image.shape if rgb_image is not None else None
-                # logger.info(f"[UNIFIED_PROC] Processing file: {file_basename}, Original shape: {original_shape}, Orientation: {orientation}")
-                
-                if orientation != 1:
-                    # logger.info(f"[UNIFIED_PROC] Applying orientation correction: {orientation}")
-                    rgb_image = self._apply_orientation_correction(rgb_image, orientation, exif_data)
-                    final_shape = rgb_image.shape if rgb_image is not None else None
-                    # logger.info(f"[UNIFIED_PROC] File: {file_basename}, Orientation correction applied, Final shape: {final_shape}")
-                
-                # 快取完整圖像 (Only cache full resolution RAWs in memory, never to disk)
-                if rgb_image is not None:
-                    self.cache.put_full_image(file_path, rgb_image)
-                
-                return rgb_image
+               return None # SPECIAL VERSION: No RAW processing, return None if preview failed
                 
         except Exception as e:
             import logging
@@ -211,10 +291,10 @@ class UnifiedImageProcessor:
     
     def _apply_orientation_correction(
         self,
-        image_array: np.ndarray,
+        image_array: 'np.ndarray',
         orientation: int,
         exif_data: Dict[str, Any] = None
-    ) -> np.ndarray:
+    ) -> 'np.ndarray':
         """根據 EXIF Orientation 值修正影像方向
 
         Orientation Reference:
@@ -230,6 +310,7 @@ class UnifiedImageProcessor:
         original_shape = image_array.shape
         print(f"[ORIENTATION] Before correction: shape = {original_shape}")
         
+        import numpy as np
         if orientation == 1:
             print(f"[ORIENTATION] Numpy operation: No operation (orientation = 1)")
             result = image_array
