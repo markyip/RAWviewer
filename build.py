@@ -160,8 +160,13 @@ def main():
     add_data_arg_str = " ".join(add_data_args)
 
     # Minimal PyInstaller command
+    # Ensure `src` is on PyInstaller's analysis path so top-level packages like `ui.*`
+    # (located at src/ui) are collected reliably in onefile builds.
+    src_path = os.path.abspath('src')
     build_command = (
         f'pyinstaller --onefile --windowed {icon_arg} '
+        f'--paths "{src_path}" '
+        f'--hidden-import rawviewer_ui.gallery_view --hidden-import rawviewer_ui.widgets '
         f'{add_data_arg_str} src/main.py --name RAWviewer'
     )
     print(f"Running: {build_command}")
