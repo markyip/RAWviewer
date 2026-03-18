@@ -1,5 +1,33 @@
 # RAWviewer Release Notes
 
+## 🚀 Version 1.5 - Gallery Smoothness & Windows EXE Stability
+**Release Date: March 18, 2026**
+
+### 🎯 What's New
+**A major gallery smoothness upgrade with visible-first loading, plus improved stability for Windows onefile executables.**
+
+This release focuses on large-folder browsing: prioritize thumbnails in the visible viewport, reduce main-thread pressure while scrolling, and improve Windows onefile EXE compatibility and runtime stability.
+
+### ✨ Key Features
+
+#### 🖼️ Gallery Improvements
+✅ **Pixel-level smooth scrolling** – Improved wheel scrolling feel to reduce stutter and jitter  
+✅ **Visible-first loading + smart prefetch** – Load viewport thumbnails first, then prefetch after scroll settles to avoid wasted work  
+✅ **Non-blocking initialization** – Defer heavy gallery setup to the event loop to keep view switching responsive  
+✅ **New gallery module packaging** – Introduced the `rawviewer_ui` package to isolate the optimized gallery implementation from legacy UI code
+
+#### 🪟 Windows EXE Packaging Stability
+✅ **More stable multiprocessing initialization** – Improved Windows onefile subprocess startup to reduce unexpected runtime behavior  
+✅ **Thumbnail output compatibility** – `thumbnail_ready` can now display `QImage` thumbnails reliably, improving pipeline consistency  
+✅ **More reliable PyInstaller analysis** – Updated build arguments to ensure UI modules and hidden imports are collected correctly in onefile builds
+
+### 📦 Technical Details
+- **Robust path matching**: normalize Windows paths for reliable async-result comparisons
+- **Better EXIF cache concurrency**: use thread-local SQLite connections and WAL to reduce contention
+- **More precise thumbnail loading**: request work by stage (e.g., `thumbnail`) to avoid unnecessary processing during gallery browsing
+
+---
+
 ## 🚀 Version 12.2 - Orientation & Build Optimization
 **Release Date: December 30, 2025**
 
