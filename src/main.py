@@ -16,6 +16,10 @@ except Exception:
 # Redirect them to a file early so all existing print() debug output is preserved.
 def _redirect_stdio_to_file_if_needed():
     try:
+        # Opt-in only: do not create log folders/files in normal releases.
+        if os.environ.get("RAWVIEWER_REDIRECT_STDIO", "").strip() not in ("1", "true", "True", "YES", "yes"):
+            return
+
         is_frozen = bool(getattr(sys, "frozen", False))
         if not is_frozen:
             return
@@ -226,65 +230,48 @@ print("All imports completed successfully!", flush=True)
 def setup_logging():
     """Setup logging configuration with file and console handlers"""
     try:
-        # Create logs directory if it doesn't exist
-        log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'logs')
-        os.makedirs(log_dir, exist_ok=True)
-        
-        # Verify directory was created
-        if not os.path.exists(log_dir):
-            raise OSError(f"Failed to create log directory: {log_dir}")
-        
-        # Create log filename with timestamp
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        log_file = os.path.join(log_dir, f'rawviewer_{timestamp}.log')
-        
         # Configure logging
         log_format = '%(asctime)s - %(levelname)s - [%(name)s:%(lineno)d] - %(message)s'
         date_format = '%Y-%m-%d %H:%M:%S'
         
         # Create formatters
         formatter = logging.Formatter(log_format, date_format)
-        
-        # File handler - log everything
-        try:
-            file_handler = logging.FileHandler(log_file, encoding='utf-8', mode='w')
-            file_handler.setLevel(logging.DEBUG)
-            file_handler.setFormatter(formatter)
-        except Exception as e:
-            raise OSError(f"Failed to create log file handler for {log_file}: {e}")
-        
-        # Console handler - log INFO and above
-        console_handler = logging.StreamHandler(sys.stdout)
-        console_handler.setLevel(logging.INFO)
-        console_handler.setFormatter(formatter)
-        
+
         # Configure root logger
         root_logger = logging.getLogger()
         root_logger.setLevel(logging.DEBUG)
         
         # Clear any existing handlers to avoid duplicates
         root_logger.handlers.clear()
-        
-        root_logger.addHandler(file_handler)
-        root_logger.addHandler(console_handler)
-        
-        # Verify log file was created and is writable
-        if not os.path.exists(log_file):
-            raise OSError(f"Log file was not created: {log_file}")
-        
-        # Test write to log file
-        try:
-            with open(log_file, 'a', encoding='utf-8') as f:
-                f.write("")
-        except Exception as e:
-            raise OSError(f"Log file is not writable: {log_file}, error: {e}")
-        
-        # Log the log file location
-        logger = logging.getLogger(__name__)
-        logger.info(f"Log file created successfully: {log_file}")
-        logger.info(f"Log directory: {log_dir}")
-        
-        return log_file
+
+        # Always attach a console/stream handler when possible.
+        stream = sys.stdout if sys.stdout is not None else getattr(sys, "__stdout__", None)
+        if stream is not None:
+            console_handler = logging.StreamHandler(stream)
+            console_handler.setLevel(logging.INFO)
+            console_handler.setFormatter(formatter)
+            root_logger.addHandler(console_handler)
+        else:
+            # Windowed builds can have no stdout; keep logging silent unless file logging is enabled.
+            root_logger.addHandler(logging.NullHandler())
+
+        # Optional file logging (opt-in) to avoid creating a logs folder in normal releases.
+        enable_file_log = os.environ.get("RAWVIEWER_FILE_LOG", "").strip() in ("1", "true", "True", "YES", "yes")
+        if enable_file_log:
+            log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'logs')
+            os.makedirs(log_dir, exist_ok=True)
+
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            log_file = os.path.join(log_dir, f'rawviewer_{timestamp}.log')
+
+            file_handler = logging.FileHandler(log_file, encoding='utf-8', mode='w')
+            file_handler.setLevel(logging.DEBUG)
+            file_handler.setFormatter(formatter)
+            root_logger.addHandler(file_handler)
+
+            return log_file
+
+        return None
         
     except Exception as e:
         # If logging setup fails, at least print to stderr
@@ -295,11 +282,13 @@ def setup_logging():
         
         # Try to write to a fallback log file
         try:
-            fallback_log = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'logs', 'error.log')
-            os.makedirs(os.path.dirname(fallback_log), exist_ok=True)
-            with open(fallback_log, 'a', encoding='utf-8') as f:
-                f.write(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} - {error_msg}\n")
-                f.write(f"{traceback.format_exc()}\n")
+            # Only attempt fallback file logging if explicitly enabled.
+            if os.environ.get("RAWVIEWER_FILE_LOG", "").strip() in ("1", "true", "True", "YES", "yes"):
+                fallback_log = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'logs', 'error.log')
+                os.makedirs(os.path.dirname(fallback_log), exist_ok=True)
+                with open(fallback_log, 'a', encoding='utf-8') as f:
+                    f.write(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} - {error_msg}\n")
+                    f.write(f"{traceback.format_exc()}\n")
         except:
             pass  # If even fallback fails, we've done our best
         
