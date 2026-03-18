@@ -1,6 +1,61 @@
 import sys
 import os
 
+# PyInstaller + multiprocessing/process pools:
+# When using ProcessPoolExecutor in a frozen onefile app on Windows, child processes
+# are spawned by re-launching the same executable. Without freeze_support(), the
+# child process can incorrectly run the GUI entrypoint and open another window.
+try:
+    import multiprocessing
+    if getattr(sys, "frozen", False):
+        multiprocessing.freeze_support()
+except Exception:
+    pass
+
+# In PyInstaller --windowed builds there is no console, so stdout/stderr can be None.
+# Redirect them to a file early so all existing print() debug output is preserved.
+def _redirect_stdio_to_file_if_needed():
+    try:
+        is_frozen = bool(getattr(sys, "frozen", False))
+        if not is_frozen:
+            return
+        if sys.stdout is not None and sys.stderr is not None:
+            return
+
+        # Prefer writing next to the project-style logs folder when present.
+        # Fallback to a local "logs" folder in current working directory.
+        base_dir = os.getcwd()
+        candidate_dirs = [
+            os.path.join(base_dir, "src", "logs"),
+            os.path.join(base_dir, "logs"),
+        ]
+        log_dir = None
+        for d in candidate_dirs:
+            try:
+                os.makedirs(d, exist_ok=True)
+                log_dir = d
+                break
+            except OSError:
+                continue
+
+        if not log_dir:
+            return
+
+        from datetime import datetime
+
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        path = os.path.join(log_dir, f"rawviewer_console_{ts}.log")
+        f = open(path, "a", encoding="utf-8", buffering=1)  # line-buffered
+        if sys.stdout is None:
+            sys.stdout = f
+        if sys.stderr is None:
+            sys.stderr = f
+    except Exception:
+        # Never fail startup due to debug output plumbing
+        pass
+
+_redirect_stdio_to_file_if_needed()
+
 # Force unbuffered output for Windows console
 # Note: In PyInstaller --windowed builds, sys.stdout/stderr may be None
 if sys.platform == 'win32':
@@ -32,6 +87,17 @@ def safe_print_err(*args, **kwargs):
             print(*args, file=sys.stderr, **kwargs)
         except (OSError, AttributeError):
             pass  # stderr may not be available
+
+
+def _norm_path(p: str) -> str:
+    """Normalize paths for reliable equality checks on Windows."""
+    try:
+        if not p:
+            return ""
+        # normcase handles case-insensitivity on Windows; normpath normalizes slashes.
+        return os.path.normcase(os.path.normpath(p))
+    except Exception:
+        return p or ""
 
 # Print immediately to verify script is running
 safe_print("=" * 80, flush=True)
@@ -147,8 +213,8 @@ except Exception as e:
 
 # UI Modules
 try:
-    from ui.widgets import ThumbnailLabel
-    from ui.gallery_view import JustifiedGallery
+    from rawviewer_ui.widgets import ThumbnailLabel
+    from rawviewer_ui.gallery_view import JustifiedGallery
     print("  - ui modules: OK", flush=True)
 except Exception as e:
     print(f"  - ui modules: ERROR - {e}", file=sys.stderr, flush=True)
@@ -1982,6 +2048,9 @@ class JustifiedGallery(QWidget):
         self._last_viewport_width = None
         self._ignore_resize_events = False
         
+        # Recursion protection for image loading
+        self._loading_visible = False
+        
         # Persistent Metadata Cache - avoids redundant DB/Disk hits during layout
         self._metadata_cache = {} 
         
@@ -2397,16 +2466,10 @@ class JustifiedGallery(QWidget):
                             w, h = h, w
                         aspect = w / h
                     else:
-                        # Try to get aspect ratio from image file without loading full image
-                        # This prevents pillarbox issues by using correct aspect ratios
-                        try:
-                            from common_image_loader import get_image_aspect_ratio
-                            aspect = get_image_aspect_ratio(item)
-                            if aspect <= 0 or aspect > 10:  # Sanity check
-                                aspect = 1.333
-                        except Exception:
-                            # Final fallback: Use default aspect ratio to prevent UI hang
-                            aspect = 1.333
+                        # IMPORTANT: Keep gallery build non-blocking.
+                        # Do not call get_image_aspect_ratio() here when metadata cache is cold;
+                        # it can hit disk/rawpy and block UI during view switching.
+                        aspect = 1.333
                 else:
                     # Pixmap object
                     aspect = item.width() / item.height() if item.height() > 0 else 1.333
@@ -2759,7 +2822,6 @@ class JustifiedGallery(QWidget):
         import time
         logger = logging.getLogger(__name__)
         
-        # CRITICAL: Don't load if we're in single view mode
         if self.parent_viewer and hasattr(self.parent_viewer, 'view_mode'):
             if self.parent_viewer.view_mode != 'gallery':
                 logger.debug(f"[JUSTIFIED_GALLERY] Skipping load_visible_images - not in gallery mode (view_mode: {self.parent_viewer.view_mode})")
@@ -2872,22 +2934,16 @@ class JustifiedGallery(QWidget):
                         widget.setPixmap(cached_pixmap)
                     widget.setText("")  # Clear loading text
                     
+                    
                     # Force widget update to ensure display
                     widget.update()
-                    widget.repaint()
                     
                     # Also update parent and gallery widget to ensure visibility
                     if widget.parent():
                         widget.parent().update()
-                        widget.parent().repaint()
                     
                     # Update the gallery widget itself
                     self.update()
-                    self.repaint()  # Force repaint of entire gallery
-                    
-                    # Process events to ensure UI updates immediately
-                    from PyQt6.QtWidgets import QApplication
-                    QApplication.processEvents()
                     
                     # Count cached images as loaded
                     if hasattr(self, '_visible_images_loaded'):
@@ -3969,6 +4025,8 @@ class CustomConfirmDialog(QDialog):
             }
         """)
         delete_btn.clicked.connect(self.accept)
+        delete_btn.setDefault(True)
+        delete_btn.setFocus()
         button_layout.addWidget(delete_btn)
         
         # Add stretch after buttons to center them
@@ -4378,28 +4436,58 @@ class RAWImageViewer(QMainWindow):
         """處理 ImageLoadManager 的縮圖就緒信號"""
         import logging
         logger = logging.getLogger(__name__)
+        from PyQt6.QtGui import QImage, QPixmap
         
-        # 只處理當前文件的縮圖
-        if file_path != self.current_file_path:
+        # Only handle current file's thumbnail (normalize for Windows path format differences)
+        if _norm_path(file_path) != _norm_path(getattr(self, "current_file_path", None)):
             logger.debug(f"[MANAGER] Thumbnail for different file: {os.path.basename(file_path)}")
             return
         
         logger.info(f"[MANAGER] Thumbnail ready for {os.path.basename(file_path)}")
+        # Speed gate: avoid rendering large thumbnails (double work) when a proper preview is imminent.
+        # Also protect UI from accidental oversized "thumbnails" (e.g. RAW BITMAP thumbs).
+        try:
+            if isinstance(thumbnail, QImage):
+                w, h = thumbnail.width(), thumbnail.height()
+            else:
+                h, w = thumbnail.shape[:2]
+            max_dim = max(h, w)
+        except Exception:
+            max_dim = 0
+
+        # If thumbnail is already near-preview size (or bigger), skip displaying it and wait for image_ready.
+        # This avoids a heavy bytes-copy + QImage/QPixmap build twice.
+        if max_dim >= 1600:
+            try:
+                logger.info(f"[MANAGER] Skipping thumbnail display (size {w}x{h}) to avoid double-render; waiting for preview/full.")
+            except Exception:
+                logger.info(f"[MANAGER] Skipping thumbnail display (max_dim={max_dim}) to avoid double-render; waiting for preview/full.")
+            self._pending_thumbnail = None
+            self.status_bar.showMessage("Processing image...")
+            return
+
         # Mark that orientation is already applied (UnifiedImageProcessor applies it to thumbnails)
-        logger.debug(f"[MANAGER] Setting _orientation_already_applied = True before display_numpy_image (thumbnail)")
+        # Support both np.ndarray and QImage thumbnails.
         self._orientation_already_applied = True
-        if self._should_show_thumbnail():
-            # Only hide overlay if we're actually showing the thumbnail
-            if hasattr(self, 'loading_overlay'):
-                self.loading_overlay.hide_loading()
-            self.display_numpy_image(thumbnail)
-            self.status_bar.showMessage("Preview loaded - processing full image...")
-        else:
-            # Keep overlay visible if we're storing thumbnail as pending (waiting for full image)
-            self._pending_thumbnail = thumbnail
-            self.status_bar.showMessage("Processing full image for quality evaluation...")
-        logger.debug(f"[MANAGER] Resetting _orientation_already_applied = False after display_numpy_image (thumbnail)")
-        self._orientation_already_applied = False  # Reset flag
+        try:
+            if self._should_show_thumbnail():
+                # Only hide overlay if we're actually showing the thumbnail
+                if hasattr(self, 'loading_overlay'):
+                    self.loading_overlay.hide_loading()
+
+                if isinstance(thumbnail, QImage):
+                    pixmap = QPixmap.fromImage(thumbnail)
+                    self.display_pixmap(pixmap)
+                else:
+                    self.display_numpy_image(thumbnail)
+
+                self.status_bar.showMessage("Preview loaded - processing full image...")
+            else:
+                # Keep overlay visible if we're storing thumbnail as pending (waiting for full image)
+                self._pending_thumbnail = thumbnail
+                self.status_bar.showMessage("Processing full image for quality evaluation...")
+        finally:
+            self._orientation_already_applied = False  # Reset flag
 
     def on_manager_image_ready(self, file_path: str, image):
         """處理 ImageLoadManager 的完整圖像就緒信號"""
@@ -4409,8 +4497,8 @@ class RAWImageViewer(QMainWindow):
         import logging
         logger = logging.getLogger(__name__)
         
-        # 只處理當前文件的圖像
-        if file_path != self.current_file_path:
+        # Only handle current file's image (normalize for Windows path format differences)
+        if _norm_path(file_path) != _norm_path(getattr(self, "current_file_path", None)):
             logger.debug(f"[MANAGER] Image for different file: {os.path.basename(file_path)}")
             return
         
@@ -4440,19 +4528,25 @@ class RAWImageViewer(QMainWindow):
 
         self.status_bar.showMessage(f"Loaded {os.path.basename(file_path)}")
         
-        # Handle pending zoom if full resolution just arrived
+        # Handle pending "spacebar 100%" zoom if full resolution just arrived.
+        # This avoids the two-step zoom (preview 100% -> full-res 100%).
         if is_full_resolution and has_pending_zoom:
-             logger.info("[MANAGER] Executing pending zoom after full resolution load")
-             self._pending_zoom = False
-             # Re-trigger zoom logic (which will now proceed because we have full res, or just zoom)
-             # We can't easily re-call 'zoom_in' without context, but typically we just let user zoom again
-             # OR we can try to apply a zoom step.
-             # Given the user just scrolled, maybe we should apply one step?
-             # For now, just having the full res image allows them to zoom further.
-             # If `_pending_zoom` was set by wheel or key, we might have blocked it.
-             # Let's try to apply a default zoom level if they were stuck?
-             # Actually, simpler: The user was blocked from zooming. Now they can.
-             pass
+            logger.info("[MANAGER] Executing pending 100% zoom after full resolution load")
+            self._pending_zoom = False
+            try:
+                # Ensure we stay in zoom (not fit-to-window)
+                self.fit_to_window = False
+                self.current_zoom_level = 1.0
+                # Update pixmap reference after display_numpy_image()
+                self.current_pixmap = self.image_label.pixmap()
+                if self.current_pixmap:
+                    image_center_x = self.current_pixmap.width() // 2
+                    image_center_y = self.current_pixmap.height() // 2
+                    self.zoom_center_point = QPoint(image_center_x, image_center_y)
+                    self.scale_image_to_100_percent()
+                    self.zoom_to_point()
+            except Exception as e:
+                logger.debug(f"[MANAGER] Pending zoom apply failed: {e}")
 
         # CRITICAL: Ensure metadata is updated after image is displayed
         self.update_status_bar()
@@ -4466,8 +4560,8 @@ class RAWImageViewer(QMainWindow):
         import logging
         logger = logging.getLogger(__name__)
         
-        # 只處理當前文件的 pixmap
-        if file_path != self.current_file_path:
+        # Only handle current file's pixmap (normalize for Windows path format differences)
+        if _norm_path(file_path) != _norm_path(getattr(self, "current_file_path", None)):
             logger.debug(f"[MANAGER] Pixmap for different file: {os.path.basename(file_path)}")
             return
         
@@ -4515,8 +4609,8 @@ class RAWImageViewer(QMainWindow):
         import logging
         logger = logging.getLogger(__name__)
         
-        # 只處理當前文件的 EXIF
-        if file_path != self.current_file_path:
+        # Only handle current file's EXIF (normalize for Windows path format differences)
+        if _norm_path(file_path) != _norm_path(getattr(self, "current_file_path", None)):
             logger.debug(f"[MANAGER] EXIF for different file: {os.path.basename(file_path)}")
             return
         
@@ -4568,8 +4662,8 @@ class RAWImageViewer(QMainWindow):
         import logging
         logger = logging.getLogger(__name__)
         
-        # 只處理當前文件的錯誤
-        if file_path != self.current_file_path:
+        # Only handle current file's error (normalize for Windows path format differences)
+        if _norm_path(file_path) != _norm_path(getattr(self, "current_file_path", None)):
             logger.debug(f"[MANAGER] Error for different file: {os.path.basename(file_path)}")
             return
         
@@ -4581,8 +4675,8 @@ class RAWImageViewer(QMainWindow):
         import logging
         logger = logging.getLogger(__name__)
         
-        # 只處理當前文件的進度
-        if file_path != self.current_file_path:
+        # Only handle current file's progress (normalize for Windows path format differences)
+        if _norm_path(file_path) != _norm_path(getattr(self, "current_file_path", None)):
             return
         
         filename = os.path.basename(file_path)
@@ -4940,6 +5034,7 @@ class RAWImageViewer(QMainWindow):
         
         self.open_button.setFlat(True)
         self.open_button.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.open_button.setToolTip("Open Image File")
         self.open_button.clicked.connect(self.open_file)
         self.open_button.setStyleSheet("""
             QPushButton {
@@ -5497,7 +5592,11 @@ class RAWImageViewer(QMainWindow):
             """)
             
             # Create JustifiedGallery widget
-            justified_gallery = JustifiedGallery([], self)  # Empty list initially, will be populated
+            # IMPORTANT: main.py also contains a legacy JustifiedGallery class further down.
+            # Import here with an alias to ensure we always use the optimized implementation
+            # from rawviewer_ui (pixel-smooth scrolling + stage-aware loading).
+            from rawviewer_ui.gallery_view import JustifiedGallery as RVJustifiedGallery
+            justified_gallery = RVJustifiedGallery([], self)  # Empty list initially, will be populated
             gallery_scroll.setWidget(justified_gallery)
             gallery_layout.addWidget(gallery_scroll)
             
@@ -5528,19 +5627,45 @@ class RAWImageViewer(QMainWindow):
                 logger.info(f"[GALLERY] Gallery widget or image files not available, returning")
                 return
             
-            # Get bulk_metadata if available (stored during folder load)
-            # This ensures aspect ratios are correct and prevents pillarbox issues
+            # IMPORTANT: Switching to gallery should be instant.
+            # Do NOT block the UI thread on metadata fetch for thousands of files.
+            # 1) Show gallery immediately with a fast layout (default aspect ratios).
             bulk_metadata = getattr(self, '_gallery_bulk_metadata', None)
-            if not bulk_metadata:
-                # Fallback: fetch metadata if not available
-                from image_cache import get_image_cache
-                cache = get_image_cache()
-                bulk_metadata = cache.get_multiple_exif(self.image_files)
-                logger.info(f"[GALLERY] Fetched metadata for {len(bulk_metadata)} images")
-            
-            # Update JustifiedGallery with file paths and metadata
-            # Passing metadata ensures correct aspect ratios are used in layout calculation
-            self.gallery_justified.set_images(self.image_files, bulk_metadata)
+            self.gallery_justified.set_images(self.image_files, bulk_metadata if bulk_metadata else None)
+
+            # 2) If metadata is missing, fetch it in the background and refresh once ready.
+            if not bulk_metadata and not getattr(self, "_gallery_metadata_fetch_in_progress", False):
+                self._gallery_metadata_fetch_in_progress = True
+                folder_at_request = getattr(self, "current_folder", None)
+                files_snapshot = list(self.image_files)
+
+                from PyQt6.QtCore import QRunnable, QThreadPool, QTimer
+
+                class _GalleryMetadataFetch(QRunnable):
+                    def run(self_inner):
+                        try:
+                            from image_cache import get_image_cache
+                            cache = get_image_cache()
+                            meta = cache.get_multiple_exif(files_snapshot, fast_mode=True)
+                        except Exception:
+                            meta = {}
+
+                        def apply_meta():
+                            try:
+                                # Ignore if folder changed during fetch
+                                if getattr(self, "current_folder", None) != folder_at_request:
+                                    return
+                                self._gallery_bulk_metadata = meta
+                                self._gallery_metadata_fetch_in_progress = False
+                                if self.gallery_justified and self.image_files:
+                                    self.gallery_justified.set_images(self.image_files, meta)
+                                    logger.info(f"[GALLERY] Background metadata ready: {len(meta)} items, gallery refreshed")
+                            finally:
+                                self._gallery_metadata_fetch_in_progress = False
+
+                        QTimer.singleShot(0, apply_meta)
+
+                QThreadPool.globalInstance().start(_GalleryMetadataFetch())
             
             total_time = time.time() - start_time
             logger.info(f"[GALLERY] ========== GALLERY LAYOUT COMPLETED in {total_time:.3f}s ==========")
@@ -6609,8 +6734,15 @@ class RAWImageViewer(QMainWindow):
     def _gallery_item_clicked(self, file_path):
         """Handle gallery item click - switch to single view and load image"""
         # SYNC: Update current file index immediately to prevent navigation jumps
-        if self.image_files and file_path in self.image_files:
-            self.current_file_index = self.image_files.index(file_path)
+        if self.image_files:
+            try:
+                target = _norm_path(file_path)
+                for i, p in enumerate(self.image_files):
+                    if _norm_path(p) == target:
+                        self.current_file_index = i
+                        break
+            except Exception:
+                pass
         
         # Mark that we're loading from gallery view - this will trigger full resolution load
         self._loading_from_gallery = True
@@ -6848,13 +6980,23 @@ class RAWImageViewer(QMainWindow):
         return self.sort_files_by_capture_time(file_paths, newest_first=newest_first, file_stats=file_stats)
 
     def open_file(self):
-        """Open a folder containing images"""
+        """Open an image file (and its containing folder)"""
         settings = self.get_settings()
         last_dir = settings.value("last_opened_dir", "")
-        folder_path = QFileDialog.getExistingDirectory(
-            self, "Open Folder", last_dir)
-        if folder_path:
-            self.load_folder_images(folder_path)
+        
+        # Build filter string from supported extensions
+        exts = self.get_supported_extensions()
+        # Format: "Images (*.jpg *.png ...);;All Files (*)"
+        input_exts = " ".join([f"*{e}" for e in exts])
+        filter_str = f"Images ({input_exts});;All Files (*)"
+        
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "Open File", last_dir, filter_str)
+            
+        if file_path:
+            folder_path = os.path.dirname(file_path)
+            # Use the selected file as the start_file to center on it
+            self.load_folder_images(folder_path, start_file=os.path.basename(file_path))
             settings.setValue("last_opened_dir", folder_path)
 
     def open_folder(self):
@@ -8009,11 +8151,8 @@ class RAWImageViewer(QMainWindow):
                 is_pixmap_half_size = pixmap_max_dim < 5000
                 if is_pixmap_half_size:
                     logger.info(f"[DISPLAY_PIXMAP] Half-size image detected ({pixmap.width()}x{pixmap.height()}), "
-                               f"temporarily showing fit-to-window, will apply zoom when full resolution loads")
-                    # Temporarily show fit-to-window for half_size image
-                    # Zoom will be restored when full resolution loads
-                    # BUT: Don't reset fit_to_window flag - keep it False so navigation can save zoom state
-                    self.scale_image_to_fit()
+                               f"optimistically applying zoom (fuzzy preview) while full resolution loads")
+                    self.apply_zoom_and_pan()
                 else:
                     # Full resolution image - apply zoom now
                     logger.info(f"[DISPLAY_PIXMAP] Full resolution image, applying zoom immediately")
@@ -9362,18 +9501,18 @@ class RAWImageViewer(QMainWindow):
                             # Cached image is also half_size, need to process full resolution
                             logger.info("Cached image is half_size, processing full resolution...")
                             self._load_full_resolution_on_demand()
-                            # Don't zoom yet - wait for full resolution to load
-                            # Store zoom intent for when full resolution is ready
+                            # Don't zoom yet - wait for full resolution to load (avoid two-step zoom)
                             self._pending_zoom = True
-                            logger.debug("Stored pending zoom - will execute when full resolution is ready")
+                            logger.debug("Stored pending 100% zoom - will execute when full resolution is ready")
+                            self.status_bar.showMessage("Loading full resolution for 100% zoom...")
                             return
                     else:
                         # Start loading full resolution in background
                         self._load_full_resolution_on_demand()
-                        # Don't zoom yet - wait for full resolution to load
-                        # Store zoom intent for when full resolution is ready
+                        # Don't zoom yet - wait for full resolution to load (avoid two-step zoom)
                         self._pending_zoom = True
-                        logger.debug("Stored pending zoom - will execute when full resolution is ready")
+                        logger.debug("Stored pending 100% zoom - will execute when full resolution is ready")
+                        self.status_bar.showMessage("Loading full resolution for 100% zoom...")
                         return
             
             # Set up zoom parameters
@@ -10726,6 +10865,17 @@ class RAWImageViewer(QMainWindow):
                     # trigger an early load for better perceived performance
                     if not early_load_triggered:
                         is_start_file = start_file and (os.path.basename(full_path) == start_file or full_path == start_file)
+                        
+                        # Force single view mode if a specific file was requested
+                        if is_start_file and hasattr(self, 'view_mode') and self.view_mode == 'gallery':
+                            logger.info(f"[FOLDER] Switching to single view for start_file: {os.path.basename(full_path)}")
+                            self.view_mode = 'single'
+                            # Ensure UI switches back to single view
+                            if hasattr(self, 'gallery_widget') and self.gallery_widget:
+                                self.gallery_widget.hide()
+                            if hasattr(self, 'scroll_area'):
+                                self.scroll_area.show()
+                                
                         if is_start_file or (not start_file and len(image_files) == 1):
                             logger.info(f"[FOLDER] Early load triggered for: {os.path.basename(full_path)}")
                             self.current_file_path = full_path
@@ -11041,6 +11191,9 @@ class RAWImageViewer(QMainWindow):
                     if hasattr(self.image_manager, '_stopped'):
                         self.image_manager._stopped = True
                     self.image_manager.cancel_all_tasks()
+                    # Now shutdown worker pools/process pool (app is closing)
+                    if hasattr(self.image_manager, 'shutdown'):
+                        self.image_manager.shutdown()
                     logger.info("[CLOSE] All image load tasks stopped and cancelled")
                 except Exception as e:
                     logger.warning(f"[CLOSE] Error stopping/cancelling image load tasks: {e}", exc_info=True)
@@ -11103,6 +11256,15 @@ class RAWImageViewer(QMainWindow):
             except Exception as e:
                 logger.warning(f"[CLOSE] Error during force cleanup: {e}", exc_info=True)
             
+            # Close image cache resources (database connections)
+            if hasattr(self, 'image_cache') and self.image_cache is not None:
+                logger.info("[CLOSE] Closing image cache resources...")
+                try:
+                    self.image_cache.close()
+                    logger.info("[CLOSE] Image cache resources closed")
+                except Exception as e:
+                    logger.warning(f"[CLOSE] Error closing image cache: {e}")
+
             logger.info("[CLOSE] Cleanup completed successfully")
             
         except Exception as e:
@@ -11308,7 +11470,10 @@ def main():
             print(f"{'='*80}\n", file=sys.stderr)
         
         logger.info(f"[MAIN] Application exited with code: {exit_code}")
-        sys.exit(exit_code)
+        # Use os._exit to force kill any lingering background threads (like database connections or rawpy)
+        # sys.exit() only raises SystemExit and waits for non-daemon threads
+        logger.info(f"[MAIN] Force exiting process with os._exit({exit_code})")
+        os._exit(exit_code)
         
     except KeyboardInterrupt:
         logger.info("Application interrupted by user (Ctrl+C)")

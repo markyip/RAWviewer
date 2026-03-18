@@ -44,6 +44,35 @@ def check_cache_for_image(file_path: str, use_full_resolution: bool = False) -> 
         
     return None, None
 
+def check_memory_cache_for_image(file_path: str, use_full_resolution: bool = False) -> Tuple[Optional[Any], Optional[str]]:
+    """
+    檢查記憶體快取中是否存在圖像 (非阻塞，不讀取磁盤)。
+    
+    返回: (數據, 快取類型) 或 (None, None)
+    類型包括: 'full_image', 'pixmap', 'thumbnail'
+    """
+    cache = get_image_cache()
+    
+    # 1. 如果請求全解析度，優先檢查全圖像快取
+    if use_full_resolution:
+        # 直接訪問記憶體 LRUCache，避免觸發磁盤讀取
+        full_image = cache.full_image_cache.get(file_path)
+        if full_image is not None:
+            return full_image, 'full_image'
+            
+    # 2. 檢查 Pixmap 快取
+    pixmap = cache.pixmap_cache.get(file_path)
+    if pixmap is not None and not pixmap.isNull():
+        return pixmap, 'pixmap'
+        
+    # 3. 如果不是必須全解析度，檢查記憶體縮圖快取
+    if not use_full_resolution:
+        thumbnail = cache.thumbnail_cache.get(file_path)
+        if thumbnail is not None:
+            return thumbnail, 'thumbnail'
+            
+    return None, None
+
 def is_raw_file(file_path: str) -> bool:
     """檢查是否為 RAW 文件"""
     raw_exts = {

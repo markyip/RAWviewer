@@ -92,12 +92,31 @@ class PersistentEXIFCache:
 
         self.db_path = os.path.join(cache_dir, "exif_cache.db")
         self.lock = threading.RLock()
+        
+        # Use thread-local storage for database connections
+        self._local = threading.local()
+        
         self._init_db()
+
+    def _get_connection(self):
+        """Get thread-local database connection."""
+        if not hasattr(self._local, 'conn'):
+            conn = sqlite3.connect(
+                self.db_path,
+                check_same_thread=False,
+                timeout=30.0
+            )
+            # Enable WAL mode for better concurrent performance
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=NORMAL")
+            conn.execute("PRAGMA cache_size=1000")
+            self._local.conn = conn
+        return self._local.conn
 
     def _init_db(self):
         """Initialize the SQLite database."""
         with self.lock:
-            conn = sqlite3.connect(self.db_path)
+            conn = self._get_connection()
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS exif_cache (
                     file_path TEXT PRIMARY KEY,
@@ -135,7 +154,6 @@ class PersistentEXIFCache:
                 print(f"[CACHE] Error checking/migrating schema: {e}")
                 
             conn.commit()
-            conn.close()
 
     def _get_file_hash(self, file_path: str) -> Tuple[int, float]:
         """Get file size and modification time for cache validation."""
@@ -153,7 +171,7 @@ class PersistentEXIFCache:
 
         with self.lock:
             try:
-                conn = sqlite3.connect(self.db_path)
+                conn = self._get_connection()
                 cursor = conn.execute(
                     "SELECT file_size, file_mtime, orientation, camera_make, camera_model, exif_data, "
                     "capture_time, original_width, original_height "
@@ -161,7 +179,6 @@ class PersistentEXIFCache:
                     (file_path,)
                 )
                 row = cursor.fetchone()
-                conn.close()
 
                 if row and row[0] == file_size and row[1] == file_mtime:
                     # Cache is valid
@@ -195,10 +212,9 @@ class PersistentEXIFCache:
         """Remove cached EXIF data for a file."""
         with self.lock:
             try:
-                conn = sqlite3.connect(self.db_path)
+                conn = self._get_connection()
                 cursor = conn.execute("DELETE FROM exif_cache WHERE file_path = ?", (file_path,))
                 conn.commit()
-                conn.close()
                 return cursor.rowcount > 0
             except Exception:
                 return False
@@ -211,7 +227,7 @@ class PersistentEXIFCache:
 
         with self.lock:
             try:
-                conn = sqlite3.connect(self.db_path)
+                conn = self._get_connection()
                 exif_blob = pickle.dumps(exif_info.get('exif_data', {}))
                 
                 # Extract capture_time for separate column
@@ -251,7 +267,6 @@ class PersistentEXIFCache:
                     )
                 )
                 conn.commit()
-                conn.close()
             except Exception:
                 pass
 
@@ -261,11 +276,10 @@ class PersistentEXIFCache:
 
         with self.lock:
             try:
-                conn = sqlite3.connect(self.db_path)
+                conn = self._get_connection()
                 conn.execute(
                     "DELETE FROM exif_cache WHERE cached_time < ?", (cutoff_time,))
                 conn.commit()
-                conn.close()
             except Exception:
                 pass
 
@@ -281,7 +295,7 @@ class PersistentEXIFCache:
         results = {}
         with self.lock:
             try:
-                conn = sqlite3.connect(self.db_path)
+                conn = self._get_connection()
                 # sqlite has a limit on the number of variables in a query
                 # Process in chunks of 500
                 for i in range(0, len(file_paths), 500):
@@ -360,12 +374,20 @@ class PersistentEXIFCache:
                                 'original_width': result_width,
                                 'original_height': result_height
                             }
-                conn.close()
+                # No conn.close() here as it is thread-local
+                pass
             except Exception:
                 pass
         return results
-
-        return results
+    
+    def close(self):
+        """Close the database connection for the current thread."""
+        try:
+            if hasattr(self, '_local') and hasattr(self._local, 'conn'):
+                self._local.conn.close()
+                del self._local.conn
+        except Exception:
+            pass
 
 
 class PersistentThumbnailCache:
@@ -576,6 +598,15 @@ class PersistentThumbnailCache:
                 conn.commit()
             except Exception:
                 pass
+
+    def close(self):
+        """Close the database connection for the current thread."""
+        try:
+            if hasattr(self, '_local') and hasattr(self._local, 'conn'):
+                self._local.conn.close()
+                del self._local.conn
+        except Exception:
+            pass
 
 
 class PersistentPreviewCache(PersistentThumbnailCache):
@@ -799,27 +830,27 @@ class ImageCache(QObject):
         self.stats['preview_requests'] += 1
         self._check_memory_pressure()
 
-        # Check in-memory cache
+        # Check in-memory cache first
         preview = self.preview_cache.get(file_path)
         if preview is not None:
             self.cache_hit.emit(file_path, 'preview')
             return preview
-        
-        # Check disk cache
+
+        # Check disk cache for previews
         jpeg_data = self.disk_preview_cache.get(file_path)
         if jpeg_data is not None:
-            try:
+             try:
                 from PIL import Image
                 import io
                 pil_image = Image.open(io.BytesIO(jpeg_data))
                 if pil_image.mode != 'RGB':
                     pil_image = pil_image.convert('RGB')
                 preview = np.array(pil_image)
-                # Cache in RAM
+                # Also cache in memory
                 self.preview_cache.put(file_path, preview.copy())
                 self.cache_hit.emit(file_path, 'preview')
                 return preview
-            except Exception:
+             except Exception:
                 self.disk_preview_cache.remove(file_path)
         
         self.cache_miss.emit(file_path, 'preview')
@@ -921,6 +952,15 @@ class ImageCache(QObject):
         """Clean up old cache entries."""
         self.exif_cache.cleanup_old_entries()
         self.disk_thumbnail_cache.cleanup_old_entries()
+
+    def close(self):
+        """Close all persistent cache connections."""
+        if hasattr(self, 'exif_cache'):
+            self.exif_cache.close()
+        if hasattr(self, 'disk_thumbnail_cache'):
+            self.disk_thumbnail_cache.close()
+        if hasattr(self, 'disk_preview_cache'):
+            self.disk_preview_cache.close()
 
 
 # Global cache instance

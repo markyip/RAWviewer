@@ -9,10 +9,10 @@ import os
 import threading
 import queue
 from enum import Enum
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Tuple
 import numpy as np
-from PyQt6.QtCore import QObject, pyqtSignal, QRunnable, QThreadPool
-from PyQt6.QtGui import QPixmap
+from PyQt6.QtCore import QObject, pyqtSignal, QRunnable, QThreadPool, QSize, Qt
+from PyQt6.QtGui import QPixmap, QImage
 
 import concurrent.futures
 from image_cache import get_image_cache
@@ -31,10 +31,20 @@ class ImageLoadTask:
     """圖像加載任務"""
     
     def __init__(self, file_path: str, priority: Priority = Priority.CURRENT, 
-                 use_full_resolution: bool = False):
+                 use_full_resolution: bool = False,
+                 stages: Optional[set] = None,
+                 thumbnail_target_size: Optional[QSize] = None,
+                 thumbnail_fit: str = "crop"):
         self.file_path = file_path
         self.priority = priority
         self.use_full_resolution = use_full_resolution
+        # Stages: {'thumbnail', 'exif', 'full'}.
+        # Gallery should typically request only {'thumbnail'} (and optionally 'exif').
+        self.stages = stages if stages is not None else {'thumbnail', 'exif', 'full'}
+        # If provided, the thumbnail will be scaled/cropped in worker thread to this size.
+        # This keeps UI thread light for smooth pixel-level scrolling.
+        self.thumbnail_target_size = thumbnail_target_size
+        self.thumbnail_fit = thumbnail_fit
         self._cancelled = False
         self._lock = threading.Lock()
     
@@ -80,6 +90,7 @@ class ImageLoadWorker(QRunnable):
         file_path = self.task.file_path
         
         try:
+            stages = self.task.stages or set()
             # 發送進度更新
             if not self.task.is_cancelled():
                 self.manager.progress_updated.emit(file_path, "Loading image...")
@@ -88,33 +99,63 @@ class ImageLoadWorker(QRunnable):
             processor = self._get_processor()
             
             # 處理縮圖
-            if not self.task.is_cancelled():
+            if 'thumbnail' in stages and not self.task.is_cancelled():
                 self.manager.progress_updated.emit(file_path, "Extracting preview...")
                 thumbnail = processor.process_thumbnail(file_path)
-                if thumbnail is not None:
-                    self.manager.thumbnail_ready.emit(file_path, thumbnail)
+                if thumbnail is not None and not self.task.is_cancelled():
+                    # Optional: pre-scale/crop thumbnail in worker thread (emit QImage)
+                    tgt = self.task.thumbnail_target_size
+                    if tgt is not None and isinstance(tgt, QSize) and tgt.isValid():
+                        try:
+                            arr = np.ascontiguousarray(thumbnail)
+                            h, w = arr.shape[:2]
+                            bpl = arr.strides[0]
+                            qimg = QImage(arr.data, w, h, bpl, QImage.Format.Format_RGB888).copy()
+                            if self.task.thumbnail_fit == "crop":
+                                scaled = qimg.scaled(
+                                    tgt,
+                                    aspectRatioMode=Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                                    transformMode=Qt.TransformationMode.SmoothTransformation,
+                                )
+                                x = max(0, (scaled.width() - tgt.width()) // 2)
+                                y = max(0, (scaled.height() - tgt.height()) // 2)
+                                qimg_out = scaled.copy(x, y, tgt.width(), tgt.height())
+                            else:
+                                qimg_out = qimg.scaled(
+                                    tgt,
+                                    aspectRatioMode=Qt.AspectRatioMode.KeepAspectRatio,
+                                    transformMode=Qt.TransformationMode.SmoothTransformation,
+                                )
+                            self.manager.thumbnail_ready.emit(file_path, qimg_out)
+                        except Exception:
+                            # Fallback: emit numpy thumbnail
+                            self.manager.thumbnail_ready.emit(file_path, thumbnail)
+                    else:
+                        self.manager.thumbnail_ready.emit(file_path, thumbnail)
             
-            # 處理 EXIF 數據（在處理完整圖像之前）
-            if not self.task.is_cancelled():
+            # 處理 EXIF 數據
+            if 'exif' in stages and not self.task.is_cancelled():
                 self.manager.progress_updated.emit(file_path, "Reading metadata...")
                 exif_data = processor.process_exif(file_path)
-                if exif_data:
+                if exif_data and not self.task.is_cancelled():
                     self.manager.exif_data_ready.emit(file_path, exif_data)
             
-            # 處理完整圖像
-            if not self.task.is_cancelled():
+            # 處理完整圖像（只在需要時）
+            if 'full' in stages and not self.task.is_cancelled():
                 if self.task.use_full_resolution:
                     self.manager.progress_updated.emit(file_path, "Loading full resolution...")
                 else:
                     self.manager.progress_updated.emit(file_path, "Processing image...")
                 result = processor.process_full_image(
-                    file_path, 
-                    use_full_resolution=self.task.use_full_resolution
+                    file_path,
+                    use_full_resolution=self.task.use_full_resolution,
+                    executor=self.manager._process_pool
                 )
-                if isinstance(result, np.ndarray):
-                    self.manager.image_ready.emit(file_path, result)
-                elif isinstance(result, QPixmap):
-                    self.manager.pixmap_ready.emit(file_path, result)
+                if not self.task.is_cancelled():
+                    if isinstance(result, np.ndarray):
+                        self.manager.image_ready.emit(file_path, result)
+                    elif isinstance(result, QPixmap):
+                        self.manager.pixmap_ready.emit(file_path, result)
             
             # 發送完成信號
             if not self.task.is_cancelled():
@@ -132,7 +173,8 @@ class ImageLoadManager(QObject):
     """統一管理所有圖像加載任務的工作隊列管理器（單例模式）"""
     
     # 信號定義
-    thumbnail_ready = pyqtSignal(str, np.ndarray)  # file_path, thumbnail
+    # NOTE: Can emit np.ndarray (base thumbnail) or QImage (pre-scaled/cropped) for smooth UI.
+    thumbnail_ready = pyqtSignal(str, object)  # file_path, thumbnail (np.ndarray or QImage)
     image_ready = pyqtSignal(str, np.ndarray)  # file_path, full_image
     pixmap_ready = pyqtSignal(str, QPixmap)  # file_path, pixmap
     error_occurred = pyqtSignal(str, str)  # file_path, error_message
@@ -191,8 +233,11 @@ class ImageLoadManager(QObject):
         self._stopped = False  # Flag to stop scheduling new tasks
         self._initialized = True
     
-    def load_image(self, file_path: str, priority: Priority = Priority.CURRENT, 
-                   cancel_existing: bool = True, use_full_resolution: bool = False):
+    def load_image(self, file_path: str, priority: Priority = Priority.CURRENT,
+                   cancel_existing: bool = True, use_full_resolution: bool = False,
+                   stages: Optional[set] = None,
+                   thumbnail_target_size: Optional[QSize] = None,
+                   thumbnail_fit: str = "crop"):
         """請求加載圖像"""
         # Don't accept new tasks if stopped
         if self._stopped:
@@ -202,12 +247,19 @@ class ImageLoadManager(QObject):
         if cancel_existing:
             self.cancel_task(file_path)
         
-        # 檢查快取
-        if self._check_cache(file_path, use_full_resolution):
+        # 檢查快取（memory-only, stage-aware）
+        if self._check_cache(file_path, use_full_resolution, stages=stages):
             return
         
         # 創建任務
-        task = ImageLoadTask(file_path, priority, use_full_resolution)
+        task = ImageLoadTask(
+            file_path,
+            priority,
+            use_full_resolution,
+            stages=stages,
+            thumbnail_target_size=thumbnail_target_size,
+            thumbnail_fit=thumbnail_fit
+        )
         with self._queue_lock:
             self._active_tasks[file_path] = task
         
@@ -224,9 +276,6 @@ class ImageLoadManager(QObject):
     
     def cancel_all_tasks(self):
         """取消所有任務"""
-        # Set stopped flag to prevent new tasks from being scheduled
-        self._stopped = True
-        
         with self._queue_lock:
             for task in self._active_tasks.values():
                 task.cancel()
@@ -239,8 +288,16 @@ class ImageLoadManager(QObject):
             except queue.Empty:
                 break
         
-        # Shutdown process pool
-        self.shutdown()
+        # NOTE: Do not shutdown pools here. This is used for folder switches and UI navigation.
+        # Use shutdown() only when the application is closing.
+
+    def flush_queue(self):
+        """Aggressively drop pending tasks to prioritize new position (used for large scroll jumps)."""
+        with self._queue_lock:
+            for task in self._active_tasks.values():
+                task.cancel()
+            self._active_tasks.clear()
+            self._work_queue = queue.PriorityQueue()
 
     def shutdown(self):
         """關閉管理器並清理資源"""
@@ -248,48 +305,48 @@ class ImageLoadManager(QObject):
         if hasattr(self, '_process_pool') and self._process_pool:
             self._process_pool.shutdown(wait=False)
     
-    def _check_cache(self, file_path: str, use_full_resolution: bool) -> bool:
-        """檢查快取，如果存在則直接發送信號"""
-        # CRITICAL: For RAW files, only use full_image cache, not pixmap cache
-        # This ensures RAW files go through proper processing with orientation correction
-        from common_image_loader import check_cache_for_image, is_raw_file
-        
+    def _check_cache(self, file_path: str, use_full_resolution: bool, stages: Optional[set] = None) -> bool:
+        """檢查快取，如果存在則直接發送信號（只檢查記憶體快取以避免阻塞 UI）"""
+        from common_image_loader import is_raw_file
+
         is_raw = is_raw_file(file_path)
-        
-        # For RAW files, only check full_image cache
-        if is_raw and use_full_resolution:
-            from image_cache import get_image_cache
-            cache = get_image_cache()
-            cached_image = cache.get_full_image(file_path)
-            if cached_image is not None:
-                print(f"[ORIENTATION] ImageLoadManager: Using cached full_image for RAW file {os.path.basename(file_path)}")
-                self.image_ready.emit(file_path, cached_image)
-                return True
-            # Don't check pixmap cache for RAW files
-            return False
-        
-        # For non-RAW files or when not using full resolution, use normal cache check
-        cached_item, cache_type = check_cache_for_image(file_path, use_full_resolution)
-        
-        if cached_item is not None:
-            if cache_type == 'full_image':
-                self.image_ready.emit(file_path, cached_item)
-                return True
-            elif cache_type == 'pixmap':
-                # Only emit pixmap_ready for non-RAW files
-                if not is_raw:
-                    self.pixmap_ready.emit(file_path, cached_item)
-                    return True
+        wanted = stages if stages is not None else {'thumbnail', 'exif', 'full'}
+
+        cache = self._cache
+        any_terminal_hit = False
+
+        # 1) Thumbnail stage: memory-only thumbnail cache (numpy)
+        if 'thumbnail' in wanted:
+            thumb = cache.thumbnail_cache.get(file_path)
+            if thumb is not None:
+                self.thumbnail_ready.emit(file_path, thumb)
+                # Not terminal; we may still want 'full'
+
+        # 2) EXIF stage: EXIF is persisted; but this check must remain memory-only.
+        # We skip emitting EXIF from cache here to avoid potential disk I/O.
+
+        # 3) Full stage: treat RAW preview (1920) as "full" when use_full_resolution=False
+        if 'full' in wanted:
+            if is_raw:
+                if use_full_resolution:
+                    full_img = cache.full_image_cache.get(file_path)
+                    if full_img is not None:
+                        self.image_ready.emit(file_path, full_img)
+                        return True
                 else:
-                    # RAW file with cached pixmap - skip it, process as RAW instead
-                    print(f"[ORIENTATION] ImageLoadManager: RAW file {os.path.basename(file_path)} has cached pixmap, but will process as RAW")
-                    return False
-            elif cache_type == 'thumbnail':
-                self.thumbnail_ready.emit(file_path, cached_item)
-            elif cache_type == 'exif':
-                self.exif_data_ready.emit(file_path, cached_item)
-        
-        return cache_type in ('full_image', 'pixmap')
+                    # Preview cache is memory-only LRU
+                    preview = cache.preview_cache.get(file_path)
+                    if preview is not None:
+                        self.image_ready.emit(file_path, preview)
+                        return True
+                # For RAW, do not use pixmap cache here
+            else:
+                pixmap = cache.pixmap_cache.get(file_path)
+                if pixmap is not None and not pixmap.isNull():
+                    self.pixmap_ready.emit(file_path, pixmap)
+                    return True
+
+        return any_terminal_hit
     
     def _schedule_next_task(self):
         """調度下一個任務到線程池"""
@@ -301,21 +358,22 @@ class ImageLoadManager(QObject):
             if self._work_queue.empty():
                 return
             
-            if self._thread_pool.activeThreadCount() >= self._thread_pool.maxThreadCount():
-                return  # 線程池已滿
-            
             try:
-                task = self._work_queue.get_nowait()
-                
-                # 檢查任務是否已取消
-                if task.is_cancelled():
-                    if task.file_path in self._active_tasks:
-                        del self._active_tasks[task.file_path]
-                    return
-                
-                # 創建工作線程並提交到線程池
-                worker = ImageLoadWorker(task, self)
-                self._thread_pool.start(worker)
+                # Fill available thread pool capacity, skipping cancelled tasks.
+                while (
+                    not self._work_queue.empty()
+                    and self._thread_pool.activeThreadCount() < self._thread_pool.maxThreadCount()
+                ):
+                    task = self._work_queue.get_nowait()
+
+                    # Skip cancelled tasks quickly (they still sit in PriorityQueue)
+                    if task.is_cancelled():
+                        if task.file_path in self._active_tasks:
+                            del self._active_tasks[task.file_path]
+                        continue
+
+                    worker = ImageLoadWorker(task, self)
+                    self._thread_pool.start(worker)
             except queue.Empty:
                 pass
     
