@@ -92,7 +92,7 @@ class ImageLoadWorker(QRunnable):
         try:
             stages = self.task.stages or set()
             # 發送進度更新
-            if not self.task.is_cancelled():
+            if self._safe_emit() and not self.task.is_cancelled():
                 self.manager.progress_updated.emit(file_path, "Loading image...")
             
             # 獲取處理器（延遲初始化）
@@ -100,7 +100,8 @@ class ImageLoadWorker(QRunnable):
             
             # 處理縮圖
             if 'thumbnail' in stages and not self.task.is_cancelled():
-                self.manager.progress_updated.emit(file_path, "Extracting preview...")
+                if self._safe_emit():
+                    self.manager.progress_updated.emit(file_path, "Extracting preview...")
                 thumbnail = processor.process_thumbnail(file_path)
                 if thumbnail is not None and not self.task.is_cancelled():
                     # Optional: pre-scale/crop thumbnail in worker thread (emit QImage)
@@ -126,47 +127,67 @@ class ImageLoadWorker(QRunnable):
                                     aspectRatioMode=Qt.AspectRatioMode.KeepAspectRatio,
                                     transformMode=Qt.TransformationMode.SmoothTransformation,
                                 )
-                            self.manager.thumbnail_ready.emit(file_path, qimg_out)
+                            if self._safe_emit():
+                                self.manager.thumbnail_ready.emit(file_path, qimg_out)
                         except Exception:
                             # Fallback: emit numpy thumbnail
-                            self.manager.thumbnail_ready.emit(file_path, thumbnail)
+                            if self._safe_emit():
+                                self.manager.thumbnail_ready.emit(file_path, thumbnail)
                     else:
-                        self.manager.thumbnail_ready.emit(file_path, thumbnail)
+                        if self._safe_emit():
+                            self.manager.thumbnail_ready.emit(file_path, thumbnail)
             
             # 處理 EXIF 數據
             if 'exif' in stages and not self.task.is_cancelled():
-                self.manager.progress_updated.emit(file_path, "Reading metadata...")
+                if self._safe_emit():
+                    self.manager.progress_updated.emit(file_path, "Reading metadata...")
                 exif_data = processor.process_exif(file_path)
                 if exif_data and not self.task.is_cancelled():
-                    self.manager.exif_data_ready.emit(file_path, exif_data)
+                    if self._safe_emit():
+                        self.manager.exif_data_ready.emit(file_path, exif_data)
             
             # 處理完整圖像（只在需要時）
             if 'full' in stages and not self.task.is_cancelled():
                 if self.task.use_full_resolution:
-                    self.manager.progress_updated.emit(file_path, "Loading full resolution...")
+                    if self._safe_emit():
+                        self.manager.progress_updated.emit(file_path, "Loading full resolution...")
                 else:
-                    self.manager.progress_updated.emit(file_path, "Processing image...")
+                    if self._safe_emit():
+                        self.manager.progress_updated.emit(file_path, "Processing image...")
                 result = processor.process_full_image(
                     file_path,
                     use_full_resolution=self.task.use_full_resolution,
-                    executor=self.manager._process_pool
+                    executor=self.manager._process_pool if self._safe_emit() else None
                 )
-                if not self.task.is_cancelled():
-                    if isinstance(result, np.ndarray):
-                        self.manager.image_ready.emit(file_path, result)
-                    elif isinstance(result, QPixmap):
-                        self.manager.pixmap_ready.emit(file_path, result)
+                if result is not None and not self.task.is_cancelled():
+                    if self._safe_emit():
+                        if isinstance(result, np.ndarray):
+                            self.manager.image_ready.emit(file_path, result)
+                        elif isinstance(result, QPixmap):
+                            self.manager.pixmap_ready.emit(file_path, result)
             
             # 發送完成信號
-            if not self.task.is_cancelled():
+            if self._safe_emit() and not self.task.is_cancelled():
                 self.manager.progress_updated.emit(file_path, "Processing complete")
                     
         except Exception as e:
-            if not self.task.is_cancelled():
+            if self._safe_emit():
                 self.manager.error_occurred.emit(file_path, str(e))
         finally:
             # 任務完成，調度下一個
-            self.manager._schedule_next_task()
+            if self._safe_emit():
+                self.manager._schedule_next_task()
+
+    def _safe_emit(self) -> bool:
+        """Verify the manager still exists before emitting signals from background thread."""
+        try:
+            from PyQt6 import sip
+            if self.manager is None or sip.isdeleted(self.manager):
+                return False
+            return True
+        except (ImportError, AttributeError):
+            # Fallback if sip is not available or manager is None
+            return self.manager is not None
 
 
 class ImageLoadManager(QObject):
@@ -195,12 +216,11 @@ class ImageLoadManager(QObject):
             print("[ImageLoadManager.__init__] ERROR: QApplication instance not found!", file=sys.stderr, flush=True)
             raise RuntimeError("QApplication must be created before ImageLoadManager")
         
-        print("[ImageLoadManager.__init__] Calling super().__init__()...", flush=True)
+        print("[ImageLoadManager.__init__] Calling super().__init__(app)...", flush=True)
         try:
-            # QObject.__init__() 可以接受可選的 parent 參數
-            # 不傳遞 parent 參數，讓 QObject 成為頂層對象
-            super().__init__()
-            print("[ImageLoadManager.__init__] super().__init__() completed", flush=True)
+            # Root the manager in the application's lifecycle to prevent premature deletion.
+            super().__init__(app)
+            print("[ImageLoadManager.__init__] super().__init__(app) completed", flush=True)
         except Exception as e:
             print(f"[ImageLoadManager.__init__] ERROR in super().__init__(): {e}", file=sys.stderr, flush=True)
             import traceback

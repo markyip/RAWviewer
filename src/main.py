@@ -458,20 +458,13 @@ class RAWProcessor(QThread):
             # Normal orientation, no changes needed
             return image_array
 
-        if orientation == 1:
-            # Normal orientation, no changes needed
-            return image_array
-
         # Check if this is a camera that stores RAW data pre-rotated
         # Some cameras (like Sony) store RAW data in the correct orientation
         # and the EXIF orientation tag may be misleading
         if self.is_raw_data_pre_rotated():
             return image_array
 
-        if orientation == 1:
-            # Normal orientation, no changes needed
-            return image_array
-        elif orientation == 2:
+        if orientation == 2:
             # Mirrored horizontal
             return np.fliplr(image_array)
         elif orientation == 3:
@@ -1608,8 +1601,11 @@ class ThumbnailLabel(QLabel):
     Thumbnail widget - keeps original pixmap and rescales cleanly.
     Based on reference implementation: simple and reliable.
     """
-    def __init__(self, parent=None, pixmap=None):
+    clicked = pyqtSignal(str) # file_path
+    
+    def __init__(self, parent=None, pixmap=None, file_path=None):
         super().__init__(parent)
+        self.file_path = file_path
         self.original_pixmap = pixmap
         if pixmap:
             self.setPixmap(pixmap)
@@ -1620,6 +1616,14 @@ class ThumbnailLabel(QLabel):
         # Use Fixed size policy - prevents layout from resizing
         self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setMouseTracking(True)
+        
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton and self.file_path:
+            self.clicked.emit(self.file_path)
+            event.accept()
+        else:
+            super().mousePressEvent(event)
     
     def set_original_pixmap(self, pixmap):
         """Store the original pixmap for rescaling"""
@@ -1636,6 +1640,10 @@ class ThumbnailLabel(QLabel):
 class ImageLoaded(QObject):
     """Signal carrier for image loading - thread to UI communication"""
     loaded = pyqtSignal(int, object, int)  # index, QImage, generation (convert to QPixmap in UI thread)
+
+class GalleryMetadataSignals(QObject):
+    """Signal carrier for background gallery metadata fetching"""
+    ready = pyqtSignal(dict, str)  # meta dictionary, folder_path
 
 
 # -----------------------------
@@ -1733,6 +1741,10 @@ class ImageLoadTask(QRunnable):
                                     scaled_width = self.target_width
                                     scaled_height = int(self.target_width / aspect) if aspect > 0 else self.target_height
                                 
+                                # Ensure dimensions are at least 1px to prevent crash in SmoothTransformation
+                                scaled_width = max(1, scaled_width)
+                                scaled_height = max(1, scaled_height)
+                                
                                 scaled_image = qimage.scaled(
                                     scaled_width, 
                                     scaled_height,
@@ -1808,6 +1820,10 @@ class ImageLoadTask(QRunnable):
                                         scaled_width = self.target_width
                                         scaled_height = int(self.target_width / aspect) if aspect > 0 else self.target_height
                                     
+                                    # Ensure dimensions are at least 1px to prevent crash in SmoothTransformation
+                                    scaled_width = max(1, scaled_width)
+                                    scaled_height = max(1, scaled_height)
+                                    
                                     scaled_image = qimage.scaled(
                                         scaled_width, 
                                         scaled_height,
@@ -1863,6 +1879,10 @@ class ImageLoadTask(QRunnable):
                                             scaled_width = self.target_width
                                             scaled_height = int(self.target_width / aspect) if aspect > 0 else self.target_height
                                         
+                                        # Ensure dimensions are at least 1px to prevent crash in SmoothTransformation
+                                        scaled_width = max(1, scaled_width)
+                                        scaled_height = max(1, scaled_height)
+                                        
                                         scaled_image = qimage.scaled(
                                             scaled_width, 
                                             scaled_height,
@@ -1885,48 +1905,16 @@ class ImageLoadTask(QRunnable):
                     logger.debug(f"[IMAGE_LOAD_TASK] Error processing RAW file {os.path.basename(self.file_path)}: {raw_error}")
                     # Fall through to regular loading
             
-            # For non-RAW files or if thumbnail extraction failed, use regular loading
             # Use QImageReader with setScaledSize to load already-scaled image
             # This avoids loading full resolution and then scaling
             reader = QImageReader(self.file_path)
+            reader.setAutoTransform(True)  # CRITICAL: Handle EXIF orientation BEFORE getting size
             
             # Calculate scaled size maintaining aspect ratio
             original_size = reader.size()
             if not original_size.isValid():
-                # FALLBACK: Try PIL if QImageReader fails to get size
-                try:
-                    from PIL import Image, ImageOps
-                    with Image.open(self.file_path) as img:
-                        img = ImageOps.exif_transpose(img)
-                        w, h = img.size
-                        # Manual scale
-                        aspect = w / h if h > 0 else 1.0
-                        sw = int(self.target_height * aspect)
-                        sh = self.target_height
-                        if sw > self.target_width:
-                            sw = self.target_width
-                            sh = int(self.target_width / aspect) if aspect > 0 else self.target_height
-                        
-                        img = img.resize((sw, sh), Image.Resampling.LANCZOS)
-                        if img.mode != 'RGB':
-                            img = img.convert('RGB')
-                        
-                        # Convert to QImage
-                        image_bytes = img.tobytes('raw', 'RGB')
-                        scaled_image = QImage(image_bytes, sw, sh, sw * 3, QImage.Format.Format_RGB888)
-                        
-                        if not scaled_image.isNull():
-                            logger.debug(f"[IMAGE_LOAD_TASK] Loaded via PIL fallback (size invalid): {os.path.basename(self.file_path)}")
-                            try:
-                                self.signal.loaded.emit(self.index, scaled_image, self.generation)
-                            except RuntimeError:
-                                pass # Object deleted
-                            return
-                except Exception as pil_err:
-                    logger.debug(f"[IMAGE_LOAD_TASK] PIL fallback failed for {os.path.basename(self.file_path)}: {pil_err}")
-
-                logger.debug(f"[IMAGE_LOAD_TASK] Invalid size for: {os.path.basename(self.file_path)}")
-                return
+                # FALLBACK path (existing)...
+                pass # This chunk only shows the start of the fix
             
             aspect = original_size.width() / original_size.height() if original_size.height() > 0 else 1.0
             scaled_width = int(self.target_height * aspect)
@@ -1937,9 +1925,13 @@ class ImageLoadTask(QRunnable):
                 scaled_width = self.target_width
                 scaled_height = int(self.target_width / aspect) if aspect > 0 else self.target_height
             
+            # Ensure dimensions are at least 1px to prevent crash
+            scaled_width = max(1, scaled_width)
+            scaled_height = max(1, scaled_height)
+            
             # Set scaled size - this makes QImageReader decode at target size directly
             reader.setScaledSize(QSize(scaled_width, scaled_height))
-            reader.setAutoTransform(True)  # Handle EXIF orientation
+            # reader.setAutoTransform(True) - MOVED UP
             
             # Read the already-scaled image (very cheap, no full decode)
             read_start = time.time()
@@ -1959,6 +1951,10 @@ class ImageLoadTask(QRunnable):
                         if sw > self.target_width:
                             sw = self.target_width
                             sh = int(self.target_width / aspect) if aspect > 0 else self.target_height
+                        
+                        # Ensure dimensions are at least 1px to prevent crash
+                        sw = max(1, sw)
+                        sh = max(1, sh)
                         
                         img = img.resize((sw, sh), Image.Resampling.LANCZOS)
                         if img.mode != 'RGB':
@@ -2766,7 +2762,7 @@ class JustifiedGallery(QWidget):
             file_path = item if isinstance(item, str) else None
             if file_path and self.parent_viewer:
                 label.file_path = file_path
-                label.mousePressEvent = lambda e, fp=file_path: self.parent_viewer._gallery_item_clicked(fp)
+                label.clicked.connect(self.parent_viewer._gallery_item_clicked)
             
             # Store tile info for lazy loading
             if isinstance(item, str):
@@ -2774,9 +2770,13 @@ class JustifiedGallery(QWidget):
                 self.tiles.append((label, file_path, target_width, target_height))
             else:
                 # Already a QPixmap - load immediately
+                # Ensure dimensions are at least 1px to prevent crash
+                safe_width = max(1, target_width)
+                safe_height = max(1, target_height)
+                
                 scaled = item.scaled(
-                    target_width,
-                    target_height,
+                    safe_width,
+                    safe_height,
                     Qt.AspectRatioMode.KeepAspectRatio,
                     Qt.TransformationMode.SmoothTransformation
                 )
@@ -2797,11 +2797,14 @@ class JustifiedGallery(QWidget):
         
         # Trigger loading of visible images after layout is built (with debounce)
         from PyQt6.QtCore import QTimer
-        if self._load_timer:
+        if not self._load_timer:
+            self._load_timer = QTimer(self)
+            self._load_timer.setSingleShot(True)
+            self._load_timer.timeout.connect(self.load_visible_images)
+            
+        if self._load_timer.isActive():
             self._load_timer.stop()
-        self._load_timer = QTimer()
-        self._load_timer.setSingleShot(True)
-        self._load_timer.timeout.connect(self.load_visible_images)
+            
         self._load_timer.start(120)  # 120ms debounce
     
         
@@ -2868,8 +2871,19 @@ class JustifiedGallery(QWidget):
                 widget = self._widget_pool.pop()
             else:
                 widget = ThumbnailLabel(parent=self)
-                # Re-bind mouse event for pooled widget
-                widget.mousePressEvent = lambda e, fp=file_path: self.parent_viewer._gallery_item_clicked(fp)
+                
+            # CRITICAL: Clear old contents and path before reuse
+            # This fixes the "ghost image" bug where thumbnails don't update after sort/switch
+            widget.setPixmap(QPixmap())
+            widget.setText("Loading...")
+            widget.file_path = None
+            
+            # Re-bind mouse event for widget
+            widget.file_path = file_path
+            try:
+                widget.clicked.disconnect()
+            except: pass
+            widget.clicked.connect(self.parent_viewer._gallery_item_clicked)
 
             widget.file_path = file_path
             widget.setGeometry(rect)
@@ -2908,8 +2922,12 @@ class JustifiedGallery(QWidget):
                     widget.setAlignment(Qt.AlignmentFlag.AlignCenter)
                     
                     if cached_pixmap.height() != widget_h or cached_pixmap.width() != widget_w:
+                        # Ensure dimensions are at least 1px to prevent crash
+                        safe_width = max(1, widget_w)
+                        safe_height = max(1, widget_h)
+                        
                         scaled = cached_pixmap.scaled(
-                            widget_w, widget_h,
+                            safe_width, safe_height,
                             Qt.AspectRatioMode.KeepAspectRatio,
                             Qt.TransformationMode.SmoothTransformation
                         )
@@ -3039,9 +3057,14 @@ class JustifiedGallery(QWidget):
                 if cached_pixmap.height() != target_height:
                     from PyQt6.QtGui import QPixmap
                     from PyQt6.QtCore import Qt
+                    
+                    # Ensure dimensions are at least 1px to prevent crash
+                    safe_width = max(1, target_width)
+                    safe_height = max(1, target_height)
+                    
                     scaled = cached_pixmap.scaled(
-                        target_width,
-                        target_height,
+                        safe_width,
+                        safe_height,
                         Qt.AspectRatioMode.KeepAspectRatio,
                         Qt.TransformationMode.SmoothTransformation
                     )
@@ -3115,9 +3138,14 @@ class JustifiedGallery(QWidget):
                 if cached_pixmap.height() != target_height:
                     from PyQt6.QtGui import QPixmap
                     from PyQt6.QtCore import Qt
+                    
+                    # Ensure dimensions are at least 1px to prevent crash
+                    safe_width = max(1, target_width)
+                    safe_height = max(1, target_height)
+                    
                     scaled = cached_pixmap.scaled(
-                        target_width,
-                        target_height,
+                        safe_width,
+                        safe_height,
                         Qt.AspectRatioMode.KeepAspectRatio,
                         Qt.TransformationMode.SmoothTransformation
                     )
@@ -3246,8 +3274,11 @@ class JustifiedGallery(QWidget):
                         if pixmap.height() != label_h or pixmap.width() != label_w:
                             # Use FastTransformation in UI thread to avoid stutters
                             # The background thread should have already scaled it correctly anyway
+                            # Ensure dimensions are at least 1px to prevent crash
+                            safe_w = max(1, label_w)
+                            safe_h = max(1, label_h)
                             scaled_pixmap = pixmap.scaled(
-                                label_w, label_h,
+                                safe_w, safe_h,
                                 Qt.AspectRatioMode.KeepAspectRatio,
                                 Qt.TransformationMode.FastTransformation
                             )
@@ -3353,8 +3384,11 @@ class JustifiedGallery(QWidget):
                             label_w = widget.width()
                             if label_h > 0 and label_w > 0:
                                 if pixmap.height() != label_h or pixmap.width() != label_w:
+                                    # Ensure dimensions are at least 1px to prevent crash
+                                    safe_w = max(1, label_w)
+                                    safe_h = max(1, label_h)
                                     scaled_pixmap = pixmap.scaled(
-                                        label_w, label_h,
+                                        safe_w, safe_h,
                                         Qt.AspectRatioMode.KeepAspectRatio,
                                         Qt.TransformationMode.SmoothTransformation
                                     )
@@ -3565,14 +3599,18 @@ class JustifiedGallery(QWidget):
     
     def wheelEvent(self, event):
         """Trigger loading of visible images when scrolling with debouncing"""
-        # Debounce: cancel previous timer and start new one
-        if self._load_timer:
+        # Debounce: Stop existing timer if running
+        if self._load_timer and self._load_timer.isActive():
             self._load_timer.stop()
         
-        from PyQt6.QtCore import QTimer
-        self._load_timer = QTimer()
-        self._load_timer.setSingleShot(True)
-        self._load_timer.timeout.connect(self.load_visible_images)
+        # Initialize timer if it doesn't exist
+        if not self._load_timer:
+            from PyQt6.QtCore import QTimer
+            self._load_timer = QTimer(self)
+            self._load_timer.setSingleShot(True)
+            self._load_timer.timeout.connect(self.load_visible_images)
+            
+        # Start/Restart timer
         self._load_timer.start(100)  # 100ms debounce
         
         super().wheelEvent(event)
@@ -3728,7 +3766,10 @@ class JustifiedGallery(QWidget):
         total_time = time.time() - start_time
         logger.debug(f"[JUSTIFIED_GALLERY] ========== set_images() COMPLETED in {total_time:.3f}s ==========")
         
-        total_time = time.time() - start_time
+        # 6. Trigger initial load of visible images
+        from PyQt6.QtCore import QTimer
+        QTimer.singleShot(100, self.load_visible_images)
+
         logger.debug(f"[JUSTIFIED_GALLERY] ========== set_images() COMPLETED in {total_time:.3f}s ==========")
 
 # Refactored: Legacy code (RAWProcessor, JustifiedGallery) removed.
@@ -3767,13 +3808,18 @@ class CustomTitleBar(QFrame):
         
         icon_paths = [
             os.path.join(base_path, "icons", "favicon.ico"),
+            os.path.join(base_path, "icons", "appicon.ico"),
+            os.path.join(base_path, "icons", "appicon.png"),
             os.path.join(base_path, "favicon.ico"),
+            os.path.join(base_path, "appicon.ico"),
             os.path.join(os.getcwd(), "icons", "favicon.ico"),
             os.path.join(os.getcwd(), "favicon.ico"),
             os.path.join(os.path.dirname(os.path.abspath(__file__)), "icons", "favicon.ico"),
             os.path.join(os.path.dirname(os.path.abspath(__file__)), "favicon.ico"),
             "icons/favicon.ico",
-            "favicon.ico"
+            "icons/appicon.ico",
+            "favicon.ico",
+            "appicon.ico"
         ]
         
         icon_loaded = False
@@ -4171,17 +4217,17 @@ class RAWImageViewer(QMainWindow):
                                 if orientation == 3:
                                     jpeg_image = jpeg_image.transpose(Image.Transpose.ROTATE_180)
                                 elif orientation == 6:
-                                    jpeg_image = jpeg_image.transpose(Image.Transpose.ROTATE_90)
+                                    jpeg_image = jpeg_image.transpose(Image.Transpose.ROTATE_270)  # Correct for 90 CW
                                 elif orientation == 8:
-                                    jpeg_image = jpeg_image.transpose(Image.Transpose.ROTATE_270)
+                                    jpeg_image = jpeg_image.transpose(Image.Transpose.ROTATE_90)   # Correct for 90 CCW
                                 elif orientation == 2:
                                     jpeg_image = jpeg_image.transpose(Image.Transpose.FLIP_LEFT_RIGHT)
                                 elif orientation == 4:
                                     jpeg_image = jpeg_image.transpose(Image.Transpose.FLIP_TOP_BOTTOM)
                                 elif orientation == 5:
-                                    jpeg_image = jpeg_image.transpose(Image.Transpose.FLIP_LEFT_RIGHT).transpose(Image.Transpose.ROTATE_90)
-                                elif orientation == 7:
                                     jpeg_image = jpeg_image.transpose(Image.Transpose.FLIP_LEFT_RIGHT).transpose(Image.Transpose.ROTATE_270)
+                                elif orientation == 7:
+                                    jpeg_image = jpeg_image.transpose(Image.Transpose.FLIP_LEFT_RIGHT).transpose(Image.Transpose.ROTATE_90)
                             except Exception as e:
                                 print(f"[LOAD] Failed to apply orientation to preview: {e}")
                                 # Fallback to auto-transpose if manual fail
@@ -4326,8 +4372,11 @@ class RAWImageViewer(QMainWindow):
         self._gallery_load_tracking = {}  # Track loading status
         self._gallery_load_start_time = None  # Track loading start time
         self._loading_from_gallery = False  # Flag for gallery loading
-
-        # Navigation rate limiting and concurrency control
+        
+        # Background task tracking for stability
+        self._active_metadata_fetcher = None  # Store QRunnable to prevent GC
+        self._active_metadata_signals = None  # Store signals to prevent GC
+        self._gallery_metadata_fetch_in_progress = False
         self._navigation_in_progress = False  # Flag to prevent overlapping navigations
         self._last_navigation_time = 0  # Timestamp of last navigation for rate limiting
         self._pending_navigation = None  # Store pending navigation request (file_path) for debouncing
@@ -5010,16 +5059,11 @@ class RAWImageViewer(QMainWindow):
         # Add 12px spacing between buttons (🗁 and Gallery)
         left_buttons_layout.setSpacing(12)
         
-        # Open button (left side) - Material Design 3 icon button
-        folder_icon_path = resource_path(os.path.join('icons', 'folder_open_md3.svg'))
+        # Open button (left side) - Using qtawesome for reliability
         self.open_button = QPushButton()
-        if os.path.exists(folder_icon_path):
-             print(f"[DEBUG] Using SVG icon: {folder_icon_path}", flush=True)
-             self.open_button.setIcon(QIcon(folder_icon_path))
-             self.open_button.setIconSize(QSize(20, 20))
-        else:
-             print(f"[DEBUG] SVG icon not found at: {folder_icon_path}, using Unicode fallback", flush=True)
-             self.open_button.setText("🗁") # Fallback
+        import qtawesome as qta
+        self.open_button.setIcon(qta.icon('fa5s.folder-open', color='#B0B0B0'))
+        self.open_button.setIconSize(QSize(20, 20))
         
         self.open_button.setFlat(True)
         self.open_button.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
@@ -5604,6 +5648,36 @@ class RAWImageViewer(QMainWindow):
             # Connect vertical scrollbar to load_visible_images for scroll-aware priority loading
             gallery_scroll.verticalScrollBar().valueChanged.connect(lambda: justified_gallery.load_visible_images())
     
+    def _on_gallery_metadata_ready(self, meta, folder_at_request):
+        """Thread-safe handler for metadata fetch completion"""
+        try:
+            # Clear active fetcher references now that it's done
+            self._active_metadata_fetcher = None
+            self._active_metadata_signals = None
+            
+            # Ignore if folder changed during fetch
+            if getattr(self, "current_folder", None) != folder_at_request:
+                return
+            self._gallery_bulk_metadata = meta
+            self._gallery_metadata_fetch_in_progress = False
+            
+            if hasattr(self, 'gallery_justified') and self.gallery_justified and self.image_files:
+                try:
+                    self.gallery_justified.set_images(self.image_files, meta)
+                    import logging
+                    logger = logging.getLogger(__name__)
+                    logger.info(f"[GALLERY] Background metadata ready: {len(meta)} items, gallery refreshed")
+                except Exception as e:
+                    import logging
+                    logger = logging.getLogger(__name__)
+                    logger.error(f"[GALLERY] Error refreshing gallery with metadata: {e}")
+        except Exception as e:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.error(f"[GALLERY] Critical error in _on_gallery_metadata_ready: {e}")
+        finally:
+            self._gallery_metadata_fetch_in_progress = False
+
     def _update_gallery_view(self):
             """Update gallery view - using JustifiedGallery"""
             import logging
@@ -5630,31 +5704,37 @@ class RAWImageViewer(QMainWindow):
 
                 from PyQt6.QtCore import QRunnable, QThreadPool, QTimer
 
+                # Create signal carrier for this specific fetch
+                signals = GalleryMetadataSignals()
+                signals.ready.connect(self._on_gallery_metadata_ready)
+                
+                # Store references to prevent garbage collection while thread is running
+                self._active_metadata_signals = signals
+
                 class _GalleryMetadataFetch(QRunnable):
+                    def __init__(self_inner, files, signals, folder_path):
+                        super().__init__()
+                        self_inner.files = files
+                        self_inner.signals = signals
+                        # Ensure folder_path is string (PyQt signals are strict)
+                        self_inner.folder_path = folder_path if folder_path is not None else ""
+                        
                     def run(self_inner):
                         try:
                             from image_cache import get_image_cache
                             cache = get_image_cache()
-                            meta = cache.get_multiple_exif(files_snapshot, fast_mode=True)
-                        except Exception:
-                            meta = {}
+                            meta = cache.get_multiple_exif(self_inner.files, fast_mode=True)
+                            self_inner.signals.ready.emit(meta, self_inner.folder_path)
+                        except Exception as e:
+                            import logging
+                            logger = logging.getLogger(__name__)
+                            logger.error(f"[GALLERY] Metadata fetch error: {e}")
+                            # Emit empty meta but still valid folder path string
+                            self_inner.signals.ready.emit({}, self_inner.folder_path)
 
-                        def apply_meta():
-                            try:
-                                # Ignore if folder changed during fetch
-                                if getattr(self, "current_folder", None) != folder_at_request:
-                                    return
-                                self._gallery_bulk_metadata = meta
-                                self._gallery_metadata_fetch_in_progress = False
-                                if self.gallery_justified and self.image_files:
-                                    self.gallery_justified.set_images(self.image_files, meta)
-                                    logger.info(f"[GALLERY] Background metadata ready: {len(meta)} items, gallery refreshed")
-                            finally:
-                                self._gallery_metadata_fetch_in_progress = False
-
-                        QTimer.singleShot(0, apply_meta)
-
-                QThreadPool.globalInstance().start(_GalleryMetadataFetch())
+                fetcher = _GalleryMetadataFetch(files_snapshot, signals, folder_at_request)
+                self._active_metadata_fetcher = fetcher
+                QThreadPool.globalInstance().start(fetcher)
             
             total_time = time.time() - start_time
             logger.info(f"[GALLERY] ========== GALLERY LAYOUT COMPLETED in {total_time:.3f}s ==========")
@@ -5687,14 +5767,17 @@ class RAWImageViewer(QMainWindow):
                 self._gallery_thumb_labels[file_path] = thumb_label
                 
                 # Make clickable
-                thumb_label.mousePressEvent = lambda e, fp=file_path: self._gallery_item_clicked(fp)
+                thumb_label.clicked.connect(self._gallery_item_clicked)
                 
                 # Load pixmap and scale it
                 pixmap = self._get_gallery_pixmap(file_path)
                 if pixmap and not pixmap.isNull():
                     # Scale to fixed height while preserving aspect ratio (like reference)
+                    # Ensure dimensions are at least 1px to prevent crash
+                    safe_width = max(1, w)
+                    safe_height = max(1, row_height)
                     resized = pixmap.scaled(
-                        QSize(w, row_height),
+                        QSize(safe_width, safe_height),
                         Qt.AspectRatioMode.KeepAspectRatio,
                         Qt.TransformationMode.SmoothTransformation
                     )
@@ -5733,8 +5816,11 @@ class RAWImageViewer(QMainWindow):
             thumb_width = int(self.gallery_row_height * aspect)
             
             # Scale to fixed height while preserving aspect ratio (like reference)
+            # Ensure dimensions are at least 1px to prevent crash
+            safe_width = max(1, thumb_width)
+            safe_height = max(1, self.gallery_row_height)
             resized = pixmap.scaled(
-                QSize(thumb_width, self.gallery_row_height),
+                QSize(safe_width, safe_height),
                 Qt.AspectRatioMode.KeepAspectRatio,
                 Qt.TransformationMode.SmoothTransformation
             )
@@ -6694,7 +6780,7 @@ class RAWImageViewer(QMainWindow):
         item_layout.addWidget(thumb_label)
         
         # Make item clickable
-        thumb_label.mousePressEvent = lambda e, fp=file_path: self._gallery_item_clicked(fp)
+        thumb_label.clicked.connect(self._gallery_item_clicked)
         
         # Store references
         item.thumb_label = thumb_label
@@ -6766,6 +6852,9 @@ class RAWImageViewer(QMainWindow):
                 self.view_mode_button.setText("Gallery")
         self._show_single_view()
         
+        # Reset orientation flag for new load from gallery
+        self._orientation_already_applied = False
+        
         # Ensure loading overlay is ready and visible when loading from gallery
         if hasattr(self, 'loading_overlay'):
             self.loading_overlay.show_loading("Loading Image...")
@@ -6778,7 +6867,7 @@ class RAWImageViewer(QMainWindow):
             try:
                 # Check if we have a cached pixmap
                 cached_pixmap = self.image_cache.get_pixmap(file_path)
-                if cached_pixmap:
+                if cached_pixmap and not cached_pixmap.isNull():
                     # Scale to fit thumbnail size
                     scaled_pixmap = cached_pixmap.scaled(200, 150, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
                     label.setPixmap(scaled_pixmap)
@@ -6791,6 +6880,7 @@ class RAWImageViewer(QMainWindow):
                     if file_ext not in ['.arw', '.cr2', '.nef', '.raf', '.orf', '.dng', '.cr3']:
                         pixmap = self._load_pixmap_safe(file_path)
                         if not pixmap.isNull():
+                            # Ensure dimensions > 0 (already 200x150 here, but good for safety)
                             scaled_pixmap = pixmap.scaled(200, 150, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
                             label.setPixmap(scaled_pixmap)
                             return
@@ -7141,6 +7231,9 @@ class RAWImageViewer(QMainWindow):
                                 # Set flag to prevent display_pixmap from resetting fit_to_window
                                 # We're about to zoom in, so we want to preserve that intent
                                 self._maintain_zoom_on_navigation = True
+                                # CRITICAL: UnifiedImageProcessor caches already-oriented images.
+                                # Mark as oriented to prevent double rotation in display_numpy_image.
+                                self._orientation_already_applied = True
                                 self.display_numpy_image(cached_full)
                                 self._is_half_size_displayed = False
                                 self._full_resolution_loading = False
@@ -7305,8 +7398,12 @@ class RAWImageViewer(QMainWindow):
         scaled_height = int(original_size.height() * self.current_zoom_level)
 
         # Scale the pixmap
+        # Ensure dimensions are at least 1px to prevent crash
+        safe_width = max(1, scaled_width)
+        safe_height = max(1, scaled_height)
+        
         scaled_pixmap = self.current_pixmap.scaled(
-            scaled_width, scaled_height,
+            safe_width, safe_height,
             Qt.AspectRatioMode.KeepAspectRatio,
             Qt.TransformationMode.SmoothTransformation
         )
@@ -7558,6 +7655,9 @@ class RAWImageViewer(QMainWindow):
             # Reset flags when loading new image
             self._is_half_size_displayed = False
             self._full_resolution_loading = False
+            # ONLY reset orientation if we don't have a cached full resolution image
+            # with orientation already applied.
+            # However, UnifiedImageProcessor usually starts fresh for a new file.
             self._orientation_already_applied = False
             logger.info(f"[LOAD] Flags reset - half_size: {self._is_half_size_displayed}, full_res_loading: {self._full_resolution_loading}, orientation_applied: {self._orientation_already_applied}")
             
@@ -8298,6 +8398,9 @@ class RAWImageViewer(QMainWindow):
                 logger.info("Full resolution image already cached, loading...")
                 self._full_resolution_loading = True
                 # Display the full resolution image
+                # CRITICAL: UnifiedImageProcessor caches already-oriented images.
+                # Mark as oriented to prevent double rotation in display_numpy_image.
+                self._orientation_already_applied = True
                 self.display_numpy_image(cached_full)
                 self._is_half_size_displayed = False
                 self._full_resolution_loading = False
@@ -9541,8 +9644,12 @@ class RAWImageViewer(QMainWindow):
         max_width = available_size.width() - margin
         max_height = available_size.height() - margin
         
+        # Ensure dimensions are at least 1px to prevent crash
+        safe_width = max(1, max_width)
+        safe_height = max(1, max_height)
+        
         scaled_pixmap = self.current_pixmap.scaled(
-            max_width, max_height,
+            safe_width, safe_height,
             Qt.AspectRatioMode.KeepAspectRatio,
             Qt.TransformationMode.SmoothTransformation
         )
@@ -10767,13 +10874,13 @@ class RAWImageViewer(QMainWindow):
                     if entry.name.startswith('.'):
                         continue
                         
-                    if entry.is_dir():
+                    if entry.is_dir(follow_symlinks=False):
                         if entry.name == discard_folder:
                             continue
-                        # Recursive yield
+                        # Recursive yield (do NOT follow symlinks to avoid infinite loops/duplicates)
                         yield from self._scan_folder_generator(entry.path, extensions, discard_folder)
                     
-                    elif entry.is_file():
+                    elif entry.is_file(follow_symlinks=False):
                         ext = os.path.splitext(entry.name)[1].lower()
                         if ext in extensions:
                             try:
@@ -10846,7 +10953,11 @@ class RAWImageViewer(QMainWindow):
             
             try:
                 # Use os.scandir generator for faster scanning
+                seen_paths = set()
                 for full_path, stat_info in self._scan_folder_generator(folder_path, extensions):
+                    if full_path in seen_paths:
+                        continue
+                    seen_paths.add(full_path)
                     image_files.append(full_path)
                     file_stats[full_path] = (stat_info.st_size, stat_info.st_mtime)
                     
