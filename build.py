@@ -9,11 +9,16 @@ import subprocess
 import platform
 import shutil
 import time
+import sys
 from pathlib import Path
 
 
 def run_command(cmd):
-    result = subprocess.run(cmd, shell=True)
+    # Support both string commands and lists
+    if isinstance(cmd, list):
+        result = subprocess.run(cmd)
+    else:
+        result = subprocess.run(cmd, shell=True)
     return result.returncode == 0
 
 
@@ -36,7 +41,7 @@ def install_dependencies():
 
     for dep in dependencies:
         print(f"Installing {dep}...")
-        if not run_command(f'pip install --upgrade {dep}'):
+        if not run_command([sys.executable, "-m", "pip", "install", "--upgrade", dep]):
             print(f"[ERROR] Failed to install {dep}")
             return False
 
@@ -159,24 +164,44 @@ def main():
     ]
     add_data_arg_str = " ".join(add_data_args)
 
-    # Minimal PyInstaller command
-    # Ensure `src` is on PyInstaller's analysis path so top-level packages like `ui.*`
-    # (located at src/ui) are collected reliably in onefile builds.
     src_path = os.path.abspath('src')
-    build_command = (
-        f'pyinstaller --onefile --windowed {icon_arg} '
-        f'--paths "{src_path}" '
-        f'--hidden-import rawviewer_ui.gallery_view --hidden-import rawviewer_ui.widgets '
-        f'{add_data_arg_str} src/main.py --name RAWviewer'
-    )
-    print(f"Running: {build_command}")
-    if not run_command(build_command):
+    
+    cmd_base = [
+        sys.executable, "-m", "PyInstaller",
+        "--windowed",
+        "--paths", src_path,
+        "--hidden-import", "rawviewer_ui.gallery_view",
+        "--hidden-import", "rawviewer_ui.widgets",
+        "--hidden-import", "natsort",
+        "--hidden-import", "send2trash",
+        "--name", "RAWviewer"
+    ]
+    
+    if platform.system() == 'Darwin':
+        cmd_base.append("--onedir")
+    else:
+        cmd_base.append("--onefile")
+        
+    if icon_arg:
+        if platform.system() == 'Windows':
+            cmd_base.extend(["--icon", icon_path])
+        else:
+            cmd_base.extend(["--icon", icon_path])
+            
+    # Add data
+    for arg in add_data_args:
+        cmd_base.extend(["--add-data", arg.split('--add-data ')[-1].strip('"')])
+        
+    cmd_base.append("src/main.py")
+
+    print(f"Running: {' '.join(cmd_base)}")
+    if not run_command(cmd_base):
         print("[ERROR] Build failed.")
         return
     if platform.system() == 'Windows':
         exe_path = Path('dist/RAWviewer.exe')
     else:
-        exe_path = Path('dist/RAWviewer')
+        exe_path = Path('dist/RAWviewer.app')
     if exe_path.exists():
         print(f"[SUCCESS] Executable created: {exe_path}")
     else:

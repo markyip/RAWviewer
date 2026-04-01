@@ -54,7 +54,7 @@ rm -f *.spec
 
 # Build the application using build.py for consistency
 echo "Building RAWviewer..."
-if python3 build.py; then
+if ./rawviewer_env/bin/python3 build.py; then
     echo ""
     echo "[SUCCESS] Build completed!"
     echo ""

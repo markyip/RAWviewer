@@ -34,7 +34,7 @@ class JustifiedGallery(QWidget):
 
         # Virtualization Data
         self._gallery_layout_items = []  # List of {rect, file_path, aspect}
-        self._visible_widgets = {}  # {file_path: ThumbnailLabel}
+        self._visible_widgets = {}  # {index: ThumbnailLabel}
         self._widget_pool = []
         self._total_content_height = 0
 
@@ -48,7 +48,8 @@ class JustifiedGallery(QWidget):
         self._thumb_base_key = "__base__"
         self._row_height_buckets = [180, 220, 260, 300, 340]
         self._width_bucket_px = 64  # quantize widths to avoid mismatched cached pixmaps
-        self._path_to_index = {}
+        # Mapping of file_path to list of indices (for when the same file appears multiple times)
+        self._path_to_indices = {}
         # Track what thumbnails we've recently requested so we can cancel far-away work
         self._requested_thumbnail_paths = set()
         self._is_scrollbar_dragging = False
@@ -281,18 +282,38 @@ class JustifiedGallery(QWidget):
             self._wheel_accum_px = 0.0
             return
 
-        if abs(self._wheel_accum_px) < 0.5:
+        # Stop if accumulation is negligible
+        if abs(self._wheel_accum_px) < 1.0:
             self._wheel_timer.stop()
             self._wheel_accum_px = 0.0
             return
 
-        step = self._wheel_step_px if self._wheel_accum_px > 0 else -self._wheel_step_px
+        # Adaptive step: consume more when accumulation is high (exponential decay)
+        # 0.2 means we consume 20% of the remaining distance per tick (8ms)
+        # This makes the scroll feel very responsive and stop quickly.
+        # But we still enforce a minimum step of _wheel_step_px (18px) to maintain movement.
+        adaptive_step = self._wheel_accum_px * 0.2
+        if abs(adaptive_step) < self._wheel_step_px:
+            step = self._wheel_step_px if self._wheel_accum_px > 0 else -self._wheel_step_px
+        else:
+            step = adaptive_step
+
+        # Don't over-consume
         if abs(step) > abs(self._wheel_accum_px):
             step = self._wheel_accum_px
+        
         self._wheel_accum_px -= step
 
-        new_val = int(sb.value() + step)
-        new_val = max(sb.minimum(), min(sb.maximum(), new_val))
+        current_val = sb.value()
+        new_val = int(current_val + step)
+        
+        # Boundary check: if we hit top/bottom, clear accumulation to stop instantly
+        if (new_val <= sb.minimum() and step < 0) or (new_val >= sb.maximum() and step > 0):
+            sb.setValue(sb.minimum() if step < 0 else sb.maximum())
+            self._wheel_accum_px = 0.0
+            self._wheel_timer.stop()
+            return
+
         sb.setValue(new_val)
 
     def _on_slider_pressed(self):
@@ -356,6 +377,7 @@ class JustifiedGallery(QWidget):
                 self._widget_pool.append(w)
             self._visible_widgets.clear()
             self._gallery_layout_items.clear()
+            self._path_to_indices.clear()
 
             if bulk_metadata:
                 self._metadata_cache.update(bulk_metadata)
@@ -420,7 +442,12 @@ class JustifiedGallery(QWidget):
             if row:
                 commit_row(row, aspect_sum, True)
 
-            self._path_to_index = {item["file_path"]: i for i, item in enumerate(self._gallery_layout_items)}
+            self._path_to_indices = {}
+            for i, item in enumerate(self._gallery_layout_items):
+                p = item["file_path"]
+                if p not in self._path_to_indices:
+                    self._path_to_indices[p] = []
+                self._path_to_indices[p].append(i)
 
             self._total_content_height = int(current_y + 20)
             self.setMinimumHeight(self._total_content_height)
@@ -476,7 +503,7 @@ class JustifiedGallery(QWidget):
 
         buffer_rect = QRect(0, scroll_y, v_port.width(), v_h)
         visible_indices_items = self._get_visible_range(buffer_rect)
-        visible_paths = {item["file_path"] for idx, item in visible_indices_items if item.get("file_path")}
+        visible_indices_set = {idx for idx, item in visible_indices_items}
 
         # Dynamic prefetch: follow the scrollbar thumb/viewport center position.
         # Slow scroll: keep more around the thumb; fast scroll: keep less.
@@ -489,9 +516,9 @@ class JustifiedGallery(QWidget):
         prefetch_indices_items = self._get_visible_range(prefetch_rect)
         prefetch_paths = {item["file_path"] for idx, item in prefetch_indices_items if item.get("file_path")}
 
-        for path in list(self._visible_widgets.keys()):
-            if path not in visible_paths:
-                w = self._visible_widgets.pop(path)
+        for idx in list(self._visible_widgets.keys()):
+            if idx not in visible_indices_set:
+                w = self._visible_widgets.pop(idx)
                 w.hide()
                 self._widget_pool.append(w)
 
@@ -513,8 +540,11 @@ class JustifiedGallery(QWidget):
                 pass
             self._requested_thumbnail_paths.clear()
         self._last_scheduled_scroll_y = scroll_y
-        # Determine what we want around current thumb position
-        wanted_paths = set(visible_paths) | (set(prefetch_paths) if allow_prefetch else set())
+        # Determine what we want around current thumb position - paths for prefetch
+        visible_paths = {item["file_path"] for idx, item in visible_indices_items if item.get("file_path")}
+        wanted_paths = set(visible_paths)
+        if allow_prefetch:
+            wanted_paths |= {item["file_path"] for idx, item in prefetch_indices_items if item.get("file_path")}
 
         # Cancel thumbnail work that is no longer near the scrollbar thumb.
         # This prevents the queue from "finishing the whole folder" in the background.
@@ -542,7 +572,7 @@ class JustifiedGallery(QWidget):
             if not path or rect is None:
                 continue
 
-            if path not in self._visible_widgets:
+            if idx not in self._visible_widgets:
                 if created_widgets >= max_widgets:
                     # Continue on next tick to keep UI responsive
                     if not self._load_timer.isActive():
@@ -550,6 +580,7 @@ class JustifiedGallery(QWidget):
                     break
                 w = self._widget_pool.pop() if self._widget_pool else ThumbnailLabel(self)
                 w.file_path = path
+                w.index = idx  # Keep track of index on the widget
                 w.setGeometry(rect)
                 w.setFixedSize(rect.size())
                 def _on_thumb_click(e, p=path):
@@ -587,7 +618,7 @@ class JustifiedGallery(QWidget):
                         w.setText("")
 
                 w.show()
-                self._visible_widgets[path] = w
+                self._visible_widgets[idx] = w
 
                 if not cache_hit:
                     load_tasks.append((path, Priority.CURRENT, rect.size()))
@@ -625,7 +656,7 @@ class JustifiedGallery(QWidget):
         # (perf logging removed)
 
     def on_thumbnail_ready(self, file_path, thumbnail_data):
-        if file_path not in self._path_to_index:
+        if file_path not in self._path_to_indices:
             return
 
         if isinstance(thumbnail_data, np.ndarray):
@@ -655,9 +686,11 @@ class JustifiedGallery(QWidget):
         if self._is_scrolling_fast:
             return
 
-        if file_path in self._visible_widgets:
-            w = self._visible_widgets[file_path]
-            if w.file_path == file_path:
+        # Update ANY widget displaying this path that is currently visible
+        indices = self._path_to_indices.get(file_path, [])
+        for idx in indices:
+            if idx in self._visible_widgets:
+                w = self._visible_widgets[idx]
                 target_size = w.size()
                 # If worker already emitted a target-fitted image, avoid re-scaling here.
                 if pixmap.width() == target_size.width() and pixmap.height() == target_size.height():
