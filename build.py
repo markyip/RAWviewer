@@ -4,6 +4,8 @@ Build script for RAW Image Viewer Windows/macOS executable
 Handles dependency installation and executable creation.
 """
 
+VERSION = "1.5.1"
+
 import os
 import subprocess
 import platform
@@ -54,9 +56,9 @@ def main():
     if system_name == 'Windows':
         print("RAWviewer Windows Build Script")
     elif system_name == 'Darwin':
-        print("RAWviewer macOS Build Script")
+        print(f"RAWviewer macOS Build Script v{VERSION}")
     else:
-        print(f"RAWviewer Build Script ({system_name})")
+        print(f"RAWviewer Build Script v{VERSION} ({system_name})")
     print("==============================")
     print("")
 

@@ -11487,7 +11487,7 @@ def main():
         # Use is_windows variable to avoid calling platform.system() again
         if is_windows:
             print("  [Windows] Setting AppUserModelID...", flush=True)
-            myappid = 'RAWviewer.1.0'
+            myappid = 'RAWviewer.1.5.1'
             ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
             print("  [Windows] AppUserModelID set", flush=True)
 
@@ -11496,7 +11496,7 @@ def main():
 
         # Set application properties
         app.setApplicationName("RAW Image Viewer")
-        app.setApplicationVersion("1.0")
+        app.setApplicationVersion("1.5.1")
 
         # Create and show splash screen
         print("Creating splash screen...", flush=True)
