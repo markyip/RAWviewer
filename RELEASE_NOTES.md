@@ -1,5 +1,23 @@
 # RAWviewer Release Notes
 
+## Version: v1.5.1 (Current)
+### 🚀 Stability & Build Update
+This update focuses on eliminating critical crashes during gallery navigation and hardening the macOS build process for reliable app bundle creation.
+
+### 🛠️ Gallery & UI Stability
+- **Fixed High-Speed Scrolling Crash**: Resolved a frequent `RuntimeError` where background threads attempted to communicate with a deleted `ImageLoadManager`. The manager is now formally anchored to the `QApplication` lifecycle.
+- **Hardened Signal Emitters**: Added safety checks (using `PyQt6.sip.isdeleted`) to all background loading tasks to ensure they only emit signals if the manager is still active.
+- **Fixed Transition NameError**: Resolved a crash that occurred when switching from single image view to gallery view due to an undefined variable in the prefetch logic.
+
+### 📦 Build System & macOS Packaging
+- **Hermetic Build Process**: Refactored `build.py` to use `sys.executable` for all child processes (`pip`, `PyInstaller`). This ensures the build system always uses the activated virtual environment, preventing conflicts with Homebrew or system Python.
+- **Robust App Bundling**: Improved the macOS `.app` bundle structure by explicitly adding the `PkgInfo` signature and performing a deep ad-hoc code sign.
+- **Fixed "Forbidden" Icon Issue**: Resolved the circle-slash symbol on the application icon by clearing security quarantine attributes and ensuring proper bundle metadata.
+
+---
+
+## Previous Releases
+
 ## 🚀 Version 1.5 - Gallery Smoothness & Windows EXE Stability
 **Release Date: March 18, 2026**
 
