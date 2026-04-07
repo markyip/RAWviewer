@@ -170,6 +170,7 @@ def main():
     
     cmd_base = [
         sys.executable, "-m", "PyInstaller",
+        "--clean",
         "--windowed",
         "--paths", src_path,
         "--hidden-import", "rawviewer_ui.gallery_view",
