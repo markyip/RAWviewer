@@ -4487,8 +4487,10 @@ class RAWImageViewer(QMainWindow):
         try:
             if isinstance(thumbnail, QImage):
                 w, h = thumbnail.width(), thumbnail.height()
-            else:
+            elif thumbnail is not None:
                 h, w = thumbnail.shape[:2]
+            else:
+                h, w = 0, 0
             max_dim = max(h, w)
         except Exception:
             max_dim = 0
@@ -4542,6 +4544,10 @@ class RAWImageViewer(QMainWindow):
         
         logger.info(f"[MANAGER] Full image ready for {os.path.basename(file_path)}")
         
+        if image is None:
+            logger.error(f"[MANAGER] image is None in on_manager_image_ready for {file_path}")
+            return
+            
         # Check resolution to see if this is "Full" or "Preview"
         max_dim = max(image.shape[0], image.shape[1])
         is_full_resolution = max_dim >= 4000 # Consider >4000px as full resolution
