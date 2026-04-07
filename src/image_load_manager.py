@@ -109,9 +109,12 @@ class ImageLoadWorker(QRunnable):
                     if tgt is not None and isinstance(tgt, QSize) and tgt.isValid():
                         try:
                             arr = np.ascontiguousarray(thumbnail)
-                            h, w = arr.shape[:2]
-                            bpl = arr.strides[0]
-                            qimg = QImage(arr.data, w, h, bpl, QImage.Format.Format_RGB888).copy()
+                            if arr is not None and hasattr(arr, 'shape'):
+                                h, w = arr.shape[:2]
+                                bpl = arr.strides[0]
+                                qimg = QImage(arr.data, w, h, bpl, QImage.Format.Format_RGB888).copy()
+                            else:
+                                raise AttributeError("Invalid thumbnail array structure")
                             if self.task.thumbnail_fit == "crop":
                                 scaled = qimg.scaled(
                                     tgt,

@@ -60,14 +60,18 @@ class ThumbnailExtractor(QObject):
                     # Already a numpy array, but some cameras provide full-size bitmaps (e.g. Sony A7 IV)
                     # We MUST respect max_size to avoid poisoning the cache with huge images
                     thumb_array = thumb.data.copy()
-                    h, w = thumb_array.shape[:2]
+                    if thumb_array is not None and hasattr(thumb_array, 'shape'):
+                        h, w = thumb_array.shape[:2]
+                    else:
+                        return None # Exit early if invalid data
                     
                     if w > max_size or h > max_size:
                          from PIL import Image
                          pil_thumb = Image.fromarray(thumb_array)
                          pil_thumb.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
                          thumb_array = np.array(pil_thumb)
-                         # logger.debug(f"Resized BITMAP thumbnail from {w}x{h} to {thumb_array.shape[1]}x{thumb_array.shape[0]}")
+                         if hasattr(thumb_array, 'shape') and len(thumb_array.shape) >= 2:
+                             pass # logger.debug could go here with safe shape access
 
                 return thumb_array
 
@@ -374,7 +378,7 @@ class OptimizedRAWProcessor(QObject):
                 rgb_image = raw.postprocess(**params)
 
                 # Convert 16-bit to 8-bit for display
-                if rgb_image.dtype == np.uint16:
+                if rgb_image is not None and hasattr(rgb_image, 'dtype') and rgb_image.dtype == np.uint16:
                     rgb_image = (rgb_image / 256).astype(np.uint8)
 
                 return rgb_image
@@ -523,8 +527,9 @@ class EnhancedRAWProcessor(QThread):
                 # Apply orientation correction
                 orientation = exif_data.get(
                     'orientation', 1) if exif_data else 1
-                rgb_image = self._apply_orientation_correction(
-                    rgb_image, orientation, exif_data)
+                if rgb_image is not None:
+                    rgb_image = self._apply_orientation_correction(
+                        rgb_image, orientation, exif_data)
 
                 # Cache the processed image
                 self.cache.put_full_image(self.file_path, rgb_image)
@@ -583,6 +588,9 @@ class EnhancedRAWProcessor(QThread):
 
     def _apply_orientation_correction(self, image_array: np.ndarray, orientation: int, exif_data: Dict[str, Any] = None) -> np.ndarray:
         """Apply orientation correction to image array."""
+        if image_array is None:
+            return None
+            
         # Check if camera stores data pre-rotated
         if self._is_camera_pre_rotated(exif_data):
             return image_array

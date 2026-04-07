@@ -58,20 +58,21 @@ class UnifiedImageProcessor:
             except Exception:
                 cached = None
 
-            # Self-healing check: verify if cached thumbnail orientation matches shape
-            exif_data = self.exif_extractor.extract_exif_data(file_path)
-            orientation = exif_data.get('orientation', 1) if exif_data else 1
-            if orientation in (6, 8):
-                h, w = cached.shape[:2]
-                if w > h:
-                    # Mismatch: Portrait metadata but Landscape cached image
-                    print(f"[ORIENTATION] UnifiedImageProcessor: Cached thumbnail for {os.path.basename(file_path)} is UNROTATED (stale). Invalidating caches.")
-                    # Also invalidate EXIF cache to ensure consistent metadata (prevents pillarboxes in gallery)
-                    self.cache.exif_cache.remove(file_path)
-                    cached = None # Force re-processing
-            
             if cached is not None:
-                return cached
+                # Self-healing check: verify if cached thumbnail orientation matches shape
+                exif_data = self.exif_extractor.extract_exif_data(file_path)
+                orientation = exif_data.get('orientation', 1) if exif_data else 1
+                if orientation in (6, 8) and hasattr(cached, 'shape'):
+                    h, w = cached.shape[:2]
+                    if w > h:
+                        # Mismatch: Portrait metadata but Landscape cached image
+                        print(f"[ORIENTATION] UnifiedImageProcessor: Cached thumbnail for {os.path.basename(file_path)} is UNROTATED (stale). Invalidating caches.")
+                        # Also invalidate EXIF cache to ensure consistent metadata (prevents pillarboxes in gallery)
+                        self.cache.exif_cache.remove(file_path)
+                        cached = None # Force re-processing
+                
+                if cached is not None and hasattr(cached, 'shape'):
+                    return cached
         
         # 提取縮圖 (Max 512px for Gallery)
         if self._is_raw_file(file_path):
@@ -145,7 +146,7 @@ class UnifiedImageProcessor:
                 logger.warning(f"Error processing thumbnail with PIL: {e}")
                 # Fallback: ensure we still don't return/caches oversized thumbnails
                 try:
-                    if thumbnail is not None:
+                    if thumbnail is not None and hasattr(thumbnail, "shape"):
                         h0, w0 = thumbnail.shape[:2]
                         if max(h0, w0) > MAX_THUMB_DIM:
                             scale = MAX_THUMB_DIM / max(h0, w0)
@@ -176,15 +177,19 @@ class UnifiedImageProcessor:
                 # Orientation verification for cache hit
                 exif_data = self.exif_extractor.extract_exif_data(file_path)
                 orientation = exif_data.get('orientation', 1) if exif_data else 1
-                h, w = cached_image.shape[:2]
                 
-                # Check for orientation mismatch (Portrait metadata but Landscape cached image)
-                if orientation in (6, 8) and w > h:
-                    print(f"[ORIENTATION] UnifiedImageProcessor: Cached full_image for {os.path.basename(file_path)} is UNROTATED (stale). Re-processing.")
-                    cached_image = None
-                
-                if cached_image is not None:
-                    print(f"[ORIENTATION] Using VALID cached full_image for {os.path.basename(file_path)}. Shape: {w}x{h}")
+                if hasattr(cached_image, 'shape'):
+                    h, w = cached_image.shape[:2]
+                    
+                    # Check for orientation mismatch (Portrait metadata but Landscape cached image)
+                    if orientation in (6, 8) and w > h:
+                        print(f"[ORIENTATION] UnifiedImageProcessor: Cached full_image for {os.path.basename(file_path)} is UNROTATED (stale). Re-processing.")
+                        cached_image = None
+                    
+                    if cached_image is not None:
+                        print(f"[ORIENTATION] Using VALID cached full_image for {os.path.basename(file_path)}. Shape: {w}x{h}")
+                        return cached_image
+                else:
                     return cached_image
 
         
@@ -274,7 +279,7 @@ class UnifiedImageProcessor:
             
             # 應用方向校正
             orientation = exif_data.get('orientation', 1) if exif_data else 1
-            if orientation != 1:
+            if orientation != 1 and rgb_image is not None:
                 rgb_image = self._apply_orientation_correction(rgb_image, orientation, exif_data)
             
             # 快取完整圖像
@@ -339,6 +344,10 @@ class UnifiedImageProcessor:
         7 = Mirrored horizontal + Rotated 90° CW
         8 = Rotated 270° CW (i.e., 90° CCW)
         """
+        if image_array is None:
+            print(f"[ORIENTATION] Error: image_array is None in _apply_orientation_correction")
+            return None
+            
         original_shape = image_array.shape
         print(f"[ORIENTATION] Before correction: shape = {original_shape}")
         
