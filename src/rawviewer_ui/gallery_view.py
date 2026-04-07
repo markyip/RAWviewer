@@ -5,9 +5,9 @@ import logging
 import numpy as np
 from typing import List, Dict, Any, Optional
 
-from PyQt6.QtWidgets import QWidget, QApplication, QScrollArea
+from PyQt6.QtWidgets import QWidget, QApplication, QScrollArea, QLabel
 from PyQt6.QtCore import Qt, QTimer, QRect, QEvent, QSize
-from PyQt6.QtGui import QPixmap, QImage, QPainter, QBrush, QColor
+from PyQt6.QtGui import QPixmap, QImage, QPainter, QBrush, QColor, QFont
 
 from rawviewer_ui.widgets import ThumbnailLabel, ImageLoaded
 from image_cache import LRUCache
@@ -55,6 +55,9 @@ class JustifiedGallery(QWidget):
         self._is_scrollbar_dragging = False
         self._last_scheduled_scroll_y = 0
         self._scroll_area = None
+
+        self._loading_label = None
+        self._empty_label = None
 
         # Smooth wheel scrolling (pixel-based) to avoid non-linear jumps and keep thumbnails in sync
         self._wheel_accum_px = 0.0
@@ -704,3 +707,132 @@ class JustifiedGallery(QWidget):
         if file_path in self._active_tasks:
             del self._active_tasks[file_path]
 
+    def show_loading_message(self, message="Loading gallery..."):
+        """Show loading message overlay - Simplified for better performance"""
+        # Remove existing loading label if any
+        if self._loading_label:
+            # Update text if already visible
+            self._loading_label.setText(message)
+            self._loading_label.adjustSize()
+            self._update_loading_label_geometry()
+            return
+        
+        # Create loading label - smaller, bottom-right toast style
+        self._loading_label = QLabel(message, self)
+        self._loading_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._loading_label.setStyleSheet("""
+            QLabel {
+                background-color: rgba(20, 20, 20, 200);
+                color: rgba(255, 255, 255, 220);
+                border-radius: 4px;
+                padding: 8px 16px;
+                font-size: 12px;
+            }
+        """)
+        font = QFont()
+        font.setPointSize(10)
+        self._loading_label.setFont(font)
+        self._loading_label.show()
+        self._loading_label.raise_()  # Bring to front
+        
+        # Update geometry
+        self._update_loading_label_geometry()
+    
+    def _update_loading_label_geometry(self):
+        """Update loading label geometry - Bottom Center"""
+        if self._loading_label and self.parent_viewer and self.parent_viewer.width() > 0:
+            self._loading_label.adjustSize()
+            w = self._loading_label.width()
+            h = self._loading_label.height()
+            
+            # Position at bottom center of the viewport
+            parent_scroll = self.parent_viewer.scroll_area if hasattr(self.parent_viewer, 'scroll_area') else None
+            if parent_scroll:
+                 # Calculate relative position in the viewport
+                 viewport_h = parent_scroll.viewport().height()
+                 scroll_y = parent_scroll.verticalScrollBar().value()
+                 
+                 # Stick to bottom of viewport
+                 y = scroll_y + viewport_h - h - 20
+                 x = (self.width() - w) // 2
+                 
+                 self._loading_label.move(x, int(y))
+            else:
+                 # Fallback
+                 x = (self.width() - w) // 2
+                 y = self.height() - h - 20
+                 self._loading_label.move(x, y)
+    
+    def hide_loading_message(self):
+        """Hide loading message overlay"""
+        if self._loading_label:
+            self._loading_label.hide()
+            self._loading_label.deleteLater()
+            self._loading_label = None
+
+    def show_empty_message(self, message):
+        """Show empty gallery message overlay"""
+        # Hide loading message if visible
+        self.hide_loading_message()
+        
+        # Remove existing empty label if any
+        if hasattr(self, '_empty_label') and self._empty_label:
+            self._empty_label.setText(message)
+            self._empty_label.adjustSize()
+            self._update_empty_label_geometry()
+            self._empty_label.show()
+            self._empty_label.raise_()
+            return
+        
+        # Create empty label - centered, larger text
+        self._empty_label = QLabel(message, self)
+        self._empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._empty_label.setStyleSheet("""
+            QLabel {
+                color: #888888;
+                font-size: 16px;
+                background-color: transparent;
+                padding: 20px;
+            }
+        """)
+        font = QFont()
+        font.setPointSize(12)
+        self._empty_label.setFont(font)
+        self._empty_label.show()
+        self._empty_label.raise_()
+        
+        # Update geometry
+        self._update_empty_label_geometry()
+        
+    def hide_empty_message(self):
+        """Hide empty gallery message"""
+        if hasattr(self, '_empty_label') and self._empty_label:
+            self._empty_label.hide()
+            self._empty_label.deleteLater()
+            self._empty_label = None
+            
+    def _update_empty_label_geometry(self):
+        """Center the empty label in the viewport"""
+        if hasattr(self, '_empty_label') and self._empty_label and self.parent_viewer:
+            self._empty_label.adjustSize()
+            w = self._empty_label.width()
+            h = self._empty_label.height()
+            
+            # Position at center of the viewport
+            parent_scroll = self.parent_viewer.scroll_area if hasattr(self.parent_viewer, 'scroll_area') else None
+            if parent_scroll:
+                 # Calculate relative position in the viewport
+                 viewport_h = parent_scroll.viewport().height()
+                 viewport_w = parent_scroll.viewport().width()
+                 scroll_y = parent_scroll.verticalScrollBar().value()
+                 
+                 # Center in viewport (taking scroll into account)
+                 y = scroll_y + (viewport_h - h) // 2
+                 x = (viewport_w - w) // 2
+                 
+                 self._empty_label.move(int(x), int(y))
+            else:
+                 # Fallback
+                 x = (self.width() - w) // 2
+                 y = (self.height() - h) // 2
+                 self._empty_label.move(int(x), int(y))
