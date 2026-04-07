@@ -3901,7 +3901,7 @@ class CustomTitleBar(QFrame):
             self.max_btn.setText("❐")
         self._is_maximized = not self._is_maximized
         # Update title bar state
-        if hasattr(self.parent, 'title_bar'):
+        if hasattr(self.parent, 'title_bar') and self.parent.title_bar is not None:
             self.parent.title_bar._is_maximized = self._is_maximized
         
         # Trigger gallery layout update after maximize/restore
@@ -4852,8 +4852,9 @@ class RAWImageViewer(QMainWindow):
         """Initialize the user interface"""
         # qtawesome doesn't require initialization - can be used directly
         
-        # Set window to frameless for custom title bar
-        self.setWindowFlags(Qt.WindowType.FramelessWindowHint)
+        # Set window to frameless for custom title bar only on Windows
+        if platform.system() == 'Windows':
+            self.setWindowFlags(Qt.WindowType.FramelessWindowHint)
         self.setWindowTitle('RAW Image Viewer')
         
         # Set simple background style (no rounded corners - simplifies window resizing)
@@ -4903,8 +4904,11 @@ class RAWImageViewer(QMainWindow):
             # Don't use translucent background (simplifies event handling)
             self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
         
-        # Create custom title bar
-        self.title_bar = CustomTitleBar(self, title="RAW Image Viewer")
+        # Create custom title bar only on Windows
+        if platform.system() == 'Windows':
+            self.title_bar = CustomTitleBar(self, title="RAW Image Viewer")
+        else:
+            self.title_bar = None
         
         # Initialize loading overlay for single view
         self.loading_overlay = LoadingOverlay(self)
@@ -4917,8 +4921,9 @@ class RAWImageViewer(QMainWindow):
         main_layout.setContentsMargins(0, 0, 0, 0)  # Set padding to 0
         main_layout.setSpacing(0)  # Remove spacing
         
-        # Add title bar first
-        main_layout.addWidget(self.title_bar)
+        # Add title bar first if it exists
+        if hasattr(self, 'title_bar') and self.title_bar is not None:
+            main_layout.addWidget(self.title_bar)
         # Menu bar removed as requested
         self.scroll_area = QScrollArea()
         # Key: allow scrolling when image is larger
@@ -5538,7 +5543,7 @@ class RAWImageViewer(QMainWindow):
             title = "RAW Image Viewer"
         
         self.setWindowTitle(title)
-        if hasattr(self, 'title_bar'):
+        if hasattr(self, 'title_bar') and self.title_bar is not None:
             self.title_bar.set_title(title)
         
         # Create gallery widget if needed
@@ -7715,7 +7720,7 @@ class RAWImageViewer(QMainWindow):
             logger.debug(f"Setting window title to: {filename}")
             self.setWindowTitle(f"RAW Image Viewer - {filename}")
             # Update custom title bar
-            if hasattr(self, 'title_bar'):
+            if hasattr(self, 'title_bar') and self.title_bar is not None:
                 self.title_bar.set_title(f"RAW Image Viewer - {filename}")
 
             # Reset EXIF data ready flag for new image
@@ -8947,7 +8952,7 @@ class RAWImageViewer(QMainWindow):
                 # Reset window title on error
                 self.setWindowTitle('RAW Image Viewer')
                 # Update custom title bar
-                if hasattr(self, 'title_bar'):
+                if hasattr(self, 'title_bar') and self.title_bar is not None:
                     self.title_bar.set_title('RAW Image Viewer')
             except Exception as ui_error:
                 logger.error(f"Error updating UI on processing error: {ui_error}")
@@ -9519,7 +9524,7 @@ class RAWImageViewer(QMainWindow):
             self.status_bar.showMessage("No images remaining in folder")
             self.setWindowTitle('RAW Image Viewer')
             # Update custom title bar
-            if hasattr(self, 'title_bar'):
+            if hasattr(self, 'title_bar') and self.title_bar is not None:
                 self.title_bar.set_title('RAW Image Viewer')
             self.update_status_bar()
             return
@@ -9800,7 +9805,7 @@ class RAWImageViewer(QMainWindow):
             pos = event.position().toPoint()
             
             # Don't resize if clicking on title bar area
-            if hasattr(self, 'title_bar') and pos.y() < self.title_bar.height():
+            if hasattr(self, 'title_bar') and self.title_bar is not None and pos.y() < self.title_bar.height():
                 super().mousePressEvent(event)
                 return
             
@@ -9842,7 +9847,7 @@ class RAWImageViewer(QMainWindow):
         pos = event.position().toPoint()
         
         # Don't show resize cursor on title bar
-        if hasattr(self, 'title_bar') and pos.y() < self.title_bar.height():
+        if hasattr(self, 'title_bar') and self.title_bar is not None and pos.y() < self.title_bar.height():
             self.unsetCursor()
             super().mouseMoveEvent(event)
             return
@@ -10148,7 +10153,7 @@ class RAWImageViewer(QMainWindow):
         # Reset window title
         self.setWindowTitle('RAW Image Viewer')
         # Update custom title bar
-        if hasattr(self, 'title_bar'):
+        if hasattr(self, 'title_bar') and self.title_bar is not None:
             self.title_bar.set_title('RAW Image Viewer')
 
     def show_error(self, title, message):
@@ -11233,7 +11238,7 @@ class RAWImageViewer(QMainWindow):
         """Handle window state changes"""
         if event.type() == QEvent.Type.WindowStateChange:
             # Update title bar's internal maximized state
-            if hasattr(self, 'title_bar'):
+            if hasattr(self, 'title_bar') and self.title_bar is not None:
                 self.title_bar._is_maximized = self.isMaximized()
         super().changeEvent(event)
     
