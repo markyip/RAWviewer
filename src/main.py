@@ -9109,37 +9109,91 @@ class RAWImageViewer(QMainWindow):
             logger.error(f"Critical error in on_processing_error: {e}", exc_info=True)
             logger.debug(f"on_processing_error error traceback: {traceback.format_exc()}")
 
+    def _scroll_gallery_vertical(self, direction: int) -> bool:
+        """Scroll gallery when in gallery mode. direction +1 = down, -1 = up."""
+        if getattr(self, "view_mode", "single") != "gallery":
+            return False
+        gs = getattr(self, "gallery_scroll", None)
+        if gs is None:
+            return False
+        sb = gs.verticalScrollBar()
+        if sb is None:
+            return False
+        step = max(sb.singleStep(), 1) * 4
+        nval = sb.value() + direction * step
+        nval = max(sb.minimum(), min(sb.maximum(), nval))
+        sb.setValue(nval)
+        return True
+
     def keyPressEvent(self, event):
-        if event.key() == Qt.Key.Key_Space:
-            import logging
-            logger = logging.getLogger(__name__)
-            logger.info(f"[TRACK] User pressed spacebar to toggle zoom - file: {os.path.basename(self.current_file_path) if hasattr(self, 'current_file_path') and self.current_file_path else 'Unknown'}")
-            self.toggle_zoom()
-            event.accept()  # Mark event as handled
-        elif event.key() == Qt.Key.Key_Left:
-            self._debounced_navigate('prev')
-            event.accept()  # Mark event as handled
-        elif event.key() == Qt.Key.Key_Right:
-            self._debounced_navigate('next')
-            event.accept()  # Mark event as handled
-        elif event.key() == Qt.Key.Key_Down:
-            self.move_current_image_to_discard()
-            event.accept()  # Mark event as handled
-        elif event.key() == Qt.Key.Key_Up:
-            # Prevent up arrow from moving the scroll area
+        vm = getattr(self, "view_mode", "single")
+        key = event.key()
+
+        if key == Qt.Key.Key_Space:
+            if vm == "single":
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.info(
+                    f"[TRACK] User pressed spacebar to toggle zoom - file: "
+                    f"{os.path.basename(self.current_file_path) if hasattr(self, 'current_file_path') and self.current_file_path else 'Unknown'}"
+                )
+                self.toggle_zoom()
             event.accept()
-        elif event.key() == Qt.Key.Key_Delete:
-            self.delete_current_image()
-            event.accept()  # Mark event as handled
-        elif event.key() == Qt.Key.Key_Escape:
-            # Return to gallery mode if in single view mode
-            if self.view_mode == 'single':
-                self.toggle_view_mode()
-                event.accept()  # Mark event as handled
+            return
+        if key == Qt.Key.Key_Left:
+            if vm == "single":
+                self._debounced_navigate("prev")
+                event.accept()
             else:
                 super().keyPressEvent(event)
-        elif event.key() == Qt.Key.Key_H:
-            if self.view_mode == 'single':
+            return
+        if key == Qt.Key.Key_Right:
+            if vm == "single":
+                self._debounced_navigate("next")
+                event.accept()
+            else:
+                super().keyPressEvent(event)
+            return
+        if key == Qt.Key.Key_Down:
+            if vm == "single":
+                self.move_current_image_to_discard()
+                event.accept()
+            elif vm == "gallery":
+                if self._scroll_gallery_vertical(1):
+                    event.accept()
+                else:
+                    super().keyPressEvent(event)
+            else:
+                super().keyPressEvent(event)
+            return
+        if key == Qt.Key.Key_Up:
+            if vm == "single":
+                # Prevent up arrow from moving the single-image scroll area
+                event.accept()
+            elif vm == "gallery":
+                if self._scroll_gallery_vertical(-1):
+                    event.accept()
+                else:
+                    super().keyPressEvent(event)
+            else:
+                super().keyPressEvent(event)
+            return
+        if key == Qt.Key.Key_Delete:
+            if vm == "single":
+                self.delete_current_image()
+                event.accept()
+            else:
+                super().keyPressEvent(event)
+            return
+        if key == Qt.Key.Key_Escape:
+            if vm == "single":
+                self.toggle_view_mode()
+                event.accept()
+            else:
+                super().keyPressEvent(event)
+            return
+        if key == Qt.Key.Key_H:
+            if vm == "single":
                 self._histogram_overlay_visible = not getattr(
                     self, "_histogram_overlay_visible", True)
                 if hasattr(self, "single_image_histogram"):
@@ -9148,8 +9202,9 @@ class RAWImageViewer(QMainWindow):
                 if hasattr(self.single_view_container, "relayout_histogram"):
                     self.single_view_container.relayout_histogram()
             event.accept()
-        else:
-            super().keyPressEvent(event)
+            return
+
+        super().keyPressEvent(event)
 
     def can_navigate(self):
         """Check if navigation is allowed (prevents overlapping navigations and rate limiting)"""
@@ -11659,7 +11714,7 @@ def main():
         # Use is_windows variable to avoid calling platform.system() again
         if is_windows:
             print("  [Windows] Setting AppUserModelID...", flush=True)
-            myappid = 'RAWviewer.1.5.2'
+            myappid = 'RAWviewer.1.5.3'
             ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
             print("  [Windows] AppUserModelID set", flush=True)
 
@@ -11668,7 +11723,7 @@ def main():
 
         # Set application properties
         app.setApplicationName("RAW Image Viewer")
-        app.setApplicationVersion("1.5.2")
+        app.setApplicationVersion("1.5.3")
 
         # Create and show splash screen
         print("Creating splash screen...", flush=True)

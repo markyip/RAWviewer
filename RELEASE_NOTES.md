@@ -1,6 +1,19 @@
 # RAWviewer Release Notes
 
-## Version: v1.5.2 (Current)
+## Version: v1.5.3 (Current)
+**Release Date: April 9, 2026**
+
+### 🎯 What's New
+**Gallery keyboard behavior fix: single-image shortcuts no longer run while you are in gallery mode.**
+
+### 🛠️ Fixes
+- **View-mode-aware shortcuts**: In **gallery** mode, **↓ / ↑** scroll the thumbnail grid instead of triggering discard or single-image logic. **Space**, **← / →**, **Delete**, and discard (**↓** in single view) apply only in **single-image** view, so the app does not act on a stale `current_file_path` when the grid has focus or the main window still holds focus after switching views.
+
+---
+
+## Previous Releases
+
+## Version: v1.5.2
 **Release Date: April 7, 2026**
 
 ### 🎯 What's New
@@ -23,8 +36,6 @@
 - `SingleImageViewOverlay` container: full-bleed `QScrollArea` plus stacked histogram widget.
 
 ---
-
-## Previous Releases
 
 ## Version: v1.5.1
 

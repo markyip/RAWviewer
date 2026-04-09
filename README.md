@@ -1,10 +1,10 @@
-# RAWviewer v1.5.2
+# RAWviewer v1.5.3
 
 <p align="center">
   <img src="icons/appicon.ico" alt="RAWviewer Icon" width="256">
 </p>
 
-![Version](https://img.shields.io/badge/version-1.5.2-blue)
+![Version](https://img.shields.io/badge/version-1.5.3-blue)
 ![Downloads](https://img.shields.io/github/downloads/markyip/RAWviewer/total) 
 ![License](https://img.shields.io/badge/license-MIT-green)
 [![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-Donate-orange?logo=buy-me-a-coffee)](https://www.buymeacoffee.com/markyip)
@@ -64,20 +64,27 @@ This is a **pre-filtering tool**, letting you go through hundreds of RAW files e
 
 #### macOS
 1. Download the latest release from the [Releases Page](https://github.com/markyip/RAWviewer/releases/latest)
-2. Download and extract `RAWviewer-v1.5.2-macOS.zip`
+2. Download and extract `RAWviewer-v1.5.3-macOS.zip`
 3. Drag `RAWviewer.app` to your Applications folder
 4. Double-click to launch from Applications or Launchpad
 5. **First launch**: Right-click → "Open" if blocked by Gatekeeper
 
 ## ⌨️ Keyboard Shortcuts
 
+**Single-image view**
+
 - **Space**: Toggle between fit-to-window and 100% zoom
-- **`H`**: Show or hide the histogram overlay (single-image view)
+- **`H`**: Show or hide the histogram overlay
 - **`G`**: Toggle between Gallery View and Single Image View
-- **`Esc`**: Return to Gallery View (from Single View)
-- **`←`/`→` arrows**: Navigate between images
+- **`Esc`**: Return to Gallery View
+- **`←`/`→`**: Previous / next image
 - **`↓`**: Move current image to Discard folder
 - **Delete**: Delete current image (with confirmation)
+
+**Gallery view**
+
+- **`↑`/`↓`**: Scroll the thumbnail grid (when the main window handles the key)
+- **Discard / delete / image navigation shortcuts** apply only after you open an image in single view (they are not run against a stale “last opened” file while browsing the grid).
 
 ## 🖱️ Mouse Controls
 
