@@ -10227,7 +10227,8 @@ class RAWImageViewer(QMainWindow):
             '.srw', '.x3f', '.raf', '.3fr', '.fff', '.iiq', '.cap', '.erf',
             '.mef', '.mos', '.nrw', '.rwl', '.srf',
             # Standard image formats
-            '.jpeg', '.jpg', '.png', '.webp', '.heif'
+            '.jpeg', '.jpg', '.png', '.webp', '.heif', '.heic',
+            '.tif', '.tiff',
         ]
 
     def is_image_file(self, file_path):
