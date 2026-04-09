@@ -118,6 +118,130 @@ import warnings
 # Suppress noisy warnings from third-party libraries
 warnings.filterwarnings('ignore', category=UserWarning, module='exifread')
 logging.getLogger('exifread').setLevel(logging.ERROR)
+
+
+def _macos_try_force_dark_titlebar():
+    """
+    Best-effort: request Dark Aqua appearance on macOS so the native title bar
+    matches our dark UI. This uses the Objective-C runtime via ctypes to avoid
+    adding PyObjC as a dependency.
+    """
+    if sys.platform != "darwin":
+        return False
+    try:
+        import ctypes
+        import ctypes.util
+
+        objc_path = ctypes.util.find_library("objc") or "/usr/lib/libobjc.A.dylib"
+        appkit_path = ctypes.util.find_library("AppKit") or "/System/Library/Frameworks/AppKit.framework/AppKit"
+        objc = ctypes.cdll.LoadLibrary(objc_path)
+        ctypes.cdll.LoadLibrary(appkit_path)
+
+        objc.objc_getClass.restype = ctypes.c_void_p
+        objc.objc_getClass.argtypes = [ctypes.c_char_p]
+        objc.sel_registerName.restype = ctypes.c_void_p
+        objc.sel_registerName.argtypes = [ctypes.c_char_p]
+
+        # On arm64, objc_msgSend must be cast to an appropriately-typed function pointer.
+        _msg_obj = ctypes.CFUNCTYPE(ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p)(("objc_msgSend", objc))
+        _msg_obj_charp = ctypes.CFUNCTYPE(ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_char_p)(("objc_msgSend", objc))
+        _msg_void_obj = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p)(("objc_msgSend", objc))
+
+        def cls(name: str) -> int:
+            return int(objc.objc_getClass(name.encode("utf-8")))
+
+        def sel(name: str) -> int:
+            return int(objc.sel_registerName(name.encode("utf-8")))
+
+        NSString = cls("NSString")
+        NSAppearance = cls("NSAppearance")
+        NSApplication = cls("NSApplication")
+
+        # name = "NSAppearanceNameDarkAqua"
+        name_str = _msg_obj_charp(NSString, sel("stringWithUTF8String:"), b"NSAppearanceNameDarkAqua")
+        appearance = _msg_obj(NSAppearance, sel("appearanceNamed:"), name_str)
+
+        app = _msg_obj(NSApplication, sel("sharedApplication"))
+        if not app or not appearance:
+            return False
+
+        _msg_void_obj(app, sel("setAppearance:"), appearance)
+        return True
+    except Exception:
+        # Never fail startup due to cosmetic integration.
+        return False
+
+
+def _macos_try_force_dark_titlebar_for_window(widget):
+    """
+    Best-effort: set Dark Aqua on the NSWindow backing a Qt widget.
+    This is more reliable than setting NSApp appearance alone for the title bar.
+    """
+    if sys.platform != "darwin":
+        return False
+    if widget is None:
+        return False
+    try:
+        import ctypes
+        import ctypes.util
+
+        objc_path = ctypes.util.find_library("objc") or "/usr/lib/libobjc.A.dylib"
+        appkit_path = ctypes.util.find_library("AppKit") or "/System/Library/Frameworks/AppKit.framework/AppKit"
+        objc = ctypes.cdll.LoadLibrary(objc_path)
+        ctypes.cdll.LoadLibrary(appkit_path)
+
+        objc.objc_getClass.restype = ctypes.c_void_p
+        objc.objc_getClass.argtypes = [ctypes.c_char_p]
+        objc.sel_registerName.restype = ctypes.c_void_p
+        objc.sel_registerName.argtypes = [ctypes.c_char_p]
+
+        _msg_obj = ctypes.CFUNCTYPE(ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p)(("objc_msgSend", objc))
+        _msg_obj_charp = ctypes.CFUNCTYPE(
+            ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_char_p
+        )(("objc_msgSend", objc))
+        _msg_void_obj = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p)(("objc_msgSend", objc))
+        _msg_void_bool = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_bool)(("objc_msgSend", objc))
+        _msg_void_int = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int)(("objc_msgSend", objc))
+        _msg_obj_4d = ctypes.CFUNCTYPE(
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_double,
+            ctypes.c_double,
+            ctypes.c_double,
+            ctypes.c_double,
+        )(("objc_msgSend", objc))
+
+        def cls(name: str) -> int:
+            return int(objc.objc_getClass(name.encode("utf-8")))
+
+        def sel(name: str) -> int:
+            return int(objc.sel_registerName(name.encode("utf-8")))
+
+        NSString = cls("NSString")
+        NSAppearance = cls("NSAppearance")
+        NSColor = cls("NSColor")
+
+        # Obtain NSView* from Qt widget. On macOS, QWidget.winId() is a pointer.
+        view_ptr = int(widget.winId())
+        if not view_ptr:
+            return False
+
+        window_ptr = _msg_obj(ctypes.c_void_p(view_ptr), sel("window"))
+        window_ptr = int(window_ptr or 0)
+        if not window_ptr:
+            return False
+
+        name_str = _msg_obj_charp(NSString, sel("stringWithUTF8String:"), b"NSAppearanceNameDarkAqua")
+        appearance = _msg_obj(NSAppearance, sel("appearanceNamed:"), name_str)
+        if not appearance:
+            return False
+
+        _msg_void_obj(ctypes.c_void_p(window_ptr), sel("setAppearance:"), appearance)
+
+        return True
+    except Exception:
+        return False
 logging.getLogger('PIL').setLevel(logging.ERROR)
 # rawpy doesn't always use standard logging, but we'll try to catch it if it does
 logging.getLogger('rawpy').setLevel(logging.ERROR)
@@ -130,7 +254,7 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QPoint, QEvent, QSettings, QSize, QRect, QObject, QRunnable, QThreadPool, QTimer
 from PyQt6.QtGui import (QPixmap, QImage, QAction, QKeySequence,
                          QDragEnterEvent, QDropEvent, QCursor, QIcon,
-                         QTransform, QRegion, QPainterPath, QPainter, QColor, QPen, QBrush)
+                         QTransform, QRegion, QPainterPath, QPainter, QColor, QPen, QBrush, QPalette)
 print("PyQt6 imported successfully", flush=True)
 
 print("Importing third-party libraries...", flush=True)
@@ -4484,6 +4608,8 @@ class RAWImageViewer(QMainWindow):
         print("  [RAWImageViewer] Initializing UI...", flush=True)
         self.init_ui()
         print("  [RAWImageViewer] UI initialized", flush=True)
+
+        # macOS native title bar tweaks disabled for stability.
 
         # Display cache initialization message
         print("  [RAWImageViewer] Getting cache stats...", flush=True)
@@ -9950,6 +10076,12 @@ class RAWImageViewer(QMainWindow):
         # Update loading overlay geometry to cover the window
         if hasattr(self, 'loading_overlay') and self.loading_overlay:
             self.loading_overlay.setGeometry(self.rect())
+
+        # macOS: fullscreen/maximize transitions can trigger re-entrant Qt event delivery.
+        # Avoid any expensive work (and especially processEvents() cascades) while the
+        # window state is actively changing.
+        if sys.platform == "darwin" and getattr(self, "_handling_window_state_change", False):
+            return
         
         # Skip logging and scaling during active resize to prevent intermediate updates
         if getattr(self, '_is_resizing', False):
@@ -11454,6 +11586,17 @@ class RAWImageViewer(QMainWindow):
     def changeEvent(self, event):
         """Handle window state changes"""
         if event.type() == QEvent.Type.WindowStateChange:
+            if sys.platform == "darwin":
+                # Guard against nested WindowStateChange recursion on macOS.
+                if getattr(self, "_handling_window_state_change", False):
+                    return
+                self._handling_window_state_change = True
+                try:
+                    QTimer.singleShot(
+                        0, lambda: setattr(self, "_handling_window_state_change", False)
+                    )
+                except Exception:
+                    self._handling_window_state_change = False
             # Update title bar's internal maximized state
             if hasattr(self, 'title_bar') and self.title_bar is not None:
                 self.title_bar._is_maximized = self.isMaximized()
@@ -11726,6 +11869,30 @@ def main():
         app.setApplicationName("RAW Image Viewer")
         app.setApplicationVersion("1.5.3")
 
+        # macOS: force dark UI to better match our dark theme (including title bar).
+        # Using Qt's palette is more reliable than trying to hard-set NSWindow colors.
+        if sys.platform == "darwin":
+            try:
+                app.setStyle("Fusion")
+                palette = QPalette()
+                palette.setColor(QPalette.ColorRole.Window, QColor(30, 30, 30))
+                palette.setColor(QPalette.ColorRole.WindowText, QColor(224, 224, 224))
+                palette.setColor(QPalette.ColorRole.Base, QColor(18, 18, 18))
+                palette.setColor(QPalette.ColorRole.AlternateBase, QColor(42, 42, 42))
+                palette.setColor(QPalette.ColorRole.ToolTipBase, QColor(30, 30, 30))
+                palette.setColor(QPalette.ColorRole.ToolTipText, QColor(224, 224, 224))
+                palette.setColor(QPalette.ColorRole.Text, QColor(224, 224, 224))
+                palette.setColor(QPalette.ColorRole.Button, QColor(30, 30, 30))
+                palette.setColor(QPalette.ColorRole.ButtonText, QColor(224, 224, 224))
+                palette.setColor(QPalette.ColorRole.BrightText, QColor(255, 0, 0))
+                palette.setColor(QPalette.ColorRole.Highlight, QColor(90, 90, 90))
+                palette.setColor(QPalette.ColorRole.HighlightedText, QColor(255, 255, 255))
+                app.setPalette(palette)
+            except Exception:
+                pass
+
+        # macOS native title bar tweaks disabled for stability.
+
         # Create and show splash screen
         print("Creating splash screen...", flush=True)
         splash_pixmap = None
@@ -11770,6 +11937,7 @@ def main():
         
         # Show main window and close splash screen
         viewer.show()
+        # macOS native title bar tweaks disabled for stability.
         splash.finish(viewer)  # Close splash screen when main window is ready
         print("Splash screen closed, main window displayed", flush=True)
 
