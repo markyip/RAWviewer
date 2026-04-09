@@ -80,12 +80,12 @@ This is a **pre-filtering tool**, letting you go through hundreds of RAW files e
 - **`←`/`→`**: Previous / next image
 - **`↓`**: Move current image to Discard folder
 - **Delete**: Delete current image (with confirmation)
-- **`i`** (status bar): Hover for a shortcut summary tooltip (menu **Keyboard Shortcuts** still opens the full list)
+- **`i`** (status bar): Hover for a shortcut summary tooltip
 
 **Gallery view**
 
 - **`↑`/`↓`**: Scroll the thumbnail grid (when the main window handles the key)
-- **Discard / delete / image navigation shortcuts** apply only after you open an image in single view (they are not run against a stale “last opened” file while browsing the grid).
+- **Discard / delete / image navigation shortcuts** apply only after you open an image in single view.
 
 ## 🖱️ Mouse Controls
 
