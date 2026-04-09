@@ -1,6 +1,33 @@
 # RAWviewer Release Notes
 
-## Version: v1.5.1 (Current)
+## Version: v1.5.2 (Current)
+**Release Date: April 7, 2026**
+
+### 🎯 What's New
+**Single-image histogram overlay, full-width viewing, and a compact shortcuts hint on the status bar.**
+
+### ✨ Key Features
+
+#### 📊 Histogram (single-image view)
+- **RGB and luminance curves** on a small **16:9** card with a **semi-transparent** background.
+- **Overlay layout**: The image area uses the **full width** of the window; the histogram floats on top instead of consuming a side column.
+- **Draggable card**: Click and drag to move the histogram within the view; position is kept while resizing (clamped to the visible area).
+- **Shortcut `H`**: Toggle the histogram on or off (single-image mode only).
+
+#### ℹ️ Status bar hint
+- **`i` control** on the bottom bar: hover to see a **tooltip** with the main keyboard shortcuts (no click dialog).
+- **Menu unchanged**: **Keyboard Shortcuts** in the menu bar still opens the full list dialog; tooltip content stays in sync via a shared help string.
+
+### 📦 Technical
+- New module `src/image_histogram.py` for sampling, binning, and painting the overlay widget.
+- `SingleImageViewOverlay` container: full-bleed `QScrollArea` plus stacked histogram widget.
+
+---
+
+## Previous Releases
+
+## Version: v1.5.1
+
 ### 🚀 Stability & Build Update
 This update focuses on eliminating critical crashes during gallery navigation and hardening the macOS build process for reliable app bundle creation.
 
@@ -15,8 +42,6 @@ This update focuses on eliminating critical crashes during gallery navigation an
 - **Fixed "Forbidden" Icon Issue**: Resolved the circle-slash symbol on the application icon by clearing security quarantine attributes and ensuring proper bundle metadata.
 
 ---
-
-## Previous Releases
 
 ## 🚀 Version 1.5 - Gallery Smoothness & Windows EXE Stability
 **Release Date: March 18, 2026**
