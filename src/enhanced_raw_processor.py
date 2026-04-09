@@ -24,6 +24,58 @@ warnings.filterwarnings('ignore', category=UserWarning, module='exifread')
 from image_cache import get_image_cache
 
 
+def extract_embedded_jpeg_by_scan(file_path: str, max_size: int) -> Optional[np.ndarray]:
+    """
+    When LibRaw cannot open a file, scan for embedded JPEG (SOI … EOI) and decode with PIL.
+    Many damaged or newer ARW/RAW containers still carry a JPEG preview readable without rawpy.
+    Picks the largest successfully decoded JPEG (by pixel area), skips tiny icons.
+    """
+    try:
+        size = os.path.getsize(file_path)
+        to_read = min(size, 120 * 1024 * 1024)
+        with open(file_path, "rb") as f:
+            blob = f.read(to_read)
+    except OSError:
+        return None
+
+    best_arr = None
+    best_area = 0
+    start = 0
+    while True:
+        idx = blob.find(b"\xff\xd8\xff", start)
+        if idx < 0:
+            break
+        end_marker = blob.find(b"\xff\xd9", idx + 3)
+        segments = []
+        if end_marker >= 0:
+            segments.append(blob[idx : end_marker + 2])
+        segments.append(blob[idx:])
+
+        for segment in segments:
+            try:
+                im = Image.open(io.BytesIO(segment))
+                im.load()
+                if im.mode != "RGB":
+                    im = im.convert("RGB")
+                w, h = im.size
+                if w < 32 or h < 32:
+                    continue
+                area = w * h
+                if area <= best_area:
+                    continue
+                best_area = area
+                work = im
+                if w > max_size or h > max_size:
+                    work = im.copy()
+                    work.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
+                best_arr = np.array(work)
+            except Exception:
+                continue
+        start = idx + 3
+
+    return best_arr
+
+
 class ThumbnailExtractor(QObject):
     """Fast thumbnail extractor for immediate display."""
 
@@ -80,7 +132,7 @@ class ThumbnailExtractor(QObject):
             # print(f"Thumbnail extraction error: {str(e)}")
             pass
 
-        return None
+        return extract_embedded_jpeg_by_scan(file_path, max_size)
 
     def extract_preview_from_raw(self, file_path: str, max_size: int = 2048) -> Optional[np.ndarray]:
         """Extract high-quality preview from RAW file (embedded JPEG)."""

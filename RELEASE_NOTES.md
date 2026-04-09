@@ -1,6 +1,26 @@
 # RAWviewer Release Notes
 
-## Version: v1.5.3 (Current)
+## Version: v1.5.4 (Current)
+**Release Date: April 9, 2026**
+
+### 🎯 What's New
+**Gallery reliability, safer navigation when loading folders, RAW preview fallback when LibRaw fails, and clear errors when nothing can be decoded.**
+
+### 🛠️ Fixes & improvements
+- **Gallery first layout**: If the scroll viewport has **zero width** during the first layout pass, the justified grid **no longer clears to blank**; it retries after a short delay until geometry is valid.
+- **Folder scan / loading UI**: "Scanning folder…" and related loading toasts are **cleared reliably** when the scan finishes; gallery loading errors surface a short **Gallery Error** message when `set_images` fails.
+- **Same-file loads**: In-flight decode for the **current path** is no longer cancelled by a duplicate load request (fixes intermittent **blank or stuck** image after changing folders or restoring session).
+- **Stale thumbnails**: A **late, lower-resolution** image from the load manager no longer **replaces** an already displayed higher-resolution frame (avoids visual flicker and related logging/UI edge cases).
+- **RAW fallback**: When **LibRaw** cannot open or postprocess a RAW file, the app attempts to extract an **embedded JPEG** by scanning the file (thumbnails and preview paths; larger limit when full resolution is requested).
+- **Decode failure feedback**: If the **full** decode stage returns nothing for the **current** image (unsupported RAW, corrupt file, or no usable embedded preview), a **Load Error** dialog is shown instead of a silent blank view.
+
+### 📦 Technical
+- `extract_embedded_jpeg_by_scan` in `enhanced_raw_processor.py`; optional retry from `unified_image_processor` after RAW processing exceptions.
+- `ImageLoadManager` emits `error_occurred` when `process_full_image` yields no result for a current-file, full-stage task.
+
+---
+
+## Version: v1.5.3
 **Release Date: April 9, 2026**
 
 ### 🎯 What's New

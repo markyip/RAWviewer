@@ -168,7 +168,18 @@ class ImageLoadWorker(QRunnable):
                             self.manager.image_ready.emit(file_path, result)
                         elif isinstance(result, QPixmap):
                             self.manager.pixmap_ready.emit(file_path, result)
-            
+                elif (
+                    "full" in stages
+                    and not self.task.is_cancelled()
+                    and self.task.priority == Priority.CURRENT
+                ):
+                    if self._safe_emit():
+                        self.manager.error_occurred.emit(
+                            file_path,
+                            "Could not decode image data (unsupported or corrupt RAW, "
+                            "or no usable embedded JPEG).",
+                        )
+
             # 發送完成信號
             if self._safe_emit() and not self.task.is_cancelled():
                 self.manager.progress_updated.emit(file_path, "Processing complete")

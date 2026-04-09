@@ -372,6 +372,24 @@ class JustifiedGallery(QWidget):
     def build_gallery(self, bulk_metadata=None):
         if self._building or not self.images:
             return
+
+        # Layout may report width 0 right after gallery_container.show() — do not clear
+        # thumbnails/layout in that case or the gallery stays empty ("failed to load").
+        viewport_width = self._get_viewport_width()
+        net_width = viewport_width - (self.MIN_SPACING * 2) - 16
+        if net_width <= 0:
+            n = getattr(self, "_gallery_width_defer_count", 0) + 1
+            self._gallery_width_defer_count = n
+            if n <= 40:
+                QTimer.singleShot(50, lambda m=bulk_metadata: self.build_gallery(bulk_metadata=m))
+            else:
+                self._gallery_width_defer_count = 0
+                logger.warning(
+                    "[GALLERY] Viewport width stayed <= 0 after retries; layout may be broken"
+                )
+            return
+        self._gallery_width_defer_count = 0
+
         self._building = True
         should_load_visible = False
         try:
@@ -388,11 +406,6 @@ class JustifiedGallery(QWidget):
                 paths = [img for img in self.images if isinstance(img, str)]
                 if paths:
                     self._metadata_cache = self.parent_viewer.image_cache.get_multiple_exif(paths)
-
-            viewport_width = self._get_viewport_width()
-            net_width = viewport_width - (self.MIN_SPACING * 2) - 16
-            if net_width <= 0:
-                return
 
             current_y = 10
             row = []
