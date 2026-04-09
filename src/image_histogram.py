@@ -59,9 +59,9 @@ class ImageHistogramWidget(QWidget):
     """Small 16:9 card with RGB + luminance histogram; call set_pixmap / clear from the main viewer."""
 
     _MAX_SAMPLE_SIDE = 384
-    # 16:9 card (width × height), exact ratio 176:99 = 16:9
-    _CARD_W = 176
-    _CARD_H = 99
+    # 16:9 card (width × height), exact ratio 352:198 = 16:9
+    _CARD_W = 352
+    _CARD_H = 198
     _BG = QColor(30, 30, 30, 200)
     _BORDER = QColor(255, 255, 255, 45)
     _RADIUS = 8
