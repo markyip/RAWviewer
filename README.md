@@ -37,7 +37,7 @@ This is a **pre-filtering tool**, letting you go through hundreds of RAW files e
 ## ✨ Features
 
 - **Cross-platform support**: Windows and macOS
-- **Ultra-Fast Performance**: Instant folder loading (scans thousands of images in milliseconds) using optimized algorithms
+- **Ultra-Fast Performance**: Fast folder scanning and loading using optimized algorithms
 - **Smart Prefetching**: Predictively loads relevant images in the background for zero-latency navigation
 - **Gallery View**: Justified grid layout with virtualized rendering for smooth scrolling through massive collections
 - **Wide RAW format support**: Canon (CR2, CR3), Nikon (NEF), Sony (ARW), Adobe DNG, and many more
@@ -64,7 +64,7 @@ This is a **pre-filtering tool**, letting you go through hundreds of RAW files e
 
 #### macOS
 1. Download the latest release from the [Releases Page](https://github.com/markyip/RAWviewer/releases/latest)
-2. Download and extract `RAWviewer-v1.5.3-macOS.zip`
+2. Download and extract `RAWviewer.app.zip`
 3. Drag `RAWviewer.app` to your Applications folder
 4. Double-click to launch from Applications or Launchpad
 5. **First launch**: Right-click → "Open" if blocked by Gatekeeper
@@ -75,11 +75,12 @@ This is a **pre-filtering tool**, letting you go through hundreds of RAW files e
 
 - **Space**: Toggle between fit-to-window and 100% zoom
 - **`H`**: Show or hide the histogram overlay
-- **`G`**: Toggle between Gallery View and Single Image View
-- **`Esc`**: Return to Gallery View
+- **Gallery ↔ single**: Use the **Gallery** button on the status bar, or click a thumbnail in the grid to open single-image view
+- **`Esc`**: Return to Gallery View (from single-image view)
 - **`←`/`→`**: Previous / next image
 - **`↓`**: Move current image to Discard folder
 - **Delete**: Delete current image (with confirmation)
+- **`i`** (status bar): Hover for a shortcut summary tooltip (menu **Keyboard Shortcuts** still opens the full list)
 
 **Gallery view**
 
@@ -113,14 +114,16 @@ This is a **pre-filtering tool**, letting you go through hundreds of RAW files e
 - **And many more supported by LibRaw**
 
 ### Standard Formats
-- **JPEG**: JPG, JPEG
-- **TIFF**: TIF, TIFF
-- **HEIF**: HEIF
+- **JPEG**: `.jpg`, `.jpeg`
+- **PNG**: `.png`
+- **WebP**: `.webp`
+- **TIFF**: `.tif`, `.tiff`
+- **HEIF / HEIC**: `.heif`, `.heic` (depends on Qt image plugins on your system)
 
 ## 🏗️ Building from Source
 
 ### Prerequisites
-- Python 3.8 or higher
+- Python **3.9 or higher** (required by NumPy 2.x)
 - pip (Python package manager)
 
 ### Windows
@@ -179,8 +182,9 @@ All dependencies are listed in `requirements.txt`:
 
 We're continuously working to improve RAWviewer. Here are some features planned for future releases:
 
-- **Histogram Display**: View RGB and luminance histograms to analyze exposure and color distribution
 - **Batch Operations**: Select and process multiple images at once
+
+*(RGB / luminance histogram overlay in single-image view is already available — press **H**, or drag the card to reposition.)*
 
 
 ## ⚠️ Known Issues
