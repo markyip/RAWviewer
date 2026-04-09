@@ -292,6 +292,24 @@ class UnifiedImageProcessor:
             import logging
             logger = logging.getLogger(__name__)
             logger.error(f"Error processing RAW image {file_path}: {e}", exc_info=True)
+            # LibRaw failed entirely; try byte-scan for embedded JPEG (already used in thumbnail
+            # path, but preview may have been skipped or a different limit may help).
+            try:
+                from enhanced_raw_processor import extract_embedded_jpeg_by_scan
+                lim = 8192 if use_full_resolution else 1920
+                scanned = extract_embedded_jpeg_by_scan(file_path, lim)
+                if scanned is not None:
+                    exif_data = self.exif_extractor.extract_exif_data(file_path)
+                    orientation = exif_data.get("orientation", 1) if exif_data else 1
+                    if orientation != 1:
+                        scanned = self._apply_orientation_correction(
+                            scanned, orientation, exif_data
+                        )
+                    if not use_full_resolution:
+                        self.cache.put_preview(file_path, scanned)
+                    return scanned
+            except Exception:
+                pass
             return None
     
     def _process_regular_image(self, file_path: str) -> Optional[QPixmap]:

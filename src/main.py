@@ -4541,6 +4541,9 @@ class RAWImageViewer(QMainWindow):
         self.image_files = []  # List of all image files in current folder
         self.current_file_index = -1  # Index of current file in the list
         self.current_file_path = None  # Path of currently loaded file
+        # Highest max dimension already shown for current file (drops late stale thumbnails)
+        self._manager_display_track_path = None
+        self._manager_displayed_max_dim = 0
         self.thumbnail_cache = {}  # Cache for thumbnails
         self.film_strip_visible = False
         self.thumbnail_threads = []  # Track running thumbnail threads
@@ -4653,7 +4656,9 @@ class RAWImageViewer(QMainWindow):
 
     def _hide_all_loading_indicators(self):
         """Helper to hide all loading indicators across modes"""
-        if hasattr(self, 'view_mode') and self.view_mode == 'gallery' and self.gallery_justified:
+        # Always clear gallery toast if the widget exists — view_mode may have
+        # switched to single during folder scan, leaving a stale "Scanning folder..." label.
+        if self.gallery_justified:
             self.gallery_justified.hide_loading_message()
         if hasattr(self, 'loading_overlay'):
             self.loading_overlay.hide_loading()
@@ -4683,6 +4688,16 @@ class RAWImageViewer(QMainWindow):
         except Exception:
             max_dim = 0
 
+        # Late thumbnail_ready after preview/full was already shown causes deep re-entrant
+        # display + status updates and can trigger RecursionError inside logging.
+        shown_max = getattr(self, "_manager_displayed_max_dim", 0)
+        if max_dim > 0 and shown_max >= max_dim:
+            logger.debug(
+                f"[MANAGER] Skipping stale thumbnail ({max_dim}px max); "
+                f"already displayed {shown_max}px for this file"
+            )
+            return
+
         # If thumbnail is already near-preview size (or bigger), skip displaying it and wait for image_ready.
         # This avoids a heavy bytes-copy + QImage/QPixmap build twice.
         if max_dim >= 1600:
@@ -4709,6 +4724,9 @@ class RAWImageViewer(QMainWindow):
                 else:
                     self.display_numpy_image(thumbnail)
 
+                self._manager_displayed_max_dim = max(
+                    getattr(self, "_manager_displayed_max_dim", 0), max_dim
+                )
                 self.status_bar.showMessage("Preview loaded - processing full image...")
             else:
                 # Keep overlay visible if we're storing thumbnail as pending (waiting for full image)
@@ -4757,6 +4775,9 @@ class RAWImageViewer(QMainWindow):
         
         # logger.debug(f"[MANAGER] Resetting _orientation_already_applied = False after display_numpy_image")
         self._orientation_already_applied = False  # Reset flag
+        self._manager_displayed_max_dim = max(
+            getattr(self, "_manager_displayed_max_dim", 0), max_dim
+        )
 
         self.status_bar.showMessage(f"Loaded {os.path.basename(file_path)}")
         
@@ -4825,6 +4846,10 @@ class RAWImageViewer(QMainWindow):
         logger.debug(f"[MANAGER] Setting _is_half_size_displayed=False for full resolution pixmap")
         
         self.display_pixmap(pixmap)
+        pm_max = max(pixmap.width(), pixmap.height())
+        self._manager_displayed_max_dim = max(
+            getattr(self, "_manager_displayed_max_dim", 0), pm_max
+        )
         self.status_bar.showMessage(f"Loaded {os.path.basename(file_path)}")
         
         # CRITICAL: Ensure metadata is updated after pixmap is displayed
@@ -5951,7 +5976,17 @@ class RAWImageViewer(QMainWindow):
             # Do NOT block the UI thread on metadata fetch for thousands of files.
             # 1) Show gallery immediately with a fast layout (default aspect ratios).
             bulk_metadata = getattr(self, '_gallery_bulk_metadata', None)
-            self.gallery_justified.set_images(self.image_files, bulk_metadata if bulk_metadata else None)
+            try:
+                self.gallery_justified.set_images(
+                    self.image_files, bulk_metadata if bulk_metadata else None
+                )
+            except Exception as e:
+                logger.exception(f"[GALLERY] set_images failed: {e}")
+                self.show_error(
+                    "Gallery Error",
+                    f"Could not build the gallery view:\n{e}",
+                )
+                return
 
             # 2) If metadata is missing, fetch it in the background and refresh once ready.
             if not bulk_metadata and not getattr(self, "_gallery_metadata_fetch_in_progress", False):
@@ -7941,9 +7976,11 @@ class RAWImageViewer(QMainWindow):
             # Clean up current processing (simplified with new architecture)
             cleanup_start = time.time()
             logger.info(f"[LOAD] Starting cleanup of current processing (if any)")
-            # Cancel any pending image load tasks (non-blocking)
-            if self.current_file_path:
-                self.image_manager.cancel_task(self.current_file_path)
+            # Cancel in-flight loads only when switching files — same-path reload must not cancel
+            # the active task (e.g. duplicate load_raw_image after folder change).
+            _prev_fp = getattr(self, "current_file_path", None)
+            if _prev_fp and _norm_path(_prev_fp) != _norm_path(requested_file_path):
+                self.image_manager.cancel_task(_prev_fp)
             # Legacy cleanup for old processor (if still exists)
             if self.current_processor:
                 logger.info(f"[LOAD] Legacy processor cleanup: {type(self.current_processor).__name__}")
@@ -7960,6 +7997,10 @@ class RAWImageViewer(QMainWindow):
             #    (it's the old file), so the check would always cancel
             self.current_file_path = requested_file_path
             self._last_loaded_path = requested_file_path # Track for view switching optimizations
+            np_req = _norm_path(requested_file_path)
+            if getattr(self, "_manager_display_track_path", None) != np_req:
+                self._manager_display_track_path = np_req
+                self._manager_displayed_max_dim = 0
             
             # Verify cleanup completed
             if self.current_processor is not None:
@@ -8486,6 +8527,13 @@ class RAWImageViewer(QMainWindow):
         
         self.current_pixmap = pixmap
         self._sync_single_image_histogram()
+        # Memory / cache redraws (e.g. _show_single_view "already in memory") skip on_manager_*,
+        # so stale thumbnail_ready must still see the real on-screen resolution here.
+        if pixmap is not None and not pixmap.isNull() and getattr(self, "current_file_path", None):
+            pm_max = max(pixmap.width(), pixmap.height())
+            self._manager_displayed_max_dim = max(
+                getattr(self, "_manager_displayed_max_dim", 0), pm_max
+            )
 
         # Handle pending zoom toggle from spacebar (when pixmap wasn't ready)
         if hasattr(self, '_pending_zoom_toggle') and self._pending_zoom_toggle:
@@ -11330,6 +11378,9 @@ class RAWImageViewer(QMainWindow):
                         if is_start_file and hasattr(self, 'view_mode') and self.view_mode == 'gallery':
                             logger.info(f"[FOLDER] Switching to single view for start_file: {os.path.basename(full_path)}")
                             self.view_mode = 'single'
+                            # Drop gallery scanning toast; later branches only update it in gallery mode
+                            if self.gallery_justified:
+                                self.gallery_justified.hide_loading_message()
                             # Ensure UI switches back to single view
                             if hasattr(self, 'gallery_widget') and self.gallery_widget:
                                 self.gallery_widget.hide()
@@ -11339,14 +11390,10 @@ class RAWImageViewer(QMainWindow):
                         if is_start_file or (not start_file and len(image_files) == 1):
                             logger.info(f"[FOLDER] Early load triggered for: {os.path.basename(full_path)}")
                             self.current_file_path = full_path
-                            # If not in gallery mode, load immediately
-                            if not (hasattr(self, 'view_mode') and self.view_mode == 'gallery'):
-                                # Temporarily set images so navigation works if needed
-                                self.image_files = [full_path]
-                                self.current_file_index = 0
-                                # Use QTimer to avoid blocking the scan
-                                from PyQt6.QtCore import QTimer
-                                QTimer.singleShot(0, lambda p=full_path: self.load_raw_image(p))
+                            # Do not QTimer-defer load_raw_image here: load_folder_images finishes scan/sort
+                            # then calls _show_single_view / gallery update, which loads once. A second
+                            # load_raw_image for the same path ran after that and cancel_task(current)
+                            # aborted the in-flight ImageLoadManager job (blank image after folder change).
                             early_load_triggered = True
             except OSError as e:
                 error_msg = f"Cannot read folder contents:\n{str(e)}"
@@ -11476,14 +11523,14 @@ class RAWImageViewer(QMainWindow):
                         if hasattr(self.gallery_justified, '_load_timer') and self.gallery_justified._load_timer:
                             self.gallery_justified._load_timer.stop()
                     
+                # Scan/sort/view setup finished — clear "Scanning folder..." and any overlay
+                self._hide_all_loading_indicators()
                 self.save_session_state()
             except Exception as e:
                 error_msg = f"Error updating gallery view:\n{str(e)}"
                 logger.error(f"Error updating gallery view for folder {folder_path}: {e}", exc_info=True)
                 self.show_error("Gallery Update Error", error_msg)
-                # Hide loading message on error
-                if hasattr(self, 'view_mode') and self.view_mode == 'gallery' and self.gallery_justified:
-                    self.gallery_justified.hide_loading_message()
+                self._hide_all_loading_indicators()
                 return
                 
         except Exception as e:
@@ -11491,9 +11538,7 @@ class RAWImageViewer(QMainWindow):
             error_msg = f"Unexpected error loading folder:\n{str(e)}"
             logger.error(f"Unexpected error in load_folder_images for {folder_path}: {e}", exc_info=True)
             self.show_error("Folder Load Error", error_msg)
-            # Hide loading message on error
-            if hasattr(self, 'view_mode') and self.view_mode == 'gallery' and self.gallery_justified:
-                self.gallery_justified.hide_loading_message()
+            self._hide_all_loading_indicators()
             return
 
     def save_session_state(self):
@@ -11858,7 +11903,7 @@ def main():
         # Use is_windows variable to avoid calling platform.system() again
         if is_windows:
             print("  [Windows] Setting AppUserModelID...", flush=True)
-            myappid = 'RAWviewer.1.5.3'
+            myappid = 'RAWviewer.1.5.4'
             ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
             print("  [Windows] AppUserModelID set", flush=True)
 
@@ -11867,7 +11912,7 @@ def main():
 
         # Set application properties
         app.setApplicationName("RAW Image Viewer")
-        app.setApplicationVersion("1.5.3")
+        app.setApplicationVersion("1.5.4")
 
         # macOS: force dark UI to better match our dark theme (including title bar).
         # Using Qt's palette is more reliable than trying to hard-set NSWindow colors.

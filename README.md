@@ -1,10 +1,10 @@
-# RAWviewer v1.5.3
+# RAWviewer v1.5.4
 
 <p align="center">
   <img src="icons/appicon.ico" alt="RAWviewer Icon" width="256">
 </p>
 
-![Version](https://img.shields.io/badge/version-1.5.3-blue)
+![Version](https://img.shields.io/badge/version-1.5.4-blue)
 ![Downloads](https://img.shields.io/github/downloads/markyip/RAWviewer/total) 
 ![License](https://img.shields.io/badge/license-MIT-green)
 [![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-Donate-orange?logo=buy-me-a-coffee)](https://www.buymeacoffee.com/markyip)
@@ -41,6 +41,7 @@ This is a **pre-filtering tool**, letting you go through hundreds of RAW files e
 - **Smart Prefetching**: Predictively loads relevant images in the background for zero-latency navigation
 - **Gallery View**: Justified grid layout with virtualized rendering for smooth scrolling through massive collections
 - **Wide RAW format support**: Canon (CR2, CR3), Nikon (NEF), Sony (ARW), Adobe DNG, and many more
+- **RAW preview fallback**: If LibRaw cannot decode a file, the app tries to recover an **embedded JPEG** from the file bytes (thumbnail and on-screen preview where possible)
 - **Robust Orientation Handling**: Definitive fixes for Sony ARW and other RAW formats, ensuring images are always displayed upright
 - **Pillarbox-Free Gallery**: Accurately calculates aspect ratios to prevent black bars in the gallery view
 - **Intuitive navigation**: Keyboard shortcuts, mouse controls, and scroll wheel support
@@ -193,6 +194,7 @@ We're continuously working to improve RAWviewer. Here are some features planned 
 - **Newer camera models**: Support for the latest camera releases may be limited due to LibRaw library compatibility
 - **Proprietary RAW formats**: Some manufacturers' newest RAW formats may not be fully supported immediately after camera release
 - **Firmware updates**: Camera firmware updates may introduce RAW format changes that require LibRaw updates
+- **When decode still fails**: If there is no usable embedded preview, you will see a **Load Error** for that file until LibRaw (or the file) is supported
 
 ## 🏛️ Architecture
 
