@@ -214,6 +214,15 @@ except Exception as e:
     print(traceback.format_exc(), file=sys.stderr, flush=True)
     raise
 
+try:
+    from image_histogram import ImageHistogramWidget
+    print("  - image_histogram: OK", flush=True)
+except Exception as e:
+    print(f"  - image_histogram: ERROR - {e}", file=sys.stderr, flush=True)
+    import traceback
+    print(traceback.format_exc(), file=sys.stderr, flush=True)
+    raise
+
 
 # UI Modules
 try:
@@ -4124,6 +4133,59 @@ class CustomConfirmDialog(QDialog):
 
 
 # -----------------------------
+# Single-image area: full-bleed scroll + draggable histogram overlay
+# -----------------------------
+class SingleImageViewOverlay(QWidget):
+    """Scroll area fills the widget; histogram floats on top (same width as image pane)."""
+
+    _HIST_MARGIN = 8
+
+    def __init__(self, scroll_area, histogram_widget, parent=None):
+        super().__init__(parent)
+        self._scroll = scroll_area
+        self._hist = histogram_widget
+        self._hist_user_placed = False
+        scroll_area.setParent(self)
+        histogram_widget.setParent(self)
+        self.setObjectName("single_view_container")
+        self.setStyleSheet("#single_view_container { background-color: #1E1E1E; }")
+        self.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._scroll.setGeometry(0, 0, self.width(), self.height())
+        self._scroll.lower()
+        self._layout_histogram()
+
+    def _layout_histogram(self):
+        h = self._hist
+        if not h.isVisible():
+            return
+        pw, ph = self.width(), self.height()
+        hw, hh = h.width(), h.height()
+        if pw < 1 or ph < 1:
+            return
+        if not self._hist_user_placed:
+            x = max(self._HIST_MARGIN, pw - hw - self._HIST_MARGIN)
+            y = self._HIST_MARGIN
+            x = min(max(0, x), max(0, pw - hw))
+            y = min(max(0, y), max(0, ph - hh))
+            h.move(x, y)
+        else:
+            x = min(max(0, h.x()), max(0, pw - hw))
+            y = min(max(0, h.y()), max(0, ph - hh))
+            h.move(x, y)
+        h.raise_()
+
+    def mark_histogram_user_moved(self):
+        self._hist_user_placed = True
+
+    def relayout_histogram(self):
+        self._layout_histogram()
+
+
+# -----------------------------
 # Loading Overlay for Single View
 # -----------------------------
 class LoadingOverlay(QWidget):
@@ -5012,6 +5074,7 @@ class RAWImageViewer(QMainWindow):
             "Use Left/Right arrow keys to navigate between images (preserves zoom if zoomed in)\n"
             "Press Down Arrow to move the current image to Discard folder\n"
             "Press Delete to remove the current image\n"
+            "Press H to show or hide histogram\n"
             "Scroll wheel (fit-to-window): Scroll down = previous image, Scroll up = next image\n"
             "Horizontal wheel (zoom mode): Scroll left/right to pan the image"
         )
@@ -5027,7 +5090,13 @@ class RAWImageViewer(QMainWindow):
         
         # Install event filter on scroll area to handle wheel events for navigation
         self.scroll_area.viewport().installEventFilter(self)
-        main_layout.addWidget(self.scroll_area)
+
+        self.single_image_histogram = ImageHistogramWidget()
+        self._histogram_overlay_visible = True
+        self.single_view_container = SingleImageViewOverlay(
+            self.scroll_area, self.single_image_histogram)
+        self.single_image_histogram.setVisible(self._histogram_overlay_visible)
+        main_layout.addWidget(self.single_view_container)
         # --- Status bar with Material Design 3 styling ---
         # Material Design 3 color scheme:
         # - Surface: #1E1E1E (dark background)
@@ -5170,6 +5239,37 @@ class RAWImageViewer(QMainWindow):
         """)
         left_buttons_layout.addWidget(self.view_mode_button, 0, alignment=Qt.AlignmentFlag.AlignVCenter)
         self.view_mode_button.hide()  # Hidden by default until images are loaded
+
+        self.shortcuts_hint_button = QPushButton("i")
+        self.shortcuts_hint_button.setFlat(True)
+        self.shortcuts_hint_button.setCursor(QCursor(Qt.CursorShape.ArrowCursor))
+        self.shortcuts_hint_button.setFixedSize(22, 22)
+        self.shortcuts_hint_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.shortcuts_hint_button.setToolTip(self._keyboard_shortcuts_help_text())
+        self.shortcuts_hint_button.setStyleSheet("""
+            QPushButton {
+                color: #888888;
+                font-size: 11px;
+                font-weight: 600;
+                padding: 0px;
+                border: none;
+                background: transparent;
+                border-radius: 11px;
+                min-width: 22px;
+                max-width: 22px;
+                min-height: 22px;
+                max-height: 22px;
+            }
+            QPushButton:hover {
+                color: #E0E0E0;
+                background-color: rgba(255, 255, 255, 0.08);
+            }
+            QPushButton:pressed {
+                background-color: rgba(255, 255, 255, 0.12);
+            }
+        """)
+        left_buttons_layout.addWidget(
+            self.shortcuts_hint_button, 0, alignment=Qt.AlignmentFlag.AlignVCenter)
         
         # Add left buttons to main layout
         status_layout.addWidget(left_buttons_widget)
@@ -5219,10 +5319,17 @@ class RAWImageViewer(QMainWindow):
         view_placeholder.adjustSize()
         view_width = view_placeholder.width()
         
-        # Calculate total left side width: Open button + spacing + View mode button
+        # Calculate total left side width: Open + Gallery + shortcuts hint ("i")
         # Note: sort button is hidden in single mode, so we don't include it
         left_buttons_spacing = 12  # 12px spacing between buttons (🗁 and Gallery)
-        left_buttons_width = open_width + left_buttons_spacing + view_width
+        hint_btn_width = self.shortcuts_hint_button.width()
+        left_buttons_width = (
+            open_width
+            + left_buttons_spacing
+            + view_width
+            + left_buttons_spacing
+            + hint_btn_width
+        )
         
         # Left spacer - accounts for left buttons width to center metadata
         left_spacer = QWidget()
@@ -5399,11 +5506,14 @@ class RAWImageViewer(QMainWindow):
         hide_time = time.time() - hide_start
         logger.info(f"[VIEW_MODE] Step 1: Gallery widget hidden (elapsed: {hide_time:.3f}s)")
         
-        # Step 2: Show scroll area
+        # Step 2: Show single-image area (scroll + histogram)
         show_start = time.time()
-        self.scroll_area.show()
+        if hasattr(self, 'single_view_container') and self.single_view_container:
+            self.single_view_container.show()
+        else:
+            self.scroll_area.show()
         show_time = time.time() - show_start
-        logger.info(f"[VIEW_MODE] Step 2: Scroll area shown (elapsed: {show_time:.3f}s)")
+        logger.info(f"[VIEW_MODE] Step 2: Single view container shown (elapsed: {show_time:.3f}s)")
         
         # Step 3: Show UI elements
         ui_start = time.time()
@@ -5506,6 +5616,8 @@ class RAWImageViewer(QMainWindow):
             # Update status bar to show metadata even if no image is loaded
             self.update_status_bar()
             logger.info(f"[VIEW_MODE] Step 4: No image to reload, status bar updated")
+
+        self._sync_single_image_histogram()
         
         total_time = time.time() - start_time
         logger.info(f"[VIEW_MODE] ========== TIMING BREAKDOWN ==========")
@@ -5550,8 +5662,11 @@ class RAWImageViewer(QMainWindow):
         if not hasattr(self, 'gallery_widget') or not self.gallery_widget:
             self._create_gallery_widget()
         
-        # Hide single view elements
-        self.scroll_area.hide()
+        # Hide single view elements (image + histogram strip)
+        if hasattr(self, 'single_view_container') and self.single_view_container:
+            self.single_view_container.hide()
+        else:
+            self.scroll_area.hide()
         
         # Hide view mode button in gallery mode (users can click images to return to single view)
         if hasattr(self, 'view_mode_button'):
@@ -5644,9 +5759,14 @@ class RAWImageViewer(QMainWindow):
             gallery_scroll.setWidget(justified_gallery)
             gallery_layout.addWidget(gallery_scroll)
             
-            # Insert gallery widget into main layout
+            # Insert gallery widget into main layout (after single-image row: scroll + histogram)
             main_layout = self.centralWidget().layout()
-            scroll_index = main_layout.indexOf(self.scroll_area)
+            anchor = (
+                self.single_view_container
+                if hasattr(self, "single_view_container") and self.single_view_container
+                else self.scroll_area
+            )
+            scroll_index = main_layout.indexOf(anchor)
             main_layout.insertWidget(scroll_index + 1, gallery_container)
             
             self.gallery_widget = gallery_container
@@ -7098,25 +7218,34 @@ class RAWImageViewer(QMainWindow):
             self.load_folder_images(folder_path)
             settings.setValue("last_opened_dir", folder_path)
 
+    def _keyboard_shortcuts_help_text(self):
+        """Plain-text shortcuts list for tooltips and the shortcuts dialog."""
+        return (
+            "Space — Toggle fit-to-window / 100% zoom\n"
+            "Double-click — Toggle fit-to-window / 100% zoom\n"
+            "Left / Right Arrow — Previous / next image\n"
+            "Down Arrow — Move image to Discard folder\n"
+            "Delete — Delete current image\n"
+            "H — Show or hide histogram (single-image view)\n\n"
+            "You can drag and drop files or folders onto the window."
+        )
+
     def show_keyboard_shortcuts(self):
         """Show keyboard shortcuts dialog"""
+        raw = self._keyboard_shortcuts_help_text().strip()
+        if "\n\n" in raw:
+            main, footer = raw.split("\n\n", 1)
+            bullets = "\n".join(
+                f"- {ln}" for ln in main.split("\n") if ln.strip())
+            body = bullets + "\n\n" + footer.strip()
+        else:
+            body = "\n".join(
+                f"- {ln}" for ln in raw.split("\n") if ln.strip())
         msg_box = QMessageBox()
         msg_box.setIcon(QMessageBox.Icon.Information)
         msg_box.setWindowTitle("Keyboard Shortcuts")
         msg_box.setText("Available Keyboard Shortcuts:")
-        msg_box.setInformativeText(
-            "- Ctrl+O - 🗁 Open image file\n"
-            "- Ctrl+Shift+O - 🗁 Open folder of images\n"
-            "- Space - Toggle between fit-to-window and 100% zoom\n"
-            "- Double-click - Toggle between fit-to-window and 100% zoom\n"
-            "- Click and drag - Pan around zoomed image\n"
-            "- Left Arrow - Previous image (preserves zoom if zoomed in)\n"
-            "- Right Arrow - Next image (preserves zoom if zoomed in)\n"
-            "- Down Arrow - Move current image to Discard folder\n"
-            "- Delete - Delete current image\n"
-            "- Ctrl+Q - Exit application\n\n"
-            "You can also drag and drop image files onto the window."
-        )
+        msg_box.setInformativeText(body)
         msg_box.exec()
 
     def image_mouse_press_event(self, event):
@@ -8199,6 +8328,24 @@ class RAWImageViewer(QMainWindow):
             error_msg = f"Error displaying numpy image: {str(e)}"
             self.show_error("Display Error", error_msg)
 
+    def _sync_single_image_histogram(self):
+        """Refresh histogram from current_pixmap when in single-image mode."""
+        w = getattr(self, "single_image_histogram", None)
+        if w is None:
+            return
+        if getattr(self, "view_mode", "single") != "single":
+            return
+        pm = getattr(self, "current_pixmap", None)
+        if pm is None or pm.isNull():
+            w.clear()
+        else:
+            w.set_pixmap(pm)
+
+    def _clear_single_image_histogram(self):
+        w = getattr(self, "single_image_histogram", None)
+        if w is not None:
+            w.clear()
+
     def display_pixmap(self, pixmap):
         """Display a QPixmap."""
         import logging
@@ -8212,6 +8359,7 @@ class RAWImageViewer(QMainWindow):
         logger.info(f"[DISPLAY_PIXMAP] File: {current_file}, Pixmap size: {pixmap.width()}x{pixmap.height()}")
         
         self.current_pixmap = pixmap
+        self._sync_single_image_histogram()
 
         # Handle pending zoom toggle from spacebar (when pixmap wasn't ready)
         if hasattr(self, '_pending_zoom_toggle') and self._pending_zoom_toggle:
@@ -8948,6 +9096,7 @@ class RAWImageViewer(QMainWindow):
                 self.image_label.setText(
                     "Error loading image\n\nPlease try a different RAW file"
                 )
+                self._clear_single_image_histogram()
                 self.status_bar.showMessage("Error loading image")
                 # Reset window title on error
                 self.setWindowTitle('RAW Image Viewer')
@@ -8989,6 +9138,16 @@ class RAWImageViewer(QMainWindow):
                 event.accept()  # Mark event as handled
             else:
                 super().keyPressEvent(event)
+        elif event.key() == Qt.Key.Key_H:
+            if self.view_mode == 'single':
+                self._histogram_overlay_visible = not getattr(
+                    self, "_histogram_overlay_visible", True)
+                if hasattr(self, "single_image_histogram"):
+                    self.single_image_histogram.setVisible(
+                        self._histogram_overlay_visible)
+                if hasattr(self.single_view_container, "relayout_histogram"):
+                    self.single_view_container.relayout_histogram()
+            event.accept()
         else:
             super().keyPressEvent(event)
 
@@ -9517,6 +9676,7 @@ class RAWImageViewer(QMainWindow):
             self.current_file_path = None
             self.current_file_index = -1
             self.current_pixmap = None
+            self._sync_single_image_histogram()
             self.image_label.setText(
                 "No more images in this folder\n\n"
                 "Use File > Open to load another image"
@@ -10123,6 +10283,7 @@ class RAWImageViewer(QMainWindow):
         # Clear any existing pixmap
         self.current_pixmap = None
         self.current_image = None
+        self._sync_single_image_histogram()
         
         # Display message in main viewing area
         # Check current view mode to determine where to show the message
@@ -11498,7 +11659,7 @@ def main():
         # Use is_windows variable to avoid calling platform.system() again
         if is_windows:
             print("  [Windows] Setting AppUserModelID...", flush=True)
-            myappid = 'RAWviewer.1.5.1'
+            myappid = 'RAWviewer.1.5.2'
             ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
             print("  [Windows] AppUserModelID set", flush=True)
 
@@ -11507,7 +11668,7 @@ def main():
 
         # Set application properties
         app.setApplicationName("RAW Image Viewer")
-        app.setApplicationVersion("1.5.1")
+        app.setApplicationVersion("1.5.2")
 
         # Create and show splash screen
         print("Creating splash screen...", flush=True)
