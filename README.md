@@ -179,15 +179,6 @@ All dependencies are listed in `requirements.txt`:
 - **Gatekeeper warnings**: Right-click the app → Open → Open anyway
 - **Performance issues**: Grant Full Disk Access in Privacy settings
 
-## 🚧 Upcoming Features
-
-We're continuously working to improve RAWviewer. Here are some features planned for future releases:
-
-- **Batch Operations**: Select and process multiple images at once
-
-*(RGB / luminance histogram overlay in single-image view is already available — press **H**, or drag the card to reposition.)*
-
-
 ## ⚠️ Known Issues
 
 ### Camera Compatibility
