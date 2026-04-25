@@ -13,8 +13,8 @@ import numpy as np
 import rawpy
 import exifread
 from typing import Optional, Dict, Any, Tuple, Union
-from PyQt6.QtCore import QThread, pyqtSignal, QObject
-from PyQt6.QtGui import QPixmap, QImage
+from PyQt6.QtCore import QThread, pyqtSignal, QObject, QSize
+from PyQt6.QtGui import QPixmap, QImage, QImageReader
 from PIL import Image
 import io
 
@@ -22,6 +22,35 @@ import io
 warnings.filterwarnings('ignore', category=UserWarning, module='exifread')
 
 from image_cache import get_image_cache
+
+
+def _qimage_to_rgb_array(image: QImage) -> Optional[np.ndarray]:
+    """Convert a QImage into a contiguous RGB numpy array without creating a QPixmap."""
+    img = image.convertToFormat(QImage.Format.Format_RGB888)
+    w, h = img.width(), img.height()
+    if w < 1 or h < 1:
+        return None
+    bpl = img.bytesPerLine()
+    nbytes = h * bpl
+    bits = img.constBits()
+    if bits is None:
+        return None
+    try:
+        if hasattr(bits, "asstring"):
+            raw = bits.asstring(nbytes)
+        else:
+            raw = bytes(memoryview(bits)[:nbytes])
+    except (BufferError, TypeError, AttributeError):
+        out = np.empty((h, w, 3), dtype=np.uint8)
+        for y in range(h):
+            for x in range(w):
+                c = img.pixel(x, y)
+                out[y, x, 0] = (c >> 16) & 0xFF
+                out[y, x, 1] = (c >> 8) & 0xFF
+                out[y, x, 2] = c & 0xFF
+        return out
+    arr = np.frombuffer(bytearray(raw), dtype=np.uint8).reshape(h, bpl)
+    return np.ascontiguousarray(arr[:, : w * 3].reshape(h, w, 3))
 
 
 _embedded_scan_miss_cache = set()
@@ -172,6 +201,23 @@ class ThumbnailExtractor(QObject):
 
     def extract_thumbnail_from_image(self, file_path: str, max_size: int = 512) -> Optional[np.ndarray]:
         """Extract thumbnail from regular image file."""
+        try:
+            reader = QImageReader(file_path)
+            reader.setAutoTransform(True)
+            size = reader.size()
+            if size.isValid() and size.width() > 0 and size.height() > 0:
+                w, h = size.width(), size.height()
+                if w > max_size or h > max_size:
+                    scale = min(max_size / w, max_size / h)
+                    reader.setScaledSize(QSize(max(1, int(w * scale)), max(1, int(h * scale))))
+            image = reader.read()
+            if not image.isNull():
+                arr = _qimage_to_rgb_array(image)
+                if arr is not None:
+                    return arr, None
+        except Exception:
+            pass
+
         try:
             with Image.open(file_path) as img:
                 # UnifiedImageProcessor will handle EXIF orientation correction
