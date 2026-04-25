@@ -283,6 +283,16 @@ class PersistentEXIFCache:
             except Exception:
                 pass
 
+    def clear(self) -> None:
+        """Remove all cached EXIF entries."""
+        with self.lock:
+            try:
+                conn = self._get_connection()
+                conn.execute("DELETE FROM exif_cache")
+                conn.commit()
+            except Exception:
+                pass
+
     def get_multiple(self, file_paths: list, file_stats: Optional[Dict[str, Tuple[int, float]]] = None, fast_mode: bool = True) -> Dict[str, Dict[str, Any]]:
         """Get cached EXIF data for multiple files at once.
         
@@ -598,6 +608,28 @@ class PersistentThumbnailCache:
                 conn.commit()
             except Exception:
                 pass
+
+    def clear(self) -> None:
+        """Remove all disk thumbnail cache files and database rows."""
+        with self.lock:
+            try:
+                conn = self._get_connection()
+                cursor = conn.execute("SELECT cache_file FROM thumbnail_cache")
+                rows = cursor.fetchall()
+                for row in rows:
+                    try:
+                        cache_file = row[0]
+                        if cache_file and os.path.exists(cache_file):
+                            os.remove(cache_file)
+                    except Exception:
+                        pass
+                conn.execute("DELETE FROM thumbnail_cache")
+                conn.commit()
+            except Exception:
+                pass
+
+        with self._file_stats_cache_lock:
+            self._file_stats_cache.clear()
 
     def close(self):
         """Close the database connection for the current thread."""
@@ -923,17 +955,22 @@ class ImageCache(QObject):
     def invalidate_file(self, file_path: str) -> None:
         """Remove all cached data for a specific file."""
         self.thumbnail_cache.remove(file_path)
+        self.preview_cache.remove(file_path)
         self.full_image_cache.remove(file_path)
         self.pixmap_cache.remove(file_path)
         self.disk_thumbnail_cache.remove(file_path)
+        self.disk_preview_cache.remove(file_path)
         # Note: EXIF cache handles file modification time automatically
 
     def clear_all(self) -> None:
         """Clear all caches."""
         self.thumbnail_cache.clear()
+        self.preview_cache.clear()
         self.full_image_cache.clear()
         self.pixmap_cache.clear()
-        # Don't clear persistent EXIF cache
+        self.exif_cache.clear()
+        self.disk_thumbnail_cache.clear()
+        self.disk_preview_cache.clear()
 
     def get_cache_stats(self) -> Dict[str, Any]:
         """Get comprehensive cache statistics."""
@@ -952,6 +989,7 @@ class ImageCache(QObject):
         """Clean up old cache entries."""
         self.exif_cache.cleanup_old_entries()
         self.disk_thumbnail_cache.cleanup_old_entries()
+        self.disk_preview_cache.cleanup_old_entries()
 
     def close(self):
         """Close all persistent cache connections."""

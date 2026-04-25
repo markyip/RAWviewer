@@ -4631,6 +4631,7 @@ class RAWImageViewer(QMainWindow):
             f"  Max thumbnails: {cache_stats['thumbnail_cache']['max_size']}", flush=True)
         print(
             f"  Available memory: {memory_info['system_available_gb']:.1f}GB", flush=True)
+        QTimer.singleShot(1000, self._cleanup_old_image_cache)
 
         # Try to restore previous session
         print("  [RAWImageViewer] Restoring session state...", flush=True)
@@ -4643,6 +4644,17 @@ class RAWImageViewer(QMainWindow):
             # If no session, show default message
             pass
         print("  [RAWImageViewer] Initialization complete!", flush=True)
+
+    def _cleanup_old_image_cache(self):
+        """Run persistent cache cleanup once after startup without delaying window creation."""
+        try:
+            if hasattr(self, 'image_cache') and self.image_cache:
+                self.image_cache.cleanup_old_cache()
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).debug(
+                "Old image cache cleanup failed: %s", e, exc_info=True
+            )
 
     def _connect_image_manager_signals(self):
         """連接 ImageLoadManager 的永久信號（事件驅動架構）"""
