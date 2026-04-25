@@ -43,7 +43,7 @@ class UnifiedImageProcessor:
         """檢查是否為 RAW 文件"""
         return is_raw_file(file_path)
     
-    def process_thumbnail(self, file_path: str) -> Optional[np.ndarray]:
+    def process_thumbnail(self, file_path: str, allow_heavy_fallback: bool = True) -> Optional[np.ndarray]:
         """處理縮圖（統一接口）"""
         MAX_THUMB_DIM = 512
 
@@ -59,24 +59,33 @@ class UnifiedImageProcessor:
                 cached = None
 
             if cached is not None:
-                # Self-healing check: verify if cached thumbnail orientation matches shape
-                exif_data = self.exif_extractor.extract_exif_data(file_path)
-                orientation = exif_data.get('orientation', 1) if exif_data else 1
-                if orientation in (6, 8) and hasattr(cached, 'shape'):
-                    h, w = cached.shape[:2]
-                    if w > h:
-                        # Mismatch: Portrait metadata but Landscape cached image
-                        print(f"[ORIENTATION] UnifiedImageProcessor: Cached thumbnail for {os.path.basename(file_path)} is UNROTATED (stale). Invalidating caches.")
-                        # Also invalidate EXIF cache to ensure consistent metadata (prevents pillarboxes in gallery)
-                        self.cache.exif_cache.remove(file_path)
-                        cached = None # Force re-processing
+                # Keep cache hits cheap for gallery scrolling. The old self-healing orientation
+                # check touched EXIF/SQLite on every hit; enable it only when repairing caches.
+                if os.environ.get("RAWVIEWER_VALIDATE_THUMB_CACHE") == "1":
+                    exif_data = self.exif_extractor.extract_exif_data(file_path)
+                    orientation = exif_data.get('orientation', 1) if exif_data else 1
+                    if orientation in (6, 8) and hasattr(cached, 'shape'):
+                        h, w = cached.shape[:2]
+                        if w > h:
+                            import logging
+                            logger = logging.getLogger(__name__)
+                            logger.debug(
+                                "Cached thumbnail orientation mismatch; invalidating %s",
+                                os.path.basename(file_path),
+                            )
+                            self.cache.exif_cache.remove(file_path)
+                            cached = None # Force re-processing
                 
                 if cached is not None and hasattr(cached, 'shape'):
                     return cached
         
         # 提取縮圖 (Max 512px for Gallery)
         if self._is_raw_file(file_path):
-            thumbnail = self.thumbnail_extractor.extract_thumbnail_from_raw(file_path, max_size=MAX_THUMB_DIM)
+            thumbnail = self.thumbnail_extractor.extract_thumbnail_from_raw(
+                file_path,
+                max_size=MAX_THUMB_DIM,
+                allow_scan_fallback=allow_heavy_fallback,
+            )
         else:
             thumbnail, _ = self.thumbnail_extractor.extract_thumbnail_from_image(file_path, max_size=MAX_THUMB_DIM)
         
