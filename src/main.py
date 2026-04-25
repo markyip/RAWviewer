@@ -1778,6 +1778,11 @@ class GalleryMetadataSignals(QObject):
     """Signal carrier for background gallery metadata fetching"""
     ready = pyqtSignal(dict, str)  # meta dictionary, folder_path
 
+class FolderLoadSignals(QObject):
+    """Signal carrier for background folder scan/sort work."""
+    ready = pyqtSignal(object, object, object, object, str, object, object, float, float)
+    error = pyqtSignal(object, str, str)
+
 
 # -----------------------------
 # Worker to load images in background
@@ -5246,7 +5251,6 @@ class RAWImageViewer(QMainWindow):
         self._histogram_overlay_visible = True
         self.single_view_container = SingleImageViewOverlay(
             self.scroll_area, self.single_image_histogram)
-        self.single_image_histogram.setVisible(self._histogram_overlay_visible)
         main_layout.addWidget(self.single_view_container)
         # --- Status bar with Material Design 3 styling ---
         # Material Design 3 color scheme:
@@ -5536,6 +5540,8 @@ class RAWImageViewer(QMainWindow):
         # Install event filter to intercept arrow keys
         self.scroll_area.installEventFilter(self)
         self.image_label.installEventFilter(self)
+
+        self._sync_single_image_histogram()
 
     def create_menu_bar(self):
         """Create the menu bar with File and Keyboard Shortcuts action"""
@@ -7366,8 +7372,10 @@ class RAWImageViewer(QMainWindow):
             
         if file_path:
             folder_path = os.path.dirname(file_path)
-            # Use the selected file as the start_file to center on it
-            self.load_folder_images(folder_path, start_file=os.path.basename(file_path))
+            base = os.path.basename(file_path)
+            self.load_folder_images(
+                folder_path, start_file=base, start_view="single"
+            )
             settings.setValue("last_opened_dir", folder_path)
 
     def open_folder(self):
@@ -8505,13 +8513,28 @@ class RAWImageViewer(QMainWindow):
         pm = getattr(self, "current_pixmap", None)
         if pm is None or pm.isNull():
             w.clear()
+            w.setEnabled(False)
+            w.setVisible(False)
+            c = getattr(self, "single_view_container", None)
+            if c is not None and hasattr(c, "relayout_histogram"):
+                c.relayout_histogram()
         else:
+            w.setEnabled(True)
+            w.setVisible(getattr(self, "_histogram_overlay_visible", True))
             w.set_pixmap(pm)
+            c = getattr(self, "single_view_container", None)
+            if c is not None and hasattr(c, "relayout_histogram"):
+                c.relayout_histogram()
 
     def _clear_single_image_histogram(self):
         w = getattr(self, "single_image_histogram", None)
         if w is not None:
             w.clear()
+            w.setEnabled(False)
+            w.setVisible(False)
+            c = getattr(self, "single_view_container", None)
+            if c is not None and hasattr(c, "relayout_histogram"):
+                c.relayout_histogram()
 
     def display_pixmap(self, pixmap):
         """Display a QPixmap."""
@@ -9368,13 +9391,18 @@ class RAWImageViewer(QMainWindow):
             return
         if key == Qt.Key.Key_H:
             if vm == "single":
+                pm = getattr(self, "current_pixmap", None)
+                if pm is None or pm.isNull():
+                    event.accept()
+                    return
                 self._histogram_overlay_visible = not getattr(
                     self, "_histogram_overlay_visible", True)
                 if hasattr(self, "single_image_histogram"):
                     self.single_image_histogram.setVisible(
                         self._histogram_overlay_visible)
-                if hasattr(self.single_view_container, "relayout_histogram"):
-                    self.single_view_container.relayout_histogram()
+                c = getattr(self, "single_view_container", None)
+                if c is not None and hasattr(c, "relayout_histogram"):
+                    c.relayout_histogram()
             event.accept()
             return
 
@@ -11301,245 +11329,246 @@ class RAWImageViewer(QMainWindow):
         except (OSError, PermissionError):
             pass
 
-    def load_folder_images(self, folder_path, start_file=None):
-        """Load images from a folder"""
+    def _on_folder_load_error(self, token, title, message):
+        if token != getattr(self, "_folder_load_generation", None):
+            return
+        self._active_folder_load_worker = None
+        self._active_folder_load_signals = None
+        self._hide_all_loading_indicators()
+        self.show_error(title, message)
+
+    def _on_folder_load_ready(self, token, image_files, bulk_metadata, file_stats,
+                              folder_path, start_file, start_view, scan_time, sort_time):
+        if token != getattr(self, "_folder_load_generation", None):
+            return
+
         import logging
         import time
         logger = logging.getLogger(__name__)
-        load_start = time.time()
-        logger.info(f"[FOLDER] ========== load_folder_images() STARTED at {load_start:.3f} ==========")
-        print(f"[PERF] 📁 Loading folder: {os.path.basename(folder_path)}")
-        
+        apply_start = time.time()
+        self._active_folder_load_worker = None
+        self._active_folder_load_signals = None
+
         try:
-            # IMMEDIATE UI FEEDBACK: Clear current state and show loading
-            if hasattr(self, 'view_mode'):
-                if self.view_mode == 'gallery' and self.gallery_justified:
-                    # Clear the gallery immediately
-                    self.gallery_justified.set_images([])
-                    # Show loading message
-                    self.gallery_justified.show_loading_message("Scanning folder...")
-                elif self.view_mode == 'single' or (hasattr(self, 'scroll_area') and self.scroll_area.isVisible()):
-                    # Show overlay for single image view or if scroll area is visible
-                    if hasattr(self, 'loading_overlay'):
-                        self.loading_overlay.show_loading("Scanning folder...")
-                    # Visually clear current image to show we are switching
-                    if hasattr(self, 'image_label'):
-                        self.image_label.clear()
-                    # Ensure UI updates immediately
-                    from PyQt6.QtWidgets import QApplication
-                    QApplication.processEvents()
-            
-            # Validate folder path
-            if not folder_path:
-                self.show_error("Invalid Folder", "No folder path provided")
-                # Hide loading message on error
-                self._hide_all_loading_indicators()
-                return
-            
-            if not os.path.exists(folder_path):
-                self.show_error("Folder Not Found", 
-                              f"The folder does not exist:\n{folder_path}")
-                # Hide loading message on error
-                self._hide_all_loading_indicators()
-                return
-            
-            if not os.path.isdir(folder_path):
-                self.show_error("Invalid Path", 
-                              f"The path is not a folder:\n{folder_path}")
-                # Hide loading message on error
-                self._hide_all_loading_indicators()
-                return
-            
-            # Scan for images in the folder and all subfolders (recursive)
-            scan_start = time.time()
             extensions = self.get_supported_extensions()
-            # Get all image files with full paths
-            image_files = []
-            file_stats = {} # Cache stats during scan to avoid redundant calls later
-            
-            early_load_triggered = False
-            
-            try:
-                # Use os.scandir generator for faster scanning
-                seen_paths = set()
-                for full_path, stat_info in self._scan_folder_generator(folder_path, extensions):
-                    if full_path in seen_paths:
-                        continue
-                    seen_paths.add(full_path)
-                    image_files.append(full_path)
-                    file_stats[full_path] = (stat_info.st_size, stat_info.st_mtime)
-                    
-                    # EARLY LOAD: If this is the start_file or the first file found,
-                    # trigger an early load for better perceived performance
-                    if not early_load_triggered:
-                        is_start_file = start_file and (os.path.basename(full_path) == start_file or full_path == start_file)
-                        
-                        # Force single view mode if a specific file was requested
-                        if is_start_file and hasattr(self, 'view_mode') and self.view_mode == 'gallery':
-                            logger.info(f"[FOLDER] Switching to single view for start_file: {os.path.basename(full_path)}")
-                            self.view_mode = 'single'
-                            # Drop gallery scanning toast; later branches only update it in gallery mode
-                            if self.gallery_justified:
-                                self.gallery_justified.hide_loading_message()
-                            # Ensure UI switches back to single view
-                            if hasattr(self, 'gallery_widget') and self.gallery_widget:
-                                self.gallery_widget.hide()
-                            if hasattr(self, 'scroll_area'):
-                                self.scroll_area.show()
-                                
-                        if is_start_file or (not start_file and len(image_files) == 1):
-                            logger.info(f"[FOLDER] Early load triggered for: {os.path.basename(full_path)}")
-                            self.current_file_path = full_path
-                            # Do not QTimer-defer load_raw_image here: load_folder_images finishes scan/sort
-                            # then calls _show_single_view / gallery update, which loads once. A second
-                            # load_raw_image for the same path ran after that and cancel_task(current)
-                            # aborted the in-flight ImageLoadManager job (blank image after folder change).
-                            early_load_triggered = True
-            except OSError as e:
-                error_msg = f"Cannot read folder contents:\n{str(e)}"
-                logger.error(f"Error reading folder {folder_path}: {e}")
-                self.show_error("Folder Access Error", error_msg)
-                # Hide loading message on error
-                self._hide_all_loading_indicators()
-                return
-            except Exception as e:
-                error_msg = f"Unexpected error while scanning folder:\n{str(e)}"
-                logger.error(f"Unexpected error scanning folder {folder_path}: {e}", exc_info=True)
-                self.show_error("Scan Error", error_msg)
-                # Hide loading message on error
-                self._hide_all_loading_indicators()
-                return
-            
-            scan_time = time.time() - scan_start
-            logger.info(f"[FOLDER] Scanned {len(image_files)} images in {scan_time:.3f}s")
-            print(f"[PERF] 📁 Scanned {len(image_files)} images in {scan_time*1000:.1f}ms")
-            
-            # Update loading message with scan results (no progress)
-            if hasattr(self, 'view_mode') and self.view_mode == 'gallery' and self.gallery_justified:
-                if len(image_files) > 0:
-                    self.gallery_justified.show_loading_message("Loading gallery...")
-                else:
-                    self._hide_all_loading_indicators()
-            
             if not image_files:
-                # Display message in main viewing area instead of popup
                 self.show_no_images_message(extensions)
-                # Hide loading message since scan is complete but empty
                 self._hide_all_loading_indicators()
-                # Reset folder state
                 self.current_folder = None
                 self.image_files = []
                 self.current_file_index = -1
                 self.current_file_path = None
                 self.update_status_bar()
                 return
-        
-            # Sort files according to user preference
-            sort_start = time.time()
-            try:
-                # Process events periodically during sorting to keep UI responsive
-                from PyQt6.QtWidgets import QApplication
-                QApplication.processEvents()
-                
-                self.current_folder = folder_path
-                # Pass file_stats to avoid redundant os.stat calls during sorting
-                # Capture bulk_metadata for reuse in gallery layout
-                self.image_files, bulk_metadata = self.sort_image_files(image_files, file_stats=file_stats)
-                # Store bulk_metadata for use in gallery updates
-                self._gallery_bulk_metadata = bulk_metadata
-                sort_time = time.time() - sort_start
-                logger.info(f"[FOLDER] Sorted {len(image_files)} images in {sort_time:.3f}s")
-                print(f"[PERF] 🔄 Sorted {len(image_files)} images in {sort_time*1000:.1f}ms")
-            except Exception as e:
-                error_msg = f"Error sorting images:\n{str(e)}"
-                logger.error(f"Error sorting images in folder {folder_path}: {e}", exc_info=True)
-                self.show_error("Sort Error", error_msg)
-                # Hide loading message on error
-                self._hide_all_loading_indicators()
-                return
-            
-            # Update loading message after sorting (no progress)
-            if hasattr(self, 'view_mode') and self.view_mode == 'gallery' and self.gallery_justified:
-                self.gallery_justified.show_loading_message("Preparing gallery...")
-            
-            # Determine which image to start with
+
+            self.current_folder = folder_path
+            self.image_files = image_files
+            self._gallery_bulk_metadata = bulk_metadata
+
             try:
                 if start_file:
-                    # Find the full path of start_file
                     start_file_path = None
                     for img_file in self.image_files:
                         if os.path.basename(img_file) == start_file or img_file == start_file:
                             start_file_path = img_file
                             break
-                    if start_file_path and start_file_path in self.image_files:
-                        idx = self.image_files.index(start_file_path)
-                    else:
-                        idx = 0
+                    idx = self.image_files.index(start_file_path) if start_file_path in self.image_files else 0
                 else:
                     idx = 0
-                    
                 self.current_file_index = idx
                 self.current_file_path = self.image_files[idx]
-            except Exception as e:
-                logger.error(f"Error determining start file: {e}", exc_info=True)
-                idx = 0
-                self.current_file_index = idx
-                if self.image_files:
-                    self.current_file_path = self.image_files[idx]
-                else:
-                    self.current_file_path = None
-            
-            total_time = time.time() - load_start
-            logger.info(f"[FOLDER] ========== load_folder_images() COMPLETED in {total_time:.3f}s ==========")
-            print(f"[PERF] 📁 Folder loaded in {total_time*1000:.1f}ms (scan: {scan_time*1000:.1f}ms, sort: {sort_time*1000:.1f}ms)")
-            
-            # Only update gallery if in gallery mode - avoid background loading in single view mode
-            try:
-                # Ensure correct view is shown and others are hidden
-                # This handles UI state consistency during startup/session restoration
-                if hasattr(self, 'view_mode') and self.view_mode == 'gallery':
-                    # Only create and update gallery widget in gallery mode
-                    if not hasattr(self, 'gallery_widget') or not self.gallery_widget:
-                        self._create_gallery_widget()
-                    self._show_gallery_view()
-                    
-                    if self.gallery_justified:
-                        # Use set_images() to properly handle folder changes:
-                        # - Increments generation counter to invalidate old tasks
-                        # - Clears load queues
-                        # - Resets background loading state
-                        # - Properly rebuilds gallery
-                        # Process events before setting images to keep UI responsive
-                        from PyQt6.QtWidgets import QApplication
-                        QApplication.processEvents()
-                        self.gallery_justified.set_images(self.image_files.copy(), bulk_metadata)
-                else:
-                    # Single view mode - just show single view, don't load gallery
-                    self._show_single_view()
-                    # Stop any background gallery loading if it's running
-                    if hasattr(self, 'gallery_justified') and self.gallery_justified:
-                        self.gallery_justified._background_loading_active = False
-                        # Cancel any pending background loads
-                        if hasattr(self.gallery_justified, '_load_timer') and self.gallery_justified._load_timer:
-                            self.gallery_justified._load_timer.stop()
-                    
-                # Scan/sort/view setup finished — clear "Scanning folder..." and any overlay
-                self._hide_all_loading_indicators()
-                self.save_session_state()
-            except Exception as e:
-                error_msg = f"Error updating gallery view:\n{str(e)}"
-                logger.error(f"Error updating gallery view for folder {folder_path}: {e}", exc_info=True)
-                self.show_error("Gallery Update Error", error_msg)
+            except Exception:
+                logger.exception("Error determining start file")
+                self.current_file_index = 0
+                self.current_file_path = self.image_files[0] if self.image_files else None
+
+            if hasattr(self, 'view_mode') and self.view_mode == 'gallery' and getattr(self, 'gallery_justified', None):
+                self.gallery_justified.show_loading_message("Preparing gallery...")
+
+            if hasattr(self, 'view_mode') and self.view_mode == 'gallery':
+                if not hasattr(self, 'gallery_widget') or not self.gallery_widget:
+                    self._create_gallery_widget()
+                self._show_gallery_view()
+                if self.gallery_justified:
+                    self.gallery_justified.set_images(self.image_files.copy(), bulk_metadata)
+            else:
+                self._show_single_view()
+                if hasattr(self, 'gallery_justified') and self.gallery_justified:
+                    self.gallery_justified._background_loading_active = False
+                    if hasattr(self.gallery_justified, '_load_timer') and self.gallery_justified._load_timer:
+                        self.gallery_justified._load_timer.stop()
+
+            total_time = scan_time + sort_time + (time.time() - apply_start)
+            logger.info(
+                "[FOLDER] Background folder load applied in %.3fs (scan %.3fs, sort %.3fs)",
+                total_time,
+                scan_time,
+                sort_time,
+            )
+            self._hide_all_loading_indicators()
+            self.save_session_state()
+        except Exception as e:
+            logger.error(f"Error updating gallery view for folder {folder_path}: {e}", exc_info=True)
+            self._hide_all_loading_indicators()
+            self.show_error("Gallery Update Error", f"Error updating gallery view:\n{str(e)}")
+
+    def load_folder_images(self, folder_path, start_file=None, start_view=None):
+        """Load images from a folder without blocking the UI during scan/sort."""
+        import logging
+        logger = logging.getLogger(__name__)
+
+        try:
+            if not folder_path:
+                self.show_error("Invalid Folder", "No folder path provided")
                 self._hide_all_loading_indicators()
                 return
-                
+            if not os.path.exists(folder_path):
+                self.show_error("Folder Not Found", f"The folder does not exist:\n{folder_path}")
+                self._hide_all_loading_indicators()
+                return
+            if not os.path.isdir(folder_path):
+                self.show_error("Invalid Path", f"The path is not a folder:\n{folder_path}")
+                self._hide_all_loading_indicators()
+                return
+
+            if start_view in ("gallery", "single"):
+                self.view_mode = start_view
+            elif start_file and getattr(self, "view_mode", None) == "gallery":
+                # Legacy behavior: opening a specific file from gallery focuses single view.
+                self.view_mode = "single"
+
+            if hasattr(self, 'view_mode'):
+                if self.view_mode == 'gallery':
+                    if not hasattr(self, 'gallery_widget') or not self.gallery_widget:
+                        self._create_gallery_widget()
+                    if self.gallery_justified:
+                        self.gallery_justified.set_images([])
+                        self.gallery_justified.show_loading_message("Scanning folder...")
+                    if hasattr(self, 'gallery_widget') and self.gallery_widget:
+                        self.gallery_widget.show()
+                else:
+                    if hasattr(self, 'loading_overlay'):
+                        self.loading_overlay.show_loading("Scanning folder...")
+                    if hasattr(self, 'image_label'):
+                        self.image_label.clear()
+
+            self._folder_load_generation = getattr(self, "_folder_load_generation", 0) + 1
+            token = self._folder_load_generation
+            extensions = set(self.get_supported_extensions())
+            newest_first = self.get_sort_preference()
+
+            signals = FolderLoadSignals()
+            signals.ready.connect(self._on_folder_load_ready)
+            signals.error.connect(self._on_folder_load_error)
+            self._active_folder_load_signals = signals
+
+            class _FolderLoadWorker(QRunnable):
+                def __init__(self_inner, token, folder_path, extensions, newest_first,
+                             start_file, start_view, signals):
+                    super().__init__()
+                    self_inner.token = token
+                    self_inner.folder_path = folder_path
+                    self_inner.extensions = extensions
+                    self_inner.newest_first = newest_first
+                    self_inner.start_file = start_file
+                    self_inner.start_view = start_view
+                    self_inner.signals = signals
+
+                def _scan(self_inner, path):
+                    with os.scandir(path) as it:
+                        for entry in it:
+                            if entry.name.startswith('.'):
+                                continue
+                            try:
+                                if entry.is_dir(follow_symlinks=False):
+                                    if entry.name == 'Discard':
+                                        continue
+                                    yield from self_inner._scan(entry.path)
+                                elif entry.is_file(follow_symlinks=False):
+                                    ext = os.path.splitext(entry.name)[1].lower()
+                                    if ext in self_inner.extensions:
+                                        stat = entry.stat()
+                                        if stat.st_size > 0:
+                                            yield entry.path, stat
+                            except (OSError, PermissionError):
+                                continue
+
+                def run(self_inner):
+                    import time
+                    from datetime import datetime
+                    try:
+                        scan_start = time.time()
+                        image_files = []
+                        file_stats = {}
+                        seen_paths = set()
+                        for full_path, stat_info in self_inner._scan(self_inner.folder_path):
+                            if full_path in seen_paths:
+                                continue
+                            seen_paths.add(full_path)
+                            image_files.append(full_path)
+                            file_stats[full_path] = (stat_info.st_size, stat_info.st_mtime)
+                        scan_time = time.time() - scan_start
+
+                        sort_start = time.time()
+                        bulk_metadata = {}
+                        if image_files:
+                            from image_cache import get_image_cache
+                            cache = get_image_cache()
+                            bulk_metadata = cache.get_multiple_exif(image_files, file_stats)
+
+                            sort_keys = {}
+                            for fp in image_files:
+                                timestamp = 0
+                                meta = bulk_metadata.get(fp)
+                                if meta and meta.get('capture_time'):
+                                    try:
+                                        dt = datetime.strptime(meta['capture_time'], "%H:%M:%S %Y-%m-%d")
+                                        timestamp = dt.timestamp()
+                                    except Exception:
+                                        timestamp = 0
+                                if timestamp == 0:
+                                    timestamp = file_stats.get(fp, (0, 0))[1]
+                                sort_keys[fp] = (timestamp, os.path.basename(fp).lower())
+
+                            image_files = sorted(
+                                image_files,
+                                key=lambda fp: sort_keys[fp],
+                                reverse=self_inner.newest_first,
+                            )
+                        sort_time = time.time() - sort_start
+
+                        self_inner.signals.ready.emit(
+                            self_inner.token,
+                            image_files,
+                            bulk_metadata,
+                            file_stats,
+                            self_inner.folder_path,
+                            self_inner.start_file,
+                            self_inner.start_view,
+                            scan_time,
+                            sort_time,
+                        )
+                    except OSError as e:
+                        self_inner.signals.error.emit(
+                            self_inner.token,
+                            "Folder Access Error",
+                            f"Cannot read folder contents:\n{str(e)}",
+                        )
+                    except Exception as e:
+                        self_inner.signals.error.emit(
+                            self_inner.token,
+                            "Folder Load Error",
+                            f"Unexpected error loading folder:\n{str(e)}",
+                        )
+
+            worker = _FolderLoadWorker(token, folder_path, extensions, newest_first, start_file, start_view, signals)
+            self._active_folder_load_worker = worker
+            QThreadPool.globalInstance().start(worker)
+            logger.info("[FOLDER] Background folder load started for %s", folder_path)
         except Exception as e:
-            # Catch any other unexpected errors
-            error_msg = f"Unexpected error loading folder:\n{str(e)}"
             logger.error(f"Unexpected error in load_folder_images for {folder_path}: {e}", exc_info=True)
-            self.show_error("Folder Load Error", error_msg)
+            self.show_error("Folder Load Error", f"Unexpected error loading folder:\n{str(e)}")
             self._hide_all_loading_indicators()
-            return
 
     def save_session_state(self):
         settings = self.get_settings()

@@ -24,6 +24,11 @@ warnings.filterwarnings('ignore', category=UserWarning, module='exifread')
 from image_cache import get_image_cache
 
 
+_embedded_scan_miss_cache = set()
+_embedded_scan_miss_lock = threading.Lock()
+_embedded_scan_miss_cache_max = 4096
+
+
 def extract_embedded_jpeg_by_scan(file_path: str, max_size: int) -> Optional[np.ndarray]:
     """
     When LibRaw cannot open a file, scan for embedded JPEG (SOI … EOI) and decode with PIL.
@@ -31,8 +36,20 @@ def extract_embedded_jpeg_by_scan(file_path: str, max_size: int) -> Optional[np.
     Picks the largest successfully decoded JPEG (by pixel area), skips tiny icons.
     """
     try:
-        size = os.path.getsize(file_path)
-        to_read = min(size, 120 * 1024 * 1024)
+        stat = os.stat(file_path)
+        size = stat.st_size
+        miss_key = (file_path, size, stat.st_mtime, max_size)
+        with _embedded_scan_miss_lock:
+            if miss_key in _embedded_scan_miss_cache:
+                return None
+
+        if max_size <= 512:
+            read_limit = 32 * 1024 * 1024
+        elif max_size <= 2048:
+            read_limit = 64 * 1024 * 1024
+        else:
+            read_limit = 120 * 1024 * 1024
+        to_read = min(size, read_limit)
         with open(file_path, "rb") as f:
             blob = f.read(to_read)
     except OSError:
@@ -67,11 +84,17 @@ def extract_embedded_jpeg_by_scan(file_path: str, max_size: int) -> Optional[np.
                 work = im
                 if w > max_size or h > max_size:
                     work = im.copy()
-                    work.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
+                    work.thumbnail((max_size, max_size), Image.Resampling.BILINEAR)
                 best_arr = np.array(work)
             except Exception:
                 continue
         start = idx + 3
+
+    if best_arr is None:
+        with _embedded_scan_miss_lock:
+            if len(_embedded_scan_miss_cache) >= _embedded_scan_miss_cache_max:
+                _embedded_scan_miss_cache.clear()
+            _embedded_scan_miss_cache.add(miss_key)
 
     return best_arr
 
@@ -82,7 +105,8 @@ class ThumbnailExtractor(QObject):
     def __init__(self):
         super().__init__()
 
-    def extract_thumbnail_from_raw(self, file_path: str, max_size: int = 512) -> Optional[np.ndarray]:
+    def extract_thumbnail_from_raw(self, file_path: str, max_size: int = 512,
+                                   allow_scan_fallback: bool = True) -> Optional[np.ndarray]:
         """Extract embedded thumbnail from RAW file and resize to max_size."""
         try:
             with rawpy.imread(file_path) as raw:
@@ -104,7 +128,7 @@ class ThumbnailExtractor(QObject):
                     # Resize if larger than max_size
                     w, h = jpeg_image.size
                     if w > max_size or h > max_size:
-                        jpeg_image.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
+                        jpeg_image.thumbnail((max_size, max_size), Image.Resampling.BILINEAR)
                         
                     thumb_array = np.array(jpeg_image)
                     
@@ -120,7 +144,7 @@ class ThumbnailExtractor(QObject):
                     if w > max_size or h > max_size:
                          from PIL import Image
                          pil_thumb = Image.fromarray(thumb_array)
-                         pil_thumb.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
+                         pil_thumb.thumbnail((max_size, max_size), Image.Resampling.BILINEAR)
                          thumb_array = np.array(pil_thumb)
                          if hasattr(thumb_array, 'shape') and len(thumb_array.shape) >= 2:
                              pass # logger.debug could go here with safe shape access
@@ -132,12 +156,19 @@ class ThumbnailExtractor(QObject):
             # print(f"Thumbnail extraction error: {str(e)}")
             pass
 
+        if not allow_scan_fallback:
+            return None
         return extract_embedded_jpeg_by_scan(file_path, max_size)
 
-    def extract_preview_from_raw(self, file_path: str, max_size: int = 2048) -> Optional[np.ndarray]:
+    def extract_preview_from_raw(self, file_path: str, max_size: int = 2048,
+                                 allow_scan_fallback: bool = True) -> Optional[np.ndarray]:
         """Extract high-quality preview from RAW file (embedded JPEG)."""
         # Reuse thumbnail logic but with larger size
-        return self.extract_thumbnail_from_raw(file_path, max_size=max_size)
+        return self.extract_thumbnail_from_raw(
+            file_path,
+            max_size=max_size,
+            allow_scan_fallback=allow_scan_fallback,
+        )
 
     def extract_thumbnail_from_image(self, file_path: str, max_size: int = 512) -> Optional[np.ndarray]:
         """Extract thumbnail from regular image file."""
@@ -148,7 +179,7 @@ class ThumbnailExtractor(QObject):
                 # to prevent "double-rotation" for JPEGs.
                 
                 # Calculate thumbnail size maintaining aspect ratio
-                img.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
+                img.thumbnail((max_size, max_size), Image.Resampling.BILINEAR)
 
                 # Convert to RGB if needed
                 if img.mode != 'RGB':

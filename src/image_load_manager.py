@@ -45,6 +45,7 @@ class ImageLoadTask:
         # This keeps UI thread light for smooth pixel-level scrolling.
         self.thumbnail_target_size = thumbnail_target_size
         self.thumbnail_fit = thumbnail_fit
+        self.task_key = None
         self._cancelled = False
         self._lock = threading.Lock()
     
@@ -85,6 +86,8 @@ class ImageLoadWorker(QRunnable):
     def run(self):
         """執行任務"""
         if self.task.is_cancelled():
+            if self._safe_emit():
+                self.manager._task_finished(self.task)
             return
         
         file_path = self.task.file_path
@@ -102,7 +105,10 @@ class ImageLoadWorker(QRunnable):
             if 'thumbnail' in stages and not self.task.is_cancelled():
                 if self._safe_emit():
                     self.manager.progress_updated.emit(file_path, "Extracting preview...")
-                thumbnail = processor.process_thumbnail(file_path)
+                thumbnail = processor.process_thumbnail(
+                    file_path,
+                    allow_heavy_fallback=self.task.priority == Priority.CURRENT,
+                )
                 if thumbnail is not None and not self.task.is_cancelled():
                     # Optional: pre-scale/crop thumbnail in worker thread (emit QImage)
                     tgt = self.task.thumbnail_target_size
@@ -190,7 +196,7 @@ class ImageLoadWorker(QRunnable):
         finally:
             # 任務完成，調度下一個
             if self._safe_emit():
-                self.manager._schedule_next_task()
+                self.manager._task_finished(self.task)
 
     def _safe_emit(self) -> bool:
         """Verify the manager still exists before emitting signals from background thread."""
@@ -261,7 +267,7 @@ class ImageLoadManager(QObject):
         # PROCESS POOL: For heavy RAW processing to bypass GIL
         self._process_pool = concurrent.futures.ProcessPoolExecutor(max_workers=max(2, core_count // 2))
         
-        self._active_tasks: Dict[str, ImageLoadTask] = {}
+        self._active_tasks: Dict[Tuple, ImageLoadTask] = {}
         self._cache = get_image_cache()
         self._queue_lock = threading.Lock()
         self._stopped = False  # Flag to stop scheduling new tasks
@@ -284,6 +290,26 @@ class ImageLoadManager(QObject):
         # 檢查快取（memory-only, stage-aware）
         if self._check_cache(file_path, use_full_resolution, stages=stages):
             return
+
+        task_key = self._make_task_key(
+            file_path,
+            use_full_resolution,
+            stages,
+            thumbnail_target_size,
+            thumbnail_fit,
+        )
+        with self._queue_lock:
+            existing = self._active_tasks.get(task_key)
+            if existing and not existing.is_cancelled():
+                # Same work is already queued/running. Avoid filling the queue with duplicates.
+                return
+
+            if priority == Priority.CURRENT:
+                # A visible tile should supersede lower-priority prefetch work for the same file.
+                for key, task in list(self._active_tasks.items()):
+                    if key and key[0] == file_path and task.priority.value > priority.value:
+                        task.cancel()
+                        del self._active_tasks[key]
         
         # 創建任務
         task = ImageLoadTask(
@@ -294,8 +320,12 @@ class ImageLoadManager(QObject):
             thumbnail_target_size=thumbnail_target_size,
             thumbnail_fit=thumbnail_fit
         )
+        task.task_key = task_key
         with self._queue_lock:
-            self._active_tasks[file_path] = task
+            existing = self._active_tasks.get(task_key)
+            if existing and not existing.is_cancelled():
+                return
+            self._active_tasks[task_key] = task
         
         # 添加到工作隊列
         self._work_queue.put(task)
@@ -304,9 +334,10 @@ class ImageLoadManager(QObject):
     def cancel_task(self, file_path: str):
         """取消任務（非阻塞）"""
         with self._queue_lock:
-            if file_path in self._active_tasks:
-                self._active_tasks[file_path].cancel()
-                del self._active_tasks[file_path]
+            for key, task in list(self._active_tasks.items()):
+                if key and key[0] == file_path:
+                    task.cancel()
+                    del self._active_tasks[key]
     
     def cancel_all_tasks(self):
         """取消所有任務"""
@@ -338,6 +369,25 @@ class ImageLoadManager(QObject):
         self._stopped = True
         if hasattr(self, '_process_pool') and self._process_pool:
             self._process_pool.shutdown(wait=False)
+
+    def _make_task_key(self, file_path: str, use_full_resolution: bool,
+                       stages: Optional[set], thumbnail_target_size: Optional[QSize],
+                       thumbnail_fit: str) -> Tuple:
+        """Build a stable key for de-duplicating queued/running work."""
+        wanted = tuple(sorted(stages if stages is not None else {'thumbnail', 'exif', 'full'}))
+        if thumbnail_target_size is not None and isinstance(thumbnail_target_size, QSize) and thumbnail_target_size.isValid():
+            target_key = (thumbnail_target_size.width(), thumbnail_target_size.height(), thumbnail_fit)
+        else:
+            target_key = None
+        return (file_path, use_full_resolution, wanted, target_key)
+
+    def _task_finished(self, task: ImageLoadTask):
+        """Remove completed/cancelled work from active map and keep the queue moving."""
+        with self._queue_lock:
+            key = getattr(task, 'task_key', None)
+            if key in self._active_tasks and self._active_tasks[key] is task:
+                del self._active_tasks[key]
+        self._schedule_next_task()
     
     def _check_cache(self, file_path: str, use_full_resolution: bool, stages: Optional[set] = None) -> bool:
         """檢查快取，如果存在則直接發送信號（只檢查記憶體快取以避免阻塞 UI）"""
@@ -354,7 +404,9 @@ class ImageLoadManager(QObject):
             thumb = cache.thumbnail_cache.get(file_path)
             if thumb is not None:
                 self.thumbnail_ready.emit(file_path, thumb)
-                # Not terminal; we may still want 'full'
+                if wanted == {'thumbnail'}:
+                    return True
+                # Not terminal if callers also requested EXIF/full image work.
 
         # 2) EXIF stage: EXIF is persisted; but this check must remain memory-only.
         # We skip emitting EXIF from cache here to avoid potential disk I/O.
@@ -402,8 +454,9 @@ class ImageLoadManager(QObject):
 
                     # Skip cancelled tasks quickly (they still sit in PriorityQueue)
                     if task.is_cancelled():
-                        if task.file_path in self._active_tasks:
-                            del self._active_tasks[task.file_path]
+                        key = getattr(task, 'task_key', None)
+                        if key in self._active_tasks and self._active_tasks[key] is task:
+                            del self._active_tasks[key]
                         continue
 
                     worker = ImageLoadWorker(task, self)
