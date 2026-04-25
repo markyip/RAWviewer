@@ -13,8 +13,8 @@ import numpy as np
 import rawpy
 import exifread
 from typing import Optional, Dict, Any, Tuple, Union
-from PyQt6.QtCore import QThread, pyqtSignal, QObject
-from PyQt6.QtGui import QPixmap, QImage
+from PyQt6.QtCore import QThread, pyqtSignal, QObject, QSize
+from PyQt6.QtGui import QPixmap, QImage, QImageReader
 from PIL import Image
 import io
 
@@ -22,6 +22,110 @@ import io
 warnings.filterwarnings('ignore', category=UserWarning, module='exifread')
 
 from image_cache import get_image_cache
+
+
+def _qimage_to_rgb_array(image: QImage) -> Optional[np.ndarray]:
+    """Convert a QImage into a contiguous RGB numpy array without creating a QPixmap."""
+    img = image.convertToFormat(QImage.Format.Format_RGB888)
+    w, h = img.width(), img.height()
+    if w < 1 or h < 1:
+        return None
+    bpl = img.bytesPerLine()
+    nbytes = h * bpl
+    bits = img.constBits()
+    if bits is None:
+        return None
+    try:
+        if hasattr(bits, "asstring"):
+            raw = bits.asstring(nbytes)
+        else:
+            raw = bytes(memoryview(bits)[:nbytes])
+    except (BufferError, TypeError, AttributeError):
+        out = np.empty((h, w, 3), dtype=np.uint8)
+        for y in range(h):
+            for x in range(w):
+                c = img.pixel(x, y)
+                out[y, x, 0] = (c >> 16) & 0xFF
+                out[y, x, 1] = (c >> 8) & 0xFF
+                out[y, x, 2] = c & 0xFF
+        return out
+    arr = np.frombuffer(bytearray(raw), dtype=np.uint8).reshape(h, bpl)
+    return np.ascontiguousarray(arr[:, : w * 3].reshape(h, w, 3))
+
+
+_embedded_scan_miss_cache = set()
+_embedded_scan_miss_lock = threading.Lock()
+_embedded_scan_miss_cache_max = 4096
+
+
+def extract_embedded_jpeg_by_scan(file_path: str, max_size: int) -> Optional[np.ndarray]:
+    """
+    When LibRaw cannot open a file, scan for embedded JPEG (SOI … EOI) and decode with PIL.
+    Many damaged or newer ARW/RAW containers still carry a JPEG preview readable without rawpy.
+    Picks the largest successfully decoded JPEG (by pixel area), skips tiny icons.
+    """
+    try:
+        stat = os.stat(file_path)
+        size = stat.st_size
+        miss_key = (file_path, size, stat.st_mtime, max_size)
+        with _embedded_scan_miss_lock:
+            if miss_key in _embedded_scan_miss_cache:
+                return None
+
+        if max_size <= 512:
+            read_limit = 32 * 1024 * 1024
+        elif max_size <= 2048:
+            read_limit = 64 * 1024 * 1024
+        else:
+            read_limit = 120 * 1024 * 1024
+        to_read = min(size, read_limit)
+        with open(file_path, "rb") as f:
+            blob = f.read(to_read)
+    except OSError:
+        return None
+
+    best_arr = None
+    best_area = 0
+    start = 0
+    while True:
+        idx = blob.find(b"\xff\xd8\xff", start)
+        if idx < 0:
+            break
+        end_marker = blob.find(b"\xff\xd9", idx + 3)
+        segments = []
+        if end_marker >= 0:
+            segments.append(blob[idx : end_marker + 2])
+        segments.append(blob[idx:])
+
+        for segment in segments:
+            try:
+                im = Image.open(io.BytesIO(segment))
+                im.load()
+                if im.mode != "RGB":
+                    im = im.convert("RGB")
+                w, h = im.size
+                if w < 32 or h < 32:
+                    continue
+                area = w * h
+                if area <= best_area:
+                    continue
+                best_area = area
+                work = im
+                if w > max_size or h > max_size:
+                    work = im.copy()
+                    work.thumbnail((max_size, max_size), Image.Resampling.BILINEAR)
+                best_arr = np.array(work)
+            except Exception:
+                continue
+        start = idx + 3
+
+    if best_arr is None:
+        with _embedded_scan_miss_lock:
+            if len(_embedded_scan_miss_cache) >= _embedded_scan_miss_cache_max:
+                _embedded_scan_miss_cache.clear()
+            _embedded_scan_miss_cache.add(miss_key)
+
+    return best_arr
 
 
 class ThumbnailExtractor(QObject):
@@ -85,6 +189,23 @@ class ThumbnailExtractor(QObject):
 
     def extract_thumbnail_from_image(self, file_path: str, max_size: int = 512) -> Optional[np.ndarray]:
         """Extract thumbnail from regular image file."""
+        try:
+            reader = QImageReader(file_path)
+            reader.setAutoTransform(True)
+            size = reader.size()
+            if size.isValid() and size.width() > 0 and size.height() > 0:
+                w, h = size.width(), size.height()
+                if w > max_size or h > max_size:
+                    scale = min(max_size / w, max_size / h)
+                    reader.setScaledSize(QSize(max(1, int(w * scale)), max(1, int(h * scale))))
+            image = reader.read()
+            if not image.isNull():
+                arr = _qimage_to_rgb_array(image)
+                if arr is not None:
+                    return arr, None
+        except Exception:
+            pass
+
         try:
             with Image.open(file_path) as img:
                 # UnifiedImageProcessor will handle EXIF orientation correction

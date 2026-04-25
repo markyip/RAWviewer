@@ -82,6 +82,32 @@ class LRUCache:
             }
 
 
+class MemoryOnlyPersistentCache:
+    """No-op persistent cache used when disk/SQLite caching is disabled."""
+
+    def get(self, file_path: str) -> Optional[Any]:
+        return None
+
+    def get_multiple(self, file_paths: list, file_stats: Optional[Dict[str, Tuple[int, float]]] = None,
+                     fast_mode: bool = True) -> Dict[str, Dict[str, Any]]:
+        return {}
+
+    def put(self, file_path: str, value: Any) -> bool:
+        return False
+
+    def remove(self, file_path: str) -> bool:
+        return False
+
+    def cleanup_old_entries(self, max_age_days: int = 30) -> None:
+        return
+
+    def clear(self) -> None:
+        return
+
+    def close(self) -> None:
+        return
+
+
 class PersistentEXIFCache:
     """Persistent cache for EXIF data using SQLite."""
 
@@ -766,14 +792,18 @@ class ImageCache(QObject):
     cache_miss = pyqtSignal(str, str)  # file_path, cache_type
     memory_warning = pyqtSignal(float)  # memory_usage_percent
 
-    def __init__(self, cache_dir: str = None):
+    def __init__(self, cache_dir: str = None, persistent_cache_enabled: bool = False):
         super().__init__()
 
         # Initialize cache directory
-        if cache_dir is None:
-            cache_dir = os.path.expanduser("~/.rawviewer_cache")
-        os.makedirs(cache_dir, exist_ok=True)
-        self.cache_dir = cache_dir
+        self.persistent_cache_enabled = persistent_cache_enabled
+        if self.persistent_cache_enabled:
+            if cache_dir is None:
+                cache_dir = os.path.expanduser("~/.rawviewer_cache")
+            os.makedirs(cache_dir, exist_ok=True)
+            self.cache_dir = cache_dir
+        else:
+            self.cache_dir = None
 
         # Initialize memory monitor
         self.memory_monitor = MemoryMonitor()
@@ -785,9 +815,15 @@ class ImageCache(QObject):
         self.preview_cache = LRUCache(max_size=10) # Keep a few high-res previews in memory
         self.full_image_cache = LRUCache(max_size=cache_sizes['full_images'])
         self.pixmap_cache = LRUCache(max_size=cache_sizes['full_images'])
-        self.exif_cache = PersistentEXIFCache(cache_dir)
-        self.disk_thumbnail_cache = PersistentThumbnailCache(cache_dir)
-        self.disk_preview_cache = PersistentPreviewCache(cache_dir)
+        if self.persistent_cache_enabled:
+            self.exif_cache = PersistentEXIFCache(cache_dir)
+            self.disk_thumbnail_cache = PersistentThumbnailCache(cache_dir)
+            self.disk_preview_cache = PersistentPreviewCache(cache_dir)
+        else:
+            # Trial mode: keep all acceleration in RAM and never create/write local cache files.
+            self.exif_cache = MemoryOnlyPersistentCache()
+            self.disk_thumbnail_cache = MemoryOnlyPersistentCache()
+            self.disk_preview_cache = MemoryOnlyPersistentCache()
 
         # Cache statistics
         self.stats = {
@@ -1006,7 +1042,8 @@ class ImageCache(QObject):
             'pixmap_cache': self.pixmap_cache.get_stats(),
             'memory_info': memory_info,
             'request_stats': self.stats.copy(),
-            'cache_budget_mb': self.max_memory_mb
+            'cache_budget_mb': self.max_memory_mb,
+            'persistent_cache_enabled': self.persistent_cache_enabled
         }
 
     def cleanup_old_cache(self) -> None:
@@ -1023,12 +1060,13 @@ def get_image_cache() -> ImageCache:
     """Get the global image cache instance."""
     global _global_cache
     if _global_cache is None:
-        _global_cache = ImageCache()
+        persistent = os.environ.get("RAWVIEWER_PERSISTENT_CACHE", "").lower() in {"1", "true", "yes", "on"}
+        _global_cache = ImageCache(persistent_cache_enabled=persistent)
     return _global_cache
 
 
-def initialize_cache(cache_dir: str = None) -> ImageCache:
+def initialize_cache(cache_dir: str = None, persistent_cache_enabled: bool = False) -> ImageCache:
     """Initialize the global image cache with custom settings."""
     global _global_cache
-    _global_cache = ImageCache(cache_dir)
+    _global_cache = ImageCache(cache_dir, persistent_cache_enabled=persistent_cache_enabled)
     return _global_cache
