@@ -1,15 +1,15 @@
 # RAWviewer Release Notes
 
-## 🚀 Version 1.6.0 - Mac Trackpad Pinch-to-Zoom & Gallery Stability
+## 🚀 Version 1.6.0 - Trackpad Pinch-to-Zoom & Gallery Stability
 **Release Date: April 28, 2026**
 
 ### 🎯 What's New
-**Adds seamless pinch-to-zoom support for Mac trackpads, improves large-folder gallery behavior, keeps cacheless mode responsive, and polishes single-image UI controls.**
+**Adds seamless pinch-to-zoom support for Mac and Windows trackpads, improves large-folder gallery behavior, keeps cacheless mode responsive, and polishes single-image UI controls.**
 
 ### ✨ Key Features
 
-#### 🔍 Mac Trackpad Gestures
-✅ **Pinch-to-Zoom** – Smoothly zoom in and out of images using the native two-finger pinch gesture on Mac trackpads.
+#### 🔍 Trackpad Gestures
+✅ **Pinch-to-Zoom** – Smoothly zoom in and out of images using the native two-finger pinch gesture on Mac trackpads, and precision touchpads on Windows (or via Ctrl+Scroll Wheel).
 ✅ **Smart Cursor Anchoring** – Zooming naturally anchors to the current cursor position, matching the expected behavior of modern macOS applications like Apple Photos.
 ✅ **Smart Zoom Gesture** – Double-tap with two fingers to instantly toggle between "Fit to Window" and 100% zoom.
 ✅ **Boundary Limits** – Maximum zoom is capped at 100% to ensure smooth performance, and zooming out is neatly bounded to the "Fit to Window" size.

@@ -82,7 +82,7 @@ This is a **pre-filtering tool**, letting you go through hundreds of RAW files e
 ## 🖱️ Mouse Controls
 
 - **Double-click**: Toggle zoom mode
-- **Pinch (Mac Trackpad)**: Smoothly zoom in/out with smart cursor anchoring
+- **Pinch (Mac/Windows Trackpad) or Ctrl+Scroll**: Smoothly zoom in/out with smart cursor anchoring
 - **Click and drag**: Pan image when zoomed in
 - **Drag and drop**: Open images or folders
 - **Scroll Wheel (fit-to-window)**: Navigate images - Scroll down = previous, Scroll up = next

@@ -7408,6 +7408,7 @@ class RAWImageViewer(QMainWindow):
         return (
             "Space — Toggle fit-to-window / 100% zoom\n"
             "Double-click — Toggle fit-to-window / 100% zoom\n"
+            "Trackpad Pinch / Ctrl+Scroll — Smooth zoom in/out\n"
             "Left / Right Arrow — Previous / next image\n"
             "Down Arrow — Move image to Discard folder\n"
             "Delete — Delete current image\n"
@@ -11313,6 +11314,43 @@ class RAWImageViewer(QMainWindow):
                 vertical_delta = wheel_event.angleDelta().y()
                 # Check horizontal wheel (left/right scroll)
                 horizontal_delta = wheel_event.angleDelta().x()
+                
+                # Handle Windows trackpad pinch-to-zoom (Ctrl + Wheel)
+                if wheel_event.modifiers() & Qt.KeyboardModifier.ControlModifier and getattr(self, 'current_pixmap', None):
+                    if vertical_delta != 0:
+                        viewport_size = self.scroll_area.viewport().size()
+                        pixmap_size = self.current_pixmap.size()
+                        fit_scale = 1.0
+                        if pixmap_size.width() > 0 and pixmap_size.height() > 0:
+                            scale_w = viewport_size.width() / pixmap_size.width()
+                            scale_h = viewport_size.height() / pixmap_size.height()
+                            fit_scale = min(scale_w, scale_h)
+
+                        if self.fit_to_window:
+                            self.fit_to_window = False
+                            self.current_zoom_level = fit_scale
+
+                        # Standard mouse wheel delta is 120 per notch. Trackpad pinch may be continuous.
+                        # Using vertical_delta / 1200.0 means 120 delta = 10% zoom.
+                        self.current_zoom_level *= (1.0 + vertical_delta / 1200.0)
+
+                        if self.current_zoom_level <= fit_scale:
+                            self.fit_to_window = True
+                            self.current_zoom_level = fit_scale
+                            self.scale_image_to_fit()
+                            self.update_status_bar()
+                            return True
+                            
+                        self.current_zoom_level = max(fit_scale, min(self.current_zoom_level, 1.0))
+
+                        mouse_global = wheel_event.globalPosition().toPoint()
+                        self.zoom_cursor_offset = self.scroll_area.viewport().mapFromGlobal(mouse_global)
+                        mouse_image = self.image_label.mapFromGlobal(mouse_global)
+                        self.zoom_center_point = self.convert_widget_to_image_coords(mouse_image)
+
+                        self.apply_zoom_and_pan()
+                        self.update_status_bar()
+                    return True
                 
                 # Only navigate if image is fit-to-window (not zoomed)
                 if hasattr(self, 'fit_to_window') and self.fit_to_window:
