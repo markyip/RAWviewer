@@ -11,6 +11,7 @@ import threading
 import sqlite3
 import hashlib
 import pickle
+import shutil
 import numpy as np
 from collections import OrderedDict
 from typing import Optional, Tuple, Dict, Any, Union
@@ -1054,6 +1055,24 @@ class ImageCache(QObject):
 
 # Global cache instance
 _global_cache: Optional[ImageCache] = None
+_legacy_cache_cleanup_done = False
+
+
+def _cleanup_legacy_disk_cache_once() -> None:
+    """Remove old on-disk cache directory once in memory-only mode."""
+    global _legacy_cache_cleanup_done
+    if _legacy_cache_cleanup_done:
+        return
+    _legacy_cache_cleanup_done = True
+
+    legacy_dir = os.path.expanduser("~/.rawviewer_cache")
+    if not os.path.isdir(legacy_dir):
+        return
+    try:
+        shutil.rmtree(legacy_dir)
+    except OSError:
+        # Best effort cleanup; app should continue even if deletion fails.
+        pass
 
 
 def get_image_cache() -> ImageCache:
@@ -1061,6 +1080,8 @@ def get_image_cache() -> ImageCache:
     global _global_cache
     if _global_cache is None:
         persistent = os.environ.get("RAWVIEWER_PERSISTENT_CACHE", "").lower() in {"1", "true", "yes", "on"}
+        if not persistent:
+            _cleanup_legacy_disk_cache_once()
         _global_cache = ImageCache(persistent_cache_enabled=persistent)
     return _global_cache
 

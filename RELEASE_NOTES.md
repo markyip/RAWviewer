@@ -1,5 +1,29 @@
 # RAWviewer Release Notes
 
+## 🚀 Version 12.4 - Cacheless Trial & Loading Optimizations
+**Release Date: April 28, 2026**
+
+### 🎯 What's New
+**Introduces a cacheless-by-default trial mode, faster non-RAW thumbnail decoding, and startup safety cleanup for legacy cache folders.**
+
+### ✨ Key Features
+
+#### ⚡ Performance & Cache Behavior
+✅ **Memory-Only Default Cache** – Persistent disk/SQLite cache is now disabled by default to prioritize clean trial behavior and reduce local cache side effects.
+✅ **Optional Persistent Cache Toggle** – You can re-enable persistent cache with `RAWVIEWER_PERSISTENT_CACHE=1`.
+✅ **Legacy Cache Auto-Cleanup on Startup** – In memory-only mode, old `~/.rawviewer_cache` is automatically removed once as a safety cleanup.
+
+#### 🖼️ Image Loading Improvements
+✅ **Faster Non-RAW Thumbnail Path** – Standard image thumbnails now use `QImageReader.setScaledSize()` for faster decode at target size.
+✅ **Robust Embedded JPEG Fallback** – Improved fallback scanning logic for embedded previews when RAW decode paths fail.
+
+#### 🧭 UX & Stability
+✅ **Open Behavior Consistency** – Restored open-flow behavior for choosing gallery folder vs single image loading.
+✅ **Histogram UX Guard** – Histogram is hidden/disabled when no image is loaded.
+✅ **Background Cleanup Coverage** – Cache cleanup paths were expanded to include preview-related data for better consistency.
+
+---
+
 ## 🚀 Version 12.2 - Orientation & Build Optimization
 **Release Date: December 30, 2025**
 
