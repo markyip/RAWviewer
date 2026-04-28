@@ -1,10 +1,10 @@
-# RAWviewer v12.3
+# RAWviewer v12.4
 
 <p align="center">
   <img src="icons/appicon.ico" alt="RAWviewer Icon" width="256">
 </p>
 
-![Version](https://img.shields.io/badge/version-12.3-blue)
+![Version](https://img.shields.io/badge/version-12.4-blue)
 ![Downloads](https://img.shields.io/github/downloads/markyip/RAWviewer/total) 
 ![License](https://img.shields.io/badge/license-MIT-green)
 [![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-Donate-orange?logo=buy-me-a-coffee)](https://www.buymeacoffee.com/markyip)
@@ -39,7 +39,8 @@ This is a **pre-filtering tool**, letting you go through hundreds of RAW files e
 - **Cross-platform support**: Windows and macOS
 - **Ultra-Fast Performance**: Instant folder loading (scans thousands of images in milliseconds) using optimized algorithms
 - **Smart Prefetching**: Predictively loads relevant images in the background for zero-latency navigation
-- **Persistent Thumbnail Cache**: Instantly loads thumbnails on restart with disk-based caching (LRU managed)
+- **Memory-First Cache (Default)**: Uses fast in-memory caching by default with no disk/SQLite writes
+- **Optional Persistent Cache**: Set `RAWVIEWER_PERSISTENT_CACHE=1` to re-enable disk/SQLite cache persistence
 - **Gallery View**: Justified grid layout with virtualized rendering for smooth scrolling through massive collections
 - **Wide RAW format support**: Canon (CR2, CR3), Nikon (NEF), Sony (ARW), Adobe DNG, and many more
 - **Robust Orientation Handling**: Definitive fixes for Sony ARW and other RAW formats, ensuring images are always displayed upright
@@ -64,7 +65,7 @@ This is a **pre-filtering tool**, letting you go through hundreds of RAW files e
 
 #### macOS
 1. Download the latest release from the [Releases Page](https://github.com/markyip/RAWviewer/releases/latest)
-2. Download and extract `RAWviewer-v12.2-macOS.zip`
+2. Download and extract `RAWviewer-v12.4-macOS.zip`
 3. Drag `RAWviewer.app` to your Applications folder
 4. Double-click to launch from Applications or Launchpad
 5. **First launch**: Right-click → "Open" if blocked by Gatekeeper
@@ -188,7 +189,7 @@ RAWviewer uses a modern, optimized architecture:
 
 - **ImageLoadManager**: Manages all image loading tasks using a thread pool and priority queue
 - **UnifiedImageProcessor**: Handles all image types (RAW, JPEG, TIFF, etc.) with a unified interface
-- **Persistent Cache**: Dual-layer caching (memory + disk) for thumbnails and metadata to survive restarts
+- **Cache System**: Memory-first cache by default, with optional persistent disk cache via env flag
 - **Smart Caching**: Efficient image and video caching for faster navigation
 - **Thread Pool**: Reuses threads to avoid creation/destruction overhead
 - **Event-Driven**: Permanent signal connections for better performance
