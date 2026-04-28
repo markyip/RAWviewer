@@ -1,6 +1,30 @@
 # RAWviewer Release Notes
 
-## 🚀 Version 12.4 - Cacheless Trial & Loading Optimizations
+## 🚀 Version 1.6.0 - Gallery Stability & Cacheless Refinements
+**Release Date: April 28, 2026**
+
+### 🎯 What's New
+**Improves large-folder gallery behavior, keeps cacheless mode responsive, and polishes single-image UI controls.**
+
+### ✨ Key Features
+
+#### 🖼️ Gallery View Improvements
+✅ **Single-Pass Gallery Rebuilds** – Removed duplicate gallery rebuild/cleanup work that could slow large folders and make thumbnail updates appear unstable.
+✅ **EXIF-Aware Gallery Ordering** – Gallery can refresh ordering after background EXIF capture-time extraction, while keeping the UI responsive during the initial load.
+✅ **Current Image Positioning** – Switching from single image view back to gallery now scrolls to the current image instead of starting from the beginning.
+✅ **Gallery Total Count** – Gallery view now shows the total number of images in the bottom status bar.
+
+#### 📊 Single-Image UI Fixes
+✅ **Histogram Reliability** – Histogram visibility now resets correctly when moving to a new image while still staying disabled when no image is loaded.
+✅ **Stable Info Button** – The bottom information button remains visible without shifting EXIF metadata text.
+
+#### ⚡ Cacheless Mode Refinements
+✅ **Reduced EXIF Re-Reads** – Orientation lookup now checks memory cache first to reduce repeated EXIF reads.
+✅ **Cleaner Console Output** – Removed noisy EXIF debug prints and fixed stale cache API usage in preview orientation handling.
+
+---
+
+## 🚀 Version 1.5.5 - Cacheless Trial & Loading Optimizations
 **Release Date: April 28, 2026**
 
 ### 🎯 What's New

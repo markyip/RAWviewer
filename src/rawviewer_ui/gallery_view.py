@@ -52,6 +52,7 @@ class JustifiedGallery(QWidget):
         self._path_to_indices = {}
         # Track what thumbnails we've recently requested so we can cancel far-away work
         self._requested_thumbnail_paths = set()
+        self._pending_scroll_to_path = None
         self._is_scrollbar_dragging = False
         self._last_scheduled_scroll_y = 0
         self._scroll_area = None
@@ -176,6 +177,38 @@ class JustifiedGallery(QWidget):
             QTimer.singleShot(0, lambda: self.build_gallery(bulk_metadata=bulk_metadata))
         except Exception:
             logger.exception("[GALLERY] set_images() failed")
+
+    def scroll_to_file(self, file_path: Optional[str]):
+        """Scroll so file_path is near the top after the gallery layout is available."""
+        if not file_path:
+            return
+        self._pending_scroll_to_path = file_path
+        if self._gallery_layout_items:
+            QTimer.singleShot(0, self._apply_pending_scroll_to_file)
+
+    def _apply_pending_scroll_to_file(self):
+        path = self._pending_scroll_to_path
+        if not path:
+            return
+        indices = self._path_to_indices.get(path)
+        if not indices:
+            return
+        idx = indices[0]
+        if idx < 0 or idx >= len(self._gallery_layout_items):
+            return
+        p = self._scroll_area
+        if p is None:
+            p = self.parent()
+            while p and not isinstance(p, QScrollArea):
+                p = p.parent()
+        if not isinstance(p, QScrollArea):
+            return
+        rect = self._gallery_layout_items[idx]["rect"]
+        sb = p.verticalScrollBar()
+        target = max(sb.minimum(), min(rect.top(), sb.maximum()))
+        sb.setValue(target)
+        self._pending_scroll_to_path = None
+        QTimer.singleShot(0, self.load_visible_images)
 
     def _scaled_cache_key(self, file_path: str, target_size):
         """Cache key for scaled thumbnails including width/height buckets."""
@@ -473,6 +506,8 @@ class JustifiedGallery(QWidget):
             self._building = False
             if should_load_visible:
                 # Run after _building is cleared, so load_visible_images won't early-return.
+                if self._pending_scroll_to_path:
+                    QTimer.singleShot(0, self._apply_pending_scroll_to_file)
                 QTimer.singleShot(0, self.load_visible_images)
 
     def _get_visible_range(self, buffer_rect):
