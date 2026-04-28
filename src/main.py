@@ -7611,16 +7611,18 @@ class RAWImageViewer(QMainWindow):
                                 # CRITICAL: UnifiedImageProcessor caches already-oriented images.
                                 # Mark as oriented to prevent double rotation in display_numpy_image.
                                 self._orientation_already_applied = True
+                                
+                                old_current_size = self.current_pixmap.size() if self.current_pixmap else None
+                                
                                 self.display_numpy_image(cached_full)
                                 self._is_half_size_displayed = False
                                 self._full_resolution_loading = False
-                                # Update pixmap reference for zoom calculation
-                                self.current_pixmap = self.image_label.pixmap()
+                                
                             # Recalculate zoom center point for full resolution image
-                            if self.current_pixmap:
+                            if self.current_pixmap and old_current_size:
                                 # Scale the zoom center point from half_size to full resolution
-                                scale_x = self.current_pixmap.width() / displayed_pixmap.width() if displayed_pixmap else 1.0
-                                scale_y = self.current_pixmap.height() / displayed_pixmap.height() if displayed_pixmap else 1.0
+                                scale_x = self.current_pixmap.width() / old_current_size.width() if old_current_size.width() > 0 else 1.0
+                                scale_y = self.current_pixmap.height() / old_current_size.height() if old_current_size.height() > 0 else 1.0
                                 if hasattr(self, 'zoom_center_point') and self.zoom_center_point:
                                     self.zoom_center_point = QPoint(
                                         int(self.zoom_center_point.x() * scale_x),
@@ -7641,7 +7643,7 @@ class RAWImageViewer(QMainWindow):
                             self._pending_zoom = True
                             # Store the calculated zoom center point and thumbnail size for scaling
                             self._pending_zoom_center = self.zoom_center_point if hasattr(self, 'zoom_center_point') else None
-                            self._pending_zoom_thumbnail_size = displayed_pixmap.size() if displayed_pixmap else None
+                            self._pending_zoom_thumbnail_size = self.current_pixmap.size() if self.current_pixmap else None
                             return  # Don't zoom yet - wait for full resolution
 
                 self.fit_to_window = False
@@ -10087,8 +10089,6 @@ class RAWImageViewer(QMainWindow):
                             self.display_numpy_image(cached_full)
                             self._is_half_size_displayed = False
                             self._full_resolution_loading = False
-                            # Update pixmap reference for zoom calculation
-                            self.current_pixmap = self.image_label.pixmap()
                             # Clear the flag after display
                             if hasattr(self, '_maintain_zoom_on_navigation'):
                                 delattr(self, '_maintain_zoom_on_navigation')
@@ -10099,6 +10099,8 @@ class RAWImageViewer(QMainWindow):
                             self._load_full_resolution_on_demand()
                             # Don't zoom yet - wait for full resolution to load (avoid two-step zoom)
                             self._pending_zoom = True
+                            self._pending_zoom_center = QPoint(self.current_pixmap.width() // 2, self.current_pixmap.height() // 2) if self.current_pixmap else None
+                            self._pending_zoom_thumbnail_size = self.current_pixmap.size() if self.current_pixmap else None
                             logger.debug("Stored pending 100% zoom - will execute when full resolution is ready")
                             self.status_bar.showMessage("Loading full resolution for 100% zoom...")
                             return
@@ -10107,6 +10109,8 @@ class RAWImageViewer(QMainWindow):
                         self._load_full_resolution_on_demand()
                         # Don't zoom yet - wait for full resolution to load (avoid two-step zoom)
                         self._pending_zoom = True
+                        self._pending_zoom_center = QPoint(self.current_pixmap.width() // 2, self.current_pixmap.height() // 2) if self.current_pixmap else None
+                        self._pending_zoom_thumbnail_size = self.current_pixmap.size() if self.current_pixmap else None
                         logger.debug("Stored pending 100% zoom - will execute when full resolution is ready")
                         self.status_bar.showMessage("Loading full resolution for 100% zoom...")
                         return
