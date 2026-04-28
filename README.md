@@ -1,10 +1,10 @@
-# RAWviewer v1.5.4
+# RAWviewer v12.4
 
 <p align="center">
   <img src="icons/appicon.ico" alt="RAWviewer Icon" width="256">
 </p>
 
-![Version](https://img.shields.io/badge/version-1.5.4-blue)
+![Version](https://img.shields.io/badge/version-12.4-blue)
 ![Downloads](https://img.shields.io/github/downloads/markyip/RAWviewer/total) 
 ![License](https://img.shields.io/badge/license-MIT-green)
 [![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-Donate-orange?logo=buy-me-a-coffee)](https://www.buymeacoffee.com/markyip)
@@ -37,11 +37,12 @@ This is a **pre-filtering tool**, letting you go through hundreds of RAW files e
 ## ✨ Features
 
 - **Cross-platform support**: Windows and macOS
-- **Ultra-Fast Performance**: Fast folder scanning and loading using optimized algorithms
+- **Ultra-Fast Performance**: Instant folder loading (scans thousands of images in milliseconds) using optimized algorithms
 - **Smart Prefetching**: Predictively loads relevant images in the background for zero-latency navigation
+- **Memory-First Cache (Default)**: Uses fast in-memory caching by default with no disk/SQLite writes
+- **Optional Persistent Cache**: Set `RAWVIEWER_PERSISTENT_CACHE=1` to re-enable disk/SQLite cache persistence
 - **Gallery View**: Justified grid layout with virtualized rendering for smooth scrolling through massive collections
 - **Wide RAW format support**: Canon (CR2, CR3), Nikon (NEF), Sony (ARW), Adobe DNG, and many more
-- **RAW preview fallback**: If LibRaw cannot decode a file, the app tries to recover an **embedded JPEG** from the file bytes (thumbnail and on-screen preview where possible)
 - **Robust Orientation Handling**: Definitive fixes for Sony ARW and other RAW formats, ensuring images are always displayed upright
 - **Pillarbox-Free Gallery**: Accurately calculates aspect ratios to prevent black bars in the gallery view
 - **Intuitive navigation**: Keyboard shortcuts, mouse controls, and scroll wheel support
@@ -51,7 +52,6 @@ This is a **pre-filtering tool**, letting you go through hundreds of RAW files e
 - **Session persistence**: Remembers your last opened folder, image, and view mode
 - **Portable executable**: No Python installation required for users
 - **Modern UI**: Material Design 3 aesthetics with Font Awesome icons (via qtawesome) and non-intrusive loading indicators
-- **Histogram overlay**: RGB and luminance histogram in single-image view (press **H** to show or hide; drag the card to reposition)
 
 ## 🚀 Quick Start
 
@@ -65,28 +65,19 @@ This is a **pre-filtering tool**, letting you go through hundreds of RAW files e
 
 #### macOS
 1. Download the latest release from the [Releases Page](https://github.com/markyip/RAWviewer/releases/latest)
-2. Download and extract `RAWviewer.app.zip`
+2. Download and extract `RAWviewer-v12.4-macOS.zip`
 3. Drag `RAWviewer.app` to your Applications folder
 4. Double-click to launch from Applications or Launchpad
 5. **First launch**: Right-click → "Open" if blocked by Gatekeeper
 
 ## ⌨️ Keyboard Shortcuts
 
-**Single-image view**
-
 - **Space**: Toggle between fit-to-window and 100% zoom
-- **`H`**: Show or hide the histogram overlay
-- **Gallery ↔ single**: Use the **Gallery** button on the status bar, or click a thumbnail in the grid to open single-image view
-- **`Esc`**: Return to Gallery View (from single-image view)
-- **`←`/`→`**: Previous / next image
+- **`G`**: Toggle between Gallery View and Single Image View
+- **`Esc`**: Return to Gallery View (from Single View)
+- **`←`/`→` arrows**: Navigate between images
 - **`↓`**: Move current image to Discard folder
 - **Delete**: Delete current image (with confirmation)
-- **`i`** (status bar): Hover for a shortcut summary tooltip
-
-**Gallery view**
-
-- **`↑`/`↓`**: Scroll the thumbnail grid (when the main window handles the key)
-- **Discard / delete / image navigation shortcuts** apply only after you open an image in single view.
 
 ## 🖱️ Mouse Controls
 
@@ -115,16 +106,14 @@ This is a **pre-filtering tool**, letting you go through hundreds of RAW files e
 - **And many more supported by LibRaw**
 
 ### Standard Formats
-- **JPEG**: `.jpg`, `.jpeg`
-- **PNG**: `.png`
-- **WebP**: `.webp`
-- **TIFF**: `.tif`, `.tiff`
-- **HEIF / HEIC**: `.heif`, `.heic` (depends on Qt image plugins on your system)
+- **JPEG**: JPG, JPEG
+- **TIFF**: TIF, TIFF
+- **HEIF**: HEIF
 
 ## 🏗️ Building from Source
 
 ### Prerequisites
-- Python **3.9 or higher** (required by NumPy 2.x)
+- Python 3.8 or higher
 - pip (Python package manager)
 
 ### Windows
@@ -179,13 +168,20 @@ All dependencies are listed in `requirements.txt`:
 - **Gatekeeper warnings**: Right-click the app → Open → Open anyway
 - **Performance issues**: Grant Full Disk Access in Privacy settings
 
+## 🚧 Upcoming Features
+
+We're continuously working to improve RAWviewer. Here are some features planned for future releases:
+
+- **Histogram Display**: View RGB and luminance histograms to analyze exposure and color distribution
+- **Batch Operations**: Select and process multiple images at once
+
+
 ## ⚠️ Known Issues
 
 ### Camera Compatibility
 - **Newer camera models**: Support for the latest camera releases may be limited due to LibRaw library compatibility
 - **Proprietary RAW formats**: Some manufacturers' newest RAW formats may not be fully supported immediately after camera release
 - **Firmware updates**: Camera firmware updates may introduce RAW format changes that require LibRaw updates
-- **When decode still fails**: If there is no usable embedded preview, you will see a **Load Error** for that file until LibRaw (or the file) is supported
 
 ## 🏛️ Architecture
 
@@ -193,7 +189,8 @@ RAWviewer uses a modern, optimized architecture:
 
 - **ImageLoadManager**: Manages all image loading tasks using a thread pool and priority queue
 - **UnifiedImageProcessor**: Handles all image types (RAW, JPEG, TIFF, etc.) with a unified interface
-- **Smart Caching**: Efficient image and thumbnail caching for faster navigation
+- **Cache System**: Memory-first cache by default, with optional persistent disk cache via env flag
+- **Smart Caching**: Efficient image and video caching for faster navigation
 - **Thread Pool**: Reuses threads to avoid creation/destruction overhead
 - **Event-Driven**: Permanent signal connections for better performance
 
