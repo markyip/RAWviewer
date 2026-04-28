@@ -1,10 +1,10 @@
-# RAWviewer v1.6.0
+# RAWviewer v1.6.1
 
 <p align="center">
   <img src="icons/appicon.ico" alt="RAWviewer Icon" width="256">
 </p>
 
-![Version](https://img.shields.io/badge/version-1.6.0-blue)
+![Version](https://img.shields.io/badge/version-1.6.1-blue)
 ![Downloads](https://img.shields.io/github/downloads/markyip/RAWviewer/total) 
 ![License](https://img.shields.io/badge/license-MIT-green)
 [![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-Donate-orange?logo=buy-me-a-coffee)](https://www.buymeacoffee.com/markyip)
@@ -46,7 +46,7 @@ This is a **pre-filtering tool**, letting you go through hundreds of RAW files e
 - **Robust Orientation Handling**: Definitive fixes for Sony ARW and other RAW formats, ensuring images are always displayed upright
 - **Pillarbox-Free Gallery**: Accurately calculates aspect ratios to prevent black bars in the gallery view
 - **Intuitive navigation**: Keyboard shortcuts, mouse controls, and scroll wheel support
-- **Zoom functionality**: Fit-to-window and 100% zoom modes with smooth panning
+- **Zoom functionality**: Fit-to-window and 100% zoom modes with smooth panning, including native Mac trackpad pinch-to-zoom
 - **File management**: Move images to discard folder or delete permanently
 - **EXIF data display**: View camera settings, focal length, ISO, aperture, and capture information with robust metadata extraction
 - **Session persistence**: Remembers your last opened folder, image, and view mode
@@ -82,6 +82,7 @@ This is a **pre-filtering tool**, letting you go through hundreds of RAW files e
 ## 🖱️ Mouse Controls
 
 - **Double-click**: Toggle zoom mode
+- **Pinch (Mac Trackpad)**: Smoothly zoom in/out with smart cursor anchoring
 - **Click and drag**: Pan image when zoomed in
 - **Drag and drop**: Open images or folders
 - **Scroll Wheel (fit-to-window)**: Navigate images - Scroll down = previous, Scroll up = next
