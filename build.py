@@ -78,10 +78,13 @@ def update_macos_plist(app_path):
         plist['NSDownloadsFolderUsageDescription'] = 'RAWviewer needs access to your Downloads folder to display images.'
         plist['NSRemovableVolumesUsageDescription'] = 'RAWviewer needs access to external volumes to display images from cameras or cards.'
         plist['NSPhotoLibraryUsageDescription'] = 'RAWviewer needs access to your photo library to display images.'
+        plist['NSAppleEventsUsageDescription'] = 'RAWviewer needs to receive file open events from the system.'
         
-        # Ensure it doesn't show as a background process only
+        # macOS specific flags
         plist['LSMinimumSystemVersion'] = '10.15.0'
         plist['NSHighResolutionCapable'] = True
+        plist['LSSupportsOpeningDocumentsInPlace'] = True
+        plist['LSApplicationCategoryType'] = 'public.app-category.photography'
 
         with open(plist_path, 'wb') as f:
             plistlib.dump(plist, f)
