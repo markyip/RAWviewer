@@ -7487,7 +7487,7 @@ class RAWImageViewer(QMainWindow):
         if event.button() == Qt.MouseButton.LeftButton and self.current_pixmap:
             if not self.fit_to_window and self._can_pan():
                 self.panning = True
-                self.last_pan_point = event.pos()
+                self.last_pan_point = event.globalPosition().toPoint()
                 self.start_scroll_x = self.scroll_area.horizontalScrollBar().value()
                 self.start_scroll_y = self.scroll_area.verticalScrollBar().value()
                 self.image_label.setCursor(
@@ -7495,8 +7495,9 @@ class RAWImageViewer(QMainWindow):
 
     def image_mouse_move_event(self, event):
         if self.panning and self.current_pixmap and self._can_pan():
-            delta = event.pos() - self.last_pan_point
-            self.last_pan_point = event.pos()
+            current_pos = event.globalPosition().toPoint()
+            delta = current_pos - self.last_pan_point
+            self.last_pan_point = current_pos
             h_scroll = self.scroll_area.horizontalScrollBar()
             v_scroll = self.scroll_area.verticalScrollBar()
             new_x = h_scroll.value() - delta.x()
@@ -7822,9 +7823,15 @@ class RAWImageViewer(QMainWindow):
                 center_y = int(self.zoom_center_point.y()
                                * self.current_zoom_level)
 
-                # Calculate scroll position to center the zoom point
-                scroll_x = center_x - round(viewport_size.width() / 2)
-                scroll_y = center_y - round(viewport_size.height() / 2)
+                # Calculate scroll position
+                if hasattr(self, 'zoom_cursor_offset') and self.zoom_cursor_offset:
+                    scroll_x = center_x - self.zoom_cursor_offset.x()
+                    scroll_y = center_y - self.zoom_cursor_offset.y()
+                    # Clear it after use so it doesn't affect other zoom actions (like double-click)
+                    self.zoom_cursor_offset = None
+                else:
+                    scroll_x = center_x - round(viewport_size.width() / 2)
+                    scroll_y = center_y - round(viewport_size.height() / 2)
 
                 # Clamp scroll positions to valid range
                 max_scroll_x = max(0, image_size.width() - viewport_size.width())
@@ -8055,9 +8062,6 @@ class RAWImageViewer(QMainWindow):
             _prev_fp = getattr(self, "current_file_path", None)
             if _prev_fp and _norm_path(_prev_fp) != _norm_path(requested_file_path):
                 self.image_manager.cancel_task(_prev_fp)
-                # Reset user-hide state when navigating to a different file.
-                self._histogram_user_hidden = False
-                self._histogram_overlay_visible = True
             # Legacy cleanup for old processor (if still exists)
             if self.current_processor:
                 logger.info(f"[LOAD] Legacy processor cleanup: {type(self.current_processor).__name__}")
@@ -11256,6 +11260,47 @@ class RAWImageViewer(QMainWindow):
                     # Ignore up arrow to prevent panning
                     return True
         
+        # Handle trackpad pinch-to-zoom on Mac
+        if event.type() == QEvent.Type.NativeGesture:
+            if hasattr(self, 'view_mode') and self.view_mode == 'single' and getattr(self, 'current_pixmap', None):
+                if event.gestureType() == Qt.NativeGestureType.ZoomNativeGesture:
+                    viewport_size = self.scroll_area.viewport().size()
+                    pixmap_size = self.current_pixmap.size()
+                    fit_scale = 1.0
+                    if pixmap_size.width() > 0 and pixmap_size.height() > 0:
+                        scale_w = viewport_size.width() / pixmap_size.width()
+                        scale_h = viewport_size.height() / pixmap_size.height()
+                        fit_scale = min(scale_w, scale_h)
+
+                    if self.fit_to_window:
+                        self.fit_to_window = False
+                        self.current_zoom_level = fit_scale
+
+                    # Reduce sensitivity and make zoom smooth/proportional
+                    self.current_zoom_level *= (1.0 + event.value() * 0.5)
+
+                    # Prevent zooming out beyond fit-to-window scale
+                    if self.current_zoom_level <= fit_scale:
+                        self.fit_to_window = True
+                        self.current_zoom_level = fit_scale
+                        self.scale_image_to_fit()
+                        self.update_status_bar()
+                        return True
+                    # Limit maximum zoom to 100% (1.0)
+                    self.current_zoom_level = max(fit_scale, min(self.current_zoom_level, 1.0))
+
+                    mouse_global = event.globalPosition().toPoint()
+                    self.zoom_cursor_offset = self.scroll_area.viewport().mapFromGlobal(mouse_global)
+                    mouse_image = self.image_label.mapFromGlobal(mouse_global)
+                    self.zoom_center_point = self.convert_widget_to_image_coords(mouse_image)
+
+                    self.apply_zoom_and_pan()
+                    self.update_status_bar()
+                    return True
+                elif event.gestureType() == Qt.NativeGestureType.SmartZoomNativeGesture:
+                    self.toggle_zoom()
+                    return True
+
         # Handle wheel events for navigation in single image view when fit-to-window
         if event.type() == QEvent.Type.Wheel:
             # Check if we're in single view mode and the event is from scroll area viewport
@@ -12019,7 +12064,7 @@ def main():
 
         # Set application properties
         app.setApplicationName("RAW Image Viewer")
-        app.setApplicationVersion("1.6.0")
+        app.setApplicationVersion("1.6.1")
 
         # macOS: force dark UI to better match our dark theme (including title bar).
         # Using Qt's palette is more reliable than trying to hard-set NSWindow colors.
