@@ -1,13 +1,9 @@
 # RAWviewer Release Notes
 
-## 🚀 Version 1.6.1
-**Release Date: April 28, 2026**
-🎯 What's New
-- macOS Native Integration: The application can now be set as the default viewer for images and RAW files on macOS. Added support for handling `FileOpen` events to instantly display files opened from Finder.
-
 ## 🚀 Version 1.6.0
 **Release Date: April 28, 2026**
 🎯 What's New
+- macOS Native Integration: The application can now be set as the default viewer for images and RAW files on macOS. Added support for handling `FileOpen` events to instantly display files opened from Finder.
 - Seamless pinch-to-zoom support for Mac and Windows trackpads, improved large-folder gallery behavior, a cacheless-by-default trial mode, faster non-RAW thumbnail decoding, and polished single-image UI controls.
 
 🛠️ Fixes & improvements

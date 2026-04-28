@@ -45,6 +45,7 @@ This is a **pre-filtering tool**, letting you go through hundreds of RAW files e
 - **Wide RAW format support**: Canon (CR2, CR3), Nikon (NEF), Sony (ARW), Adobe DNG, and many more
 - **Robust Orientation Handling**: Definitive fixes for Sony ARW and other RAW formats, ensuring images are always displayed upright
 - **Pillarbox-Free Gallery**: Accurately calculates aspect ratios to prevent black bars in the gallery view
+- **macOS File Association**: Fully integrated with macOS Finder; can be set as the default viewer and supports double-click to open
 - **Intuitive navigation**: Keyboard shortcuts, mouse controls, and scroll wheel support
 - **Zoom functionality**: Fit-to-window and 100% zoom modes with smooth panning, including native Mac trackpad pinch-to-zoom
 - **File management**: Move images to discard folder or delete permanently
@@ -165,9 +166,13 @@ All dependencies are listed in `requirements.txt`:
 - **AttributeError with stdout**: This is normal for windowed builds - the application runs without a console window
 
 ### macOS
-- **"App is damaged" error**: Go to System Preferences → Security & Privacy → Allow
-- **Gatekeeper warnings**: Right-click the app → Open → Open anyway
-- **Performance issues**: Grant Full Disk Access in Privacy settings
+- **"App is damaged" or "Unverified Developer"**: This is common for locally built apps. Our build script automatically clears the quarantine flag, but if it persists, run `xattr -cr dist/RAWviewer.app` in your terminal.
+- **Gatekeeper warnings**: Right-click the app → "Open" → "Open" anyway. This "registers" the app with macOS.
+- **Permission Denied / Cannot Read Folder**: Modern macOS requires explicit permission for apps to access the Desktop or Documents. 
+  1. Go to **System Settings** > **Privacy & Security** > **Full Disk Access**.
+  2. Click the **+** button and add `RAWviewer.app`.
+  3. Toggle it to **ON**.
+- **"Open with" behavior**: For the very first launch, open the app directly and grant permissions. After that, "Right-click -> Open with" will work perfectly.
 
 ## 🚧 Upcoming Features
 
