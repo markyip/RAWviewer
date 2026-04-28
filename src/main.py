@@ -9402,10 +9402,10 @@ class RAWImageViewer(QMainWindow):
         sb.setValue(nval)
         return True
 
-    def keyPressEvent(self, event):
+    def _handle_app_shortcut(self, key):
+        """Handle application-wide shortcuts for better consistency and focus-resilience."""
         vm = getattr(self, "view_mode", "single")
-        key = event.key()
-
+        
         if key == Qt.Key.Key_Space:
             if vm == "single":
                 import logging
@@ -9415,77 +9415,72 @@ class RAWImageViewer(QMainWindow):
                     f"{os.path.basename(self.current_file_path) if hasattr(self, 'current_file_path') and self.current_file_path else 'Unknown'}"
                 )
                 self.toggle_zoom()
-            event.accept()
-            return
-        if key == Qt.Key.Key_Left:
+                return True
+        elif key == Qt.Key.Key_Left:
             if vm == "single":
                 self._debounced_navigate("prev")
-                event.accept()
-            else:
-                super().keyPressEvent(event)
-            return
-        if key == Qt.Key.Key_Right:
+                return True
+        elif key == Qt.Key.Key_Right:
             if vm == "single":
                 self._debounced_navigate("next")
-                event.accept()
-            else:
-                super().keyPressEvent(event)
-            return
-        if key == Qt.Key.Key_Down:
+                return True
+        elif key == Qt.Key.Key_Down:
             if vm == "single":
                 self.move_current_image_to_discard()
-                event.accept()
-            elif vm == "gallery":
-                if self._scroll_gallery_vertical(1):
-                    event.accept()
-                else:
-                    super().keyPressEvent(event)
-            else:
-                super().keyPressEvent(event)
-            return
-        if key == Qt.Key.Key_Up:
+                return True
+        elif key == Qt.Key.Key_Up:
             if vm == "single":
-                # Prevent up arrow from moving the single-image scroll area
-                event.accept()
-            elif vm == "gallery":
-                if self._scroll_gallery_vertical(-1):
-                    event.accept()
-                else:
-                    super().keyPressEvent(event)
-            else:
-                super().keyPressEvent(event)
-            return
-        if key == Qt.Key.Key_Delete:
+                # Consume Up arrow in single view to prevent scrolling/panning glitches
+                return True
+        elif key == Qt.Key.Key_Delete:
             if vm == "single":
                 self.delete_current_image()
-                event.accept()
-            else:
-                super().keyPressEvent(event)
-            return
-        if key == Qt.Key.Key_Escape:
+                return True
+        elif key == Qt.Key.Key_Escape:
             if vm == "single":
                 self.toggle_view_mode()
-                event.accept()
-            else:
-                super().keyPressEvent(event)
-            return
-        if key == Qt.Key.Key_H:
+                return True
+        elif key == Qt.Key.Key_H:
             if vm == "single":
-                pm = getattr(self, "current_pixmap", None)
-                if pm is None or pm.isNull():
-                    event.accept()
-                    return
-                self._histogram_overlay_visible = not getattr(
-                    self, "_histogram_overlay_visible", True)
+                # Toggle histogram visibility and preference
+                self._histogram_overlay_visible = not getattr(self, "_histogram_overlay_visible", True)
                 self._histogram_user_hidden = not self._histogram_overlay_visible
+                
                 if hasattr(self, "single_image_histogram"):
-                    self.single_image_histogram.setVisible(
-                        self._histogram_overlay_visible)
+                    # Only show if we actually have a pixmap, otherwise keep hidden but save preference
+                    pm = getattr(self, "current_pixmap", None)
+                    if pm is not None and not pm.isNull():
+                        self.single_image_histogram.setVisible(self._histogram_overlay_visible)
+                    else:
+                        self.single_image_histogram.setVisible(False)
+                        
                 c = getattr(self, "single_view_container", None)
                 if c is not None and hasattr(c, "relayout_histogram"):
                     c.relayout_histogram()
+                return True
+                
+        return False
+
+    def keyPressEvent(self, event):
+        key = event.key()
+        vm = getattr(self, "view_mode", "single")
+
+        # Try to handle common app shortcuts first
+        if self._handle_app_shortcut(key):
             event.accept()
             return
+
+        # Handle mode-specific keys that aren't app-wide shortcuts
+        if key == Qt.Key.Key_Down:
+            if vm == "gallery":
+                if self._scroll_gallery_vertical(1):
+                    event.accept()
+                    return
+        elif key == Qt.Key.Key_Up:
+            if vm == "gallery":
+                if self._scroll_gallery_vertical(-1):
+                    event.accept()
+                    return
 
         super().keyPressEvent(event)
 
@@ -11244,22 +11239,9 @@ class RAWImageViewer(QMainWindow):
 
     def eventFilter(self, obj, event):
         if event.type() == QEvent.Type.KeyPress:
-            key = event.key()
-            # Only handle keys in single view mode
-            if hasattr(self, 'view_mode') and self.view_mode == 'single':
-                if key == Qt.Key.Key_Left:
-                    self.navigate_to_previous_image()
-                    return True
-                elif key == Qt.Key.Key_Right:
-                    self.navigate_to_next_image()
-                    return True
-                elif key == Qt.Key.Key_Down:
-                    # Move current image to Discard folder in single view
-                    self.move_current_image_to_discard()
-                    return True
-                elif key == Qt.Key.Key_Up:
-                    # Ignore up arrow to prevent panning
-                    return True
+            # Handle application-wide shortcuts even when sub-widgets (like viewport) have focus
+            if self._handle_app_shortcut(event.key()):
+                return True
         
         # Handle trackpad pinch-to-zoom on Mac
         if event.type() == QEvent.Type.NativeGesture:
