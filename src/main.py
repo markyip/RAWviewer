@@ -3757,157 +3757,79 @@ class JustifiedGallery(QWidget):
         """Update the images list and rebuild"""
         import logging
         import time
-        from collections import deque
         from PyQt6.QtCore import QTimer
         logger = logging.getLogger(__name__)
         start_time = time.time()
         logger.debug(f"[JUSTIFIED_GALLERY] ========== set_images() STARTED ==========")
         logger.debug(f"[JUSTIFIED_GALLERY] New image count: {len(images)}")
-        
-        # 0. Hide empty message if we have new images or are clearing
+
         self.hide_empty_message()
-        
-        # 1. Store images
-        self.images = images
-        # Clear metadata cache for new folder load
-        self._metadata_cache = {}
-        
-        # 2. Reset scroll position and selection for new folder
-        if hasattr(self, 'parent_scroll_area') and self.parent_scroll_area:
-            self.parent_scroll_area.verticalScrollBar().setValue(0)
-            self.parent_scroll_area.horizontalScrollBar().setValue(0)
-            
-        # 3. Increase generation to invalidate pending loads
+
+        # Invalidate pending thumbnail work before changing layout state.
         self._gallery_generation += 1
-        
-        # 4. Cancel active tasks
-        active_indices = list(self._active_tasks.keys())
         cancelled_count = 0
-        for idx in active_indices:
-            task = self._active_tasks.get(idx)
-            if task:
+        for task in list(getattr(self, '_active_tasks', {}).values()):
+            try:
                 task.cancel()
                 cancelled_count += 1
-        
-        # Clear priority queue
-        items_cleared = len(self._priority_queue)
-        self._priority_queue = []
-        
-        logger.info(f"[JUSTIFIED_GALLERY] Folder switch detected, new generation: {self._gallery_generation} "
-                   f"(clearing {items_cleared} regular and {cancelled_count} priority queued items)")
-        
+            except Exception:
+                pass
         self._active_tasks = {}
-        self._load_queue = [] # Use list instead of deque for slicing support
+        self._load_queue = []
+        self._priority_queue = []
+        self._loading_tiles.clear()
+        self._background_loading_active = False
+        self._images_loaded_count = 0
+        self._render_start_time = None
         self._loaded_indices = set()
-        
-        # 5. Build layout
-        # If no width yet, we might need a retry
-        if self.width() <= 0:
-            def retry_set_images():
-                if self.width() > 0:
-                    self.build_gallery(bulk_metadata)
-                else:
-                    QTimer.singleShot(100, retry_set_images)
-            QTimer.singleShot(100, retry_set_images)
-        else:
-            # Process events once to ensure viewport has correct size, then build
-            # This fixes the pillarbox issue by ensuring viewport width is calculated correctly
-            from PyQt6.QtWidgets import QApplication
-            QApplication.processEvents()
-            self.build_gallery(bulk_metadata)
-            
-        logger.debug(f"[JUSTIFIED_GALLERY] ========== set_images() COMPLETED in {time.time() - start_time:.3f}s ==========")
-        
-        # Stop any pending load timers
+
         if self._load_timer:
             self._load_timer.stop()
             self._load_timer = None
-            
-        # Explicitly cancel all active worker tasks
-        if hasattr(self, '_active_tasks'):
-            active_count = len(self._active_tasks)
-            for task in self._active_tasks.values():
-                task.cancel()
-            self._active_tasks.clear()
-            if active_count > 0:
-                logger.info(f"[JUSTIFIED_GALLERY] Cancelled {active_count} active web worker tasks")
-        
-        # Clear the load queues to prevent old folder's images from loading
-        old_queue_size = len(self._load_queue)
-        old_priority_size = len(self._priority_queue) if hasattr(self, '_priority_queue') else 0
-        self._load_queue.clear()
-        if hasattr(self, '_priority_queue'):
-            self._priority_queue.clear()
-        if old_queue_size > 0 or old_priority_size > 0:
-            logger.debug(f"[JUSTIFIED_GALLERY] Cleared {old_queue_size} regular and {old_priority_size} priority items from load queue")
-        
-        # Reset rendering progress tracking
-        self._images_loaded_count = 0
-        self._render_start_time = None
-        
-        # Clear loading tracking
-        self._loading_tiles.clear()
-        
-        # Stop background loading cycle
-        self._background_loading_active = False
-        
-        # 1. Clear existing widgets and move to pool instead of deleting
+
         for label in self._visible_widgets.values():
             label.hide()
             self._widget_pool.append(label)
         self._visible_widgets = {}
-        
-        # ROBUST CLEANUP: Check for any orphaned thumbnail labels
-        # Use findChildren to catch any widgets that were tracked incorrectly
-        # This fixes the "ghost image" bug where an image persists after folder switch
+
         try:
-            # ThumbnailLabel is defined in this file (main.py)
-            orphans_found = 0
             for child in self.findChildren(ThumbnailLabel):
                 if not child.isHidden():
                     child.hide()
-                    # Use careful add to pool - only if not already in it (though pool is list)
                     if child not in self._widget_pool:
-                         self._widget_pool.append(child)
-                    orphans_found += 1
-            if orphans_found > 0:
-                logger.debug(f"[JUSTIFIED_GALLERY] Cleaned up {orphans_found} orphan gallery widgets")
+                        self._widget_pool.append(child)
         except Exception as e:
-            logger.error(f"[JUSTIFIED_GALLERY] Error cleaning up orphans: {e}")
-        
+            logger.debug(f"[JUSTIFIED_GALLERY] Error cleaning orphan gallery widgets: {e}")
+
+        self.images = list(images or [])
+        self._metadata_cache = {}
+        if bulk_metadata:
+            self._metadata_cache.update(bulk_metadata)
         self._gallery_layout_items = []
-        
-        logger.debug(f"[JUSTIFIED_GALLERY] Cleared visible widgets and reset layout state")
-        
-        # Force immediate update to clear old layout
+
+        if hasattr(self, 'parent_scroll_area') and self.parent_scroll_area:
+            self.parent_scroll_area.verticalScrollBar().setValue(0)
+            self.parent_scroll_area.horizontalScrollBar().setValue(0)
+
+        logger.info(f"[JUSTIFIED_GALLERY] Folder switch detected, new generation: {self._gallery_generation} "
+                   f"(cancelled {cancelled_count} active tasks)")
+
         self.update()
         self.repaint()
-        from PyQt6.QtWidgets import QApplication
-        QApplication.processEvents()
-        
-        # Rebuild - but only if widget has proper size
-        if self.width() > 0:
-            # Ensure viewport width is calculated correctly before building
-            viewport_width = self._get_viewport_width()
-            # Only build if viewport width is reasonable (at least 300px)
-            if viewport_width >= 300:
-                self.build_gallery()
-            else:
-                logger.warning(f"[JUSTIFIED_GALLERY] Viewport width too small ({viewport_width}), delaying build")
-                from PyQt6.QtCore import QTimer
-                QTimer.singleShot(100, self._delayed_build)
-        else:
-            logger.warning("[JUSTIFIED_GALLERY] Widget has no width yet, delaying build")
-            from PyQt6.QtCore import QTimer
-            QTimer.singleShot(100, self._delayed_build)
-        
-        total_time = time.time() - start_time
-        logger.debug(f"[JUSTIFIED_GALLERY] ========== set_images() COMPLETED in {total_time:.3f}s ==========")
-        
-        # 6. Trigger initial load of visible images
-        from PyQt6.QtCore import QTimer
-        QTimer.singleShot(100, self.load_visible_images)
 
+        def build_when_ready():
+            if self.width() > 0 and self._get_viewport_width() >= 300:
+                self.build_gallery(self._metadata_cache if self._metadata_cache else None)
+                QTimer.singleShot(100, self.load_visible_images)
+            else:
+                QTimer.singleShot(100, build_when_ready)
+
+        if self.width() > 0 and self._get_viewport_width() >= 300:
+            self.build_gallery(self._metadata_cache if self._metadata_cache else None)
+        else:
+            QTimer.singleShot(100, build_when_ready)
+
+        total_time = time.time() - start_time
         logger.debug(f"[JUSTIFIED_GALLERY] ========== set_images() COMPLETED in {total_time:.3f}s ==========")
 
 # Refactored: Legacy code (RAWProcessor, JustifiedGallery) removed.
@@ -4400,9 +4322,8 @@ class RAWImageViewer(QMainWindow):
                             # Get EXIF orientation from the main file (cached), NOT the embedded thumbnail
                             try:
                                 orientation = 1
-                                if hasattr(self, 'image_cache'):
-                                    exif_dict = self.image_cache.get_exif_data(file_path)
-                                    orientation = exif_dict.get('orientation', 1)
+                                if hasattr(self, 'get_orientation_from_exif'):
+                                    orientation = self.get_orientation_from_exif(file_path)
                                 
                                 # Apply manual orientation correction
                                 if orientation == 3:
@@ -4550,7 +4471,7 @@ class RAWImageViewer(QMainWindow):
         self._manager_display_track_path = None
         self._manager_displayed_max_dim = 0
         self.thumbnail_cache = {}  # Cache for thumbnails
-        self.film_strip_visible = False
+        self._histogram_user_hidden = False
         self.thumbnail_threads = []  # Track running thumbnail threads
         
         # View mode: 'single' for single image view, 'gallery' for gallery view
@@ -4959,19 +4880,20 @@ class RAWImageViewer(QMainWindow):
     def get_orientation_from_exif(self, file_path):
         """Extract orientation from EXIF data for non-RAW files"""
         try:
+            if hasattr(self, "image_cache") and self.image_cache is not None:
+                cached = self.image_cache.get_exif(file_path)
+                if cached:
+                    cached_orientation = cached.get("orientation")
+                    if isinstance(cached_orientation, int) and 1 <= cached_orientation <= 8:
+                        return cached_orientation
+        except Exception:
+            pass
+        try:
             # Suppress exifread warnings for unsupported file formats
             with warnings.catch_warnings():
                 warnings.filterwarnings('ignore', category=UserWarning, module='exifread')
             with open(file_path, 'rb') as f:
                 tags = exifread.process_file(f, details=False)
-
-                # Debug: Print EXIF orientation, make, and model
-                orientation_tag = tags.get('Image Orientation')
-                make_tag = tags.get('Image Make')
-                model_tag = tags.get('Image Model')
-                print(f"[DEBUG] EXIF Orientation: {orientation_tag}")
-                print(f"[DEBUG] EXIF Make: {make_tag}")
-                print(f"[DEBUG] EXIF Model: {model_tag}")
 
                 # Check for orientation tag
                 orientation_tag = tags.get('Image Orientation')
@@ -4990,7 +4912,13 @@ class RAWImageViewer(QMainWindow):
                         'Rotated 90 CCW': 8
                     }
 
-                    return orientation_map.get(orientation_str, 1)
+                    orientation_value = orientation_map.get(orientation_str, 1)
+                    try:
+                        if hasattr(self, "image_cache") and self.image_cache is not None:
+                            self.image_cache.put_exif(file_path, {"orientation": orientation_value})
+                    except Exception:
+                        pass
+                    return orientation_value
 
                 return 1  # Default orientation (no rotation needed)
         except Exception:
@@ -5437,6 +5365,7 @@ class RAWImageViewer(QMainWindow):
         """)
         left_buttons_layout.addWidget(
             self.shortcuts_hint_button, 0, alignment=Qt.AlignmentFlag.AlignVCenter)
+        self._set_shortcuts_hint_hovered(True)
         
         # Add left buttons to main layout
         status_layout.addWidget(left_buttons_widget)
@@ -5836,20 +5765,20 @@ class RAWImageViewer(QMainWindow):
             self.single_view_container.hide()
         else:
             self.scroll_area.hide()
-        
         # Hide view mode button in gallery mode (users can click images to return to single view)
         if hasattr(self, 'view_mode_button'):
             self.view_mode_button.hide()
         
-        # In gallery mode: hide metadata and counter, but keep status_bar visible for sort button
+        # In gallery mode: hide per-image metadata, but keep total count visible.
         if hasattr(self, 'status_bar'):
             self.status_bar.show()  # Keep status_bar visible to show sort button
             self.status_bar.showMessage("")  # Clear message
-        # Hide metadata and counter labels
         if hasattr(self, 'status_metadata_label'):
             self.status_metadata_label.hide()
         if hasattr(self, 'status_counter_label'):
-            self.status_counter_label.hide()
+            total = len(self.image_files) if self.image_files else 0
+            self.status_counter_label.setText(f"{total} images")
+            self.status_counter_label.show()
         # Show sort button in gallery mode
         if hasattr(self, 'sort_toggle_button'):
             self.sort_toggle_button.show()
@@ -5963,10 +5892,40 @@ class RAWImageViewer(QMainWindow):
             
             if hasattr(self, 'gallery_justified') and self.gallery_justified and self.image_files:
                 try:
-                    self.gallery_justified.set_images(self.image_files, meta)
                     import logging
+                    from datetime import datetime
                     logger = logging.getLogger(__name__)
-                    logger.info(f"[GALLERY] Background metadata ready: {len(meta)} items, gallery refreshed")
+                    current_file = getattr(self, "current_file_path", None)
+                    newest_first = self.get_sort_preference()
+
+                    def _sort_key(fp):
+                        timestamp = 0
+                        data = meta.get(fp) if meta else None
+                        if data and data.get("capture_time"):
+                            try:
+                                timestamp = datetime.strptime(
+                                    data["capture_time"], "%H:%M:%S %Y-%m-%d"
+                                ).timestamp()
+                            except Exception:
+                                timestamp = 0
+                        if timestamp == 0:
+                            try:
+                                timestamp = os.path.getmtime(fp)
+                            except OSError:
+                                timestamp = 0
+                        return (timestamp, os.path.basename(fp).lower())
+
+                    sorted_files = sorted(self.image_files, key=_sort_key, reverse=newest_first)
+                    if sorted_files != self.image_files:
+                        self.image_files = sorted_files
+                        if current_file in self.image_files:
+                            self.current_file_index = self.image_files.index(current_file)
+                        self.update_status_bar()
+
+                    self.gallery_justified.set_images(self.image_files, meta)
+                    if current_file and hasattr(self.gallery_justified, "scroll_to_file"):
+                        self.gallery_justified.scroll_to_file(current_file)
+                    logger.info(f"[GALLERY] Background metadata ready: {len(meta)} items, gallery sorted/refreshed")
                 except Exception as e:
                     import logging
                     logger = logging.getLogger(__name__)
@@ -5998,6 +5957,9 @@ class RAWImageViewer(QMainWindow):
                 self.gallery_justified.set_images(
                     self.image_files, bulk_metadata if bulk_metadata else None
                 )
+                current_file = getattr(self, "current_file_path", None)
+                if current_file and hasattr(self.gallery_justified, "scroll_to_file"):
+                    self.gallery_justified.scroll_to_file(current_file)
             except Exception as e:
                 logger.exception(f"[GALLERY] set_images failed: {e}")
                 self.show_error(
@@ -6031,9 +5993,51 @@ class RAWImageViewer(QMainWindow):
                         
                     def run(self_inner):
                         try:
+                            import os
+                            import exifread
+                            import warnings
+                            from datetime import datetime
                             from image_cache import get_image_cache
                             cache = get_image_cache()
                             meta = cache.get_multiple_exif(self_inner.files, fast_mode=True)
+                            for fp in self_inner.files:
+                                data = meta.get(fp, {}) or {}
+                                if data.get("capture_time"):
+                                    continue
+                                try:
+                                    with warnings.catch_warnings():
+                                        warnings.filterwarnings('ignore', category=UserWarning, module='exifread')
+                                        with open(fp, "rb") as f:
+                                            tags = exifread.process_file(f, details=False)
+                                    dt_tag = (
+                                        tags.get("EXIF DateTimeOriginal")
+                                        or tags.get("Image DateTime")
+                                        or tags.get("EXIF DateTime")
+                                    )
+                                    if not dt_tag:
+                                        continue
+                                    dt = datetime.strptime(str(dt_tag), "%Y:%m:%d %H:%M:%S")
+                                    data["capture_time"] = dt.strftime("%H:%M:%S %Y-%m-%d")
+                                    orient = tags.get("Image Orientation")
+                                    if orient:
+                                        orientation_map = {
+                                            'Horizontal (normal)': 1,
+                                            'Mirrored horizontal': 2,
+                                            'Rotated 180': 3,
+                                            'Mirrored vertical': 4,
+                                            'Mirrored horizontal then rotated 90 CCW': 5,
+                                            'Rotated 90 CW': 6,
+                                            'Mirrored horizontal then rotated 90 CW': 7,
+                                            'Rotated 90 CCW': 8,
+                                        }
+                                        data["orientation"] = orientation_map.get(str(orient), data.get("orientation", 1))
+                                    meta[fp] = data
+                                    try:
+                                        cache.put_exif(fp, data)
+                                    except Exception:
+                                        pass
+                                except Exception:
+                                    continue
                             self_inner.signals.ready.emit(meta, self_inner.folder_path)
                         except Exception as e:
                             import logging
@@ -7411,6 +7415,56 @@ class RAWImageViewer(QMainWindow):
             "You can drag and drop files or folders onto the window."
         )
 
+    def _set_shortcuts_hint_hovered(self, hovered: bool):
+        """Toggle hint prominence without affecting layout width."""
+        if not hasattr(self, "shortcuts_hint_button"):
+            return
+        btn = self.shortcuts_hint_button
+        if hovered:
+            btn.setEnabled(True)
+            btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+            btn.setStyleSheet("""
+                QPushButton {
+                    color: #C8C8C8;
+                    font-size: 11px;
+                    font-weight: 600;
+                    padding: 0px;
+                    border: none;
+                    background: transparent;
+                    border-radius: 11px;
+                    min-width: 22px;
+                    max-width: 22px;
+                    min-height: 22px;
+                    max-height: 22px;
+                }
+                QPushButton:hover {
+                    color: #E0E0E0;
+                    background-color: rgba(255, 255, 255, 0.08);
+                }
+                QPushButton:pressed {
+                    background-color: rgba(255, 255, 255, 0.12);
+                }
+            """)
+        else:
+            btn.setEnabled(False)
+            btn.setCursor(QCursor(Qt.CursorShape.ArrowCursor))
+            # Keep the button in layout so metadata text does not shift.
+            btn.setStyleSheet("""
+                QPushButton {
+                    color: rgba(136, 136, 136, 0);
+                    font-size: 11px;
+                    font-weight: 600;
+                    padding: 0px;
+                    border: none;
+                    background: transparent;
+                    border-radius: 11px;
+                    min-width: 22px;
+                    max-width: 22px;
+                    min-height: 22px;
+                    max-height: 22px;
+                }
+            """)
+
     def show_keyboard_shortcuts(self):
         """Show keyboard shortcuts dialog"""
         raw = self._keyboard_shortcuts_help_text().strip()
@@ -8001,6 +8055,9 @@ class RAWImageViewer(QMainWindow):
             _prev_fp = getattr(self, "current_file_path", None)
             if _prev_fp and _norm_path(_prev_fp) != _norm_path(requested_file_path):
                 self.image_manager.cancel_task(_prev_fp)
+                # Reset user-hide state when navigating to a different file.
+                self._histogram_user_hidden = False
+                self._histogram_overlay_visible = True
             # Legacy cleanup for old processor (if still exists)
             if self.current_processor:
                 logger.info(f"[LOAD] Legacy processor cleanup: {type(self.current_processor).__name__}")
@@ -8017,6 +8074,8 @@ class RAWImageViewer(QMainWindow):
             #    (it's the old file), so the check would always cancel
             self.current_file_path = requested_file_path
             self._last_loaded_path = requested_file_path # Track for view switching optimizations
+            if self.image_files and requested_file_path in self.image_files:
+                self.current_file_index = self.image_files.index(requested_file_path)
             np_req = _norm_path(requested_file_path)
             if getattr(self, "_manager_display_track_path", None) != np_req:
                 self._manager_display_track_path = np_req
@@ -8532,6 +8591,10 @@ class RAWImageViewer(QMainWindow):
                 c.relayout_histogram()
         else:
             w.setEnabled(True)
+            if self._histogram_user_hidden:
+                self._histogram_overlay_visible = False
+            else:
+                self._histogram_overlay_visible = True
             w.setVisible(getattr(self, "_histogram_overlay_visible", True))
             w.set_pixmap(pm)
             c = getattr(self, "single_view_container", None)
@@ -9409,6 +9472,7 @@ class RAWImageViewer(QMainWindow):
                     return
                 self._histogram_overlay_visible = not getattr(
                     self, "_histogram_overlay_visible", True)
+                self._histogram_user_hidden = not self._histogram_overlay_visible
                 if hasattr(self, "single_image_histogram"):
                     self.single_image_histogram.setVisible(
                         self._histogram_overlay_visible)
@@ -11154,7 +11218,11 @@ class RAWImageViewer(QMainWindow):
                 self.status_metadata_label.setVisible(False)
 
         # Update image counter (right label)
-        if self.image_files and self.current_file_index >= 0:
+        if getattr(self, "view_mode", "single") == "gallery":
+            total_files = len(self.image_files) if self.image_files else 0
+            self.status_counter_label.setVisible(True)
+            self.status_counter_label.setText(f"{total_files} images")
+        elif self.image_files and self.current_file_index >= 0:
             total_files = len(self.image_files)
             current_pos = self.current_file_index + 1
             self.status_counter_label.setText(f"{current_pos} / {total_files}")
@@ -11401,8 +11469,6 @@ class RAWImageViewer(QMainWindow):
                 if not hasattr(self, 'gallery_widget') or not self.gallery_widget:
                     self._create_gallery_widget()
                 self._show_gallery_view()
-                if self.gallery_justified:
-                    self.gallery_justified.set_images(self.image_files.copy(), bulk_metadata)
             else:
                 self._show_single_view()
                 if hasattr(self, 'gallery_justified') and self.gallery_justified:
@@ -11944,7 +12010,7 @@ def main():
         # Use is_windows variable to avoid calling platform.system() again
         if is_windows:
             print("  [Windows] Setting AppUserModelID...", flush=True)
-            myappid = 'RAWviewer.1.5.4'
+            myappid = 'RAWviewer.1.6.0'
             ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
             print("  [Windows] AppUserModelID set", flush=True)
 
@@ -11953,7 +12019,7 @@ def main():
 
         # Set application properties
         app.setApplicationName("RAW Image Viewer")
-        app.setApplicationVersion("1.5.4")
+        app.setApplicationVersion("1.6.0")
 
         # macOS: force dark UI to better match our dark theme (including title bar).
         # Using Qt's palette is more reliable than trying to hard-set NSWindow colors.
