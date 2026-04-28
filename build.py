@@ -24,6 +24,55 @@ def run_command(cmd):
     return result.returncode == 0
 
 
+def update_macos_plist(app_path):
+    """Update Info.plist in macOS app bundle to add file associations"""
+    plist_path = os.path.join(app_path, 'Contents', 'Info.plist')
+    if not os.path.exists(plist_path):
+        print(f"[WARNING] Info.plist not found at {plist_path}")
+        return False
+        
+    try:
+        import plistlib
+        with open(plist_path, 'rb') as f:
+            plist = plistlib.load(f)
+            
+        # Define supported extensions
+        image_extensions = [
+            'jpg', 'jpeg', 'png', 'bmp', 'gif', 'webp', 'tif', 'tiff', 'heic',
+            'cr2', 'cr3', 'nef', 'arw', 'dng', 'raf', 'orf', 'rw2', 'pef', 'srw', 'crw', 'mef', 'mrw'
+        ]
+        
+        # Add CFBundleDocumentTypes if not present
+        if 'CFBundleDocumentTypes' not in plist:
+            plist['CFBundleDocumentTypes'] = []
+            
+        # Check if our document type is already defined
+        doc_type_exists = any(
+            doc.get('CFBundleTypeName') == 'Image File' for doc in plist['CFBundleDocumentTypes']
+        )
+        
+        if not doc_type_exists:
+            doc_type = {
+                'CFBundleTypeName': 'Image File',
+                'CFBundleTypeRole': 'Viewer',
+                'LSHandlerRank': 'Alternate',
+                'LSItemContentTypes': [
+                    'public.image',
+                    'public.camera-raw-image'
+                ],
+                'CFBundleTypeExtensions': image_extensions
+            }
+            plist['CFBundleDocumentTypes'].append(doc_type)
+            
+            with open(plist_path, 'wb') as f:
+                plistlib.dump(plist, f)
+            print("[SUCCESS] Updated Info.plist with file associations")
+        return True
+    except Exception as e:
+        print(f"[ERROR] Failed to update Info.plist: {e}")
+        return False
+
+
 def install_dependencies():
     """Install required dependencies"""
     print("Installing/upgrading dependencies...")
@@ -206,6 +255,9 @@ def main():
         exe_path = Path('dist/RAWviewer.app')
     if exe_path.exists():
         print(f"[SUCCESS] Executable created: {exe_path}")
+        if platform.system() == 'Darwin':
+            print("Patching macOS Info.plist...")
+            update_macos_plist(str(exe_path))
     else:
         print("[ERROR] Executable was not created!")
 

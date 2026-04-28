@@ -11980,6 +11980,40 @@ class RAWImageViewer(QMainWindow):
             super().closeEvent(event)
     
 
+class RAWApplication(QApplication):
+    """Custom QApplication to handle macOS FileOpen events"""
+    def __init__(self, argv):
+        super().__init__(argv)
+        self.viewer = None
+        self.pending_files = []
+
+    def set_viewer(self, viewer):
+        """Set the main viewer window and load any pending files"""
+        self.viewer = viewer
+        for file_path in self.pending_files:
+            self._load_file(file_path)
+        self.pending_files.clear()
+
+    def event(self, event):
+        """Intercept application-level events"""
+        if event.type() == QEvent.Type.FileOpen:
+            file_path = event.file()
+            if file_path:
+                if self.viewer:
+                    self._load_file(file_path)
+                else:
+                    self.pending_files.append(file_path)
+            return True
+        return super().event(event)
+
+    def _load_file(self, path):
+        """Load a file into the viewer"""
+        if os.path.isfile(path):
+            self.viewer.load_folder_images(os.path.dirname(path), start_file=os.path.basename(path))
+        elif os.path.isdir(path):
+            self.viewer.load_folder_images(path)
+
+
 def main():
     """Main function to run the application"""
     import logging
@@ -12097,8 +12131,8 @@ def main():
             ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
             print("  [Windows] AppUserModelID set", flush=True)
 
-        app = QApplication(sys.argv)
-        print("QApplication created successfully", flush=True)
+        app = RAWApplication(sys.argv)
+        print("RAWApplication created successfully", flush=True)
 
         # Set application properties
         app.setApplicationName("RAW Image Viewer")
@@ -12160,6 +12194,10 @@ def main():
         print("Creating RAWImageViewer...", flush=True)
         viewer = RAWImageViewer()
         print("RAWImageViewer created successfully", flush=True)
+        
+        # Connect viewer to application to handle macOS file open events
+        app.set_viewer(viewer)
+        
         # Check for file or folder argument
         if len(sys.argv) > 1:
             path = sys.argv[1]
