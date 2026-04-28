@@ -1,10 +1,10 @@
 # RAWviewer Release Notes
 
-## 🚀 Version 1.6.0 - Trackpad Pinch-to-Zoom & Gallery Stability
+## 🚀 Version 1.6.0 - Trackpad Pinch-to-Zoom, Cacheless Trial & Gallery Stability
 **Release Date: April 28, 2026**
 
 ### 🎯 What's New
-**Adds seamless pinch-to-zoom support for Mac and Windows trackpads, improves large-folder gallery behavior, keeps cacheless mode responsive, and polishes single-image UI controls.**
+**Adds seamless pinch-to-zoom support for Mac and Windows trackpads, improves large-folder gallery behavior, introduces a cacheless-by-default trial mode, faster non-RAW thumbnail decoding, and polishes single-image UI controls.**
 
 ### ✨ Key Features
 
@@ -15,42 +15,25 @@
 ✅ **Boundary Limits** – Maximum zoom is capped at 100% to ensure smooth performance, and zooming out is neatly bounded to the "Fit to Window" size.
 ✅ **Live Percentage** – The status bar actively displays the precise zoom percentage in real-time as you pinch.
 
-#### 🖼️ Gallery View Improvements
+#### ⚡ Performance & Cache Behavior
+✅ **Memory-Only Default Cache** – Persistent disk/SQLite cache is now disabled by default to prioritize clean trial behavior and reduce local cache side effects.
+✅ **Optional Persistent Cache Toggle** – You can re-enable persistent cache with `RAWVIEWER_PERSISTENT_CACHE=1`.
+✅ **Legacy Cache Auto-Cleanup on Startup** – In memory-only mode, old `~/.rawviewer_cache` is automatically removed once as a safety cleanup.
+✅ **Reduced EXIF Re-Reads** – Orientation lookup now checks memory cache first to reduce repeated EXIF reads.
+✅ **Cleaner Console Output** – Removed noisy EXIF debug prints and fixed stale cache API usage in preview orientation handling.
+
+#### 🖼️ Gallery & Loading Improvements
+✅ **Faster Non-RAW Thumbnail Path** – Standard image thumbnails now use `QImageReader.setScaledSize()` for faster decode at target size.
+✅ **Robust Embedded JPEG Fallback** – Improved fallback scanning logic for embedded previews when RAW decode paths fail.
 ✅ **Single-Pass Gallery Rebuilds** – Removed duplicate gallery rebuild/cleanup work that could slow large folders and make thumbnail updates appear unstable.
 ✅ **EXIF-Aware Gallery Ordering** – Gallery can refresh ordering after background EXIF capture-time extraction, while keeping the UI responsive during the initial load.
 ✅ **Current Image Positioning** – Switching from single image view back to gallery now scrolls to the current image instead of starting from the beginning.
 ✅ **Gallery Total Count** – Gallery view now shows the total number of images in the bottom status bar.
 
-#### 📊 Single-Image UI Fixes
-✅ **Histogram Reliability** – Histogram visibility now resets correctly when moving to a new image while still staying disabled when no image is loaded.
-✅ **Stable Info Button** – The bottom information button remains visible without shifting EXIF metadata text.
-
-#### ⚡ Cacheless Mode Refinements
-✅ **Reduced EXIF Re-Reads** – Orientation lookup now checks memory cache first to reduce repeated EXIF reads.
-✅ **Cleaner Console Output** – Removed noisy EXIF debug prints and fixed stale cache API usage in preview orientation handling.
-
----
-
-## 🚀 Version 1.5.5 - Cacheless Trial & Loading Optimizations
-**Release Date: April 28, 2026**
-
-### 🎯 What's New
-**Introduces a cacheless-by-default trial mode, faster non-RAW thumbnail decoding, and startup safety cleanup for legacy cache folders.**
-
-### ✨ Key Features
-
-#### ⚡ Performance & Cache Behavior
-✅ **Memory-Only Default Cache** – Persistent disk/SQLite cache is now disabled by default to prioritize clean trial behavior and reduce local cache side effects.
-✅ **Optional Persistent Cache Toggle** – You can re-enable persistent cache with `RAWVIEWER_PERSISTENT_CACHE=1`.
-✅ **Legacy Cache Auto-Cleanup on Startup** – In memory-only mode, old `~/.rawviewer_cache` is automatically removed once as a safety cleanup.
-
-#### 🖼️ Image Loading Improvements
-✅ **Faster Non-RAW Thumbnail Path** – Standard image thumbnails now use `QImageReader.setScaledSize()` for faster decode at target size.
-✅ **Robust Embedded JPEG Fallback** – Improved fallback scanning logic for embedded previews when RAW decode paths fail.
-
-#### 🧭 UX & Stability
+#### 📊 Single-Image & UX Fixes
 ✅ **Open Behavior Consistency** – Restored open-flow behavior for choosing gallery folder vs single image loading.
-✅ **Histogram UX Guard** – Histogram is hidden/disabled when no image is loaded.
+✅ **Histogram UX Guard** – Histogram visibility now resets correctly when moving to a new image while still staying disabled when no image is loaded.
+✅ **Stable Info Button** – The bottom information button remains visible without shifting EXIF metadata text.
 ✅ **Background Cleanup Coverage** – Cache cleanup paths were expanded to include preview-related data for better consistency.
 
 ---
