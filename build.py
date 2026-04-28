@@ -278,6 +278,8 @@ def main():
         if platform.system() == 'Darwin':
             print("Patching macOS Info.plist...")
             update_macos_plist(str(exe_path))
+            print("Re-signing macOS app bundle (ad-hoc)...")
+            run_command(['codesign', '--force', '--deep', '-s', '-', str(exe_path)])
             print("Clearing macOS quarantine attribute...")
             run_command(['xattr', '-cr', str(exe_path)])
     else:
