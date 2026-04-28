@@ -64,17 +64,28 @@ def update_macos_plist(app_path):
             }
             plist['CFBundleDocumentTypes'].append(doc_type)
             
+        # Set a unique Bundle Identifier
+        plist['CFBundleIdentifier'] = 'com.markyip.rawviewer'
+        plist['CFBundleName'] = 'RAWviewer'
+        plist['CFBundleDisplayName'] = 'RAW Image Viewer'
+        plist['CFBundleExecutable'] = 'RAWviewer'
+        plist['CFBundlePackageType'] = 'APPL'
+        plist['CFBundleShortVersionString'] = VERSION
+        
         # Add macOS permission usage descriptions
         plist['NSDesktopFolderUsageDescription'] = 'RAWviewer needs access to your Desktop to display images.'
         plist['NSDocumentsFolderUsageDescription'] = 'RAWviewer needs access to your Documents folder to display images.'
         plist['NSDownloadsFolderUsageDescription'] = 'RAWviewer needs access to your Downloads folder to display images.'
         plist['NSRemovableVolumesUsageDescription'] = 'RAWviewer needs access to external volumes to display images from cameras or cards.'
+        plist['NSPhotoLibraryUsageDescription'] = 'RAWviewer needs access to your photo library to display images.'
+        
         # Ensure it doesn't show as a background process only
         plist['LSMinimumSystemVersion'] = '10.15.0'
+        plist['NSHighResolutionCapable'] = True
 
         with open(plist_path, 'wb') as f:
             plistlib.dump(plist, f)
-        print("[SUCCESS] Updated Info.plist with file associations and usage descriptions")
+        print("[SUCCESS] Updated Info.plist with Bundle ID, file associations and usage descriptions")
         return True
     except Exception as e:
         print(f"[ERROR] Failed to update Info.plist: {e}")
@@ -238,6 +249,7 @@ def main():
     
     if platform.system() == 'Darwin':
         cmd_base.append("--onedir")
+        cmd_base.extend(["--osx-bundle-identifier", "com.markyip.rawviewer"])
     else:
         cmd_base.append("--onefile")
         
@@ -266,6 +278,8 @@ def main():
         if platform.system() == 'Darwin':
             print("Patching macOS Info.plist...")
             update_macos_plist(str(exe_path))
+            print("Clearing macOS quarantine attribute...")
+            run_command(['xattr', '-cr', str(exe_path)])
     else:
         print("[ERROR] Executable was not created!")
 
