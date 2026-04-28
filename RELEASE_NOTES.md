@@ -6,6 +6,9 @@
 - macOS Native Integration: The application can now be set as the default viewer for images and RAW files on macOS. Added support for handling `FileOpen` events to instantly display files opened from Finder.
 - Seamless pinch-to-zoom support for Mac and Windows trackpads, improved large-folder gallery behavior, a cacheless-by-default trial mode, faster non-RAW thumbnail decoding, and polished single-image UI controls.
 
+> [!IMPORTANT]
+> **macOS First Launch Note**: If you see a warning about "Malware" when using *Open With* for the first time, simply Right-click the app in your Applications folder and choose **Open**. This registers the app with macOS, after which *Open With* will work normally.
+
 🛠️ Fixes & improvements
 - Pinch-to-Zoom: Smoothly zoom in and out of images using the native two-finger pinch gesture on Mac trackpads, and precision touchpads on Windows (or via Ctrl+Scroll Wheel).
 - Smart Cursor Anchoring: Zooming naturally anchors to the current cursor position, matching the expected behavior of modern macOS applications like Apple Photos.

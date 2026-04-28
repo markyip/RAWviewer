@@ -172,7 +172,7 @@ All dependencies are listed in `requirements.txt`:
   1. Go to **System Settings** > **Privacy & Security** > **Full Disk Access**.
   2. Click the **+** button and add `RAWviewer.app`.
   3. Toggle it to **ON**.
-- **"Open with" behavior**: For the very first launch, open the app directly and grant permissions. After that, "Right-click -> Open with" will work perfectly.
+- **"Open with" behavior**: For the very first launch, if you see a malware warning, open the app directly via Right-click -> "Open". This "registers" the app with macOS, after which "Right-click -> Open with" will work perfectly.
 
 ## 🚧 Upcoming Features
 
