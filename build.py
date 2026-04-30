@@ -4,7 +4,7 @@ Build script for RAW Image Viewer Windows/macOS executable
 Handles dependency installation and executable creation.
 """
 
-VERSION = "1.6.0"
+VERSION = "1.7.0"
 
 import os
 import subprocess
@@ -117,6 +117,17 @@ def install_dependencies():
         if not run_command([sys.executable, "-m", "pip", "install", "--upgrade", dep]):
             print(f"[ERROR] Failed to install {dep}")
             return False
+
+    if platform.system() == "Darwin":
+        print("Installing pyobjc-framework-Cocoa (macOS share sheet)...")
+        if not run_command(
+            [sys.executable, "-m", "pip", "install", "--upgrade", "pyobjc-framework-Cocoa"]
+        ):
+            print("[WARNING] pyobjc-framework-Cocoa install failed; Share may not work in the built app.")
+    elif platform.system() == "Windows":
+        print("Installing pywin32 (Windows Share verb)...")
+        if not run_command([sys.executable, "-m", "pip", "install", "--upgrade", "pywin32"]):
+            print("[WARNING] pywin32 install failed; Share may not work in the built app.")
 
     print("Dependencies installed successfully!")
     return True
@@ -249,6 +260,18 @@ def main():
         "--hidden-import", "send2trash",
         "--name", "RAWviewer"
     ]
+    if platform.system() == "Darwin":
+        cmd_base.extend([
+            "--hidden-import", "objc",
+            "--hidden-import", "AppKit",
+            "--hidden-import", "Foundation",
+        ])
+    elif platform.system() == "Windows":
+        cmd_base.extend([
+            "--hidden-import", "win32com.client",
+            "--hidden-import", "pythoncom",
+            "--hidden-import", "pywintypes",
+        ])
     
     if platform.system() == 'Darwin':
         cmd_base.append("--onedir")

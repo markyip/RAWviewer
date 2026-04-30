@@ -5,7 +5,7 @@ import logging
 import numpy as np
 from typing import List, Dict, Any, Optional
 
-from PyQt6.QtWidgets import QWidget, QApplication, QScrollArea, QLabel
+from PyQt6.QtWidgets import QWidget, QScrollArea, QLabel
 from PyQt6.QtCore import Qt, QTimer, QRect, QEvent, QSize
 from PyQt6.QtGui import QPixmap, QImage, QPainter, QBrush, QColor, QFont
 
@@ -220,6 +220,13 @@ class JustifiedGallery(QWidget):
         w_bucket = max(self._width_bucket_px, int(round(tw / self._width_bucket_px)) * self._width_bucket_px)
         return (file_path, h_bucket, w_bucket)
 
+    def invalidate_thumbnails_for_path(self, file_path: str) -> None:
+        """Drop cached gallery pixmaps for a path (e.g. after on-disk rotation)."""
+        try:
+            self._thumbnail_cache.remove_keys_for_file_path(file_path)
+        except Exception:
+            pass
+
     def resizeEvent(self, event):
         # Debounce expensive rebuilds during window resize.
         try:
@@ -243,7 +250,9 @@ class JustifiedGallery(QWidget):
     def _delayed_initial_build(self):
         self._setup_scroll_tracking()
         if self.width() > 0:
-            QApplication.processEvents()
+            # Never call processEvents() here: it can re-enter Qt/Python slots
+            # (e.g. ImageLoadManager.thumbnail_ready) while still inside gallery init
+            # and cause deep recursion / SIGABRT via pyqt6_err_print.
             self.build_gallery()
         else:
             QTimer.singleShot(50, self._delayed_initial_build)
@@ -707,6 +716,12 @@ class JustifiedGallery(QWidget):
         # (perf logging removed)
 
     def on_thumbnail_ready(self, file_path, thumbnail_data):
+        # Single-image view uses RAWImageViewer.on_manager_thumbnail_ready; skip gallery
+        # work to avoid duplicate handling and any re-entrant UI paths on the same signal.
+        if self.parent_viewer is not None and getattr(
+            self.parent_viewer, "view_mode", "gallery"
+        ) != "gallery":
+            return
         if file_path not in self._path_to_indices:
             return
 

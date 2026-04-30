@@ -103,6 +103,7 @@ def _norm_path(p: str) -> str:
     except Exception:
         return p or ""
 
+
 # Print immediately to verify script is running
 safe_print("=" * 80, flush=True)
 safe_print("RAWviewer: Starting imports...", flush=True)
@@ -252,7 +253,7 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QMessageBox, QScrollArea, QSizePolicy, QPushButton, QFrame,
                              QGridLayout, QScrollBar, QDialog, QSplashScreen)
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QPoint, QEvent, QSettings, QSize, QRect, QObject, QRunnable, QThreadPool, QTimer
-from PyQt6.QtGui import (QPixmap, QImage, QAction, QKeySequence,
+from PyQt6.QtGui import (QPixmap, QImage, QAction, QKeySequence, QGuiApplication,
                          QDragEnterEvent, QDropEvent, QCursor, QIcon,
                          QTransform, QRegion, QPainterPath, QPainter, QColor, QPen, QBrush, QPalette)
 print("PyQt6 imported successfully", flush=True)
@@ -2303,9 +2304,6 @@ class JustifiedGallery(QWidget):
         """Delayed initial build to ensure widget has proper size"""
         self._setup_scroll_tracking() # Ensure scroll tracking is set up
         if self.width() > 0:
-            # Process events once to ensure viewport has correct size, then build
-            from PyQt6.QtWidgets import QApplication
-            QApplication.processEvents()
             self.build_gallery()
         else:
             # If still no width, try again
@@ -2567,14 +2565,7 @@ class JustifiedGallery(QWidget):
                 current_y += row_h + self.MIN_SPACING
 
             # 4. Greedy Row Partitioning
-            # OPTIMIZATION: Throttled processEvents frequency for Windows performance
-            PROCESS_BATCH_SIZE = 100 
-            
             for idx, item in enumerate(self.images):
-                # Process events periodically to keep UI responsive
-                if idx > 0 and idx % PROCESS_BATCH_SIZE == 0:
-                    QApplication.processEvents()
-                
                 aspect = 1.333  # Default fallback
                 
                 if isinstance(item, str):
@@ -2617,8 +2608,6 @@ class JustifiedGallery(QWidget):
             self._total_content_height = int(current_y + 8)
             self.setMinimumHeight(self._total_content_height)
             self.update() 
-            
-            QApplication.processEvents() # Final flush
 
             logger.debug(f"[JUSTIFIED_GALLERY] Layout built in {time.time() - start_time:.3f}s. Items: {len(self._gallery_layout_items)}")
             
@@ -3439,9 +3428,6 @@ class JustifiedGallery(QWidget):
                         self.update()
                         self.repaint()
                         
-                        # Process events to ensure UI updates immediately
-                        QApplication.processEvents()
-                        
                         # Track loaded images
                         if hasattr(self, '_visible_images_loaded'):
                             self._visible_images_loaded += 1
@@ -3481,9 +3467,6 @@ class JustifiedGallery(QWidget):
                                 # Update the gallery widget itself
                                 self.update()
                                 self.repaint()
-                                
-                                # Process events to ensure UI updates immediately
-                                QApplication.processEvents()
                                 
                                 # Track loaded images
                                 if hasattr(self, '_visible_images_loaded'):
@@ -3547,9 +3530,6 @@ class JustifiedGallery(QWidget):
                                 # Update the gallery widget itself
                                 self.update()
                                 self.repaint()
-                                
-                                # Process events to ensure UI updates immediately
-                                QApplication.processEvents()
                                 
                                 if hasattr(self, '_visible_images_loaded'):
                                     self._visible_images_loaded += 1
@@ -4496,7 +4476,10 @@ class RAWImageViewer(QMainWindow):
         self._last_navigation_time = 0  # Timestamp of last navigation for rate limiting
         self._pending_navigation = None  # Store pending navigation request (file_path) for debouncing
         self._navigation_timer = None  # QTimer for debouncing rapid navigation
-        
+
+        self._slideshow_timer = None
+        self._slideshow_force_fit_next = False
+
         # Resize event handling
         self._is_resizing = False  # Flag to track when window is being actively resized
         
@@ -4554,16 +4537,14 @@ class RAWImageViewer(QMainWindow):
             f"  Available memory: {memory_info['system_available_gb']:.1f}GB", flush=True)
         QTimer.singleShot(1000, self._cleanup_old_image_cache)
 
-        # Try to restore previous session
-        print("  [RAWImageViewer] Restoring session state...", flush=True)
-        if self.restore_session_state():
-            # If session was restored, check if we need to show gallery view
-            if hasattr(self, 'view_mode') and self.view_mode == 'gallery':
-                # Show gallery view if it was the last view mode
-                self._show_gallery_view()
+        # Restore last folder / file / view mode (opt-out: RAWVIEWER_DISABLE_SESSION_RESTORE=1)
+        if os.environ.get("RAWVIEWER_DISABLE_SESSION_RESTORE", "0").strip() != "1":
+            print("  [RAWImageViewer] Restoring session state...", flush=True)
+            if self.restore_session_state():
+                if hasattr(self, "view_mode") and self.view_mode == "gallery":
+                    self._show_gallery_view()
         else:
-            # If no session, show default message
-            pass
+            print("  [RAWImageViewer] Session restore skipped (RAWVIEWER_DISABLE_SESSION_RESTORE)", flush=True)
         print("  [RAWImageViewer] Initialization complete!", flush=True)
 
     def _cleanup_old_image_cache(self):
@@ -4634,6 +4615,8 @@ class RAWImageViewer(QMainWindow):
                 f"[MANAGER] Skipping stale thumbnail ({max_dim}px max); "
                 f"already displayed {shown_max}px for this file"
             )
+            if hasattr(self, "loading_overlay"):
+                self.loading_overlay.hide_loading()
             return
 
         # If thumbnail is already near-preview size (or bigger), skip displaying it and wait for image_ready.
@@ -4750,11 +4733,14 @@ class RAWImageViewer(QMainWindow):
         """處理 ImageLoadManager 的 QPixmap 就緒信號（非 RAW 文件）"""
         import logging
         logger = logging.getLogger(__name__)
-        
+
         # Only handle current file's pixmap (normalize for Windows path format differences)
         if _norm_path(file_path) != _norm_path(getattr(self, "current_file_path", None)):
             logger.debug(f"[MANAGER] Pixmap for different file: {os.path.basename(file_path)}")
             return
+
+        if hasattr(self, "loading_overlay"):
+            self.loading_overlay.hide_loading()
         
         # Check if this is actually a RAW file (shouldn't happen, but log it)
         raw_extensions = {'.cr2', '.cr3', '.nef', '.arw', '.dng', '.orf', '.rw2', 
@@ -5082,7 +5068,14 @@ class RAWImageViewer(QMainWindow):
         # Add title bar first if it exists
         if hasattr(self, 'title_bar') and self.title_bar is not None:
             main_layout.addWidget(self.title_bar)
-        # Menu bar removed as requested
+        # Native menu bar (File, View, keyboard shortcuts)
+        self.create_menu_bar()
+        # Windows uses a frameless window: the system menu bar is often invisible; embed it in-window.
+        if platform.system() == "Windows":
+            try:
+                self.menuBar().setNativeMenuBar(False)
+            except Exception:
+                pass
         self.scroll_area = QScrollArea()
         # Key: allow scrolling when image is larger
         self.scroll_area.setWidgetResizable(False)
@@ -5168,6 +5161,7 @@ class RAWImageViewer(QMainWindow):
             "Double-click image to zoom in/out\n"
             "Click and drag to pan when zoomed\n"
             "Use Left/Right arrow keys to navigate between images (preserves zoom if zoomed in)\n"
+            "Bottom bar: Share and other controls when images are loaded\n"
             "Press Down Arrow to move the current image to Discard folder\n"
             "Press Delete to remove the current image\n"
             "Press H to show or hide histogram\n"
@@ -5233,23 +5227,14 @@ class RAWImageViewer(QMainWindow):
         left_buttons_layout.setContentsMargins(0, 0, 0, 0)
         # Add 12px spacing between buttons (🗁 and Gallery)
         left_buttons_layout.setSpacing(12)
-        
-        # Open button (left side) - Using qtawesome for reliability
-        self.open_button = QPushButton()
+
         import qtawesome as qta
-        self.open_button.setIcon(qta.icon('fa5s.folder-open', color='#B0B0B0'))
-        self.open_button.setIconSize(QSize(20, 20))
-        
-        self.open_button.setFlat(True)
-        self.open_button.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        self.open_button.setToolTip("Open Image File")
-        self.open_button.clicked.connect(self.open_file)
-        self.open_button.setStyleSheet("""
+        bottom_icon_btn_style = """
             QPushButton {
                 color: #B0B0B0;
                 font-size: 13px;
-                font-weight: 700;
-                padding: 0px;
+                font-weight: 500;
+                padding: 4px 8px;
                 border: none;
                 background: transparent;
                 text-align: center;
@@ -5263,7 +5248,21 @@ class RAWImageViewer(QMainWindow):
             QPushButton:pressed {
                 background-color: rgba(255, 255, 255, 0.1);
             }
-        """)
+            QPushButton:checked {
+                background-color: rgba(255, 255, 255, 0.08);
+            }
+        """
+
+        # Open button (left side) - Using qtawesome for reliability
+        self.open_button = QPushButton()
+        self.open_button.setIcon(qta.icon('fa5s.folder-open', color='#B0B0B0'))
+        self.open_button.setIconSize(QSize(20, 20))
+
+        self.open_button.setFlat(True)
+        self.open_button.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.open_button.setToolTip("Open Image File")
+        self.open_button.clicked.connect(self.open_file)
+        self.open_button.setStyleSheet(bottom_icon_btn_style)
         left_buttons_layout.addWidget(self.open_button, 0, alignment=Qt.AlignmentFlag.AlignVCenter)
         
         # Sort toggle button (left side) - Material Design 3 text button style
@@ -5303,7 +5302,7 @@ class RAWImageViewer(QMainWindow):
             try:
                 gallery_icon = qta.icon('fa5s.th', color='#B0B0B0')
                 self.view_mode_button.setIcon(gallery_icon)
-                self.view_mode_button.setIconSize(QSize(18, 18))
+                self.view_mode_button.setIconSize(QSize(20, 20))
             except Exception as e:
                 print(f"[WARNING] Failed to set qtawesome icon: {e}, using text fallback", flush=True)
                 self.view_mode_button.setText("Gallery")
@@ -5312,28 +5311,39 @@ class RAWImageViewer(QMainWindow):
         self.view_mode_button.setFlat(True)
         self.view_mode_button.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         self.view_mode_button.clicked.connect(self.toggle_view_mode)
-        self.view_mode_button.setStyleSheet("""
-            QPushButton {
-                color: #B0B0B0;
-                font-size: 13px;
-                font-weight: 500;
-                padding: 4px 8px;
-                border: none;
-                background: transparent;
-                text-align: center;
-                letter-spacing: 0.25px;
-            }
-            QPushButton:hover {
-                color: #E0E0E0;
-                background-color: rgba(255, 255, 255, 0.05);
-                border-radius: 4px;
-            }
-            QPushButton:pressed {
-                background-color: rgba(255, 255, 255, 0.1);
-            }
-        """)
+        self.view_mode_button.setStyleSheet(bottom_icon_btn_style)
         left_buttons_layout.addWidget(self.view_mode_button, 0, alignment=Qt.AlignmentFlag.AlignVCenter)
         self.view_mode_button.hide()  # Hidden by default until images are loaded
+
+        self.share_bottom_button = QPushButton()
+        self.share_bottom_button.setFlat(True)
+        self.share_bottom_button.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.share_bottom_button.setIcon(qta.icon("fa5s.share-alt", color="#B0B0B0"))
+        self.share_bottom_button.setIconSize(QSize(20, 20))
+        self.share_bottom_button.setStyleSheet(bottom_icon_btn_style)
+        self.share_bottom_button.clicked.connect(self._share_current_image_os)
+        self.share_bottom_button.hide()
+
+        self.slideshow_bottom_button = QPushButton()
+        self.slideshow_bottom_button.setCheckable(True)
+        self.slideshow_bottom_button.setFlat(True)
+        self.slideshow_bottom_button.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.slideshow_bottom_button.setIcon(qta.icon("fa5s.play", color="#B0B0B0"))
+        self.slideshow_bottom_button.setIconSize(QSize(20, 20))
+        self.slideshow_bottom_button.setStyleSheet(bottom_icon_btn_style)
+        self.slideshow_bottom_button.toggled.connect(self._on_slideshow_bottom_toggled)
+        self.slideshow_bottom_button.hide()
+        left_buttons_layout.addWidget(self.slideshow_bottom_button, 0, alignment=Qt.AlignmentFlag.AlignVCenter)
+
+        self.rotate_bottom_button = QPushButton()
+        self.rotate_bottom_button.setFlat(True)
+        self.rotate_bottom_button.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.rotate_bottom_button.setIcon(qta.icon("fa5s.redo", color="#B0B0B0"))
+        self.rotate_bottom_button.setIconSize(QSize(20, 20))
+        self.rotate_bottom_button.setStyleSheet(bottom_icon_btn_style)
+        self.rotate_bottom_button.clicked.connect(self._rotate_current_image_clockwise_persist)
+        self.rotate_bottom_button.hide()
+        left_buttons_layout.addWidget(self.rotate_bottom_button, 0, alignment=Qt.AlignmentFlag.AlignVCenter)
 
         self.shortcuts_hint_button = QPushButton("i")
         self.shortcuts_hint_button.setFlat(True)
@@ -5363,70 +5373,55 @@ class RAWImageViewer(QMainWindow):
                 background-color: rgba(255, 255, 255, 0.12);
             }
         """)
-        left_buttons_layout.addWidget(
+
+        self.right_status_actions = QWidget()
+        right_status_actions_layout = QHBoxLayout(self.right_status_actions)
+        right_status_actions_layout.setContentsMargins(0, 0, 0, 0)
+        right_status_actions_layout.setSpacing(8)
+        right_status_actions_layout.addWidget(
+            self.share_bottom_button, 0, alignment=Qt.AlignmentFlag.AlignVCenter)
+        right_status_actions_layout.addWidget(
             self.shortcuts_hint_button, 0, alignment=Qt.AlignmentFlag.AlignVCenter)
-        self._set_shortcuts_hint_hovered(True)
-        
-        # Add left buttons to main layout
-        status_layout.addWidget(left_buttons_widget)
-        
-        # Calculate widths for proper centering
-        # Measure counter width for balancing
-        counter_placeholder = QLabel("999/999")
-        counter_placeholder.setStyleSheet("""
+
+        # Image counter (right-aligned text); lives in a trailing strip with share + shortcuts hint
+        _counter_label_style = """
             QLabel {
                 color: #B0B0B0;
                 font-size: 13px;
                 font-weight: 400;
-                padding: 4px 12px 4px 0px;
+                padding: 4px 12px 4px 4px;
                 letter-spacing: 0.25px;
             }
-        """)
-        counter_placeholder.adjustSize()
-        counter_width = counter_placeholder.width()
-        
-        # Measure actual left buttons width for accurate centering
-        # Create temporary buttons to measure their actual widths
-        open_placeholder = QPushButton("🗁")  # U+1F5C1 folder icon
-        open_placeholder.setStyleSheet("""
-            QPushButton {
-                color: #B0B0B0;
-                font-size: 13px;
-                font-weight: 700;
-                padding: 0px;
-                border: none;
-                background: transparent;
-            }
-        """)
-        open_placeholder.adjustSize()
-        open_width = open_placeholder.width()
-        
-        view_placeholder = QPushButton("Gallery")
-        view_placeholder.setStyleSheet("""
-            QPushButton {
-                color: #B0B0B0;
-                font-size: 13px;
-                font-weight: 500;
-                padding: 0px;
-                border: none;
-                background: transparent;
-            }
-        """)
-        view_placeholder.adjustSize()
-        view_width = view_placeholder.width()
-        
-        # Calculate total left side width: Open + Gallery + shortcuts hint ("i")
-        # Note: sort button is hidden in single mode, so we don't include it
-        left_buttons_spacing = 12  # 12px spacing between buttons (🗁 and Gallery)
-        hint_btn_width = self.shortcuts_hint_button.width()
-        left_buttons_width = (
-            open_width
-            + left_buttons_spacing
-            + view_width
-            + left_buttons_spacing
-            + hint_btn_width
+        """
+        self.status_counter_label = QLabel("")
+        self.status_counter_label.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
         )
-        
+        self.status_counter_label.setStyleSheet(_counter_label_style)
+
+        # Trailing block: [share][i] — fixed gap — [counter] (avoids whole status bar 20px gap)
+        self.right_status_trailing = QWidget()
+        _rtl = QHBoxLayout(self.right_status_trailing)
+        _rtl.setContentsMargins(0, 0, 0, 0)
+        _rtl.setSpacing(12)
+        _rtl.addWidget(self.right_status_actions, 0, alignment=Qt.AlignmentFlag.AlignVCenter)
+        _rtl.addWidget(self.status_counter_label, 0, alignment=Qt.AlignmentFlag.AlignVCenter)
+
+        # Add left buttons to main layout
+        status_layout.addWidget(left_buttons_widget)
+
+        counter_placeholder = QLabel("999/999")
+        counter_placeholder.setStyleSheet(_counter_label_style)
+        counter_placeholder.adjustSize()
+        _gap = _rtl.spacing()
+        right_cluster_width = (
+            self.right_status_actions.sizeHint().width()
+            + _gap
+            + counter_placeholder.width()
+        )
+
+        left_buttons_width = left_buttons_widget.sizeHint().width()
+
         # Left spacer - accounts for left buttons width to center metadata
         left_spacer = QWidget()
         left_spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
@@ -5450,25 +5445,15 @@ class RAWImageViewer(QMainWindow):
         # This ensures the label itself is centered, and text within label is also centered
         status_layout.addWidget(self.status_metadata_label, 0, alignment=Qt.AlignmentFlag.AlignHCenter)
         
-        # Right spacer - balances left spacer and accounts for counter width
+        # Right spacer - balances left spacer (reserve trailing cluster + layout gaps)
         right_spacer = QWidget()
         right_spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-        right_spacer.setMinimumWidth(counter_width)  # Match counter width
+        _sb = status_layout.spacing()
+        right_spacer.setMinimumWidth(right_cluster_width + 2 * _sb)
         status_layout.addWidget(right_spacer)
-        
-        # Image counter label (right-aligned) - Material Design 3 style
-        self.status_counter_label = QLabel("")
-        self.status_counter_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        self.status_counter_label.setStyleSheet("""
-            QLabel {
-                color: #B0B0B0;
-                font-size: 13px;
-                font-weight: 400;
-                padding: 4px 12px 4px 0px;
-                letter-spacing: 0.25px;
-            }
-        """)
-        status_layout.addWidget(self.status_counter_label)
+
+        status_layout.addWidget(self.right_status_trailing, 0, alignment=Qt.AlignmentFlag.AlignVCenter)
+        self._set_shortcuts_hint_hovered(True)
         
         # Add custom widget to status bar
         self.status_bar.addPermanentWidget(status_widget, 1)
@@ -5504,6 +5489,23 @@ class RAWImageViewer(QMainWindow):
         open_folder_action.setStatusTip('Open a folder of images')
         open_folder_action.triggered.connect(self.open_folder)
         file_menu.addAction(open_folder_action)
+
+        file_menu.addSeparator()
+
+        self.copy_path_action = QAction("Copy Image Path", self)
+        self.copy_path_action.setStatusTip("Copy the current file path to the clipboard")
+        self.copy_path_action.triggered.connect(self._copy_current_file_path_to_clipboard)
+        file_menu.addAction(self.copy_path_action)
+
+        reveal_name = (
+            "Reveal in Finder"
+            if sys.platform == "darwin"
+            else ("Show in File Explorer" if sys.platform == "win32" else "Open Folder in File Manager")
+        )
+        self.reveal_action = QAction(reveal_name, self)
+        self.reveal_action.setStatusTip("Select this file in the system file manager")
+        self.reveal_action.triggered.connect(self._reveal_current_file_in_os_file_manager)
+        file_menu.addAction(self.reveal_action)
 
         file_menu.addSeparator()
 
@@ -5569,6 +5571,7 @@ class RAWImageViewer(QMainWindow):
         
         logger.info(f"[VIEW_MODE] Mode changed, calling view method (elapsed: 0.000s)")
         if self.view_mode == 'gallery':
+            self._stop_slideshow()
             self._show_gallery_view()
         else:
             self._show_single_view()
@@ -5596,6 +5599,9 @@ class RAWImageViewer(QMainWindow):
             if hasattr(self.gallery_justified, '_load_queue'):
                 self.gallery_justified._load_queue.clear()
             logger.debug(f"[VIEW_MODE] Stopped all gallery background loading")
+        
+        if hasattr(self, "loading_overlay"):
+            self.loading_overlay.hide_loading()
         
         # Step 1: Hide gallery widget
         hide_start = time.time()
@@ -5633,7 +5639,7 @@ class RAWImageViewer(QMainWindow):
                 try:
                     gallery_icon = qta.icon('fa5s.th', color='#B0B0B0')
                     self.view_mode_button.setIcon(gallery_icon)
-                    self.view_mode_button.setIconSize(QSize(18, 18))
+                    self.view_mode_button.setIconSize(QSize(20, 20))
                     self.view_mode_button.setText("")  # Clear text if using icon
                 except Exception:
                     self.view_mode_button.setText("Gallery")
@@ -5678,6 +5684,8 @@ class RAWImageViewer(QMainWindow):
                         else:
                             self._orientation_already_applied = True
                         self.display_pixmap(cached_pixmap)
+                        if hasattr(self, "loading_overlay"):
+                            self.loading_overlay.hide_loading()
             except Exception as e:
                 logger.debug(f"[VIEW_MODE] Error using cached pixmap: {e}")
             
@@ -5690,6 +5698,8 @@ class RAWImageViewer(QMainWindow):
             if is_already_loaded:
                 logger.info(f"[VIEW_MODE] Image already in memory, skipping reload")
                 self.display_pixmap(self.current_pixmap)
+                if hasattr(self, "loading_overlay"):
+                    self.loading_overlay.hide_loading()
                 # CRITICAL: Ensure metadata is updated when displaying already loaded image
                 logger.info(f"[VIEW_MODE] Updating status bar to ensure metadata is displayed")
                 self.update_status_bar()
@@ -5705,6 +5715,8 @@ class RAWImageViewer(QMainWindow):
                     self.load_raw_image(self.current_file_path)
                 else:
                     logger.info(f"[VIEW_MODE] Using cached pixmap, skipping reload for non-RAW file")
+                    if hasattr(self, "loading_overlay"):
+                        self.loading_overlay.hide_loading()
                     # CRITICAL: Ensure metadata is updated when displaying cached pixmap
                     logger.info(f"[VIEW_MODE] Updating status bar to ensure metadata is displayed for cached pixmap")
                     self.update_status_bar()
@@ -5737,7 +5749,10 @@ class RAWImageViewer(QMainWindow):
         from PyQt6.QtCore import QTimer
         logger = logging.getLogger(__name__)
         logger.info(f"[GALLERY] Showing gallery view")
-        
+        self._stop_slideshow()
+        if hasattr(self, "loading_overlay"):
+            self.loading_overlay.hide_loading()
+
         # Track gallery loading start time for performance monitoring
         if hasattr(self, 'gallery_justified') and self.gallery_justified:
             self.gallery_justified._gallery_load_start_time = time.time()
@@ -5782,6 +5797,14 @@ class RAWImageViewer(QMainWindow):
         # Show sort button in gallery mode
         if hasattr(self, 'sort_toggle_button'):
             self.sort_toggle_button.show()
+        # Single-image actions stay in update_status_bar for single mode only; hide here
+        # because we do not call update_status_bar() when entering gallery (counter text differs).
+        if hasattr(self, "share_bottom_button"):
+            self.share_bottom_button.hide()
+        if hasattr(self, "slideshow_bottom_button"):
+            self.slideshow_bottom_button.hide()
+        if hasattr(self, "rotate_bottom_button"):
+            self.rotate_bottom_button.hide()
         
         # Show gallery
         self.gallery_widget.show()
@@ -6115,9 +6138,7 @@ class RAWImageViewer(QMainWindow):
     
     def _load_gallery_thumbnail_simple(self, file_path, thumb_label):
             """Load thumbnail simply - based on reference code"""
-            from PyQt6.QtWidgets import QApplication
             from PyQt6.QtCore import QTimer
-            QApplication.processEvents()
             
             pixmap = self._get_gallery_pixmap(file_path)
             if not pixmap or pixmap.isNull():
@@ -6732,9 +6753,6 @@ class RAWImageViewer(QMainWindow):
         final_target_height = target_height
         
         def load_thumbnail():
-            # Process events at start to keep UI responsive
-            from PyQt6.QtWidgets import QApplication
-            QApplication.processEvents()
             load_start = time.time()
             # Use local variables for target dimensions
             local_target_width = final_target_width
@@ -6888,8 +6906,6 @@ class RAWImageViewer(QMainWindow):
                     pixmap = self._get_gallery_pixmap(file_path)
                 
                 # If not in cache, try to load directly
-                # CRITICAL: Process events periodically during file I/O to keep UI responsive
-                from PyQt6.QtWidgets import QApplication
                 
                 if not pixmap or pixmap.isNull():
                     if os.path.exists(file_path):
@@ -6898,8 +6914,6 @@ class RAWImageViewer(QMainWindow):
                         
                         # For RAW files, try to extract embedded JPEG preview (fast)
                         if file_ext in raw_extensions:
-                            # Process events before file I/O to keep UI responsive
-                            QApplication.processEvents()
                             try:
                                 pixmap = self._extract_embedded_preview(file_path)
                                 if pixmap and not pixmap.isNull():
@@ -6910,14 +6924,10 @@ class RAWImageViewer(QMainWindow):
                         
                         # For non-RAW files, try direct QPixmap load
                         if (not pixmap or pixmap.isNull()) and file_ext not in raw_extensions:
-                            # Process events before file I/O to keep UI responsive
-                            QApplication.processEvents()
                             pixmap = self._load_pixmap_safe(file_path)
                             if pixmap.isNull():
                                 # If QPixmap fails, try PIL Image
                                 try:
-                                    # Process events before PIL operations
-                                    QApplication.processEvents()
                                     pil_image = Image.open(file_path)
                                     if pil_image.mode != 'RGB':
                                         pil_image = pil_image.convert('RGB')
@@ -6938,14 +6948,10 @@ class RAWImageViewer(QMainWindow):
                         # If still no pixmap, try to get thumbnail from image cache
                         if (not pixmap or pixmap.isNull()) and hasattr(self, 'image_cache'):
                             try:
-                                # Process events before cache access
-                                QApplication.processEvents()
                                 thumbnail_data = self.image_cache.get_thumbnail(file_path)
                                 if thumbnail_data is not None:
                                     # Use unified conversion method
                                     pixmap = self._numpy_to_qpixmap(thumbnail_data)
-                                    # Process events after conversion
-                                    QApplication.processEvents()
                             except Exception as thumb_error:
                                 logger.debug(f"Error getting thumbnail from cache for {os.path.basename(file_path)}: {thumb_error}")
                                 import traceback
@@ -7158,7 +7164,7 @@ class RAWImageViewer(QMainWindow):
                 try:
                     gallery_icon = qta.icon('fa5s.th', color='#B0B0B0')
                     self.view_mode_button.setIcon(gallery_icon)
-                    self.view_mode_button.setIconSize(QSize(18, 18))
+                    self.view_mode_button.setIconSize(QSize(20, 20))
                     self.view_mode_button.setText("")  # Clear text if using icon
                 except Exception:
                     self.view_mode_button.setText("Gallery")
@@ -7487,6 +7493,7 @@ class RAWImageViewer(QMainWindow):
     def image_mouse_press_event(self, event):
         if event.button() == Qt.MouseButton.LeftButton and self.current_pixmap:
             if not self.fit_to_window and self._can_pan():
+                self._stop_slideshow()
                 self.panning = True
                 self.last_pan_point = event.globalPosition().toPoint()
                 self.start_scroll_x = self.scroll_area.horizontalScrollBar().value()
@@ -7536,6 +7543,7 @@ class RAWImageViewer(QMainWindow):
         if not self.current_pixmap:
             return
         if event.button() == Qt.MouseButton.LeftButton:
+            self._stop_slideshow()
             import logging
             logger = logging.getLogger(__name__)
             logger.info(f"[TRACK] User double-clicked to zoom - file: {os.path.basename(self.current_file_path) if hasattr(self, 'current_file_path') and self.current_file_path else 'Unknown'}")
@@ -8023,6 +8031,8 @@ class RAWImageViewer(QMainWindow):
                 error_msg = f"The file {file_path} does not exist."
                 logger.error(f"[LOAD] File not found: {file_path}")
                 self.show_error("File not found", error_msg)
+                if hasattr(self, "loading_overlay"):
+                    self.loading_overlay.hide_loading()
                 return
 
             # Store the requested file path for later comparison (after cleanup)
@@ -8063,8 +8073,13 @@ class RAWImageViewer(QMainWindow):
             # Cancel in-flight loads only when switching files — same-path reload must not cancel
             # the active task (e.g. duplicate load_raw_image after folder change).
             _prev_fp = getattr(self, "current_file_path", None)
-            if _prev_fp and _norm_path(_prev_fp) != _norm_path(requested_file_path):
+            _same_path_reload = _prev_fp and _norm_path(_prev_fp) == _norm_path(requested_file_path)
+            if _prev_fp and not _same_path_reload:
                 self.image_manager.cancel_task(_prev_fp)
+            if _same_path_reload:
+                # Same file (e.g. after on-disk rotation): drop "already displayed N px" gate so
+                # thumbnail/image handlers don't skip updates and leave the loading overlay stuck.
+                self._manager_displayed_max_dim = 0
             # Legacy cleanup for old processor (if still exists)
             if self.current_processor:
                 logger.info(f"[LOAD] Legacy processor cleanup: {type(self.current_processor).__name__}")
@@ -8142,10 +8157,14 @@ class RAWImageViewer(QMainWindow):
                     # Only preload after successful display (matches RAWviewer-1.0 behavior)
                     self._start_preloading()
                     logger.info(f"[LOAD] Successfully displayed cached full image for {filename} (total: {time.time() - load_start:.3f}s)")
+                    if hasattr(self, "loading_overlay"):
+                        self.loading_overlay.hide_loading()
                     return
                 except Exception as display_error:
                     logger.error(f"[LOAD] Error displaying cached image: {display_error}", exc_info=True)
                     logger.error(f"[LOAD] Display error traceback:\n{traceback.format_exc()}")
+                    if hasattr(self, "loading_overlay"):
+                        self.loading_overlay.hide_loading()
                     # Continue to process if display fails
 
             # Check if we have a cached pixmap for non-RAW files ONLY
@@ -8195,10 +8214,14 @@ class RAWImageViewer(QMainWindow):
                             pass
                         self._start_preloading()
                         logger.info(f"[LOAD] Successfully displayed cached pixmap for {filename} (total: {time.time() - load_start:.3f}s)")
+                        if hasattr(self, "loading_overlay"):
+                            self.loading_overlay.hide_loading()
                         return
                     except Exception as display_error:
                         logger.error(f"[LOAD] Error displaying cached pixmap: {display_error}", exc_info=True)
                         logger.error(f"[LOAD] Display error traceback:\n{traceback.format_exc()}")
+                        if hasattr(self, "loading_overlay"):
+                            self.loading_overlay.hide_loading()
                         # Continue to process if display fails
             else:
                 logger.info(f"[LOAD] Skipping pixmap cache check for RAW file: {filename}")
@@ -8240,6 +8263,8 @@ class RAWImageViewer(QMainWindow):
             except Exception as manager_error:
                 logger.error(f"[LOAD] Failed to request image load: {manager_error}", exc_info=True)
                 logger.error(f"[LOAD] Manager error traceback:\n{traceback.format_exc()}")
+                if hasattr(self, "loading_overlay"):
+                    self.loading_overlay.hide_loading()
                 # Fallback to legacy processor if manager fails
                 logger.warning(f"[LOAD] Falling back to legacy RAWProcessor")
                 try:
@@ -8285,6 +8310,8 @@ class RAWImageViewer(QMainWindow):
             logger.error(f"[LOAD] Full traceback:\n{traceback.format_exc()}")
             requested_file_name = requested_file_path if 'requested_file_path' in locals() else (file_path if 'file_path' in locals() else 'unknown')
             print(f"[PERF] ❌ LOAD ERROR: {os.path.basename(requested_file_name)} failed after {total_time*1000:.1f}ms - {type(e).__name__}: {e}")
+            if hasattr(self, "loading_overlay"):
+                self.loading_overlay.hide_loading()
             # Try to show error to user
             try:
                 self.show_error("Load Error", f"Failed to load image: {str(e)}")
@@ -8618,6 +8645,279 @@ class RAWImageViewer(QMainWindow):
             if c is not None and hasattr(c, "relayout_histogram"):
                 c.relayout_histogram()
 
+    def _slideshow_interval_ms(self) -> int:
+        try:
+            return max(500, int(os.environ.get("RAWVIEWER_SLIDESHOW_INTERVAL_MS", "5000")))
+        except ValueError:
+            return 5000
+
+    def _sync_slideshow_button_icon(self, playing: bool):
+        btn = getattr(self, "slideshow_bottom_button", None)
+        if btn is None:
+            return
+        try:
+            import qtawesome as qta
+            if playing:
+                btn.setIcon(qta.icon("fa5s.pause", color="#B0B0B0"))
+            else:
+                btn.setIcon(qta.icon("fa5s.play", color="#B0B0B0"))
+        except Exception:
+            pass
+
+    def _stop_slideshow(self):
+        t = getattr(self, "_slideshow_timer", None)
+        if t is not None and t.isActive():
+            t.stop()
+        btn = getattr(self, "slideshow_bottom_button", None)
+        if btn is not None:
+            btn.blockSignals(True)
+            btn.setChecked(False)
+            btn.blockSignals(False)
+            self._sync_slideshow_button_icon(False)
+
+    def _on_slideshow_tick(self):
+        if getattr(self, "view_mode", "single") != "single":
+            self._stop_slideshow()
+            return
+        if not self.image_files or self.current_file_index < 0:
+            self._stop_slideshow()
+            return
+        btn = getattr(self, "slideshow_bottom_button", None)
+        if btn is None or not btn.isChecked():
+            self._stop_slideshow()
+            return
+        self._slideshow_force_fit_next = True
+        self._debounced_navigate("next", from_slideshow=True)
+
+    def _on_slideshow_bottom_toggled(self, on: bool):
+        if on:
+            if getattr(self, "view_mode", "single") != "single" or not self.image_files:
+                b = getattr(self, "slideshow_bottom_button", None)
+                if b is not None:
+                    b.blockSignals(True)
+                    b.setChecked(False)
+                    b.blockSignals(False)
+                    self._sync_slideshow_button_icon(False)
+                return
+            self.fit_to_window = True
+            self.current_zoom_level = 1.0
+            self.zoom_center_point = None
+            if getattr(self, "current_pixmap", None) and not self.current_pixmap.isNull():
+                self.scale_image_to_fit()
+                self.update_status_bar()
+            if self._slideshow_timer is None:
+                self._slideshow_timer = QTimer(self)
+                self._slideshow_timer.timeout.connect(self._on_slideshow_tick)
+            self._slideshow_timer.start(self._slideshow_interval_ms())
+            self._sync_slideshow_button_icon(True)
+        else:
+            if self._slideshow_timer is not None and self._slideshow_timer.isActive():
+                self._slideshow_timer.stop()
+            self._sync_slideshow_button_icon(False)
+
+    def _share_current_image_os(self):
+        """Open the system share sheet (macOS / Windows) for the current file path."""
+        p = getattr(self, "current_file_path", None)
+        if not p or not os.path.isfile(p):
+            self.status_bar.showMessage("No file to share", 2000)
+            return
+        path = os.path.abspath(p)
+        if sys.platform == "darwin":
+            if self._share_macos(path):
+                self.status_bar.showMessage("Share", 1500)
+                return
+        elif sys.platform == "win32":
+            if self._share_windows_shell(path):
+                self.status_bar.showMessage("Share", 1500)
+                return
+        self._copy_current_file_path_to_clipboard()
+        self.status_bar.showMessage("Share unavailable — path copied to clipboard", 4000)
+
+    def _share_macos(self, path: str) -> bool:
+        try:
+            from AppKit import NSURL, NSSharingServicePicker, NSMakeRect
+            import objc
+            from ctypes import c_void_p
+
+            url = NSURL.fileURLWithPath_(path)
+            btn = self.share_bottom_button
+            view = objc.objc_object(c_void_p=int(btn.winId()))
+            w = max(1, btn.width())
+            h = max(1, btn.height())
+            rect = NSMakeRect(0, 0, w, h)
+            picker = NSSharingServicePicker.alloc().initWithItems_([url])
+            picker.showRelativeToRect_ofView_preferredEdge_(rect, view, 3)
+            return True
+        except Exception:
+            return False
+
+    def _share_windows_shell(self, path: str) -> bool:
+        try:
+            import win32com.client  # type: ignore
+
+            folder = win32com.client.Dispatch("Shell.Application").Namespace(
+                os.path.dirname(path)
+            )
+            item = folder.ParseName(os.path.basename(path))
+            if item is None:
+                return False
+            try:
+                item.InvokeVerb("share")
+                return True
+            except Exception:
+                pass
+            for verb in item.Verbs():
+                try:
+                    name = str(verb.Name).replace("&", "")
+                    if "share" in name.lower():
+                        verb.DoIt()
+                        return True
+                except Exception:
+                    continue
+        except Exception:
+            return False
+        return False
+
+    def _exif_orientation_after_cw90_meta_only(self, o: int) -> int:
+        """EXIF Orientation tag after a further 90° clockwise rotation (metadata-only, pixels unchanged)."""
+        o = int(o) if o else 1
+        if o < 1 or o > 8:
+            o = 1
+        return {1: 6, 2: 5, 3: 8, 4: 7, 5: 2, 6: 3, 7: 4, 8: 1}[o]
+
+    def _rotate_raster_pil_cw90(self, path: str) -> None:
+        from PIL import Image, ImageOps
+
+        tmp = path + ".rawviewer_rotate_tmp"
+        im = None
+        try:
+            im = Image.open(path)
+            im = ImageOps.exif_transpose(im)
+            im = im.transpose(Image.Transpose.ROTATE_270)
+            ext = os.path.splitext(path)[1].lower()
+            save_kw = {}
+            if ext in (".jpg", ".jpeg"):
+                save_kw = {"quality": 95, "subsampling": 0, "optimize": True}
+            if ext in (".jpg", ".jpeg"):
+                im.save(tmp, "JPEG", **save_kw)
+            elif ext in (".png",):
+                im.save(tmp, "PNG", optimize=True)
+            elif ext in (".webp",):
+                im.save(tmp, "WEBP", quality=95, method=6)
+            elif ext in (".bmp",):
+                im.save(tmp, "BMP")
+            elif ext in (".tif", ".tiff"):
+                im.save(tmp, "TIFF", compression="tiff_lzw")
+            else:
+                im.save(tmp)
+            os.replace(tmp, path)
+        except Exception:
+            if os.path.isfile(tmp):
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+            raise
+        finally:
+            if im is not None:
+                im.close()
+
+    def _rotate_raw_exiftool_meta_cw90(self, path: str) -> None:
+        import shutil
+        import subprocess
+
+        ex = shutil.which("exiftool")
+        if not ex:
+            raise RuntimeError(
+                "Rotating this file type needs exiftool in PATH (https://exiftool.org/)."
+            )
+        r = subprocess.run(
+            [ex, "-n", "-Orientation", "-m", path],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        o = 1
+        for line in (r.stdout or "").splitlines():
+            if ":" in line:
+                try:
+                    o = int(line.split(":")[-1].strip())
+                except ValueError:
+                    o = 1
+                break
+        new_o = self._exif_orientation_after_cw90_meta_only(o)
+        r2 = subprocess.run(
+            [ex, "-overwrite_original", "-q", "-m", f"-Orientation={new_o}", path],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        if r2.returncode != 0:
+            msg = (r2.stderr or r2.stdout or "exiftool failed").strip()
+            raise RuntimeError(msg or "exiftool failed")
+
+    def _rotate_current_image_clockwise_persist(self):
+        """Rotate 90° clockwise on disk and refresh single view + gallery."""
+        path = getattr(self, "current_file_path", None)
+        if not path or not os.path.isfile(path):
+            self.status_bar.showMessage("No image to rotate", 2000)
+            return
+        self._stop_slideshow()
+        ext = os.path.splitext(path)[1].lower()
+        try:
+            if ext in (".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff"):
+                self._rotate_raster_pil_cw90(path)
+            elif is_raw_file(path):
+                self._rotate_raw_exiftool_meta_cw90(path)
+            else:
+                self._rotate_raster_pil_cw90(path)
+        except Exception as e:
+            QMessageBox.warning(self, "Rotate", str(e))
+            return
+
+        self.image_cache.invalidate_file(path)
+        try:
+            self.image_cache.exif_cache.remove(path)
+        except Exception:
+            pass
+        if path in getattr(self, "gallery_aspect_cache", {}):
+            del self.gallery_aspect_cache[path]
+        gj = getattr(self, "gallery_justified", None)
+        if gj is not None and hasattr(gj, "invalidate_thumbnails_for_path"):
+            gj.invalidate_thumbnails_for_path(path)
+
+        self._orientation_already_applied = False
+        self.load_raw_image(path)
+        self.status_bar.showMessage("Rotated 90° clockwise (saved)", 2500)
+
+    def _copy_current_file_path_to_clipboard(self):
+        p = getattr(self, "current_file_path", None)
+        if not p:
+            self.status_bar.showMessage("No file open", 2000)
+            return
+        QGuiApplication.clipboard().setText(p)
+        self.status_bar.showMessage("Path copied to clipboard", 2000)
+
+    def _reveal_current_file_in_os_file_manager(self):
+        import subprocess
+
+        p = getattr(self, "current_file_path", None)
+        if not p or not os.path.isfile(p):
+            self.status_bar.showMessage("No file to reveal", 2000)
+            return
+        try:
+            if sys.platform == "darwin":
+                subprocess.run(["/usr/bin/open", "-R", p], check=False)
+            elif sys.platform == "win32":
+                subprocess.run(
+                    ["explorer", "/select,", os.path.normpath(p)], check=False
+                )
+            else:
+                subprocess.run(["xdg-open", os.path.dirname(p)], check=False)
+            self.status_bar.showMessage("Revealed in file manager", 2000)
+        except Exception:
+            self.status_bar.showMessage("Could not open file manager", 2000)
+
     def display_pixmap(self, pixmap):
         """Display a QPixmap."""
         import logging
@@ -8629,7 +8929,15 @@ class RAWImageViewer(QMainWindow):
         current_file = os.path.basename(self.current_file_path) if hasattr(self, 'current_file_path') and self.current_file_path else "Unknown"
         logger.info(f"[DISPLAY_PIXMAP] ========== display_pixmap() STARTED at {display_start:.3f} ==========")
         logger.info(f"[DISPLAY_PIXMAP] File: {current_file}, Pixmap size: {pixmap.width()}x{pixmap.height()}")
-        
+
+        if getattr(self, "_slideshow_force_fit_next", False):
+            sb = getattr(self, "slideshow_bottom_button", None)
+            if sb is not None and sb.isChecked():
+                self.fit_to_window = True
+                self.current_zoom_level = 1.0
+                self.zoom_center_point = None
+            self._slideshow_force_fit_next = False
+
         self.current_pixmap = pixmap
         self._sync_single_image_histogram()
         # Memory / cache redraws (e.g. _show_single_view "already in memory") skip on_manager_*,
@@ -9514,12 +9822,15 @@ class RAWImageViewer(QMainWindow):
         logger.debug(f"[NAV_CHECK] Navigation ALLOWED")
         return True
     
-    def _debounced_navigate(self, direction):
+    def _debounced_navigate(self, direction, from_slideshow=False):
         """Debounced navigation to handle rapid key presses efficiently"""
         import logging
         from PyQt6.QtCore import QTimer
         logger = logging.getLogger(__name__)
-        
+
+        if not from_slideshow:
+            self._stop_slideshow()
+
         # Store the navigation direction
         had_pending = self._pending_navigation is not None
         self._pending_navigation = direction
@@ -9899,6 +10210,7 @@ class RAWImageViewer(QMainWindow):
         if (not self.current_file_path or not os.path.exists(self.current_file_path)):
             self.show_error("Delete Error", "No image file to delete.")
             return
+        self._stop_slideshow()
 
         if self.confirm_deletion():
             # Only maintain zoom state if not in fit-to-window mode
@@ -10049,6 +10361,7 @@ class RAWImageViewer(QMainWindow):
                 logger.debug("Pixmap not ready yet, will toggle zoom once image is loaded")
                 return
             return
+        self._stop_slideshow()
         if self.fit_to_window:
             # Switch to 100% zoom mode - center on image center
             self.fit_to_window = False
@@ -10551,25 +10864,26 @@ class RAWImageViewer(QMainWindow):
             # Get supported extensions
             supported_extensions = self.get_supported_extensions()
 
-            # Scan folder for image files (recursively including subfolders)
+            # Top-level only: do not recurse into subfolders (Desktop / large trees stay fast).
             image_files = []
 
             try:
-                # Use os.walk() to recursively scan all subfolders
-                for root, dirs, files in os.walk(folder_path):
-                    # Skip "Discard" folder and its subfolders
-                    if 'Discard' in dirs:
-                        dirs.remove('Discard')
-                    
-                    for filename in files:
-                        # Skip macOS resource fork files (._filename)
-                        if filename.startswith('._'):
+                with os.scandir(folder_path) as it:
+                    for entry in it:
+                        if entry.name.startswith("."):
                             continue
-                        file_ext = os.path.splitext(filename)[1].lower()
-                        if file_ext in supported_extensions:
-                            full_path = os.path.join(root, filename)
-                            if os.path.isfile(full_path):
-                                image_files.append(full_path)
+                        try:
+                            if not entry.is_file(follow_symlinks=False):
+                                continue
+                            file_ext = os.path.splitext(entry.name)[1].lower()
+                            if file_ext not in supported_extensions:
+                                continue
+                            stat = entry.stat()
+                            if stat.st_size <= 0:
+                                continue
+                            image_files.append(os.path.abspath(entry.path))
+                        except (OSError, PermissionError):
+                            continue
             except OSError as e:
                 error_msg = f"Cannot read folder contents:\n{str(e)}"
                 logger.error(f"Error reading folder {folder_path}: {e}")
@@ -10805,10 +11119,17 @@ class RAWImageViewer(QMainWindow):
             else:
                 self.sort_toggle_button.setVisible(False)  # Hide in single mode
         
-        # Show/hide gallery toggle button based on whether images are loaded
+        # Gallery toggle only in single-image mode (in gallery you return by tapping a thumbnail)
         if hasattr(self, 'view_mode_button'):
-            self.view_mode_button.setVisible(bool(self.image_files))
-        
+            self.view_mode_button.setVisible(
+                bool(self.image_files) and self.view_mode == "single"
+            )
+        if hasattr(self, "share_bottom_button"):
+            vis = bool(self.image_files) and self.view_mode == "single"
+            self.share_bottom_button.setVisible(vis)
+            self.slideshow_bottom_button.setVisible(vis)
+            self.rotate_bottom_button.setVisible(vis)
+
         if not self.current_file_path:
             # Hide metadata when no image is loaded
             if hasattr(self, 'status_metadata_label'):
@@ -11251,6 +11572,7 @@ class RAWImageViewer(QMainWindow):
         if event.type() == QEvent.Type.NativeGesture:
             if hasattr(self, 'view_mode') and self.view_mode == 'single' and getattr(self, 'current_pixmap', None):
                 if event.gestureType() == Qt.NativeGestureType.ZoomNativeGesture:
+                    self._stop_slideshow()
                     viewport_size = self.scroll_area.viewport().size()
                     pixmap_size = self.current_pixmap.size()
                     fit_scale = 1.0
@@ -11285,6 +11607,7 @@ class RAWImageViewer(QMainWindow):
                     self.update_status_bar()
                     return True
                 elif event.gestureType() == Qt.NativeGestureType.SmartZoomNativeGesture:
+                    self._stop_slideshow()
                     self.toggle_zoom()
                     return True
 
@@ -11293,6 +11616,7 @@ class RAWImageViewer(QMainWindow):
             # Check if we're in single view mode and the event is from scroll area viewport
             if (hasattr(self, 'view_mode') and self.view_mode == 'single' and
                 hasattr(self, 'scroll_area') and obj == self.scroll_area.viewport()):
+                self._stop_slideshow()
                 from PyQt6.QtGui import QWheelEvent
                 wheel_event = event
                 
@@ -11385,6 +11709,7 @@ class RAWImageViewer(QMainWindow):
         if not self.current_file_path or not os.path.exists(self.current_file_path):
             self.show_error("Discard Error", "No image file to move.")
             return
+        self._stop_slideshow()
         try:
             file_to_move = self.current_file_path
             folder_path = os.path.dirname(file_to_move)
@@ -11452,29 +11777,24 @@ class RAWImageViewer(QMainWindow):
             self.show_error("Discard Error", error_msg)
 
     def _scan_folder_generator(self, folder_path, extensions, discard_folder='Discard'):
-        """Recursively scan folder using os.scandir for better performance."""
+        """Yield (path, stat) for supported images in folder_path only (no subfolders)."""
+        _ = discard_folder  # unused: subfolders are not scanned (kept for API compatibility)
         try:
             with os.scandir(folder_path) as it:
                 for entry in it:
                     if entry.name.startswith('.'):
                         continue
-                        
-                    if entry.is_dir(follow_symlinks=False):
-                        if entry.name == discard_folder:
-                            continue
-                        # Recursive yield (do NOT follow symlinks to avoid infinite loops/duplicates)
-                        yield from self._scan_folder_generator(entry.path, extensions, discard_folder)
-                    
-                    elif entry.is_file(follow_symlinks=False):
-                        ext = os.path.splitext(entry.name)[1].lower()
-                        if ext in extensions:
-                            try:
-                                # entry.stat() is fast/cached on Windows
-                                stat = entry.stat()
-                                if stat.st_size > 0:
-                                    yield entry.path, stat
-                            except OSError:
-                                pass
+                    if not entry.is_file(follow_symlinks=False):
+                        continue
+                    ext = os.path.splitext(entry.name)[1].lower()
+                    if ext not in extensions:
+                        continue
+                    try:
+                        stat = entry.stat()
+                        if stat.st_size > 0:
+                            yield entry.path, stat
+                    except OSError:
+                        pass
         except (OSError, PermissionError):
             pass
 
@@ -11621,22 +11941,21 @@ class RAWImageViewer(QMainWindow):
                     self_inner.start_view = start_view
                     self_inner.signals = signals
 
-                def _scan(self_inner, path):
+                def _scan_top_level_only(self_inner, path):
+                    """List image files in path only; do not descend into subfolders."""
                     with os.scandir(path) as it:
                         for entry in it:
                             if entry.name.startswith('.'):
                                 continue
                             try:
-                                if entry.is_dir(follow_symlinks=False):
-                                    if entry.name == 'Discard':
-                                        continue
-                                    yield from self_inner._scan(entry.path)
-                                elif entry.is_file(follow_symlinks=False):
-                                    ext = os.path.splitext(entry.name)[1].lower()
-                                    if ext in self_inner.extensions:
-                                        stat = entry.stat()
-                                        if stat.st_size > 0:
-                                            yield entry.path, stat
+                                if not entry.is_file(follow_symlinks=False):
+                                    continue
+                                ext = os.path.splitext(entry.name)[1].lower()
+                                if ext not in self_inner.extensions:
+                                    continue
+                                stat = entry.stat()
+                                if stat.st_size > 0:
+                                    yield entry.path, stat
                             except (OSError, PermissionError):
                                 continue
 
@@ -11648,12 +11967,16 @@ class RAWImageViewer(QMainWindow):
                         image_files = []
                         file_stats = {}
                         seen_paths = set()
-                        for full_path, stat_info in self_inner._scan(self_inner.folder_path):
-                            if full_path in seen_paths:
+                        for full_path, stat_info in self_inner._scan_top_level_only(
+                            self_inner.folder_path
+                        ):
+                            ap = os.path.abspath(full_path)
+                            if ap in seen_paths:
                                 continue
-                            seen_paths.add(full_path)
-                            image_files.append(full_path)
-                            file_stats[full_path] = (stat_info.st_size, stat_info.st_mtime)
+                            seen_paths.add(ap)
+                            image_files.append(ap)
+                            file_stats[ap] = (stat_info.st_size, stat_info.st_mtime)
+
                         scan_time = time.time() - scan_start
 
                         sort_start = time.time()
@@ -12113,7 +12436,7 @@ def main():
         # Use is_windows variable to avoid calling platform.system() again
         if is_windows:
             print("  [Windows] Setting AppUserModelID...", flush=True)
-            myappid = 'RAWviewer.1.6.0'
+            myappid = 'RAWviewer.1.7.0'
             ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
             print("  [Windows] AppUserModelID set", flush=True)
 
@@ -12122,7 +12445,7 @@ def main():
 
         # Set application properties
         app.setApplicationName("RAW Image Viewer")
-        app.setApplicationVersion("1.6.0")
+        app.setApplicationVersion("1.7.0")
 
         # macOS: force dark UI to better match our dark theme (including title bar).
         # Using Qt's palette is more reliable than trying to hard-set NSWindow colors.
