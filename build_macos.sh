@@ -58,7 +58,7 @@ echo "Upgrading pip..."
 
 # Install/upgrade dependencies
 echo "Installing dependencies..."
-"$PYTHON_BIN" -m pip install --upgrade PyQt6 rawpy send2trash pyinstaller natsort exifread Pillow psutil numpy qtawesome pyqtgraph
+"$PYTHON_BIN" -m pip install --upgrade PyQt6 rawpy send2trash pyinstaller natsort exifread Pillow psutil numpy qtawesome pyqtgraph pyobjc-framework-Cocoa
 
 # Clean previous builds
 echo "Cleaning previous builds..."

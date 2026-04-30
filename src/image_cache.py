@@ -64,6 +64,18 @@ class LRUCache:
                 return True
             return False
 
+    def remove_keys_for_file_path(self, file_path: str) -> int:
+        """Remove entries keyed by file_path (tuple first element or string key)."""
+        n = 0
+        with self.lock:
+            for k in list(self.cache.keys()):
+                if k == file_path or (
+                    isinstance(k, tuple) and len(k) > 0 and k[0] == file_path
+                ):
+                    del self.cache[k]
+                    n += 1
+        return n
+
     def clear(self) -> None:
         with self.lock:
             self.cache.clear()

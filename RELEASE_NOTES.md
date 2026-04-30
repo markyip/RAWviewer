@@ -1,5 +1,20 @@
 # RAWviewer Release Notes
 
+## 🚀 Version 1.7.0
+**Release Date: April 30, 2026**
+
+### What's new
+- **Status bar layout**: Share, shortcuts hint (`i`), and image counter are grouped with consistent spacing; metadata centering uses the same trailing width math as before.
+- **Keyboard shortcuts help**: Tooltip and shortcuts dialog list only keyboard/trackpad actions; slideshow and rotate remain on the bottom bar (not listed as hotkeys).
+
+### Fixes & improvements
+- **Build / Share**: `requirements.txt`, `build.py`, and platform build scripts include optional `pyobjc-framework-Cocoa` (macOS) and `pywin32` (Windows) with matching PyInstaller hidden imports so the bottom-bar Share action works in packaged apps.
+- **Gallery mode chrome**: While in gallery view, the gallery toggle, share, slideshow, rotate, and single-image metadata counter behave as expected (only sort + total count + essentials stay visible; return to a photo via the grid).
+- **Gallery → single loading**: Fixed cases where the “Loading image” overlay could remain after picking a thumbnail when the image was served from memory cache.
+- **Empty-state copy**: Onboarding text refers to bottom-bar controls generically instead of naming slideshow/rotate as keys.
+
+---
+
 ## 🚀 Version 1.6.0
 **Release Date: April 28, 2026**
 🎯 What's New
