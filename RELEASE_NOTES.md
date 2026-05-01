@@ -1,27 +1,18 @@
 # RAWviewer Release Notes
 
-## 🚀 Version 1.7.1
-**Release Date: May 1, 2026**
-
-### What's new
-- **Windows UI**: The in-window menu bar (File / Keyboard Shortcuts) is hidden on Windows frameless builds; menu shortcuts remain active via the main window, and the bottom-bar **i** tooltip still lists keyboard help.
-- **Windows — no Share button**: The bottom-bar Share control is removed on Windows only. macOS keeps the native share sheet from the same control.
-
-### Fixes & improvements
-- **Windows sharing**: Removed legacy `ShellExecute` / `ShellExecuteEx` use of the Explorer **`share`** verb, which often triggered “no application is associated with this file” for common types (e.g. JPEG). Sharing now defers to the next event-loop tick, tries Explorer COM verbs when available, then falls back to **file clipboard** (`CF_HDROP`), **PowerShell `Set-Clipboard -LiteralPath`**, and finally path text.
-- **Rotate button**: Shown only for on-disk-rotatable raster images (not RAW). RAW rotation still relies on **ExifTool**; resolution order is `PATH`, `RAWVIEWER_EXIFTOOL`, next to the executable, then project root, with a clearer error message when missing.
-
----
-
 ## 🚀 Version 1.7.0
 **Release Date: April 30, 2026**
 
 ### What's new
-- **Status bar layout**: Share, shortcuts hint (`i`), and image counter are grouped with consistent spacing; metadata centering uses the same trailing width math as before.
+- **Windows UI**: The in-window menu bar (File / Keyboard Shortcuts) is hidden on Windows frameless builds; menu shortcuts remain active via the main window, and the bottom-bar **i** tooltip still lists keyboard help.
+- **Windows — no Share button**: The bottom-bar Share control is removed on Windows only. macOS keeps the native share sheet from the same control.
+- **Status bar layout**: Share (macOS only), shortcuts hint (`i`), and image counter are grouped with consistent spacing; metadata centering uses the same trailing width math as before.
 - **Keyboard shortcuts help**: Tooltip and shortcuts dialog list only keyboard/trackpad actions; slideshow and rotate remain on the bottom bar (not listed as hotkeys).
 
 ### Fixes & improvements
-- **Build / Share**: `requirements.txt`, `build.py`, and platform build scripts include optional `pyobjc-framework-Cocoa` (macOS) and `pywin32` (Windows) with matching PyInstaller hidden imports so the bottom-bar Share action works in packaged apps.
+- **Windows shell sharing**: Removed legacy `ShellExecute` / `ShellExecuteEx` use of the Explorer **`share`** verb, which often triggered “no application is associated with this file” for common types (e.g. JPEG). Any remaining share-related code path defers to the next event-loop tick, tries Explorer COM verbs when available, then falls back to **file clipboard** (`CF_HDROP`), **PowerShell `Set-Clipboard -LiteralPath`**, and finally path text.
+- **Rotate button**: Shown only for on-disk-rotatable raster images (not RAW). RAW rotation still relies on **ExifTool**; resolution order is `PATH`, `RAWVIEWER_EXIFTOOL`, next to the executable, then project root, with a clearer error message when missing.
+- **Build**: `requirements.txt`, `build.py`, and platform build scripts include optional `pyobjc-framework-Cocoa` (macOS) and `pywin32` (Windows) with matching PyInstaller hidden imports so packaged apps include the APIs needed for macOS Share and other shell features.
 - **Gallery mode chrome**: While in gallery view, the gallery toggle, share, slideshow, rotate, and single-image metadata counter behave as expected (only sort + total count + essentials stay visible; return to a photo via the grid).
 - **Gallery → single loading**: Fixed cases where the “Loading image” overlay could remain after picking a thumbnail when the image was served from memory cache.
 - **Empty-state copy**: Onboarding text refers to bottom-bar controls generically instead of naming slideshow/rotate as keys.

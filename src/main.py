@@ -12602,7 +12602,7 @@ def main():
         # Use is_windows variable to avoid calling platform.system() again
         if is_windows:
             print("  [Windows] Setting AppUserModelID...", flush=True)
-            myappid = 'RAWviewer.1.7.1'
+            myappid = 'RAWviewer.1.7.0'
             ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
             print("  [Windows] AppUserModelID set", flush=True)
 
@@ -12611,7 +12611,7 @@ def main():
 
         # Set application properties
         app.setApplicationName("RAW Image Viewer")
-        app.setApplicationVersion("1.7.1")
+        app.setApplicationVersion("1.7.0")
 
         # macOS: force dark UI to better match our dark theme (including title bar).
         # Using Qt's palette is more reliable than trying to hard-set NSWindow colors.
