@@ -7,7 +7,7 @@ from typing import List, Dict, Any, Optional
 
 from PyQt6.QtWidgets import QWidget, QScrollArea, QLabel
 from PyQt6.QtCore import Qt, QTimer, QRect, QEvent, QSize
-from PyQt6.QtGui import QPixmap, QImage, QPainter, QBrush, QColor, QFont
+from PyQt6.QtGui import QPixmap, QImage, QPainter, QBrush, QColor, QFont, QTransform
 
 from rawviewer_ui.widgets import ThumbnailLabel, ImageLoaded
 from image_cache import LRUCache
@@ -214,11 +214,36 @@ class JustifiedGallery(QWidget):
         """Cache key for scaled thumbnails including width/height buckets."""
         th = int(target_size.height())
         tw = int(target_size.width())
+        rot = self._get_rotation_degrees_for_path(file_path)
         if th <= 0 or tw <= 0:
-            return (file_path, self._thumb_base_key)
+            return (file_path, self._thumb_base_key, rot)
         h_bucket = min(self._row_height_buckets, key=lambda x: abs(x - th))
         w_bucket = max(self._width_bucket_px, int(round(tw / self._width_bucket_px)) * self._width_bucket_px)
-        return (file_path, h_bucket, w_bucket)
+        return (file_path, h_bucket, w_bucket, rot)
+
+    def _get_rotation_degrees_for_path(self, file_path: str) -> int:
+        """Read per-file visual rotation from parent viewer (0/90/180/270)."""
+        pv = getattr(self, "parent_viewer", None)
+        if pv is None:
+            return 0
+        getter = getattr(pv, "_get_visual_rotation_degrees", None)
+        if getter is None:
+            return 0
+        try:
+            return int(getter(file_path)) % 360
+        except Exception:
+            return 0
+
+    def _apply_visual_rotation_for_path(self, file_path: str, pixmap: QPixmap) -> QPixmap:
+        """Apply non-destructive visual rotation for gallery tile rendering only."""
+        if not pixmap or pixmap.isNull():
+            return pixmap
+        deg = self._get_rotation_degrees_for_path(file_path)
+        if deg == 0:
+            return pixmap
+        t = QTransform()
+        t.rotate(deg)
+        return pixmap.transformed(t, Qt.TransformationMode.SmoothTransformation)
 
     def invalidate_thumbnails_for_path(self, file_path: str) -> None:
         """Drop cached gallery pixmaps for a path (e.g. after on-disk rotation)."""
@@ -226,6 +251,52 @@ class JustifiedGallery(QWidget):
             self._thumbnail_cache.remove_keys_for_file_path(file_path)
         except Exception:
             pass
+
+    def _invalidate_scaled_thumbnails_for_path(self, file_path: str) -> None:
+        """Drop only scaled variants for a path; keep base thumbnail to speed immediate redraw."""
+        try:
+            with self._thumbnail_cache.lock:
+                for k in list(self._thumbnail_cache.cache.keys()):
+                    if (
+                        isinstance(k, tuple)
+                        and len(k) >= 2
+                        and k[0] == file_path
+                        and not (len(k) >= 2 and k[1] == self._thumb_base_key)
+                    ):
+                        del self._thumbnail_cache.cache[k]
+        except Exception:
+            pass
+
+    def refresh_visible_tile_for_path(self, file_path: str) -> None:
+        """Immediately refresh visible widgets for a path after visual-rotation changes."""
+        if not file_path:
+            return
+        self._invalidate_scaled_thumbnails_for_path(file_path)
+        indices = self._path_to_indices.get(file_path, [])
+        if not indices:
+            return
+        base = self._thumbnail_cache.get((file_path, self._thumb_base_key))
+        for idx in indices:
+            if idx not in self._visible_widgets:
+                continue
+            w = self._visible_widgets[idx]
+            target_size = w.size()
+            if base and not base.isNull():
+                rotated = self._apply_visual_rotation_for_path(file_path, base)
+                fitted = self._scale_crop_to_fit(rotated, target_size)
+                self._thumbnail_cache.put(self._scaled_cache_key(file_path, target_size), fitted)
+                w.setPixmap(fitted)
+                w.setText("")
+            elif self.load_manager is not None:
+                # No base thumbnail yet: schedule an immediate fetch for this visible tile.
+                self.load_manager.load_image(
+                    file_path,
+                    priority=Priority.CURRENT,
+                    cancel_existing=False,
+                    stages={"thumbnail"},
+                    thumbnail_target_size=QSize(target_size.width(), target_size.height()),
+                    thumbnail_fit="crop",
+                )
 
     def resizeEvent(self, event):
         # Debounce expensive rebuilds during window resize.
@@ -668,7 +739,8 @@ class JustifiedGallery(QWidget):
                 else:
                     base = self._thumbnail_cache.get((path, self._thumb_base_key))
                     if base:
-                        scaled = self._scale_crop_to_fit(base, rect.size())
+                        rotated_base = self._apply_visual_rotation_for_path(path, base)
+                        scaled = self._scale_crop_to_fit(rotated_base, rect.size())
                         self._thumbnail_cache.put(scaled_key, scaled)
                         w.setPixmap(scaled)
                         w.setText("")
@@ -739,7 +811,7 @@ class JustifiedGallery(QWidget):
         if not pixmap:
             return
 
-        # Cache base thumbnail (and also cache a scaled version if we can infer current visible tile size)
+        # Cache base thumbnail in original orientation; visual rotation is applied lazily per visible tile.
         self._thumbnail_cache.put((file_path, self._thumb_base_key), pixmap)
 
         now = time.time()
@@ -758,11 +830,12 @@ class JustifiedGallery(QWidget):
             if idx in self._visible_widgets:
                 w = self._visible_widgets[idx]
                 target_size = w.size()
+                rotated = self._apply_visual_rotation_for_path(file_path, pixmap)
                 # If worker already emitted a target-fitted image, avoid re-scaling here.
-                if pixmap.width() == target_size.width() and pixmap.height() == target_size.height():
-                    fitted = pixmap
+                if rotated.width() == target_size.width() and rotated.height() == target_size.height():
+                    fitted = rotated
                 else:
-                    fitted = self._scale_crop_to_fit(pixmap, target_size)
+                    fitted = self._scale_crop_to_fit(rotated, target_size)
                 self._thumbnail_cache.put(self._scaled_cache_key(file_path, target_size), fitted)
                 w.setPixmap(fitted)
                 w.setText("")

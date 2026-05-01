@@ -4599,6 +4599,8 @@ class RAWImageViewer(QMainWindow):
 
         self._slideshow_timer = None
         self._slideshow_force_fit_next = False
+        # Non-destructive per-file visual rotation (clockwise degrees: 0/90/180/270)
+        self._visual_rotation_degrees = {}
 
         # Resize event handling
         self._is_resizing = False  # Flag to track when window is being actively resized
@@ -8946,6 +8948,26 @@ class RAWImageViewer(QMainWindow):
             o = 1
         return {1: 6, 2: 5, 3: 8, 4: 7, 5: 2, 6: 3, 7: 4, 8: 1}[o]
 
+    def _get_visual_rotation_degrees(self, file_path=None) -> int:
+        """Get current non-destructive clockwise visual rotation for a file."""
+        fp = file_path or getattr(self, "current_file_path", None)
+        if not fp:
+            return 0
+        return int(self._visual_rotation_degrees.get(_norm_path(fp), 0)) % 360
+
+    def _apply_visual_rotation_for_current(self, pixmap: QPixmap) -> QPixmap:
+        """Apply per-file visual rotation to the pixmap for on-screen display only."""
+        if pixmap is None or pixmap.isNull():
+            return pixmap
+        degrees = self._get_visual_rotation_degrees()
+        if degrees == 0:
+            return pixmap
+        transform = QTransform()
+        # Stored ``degrees`` is clockwise (each button click +90° CW). pixmap.transformed()
+        # with rotate(angle) yields a clockwise on-screen rotation for positive angle here.
+        transform.rotate(degrees)
+        return pixmap.transformed(transform, Qt.TransformationMode.SmoothTransformation)
+
     def _rotate_raster_pil_cw90(self, path: str) -> None:
         from PIL import Image, ImageOps
 
@@ -9020,38 +9042,34 @@ class RAWImageViewer(QMainWindow):
             raise RuntimeError(msg or "exiftool failed")
 
     def _rotate_current_image_clockwise_persist(self):
-        """Rotate 90° clockwise on disk and refresh single view + gallery."""
+        """Rotate current image visually by 90° clockwise (non-destructive)."""
         path = getattr(self, "current_file_path", None)
         if not path or not os.path.isfile(path):
             self.status_bar.showMessage("No image to rotate", 2000)
             return
         self._stop_slideshow()
-        ext = os.path.splitext(path)[1].lower()
-        try:
-            if ext in (".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff"):
-                self._rotate_raster_pil_cw90(path)
-            elif is_raw_file(path):
-                self._rotate_raw_exiftool_meta_cw90(path)
-            else:
-                self._rotate_raster_pil_cw90(path)
-        except Exception as e:
-            QMessageBox.warning(self, "Rotate", str(e))
-            return
+        k = _norm_path(path)
+        current = int(self._visual_rotation_degrees.get(k, 0)) % 360
+        updated = (current + 90) % 360
+        if updated == 0:
+            self._visual_rotation_degrees.pop(k, None)
+        else:
+            self._visual_rotation_degrees[k] = updated
 
-        self.image_cache.invalidate_file(path)
-        try:
-            self.image_cache.exif_cache.remove(path)
-        except Exception:
-            pass
-        if path in getattr(self, "gallery_aspect_cache", {}):
-            del self.gallery_aspect_cache[path]
         gj = getattr(self, "gallery_justified", None)
-        if gj is not None and hasattr(gj, "invalidate_thumbnails_for_path"):
-            gj.invalidate_thumbnails_for_path(path)
+        if gj is not None and hasattr(gj, "refresh_visible_tile_for_path"):
+            try:
+                gj.refresh_visible_tile_for_path(path)
+            except Exception:
+                pass
 
-        self._orientation_already_applied = False
-        self.load_raw_image(path)
-        self.status_bar.showMessage("Rotated 90° clockwise (saved)", 2500)
+        # Re-render from the current base pixmap if available; otherwise load from cache/source.
+        base_pixmap = getattr(self, "_base_display_pixmap", None)
+        if base_pixmap is not None and not base_pixmap.isNull():
+            self.display_pixmap(base_pixmap)
+        else:
+            self.load_raw_image(path)
+        self.status_bar.showMessage(f"Rotated view {updated}°", 1800)
 
     def _copy_current_file_path_to_clipboard(self):
         p = getattr(self, "current_file_path", None)
@@ -9101,6 +9119,9 @@ class RAWImageViewer(QMainWindow):
                 self.zoom_center_point = None
             self._slideshow_force_fit_next = False
 
+        # Keep the unrotated (display pipeline) pixmap so visual rotations can re-render instantly.
+        self._base_display_pixmap = pixmap
+        pixmap = self._apply_visual_rotation_for_current(pixmap)
         self.current_pixmap = pixmap
         self._sync_single_image_histogram()
         # Memory / cache redraws (e.g. _show_single_view "already in memory") skip on_manager_*,
@@ -11293,7 +11314,7 @@ class RAWImageViewer(QMainWindow):
             self.share_bottom_button.setVisible(vis and sys.platform != "win32")
             self.slideshow_bottom_button.setVisible(vis)
             cp = getattr(self, "current_file_path", None)
-            show_rotate = bool(vis and cp and os.path.isfile(cp) and not is_raw_file(cp))
+            show_rotate = bool(vis and cp and os.path.isfile(cp))
             self.rotate_bottom_button.setVisible(show_rotate)
 
         if not self.current_file_path:

@@ -54,7 +54,8 @@ This is a **pre-filtering tool**, letting you go through hundreds of RAW files e
 - **Single-image histogram**: Press `H` to show or hide the strip while viewing one image
 - **Portable executable**: No Python installation required for users
 - **Modern UI**: Material Design 3 aesthetics with Font Awesome icons (via qtawesome) and non-intrusive loading indicators
-- **Platform-specific chrome**: On Windows, the bottom bar omits Share (no stable system share without WinRT interop); **Share** remains on macOS. **Rotate** appears only for standard raster files; rotating RAW requires [ExifTool](https://exiftool.org/) (see release notes).
+- **Platform-specific chrome**: On Windows, the bottom bar omits Share (no stable system share without WinRT interop); **Share** remains on macOS.
+- **Non-destructive visual rotate**: Rotate in viewer by 90° steps without modifying original files (including RAW), with gallery-visible tiles refreshed immediately.
 
 ## 🚀 Quick Start
 
