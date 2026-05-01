@@ -173,6 +173,24 @@ class JustifiedGallery(QWidget):
             finally:
                 self._requested_thumbnail_paths.clear()
 
+            if not self.images:
+                self.clear_thumbnail_widgets()
+                self._gallery_layout_items.clear()
+                self._path_to_indices.clear()
+                parent_scroll = self._scroll_area
+                if parent_scroll is None:
+                    parent_scroll = self.parent()
+                    while parent_scroll and not isinstance(parent_scroll, QScrollArea):
+                        parent_scroll = parent_scroll.parent()
+                viewport_h = parent_scroll.viewport().height() if isinstance(parent_scroll, QScrollArea) else 0
+                self._total_content_height = max(1, int(viewport_h))
+                self.setMinimumHeight(self._total_content_height)
+                self.resize(max(self.width(), self._get_viewport_width()), self._total_content_height)
+                if isinstance(parent_scroll, QScrollArea):
+                    parent_scroll.verticalScrollBar().setValue(parent_scroll.verticalScrollBar().minimum())
+                self.update()
+                return
+
             # Rebuild on next event loop tick (avoid doing heavy UI work inside caller)
             QTimer.singleShot(0, lambda: self.build_gallery(bulk_metadata=bulk_metadata))
         except Exception:
@@ -946,6 +964,43 @@ class JustifiedGallery(QWidget):
             self._empty_label.hide()
             self._empty_label.deleteLater()
             self._empty_label = None
+
+    def clear_thumbnail_widgets(self):
+        """Remove all thumbnail widgets from the gallery surface."""
+        for label in list(getattr(self, "_visible_widgets", {}).values()):
+            try:
+                label.hide()
+                label.clear()
+                label.setText("")
+                label.file_path = None
+                label.original_pixmap = None
+                label.deleteLater()
+            except Exception:
+                pass
+        self._visible_widgets.clear()
+
+        for label in list(getattr(self, "_widget_pool", [])):
+            try:
+                label.hide()
+                label.clear()
+                label.setText("")
+                label.file_path = None
+                label.original_pixmap = None
+                label.deleteLater()
+            except Exception:
+                pass
+        self._widget_pool = []
+
+        try:
+            for child in self.findChildren(ThumbnailLabel):
+                child.hide()
+                child.clear()
+                child.setText("")
+                child.file_path = None
+                child.original_pixmap = None
+                child.deleteLater()
+        except Exception:
+            pass
             
     def _update_empty_label_geometry(self):
         """Center the empty label in the viewport"""
