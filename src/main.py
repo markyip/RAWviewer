@@ -4272,6 +4272,126 @@ class LoadingOverlay(QWidget):
         # Already covers parent because we resize it in parent's resizeEvent
         super().resizeEvent(event)
 
+
+def _windows_shell_verb_suggests_share(verb_name: object) -> bool:
+    """Match Explorer context-menu verbs for 'Share' across English and common locales."""
+    s = str(verb_name or "")
+    low = s.replace("&", "").strip().lower()
+    if "share" in low or "windows.share" in low:
+        return True
+    plain = s.replace("&", "")
+    for token in (
+        "\u5171\u7528",  # zh-TW: 共用
+        "\u5206\u4eab",  # zh-CN: 分享
+        "partage",
+        "teilen",
+        "condividi",
+        "compartir",
+        "delen",
+    ):
+        if token in plain or token in low:
+            return True
+    return False
+
+
+def _resolve_exiftool_executable():
+    """ExifTool for on-disk RAW orientation; PATH, RAWVIEWER_EXIFTOOL, next to exe, or project root."""
+    import shutil
+
+    ex = shutil.which("exiftool")
+    if ex:
+        return ex
+    env = os.environ.get("RAWVIEWER_EXIFTOOL", "").strip()
+    if env:
+        env = os.path.expandvars(os.path.expanduser(env))
+        if os.path.isfile(env):
+            return env
+        d = os.path.dirname(env)
+        if d:
+            w = shutil.which(os.path.basename(env), path=d)
+            if w:
+                return w
+    if getattr(sys, "frozen", False):
+        base = os.path.dirname(sys.executable)
+        for name in ("exiftool.exe", "exiftool", "exiftool(-k).exe"):
+            cand = os.path.join(base, name)
+            if os.path.isfile(cand):
+                return cand
+    try:
+        here = os.path.dirname(os.path.abspath(__file__))
+        root = os.path.dirname(here)
+        for name in ("exiftool.exe", "exiftool", "exiftool(-k).exe"):
+            cand = os.path.join(root, name)
+            if os.path.isfile(cand):
+                return cand
+    except Exception:
+        pass
+    return None
+
+
+def _share_windows_clipboard_cf_hdrop(path: str) -> bool:
+    """Place file(s) on clipboard as CF_HDROP (native Windows file clipboard)."""
+    import struct
+
+    try:
+        import win32clipboard  # type: ignore
+        import win32con  # type: ignore
+    except ImportError:
+        return False
+
+    abs_path = os.path.abspath(path)
+    if not os.path.isfile(abs_path):
+        return False
+    paths = (abs_path + "\0").encode("utf-16le") + b"\x00\x00"
+    dropfiles = struct.pack("<IIIII", 20, 0, 0, 0, 1)
+    data = dropfiles + paths
+    try:
+        win32clipboard.OpenClipboard()
+        try:
+            win32clipboard.EmptyClipboard()
+            win32clipboard.SetClipboardData(win32con.CF_HDROP, data)
+        finally:
+            win32clipboard.CloseClipboard()
+        return True
+    except Exception:
+        try:
+            win32clipboard.CloseClipboard()
+        except Exception:
+            pass
+        return False
+
+
+def _share_windows_clipboard_file_via_powershell(path: str) -> bool:
+    """Put the file object on the clipboard (Windows) so the user can paste into Mail, Teams, Explorer, etc."""
+    import subprocess
+
+    abs_path = os.path.abspath(path)
+    if not os.path.isfile(abs_path):
+        return False
+    flags = 0
+    if sys.platform == "win32" and hasattr(subprocess, "CREATE_NO_WINDOW"):
+        flags = subprocess.CREATE_NO_WINDOW  # type: ignore[attr-defined]
+    try:
+        r = subprocess.run(
+            [
+                "powershell",
+                "-NoProfile",
+                "-Sta",
+                "-Command",
+                "Set-Clipboard",
+                "-LiteralPath",
+                abs_path,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=20,
+            creationflags=flags,
+        )
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
 class RAWImageViewer(QMainWindow):
     def _load_pixmap_safe(self, file_path):
         """Safely load QPixmap, using rawpy for RAW files and PIL for TIFF files to avoid Qt warnings"""
@@ -4679,9 +4799,6 @@ class RAWImageViewer(QMainWindow):
         max_dim = max(image.shape[0], image.shape[1])
         is_full_resolution = max_dim >= 4000 # Consider >4000px as full resolution
         
-        # Check pending zoom states
-        has_pending_zoom = getattr(self, '_pending_zoom', False)
-        
         if is_full_resolution:
             logger.info(f"[MANAGER] High-resolution image loaded ({image.shape[1]}x{image.shape[0]}). maintain_zoom flag set.")
             self._full_resolution_loading = False
@@ -4702,25 +4819,10 @@ class RAWImageViewer(QMainWindow):
 
         self.status_bar.showMessage(f"Loaded {os.path.basename(file_path)}")
         
-        # Handle pending "spacebar 100%" zoom if full resolution just arrived.
-        # This avoids the two-step zoom (preview 100% -> full-res 100%).
-        if is_full_resolution and has_pending_zoom:
-            logger.info("[MANAGER] Executing pending 100% zoom after full resolution load")
-            self._pending_zoom = False
-            try:
-                # Ensure we stay in zoom (not fit-to-window)
-                self.fit_to_window = False
-                self.current_zoom_level = 1.0
-                # Update pixmap reference after display_numpy_image()
-                self.current_pixmap = self.image_label.pixmap()
-                if self.current_pixmap:
-                    image_center_x = self.current_pixmap.width() // 2
-                    image_center_y = self.current_pixmap.height() // 2
-                    self.zoom_center_point = QPoint(image_center_x, image_center_y)
-                    self.scale_image_to_100_percent()
-                    self.zoom_to_point()
-            except Exception as e:
-                logger.debug(f"[MANAGER] Pending zoom apply failed: {e}")
+        # Pending 100% zoom after half-res (double-click or spacebar) is applied inside
+        # display_pixmap() using _pending_zoom_center / _pending_zoom_thumbnail_size.
+        # Do not re-run zoom here: a stale pre-display _pending_zoom flag would wrongly
+        # replace the click-based center with the image center.
 
         # CRITICAL: Ensure metadata is updated after image is displayed
         self.update_status_bar()
@@ -5074,6 +5176,10 @@ class RAWImageViewer(QMainWindow):
         if platform.system() == "Windows":
             try:
                 self.menuBar().setNativeMenuBar(False)
+            except Exception:
+                pass
+            try:
+                self.menuBar().setVisible(False)
             except Exception:
                 pass
         self.scroll_area = QScrollArea()
@@ -5521,6 +5627,14 @@ class RAWImageViewer(QMainWindow):
         shortcuts_action.setStatusTip('Show keyboard shortcuts')
         shortcuts_action.triggered.connect(self.show_keyboard_shortcuts)
         menubar.addAction(shortcuts_action)
+
+        # Shortcuts still work when the menu bar is hidden (Windows frameless UI)
+        self.addAction(open_action)
+        self.addAction(open_folder_action)
+        self.addAction(self.copy_path_action)
+        self.addAction(self.reveal_action)
+        self.addAction(exit_action)
+        self.addAction(shortcuts_action)
 
     def get_settings(self):
         return QSettings("RAWviewer", "RAWviewer")
@@ -7679,7 +7793,10 @@ class RAWImageViewer(QMainWindow):
         self.image_label.setCursor(QCursor(Qt.CursorShape.OpenHandCursor))
 
         # Actually center the view on the zoom point
-        self._complete_zoom_to_point()
+        # Defer the scroll update to the next event loop iteration to ensure
+        # the scroll area layout is fully updated and scrollbars have correct maximums.
+        from PyQt6.QtCore import QTimer
+        QTimer.singleShot(0, self._complete_zoom_to_point)
 
     def _complete_zoom_to_point(self):
         if self.zoom_center_point:
@@ -8727,9 +8844,38 @@ class RAWImageViewer(QMainWindow):
                 self.status_bar.showMessage("Share", 1500)
                 return
         elif sys.platform == "win32":
-            if self._share_windows_shell(path):
-                self.status_bar.showMessage("Share", 1500)
-                return
+            QTimer.singleShot(0, lambda fp=path: self._share_windows_ui_chain(fp))
+            return
+        self._copy_current_file_path_to_clipboard()
+        self.status_bar.showMessage("Share unavailable — path copied to clipboard", 4000)
+
+    def _share_windows_ui_chain(self, path: str):
+        """Run after the next event-loop tick so Shell share UI can attach to a pumped UI thread."""
+        owner = 0
+        wh = self.windowHandle()
+        if wh is not None:
+            try:
+                owner = int(wh.winId())
+            except Exception:
+                owner = 0
+        if owner == 0:
+            try:
+                owner = int(self.effectiveWinId())
+            except Exception:
+                owner = 0
+        if self._share_windows_shell(path, owner):
+            self.status_bar.showMessage("Share", 1500)
+            return
+        if _share_windows_clipboard_cf_hdrop(path):
+            self.status_bar.showMessage(
+                "File copied to clipboard — paste into Mail, Teams, or other apps", 4500
+            )
+            return
+        if _share_windows_clipboard_file_via_powershell(path):
+            self.status_bar.showMessage(
+                "File copied to clipboard — paste into Mail, Teams, or other apps", 4500
+            )
+            return
         self._copy_current_file_path_to_clipboard()
         self.status_bar.showMessage("Share unavailable — path copied to clipboard", 4000)
 
@@ -8751,25 +8897,40 @@ class RAWImageViewer(QMainWindow):
         except Exception:
             return False
 
-    def _share_windows_shell(self, path: str) -> bool:
+    def _share_windows_shell(self, path: str, owner_hwnd: int = 0) -> bool:
+        """Invoke Windows share where available.
+
+        Microsoft documents programmatic sharing for desktop apps via WinRT
+        ``DataTransferManager`` + ``IDataTransferManagerInterop`` (GetForWindow /
+        ShowShareUIForWindow), not via the legacy Explorer ``share`` shell verb:
+        https://learn.microsoft.com/en-us/windows/apps/develop/ui/display-ui-objects
+
+        Calling ``ShellExecute*`` with verb ``share`` often raises Win32 error 1155 /
+        "no application is associated with this file" for many paths (including
+        common image types) because that verb is not a guaranteed shell association.
+        We therefore avoid ShellExecute-based share here and rely on Explorer COM
+        verbs first, then clipboard fallbacks in ``_share_windows_ui_chain``.
+        """
+        abs_path = _norm_path(os.path.abspath(path))
+        _ = owner_hwnd  # reserved for a future WinRT (IDataTransferManagerInterop) implementation
         try:
             import win32com.client  # type: ignore
 
             folder = win32com.client.Dispatch("Shell.Application").Namespace(
-                os.path.dirname(path)
+                os.path.dirname(abs_path)
             )
-            item = folder.ParseName(os.path.basename(path))
+            item = folder.ParseName(os.path.basename(abs_path))
             if item is None:
                 return False
-            try:
-                item.InvokeVerb("share")
-                return True
-            except Exception:
-                pass
+            for verb_key in ("share", "Windows.share", "Windows.Share"):
+                try:
+                    item.InvokeVerb(verb_key)
+                    return True
+                except Exception:
+                    continue
             for verb in item.Verbs():
                 try:
-                    name = str(verb.Name).replace("&", "")
-                    if "share" in name.lower():
+                    if _windows_shell_verb_suggests_share(verb.Name):
                         verb.DoIt()
                         return True
                 except Exception:
@@ -8823,13 +8984,15 @@ class RAWImageViewer(QMainWindow):
                 im.close()
 
     def _rotate_raw_exiftool_meta_cw90(self, path: str) -> None:
-        import shutil
         import subprocess
 
-        ex = shutil.which("exiftool")
+        ex = _resolve_exiftool_executable()
         if not ex:
             raise RuntimeError(
-                "Rotating this file type needs exiftool in PATH (https://exiftool.org/)."
+                "Rotating RAW files updates metadata only (sensor pixels are unchanged) and "
+                "requires ExifTool. Install from https://exiftool.org/ and add it to PATH, "
+                "or place exiftool.exe next to RAWviewer.exe, "
+                "or set environment variable RAWVIEWER_EXIFTOOL to the full path of exiftool.exe."
             )
         r = subprocess.run(
             [ex, "-n", "-Orientation", "-m", path],
@@ -11126,9 +11289,12 @@ class RAWImageViewer(QMainWindow):
             )
         if hasattr(self, "share_bottom_button"):
             vis = bool(self.image_files) and self.view_mode == "single"
-            self.share_bottom_button.setVisible(vis)
+            # Share is not offered on Windows (no stable system share UX without WinRT interop).
+            self.share_bottom_button.setVisible(vis and sys.platform != "win32")
             self.slideshow_bottom_button.setVisible(vis)
-            self.rotate_bottom_button.setVisible(vis)
+            cp = getattr(self, "current_file_path", None)
+            show_rotate = bool(vis and cp and os.path.isfile(cp) and not is_raw_file(cp))
+            self.rotate_bottom_button.setVisible(show_rotate)
 
         if not self.current_file_path:
             # Hide metadata when no image is loaded
@@ -12436,7 +12602,7 @@ def main():
         # Use is_windows variable to avoid calling platform.system() again
         if is_windows:
             print("  [Windows] Setting AppUserModelID...", flush=True)
-            myappid = 'RAWviewer.1.7.0'
+            myappid = 'RAWviewer.1.7.1'
             ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
             print("  [Windows] AppUserModelID set", flush=True)
 
@@ -12445,7 +12611,7 @@ def main():
 
         # Set application properties
         app.setApplicationName("RAW Image Viewer")
-        app.setApplicationVersion("1.7.0")
+        app.setApplicationVersion("1.7.1")
 
         # macOS: force dark UI to better match our dark theme (including title bar).
         # Using Qt's palette is more reliable than trying to hard-set NSWindow colors.
