@@ -1,10 +1,10 @@
-# RAWviewer v1.7.0
+# RAWviewer v1.7.1
 
 <p align="center">
   <img src="icons/appicon.ico" alt="RAWviewer Icon" width="256">
 </p>
 
-![Version](https://img.shields.io/badge/version-1.7.0-blue)
+![Version](https://img.shields.io/badge/version-1.7.1-blue)
 ![Downloads](https://img.shields.io/github/downloads/markyip/RAWviewer/total) 
 ![License](https://img.shields.io/badge/license-MIT-green)
 [![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-Donate-orange?logo=buy-me-a-coffee)](https://www.buymeacoffee.com/markyip)
@@ -54,6 +54,7 @@ This is a **pre-filtering tool**, letting you go through hundreds of RAW files e
 - **Single-image histogram**: Press `H` to show or hide the strip while viewing one image
 - **Portable executable**: No Python installation required for users
 - **Modern UI**: Material Design 3 aesthetics with Font Awesome icons (via qtawesome) and non-intrusive loading indicators
+- **Platform-specific chrome**: On Windows, the bottom bar omits Share (no stable system share without WinRT interop); **Share** remains on macOS. **Rotate** appears only for standard raster files; rotating RAW requires [ExifTool](https://exiftool.org/) (see release notes).
 
 ## 🚀 Quick Start
 
@@ -67,7 +68,7 @@ This is a **pre-filtering tool**, letting you go through hundreds of RAW files e
 
 #### macOS
 1. Download the latest release from the [Releases Page](https://github.com/markyip/RAWviewer/releases/latest)
-2. Download and extract `RAWviewer-v1.7.0-macOS.zip`
+2. Download and extract `RAWviewer-v1.7.1-macOS.zip`
 3. Drag `RAWviewer.app` to your Applications folder
 4. Double-click to launch from Applications or Launchpad
 5. **First launch**: Right-click → "Open" if blocked by Gatekeeper

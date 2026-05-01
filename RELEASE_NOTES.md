@@ -1,5 +1,18 @@
 # RAWviewer Release Notes
 
+## 🚀 Version 1.7.1
+**Release Date: May 1, 2026**
+
+### What's new
+- **Windows UI**: The in-window menu bar (File / Keyboard Shortcuts) is hidden on Windows frameless builds; menu shortcuts remain active via the main window, and the bottom-bar **i** tooltip still lists keyboard help.
+- **Windows — no Share button**: The bottom-bar Share control is removed on Windows only. macOS keeps the native share sheet from the same control.
+
+### Fixes & improvements
+- **Windows sharing**: Removed legacy `ShellExecute` / `ShellExecuteEx` use of the Explorer **`share`** verb, which often triggered “no application is associated with this file” for common types (e.g. JPEG). Sharing now defers to the next event-loop tick, tries Explorer COM verbs when available, then falls back to **file clipboard** (`CF_HDROP`), **PowerShell `Set-Clipboard -LiteralPath`**, and finally path text.
+- **Rotate button**: Shown only for on-disk-rotatable raster images (not RAW). RAW rotation still relies on **ExifTool**; resolution order is `PATH`, `RAWVIEWER_EXIFTOOL`, next to the executable, then project root, with a clearer error message when missing.
+
+---
+
 ## 🚀 Version 1.7.0
 **Release Date: April 30, 2026**
 
