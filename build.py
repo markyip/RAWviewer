@@ -98,6 +98,7 @@ def update_macos_plist(app_path):
 def install_dependencies():
     """Install required dependencies"""
     print("Installing/upgrading dependencies...")
+    system_name = platform.system()
     dependencies = [
         'PyQt6',
         'rawpy',
@@ -109,8 +110,20 @@ def install_dependencies():
         'psutil',  # Added for system memory info in image_cache
         'numpy',   # Required for image processing (used in all modules)
         'qtawesome', # Required for icons in main.py
-        'pyqtgraph'  # Optional/Future dependency included in requirements.txt
+        'pyqtgraph',  # Optional/Future dependency included in requirements.txt
+        'reverse-geocoder',  # Offline city/country lookup from GPS EXIF
+        'pycountry',  # ISO country code -> full country name
     ]
+
+    if system_name == "Windows":
+        # Windows semantic backend will move to ONNX; keep sentence-transformers out of
+        # the default macOS test build so PyTorch is not bundled.
+        dependencies.append('sentence-transformers')
+    elif system_name == "Darwin":
+        dependencies.append('huggingface-hub')
+        dependencies.append('pyobjc-framework-CoreML')
+        dependencies.append('pyobjc-framework-Quartz')
+        dependencies.append('pyobjc-framework-Vision')
 
     for dep in dependencies:
         print(f"Installing {dep}...")
@@ -118,13 +131,13 @@ def install_dependencies():
             print(f"[ERROR] Failed to install {dep}")
             return False
 
-    if platform.system() == "Darwin":
+    if system_name == "Darwin":
         print("Installing pyobjc-framework-Cocoa (macOS share sheet)...")
         if not run_command(
             [sys.executable, "-m", "pip", "install", "--upgrade", "pyobjc-framework-Cocoa"]
         ):
             print("[WARNING] pyobjc-framework-Cocoa install failed; Share may not work in the built app.")
-    elif platform.system() == "Windows":
+    elif system_name == "Windows":
         print("Installing pywin32 (Windows Share verb)...")
         if not run_command([sys.executable, "-m", "pip", "install", "--upgrade", "pywin32"]):
             print("[WARNING] pywin32 install failed; Share may not work in the built app.")
@@ -265,6 +278,18 @@ def main():
             "--hidden-import", "objc",
             "--hidden-import", "AppKit",
             "--hidden-import", "Foundation",
+            "--hidden-import", "CoreML",
+            "--hidden-import", "Quartz",
+            "--hidden-import", "Vision",
+            "--exclude-module", "coremltools",
+            "--exclude-module", "torch",
+            "--exclude-module", "torchvision",
+            "--exclude-module", "sentence_transformers",
+            "--exclude-module", "transformers",
+            "--exclude-module", "sklearn",
+            "--exclude-module", "scipy",
+            "--exclude-module", "tokenizers",
+            "--exclude-module", "safetensors",
         ])
     elif platform.system() == "Windows":
         cmd_base.extend([

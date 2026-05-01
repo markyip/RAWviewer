@@ -58,7 +58,10 @@ echo "Upgrading pip..."
 
 # Install/upgrade dependencies
 echo "Installing dependencies..."
-"$PYTHON_BIN" -m pip install --upgrade PyQt6 rawpy send2trash pyinstaller natsort exifread Pillow psutil numpy qtawesome pyqtgraph pyobjc-framework-Cocoa
+"$PYTHON_BIN" -m pip install --upgrade PyQt6 rawpy send2trash pyinstaller natsort exifread Pillow psutil numpy qtawesome pyqtgraph reverse-geocoder pycountry huggingface-hub pyobjc-framework-Cocoa pyobjc-framework-CoreML pyobjc-framework-Quartz pyobjc-framework-Vision
+
+# Keep the macOS test bundle free of PyTorch until the Core ML backend is wired in.
+"$PYTHON_BIN" -m pip uninstall -y sentence-transformers torch torchvision transformers scikit-learn scipy tokenizers safetensors coremltools >/dev/null 2>&1 || true
 
 # Clean previous builds
 echo "Cleaning previous builds..."

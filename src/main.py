@@ -251,8 +251,9 @@ print("Basic imports done, importing PyQt6...", flush=True)
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QLabel, QFileDialog,
                              QMessageBox, QScrollArea, QSizePolicy, QPushButton, QFrame,
-                             QGridLayout, QScrollBar, QDialog, QSplashScreen)
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QPoint, QEvent, QSettings, QSize, QRect, QObject, QRunnable, QThreadPool, QTimer
+                             QGridLayout, QScrollBar, QDialog, QSplashScreen, QInputDialog,
+                             QLineEdit, QStackedLayout)
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QPoint, QEvent, QSettings, QSize, QRect, QObject, QRunnable, QThreadPool, QTimer, QPropertyAnimation, QEasingCurve
 from PyQt6.QtGui import (QPixmap, QImage, QAction, QKeySequence, QGuiApplication,
                          QDragEnterEvent, QDropEvent, QCursor, QIcon,
                          QTransform, QRegion, QPainterPath, QPainter, QColor, QPen, QBrush, QPalette)
@@ -347,6 +348,13 @@ except Exception as e:
     import traceback
     print(traceback.format_exc(), file=sys.stderr, flush=True)
     raise
+
+try:
+    from semantic_search import SemanticImageIndex
+    print("  - semantic_search: OK", flush=True)
+except Exception as e:
+    print(f"  - semantic_search: WARNING - {e}", flush=True)
+    SemanticImageIndex = None
 
 
 # UI Modules
@@ -1784,6 +1792,18 @@ class FolderLoadSignals(QObject):
     ready = pyqtSignal(object, object, object, object, str, object, object, float, float)
     error = pyqtSignal(object, str, str)
 
+class SemanticIndexSignals(QObject):
+    """Signal carrier for background semantic index build."""
+    progress = pyqtSignal(object, int, int, str)  # token, current, total, basename
+    done = pyqtSignal(object, object)             # token, result dict
+    error = pyqtSignal(object, str)               # token, error
+
+class SemanticAssetDownloadSignals(QObject):
+    """Signal carrier for background semantic backend asset download."""
+    progress = pyqtSignal(object, str)            # token, status message
+    done = pyqtSignal(object, str, object)        # token, asset path, corpus files
+    error = pyqtSignal(object, str)               # token, error
+
 
 # -----------------------------
 # Worker to load images in background
@@ -2421,6 +2441,43 @@ class JustifiedGallery(QWidget):
             self._empty_label.hide()
             self._empty_label.deleteLater()
             self._empty_label = None
+
+    def clear_thumbnail_widgets(self):
+        """Remove all thumbnail widgets from the gallery surface."""
+        for label in list(getattr(self, "_visible_widgets", {}).values()):
+            try:
+                label.hide()
+                label.clear()
+                label.setText("")
+                label.file_path = None
+                label.original_pixmap = None
+                label.deleteLater()
+            except Exception:
+                pass
+        self._visible_widgets = {}
+
+        for label in list(getattr(self, "_widget_pool", [])):
+            try:
+                label.hide()
+                label.clear()
+                label.setText("")
+                label.file_path = None
+                label.original_pixmap = None
+                label.deleteLater()
+            except Exception:
+                pass
+        self._widget_pool = []
+
+        try:
+            for child in self.findChildren(ThumbnailLabel):
+                child.hide()
+                child.clear()
+                child.setText("")
+                child.file_path = None
+                child.original_pixmap = None
+                child.deleteLater()
+        except Exception:
+            pass
             
     def _update_empty_label_geometry(self):
         """Center the empty label in the viewport"""
@@ -3767,16 +3824,19 @@ class JustifiedGallery(QWidget):
             self._load_timer.stop()
             self._load_timer = None
 
-        for label in self._visible_widgets.values():
-            label.hide()
-            self._widget_pool.append(label)
-        self._visible_widgets = {}
+        if images:
+            for label in self._visible_widgets.values():
+                label.hide()
+                self._widget_pool.append(label)
+            self._visible_widgets = {}
+        else:
+            self.clear_thumbnail_widgets()
 
         try:
             for child in self.findChildren(ThumbnailLabel):
                 if not child.isHidden():
                     child.hide()
-                    if child not in self._widget_pool:
+                    if images and child not in self._widget_pool:
                         self._widget_pool.append(child)
         except Exception as e:
             logger.debug(f"[JUSTIFIED_GALLERY] Error cleaning orphan gallery widgets: {e}")
@@ -3796,6 +3856,14 @@ class JustifiedGallery(QWidget):
 
         self.update()
         self.repaint()
+
+        if not self.images:
+            self._total_content_height = max(300, self.height())
+            self.setMinimumHeight(self._total_content_height)
+            self.update()
+            total_time = time.time() - start_time
+            logger.debug(f"[JUSTIFIED_GALLERY] Empty set_images() completed in {total_time:.3f}s")
+            return
 
         def build_when_ready():
             if self.width() > 0 and self._get_viewport_width() >= 300:
@@ -4156,6 +4224,162 @@ class CustomConfirmDialog(QDialog):
     
     def mouseReleaseEvent(self, event):
         """Stop dragging"""
+        if hasattr(self, '_dragging'):
+            self._dragging = False
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+
+class MobileCLIPDownloadDialog(QDialog):
+    """RAWviewer-styled prompt for downloading optional MobileCLIP assets."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setModal(True)
+
+        self.container = QWidget(self)
+        self.container.setObjectName("mobileclip_download_container")
+        self.container.setStyleSheet("""
+            #mobileclip_download_container {
+                background-color: #1E1E1E;
+                border: 1px solid #2E2E2E;
+                border-radius: 12px;
+            }
+        """)
+
+        main_layout = QVBoxLayout(self.container)
+        main_layout.setContentsMargins(24, 22, 24, 22)
+        main_layout.setSpacing(12)
+
+        title_label = QLabel("Enable Semantic Search")
+        title_label.setStyleSheet("""
+            QLabel {
+                color: #E0E0E0;
+                font-size: 17px;
+                font-weight: 600;
+                font-family: 'Roboto', 'Segoe UI', sans-serif;
+            }
+        """)
+        main_layout.addWidget(title_label)
+
+        message_label = QLabel(
+            "RAWviewer can download the MobileCLIP Core ML assets now. "
+            "This is a one-time download used for local, offline semantic indexing."
+        )
+        message_label.setWordWrap(True)
+        message_label.setStyleSheet("""
+            QLabel {
+                color: #B0B0B0;
+                font-size: 13px;
+                line-height: 1.45;
+                font-family: 'Roboto', 'Segoe UI', sans-serif;
+            }
+        """)
+        main_layout.addWidget(message_label)
+
+        note_label = QLabel("You can still use EXIF-only search without downloading.")
+        note_label.setWordWrap(True)
+        note_label.setStyleSheet("""
+            QLabel {
+                color: #888888;
+                font-size: 12px;
+                font-family: 'Roboto', 'Segoe UI', sans-serif;
+            }
+        """)
+        main_layout.addWidget(note_label)
+
+        button_layout = QHBoxLayout()
+        button_layout.setContentsMargins(0, 10, 0, 0)
+        button_layout.setSpacing(12)
+        button_layout.addStretch()
+
+        exif_only_btn = QPushButton("EXIF Only")
+        exif_only_btn.setFixedHeight(36)
+        exif_only_btn.setMinimumWidth(110)
+        exif_only_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        exif_only_btn.setStyleSheet("""
+            QPushButton {
+                background-color: transparent;
+                color: #B0B0B0;
+                border: 1px solid #4A4A4A;
+                border-radius: 18px;
+                font-size: 13px;
+                font-weight: 500;
+                font-family: 'Roboto', 'Segoe UI', sans-serif;
+                padding: 0px 20px;
+            }
+            QPushButton:hover {
+                color: #E0E0E0;
+                background-color: rgba(255, 255, 255, 0.05);
+                border-color: #5A5A5A;
+            }
+            QPushButton:pressed {
+                background-color: rgba(255, 255, 255, 0.1);
+            }
+        """)
+        exif_only_btn.clicked.connect(self.reject)
+        button_layout.addWidget(exif_only_btn)
+
+        download_btn = QPushButton("Download")
+        download_btn.setFixedHeight(36)
+        download_btn.setMinimumWidth(110)
+        download_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        download_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #3A3A3A;
+                color: #E0E0E0;
+                border: 1px solid #4A4A4A;
+                border-radius: 18px;
+                font-size: 13px;
+                font-weight: 600;
+                font-family: 'Roboto', 'Segoe UI', sans-serif;
+                padding: 0px 20px;
+            }
+            QPushButton:hover {
+                background-color: #4A4A4A;
+                border-color: #5A5A5A;
+            }
+            QPushButton:pressed {
+                background-color: #2F2F2F;
+            }
+        """)
+        download_btn.clicked.connect(self.accept)
+        download_btn.setDefault(True)
+        download_btn.setFocus()
+        button_layout.addWidget(download_btn)
+        main_layout.addLayout(button_layout)
+
+        container_layout = QVBoxLayout(self)
+        container_layout.setContentsMargins(0, 0, 0, 0)
+        container_layout.addWidget(self.container)
+        self.setFixedSize(460, 220)
+        self.container.setFixedSize(460, 220)
+
+        if parent:
+            parent_geometry = parent.geometry()
+            dialog_x = parent_geometry.x() + (parent_geometry.width() - self.width()) // 2
+            dialog_y = parent_geometry.y() + (parent_geometry.height() - self.height()) // 2
+            self.move(dialog_x, dialog_y)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._dragging = True
+            self._drag_pos = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if hasattr(self, '_dragging') and self._dragging:
+            self.move(event.globalPosition().toPoint() - self._drag_pos)
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
         if hasattr(self, '_dragging'):
             self._dragging = False
             event.accept()
@@ -4601,6 +4825,18 @@ class RAWImageViewer(QMainWindow):
         self._slideshow_force_fit_next = False
         # Non-destructive per-file visual rotation (clockwise degrees: 0/90/180/270)
         self._visual_rotation_degrees = {}
+        self._semantic_index = None
+        self._semantic_search_backup_files = None
+        # Full unfiltered file list for semantic index/search corpus in current folder.
+        self._semantic_search_corpus_files = []
+        self._semantic_index_active_token = None
+        self._semantic_indexing_in_progress = False
+        self._semantic_asset_download_in_progress = False
+        self._semantic_asset_download_signals = None
+        self._mobileclip_download_dismissed_this_session = False
+        self._last_semantic_query = ""
+        self._semantic_index_progress_base = 0
+        self._semantic_index_progress_total = 0
 
         # Resize event handling
         self._is_resizing = False  # Flag to track when window is being actively resized
@@ -5453,6 +5689,74 @@ class RAWImageViewer(QMainWindow):
         self.rotate_bottom_button.hide()
         left_buttons_layout.addWidget(self.rotate_bottom_button, 0, alignment=Qt.AlignmentFlag.AlignVCenter)
 
+        self.search_bottom_button = QPushButton()
+        self.search_bottom_button.setFlat(True)
+        self.search_bottom_button.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        if qta is not None:
+            try:
+                self.search_bottom_button.setIcon(qta.icon("fa5s.search", color="#B0B0B0"))
+                self.search_bottom_button.setIconSize(QSize(20, 20))
+            except Exception:
+                self.search_bottom_button.setText("Search")
+        else:
+            self.search_bottom_button.setText("Search")
+        self.search_bottom_button.setStyleSheet(bottom_icon_btn_style)
+        self.search_bottom_button.clicked.connect(self._on_search_bottom_clicked)
+        self.search_bottom_button.hide()
+        left_buttons_layout.addWidget(self.search_bottom_button, 0, alignment=Qt.AlignmentFlag.AlignVCenter)
+
+        # Search panel: expands from search button (gallery mode only)
+        self.search_expand_container = QWidget()
+        self.search_expand_container.setSizePolicy(
+            QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred
+        )
+        self.search_expand_container.setMinimumWidth(0)
+        self.search_expand_container.setMaximumWidth(0)
+        self.search_expand_layout = QStackedLayout(self.search_expand_container)
+        self.search_expand_layout.setContentsMargins(0, 0, 0, 0)
+
+        self.gallery_search_status_label = QLabel("")
+        self.gallery_search_status_label.setAlignment(
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+        )
+        self.gallery_search_status_label.setStyleSheet("""
+            QLabel {
+                color: #B0B0B0;
+                font-size: 13px;
+                font-weight: 500;
+                padding: 6px 0px 6px 6px;
+            }
+        """)
+        self.search_expand_layout.addWidget(self.gallery_search_status_label)
+
+        self.gallery_search_input = QLineEdit()
+        self.gallery_search_input.setPlaceholderText(
+            "Search gallery (e.g. jet takeoff camera:sony iso<800 city:tokyo)"
+        )
+        self.gallery_search_input.setClearButtonEnabled(True)
+        self.gallery_search_input.setFixedWidth(560)
+        self.gallery_search_input.setStyleSheet("""
+            QLineEdit {
+                color: #E0E0E0;
+                background-color: #2A2A2A;
+                border: 1px solid #3A3A3A;
+                border-radius: 6px;
+                padding: 6px 10px;
+                font-size: 13px;
+            }
+            QLineEdit:focus {
+                border: 1px solid #5A5A5A;
+            }
+        """)
+        self.gallery_search_input.returnPressed.connect(self._semantic_search_from_bar)
+        self.gallery_search_input.textChanged.connect(self._on_gallery_search_text_changed)
+        self.search_expand_layout.addWidget(self.gallery_search_input)
+        self.search_expand_layout.setCurrentWidget(self.gallery_search_status_label)
+        self._search_panel_target_width = 560
+        self._search_panel_expanded = False
+        self._search_panel_animation = None
+        left_buttons_layout.addWidget(self.search_expand_container, 0, alignment=Qt.AlignmentFlag.AlignVCenter)
+
         self.shortcuts_hint_button = QPushButton("i")
         self.shortcuts_hint_button.setFlat(True)
         self.shortcuts_hint_button.setCursor(QCursor(Qt.CursorShape.ArrowCursor))
@@ -5536,8 +5840,7 @@ class RAWImageViewer(QMainWindow):
         left_spacer.setMinimumWidth(left_buttons_width)  # Match left side width
         status_layout.addWidget(left_spacer)
         
-        # Center metadata label - text center aligns with window center
-        # Text should be centered, so the center of the text aligns with window center
+        # Center area: metadata only (single-image mode)
         self.status_metadata_label = QLabel("")
         self.status_metadata_label.setAlignment(Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter)
         self.status_metadata_label.setStyleSheet("""
@@ -5549,8 +5852,6 @@ class RAWImageViewer(QMainWindow):
                 letter-spacing: 0.15px;
             }
         """)
-        # Add with stretch=0 so it doesn't expand, and center alignment
-        # This ensures the label itself is centered, and text within label is also centered
         status_layout.addWidget(self.status_metadata_label, 0, alignment=Qt.AlignmentFlag.AlignHCenter)
         
         # Right spacer - balances left spacer (reserve trailing cluster + layout gaps)
@@ -5637,6 +5938,458 @@ class RAWImageViewer(QMainWindow):
         self.addAction(self.reveal_action)
         self.addAction(exit_action)
         self.addAction(shortcuts_action)
+
+    def _get_semantic_index(self):
+        if SemanticImageIndex is None:
+            raise RuntimeError(
+                "Semantic search module is unavailable. Please ensure dependencies are installed."
+            )
+        if self._semantic_index is None:
+            self._semantic_index = SemanticImageIndex()
+        return self._semantic_index
+
+    def _set_gallery_search_status(self, message: str):
+        if hasattr(self, "gallery_search_status_label") and self.gallery_search_status_label is not None:
+            self.gallery_search_status_label.setText(message or "")
+        if getattr(self, "view_mode", "single") != "gallery":
+            return
+        if hasattr(self, "search_expand_layout") and hasattr(self, "gallery_search_status_label"):
+            self.search_expand_layout.setCurrentWidget(self.gallery_search_status_label)
+        self._set_search_panel_expanded(True)
+
+    def _set_gallery_search_input_visible(self):
+        if getattr(self, "view_mode", "single") != "gallery":
+            return
+        if hasattr(self, "search_expand_layout") and hasattr(self, "gallery_search_input"):
+            self.search_expand_layout.setCurrentWidget(self.gallery_search_input)
+        self._set_search_panel_expanded(True)
+
+    def _set_search_panel_expanded(self, expanded: bool, animate: bool = True):
+        if not hasattr(self, "search_expand_container") or self.search_expand_container is None:
+            return
+        target = self._search_panel_target_width if expanded else 0
+        self._search_panel_expanded = bool(expanded)
+        if not expanded and hasattr(self, "gallery_search_input") and self.gallery_search_input is not None:
+            try:
+                self.gallery_search_input.clearFocus()
+            except Exception:
+                pass
+        if self._search_panel_animation is not None:
+            try:
+                self._search_panel_animation.stop()
+            except Exception:
+                pass
+            self._search_panel_animation = None
+        if not animate:
+            self.search_expand_container.setMinimumWidth(target)
+            self.search_expand_container.setMaximumWidth(target)
+            return
+        anim = QPropertyAnimation(self.search_expand_container, b"maximumWidth")
+        anim.setDuration(180)
+        anim.setStartValue(self.search_expand_container.maximumWidth())
+        anim.setEndValue(target)
+        anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self.search_expand_container.setMinimumWidth(0)
+        self._search_panel_animation = anim
+
+        def _finish():
+            self.search_expand_container.setMinimumWidth(target)
+            self.search_expand_container.setMaximumWidth(target)
+            self._search_panel_animation = None
+
+        anim.finished.connect(_finish)
+        anim.start()
+
+    def _is_semantic_index_ready(self, corpus_files):
+        idx = self._get_semantic_index()
+        return idx.get_index_coverage(corpus_files)
+
+    def _start_semantic_index_build_background(self, corpus_files):
+        if self._semantic_indexing_in_progress:
+            return
+        index = self._get_semantic_index()
+        coverage = index.get_index_coverage(corpus_files)
+        pending_files = index.get_pending_paths(corpus_files)
+        total_files = int(coverage.get("total", len(corpus_files)))
+        indexed_files = max(0, int(coverage.get("indexed", 0)))
+        if not pending_files:
+            self._set_gallery_search_input_visible()
+            if (
+                getattr(self, "view_mode", "single") == "gallery"
+                and hasattr(self, "gallery_search_input")
+                and self.gallery_search_input is not None
+            ):
+                self.gallery_search_input.setFocus()
+            self.status_bar.showMessage("Semantic index already up-to-date", 2500)
+            return
+        token = time.time_ns()
+        self._semantic_index_active_token = token
+        self._semantic_indexing_in_progress = True
+        self._semantic_index_progress_total = max(total_files, indexed_files + len(pending_files))
+        self._semantic_index_progress_base = min(indexed_files, self._semantic_index_progress_total)
+        signals = SemanticIndexSignals()
+        self._semantic_index_signals = signals
+        signals.progress.connect(self._on_semantic_index_progress)
+        signals.done.connect(self._on_semantic_index_done)
+        signals.error.connect(self._on_semantic_index_error)
+
+        class _SemanticIndexWorker(QRunnable):
+            def __init__(self_inner, token, files, index, signals):
+                super().__init__()
+                self_inner.token = token
+                self_inner.files = files
+                self_inner.index = index
+                self_inner.signals = signals
+
+            def run(self_inner):
+                try:
+                    def _progress(i, n, fp):
+                        self_inner.signals.progress.emit(
+                            self_inner.token, i, n, os.path.basename(fp)
+                        )
+
+                    result = self_inner.index.build_index(
+                        self_inner.files, progress_callback=_progress
+                    )
+                    self_inner.signals.done.emit(self_inner.token, result)
+                except Exception as e:
+                    self_inner.signals.error.emit(self_inner.token, str(e))
+
+        self._set_gallery_search_status(
+            "Initializing semantic index... "
+            f"{self._semantic_index_progress_base}/{self._semantic_index_progress_total} "
+            f"(pending {len(pending_files)})"
+        )
+        worker = _SemanticIndexWorker(token, list(pending_files), index, signals)
+        QThreadPool.globalInstance().start(worker)
+
+    def _on_semantic_index_progress(self, token, i, n, basename):
+        if token != self._semantic_index_active_token:
+            return
+        done = min(
+            self._semantic_index_progress_total,
+            self._semantic_index_progress_base + max(0, int(i)),
+        )
+        total = max(done, self._semantic_index_progress_total)
+        self._set_gallery_search_status(f"Initializing semantic index... {done}/{total} ({basename})")
+
+    def _on_semantic_index_done(self, token, result):
+        if token != self._semantic_index_active_token:
+            return
+        self._semantic_indexing_in_progress = False
+        self._semantic_index_active_token = None
+        self._semantic_index_signals = None
+        self._semantic_index_progress_base = 0
+        self._semantic_index_progress_total = 0
+        self._set_gallery_search_input_visible()
+        if (
+            getattr(self, "view_mode", "single") == "gallery"
+            and hasattr(self, "gallery_search_input")
+            and self.gallery_search_input is not None
+        ):
+            self.gallery_search_input.setFocus()
+        self.status_bar.showMessage(
+            "Semantic index ready: "
+            f"indexed {result.get('indexed', 0)}, skipped {result.get('skipped', 0)}, "
+            f"failed {result.get('failed', 0)}",
+            5000,
+        )
+
+    def _on_semantic_index_error(self, token, error):
+        if token != self._semantic_index_active_token:
+            return
+        self._semantic_indexing_in_progress = False
+        self._semantic_index_active_token = None
+        self._semantic_index_signals = None
+        self._semantic_index_progress_base = 0
+        self._semantic_index_progress_total = 0
+        self._set_gallery_search_status("Semantic index initialization failed")
+        self.status_bar.showMessage(f"Semantic index failed: {error}", 5000)
+
+    def _start_semantic_asset_download_background(self, corpus_files):
+        if self._semantic_asset_download_in_progress:
+            return
+        index = self._get_semantic_index()
+        token = time.time_ns()
+        self._semantic_asset_download_in_progress = True
+        signals = SemanticAssetDownloadSignals()
+        self._semantic_asset_download_signals = signals
+        signals.progress.connect(self._on_semantic_asset_download_progress)
+        signals.done.connect(self._on_semantic_asset_download_done)
+        signals.error.connect(self._on_semantic_asset_download_error)
+
+        class _SemanticAssetDownloadWorker(QRunnable):
+            def __init__(self_inner, token, index, files, signals):
+                super().__init__()
+                self_inner.token = token
+                self_inner.index = index
+                self_inner.files = files
+                self_inner.signals = signals
+
+            def run(self_inner):
+                try:
+                    def _progress(message):
+                        self_inner.signals.progress.emit(self_inner.token, str(message))
+
+                    path = self_inner.index.download_semantic_backend_assets(
+                        progress_callback=_progress
+                    )
+                    self_inner.signals.done.emit(self_inner.token, path, list(self_inner.files))
+                except Exception as e:
+                    self_inner.signals.error.emit(self_inner.token, str(e))
+
+        self._set_gallery_search_status("Downloading MobileCLIP semantic assets...")
+        worker = _SemanticAssetDownloadWorker(token, index, list(corpus_files), signals)
+        QThreadPool.globalInstance().start(worker)
+
+    def _on_semantic_asset_download_progress(self, token, message):
+        if not self._semantic_asset_download_in_progress:
+            return
+        self._set_gallery_search_status(message or "Downloading MobileCLIP semantic assets...")
+
+    def _on_semantic_asset_download_done(self, token, asset_path, corpus_files):
+        if not self._semantic_asset_download_in_progress:
+            return
+        self._semantic_asset_download_in_progress = False
+        self._semantic_asset_download_signals = None
+        self.status_bar.showMessage(f"MobileCLIP assets ready: {asset_path}", 4000)
+        self._start_semantic_index_build_background(corpus_files)
+
+    def _on_semantic_asset_download_error(self, token, error):
+        if not self._semantic_asset_download_in_progress:
+            return
+        self._semantic_asset_download_in_progress = False
+        self._semantic_asset_download_signals = None
+        self._set_gallery_search_status("MobileCLIP asset download failed")
+        self.status_bar.showMessage(f"MobileCLIP download failed: {error}", 7000)
+
+    def _on_search_bottom_clicked(self):
+        if getattr(self, "view_mode", "single") != "gallery":
+            return
+        if self._search_panel_expanded and not self._semantic_indexing_in_progress and not self._semantic_asset_download_in_progress:
+            self._set_search_panel_expanded(False)
+            return
+        corpus_files = [p for p in self._semantic_search_corpus_files if os.path.isfile(p)]
+        if not corpus_files:
+            corpus_files = [p for p in self.image_files if os.path.isfile(p)]
+        if not corpus_files:
+            self._set_gallery_search_status("No images available for semantic search")
+            return
+        try:
+            index = self._get_semantic_index()
+            backend_available = index.semantic_backend_available()
+            coverage = self._is_semantic_index_ready(corpus_files)
+            indexed = int(coverage.get("indexed", 0))
+            total = int(coverage.get("total", len(corpus_files)))
+            if not backend_available:
+                backend_error = index.semantic_backend_error()
+                if "Missing MobileCLIP" in backend_error:
+                    if self._mobileclip_download_dismissed_this_session:
+                        self._set_gallery_search_input_visible()
+                        if hasattr(self, "gallery_search_input") and self.gallery_search_input is not None:
+                            self.gallery_search_input.setFocus()
+                        message = "EXIF search only. MobileCLIP download skipped for this session."
+                        self.status_bar.showMessage(message, 5000)
+                    else:
+                        dialog = MobileCLIPDownloadDialog(self)
+                        if dialog.exec() == QDialog.DialogCode.Accepted:
+                            self._start_semantic_asset_download_background(corpus_files)
+                        else:
+                            self._mobileclip_download_dismissed_this_session = True
+                            self._set_gallery_search_input_visible()
+                            if hasattr(self, "gallery_search_input") and self.gallery_search_input is not None:
+                                self.gallery_search_input.setFocus()
+                            message = "EXIF search only. MobileCLIP download skipped for this session."
+                            self.status_bar.showMessage(message, 5000)
+                else:
+                    self._set_gallery_search_input_visible()
+                    if hasattr(self, "gallery_search_input") and self.gallery_search_input is not None:
+                        self.gallery_search_input.setFocus()
+                    message = f"EXIF search only. Semantic backend unavailable: {backend_error}"
+                    self._set_gallery_search_status(message)
+                    self._set_gallery_search_input_visible()
+                    self.status_bar.showMessage(message, 7000)
+            elif indexed > 0:
+                self._set_gallery_search_input_visible()
+                if hasattr(self, "gallery_search_input") and self.gallery_search_input is not None:
+                    self.gallery_search_input.setFocus()
+                if int(coverage.get("ready", 0)) == 1:
+                    self.status_bar.showMessage("Semantic index ready", 2500)
+                else:
+                    self.status_bar.showMessage(
+                        f"Semantic index available ({indexed}/{total}). Search uses indexed images.",
+                        3500,
+                    )
+            else:
+                self._start_semantic_index_build_background(corpus_files)
+        except Exception as e:
+            self._set_gallery_search_status(f"Semantic search unavailable: {e}")
+
+    def _build_semantic_index_current_folder(self):
+        # Legacy menu path retained for compatibility; use same gallery button flow.
+        self._on_search_bottom_clicked()
+
+    def _semantic_search_current_folder(self):
+        if not self.image_files:
+            self.status_bar.showMessage("No images to search", 2500)
+            return
+        query, ok = QInputDialog.getText(
+            self,
+            "Semantic Search",
+            (
+                "Describe image + optional filters.\n"
+                "Examples:\n"
+                "  jet takeoff camera:sony iso<800 has:gps city:tokyo\n"
+                "  date:2026:05 lens:70-200 country:jp\n"
+                "  year>=2024 month=5"
+            ),
+        )
+        if not ok:
+            return
+        query = (query or "").strip()
+        if not query:
+            return
+
+        self._run_semantic_search_query(query)
+
+    def _semantic_search_from_bar(self):
+        query = ""
+        if hasattr(self, "gallery_search_input") and self.gallery_search_input is not None:
+            query = (self.gallery_search_input.text() or "").strip()
+        if not query:
+            self._clear_semantic_search_results(silent=True)
+            return
+        if query == (self._last_semantic_query or ""):
+            return
+        self._run_semantic_search_query(query)
+
+    def _on_gallery_search_text_changed(self, text):
+        if (text or "").strip():
+            return
+        # Triggered by clear button "x" or manual delete-to-empty.
+        if self._semantic_search_backup_files:
+            self._clear_semantic_search_results(silent=True)
+
+    def _update_gallery_counter(self):
+        if not hasattr(self, "status_counter_label") or self.status_counter_label is None:
+            return
+        if getattr(self, "view_mode", "single") != "gallery":
+            return
+        total = len(self.image_files) if self.image_files else 0
+        self.status_counter_label.setText(f"{total} images")
+        self.status_counter_label.show()
+
+    def _run_semantic_search_query(self, query: str):
+        query = (query or "").strip()
+        if not query:
+            return
+        try:
+            index = self._get_semantic_index()
+            base_files = (
+                [p for p in self._semantic_search_corpus_files if os.path.isfile(p)]
+                if self._semantic_search_corpus_files
+                else []
+            )
+            if not base_files:
+                base_files = [p for p in self.image_files if os.path.isfile(p)]
+            if self._semantic_search_backup_files is None:
+                self._semantic_search_backup_files = list(base_files)
+            self.status_bar.showMessage("Running semantic search...")
+            QApplication.processEvents()
+            metadata_hits, semantic_query = index.search_metadata_text(
+                query, base_files, top_k=max(1, len(base_files))
+            )
+            used_semantic_backend = False
+            if not semantic_query:
+                hits = metadata_hits
+            elif not index.semantic_backend_available():
+                hits = []
+                self.status_bar.showMessage(
+                    f"Semantic backend unavailable: {index.semantic_backend_error()}",
+                    5000,
+                )
+            else:
+                # EXIF/GPS/loose metadata terms are hard filters. Only the files
+                # that survived those filters are eligible for semantic ranking.
+                metadata_candidate_paths = [
+                    h.file_path for h in metadata_hits if os.path.isfile(h.file_path)
+                ]
+                hits = index.search_text(
+                    semantic_query,
+                    metadata_candidate_paths,
+                    top_k=min(500, len(base_files)),
+                    min_score=0.20,
+                )
+                used_semantic_backend = True
+            if not hits:
+                self.image_files = []
+                self.current_file_index = -1
+                self.current_file_path = None
+                if getattr(self, "view_mode", "single") == "gallery" and hasattr(self, "gallery_justified") and self.gallery_justified:
+                    self.gallery_justified.clear_thumbnail_widgets()
+                    self.gallery_justified.set_images([])
+                    self.gallery_justified.show_empty_message("No results found for current search")
+                if hasattr(self, "status_counter_label"):
+                    self._update_gallery_counter()
+                self.status_bar.showMessage("No search results", 3000)
+                self._last_semantic_query = query
+                return
+
+            ranked_paths = [h.file_path for h in hits if os.path.isfile(h.file_path)]
+            if not ranked_paths:
+                self.status_bar.showMessage("No valid files in search results", 3000)
+                return
+
+            self.image_files = ranked_paths
+            self.current_file_index = 0
+            self.current_file_path = self.image_files[0]
+            self._update_gallery_counter()
+
+            if getattr(self, "view_mode", "single") == "gallery":
+                self._update_gallery_view()
+            else:
+                self.load_raw_image(self.current_file_path)
+
+            top = hits[0]
+            if used_semantic_backend:
+                message = f"Semantic search: {len(ranked_paths)} result(s) | top score {top.score:.3f}"
+            else:
+                message = f"EXIF search: {len(ranked_paths)} result(s)"
+            self.status_bar.showMessage(message, 5000)
+            self._last_semantic_query = query
+        except Exception as e:
+            QMessageBox.warning(self, "Semantic Search", str(e))
+
+    def _clear_semantic_search_results(self, silent=False):
+        if not self._semantic_search_backup_files and not self._semantic_search_corpus_files:
+            if not silent:
+                self.status_bar.showMessage("No active semantic search filter", 2500)
+            return
+        if self._semantic_search_corpus_files:
+            restored = [p for p in self._semantic_search_corpus_files if os.path.isfile(p)]
+        else:
+            restored = [p for p in self._semantic_search_backup_files if os.path.isfile(p)]
+        self._semantic_search_backup_files = None
+        self._last_semantic_query = ""
+        if not restored:
+            if not silent:
+                self.status_bar.showMessage("Search filter cleared, but no files remain", 3000)
+            return
+        self.image_files = restored
+        self._update_gallery_counter()
+        if hasattr(self, "gallery_justified") and self.gallery_justified:
+            self.gallery_justified.hide_empty_message()
+        if self.current_file_path in self.image_files:
+            self.current_file_index = self.image_files.index(self.current_file_path)
+        else:
+            self.current_file_index = 0
+            self.current_file_path = self.image_files[0]
+        if getattr(self, "view_mode", "single") == "gallery":
+            self._update_gallery_view()
+        else:
+            self.load_raw_image(self.current_file_path)
+        if not silent:
+            self.status_bar.showMessage("Semantic search filter cleared", 3000)
 
     def get_settings(self):
         return QSettings("RAWviewer", "RAWviewer")
@@ -5750,17 +6503,20 @@ class RAWImageViewer(QMainWindow):
             self.sort_toggle_button.hide()
         if hasattr(self, 'view_mode_button'):
             self.view_mode_button.show()
-            # Update icon if using qtawesome
-            if qta is not None:
-                try:
-                    gallery_icon = qta.icon('fa5s.th', color='#B0B0B0')
-                    self.view_mode_button.setIcon(gallery_icon)
-                    self.view_mode_button.setIconSize(QSize(20, 20))
-                    self.view_mode_button.setText("")  # Clear text if using icon
-                except Exception:
-                    self.view_mode_button.setText("Gallery")
-            else:
+        if hasattr(self, "search_bottom_button"):
+            self.search_bottom_button.hide()
+        self._set_search_panel_expanded(False, animate=False)
+        # Update icon if using qtawesome
+        if qta is not None:
+            try:
+                gallery_icon = qta.icon('fa5s.th', color='#B0B0B0')
+                self.view_mode_button.setIcon(gallery_icon)
+                self.view_mode_button.setIconSize(QSize(20, 20))
+                self.view_mode_button.setText("")  # Clear text if using icon
+            except Exception:
                 self.view_mode_button.setText("Gallery")
+        else:
+            self.view_mode_button.setText("Gallery")
         
         ui_time = time.time() - ui_start
         logger.info(f"[VIEW_MODE] Step 3: UI elements shown (elapsed: {ui_time:.3f}s)")
@@ -5907,12 +6663,17 @@ class RAWImageViewer(QMainWindow):
         if hasattr(self, 'status_metadata_label'):
             self.status_metadata_label.hide()
         if hasattr(self, 'status_counter_label'):
-            total = len(self.image_files) if self.image_files else 0
-            self.status_counter_label.setText(f"{total} images")
-            self.status_counter_label.show()
+            self._update_gallery_counter()
+        if self._semantic_indexing_in_progress:
+            self._set_gallery_search_status(self.gallery_search_status_label.text() or "Initializing semantic index...")
+        elif self._search_panel_expanded and hasattr(self, "search_expand_layout") and hasattr(self, "gallery_search_input"):
+            # Keep whichever expanded panel view is currently active.
+            self.search_expand_layout.setCurrentWidget(self.gallery_search_input)
         # Show sort button in gallery mode
         if hasattr(self, 'sort_toggle_button'):
             self.sort_toggle_button.show()
+        if hasattr(self, "search_bottom_button"):
+            self.search_bottom_button.show()
         # Single-image actions stay in update_status_bar for single mode only; hide here
         # because we do not call update_status_bar() when entering gallery (counter text differs).
         if hasattr(self, "share_bottom_button"):
@@ -6083,6 +6844,7 @@ class RAWImageViewer(QMainWindow):
             logger = logging.getLogger(__name__)
             start_time = time.time()
             logger.info(f"[GALLERY] ========== _update_gallery_view() STARTED ==========")
+            self._update_gallery_counter()
             
             if not self.gallery_widget or not self.gallery_justified or not self.image_files:
                 logger.info(f"[GALLERY] Gallery widget or image files not available, returning")
@@ -10927,29 +11689,44 @@ class RAWImageViewer(QMainWindow):
     
     def mouseReleaseEvent(self, event):
         """Handle mouse release to stop window resizing"""
-        if self._resize_edge_active:
+        try:
+            if self._resize_edge_active:
+                self._resize_edge_active = None
+                self._is_resizing = False  # Mark that resizing has ended
+                self.unsetCursor()
+
+                # Re-enable resize events and trigger layout update.
+                # Guard against deleted Qt wrappers during mode/widget transitions.
+                if hasattr(self, 'view_mode') and self.view_mode == 'gallery':
+                    gallery = getattr(self, 'gallery_justified', None)
+                    if gallery is not None:
+                        try:
+                            gallery._ignore_resize_events = False
+                            from PyQt6.QtCore import QTimer
+                            QTimer.singleShot(100, gallery.force_layout_update)
+                        except Exception:
+                            pass
+
+                # Scale image to fit after resize completes (for single view mode)
+                if hasattr(self, 'view_mode') and self.view_mode == 'single':
+                    if getattr(self, 'current_pixmap', None) is not None and getattr(self, 'fit_to_window', False):
+                        from PyQt6.QtCore import QTimer
+                        QTimer.singleShot(100, self.scale_image_to_fit)
+
+                event.accept()
+                return
+
+            super().mouseReleaseEvent(event)
+        except Exception as e:
+            # Unhandled Python exceptions inside Qt event handlers can abort the app on macOS.
+            print(f"mouseReleaseEvent error (ignored): {e}")
             self._resize_edge_active = None
-            self._is_resizing = False  # Mark that resizing has ended
-            self.unsetCursor()
-            
-            # Re-enable resize events and trigger layout update
-            if hasattr(self, 'view_mode') and self.view_mode == 'gallery':
-                if hasattr(self, 'gallery_justified') and self.gallery_justified:
-                    self.gallery_justified._ignore_resize_events = False
-                    # Trigger layout update with new window size
-                    from PyQt6.QtCore import QTimer
-                    QTimer.singleShot(100, self.gallery_justified.force_layout_update)
-            
-            # Scale image to fit after resize completes (for single view mode)
-            if hasattr(self, 'view_mode') and self.view_mode == 'single':
-                if self.current_pixmap and self.fit_to_window:
-                    from PyQt6.QtCore import QTimer
-                    QTimer.singleShot(100, self.scale_image_to_fit)
-            
+            self._is_resizing = False
+            try:
+                self.unsetCursor()
+            except Exception:
+                pass
             event.accept()
-            return
-        
-        super().mouseReleaseEvent(event)
     
     def _get_resize_edge(self, pos):
         """Determine which edge the mouse is near"""
@@ -11081,6 +11858,9 @@ class RAWImageViewer(QMainWindow):
                 self.show_no_images_message(supported_extensions)
                 # Reset state
                 self.image_files = []
+                self._semantic_search_corpus_files = []
+                self._semantic_search_backup_files = None
+                self._last_semantic_query = ""
                 self.current_file_index = -1
                 self.current_file_path = None
                 self.current_folder = None
@@ -11088,6 +11868,10 @@ class RAWImageViewer(QMainWindow):
 
             # Sort files according to user preference
             self.image_files = self.sort_image_files(image_files)
+            # Keep semantic search corpus aligned with the currently scanned folder.
+            self._semantic_search_corpus_files = list(self.image_files)
+            self._semantic_search_backup_files = None
+            self._last_semantic_query = ""
 
             # Find current file index
             self.current_file_index = -1
@@ -11316,6 +12100,10 @@ class RAWImageViewer(QMainWindow):
             cp = getattr(self, "current_file_path", None)
             show_rotate = bool(vis and cp and os.path.isfile(cp))
             self.rotate_bottom_button.setVisible(show_rotate)
+        if hasattr(self, "search_bottom_button"):
+            self.search_bottom_button.setVisible(
+                bool(self.image_files) and self.view_mode == "gallery"
+            )
 
         if not self.current_file_path:
             # Hide metadata when no image is loaded
@@ -12012,6 +12800,7 @@ class RAWImageViewer(QMainWindow):
                 self._hide_all_loading_indicators()
                 self.current_folder = None
                 self.image_files = []
+                self._semantic_search_corpus_files = []
                 self.current_file_index = -1
                 self.current_file_path = None
                 self.update_status_bar()
@@ -12019,6 +12808,7 @@ class RAWImageViewer(QMainWindow):
 
             self.current_folder = folder_path
             self.image_files = image_files
+            self._semantic_search_corpus_files = list(image_files)
             self._gallery_bulk_metadata = bulk_metadata
 
             try:
@@ -12070,6 +12860,8 @@ class RAWImageViewer(QMainWindow):
         """Load images from a folder without blocking the UI during scan/sort."""
         import logging
         logger = logging.getLogger(__name__)
+        # Folder scope changed; drop any active semantic search filter snapshot.
+        self._semantic_search_backup_files = None
 
         try:
             if not folder_path:
