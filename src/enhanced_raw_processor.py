@@ -22,6 +22,10 @@ import io
 warnings.filterwarnings('ignore', category=UserWarning, module='exifread')
 
 from image_cache import get_image_cache
+from raw_file_extensions import RAW_FILE_EXTENSIONS
+
+# Cached EXIF rows without this version used embedded-JPEG dimensions as "original" (e.g. 1920×1080).
+RAW_EXIF_SENSOR_META_VER = 3
 
 
 def _qimage_to_rgb_array(image: QImage) -> Optional[np.ndarray]:
@@ -183,7 +187,7 @@ class ThumbnailExtractor(QObject):
         except Exception as e:
             # Log the error for debugging
             # print(f"Thumbnail extraction error: {str(e)}")
-            pass
+            return None
 
         if not allow_scan_fallback:
             return None
@@ -214,7 +218,7 @@ class ThumbnailExtractor(QObject):
             if not image.isNull():
                 arr = _qimage_to_rgb_array(image)
                 if arr is not None:
-                    return arr, None
+                    return arr
         except Exception:
             pass
 
@@ -231,12 +235,12 @@ class ThumbnailExtractor(QObject):
                 if img.mode != 'RGB':
                     img = img.convert('RGB')
 
-                return np.array(img), None
+                return np.array(img)
 
         except Exception:
             pass
 
-        return None, None
+        return None
 
 
 class EXIFExtractor(QObject):
@@ -266,6 +270,10 @@ class EXIFExtractor(QObject):
                  logger = logging.getLogger(__name__)
                  logger.info(f"[EXIF] Found potentially stale orientation 1 for {os.path.basename(file_path)}, forcing re-check.")
                  cached_exif = None
+             # RAW: drop cache if it predates sensor-dimension fix (preview JPEG size was stored as original_*).
+             if cached_exif is not None and is_raw:
+                 if cached_exif.get('raw_exif_sensor_meta_ver', 0) < RAW_EXIF_SENSOR_META_VER:
+                     cached_exif = None
         
         if cached_exif is not None:
             # logger.debug(f"[EXIF] Using cached EXIF for {os.path.basename(file_path)}")
@@ -286,8 +294,8 @@ class EXIFExtractor(QObject):
 
     def _is_raw_file(self, file_path: str) -> bool:
         """Helper to check if file is raw."""
-        raw_map = {'.arw', '.cr2', '.cr3', '.nef', '.dng', '.raf', '.orf', '.rw2'}
-        return os.path.splitext(file_path)[1].lower() in raw_map
+        ext = os.path.splitext(file_path)[1].lower().lstrip(".")
+        return ext in RAW_FILE_EXTENSIONS
 
     def _extract_exif_from_file(self, file_path: str) -> Dict[str, Any]:
         """Extract EXIF data from file."""
@@ -366,36 +374,20 @@ class EXIFExtractor(QObject):
                     except:
                         pass
 
-                # Determine if we need to fall back to rawpy
-                # 1. Dimensions are missing
-                # 2. OR (Orientation is 1/Default AND we didn't find a valid tag AND it's a RAW file)
-                should_check_rawpy = (original_width is None or original_height is None)
-                
-                # OPTIMIZATION: Only check rawpy for orientation if potentially missing
-                # If we have explicit '1' from EXIF, we generally trust it, BUT some cameras (Sony)
-                # write '1' in EXIF but rely on rawpy logic for rotation.
-                # So for RAW files, if orientation is 1, we MUST verify with rawpy to be sure.
-                if not should_check_rawpy and self._is_raw_file(file_path):
-                    if orientation == 1:
-                        should_check_rawpy = True
-                        # logger.debug(f"[ORIENTATION] EXIFExtractor: Orientation is 1 for RAW, forcing rawpy check to verify")
-
-                # Fallback to rawpy for dimensions/orientation if needed
-                if should_check_rawpy and self._is_raw_file(file_path):
+                # RAW: EXIF ExifImageWidth/Length typically describe the embedded preview (often 1920×1080),
+                # not the sensor. Prefer rawpy's raw bitmap geometry whenever metadata read succeeds.
+                if self._is_raw_file(file_path):
                     try:
-                        import rawpy
                         with rawpy.imread(file_path) as raw:
                             sizes = raw.sizes
-                            if original_width is None: original_width = sizes.width
-                            if original_height is None: original_height = sizes.height
-                            
-                            # CRITICAL: If EXIF orientation was missing/default, use rawpy's flip
+                            original_width = sizes.width
+                            original_height = sizes.height
+                            # If EXIF said "normal" but LibRaw disagrees, trust sizes.flip for consistency.
                             if orientation == 1 and sizes.flip != 0:
-                                # rawpy's flip mapping corresponds to EXIF
                                 orientation = sizes.flip
                                 print(f"[ORIENTATION] EXIFExtractor: Using rawpy flip fallback = {orientation}")
-                    except Exception as e:
-                        # logger.warning(f"Failed to read rawpy metadata: {e}")
+                    except Exception:
+                        # Keep EXIF-derived dimensions if rawpy fails (offline / corrupt sidecar edge cases).
                         pass
 
                 # Extract technical metadata for top-level cache columns
@@ -453,7 +445,8 @@ class EXIFExtractor(QObject):
                     'focal_length': focal_length,
                     'aperture': aperture,
                     'iso': iso,
-                    'verified_orientation': True  # Mark this extraction as verified with new logic
+                    'verified_orientation': True,  # Mark this extraction as verified with new logic
+                    'raw_exif_sensor_meta_ver': RAW_EXIF_SENSOR_META_VER,
                 }
         except Exception:
             pass
@@ -649,13 +642,8 @@ class EnhancedRAWProcessor(QThread):
 
     def _is_raw_file(self, file_path: str) -> bool:
         """Check if file is a RAW format."""
-        raw_exts = {
-            '.cr2', '.cr3', '.nef', '.arw', '.dng', '.orf', '.rw2', '.pef',
-            '.srw', '.x3f', '.raf', '.3fr', '.fff', '.iiq', '.cap', '.erf',
-            '.mef', '.mos', '.nrw', '.rwl', '.srf'
-        }
-        ext = os.path.splitext(file_path)[1].lower()
-        return ext in raw_exts
+        ext = os.path.splitext(file_path)[1].lower().lstrip(".")
+        return ext in RAW_FILE_EXTENSIONS
 
     def stop_processing(self):
         """Stop the processing thread."""
@@ -877,13 +865,8 @@ class PreloadManager(QObject):
 
     def _is_raw_file(self, file_path: str) -> bool:
         """Check if file is a RAW format."""
-        raw_exts = {
-            '.cr2', '.cr3', '.nef', '.arw', '.dng', '.orf', '.rw2', '.pef',
-            '.srw', '.x3f', '.raf', '.3fr', '.fff', '.iiq', '.cap', '.erf',
-            '.mef', '.mos', '.nrw', '.rwl', '.srf'
-        }
-        ext = os.path.splitext(file_path)[1].lower()
-        return ext in raw_exts
+        ext = os.path.splitext(file_path)[1].lower().lstrip(".")
+        return ext in RAW_FILE_EXTENSIONS
 
     def preload_images(self, file_paths: list, priority_order: list = None):
         """Preload images in background threads using RAWProcessor (v0.5 style)."""

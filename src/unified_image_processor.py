@@ -338,20 +338,12 @@ class UnifiedImageProcessor:
             return None
     
     def process_exif(self, file_path: str) -> Optional[Dict[str, Any]]:
-        """處理 EXIF 數據（統一接口）"""
-        # 檢查快取
-        cached_exif = self.cache.get_exif(file_path)
-        if cached_exif is not None:
-            return cached_exif
+        """處理 EXIF 數據（統一接口）
         
-        # 提取 EXIF 數據
-        exif_data = self.exif_extractor.extract_exif_data(file_path)
-        
-        # 快取 EXIF 數據
-        if exif_data:
-            self.cache.put_exif(file_path, exif_data)
-        
-        return exif_data
+        必須經 EXIFExtractor：SQLite 直返會略過 RAW 感測器尺寸與 raw_exif_sensor_meta_ver 驗證，
+        導致狀態列長期顯示內嵌預覽解析度（例如 1920×1080）。
+        """
+        return self.exif_extractor.extract_exif_data(file_path)
     
     def _apply_orientation_correction(
         self,

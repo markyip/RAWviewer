@@ -188,6 +188,12 @@ class PersistentEXIFCache:
                 if 'original_height' not in columns:
                     print("[CACHE] Migrating database: adding original_height column")
                     conn.execute("ALTER TABLE exif_cache ADD COLUMN original_height INTEGER")
+
+                if 'sensor_meta_ver' not in columns:
+                    print("[CACHE] Migrating database: adding sensor_meta_ver column")
+                    conn.execute(
+                        "ALTER TABLE exif_cache ADD COLUMN sensor_meta_ver INTEGER DEFAULT 0"
+                    )
                     
             except Exception as e:
                 print(f"[CACHE] Error checking/migrating schema: {e}")
@@ -213,7 +219,7 @@ class PersistentEXIFCache:
                 conn = self._get_connection()
                 cursor = conn.execute(
                     "SELECT file_size, file_mtime, orientation, camera_make, camera_model, exif_data, "
-                    "capture_time, original_width, original_height "
+                    "capture_time, original_width, original_height, sensor_meta_ver "
                     "FROM exif_cache WHERE file_path = ?",
                     (file_path,)
                 )
@@ -230,6 +236,9 @@ class PersistentEXIFCache:
                     
                     result_width = row[7]
                     result_height = row[8]
+                    sensor_meta_ver = row[9] if len(row) > 9 else 0
+                    if sensor_meta_ver is None:
+                        sensor_meta_ver = 0
                     if result_width: exif_data['original_width'] = result_width
                     if result_height: exif_data['original_height'] = result_height
                     
@@ -240,7 +249,8 @@ class PersistentEXIFCache:
                         'exif_data': exif_data,
                         'capture_time': result_capture_time,
                         'original_width': result_width if result_width else exif_data.get('original_width'),
-                        'original_height': result_height if result_height else exif_data.get('original_height')
+                        'original_height': result_height if result_height else exif_data.get('original_height'),
+                        'raw_exif_sensor_meta_ver': int(sensor_meta_ver),
                     }
             except Exception:
                 pass
@@ -285,12 +295,16 @@ class PersistentEXIFCache:
                     if isinstance(exif_dict, dict):
                          if not width: width = exif_dict.get('original_width')
                          if not height: height = exif_dict.get('original_height')
+
+                sensor_meta_ver = exif_info.get('raw_exif_sensor_meta_ver')
+                if sensor_meta_ver is None:
+                    sensor_meta_ver = 0
                 
                 conn.execute(
                     "INSERT OR REPLACE INTO exif_cache "
                     "(file_path, file_size, file_mtime, orientation, camera_make, camera_model, exif_data, "
-                    "cached_time, capture_time, original_width, original_height) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "cached_time, capture_time, original_width, original_height, sensor_meta_ver) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         file_path,
                         file_size,
@@ -302,7 +316,8 @@ class PersistentEXIFCache:
                         time.time(),
                         capture_time,
                         width,
-                        height
+                        height,
+                        int(sensor_meta_ver),
                     )
                 )
                 conn.commit()
@@ -353,7 +368,7 @@ class PersistentEXIFCache:
                     
                     # Fetch all optimized columns
                     query = f"SELECT file_path, file_size, file_mtime, orientation, camera_make, camera_model, " \
-                            f"exif_data, capture_time, original_width, original_height " \
+                            f"exif_data, capture_time, original_width, original_height, sensor_meta_ver " \
                             f"FROM exif_cache WHERE file_path IN ({placeholders})"
                             
                     cursor = conn.execute(query, chunk)
@@ -368,6 +383,7 @@ class PersistentEXIFCache:
                         
                         if row[1] == file_size and row[2] == file_mtime:
                             # Cache is valid
+                            sensor_meta_ver = int(row[10] or 0) if len(row) > 10 else 0
                             
                             # Fast Mode Optimization: Skip unpickling if we have all needed data
                             # We need capture_time, width, height, orientation
@@ -421,7 +437,8 @@ class PersistentEXIFCache:
                                 'exif_data': exif_data,
                                 'capture_time': result_capture_time,
                                 'original_width': result_width,
-                                'original_height': result_height
+                                'original_height': result_height,
+                                'raw_exif_sensor_meta_ver': sensor_meta_ver,
                             }
                 # No conn.close() here as it is thread-local
                 pass
@@ -748,8 +765,8 @@ class MemoryMonitor:
         memory_info = self.get_memory_info()
         available_gb = memory_info['system_available_gb']
 
-        # Conservative approach: use max 25% of available memory for caching
-        cache_budget_gb = min(available_gb * 0.25, 4.0)  # Cap at 4GB
+        # Conservative approach: use up to 25% of available memory for caching
+        cache_budget_gb = min(available_gb * 0.25, 4.0)
 
         # Estimate memory per image (conservative)
         # Full image: ~100MB, Thumbnail: ~1MB
@@ -762,8 +779,8 @@ class MemoryMonitor:
             50, int((cache_budget_gb * 1024 * 0.2) / thumbnail_mb))
 
         return {
-            'full_images': min(max_full_images, 100),  # Increased from 50
-            'thumbnails': min(max_thumbnails, 2000),   # Increased from 500
+            'full_images': min(max_full_images, 100),
+            'thumbnails': min(max_thumbnails, 2000),
             'cache_budget_mb': int(cache_budget_gb * 1024)
         }
 
@@ -808,6 +825,9 @@ class ImageCache(QObject):
             self.exif_cache = MemoryOnlyPersistentCache()
             self.disk_thumbnail_cache = MemoryOnlyPersistentCache()
             self.disk_preview_cache = MemoryOnlyPersistentCache()
+
+        # In-memory EXIF cache (used even if persistent cache is enabled for speed)
+        self.exif_memory_cache = LRUCache(max_size=cache_sizes['thumbnails'])
 
         # Cache statistics
         self.stats = {
@@ -983,8 +1003,17 @@ class ImageCache(QObject):
         """Get cached EXIF data or return None if not cached."""
         self.stats['exif_requests'] += 1
 
+        # 1. Check in-memory cache first
+        exif_data = self.exif_memory_cache.get(file_path)
+        if exif_data is not None:
+            self.cache_hit.emit(file_path, 'exif')
+            return exif_data
+
+        # 2. Check persistent cache
         exif_data = self.exif_cache.get(file_path)
         if exif_data is not None:
+            # Cache in memory for faster subsequent access
+            self.exif_memory_cache.put(file_path, exif_data)
             self.cache_hit.emit(file_path, 'exif')
             return exif_data
         else:
@@ -994,12 +1023,32 @@ class ImageCache(QObject):
     def put_exif(self, file_path: str, exif_data: Dict[str, Any]) -> None:
         """Cache EXIF data."""
         if exif_data:
+            self.exif_memory_cache.put(file_path, exif_data)
             self.exif_cache.put(file_path, exif_data)
 
     def get_multiple_exif(self, file_paths: list, file_stats: Optional[Dict[str, Tuple[int, float]]] = None, fast_mode: bool = True) -> Dict[str, Dict[str, Any]]:
         """Get cached EXIF data for multiple files at once."""
         self.stats['exif_requests'] += len(file_paths)
-        return self.exif_cache.get_multiple(file_paths, file_stats, fast_mode)
+        
+        results = {}
+        missing_paths = []
+        
+        # Check memory cache first
+        for path in file_paths:
+            exif = self.exif_memory_cache.get(path)
+            if exif:
+                results[path] = exif
+            else:
+                missing_paths.append(path)
+        
+        if missing_paths:
+            # Fetch missing from persistent cache
+            db_results = self.exif_cache.get_multiple(missing_paths, file_stats, fast_mode)
+            for path, exif in db_results.items():
+                self.exif_memory_cache.put(path, exif)
+                results[path] = exif
+                
+        return results
 
     def invalidate_file(self, file_path: str) -> None:
         """Remove all cached data for a specific file."""
@@ -1009,7 +1058,8 @@ class ImageCache(QObject):
         self.pixmap_cache.remove(file_path)
         self.disk_thumbnail_cache.remove(file_path)
         self.disk_preview_cache.remove(file_path)
-        # Note: EXIF cache handles file modification time automatically
+        self.exif_memory_cache.remove(file_path)
+        # Note: EXIF persistent cache handles file modification time automatically
 
     def clear_all(self) -> None:
         """Clear all caches."""
@@ -1018,6 +1068,7 @@ class ImageCache(QObject):
         self.full_image_cache.clear()
         self.pixmap_cache.clear()
         self.exif_cache.clear()
+        self.exif_memory_cache.clear()
         self.disk_thumbnail_cache.clear()
         self.disk_preview_cache.clear()
 

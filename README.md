@@ -91,6 +91,7 @@ Open the bottom search panel. The search field placeholder is **Search gallery**
 
 - On **macOS** with bundled Core ML models, free-text queries run **semantic ranking** over the images that pass any filters below.
 - **Important:** Words like **`face`**, **`faces`**, **`people`**, **`person`**, and **`human`** are **not** sent to the neural search: they filter by the **Vision face-detection count** stored at index time (same as `has:face`). If no faces were detected (distant subjects, backs to camera, silhouettes), those photos are excluded—try free-text phrases instead, e.g. `crowd`, `pedestrians`, `spectators`.
+- **Formats:** Prefer **`format:jpeg`** · **`format:raw`** (`type jpeg` / `ext raw` with a space also normalize). Loose phrases **`file jpeg`** / **`file raw`** map to **`format:`** so **`.jpg`** matches **JPEG** synonyms and **`raw`** covers typical camera RAW extensions (not only filenames containing the substring `raw`).
 - You can combine a description with structured filters on one line (see examples).
 - **Clear** the field or use the **×** control to restore the full folder.
 
@@ -105,7 +106,7 @@ Separate tokens with spaces. Filters use `key:value` or comparison forms.
 | ISO / year | `iso<=800` · `year>=2024` |
 | Place | `city:tokyo` · `country:jp` · `admin:california` |
 | File name | `filename:_dsc` or `name:img_` |
-| File format | `format:cr3` · `type:jpeg` · `ext:jpg,png` · `format:raw` (common RAW extensions) |
+| File format | `format:cr3` · `type:jpeg` · `ext:jpg,png` · `format:raw` (same set as [`src/raw_file_extensions.py`](src/raw_file_extensions.py)) |
 | Date prefix | `date:2024-05` |
 | GPS / faces | `has:gps` · `no:gps` · `has:face` · `people` · `person` · `no:face` |
 
