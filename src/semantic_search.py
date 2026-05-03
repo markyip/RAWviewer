@@ -169,7 +169,10 @@ class MobileCLIPCoreMLBackend:
                 [
                     os.path.join(exe_dir, "mobileclip_coreml"),
                     os.path.join(exe_dir, "..", "Resources", "mobileclip_coreml"),
+                    os.path.join(exe_dir, "..", "Resources", "models", "mobileclip2_coreml"),
+                    os.path.join(exe_dir, "..", "Resources", "models", "mobileclip_coreml"),
                     os.path.join(exe_dir, "..", "Frameworks", "mobileclip_coreml"),
+                    os.path.join(exe_dir, "..", "Frameworks", "models", "mobileclip2_coreml"),
                 ]
             )
         module_dir = os.path.dirname(os.path.abspath(__file__))
