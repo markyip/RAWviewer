@@ -633,6 +633,25 @@ class SemanticImageIndex:
         }
     )
 
+    # Gallery search: these map to indexed Vision face_count (>0), not CLIP text similarity.
+    _FACE_COUNT_POSITIVE_TOKENS = frozenset(
+        {
+            "has:face",
+            "has:faces",
+            "face",
+            "faces",
+            "has:people",
+            "has:person",
+            "people",
+            "person",
+            "humans",
+            "human",
+        }
+    )
+    _FACE_COUNT_NEGATIVE_TOKENS = frozenset(
+        {"no:face", "no:faces", "no:people", "no:person"}
+    )
+
     def __init__(self, db_path: Optional[str] = None, model_name: Optional[str] = None):
         if db_path is None:
             cache_dir = os.path.expanduser("~/.rawviewer_cache")
@@ -1493,7 +1512,8 @@ class SemanticImageIndex:
         - month=5 / month>=6 / month<3
         - width>=3000 / height<2000
         - has:gps / no:gps
-        - has:face / no:face
+        - has:face / no:face — also shorthand face, faces, people, person, human(s),
+          has:people (uses indexed Vision face counts, not CLIP similarity)
         """
         raw = (query_text or "").strip()
         if not raw:
@@ -1622,12 +1642,12 @@ class SemanticImageIndex:
                 ]
                 continue
 
-            if low in ("has:face", "has:faces", "face", "faces"):
+            if low in self._FACE_COUNT_POSITIVE_TOKENS:
                 matched = True
                 filtered = [r for r in filtered if int(r["face_count"] or 0) > 0]
                 continue
 
-            if low in ("no:face", "no:faces"):
+            if low in self._FACE_COUNT_NEGATIVE_TOKENS:
                 matched = True
                 filtered = [r for r in filtered if int(r["face_count"] or 0) <= 0]
                 continue

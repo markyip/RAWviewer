@@ -90,6 +90,7 @@ This is a **pre-filtering tool**, letting you go through hundreds of RAW files e
 Open the bottom search panel. The search field placeholder is **Search gallery**.
 
 - On **macOS** with bundled Core ML models, free-text queries run **semantic ranking** over the images that pass any filters below.
+- **Important:** Words like **`face`**, **`faces`**, **`people`**, **`person`**, and **`human`** are **not** sent to the neural search: they filter by the **Vision face-detection count** stored at index time (same as `has:face`). If no faces were detected (distant subjects, backs to camera, silhouettes), those photos are excluded—try free-text phrases instead, e.g. `crowd`, `pedestrians`, `spectators`.
 - You can combine a description with structured filters on one line (see examples).
 - **Clear** the field or use the **×** control to restore the full folder.
 
@@ -106,7 +107,9 @@ Separate tokens with spaces. Filters use `key:value` or comparison forms.
 | File name | `filename:_dsc` or `name:img_` |
 | File format | `format:cr3` · `type:jpeg` · `ext:jpg,png` · `format:raw` (common RAW extensions) |
 | Date prefix | `date:2024-05` |
-| GPS / faces | `has:gps` · `no:gps` · `has:face` · `no:face` |
+| GPS / faces | `has:gps` · `no:gps` · `has:face` · `people` · `person` · `no:face` |
+
+Optional: **stronger semantic models** (advanced). The app bundle uses **MobileCLIP2-S0** for speed and size. From the same MobileCLIP2 family, **S2** or **B** checkpoints usually score better on open-vocabulary retrieval at the cost of a larger Core ML package and slower indexing—export with `python scripts/export_mobileclip2_coreml.py --model MobileCLIP2-S2` (today’s `--for-app` flow names files `mobileclip2_s0_*`; you can replace those mlpackages after export or adjust filenames to match). You can also set environment variable **`RAWVIEWER_MOBILECLIP_VARIANT=s2`** to prefer Apple’s downloadable **MobileCLIP S2** Core ML models (a different architecture than MobileCLIP2, but often strong for general photo text queries).
 
 ## 🖱️ Mouse Controls
 
