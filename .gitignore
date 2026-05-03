@@ -53,6 +53,12 @@ DEBUG_*.md
 rawviewer_env/
 .venv/
 venv/
+.venv_mobileclip2_export/
+
+# Local MobileCLIP2 / OpenCLIP Core ML export trees (not part of the app bundle)
+.build/
+.hf_cache_mobileclip/
+artifacts/mobileclip2_coreml/
 
 # Distribution packages
 *.zip
