@@ -4,22 +4,101 @@ Build script for RAW Image Viewer Windows/macOS executable
 Handles dependency installation and executable creation.
 """
 
+VERSION = "1.7.0"
+
 import os
 import subprocess
 import platform
 import shutil
 import time
+import sys
 from pathlib import Path
 
 
 def run_command(cmd):
-    result = subprocess.run(cmd, shell=True)
+    # Support both string commands and lists
+    if isinstance(cmd, list):
+        result = subprocess.run(cmd)
+    else:
+        result = subprocess.run(cmd, shell=True)
     return result.returncode == 0
+
+
+def update_macos_plist(app_path):
+    """Update Info.plist in macOS app bundle to add file associations"""
+    plist_path = os.path.join(app_path, 'Contents', 'Info.plist')
+    if not os.path.exists(plist_path):
+        print(f"[WARNING] Info.plist not found at {plist_path}")
+        return False
+        
+    try:
+        import plistlib
+        with open(plist_path, 'rb') as f:
+            plist = plistlib.load(f)
+            
+        # Define supported extensions
+        image_extensions = [
+            'jpg', 'jpeg', 'png', 'bmp', 'gif', 'webp', 'tif', 'tiff', 'heic',
+            'cr2', 'cr3', 'nef', 'arw', 'dng', 'raf', 'orf', 'rw2', 'pef', 'srw', 'crw', 'mef', 'mrw'
+        ]
+        
+        # Add CFBundleDocumentTypes if not present
+        if 'CFBundleDocumentTypes' not in plist:
+            plist['CFBundleDocumentTypes'] = []
+            
+        # Check if our document type is already defined
+        doc_type_exists = any(
+            doc.get('CFBundleTypeName') == 'Image File' for doc in plist['CFBundleDocumentTypes']
+        )
+        
+        if not doc_type_exists:
+            doc_type = {
+                'CFBundleTypeName': 'Image File',
+                'CFBundleTypeRole': 'Viewer',
+                'LSHandlerRank': 'Alternate',
+                'LSItemContentTypes': [
+                    'public.image',
+                    'public.camera-raw-image'
+                ],
+                'CFBundleTypeExtensions': image_extensions
+            }
+            plist['CFBundleDocumentTypes'].append(doc_type)
+            
+        # Set a unique Bundle Identifier
+        plist['CFBundleIdentifier'] = 'com.markyip.rawviewer'
+        plist['CFBundleName'] = 'RAWviewer'
+        plist['CFBundleDisplayName'] = 'RAW Image Viewer'
+        plist['CFBundleExecutable'] = 'RAWviewer'
+        plist['CFBundlePackageType'] = 'APPL'
+        plist['CFBundleShortVersionString'] = VERSION
+        
+        # Add macOS permission usage descriptions
+        plist['NSDesktopFolderUsageDescription'] = 'RAWviewer needs access to your Desktop to display images.'
+        plist['NSDocumentsFolderUsageDescription'] = 'RAWviewer needs access to your Documents folder to display images.'
+        plist['NSDownloadsFolderUsageDescription'] = 'RAWviewer needs access to your Downloads folder to display images.'
+        plist['NSRemovableVolumesUsageDescription'] = 'RAWviewer needs access to external volumes to display images from cameras or cards.'
+        plist['NSPhotoLibraryUsageDescription'] = 'RAWviewer needs access to your photo library to display images.'
+        plist['NSAppleEventsUsageDescription'] = 'RAWviewer needs to receive file open events from the system.'
+        
+        # macOS specific flags
+        plist['LSMinimumSystemVersion'] = '10.15.0'
+        plist['NSHighResolutionCapable'] = True
+        plist['LSSupportsOpeningDocumentsInPlace'] = True
+        plist['LSApplicationCategoryType'] = 'public.app-category.photography'
+
+        with open(plist_path, 'wb') as f:
+            plistlib.dump(plist, f)
+        print("[SUCCESS] Updated Info.plist with Bundle ID, file associations and usage descriptions")
+        return True
+    except Exception as e:
+        print(f"[ERROR] Failed to update Info.plist: {e}")
+        return False
 
 
 def install_dependencies():
     """Install required dependencies"""
     print("Installing/upgrading dependencies...")
+    system_name = platform.system()
     dependencies = [
         'PyQt6',
         'rawpy',
@@ -31,14 +110,37 @@ def install_dependencies():
         'psutil',  # Added for system memory info in image_cache
         'numpy',   # Required for image processing (used in all modules)
         'qtawesome', # Required for icons in main.py
-        'pyqtgraph'  # Optional/Future dependency included in requirements.txt
+        'pyqtgraph',  # Optional/Future dependency included in requirements.txt
+        'reverse-geocoder',  # Offline city/country lookup from GPS EXIF
+        'pycountry',  # ISO country code -> full country name
     ]
+
+    if system_name == "Windows":
+        # Windows semantic backend will move to ONNX; keep sentence-transformers out of
+        # the default macOS test build so PyTorch is not bundled.
+        dependencies.append('sentence-transformers')
+    elif system_name == "Darwin":
+        dependencies.append('huggingface-hub')
+        dependencies.append('pyobjc-framework-CoreML')
+        dependencies.append('pyobjc-framework-Quartz')
+        dependencies.append('pyobjc-framework-Vision')
 
     for dep in dependencies:
         print(f"Installing {dep}...")
-        if not run_command(f'pip install --upgrade {dep}'):
+        if not run_command([sys.executable, "-m", "pip", "install", "--upgrade", dep]):
             print(f"[ERROR] Failed to install {dep}")
             return False
+
+    if system_name == "Darwin":
+        print("Installing pyobjc-framework-Cocoa (macOS share sheet)...")
+        if not run_command(
+            [sys.executable, "-m", "pip", "install", "--upgrade", "pyobjc-framework-Cocoa"]
+        ):
+            print("[WARNING] pyobjc-framework-Cocoa install failed; Share may not work in the built app.")
+    elif system_name == "Windows":
+        print("Installing pywin32 (Windows Share verb)...")
+        if not run_command([sys.executable, "-m", "pip", "install", "--upgrade", "pywin32"]):
+            print("[WARNING] pywin32 install failed; Share may not work in the built app.")
 
     print("Dependencies installed successfully!")
     return True
@@ -49,9 +151,9 @@ def main():
     if system_name == 'Windows':
         print("RAWviewer Windows Build Script")
     elif system_name == 'Darwin':
-        print("RAWviewer macOS Build Script")
+        print(f"RAWviewer macOS Build Script v{VERSION}")
     else:
-        print(f"RAWviewer Build Script ({system_name})")
+        print(f"RAWviewer Build Script v{VERSION} ({system_name})")
     print("==============================")
     print("")
 
@@ -159,21 +261,78 @@ def main():
     ]
     add_data_arg_str = " ".join(add_data_args)
 
-    # Minimal PyInstaller command
-    build_command = (
-        f'pyinstaller --onefile --windowed {icon_arg} '
-        f'{add_data_arg_str} src/main.py --name RAWviewer'
-    )
-    print(f"Running: {build_command}")
-    if not run_command(build_command):
+    src_path = os.path.abspath('src')
+    
+    cmd_base = [
+        sys.executable, "-m", "PyInstaller",
+        "--windowed",
+        "--paths", src_path,
+        "--hidden-import", "rawviewer_ui.gallery_view",
+        "--hidden-import", "rawviewer_ui.widgets",
+        "--hidden-import", "natsort",
+        "--hidden-import", "send2trash",
+        "--name", "RAWviewer"
+    ]
+    if platform.system() == "Darwin":
+        cmd_base.extend([
+            "--hidden-import", "objc",
+            "--hidden-import", "AppKit",
+            "--hidden-import", "Foundation",
+            "--hidden-import", "CoreML",
+            "--hidden-import", "Quartz",
+            "--hidden-import", "Vision",
+            "--exclude-module", "coremltools",
+            "--exclude-module", "torch",
+            "--exclude-module", "torchvision",
+            "--exclude-module", "sentence_transformers",
+            "--exclude-module", "transformers",
+            "--exclude-module", "sklearn",
+            "--exclude-module", "scipy",
+            "--exclude-module", "tokenizers",
+            "--exclude-module", "safetensors",
+        ])
+    elif platform.system() == "Windows":
+        cmd_base.extend([
+            "--hidden-import", "win32com.client",
+            "--hidden-import", "pythoncom",
+            "--hidden-import", "pywintypes",
+        ])
+    
+    if platform.system() == 'Darwin':
+        cmd_base.append("--onedir")
+        cmd_base.extend(["--osx-bundle-identifier", "com.markyip.rawviewer"])
+    else:
+        cmd_base.append("--onefile")
+        
+    if icon_arg:
+        if platform.system() == 'Windows':
+            cmd_base.extend(["--icon", icon_path])
+        else:
+            cmd_base.extend(["--icon", icon_path])
+            
+    # Add data
+    for arg in add_data_args:
+        cmd_base.extend(["--add-data", arg.split('--add-data ')[-1].strip('"')])
+        
+    cmd_base.append("src/main.py")
+
+    print(f"Running: {' '.join(cmd_base)}")
+    if not run_command(cmd_base):
         print("[ERROR] Build failed.")
         return
     if platform.system() == 'Windows':
         exe_path = Path('dist/RAWviewer.exe')
     else:
-        exe_path = Path('dist/RAWviewer')
+        exe_path = Path('dist/RAWviewer.app')
     if exe_path.exists():
         print(f"[SUCCESS] Executable created: {exe_path}")
+        if platform.system() == 'Darwin':
+            print("Patching macOS Info.plist...")
+            update_macos_plist(str(exe_path))
+            print("Re-signing macOS app bundle (ad-hoc)...")
+            run_command(['codesign', '--force', '--deep', '-s', '-', str(exe_path)])
+            print("Clearing macOS quarantine attribute...")
+            run_command(['xattr', '-cr', str(exe_path)])
     else:
         print("[ERROR] Executable was not created!")
 

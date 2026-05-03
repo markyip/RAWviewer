@@ -3,6 +3,10 @@
 # Exit on any error
 set -e
 
+# Repo root = directory containing this script (works if you cd elsewhere or project was moved)
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "$SCRIPT_DIR"
+
 echo "RAWviewer macOS Build Script"
 echo "==========================="
 echo ""
@@ -27,34 +31,52 @@ if [ ! -f "icons/appicon.icns" ]; then
     echo "The app will be built without a custom icon."
 fi
 
+VENV_DIR="$SCRIPT_DIR/rawviewer_env"
+PYTHON_BIN="$VENV_DIR/bin/python3"
+
 # Check if virtual environment exists
-if [ ! -d "rawviewer_env" ]; then
+if [ ! -d "$VENV_DIR" ]; then
     echo "Creating virtual environment..."
-    python3 -m venv rawviewer_env
+    python3 -m venv "$VENV_DIR"
     echo "Virtual environment created."
 fi
 
-# Activate virtual environment
-echo "Activating virtual environment..."
-source rawviewer_env/bin/activate
+if [ ! -x "$PYTHON_BIN" ]; then
+    echo "[ERROR] Missing venv interpreter: $PYTHON_BIN"
+    echo "Remove the broken folder and re-run: rm -rf rawviewer_env"
+    exit 1
+fi
+
+# Always call the venv interpreter by path. "source activate" embeds the old absolute
+# path when the repo is copied or moved, so PATH may not include this venv and plain
+# "pip" can install into Homebrew or another Python instead.
+echo "Using virtual environment: $VENV_DIR"
 
 # Upgrade pip first
 echo "Upgrading pip..."
-pip install --upgrade pip
+"$PYTHON_BIN" -m pip install --upgrade pip
 
 # Install/upgrade dependencies
 echo "Installing dependencies..."
-pip install --upgrade PyQt6 rawpy send2trash pyinstaller natsort exifread Pillow psutil numpy qtawesome pyqtgraph
+"$PYTHON_BIN" -m pip install --upgrade PyQt6 rawpy send2trash pyinstaller natsort exifread Pillow psutil numpy qtawesome pyqtgraph reverse-geocoder pycountry huggingface-hub pyobjc-framework-Cocoa pyobjc-framework-CoreML pyobjc-framework-Quartz pyobjc-framework-Vision
+
+# Keep the macOS test bundle free of PyTorch until the Core ML backend is wired in.
+"$PYTHON_BIN" -m pip uninstall -y sentence-transformers torch torchvision transformers scikit-learn scipy tokenizers safetensors coremltools >/dev/null 2>&1 || true
 
 # Clean previous builds
 echo "Cleaning previous builds..."
-rm -rf build dist
+# macOS/Finder can leave metadata files (e.g. .DS_Store) with odd flags; be defensive.
+rm -rf build || true
+if [ -d "dist" ]; then
+    chmod -R u+w dist 2>/dev/null || true
+fi
+rm -rf dist || true
 # Only remove spec files if they exist (don't fail if they don't)
 rm -f *.spec
 
 # Build the application using build.py for consistency
 echo "Building RAWviewer..."
-if python3 build.py; then
+if "$PYTHON_BIN" build.py; then
     echo ""
     echo "[SUCCESS] Build completed!"
     echo ""

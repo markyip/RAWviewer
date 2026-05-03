@@ -1,10 +1,10 @@
-# RAWviewer v12.4
+# RAWviewer v1.7.0
 
 <p align="center">
   <img src="icons/appicon.ico" alt="RAWviewer Icon" width="256">
 </p>
 
-![Version](https://img.shields.io/badge/version-12.4-blue)
+![Version](https://img.shields.io/badge/version-1.7.0-blue)
 ![Downloads](https://img.shields.io/github/downloads/markyip/RAWviewer/total) 
 ![License](https://img.shields.io/badge/license-MIT-green)
 [![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-Donate-orange?logo=buy-me-a-coffee)](https://www.buymeacoffee.com/markyip)
@@ -41,17 +41,21 @@ This is a **pre-filtering tool**, letting you go through hundreds of RAW files e
 - **Smart Prefetching**: Predictively loads relevant images in the background for zero-latency navigation
 - **Memory-First Cache (Default)**: Uses fast in-memory caching by default with no disk/SQLite writes
 - **Optional Persistent Cache**: Set `RAWVIEWER_PERSISTENT_CACHE=1` to re-enable disk/SQLite cache persistence
-- **Gallery View**: Justified grid layout with virtualized rendering for smooth scrolling through massive collections
+- **Gallery View**: Justified grid layout with virtualized rendering, EXIF-aware ordering, and current-image positioning
 - **Wide RAW format support**: Canon (CR2, CR3), Nikon (NEF), Sony (ARW), Adobe DNG, and many more
 - **Robust Orientation Handling**: Definitive fixes for Sony ARW and other RAW formats, ensuring images are always displayed upright
 - **Pillarbox-Free Gallery**: Accurately calculates aspect ratios to prevent black bars in the gallery view
+- **macOS File Association**: Fully integrated with macOS Finder; can be set as the default viewer and supports double-click to open
 - **Intuitive navigation**: Keyboard shortcuts, mouse controls, and scroll wheel support
-- **Zoom functionality**: Fit-to-window and 100% zoom modes with smooth panning
+- **Zoom functionality**: Fit-to-window and 100% zoom modes with smooth panning, including native Mac trackpad pinch-to-zoom
 - **File management**: Move images to discard folder or delete permanently
 - **EXIF data display**: View camera settings, focal length, ISO, aperture, and capture information with robust metadata extraction
 - **Session persistence**: Remembers your last opened folder, image, and view mode
+- **Single-image histogram**: Press `H` to show or hide the strip while viewing one image
 - **Portable executable**: No Python installation required for users
 - **Modern UI**: Material Design 3 aesthetics with Font Awesome icons (via qtawesome) and non-intrusive loading indicators
+- **Platform-specific chrome**: On Windows, the bottom bar omits Share (no stable system share without WinRT interop); **Share** remains on macOS.
+- **Non-destructive visual rotate**: Rotate in viewer by 90° steps without modifying original files (including RAW), with gallery-visible tiles refreshed immediately.
 
 ## 🚀 Quick Start
 
@@ -65,7 +69,7 @@ This is a **pre-filtering tool**, letting you go through hundreds of RAW files e
 
 #### macOS
 1. Download the latest release from the [Releases Page](https://github.com/markyip/RAWviewer/releases/latest)
-2. Download and extract `RAWviewer-v12.4-macOS.zip`
+2. Download and extract `RAWviewer-v1.7.0-macOS.zip`
 3. Drag `RAWviewer.app` to your Applications folder
 4. Double-click to launch from Applications or Launchpad
 5. **First launch**: Right-click → "Open" if blocked by Gatekeeper
@@ -78,10 +82,12 @@ This is a **pre-filtering tool**, letting you go through hundreds of RAW files e
 - **`←`/`→` arrows**: Navigate between images
 - **`↓`**: Move current image to Discard folder
 - **Delete**: Delete current image (with confirmation)
+- **`H`**: Show or hide the single-image histogram strip
 
 ## 🖱️ Mouse Controls
 
 - **Double-click**: Toggle zoom mode
+- **Pinch (Mac/Windows Trackpad) or Ctrl+Scroll**: Smoothly zoom in/out with smart cursor anchoring
 - **Click and drag**: Pan image when zoomed in
 - **Drag and drop**: Open images or folders
 - **Scroll Wheel (fit-to-window)**: Navigate images - Scroll down = previous, Scroll up = next
@@ -164,15 +170,18 @@ All dependencies are listed in `requirements.txt`:
 - **AttributeError with stdout**: This is normal for windowed builds - the application runs without a console window
 
 ### macOS
-- **"App is damaged" error**: Go to System Preferences → Security & Privacy → Allow
-- **Gatekeeper warnings**: Right-click the app → Open → Open anyway
-- **Performance issues**: Grant Full Disk Access in Privacy settings
+- **"App is damaged" or "Unverified Developer"**: This is common for locally built apps. Our build script automatically clears the quarantine flag, but if it persists, run `xattr -cr dist/RAWviewer.app` in your terminal.
+- **Gatekeeper warnings**: Right-click the app → "Open" → "Open" anyway. This "registers" the app with macOS.
+- **Permission Denied / Cannot Read Folder**: Modern macOS requires explicit permission for apps to access the Desktop or Documents. 
+  1. Go to **System Settings** > **Privacy & Security** > **Full Disk Access**.
+  2. Click the **+** button and add `RAWviewer.app`.
+  3. Toggle it to **ON**.
+- **"Open with" behavior**: For the very first launch, if you see a malware warning, open the app directly via Right-click -> "Open". This "registers" the app with macOS, after which "Right-click -> Open with" will work perfectly.
 
 ## 🚧 Upcoming Features
 
 We're continuously working to improve RAWviewer. Here are some features planned for future releases:
 
-- **Histogram Display**: View RGB and luminance histograms to analyze exposure and color distribution
 - **Batch Operations**: Select and process multiple images at once
 
 

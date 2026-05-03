@@ -5,7 +5,7 @@ import logging
 import numpy as np
 from typing import List, Dict, Any, Optional
 
-from PyQt6.QtWidgets import QWidget, QFrame, QHBoxLayout, QVBoxLayout, QApplication, QLabel, QScrollArea, QSizePolicy
+from PyQt6.QtWidgets import QWidget, QFrame, QHBoxLayout, QVBoxLayout, QLabel, QScrollArea, QSizePolicy
 from PyQt6.QtCore import Qt, QTimer, QRect, QThreadPool, QSize, QRunnable, QObject, pyqtSignal, QPoint
 from PyQt6.QtGui import QPixmap, QImage, QFont, QImageReader, QPainter, QBrush, QColor
 
@@ -93,7 +93,7 @@ class JustifiedGallery(QWidget):
         """Initial build after widget measurements are valid"""
         self._setup_scroll_tracking()
         if self.width() > 0:
-            QApplication.processEvents()
+            # Avoid processEvents(): it can re-enter signal handlers during gallery init.
             self.build_gallery()
         else:
             QTimer.singleShot(50, self._delayed_initial_build)

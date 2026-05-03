@@ -64,6 +64,18 @@ class LRUCache:
                 return True
             return False
 
+    def remove_keys_for_file_path(self, file_path: str) -> int:
+        """Remove entries keyed by file_path (tuple first element or string key)."""
+        n = 0
+        with self.lock:
+            for k in list(self.cache.keys()):
+                if k == file_path or (
+                    isinstance(k, tuple) and len(k) > 0 and k[0] == file_path
+                ):
+                    del self.cache[k]
+                    n += 1
+        return n
+
     def clear(self) -> None:
         with self.lock:
             self.cache.clear()
@@ -120,17 +132,30 @@ class PersistentEXIFCache:
         self.db_path = os.path.join(cache_dir, "exif_cache.db")
         self.lock = threading.RLock()
         
-        # Cache for file stats to avoid repeated os.stat() calls
-        self._file_stats_cache = {}
-        self._file_stats_cache_lock = threading.RLock()
-        self._file_stats_cache_max_size = 2000 # Larger than thumbnails because we use it for sorting
+        # Use thread-local storage for database connections
+        self._local = threading.local()
         
         self._init_db()
+
+    def _get_connection(self):
+        """Get thread-local database connection."""
+        if not hasattr(self._local, 'conn'):
+            conn = sqlite3.connect(
+                self.db_path,
+                check_same_thread=False,
+                timeout=30.0
+            )
+            # Enable WAL mode for better concurrent performance
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=NORMAL")
+            conn.execute("PRAGMA cache_size=1000")
+            self._local.conn = conn
+        return self._local.conn
 
     def _init_db(self):
         """Initialize the SQLite database."""
         with self.lock:
-            conn = sqlite3.connect(self.db_path)
+            conn = self._get_connection()
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS exif_cache (
                     file_path TEXT PRIMARY KEY,
@@ -143,10 +168,7 @@ class PersistentEXIFCache:
                     cached_time REAL,
                     capture_time TEXT,
                     original_width INTEGER,
-                    original_height INTEGER,
-                    focal_length TEXT,
-                    aperture TEXT,
-                    iso TEXT
+                    original_height INTEGER
                 )
             """)
             
@@ -166,53 +188,17 @@ class PersistentEXIFCache:
                 if 'original_height' not in columns:
                     print("[CACHE] Migrating database: adding original_height column")
                     conn.execute("ALTER TABLE exif_cache ADD COLUMN original_height INTEGER")
-
-                if 'focal_length' not in columns:
-                    print("[CACHE] Migrating database: adding focal_length column")
-                    conn.execute("ALTER TABLE exif_cache ADD COLUMN focal_length TEXT")
-
-                if 'aperture' not in columns:
-                    print("[CACHE] Migrating database: adding aperture column")
-                    conn.execute("ALTER TABLE exif_cache ADD COLUMN aperture TEXT")
-
-                if 'iso' not in columns:
-                    print("[CACHE] Migrating database: adding iso column")
-                    conn.execute("ALTER TABLE exif_cache ADD COLUMN iso TEXT")
                     
             except Exception as e:
                 print(f"[CACHE] Error checking/migrating schema: {e}")
                 
             conn.commit()
-            conn.close()
 
     def _get_file_hash(self, file_path: str) -> Tuple[int, float]:
-        """Get file size and modification time for cache validation.
-        
-        Note: We round mtime to 4 decimal places to ensure consistent behavior
-        between Python and SQLite storage/comparison.
-        """
-        # Check cache first to avoid repeated os.stat() calls
-        with self._file_stats_cache_lock:
-            if file_path in self._file_stats_cache:
-                return self._file_stats_cache[file_path]
-
+        """Get file size and modification time for cache validation."""
         try:
             stat = os.stat(file_path)
-            # CRITICAL: Round mtime to 4 decimal places for consistent SQLite comparison
-            # SQLite may lose precision when storing REAL values, and Python's float is high-precision.
-            mtime = round(stat.st_mtime, 4)
-            result = (stat.st_size, mtime)
-
-            # Cache the result
-            with self._file_stats_cache_lock:
-                if len(self._file_stats_cache) >= self._file_stats_cache_max_size:
-                    # Simple FIFO-like eviction
-                    keys_to_remove = list(self._file_stats_cache.keys())[:self._file_stats_cache_max_size // 2]
-                    for key in keys_to_remove:
-                        del self._file_stats_cache[key]
-                self._file_stats_cache[file_path] = result
-                
-            return result
+            return stat.st_size, stat.st_mtime
         except OSError:
             return 0, 0
 
@@ -224,31 +210,21 @@ class PersistentEXIFCache:
 
         with self.lock:
             try:
-                conn = sqlite3.connect(self.db_path)
+                conn = self._get_connection()
                 cursor = conn.execute(
                     "SELECT file_size, file_mtime, orientation, camera_make, camera_model, exif_data, "
-                    "capture_time, original_width, original_height, focal_length, aperture, iso "
+                    "capture_time, original_width, original_height "
                     "FROM exif_cache WHERE file_path = ?",
                     (file_path,)
                 )
                 row = cursor.fetchone()
-                conn.close()
 
-                if row and row[0] == file_size and abs(row[1] - file_mtime) < 0.0001:
+                if row and row[0] == file_size and row[1] == file_mtime:
                     # Cache is valid
                     exif_data = pickle.loads(row[5]) if row[5] else {}
                     
                     # Ensure consistent data (DB columns override/augment blob)
                     result_capture_time = row[6]
-                    if not result_capture_time:
-                         result_capture_time = exif_data.get('capture_time')
-                         if not result_capture_time:
-                              for tag in ['EXIF DateTimeOriginal', 'Image DateTime', 'EXIF DateTimeDigitized', 'DateTimeOriginal', 'DateTime']:
-                                   val = exif_data.get(tag)
-                                   if val:
-                                       result_capture_time = str(val)
-                                       break
-
                     if result_capture_time and 'capture_time' not in exif_data:
                          exif_data['capture_time'] = result_capture_time
                     
@@ -257,11 +233,6 @@ class PersistentEXIFCache:
                     if result_width: exif_data['original_width'] = result_width
                     if result_height: exif_data['original_height'] = result_height
                     
-                    # Store new columns in exif_data if not present
-                    if row[9] and 'focal_length' not in exif_data: exif_data['focal_length'] = row[9]
-                    if row[10] and 'aperture' not in exif_data: exif_data['aperture'] = row[10]
-                    if row[11] and 'iso' not in exif_data: exif_data['iso'] = row[11]
-                    
                     return {
                         'orientation': row[2],
                         'camera_make': row[3],
@@ -269,10 +240,7 @@ class PersistentEXIFCache:
                         'exif_data': exif_data,
                         'capture_time': result_capture_time,
                         'original_width': result_width if result_width else exif_data.get('original_width'),
-                        'original_height': result_height if result_height else exif_data.get('original_height'),
-                        'focal_length': row[9] if row[9] else exif_data.get('focal_length'),
-                        'aperture': row[10] if row[10] else exif_data.get('aperture'),
-                        'iso': row[11] if row[11] else exif_data.get('iso')
+                        'original_height': result_height if result_height else exif_data.get('original_height')
                     }
             except Exception:
                 pass
@@ -283,10 +251,9 @@ class PersistentEXIFCache:
         """Remove cached EXIF data for a file."""
         with self.lock:
             try:
-                conn = sqlite3.connect(self.db_path)
+                conn = self._get_connection()
                 cursor = conn.execute("DELETE FROM exif_cache WHERE file_path = ?", (file_path,))
                 conn.commit()
-                conn.close()
                 return cursor.rowcount > 0
             except Exception:
                 return False
@@ -299,7 +266,7 @@ class PersistentEXIFCache:
 
         with self.lock:
             try:
-                conn = sqlite3.connect(self.db_path)
+                conn = self._get_connection()
                 exif_blob = pickle.dumps(exif_info.get('exif_data', {}))
                 
                 # Extract capture_time for separate column
@@ -322,8 +289,8 @@ class PersistentEXIFCache:
                 conn.execute(
                     "INSERT OR REPLACE INTO exif_cache "
                     "(file_path, file_size, file_mtime, orientation, camera_make, camera_model, exif_data, "
-                    "cached_time, capture_time, original_width, original_height, focal_length, aperture, iso) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "cached_time, capture_time, original_width, original_height) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         file_path,
                         file_size,
@@ -335,14 +302,10 @@ class PersistentEXIFCache:
                         time.time(),
                         capture_time,
                         width,
-                        height,
-                        exif_info.get('focal_length'),
-                        exif_info.get('aperture'),
-                        exif_info.get('iso')
+                        height
                     )
                 )
                 conn.commit()
-                conn.close()
             except Exception:
                 pass
 
@@ -352,11 +315,20 @@ class PersistentEXIFCache:
 
         with self.lock:
             try:
-                conn = sqlite3.connect(self.db_path)
+                conn = self._get_connection()
                 conn.execute(
                     "DELETE FROM exif_cache WHERE cached_time < ?", (cutoff_time,))
                 conn.commit()
-                conn.close()
+            except Exception:
+                pass
+
+    def clear(self) -> None:
+        """Remove all cached EXIF entries."""
+        with self.lock:
+            try:
+                conn = self._get_connection()
+                conn.execute("DELETE FROM exif_cache")
+                conn.commit()
             except Exception:
                 pass
 
@@ -372,7 +344,7 @@ class PersistentEXIFCache:
         results = {}
         with self.lock:
             try:
-                conn = sqlite3.connect(self.db_path)
+                conn = self._get_connection()
                 # sqlite has a limit on the number of variables in a query
                 # Process in chunks of 500
                 for i in range(0, len(file_paths), 500):
@@ -381,7 +353,7 @@ class PersistentEXIFCache:
                     
                     # Fetch all optimized columns
                     query = f"SELECT file_path, file_size, file_mtime, orientation, camera_make, camera_model, " \
-                            f"exif_data, capture_time, original_width, original_height, focal_length, aperture, iso " \
+                            f"exif_data, capture_time, original_width, original_height " \
                             f"FROM exif_cache WHERE file_path IN ({placeholders})"
                             
                     cursor = conn.execute(query, chunk)
@@ -394,7 +366,7 @@ class PersistentEXIFCache:
                         else:
                             file_size, file_mtime = self._get_file_hash(path)
                         
-                        if row[1] == file_size and abs(row[2] - file_mtime) < 0.0001:
+                        if row[1] == file_size and row[2] == file_mtime:
                             # Cache is valid
                             
                             # Fast Mode Optimization: Skip unpickling if we have all needed data
@@ -407,33 +379,10 @@ class PersistentEXIFCache:
                                 result_capture_time = row[7]
                                 result_width = row[8]
                                 result_height = row[9]
-                                
-                                # SYNTHESIZE EXIF tags for main.py to find without unpickling
-                                # This avoids Disk I/O fallback in main.py status bar update
-                                if row[10]: # focal_length
-                                    exif_data['EXIF FocalLength'] = row[10]
-                                    exif_data['focal_length'] = row[10]
-                                if row[11]: # aperture
-                                    exif_data['EXIF FNumber'] = row[11]
-                                    exif_data['aperture'] = row[11]
-                                if row[12]: # iso
-                                    exif_data['EXIF ISOSpeedRatings'] = row[12]
-                                    exif_data['iso'] = row[12]
-                                if result_capture_time:
-                                    exif_data['EXIF DateTimeOriginal'] = result_capture_time
-                                    exif_data['capture_time'] = result_capture_time
                             else:
                                 # SLOW PATH: Unpickle blob
                                 exif_data = pickle.loads(row[6]) if row[6] else {}
                                 result_capture_time = row[7] if row[7] else exif_data.get('capture_time')
-                                
-                                # Capture Time fallback
-                                if result_capture_time is None:
-                                    for tag in ['EXIF DateTimeOriginal', 'Image DateTime', 'EXIF DateTimeDigitized', 'DateTimeOriginal', 'DateTime']:
-                                        val = exif_data.get(tag)
-                                        if val:
-                                            result_capture_time = str(val)
-                                            break
                                 
                                 # Width fallback
                                 result_width = row[8]
@@ -472,17 +421,22 @@ class PersistentEXIFCache:
                                 'exif_data': exif_data,
                                 'capture_time': result_capture_time,
                                 'original_width': result_width,
-                                'original_height': result_height,
-                                'focal_length': row[10],
-                                'aperture': row[11],
-                                'iso': row[12]
+                                'original_height': result_height
                             }
-                conn.close()
+                # No conn.close() here as it is thread-local
+                pass
             except Exception:
                 pass
         return results
-
-        return results
+    
+    def close(self):
+        """Close the database connection for the current thread."""
+        try:
+            if hasattr(self, '_local') and hasattr(self._local, 'conn'):
+                self._local.conn.close()
+                del self._local.conn
+        except Exception:
+            pass
 
 
 class PersistentThumbnailCache:
@@ -557,9 +511,7 @@ class PersistentThumbnailCache:
         
         try:
             stat = os.stat(file_path)
-            # CRITICAL: Round mtime to 4 decimal places for consistent SQLite comparison
-            mtime = round(stat.st_mtime, 4)
-            result = (stat.st_size, mtime)
+            result = (stat.st_size, stat.st_mtime)
             
             # Cache the result
             with self._file_stats_cache_lock:
@@ -595,7 +547,7 @@ class PersistentThumbnailCache:
             )
             row = cursor.fetchone()
             
-            if row and row[0] == file_size and abs(row[1] - file_mtime) < 0.0001:
+            if row and row[0] == file_size and row[1] == file_mtime:
                 # Cache is valid, check if file exists
                 cache_file = row[2]
                 if os.path.exists(cache_file):
@@ -695,6 +647,37 @@ class PersistentThumbnailCache:
                 conn.commit()
             except Exception:
                 pass
+
+    def clear(self) -> None:
+        """Remove all disk thumbnail cache files and database rows."""
+        with self.lock:
+            try:
+                conn = self._get_connection()
+                cursor = conn.execute("SELECT cache_file FROM thumbnail_cache")
+                rows = cursor.fetchall()
+                for row in rows:
+                    try:
+                        cache_file = row[0]
+                        if cache_file and os.path.exists(cache_file):
+                            os.remove(cache_file)
+                    except Exception:
+                        pass
+                conn.execute("DELETE FROM thumbnail_cache")
+                conn.commit()
+            except Exception:
+                pass
+
+        with self._file_stats_cache_lock:
+            self._file_stats_cache.clear()
+
+    def close(self):
+        """Close the database connection for the current thread."""
+        try:
+            if hasattr(self, '_local') and hasattr(self._local, 'conn'):
+                self._local.conn.close()
+                del self._local.conn
+        except Exception:
+            pass
 
 
 class PersistentPreviewCache(PersistentThumbnailCache):
@@ -928,27 +911,27 @@ class ImageCache(QObject):
         self.stats['preview_requests'] += 1
         self._check_memory_pressure()
 
-        # Check in-memory cache
+        # Check in-memory cache first
         preview = self.preview_cache.get(file_path)
         if preview is not None:
             self.cache_hit.emit(file_path, 'preview')
             return preview
-        
-        # Check disk cache
+
+        # Check disk cache for previews
         jpeg_data = self.disk_preview_cache.get(file_path)
         if jpeg_data is not None:
-            try:
+             try:
                 from PIL import Image
                 import io
                 pil_image = Image.open(io.BytesIO(jpeg_data))
                 if pil_image.mode != 'RGB':
                     pil_image = pil_image.convert('RGB')
                 preview = np.array(pil_image)
-                # Cache in RAM
+                # Also cache in memory
                 self.preview_cache.put(file_path, preview.copy())
                 self.cache_hit.emit(file_path, 'preview')
                 return preview
-            except Exception:
+             except Exception:
                 self.disk_preview_cache.remove(file_path)
         
         self.cache_miss.emit(file_path, 'preview')
@@ -1021,17 +1004,22 @@ class ImageCache(QObject):
     def invalidate_file(self, file_path: str) -> None:
         """Remove all cached data for a specific file."""
         self.thumbnail_cache.remove(file_path)
+        self.preview_cache.remove(file_path)
         self.full_image_cache.remove(file_path)
         self.pixmap_cache.remove(file_path)
         self.disk_thumbnail_cache.remove(file_path)
+        self.disk_preview_cache.remove(file_path)
         # Note: EXIF cache handles file modification time automatically
 
     def clear_all(self) -> None:
         """Clear all caches."""
         self.thumbnail_cache.clear()
+        self.preview_cache.clear()
         self.full_image_cache.clear()
         self.pixmap_cache.clear()
-        # Don't clear persistent EXIF cache
+        self.exif_cache.clear()
+        self.disk_thumbnail_cache.clear()
+        self.disk_preview_cache.clear()
 
     def get_cache_stats(self) -> Dict[str, Any]:
         """Get comprehensive cache statistics."""
@@ -1051,6 +1039,16 @@ class ImageCache(QObject):
         """Clean up old cache entries."""
         self.exif_cache.cleanup_old_entries()
         self.disk_thumbnail_cache.cleanup_old_entries()
+        self.disk_preview_cache.cleanup_old_entries()
+
+    def close(self):
+        """Close all persistent cache connections."""
+        if hasattr(self, 'exif_cache'):
+            self.exif_cache.close()
+        if hasattr(self, 'disk_thumbnail_cache'):
+            self.disk_thumbnail_cache.close()
+        if hasattr(self, 'disk_preview_cache'):
+            self.disk_preview_cache.close()
 
 
 # Global cache instance
@@ -1059,7 +1057,7 @@ _legacy_cache_cleanup_done = False
 
 
 def _cleanup_legacy_disk_cache_once() -> None:
-    """Remove old on-disk cache directory once in memory-only mode."""
+    """Remove legacy image caches while preserving semantic search assets."""
     global _legacy_cache_cleanup_done
     if _legacy_cache_cleanup_done:
         return
@@ -1068,11 +1066,36 @@ def _cleanup_legacy_disk_cache_once() -> None:
     legacy_dir = os.path.expanduser("~/.rawviewer_cache")
     if not os.path.isdir(legacy_dir):
         return
-    try:
-        shutil.rmtree(legacy_dir)
-    except OSError:
-        # Best effort cleanup; app should continue even if deletion fails.
-        pass
+
+    # Keep semantic_index.db, WAL/SHM files, MobileCLIP assets, and any future
+    # non-image assets in this cache root. Memory-only mode should only clear
+    # obsolete image/EXIF cache stores from older builds.
+    obsolete_entries = (
+        "exif_cache.db",
+        "exif_cache.db-shm",
+        "exif_cache.db-wal",
+        "thumbnail_cache.db",
+        "thumbnail_cache.db-shm",
+        "thumbnail_cache.db-wal",
+        "preview_cache.db",
+        "preview_cache.db-shm",
+        "preview_cache.db-wal",
+        "thumbnails",
+        "previews",
+        "images",
+    )
+    for name in obsolete_entries:
+        path = os.path.join(legacy_dir, name)
+        if not os.path.exists(path):
+            continue
+        try:
+            if os.path.isdir(path) and not os.path.islink(path):
+                shutil.rmtree(path)
+            else:
+                os.remove(path)
+        except OSError:
+            # Best effort cleanup; app should continue even if deletion fails.
+            pass
 
 
 def get_image_cache() -> ImageCache:
