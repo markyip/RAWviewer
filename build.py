@@ -259,6 +259,13 @@ def main():
         f'--add-data "{imageformats_src}{add_data_sep}imageformats"',
         f'--add-data "icons{add_data_sep}icons"'
     ]
+    if platform.system() == "Darwin":
+        m2 = Path("models/mobileclip2_coreml")
+        if m2.is_dir() and list(m2.glob("*_image.mlpackage")):
+            add_data_args.append(
+                f'--add-data "{m2.resolve()}{add_data_sep}models/mobileclip2_coreml"'
+            )
+            print("[INFO] Bundling MobileCLIP2 Core ML from models/mobileclip2_coreml/")
     add_data_arg_str = " ".join(add_data_args)
 
     src_path = os.path.abspath('src')

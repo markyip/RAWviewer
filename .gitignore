@@ -60,6 +60,10 @@ venv/
 .hf_cache_mobileclip/
 artifacts/mobileclip2_coreml/
 
+# Bundled MobileCLIP2 Core ML (large); export with scripts/export_mobileclip2_coreml.py --for-app
+models/mobileclip2_coreml/**
+!models/mobileclip2_coreml/.gitkeep
+
 # Distribution packages
 *.zip
 *.tar.gz
