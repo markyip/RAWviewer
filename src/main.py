@@ -5730,9 +5730,7 @@ class RAWImageViewer(QMainWindow):
         self.search_expand_layout.addWidget(self.gallery_search_status_label)
 
         self.gallery_search_input = QLineEdit()
-        self.gallery_search_input.setPlaceholderText(
-            "Search gallery (e.g. jet takeoff camera:sony iso<800 city:tokyo)"
-        )
+        self.gallery_search_input.setPlaceholderText("Search gallery")
         self.gallery_search_input.setClearButtonEnabled(True)
         self.gallery_search_input.setFixedWidth(560)
         self.gallery_search_input.setStyleSheet("""
@@ -6282,6 +6280,16 @@ class RAWImageViewer(QMainWindow):
         self.status_counter_label.setText(f"{total} images")
         self.status_counter_label.show()
 
+    def _sync_gallery_scrollbar_policy(self):
+        """Hide vertical scrollbar when gallery has nothing to scroll (e.g. no matches)."""
+        gs = getattr(self, "gallery_scroll", None)
+        if gs is None or getattr(self, "view_mode", "") != "gallery":
+            return
+        if not self.image_files:
+            gs.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            gs.verticalScrollBar().setValue(gs.verticalScrollBar().minimum())
+        else:
+            gs.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
     def _run_semantic_search_query(self, query: str):
         query = (query or "").strip()
         if not query:
@@ -6328,19 +6336,35 @@ class RAWImageViewer(QMainWindow):
                 self.image_files = []
                 self.current_file_index = -1
                 self.current_file_path = None
+                backend_missing = bool(semantic_query) and not index.semantic_backend_available()
+                empty_msg = (
+                    "Semantic search unavailable" if backend_missing else "No matching images"
+                )
                 if getattr(self, "view_mode", "single") == "gallery" and hasattr(self, "gallery_justified") and self.gallery_justified:
                     self.gallery_justified.clear_thumbnail_widgets()
                     self.gallery_justified.set_images([])
-                    self.gallery_justified.show_empty_message("No results found for current search")
+                    self.gallery_justified.show_empty_message(empty_msg)
+                self._sync_gallery_scrollbar_policy()
                 if hasattr(self, "status_counter_label"):
                     self._update_gallery_counter()
-                self.status_bar.showMessage("No search results", 3000)
+                if not backend_missing:
+                    self.status_bar.showMessage("No matching images", 3000)
                 self._last_semantic_query = query
                 return
 
             ranked_paths = [h.file_path for h in hits if os.path.isfile(h.file_path)]
             if not ranked_paths:
-                self.status_bar.showMessage("No valid files in search results", 3000)
+                self.image_files = []
+                self.current_file_index = -1
+                self.current_file_path = None
+                if getattr(self, "view_mode", "single") == "gallery" and hasattr(self, "gallery_justified") and self.gallery_justified:
+                    self.gallery_justified.clear_thumbnail_widgets()
+                    self.gallery_justified.set_images([])
+                    self.gallery_justified.show_empty_message("No matching images")
+                self._sync_gallery_scrollbar_policy()
+                self._update_gallery_counter()
+                self.status_bar.showMessage("No matching images", 3000)
+                self._last_semantic_query = query
                 return
 
             self.image_files = ranked_paths
@@ -6349,6 +6373,9 @@ class RAWImageViewer(QMainWindow):
             self._update_gallery_counter()
 
             if getattr(self, "view_mode", "single") == "gallery":
+                if hasattr(self, "gallery_justified") and self.gallery_justified:
+                    self.gallery_justified.hide_empty_message()
+                self._sync_gallery_scrollbar_policy()
                 self._update_gallery_view()
             else:
                 self.load_raw_image(self.current_file_path)
@@ -6388,6 +6415,7 @@ class RAWImageViewer(QMainWindow):
             self.current_file_index = 0
             self.current_file_path = self.image_files[0]
         if getattr(self, "view_mode", "single") == "gallery":
+            self._sync_gallery_scrollbar_policy()
             self._update_gallery_view()
         else:
             self.load_raw_image(self.current_file_path)
@@ -6714,9 +6742,7 @@ class RAWImageViewer(QMainWindow):
             gallery_scroll.setWidgetResizable(True)
             gallery_scroll.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
             gallery_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-            # Set scrollbar to always on to prevent width change -> rebuild -> width change loop
-            # This keeps viewport width constant whether images are loaded or not
-            gallery_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
+            gallery_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
             gallery_scroll.setStyleSheet("""
                 QScrollArea {
                     border: none;
@@ -6849,10 +6875,21 @@ class RAWImageViewer(QMainWindow):
             logger.info(f"[GALLERY] ========== _update_gallery_view() STARTED ==========")
             self._update_gallery_counter()
             
-            if not self.gallery_widget or not self.gallery_justified or not self.image_files:
-                logger.info(f"[GALLERY] Gallery widget or image files not available, returning")
+            if not self.gallery_widget or not self.gallery_justified:
+                logger.info(f"[GALLERY] Gallery widget not available, returning")
                 return
-            
+            self._sync_gallery_scrollbar_policy()
+            if not self.image_files:
+                logger.info(f"[GALLERY] No image files for gallery update, returning")
+                query = getattr(self, "_last_semantic_query", "") or ""
+                if query.strip():
+                    bulk_meta = getattr(self, "_gallery_bulk_metadata", None)
+                    self.gallery_justified.set_images(
+                        [], bulk_meta if bulk_meta else None
+                    )
+                    self.gallery_justified.show_empty_message("No matching images")
+                return
+
             # IMPORTANT: Switching to gallery should be instant.
             # Do NOT block the UI thread on metadata fetch for thousands of files.
             # 1) Show gallery immediately with a fast layout (default aspect ratios).
