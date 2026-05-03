@@ -710,12 +710,11 @@ class EnhancedRAWProcessor(QThread):
 
         # Extract thumbnail
         thumbnail = None
-        jpeg_data = None
         if self.is_raw_file:
-            thumbnail, jpeg_data = self.thumbnail_extractor.extract_thumbnail_from_raw(
+            thumbnail = self.thumbnail_extractor.extract_thumbnail_from_raw(
                 self.file_path)
         else:
-            thumbnail, _ = self.thumbnail_extractor.extract_thumbnail_from_image(
+            thumbnail = self.thumbnail_extractor.extract_thumbnail_from_image(
                 self.file_path)
 
         if thumbnail is not None:
@@ -742,7 +741,7 @@ class EnhancedRAWProcessor(QThread):
         # Try to extract thumbnail as fallback first
         thumbnail_fallback = None
         try:
-            thumbnail_fallback, _ = self.thumbnail_extractor.extract_thumbnail_from_raw(
+            thumbnail_fallback = self.thumbnail_extractor.extract_thumbnail_from_raw(
                 self.file_path)
         except Exception:
             pass
