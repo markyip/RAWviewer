@@ -340,6 +340,11 @@ class JustifiedGallery(QWidget):
                 QTimer.singleShot(0, self.build_gallery)
         except Exception:
             pass
+        try:
+            if getattr(self, "_empty_label", None) and self._empty_label.isVisible():
+                self._update_empty_label_geometry()
+        except Exception:
+            pass
         return super().resizeEvent(event)
 
     def _handle_resize_rebuild(self):
@@ -939,39 +944,45 @@ class JustifiedGallery(QWidget):
             self._loading_label = None
 
     def show_empty_message(self, message):
-        """Show empty gallery message overlay"""
-        # Hide loading message if visible
+        """Show empty gallery message centered in the gallery frame."""
         self.hide_loading_message()
-        
-        # Remove existing empty label if any
-        if hasattr(self, '_empty_label') and self._empty_label:
+
+        style = """
+            QLabel {
+                color: #a8a8a8;
+                font-size: 15px;
+                background-color: transparent;
+                padding: 24px;
+            }
+        """
+
+        if hasattr(self, "_empty_label") and self._empty_label:
             self._empty_label.setText(message)
-            self._empty_label.adjustSize()
+            self._empty_label.setAlignment(
+                Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter
+            )
+            self._empty_label.setWordWrap(True)
+            self._empty_label.setStyleSheet(style)
             self._update_empty_label_geometry()
             self._empty_label.show()
             self._empty_label.raise_()
+            QTimer.singleShot(0, self._update_empty_label_geometry)
             return
-        
-        # Create empty label - centered, larger text
+
         self._empty_label = QLabel(message, self)
-        self._empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._empty_label.setStyleSheet("""
-            QLabel {
-                color: #888888;
-                font-size: 16px;
-                background-color: transparent;
-                padding: 20px;
-            }
-        """)
+        self._empty_label.setAlignment(
+            Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter
+        )
+        self._empty_label.setWordWrap(True)
+        self._empty_label.setStyleSheet(style)
         font = QFont()
         font.setPointSize(12)
         self._empty_label.setFont(font)
         self._empty_label.show()
         self._empty_label.raise_()
-        
-        # Update geometry
         self._update_empty_label_geometry()
-        
+        QTimer.singleShot(0, self._update_empty_label_geometry)
+
     def hide_empty_message(self):
         """Hide empty gallery message"""
         if hasattr(self, '_empty_label') and self._empty_label:
@@ -1017,27 +1028,21 @@ class JustifiedGallery(QWidget):
             pass
             
     def _update_empty_label_geometry(self):
-        """Center the empty label in the viewport"""
-        if hasattr(self, '_empty_label') and self._empty_label and self.parent_viewer:
-            self._empty_label.adjustSize()
-            w = self._empty_label.width()
-            h = self._empty_label.height()
-            
-            # Position at center of the viewport
-            parent_scroll = self.parent_viewer.scroll_area if hasattr(self.parent_viewer, 'scroll_area') else None
-            if parent_scroll:
-                 # Calculate relative position in the viewport
-                 viewport_h = parent_scroll.viewport().height()
-                 viewport_w = parent_scroll.viewport().width()
-                 scroll_y = parent_scroll.verticalScrollBar().value()
-                 
-                 # Center in viewport (taking scroll into account)
-                 y = scroll_y + (viewport_h - h) // 2
-                 x = (viewport_w - w) // 2
-                 
-                 self._empty_label.move(int(x), int(y))
-            else:
-                 # Fallback
-                 x = (self.width() - w) // 2
-                 y = (self.height() - h) // 2
-                 self._empty_label.move(int(x), int(y))
+        """Lay out empty-state text across the justified gallery canvas (fills the frame when empty)."""
+        if not getattr(self, "_empty_label", None):
+            return
+        margin_x = 32
+        avail_w = max(120, int(self.width() - margin_x * 2))
+        avail_h = max(120, self.height())
+
+        label = self._empty_label
+        label.setFixedWidth(avail_w)
+        try:
+            hint_h = int(label.heightForWidth(avail_w))
+        except Exception:
+            label.adjustSize()
+            hint_h = int(label.sizeHint().height())
+        label_h = min(max(hint_h, 48), avail_h - 16)
+        y = max(8, (avail_h - label_h) // 2)
+        x = margin_x
+        label.setGeometry(int(x), int(y), avail_w, label_h)

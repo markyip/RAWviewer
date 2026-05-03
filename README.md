@@ -84,6 +84,28 @@ This is a **pre-filtering tool**, letting you go through hundreds of RAW files e
 - **Delete**: Delete current image (with confirmation)
 - **`H`**: Show or hide the single-image histogram strip
 
+## 🔎 Gallery search (Gallery view)
+
+Open the bottom search panel. The search field placeholder is **Search gallery**.
+
+- On **macOS** with bundled Core ML models, free-text queries run **semantic ranking** over the images that pass any filters below.
+- You can combine a description with structured filters on one line (see examples).
+- **Clear** the field or use the **×** control to restore the full folder.
+
+### Gallery search syntax examples
+
+Separate tokens with spaces. Filters use `key:value` or comparison forms.
+
+| Kind | Example |
+|------|---------|
+| Free text + filter | `jet takeoff camera:sony iso<800` |
+| Camera / lens | `camera:canon` · `lens:70-200` |
+| ISO / year | `iso<=800` · `year>=2024` |
+| Place | `city:tokyo` · `country:jp` · `admin:california` |
+| File name | `filename:_dsc` or `name:img_` |
+| Date prefix | `date:2024-05` |
+| GPS / faces | `has:gps` · `no:gps` · `has:face` · `no:face` |
+
 ## 🖱️ Mouse Controls
 
 - **Double-click**: Toggle zoom mode
