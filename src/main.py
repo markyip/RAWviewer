@@ -6183,7 +6183,10 @@ class RAWImageViewer(QMainWindow):
             total = int(coverage.get("total", len(corpus_files)))
             if not backend_available:
                 backend_error = index.semantic_backend_error()
-                if "Missing MobileCLIP" in backend_error:
+                if (
+                    "Missing MobileCLIP" in backend_error
+                    and index.mobileclip_supports_hub_download()
+                ):
                     if self._mobileclip_download_dismissed_this_session:
                         self._set_gallery_search_input_visible()
                         if hasattr(self, "gallery_search_input") and self.gallery_search_input is not None:

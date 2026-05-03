@@ -128,6 +128,11 @@ class MobileCLIPCoreMLBackend:
     Note: text encoding also needs a tokenizer compatible with the Core ML text
     encoder. Until a tokenizer asset is present, the backend reports unavailable
     rather than silently falling back to metadata-only results.
+
+    Exported MobileCLIP2 models (see ``scripts/export_mobileclip2_coreml.py``)
+    expose the image encoder as FLOAT32 MultiArray ``[1,3,256,256]`` in NCHW
+    pixel scale ``[0,1]``. Apple-shipped MobileCLIP S2 bundles use MLFeatureTypeImage;
+    ``encode_image`` supports both via model introspection.
     """
 
     MODEL_ID = "mobileclip-coreml-s2"
@@ -135,6 +140,7 @@ class MobileCLIPCoreMLBackend:
     IMAGE_MODEL_FILE = "mobileclip_s2_image.mlpackage"
     TEXT_MODEL_FILE = "mobileclip_s2_text.mlpackage"
     TOKENIZER_URL = "https://openaipublic.azureedge.net/clip/bpe_simple_vocab_16e6.txt.gz"
+    SUPPORTS_HUB_DOWNLOAD = True
 
     def __init__(self, model_dir: Optional[str] = None):
         if model_dir is None:
@@ -169,6 +175,7 @@ class MobileCLIPCoreMLBackend:
         module_dir = os.path.dirname(os.path.abspath(__file__))
         dirs.extend(
             [
+                os.path.join(module_dir, "..", "models", "mobileclip2_coreml"),
                 os.path.join(module_dir, "..", "models", "mobileclip_coreml"),
                 os.path.join(module_dir, "..", "mobileclip_coreml"),
             ]
@@ -327,18 +334,53 @@ class MobileCLIPCoreMLBackend:
             raise RuntimeError(f"MobileCLIP text prediction failed: {err}")
         return self._normalize(self._multi_array_to_numpy(out.featureValueForName_(output_name).multiArrayValue()))
 
+    def _float32_multi_array_nchw(self, tensor_nchw: np.ndarray):
+        CoreML = self._CoreML
+        t = np.asarray(tensor_nchw, dtype=np.float32).reshape(1, 3, 256, 256)
+        flat = np.ascontiguousarray(t).ravel(order="C")
+        arr, err = CoreML.MLMultiArray.alloc().initWithShape_dataType_error_(
+            [1, 3, 256, 256], CoreML.MLMultiArrayDataTypeFloat32, None
+        )
+        if err is not None or arr is None:
+            raise RuntimeError(f"Failed to allocate Core ML image tensor: {err}")
+        for i, value in enumerate(flat):
+            arr.setObject_atIndexedSubscript_(float(value), i)
+        return arr
+
     def encode_image(self, file_path: str) -> np.ndarray:
         self._load_models()
         CoreML = self._CoreML
         im = _load_index_source_image(file_path, max_size=512).resize(
             (256, 256), Image.Resampling.BICUBIC
         )
+        desc = self._image_model.modelDescription()
         input_name = self._native_feature_name(self._image_model, "input")
         output_name = self._native_feature_name(self._image_model, "output")
-        pixel_buffer = self._image_to_pixel_buffer(im)
-        feature = CoreML.MLFeatureValue.alloc().initWithValue_type_(
-            pixel_buffer, CoreML.MLFeatureTypeImage
-        )
+        by_name = desc.inputDescriptionsByName()
+        feature_desc = by_name.objectForKey_(input_name) if by_name is not None else None
+        if feature_desc is None and by_name is not None:
+            for key in by_name:
+                if str(key) == str(input_name):
+                    feature_desc = by_name.objectForKey_(key)
+                    break
+        if feature_desc is None:
+            raise RuntimeError("Core ML image model has no input description")
+        in_type = int(feature_desc.type())
+
+        feature = None
+        if in_type == CoreML.MLFeatureTypeMultiArray:
+            rgb = np.asarray(im.convert("RGB"), dtype=np.float32) / 255.0
+            nchw = np.transpose(rgb, (2, 0, 1))[np.newaxis, ...]
+            multi = self._float32_multi_array_nchw(nchw)
+            feature = CoreML.MLFeatureValue.featureValueWithMultiArray_(multi)
+        elif in_type == CoreML.MLFeatureTypeImage:
+            pixel_buffer = self._image_to_pixel_buffer(im)
+            feature = CoreML.MLFeatureValue.alloc().initWithValue_type_(
+                pixel_buffer, CoreML.MLFeatureTypeImage
+            )
+        else:
+            raise RuntimeError(f"Unsupported Core ML image encoder input type: {in_type}")
+
         provider, err = CoreML.MLDictionaryFeatureProvider.alloc().initWithDictionary_error_(
             {input_name: feature}, None
         )
@@ -400,6 +442,51 @@ class MobileCLIPCoreMLBackend:
         finally:
             Quartz.CVPixelBufferUnlockBaseAddress(pixel_buffer, 0)
         return pixel_buffer
+
+
+class MobileCLIP2CoreMLBackend(MobileCLIPCoreMLBackend):
+    """Core ML encoders from ``scripts/export_mobileclip2_coreml.py --for-app``."""
+
+    MODEL_ID = "mobileclip-coreml-2-s0"
+    HUB_REPO_ID = ""
+    IMAGE_MODEL_FILE = "mobileclip2_s0_image.mlpackage"
+    TEXT_MODEL_FILE = "mobileclip2_s0_text.mlpackage"
+    SUPPORTS_HUB_DOWNLOAD = False
+
+    def download_assets(self, progress_callback: Optional[Callable[[str], None]] = None) -> str:
+        if self._mlpackage_complete(self.image_model_path) and self._mlpackage_complete(self.text_model_path):
+            if not os.path.exists(self.tokenizer_path):
+                os.makedirs(self.model_dir, exist_ok=True)
+                if progress_callback:
+                    progress_callback("Downloading CLIP BPE tokenizer...")
+                urllib.request.urlretrieve(self.TOKENIZER_URL, self.tokenizer_path)
+            err = self.availability_error()
+            if err:
+                raise RuntimeError(err)
+            return self.model_dir
+        raise RuntimeError(
+            "MobileCLIP2 Core ML models are not bundled. Build with "
+            "`python scripts/export_mobileclip2_coreml.py --for-app` and copy outputs into "
+            "models/mobileclip2_coreml/ (sources) or set RAWVIEWER_MOBILECLIP_MODEL_DIR, "
+            "or install Apple MobileCLIP S2 with RAWVIEWER_MOBILECLIP_VARIANT=s2."
+        )
+
+
+def resolve_mobileclip_coreml_backend() -> MobileCLIPCoreMLBackend:
+    """Prefer MobileCLIP2 on disk; fall back to downloadable Apple MobileCLIP S2."""
+    variant = (os.environ.get("RAWVIEWER_MOBILECLIP_VARIANT") or "").strip().lower()
+    if variant in ("s2", "legacy", "mobileclip-s2", "mobileclip1"):
+        order: List[type] = [MobileCLIPCoreMLBackend, MobileCLIP2CoreMLBackend]
+    elif variant in ("2", "mobileclip2", "mc2", "s0"):
+        order = [MobileCLIP2CoreMLBackend, MobileCLIPCoreMLBackend]
+    else:
+        order = [MobileCLIP2CoreMLBackend, MobileCLIPCoreMLBackend]
+
+    for cls in order:
+        inst = cls()
+        if inst.available():
+            return inst
+    return order[0]()
 
 
 def _bytes_to_unicode() -> Dict[int, str]:
@@ -505,11 +592,14 @@ class SemanticImageIndex:
             os.makedirs(cache_dir, exist_ok=True)
             db_path = os.path.join(cache_dir, "semantic_index.db")
         self.db_path = db_path
-        self._mobileclip_backend = MobileCLIPCoreMLBackend() if sys.platform == "darwin" else None
+        if sys.platform == "darwin":
+            self._mobileclip_backend = resolve_mobileclip_coreml_backend()
+        else:
+            self._mobileclip_backend = None
         if model_name is None:
             model_name = (
-                MobileCLIPCoreMLBackend.MODEL_ID
-                if self._mobileclip_backend is not None
+                getattr(type(self._mobileclip_backend), "MODEL_ID", MobileCLIPCoreMLBackend.MODEL_ID)
+                if sys.platform == "darwin"
                 else "clip-ViT-B-32"
             )
         self.model_name = model_name
@@ -609,7 +699,7 @@ class SemanticImageIndex:
     @staticmethod
     def semantic_backend_available() -> bool:
         if sys.platform == "darwin":
-            return MobileCLIPCoreMLBackend().available()
+            return resolve_mobileclip_coreml_backend().available()
         try:
             import sentence_transformers  # noqa: F401
             return True
@@ -618,7 +708,7 @@ class SemanticImageIndex:
 
     def semantic_backend_error(self) -> str:
         if sys.platform == "darwin" or self.model_name.startswith("mobileclip-coreml"):
-            backend = self._mobileclip_backend or MobileCLIPCoreMLBackend()
+            backend = self._mobileclip_backend or resolve_mobileclip_coreml_backend()
             return backend.availability_error()
         try:
             self._ensure_model()
@@ -626,11 +716,18 @@ class SemanticImageIndex:
         except Exception as exc:
             return str(exc)
 
+    def mobileclip_supports_hub_download(self) -> bool:
+        return bool(
+            self.model_name.startswith("mobileclip-coreml")
+            and self._mobileclip_backend is not None
+            and getattr(self._mobileclip_backend, "SUPPORTS_HUB_DOWNLOAD", False)
+        )
+
     def download_semantic_backend_assets(
         self, progress_callback: Optional[Callable[[str], None]] = None
     ) -> str:
         if sys.platform == "darwin" or self.model_name.startswith("mobileclip-coreml"):
-            backend = self._mobileclip_backend or MobileCLIPCoreMLBackend()
+            backend = self._mobileclip_backend or resolve_mobileclip_coreml_backend()
             path = backend.download_assets(progress_callback=progress_callback)
             self._mobileclip_backend = backend
             return path
@@ -1046,7 +1143,7 @@ class SemanticImageIndex:
 
     def _encode_image(self, file_path: str) -> np.ndarray:
         if self.model_name.startswith("mobileclip-coreml"):
-            backend = self._mobileclip_backend or MobileCLIPCoreMLBackend()
+            backend = self._mobileclip_backend or resolve_mobileclip_coreml_backend()
             err = backend.availability_error()
             if err:
                 raise RuntimeError(f"MobileCLIP Core ML backend unavailable: {err}")
@@ -1063,7 +1160,7 @@ class SemanticImageIndex:
 
     def _encode_text(self, text: str) -> np.ndarray:
         if self.model_name.startswith("mobileclip-coreml"):
-            backend = self._mobileclip_backend or MobileCLIPCoreMLBackend()
+            backend = self._mobileclip_backend or resolve_mobileclip_coreml_backend()
             err = backend.availability_error()
             if err:
                 raise RuntimeError(f"MobileCLIP Core ML backend unavailable: {err}")

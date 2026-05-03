@@ -21,7 +21,10 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+import urllib.request
 from pathlib import Path
+
+_CLIP_BPE_URL = "https://openaipublic.azureedge.net/clip/bpe_simple_vocab_16e6.txt.gz"
 
 
 def _bootstrap_hf_cache(argv: argparse.Namespace, repo_root: Path) -> Path:
@@ -52,8 +55,13 @@ def main() -> int:
     )
     p.add_argument(
         "--out-dir",
-        default=str(default_out),
-        help="Where to save *.mlpackage (default: artifacts/mobileclip2_coreml under repo root)",
+        default=None,
+        help="Where to save *.mlpackage (default: artifacts/mobileclip2_coreml, or models/mobileclip2_coreml with --for-app)",
+    )
+    p.add_argument(
+        "--for-app",
+        action="store_true",
+        help="Use RAWviewer bundle filenames (mobileclip2_s0_*) under models/mobileclip2_coreml/ and download CLIP tokenizer if missing",
     )
     p.add_argument(
         "--hf-home",
@@ -63,6 +71,21 @@ def main() -> int:
     )
     p.add_argument("--verify", action="store_true", help="Run cosine check vs PyTorch on random inputs")
     args = p.parse_args()
+
+    if args.for_app:
+        out_dir = (
+            Path(args.out_dir).expanduser().resolve()
+            if args.out_dir
+            else (repo_root / "models" / "mobileclip2_coreml").resolve()
+        )
+        slug = "mobileclip2_s0"
+    else:
+        out_dir = (
+            Path(args.out_dir).expanduser().resolve()
+            if args.out_dir
+            else default_out.expanduser().resolve()
+        )
+        slug = args.model.replace("/", "-")
 
     hub_cache = _bootstrap_hf_cache(args, repo_root)
 
@@ -108,9 +131,7 @@ def main() -> int:
         def forward(self, tokens):
             return self.m.encode_text(tokens.to(torch.int64))
 
-    out_dir = Path(args.out_dir).expanduser().resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
-    slug = model_name.replace("/", "-")
     path_img = out_dir / f"{slug}_image.mlpackage"
     path_txt = out_dir / f"{slug}_text.mlpackage"
 
@@ -137,6 +158,12 @@ def main() -> int:
     ml_txt.save(str(path_txt))
     print(f"Saved image model: {path_img}")
     print(f"Saved text model:  {path_txt}")
+
+    if args.for_app:
+        vocab = out_dir / "bpe_simple_vocab_16e6.txt.gz"
+        if not vocab.is_file():
+            print(f"Downloading tokenizer to {vocab}...")
+            urllib.request.urlretrieve(_CLIP_BPE_URL, vocab)
 
     if args.verify:
         mli = ct.models.MLModel(str(path_img), compute_units=ct.ComputeUnit.CPU_ONLY)
