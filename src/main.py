@@ -6322,8 +6322,10 @@ class RAWImageViewer(QMainWindow):
                 self._semantic_search_backup_files = list(base_files)
             self.status_bar.showMessage("Running semantic search...")
             QApplication.processEvents()
+            
+            sort_newest = self.get_sort_preference()
             metadata_hits, semantic_query = index.search_metadata_text(
-                query, base_files, top_k=max(1, len(base_files))
+                query, base_files, top_k=max(1, len(base_files)), sort_newest=sort_newest
             )
             used_semantic_backend = False
             if not semantic_query:
