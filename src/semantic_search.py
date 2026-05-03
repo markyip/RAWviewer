@@ -1967,7 +1967,7 @@ class SemanticImageIndex:
         return scores[: max(1, int(top_k))]
 
     def search_metadata_text(
-        self, query: str, candidate_paths: Sequence[str], top_k: int = 500
+        self, query: str, candidate_paths: Sequence[str], top_k: int = 500, sort_newest: bool = True
     ) -> tuple[List[SearchHit], str]:
         """
         Metadata/EXIF-only search that works without any embedding backend.
@@ -2002,7 +2002,7 @@ class SemanticImageIndex:
             )
             for r in filtered
         ]
-        hits.sort(key=lambda h: h.capture_time, reverse=True)
+        hits.sort(key=lambda h: h.capture_time, reverse=sort_newest)
         return hits[: max(1, int(top_k))], semantic_query
 
     def _metadata_rows_for_search(
