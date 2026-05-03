@@ -66,10 +66,9 @@ echo "Installing dependencies..."
 # Clean previous builds
 echo "Cleaning previous builds..."
 # macOS/Finder can leave metadata files (e.g. .DS_Store) with odd flags; be defensive.
+chmod -R u+w build dist 2>/dev/null || true
 rm -rf build || true
-if [ -d "dist" ]; then
-    chmod -R u+w dist 2>/dev/null || true
-fi
+chmod -R u+w dist 2>/dev/null || true
 rm -rf dist || true
 # Only remove spec files if they exist (don't fail if they don't)
 rm -f *.spec

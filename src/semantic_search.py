@@ -589,6 +589,50 @@ class _ClipBPETokenizer:
 class SemanticImageIndex:
     """SQLite-backed CLIP embedding index for local semantic search."""
 
+    # Lowercase extensions commonly treated as camera RAW (LibRaw-ish set; not exhaustive).
+    _RAW_FILE_EXTENSIONS: frozenset = frozenset(
+        {
+            "3fr",
+            "ari",
+            "arw",
+            "bay",
+            "braw",
+            "cr2",
+            "cr3",
+            "crw",
+            "cs1",
+            "dcr",
+            "dcs",
+            "dng",
+            "drf",
+            "erf",
+            "fff",
+            "iiq",
+            "kdc",
+            "mdc",
+            "mef",
+            "mos",
+            "mrw",
+            "nef",
+            "nrw",
+            "orf",
+            "ori",
+            "pef",
+            "ptx",
+            "pxn",
+            "raf",
+            "raw",
+            "r3d",
+            "rw2",
+            "rwz",
+            "rwl",
+            "sr2",
+            "srf",
+            "srw",
+            "x3f",
+        }
+    )
+
     def __init__(self, db_path: Optional[str] = None, model_name: Optional[str] = None):
         if db_path is None:
             cache_dir = os.path.expanduser("~/.rawviewer_cache")
@@ -1377,6 +1421,39 @@ class SemanticImageIndex:
     def _normalize_date_value(value: str) -> str:
         return (value or "").strip().replace("-", ":").replace("/", ":")
 
+    @staticmethod
+    def _row_file_extension(row) -> str:
+        fp = str(SemanticImageIndex._row_value(row, "file_path") or "")
+        bn = str(SemanticImageIndex._row_value(row, "file_name") or "") or (
+            os.path.basename(fp) if fp else ""
+        )
+        return os.path.splitext(bn)[1].lower().lstrip(".")
+
+    @classmethod
+    def _format_specs_to_accept_set(cls, spec: str) -> frozenset:
+        """Map one user-facing format keyword to a set of lowercase extensions."""
+        s = (spec or "").strip().lower().lstrip(".")
+        if not s:
+            return frozenset()
+        if s in ("jpeg", "jpg", "jpe"):
+            return frozenset({"jpg", "jpeg", "jpe"})
+        if s in ("tif", "tiff"):
+            return frozenset({"tif", "tiff"})
+        if s in ("heic", "heif"):
+            return frozenset({"heic", "heif"})
+        if s == "raw":
+            return cls._RAW_FILE_EXTENSIONS
+        return frozenset({s})
+
+    @classmethod
+    def _row_matches_format_specs(cls, row, specs: Sequence[str]) -> bool:
+        fe = cls._row_file_extension(row)
+        for spec in specs:
+            accepted = cls._format_specs_to_accept_set(spec)
+            if fe in accepted:
+                return True
+        return False
+
     @classmethod
     def _capture_time_matches_date(cls, capture_time: str, value: str) -> bool:
         normalized = cls._normalize_date_value(value)
@@ -1408,6 +1485,9 @@ class SemanticImageIndex:
         - country:<text>          (country name or code)
         - date:<prefix>          (e.g. date:2026:05, date:2026-05, date:2026-05-01)
         - filename:<text> / file:<text> / name:<text>
+        - format:<ext> / type:<ext> / ext:<ext>
+          Comma-separated OR: format:jpg,png. Leading dot optional. Synonyms:
+          jpg/jpeg/jpe, tif/tiff, heif/heic, raw=<common RAW extensions>.
         - iso<800 / iso<=800 / iso=400 / iso>=200 / iso>100
         - year=2026 / year>=2024 / year<2020
         - month=5 / month>=6 / month<3
@@ -1485,6 +1565,15 @@ class SemanticImageIndex:
                             needle,
                         )
                     ]
+                continue
+
+            if low.startswith(("format:", "type:", "ext:")):
+                matched = True
+                rest = t.split(":", 1)[1].strip()
+                if rest:
+                    specs = [s.strip().lower().lstrip(".") for s in re.split(r"[,;/|]", rest) if s.strip()]
+                    if specs:
+                        filtered = [r for r in filtered if self._row_matches_format_specs(r, specs)]
                 continue
 
             if low.startswith("city:"):
@@ -1626,7 +1715,7 @@ class SemanticImageIndex:
             flags=re.I,
         )
         text = re.sub(
-            r"\b(camera|lens|city|admin|country|date|filename|file|name)\s*=\s*([^\s]+)\b",
+            r"\b(camera|lens|city|admin|country|date|filename|file|name|format|type|ext)\s*=\s*([^\s]+)\b",
             r"\1:\2",
             text,
             flags=re.I,

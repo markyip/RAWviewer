@@ -1,10 +1,10 @@
-# RAWviewer v1.7.0
+# RAWviewer v1.8.0
 
 <p align="center">
   <img src="icons/appicon.ico" alt="RAWviewer Icon" width="256">
 </p>
 
-![Version](https://img.shields.io/badge/version-1.7.0-blue)
+![Version](https://img.shields.io/badge/version-1.8.0-blue)
 ![Downloads](https://img.shields.io/github/downloads/markyip/RAWviewer/total) 
 ![License](https://img.shields.io/badge/license-MIT-green)
 [![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-Donate-orange?logo=buy-me-a-coffee)](https://www.buymeacoffee.com/markyip)
@@ -42,6 +42,7 @@ This is a **pre-filtering tool**, letting you go through hundreds of RAW files e
 - **Memory-First Cache (Default)**: Uses fast in-memory caching by default with no disk/SQLite writes
 - **Optional Persistent Cache**: Set `RAWVIEWER_PERSISTENT_CACHE=1` to re-enable disk/SQLite cache persistence
 - **Gallery View**: Justified grid layout with virtualized rendering, EXIF-aware ordering, and current-image positioning
+- **Gallery search (macOS + Core ML bundle)**: Free-text semantic ranking plus structured metadata filters (`camera:`, ISO, GPS, **`format:`** / **`ext:`**, and more — see README table below)
 - **Wide RAW format support**: Canon (CR2, CR3), Nikon (NEF), Sony (ARW), Adobe DNG, and many more
 - **Robust Orientation Handling**: Definitive fixes for Sony ARW and other RAW formats, ensuring images are always displayed upright
 - **Pillarbox-Free Gallery**: Accurately calculates aspect ratios to prevent black bars in the gallery view
@@ -103,6 +104,7 @@ Separate tokens with spaces. Filters use `key:value` or comparison forms.
 | ISO / year | `iso<=800` · `year>=2024` |
 | Place | `city:tokyo` · `country:jp` · `admin:california` |
 | File name | `filename:_dsc` or `name:img_` |
+| File format | `format:cr3` · `type:jpeg` · `ext:jpg,png` · `format:raw` (common RAW extensions) |
 | Date prefix | `date:2024-05` |
 | GPS / faces | `has:gps` · `no:gps` · `has:face` · `no:face` |
 

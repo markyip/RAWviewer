@@ -1,5 +1,19 @@
 # RAWviewer Release Notes
 
+## 🚀 Version 1.8.0
+**Release Date: May 3, 2026**
+
+### What's new
+- **Local semantic gallery search (macOS)**: When bundled **MobileCLIP2 Core ML** models are present (`models/mobileclip2_coreml/`, included in packaged builds when exported), gallery search ranks images by meaning from natural-language queries. Combine with structured filters below.
+- **Structured metadata filters**: Narrow by camera, lens, place, ISO, dimensions, GPS/face hints, filename, capture date prefixes, **and file format** using `format:` / `type:` / `ext:` (e.g. `format:cr3`, `format:raw`, comma-separated alternatives like `ext:jpg,png`).
+- **Gallery search UX**: Clear empty-state when filters or semantic ranking return nothing, scrollbar hides when there are no tiles, unified **Search gallery** placeholder, bundled-app path fix so frozen macOS builds resolve Core ML weights under `Resources`.
+
+### Packaging & tooling
+- **Export helpers**: Scripts and build pipeline support producing a Core ML bundle for the app (`scripts/export_mobileclip2_coreml.py --for-app`); PyInstaller Darwin build adds models when present.
+- Semantic stack remains **offline / local-first** (SQLite index + embeddings); HF Hub is optional for fetching export assets during development only.
+
+---
+
 ## 🚀 Version 1.7.0
 **Release Date: April 30, 2026**
 
