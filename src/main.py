@@ -1703,7 +1703,9 @@ class PixmapConverter(QThread):
             if self._should_stop:
                 return
             
-            height, width, channels = self.rgb_image.shape
+            shape = self.rgb_image.shape
+            height, width = shape[0], shape[1]
+            channels = shape[2] if len(shape) > 2 else 1
             bytes_per_line = channels * width
             
             # Ensure the data is contiguous
@@ -1721,8 +1723,14 @@ class PixmapConverter(QThread):
                 return
             
             # Create QImage and QPixmap
+            q_format = QImage.Format.Format_RGB888
+            if channels == 1:
+                q_format = QImage.Format.Format_Grayscale8
+            elif channels == 4:
+                q_format = QImage.Format.Format_RGBA8888
+
             q_image = QImage(image_data, width, height,
-                             bytes_per_line, QImage.Format.Format_RGB888)
+                             bytes_per_line, q_format)
             pixmap = QPixmap.fromImage(q_image)
             
             if self._should_stop:
@@ -7273,14 +7281,16 @@ class RAWImageViewer(QMainWindow):
                 return None
             
             # Get shape
-            if len(numpy_array.shape) != 3:
-                logger.warning(f"[GALLERY] Invalid numpy array shape: {numpy_array.shape}, expected 3D (H, W, C)")
+            shape = numpy_array.shape
+            if len(shape) < 2:
+                logger.warning(f"[GALLERY] Invalid numpy array shape: {shape}, expected at least 2D (H, W)")
                 return None
             
-            height, width, channels = numpy_array.shape
+            height, width = shape[0], shape[1]
+            channels = shape[2] if len(shape) > 2 else 1
             
-            if channels != 3:
-                logger.warning(f"[GALLERY] Invalid channel count: {channels}, expected 3 (RGB)")
+            if channels not in [1, 3, 4]:
+                logger.warning(f"[GALLERY] Unsupported channel count: {channels}, expected 1, 3, or 4")
                 return None
             
             if width <= 0 or height <= 0:
@@ -7362,14 +7372,20 @@ class RAWImageViewer(QMainWindow):
                 )
                 
                 # Convert numpy array to QPixmap
-                from PyQt6.QtGui import QImage, QPixmap
-                height, width, channels = rgb.shape
-                bytes_per_line = channels * width
-                qimage = QImage(rgb.data.tobytes(), width, height, bytes_per_line, QImage.Format.Format_RGB888)
+                shape = rgb.shape
+                h, w = shape[0], shape[1]
+                c = shape[2] if len(shape) > 2 else 1
                 
-                if not qimage.isNull():
-                    pixmap = QPixmap.fromImage(qimage)
-                    logger.debug(f"[GALLERY] Decoded RAW for thumbnail: {os.path.basename(file_path)}, size: {width}x{height}")
+                q_format = QImage.Format.Format_RGB888
+                if c == 1:
+                    q_format = QImage.Format.Format_Grayscale8
+                elif c == 4:
+                    q_format = QImage.Format.Format_RGBA8888
+
+                q_img = QImage(rgb.data, w, h, c * w, q_format)
+                if not q_img.isNull():
+                    pixmap = QPixmap.fromImage(q_img)
+                    logger.debug(f"[GALLERY] Decoded RAW for thumbnail: {os.path.basename(file_path)}, size: {w}x{h}")
                     return pixmap
                     
         except Exception as e:
@@ -8475,131 +8491,135 @@ class RAWImageViewer(QMainWindow):
         self.setFocus()
 
     def image_double_click_event(self, event):
-        if not self.current_pixmap:
-            return
-        if event.button() == Qt.MouseButton.LeftButton:
-            self._stop_slideshow()
-            import logging
-            logger = logging.getLogger(__name__)
-            logger.info(f"[TRACK] User double-clicked to zoom - file: {os.path.basename(self.current_file_path) if hasattr(self, 'current_file_path') and self.current_file_path else 'Unknown'}")
-            if self.fit_to_window:
-                # Zooming in from fit-to-window mode
-                click_pos = event.pos()
-                displayed_pixmap = self.image_label.pixmap()
+        try:
+            if not self.current_pixmap:
+                return
+            if event.button() == Qt.MouseButton.LeftButton:
+                self._stop_slideshow()
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.info(f"[TRACK] User double-clicked to zoom - file: {os.path.basename(self.current_file_path) if hasattr(self, 'current_file_path') and self.current_file_path else 'Unknown'}")
+                if self.fit_to_window:
+                    # Zooming in from fit-to-window mode
+                    click_pos = event.pos()
+                    displayed_pixmap = self.image_label.pixmap()
 
-                if displayed_pixmap:
-                    # Calculate where the click occurred relative to the displayed image
-                    label_size = self.image_label.size()
-                    displayed_size = displayed_pixmap.size()
+                    if displayed_pixmap:
+                        # Calculate where the click occurred relative to the displayed image
+                        label_size = self.image_label.size()
+                        displayed_size = displayed_pixmap.size()
 
-                    # Calculate image offset within the label (image is centered in label)
-                    image_x_offset = (label_size.width() -
-                                      displayed_size.width()) / 2
-                    image_y_offset = (label_size.height() -
-                                      displayed_size.height()) / 2
+                        # Calculate image offset within the label (image is centered in label)
+                        image_x_offset = (label_size.width() -
+                                          displayed_size.width()) / 2
+                        image_y_offset = (label_size.height() -
+                                          displayed_size.height()) / 2
 
-                    # Adjust click position relative to the displayed image
-                    adjusted_click_x = click_pos.x() - image_x_offset
-                    adjusted_click_y = click_pos.y() - image_y_offset
+                        # Adjust click position relative to the displayed image
+                        adjusted_click_x = click_pos.x() - image_x_offset
+                        adjusted_click_y = click_pos.y() - image_y_offset
 
-                    # Check if click is within the displayed image bounds
-                    if (0 <= adjusted_click_x < displayed_size.width() and
-                            0 <= adjusted_click_y < displayed_size.height()):
+                        # Check if click is within the displayed image bounds
+                        if (0 <= adjusted_click_x < displayed_size.width() and
+                                0 <= adjusted_click_y < displayed_size.height()):
 
-                        # Calculate the ratio of the click position within the displayed image
-                        click_ratio_x = adjusted_click_x / displayed_size.width()
-                        click_ratio_y = adjusted_click_y / displayed_size.height()
+                            # Calculate the ratio of the click position within the displayed image
+                            click_ratio_x = adjusted_click_x / displayed_size.width()
+                            click_ratio_y = adjusted_click_y / displayed_size.height()
 
-                        # Map this ratio to the full-size image coordinates
-                        full_size = self.current_pixmap.size()
-                        image_click_x = int(click_ratio_x * full_size.width())
-                        image_click_y = int(click_ratio_y * full_size.height())
+                            # Map this ratio to the full-size image coordinates
+                            full_size = self.current_pixmap.size()
+                            image_click_x = int(click_ratio_x * full_size.width())
+                            image_click_y = int(click_ratio_y * full_size.height())
 
-                        # Clamp to valid coordinates
-                        image_click_x = max(
-                            0, min(image_click_x, full_size.width() - 1))
-                        image_click_y = max(
-                            0, min(image_click_y, full_size.height() - 1))
+                            # Clamp to valid coordinates
+                            image_click_x = max(
+                                0, min(image_click_x, full_size.width() - 1))
+                            image_click_y = max(
+                                0, min(image_click_y, full_size.height() - 1))
 
-                        self.zoom_center_point = QPoint(
-                            image_click_x, image_click_y)
+                            self.zoom_center_point = QPoint(
+                                image_click_x, image_click_y)
+                        else:
+                            # Click outside image, center on image center
+                            self.zoom_center_point = QPoint(
+                                self.current_pixmap.width() // 2,
+                                self.current_pixmap.height() // 2)
                     else:
-                        # Click outside image, center on image center
+                        # No displayed pixmap, center on image center
                         self.zoom_center_point = QPoint(
                             self.current_pixmap.width() // 2,
                             self.current_pixmap.height() // 2)
+
+                    # Switch to 100% zoom mode
+                    # If currently displaying half_size and user zooms in, load full resolution FIRST
+                    if hasattr(self, '_is_half_size_displayed') and self._is_half_size_displayed:
+                        if not hasattr(self, '_full_resolution_loading') or not self._full_resolution_loading:
+                            import logging
+                            logger = logging.getLogger(__name__)
+                            logger.info("User double-clicked to zoom in - triggering full resolution load")
+                            # Check if full resolution is already cached - if so, load it immediately
+                            cached_full = self.image_cache.get_full_image(self.current_file_path)
+                            if cached_full is not None:
+                                # Safe shape access
+                                cached_h, cached_w = cached_full.shape[0], cached_full.shape[1]
+                                cached_max_dim = max(cached_w, cached_h)
+                                if cached_max_dim > 5000:
+                                    logger.info("Full resolution image already cached, loading immediately...")
+                                    self._full_resolution_loading = True
+                                    # Set flag to prevent display_pixmap from resetting fit_to_window
+                                    self._maintain_zoom_on_navigation = True
+                                    # CRITICAL: UnifiedImageProcessor caches already-oriented images.
+                                    self._orientation_already_applied = True
+                                    
+                                    old_current_size = self.current_pixmap.size() if self.current_pixmap else None
+                                    
+                                    self.display_numpy_image(cached_full)
+                                    self._is_half_size_displayed = False
+                                    self._full_resolution_loading = False
+                                    
+                                    # Recalculate zoom center point for full resolution image
+                                    if self.current_pixmap and old_current_size:
+                                        # Scale the zoom center point from half_size to full resolution
+                                        scale_x = self.current_pixmap.width() / old_current_size.width() if old_current_size.width() > 0 else 1.0
+                                        scale_y = self.current_pixmap.height() / old_current_size.height() if old_current_size.height() > 0 else 1.0
+                                        if hasattr(self, 'zoom_center_point') and self.zoom_center_point:
+                                            self.zoom_center_point = QPoint(
+                                                int(self.zoom_center_point.x() * scale_x),
+                                                int(self.zoom_center_point.y() * scale_y)
+                                            )
+                                    # Clear the flag after display
+                                    if hasattr(self, '_maintain_zoom_on_navigation'):
+                                        delattr(self, '_maintain_zoom_on_navigation')
+                                    # Now execute the zoom after displaying full resolution
+                                    self.fit_to_window = False
+                                    self.current_zoom_level = 1.0
+                                    self.zoom_to_point()
+                                    return  # Exit early since we've handled the zoom
+                                else:
+                                    # Wait for full decode before 100% (single transition — no preview-then-full jump).
+                                    self._load_full_resolution_on_demand()
+                                    self._pending_zoom = True
+                                    self._pending_zoom_center = self.zoom_center_point if hasattr(self, 'zoom_center_point') else None
+                                    self._pending_zoom_thumbnail_size = self.current_pixmap.size() if self.current_pixmap else None
+                                    return
+
+                    self.fit_to_window = False
+                    self.current_zoom_level = 1.0
+                    self.zoom_to_point()
                 else:
-                    # No displayed pixmap, center on image center
-                    self.zoom_center_point = QPoint(
-                        self.current_pixmap.width() // 2,
-                        self.current_pixmap.height() // 2)
-
-                # Switch to 100% zoom mode
-                # If currently displaying half_size and user zooms in, load full resolution FIRST
-                if hasattr(self, '_is_half_size_displayed') and self._is_half_size_displayed:
-                    if not hasattr(self, '_full_resolution_loading') or not self._full_resolution_loading:
-                        import logging
-                        logger = logging.getLogger(__name__)
-                        logger.info("User double-clicked to zoom in - triggering full resolution load")
-                        # Check if full resolution is already cached - if so, load it immediately
-                        cached_full = self.image_cache.get_full_image(self.current_file_path)
-                        if cached_full is not None:
-                            cached_max_dim = max(cached_full.shape[1], cached_full.shape[0])
-                            if cached_max_dim > 5000:
-                                logger.info("Full resolution image already cached, loading immediately...")
-                                self._full_resolution_loading = True
-                                # Set flag to prevent display_pixmap from resetting fit_to_window
-                                # We're about to zoom in, so we want to preserve that intent
-                                self._maintain_zoom_on_navigation = True
-                                # CRITICAL: UnifiedImageProcessor caches already-oriented images.
-                                # Mark as oriented to prevent double rotation in display_numpy_image.
-                                self._orientation_already_applied = True
-                                
-                                old_current_size = self.current_pixmap.size() if self.current_pixmap else None
-                                
-                                self.display_numpy_image(cached_full)
-                                self._is_half_size_displayed = False
-                                self._full_resolution_loading = False
-                                
-                            # Recalculate zoom center point for full resolution image
-                            if self.current_pixmap and old_current_size:
-                                # Scale the zoom center point from half_size to full resolution
-                                scale_x = self.current_pixmap.width() / old_current_size.width() if old_current_size.width() > 0 else 1.0
-                                scale_y = self.current_pixmap.height() / old_current_size.height() if old_current_size.height() > 0 else 1.0
-                                if hasattr(self, 'zoom_center_point') and self.zoom_center_point:
-                                    self.zoom_center_point = QPoint(
-                                        int(self.zoom_center_point.x() * scale_x),
-                                        int(self.zoom_center_point.y() * scale_y)
-                                    )
-                            # Clear the flag after display
-                            if hasattr(self, '_maintain_zoom_on_navigation'):
-                                delattr(self, '_maintain_zoom_on_navigation')
-                            # Now execute the zoom after displaying full resolution
-                            self.fit_to_window = False
-                            self.current_zoom_level = 1.0
-                            self.zoom_to_point()
-                            return  # Exit early since we've handled the zoom
-                        else:
-                            # Wait for full decode before 100% (single transition — no preview-then-full jump).
-                            self._load_full_resolution_on_demand()
-                            self._pending_zoom = True
-                            self._pending_zoom_center = self.zoom_center_point if hasattr(self, 'zoom_center_point') else None
-                            self._pending_zoom_thumbnail_size = self.current_pixmap.size() if self.current_pixmap else None
-                            return
-
-                self.fit_to_window = False
-                self.current_zoom_level = 1.0
-                self.zoom_to_point()
-            else:
-                # Zooming out to fit-to-window mode
-                self.fit_to_window = True
-                self.current_zoom_level = 1.0
-                self.zoom_center_point = None
-                self.scale_image_to_fit()
-                self.image_label.setCursor(QCursor(Qt.CursorShape.ArrowCursor))
-
-            self.update_status_bar()
+                    # Zooming out to fit-to-window mode
+                    self.fit_to_window = True
+                    self.current_zoom_level = 1.0
+                    self.zoom_center_point = None
+                    self.scale_image_to_fit()
+                    self.image_label.setCursor(QCursor(Qt.CursorShape.ArrowCursor))
+            
+            # Always ensure main window has focus for keyboard events
             self.setFocus()
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).error(f"Error in image_double_click_event: {e}", exc_info=True)
 
     def zoom_to_point(self):
         if not self.current_pixmap:
@@ -9456,34 +9476,28 @@ class RAWImageViewer(QMainWindow):
         display_start = time.time()
         
         try:
-            height, width, channels = rgb_image.shape
+            shape = rgb_image.shape
+            height, width = shape[0], shape[1]
+            channels = shape[2] if len(shape) > 2 else 1
+            
             logger.info(f"[DISPLAY] ========== display_numpy_image() STARTED at {display_start:.3f} ==========")
             logger.info(f"[DISPLAY] Image dimensions: {width}x{height}, channels: {channels}")
             
             # Check if we have a cached pixmap first (fastest path)
-            # BUT: if this is a full resolution image (max dimension > 5000px), don't use cached half_size pixmap
             if hasattr(self, 'current_file_path') and self.current_file_path:
-                height, width, channels = rgb_image.shape
                 # Use max dimension to handle both portrait and landscape orientations
                 max_dimension = max(width, height)
                 is_full_resolution = max_dimension > 5000
                 logger.info(f"[DISPLAY] Full resolution check: {is_full_resolution} (max dimension: {max_dimension}, {width}x{height})")
                 
                 if is_full_resolution:
-                    # For full resolution images, always convert and display the new image
-                    # Don't use cached pixmap which might be half_size
                     logger.info(f"[DISPLAY] Full resolution image ({width}x{height}), converting and displaying")
                 else:
-                    # For thumbnails or half_size, check cache first
                     logger.info(f"[DISPLAY] Checking for cached pixmap")
                     cached_pixmap = self.image_cache.get_pixmap(self.current_file_path)
                     if cached_pixmap is not None:
-                        # Aspect ratio validation: ensure the cached pixmap orientation matches the new image
-                        # If input is Portrait (h > w) but cache is Landscape (w > h), ignore cache
                         input_aspect = width / height
                         cached_aspect = cached_pixmap.width() / cached_pixmap.height()
-                        
-                        # Use a small tolerance for floating point comparison
                         aspect_mismatch = (input_aspect > 1.0 and cached_aspect < 1.0) or (input_aspect < 1.0 and cached_aspect > 1.0)
                         
                         if aspect_mismatch:
@@ -9492,8 +9506,6 @@ class RAWImageViewer(QMainWindow):
                         
                         if cached_pixmap is not None:
                             logger.info(f"[DISPLAY] Using cached pixmap for {width}x{height} image")
-                            # Orientation check for cached pixmap
-                            # ... (rest of the logic)
                             if not getattr(self, '_orientation_already_applied', False):
                                 orientation = self.get_orientation_from_exif(self.current_file_path)
                                 if orientation != 1:
@@ -9512,20 +9524,24 @@ class RAWImageViewer(QMainWindow):
             bytes_per_line = channels * width
             logger.info(f"[DISPLAY] Converting numpy array to QPixmap - bytes_per_line: {bytes_per_line}")
 
-            # Ensure the data is contiguous
             if not rgb_image.flags['C_CONTIGUOUS']:
                 logger.info(f"[DISPLAY] Making array contiguous")
                 rgb_image = np.ascontiguousarray(rgb_image)
 
-            # Convert to bytes for PyQt6 compatibility
             conversion_start = time.time()
             logger.info(f"[DISPLAY] Converting to bytes")
             image_data = rgb_image.data.tobytes() if hasattr(
                 rgb_image.data, 'tobytes') else bytes(rgb_image.data)
             logger.info(f"[DISPLAY] Bytes conversion completed, creating QImage")
 
+            q_format = QImage.Format.Format_RGB888
+            if channels == 1:
+                q_format = QImage.Format.Format_Grayscale8
+            elif channels == 4:
+                q_format = QImage.Format.Format_RGBA8888
+
             q_image = QImage(image_data, width, height,
-                             bytes_per_line, QImage.Format.Format_RGB888)
+                             bytes_per_line, q_format)
             logger.info(f"[DISPLAY] QImage created, creating QPixmap")
             pixmap = QPixmap.fromImage(q_image)
             conversion_time = time.time() - conversion_start
@@ -10514,7 +10530,9 @@ class RAWImageViewer(QMainWindow):
             else:
                 # RAW: successful processing with numpy array
                 try:
-                    height, width, channels = rgb_image.shape
+                    shape = rgb_image.shape
+                    height, width = shape[0], shape[1]
+                    channels = shape[2] if len(shape) > 2 else 1
                     bytes_per_line = channels * width
 
                     # Ensure the data is contiguous and convert to bytes for PyQt6 compatibility
@@ -10590,8 +10608,14 @@ class RAWImageViewer(QMainWindow):
                             image_data = rgb_image.data.tobytes() if hasattr(
                                 rgb_image.data, 'tobytes') else bytes(rgb_image.data)
 
+                            q_format = QImage.Format.Format_RGB888
+                            if channels == 1:
+                                q_format = QImage.Format.Format_Grayscale8
+                            elif channels == 4:
+                                q_format = QImage.Format.Format_RGBA8888
+
                             q_image = QImage(image_data, width, height,
-                                             bytes_per_line, QImage.Format.Format_RGB888)
+                                             bytes_per_line, q_format)
                             pixmap = QPixmap.fromImage(q_image)
                             self.current_pixmap = pixmap
                             
@@ -10612,8 +10636,14 @@ class RAWImageViewer(QMainWindow):
                         image_data = rgb_image.data.tobytes() if hasattr(
                             rgb_image.data, 'tobytes') else bytes(rgb_image.data)
 
+                        q_format = QImage.Format.Format_RGB888
+                        if channels == 1:
+                            q_format = QImage.Format.Format_Grayscale8
+                        elif channels == 4:
+                            q_format = QImage.Format.Format_RGBA8888
+
                         q_image = QImage(image_data, width, height,
-                                         bytes_per_line, QImage.Format.Format_RGB888)
+                                         bytes_per_line, q_format)
                         pixmap = QPixmap.fromImage(q_image)
                         
                         # CRITICAL: Apply orientation correction to pixmap before caching
