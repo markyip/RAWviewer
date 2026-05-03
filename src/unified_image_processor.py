@@ -87,7 +87,7 @@ class UnifiedImageProcessor:
                 allow_scan_fallback=allow_heavy_fallback,
             )
         else:
-            thumbnail, _ = self.thumbnail_extractor.extract_thumbnail_from_image(file_path, max_size=MAX_THUMB_DIM)
+            thumbnail = self.thumbnail_extractor.extract_thumbnail_from_image(file_path, max_size=MAX_THUMB_DIM)
         
         if thumbnail is not None:
             # 獲取 EXIF 數據以獲取 orientation
