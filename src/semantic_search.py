@@ -26,7 +26,7 @@ from typing import Callable, Dict, Iterable, List, Optional, Sequence
 import numpy as np
 from PIL import Image, ImageOps
 
-import exifread
+import metadata_backend
 
 from raw_file_extensions import RAW_FILE_EXTENSIONS
 
@@ -451,49 +451,151 @@ class MobileCLIPCoreMLBackend:
         return pixel_buffer
 
 
-class MobileCLIP2CoreMLBackend(MobileCLIPCoreMLBackend):
-    """Core ML encoders from ``scripts/export_mobileclip2_coreml.py --for-app``."""
+class MobileCLIPONNXBackend:
+    """Windows/Linux ONNX backend for MobileCLIP2-S0.
+    
+    Requires 'onnxruntime' and 'numpy'.
+    """
 
-    MODEL_ID = "mobileclip-coreml-2-s0"
-    HUB_REPO_ID = ""
-    IMAGE_MODEL_FILE = "mobileclip2_s0_image.mlpackage"
-    TEXT_MODEL_FILE = "mobileclip2_s0_text.mlpackage"
-    SUPPORTS_HUB_DOWNLOAD = False
+    MODEL_ID = "mobileclip-onnx-2-s0"
+    HUB_REPO_ID = "plhery/mobileclip2-onnx"
+    IMAGE_MODEL_FILE = "image_encoder.onnx"
+    TEXT_MODEL_FILE = "text_encoder.onnx"
+    TOKENIZER_URL = "https://openaipublic.azureedge.net/clip/bpe_simple_vocab_16e6.txt.gz"
+    SUPPORTS_HUB_DOWNLOAD = True
+
+    def __init__(self, model_dir: Optional[str] = None):
+        if model_dir is None:
+            model_dir = self._default_model_dir()
+        self.model_dir = model_dir
+        self.image_model_path = os.path.join(model_dir, self.IMAGE_MODEL_FILE)
+        self.text_model_path = os.path.join(model_dir, self.TEXT_MODEL_FILE)
+        self.tokenizer_path = os.path.join(model_dir, "bpe_simple_vocab_16e6.txt.gz")
+        self._image_session = None
+        self._text_session = None
+        self._tokenizer = None
+
+    @staticmethod
+    def _candidate_model_dirs() -> List[str]:
+        dirs: List[str] = []
+        env_dir = os.environ.get("RAWVIEWER_MOBILECLIP_MODEL_DIR")
+        if env_dir:
+            dirs.append(env_dir)
+        dirs.append(os.path.expanduser("~/.rawviewer_cache/mobileclip_onnx"))
+        if getattr(sys, "frozen", False):
+            exe_dir = os.path.dirname(sys.executable)
+            dirs.append(os.path.join(exe_dir, "mobileclip_onnx"))
+        module_dir = os.path.dirname(os.path.abspath(__file__))
+        dirs.append(os.path.join(module_dir, "..", "models", "mobileclip2_onnx"))
+        return dirs
+
+    @classmethod
+    def _default_model_dir(cls) -> str:
+        for d in cls._candidate_model_dirs():
+            if (
+                os.path.exists(os.path.join(d, cls.IMAGE_MODEL_FILE))
+                and os.path.exists(os.path.join(d, cls.TEXT_MODEL_FILE))
+            ):
+                return d
+        return cls._candidate_model_dirs()[0]
+
+    def availability_error(self) -> str:
+        try:
+            import onnxruntime  # noqa: F401
+        except ImportError:
+            return "Missing 'onnxruntime' dependency"
+        if not os.path.exists(self.image_model_path):
+            return f"Missing image model: {self.IMAGE_MODEL_FILE}"
+        if not os.path.exists(self.text_model_path):
+            return f"Missing text model: {self.TEXT_MODEL_FILE}"
+        return ""
+
+    def available(self) -> bool:
+        return self.availability_error() == ""
 
     def download_assets(self, progress_callback: Optional[Callable[[str], None]] = None) -> str:
-        if self._mlpackage_complete(self.image_model_path) and self._mlpackage_complete(self.text_model_path):
-            if not os.path.exists(self.tokenizer_path):
-                os.makedirs(self.model_dir, exist_ok=True)
-                if progress_callback:
-                    progress_callback("Downloading CLIP BPE tokenizer...")
-                urllib.request.urlretrieve(self.TOKENIZER_URL, self.tokenizer_path)
-            err = self.availability_error()
-            if err:
-                raise RuntimeError(err)
-            return self.model_dir
-        raise RuntimeError(
-            "MobileCLIP2 Core ML models are not bundled. Build with "
-            "`python scripts/export_mobileclip2_coreml.py --for-app` and copy outputs into "
-            "models/mobileclip2_coreml/ (sources) or set RAWVIEWER_MOBILECLIP_MODEL_DIR, "
-            "or install Apple MobileCLIP S2 with RAWVIEWER_MOBILECLIP_VARIANT=s2."
-        )
+        def _progress(message: str) -> None:
+            if progress_callback:
+                progress_callback(message)
+
+        os.makedirs(self.model_dir, exist_ok=True)
+        _progress("Downloading MobileCLIP ONNX models...")
+        try:
+            from huggingface_hub import hf_hub_download
+        except ImportError:
+            raise RuntimeError("MobileCLIP download requires 'huggingface_hub' (pip install huggingface_hub)")
+
+        # Download from a known good MobileCLIP2-S0 ONNX repo
+        hf_hub_download(repo_id=self.HUB_REPO_ID, filename="image_encoder.onnx", local_dir=self.model_dir)
+        hf_hub_download(repo_id=self.HUB_REPO_ID, filename="text_encoder.onnx", local_dir=self.model_dir)
+        
+        if not os.path.exists(self.tokenizer_path):
+            _progress("Downloading CLIP tokenizer...")
+            urllib.request.urlretrieve(self.TOKENIZER_URL, self.tokenizer_path)
+            
+        return self.model_dir
+
+    def _ensure_sessions(self):
+        if self._image_session is not None:
+            return
+        import onnxruntime as ort
+        # Use CPU provider for maximum compatibility, especially for small models
+        self._image_session = ort.InferenceSession(self.image_model_path, providers=["CPUExecutionProvider"])
+        self._text_session = ort.InferenceSession(self.text_model_path, providers=["CPUExecutionProvider"])
+
+    def _ensure_tokenizer(self):
+        if self._tokenizer is None:
+            self._tokenizer = _ClipBPETokenizer(self.tokenizer_path)
+        return self._tokenizer
+
+    def encode_text(self, text: str) -> np.ndarray:
+        self._ensure_sessions()
+        tokenizer = self._ensure_tokenizer()
+        tokens = np.asarray([tokenizer.encode_for_clip(text)], dtype=np.int32)
+        
+        inputs = {self._text_session.get_inputs()[0].name: tokens}
+        outputs = self._text_session.run(None, inputs)
+        return self._normalize(outputs[0])
+
+    def encode_image(self, file_path: str) -> np.ndarray:
+        self._ensure_sessions()
+        # MobileCLIP2-S0 typically uses 256x256
+        im = _load_index_source_image(file_path, max_size=1024).resize((256, 256), Image.Resampling.BICUBIC)
+        rgb = np.asarray(im.convert("RGB"), dtype=np.float32) / 255.0
+        nchw = np.transpose(rgb, (2, 0, 1))[np.newaxis, ...]
+        
+        inputs = {self._image_session.get_inputs()[0].name: nchw}
+        outputs = self._image_session.run(None, inputs)
+        return self._normalize(outputs[0])
+
+    @staticmethod
+    def _normalize(vec: np.ndarray) -> np.ndarray:
+        arr = np.asarray(vec, dtype=np.float32).reshape(-1)
+        norm = float(np.linalg.norm(arr))
+        if norm > 0:
+            arr = arr / norm
+        return arr
 
 
-def resolve_mobileclip_coreml_backend() -> MobileCLIPCoreMLBackend:
-    """Prefer MobileCLIP2 on disk; fall back to downloadable Apple MobileCLIP S2."""
-    variant = (os.environ.get("RAWVIEWER_MOBILECLIP_VARIANT") or "").strip().lower()
-    if variant in ("s2", "legacy", "mobileclip-s2", "mobileclip1"):
-        order: List[type] = [MobileCLIPCoreMLBackend, MobileCLIP2CoreMLBackend]
-    elif variant in ("2", "mobileclip2", "mc2", "s0"):
-        order = [MobileCLIP2CoreMLBackend, MobileCLIPCoreMLBackend]
-    else:
-        order = [MobileCLIP2CoreMLBackend, MobileCLIPCoreMLBackend]
-
-    for cls in order:
-        inst = cls()
+def resolve_mobileclip_backend() -> Any:
+    """Prefer platform-native; then ONNX; then Core ML fallback."""
+    if sys.platform == "darwin":
+        # Prefer Core ML on macOS
+        for cls in [MobileCLIP2CoreMLBackend, MobileCLIPCoreMLBackend]:
+            inst = cls()
+            if inst.available():
+                return inst
+        # Try ONNX on macOS too if Core ML fails
+        inst = MobileCLIPONNXBackend()
         if inst.available():
             return inst
-    return order[0]()
+        return MobileCLIP2CoreMLBackend()
+    else:
+        # Windows/Linux prefer ONNX
+        inst = MobileCLIPONNXBackend()
+        if inst.available():
+            return inst
+        return inst # Return anyway for download_assets availability
 
 
 def _bytes_to_unicode() -> Dict[int, str]:
@@ -643,16 +745,14 @@ class SemanticImageIndex:
             os.makedirs(cache_dir, exist_ok=True)
             db_path = os.path.join(cache_dir, "semantic_index.db")
         self.db_path = db_path
-        if sys.platform == "darwin":
-            self._mobileclip_backend = resolve_mobileclip_coreml_backend()
-        else:
-            self._mobileclip_backend = None
+        self.db_path = db_path
+        self._mobileclip_backend = resolve_mobileclip_backend()
+        
         if model_name is None:
-            model_name = (
-                getattr(type(self._mobileclip_backend), "MODEL_ID", MobileCLIPCoreMLBackend.MODEL_ID)
-                if sys.platform == "darwin"
-                else "clip-ViT-B-32"
-            )
+            if hasattr(self._mobileclip_backend, "MODEL_ID"):
+                model_name = self._mobileclip_backend.MODEL_ID
+            else:
+                model_name = "clip-ViT-B-32"
         self.model_name = model_name
         self._model = None
         self._reverse_geocoder = None
@@ -752,8 +852,8 @@ class SemanticImageIndex:
 
     @staticmethod
     def semantic_backend_available() -> bool:
-        if sys.platform == "darwin":
-            return resolve_mobileclip_coreml_backend().available()
+        if resolve_mobileclip_backend().available():
+            return True
         try:
             import sentence_transformers  # noqa: F401
             return True
@@ -761,8 +861,8 @@ class SemanticImageIndex:
             return False
 
     def semantic_backend_error(self) -> str:
-        if sys.platform == "darwin" or self.model_name.startswith("mobileclip-coreml"):
-            backend = self._mobileclip_backend or resolve_mobileclip_coreml_backend()
+        if self.model_name.startswith("mobileclip-"):
+            backend = self._mobileclip_backend or resolve_mobileclip_backend()
             return backend.availability_error()
         try:
             self._ensure_model()
@@ -772,7 +872,7 @@ class SemanticImageIndex:
 
     def mobileclip_supports_hub_download(self) -> bool:
         return bool(
-            self.model_name.startswith("mobileclip-coreml")
+            self.model_name.startswith("mobileclip-")
             and self._mobileclip_backend is not None
             and getattr(self._mobileclip_backend, "SUPPORTS_HUB_DOWNLOAD", False)
         )
@@ -780,8 +880,8 @@ class SemanticImageIndex:
     def download_semantic_backend_assets(
         self, progress_callback: Optional[Callable[[str], None]] = None
     ) -> str:
-        if sys.platform == "darwin" or self.model_name.startswith("mobileclip-coreml"):
-            backend = self._mobileclip_backend or resolve_mobileclip_coreml_backend()
+        if self.model_name.startswith("mobileclip-"):
+            backend = self._mobileclip_backend or resolve_mobileclip_backend()
             path = backend.download_assets(progress_callback=progress_callback)
             self._mobileclip_backend = backend
             return path
@@ -1037,8 +1137,9 @@ class SemanticImageIndex:
             "face_count": None,
         }
         try:
-            with open(file_path, "rb") as f:
-                tags = exifread.process_file(f, details=False)
+            tags = metadata_backend.process_file_from_path(
+                file_path, details=False
+            )
             result["capture_time"] = self._tag_text(
                 tags,
                 "EXIF DateTimeOriginal",
@@ -1196,11 +1297,11 @@ class SemanticImageIndex:
         return True
 
     def _encode_image(self, file_path: str) -> np.ndarray:
-        if self.model_name.startswith("mobileclip-coreml"):
-            backend = self._mobileclip_backend or resolve_mobileclip_coreml_backend()
+        if self.model_name.startswith("mobileclip-"):
+            backend = self._mobileclip_backend or resolve_mobileclip_backend()
             err = backend.availability_error()
             if err:
-                raise RuntimeError(f"MobileCLIP Core ML backend unavailable: {err}")
+                raise RuntimeError(f"MobileCLIP backend unavailable: {err}")
             return backend.encode_image(file_path)
         model = self._ensure_model()
         try:
@@ -1213,11 +1314,11 @@ class SemanticImageIndex:
             ) from exc
 
     def _encode_text(self, text: str) -> np.ndarray:
-        if self.model_name.startswith("mobileclip-coreml"):
-            backend = self._mobileclip_backend or resolve_mobileclip_coreml_backend()
+        if self.model_name.startswith("mobileclip-"):
+            backend = self._mobileclip_backend or resolve_mobileclip_backend()
             err = backend.availability_error()
             if err:
-                raise RuntimeError(f"MobileCLIP Core ML backend unavailable: {err}")
+                raise RuntimeError(f"MobileCLIP backend unavailable: {err}")
             return backend.encode_text(text)
         model = self._ensure_model()
         return np.asarray(model.encode(text, normalize_embeddings=True), dtype=np.float32)
