@@ -5150,36 +5150,6 @@ class RAWImageViewer(QMainWindow):
         except Exception:
             pass
 
-        try:
-            from exifread_af import pixmap_ltwh_subject_cipa_from_exifread
-
-            lt_sub = pixmap_ltwh_subject_cipa_from_exifread(path, pm.width(), pm.height())
-            if lt_sub is not None:
-                self._focus_subject_rect_image = QRect(
-                    lt_sub[0], lt_sub[1], lt_sub[2], lt_sub[3]
-                )
-                self._focus_rect_source = "exif_subject"
-                return
-        except ImportError:
-            pass
-        except Exception:
-            pass
-
-        try:
-            from exifread_af import pixmap_ltwh_af_from_exifread
-
-            lt_af = pixmap_ltwh_af_from_exifread(path, pm.width(), pm.height())
-            if lt_af is not None:
-                self._focus_subject_rect_image = QRect(
-                    lt_af[0], lt_af[1], lt_af[2], lt_af[3]
-                )
-                self._focus_rect_source = "makernote_af"
-                return
-        except ImportError:
-            pass
-        except Exception:
-            pass
-
     def _sync_focus_subject_outline_after_display(self) -> None:
         if (
             not getattr(self, "_focus_subject_outline_active", False)
