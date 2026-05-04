@@ -6029,21 +6029,27 @@ class RAWImageViewer(QMainWindow):
         self.search_expand_layout.setContentsMargins(0, 0, 0, 0)
 
         self.gallery_search_panel = QWidget()
-        _gsp = QHBoxLayout(self.gallery_search_panel)
-        _gsp.setContentsMargins(0, 0, 10, 0)
-        _gsp.setSpacing(8)
+        _gsp_outer = QVBoxLayout(self.gallery_search_panel)
+        _gsp_outer.setContentsMargins(0, 0, 10, 0)
+        _gsp_outer.setSpacing(4)
+        _gsp_row = QHBoxLayout()
+        _gsp_row.setContentsMargins(0, 0, 0, 0)
+        _gsp_row.setSpacing(6)
 
         self.gallery_search_status_label = QLabel("")
         self.gallery_search_status_label.setAlignment(
-            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop
         )
-        self.gallery_search_status_label.setWordWrap(False)
+        self.gallery_search_status_label.setWordWrap(True)
+        self.gallery_search_status_label.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred
+        )
         self.gallery_search_status_label.setStyleSheet("""
             QLabel {
                 color: #B0B0B0;
                 font-size: 12px;
                 font-weight: 500;
-                padding: 0px 0px 0px 4px;
+                padding: 0px 0px 0px 2px;
             }
         """)
         self.gallery_search_status_label.hide()
@@ -6051,7 +6057,11 @@ class RAWImageViewer(QMainWindow):
         self.gallery_search_input = QLineEdit()
         self.gallery_search_input.setPlaceholderText("Search gallery")
         self.gallery_search_input.setClearButtonEnabled(True)
-        self.gallery_search_input.setFixedWidth(560)
+        self.gallery_search_input.setMinimumWidth(160)
+        self.gallery_search_input.setMaximumWidth(360)
+        self.gallery_search_input.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+        )
         self.gallery_search_style_input = """
             QLineEdit {
                 color: #E0E0E0;
@@ -6069,12 +6079,12 @@ class RAWImageViewer(QMainWindow):
         self.gallery_search_input.returnPressed.connect(self._semantic_search_from_bar)
         self.gallery_search_input.textChanged.connect(self._on_gallery_search_text_changed)
 
-        _gsp.addWidget(self.gallery_search_input)
-        _gsp.addWidget(self.gallery_search_status_label)
-        _gsp.addStretch(1)
+        _gsp_row.addWidget(self.gallery_search_input, 1)
+        _gsp_outer.addLayout(_gsp_row)
+        _gsp_outer.addWidget(self.gallery_search_status_label)
         self.search_expand_layout.addWidget(self.gallery_search_panel)
         self.search_expand_layout.setCurrentWidget(self.gallery_search_panel)
-        self._search_panel_target_width = 900
+        self._search_panel_target_width = 380
         self._search_panel_expanded = False
         self._search_panel_animation = None
         left_buttons_layout.addWidget(self.search_expand_container, 0, alignment=Qt.AlignmentFlag.AlignVCenter)
@@ -6283,10 +6293,34 @@ class RAWImageViewer(QMainWindow):
             self._semantic_index = SemanticImageIndex()
         return self._semantic_index
 
+    def _reset_semantic_search_for_new_folder(self):
+        """Clear gallery search UI and stale query when the folder scope changes."""
+        self._semantic_search_backup_files = None
+        self._last_semantic_query = ""
+        self._semantic_indexing_in_progress = False
+        self._semantic_index_active_token = None
+        self._semantic_index_signals = None
+        self._semantic_index_progress_base = 0
+        self._semantic_index_progress_total = 0
+        try:
+            self._set_gallery_search_status("")
+        except Exception:
+            pass
+        if hasattr(self, "gallery_search_input") and self.gallery_search_input is not None:
+            try:
+                self.gallery_search_input.blockSignals(True)
+                self.gallery_search_input.clear()
+            finally:
+                self.gallery_search_input.blockSignals(False)
+            ph = getattr(self, "_gallery_search_placeholder_saved", "") or "Search gallery"
+            self.gallery_search_input.setPlaceholderText(ph)
+            self._gallery_search_placeholder_saved = ""
+
     def _set_gallery_search_status(self, message: str):
         has_msg = bool(message and str(message).strip())
-        old_target = getattr(self, "_search_panel_target_width", 560)
-        new_target = 900 if has_msg else 560
+        old_target = getattr(self, "_search_panel_target_width", 380)
+        # Narrow bar: input row + optional wrapped status row (indexing text no longer overlaps the field).
+        new_target = 480 if has_msg else 380
         self._search_panel_target_width = new_target
 
         if hasattr(self, "gallery_search_status_label") and self.gallery_search_status_label is not None:
@@ -12451,7 +12485,10 @@ class RAWImageViewer(QMainWindow):
         
         try:
             # Get the folder path
-            folder_path = os.path.dirname(file_path)
+            folder_path = os.path.abspath(os.path.dirname(file_path))
+            prev_folder = getattr(self, "current_folder", None)
+            if prev_folder is not None and _norm_path(prev_folder) != _norm_path(folder_path):
+                self._reset_semantic_search_for_new_folder()
             
             # Validate folder
             if not os.path.isdir(folder_path):
@@ -13607,8 +13644,8 @@ class RAWImageViewer(QMainWindow):
         """Load images from a folder without blocking the UI during scan/sort."""
         import logging
         logger = logging.getLogger(__name__)
-        # Folder scope changed; drop any active semantic search filter snapshot.
-        self._semantic_search_backup_files = None
+        # Folder scope changed: clear search bar, indexing UI, and filter snapshot.
+        self._reset_semantic_search_for_new_folder()
 
         try:
             if not folder_path:
