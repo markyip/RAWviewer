@@ -6029,20 +6029,19 @@ class RAWImageViewer(QMainWindow):
         self.search_expand_layout.setContentsMargins(0, 0, 0, 0)
 
         self.gallery_search_panel = QWidget()
-        _gsp_outer = QVBoxLayout(self.gallery_search_panel)
-        _gsp_outer.setContentsMargins(0, 0, 10, 0)
-        _gsp_outer.setSpacing(4)
-        _gsp_row = QHBoxLayout()
-        _gsp_row.setContentsMargins(0, 0, 0, 0)
-        _gsp_row.setSpacing(6)
+        _gsp = QHBoxLayout(self.gallery_search_panel)
+        _gsp.setContentsMargins(0, 0, 10, 0)
+        _gsp.setSpacing(8)
 
         self.gallery_search_status_label = QLabel("")
         self.gallery_search_status_label.setAlignment(
-            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
         )
-        self.gallery_search_status_label.setWordWrap(True)
+        self.gallery_search_status_label.setWordWrap(False)
+        self.gallery_search_status_label.setMinimumWidth(0)
+        self.gallery_search_status_label.setMaximumWidth(220)
         self.gallery_search_status_label.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed
         )
         self.gallery_search_status_label.setStyleSheet("""
             QLabel {
@@ -6057,10 +6056,10 @@ class RAWImageViewer(QMainWindow):
         self.gallery_search_input = QLineEdit()
         self.gallery_search_input.setPlaceholderText("Search gallery")
         self.gallery_search_input.setClearButtonEnabled(True)
-        self.gallery_search_input.setMinimumWidth(160)
-        self.gallery_search_input.setMaximumWidth(360)
+        self.gallery_search_input.setMinimumWidth(140)
+        self.gallery_search_input.setMaximumWidth(260)
         self.gallery_search_input.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed
         )
         self.gallery_search_style_input = """
             QLineEdit {
@@ -6079,12 +6078,13 @@ class RAWImageViewer(QMainWindow):
         self.gallery_search_input.returnPressed.connect(self._semantic_search_from_bar)
         self.gallery_search_input.textChanged.connect(self._on_gallery_search_text_changed)
 
-        _gsp_row.addWidget(self.gallery_search_input, 1)
-        _gsp_outer.addLayout(_gsp_row)
-        _gsp_outer.addWidget(self.gallery_search_status_label)
+        _gsp.addWidget(self.gallery_search_input, 0)
+        _gsp.addWidget(self.gallery_search_status_label, 0)
+        _gsp.addStretch(1)
         self.search_expand_layout.addWidget(self.gallery_search_panel)
         self.search_expand_layout.setCurrentWidget(self.gallery_search_panel)
-        self._search_panel_target_width = 380
+        self._gallery_search_status_full = ""
+        self._search_panel_target_width = 300
         self._search_panel_expanded = False
         self._search_panel_animation = None
         left_buttons_layout.addWidget(self.search_expand_container, 0, alignment=Qt.AlignmentFlag.AlignVCenter)
@@ -6316,18 +6316,41 @@ class RAWImageViewer(QMainWindow):
             self.gallery_search_input.setPlaceholderText(ph)
             self._gallery_search_placeholder_saved = ""
 
+    def _apply_gallery_search_status_elide(self):
+        """Single-row status: show truncated text; full string in tooltip when clipped."""
+        full = (getattr(self, "_gallery_search_status_full", None) or "").strip()
+        lab = getattr(self, "gallery_search_status_label", None)
+        if lab is None:
+            return
+        if not full:
+            lab.setText("")
+            lab.setToolTip("")
+            return
+        from PyQt6.QtGui import QFontMetrics
+        w = lab.maximumWidth()
+        if w <= 0:
+            w = 220
+        max_px = max(48, int(w) - 6)
+        fm = QFontMetrics(lab.font())
+        elided = fm.elidedText(full, Qt.TextElideMode.ElideRight, max_px)
+        lab.setText(elided)
+        lab.setToolTip(full if elided != full else "")
+
     def _set_gallery_search_status(self, message: str):
         has_msg = bool(message and str(message).strip())
-        old_target = getattr(self, "_search_panel_target_width", 380)
-        # Narrow bar: input row + optional wrapped status row (indexing text no longer overlaps the field).
-        new_target = 480 if has_msg else 380
+        self._gallery_search_status_full = (message or "").strip()
+        old_target = getattr(self, "_search_panel_target_width", 300)
+        # One horizontal row with the rest of the bottom bar: compact input + capped status width.
+        new_target = 500 if has_msg else 300
         self._search_panel_target_width = new_target
 
         if hasattr(self, "gallery_search_status_label") and self.gallery_search_status_label is not None:
-            self.gallery_search_status_label.setText(message or "")
             if has_msg:
                 self.gallery_search_status_label.show()
+                self._apply_gallery_search_status_elide()
             else:
+                self.gallery_search_status_label.setText("")
+                self.gallery_search_status_label.setToolTip("")
                 self.gallery_search_status_label.hide()
         
         if getattr(self, "view_mode", "single") != "gallery":
