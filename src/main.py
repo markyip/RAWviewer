@@ -2272,6 +2272,7 @@ class JustifiedGallery(QWidget):
         self._loads_per_second = 8
         self._batch_size = 8  # For background images
         self._priority_batch_size = 20  # Larger batch for visible images
+        self._raw_load_limit = 3  # Keep RAW decodes bounded for responsive gallery paint
         
         # Scroll Optimization
         self._last_scroll_y = -1
@@ -3250,6 +3251,16 @@ class JustifiedGallery(QWidget):
         bucket = min(self._row_height_buckets, key=lambda x: abs(x - row_height))
         return (file_path, bucket)
 
+    def _is_raw_file(self, file_path):
+        """Return True for RAW formats that are expensive to decode in gallery."""
+        if not file_path:
+            return False
+        ext = os.path.splitext(file_path)[1].lower()
+        return ext in {
+            '.arw', '.cr2', '.nef', '.raf', '.orf', '.dng', '.cr3', '.rw2', '.rwl', '.srw',
+            '.pef', '.x3f', '.3fr', '.fff', '.iiq', '.cap', '.erf', '.mef', '.mos', '.nrw', '.srf'
+        }
+
     def _process_priority_queue(self):
         """Processes priority queue (visible images) aggressively with no delays"""
         import logging
@@ -3260,14 +3271,18 @@ class JustifiedGallery(QWidget):
             return
         
         # Process all priority items immediately (or large batch)
-        # No delays for visible images - they need to load fast
-        batch = self._priority_queue[:self._priority_batch_size]
+        # No delays for visible images - they need to load fast.
+        # Prefer light formats first so the viewport fills quickly.
+        selected = self._priority_queue[:self._priority_batch_size]
         self._priority_queue = self._priority_queue[self._priority_batch_size:]
+        selected.sort(key=lambda e: 1 if self._is_raw_file(e[1]) else 0)
         
         priority_start = time.time()
         tasks_started = 0
         
-        for index, file_path, target_width, target_height, is_priority in batch:
+        active_raw = sum(1 for p in self._loading_tiles if self._is_raw_file(p))
+        deferred_raw = []
+        for index, file_path, target_width, target_height, is_priority in selected:
             # Verify this file is still in the current gallery layout (folder might have changed)
             if index >= len(self._gallery_layout_items):
                 continue  # Index out of range, folder probably changed
@@ -3276,6 +3291,11 @@ class JustifiedGallery(QWidget):
             
             if file_path in self._loading_tiles:
                 continue  # Already loading
+
+            # Bound concurrent RAW work so JPEG/cover thumbnails can paint first.
+            if self._is_raw_file(file_path) and active_raw >= self._raw_load_limit:
+                deferred_raw.append((index, file_path, target_width, target_height, is_priority))
+                continue
             
             # Check cache first (for row height buckets)
             cache_key = self._get_cache_key(file_path, target_height)
@@ -3318,6 +3338,11 @@ class JustifiedGallery(QWidget):
             self._active_tasks[file_path] = task # Track for cancellation
             self.thread_pool.start(task)
             tasks_started += 1
+            if self._is_raw_file(file_path):
+                active_raw += 1
+
+        if deferred_raw:
+            self._priority_queue = deferred_raw + self._priority_queue
         
         if tasks_started > 0:
             priority_time = time.time() - priority_start
@@ -3348,6 +3373,8 @@ class JustifiedGallery(QWidget):
         batch = self._load_queue[:self._batch_size]
         self._load_queue = self._load_queue[self._batch_size:]
         
+        active_raw = sum(1 for p in self._loading_tiles if self._is_raw_file(p))
+        deferred_raw = []
         for index, file_path, target_width, target_height, is_priority in batch:
             # Verify this file is still in the current gallery layout (folder might have changed)
             if index >= len(self._gallery_layout_items):
@@ -3357,6 +3384,10 @@ class JustifiedGallery(QWidget):
             
             if file_path in self._loading_tiles:
                 continue  # Already loading
+
+            if self._is_raw_file(file_path) and active_raw >= self._raw_load_limit:
+                deferred_raw.append((index, file_path, target_width, target_height, is_priority))
+                continue
             
             # Check cache first (for row height buckets)
             cache_key = self._get_cache_key(file_path, target_height)
@@ -3398,6 +3429,11 @@ class JustifiedGallery(QWidget):
             )
             self._active_tasks[file_path] = task # Track for cancellation
             self.thread_pool.start(task)
+            if self._is_raw_file(file_path):
+                active_raw += 1
+
+        if deferred_raw:
+            self._load_queue = deferred_raw + self._load_queue
         
         # Schedule the next batch if the queue isn't empty
         if self._load_queue:
