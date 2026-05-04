@@ -846,6 +846,7 @@ class SemanticImageIndex:
                 file_size INTEGER NOT NULL,
                 file_mtime REAL NOT NULL,
                 mtime_ns INTEGER,
+                semantic_ready INTEGER DEFAULT 1,
                 model_name TEXT NOT NULL,
                 dim INTEGER NOT NULL,
                 embedding BLOB NOT NULL,
@@ -887,6 +888,13 @@ class SemanticImageIndex:
             self._conn.execute("ALTER TABLE semantic_index ADD COLUMN file_signature TEXT")
         if "mtime_ns" not in cols:
             self._conn.execute("ALTER TABLE semantic_index ADD COLUMN mtime_ns INTEGER")
+        if "semantic_ready" not in cols:
+            self._conn.execute(
+                "ALTER TABLE semantic_index ADD COLUMN semantic_ready INTEGER DEFAULT 1"
+            )
+            self._conn.execute(
+                "UPDATE semantic_index SET semantic_ready = 1 WHERE semantic_ready IS NULL"
+            )
         if "gps_lat" not in cols:
             self._conn.execute("ALTER TABLE semantic_index ADD COLUMN gps_lat REAL")
         if "gps_lon" not in cols:
@@ -905,6 +913,9 @@ class SemanticImageIndex:
             self._conn.execute("ALTER TABLE semantic_index ADD COLUMN face_count INTEGER")
         self._conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_semantic_signature_model ON semantic_index(file_signature, model_name)"
+        )
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_semantic_ready_model ON semantic_index(semantic_ready, model_name)"
         )
         self._conn.commit()
         self._backfill_file_signatures()
@@ -1359,12 +1370,19 @@ class SemanticImageIndex:
                 pass
         return self._mtime_matches(float(row["file_mtime"]), st)
 
+    def _row_semantic_ready(self, row: sqlite3.Row) -> bool:
+        try:
+            return int(row["semantic_ready"] or 0) == 1
+        except Exception:
+            # Backward compatibility for rows loaded before migration.
+            return True
+
     def _needs_reindex(self, file_path: str, st: os.stat_result) -> bool:
         rows = self._lookup_index_rows(file_path, st)
         if not rows:
             return True
         for row in rows:
-            if self._row_matches_file(row, st):
+            if self._row_matches_file(row, st) and self._row_semantic_ready(row):
                 return False
         return True
 
@@ -1403,11 +1421,12 @@ class SemanticImageIndex:
         batch_writes = 0
         # Committing every row forces fsync churn; batch for much faster bulk builds.
         commit_every = 40
+        pending_for_semantic: List[tuple[str, os.stat_result]] = []
+
+        # Phase 1: metadata-first pass (fast). This makes EXIF search available early.
+        # Do not spam progress callbacks here; UI progress should focus on the slower
+        # semantic embedding phase.
         for i, fp in enumerate(file_paths, start=1):
-            if progress_callback:
-                # Throttle UI / callback overhead on huge folders.
-                if i <= 2 or i >= total or (i % 12 == 0):
-                    progress_callback(i, total, fp)
             if not fp or not os.path.isfile(fp):
                 failed += 1
                 continue
@@ -1420,24 +1439,23 @@ class SemanticImageIndex:
                 file_name = os.path.basename(canonical_fp)
                 file_signature = self._file_signature_from_stat(canonical_fp, st)
                 mtime_ns = self._mtime_ns_from_stat(st)
-                vec = self._encode_image(canonical_fp)
-                # Face presence is metadata: compute it once during indexing so
-                # face/no-face filters do not need to scan images repeatedly.
                 meta = self._extract_exif_brief(canonical_fp, include_face=True)
                 self._conn.execute(
                     """
                     INSERT INTO semantic_index (
                         file_path, file_name, file_signature, file_size, file_mtime, mtime_ns,
+                        semantic_ready,
                         model_name, dim, embedding,
                         capture_time, camera_model, lens_model, iso, width, height,
                         gps_lat, gps_lon, gps_raw, city, admin1, country, country_code, face_count, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(file_path) DO UPDATE SET
                         file_name=excluded.file_name,
                         file_signature=excluded.file_signature,
                         file_size=excluded.file_size,
                         file_mtime=excluded.file_mtime,
                         mtime_ns=excluded.mtime_ns,
+                        semantic_ready=excluded.semantic_ready,
                         model_name=excluded.model_name,
                         dim=excluded.dim,
                         embedding=excluded.embedding,
@@ -1464,9 +1482,10 @@ class SemanticImageIndex:
                         int(st.st_size),
                         float(st.st_mtime),
                         mtime_ns,
+                        0,
                         self.model_name,
-                        int(vec.size),
-                        self._to_blob(vec),
+                        0,
+                        b"",
                         str(meta["capture_time"]),
                         str(meta["camera_model"]),
                         str(meta["lens_model"]),
@@ -1482,6 +1501,43 @@ class SemanticImageIndex:
                         str(meta["country_code"]),
                         int(meta["face_count"]) if meta.get("face_count") is not None else None,
                         float(time.time()),
+                    ),
+                )
+                pending_for_semantic.append((canonical_fp, st))
+                batch_writes += 1
+                if batch_writes >= commit_every:
+                    self._conn.commit()
+                    batch_writes = 0
+            except Exception:
+                failed += 1
+
+        if batch_writes:
+            self._conn.commit()
+        batch_writes = 0
+
+        # Phase 2: semantic embeddings (slow). Update existing rows in-place.
+        total_sem = len(pending_for_semantic)
+        for i, (canonical_fp, st) in enumerate(pending_for_semantic, start=1):
+            if progress_callback:
+                # Keep callback signature unchanged while reporting semantic pass progress.
+                if i <= 2 or i >= total_sem or (i % 12 == 0):
+                    progress_callback(i, total_sem, canonical_fp)
+            try:
+                vec = self._encode_image(canonical_fp)
+                self._conn.execute(
+                    """
+                    UPDATE semantic_index
+                    SET dim = ?, embedding = ?, semantic_ready = 1, updated_at = ?
+                    WHERE file_path = ? AND model_name = ? AND file_size = ? AND mtime_ns = ?
+                    """,
+                    (
+                        int(vec.size),
+                        self._to_blob(vec),
+                        float(time.time()),
+                        canonical_fp,
+                        self.model_name,
+                        int(st.st_size),
+                        self._mtime_ns_from_stat(st),
                     ),
                 )
                 indexed += 1
@@ -1511,7 +1567,10 @@ class SemanticImageIndex:
             try:
                 st = os.stat(fp)
                 rows = self._lookup_index_rows(fp, st)
-                if any(self._row_matches_file(r, st) for r in rows):
+                if any(
+                    self._row_matches_file(r, st) and self._row_semantic_ready(r)
+                    for r in rows
+                ):
                     indexed += 1
             except Exception:
                 continue
@@ -1572,7 +1631,7 @@ class SemanticImageIndex:
             query = f"""
                 SELECT file_path, file_name, file_signature, dim, embedding, capture_time, 
                        camera_model, lens_model, iso, gps_lat, gps_lon, width, height, 
-                       city, admin1, country, country_code, face_count,
+                       city, admin1, country, country_code, face_count, semantic_ready,
                        file_size, file_mtime, mtime_ns, model_name
                 FROM semantic_index
                 WHERE model_name = ? AND file_path IN ({placeholders})
@@ -2119,6 +2178,8 @@ class SemanticImageIndex:
 
         scores: List[SearchHit] = []
         for r in rows:
+            if not self._row_semantic_ready(r):
+                continue
             vec = self._from_blob(r["embedding"], int(r["dim"]))
             if vec.size == 0:
                 continue
@@ -2194,17 +2255,19 @@ class SemanticImageIndex:
     def _metadata_rows_for_search(
         self, candidate_paths: Sequence[str], needs_face: bool = False
     ) -> List[Dict[str, object]]:
-        """Optimized metadata row preparation for search. Uses bulk fetching and avoids slow disk I/O."""
+        """Metadata rows for search, with DB-first lookup and fallback EXIF extraction."""
         if not candidate_paths:
             return []
 
         # Bulk fetch all rows that exist in the index
         rows: List[Dict[str, object]] = []
         db_rows = self._fetch_rows_for_paths(candidate_paths)
-        
-        # Create a lookup for paths we found in DB
+        found_paths: set[str] = set()
+
+        # Rows present in DB (fast path).
         for row in db_rows:
             original = str(row["file_path"])
+            found_paths.add(self._canonical_path(original))
             
             face_count = row["face_count"] if "face_count" in row.keys() else None
             # Only detect faces during search if explicitly needed and missing, 
@@ -2233,10 +2296,34 @@ class SemanticImageIndex:
                     "face_count": int(face_count or 0),
                 }
             )
-
-        # NOTE: For search performance, we DO NOT perform real-time EXIF extraction 
-        # for files missing from the index. Search only works on indexed data.
-        
+        # Fallback for files not yet indexed: extract EXIF so metadata search can still
+        # cover the whole album while semantic indexing continues in background.
+        for p in candidate_paths:
+            if not p or not os.path.isfile(p):
+                continue
+            canonical = self._canonical_path(p)
+            if canonical in found_paths:
+                continue
+            meta = self._extract_exif_brief(canonical, include_face=needs_face)
+            rows.append(
+                {
+                    "file_path": canonical,
+                    "file_name": os.path.basename(canonical),
+                    "capture_time": str(meta.get("capture_time") or ""),
+                    "camera_model": str(meta.get("camera_model") or ""),
+                    "lens_model": str(meta.get("lens_model") or ""),
+                    "iso": int(meta.get("iso") or 0),
+                    "width": int(meta.get("width") or 0),
+                    "height": int(meta.get("height") or 0),
+                    "gps_lat": meta.get("gps_lat"),
+                    "gps_lon": meta.get("gps_lon"),
+                    "city": str(meta.get("city") or ""),
+                    "admin1": str(meta.get("admin1") or ""),
+                    "country": str(meta.get("country") or ""),
+                    "country_code": str(meta.get("country_code") or ""),
+                    "face_count": int(meta.get("face_count") or 0),
+                }
+            )
         return rows
 
     def _store_face_count(self, file_path: str, face_count: int) -> None:

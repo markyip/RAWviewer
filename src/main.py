@@ -5997,12 +5997,21 @@ class RAWImageViewer(QMainWindow):
         self.share_bottom_button.hide()
 
         self.slideshow_bottom_button = QPushButton()
+        self.slideshow_bottom_button.setObjectName("slideshowBottomButton")
         self.slideshow_bottom_button.setCheckable(True)
         self.slideshow_bottom_button.setFlat(True)
         self.slideshow_bottom_button.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         self.slideshow_bottom_button.setIcon(qta.icon("fa5s.play", color="#B0B0B0"))
         self.slideshow_bottom_button.setIconSize(QSize(20, 20))
-        self.slideshow_bottom_button.setStyleSheet(bottom_icon_btn_style)
+        self.slideshow_bottom_button.setFixedSize(28, 28)
+        self.slideshow_bottom_button.setStyleSheet(
+            bottom_icon_btn_style
+            + """
+            QPushButton#slideshowBottomButton {
+                padding: 0px;
+            }
+            """
+        )
         self.slideshow_bottom_button.toggled.connect(self._on_slideshow_bottom_toggled)
         self.slideshow_bottom_button.hide()
         left_buttons_layout.addWidget(self.slideshow_bottom_button, 0, alignment=Qt.AlignmentFlag.AlignVCenter)
@@ -6499,9 +6508,8 @@ class RAWImageViewer(QMainWindow):
                     self_inner.signals.error.emit(self_inner.token, str(e))
 
         self._set_gallery_search_status(
-            "Initializing semantic index... "
-            f"{self._semantic_index_progress_base}/{self._semantic_index_progress_total} "
-            f"(pending {len(pending_files)})"
+            "Semantic ready "
+            f"{self._semantic_index_progress_base}/{self._semantic_index_progress_total}"
         )
         worker = _SemanticIndexWorker(token, list(pending_files), index, signals)
         self._gallery_search_placeholder_saved = self.gallery_search_input.placeholderText()
@@ -6516,7 +6524,9 @@ class RAWImageViewer(QMainWindow):
             self._semantic_index_progress_base + max(0, int(i)),
         )
         total = max(done, self._semantic_index_progress_total)
-        self._set_gallery_search_status(f"Initializing semantic index... {done}/{total} ({basename})")
+        self._set_gallery_search_status(
+            f"Semantic ready {done}/{total}"
+        )
 
     def _on_semantic_index_done(self, token, result):
         if token != self._semantic_index_active_token:
@@ -6780,7 +6790,7 @@ class RAWImageViewer(QMainWindow):
                 self._semantic_search_backup_files = list(base_files)
             if getattr(self, "_semantic_indexing_in_progress", False):
                 self.status_bar.showMessage(
-                    "Searching while indexing… EXIF/metadata uses indexed rows only; DB may briefly wait.",
+                    "Searching while indexing… EXIF/metadata covers whole album; semantic ranking improves as indexing progresses.",
                     4500,
                 )
             else:
