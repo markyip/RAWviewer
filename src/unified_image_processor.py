@@ -17,7 +17,12 @@ from enhanced_raw_processor import (
     EXIFExtractor, 
     OptimizedRAWProcessor
 )
-from common_image_loader import is_raw_file, is_tiff_file, load_pixmap_safe
+from common_image_loader import (
+    is_raw_file,
+    is_tiff_file,
+    load_pixmap_safe,
+    use_libraw_consistent_preview_first,
+)
 
 
 def decode_raw_file(file_path: str, params: Dict[str, Any]) -> np.ndarray:
@@ -222,6 +227,7 @@ class UnifiedImageProcessor:
                           use_full_resolution: bool = False,
                           executor: Optional[Any] = None) -> Optional[np.ndarray]:
         """處理 RAW 圖像"""
+        libraw_first = use_libraw_consistent_preview_first()
         try:
             # 獲取 EXIF 數據（用於處理參數）
             exif_data = self.exif_extractor.extract_exif_data(file_path)
@@ -232,7 +238,7 @@ class UnifiedImageProcessor:
             
             # 處理 RAW 文件
             # Check if we should use Preview (embedded JPEG) instead of processing RAW
-            if not use_full_resolution:
+            if not use_full_resolution and not libraw_first:
                # OPTIMIZATION: Try to get/create a high-quality preview (e.g. 1920px) 
                # instead of processing the RAW data (even at half size, raw processing is slow/heavy)
                
@@ -272,6 +278,10 @@ class UnifiedImageProcessor:
             
             # 根據需求調整參數
             if use_fast_processing:
+                params['half_size'] = True
+
+            # LibRaw-first: first fit view uses same pipeline as zoom (half-res decode is faster than full demosaic)
+            if libraw_first and not use_full_resolution:
                 params['half_size'] = True
             
             if use_full_resolution:
@@ -320,7 +330,7 @@ class UnifiedImageProcessor:
                         scanned = self._apply_orientation_correction(
                             scanned, orientation, exif_data
                         )
-                    if not use_full_resolution:
+                    if not use_full_resolution and not libraw_first:
                         self.cache.put_preview(file_path, scanned)
                     return scanned
             except Exception:

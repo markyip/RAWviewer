@@ -395,9 +395,10 @@ class ImageLoadManager(QObject):
     
     def _check_cache(self, file_path: str, use_full_resolution: bool, stages: Optional[set] = None) -> bool:
         """檢查快取，如果存在則直接發送信號（只檢查記憶體快取以避免阻塞 UI）"""
-        from common_image_loader import is_raw_file
+        from common_image_loader import is_raw_file, use_libraw_consistent_preview_first
 
         is_raw = is_raw_file(file_path)
+        libraw_first = use_libraw_consistent_preview_first()
         wanted = stages if stages is not None else {'thumbnail', 'exif', 'full'}
 
         cache = self._cache
@@ -429,11 +430,18 @@ class ImageLoadManager(QObject):
                         self._emit_cached_result_later(self.image_ready, file_path, full_img)
                         return True
                 else:
-                    # Preview cache is memory-only LRU
-                    preview = cache.preview_cache.get(file_path)
-                    if preview is not None:
-                        self._emit_cached_result_later(self.image_ready, file_path, preview)
-                        return True
+                    # Prefer any LibRaw buffer already in memory (fit ↔ zoom consistency)
+                    if libraw_first:
+                        full_img = cache.get_full_image(file_path)
+                        if full_img is not None:
+                            self._emit_cached_result_later(self.image_ready, file_path, full_img)
+                            return True
+                    else:
+                        # Preview cache is memory-only LRU (embedded JPEG path)
+                        preview = cache.preview_cache.get(file_path)
+                        if preview is not None:
+                            self._emit_cached_result_later(self.image_ready, file_path, preview)
+                            return True
                 # For RAW, do not use pixmap cache here
             else:
                 pixmap = cache.pixmap_cache.get(file_path)
