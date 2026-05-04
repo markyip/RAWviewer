@@ -52,13 +52,22 @@ fi
 # "pip" can install into Homebrew or another Python instead.
 echo "Using virtual environment: $VENV_DIR"
 
+# pyexiv2's libexiv2.dylib loads Homebrew libINIReader / gettext at import time.
+if command -v brew >/dev/null 2>&1; then
+    echo "Checking Homebrew dependencies for pyexiv2 (inih, gettext)..."
+    brew list inih &>/dev/null || brew install inih
+    brew list gettext &>/dev/null || brew install gettext
+else
+    echo "[INFO] brew not on PATH. If the build fails on pyexiv2: install Homebrew, then: brew install inih gettext"
+fi
+
 # Upgrade pip first
 echo "Upgrading pip..."
 "$PYTHON_BIN" -m pip install --upgrade pip
 
 # Install/upgrade dependencies
 echo "Installing dependencies..."
-"$PYTHON_BIN" -m pip install --upgrade PyQt6 rawpy send2trash pyinstaller natsort exifread Pillow psutil numpy qtawesome pyqtgraph reverse-geocoder pycountry huggingface-hub pyobjc-framework-Cocoa pyobjc-framework-CoreML pyobjc-framework-Quartz pyobjc-framework-Vision
+"$PYTHON_BIN" -m pip install --upgrade PyQt6 rawpy send2trash pyinstaller natsort exifread pyexiv2 Pillow psutil numpy qtawesome pyqtgraph reverse-geocoder pycountry huggingface-hub pyobjc-framework-Cocoa pyobjc-framework-CoreML pyobjc-framework-Quartz pyobjc-framework-Vision
 
 # Keep the macOS test bundle free of PyTorch until the Core ML backend is wired in.
 "$PYTHON_BIN" -m pip uninstall -y sentence-transformers torch torchvision transformers scikit-learn scipy tokenizers safetensors coremltools >/dev/null 2>&1 || true
