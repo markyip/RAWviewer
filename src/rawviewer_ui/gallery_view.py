@@ -678,6 +678,21 @@ class JustifiedGallery(QWidget):
     def load_visible_images(self):
         if self._building:
             return
+        # Startup race guard: callers may trigger this before _post_init finished.
+        if self._load_timer is None:
+            self._load_timer = QTimer(self)
+            self._load_timer.setSingleShot(True)
+            self._load_timer.timeout.connect(self.load_visible_images)
+        if self._scroll_settle_timer is None:
+            self._scroll_settle_timer = QTimer(self)
+            self._scroll_settle_timer.setSingleShot(True)
+            self._scroll_settle_timer.timeout.connect(self._on_scroll_settled)
+        if self._resize_timer is None:
+            self._resize_timer = QTimer(self)
+            self._resize_timer.setSingleShot(True)
+            self._resize_timer.timeout.connect(self._handle_resize_rebuild)
+        if self._scroll_area is None:
+            self._setup_scroll_tracking()
 
         p = self.parent()
         while p and not isinstance(p, QScrollArea):
@@ -696,6 +711,12 @@ class JustifiedGallery(QWidget):
             if self.load_manager is None:
                 QTimer.singleShot(60, self.load_visible_images)
                 return
+
+        # If we have images but no computed layout yet, schedule a rebuild first.
+        if self.images and not self._gallery_layout_items:
+            QTimer.singleShot(0, self.build_gallery)
+            QTimer.singleShot(40, self.load_visible_images)
+            return
 
         v_port = p.viewport()
         scrollbar = p.verticalScrollBar()
