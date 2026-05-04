@@ -12,6 +12,17 @@ from PyQt6.QtGui import QPixmap, QImage
 from image_cache import get_image_cache
 from raw_file_extensions import RAW_FILE_EXTENSIONS
 
+
+def use_libraw_consistent_preview_first() -> bool:
+    """
+    When True (default), single-image RAW avoids embedded-JPEG preview paths so fit and zoom
+    share the same LibRaw postprocess look. Set RAWVIEWER_LIBRAW_CONSISTENT_PREVIEW=0 to restore
+    the faster embedded-preview first paint.
+    """
+    v = os.environ.get("RAWVIEWER_LIBRAW_CONSISTENT_PREVIEW", "1").strip().lower()
+    return v not in ("0", "false", "no", "off")
+
+
 def check_cache_for_image(file_path: str, use_full_resolution: bool = False) -> Tuple[Optional[Any], Optional[str]]:
     """
     檢查快取中是否存在圖像或相關數據。
@@ -74,7 +85,7 @@ def check_memory_cache_for_image(file_path: str, use_full_resolution: bool = Fal
         if thumbnail is not None:
             return thumbnail, 'thumbnail'
         # 單圖導覽常以 preview_cache 為「半成品」載入結果；thumbnail_cache 不一定有資料
-        if is_raw_file(file_path):
+        if is_raw_file(file_path) and not use_libraw_consistent_preview_first():
             preview = cache.preview_cache.get(file_path)
             if preview is not None:
                 return preview, 'preview'

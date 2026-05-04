@@ -353,6 +353,7 @@ try:
         check_memory_cache_for_image,
         is_raw_file,
         load_pixmap_safe,
+        use_libraw_consistent_preview_first,
     )
     safe_print("  - common_image_loader: OK", flush=True)
 except Exception as e:
@@ -9641,11 +9642,21 @@ class RAWImageViewer(QMainWindow):
                 # never show a sharpened-zoom on a soft preview followed by another zoom swap.
                 preserve_zoom_navigation = bool(getattr(self, "_preserve_nav_zoom_active", False))
                 request_full_res = preserve_zoom_navigation
-                load_stages = {"exif", "full"} if preserve_zoom_navigation else None
+                libraw_fit = (
+                    use_libraw_consistent_preview_first()
+                    and is_raw_file(requested_file_path)
+                    and not preserve_zoom_navigation
+                )
+                load_stages = (
+                    {"exif", "full"}
+                    if (preserve_zoom_navigation or libraw_fit)
+                    else None
+                )
                 
                 logger.info(
                     f"[LOAD] ImageLoadManager — use_full_resolution={request_full_res}, "
-                    f"stages={load_stages or 'default'}, preserve_nav_zoom={preserve_zoom_navigation}"
+                    f"stages={load_stages or 'default'}, preserve_nav_zoom={preserve_zoom_navigation}, "
+                    f"libraw_consistent_fit={libraw_fit}"
                 )
                 
                 if self._loading_from_gallery:
