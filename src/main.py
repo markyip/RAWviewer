@@ -7447,7 +7447,7 @@ class RAWImageViewer(QMainWindow):
                 folder_at_request = getattr(self, "current_folder", None)
                 files_snapshot = list(self.image_files)
 
-                from PyQt6.QtCore import QRunnable, QThreadPool, QTimer
+                from PyQt6.QtCore import QRunnable, QThreadPool
 
                 # Create signal carrier for this specific fetch
                 signals = GalleryMetadataSignals()
