@@ -332,7 +332,11 @@ except Exception as e:
     raise
 
 try:
-    from common_image_loader import check_cache_for_image, is_raw_file, load_pixmap_safe
+    from common_image_loader import (
+        check_memory_cache_for_image,
+        is_raw_file,
+        load_pixmap_safe,
+    )
     print("  - common_image_loader: OK", flush=True)
 except Exception as e:
     print(f"  - common_image_loader: ERROR - {e}", file=sys.stderr, flush=True)
@@ -1700,7 +1704,6 @@ class PixmapConverter(QThread):
                 return
             
             if not hasattr(self.rgb_image, 'shape'):
-                # Fallback or error handling
                 if hasattr(self.rgb_image, 'width') and hasattr(self.rgb_image, 'height'):
                     height, width = self.rgb_image.height(), self.rgb_image.width()
                     channels = 3
@@ -4997,9 +5000,10 @@ class RAWImageViewer(QMainWindow):
                 self.loading_overlay.hide_loading()
             return
 
-        # If thumbnail is already near-preview size (or bigger), skip displaying it and wait for image_ready.
-        # This avoids a heavy bytes-copy + QImage/QPixmap build twice.
-        if max_dim >= 1600:
+        # If thumbnail is already very large (near full embedded JPEG), skip displaying it and wait for image_ready.
+        # Threshold was 1600px which skipped typical 1920px camera embeds — users saw no preview for seconds.
+        # 3840: show normal ~2K/3K embeds immediately; only skip huge thumbs to limit double-render cost.
+        if max_dim >= 3840:
             try:
                 logger.info(f"[MANAGER] Skipping thumbnail display (size {w}x{h}) to avoid double-render; waiting for preview/full.")
             except Exception:
@@ -6035,6 +6039,10 @@ class RAWImageViewer(QMainWindow):
             return
         target = self._search_panel_target_width if expanded else 0
         self._search_panel_expanded = bool(expanded)
+        
+        if expanded:
+            self.search_expand_container.show()
+
         if not expanded and hasattr(self, "gallery_search_input") and self.gallery_search_input is not None:
             try:
                 self.gallery_search_input.clearFocus()
@@ -6046,10 +6054,14 @@ class RAWImageViewer(QMainWindow):
             except Exception:
                 pass
             self._search_panel_animation = None
+            
         if not animate:
             self.search_expand_container.setMinimumWidth(target)
             self.search_expand_container.setMaximumWidth(target)
+            if not expanded:
+                self.search_expand_container.hide()
             return
+            
         anim = QPropertyAnimation(self.search_expand_container, b"maximumWidth")
         anim.setDuration(180)
         anim.setStartValue(self.search_expand_container.maximumWidth())
@@ -6062,6 +6074,8 @@ class RAWImageViewer(QMainWindow):
             self.search_expand_container.setMinimumWidth(target)
             self.search_expand_container.setMaximumWidth(target)
             self._search_panel_animation = None
+            if not expanded:
+                self.search_expand_container.hide()
 
         anim.finished.connect(_finish)
         anim.start()
@@ -6606,7 +6620,8 @@ class RAWImageViewer(QMainWindow):
             self.view_mode_button.show()
         if hasattr(self, "search_bottom_button"):
             self.search_bottom_button.hide()
-        self._set_search_panel_expanded(False, animate=False)
+        if hasattr(self, "search_expand_container") and self.search_expand_container:
+            self.search_expand_container.hide()
         # Update icon if using qtawesome
         if qta is not None:
             try:
@@ -6775,6 +6790,10 @@ class RAWImageViewer(QMainWindow):
             self.sort_toggle_button.show()
         if hasattr(self, "search_bottom_button"):
             self.search_bottom_button.show()
+        # Restore search panel state
+        if hasattr(self, "search_expand_container") and self.search_expand_container:
+            expanded = getattr(self, "_search_panel_expanded", False)
+            self._set_search_panel_expanded(expanded, animate=False)
         # Single-image actions stay in update_status_bar for single mode only; hide here
         # because we do not call update_status_bar() when entering gallery (counter text differs).
         if hasattr(self, "share_bottom_button"):
@@ -6820,7 +6839,7 @@ class RAWImageViewer(QMainWindow):
                 }
                 QScrollBar:vertical {
                     background: transparent;
-                    width: 12px;
+                    width: 24px;
                     margin: 0px;
                     border: none;
                 }
@@ -6828,7 +6847,7 @@ class RAWImageViewer(QMainWindow):
                     background: rgba(255, 255, 255, 0.2);
                     min-height: 30px;
                     border-radius: 6px;
-                    margin: 2px;
+                    margin: 2px 6px 2px 6px;
                 }
                 QScrollBar::handle:vertical:hover {
                     background: rgba(255, 255, 255, 0.3);
@@ -7321,14 +7340,16 @@ class RAWImageViewer(QMainWindow):
                 return None
             
             # Get shape
-            if len(numpy_array.shape) != 3:
-                logger.warning(f"[GALLERY] Invalid numpy array shape: {numpy_array.shape}, expected 3D (H, W, C)")
+            shape = numpy_array.shape
+            if len(shape) < 2:
+                logger.warning(f"[GALLERY] Invalid numpy array shape: {shape}, expected at least 2D (H, W)")
                 return None
             
-            height, width, channels = numpy_array.shape
+            height, width = shape[0], shape[1]
+            channels = shape[2] if len(shape) > 2 else 1
             
-            if channels != 3:
-                logger.warning(f"[GALLERY] Invalid channel count: {channels}, expected 3 (RGB)")
+            if channels not in [1, 3, 4]:
+                logger.warning(f"[GALLERY] Unsupported channel count: {channels}, expected 1, 3, or 4")
                 return None
             
             if width <= 0 or height <= 0:
@@ -7410,14 +7431,20 @@ class RAWImageViewer(QMainWindow):
                 )
                 
                 # Convert numpy array to QPixmap
-                from PyQt6.QtGui import QImage, QPixmap
-                height, width, channels = rgb.shape
-                bytes_per_line = channels * width
-                qimage = QImage(rgb.data.tobytes(), width, height, bytes_per_line, QImage.Format.Format_RGB888)
+                shape = rgb.shape
+                h, w = shape[0], shape[1]
+                c = shape[2] if len(shape) > 2 else 1
                 
-                if not qimage.isNull():
-                    pixmap = QPixmap.fromImage(qimage)
-                    logger.debug(f"[GALLERY] Decoded RAW for thumbnail: {os.path.basename(file_path)}, size: {width}x{height}")
+                q_format = QImage.Format.Format_RGB888
+                if c == 1:
+                    q_format = QImage.Format.Format_Grayscale8
+                elif c == 4:
+                    q_format = QImage.Format.Format_RGBA8888
+
+                q_img = QImage(rgb.data, w, h, c * w, q_format)
+                if not q_img.isNull():
+                    pixmap = QPixmap.fromImage(q_img)
+                    logger.debug(f"[GALLERY] Decoded RAW for thumbnail: {os.path.basename(file_path)}, size: {w}x{h}")
                     return pixmap
                     
         except Exception as e:
@@ -8525,10 +8552,12 @@ class RAWImageViewer(QMainWindow):
     def image_double_click_event(self, event):
         try:
             if not self.current_pixmap:
-                # If image is loading, set pending zoom
                 if hasattr(self, 'current_file_path') and self.current_file_path:
                     self._pending_zoom_toggle = True
-                    logger.info("Double-click recorded while image is loading, will zoom once ready.")
+                    import logging
+                    logging.getLogger(__name__).info(
+                        "Double-click recorded while image is loading; will zoom once ready."
+                    )
                 return
             if event.button() == Qt.MouseButton.LeftButton:
                 self._stop_slideshow()
@@ -8587,29 +8616,28 @@ class RAWImageViewer(QMainWindow):
                             self.current_pixmap.width() // 2,
                             self.current_pixmap.height() // 2)
 
-                    # Switch to 100% zoom mode
-                    # Check if we should upgrade to full resolution
+                    # Switch to 100% zoom mode — upgrade decode when pixmap is preview-sized vs sensor/cache.
                     should_upgrade = False
-                    if hasattr(self, '_is_half_size_displayed') and self._is_half_size_displayed:
+                    if getattr(self, '_is_half_size_displayed', False):
                         should_upgrade = True
                     else:
-                        # Safety check: compare current size to original size from cache
                         cached_exif = self.image_cache.get_exif(self.current_file_path)
                         if cached_exif and self.current_pixmap:
-                            original_max = max(cached_exif.get('original_width', 0), cached_exif.get('original_height', 0))
+                            ow = cached_exif.get('original_width', 0) or 0
+                            oh = cached_exif.get('original_height', 0) or 0
+                            original_max = max(ow, oh)
                             current_max = max(self.current_pixmap.width(), self.current_pixmap.height())
                             if original_max > 0 and current_max < original_max * 0.8:
                                 should_upgrade = True
-                    
+
                     if should_upgrade:
-                        if not hasattr(self, '_full_resolution_loading') or not self._full_resolution_loading:
+                        if not getattr(self, '_full_resolution_loading', False):
                             import logging
                             logger = logging.getLogger(__name__)
                             logger.info("User double-clicked to zoom in - triggering full resolution load")
-                            # Check if full resolution is already cached - if so, load it immediately
                             cached_full = self.image_cache.get_full_image(self.current_file_path)
                             if cached_full is not None:
-                                # Safe shape access
+                                # Safe shape access (processor may wrap buffer types)
                                 if hasattr(cached_full, 'shape'):
                                     cached_h, cached_w = cached_full.shape[0], cached_full.shape[1]
                                 elif hasattr(cached_full, 'width') and hasattr(cached_full, 'height'):
@@ -8620,44 +8648,37 @@ class RAWImageViewer(QMainWindow):
                                 if cached_max_dim >= 3000:
                                     logger.info("Full resolution image already cached, loading immediately...")
                                     self._full_resolution_loading = True
-                                    # Set flag to prevent display_pixmap from resetting fit_to_window
                                     self._maintain_zoom_on_navigation = True
-                                    # CRITICAL: UnifiedImageProcessor caches already-oriented images.
                                     self._orientation_already_applied = True
-                                    
+
                                     old_current_size = self.current_pixmap.size() if self.current_pixmap else None
-                                    
+
                                     self.display_numpy_image(cached_full)
                                     self._is_half_size_displayed = False
                                     self._full_resolution_loading = False
-                                    
-                                    # Recalculate zoom center point for full resolution image
+
                                     if self.current_pixmap and old_current_size:
-                                        # Scale the zoom center point from half_size to full resolution
                                         scale_x = self.current_pixmap.width() / old_current_size.width() if old_current_size.width() > 0 else 1.0
                                         scale_y = self.current_pixmap.height() / old_current_size.height() if old_current_size.height() > 0 else 1.0
-                                        if hasattr(self, 'zoom_center_point') and self.zoom_center_point:
+                                        if getattr(self, 'zoom_center_point', None):
                                             self.zoom_center_point = QPoint(
                                                 int(self.zoom_center_point.x() * scale_x),
                                                 int(self.zoom_center_point.y() * scale_y)
                                             )
-                                    # Clear the flag after display
                                     if hasattr(self, '_maintain_zoom_on_navigation'):
                                         delattr(self, '_maintain_zoom_on_navigation')
-                                    # Now execute the zoom after displaying full resolution
                                     self.fit_to_window = False
                                     self.current_zoom_level = 1.0
                                     self.zoom_to_point()
-                                    return  # Exit early since we've handled the zoom
-                                else:
-                                    logger.info(
-                                        "Cached RGB is still preview-sized — decoding full resolution before 100%% zoom..."
-                                    )
+                                    return
+                                logger.info(
+                                    "Cached RGB is still preview-sized — decoding full resolution before 100%% zoom..."
+                                )
 
                             self._load_full_resolution_on_demand()
                             self._pending_zoom = True
                             self._pending_zoom_center = (
-                                self.zoom_center_point if hasattr(self, 'zoom_center_point') and self.zoom_center_point else None
+                                self.zoom_center_point if getattr(self, 'zoom_center_point', None) else None
                             )
                             self._pending_zoom_thumbnail_size = self.current_pixmap.size() if self.current_pixmap else None
                             self.status_bar.showMessage("Loading full resolution for 100% zoom...")
@@ -8900,6 +8921,76 @@ class RAWImageViewer(QMainWindow):
         else:
             self.image_label.setCursor(QCursor(Qt.CursorShape.ArrowCursor))
 
+    def _max_smooth_zoom_level(self) -> float:
+        """Ceiling for trackpad pinch / Ctrl+wheel zoom relative to ``current_pixmap`` pixels."""
+        if not getattr(self, "_is_half_size_displayed", False):
+            return 1.0
+        pm = getattr(self, "current_pixmap", None)
+        if pm is None or pm.isNull():
+            return max(1.0, min(8.0, 4.0))
+        preview_long = max(pm.width(), pm.height())
+        if preview_long <= 0:
+            return max(1.0, min(8.0, 4.0))
+        try:
+            exif = self.image_cache.get_exif(self.current_file_path)
+            if exif:
+                ow, oh = exif.get("original_width"), exif.get("original_height")
+                if ow and oh:
+                    sensor_long = max(int(ow), int(oh))
+                    if sensor_long > preview_long * 1.08:
+                        r = sensor_long / float(preview_long)
+                        return max(1.0, min(r, 8.0))
+        except Exception:
+            pass
+        return max(1.0, min(8.0, 4.0))
+
+    def _maybe_request_full_res_for_smooth_zoom(self) -> None:
+        if not getattr(self, "_is_half_size_displayed", False):
+            return
+        if not getattr(self, "current_file_path", None):
+            return
+        if getattr(self, "_full_resolution_loading", False):
+            return
+        if getattr(self, "_smooth_zoom_full_request_sent", False):
+            return
+        import logging
+
+        self._smooth_zoom_full_request_sent = True
+        logging.getLogger(__name__).info(
+            "[ZOOM] Preview at native pixels — starting full-resolution decode"
+        )
+        self._load_full_resolution_on_demand()
+
+    def _schedule_raw_sensor_exif_status_refresh(self) -> None:
+        """Reload EXIF through EXIFExtractor so status shows sensor WxH."""
+        fp = getattr(self, "current_file_path", None)
+        if not fp or not os.path.isfile(fp):
+            return
+        if getattr(self, "view_mode", "single") != "single":
+            return
+        if getattr(self, "_raw_status_exif_refresh_path", None) == fp:
+            return
+        if getattr(self, "_raw_status_exif_refresh_scheduled", False):
+            return
+        self._raw_status_exif_refresh_scheduled = True
+
+        def _job():
+            self._raw_status_exif_refresh_scheduled = False
+            if getattr(self, "current_file_path", None) != fp or not os.path.isfile(fp):
+                return
+            try:
+                from enhanced_raw_processor import EXIFExtractor
+
+                data = EXIFExtractor().extract_exif_data(fp)
+                if data:
+                    self.image_cache.put_exif(fp, data)
+                    self._raw_status_exif_refresh_path = fp
+                    self.update_status_bar()
+            except Exception:
+                pass
+
+        QTimer.singleShot(0, _job)
+
     def dragEnterEvent(self, event: QDragEnterEvent):
         """Handle drag enter events for file and folder dropping"""
         if event.mimeData().hasUrls():
@@ -9084,12 +9175,13 @@ class RAWImageViewer(QMainWindow):
             # proper concurrency control
             
             # Reset flags when loading new image
-            # Note: We set this to True initially because we almost always start with a preview/half-size
+            # Assume preview-first until a full-resolution buffer is confirmed on-screen.
             self._is_half_size_displayed = True
             self._full_resolution_loading = False
-            # ONLY reset orientation if we don't have a cached full resolution image
-            # with orientation already applied.
-            # However, UnifiedImageProcessor usually starts fresh for a new file.
+            self._smooth_zoom_full_request_sent = False
+            self._raw_status_exif_refresh_path = None
+
+            # Orientation defaults off for each new file; cache hits set this True again below.
             self._orientation_already_applied = False
             logger.info(f"[LOAD] Flags reset - half_size: {self._is_half_size_displayed}, full_res_loading: {self._full_resolution_loading}, orientation_applied: {self._orientation_already_applied}")
             
@@ -9272,8 +9364,13 @@ class RAWImageViewer(QMainWindow):
             # Set loading message with proper alignment (centered both vertically and horizontally)
             # Ensure label fills the viewport for proper centering
             self.image_label.setAlignment(Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter)
-            # Show loading overlay
-            if hasattr(self, 'loading_overlay'):
+            # Full-screen overlay: skip when arrow-navigating while zoomed in — keeps prior image
+            # visible until the next one is ready (avoids flashing "Loading Image..." every step).
+            skip_loading_overlay = (
+                not self.fit_to_window
+                and getattr(self, "_maintain_zoom_on_navigation", False)
+            )
+            if hasattr(self, "loading_overlay") and not skip_loading_overlay:
                 self.loading_overlay.show_loading("Loading Image...")
             
             # Use new unified image load manager (non-blocking, thread pool based)
@@ -9505,9 +9602,9 @@ class RAWImageViewer(QMainWindow):
             else:
                 logger.error(f"Invalid image type in display_numpy_image: {type(rgb_image)}")
                 return
-                
+
             max_dim = max(height, width)
-            
+
             # Check for resolution downgrade for the CURRENT file
             if hasattr(self, 'current_file_path') and self.current_file_path:
                 norm_current = _norm_path(self.current_file_path)
@@ -9515,12 +9612,12 @@ class RAWImageViewer(QMainWindow):
                     if max_dim < self._file_max_dim_map[norm_current] * 0.9:
                         logger.info(f"[DISPLAY] Ignoring resolution downgrade for {os.path.basename(self.current_file_path)}: {width}x{height} < cached max")
                         return
-                
+
                 # Update map
                 if not hasattr(self, "_file_max_dim_map"):
                     self._file_max_dim_map = {}
                 self._file_max_dim_map[norm_current] = max(self._file_max_dim_map.get(norm_current, 0), max_dim)
-            
+
             logger.info(f"[DISPLAY] ========== display_numpy_image() STARTED at {display_start:.3f} ==========")
             logger.info(f"[DISPLAY] Image dimensions: {width}x{height}, channels: {channels}")
             
@@ -9583,12 +9680,6 @@ class RAWImageViewer(QMainWindow):
             conversion_time = time.time() - conversion_start
             logger.info(f"[DISPLAY] QImage/QPixmap conversion completed in {conversion_time:.3f}s")
 
-            # Handle pending zoom toggle from spacebar (when pixmap wasn't ready)
-            if hasattr(self, '_pending_zoom_toggle') and self._pending_zoom_toggle:
-                logger.info("[DISPLAY] Handling pending zoom toggle in display_numpy_image")
-                self._pending_zoom_toggle = False
-                # Will be handled after pixmap is set
-
             # CRITICAL: Apply orientation correction only if not already applied
             # Images from UnifiedImageProcessor (via ImageLoadManager) already have orientation applied
             # Images from old RAWProcessor path need orientation correction here
@@ -9616,6 +9707,7 @@ class RAWImageViewer(QMainWindow):
             if is_half_size:
                 logger.debug(f"[DISPLAY] Detected thumbnail/half_size image ({width}x{height}, max: {max_dimension})")
             else:
+                self._smooth_zoom_full_request_sent = False
                 logger.info(f"[DISPLAY] Detected full resolution image ({width}x{height}, max: {max_dimension})")
 
             # Cache the pixmap for future use (after orientation correction)
@@ -10384,43 +10476,23 @@ class RAWImageViewer(QMainWindow):
 
         current_path = self.current_file_path
 
-        # AGGRESSIVE CACHING STRATEGY: Preload more images and cache full images in background
-        # Use new ImageLoadManager for preloading
-        # Next images (higher priority) - increased from 3 to 5
+        # Preload neighboring files' *pixels* (memory only). Do not use check_cache_for_image():
+        # it treats EXIF-only as a hit, which skipped decode when gallery/metadata warmed EXIF first.
         next_count = min(5, len(self.image_files) - 1)
         for i in range(1, next_count + 1):  # Preload next images (more aggressive)
             next_index = (self.current_file_index + i) % len(self.image_files)
             next_file = self.image_files[next_index]
             if _norm_path(next_file) == _norm_path(current_path):
                 continue
-            # Check if already cached
-            cached_item, cache_type = check_cache_for_image(next_file, use_full_resolution=False)
+            cached_item, cache_type = check_memory_cache_for_image(
+                next_file, use_full_resolution=False
+            )
             if cached_item is None:
                 self.image_manager.load_image(
                     file_path=next_file,
                     priority=Priority.PRELOAD_NEXT,
                     cancel_existing=False,
                     use_full_resolution=False
-                )
-        
-        # AGGRESSIVE: Also preload full resolution for next 2 images in background
-        # This ensures instant display when user navigates forward
-        full_preload_count = min(2, len(self.image_files) - 1)
-        for i in range(1, full_preload_count + 1):  # Preload full resolution for next images
-            next_index = (self.current_file_index + i) % len(self.image_files)
-            next_file = self.image_files[next_index]
-            if _norm_path(next_file) == _norm_path(current_path):
-                continue
-            # Check if full image already cached
-            from image_cache import get_image_cache
-            cache = get_image_cache()
-            if cache.get_full_image(next_file) is None:
-                # Preload full image in background (low priority)
-                self.image_manager.load_image(
-                    file_path=next_file,
-                    priority=Priority.BACKGROUND,  # Lower priority for full resolution preload
-                    cancel_existing=False,
-                    use_full_resolution=False  # Still use half_size for preload, but cache it
                 )
 
         # Previous images (lower priority) - increased from 2 to 3
@@ -10430,8 +10502,9 @@ class RAWImageViewer(QMainWindow):
             prev_file = self.image_files[prev_index]
             if _norm_path(prev_file) == _norm_path(current_path):
                 continue
-            # Check if already cached
-            cached_item, cache_type = check_cache_for_image(prev_file, use_full_resolution=False)
+            cached_item, cache_type = check_memory_cache_for_image(
+                prev_file, use_full_resolution=False
+            )
             if cached_item is None:
                 self.image_manager.load_image(
                     file_path=prev_file,
@@ -10666,7 +10739,7 @@ class RAWImageViewer(QMainWindow):
                     else:
                         logger.error(f"Invalid image type in on_image_processed: {type(rgb_image)}")
                         return
-                        
+
                     bytes_per_line = channels * width
 
                     # Ensure the data is contiguous and convert to bytes for PyQt6 compatibility
@@ -11657,25 +11730,25 @@ class RAWImageViewer(QMainWindow):
                                 delattr(self, '_maintain_zoom_on_navigation')
                             # Continue to zoom setup below
                         else:
-                            # Cached image is also half_size, need to process full resolution
                             logger.info("Cached image is half_size, processing full resolution...")
                             self._load_full_resolution_on_demand()
-                            # Don't zoom yet - wait for full resolution to load (avoid two-step zoom)
                             self._pending_zoom = True
                             self._pending_zoom_center = QPoint(self.current_pixmap.width() // 2, self.current_pixmap.height() // 2) if self.current_pixmap else None
                             self._pending_zoom_thumbnail_size = self.current_pixmap.size() if self.current_pixmap else None
-                            logger.debug("Stored pending 100% zoom - will execute when full resolution is ready")
+                            logger.debug("Stored pending 100% zoom - full decode first")
                             self.status_bar.showMessage("Loading full resolution for 100% zoom...")
+                            self.update_status_bar()
+                            self.setFocus()
                             return
                     else:
-                        # Start loading full resolution in background
                         self._load_full_resolution_on_demand()
-                        # Don't zoom yet - wait for full resolution to load (avoid two-step zoom)
                         self._pending_zoom = True
                         self._pending_zoom_center = QPoint(self.current_pixmap.width() // 2, self.current_pixmap.height() // 2) if self.current_pixmap else None
                         self._pending_zoom_thumbnail_size = self.current_pixmap.size() if self.current_pixmap else None
-                        logger.debug("Stored pending 100% zoom - will execute when full resolution is ready")
+                        logger.debug("Stored pending 100% zoom - full decode first")
                         self.status_bar.showMessage("Loading full resolution for 100% zoom...")
+                        self.update_status_bar()
+                        self.setFocus()
                         return
             
             # Set up zoom parameters
@@ -12430,23 +12503,25 @@ class RAWImageViewer(QMainWindow):
         original_height = None
         display_width = None
         display_height = None
-        
+
         # Get original dimensions from cache (authoritative source)
         cached_exif = self.image_cache.get_exif(self.current_file_path)
         if cached_exif:
             # CRITICAL: Always check for original_width and original_height in cache
             original_width = cached_exif.get('original_width')
             original_height = cached_exif.get('original_height')
-            
-            # Sanity check: if RAW but dimensions are suspiciously small (<=1920), 
+
+            # Sanity check: if RAW but dimensions are suspiciously small (<=1920),
             # they are likely from a preview. Force re-extraction.
             raw_map = {'.arw', '.cr2', '.cr3', '.nef', '.dng', '.raf', '.orf', '.rw2'}
-            is_raw = os.path.splitext(self.current_file_path)[1].lower() in raw_map
-            
-            if is_raw and original_width and original_height and max(original_width, original_height) <= 1920:
+            is_raw_preview = os.path.splitext(self.current_file_path)[1].lower() in raw_map
+
+            if is_raw_preview and original_width and original_height and max(original_width, original_height) <= 1920:
                 import logging
-                logger = logging.getLogger(__name__)
-                logger.info(f"[STATUS] Suspiciously small dimensions ({original_width}x{original_height}) for RAW file, forcing re-extraction")
+
+                logging.getLogger(__name__).info(
+                    f"[STATUS] Suspiciously small dimensions ({original_width}x{original_height}) for RAW file, forcing re-extraction"
+                )
                 original_width = None
                 original_height = None
 
@@ -12496,7 +12571,6 @@ class RAWImageViewer(QMainWindow):
                                 self.image_cache.put_exif(self.current_file_path, cached_exif)
                 except Exception:
                     pass
-        
         # Get current display dimensions (from pixmap)
         if self.current_pixmap:
             display_width = self.current_pixmap.width()
@@ -12524,7 +12598,34 @@ class RAWImageViewer(QMainWindow):
                 height = display_height
             else:
                 width = height = 0
-        
+
+        # RAW: cache often holds embedded‑preview WxH until EXIFExtractor fills sensor size — kick async refresh early.
+        _fp_sb = getattr(self, "current_file_path", None)
+        if _fp_sb and is_raw_file(_fp_sb):
+            _dm_sb = max(display_width or 0, display_height or 0)
+            _ow_sb = original_width if original_width else 0
+            _oh_sb = original_height if original_height else 0
+            _om_sb = max(_ow_sb, _oh_sb) if (_ow_sb and _oh_sb) else 0
+            _needs_sensor_exif = False
+            if not original_width or not original_height:
+                _needs_sensor_exif = True
+            elif (
+                getattr(self, "_is_half_size_displayed", False)
+                and _dm_sb > 0
+                and _om_sb > 0
+                and _om_sb <= int(_dm_sb * 1.02 + 0.5)
+            ):
+                _needs_sensor_exif = True
+            elif (
+                _dm_sb > 0
+                and _om_sb > 0
+                and _dm_sb > int(_om_sb * 1.08 + 0.5)
+            ):
+                # Decoded pixmap is visibly larger than cached "original" (stale embedded preview dims).
+                _needs_sensor_exif = True
+            if _needs_sensor_exif:
+                self._schedule_raw_sensor_exif_status_refresh()
+
         # Determine if we're displaying a thumbnail (for status bar indication)
         is_displaying_thumbnail = False
         if original_width and original_height and display_width and display_height:
@@ -12915,8 +13016,8 @@ class RAWImageViewer(QMainWindow):
                         self.scale_image_to_fit()
                         self.update_status_bar()
                         return True
-                    # Cap at native 100% of the displayed pixmap — smooth / predictable pinch zoom.
-                    self.current_zoom_level = max(fit_scale, min(self.current_zoom_level, 1.0))
+                    zoom_cap = self._max_smooth_zoom_level()
+                    self.current_zoom_level = max(fit_scale, min(self.current_zoom_level, zoom_cap))
 
                     mouse_global = event.globalPosition().toPoint()
                     self.zoom_cursor_offset = self.scroll_area.viewport().mapFromGlobal(mouse_global)
@@ -12924,6 +13025,12 @@ class RAWImageViewer(QMainWindow):
                     self.zoom_center_point = self.convert_widget_to_image_coords(mouse_image)
 
                     self.apply_zoom_and_pan()
+                    if (
+                        not self.fit_to_window
+                        and getattr(self, "_is_half_size_displayed", False)
+                        and self.current_zoom_level >= 1.0 - 1e-9
+                    ):
+                        self._maybe_request_full_res_for_smooth_zoom()
                     self.update_status_bar()
                     return True
                 elif event.gestureType() == Qt.NativeGestureType.SmartZoomNativeGesture:
@@ -12972,8 +13079,8 @@ class RAWImageViewer(QMainWindow):
                             self.update_status_bar()
                             return True
 
-                        # Cap at native 100% — same as pinch for a smooth Ctrl+wheel / trackpad UX.
-                        self.current_zoom_level = max(fit_scale, min(self.current_zoom_level, 1.0))
+                        zoom_cap = self._max_smooth_zoom_level()
+                        self.current_zoom_level = max(fit_scale, min(self.current_zoom_level, zoom_cap))
 
                         mouse_global = wheel_event.globalPosition().toPoint()
                         self.zoom_cursor_offset = self.scroll_area.viewport().mapFromGlobal(mouse_global)
@@ -12981,6 +13088,12 @@ class RAWImageViewer(QMainWindow):
                         self.zoom_center_point = self.convert_widget_to_image_coords(mouse_image)
 
                         self.apply_zoom_and_pan()
+                        if (
+                            not self.fit_to_window
+                            and getattr(self, "_is_half_size_displayed", False)
+                            and self.current_zoom_level >= 1.0 - 1e-9
+                        ):
+                            self._maybe_request_full_res_for_smooth_zoom()
                         self.update_status_bar()
                     return True
                 

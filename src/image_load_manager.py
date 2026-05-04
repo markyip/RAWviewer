@@ -101,6 +101,16 @@ class ImageLoadWorker(QRunnable):
             # 獲取處理器（延遲初始化）
             processor = self._get_processor()
             
+            # EXIF before thumbnail when both stages run: lightweight metadata (true dimensions)
+            # should land in the UI before heavier embedded-preview decode (common case: 1920px JPEG).
+            if 'exif' in stages and not self.task.is_cancelled():
+                if self._safe_emit():
+                    self.manager.progress_updated.emit(file_path, "Reading metadata...")
+                exif_data = processor.process_exif(file_path)
+                if exif_data and not self.task.is_cancelled():
+                    if self._safe_emit():
+                        self.manager.exif_data_ready.emit(file_path, exif_data)
+            
             # 處理縮圖
             if 'thumbnail' in stages and not self.task.is_cancelled():
                 if self._safe_emit():
@@ -138,22 +148,11 @@ class ImageLoadWorker(QRunnable):
                                 )
                             if self._safe_emit():
                                 self.manager.thumbnail_ready.emit(file_path, qimg_out)
-                        except Exception:
-                            # Fallback: emit numpy thumbnail
-                            if self._safe_emit():
-                                self.manager.thumbnail_ready.emit(file_path, thumbnail)
+                        except Exception as e:
+                            print(f"[PERF] Worker scale error for {file_path}: {e}")
                     else:
                         if self._safe_emit():
                             self.manager.thumbnail_ready.emit(file_path, thumbnail)
-            
-            # 處理 EXIF 數據
-            if 'exif' in stages and not self.task.is_cancelled():
-                if self._safe_emit():
-                    self.manager.progress_updated.emit(file_path, "Reading metadata...")
-                exif_data = processor.process_exif(file_path)
-                if exif_data and not self.task.is_cancelled():
-                    if self._safe_emit():
-                        self.manager.exif_data_ready.emit(file_path, exif_data)
             
             # 處理完整圖像（只在需要時）
             if 'full' in stages and not self.task.is_cancelled():
@@ -413,9 +412,14 @@ class ImageLoadManager(QObject):
                     return True
                 # Not terminal if callers also requested EXIF/full image work.
 
-        # 2) EXIF stage: EXIF is persisted; but this check must remain memory-only.
-        # We skip emitting EXIF from cache here to avoid potential disk I/O.
-
+        # 2) EXIF stage: check memory cache and emit if found
+        if 'exif' in wanted:
+            # Check memory cache (now always available via ImageCache.exif_memory_cache)
+            exif_data = cache.exif_memory_cache.get(file_path)
+            if exif_data is not None:
+                self._emit_cached_result_later(self.exif_data_ready, file_path, exif_data)
+                # Note: EXIF hit alone doesn't terminate processing if pixels are also wanted
+        
         # 3) Full stage: treat RAW preview (1920) as "full" when use_full_resolution=False
         if 'full' in wanted:
             if is_raw:

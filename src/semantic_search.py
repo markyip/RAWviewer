@@ -28,6 +28,8 @@ from PIL import Image, ImageOps
 
 import exifread
 
+from raw_file_extensions import RAW_FILE_EXTENSIONS
+
 try:
     import pycountry
 except Exception:
@@ -589,48 +591,29 @@ class _ClipBPETokenizer:
 class SemanticImageIndex:
     """SQLite-backed CLIP embedding index for local semantic search."""
 
-    # Lowercase extensions commonly treated as camera RAW (LibRaw-ish set; not exhaustive).
-    _RAW_FILE_EXTENSIONS: frozenset = frozenset(
-        {
-            "3fr",
-            "ari",
-            "arw",
-            "bay",
-            "braw",
-            "cr2",
-            "cr3",
-            "crw",
-            "cs1",
-            "dcr",
-            "dcs",
-            "dng",
-            "drf",
-            "erf",
-            "fff",
-            "iiq",
-            "kdc",
-            "mdc",
-            "mef",
-            "mos",
-            "mrw",
-            "nef",
-            "nrw",
-            "orf",
-            "ori",
-            "pef",
-            "ptx",
-            "pxn",
-            "raf",
-            "raw",
-            "r3d",
-            "rw2",
-            "rwz",
-            "rwl",
-            "sr2",
-            "srf",
-            "srw",
-            "x3f",
-        }
+    # Camera/LibRaw RAW extensions (shared with is_raw_file); used for format:raw.
+    _RAW_FILE_EXTENSIONS = RAW_FILE_EXTENSIONS
+
+    # Tokens that mean "filter by extension" when used as filename:jpg / file raw (not substring search).
+    _FORMAT_HINT_FILENAME_TOKENS: frozenset = (
+        frozenset(
+            {
+                "jpeg",
+                "jpg",
+                "jpe",
+                "tif",
+                "tiff",
+                "png",
+                "gif",
+                "bmp",
+                "webp",
+                "heic",
+                "heif",
+                "avif",
+                "raw",
+            }
+        )
+        | _RAW_FILE_EXTENSIONS
     )
 
     # Gallery search: these map to indexed Vision face_count (>0), not CLIP text similarity.
@@ -1373,43 +1356,45 @@ class SemanticImageIndex:
         return pending
 
     def _fetch_rows_for_paths(self, paths: Sequence[str]) -> List[sqlite3.Row]:
+        """Bulk fetch rows for a list of paths using optimized batch queries."""
         if not paths:
             return []
-        out = []
+        
+        # 1. Deduplicate and canonicalize
+        canonical_to_original = {}
+        unique_canonical = []
+        for p in paths:
+            if not p:
+                continue
+            cp = self._canonical_path(p)
+            if cp not in canonical_to_original:
+                canonical_to_original[cp] = p
+                unique_canonical.append(cp)
+        
+        if not unique_canonical:
+            return []
+
+        # 2. Bulk fetch by file_path
+        all_rows = []
         self._conn.row_factory = sqlite3.Row
-        seen = set()
-        for fp in paths:
-            if not fp or not os.path.isfile(fp):
-                continue
-            try:
-                canonical = self._canonical_path(fp)
-                st = os.stat(canonical)
-                signature = self._file_signature_from_stat(canonical, st)
-                aliases = self._path_aliases(canonical)
-                placeholders = ",".join(["?"] * len(aliases))
-                rows = self._conn.execute(
-                    f"""
-                    SELECT file_path, file_name, file_signature, dim, embedding, capture_time, camera_model, lens_model, iso
-                         , gps_lat, gps_lon, width, height, city, admin1, country, country_code, face_count
-                         , file_size, file_mtime, mtime_ns, model_name
-                    FROM semantic_index
-                    WHERE (file_signature = ? AND model_name = ?)
-                       OR file_path IN ({placeholders})
-                    """,
-                    [signature, self.model_name, *aliases],
-                ).fetchall()
-                for row in rows:
-                    if not self._row_matches_file(row, st):
-                        continue
-                    key = str(row["file_signature"] or row["file_path"])
-                    if key in seen:
-                        continue
-                    seen.add(key)
-                    out.append(row)
-                    break
-            except Exception:
-                continue
-        return out
+        
+        # SQLite parameter limit is usually 999; use 500 to be safe
+        chunk_size = 500
+        for i in range(0, len(unique_canonical), chunk_size):
+            chunk = unique_canonical[i:i+chunk_size]
+            placeholders = ",".join(["?"] * len(chunk))
+            query = f"""
+                SELECT file_path, file_name, file_signature, dim, embedding, capture_time, 
+                       camera_model, lens_model, iso, gps_lat, gps_lon, width, height, 
+                       city, admin1, country, country_code, face_count,
+                       file_size, file_mtime, mtime_ns, model_name
+                FROM semantic_index
+                WHERE model_name = ? AND file_path IN ({placeholders})
+            """
+            rows = self._conn.execute(query, [self.model_name, *chunk]).fetchall()
+            all_rows.extend(rows)
+            
+        return all_rows
 
     @staticmethod
     def _parse_capture_year(capture_time: str) -> int:
@@ -1443,11 +1428,21 @@ class SemanticImageIndex:
     @staticmethod
     def _row_file_extension(row) -> str:
         fp = str(SemanticImageIndex._row_value(row, "file_path") or "")
-        bn = str(SemanticImageIndex._row_value(row, "file_name") or "") or (
-            os.path.basename(fp) if fp else ""
-        )
-        return os.path.splitext(bn)[1].lower().lstrip(".")
+        fn = str(SemanticImageIndex._row_value(row, "file_name") or "")
+        # Prefer path basename (primary key truth); fallback to indexed file_name.
+        for base in (os.path.basename(fp), fn):
+            ext = os.path.splitext(base)[1].lower().lstrip(".")
+            if ext:
+                return ext
+        return ""
 
+    def _needle_is_solitary_format_token(self, needle: str) -> bool:
+        n = (needle or "").strip().lower().replace("_", "")
+        if len(n) < 2 or len(n) > 12:
+            return False
+        if not re.fullmatch(r"[a-z0-9]+", n):
+            return False
+        return n in self._FORMAT_HINT_FILENAME_TOKENS
     @classmethod
     def _format_specs_to_accept_set(cls, spec: str) -> frozenset:
         """Map one user-facing format keyword to a set of lowercase extensions."""
@@ -1577,14 +1572,18 @@ class SemanticImageIndex:
                 matched = True
                 needle = t.split(":", 1)[1].strip().lower()
                 if needle:
-                    filtered = [
-                        r
-                        for r in filtered
-                        if self._contains_loose(
-                            str(self._row_value(r, "file_name") or os.path.basename(str(self._row_value(r, "file_path") or ""))),
-                            needle,
-                        )
-                    ]
+                    if self._needle_is_solitary_format_token(needle):
+                        specs = [needle]
+                        filtered = [r for r in filtered if self._row_matches_format_specs(r, specs)]
+                    else:
+                        filtered = [
+                            r
+                            for r in filtered
+                            if self._contains_loose(
+                                str(self._row_value(r, "file_name") or os.path.basename(str(self._row_value(r, "file_path") or ""))),
+                                needle,
+                            )
+                        ]
                 continue
 
             if low.startswith(("format:", "type:", "ext:")):
@@ -1691,6 +1690,14 @@ class SemanticImageIndex:
                 continue
 
             if not matched:
+                bare = low.strip().lstrip(".")
+                if (
+                    re.fullmatch(r"[a-z0-9]{2,15}", bare or "")
+                    and bare in self._FORMAT_HINT_FILENAME_TOKENS
+                ):
+                    matched = True
+                    filtered = [r for r in filtered if self._row_matches_format_specs(r, [bare])]
+                    continue
                 semantic_terms.append(t)
 
         filtered, semantic_terms = self._auto_match_metadata_keywords(filtered, semantic_terms)
@@ -1751,15 +1758,55 @@ class SemanticImageIndex:
         for pattern, replacement in numeric_phrases:
             text = re.sub(pattern, replacement, text, flags=re.I)
 
+        # File-format phrases MUST run before loose "in <place>" / "from <place>" patterns,
+        # otherwise "in jpeg", "near raw", "from raw" become city:/country: filters.
+        text = re.sub(
+            r"\b(format|type|ext)\s+(jpeg|jpe|jpg|tif|tiff|png|gif|bmp|webp|heic|heif|avif|raw"
+            r"|cr2|cr3|arw|nef|dng|orf|raf|rw2|pef|srw|rwl|erf|x3f|3fr)\b",
+            lambda m: f"{m.group(1).lower()}:{m.group(2).lower()}",
+            text,
+            flags=re.I,
+        )
+        text = re.sub(
+            r"\b(?:file|file\s+name|name)\s+(jpeg|jpe|jpg|tif|tiff|png|gif|bmp|webp|heic|heif|avif|raw)\b",
+            lambda m: f"format:{m.group(1).lower()}",
+            text,
+            flags=re.I,
+        )
+        text = re.sub(
+            r"\b(?:file|file\s+name|name)\s+(cr2|cr3|arw|nef|dng|orf|raf|rw2|pef|srw|rwl|erf|x3f|3fr)\b",
+            lambda m: f"format:{m.group(1).lower()}",
+            text,
+            flags=re.I,
+        )
+
+        fmt_hints = self._FORMAT_HINT_FILENAME_TOKENS
+
+        def _loose_place_to_city(m):
+            place = m.group(1).strip()
+            if not re.search(r"\s", place):
+                token = place.lower().lstrip(".")
+                if token in fmt_hints:
+                    return f"format:{token}"
+            return f"city:{'_'.join(place.split())}"
+
+        def _loose_place_to_country(m):
+            place = m.group(1).strip()
+            if not re.search(r"\s", place):
+                token = place.lower().lstrip(".")
+                if token in fmt_hints:
+                    return f"format:{token}"
+            return f"country:{'_'.join(place.split())}"
+
         text = re.sub(
             r"\b(?:in|at|near)\s+([A-Za-z][\w\-]*(?:\s+[A-Za-z][\w\-]*){0,2})\b",
-            lambda m: f"city:{'_'.join(m.group(1).split())}",
+            _loose_place_to_city,
             text,
             flags=re.I,
         )
         text = re.sub(
             r"\b(?:from|country)\s+([A-Za-z][\w\-]*(?:\s+[A-Za-z][\w\-]*){0,2})\b",
-            lambda m: f"country:{'_'.join(m.group(1).split())}",
+            _loose_place_to_country,
             text,
             flags=re.I,
         )
@@ -1775,6 +1822,7 @@ class SemanticImageIndex:
             text,
             flags=re.I,
         )
+
         text = re.sub(
             r"\b(?:filename|file\s+name|file|name)\s+([A-Za-z0-9][\w\-.]*(?:\s+[A-Za-z0-9][\w\-.]*){0,2})\b",
             lambda m: f"filename:{'_'.join(m.group(1).split())}",
@@ -1960,34 +2008,26 @@ class SemanticImageIndex:
     def _metadata_rows_for_search(
         self, candidate_paths: Sequence[str], needs_face: bool = False
     ) -> List[Dict[str, object]]:
-        original_by_canonical: Dict[str, str] = {}
-        original_by_signature: Dict[str, str] = {}
-        valid_paths: List[str] = []
-        for p in candidate_paths:
-            if not p or not os.path.isfile(p):
-                continue
-            try:
-                canonical = self._canonical_path(p)
-                st = os.stat(canonical)
-                valid_paths.append(p)
-                original_by_canonical[canonical] = p
-                original_by_signature[self._file_signature_from_stat(canonical, st)] = p
-            except Exception:
-                canonical = self._canonical_path(p)
-                valid_paths.append(p)
-                original_by_canonical[canonical] = p
+        """Optimized metadata row preparation for search. Uses bulk fetching and avoids slow disk I/O."""
+        if not candidate_paths:
+            return []
 
+        # Bulk fetch all rows that exist in the index
         rows: List[Dict[str, object]] = []
-        seen: set[str] = set()
-        for row in self._fetch_rows_for_paths(valid_paths):
-            signature = str(row["file_signature"] or "")
-            canonical = self._canonical_path(str(row["file_path"]))
-            original = original_by_signature.get(signature) or original_by_canonical.get(canonical) or canonical
+        db_rows = self._fetch_rows_for_paths(candidate_paths)
+        
+        # Create a lookup for paths we found in DB
+        for row in db_rows:
+            original = str(row["file_path"])
+            
             face_count = row["face_count"] if "face_count" in row.keys() else None
+            # Only detect faces during search if explicitly needed and missing, 
+            # but ideally this should be done during background indexing.
             if needs_face and face_count is None:
-                face_count = self._detect_face_count(original)
-                self._store_face_count(original, int(face_count or 0))
-            seen.add(self._canonical_path(original))
+                if os.path.isfile(original):
+                    face_count = self._detect_face_count(original)
+                    self._store_face_count(original, int(face_count or 0))
+            
             rows.append(
                 {
                     "file_path": original,
@@ -2008,35 +2048,9 @@ class SemanticImageIndex:
                 }
             )
 
-        for fp in valid_paths:
-            canonical = self._canonical_path(fp)
-            if canonical in seen:
-                continue
-            if not fp or not os.path.isfile(fp):
-                continue
-            try:
-                meta = self._extract_exif_brief(canonical, include_face=needs_face)
-                rows.append(
-                    {
-                        "file_path": fp,
-                        "file_name": os.path.basename(fp),
-                        "capture_time": str(meta.get("capture_time", "")),
-                        "camera_model": str(meta.get("camera_model", "")),
-                        "lens_model": str(meta.get("lens_model", "")),
-                        "iso": int(meta.get("iso", 0) or 0),
-                        "width": int(meta.get("width", 0) or 0),
-                        "height": int(meta.get("height", 0) or 0),
-                        "gps_lat": meta.get("gps_lat"),
-                        "gps_lon": meta.get("gps_lon"),
-                        "city": str(meta.get("city", "")),
-                        "admin1": str(meta.get("admin1", "")),
-                        "country": str(meta.get("country", "")),
-                        "country_code": str(meta.get("country_code", "")),
-                        "face_count": int(meta.get("face_count") or 0),
-                    }
-                )
-            except Exception:
-                continue
+        # NOTE: For search performance, we DO NOT perform real-time EXIF extraction 
+        # for files missing from the index. Search only works on indexed data.
+        
         return rows
 
     def _store_face_count(self, file_path: str, face_count: int) -> None:

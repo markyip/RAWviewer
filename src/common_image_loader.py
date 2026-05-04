@@ -10,6 +10,7 @@ from PyQt6.QtGui import QPixmap, QImage
 # PIL Image will be imported lazily to avoid import delays
 
 from image_cache import get_image_cache
+from raw_file_extensions import RAW_FILE_EXTENSIONS
 
 def check_cache_for_image(file_path: str, use_full_resolution: bool = False) -> Tuple[Optional[Any], Optional[str]]:
     """
@@ -17,6 +18,8 @@ def check_cache_for_image(file_path: str, use_full_resolution: bool = False) -> 
     
     返回: (數據, 快取類型) 或 (None, None)
     類型包括: 'full_image', 'pixmap', 'thumbnail', 'exif'
+
+    注意：若只有 EXIF 也會視為命中；單圖「預載像素」請用 check_memory_cache_for_image，避免誤跳過預載。
     """
     cache = get_image_cache()
     
@@ -65,23 +68,23 @@ def check_memory_cache_for_image(file_path: str, use_full_resolution: bool = Fal
     if pixmap is not None and not pixmap.isNull():
         return pixmap, 'pixmap'
         
-    # 3. 如果不是必須全解析度，檢查記憶體縮圖快取
+    # 3. 如果不是必須全解析度，檢查記憶體縮圖／RAW 預覽快取（不觸發磁碟）
     if not use_full_resolution:
         thumbnail = cache.thumbnail_cache.get(file_path)
         if thumbnail is not None:
             return thumbnail, 'thumbnail'
-            
+        # 單圖導覽常以 preview_cache 為「半成品」載入結果；thumbnail_cache 不一定有資料
+        if is_raw_file(file_path):
+            preview = cache.preview_cache.get(file_path)
+            if preview is not None:
+                return preview, 'preview'
+
     return None, None
 
 def is_raw_file(file_path: str) -> bool:
-    """檢查是否為 RAW 文件"""
-    raw_exts = {
-        '.cr2', '.cr3', '.nef', '.arw', '.dng', '.orf', '.rw2', '.pef',
-        '.srw', '.x3f', '.raf', '.3fr', '.fff', '.iiq', '.cap', '.erf',
-        '.mef', '.mos', '.nrw', '.rwl', '.srf'
-    }
-    ext = os.path.splitext(file_path)[1].lower()
-    return ext in raw_exts
+    """檢查是否為 RAW 文件（與 semantic `format:raw` 使用同一附檔名集合）。"""
+    ext = os.path.splitext(file_path)[1].lower().lstrip(".")
+    return ext in RAW_FILE_EXTENSIONS
 
 
 def is_tiff_file(file_path: str) -> bool:
