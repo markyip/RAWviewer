@@ -7427,6 +7427,12 @@ class RAWImageViewer(QMainWindow):
                 current_file = getattr(self, "current_file_path", None)
                 if current_file and hasattr(self.gallery_justified, "scroll_to_file"):
                     self.gallery_justified.scroll_to_file(current_file)
+                # Defensive refresh: on some startup/folder-switch timing paths, set_images()
+                # can finish before viewport geometry fully settles, leaving no visible widgets
+                # instantiated yet. Force a second pass to populate visible thumbnails.
+                QTimer.singleShot(0, self.gallery_justified.force_layout_update)
+                QTimer.singleShot(30, self.gallery_justified.load_visible_images)
+                QTimer.singleShot(120, self.gallery_justified.load_visible_images)
             except Exception as e:
                 logger.exception(f"[GALLERY] set_images failed: {e}")
                 self.show_error(
