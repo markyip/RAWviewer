@@ -13,6 +13,7 @@ __pycache__/
 .vscode/
 .idea/
 .agent/
+.gemini/
 *.swp
 *.swo
 

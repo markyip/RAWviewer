@@ -254,7 +254,7 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QGridLayout, QScrollBar, QDialog, QSplashScreen, QInputDialog,
                              QLineEdit, QStackedLayout)
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QPoint, QEvent, QSettings, QSize, QRect, QObject, QRunnable, QThreadPool, QTimer, QPropertyAnimation, QEasingCurve
-from PyQt6.QtGui import (QPixmap, QImage, QAction, QKeySequence, QGuiApplication,
+from PyQt6.QtGui import (QPixmap, QImage, QAction, QKeySequence, QShortcut, QGuiApplication,
                          QDragEnterEvent, QDropEvent, QCursor, QIcon,
                          QTransform, QRegion, QPainterPath, QPainter, QColor, QPen, QBrush, QPalette)
 print("PyQt6 imported successfully", flush=True)
@@ -284,6 +284,23 @@ try:
     print("  - exifread: OK", flush=True)
 except Exception as e:
     print(f"  - exifread: ERROR - {e}", file=sys.stderr, flush=True)
+    raise
+
+try:
+    from metadata_backend import (
+        exif_backend_mode,
+        exif_orientation_after_cw90,
+        has_pyexiv2,
+        process_file_from_path,
+    )
+
+    print(
+        f"  - metadata_backend: pyexiv2={'yes' if has_pyexiv2() else 'no'}, "
+        f"RAWVIEWER_EXIF_BACKEND={exif_backend_mode()}",
+        flush=True,
+    )
+except Exception as e:
+    print(f"  - metadata_backend: ERROR - {e}", file=sys.stderr, flush=True)
     raise
 
 from datetime import datetime
@@ -359,6 +376,16 @@ try:
 except Exception as e:
     print(f"  - semantic_search: WARNING - {e}", flush=True)
     SemanticImageIndex = None
+
+try:
+    import exif_subject_area  # noqa: F401 — ensure PyInstaller ships pyexiv2 focus/subject helpers
+except Exception:
+    pass
+
+try:
+    import exifread_af  # noqa: F401 — MakerNote AF (exifread)
+except Exception:
+    pass
 
 
 # UI Modules
@@ -571,30 +598,30 @@ class RAWProcessor(QThread):
     def get_orientation_from_exif(self, file_path):
         """Extract orientation from EXIF data - optimized for minimal logging"""
         try:
-            with open(file_path, 'rb') as f:
-                # Only extract essential tags to reduce processing time and logging
-                tags = exifread.process_file(f, details=False, stop_tag='Image Orientation')
+            tags = process_file_from_path(
+                file_path, details=False, stop_tag="Image Orientation"
+            )
 
-                # Check for orientation tag
-                orientation_tag = tags.get('Image Orientation')
-                if orientation_tag:
-                    orientation_str = str(orientation_tag)
+            # Check for orientation tag
+            orientation_tag = tags.get("Image Orientation")
+            if orientation_tag:
+                orientation_str = str(orientation_tag)
 
-                    # Map orientation descriptions to numeric values
-                    orientation_map = {
-                        'Horizontal (normal)': 1,
-                        'Mirrored horizontal': 2,
-                        'Rotated 180': 3,
-                        'Mirrored vertical': 4,
-                        'Mirrored horizontal then rotated 90 CCW': 5,
-                        'Rotated 90 CW': 6,
-                        'Mirrored horizontal then rotated 90 CW': 7,
-                        'Rotated 90 CCW': 8
-                    }
+                # Map orientation descriptions to numeric values
+                orientation_map = {
+                    'Horizontal (normal)': 1,
+                    'Mirrored horizontal': 2,
+                    'Rotated 180': 3,
+                    'Mirrored vertical': 4,
+                    'Mirrored horizontal then rotated 90 CCW': 5,
+                    'Rotated 90 CW': 6,
+                    'Mirrored horizontal then rotated 90 CW': 7,
+                    'Rotated 90 CCW': 8
+                }
 
-                    return orientation_map.get(orientation_str, 1)
+                return orientation_map.get(orientation_str, 1)
 
-                return 1  # Default orientation (no rotation needed)
+            return 1  # Default orientation (no rotation needed)
         except Exception:
             return 1  # Default orientation if EXIF reading fails
 
@@ -678,17 +705,17 @@ class RAWProcessor(QThread):
             if file_ext in ['.cr2', '.cr3']:
                 return True
 
-            # Fallback to EXIF detection for other formats
             # Fallback to EXIF detection for other formats - only read Image Make tag
-            with open(self.file_path, 'rb') as f:
-                tags = exifread.process_file(f, details=False, stop_tag='Image Make')
-                make = tags.get('Image Make')
+            tags = process_file_from_path(
+                self.file_path, details=False, stop_tag="Image Make"
+            )
+            make = tags.get("Image Make")
 
-                if make:
-                    make_str = str(make).upper()
-                    # Canon cameras need special white balance processing
-                    if 'CANON' in make_str:
-                        return True
+            if make:
+                make_str = str(make).upper()
+                # Canon cameras need special white balance processing
+                if "CANON" in make_str:
+                    return True
 
         except Exception:
             pass
@@ -703,17 +730,17 @@ class RAWProcessor(QThread):
             if file_ext in ['.raf']:
                 return True
 
-            # Fallback to EXIF detection for other formats
             # Fallback to EXIF detection for other formats - only read Image Make tag
-            with open(self.file_path, 'rb') as f:
-                tags = exifread.process_file(f, details=False, stop_tag='Image Make')
-                make = tags.get('Image Make')
+            tags = process_file_from_path(
+                self.file_path, details=False, stop_tag="Image Make"
+            )
+            make = tags.get("Image Make")
 
-                if make:
-                    make_str = str(make).upper()
-                    # Fujifilm cameras need special white balance processing
-                    if 'FUJIFILM' in make_str or 'FUJI' in make_str:
-                        return True
+            if make:
+                make_str = str(make).upper()
+                # Fujifilm cameras need special white balance processing
+                if "FUJIFILM" in make_str or "FUJI" in make_str:
+                    return True
 
         except Exception:
             pass
@@ -1007,12 +1034,10 @@ class RAWProcessor(QThread):
             with self._raw_handle_lock:
                 if self._raw_handle is None or self._raw_handle != raw:
                     return None
-            # Fallback with optimized parameters for speed
-            # Use auto-brightness by default (True) to match initial display brightness
-            use_auto_bright_fallback = True
+            # Fallback with optimized parameters for speed (keep LibRaw auto-brightness off)
             postprocess_params = {
                 'output_bps': 8,  # Use 8-bit for faster processing
-                'no_auto_bright': not use_auto_bright_fallback,  # Use auto-brightness for full resolution
+                'no_auto_bright': True,
                 'gamma': (2.222, 4.5),  # Standard sRGB gamma
                 'user_flip': 0
             }
@@ -1395,7 +1420,7 @@ class RAWProcessor(QThread):
                                 # Emit progress signal for thumbnail generation
                                 if not self.use_full_resolution:
                                     self.processing_progress.emit("Extracting preview...")
-                                # Generate thumbnail from RAW processing with auto-brightness
+                                # Generate thumbnail from RAW processing (no_auto_bright)
                                 # This ensures thumbnails match processed images exactly
                                 logger.debug(f"Generating thumbnail from RAW processing (no embedded thumbnail): {os.path.basename(self.file_path)}")
                                 
@@ -1447,7 +1472,7 @@ class RAWProcessor(QThread):
                                         
                                         # Cache the thumbnail
                                         cache.put_thumbnail(self.file_path, thumbnail_data)
-                                        logger.info(f"Thumbnail generated from RAW with auto-brightness: {os.path.basename(self.file_path)} ({thumbnail_data.shape[1]}x{thumbnail_data.shape[0]})")
+                                        logger.info(f"Thumbnail generated from RAW (no auto-brightness): {os.path.basename(self.file_path)} ({thumbnail_data.shape[1]}x{thumbnail_data.shape[0]})")
                                         
                                         # Emit thumbnail immediately for fast display (only if not loading full resolution only)
                                         if not self.use_full_resolution:
@@ -4537,41 +4562,6 @@ def _windows_shell_verb_suggests_share(verb_name: object) -> bool:
     return False
 
 
-def _resolve_exiftool_executable():
-    """ExifTool for on-disk RAW orientation; PATH, RAWVIEWER_EXIFTOOL, next to exe, or project root."""
-    import shutil
-
-    ex = shutil.which("exiftool")
-    if ex:
-        return ex
-    env = os.environ.get("RAWVIEWER_EXIFTOOL", "").strip()
-    if env:
-        env = os.path.expandvars(os.path.expanduser(env))
-        if os.path.isfile(env):
-            return env
-        d = os.path.dirname(env)
-        if d:
-            w = shutil.which(os.path.basename(env), path=d)
-            if w:
-                return w
-    if getattr(sys, "frozen", False):
-        base = os.path.dirname(sys.executable)
-        for name in ("exiftool.exe", "exiftool", "exiftool(-k).exe"):
-            cand = os.path.join(base, name)
-            if os.path.isfile(cand):
-                return cand
-    try:
-        here = os.path.dirname(os.path.abspath(__file__))
-        root = os.path.dirname(here)
-        for name in ("exiftool.exe", "exiftool", "exiftool(-k).exe"):
-            cand = os.path.join(root, name)
-            if os.path.isfile(cand):
-                return cand
-    except Exception:
-        pass
-    return None
-
-
 def _share_windows_clipboard_cf_hdrop(path: str) -> bool:
     """Place file(s) on clipboard as CF_HDROP (native Windows file clipboard)."""
     import struct
@@ -4861,6 +4851,13 @@ class RAWImageViewer(QMainWindow):
         self._semantic_index_progress_base = 0
         self._semantic_index_progress_total = 0
 
+        # Focus-area dashed outline from EXIF / maker AF (toggle with F)
+        self._focus_subject_outline_active = False
+        # EXIF SubjectArea / maker AF (pyexiv2/Exiv2) in current_pixmap coordinates
+        self._focus_subject_rect_image: QRect | None = None
+        # "makernote_af" (exifread Canon AF) vs "exif_subject" (SubjectArea/Location via Exiv2)
+        self._focus_rect_source: str | None = None
+
         # Resize event handling
         self._is_resizing = False  # Flag to track when window is being actively resized
         
@@ -4932,6 +4929,280 @@ class RAWImageViewer(QMainWindow):
         else:
             print("  [RAWImageViewer] Session restore skipped (RAWVIEWER_DISABLE_SESSION_RESTORE)", flush=True)
         print("  [RAWImageViewer] Initialization complete!", flush=True)
+
+    def _set_single_view_pixmap(self, base: QPixmap) -> None:
+        """Set image_label pixmap with optional dashed focus / subject outline."""
+        blended = base
+        ow = self.current_pixmap.width() if self.current_pixmap else 0
+        oh = self.current_pixmap.height() if self.current_pixmap else 0
+        subj = getattr(self, "_focus_subject_rect_image", None)
+        draw_exif_subj = (
+            getattr(self, "_focus_subject_outline_active", False)
+            and subj is not None
+            and isinstance(subj, QRect)
+            and not subj.isNull()
+            and self.current_pixmap is not None
+            and not self.current_pixmap.isNull()
+            and ow > 0
+            and oh > 0
+            and not base.isNull()
+        )
+        if draw_exif_subj:
+            blended = base.copy()
+            p = QPainter(blended)
+            self._draw_focus_subject_outline_on_base_painter(p, base, subj)
+            p.end()
+        self.image_label.setPixmap(blended)
+        self.image_label.resize(blended.size())
+
+    def _draw_focus_subject_outline_on_base_painter(
+        self, painter: QPainter, base_pm: QPixmap, rect_image_space: QRect
+    ) -> None:
+        """Dashed outline: MakerNote AF (amber) or EXIF Subject area (lime)."""
+        if base_pm.isNull() or rect_image_space.isNull():
+            return
+        ow = self.current_pixmap.width() if self.current_pixmap else 0
+        oh = self.current_pixmap.height() if self.current_pixmap else 0
+        if ow <= 0 or oh <= 0:
+            return
+        sx = base_pm.width() / float(ow)
+        sy = base_pm.height() / float(oh)
+        rx = int(rect_image_space.left() * sx)
+        ry = int(rect_image_space.top() * sy)
+        rw = max(1, int(round(rect_image_space.width() * sx)))
+        rh = max(1, int(round(rect_image_space.height() * sy)))
+        src = getattr(self, "_focus_rect_source", None) or ""
+        if src == "makernote_af":
+            col = QColor(255, 185, 45, 255)
+        else:
+            col = QColor(165, 255, 95, 255)
+        pen = QPen(col)
+        pen.setWidth(max(2, min(base_pm.width(), base_pm.height()) // 380))
+        pen.setCosmetic(True)
+        pen.setStyle(Qt.PenStyle.DashLine)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawRect(QRect(rx, ry, rw, rh))
+
+    def _zoom_in_to_image_point_finish(self) -> None:
+        """``zoom_center_point`` already set; match double-click zoom-in (full decode + 100%)."""
+        import logging
+
+        logger = logging.getLogger(__name__)
+        if not self.current_pixmap or not getattr(self, "current_file_path", None):
+            return
+
+        should_upgrade = False
+        if getattr(self, "_is_half_size_displayed", False):
+            should_upgrade = True
+        else:
+            cached_exif = self.image_cache.get_exif(self.current_file_path)
+            if cached_exif and self.current_pixmap:
+                ow = cached_exif.get("original_width", 0) or 0
+                oh = cached_exif.get("original_height", 0) or 0
+                original_max = max(ow, oh)
+                current_max = max(
+                    self.current_pixmap.width(), self.current_pixmap.height()
+                )
+                if original_max > 0 and current_max < original_max * 0.8:
+                    should_upgrade = True
+
+        if should_upgrade:
+            if not getattr(self, "_full_resolution_loading", False):
+                logger.info("Zoom-to-point — triggering full resolution load path")
+                cached_full = self.image_cache.get_full_image(self.current_file_path)
+                if cached_full is not None:
+                    if hasattr(cached_full, "shape"):
+                        cached_h, cached_w = cached_full.shape[0], cached_full.shape[1]
+                    elif hasattr(cached_full, "width") and hasattr(cached_full, "height"):
+                        cached_h, cached_w = cached_full.height(), cached_full.width()
+                    else:
+                        cached_h, cached_w = 0, 0
+                    cached_max_dim = max(cached_w, cached_h)
+                    if cached_max_dim >= 3000:
+                        self._full_resolution_loading = True
+                        self._maintain_zoom_on_navigation = True
+                        self._orientation_already_applied = True
+
+                        old_current_size = (
+                            self.current_pixmap.size() if self.current_pixmap else None
+                        )
+
+                        self.display_numpy_image(cached_full)
+                        self._is_half_size_displayed = False
+                        self._full_resolution_loading = False
+
+                        if self.current_pixmap and old_current_size:
+                            scale_x = (
+                                self.current_pixmap.width() / old_current_size.width()
+                                if old_current_size.width() > 0
+                                else 1.0
+                            )
+                            scale_y = (
+                                self.current_pixmap.height() / old_current_size.height()
+                                if old_current_size.height() > 0
+                                else 1.0
+                            )
+                            if getattr(self, "zoom_center_point", None):
+                                self.zoom_center_point = QPoint(
+                                    int(self.zoom_center_point.x() * scale_x),
+                                    int(self.zoom_center_point.y() * scale_y),
+                                )
+                        if hasattr(self, "_maintain_zoom_on_navigation"):
+                            delattr(self, "_maintain_zoom_on_navigation")
+                        self.fit_to_window = False
+                        self.current_zoom_level = 1.0
+                        self.zoom_to_point()
+                        return
+
+                self._load_full_resolution_on_demand()
+                self._pending_zoom = True
+                self._pending_zoom_center = (
+                    self.zoom_center_point
+                    if getattr(self, "zoom_center_point", None)
+                    else None
+                )
+                self._pending_zoom_thumbnail_size = (
+                    self.current_pixmap.size() if self.current_pixmap else None
+                )
+                self.status_bar.showMessage("Loading full resolution for 100% zoom...")
+                return
+
+        self.fit_to_window = False
+        self.current_zoom_level = 1.0
+        self.zoom_to_point()
+
+    def _focus_jump_to_subject_center(self) -> None:
+        """With focus outline on: center zoom on EXIF / maker AF rectangle (fit-to-window)."""
+        if not self.current_pixmap or self.current_pixmap.isNull():
+            return
+        rect = getattr(self, "_focus_subject_rect_image", None)
+        if rect is None or rect.isNull() or rect.width() < 1 or rect.height() < 1:
+            self.status_bar.showMessage(
+                "No focus area from EXIF for this image", 2500
+            )
+            return
+        cx = rect.left() + rect.width() // 2
+        cy = rect.top() + rect.height() // 2
+        self._stop_slideshow()
+        self.zoom_center_point = QPoint(cx, cy)
+        if self.fit_to_window:
+            self._zoom_in_to_image_point_finish()
+        else:
+            self.apply_zoom_and_pan()
+        self.update_status_bar()
+        self.setFocus()
+
+    def _toggle_focus_subject_outline(self) -> bool:
+        """Return True if handled."""
+        if getattr(self, "view_mode", "single") != "single":
+            return False
+
+        self._focus_subject_outline_active = not getattr(
+            self, "_focus_subject_outline_active", False
+        )
+        if self._focus_subject_outline_active:
+            self._refresh_focus_subject_rect_from_exif()
+            self.status_bar.showMessage(
+                "Focus outline ON — amber dashed = maker AF; lime = Subject / CIPA. "
+                "From fit: Space or double-click centers on the box. F = off.",
+                6500,
+            )
+            self._redraw_single_view_pixmap_without_relayout()
+        else:
+            self._focus_subject_rect_image = None
+            self._focus_rect_source = None
+            self._redraw_single_view_pixmap_without_relayout()
+            self.status_bar.showMessage("Focus outline off", 2000)
+        self.update_status_bar()
+        return True
+
+    def _refresh_focus_subject_rect_from_exif(self) -> None:
+        """Populate _focus_subject_rect_image from pyexiv2, then exifread Subject*, then Canon AF."""
+        self._focus_subject_rect_image = None
+        self._focus_rect_source = None
+        path = getattr(self, "current_file_path", None)
+        pm = getattr(self, "current_pixmap", None)
+        if not path or pm is None or pm.isNull():
+            return
+
+        try:
+            from exif_subject_area import pixmap_ltwh_focus_hint
+
+            orientation = 1
+            cached_exif = self.image_cache.get_exif(path)
+            if cached_exif:
+                orientation = cached_exif.get("orientation", 1)
+
+            hint = pixmap_ltwh_focus_hint(path, pm.width(), pm.height(), orientation)
+            if hint is not None:
+                ltwh, src = hint
+                self._focus_subject_rect_image = QRect(
+                    ltwh[0], ltwh[1], ltwh[2], ltwh[3]
+                )
+                self._focus_rect_source = (
+                    "exif_subject" if src == "exif_subject" else "makernote_af"
+                )
+                return
+        except ImportError:
+            pass
+        except Exception:
+            pass
+
+        try:
+            from exifread_af import pixmap_ltwh_subject_cipa_from_exifread
+
+            lt_sub = pixmap_ltwh_subject_cipa_from_exifread(path, pm.width(), pm.height())
+            if lt_sub is not None:
+                self._focus_subject_rect_image = QRect(
+                    lt_sub[0], lt_sub[1], lt_sub[2], lt_sub[3]
+                )
+                self._focus_rect_source = "exif_subject"
+                return
+        except ImportError:
+            pass
+        except Exception:
+            pass
+
+        try:
+            from exifread_af import pixmap_ltwh_af_from_exifread
+
+            lt_af = pixmap_ltwh_af_from_exifread(path, pm.width(), pm.height())
+            if lt_af is not None:
+                self._focus_subject_rect_image = QRect(
+                    lt_af[0], lt_af[1], lt_af[2], lt_af[3]
+                )
+                self._focus_rect_source = "makernote_af"
+                return
+        except ImportError:
+            pass
+        except Exception:
+            pass
+
+    def _sync_focus_subject_outline_after_display(self) -> None:
+        if (
+            not getattr(self, "_focus_subject_outline_active", False)
+            or getattr(self, "view_mode", "single") != "single"
+        ):
+            return
+        self._refresh_focus_subject_rect_from_exif()
+        self._redraw_single_view_pixmap_without_relayout()
+
+    def _redraw_single_view_pixmap_without_relayout(self) -> None:
+        if not self.current_pixmap:
+            return
+        if self.fit_to_window:
+            self.scale_image_to_fit()
+        else:
+            self.apply_zoom_and_pan()
+
+    def _maybe_refresh_focus_subject_outline_after_display(self) -> None:
+        if (
+            getattr(self, "_focus_subject_outline_active", False)
+            and getattr(self, "view_mode", "single") == "single"
+        ):
+            QTimer.singleShot(0, self._sync_focus_subject_outline_after_display)
 
     def _cleanup_old_image_cache(self):
         """Run persistent cache cleanup once after startup without delaying window creation."""
@@ -5292,38 +5563,34 @@ class RAWImageViewer(QMainWindow):
         except Exception:
             pass
         try:
-            # Suppress exifread warnings for unsupported file formats
-            with warnings.catch_warnings():
-                warnings.filterwarnings('ignore', category=UserWarning, module='exifread')
-            with open(file_path, 'rb') as f:
-                tags = exifread.process_file(f, details=False)
+            tags = process_file_from_path(file_path, details=False)
 
-                # Check for orientation tag
-                orientation_tag = tags.get('Image Orientation')
-                if orientation_tag:
-                    orientation_str = str(orientation_tag)
+            # Check for orientation tag
+            orientation_tag = tags.get("Image Orientation")
+            if orientation_tag:
+                orientation_str = str(orientation_tag)
 
-                    # Map orientation descriptions to numeric values
-                    orientation_map = {
-                        'Horizontal (normal)': 1,
-                        'Mirrored horizontal': 2,
-                        'Rotated 180': 3,
-                        'Mirrored vertical': 4,
-                        'Mirrored horizontal then rotated 90 CCW': 5,
-                        'Rotated 90 CW': 6,
-                        'Mirrored horizontal then rotated 90 CW': 7,
-                        'Rotated 90 CCW': 8
-                    }
+                # Map orientation descriptions to numeric values
+                orientation_map = {
+                    'Horizontal (normal)': 1,
+                    'Mirrored horizontal': 2,
+                    'Rotated 180': 3,
+                    'Mirrored vertical': 4,
+                    'Mirrored horizontal then rotated 90 CCW': 5,
+                    'Rotated 90 CW': 6,
+                    'Mirrored horizontal then rotated 90 CW': 7,
+                    'Rotated 90 CCW': 8
+                }
 
-                    orientation_value = orientation_map.get(orientation_str, 1)
-                    try:
-                        if hasattr(self, "image_cache") and self.image_cache is not None:
-                            self.image_cache.put_exif(file_path, {"orientation": orientation_value})
-                    except Exception:
-                        pass
-                    return orientation_value
+                orientation_value = orientation_map.get(orientation_str, 1)
+                try:
+                    if hasattr(self, "image_cache") and self.image_cache is not None:
+                        self.image_cache.put_exif(file_path, {"orientation": orientation_value})
+                except Exception:
+                    pass
+                return orientation_value
 
-                return 1  # Default orientation (no rotation needed)
+            return 1  # Default orientation (no rotation needed)
         except Exception:
             return 1  # Default orientation if EXIF reading fails
 
@@ -5385,24 +5652,22 @@ class RAWImageViewer(QMainWindow):
                 return False
             
             # For RAW files, check camera make
-            # Read camera make from EXIF
-            with open(self.current_file_path, 'rb') as f:
-                tags = exifread.process_file(f, details=False)
-                make = tags.get('Image Make')
+            tags = process_file_from_path(self.current_file_path, details=False)
+            make = tags.get("Image Make")
 
-                if make:
-                    make_str = str(make).upper()
-                    # Sony cameras often store RAW data pre-rotated (but not JPEG)
-                    if 'SONY' in make_str:
-                        return True
+            if make:
+                make_str = str(make).upper()
+                # Sony cameras often store RAW data pre-rotated (but not JPEG)
+                if "SONY" in make_str:
+                    return True
 
-                    # Leica cameras also store RAW data pre-rotated (but not JPEG)
-                    if 'LEICA' in make_str:
-                        return True
+                # Leica cameras also store RAW data pre-rotated (but not JPEG)
+                if "LEICA" in make_str:
+                    return True
 
-                    # Hasselblad cameras also store RAW data pre-rotated (but not JPEG)
-                    if 'HASSELBLAD' in make_str:
-                        return True
+                # Hasselblad cameras also store RAW data pre-rotated (but not JPEG)
+                if "HASSELBLAD" in make_str:
+                    return True
 
         except Exception:
             pass
@@ -5586,6 +5851,7 @@ class RAWImageViewer(QMainWindow):
             "Press Down Arrow to move the current image to Discard folder\n"
             "Press Delete to remove the current image\n"
             "Press H to show or hide histogram\n"
+            "Press F — show dashed focus / subject outline from EXIF (amber = maker AF; lime = Subject / CIPA)\n"
             "Scroll wheel (fit-to-window): Scroll down = previous image, Scroll up = next image\n"
             "Horizontal wheel (zoom mode): Scroll left/right to pan the image"
         )
@@ -5961,6 +6227,19 @@ class RAWImageViewer(QMainWindow):
         # Install event filter to intercept arrow keys
         self.scroll_area.installEventFilter(self)
         self.image_label.installEventFilter(self)
+
+        # F must work even when no child widget accepts keyboard focus (QLabel default
+        # is NoFocus). WindowShortcut fires while this window is active.
+        self._shortcut_toggle_focus_subject_outline = QShortcut(
+            QKeySequence(Qt.Key.Key_F), self
+        )
+        self._shortcut_toggle_focus_subject_outline.setContext(
+            Qt.ShortcutContext.WindowShortcut
+        )
+        self._shortcut_toggle_focus_subject_outline.setAutoRepeat(False)
+        self._shortcut_toggle_focus_subject_outline.activated.connect(
+            self._toggle_focus_subject_outline
+        )
 
         self._sync_single_image_histogram()
 
@@ -6597,6 +6876,10 @@ class RAWImageViewer(QMainWindow):
         if self.view_mode == 'single':
             logger.info(f"[VIEW_MODE] Switching from single to gallery mode")
             self.view_mode = 'gallery'
+            if getattr(self, "_focus_subject_outline_active", False):
+                self._focus_subject_outline_active = False
+                self._focus_subject_rect_image = None
+                self._focus_rect_source = None
         else:
             logger.info(f"[VIEW_MODE] Switching from gallery to single mode")
             self.view_mode = 'single'
@@ -7073,8 +7356,6 @@ class RAWImageViewer(QMainWindow):
                     def run(self_inner):
                         try:
                             import os
-                            import exifread
-                            import warnings
                             from datetime import datetime
                             from image_cache import get_image_cache
                             cache = get_image_cache()
@@ -7084,10 +7365,7 @@ class RAWImageViewer(QMainWindow):
                                 if data.get("capture_time"):
                                     continue
                                 try:
-                                    with warnings.catch_warnings():
-                                        warnings.filterwarnings('ignore', category=UserWarning, module='exifread')
-                                        with open(fp, "rb") as f:
-                                            tags = exifread.process_file(f, details=False)
+                                    tags = process_file_from_path(fp, details=False)
                                     dt_tag = (
                                         tags.get("EXIF DateTimeOriginal")
                                         or tags.get("Image DateTime")
@@ -7262,58 +7540,62 @@ class RAWImageViewer(QMainWindow):
                         '.pef', '.x3f', '.3fr', '.fff', '.iiq', '.cap', '.erf', '.mef', '.mos', '.nrw', '.srf'}
         is_raw = ext in raw_extensions
         
-        # A. Try exifread for JPEG/TIFF and some RAW formats
+        # A. Try EXIF (pyexiv2 preferred, else exifread) for JPEG/TIFF and some RAW formats
         exif_likely_exts = {'.jpg', '.jpeg', '.tif', '.tiff', '.arw', '.cr2', '.nef', '.raf', '.orf', '.dng', '.cr3', '.heic', '.heif'}
         if ext in exif_likely_exts:
             try:
-                import exifread
-                with open(file_path, 'rb') as f:
-                    tags = exifread.process_file(f, details=False, stop_tag='EXIF ExifImageWidth')
-                    
-                    # Search for width and height in various tags
-                    w = h = None
-                    for w_tag in ['EXIF ExifImageWidth', 'Image ImageWidth']:
-                        if w_tag in tags:
-                            try:
-                                w = int(str(tags[w_tag]))
-                                break
-                            except: pass
-                    
-                    for h_tag in ['EXIF ExifImageLength', 'Image ImageLength']:
-                        if h_tag in tags:
-                            try:
-                                h = int(str(tags[h_tag]))
-                                break
-                            except: pass
-                    
-                    # Handle Orientation
-                    orientation = 1
-                    if 'Image Orientation' in tags:
+                tags = process_file_from_path(
+                    file_path, details=False, stop_tag="EXIF ExifImageWidth"
+                )
+
+                # Search for width and height in various tags
+                w = h = None
+                for w_tag in ['EXIF ExifImageWidth', 'Image ImageWidth']:
+                    if w_tag in tags:
                         try:
-                            val = tags['Image Orientation'].values[0]
-                            # Handle both integer and string orientation values
-                            if isinstance(val, int):
-                                orientation = val
-                            else:
-                                # Map common string orientations to numbers if necessary
-                                # Most exifread results for 'Orientation' are already integers in values[0]
-                                orientation = int(str(val))
-                        except: pass
-                    
-                    if w and h and h > 0:
-                        real_w, real_h = (h, w) if orientation in (5, 6, 7, 8) else (w, h)
-                        aspect = real_w / real_h
-                        self.gallery_aspect_cache[file_path] = aspect
-                        
-                        # Update cache with un-swapped dimensions but correct orientation
+                            w = int(str(tags[w_tag]))
+                            break
+                        except Exception:
+                            pass
+
+                for h_tag in ['EXIF ExifImageLength', 'Image ImageLength']:
+                    if h_tag in tags:
                         try:
-                            cached_exif = self.image_cache.get_exif(file_path) or {}
-                            cached_exif['original_width'] = w
-                            cached_exif['original_height'] = h
-                            cached_exif['orientation'] = orientation
-                            self.image_cache.put_exif(file_path, cached_exif)
-                        except: pass
-                        return aspect
+                            h = int(str(tags[h_tag]))
+                            break
+                        except Exception:
+                            pass
+
+                # Handle Orientation
+                orientation = 1
+                if 'Image Orientation' in tags:
+                    try:
+                        val = tags['Image Orientation'].values[0]
+                        # Handle both integer and string orientation values
+                        if isinstance(val, int):
+                            orientation = val
+                        else:
+                            # Map common string orientations to numbers if necessary
+                            # Most exifread results for 'Orientation' are already integers in values[0]
+                            orientation = int(str(val))
+                    except Exception:
+                        pass
+
+                if w and h and h > 0:
+                    real_w, real_h = (h, w) if orientation in (5, 6, 7, 8) else (w, h)
+                    aspect = real_w / real_h
+                    self.gallery_aspect_cache[file_path] = aspect
+
+                    # Update cache with un-swapped dimensions but correct orientation
+                    try:
+                        cached_exif = self.image_cache.get_exif(file_path) or {}
+                        cached_exif['original_width'] = w
+                        cached_exif['original_height'] = h
+                        cached_exif['orientation'] = orientation
+                        self.image_cache.put_exif(file_path, cached_exif)
+                    except Exception:
+                        pass
+                    return aspect
             except Exception:
                 pass
 
@@ -8343,21 +8625,26 @@ class RAWImageViewer(QMainWindow):
                 exif_likely_exts = {'.jpg', '.jpeg', '.tif', '.tiff', '.arw', '.cr2', '.nef', '.raf', '.orf', '.dng', '.cr3'}
                 
                 if ext in exif_likely_exts:
-                    with open(file_path, 'rb') as f:
-                        tags = exifread.process_file(f, details=False)
-                    
-                        # Try different datetime tags in order of preference
-                        datetime_tags = ['EXIF DateTimeOriginal', 'Image DateTime', 'EXIF DateTime']
-                        for tag_name in datetime_tags:
-                            if tag_name in tags:
-                                datetime_raw = tags[tag_name]
-                                try:
-                                    datetime_str = str(datetime_raw)
-                                    # Parse datetime string (format: "YYYY:MM:DD HH:MM:SS")
-                                    dt = datetime.strptime(datetime_str, "%Y:%m:%d %H:%M:%S")
-                                    return dt.timestamp()
-                                except (ValueError, AttributeError):
-                                    continue
+                    tags = process_file_from_path(file_path, details=False)
+
+                    # Try different datetime tags in order of preference
+                    datetime_tags = [
+                        "EXIF DateTimeOriginal",
+                        "Image DateTime",
+                        "EXIF DateTime",
+                    ]
+                    for tag_name in datetime_tags:
+                        if tag_name in tags:
+                            datetime_raw = tags[tag_name]
+                            try:
+                                datetime_str = str(datetime_raw)
+                                # Parse datetime string (format: "YYYY:MM:DD HH:MM:SS")
+                                dt = datetime.strptime(
+                                    datetime_str, "%Y:%m:%d %H:%M:%S"
+                                )
+                                return dt.timestamp()
+                            except (ValueError, AttributeError):
+                                continue
             except Exception:
                 pass
             
@@ -8477,7 +8764,9 @@ class RAWImageViewer(QMainWindow):
             "Left / Right Arrow — Previous / next image\n"
             "Down Arrow — Move image to Discard folder\n"
             "Delete — Delete current image\n"
-            "H — Show or hide histogram (single-image view)\n\n"
+            "H — Show or hide histogram (single-image view)\n"
+            "F — Focus / subject outline from EXIF (amber = maker AF; lime = Subject / CIPA). "
+            "From fit: Space or double-click centers on the box when outline is on. Zoomed: Space/double-click = fit.\n\n"
             "You can drag and drop files or folders onto the window."
         )
 
@@ -8613,7 +8902,21 @@ class RAWImageViewer(QMainWindow):
                 import logging
                 logger = logging.getLogger(__name__)
                 logger.info(f"[TRACK] User double-clicked to zoom - file: {os.path.basename(self.current_file_path) if hasattr(self, 'current_file_path') and self.current_file_path else 'Unknown'}")
-                if self.fit_to_window:
+                if getattr(self, "_focus_subject_outline_active", False):
+                    if self.fit_to_window:
+                        logger.info(
+                            "[TRACK] Double-click — focus outline jump to subject/AF center"
+                        )
+                        self._focus_jump_to_subject_center()
+                    else:
+                        self.fit_to_window = True
+                        self.current_zoom_level = 1.0
+                        self.zoom_center_point = None
+                        self.scale_image_to_fit()
+                        self.image_label.setCursor(
+                            QCursor(Qt.CursorShape.ArrowCursor)
+                        )
+                elif self.fit_to_window:
                     # Zooming in from fit-to-window mode
                     click_pos = event.pos()
                     displayed_pixmap = self.image_label.pixmap()
@@ -8665,77 +8968,7 @@ class RAWImageViewer(QMainWindow):
                             self.current_pixmap.width() // 2,
                             self.current_pixmap.height() // 2)
 
-                    # Switch to 100% zoom mode — upgrade decode when pixmap is preview-sized vs sensor/cache.
-                    should_upgrade = False
-                    if getattr(self, '_is_half_size_displayed', False):
-                        should_upgrade = True
-                    else:
-                        cached_exif = self.image_cache.get_exif(self.current_file_path)
-                        if cached_exif and self.current_pixmap:
-                            ow = cached_exif.get('original_width', 0) or 0
-                            oh = cached_exif.get('original_height', 0) or 0
-                            original_max = max(ow, oh)
-                            current_max = max(self.current_pixmap.width(), self.current_pixmap.height())
-                            if original_max > 0 and current_max < original_max * 0.8:
-                                should_upgrade = True
-
-                    if should_upgrade:
-                        if not getattr(self, '_full_resolution_loading', False):
-                            import logging
-                            logger = logging.getLogger(__name__)
-                            logger.info("User double-clicked to zoom in - triggering full resolution load")
-                            cached_full = self.image_cache.get_full_image(self.current_file_path)
-                            if cached_full is not None:
-                                # Safe shape access (processor may wrap buffer types)
-                                if hasattr(cached_full, 'shape'):
-                                    cached_h, cached_w = cached_full.shape[0], cached_full.shape[1]
-                                elif hasattr(cached_full, 'width') and hasattr(cached_full, 'height'):
-                                    cached_h, cached_w = cached_full.height(), cached_full.width()
-                                else:
-                                    cached_h, cached_w = 0, 0
-                                cached_max_dim = max(cached_w, cached_h)
-                                if cached_max_dim >= 3000:
-                                    logger.info("Full resolution image already cached, loading immediately...")
-                                    self._full_resolution_loading = True
-                                    self._maintain_zoom_on_navigation = True
-                                    self._orientation_already_applied = True
-
-                                    old_current_size = self.current_pixmap.size() if self.current_pixmap else None
-
-                                    self.display_numpy_image(cached_full)
-                                    self._is_half_size_displayed = False
-                                    self._full_resolution_loading = False
-
-                                    if self.current_pixmap and old_current_size:
-                                        scale_x = self.current_pixmap.width() / old_current_size.width() if old_current_size.width() > 0 else 1.0
-                                        scale_y = self.current_pixmap.height() / old_current_size.height() if old_current_size.height() > 0 else 1.0
-                                        if getattr(self, 'zoom_center_point', None):
-                                            self.zoom_center_point = QPoint(
-                                                int(self.zoom_center_point.x() * scale_x),
-                                                int(self.zoom_center_point.y() * scale_y)
-                                            )
-                                    if hasattr(self, '_maintain_zoom_on_navigation'):
-                                        delattr(self, '_maintain_zoom_on_navigation')
-                                    self.fit_to_window = False
-                                    self.current_zoom_level = 1.0
-                                    self.zoom_to_point()
-                                    return
-                                logger.info(
-                                    "Cached RGB is still preview-sized — decoding full resolution before 100%% zoom..."
-                                )
-
-                            self._load_full_resolution_on_demand()
-                            self._pending_zoom = True
-                            self._pending_zoom_center = (
-                                self.zoom_center_point if getattr(self, 'zoom_center_point', None) else None
-                            )
-                            self._pending_zoom_thumbnail_size = self.current_pixmap.size() if self.current_pixmap else None
-                            self.status_bar.showMessage("Loading full resolution for 100% zoom...")
-                            return
-
-                    self.fit_to_window = False
-                    self.current_zoom_level = 1.0
-                    self.zoom_to_point()
+                    self._zoom_in_to_image_point_finish()
                 else:
                     # Zooming out to fit-to-window mode
                     self.fit_to_window = True
@@ -8753,8 +8986,7 @@ class RAWImageViewer(QMainWindow):
     def zoom_to_point(self):
         if not self.current_pixmap:
             return
-        self.image_label.setPixmap(self.current_pixmap)
-        self.image_label.resize(self.current_pixmap.size())
+        self._set_single_view_pixmap(self.current_pixmap)
         self.image_label.adjustSize()  # Ensure label is resized to pixmap
         self.scroll_area.widget().adjustSize()  # Force scroll area to update
         self.scroll_area.updateGeometry()
@@ -8836,8 +9068,7 @@ class RAWImageViewer(QMainWindow):
             return
 
         # Set the image at 100% zoom
-        self.image_label.setPixmap(self.current_pixmap)
-        self.image_label.resize(self.current_pixmap.size())
+        self._set_single_view_pixmap(self.current_pixmap)
 
         # If we have a zoom center point, center the scroll area on it
         if self.zoom_center_point:
@@ -8902,8 +9133,7 @@ class RAWImageViewer(QMainWindow):
         )
 
         # Set the scaled pixmap
-        self.image_label.setPixmap(scaled_pixmap)
-        self.image_label.resize(scaled_pixmap.size())
+        self._set_single_view_pixmap(scaled_pixmap)
 
         # Apply zoom center point and panning
         if self.zoom_center_point:
@@ -10028,10 +10258,7 @@ class RAWImageViewer(QMainWindow):
 
     def _exif_orientation_after_cw90_meta_only(self, o: int) -> int:
         """EXIF Orientation tag after a further 90° clockwise rotation (metadata-only, pixels unchanged)."""
-        o = int(o) if o else 1
-        if o < 1 or o > 8:
-            o = 1
-        return {1: 6, 2: 5, 3: 8, 4: 7, 5: 2, 6: 3, 7: 4, 8: 1}[o]
+        return exif_orientation_after_cw90(o)
 
     def _get_visual_rotation_degrees(self, file_path=None) -> int:
         """Get current non-destructive clockwise visual rotation for a file."""
@@ -10090,41 +10317,10 @@ class RAWImageViewer(QMainWindow):
             if im is not None:
                 im.close()
 
-    def _rotate_raw_exiftool_meta_cw90(self, path: str) -> None:
-        import subprocess
+    def _rotate_raw_pyexiv2_meta_cw90(self, path: str) -> None:
+        from metadata_backend import rotate_exif_orientation_meta_cw90
 
-        ex = _resolve_exiftool_executable()
-        if not ex:
-            raise RuntimeError(
-                "Rotating RAW files updates metadata only (sensor pixels are unchanged) and "
-                "requires ExifTool. Install from https://exiftool.org/ and add it to PATH, "
-                "or place exiftool.exe next to RAWviewer.exe, "
-                "or set environment variable RAWVIEWER_EXIFTOOL to the full path of exiftool.exe."
-            )
-        r = subprocess.run(
-            [ex, "-n", "-Orientation", "-m", path],
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
-        o = 1
-        for line in (r.stdout or "").splitlines():
-            if ":" in line:
-                try:
-                    o = int(line.split(":")[-1].strip())
-                except ValueError:
-                    o = 1
-                break
-        new_o = self._exif_orientation_after_cw90_meta_only(o)
-        r2 = subprocess.run(
-            [ex, "-overwrite_original", "-q", "-m", f"-Orientation={new_o}", path],
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
-        if r2.returncode != 0:
-            msg = (r2.stderr or r2.stdout or "exiftool failed").strip()
-            raise RuntimeError(msg or "exiftool failed")
+        rotate_exif_orientation_meta_cw90(path)
 
     def _rotate_current_image_clockwise_persist(self):
         """Rotate current image visually by 90° clockwise (non-destructive)."""
@@ -10209,6 +10405,10 @@ class RAWImageViewer(QMainWindow):
         pixmap = self._apply_visual_rotation_for_current(pixmap)
         self.current_pixmap = pixmap
         self._displayed_content_path = getattr(self, "current_file_path", None)
+        # New pixmap: clear outline rect until EXIF is re-read for this buffer.
+        if getattr(self, "_focus_subject_outline_active", False):
+            self._focus_subject_rect_image = None
+            self._focus_rect_source = None
         self._sync_single_image_histogram()
         # Memory / cache redraws (e.g. _show_single_view "already in memory") skip on_manager_*,
         # so stale thumbnail_ready must still see the real on-screen resolution here.
@@ -10449,7 +10649,8 @@ class RAWImageViewer(QMainWindow):
         # Don't pass dimensions - let update_status_bar use original dimensions from cache
         # update_status_bar will read EXIF data from cache automatically
         self.update_status_bar()
-        
+        self._maybe_refresh_focus_subject_outline_after_display()
+
         # Track image fully loaded and rendered
         display_time = time.time() - display_start
         max_dim = max(pixmap.width(), pixmap.height())
@@ -11088,6 +11289,14 @@ class RAWImageViewer(QMainWindow):
                     f"[TRACK] User pressed spacebar to toggle zoom - file: "
                     f"{os.path.basename(self.current_file_path) if hasattr(self, 'current_file_path') and self.current_file_path else 'Unknown'}"
                 )
+                if getattr(self, "_focus_subject_outline_active", False):
+                    # When already zoomed in, Space must still zoom out like normal;
+                    # only from fit-to-window does Space jump to the focus box center.
+                    if self.fit_to_window:
+                        self._focus_jump_to_subject_center()
+                    else:
+                        self.toggle_zoom()
+                    return True
                 self.toggle_zoom()
                 return True
         elif key == Qt.Key.Key_Left:
@@ -11869,8 +12078,7 @@ class RAWImageViewer(QMainWindow):
         print(f"[IMAGE_SCALE] Original: {original_size.width()}x{original_size.height()} -> "
               f"Scaled: {scaled_size.width()}x{scaled_size.height()} (available: {max_width}x{max_height})")
         
-        self.image_label.setPixmap(scaled_pixmap)
-        self.image_label.resize(scaled_pixmap.size())
+        self._set_single_view_pixmap(scaled_pixmap)
         self.image_label.adjustSize()  # Ensure label is resized to pixmap
         self.scroll_area.widget().adjustSize()  # Force scroll area to update
         self.scroll_area.updateGeometry()
@@ -11891,8 +12099,7 @@ class RAWImageViewer(QMainWindow):
         print(f"[IMAGE_SCALE] 100% zoom: {original_size.width()}x{original_size.height()}")
 
         # Set original pixmap without scaling
-        self.image_label.setPixmap(self.current_pixmap)
-        self.image_label.resize(self.current_pixmap.size())
+        self._set_single_view_pixmap(self.current_pixmap)
 
         # Center the image in the scroll area
         self.center_image_in_scroll_area()
@@ -12401,90 +12608,98 @@ class RAWImageViewer(QMainWindow):
         }
 
         try:
-            # Suppress exifread warnings for unsupported file formats
-            with warnings.catch_warnings():
-                warnings.filterwarnings('ignore', category=UserWarning, module='exifread')
-            with open(file_path, 'rb') as f:
-                tags = exifread.process_file(f, details=False)
+            tags = process_file_from_path(file_path, details=False)
 
-                # Extract focal length - try multiple possible tag keys
-                focal_length_tags = ['EXIF FocalLength', 'EXIF FocalLengthIn35mmFilm']
-                for tag_name in focal_length_tags:
-                    if tag_name in tags:
-                        focal_length_raw = tags[tag_name]
-                        try:
-                            # Handle different focal length formats
-                            focal_str = str(focal_length_raw)
-                            if '/' in focal_str:
-                                # Handle fraction format (e.g., "24/1")
-                                num, den = focal_str.split('/')
-                                focal_length = round(float(num) / float(den))
-                            else:
-                                # Handle decimal format
-                                focal_length = round(float(focal_str))
-                            if focal_length and focal_length > 0:
-                                exif_data['focal_length'] = f"{focal_length}mm"
-                                break
-                        except (ValueError, AttributeError, ZeroDivisionError):
-                            continue
+            # Extract focal length - try multiple possible tag keys
+            focal_length_tags = [
+                "EXIF FocalLength",
+                "EXIF FocalLengthIn35mmFilm",
+            ]
+            for tag_name in focal_length_tags:
+                if tag_name in tags:
+                    focal_length_raw = tags[tag_name]
+                    try:
+                        # Handle different focal length formats
+                        focal_str = str(focal_length_raw)
+                        if "/" in focal_str:
+                            # Handle fraction format (e.g., "24/1")
+                            num, den = focal_str.split("/")
+                            focal_length = round(float(num) / float(den))
+                        else:
+                            # Handle decimal format
+                            focal_length = round(float(focal_str))
+                        if focal_length and focal_length > 0:
+                            exif_data["focal_length"] = f"{focal_length}mm"
+                            break
+                    except (ValueError, AttributeError, ZeroDivisionError):
+                        continue
 
-                # Extract aperture - try multiple possible tag keys
-                aperture_tags = ['EXIF FNumber', 'EXIF ApertureValue']
-                for tag_name in aperture_tags:
-                    if tag_name in tags:
-                        aperture_raw = tags[tag_name]
-                        try:
-                            # Handle different aperture formats
-                            aperture_str = str(aperture_raw)
-                            if '/' in aperture_str:
-                                # Handle fraction format (e.g., "28/10")
-                                num, den = aperture_str.split('/')
-                                aperture = float(num) / float(den)
-                            else:
-                                # Handle decimal format
-                                aperture = float(aperture_str)
-                            if aperture and aperture > 0:
-                                exif_data['aperture'] = f"f/{aperture:.1f}"
-                                break
-                        except (ValueError, AttributeError, ZeroDivisionError):
-                            continue
+            # Extract aperture - try multiple possible tag keys
+            aperture_tags = ["EXIF FNumber", "EXIF ApertureValue"]
+            for tag_name in aperture_tags:
+                if tag_name in tags:
+                    aperture_raw = tags[tag_name]
+                    try:
+                        # Handle different aperture formats
+                        aperture_str = str(aperture_raw)
+                        if "/" in aperture_str:
+                            # Handle fraction format (e.g., "28/10")
+                            num, den = aperture_str.split("/")
+                            aperture = float(num) / float(den)
+                        else:
+                            # Handle decimal format
+                            aperture = float(aperture_str)
+                        if aperture and aperture > 0:
+                            exif_data["aperture"] = f"f/{aperture:.1f}"
+                            break
+                    except (ValueError, AttributeError, ZeroDivisionError):
+                        continue
 
-                # Extract ISO - try multiple possible tag keys
-                iso_tags = ['EXIF ISOSpeedRatings', 'EXIF ISO', 'EXIF PhotographicSensitivity']
-                for tag_name in iso_tags:
-                    if tag_name in tags:
-                        iso_raw = tags[tag_name]
-                        try:
-                            iso_str = str(iso_raw)
-                            # Handle fraction format for ISO
-                            if '/' in iso_str:
-                                num, den = iso_str.split('/')
-                                iso = int(float(num) / float(den))
-                            else:
-                                iso = int(iso_str)
-                            if iso and iso > 0:
-                                exif_data['iso'] = f"ISO {iso}"
-                                break
-                        except (ValueError, AttributeError, ZeroDivisionError):
-                            continue
+            # Extract ISO - try multiple possible tag keys
+            iso_tags = [
+                "EXIF ISOSpeedRatings",
+                "EXIF ISO",
+                "EXIF PhotographicSensitivity",
+            ]
+            for tag_name in iso_tags:
+                if tag_name in tags:
+                    iso_raw = tags[tag_name]
+                    try:
+                        iso_str = str(iso_raw)
+                        # Handle fraction format for ISO
+                        if "/" in iso_str:
+                            num, den = iso_str.split("/")
+                            iso = int(float(num) / float(den))
+                        else:
+                            iso = int(iso_str)
+                        if iso and iso > 0:
+                            exif_data["iso"] = f"ISO {iso}"
+                            break
+                    except (ValueError, AttributeError, ZeroDivisionError):
+                        continue
 
-                # Extract capture time
-                datetime_tags = ['EXIF DateTimeOriginal',
-                                 'Image DateTime', 'EXIF DateTime']
-                for tag_name in datetime_tags:
-                    if tag_name in tags:
-                        datetime_raw = tags[tag_name]
-                        try:
-                            datetime_str = str(datetime_raw)
-                            # Parse datetime string (format: "YYYY:MM:DD HH:MM:SS")
-                            dt = datetime.strptime(
-                                datetime_str, "%Y:%m:%d %H:%M:%S")
-                            # Format as "HH:MM:SS YYYY-MM-DD"
-                            exif_data['capture_time'] = dt.strftime(
-                                "%H:%M:%S %Y-%m-%d")
-                            break  # Use first available datetime
-                        except (ValueError, AttributeError):
-                            continue
+            # Extract capture time
+            datetime_tags = [
+                "EXIF DateTimeOriginal",
+                "Image DateTime",
+                "EXIF DateTime",
+            ]
+            for tag_name in datetime_tags:
+                if tag_name in tags:
+                    datetime_raw = tags[tag_name]
+                    try:
+                        datetime_str = str(datetime_raw)
+                        # Parse datetime string (format: "YYYY:MM:DD HH:MM:SS")
+                        dt = datetime.strptime(
+                            datetime_str, "%Y:%m:%d %H:%M:%S"
+                        )
+                        # Format as "HH:MM:SS YYYY-MM-DD"
+                        exif_data["capture_time"] = dt.strftime(
+                            "%H:%M:%S %Y-%m-%d"
+                        )
+                        break  # Use first available datetime
+                    except (ValueError, AttributeError):
+                        continue
 
         except Exception:
             # If any error occurs during EXIF extraction, return empty data
@@ -12611,27 +12826,37 @@ class RAWImageViewer(QMainWindow):
                 except Exception as e:
                     pass
             
-            # Fallback to exifread for other files or if rawpy fails
+            # Fallback to EXIF reader for other files or if rawpy fails
             if not original_width or not original_height:
                 try:
-                    import exifread
-                    with warnings.catch_warnings():
-                        warnings.filterwarnings('ignore', category=UserWarning, module='exifread')
-                        with open(self.current_file_path, 'rb') as f:
-                            tags = exifread.process_file(f, details=False)
-                            for w_tag in ('EXIF ExifImageWidth', 'Image ImageWidth', 'Image Width'):
-                                if w_tag in tags:
-                                    original_width = int(str(tags[w_tag]))
-                                    break
-                            for h_tag in ('EXIF ExifImageLength', 'Image ImageLength', 'Image Height', 'Image Length', 'EXIF ExifImageHeight'):
-                                if h_tag in tags:
-                                    original_height = int(str(tags[h_tag]))
-                                    break
-                            
-                            if original_width and original_height and cached_exif:
-                                cached_exif['original_width'] = original_width
-                                cached_exif['original_height'] = original_height
-                                self.image_cache.put_exif(self.current_file_path, cached_exif)
+                    tags = process_file_from_path(
+                        self.current_file_path, details=False
+                    )
+                    for w_tag in (
+                        "EXIF ExifImageWidth",
+                        "Image ImageWidth",
+                        "Image Width",
+                    ):
+                        if w_tag in tags:
+                            original_width = int(str(tags[w_tag]))
+                            break
+                    for h_tag in (
+                        "EXIF ExifImageLength",
+                        "Image ImageLength",
+                        "Image Height",
+                        "Image Length",
+                        "EXIF ExifImageHeight",
+                    ):
+                        if h_tag in tags:
+                            original_height = int(str(tags[h_tag]))
+                            break
+
+                    if original_width and original_height and cached_exif:
+                        cached_exif["original_width"] = original_width
+                        cached_exif["original_height"] = original_height
+                        self.image_cache.put_exif(
+                            self.current_file_path, cached_exif
+                        )
                 except Exception:
                     pass
         # Get current display dimensions (from pixmap)
@@ -12919,69 +13144,86 @@ class RAWImageViewer(QMainWindow):
             except Exception as e:
                 logger.warning(f"[STATUS] Fallback EXIF extraction failed: {e}")
         
-        # Final fallback: If we still have no metadata, try direct file reading with exifread
+        # Final fallback: direct EXIF read (pyexiv2 preferred, else exifread)
         if not exif_info and self.current_file_path:
-            logger.warning(f"[STATUS] No metadata extracted from cache or fallback. Attempting direct file read with exifread.")
+            logger.warning(
+                "[STATUS] No metadata from cache/fallback; direct EXIF read "
+                "(metadata_backend)."
+            )
             try:
-                import exifread
-                import warnings
-                with warnings.catch_warnings():
-                    warnings.filterwarnings('ignore', category=UserWarning, module='exifread')
-                    with open(self.current_file_path, 'rb') as f:
-                        tags = exifread.process_file(f, details=False)
-                        
-                        # Search all tags for focal length
-                        for tag_key in tags.keys():
-                            if 'Focal' in tag_key and not any('mm' in item for item in exif_info):
-                                try:
-                                    focal_str = str(tags[tag_key])
-                                    if '/' in focal_str:
-                                        num, den = focal_str.split('/')
-                                        focal_length = round(float(num) / float(den))
-                                    else:
-                                        focal_length = round(float(focal_str))
-                                    if focal_length and focal_length > 0:
-                                        exif_info.append(f"{focal_length}mm")
-                                        logger.info(f"[STATUS] Found focal length from direct file read, tag '{tag_key}': {focal_length}mm")
-                                        break
-                                except:
-                                    continue
-                        
-                        # Search all tags for ISO
-                        for tag_key in tags.keys():
-                            if 'ISO' in tag_key.upper() and not any('ISO' in item for item in exif_info):
-                                try:
-                                    iso_str = str(tags[tag_key])
-                                    if '/' in iso_str:
-                                        num, den = iso_str.split('/')
-                                        iso = int(float(num) / float(den))
-                                    else:
-                                        iso = int(iso_str)
-                                    if iso and iso > 0:
-                                        exif_info.append(f"ISO {iso}")
-                                        logger.info(f"[STATUS] Found ISO from direct file read, tag '{tag_key}': ISO {iso}")
-                                        break
-                                except:
-                                    continue
-                        
-                        # Search all tags for aperture
-                        for tag_key in tags.keys():
-                            if ('FNumber' in tag_key or 'Aperture' in tag_key) and not any('f/' in item for item in exif_info):
-                                try:
-                                    aperture_str = str(tags[tag_key])
-                                    if '/' in aperture_str:
-                                        num, den = aperture_str.split('/')
-                                        aperture = float(num) / float(den)
-                                    else:
-                                        aperture = float(aperture_str)
-                                    if aperture and aperture > 0:
-                                        exif_info.append(f"f/{aperture:.1f}")
-                                        logger.info(f"[STATUS] Found aperture from direct file read, tag '{tag_key}': f/{aperture:.1f}")
-                                        break
-                                except:
-                                    continue
+                tags = process_file_from_path(
+                    self.current_file_path, details=False
+                )
+
+                # Search all tags for focal length
+                for tag_key in tags.keys():
+                    if "Focal" in tag_key and not any(
+                        "mm" in item for item in exif_info
+                    ):
+                        try:
+                            focal_str = str(tags[tag_key])
+                            if "/" in focal_str:
+                                num, den = focal_str.split("/")
+                                focal_length = round(float(num) / float(den))
+                            else:
+                                focal_length = round(float(focal_str))
+                            if focal_length and focal_length > 0:
+                                exif_info.append(f"{focal_length}mm")
+                                logger.info(
+                                    "[STATUS] Found focal length from direct "
+                                    f"read, tag '{tag_key}': {focal_length}mm"
+                                )
+                                break
+                        except Exception:
+                            continue
+
+                # Search all tags for ISO
+                for tag_key in tags.keys():
+                    if "ISO" in tag_key.upper() and not any(
+                        "ISO" in item for item in exif_info
+                    ):
+                        try:
+                            iso_str = str(tags[tag_key])
+                            if "/" in iso_str:
+                                num, den = iso_str.split("/")
+                                iso = int(float(num) / float(den))
+                            else:
+                                iso = int(iso_str)
+                            if iso and iso > 0:
+                                exif_info.append(f"ISO {iso}")
+                                logger.info(
+                                    "[STATUS] Found ISO from direct read, "
+                                    f"tag '{tag_key}': ISO {iso}"
+                                )
+                                break
+                        except Exception:
+                            continue
+
+                # Search all tags for aperture
+                for tag_key in tags.keys():
+                    if (
+                        "FNumber" in tag_key or "Aperture" in tag_key
+                    ) and not any("f/" in item for item in exif_info):
+                        try:
+                            aperture_str = str(tags[tag_key])
+                            if "/" in aperture_str:
+                                num, den = aperture_str.split("/")
+                                aperture = float(num) / float(den)
+                            else:
+                                aperture = float(aperture_str)
+                            if aperture and aperture > 0:
+                                exif_info.append(f"f/{aperture:.1f}")
+                                logger.info(
+                                    "[STATUS] Found aperture from direct read, "
+                                    f"tag '{tag_key}': f/{aperture:.1f}"
+                                )
+                                break
+                        except Exception:
+                            continue
             except Exception as e:
-                logger.warning(f"[STATUS] Direct file read with exifread failed: {e}")
+                logger.warning(
+                    f"[STATUS] Direct EXIF read (metadata_backend) failed: {e}"
+                )
 
         # Construct metadata text (center label)
         metadata_parts = []
