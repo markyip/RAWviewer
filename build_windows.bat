@@ -14,9 +14,14 @@ REM Activate virtual environment
 echo Activating virtual environment...
 call rawviewer_env\Scripts\activate.bat
 
+REM Build MobileCLIP wheel if missing or needed
+echo Checking MobileCLIP wheels...
+if not exist "wheels" mkdir wheels
+python scripts/build_mobileclip_wheel.py
+
 REM Install/upgrade dependencies
 echo Installing dependencies...
-pip install --upgrade PyQt6 rawpy send2trash pyinstaller natsort exifread Pillow psutil numpy qtawesome pyqtgraph sentence-transformers reverse-geocoder pycountry pywin32
+pip install --upgrade PyQt6 rawpy send2trash pyinstaller natsort exifread pyexiv2 Pillow psutil numpy qtawesome pyqtgraph sentence-transformers reverse-geocoder pycountry pywin32
 
 REM Try to close any running RAWviewer.exe instances
 echo Checking for running RAWviewer instances...

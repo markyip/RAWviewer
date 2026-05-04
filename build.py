@@ -14,6 +14,93 @@ import time
 import sys
 from pathlib import Path
 
+# Repository root (directory containing this script)
+REPO_ROOT = Path(__file__).resolve().parent
+
+
+def _project_venv_python() -> Path:
+    if platform.system() == "Windows":
+        return REPO_ROOT / "rawviewer_env" / "Scripts" / "python.exe"
+    return REPO_ROOT / "rawviewer_env" / "bin" / "python3"
+
+
+def _running_inside_project_venv() -> bool:
+    try:
+        return Path(sys.executable).resolve() == _project_venv_python().resolve()
+    except OSError:
+        return False
+
+
+def _is_externally_managed_python() -> bool:
+    """True for Homebrew / Debian PEP 668 installs where ``pip install`` to system is blocked."""
+    return (Path(sys.prefix) / "EXTERNALLY-MANAGED").is_file()
+
+
+def _should_use_project_venv_for_build() -> bool:
+    """
+    Prefer ./rawviewer_env so ``pip install`` / PyInstaller do not hit system Python limits.
+
+    - macOS: always (matches ``build_macos.sh``; Homebrew 3.14 may block pip without an
+      ``EXTERNALLY-MANAGED`` file under ``sys.prefix``).
+    - Linux: when PEP 668 marker is present.
+    Set ``RAWVIEWER_USE_SYSTEM_PYTHON_BUILD=1`` to skip and use the current interpreter.
+    """
+    if os.environ.get("RAWVIEWER_USE_SYSTEM_PYTHON_BUILD", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    ):
+        return False
+    if _running_inside_project_venv():
+        return False
+    if platform.system() == "Darwin":
+        return True
+    if _is_externally_managed_python():
+        return True
+    return False
+
+
+def ensure_project_venv_and_reexec() -> None:
+    """
+    Create ./rawviewer_env if needed and re-exec this script with that interpreter.
+
+    Skips when already using ./rawviewer_env (e.g. ``./build_macos.sh``) or when
+    ``RAWVIEWER_USE_SYSTEM_PYTHON_BUILD=1``.
+    """
+    if not _should_use_project_venv_for_build():
+        return
+    vpy = _project_venv_python()
+    venv_dir = REPO_ROOT / "rawviewer_env"
+    if not vpy.is_file():
+        if platform.system() == "Darwin":
+            venv_msg = (
+                "[INFO] Creating ./rawviewer_env — macOS builds default to an isolated venv "
+                "(reliable pip/PyInstaller vs Homebrew Python). "
+                "Set RAWVIEWER_USE_SYSTEM_PYTHON_BUILD=1 to opt out."
+            )
+        else:
+            venv_msg = (
+                "[INFO] Creating ./rawviewer_env — system Python is PEP 668 externally managed; "
+                "pip cannot install into it."
+            )
+        print(venv_msg)
+        rc = subprocess.run(
+            [sys.executable, "-m", "venv", str(venv_dir)],
+            check=False,
+        ).returncode
+        if rc != 0 or not vpy.is_file():
+            print(
+                "[ERROR] Could not create ./rawviewer_env. From the repo root try:\n"
+                "  ./build_macos.sh\n"
+                "or:  python3 -m venv rawviewer_env && ./rawviewer_env/bin/python3 -m pip install -U pip && "
+                "./rawviewer_env/bin/python3 build.py"
+            )
+            sys.exit(1)
+    script = Path(__file__).resolve()
+    argv = [str(vpy), str(script), *sys.argv[1:]]
+    print(f"[INFO] Re-running build with project venv: {vpy}")
+    os.execv(str(vpy), argv)
+
 
 def run_command(cmd):
     # Support both string commands and lists
@@ -124,6 +211,8 @@ def install_dependencies():
         dependencies.append('pyobjc-framework-CoreML')
         dependencies.append('pyobjc-framework-Quartz')
         dependencies.append('pyobjc-framework-Vision')
+    if system_name in ("Darwin", "Windows"):
+        dependencies.append("pyexiv2")
 
     for dep in dependencies:
         print(f"Installing {dep}...")
@@ -142,11 +231,65 @@ def install_dependencies():
         if not run_command([sys.executable, "-m", "pip", "install", "--upgrade", "pywin32"]):
             print("[WARNING] pywin32 install failed; Share may not work in the built app.")
 
+    # Install any local wheels (e.g., MobileCLIP built by build_mobileclip_wheel.py)
+    wheels_dir = REPO_ROOT / "wheels"
+    if wheels_dir.exists():
+        wheels = list(wheels_dir.glob("*.whl"))
+        if wheels:
+            print(f"[INFO] Found {len(wheels)} local wheels to install...")
+            for whl in wheels:
+                print(f"Installing {whl.name}...")
+                run_command([sys.executable, "-m", "pip", "install", "--upgrade", "--force-reinstall", str(whl)])
+
     print("Dependencies installed successfully!")
     return True
 
 
+def _darwin_ensure_homebrew_pyexiv2_libs() -> None:
+    """
+    pyexiv2's bundled libexiv2.dylib expects Homebrew libinih / gettext on the build machine
+    (see https://github.com/LeoHsiao1/pyexiv2/blob/master/docs/Tutorial.md FAQ).
+    """
+    if platform.system() != "Darwin":
+        return
+    brew = shutil.which("brew")
+    if not brew:
+        print(
+            "[INFO] Homebrew (`brew`) not on PATH. If `import pyexiv2` fails, install "
+            "https://brew.sh then run: brew install inih gettext"
+        )
+        return
+    for formula in ("inih", "gettext"):
+        listed = subprocess.run(
+            [brew, "list", formula],
+            capture_output=True,
+        )
+        if listed.returncode != 0:
+            print(
+                f"[INFO] Installing Homebrew `{formula}` (native dependency for pyexiv2 / Exiv2)..."
+            )
+            subprocess.run([brew, "install", formula], check=False)
+
+
+def _darwin_preflight_pyexiv2_import() -> None:
+    """Fail fast with a clear message before PyInstaller touches pyexiv2."""
+    if platform.system() != "Darwin":
+        return
+    try:
+        import pyexiv2  # noqa: F401
+    except Exception as e:
+        print(
+            "[ERROR] pyexiv2 failed to import (required for this macOS build).\n"
+            "  Install native libraries, then re-run:\n"
+            "    brew install inih gettext\n"
+            f"  Underlying error: {e}"
+        )
+        sys.exit(1)
+
+
 def main():
+    ensure_project_venv_and_reexec()
+
     system_name = platform.system()
     if system_name == 'Windows':
         print("RAWviewer Windows Build Script")
@@ -161,6 +304,10 @@ def main():
     if not install_dependencies():
         print("[ERROR] Dependency installation failed.")
         sys.exit(1)
+
+    if platform.system() == "Darwin":
+        _darwin_ensure_homebrew_pyexiv2_libs()
+        _darwin_preflight_pyexiv2_import()
 
     print("")
     print("Building RAWviewer executable...")
@@ -278,8 +425,21 @@ def main():
         "--hidden-import", "rawviewer_ui.widgets",
         "--hidden-import", "natsort",
         "--hidden-import", "send2trash",
+        "--hidden-import", "metadata_backend",
         "--name", "RAWviewer"
     ]
+    try:
+        import pyexiv2  # noqa: F401
+
+        if platform.system() in ("Darwin", "Windows"):
+            cmd_base.extend(["--hidden-import", "pyexiv2", "--collect-all", "pyexiv2"])
+            print("[INFO] PyInstaller: bundling pyexiv2 with --collect-all (native Exiv2 libs).")
+    except ImportError:
+        print(
+            "[WARNING] pyexiv2 not importable; build continues without pyexiv2 bundling. "
+            "Install pyexiv2 before packaging for EXIF read/write in the app."
+        )
+
     if platform.system() == "Darwin":
         cmd_base.extend([
             "--hidden-import", "objc",
@@ -304,6 +464,19 @@ def main():
             "--hidden-import", "pythoncom",
             "--hidden-import", "pywintypes",
         ])
+        # Include MobileCLIP and OpenCLIP if installed (e.g. via local wheel)
+        try:
+            import mobileclip
+            cmd_base.extend(["--hidden-import", "mobileclip", "--collect-all", "mobileclip"])
+            print("[INFO] PyInstaller: bundling mobileclip with --collect-all.")
+        except ImportError:
+            pass
+        try:
+            import open_clip
+            cmd_base.extend(["--hidden-import", "open_clip", "--collect-all", "open_clip"])
+            print("[INFO] PyInstaller: bundling open_clip with --collect-all.")
+        except ImportError:
+            pass
     
     if platform.system() == 'Darwin':
         cmd_base.append("--onedir")
