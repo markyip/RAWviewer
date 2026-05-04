@@ -587,7 +587,8 @@ class MobileCLIPONNXBackend:
     def encode_text(self, text: str) -> np.ndarray:
         self._ensure_sessions()
         tokenizer = self._ensure_tokenizer()
-        tokens = np.asarray([tokenizer.encode_for_clip(text)], dtype=np.int32)
+        # MobileCLIP2 ONNX text encoder expects int64 token IDs (ORT rejects int32).
+        tokens = np.asarray([tokenizer.encode_for_clip(text)], dtype=np.int64)
         
         inputs = {self._text_session.get_inputs()[0].name: tokens}
         outputs = self._text_session.run(None, inputs)
