@@ -7341,8 +7341,9 @@ class RAWImageViewer(QMainWindow):
             # Hide it initially - it will be shown by _show_gallery_view() when needed
             gallery_container.hide()
             
-            # Connect vertical scrollbar to load_visible_images for scroll-aware priority loading
-            gallery_scroll.verticalScrollBar().valueChanged.connect(lambda: justified_gallery.load_visible_images())
+            # NOTE: rawviewer_ui.gallery_view.JustifiedGallery already wires scrollbar events
+            # internally (valueChanged + sliderPressed/Released). Avoid duplicate connections
+            # here; they can trigger redundant scheduling and visible scroll lag.
     
     def _on_gallery_metadata_ready(self, meta, folder_at_request):
         """Thread-safe handler for metadata fetch completion"""

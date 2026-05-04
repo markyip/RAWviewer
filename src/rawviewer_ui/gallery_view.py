@@ -355,6 +355,19 @@ class JustifiedGallery(QWidget):
         except Exception:
             logger.exception("[GALLERY] resize rebuild failed")
 
+    def force_layout_update(self):
+        """
+        Compatibility hook used by main.py.
+        Rebuild after geometry settles, then populate visible tiles.
+        """
+        try:
+            if self._resize_timer is not None and self._resize_timer.isActive():
+                self._resize_timer.stop()
+        except Exception:
+            pass
+        QTimer.singleShot(0, self._handle_resize_rebuild)
+        QTimer.singleShot(30, self.load_visible_images)
+
     def _delayed_initial_build(self):
         self._setup_scroll_tracking()
         if self.width() > 0:
@@ -494,7 +507,10 @@ class JustifiedGallery(QWidget):
 
         # Throttle (do NOT restart continuously): allow periodic updates while scrolling.
         # The settle timer below guarantees a final update when scrolling stops.
-        interval = 50 if not self._is_scrolling_fast else 150
+        if self._is_scrollbar_dragging:
+            interval = 140
+        else:
+            interval = 50 if not self._is_scrolling_fast else 150
         if not self._load_timer.isActive():
             self._load_timer.start(interval)
 
@@ -698,7 +714,8 @@ class JustifiedGallery(QWidget):
         # Fast scroll policy:
         # - still keep visible thumbnails loading (small budget)
         # - avoid heavy prefetch
-        is_fast = self._is_scrolling_fast
+        is_thumb_drag = bool(self._is_scrollbar_dragging)
+        is_fast = self._is_scrolling_fast or is_thumb_drag
         allow_prefetch = not is_fast
 
         # If the user jumped far (typical when dragging scrollbar), flush stale queue so new
@@ -735,8 +752,13 @@ class JustifiedGallery(QWidget):
         scheduled_tasks = 0
 
         # Reduce per-tick work when fast scrolling (keep things responsive)
-        max_widgets = 4 if is_fast else self._max_widgets_per_tick
-        max_tasks = 6 if is_fast else self._max_tasks_per_tick
+        if is_thumb_drag:
+            # Thumb-drag mode: prioritize immediate viewport response over throughput.
+            max_widgets = 2
+            max_tasks = 3
+        else:
+            max_widgets = 4 if is_fast else self._max_widgets_per_tick
+            max_tasks = 6 if is_fast else self._max_tasks_per_tick
 
         # Create/update widgets for visible items and schedule loads for missing thumbnails.
         for idx, item in visible_indices_items:
