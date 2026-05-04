@@ -8,6 +8,7 @@
 import os
 import threading
 import queue
+import sys
 from enum import Enum
 from typing import Optional, Dict, Any, Tuple
 import numpy as np
@@ -263,8 +264,20 @@ class ImageLoadManager(QObject):
             
         self._thread_pool.setMaxThreadCount(max_workers)
         
-        # PROCESS POOL: For heavy RAW processing to bypass GIL
-        self._process_pool = concurrent.futures.ProcessPoolExecutor(max_workers=max(2, core_count // 2))
+        # PROCESS POOL: For heavy RAW processing to bypass GIL.
+        # Windows spawn re-imports the main module in child processes; this project has heavy
+        # top-level startup/import work, so default to thread-only on Windows for smoother UI.
+        # Set RAWVIEWER_ENABLE_PROCESS_POOL=1 to opt in.
+        enable_process_pool_env = os.environ.get("RAWVIEWER_ENABLE_PROCESS_POOL", "").strip().lower()
+        if enable_process_pool_env:
+            enable_process_pool = enable_process_pool_env in ("1", "true", "yes", "on")
+        else:
+            enable_process_pool = sys.platform != "win32"
+        self._process_pool = (
+            concurrent.futures.ProcessPoolExecutor(max_workers=max(2, core_count // 2))
+            if enable_process_pool
+            else None
+        )
         
         self._active_tasks: Dict[Tuple, ImageLoadTask] = {}
         self._cache = get_image_cache()
