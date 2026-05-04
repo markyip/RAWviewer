@@ -526,7 +526,11 @@ class JustifiedGallery(QWidget):
         # Layout may report width 0 right after gallery_container.show() — do not clear
         # thumbnails/layout in that case or the gallery stays empty ("failed to load").
         viewport_width = self._get_viewport_width()
-        net_width = viewport_width - (self.MIN_SPACING * 2) - 16
+        # Layout margins for symmetry with scrollbar
+        # Left margin 24px, Right margin 0px + 24px scrollbar gutter = 24px on both sides
+        left_margin = 24
+        right_margin = 0
+        net_width = viewport_width - left_margin - right_margin
         if net_width <= 0:
             n = getattr(self, "_gallery_width_defer_count", 0) + 1
             self._gallery_width_defer_count = n
@@ -558,6 +562,7 @@ class JustifiedGallery(QWidget):
                     self._metadata_cache = self.parent_viewer.image_cache.get_multiple_exif(paths)
 
             current_y = 10
+            left_margin = 24
             row = []
             aspect_sum = 0
 
@@ -569,11 +574,11 @@ class JustifiedGallery(QWidget):
                 row_h = self.TARGET_ROW_HEIGHT if is_last else (net_width - spacing) / a_sum
                 row_h = max(self.TARGET_ROW_HEIGHT * 0.5, min(self.TARGET_ROW_HEIGHT * 2.0, row_h))
 
-                curr_x = 10
+                curr_x = left_margin
                 for i, (item, aspect) in enumerate(r):
                     w = int(row_h * aspect)
                     if not is_last and i == len(r) - 1:
-                        w = net_width - (curr_x - 10)
+                        w = net_width - (curr_x - left_margin)
                     self._gallery_layout_items.append(
                         {
                             "rect": QRect(curr_x, int(current_y), int(w), int(row_h)),
