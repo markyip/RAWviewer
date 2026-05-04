@@ -13,7 +13,7 @@ except Exception:
     pass
 
 # In PyInstaller --windowed builds there is no console, so stdout/stderr can be None.
-# Redirect them to a file early so all existing print() debug output is preserved.
+# Redirect them to a file early so all existing safe_print() debug output is preserved.
 def _redirect_stdio_to_file_if_needed():
     try:
         # Opt-in only: do not create log folders/files in normal releases.
@@ -247,7 +247,7 @@ logging.getLogger('PIL').setLevel(logging.ERROR)
 # rawpy doesn't always use standard logging, but we'll try to catch it if it does
 logging.getLogger('rawpy').setLevel(logging.ERROR)
 
-print("Basic imports done, importing PyQt6...", flush=True)
+safe_print("Basic imports done, importing PyQt6...", flush=True)
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QLabel, QFileDialog,
                              QMessageBox, QScrollArea, QSizePolicy, QPushButton, QFrame,
@@ -257,33 +257,33 @@ from PyQt6.QtCore import Qt, QThread, pyqtSignal, QPoint, QEvent, QSettings, QSi
 from PyQt6.QtGui import (QPixmap, QImage, QAction, QKeySequence, QShortcut, QGuiApplication,
                          QDragEnterEvent, QDropEvent, QCursor, QIcon,
                          QTransform, QRegion, QPainterPath, QPainter, QColor, QPen, QBrush, QPalette)
-print("PyQt6 imported successfully", flush=True)
+safe_print("PyQt6 imported successfully", flush=True)
 
-print("Importing third-party libraries...", flush=True)
+safe_print("Importing third-party libraries...", flush=True)
 try:
     import rawpy
-    print("  - rawpy: OK", flush=True)
+    safe_print("  - rawpy: OK", flush=True)
 except Exception as e:
-    print(f"  - rawpy: ERROR - {e}", file=sys.stderr, flush=True)
+    safe_print_err(f"  - rawpy: ERROR - {e}", flush=True)
     raise
 
 try:
     import numpy as np
-    print("  - numpy: OK", flush=True)
+    safe_print("  - numpy: OK", flush=True)
 except Exception as e:
-    print(f"  - numpy: ERROR - {e}", file=sys.stderr, flush=True)
+    safe_print_err(f"  - numpy: ERROR - {e}", flush=True)
     raise
 
 # natsort and send2trash will be imported lazily when needed
 # These modules can cause import delays or hangs, so we import them on-demand
-print("  - natsort: Will be imported on demand", flush=True)
-print("  - send2trash: Will be imported on demand", flush=True)
+safe_print("  - natsort: Will be imported on demand", flush=True)
+safe_print("  - send2trash: Will be imported on demand", flush=True)
 
 try:
     import exifread
-    print("  - exifread: OK", flush=True)
+    safe_print("  - exifread: OK", flush=True)
 except Exception as e:
-    print(f"  - exifread: ERROR - {e}", file=sys.stderr, flush=True)
+    safe_print_err(f"  - exifread: ERROR - {e}", flush=True)
     raise
 
 try:
@@ -294,13 +294,13 @@ try:
         process_file_from_path,
     )
 
-    print(
+    safe_print(
         f"  - metadata_backend: pyexiv2={'yes' if has_pyexiv2() else 'no'}, "
         f"RAWVIEWER_EXIF_BACKEND={exif_backend_mode()}",
         flush=True,
     )
 except Exception as e:
-    print(f"  - metadata_backend: ERROR - {e}", file=sys.stderr, flush=True)
+    safe_print_err(f"  - metadata_backend: ERROR - {e}", flush=True)
     raise
 
 from datetime import datetime
@@ -310,42 +310,42 @@ import time
 
 try:
     import qtawesome as qta
-    print("  - qtawesome: OK", flush=True)
+    safe_print("  - qtawesome: OK", flush=True)
 except Exception as e:
-    print(f"  - qtawesome: ERROR - {e}", file=sys.stderr, flush=True)
+    safe_print_err(f"  - qtawesome: ERROR - {e}", flush=True)
     qta = None  # Set to None if import fails
 
-print("Third-party imports done, importing local modules...", flush=True)
+safe_print("Third-party imports done, importing local modules...", flush=True)
 
 # Import enhanced performance modules
 try:
     from image_cache import get_image_cache, initialize_cache
-    print("  - image_cache: OK", flush=True)
+    safe_print("  - image_cache: OK", flush=True)
 except Exception as e:
-    print(f"  - image_cache: ERROR - {e}", file=sys.stderr, flush=True)
+    safe_print_err(f"  - image_cache: ERROR - {e}", flush=True)
     import traceback
-    print(traceback.format_exc(), file=sys.stderr, flush=True)
+    safe_print_err(traceback.format_exc(), flush=True)
     raise
 
 try:
     from enhanced_raw_processor import EnhancedRAWProcessor, PreloadManager, ThumbnailExtractor
-    print("  - enhanced_raw_processor: OK", flush=True)
+    safe_print("  - enhanced_raw_processor: OK", flush=True)
 except Exception as e:
-    print(f"  - enhanced_raw_processor: ERROR - {e}", file=sys.stderr, flush=True)
+    safe_print_err(f"  - enhanced_raw_processor: ERROR - {e}", flush=True)
     import traceback
-    print(traceback.format_exc(), file=sys.stderr, flush=True)
+    safe_print_err(traceback.format_exc(), flush=True)
     raise
 
-print("Enhanced modules imported, importing new unified architecture...", flush=True)
+safe_print("Enhanced modules imported, importing new unified architecture...", flush=True)
 
 # Import new unified architecture
 try:
     from image_load_manager import get_image_load_manager, Priority
-    print("  - image_load_manager: OK", flush=True)
+    safe_print("  - image_load_manager: OK", flush=True)
 except Exception as e:
-    print(f"  - image_load_manager: ERROR - {e}", file=sys.stderr, flush=True)
+    safe_print_err(f"  - image_load_manager: ERROR - {e}", flush=True)
     import traceback
-    print(traceback.format_exc(), file=sys.stderr, flush=True)
+    safe_print_err(traceback.format_exc(), flush=True)
     raise
 
 try:
@@ -354,27 +354,27 @@ try:
         is_raw_file,
         load_pixmap_safe,
     )
-    print("  - common_image_loader: OK", flush=True)
+    safe_print("  - common_image_loader: OK", flush=True)
 except Exception as e:
-    print(f"  - common_image_loader: ERROR - {e}", file=sys.stderr, flush=True)
+    safe_print_err(f"  - common_image_loader: ERROR - {e}", flush=True)
     import traceback
-    print(traceback.format_exc(), file=sys.stderr, flush=True)
+    safe_print_err(traceback.format_exc(), flush=True)
     raise
 
 try:
     from image_histogram import ImageHistogramWidget
-    print("  - image_histogram: OK", flush=True)
+    safe_print("  - image_histogram: OK", flush=True)
 except Exception as e:
-    print(f"  - image_histogram: ERROR - {e}", file=sys.stderr, flush=True)
+    safe_print_err(f"  - image_histogram: ERROR - {e}", flush=True)
     import traceback
-    print(traceback.format_exc(), file=sys.stderr, flush=True)
+    safe_print_err(traceback.format_exc(), flush=True)
     raise
 
 try:
     from semantic_search import SemanticImageIndex
-    print("  - semantic_search: OK", flush=True)
+    safe_print("  - semantic_search: OK", flush=True)
 except Exception as e:
-    print(f"  - semantic_search: WARNING - {e}", flush=True)
+    safe_print(f"  - semantic_search: WARNING - {e}", flush=True)
     SemanticImageIndex = None
 
 try:
@@ -392,12 +392,12 @@ except Exception:
 try:
     from rawviewer_ui.widgets import ThumbnailLabel
     from rawviewer_ui.gallery_view import JustifiedGallery
-    print("  - ui modules: OK", flush=True)
+    safe_print("  - ui modules: OK", flush=True)
 except Exception as e:
-    print(f"  - ui modules: ERROR - {e}", file=sys.stderr, flush=True)
+    safe_print_err(f"  - ui modules: ERROR - {e}", flush=True)
     raise
 
-print("All imports completed successfully!", flush=True)
+safe_print("All imports completed successfully!", flush=True)
 
 
 def setup_logging():
@@ -449,9 +449,9 @@ def setup_logging():
     except Exception as e:
         # If logging setup fails, at least print to stderr
         error_msg = f"CRITICAL: Failed to setup logging: {e}"
-        print(error_msg, file=sys.stderr)
+        safe_print_err(error_msg)
         import traceback
-        print(f"Traceback: {traceback.format_exc()}", file=sys.stderr)
+        safe_print_err(f"Traceback: {traceback.format_exc()}")
         
         # Try to write to a fallback log file
         try:
@@ -1122,7 +1122,7 @@ class RAWProcessor(QThread):
                                 # Successfully extracted embedded JPEG thumbnail
                                 embedded_time = time.time() - embedded_start
                                 logger.info(f"[RAW_PROC] ⚡ FAST: Extracted embedded JPEG thumbnail in {embedded_time*1000:.1f}ms")
-                                print(f"[PERF] ⚡ FAST THUMBNAIL: Embedded JPEG extracted in {embedded_time*1000:.1f}ms")
+                                safe_print(f"[PERF] ⚡ FAST THUMBNAIL: Embedded JPEG extracted in {embedded_time*1000:.1f}ms")
                                 
                                 # Convert JPEG bytes to numpy array
                                 from io import BytesIO
@@ -1339,10 +1339,10 @@ class RAWProcessor(QThread):
                                                     extracted_thumbnail = thumb.data
                                                 thumb_size = f"{extracted_thumbnail.shape[1]}x{extracted_thumbnail.shape[0]}" if extracted_thumbnail is not None else 'N/A'
                                                 logger.debug(f"Thumbnail extracted using existing raw handle: {thumb_size}")
-                                                print(f"[PERF] ⚡ FAST THUMBNAIL: Extracted using existing raw handle ({thumb_size})")
+                                                safe_print(f"[PERF] ⚡ FAST THUMBNAIL: Extracted using existing raw handle ({thumb_size})")
                                         except Exception as thumb_extract_error:
                                             logger.debug(f"Failed to extract thumbnail from raw handle: {thumb_extract_error}")
-                                            print(f"[PERF] ⚠️  Raw handle extraction failed, falling back")
+                                            safe_print(f"[PERF] ⚠️  Raw handle extraction failed, falling back")
                                 
                                 # Fallback: Use ThumbnailExtractor if raw handle extraction failed
                                 if extracted_thumbnail is None:
@@ -1351,7 +1351,7 @@ class RAWProcessor(QThread):
                                     extracted_thumbnail = self.thumbnail_extractor.extract_thumbnail_from_raw(self.file_path)
                                     fallback_time = time.time() - fallback_start
                                     if extracted_thumbnail is not None:
-                                        print(f"[PERF] 🔄 FALLBACK THUMBNAIL: Extracted via ThumbnailExtractor in {fallback_time*1000:.1f}ms")
+                                        safe_print(f"[PERF] 🔄 FALLBACK THUMBNAIL: Extracted via ThumbnailExtractor in {fallback_time*1000:.1f}ms")
                                 
                                 if self._should_stop:
                                     return
@@ -4674,7 +4674,7 @@ class RAWImageViewer(QMainWindow):
                                 elif orientation == 7:
                                     jpeg_image = jpeg_image.transpose(Image.Transpose.FLIP_LEFT_RIGHT).transpose(Image.Transpose.ROTATE_90)
                             except Exception as e:
-                                print(f"[LOAD] Failed to apply orientation to preview: {e}")
+                                safe_print(f"[LOAD] Failed to apply orientation to preview: {e}")
                                 # Fallback to auto-transpose if manual fail
                                 jpeg_image = ImageOps.exif_transpose(jpeg_image)
                             if jpeg_image.mode != 'RGB':
@@ -4774,9 +4774,9 @@ class RAWImageViewer(QMainWindow):
         return QPixmap(file_path)
     
     def __init__(self):
-        print("  [RAWImageViewer] Starting initialization...", flush=True)
+        safe_print("  [RAWImageViewer] Starting initialization...", flush=True)
         super().__init__()
-        print("  [RAWImageViewer] QMainWindow.__init__() completed", flush=True)
+        safe_print("  [RAWImageViewer] QMainWindow.__init__() completed", flush=True)
         self.current_image = None
         self.current_pixmap = None
 
@@ -4866,69 +4866,69 @@ class RAWImageViewer(QMainWindow):
         self._cleanup_in_progress = False  # Flag to track if cleanup is in progress
 
         # Initialize enhanced performance components
-        print("  [RAWImageViewer] Initializing image cache...", flush=True)
+        safe_print("  [RAWImageViewer] Initializing image cache...", flush=True)
         self.image_cache = get_image_cache()
-        print("  [RAWImageViewer] Image cache initialized", flush=True)
+        safe_print("  [RAWImageViewer] Image cache initialized", flush=True)
         # Pass RAWProcessor class to PreloadManager for consistent processing (legacy support)
-        print("  [RAWImageViewer] Initializing PreloadManager...", flush=True)
+        safe_print("  [RAWImageViewer] Initializing PreloadManager...", flush=True)
         self.preload_manager = PreloadManager(max_preload_threads=8, processor_class=RAWProcessor)
-        print("  [RAWImageViewer] PreloadManager initialized", flush=True)
+        safe_print("  [RAWImageViewer] PreloadManager initialized", flush=True)
         self.current_processor = None  # Legacy support - will be phased out
         self._pending_thumbnail = None  # Store thumbnail when not immediately displayed
         self._exif_data_ready = False  # Flag to track if EXIF data is available
         
         # Initialize new unified image load manager
-        print("  [RAWImageViewer] Initializing ImageLoadManager...", flush=True)
+        safe_print("  [RAWImageViewer] Initializing ImageLoadManager...", flush=True)
         self.image_manager = get_image_load_manager(max_workers=4)
-        print("  [RAWImageViewer] ImageLoadManager initialized", flush=True)
-        print("  [RAWImageViewer] Connecting ImageLoadManager signals...", flush=True)
+        safe_print("  [RAWImageViewer] ImageLoadManager initialized", flush=True)
+        safe_print("  [RAWImageViewer] Connecting ImageLoadManager signals...", flush=True)
         self._connect_image_manager_signals()
         self._save_session_debounce_timer = QTimer(self)
         self._save_session_debounce_timer.setSingleShot(True)
         self._save_session_debounce_timer.setInterval(420)
         self._save_session_debounce_timer.timeout.connect(self.save_session_state)
         self._defer_post_deletion_load_generation = 0
-        print("  [RAWImageViewer] ImageLoadManager signals connected", flush=True)
+        safe_print("  [RAWImageViewer] ImageLoadManager signals connected", flush=True)
 
         # Thumbnail display preferences
         # User preference: show thumbnails even at 100% zoom
         self.show_thumbnails_when_zoomed = False
 
         # Connect cache signals for performance monitoring
-        print("  [RAWImageViewer] Connecting cache signals...", flush=True)
+        safe_print("  [RAWImageViewer] Connecting cache signals...", flush=True)
         self.image_cache.cache_hit.connect(self.on_cache_hit)
         self.image_cache.memory_warning.connect(self.on_memory_warning)
-        print("  [RAWImageViewer] Cache signals connected", flush=True)
+        safe_print("  [RAWImageViewer] Cache signals connected", flush=True)
 
-        print("  [RAWImageViewer] Initializing UI...", flush=True)
+        safe_print("  [RAWImageViewer] Initializing UI...", flush=True)
         self.init_ui()
-        print("  [RAWImageViewer] UI initialized", flush=True)
+        safe_print("  [RAWImageViewer] UI initialized", flush=True)
 
         # macOS native title bar tweaks disabled for stability.
 
         # Display cache initialization message
-        print("  [RAWImageViewer] Getting cache stats...", flush=True)
+        safe_print("  [RAWImageViewer] Getting cache stats...", flush=True)
         cache_stats = self.image_cache.get_cache_stats()
         memory_info = cache_stats['memory_info']
-        print(f"✓ Enhanced image cache initialized", flush=True)
-        print(f"  Cache budget: {cache_stats['cache_budget_mb']}MB", flush=True)
-        print(
+        safe_print(f"✓ Enhanced image cache initialized", flush=True)
+        safe_print(f"  Cache budget: {cache_stats['cache_budget_mb']}MB", flush=True)
+        safe_print(
             f"  Max full images: {cache_stats['full_image_cache']['max_size']}", flush=True)
-        print(
+        safe_print(
             f"  Max thumbnails: {cache_stats['thumbnail_cache']['max_size']}", flush=True)
-        print(
+        safe_print(
             f"  Available memory: {memory_info['system_available_gb']:.1f}GB", flush=True)
         QTimer.singleShot(1000, self._cleanup_old_image_cache)
 
         # Restore last folder / file / view mode (opt-out: RAWVIEWER_DISABLE_SESSION_RESTORE=1)
         if os.environ.get("RAWVIEWER_DISABLE_SESSION_RESTORE", "0").strip() != "1":
-            print("  [RAWImageViewer] Restoring session state...", flush=True)
+            safe_print("  [RAWImageViewer] Restoring session state...", flush=True)
             if self.restore_session_state():
                 if hasattr(self, "view_mode") and self.view_mode == "gallery":
                     self._show_gallery_view()
         else:
-            print("  [RAWImageViewer] Session restore skipped (RAWVIEWER_DISABLE_SESSION_RESTORE)", flush=True)
-        print("  [RAWImageViewer] Initialization complete!", flush=True)
+            safe_print("  [RAWImageViewer] Session restore skipped (RAWVIEWER_DISABLE_SESSION_RESTORE)", flush=True)
+        safe_print("  [RAWImageViewer] Initialization complete!", flush=True)
 
     def _set_single_view_pixmap(self, base: QPixmap) -> None:
         """Set image_label pixmap with optional dashed focus / subject outline."""
@@ -5407,7 +5407,7 @@ class RAWImageViewer(QMainWindow):
         is_raw_file = file_ext in raw_extensions
         
         if is_raw_file:
-            print(f"[ORIENTATION] WARNING: RAW file {os.path.basename(file_path)} received as pixmap! Ensuring it is oriented.")
+            safe_print(f"[ORIENTATION] WARNING: RAW file {os.path.basename(file_path)} received as pixmap! Ensuring it is oriented.")
             # If it's a RAW file coming through here, it should ideally be oriented by the processor.
             # But as a safety measure, we check if we need to apply it ourselves.
             if not getattr(self, '_orientation_already_applied', False):
@@ -5421,7 +5421,7 @@ class RAWImageViewer(QMainWindow):
         # Set flag so display_pixmap doesn't apply it again
         self._orientation_already_applied = True
         
-        print(f"[ORIENTATION] on_manager_pixmap_ready: _orientation_already_applied = {self._orientation_already_applied}")
+        safe_print(f"[ORIENTATION] on_manager_pixmap_ready: _orientation_already_applied = {self._orientation_already_applied}")
         # Pixmap from manager is always full resolution for non-RAW files
         self._is_half_size_displayed = False
         logger.debug(f"[MANAGER] Setting _is_half_size_displayed=False for full resolution pixmap")
@@ -5960,7 +5960,7 @@ class RAWImageViewer(QMainWindow):
                 self.view_mode_button.setIcon(gallery_icon)
                 self.view_mode_button.setIconSize(QSize(20, 20))
             except Exception as e:
-                print(f"[WARNING] Failed to set qtawesome icon: {e}, using text fallback", flush=True)
+                safe_print(f"[WARNING] Failed to set qtawesome icon: {e}, using text fallback", flush=True)
                 self.view_mode_button.setText("Gallery")
         else:
             self.view_mode_button.setText("Gallery")
@@ -6028,24 +6028,23 @@ class RAWImageViewer(QMainWindow):
         self.search_expand_layout.setContentsMargins(0, 0, 0, 0)
 
         self.gallery_search_panel = QWidget()
-        _gsp = QVBoxLayout(self.gallery_search_panel)
-        _gsp.setContentsMargins(0, 0, 0, 0)
-        _gsp.setSpacing(4)
+        _gsp = QHBoxLayout(self.gallery_search_panel)
+        _gsp.setContentsMargins(0, 0, 10, 0)
+        _gsp.setSpacing(8)
 
         self.gallery_search_status_label = QLabel("")
         self.gallery_search_status_label.setAlignment(
             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
         )
         self.gallery_search_status_label.setWordWrap(False)
-        self.gallery_search_style_status = """
+        self.gallery_search_status_label.setStyleSheet("""
             QLabel {
                 color: #B0B0B0;
                 font-size: 12px;
                 font-weight: 500;
-                padding: 0px 0px 0px 6px;
+                padding: 0px 0px 0px 4px;
             }
-        """
-        self.gallery_search_status_label.setStyleSheet(self.gallery_search_style_status)
+        """)
         self.gallery_search_status_label.hide()
 
         self.gallery_search_input = QLineEdit()
@@ -6069,11 +6068,12 @@ class RAWImageViewer(QMainWindow):
         self.gallery_search_input.returnPressed.connect(self._semantic_search_from_bar)
         self.gallery_search_input.textChanged.connect(self._on_gallery_search_text_changed)
 
-        _gsp.addWidget(self.gallery_search_status_label)
         _gsp.addWidget(self.gallery_search_input)
+        _gsp.addWidget(self.gallery_search_status_label)
+        _gsp.addStretch(1)
         self.search_expand_layout.addWidget(self.gallery_search_panel)
         self.search_expand_layout.setCurrentWidget(self.gallery_search_panel)
-        self._search_panel_target_width = 560
+        self._search_panel_target_width = 900
         self._search_panel_expanded = False
         self._search_panel_animation = None
         left_buttons_layout.addWidget(self.search_expand_container, 0, alignment=Qt.AlignmentFlag.AlignVCenter)
@@ -6283,15 +6283,26 @@ class RAWImageViewer(QMainWindow):
         return self._semantic_index
 
     def _set_gallery_search_status(self, message: str):
+        has_msg = bool(message and str(message).strip())
+        old_target = getattr(self, "_search_panel_target_width", 560)
+        new_target = 900 if has_msg else 560
+        self._search_panel_target_width = new_target
+
         if hasattr(self, "gallery_search_status_label") and self.gallery_search_status_label is not None:
             self.gallery_search_status_label.setText(message or "")
-            if message and str(message).strip():
+            if has_msg:
                 self.gallery_search_status_label.show()
             else:
                 self.gallery_search_status_label.hide()
+        
         if getattr(self, "view_mode", "single") != "gallery":
             return
-        self._set_search_panel_expanded(True)
+            
+        # If target changed and we are already expanded, re-run expansion to update width
+        if old_target != new_target and getattr(self, "_search_panel_expanded", False):
+            self._set_search_panel_expanded(True, animate=True)
+        elif has_msg:
+            self._set_search_panel_expanded(True)
 
     def _set_gallery_search_input_visible(self):
         if getattr(self, "view_mode", "single") != "gallery":
@@ -8685,7 +8696,7 @@ class RAWImageViewer(QMainWindow):
         
         sort_time = time.time() - sort_start
         logger.info(f"[SORT] Bulk metadata fetch & sort of {len(file_paths)} files took {sort_time:.3f}s")
-        print(f"[PERF] 🔄 Sorted {len(file_paths)} files in {sort_time*1000:.1f}ms")
+        safe_print(f"[PERF] 🔄 Sorted {len(file_paths)} files in {sort_time*1000:.1f}ms")
         return sorted_files, bulk_metadata
     
     def sort_image_files(self, file_paths, file_stats=None):
@@ -9416,7 +9427,7 @@ class RAWImageViewer(QMainWindow):
             requested_file_path = file_path
             
             logger.info(f"[LOAD] File exists, proceeding with load")
-            print(f"[PERF] Loading image: {os.path.basename(requested_file_path)}")
+            safe_print(f"[PERF] Loading image: {os.path.basename(requested_file_path)}")
             
             # Note: Navigation concurrency is controlled by can_navigate() in navigation methods
             # We don't check _navigation_in_progress here because load_raw_image may be called
@@ -9511,7 +9522,7 @@ class RAWImageViewer(QMainWindow):
             cache_check_time = time.time() - cache_check_start
             if cached_image is not None:
                 logger.info(f"[LOAD] Cache hit: full image found for {filename}, shape: {cached_image.shape}")
-                print(f"[PERF] ✅ CACHE HIT: Full image loaded from cache in {cache_check_time*1000:.1f}ms")
+                safe_print(f"[PERF] ✅ CACHE HIT: Full image loaded from cache in {cache_check_time*1000:.1f}ms")
                 self.status_bar.showMessage(f"Loaded {filename} from cache")
                 try:
                     logger.info(f"[LOAD] Displaying cached full image")
@@ -9562,7 +9573,7 @@ class RAWImageViewer(QMainWindow):
                 cache_check_time = time.time() - cache_check_start
                 if cached_pixmap is not None:
                     logger.info(f"[LOAD] Cache hit: pixmap found for {filename}, size: {cached_pixmap.width()}x{cached_pixmap.height()}")
-                    print(f"[PERF] ✅ CACHE HIT: Pixmap loaded from cache in {cache_check_time*1000:.1f}ms")
+                    safe_print(f"[PERF] ✅ CACHE HIT: Pixmap loaded from cache in {cache_check_time*1000:.1f}ms")
                     self.status_bar.showMessage(f"Loaded {filename} from cache")
                     try:
                         # CRITICAL: Apply orientation correction to cached pixmap
@@ -9608,7 +9619,7 @@ class RAWImageViewer(QMainWindow):
             # No cache hit, use new unified image load manager
             cache_miss_time = time.time() - load_start
             logger.info(f"[LOAD] No cache hit, starting unified image load manager (elapsed: {cache_miss_time:.3f}s)")
-            print(f"[PERF] ❌ CACHE MISS: Starting processing (cache check took {cache_miss_time*1000:.1f}ms)")
+            safe_print(f"[PERF] ❌ CACHE MISS: Starting processing (cache check took {cache_miss_time*1000:.1f}ms)")
             self.status_bar.showMessage(f"Loading {filename}...")
             # Set loading message with proper alignment (centered both vertically and horizontally)
             # Ensure label fills the viewport for proper centering
@@ -9673,7 +9684,7 @@ class RAWImageViewer(QMainWindow):
             
             manager_request_time = time.time() - manager_start
             logger.info(f"[LOAD] Image load requested in {manager_request_time:.3f}s")
-            print(f"[PERF] 📊 SETUP TIME: {manager_request_time*1000:.1f}ms (cleanup: {cleanup_time*1000:.1f}ms)")
+            safe_print(f"[PERF] 📊 SETUP TIME: {manager_request_time*1000:.1f}ms (cleanup: {cleanup_time*1000:.1f}ms)")
 
             self.setFocus()
             # Save session state when image changes
@@ -9692,14 +9703,14 @@ class RAWImageViewer(QMainWindow):
             
             total_time = time.time() - load_start
             logger.info(f"[LOAD] ========== load_raw_image() COMPLETED for {filename} in {total_time:.3f}s ==========")
-            print(f"[PERF] ✅ LOAD COMPLETE: {os.path.basename(requested_file_path)} in {total_time*1000:.1f}ms")
+            safe_print(f"[PERF] ✅ LOAD COMPLETE: {os.path.basename(requested_file_path)} in {total_time*1000:.1f}ms")
         except Exception as e:
             total_time = time.time() - load_start
             logger.error(f"[LOAD] ========== CRITICAL ERROR in load_raw_image (at {time.time():.3f}, duration: {total_time:.3f}s) ==========")
             logger.error(f"[LOAD] Exception type: {type(e).__name__}, message: {e}", exc_info=True)
             logger.error(f"[LOAD] Full traceback:\n{traceback.format_exc()}")
             requested_file_name = requested_file_path if 'requested_file_path' in locals() else (file_path if 'file_path' in locals() else 'unknown')
-            print(f"[PERF] ❌ LOAD ERROR: {os.path.basename(requested_file_name)} failed after {total_time*1000:.1f}ms - {type(e).__name__}: {e}")
+            safe_print(f"[PERF] ❌ LOAD ERROR: {os.path.basename(requested_file_name)} failed after {total_time*1000:.1f}ms - {type(e).__name__}: {e}")
             if hasattr(self, "loading_overlay"):
                 self.loading_overlay.hide_loading()
             # Try to show error to user
@@ -9801,7 +9812,7 @@ class RAWImageViewer(QMainWindow):
 
     def on_memory_warning(self, memory_percent):
         """Handle memory warning events."""
-        print(f"⚠️ Memory usage high: {memory_percent:.1f}%")
+        safe_print(f"⚠️ Memory usage high: {memory_percent:.1f}%")
 
     def _should_show_thumbnail(self):
         """Determine if we should show thumbnail immediately or wait for full image."""
@@ -9936,7 +9947,7 @@ class RAWImageViewer(QMainWindow):
                 # Check if orientation was already applied (e.g., by UnifiedImageProcessor)
                 orientation_already_applied = getattr(self, '_orientation_already_applied', False)
                 # Console log: _orientation_already_applied value in display_numpy_image
-                print(f"[ORIENTATION] display_numpy_image: _orientation_already_applied = {orientation_already_applied}")
+                safe_print(f"[ORIENTATION] display_numpy_image: _orientation_already_applied = {orientation_already_applied}")
                 if not orientation_already_applied:
                     orientation = self.get_orientation_from_exif(self.current_file_path)
                     if orientation != 1:
@@ -9946,7 +9957,7 @@ class RAWImageViewer(QMainWindow):
                         logger.debug(f"[DISPLAY] Orientation is 1 (normal), no correction needed")
                 else:
                     logger.debug(f"[DISPLAY] Orientation already applied by processor, skipping")
-                    print(f"[ORIENTATION] display_numpy_image: Skipping orientation correction (already applied)")
+                    safe_print(f"[ORIENTATION] display_numpy_image: Skipping orientation correction (already applied)")
             # Set _is_half_size_displayed flag based on image dimensions
             # This is important for zoom detection - if user zooms in, we need to load full resolution
             max_dimension = max(width, height)
@@ -10003,7 +10014,7 @@ class RAWImageViewer(QMainWindow):
                 self._finish_nav_zoom_preserve()
             total_time = time.time() - display_start
             logger.info(f"[DISPLAY] RAW image displayed successfully: {width}x{height} (pixmap display: {pixmap_display_time:.3f}s, total: {total_time:.3f}s)")
-            print(f"[PERF] 🖼️  DISPLAY COMPLETE: {width}x{height} (pixmap: {pixmap_display_time*1000:.1f}ms, total: {total_time*1000:.1f}ms)")
+            safe_print(f"[PERF] 🖼️  DISPLAY COMPLETE: {width}x{height} (pixmap: {pixmap_display_time*1000:.1f}ms, total: {total_time*1000:.1f}ms)")
 
         except Exception as e:
             total_time = time.time() - display_start
@@ -10861,7 +10872,7 @@ class RAWImageViewer(QMainWindow):
             
             if processor_file and processor_file != current_file:
                 logger.warning(f"[PROCESS] Signal mismatch: processor file ({os.path.basename(processor_file)}) != current file ({current_file_basename}). Skipping processing to avoid displaying wrong image.")
-                print(f"[PERF] ⚠️  SKIP PROCESSING: File changed (processor: {os.path.basename(processor_file)}, current: {current_file_basename})")
+                safe_print(f"[PERF] ⚠️  SKIP PROCESSING: File changed (processor: {os.path.basename(processor_file)}, current: {current_file_basename})")
                 # Skip processing - this image is no longer relevant
                 return
         
@@ -11146,10 +11157,10 @@ class RAWImageViewer(QMainWindow):
                     if hasattr(self, '_last_navigation_start'):
                         total_time = time.time() - self._last_navigation_start
                         logger.info(f"RAW image displayed successfully: {width}x{height} (total from navigation: {total_time:.3f}s)")
-                        print(f"[PERF] 🖼️  IMAGE DISPLAYED: {width}x{height} (total navigation time: {total_time*1000:.1f}ms)")
+                        safe_print(f"[PERF] 🖼️  IMAGE DISPLAYED: {width}x{height} (total navigation time: {total_time*1000:.1f}ms)")
                     else:
                         logger.info(f"RAW image displayed successfully: {width}x{height}")
-                        print(f"[PERF] 🖼️  IMAGE DISPLAYED: {width}x{height}")
+                        safe_print(f"[PERF] 🖼️  IMAGE DISPLAYED: {width}x{height}")
                 except Exception as e:
                     import logging
                     import traceback
@@ -11360,7 +11371,7 @@ class RAWImageViewer(QMainWindow):
         # 3. Users should be able to navigate quickly if the previous navigation completed
         if nav_in_progress:
             logger.warning(f"[NAV_CHECK] Navigation BLOCKED: navigation already in progress")
-            print(f"[PERF] 🚫 NAVIGATION BLOCKED: Already in progress")
+            safe_print(f"[PERF] 🚫 NAVIGATION BLOCKED: Already in progress")
             return False
         
         logger.debug(f"[NAV_CHECK] Navigation ALLOWED")
@@ -11383,7 +11394,7 @@ class RAWImageViewer(QMainWindow):
         if self._navigation_timer is not None:
             self._navigation_timer.stop()
             if had_pending:
-                print(f"[PERF] 🔄 DEBOUNCE: Cancelled previous navigation, queued new {direction} request")
+                safe_print(f"[PERF] 🔄 DEBOUNCE: Cancelled previous navigation, queued new {direction} request")
         
         # Create a new timer with short delay (50ms) to batch rapid key presses
         # This allows users to press keys rapidly, but only the last navigation within 50ms will execute
@@ -11394,7 +11405,7 @@ class RAWImageViewer(QMainWindow):
         
         logger.debug(f"[NAV_DEBOUNCE] Navigation request queued: {direction}")
         if not had_pending:
-            print(f"[PERF] ⏱️  DEBOUNCE: Navigation {direction} queued (50ms delay)")
+            safe_print(f"[PERF] ⏱️  DEBOUNCE: Navigation {direction} queued (50ms delay)")
     
     def _execute_pending_navigation(self):
         """Execute the pending navigation after debounce delay"""
@@ -11411,7 +11422,7 @@ class RAWImageViewer(QMainWindow):
         
         logger.debug(f"[NAV_DEBOUNCE] Executing pending navigation: {direction}")
         nav_start = time.time()
-        print(f"[PERF] ▶️  EXECUTING: Navigation {direction} (after debounce)")
+        safe_print(f"[PERF] ▶️  EXECUTING: Navigation {direction} (after debounce)")
         
         if direction == 'prev':
             self.navigate_to_previous_image()
@@ -11419,7 +11430,7 @@ class RAWImageViewer(QMainWindow):
             self.navigate_to_next_image()
         
         nav_time = time.time() - nav_start
-        print(f"[PERF] ✅ NAVIGATION COMPLETE: {direction} took {nav_time*1000:.1f}ms")
+        safe_print(f"[PERF] ✅ NAVIGATION COMPLETE: {direction} took {nav_time*1000:.1f}ms")
     
     def start_navigation(self):
         """Mark navigation as started"""
@@ -12046,7 +12057,7 @@ class RAWImageViewer(QMainWindow):
         # Log scaling information
         logger.info(f"[IMAGE_SCALE] Scaling image: original={original_size.width()}x{original_size.height()}, "
                    f"available={max_width}x{max_height}, scaled={scaled_size.width()}x{scaled_size.height()}")
-        print(f"[IMAGE_SCALE] Original: {original_size.width()}x{original_size.height()} -> "
+        safe_print(f"[IMAGE_SCALE] Original: {original_size.width()}x{original_size.height()} -> "
               f"Scaled: {scaled_size.width()}x{scaled_size.height()} (available: {max_width}x{max_height})")
         
         self._set_single_view_pixmap(scaled_pixmap)
@@ -12067,7 +12078,7 @@ class RAWImageViewer(QMainWindow):
         
         # Log 100% zoom information
         logger.info(f"[IMAGE_SCALE] Setting to 100% zoom: {original_size.width()}x{original_size.height()}")
-        print(f"[IMAGE_SCALE] 100% zoom: {original_size.width()}x{original_size.height()}")
+        safe_print(f"[IMAGE_SCALE] 100% zoom: {original_size.width()}x{original_size.height()}")
 
         # Set original pixmap without scaling
         self._set_single_view_pixmap(self.current_pixmap)
@@ -12122,25 +12133,25 @@ class RAWImageViewer(QMainWindow):
         
         # Log window size change
         logger.info(f"[WINDOW_RESIZE] Window size changed: {old_size.width()}x{old_size.height()} -> {new_size.width()}x{new_size.height()}")
-        print(f"[WINDOW_RESIZE] Window: {old_size.width()}x{old_size.height()} -> {new_size.width()}x{new_size.height()}")
+        safe_print(f"[WINDOW_RESIZE] Window: {old_size.width()}x{old_size.height()} -> {new_size.width()}x{new_size.height()}")
         
         # Log scroll area (viewing section) size
         if hasattr(self, 'scroll_area') and self.scroll_area:
             scroll_size = self.scroll_area.size()
             logger.info(f"[WINDOW_RESIZE] Scroll area size: {scroll_size.width()}x{scroll_size.height()}")
-            print(f"[WINDOW_RESIZE] Scroll area: {scroll_size.width()}x{scroll_size.height()}")
+            safe_print(f"[WINDOW_RESIZE] Scroll area: {scroll_size.width()}x{scroll_size.height()}")
             
             # Log viewport size
             if hasattr(self.scroll_area, 'viewport') and self.scroll_area.viewport():
                 viewport_size = self.scroll_area.viewport().size()
                 logger.info(f"[WINDOW_RESIZE] Viewport size: {viewport_size.width()}x{viewport_size.height()}")
-                print(f"[WINDOW_RESIZE] Viewport: {viewport_size.width()}x{viewport_size.height()}")
+                safe_print(f"[WINDOW_RESIZE] Viewport: {viewport_size.width()}x{viewport_size.height()}")
         
         # Log current image resolution if available
         if hasattr(self, 'current_pixmap') and self.current_pixmap and not self.current_pixmap.isNull():
             pixmap_size = self.current_pixmap.size()
             logger.info(f"[WINDOW_RESIZE] Current image resolution: {pixmap_size.width()}x{pixmap_size.height()}")
-            print(f"[WINDOW_RESIZE] Image resolution: {pixmap_size.width()}x{pixmap_size.height()}")
+            safe_print(f"[WINDOW_RESIZE] Image resolution: {pixmap_size.width()}x{pixmap_size.height()}")
             
             # Log displayed image size (scaled size)
             if hasattr(self, 'image_label') and self.image_label:
@@ -12148,24 +12159,24 @@ class RAWImageViewer(QMainWindow):
                 if label_pixmap and not label_pixmap.isNull():
                     displayed_size = label_pixmap.size()
                     logger.info(f"[WINDOW_RESIZE] Displayed image size: {displayed_size.width()}x{displayed_size.height()}")
-                    print(f"[WINDOW_RESIZE] Displayed size: {displayed_size.width()}x{displayed_size.height()}")
+                    safe_print(f"[WINDOW_RESIZE] Displayed size: {displayed_size.width()}x{displayed_size.height()}")
         
         # Log gallery view size if in gallery mode
         if hasattr(self, 'view_mode') and self.view_mode == 'gallery':
             if hasattr(self, 'gallery_widget') and self.gallery_widget:
                 gallery_size = self.gallery_widget.size()
                 logger.info(f"[WINDOW_RESIZE] Gallery widget size: {gallery_size.width()}x{gallery_size.height()}")
-                print(f"[WINDOW_RESIZE] Gallery widget: {gallery_size.width()}x{gallery_size.height()}")
+                safe_print(f"[WINDOW_RESIZE] Gallery widget: {gallery_size.width()}x{gallery_size.height()}")
             
             if hasattr(self, 'gallery_scroll') and self.gallery_scroll:
                 gallery_scroll_size = self.gallery_scroll.size()
                 logger.info(f"[WINDOW_RESIZE] Gallery scroll area size: {gallery_scroll_size.width()}x{gallery_scroll_size.height()}")
-                print(f"[WINDOW_RESIZE] Gallery scroll: {gallery_scroll_size.width()}x{gallery_scroll_size.height()}")
+                safe_print(f"[WINDOW_RESIZE] Gallery scroll: {gallery_scroll_size.width()}x{gallery_scroll_size.height()}")
                 
                 if hasattr(self.gallery_scroll, 'viewport') and self.gallery_scroll.viewport():
                     gallery_viewport_size = self.gallery_scroll.viewport().size()
                     logger.info(f"[WINDOW_RESIZE] Gallery viewport size: {gallery_viewport_size.width()}x{gallery_viewport_size.height()}")
-                    print(f"[WINDOW_RESIZE] Gallery viewport: {gallery_viewport_size.width()}x{gallery_viewport_size.height()}")
+                    safe_print(f"[WINDOW_RESIZE] Gallery viewport: {gallery_viewport_size.width()}x{gallery_viewport_size.height()}")
         
         # No rounded corners to update
         # Rescale image when window is resized, but only in fit-to-window mode
@@ -12337,7 +12348,7 @@ class RAWImageViewer(QMainWindow):
             super().mouseReleaseEvent(event)
         except Exception as e:
             # Unhandled Python exceptions inside Qt event handlers can abort the app on macOS.
-            print(f"mouseReleaseEvent error (ignored): {e}")
+            safe_print(f"mouseReleaseEvent error (ignored): {e}")
             self._resize_edge_active = None
             self._is_resizing = False
             try:
@@ -14092,7 +14103,7 @@ def main():
     import traceback
     
     # Print to console immediately (before logging might be ready)
-    print("main() function called", flush=True)
+    safe_print("main() function called", flush=True)
     
     # Logging should already be setup in if __name__ == '__main__'
     # But check if it's configured, if not, setup it
@@ -14108,21 +14119,21 @@ def main():
             logger.info("=" * 80)
         except Exception as log_error:
             # If logging setup fails, at least print to stderr
-            print(f"ERROR: Failed to setup logging: {log_error}", file=sys.stderr)
-            print(f"Traceback: {traceback.format_exc()}", file=sys.stderr)
+            safe_print_err(f"ERROR: Failed to setup logging: {log_error}")
+            safe_print_err(f"Traceback: {traceback.format_exc()}")
     else:
         # Logging already configured, just log startup
-        print("[MAIN] Logging already configured, logging startup info...", flush=True)
+        safe_print("[MAIN] Logging already configured, logging startup info...", flush=True)
         logger.info("=" * 80)
-        print("[MAIN] Logger.info('=' * 80) called", flush=True)
+        safe_print("[MAIN] Logger.info('=' * 80) called", flush=True)
         logger.info("Application startup started")
-        print("[MAIN] Logger.info('Application startup started') called", flush=True)
+        safe_print("[MAIN] Logger.info('Application startup started') called", flush=True)
         logger.info(f"Python version: {sys.version}")
-        print(f"[MAIN] Python version logged: {sys.version}", flush=True)
-        print("[MAIN] Getting platform info...", flush=True)
+        safe_print(f"[MAIN] Python version logged: {sys.version}", flush=True)
+        safe_print("[MAIN] Getting platform info...", flush=True)
         # Temporarily skip platform info to avoid potential blocking
         # Use hardcoded values for Windows
-        print("[MAIN] Using hardcoded platform info (Windows) to avoid blocking...", flush=True)
+        safe_print("[MAIN] Using hardcoded platform info (Windows) to avoid blocking...", flush=True)
         platform_system = "Windows"
         platform_release = "10"
         try:
@@ -14142,30 +14153,30 @@ def main():
             if platform_result[0] and platform_result[1]:
                 platform_system = platform_result[0]
                 platform_release = platform_result[1]
-                print(f"[MAIN] Got platform info: {platform_system} {platform_release}", flush=True)
+                safe_print(f"[MAIN] Got platform info: {platform_system} {platform_release}", flush=True)
             else:
-                print(f"[MAIN] Using fallback platform info: {platform_system} {platform_release}", flush=True)
+                safe_print(f"[MAIN] Using fallback platform info: {platform_system} {platform_release}", flush=True)
         except Exception as e:
-            print(f"[MAIN] Error getting platform info, using fallback: {e}", flush=True)
+            safe_print(f"[MAIN] Error getting platform info, using fallback: {e}", flush=True)
         
-        print("[MAIN] Calling logger.info for platform...", flush=True)
+        safe_print("[MAIN] Calling logger.info for platform...", flush=True)
         logger.info(f"Platform: {platform_system} {platform_release}")
-        print(f"[MAIN] Platform logged: {platform_system} {platform_release}", flush=True)
+        safe_print(f"[MAIN] Platform logged: {platform_system} {platform_release}", flush=True)
         logger.info(f"Working directory: {os.getcwd()}")
-        print(f"[MAIN] Working directory logged: {os.getcwd()}", flush=True)
+        safe_print(f"[MAIN] Working directory logged: {os.getcwd()}", flush=True)
         logger.info("=" * 80)
-        print("[MAIN] All platform info logged, setting up Windows exception handler...", flush=True)
+        safe_print("[MAIN] All platform info logged, setting up Windows exception handler...", flush=True)
     
     # Set up Windows exception handler to catch access violations
     # Use platform_system variable to avoid calling platform.system() again
     is_windows = (platform_system == 'Windows')
     if is_windows:
-        print("  [Windows] Importing ctypes...", flush=True)
+        safe_print("  [Windows] Importing ctypes...", flush=True)
         import ctypes
-        print("  [Windows] ctypes imported", flush=True)
-        print("  [Windows] Importing wintypes...", flush=True)
+        safe_print("  [Windows] ctypes imported", flush=True)
+        safe_print("  [Windows] Importing wintypes...", flush=True)
         from ctypes import wintypes
-        print("  [Windows] wintypes imported", flush=True)
+        safe_print("  [Windows] wintypes imported", flush=True)
         
         # Define exception handler function
         def exception_handler(exception_info):
@@ -14178,33 +14189,33 @@ def main():
                 error_msg = f"Access Violation (0xC0000005) at address {exception_address}"
                 logger.critical(f"Windows Access Violation: {error_msg}")
                 logger.critical(f"This usually indicates accessing invalid memory (null pointer, freed object, etc.)")
-                print(f"\n{'='*80}", file=sys.stderr)
-                print(f"WINDOWS ACCESS VIOLATION", file=sys.stderr)
-                print(f"{'='*80}", file=sys.stderr)
-                print(f"{error_msg}", file=sys.stderr)
-                print(f"{'='*80}\n", file=sys.stderr)
+                safe_print_err(f"\n{'='*80}")
+                safe_print_err(f"WINDOWS ACCESS VIOLATION")
+                safe_print_err(f"{'='*80}")
+                safe_print_err(f"{error_msg}")
+                safe_print_err(f"{'='*80}\n")
                 return 1  # EXCEPTION_EXECUTE_HANDLER
             return 0  # EXCEPTION_CONTINUE_SEARCH
         
         # Note: Setting up structured exception handling in Python is complex
         # We'll rely on Python's exception handling and add more defensive checks
-        print("  [Windows] Exception handler setup complete", flush=True)
+        safe_print("  [Windows] Exception handler setup complete", flush=True)
     else:
-        print("  [Non-Windows] Skipping Windows exception handler", flush=True)
+        safe_print("  [Non-Windows] Skipping Windows exception handler", flush=True)
     
-    print("Entering main try block...", flush=True)
+    safe_print("Entering main try block...", flush=True)
     try:
-        print("Creating QApplication...", flush=True)
+        safe_print("Creating QApplication...", flush=True)
         # Set AppUserModelID to ensure the icon is displayed correctly on the taskbar on Windows
         # Use is_windows variable to avoid calling platform.system() again
         if is_windows:
-            print("  [Windows] Setting AppUserModelID...", flush=True)
+            safe_print("  [Windows] Setting AppUserModelID...", flush=True)
             myappid = 'RAWviewer.1.8.0'
             ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
-            print("  [Windows] AppUserModelID set", flush=True)
+            safe_print("  [Windows] AppUserModelID set", flush=True)
 
         app = RAWApplication(sys.argv)
-        print("RAWApplication created successfully", flush=True)
+        safe_print("RAWApplication created successfully", flush=True)
 
         # Set application properties
         app.setApplicationName("RAW Image Viewer")
@@ -14235,7 +14246,7 @@ def main():
         # macOS native title bar tweaks disabled for stability.
 
         # Create and show splash screen
-        print("Creating splash screen...", flush=True)
+        safe_print("Creating splash screen...", flush=True)
         splash_pixmap = None
         # Use resource_path to find icon, ensuring it works when bundled
         splash_path = resource_path(os.path.join('icons', 'appicon.png'))
@@ -14260,12 +14271,12 @@ def main():
         splash = QSplashScreen(splash_pixmap, Qt.WindowType.WindowStaysOnTopHint)
         splash.show()
         app.processEvents()  # Process events to show splash screen immediately
-        print("Splash screen displayed", flush=True)
+        safe_print("Splash screen displayed", flush=True)
 
         # Create and show main window
-        print("Creating RAWImageViewer...", flush=True)
+        safe_print("Creating RAWImageViewer...", flush=True)
         viewer = RAWImageViewer()
-        print("RAWImageViewer created successfully", flush=True)
+        safe_print("RAWImageViewer created successfully", flush=True)
         
         # Connect viewer to application to handle macOS file open events
         app.set_viewer(viewer)
@@ -14284,7 +14295,7 @@ def main():
         viewer.show()
         # macOS native title bar tweaks disabled for stability.
         splash.finish(viewer)  # Close splash screen when main window is ready
-        print("Splash screen closed, main window displayed", flush=True)
+        safe_print("Splash screen closed, main window displayed", flush=True)
 
         # Run application
         logger.info(f"[MAIN] Starting Qt event loop")
@@ -14298,17 +14309,17 @@ def main():
             logger.critical(f"[MAIN]   2. Qt object accessed from wrong thread")
             logger.critical(f"[MAIN]   3. Memory corruption in rawpy/Qt")
             logger.critical(f"[MAIN]   4. Signal/slot connection to deleted object")
-            print(f"\n{'='*80}", file=sys.stderr)
-            print(f"ACCESS VIOLATION DETECTED (0xC0000005)", file=sys.stderr)
-            print(f"{'='*80}", file=sys.stderr)
-            print(f"This error indicates the application tried to access invalid memory.", file=sys.stderr)
-            print(f"Possible causes:", file=sys.stderr)
-            print(f"  - Qt object accessed from wrong thread", file=sys.stderr)
-            print(f"  - Accessing deleted/freed object", file=sys.stderr)
-            print(f"  - Memory corruption in rawpy or Qt library", file=sys.stderr)
-            print(f"  - Signal connected to deleted slot", file=sys.stderr)
-            print(f"\nCheck the log file for detailed information.", file=sys.stderr)
-            print(f"{'='*80}\n", file=sys.stderr)
+            safe_print_err(f"\n{'='*80}")
+            safe_print_err(f"ACCESS VIOLATION DETECTED (0xC0000005)")
+            safe_print_err(f"{'='*80}")
+            safe_print_err(f"This error indicates the application tried to access invalid memory.")
+            safe_print_err(f"Possible causes:")
+            safe_print_err(f"  - Qt object accessed from wrong thread")
+            safe_print_err(f"  - Accessing deleted/freed object")
+            safe_print_err(f"  - Memory corruption in rawpy or Qt library")
+            safe_print_err(f"  - Signal connected to deleted slot")
+            safe_print_err(f"\nCheck the log file for detailed information.")
+            safe_print_err(f"{'='*80}\n")
         
         logger.info(f"[MAIN] Application exited with code: {exit_code}")
         # Use os._exit to force kill any lingering background threads (like database connections or rawpy)
@@ -14318,7 +14329,7 @@ def main():
         
     except KeyboardInterrupt:
         logger.info("Application interrupted by user (Ctrl+C)")
-        print("\n[INFO] Application interrupted by user (Ctrl+C)")
+        safe_print("\n[INFO] Application interrupted by user (Ctrl+C)")
         sys.exit(0)
     except SystemExit as e:
         # Re-raise SystemExit to preserve exit code
@@ -14333,13 +14344,13 @@ def main():
         logger.critical(f"Full traceback:\n{error_traceback}")
         
         # Also print to console/stderr so it's visible even if logging fails
-        print(f"\n{'='*80}", file=sys.stderr)
-        print(f"FATAL ERROR", file=sys.stderr)
-        print(f"{'='*80}", file=sys.stderr)
-        print(f"{error_msg}", file=sys.stderr)
-        print(f"\nFull traceback:", file=sys.stderr)
-        print(f"{error_traceback}", file=sys.stderr)
-        print(f"{'='*80}\n", file=sys.stderr)
+        safe_print_err(f"\n{'='*80}")
+        safe_print_err(f"FATAL ERROR")
+        safe_print_err(f"{'='*80}")
+        safe_print_err(f"{error_msg}")
+        safe_print_err(f"\nFull traceback:")
+        safe_print_err(f"{error_traceback}")
+        safe_print_err(f"{'='*80}\n")
         
         # Try to show error dialog if possible
         try:
@@ -14360,27 +14371,27 @@ def main():
 
 if __name__ == '__main__':
     # Print startup message to console immediately
-    print("=" * 80, flush=True)
-    print("RAWviewer Starting...", flush=True)
-    print("=" * 80, flush=True)
+    safe_print("=" * 80, flush=True)
+    safe_print("RAWviewer Starting...", flush=True)
+    safe_print("=" * 80, flush=True)
     
     # Setup logging before anything else
     try:
-        print("Setting up logging...", flush=True)
+        safe_print("Setting up logging...", flush=True)
         setup_logging()
-        print("Logging setup complete.", flush=True)
+        safe_print("Logging setup complete.", flush=True)
     except Exception as e:
-        print(f"ERROR: Failed to setup logging: {e}", file=sys.stderr, flush=True)
+        safe_print_err(f"ERROR: Failed to setup logging: {e}", flush=True)
         import traceback
-        print(f"Traceback: {traceback.format_exc()}", file=sys.stderr, flush=True)
+        safe_print_err(f"Traceback: {traceback.format_exc()}", flush=True)
     
     try:
-        print("Calling main()...", flush=True)
+        safe_print("Calling main()...", flush=True)
         main()
     except Exception as e:
-        print(f"\n{'='*80}", file=sys.stderr, flush=True)
-        print(f"FATAL ERROR in main(): {type(e).__name__}: {e}", file=sys.stderr, flush=True)
+        safe_print_err(f"\n{'='*80}", flush=True)
+        safe_print_err(f"FATAL ERROR in main(): {type(e).__name__}: {e}", flush=True)
         import traceback
-        print(f"Traceback:\n{traceback.format_exc()}", file=sys.stderr, flush=True)
-        print(f"{'='*80}\n", file=sys.stderr, flush=True)
+        safe_print_err(f"Traceback:\n{traceback.format_exc()}", flush=True)
+        safe_print_err(f"{'='*80}\n", flush=True)
         raise

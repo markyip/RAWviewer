@@ -468,6 +468,17 @@ def main():
             print("[INFO] PyInstaller: bundling onnxruntime with --collect-all.")
         except ImportError:
             print("[WARNING] onnxruntime not found; semantic search may be disabled on Windows.")
+            
+        # Exclude heavy libraries on Windows to keep the build "Light"
+        cmd_base.extend([
+            "--exclude-module", "torch",
+            "--exclude-module", "torchvision",
+            "--exclude-module", "tensorboard",
+            "--exclude-module", "sentence_transformers",
+            "--exclude-module", "transformers",
+            "--exclude-module", "scipy",
+            "--exclude-module", "matplotlib",
+        ])
     
     if platform.system() == 'Darwin':
         cmd_base.append("--onedir")
