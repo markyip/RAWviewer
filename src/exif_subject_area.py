@@ -28,6 +28,8 @@ from __future__ import annotations
 
 import re
 import struct
+import functools
+import os
 from typing import Any
 
 
@@ -368,84 +370,6 @@ def _nikon_afinfo2_rect_and_reference(
     return best[1], best[2], best[3]
 
 
-def _rect_ref_from_nikon_afinfo2_row(
-    row: dict[str, Any], ref_w: int, ref_h: int, pixmap_w: int, pixmap_h: int, orientation: int = 1
-) -> tuple[tuple[int, int, int, int], str] | None:
-    raw_s = _pick(row, "AFInfo2")
-    if raw_s is None:
-        return None
-    b = _bytes_from_space_separated_uint8_string(str(raw_s))
-    if not b or len(b) < 74:
-        return None
-    parsed = _nikon_afinfo2_rect_and_reference(b, ref_w, ref_h)
-    if parsed is None:
-        return None
-    rect_ref, rw, rh = parsed
-    rect_rot = _rotate_rect(rect_ref, rw, rh, orientation)
-    rw_rot, rh_rot = (rh, rw) if orientation in (5, 6, 7, 8) else (rw, rh)
-    return (
-        _ltwh_in_pixmap(rect_rot, rw_rot, rh_rot, pixmap_w, pixmap_h),
-        "maker_af",
-    )
-
-
-def _pixmap_ltwh_nikon_afinfo2_from_exifread(
-    path: str, pixmap_w: int, pixmap_h: int, orientation: int = 1
-) -> tuple[tuple[int, int, int, int], str] | None:
-    """When Exiv2 omits AF leaves, exifread ``MakerNote AFInfo2`` (details=True) may still work."""
-    try:
-        import exifread
-        from exifread_af import _flatten_ints, _ref_dims
-    except ImportError:
-        return None
-    try:
-        with open(path, "rb") as f:
-            tags = exifread.process_file(f, details=True)
-    except OSError:
-        return None
-    t = tags.get("MakerNote AFInfo2")
-    if t is None:
-        return None
-    ints = _flatten_ints(t)
-    if len(ints) < 74 or any(i < 0 or i > 255 for i in ints):
-        return None
-    blob = bytes(ints)
-    ref_w, ref_h = _ref_dims(tags, pixmap_w, pixmap_h)
-    parsed = _nikon_afinfo2_rect_and_reference(blob, ref_w, ref_h)
-    if parsed is None:
-        return None
-    rect_ref, rw, rh = parsed
-    rect_rot = _rotate_rect(rect_ref, rw, rh, orientation)
-    rw_rot, rh_rot = (rh, rw) if orientation in (5, 6, 7, 8) else (rw, rh)
-    return (
-        _ltwh_in_pixmap(rect_rot, rw_rot, rh_rot, pixmap_w, pixmap_h),
-        "maker_af",
-    )
-
-
-def _pixmap_ltwh_focus_hint_exifread_fallback(
-    path: str, pixmap_w: int, pixmap_h: int
-) -> tuple[tuple[int, int, int, int], str] | None:
-    """No Exiv2 string dict (or caller skipped row): Canon AF / Subject / Nikon AFInfo2 via exifread."""
-    try:
-        from exifread_af import (
-            pixmap_ltwh_af_from_exifread,
-            pixmap_ltwh_subject_cipa_from_exifread,
-        )
-    except ImportError:
-        return _pixmap_ltwh_nikon_afinfo2_from_exifread(path, pixmap_w, pixmap_h)
-
-    # Priority 1: MakerNote AF (Canon / Nikon AFInfo2)
-    lt_af = pixmap_ltwh_af_from_exifread(path, pixmap_w, pixmap_h)
-    if lt_af is not None:
-        return lt_af, "maker_af"
-
-    # Priority 2: Standard CIPA SubjectArea / SubjectLocation
-    lt = pixmap_ltwh_subject_cipa_from_exifread(path, pixmap_w, pixmap_h)
-    if lt is not None:
-        return lt, "exif_subject"
-
-    return _pixmap_ltwh_nikon_afinfo2_from_exifread(path, pixmap_w, pixmap_h)
 
 
 def _rect_ref_sony(row: dict[str, Any], ref_w: int, ref_h: int) -> tuple[int, int, int, int] | None:
@@ -567,6 +491,84 @@ def _row_from_pyexiv2(path: str) -> dict[str, Any] | None:
     return row
 
 
+@functools.lru_cache(maxsize=1024)
+def _get_focus_hint_sensor_space(path: str) -> tuple[tuple[int, int, int, int], str, int, int] | None:
+    """Internal: returns ((l,t,w,h) in sensor space, source, ref_w, ref_h) or None."""
+    row = _row_from_pyexiv2(path)
+    if not row:
+        # Fallback to exifread: only SubjectArea for non-RAW to keep it fast.
+        ext = os.path.splitext(path)[1].lower().lstrip(".")
+        is_raw = ext in ("cr2", "cr3", "nef", "arw", "dng", "orf", "rw2", "raf")
+        
+        try:
+            from exifread_af import (
+                pixmap_ltwh_subject_cipa_from_exifread,
+                pixmap_ltwh_af_from_exifread
+            )
+            # Use 1000x1000 as virtual pixmap to get a normalized rect_ref
+            lt_sub = pixmap_ltwh_subject_cipa_from_exifread(path, 1000, 1000)
+            if lt_sub:
+                return lt_sub, "exif_subject", 1000, 1000
+            
+            if is_raw:
+                lt_af = pixmap_ltwh_af_from_exifread(path, 1000, 1000)
+                if lt_af:
+                    return lt_af, "maker_af", 1000, 1000
+        except:
+            pass
+        return None
+
+    ref_w, ref_h = _reference_dimensions(row)
+    if ref_w <= 0 or ref_h <= 0:
+        return None
+
+    # Priority 1: Maker-specific AF tags
+    for fn in (
+        _rect_ref_canon_style_af,
+        _rect_ref_nikon_cdaf,
+        _rect_ref_nikon_initial,
+        _rect_ref_sony,
+    ):
+        rect_ref = fn(row, ref_w, ref_h)
+        if rect_ref is not None:
+            return rect_ref, "maker_af", ref_w, ref_h
+
+    hint_af2 = _rect_ref_from_nikon_afinfo2_row_sensor_space(row, ref_w, ref_h)
+    if hint_af2:
+        return hint_af2
+
+    # Priority 2: CIPA SubjectArea / SubjectLocation
+    sa = row.get("SubjectArea")
+    if sa is not None:
+        nums = _numbers_from_tag_value(sa)
+        rect_ref = _rect_ref_from_subject_area(nums, ref_w, ref_h)
+        if rect_ref:
+            return rect_ref, "exif_subject", ref_w, ref_h
+    
+    sl = row.get("SubjectLocation")
+    if sl is not None:
+        nums = _numbers_from_tag_value(sl)
+        rect_ref = _rect_ref_from_subject_location(nums, ref_w, ref_h)
+        if rect_ref:
+            return rect_ref, "exif_subject", ref_w, ref_h
+
+    return None
+
+
+def _rect_ref_from_nikon_afinfo2_row_sensor_space(row: dict[str, Any], ref_w: int, ref_h: int) -> tuple[tuple[int, int, int, int], str, int, int] | None:
+    raw_s = _pick(row, "AFInfo2")
+    if raw_s is None:
+        return None
+    b = _bytes_from_space_separated_uint8_string(str(raw_s))
+    if not b or len(b) < 74:
+        return None
+    parsed = _nikon_afinfo2_rect_and_reference(b, ref_w, ref_h)
+    if parsed:
+        rect_ref, rw, rh = parsed
+        return rect_ref, "maker_af", rw, rh
+    return None
+
+
 def pixmap_ltwh_focus_hint(
     path: str,
     pixmap_w: int,
@@ -576,66 +578,26 @@ def pixmap_ltwh_focus_hint(
     """
     Main entry: (left, top, width, height) in pixmap pixels, plus source name.
     Accounts for EXIF orientation when mapping from sensor to display space.
+    Results are cached for performance.
     """
     if not path or pixmap_w < 4 or pixmap_h < 4:
         return None
-    row = _row_from_pyexiv2(path)
-    if not row:
-        return _pixmap_ltwh_focus_hint_exifread_fallback(path, pixmap_w, pixmap_h)
-    ref_w, ref_h = _reference_dimensions(row)
-    if ref_w <= 0 or ref_h <= 0:
-        ref_w, ref_h = pixmap_w, pixmap_h
-
-    rect_ref: tuple[int, int, int, int] | None = None
-
-    # Priority 1: Maker-specific AF tags (amber dashed). They are usually more
-    # accurate and specific than the generic SubjectArea.
-    for fn in (
-        _rect_ref_canon_style_af,
-        _rect_ref_nikon_cdaf,
-        _rect_ref_nikon_initial,
-        _rect_ref_sony,
-    ):
-        rect_ref = fn(row, ref_w, ref_h)
-        if rect_ref is not None:
-            # Rotate rect before mapping to final pixmap if display is rotated
-            rect_rot = _rotate_rect(rect_ref, ref_w, ref_h, orientation)
-            # Swap ref_w/ref_h if 90deg rotated
-            rw, rh = (ref_h, ref_w) if orientation in (5, 6, 7, 8) else (ref_w, ref_h)
-            return (
-                _ltwh_in_pixmap(rect_rot, rw, rh, pixmap_w, pixmap_h),
-                "maker_af",
-            )
-
-    hint_af2 = _rect_ref_from_nikon_afinfo2_row(
-        row, ref_w, ref_h, pixmap_w, pixmap_h, orientation
+    
+    hint_data = _get_focus_hint_sensor_space(path)
+    if not hint_data:
+        return None
+    
+    rect_ref, source, ref_w, ref_h = hint_data
+    
+    # Rotate rect before mapping to final pixmap if display is rotated
+    rect_rot = _rotate_rect(rect_ref, ref_w, ref_h, orientation)
+    # Swap ref_w/ref_h if 90deg rotated
+    rw_rot, rh_rot = (ref_h, ref_w) if orientation in (5, 6, 7, 8) else (ref_w, ref_h)
+    
+    return (
+        _ltwh_in_pixmap(rect_rot, rw_rot, rh_rot, pixmap_w, pixmap_h),
+        source,
     )
-    if hint_af2 is not None:
-        return hint_af2
-    hint_er = _pixmap_ltwh_nikon_afinfo2_from_exifread(path, pixmap_w, pixmap_h, orientation)
-    if hint_er is not None:
-        return hint_er
-
-    # Priority 2: CIPA SubjectArea / SubjectLocation (lime solid/dashed).
-    # These are the standard EXIF tags.
-    sa = row.get("SubjectArea")
-    if sa is not None:
-        nums = _numbers_from_tag_value(sa)
-        rect_ref = _rect_ref_from_subject_area(nums, ref_w, ref_h)
-    if rect_ref is None:
-        sl = row.get("SubjectLocation")
-        if sl is not None:
-            nums = _numbers_from_tag_value(sl)
-            rect_ref = _rect_ref_from_subject_location(nums, ref_w, ref_h)
-    if rect_ref is not None:
-        rect_rot = _rotate_rect(rect_ref, ref_w, ref_h, orientation)
-        rw, rh = (ref_h, ref_w) if orientation in (5, 6, 7, 8) else (ref_w, ref_h)
-        return (
-            _ltwh_in_pixmap(rect_rot, rw, rh, pixmap_w, pixmap_h),
-            "exif_subject",
-        )
-
-    return None
 
 
 def pixmap_ltwh_subject_region(
