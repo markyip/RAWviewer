@@ -19,6 +19,9 @@ Coordinates are interpreted per CIPA EXIF 2.32:
 - SubjectArea 4 values: center x, center y, width, height.
 - SubjectLocation: center x, y (deprecated); used as fallback with a small box.
 
+Degenerate boxes (1–2 px in one dimension after downscale) are expanded symmetrically
+around the same center so the dashed overlay stays visible.
+
 Reference size uses ExifImageWidth/Height, then ImageWidth/Height, else the
 display pixmap size (assumes 1:1). Preview rotation from EXIF Orientation is
 not remapped here; the box may be offset on rotated JPEG previews.
@@ -459,6 +462,29 @@ def _ltwh_in_pixmap(
     return _clamp_rect(l * sx, t * sy, w * sx, h * sy, pw, ph)
 
 
+def _ensure_min_display_ltwh(
+    ltwh: tuple[int, int, int, int], pw: int, ph: int
+) -> tuple[int, int, int, int]:
+    """
+    Expand very thin / tiny rectangles in **pixmap** space so outlines are not a
+    single pixel dot or line after scaling (common for SubjectArea vs large ref).
+    """
+    l, t, w, h = ltwh
+    if pw < 4 or ph < 4:
+        return ltwh
+    # ~2% of shorter side, at least 12 px — visible but not dominating the image.
+    min_side = max(12, min(pw, ph) // 50)
+    if w >= min_side and h >= min_side:
+        return ltwh
+    cx = l + w / 2.0
+    cy = t + h / 2.0
+    nw = float(max(w, min_side))
+    nh = float(max(h, min_side))
+    nl = cx - nw / 2.0
+    nt = cy - nh / 2.0
+    return _clamp_rect(nl, nt, nw, nh, pw, ph)
+
+
 def _row_from_pyexiv2(path: str) -> dict[str, Any] | None:
     """Flatten ``read_exif_raw_string_dict`` keys to Exiv2 leaf names (last segment)."""
     try:
@@ -593,11 +619,10 @@ def pixmap_ltwh_focus_hint(
     rect_rot = _rotate_rect(rect_ref, ref_w, ref_h, orientation)
     # Swap ref_w/ref_h if 90deg rotated
     rw_rot, rh_rot = (ref_h, ref_w) if orientation in (5, 6, 7, 8) else (ref_w, ref_h)
-    
-    return (
-        _ltwh_in_pixmap(rect_rot, rw_rot, rh_rot, pixmap_w, pixmap_h),
-        source,
-    )
+
+    ltwh = _ltwh_in_pixmap(rect_rot, rw_rot, rh_rot, pixmap_w, pixmap_h)
+    ltwh = _ensure_min_display_ltwh(ltwh, pixmap_w, pixmap_h)
+    return (ltwh, source)
 
 
 def pixmap_ltwh_subject_region(
