@@ -22,6 +22,7 @@ import io
 warnings.filterwarnings('ignore', category=UserWarning, module='exifread')
 
 from image_cache import get_image_cache
+import metadata_backend
 from raw_file_extensions import RAW_FILE_EXTENSIONS
 
 # Cached EXIF rows without this version used embedded-JPEG dimensions as "original" (e.g. 1920×1080).
@@ -300,154 +301,151 @@ class EXIFExtractor(QObject):
     def _extract_exif_from_file(self, file_path: str) -> Dict[str, Any]:
         """Extract EXIF data from file."""
         try:
-            with open(file_path, 'rb') as f:
-                tags = exifread.process_file(f, details=False)
+            tags = metadata_backend.process_file_from_path(file_path, details=False)
+            orientation = 1
+            camera_make = ''
+            camera_model = ''
 
-                # Extract key information
-                orientation = 1
-                camera_make = ''
-                camera_model = ''
+            # Get orientation - Check multiple possible tags
+            orientation_tag = tags.get('Image Orientation') or tags.get('EXIF Orientation')
+            if orientation_tag:
+                orientation_str = str(orientation_tag)
+                # Console log: Show what orientation string we got
+                print(f"[ORIENTATION] EXIFExtractor: Raw orientation tag string = '{orientation_str}'")
+                orientation_map = {
+                    'Horizontal (normal)': 1,
+                    'Mirrored horizontal': 2,
+                    'Rotated 180': 3,
+                    'Mirrored vertical': 4,
+                    'Mirrored horizontal then rotated 90 CCW': 5,
+                    'Rotated 90 CW': 6,
+                    'Mirrored horizontal then rotated 90 CW': 7,
+                    'Rotated 90 CCW': 8,
+                    # Add numeric string support
+                    '1': 1, '2': 2, '3': 3, '4': 4,
+                    '5': 5, '6': 6, '7': 7, '8': 8
+                }
+                orientation = orientation_map.get(orientation_str, 1)
+                # print(f"[ORIENTATION] EXIFExtractor: Mapped orientation value = {orientation}")
+                if orientation == 1 and orientation_str not in orientation_map:
+                    # Try to parse as int just in case
+                    try:
+                        orientation = int(orientation_str)
+                        if orientation < 1 or orientation > 8:
+                            orientation = 1
+                    except ValueError:
+                        print(f"[ORIENTATION] EXIFExtractor: WARNING - Orientation string '{orientation_str}' not in map, defaulting to 1")
+            else:
+                # logger.debug(f"[ORIENTATION] EXIFExtractor: No 'Image Orientation' tag found, defaulting to 1")
+                pass
 
-                # Get orientation - Check multiple possible tags
-                orientation_tag = tags.get('Image Orientation') or tags.get('EXIF Orientation')
-                if orientation_tag:
-                    orientation_str = str(orientation_tag)
-                    # Console log: Show what orientation string we got
-                    print(f"[ORIENTATION] EXIFExtractor: Raw orientation tag string = '{orientation_str}'")
-                    orientation_map = {
-                        'Horizontal (normal)': 1,
-                        'Mirrored horizontal': 2,
-                        'Rotated 180': 3,
-                        'Mirrored vertical': 4,
-                        'Mirrored horizontal then rotated 90 CCW': 5,
-                        'Rotated 90 CW': 6,
-                        'Mirrored horizontal then rotated 90 CW': 7,
-                        'Rotated 90 CCW': 8,
-                        # Add numeric string support
-                        '1': 1, '2': 2, '3': 3, '4': 4,
-                        '5': 5, '6': 6, '7': 7, '8': 8
-                    }
-                    orientation = orientation_map.get(orientation_str, 1)
-                    # print(f"[ORIENTATION] EXIFExtractor: Mapped orientation value = {orientation}")
-                    if orientation == 1 and orientation_str not in orientation_map:
-                        # Try to parse as int just in case
+            # Get camera info
+            make_tag = tags.get('Image Make')
+            if make_tag:
+                camera_make = str(make_tag).strip()
+
+            model_tag = tags.get('Image Model')
+            if model_tag:
+                camera_model = str(model_tag).strip()
+
+            # Convert all tags to serializable format
+            exif_dict = {}
+            original_width = None
+            original_height = None
+            
+            for key, value in tags.items():
+                try:
+                    str_val = str(value)
+                    exif_dict[key] = str_val
+                    
+                    # Extract dimensions from tags
+                    if key in ('Image ImageWidth', 'EXIF ExifImageWidth', 'Image Width'):
                         try:
-                            orientation = int(orientation_str)
-                            if orientation < 1 or orientation > 8:
-                                orientation = 1
-                        except ValueError:
-                            print(f"[ORIENTATION] EXIFExtractor: WARNING - Orientation string '{orientation_str}' not in map, defaulting to 1")
-                else:
-                    # logger.debug(f"[ORIENTATION] EXIFExtractor: No 'Image Orientation' tag found, defaulting to 1")
+                            original_width = int(str_val)
+                        except:
+                            pass
+                    elif key in ('Image ImageLength', 'EXIF ExifImageLength', 'Image Height', 'Image Length', 'EXIF ExifImageHeight'):
+                        try:
+                            original_height = int(str_val)
+                        except:
+                            pass
+                except:
                     pass
 
-                # Get camera info
-                make_tag = tags.get('Image Make')
-                if make_tag:
-                    camera_make = str(make_tag).strip()
+            # RAW: EXIF ExifImageWidth/Length often describe embedded preview dimensions, not sensor size.
+            # Prefer LibRaw/rawpy bitmap geometry when metadata read succeeds. Some cameras report
+            # orientation as "normal" in EXIF while sizes.flip differs — trust flip in that case.
+            if self._is_raw_file(file_path):
+                try:
+                    with rawpy.imread(file_path) as raw:
+                        sizes = raw.sizes
+                        original_width = sizes.width
+                        original_height = sizes.height
+                        if orientation == 1 and sizes.flip != 0:
+                            orientation = sizes.flip
+                            print(f"[ORIENTATION] EXIFExtractor: Using rawpy flip fallback = {orientation}")
+                except Exception:
+                    # Keep EXIF-derived dimensions if rawpy fails (offline / corrupt edge cases).
+                    pass
 
-                model_tag = tags.get('Image Model')
-                if model_tag:
-                    camera_model = str(model_tag).strip()
-
-                # Convert all tags to serializable format
-                exif_dict = {}
-                original_width = None
-                original_height = None
-                
-                for key, value in tags.items():
+            # Extract technical metadata for top-level cache columns
+            focal_length = None
+            aperture = None
+            iso = None
+            
+            # Focal Length
+            for tag in ('EXIF FocalLength', 'EXIF FocalLengthIn35mmFilm'):
+                if tag in exif_dict:
                     try:
-                        str_val = str(value)
-                        exif_dict[key] = str_val
-                        
-                        # Extract dimensions from tags
-                        if key in ('Image ImageWidth', 'EXIF ExifImageWidth', 'Image Width'):
-                            try:
-                                original_width = int(str_val)
-                            except:
-                                pass
-                        elif key in ('Image ImageLength', 'EXIF ExifImageLength', 'Image Height', 'Image Length', 'EXIF ExifImageHeight'):
-                            try:
-                                original_height = int(str_val)
-                            except:
-                                pass
-                    except:
-                        pass
-
-                # RAW: EXIF ExifImageWidth/Length often describe embedded preview dimensions, not sensor size.
-                # Prefer LibRaw/rawpy bitmap geometry when metadata read succeeds. Some cameras report
-                # orientation as "normal" in EXIF while sizes.flip differs — trust flip in that case.
-                if self._is_raw_file(file_path):
+                        val = exif_dict[tag]
+                        if '/' in val:
+                            num, den = val.split('/')
+                            focal_length = f"{round(float(num) / float(den))}mm"
+                        else:
+                            focal_length = f"{round(float(val))}mm"
+                        break
+                    except: pass
+            
+            # Aperture
+            for tag in ('EXIF FNumber', 'EXIF ApertureValue'):
+                if tag in exif_dict:
                     try:
-                        with rawpy.imread(file_path) as raw:
-                            sizes = raw.sizes
-                            original_width = sizes.width
-                            original_height = sizes.height
-                            if orientation == 1 and sizes.flip != 0:
-                                orientation = sizes.flip
-                                print(f"[ORIENTATION] EXIFExtractor: Using rawpy flip fallback = {orientation}")
-                    except Exception:
-                        # Keep EXIF-derived dimensions if rawpy fails (offline / corrupt edge cases).
-                        pass
+                        val = exif_dict[tag]
+                        if '/' in val:
+                            num, den = val.split('/')
+                            aperture = f"f/{float(num) / float(den):.1f}"
+                        else:
+                            aperture = f"f/{float(val):.1f}"
+                        break
+                    except: pass
+            
+            # ISO
+            for tag in ('EXIF ISOSpeedRatings', 'EXIF ISO', 'EXIF PhotographicSensitivity'):
+                if tag in exif_dict:
+                    try:
+                        val = exif_dict[tag]
+                        if '/' in val:
+                            num, den = val.split('/')
+                            iso = f"ISO {int(float(num) / float(den))}"
+                        else:
+                            iso = f"ISO {val}"
+                        break
+                    except: pass
 
-                # Extract technical metadata for top-level cache columns
-                focal_length = None
-                aperture = None
-                iso = None
-                
-                # Focal Length
-                for tag in ('EXIF FocalLength', 'EXIF FocalLengthIn35mmFilm'):
-                    if tag in exif_dict:
-                        try:
-                            val = exif_dict[tag]
-                            if '/' in val:
-                                num, den = val.split('/')
-                                focal_length = f"{round(float(num) / float(den))}mm"
-                            else:
-                                focal_length = f"{round(float(val))}mm"
-                            break
-                        except: pass
-                
-                # Aperture
-                for tag in ('EXIF FNumber', 'EXIF ApertureValue'):
-                    if tag in exif_dict:
-                        try:
-                            val = exif_dict[tag]
-                            if '/' in val:
-                                num, den = val.split('/')
-                                aperture = f"f/{float(num) / float(den):.1f}"
-                            else:
-                                aperture = f"f/{float(val):.1f}"
-                            break
-                        except: pass
-                
-                # ISO
-                for tag in ('EXIF ISOSpeedRatings', 'EXIF ISO', 'EXIF PhotographicSensitivity'):
-                    if tag in exif_dict:
-                        try:
-                            val = exif_dict[tag]
-                            if '/' in val:
-                                num, den = val.split('/')
-                                iso = f"ISO {int(float(num) / float(den))}"
-                            else:
-                                iso = f"ISO {val}"
-                            break
-                        except: pass
-
-                return {
-                    'orientation': orientation,
-                    'camera_make': camera_make,
-                    'camera_model': camera_model,
-                    'exif_data': exif_dict,
-                    'original_width': original_width,
-                    'original_height': original_height,
-                    'capture_time': exif_dict.get('EXIF DateTimeOriginal') or exif_dict.get('Image DateTime'),
-                    'focal_length': focal_length,
-                    'aperture': aperture,
-                    'iso': iso,
-                    'verified_orientation': True,  # Mark this extraction as verified with new logic
-                    'raw_exif_sensor_meta_ver': RAW_EXIF_SENSOR_META_VER,
-                }
+            return {
+                'orientation': orientation,
+                'camera_make': camera_make,
+                'camera_model': camera_model,
+                'exif_data': exif_dict,
+                'original_width': original_width,
+                'original_height': original_height,
+                'capture_time': exif_dict.get('EXIF DateTimeOriginal') or exif_dict.get('Image DateTime'),
+                'focal_length': focal_length,
+                'aperture': aperture,
+                'iso': iso,
+                'verified_orientation': True,  # Mark this extraction as verified with new logic
+                'raw_exif_sensor_meta_ver': RAW_EXIF_SENSOR_META_VER,
+            }
         except Exception:
             pass
 

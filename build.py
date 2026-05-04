@@ -403,6 +403,13 @@ def main():
                 f'--add-data "{m2.resolve()}{add_data_sep}models/mobileclip2_coreml"'
             )
             print("[INFO] Bundling MobileCLIP2 Core ML from models/mobileclip2_coreml/")
+    elif platform.system() == "Windows":
+        mo = Path("models/mobileclip_onnx")
+        if mo.is_dir() and (mo / "image_encoder.onnx").exists():
+            add_data_args.append(
+                f'--add-data "{mo.resolve()}{add_data_sep}models/mobileclip_onnx"'
+            )
+            print("[INFO] Bundling MobileCLIP2 ONNX from models/mobileclip_onnx/")
     add_data_arg_str = " ".join(add_data_args)
 
     src_path = os.path.abspath('src')

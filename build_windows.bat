@@ -14,6 +14,10 @@ REM Activate virtual environment
 echo Activating virtual environment...
 call rawviewer_env\Scripts\activate.bat
 
+REM Download MobileCLIP2 ONNX models for bundling if missing
+echo Checking MobileCLIP2 ONNX models...
+python scripts/download_mobileclip_onnx.py
+
 REM Install/upgrade dependencies
 echo Installing dependencies...
 pip install --upgrade PyQt6 rawpy send2trash pyinstaller natsort exifread pyexiv2 Pillow psutil numpy qtawesome pyqtgraph sentence-transformers reverse-geocoder pycountry pywin32

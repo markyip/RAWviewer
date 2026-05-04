@@ -481,12 +481,17 @@ class MobileCLIPONNXBackend:
         env_dir = os.environ.get("RAWVIEWER_MOBILECLIP_MODEL_DIR")
         if env_dir:
             dirs.append(env_dir)
-        dirs.append(os.path.expanduser("~/.rawviewer_cache/mobileclip_onnx"))
+            
         if getattr(sys, "frozen", False):
-            exe_dir = os.path.dirname(sys.executable)
-            dirs.append(os.path.join(exe_dir, "mobileclip_onnx"))
+            # PyInstaller temporary extract directory (_MEIPASS) or executable directory
+            base_dir = getattr(sys, "_MEIPASS", os.path.dirname(sys.executable))
+            dirs.append(os.path.join(base_dir, "models", "mobileclip_onnx"))
+            dirs.append(os.path.join(base_dir, "mobileclip_onnx"))
+            
+        dirs.append(os.path.expanduser("~/.rawviewer_cache/mobileclip_onnx"))
+        
         module_dir = os.path.dirname(os.path.abspath(__file__))
-        dirs.append(os.path.join(module_dir, "..", "models", "mobileclip2_onnx"))
+        dirs.append(os.path.join(module_dir, "..", "models", "mobileclip_onnx"))
         return dirs
 
     @classmethod
