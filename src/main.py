@@ -6302,6 +6302,11 @@ class RAWImageViewer(QMainWindow):
         self._semantic_index_signals = None
         self._semantic_index_progress_base = 0
         self._semantic_index_progress_total = 0
+        # Collapse first so clearing status does not re-trigger expand-with-new-width while still open.
+        try:
+            self._set_search_panel_expanded(False, animate=False)
+        except Exception:
+            pass
         try:
             self._set_gallery_search_status("")
         except Exception:
@@ -6477,9 +6482,7 @@ class RAWImageViewer(QMainWindow):
         )
         worker = _SemanticIndexWorker(token, list(pending_files), index, signals)
         self._gallery_search_placeholder_saved = self.gallery_search_input.placeholderText()
-        self.gallery_search_input.setPlaceholderText(
-            "EXIF/metadata: indexed rows only • CLIP resumes when indexing finishes"
-        )
+        self.gallery_search_input.setPlaceholderText("EXIF only")
         QThreadPool.globalInstance().start(worker)
 
     def _on_semantic_index_progress(self, token, i, n, basename):
