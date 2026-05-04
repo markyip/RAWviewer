@@ -483,10 +483,14 @@ class MobileCLIPONNXBackend:
             dirs.append(env_dir)
             
         if getattr(sys, "frozen", False):
-            # PyInstaller temporary extract directory (_MEIPASS) or executable directory
-            base_dir = getattr(sys, "_MEIPASS", os.path.dirname(sys.executable))
-            dirs.append(os.path.join(base_dir, "models", "mobileclip_onnx"))
-            dirs.append(os.path.join(base_dir, "mobileclip_onnx"))
+            # Prioritize the actual executable directory for external (non-bundled) models
+            exe_dir = os.path.dirname(sys.executable)
+            dirs.append(os.path.join(exe_dir, "models", "mobileclip_onnx"))
+            dirs.append(os.path.join(exe_dir, "mobileclip_onnx"))
+            
+            # Fallback to PyInstaller temporary extract directory (_MEIPASS)
+            if hasattr(sys, "_MEIPASS"):
+                dirs.append(os.path.join(sys._MEIPASS, "models", "mobileclip_onnx"))
             
         dirs.append(os.path.expanduser("~/.rawviewer_cache/mobileclip_onnx"))
         
@@ -530,12 +534,39 @@ class MobileCLIPONNXBackend:
         except ImportError:
             raise RuntimeError("MobileCLIP download requires 'huggingface_hub' (pip install huggingface_hub)")
 
-        # Download from a known good MobileCLIP2-S0 ONNX repo
-        hf_hub_download(repo_id=self.HUB_REPO_ID, filename="image_encoder.onnx", local_dir=self.model_dir)
-        hf_hub_download(repo_id=self.HUB_REPO_ID, filename="text_encoder.onnx", local_dir=self.model_dir)
+        # Mapping of remote path in HF repo to local filename expected by RAWviewer
+        files_to_download = {
+            "onnx/s0/vision_model.onnx": self.IMAGE_MODEL_FILE,
+            "onnx/s0/text_model.onnx": self.TEXT_MODEL_FILE
+        }
         
+        for remote_path, local_name in files_to_download.items():
+            _progress(f"Fetching {local_name}...")
+            hf_hub_download(
+                repo_id=self.HUB_REPO_ID,
+                filename=remote_path,
+                local_dir=self.model_dir,
+                local_dir_use_symlinks=False
+            )
+            
+            # Handle nesting created by local_dir
+            downloaded_path = os.path.join(self.model_dir, remote_path)
+            target_path = os.path.join(self.model_dir, local_name)
+            
+            if os.path.exists(downloaded_path):
+                if os.path.exists(target_path):
+                    os.remove(target_path)
+                os.rename(downloaded_path, target_path)
+
+        # Clean up empty subdirectories
+        onnx_dir = os.path.join(self.model_dir, "onnx")
+        if os.path.exists(onnx_dir):
+            import shutil
+            shutil.rmtree(onnx_dir)
+            
         if not os.path.exists(self.tokenizer_path):
             _progress("Downloading CLIP tokenizer...")
+            import urllib.request
             urllib.request.urlretrieve(self.TOKENIZER_URL, self.tokenizer_path)
             
         return self.model_dir

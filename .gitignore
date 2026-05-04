@@ -65,6 +65,15 @@ artifacts/mobileclip2_coreml/
 models/mobileclip2_coreml/**
 !models/mobileclip2_coreml/.gitkeep
 
+# Bundled MobileCLIP2 ONNX (large); download with scripts/download_mobileclip_onnx.py
+models/mobileclip_onnx/
+!models/mobileclip_onnx/.gitkeep
+
+# Test RAW files
+!DSC00738.ARW
+!DSC_4526.NEF
+!IMG_0159.CR3
+
 # Distribution packages
 *.zip
 *.tar.gz
