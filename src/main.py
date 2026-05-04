@@ -5073,16 +5073,14 @@ class RAWImageViewer(QMainWindow):
         self.current_zoom_level = 1.0
         self.zoom_to_point()
 
-    def _focus_jump_to_subject_center(self) -> None:
+    def _focus_jump_to_subject_center(self) -> bool:
         """With focus outline on: center zoom on EXIF / maker AF rectangle (fit-to-window)."""
         if not self.current_pixmap or self.current_pixmap.isNull():
-            return
+            return False
         rect = getattr(self, "_focus_subject_rect_image", None)
         if rect is None or rect.isNull() or rect.width() < 1 or rect.height() < 1:
-            self.status_bar.showMessage(
-                "No focus area from EXIF for this image", 2500
-            )
-            return
+            # Fallback to standard zoom if no EXIF box
+            return False
         cx = rect.left() + rect.width() // 2
         cy = rect.top() + rect.height() // 2
         self._stop_slideshow()
@@ -5093,6 +5091,7 @@ class RAWImageViewer(QMainWindow):
             self.apply_zoom_and_pan()
         self.update_status_bar()
         self.setFocus()
+        return True
 
     def _toggle_focus_subject_outline(self) -> bool:
         """Return True if handled."""
@@ -8877,7 +8876,8 @@ class RAWImageViewer(QMainWindow):
                         logger.info(
                             "[TRACK] Double-click — focus outline jump to subject/AF center"
                         )
-                        self._focus_jump_to_subject_center()
+                        if self._focus_jump_to_subject_center():
+                            return
                     else:
                         self.fit_to_window = True
                         self.current_zoom_level = 1.0
@@ -11263,7 +11263,8 @@ class RAWImageViewer(QMainWindow):
                     # When already zoomed in, Space must still zoom out like normal;
                     # only from fit-to-window does Space jump to the focus box center.
                     if self.fit_to_window:
-                        self._focus_jump_to_subject_center()
+                        if self._focus_jump_to_subject_center():
+                            return True
                     else:
                         self.toggle_zoom()
                     return True
