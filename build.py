@@ -231,16 +231,6 @@ def install_dependencies():
         if not run_command([sys.executable, "-m", "pip", "install", "--upgrade", "pywin32"]):
             print("[WARNING] pywin32 install failed; Share may not work in the built app.")
 
-    # Install any local wheels (e.g., MobileCLIP built by build_mobileclip_wheel.py)
-    wheels_dir = REPO_ROOT / "wheels"
-    if wheels_dir.exists():
-        wheels = list(wheels_dir.glob("*.whl"))
-        if wheels:
-            print(f"[INFO] Found {len(wheels)} local wheels to install...")
-            for whl in wheels:
-                print(f"Installing {whl.name}...")
-                run_command([sys.executable, "-m", "pip", "install", "--upgrade", "--force-reinstall", str(whl)])
-
     print("Dependencies installed successfully!")
     return True
 
@@ -464,19 +454,13 @@ def main():
             "--hidden-import", "pythoncom",
             "--hidden-import", "pywintypes",
         ])
-        # Include MobileCLIP and OpenCLIP if installed (e.g. via local wheel)
+        # Bundling ONNX Runtime for lightweight semantic search
         try:
-            import mobileclip
-            cmd_base.extend(["--hidden-import", "mobileclip", "--collect-all", "mobileclip"])
-            print("[INFO] PyInstaller: bundling mobileclip with --collect-all.")
+            import onnxruntime
+            cmd_base.extend(["--hidden-import", "onnxruntime", "--collect-all", "onnxruntime"])
+            print("[INFO] PyInstaller: bundling onnxruntime with --collect-all.")
         except ImportError:
-            pass
-        try:
-            import open_clip
-            cmd_base.extend(["--hidden-import", "open_clip", "--collect-all", "open_clip"])
-            print("[INFO] PyInstaller: bundling open_clip with --collect-all.")
-        except ImportError:
-            pass
+            print("[WARNING] onnxruntime not found; semantic search may be disabled on Windows.")
     
     if platform.system() == 'Darwin':
         cmd_base.append("--onedir")
