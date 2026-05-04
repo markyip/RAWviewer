@@ -27,6 +27,9 @@ from raw_file_extensions import RAW_FILE_EXTENSIONS
 
 # Cached EXIF rows without this version used embedded-JPEG dimensions as "original" (e.g. 1920×1080).
 RAW_EXIF_SENSOR_META_VER = 3
+_EXIF_STALE_RECHECK_COOLDOWN_SEC = 30.0
+_stale_orientation_recheck_guard: Dict[str, Dict[str, Any]] = {}
+_stale_orientation_recheck_lock = threading.Lock()
 
 
 def _qimage_to_rgb_array(image: QImage) -> Optional[np.ndarray]:
@@ -266,11 +269,38 @@ class EXIFExtractor(QObject):
              is_verified = cached_exif.get('verified_orientation', False)
              
              if is_raw and orientation == 1 and not is_verified:
-                 # INVALIDATE CACHE - Force fresh extraction with new logic
+                 # INVALIDATE CACHE - Force fresh extraction with new logic, but throttle
+                 # duplicate re-checks for the same unchanged file to avoid I/O storms.
                  import logging
                  logger = logging.getLogger(__name__)
-                 logger.info(f"[EXIF] Found potentially stale orientation 1 for {os.path.basename(file_path)}, forcing re-check.")
-                 cached_exif = None
+                 now = time.time()
+                 try:
+                     stat = os.stat(file_path)
+                     sig = (stat.st_size, stat.st_mtime_ns)
+                 except OSError:
+                     sig = (None, None)
+                 force_recheck = True
+                 with _stale_orientation_recheck_lock:
+                     prev = _stale_orientation_recheck_guard.get(file_path)
+                     if (
+                         prev is not None
+                         and prev.get("sig") == sig
+                         and (now - float(prev.get("ts", 0.0))) < _EXIF_STALE_RECHECK_COOLDOWN_SEC
+                     ):
+                         force_recheck = False
+                     else:
+                         _stale_orientation_recheck_guard[file_path] = {"sig": sig, "ts": now}
+                 if force_recheck:
+                     logger.info(
+                         f"[EXIF] Found potentially stale orientation 1 for "
+                         f"{os.path.basename(file_path)}, forcing re-check."
+                     )
+                     cached_exif = None
+                 else:
+                     logger.debug(
+                         f"[EXIF] Throttling stale-orientation re-check for "
+                         f"{os.path.basename(file_path)} (cooldown active)."
+                     )
              # RAW: drop cache if it predates sensor-dimension fix (preview JPEG size was stored as original_*).
              if cached_exif is not None and is_raw:
                  if cached_exif.get('raw_exif_sensor_meta_ver', 0) < RAW_EXIF_SENSOR_META_VER:
