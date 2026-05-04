@@ -5441,6 +5441,27 @@ class RAWImageViewer(QMainWindow):
         # Pixmap from manager is always full resolution for non-RAW files
         self._is_half_size_displayed = False
         logger.debug(f"[MANAGER] Setting _is_half_size_displayed=False for full resolution pixmap")
+
+        # Avoid duplicate repaint churn: thumbnail_ready path may have already displayed the same
+        # full-size pixmap through display_numpy_image() cache fast-path just moments earlier.
+        displayed_for = getattr(self, "_displayed_content_path", None)
+        if (
+            displayed_for is not None
+            and _norm_path(displayed_for) == _norm_path(file_path)
+            and self.current_pixmap is not None
+            and not self.current_pixmap.isNull()
+            and self.current_pixmap.width() == pixmap.width()
+            and self.current_pixmap.height() == pixmap.height()
+        ):
+            logger.debug(
+                f"[MANAGER] Skipping duplicate pixmap redraw for "
+                f"{os.path.basename(file_path)} ({pixmap.width()}x{pixmap.height()})"
+            )
+            pm_max = max(pixmap.width(), pixmap.height())
+            self._manager_displayed_max_dim = max(
+                getattr(self, "_manager_displayed_max_dim", 0), pm_max
+            )
+            return
         
         self.display_pixmap(pixmap)
         pm_max = max(pixmap.width(), pixmap.height())
