@@ -123,9 +123,11 @@ class MobileCLIPCoreMLBackend:
     - RAWVIEWER_MOBILECLIP_MODEL_DIR, or
     - ~/.rawviewer_cache/mobileclip_coreml
 
-    Expected Apple filenames:
-    - mobileclip_s2_image.mlpackage
-    - mobileclip_s2_text.mlpackage
+    Recognized bundle pairs (first match wins under ``model_dir``):
+
+    - **Apple Hub (S2):** ``mobileclip_s2_image.mlpackage`` / ``mobileclip_s2_text.mlpackage``
+    - **App export (``export_mobileclip2_coreml.py --for-app``):**
+      ``mobileclip2_s0_image.mlpackage`` / ``mobileclip2_s0_text.mlpackage``
 
     Note: text encoding also needs a tokenizer compatible with the Core ML text
     encoder. Until a tokenizer asset is present, the backend reports unavailable
@@ -144,12 +146,28 @@ class MobileCLIPCoreMLBackend:
     TOKENIZER_URL = "https://openaipublic.azureedge.net/clip/bpe_simple_vocab_16e6.txt.gz"
     SUPPORTS_HUB_DOWNLOAD = True
 
+    _COREML_BUNDLE_PAIRS: tuple[tuple[str, str], ...] = (
+        ("mobileclip_s2_image.mlpackage", "mobileclip_s2_text.mlpackage"),
+        ("mobileclip2_s0_image.mlpackage", "mobileclip2_s0_text.mlpackage"),
+    )
+
     def __init__(self, model_dir: Optional[str] = None):
         if model_dir is None:
             model_dir = self._default_model_dir()
         self.model_dir = model_dir
-        self.image_model_path = os.path.join(model_dir, self.IMAGE_MODEL_FILE)
-        self.text_model_path = os.path.join(model_dir, self.TEXT_MODEL_FILE)
+        pair = self._find_bundle_basenames(model_dir)
+        if pair is not None:
+            img_f, txt_f = pair
+            self.image_model_path = os.path.join(model_dir, img_f)
+            self.text_model_path = os.path.join(model_dir, txt_f)
+            if img_f.startswith("mobileclip2_s0"):
+                self.MODEL_ID = "mobileclip-coreml-2-s0"
+            else:
+                self.MODEL_ID = MobileCLIPCoreMLBackend.MODEL_ID
+        else:
+            self.image_model_path = os.path.join(model_dir, self.IMAGE_MODEL_FILE)
+            self.text_model_path = os.path.join(model_dir, self.TEXT_MODEL_FILE)
+            self.MODEL_ID = MobileCLIPCoreMLBackend.MODEL_ID
         self.tokenizer_path = os.path.join(model_dir, "bpe_simple_vocab_16e6.txt.gz")
         self._image_model = None
         self._text_model = None
@@ -157,6 +175,18 @@ class MobileCLIPCoreMLBackend:
         self._CoreML = None
         self._Foundation = None
         self._Quartz = None
+
+    @classmethod
+    def _find_bundle_basenames(cls, model_dir: str) -> tuple[str, str] | None:
+        tok = os.path.join(model_dir, "bpe_simple_vocab_16e6.txt.gz")
+        if not os.path.isfile(tok):
+            return None
+        for img_f, txt_f in cls._COREML_BUNDLE_PAIRS:
+            ip = os.path.join(model_dir, img_f)
+            tp = os.path.join(model_dir, txt_f)
+            if cls._mlpackage_complete(ip) and cls._mlpackage_complete(tp):
+                return img_f, txt_f
+        return None
 
     @staticmethod
     def _candidate_model_dirs() -> List[str]:
@@ -167,8 +197,10 @@ class MobileCLIPCoreMLBackend:
         dirs.append(os.path.expanduser("~/.rawviewer_cache/mobileclip_coreml"))
         if getattr(sys, "frozen", False):
             exe_dir = os.path.dirname(sys.executable)
+            meipass = getattr(sys, "_MEIPASS", None)
             dirs.extend(
                 [
+                    os.path.join(exe_dir, "models", "mobileclip2_coreml"),
                     os.path.join(exe_dir, "mobileclip_coreml"),
                     os.path.join(exe_dir, "..", "Resources", "mobileclip_coreml"),
                     os.path.join(exe_dir, "..", "Resources", "models", "mobileclip2_coreml"),
@@ -177,6 +209,13 @@ class MobileCLIPCoreMLBackend:
                     os.path.join(exe_dir, "..", "Frameworks", "models", "mobileclip2_coreml"),
                 ]
             )
+            if meipass:
+                dirs.extend(
+                    [
+                        os.path.join(meipass, "models", "mobileclip2_coreml"),
+                        os.path.join(meipass, "models", "mobileclip_coreml"),
+                    ]
+                )
         module_dir = os.path.dirname(os.path.abspath(__file__))
         dirs.extend(
             [
@@ -195,11 +234,7 @@ class MobileCLIPCoreMLBackend:
     @classmethod
     def _default_model_dir(cls) -> str:
         for d in cls._candidate_model_dirs():
-            if (
-                os.path.exists(os.path.join(d, cls.IMAGE_MODEL_FILE))
-                and os.path.exists(os.path.join(d, cls.TEXT_MODEL_FILE))
-                and os.path.exists(os.path.join(d, "bpe_simple_vocab_16e6.txt.gz"))
-            ):
+            if cls._find_bundle_basenames(d) is not None:
                 return d
         return cls._candidate_model_dirs()[0]
 
@@ -617,8 +652,8 @@ class MobileCLIPONNXBackend:
 def resolve_mobileclip_backend() -> Any:
     """Prefer platform-native; then ONNX; then Core ML fallback."""
     if sys.platform == "darwin":
-        # Prefer Core ML on macOS
-        for cls in [MobileCLIP2CoreMLBackend, MobileCLIPCoreMLBackend]:
+        # Prefer Core ML on macOS (single shipped class: MobileCLIPCoreMLBackend / S2)
+        for cls in (MobileCLIPCoreMLBackend,):
             inst = cls()
             if inst.available():
                 return inst
@@ -626,7 +661,7 @@ def resolve_mobileclip_backend() -> Any:
         inst = MobileCLIPONNXBackend()
         if inst.available():
             return inst
-        return MobileCLIP2CoreMLBackend()
+        return MobileCLIPCoreMLBackend()
     else:
         # Windows/Linux prefer ONNX
         inst = MobileCLIPONNXBackend()

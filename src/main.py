@@ -4851,6 +4851,8 @@ class RAWImageViewer(QMainWindow):
         self._last_semantic_query = ""
         self._semantic_index_progress_base = 0
         self._semantic_index_progress_total = 0
+        # Gallery: user hid search strip during index/download — skip auto-expand from status updates.
+        self._gallery_search_user_collapsed_while_busy = False
 
         # Focus-area dashed outline from EXIF / maker AF (toggle with F)
         self._focus_subject_outline_active = False
@@ -4972,6 +4974,19 @@ class RAWImageViewer(QMainWindow):
         ry = int(rect_image_space.top() * sy)
         rw = max(1, int(round(rect_image_space.width() * sx)))
         rh = max(1, int(round(rect_image_space.height() * sy)))
+        bw, bh = base_pm.width(), base_pm.height()
+        min_draw = max(12, min(bw, bh) // 50)
+        if rw < min_draw or rh < min_draw:
+            cx = rx + rw / 2.0
+            cy = ry + rh / 2.0
+            rw = max(rw, min_draw)
+            rh = max(rh, min_draw)
+            rx = int(round(cx - rw / 2.0))
+            ry = int(round(cy - rh / 2.0))
+            rx = max(0, min(rx, bw - 1))
+            ry = max(0, min(ry, bh - 1))
+            rw = max(1, min(rw, bw - rx))
+            rh = max(1, min(rh, bh - ry))
         src = getattr(self, "_focus_rect_source", None) or ""
         if src == "makernote_af":
             col = QColor(255, 185, 45, 255)
@@ -5106,7 +5121,7 @@ class RAWImageViewer(QMainWindow):
             self._refresh_focus_subject_rect_from_exif()
             self.status_bar.showMessage(
                 "Focus outline ON — amber dashed = maker AF; lime = Subject / CIPA. "
-                "From fit: Space or double-click centers on the box. F = off.",
+                "From fit: Space centers on the box; double-click zooms to the click. F = off.",
                 6500,
             )
             self._redraw_single_view_pixmap_without_relayout()
@@ -6302,6 +6317,7 @@ class RAWImageViewer(QMainWindow):
         self._semantic_index_signals = None
         self._semantic_index_progress_base = 0
         self._semantic_index_progress_total = 0
+        self._gallery_search_user_collapsed_while_busy = False
         # Collapse first so clearing status does not re-trigger expand-with-new-width while still open.
         try:
             self._set_search_panel_expanded(False, animate=False)
@@ -6360,11 +6376,18 @@ class RAWImageViewer(QMainWindow):
         
         if getattr(self, "view_mode", "single") != "gallery":
             return
-            
+
+        user_collapsed = getattr(
+            self, "_gallery_search_user_collapsed_while_busy", False
+        )
         # If target changed and we are already expanded, re-run expansion to update width
-        if old_target != new_target and getattr(self, "_search_panel_expanded", False):
+        if (
+            old_target != new_target
+            and getattr(self, "_search_panel_expanded", False)
+            and not user_collapsed
+        ):
             self._set_search_panel_expanded(True, animate=True)
-        elif has_msg:
+        elif has_msg and not user_collapsed:
             self._set_search_panel_expanded(True)
 
     def _set_gallery_search_input_visible(self):
@@ -6511,13 +6534,16 @@ class RAWImageViewer(QMainWindow):
         except Exception:
             pass
         self._set_gallery_search_status("")
-        self._set_gallery_search_input_visible()
-        if (
-            getattr(self, "view_mode", "single") == "gallery"
-            and hasattr(self, "gallery_search_input")
-            and self.gallery_search_input is not None
-        ):
-            self.gallery_search_input.setFocus()
+        user_hid = getattr(self, "_gallery_search_user_collapsed_while_busy", False)
+        if not user_hid:
+            self._set_gallery_search_input_visible()
+            if (
+                getattr(self, "view_mode", "single") == "gallery"
+                and hasattr(self, "gallery_search_input")
+                and self.gallery_search_input is not None
+            ):
+                self.gallery_search_input.setFocus()
+        self._gallery_search_user_collapsed_while_busy = False
         self.status_bar.showMessage(
             "Semantic index ready: "
             f"indexed {result.get('indexed', 0)}, skipped {result.get('skipped', 0)}, "
@@ -6540,8 +6566,11 @@ class RAWImageViewer(QMainWindow):
                 self._gallery_search_placeholder_saved = ""
         except Exception:
             pass
-        self._set_gallery_search_input_visible()
+        user_hid = getattr(self, "_gallery_search_user_collapsed_while_busy", False)
+        if not user_hid:
+            self._set_gallery_search_input_visible()
         self._set_gallery_search_status("Semantic index initialization failed")
+        self._gallery_search_user_collapsed_while_busy = False
         self.status_bar.showMessage(f"Semantic index failed: {error}", 5000)
 
     def _start_semantic_asset_download_background(self, corpus_files):
@@ -6599,14 +6628,18 @@ class RAWImageViewer(QMainWindow):
         self._semantic_asset_download_in_progress = False
         self._semantic_asset_download_signals = None
         self._set_gallery_search_status("MobileCLIP asset download failed")
+        self._gallery_search_user_collapsed_while_busy = False
         self.status_bar.showMessage(f"MobileCLIP download failed: {error}", 7000)
 
     def _on_search_bottom_clicked(self):
         if getattr(self, "view_mode", "single") != "gallery":
             return
-        if self._search_panel_expanded and not self._semantic_indexing_in_progress and not self._semantic_asset_download_in_progress:
+        if self._search_panel_expanded:
+            if self._semantic_indexing_in_progress or self._semantic_asset_download_in_progress:
+                self._gallery_search_user_collapsed_while_busy = True
             self._set_search_panel_expanded(False)
             return
+        self._gallery_search_user_collapsed_while_busy = False
         corpus_files = [p for p in self._semantic_search_corpus_files if os.path.isfile(p)]
         if not corpus_files:
             corpus_files = [p for p in self.image_files if os.path.isfile(p)]
@@ -8807,7 +8840,7 @@ class RAWImageViewer(QMainWindow):
             "Delete — Delete current image\n"
             "H — Show or hide histogram (single-image view)\n"
             "F — Focus / subject outline from EXIF (amber = maker AF; lime = Subject / CIPA). "
-            "From fit: Space or double-click centers on the box when outline is on. Zoomed: Space/double-click = fit.\n\n"
+            "With outline on, from fit: Space centers on the box; double-click zooms to the click. Zoomed: Space/double-click = fit.\n\n"
             "You can drag and drop files or folders onto the window."
         )
 
@@ -8943,21 +8976,19 @@ class RAWImageViewer(QMainWindow):
                 import logging
                 logger = logging.getLogger(__name__)
                 logger.info(f"[TRACK] User double-clicked to zoom - file: {os.path.basename(self.current_file_path) if hasattr(self, 'current_file_path') and self.current_file_path else 'Unknown'}")
-                if getattr(self, "_focus_subject_outline_active", False):
-                    if self.fit_to_window:
-                        logger.info(
-                            "[TRACK] Double-click — focus outline jump to subject/AF center"
-                        )
-                        if self._focus_jump_to_subject_center():
-                            return
-                    else:
-                        self.fit_to_window = True
-                        self.current_zoom_level = 1.0
-                        self.zoom_center_point = None
-                        self.scale_image_to_fit()
-                        self.image_label.setCursor(
-                            QCursor(Qt.CursorShape.ArrowCursor)
-                        )
+                # Spacebar still jumps to EXIF focus box when outline is on; double-click
+                # always zooms toward the clicked point (same as outline off).
+                if (
+                    getattr(self, "_focus_subject_outline_active", False)
+                    and not self.fit_to_window
+                ):
+                    self.fit_to_window = True
+                    self.current_zoom_level = 1.0
+                    self.zoom_center_point = None
+                    self.scale_image_to_fit()
+                    self.image_label.setCursor(
+                        QCursor(Qt.CursorShape.ArrowCursor)
+                    )
                 elif self.fit_to_window:
                     # Zooming in from fit-to-window mode
                     click_pos = event.pos()

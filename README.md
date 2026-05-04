@@ -57,7 +57,7 @@ This is a **pre-filtering tool**, letting you go through hundreds of RAW files e
 - **Modern UI**: Material Design 3 aesthetics with Font Awesome icons (via qtawesome) and non-intrusive loading indicators
 - **Platform-specific chrome**: On Windows, the bottom bar omits Share (no stable system share without WinRT interop); **Share** remains on macOS.
 - **Non-destructive visual rotate**: Rotate in viewer by 90° steps without modifying original files (including RAW), with gallery-visible tiles refreshed immediately.
-- **Precision Focus Area Detection**: Overlays the camera's focus point(s) using manufacturer-specific MakerNote data (Canon, Nikon, Sony) with orientation-aware mapping and robust coordinate scaling.
+- **Precision Focus Area Detection**: Overlays the camera's focus point(s) using manufacturer-specific MakerNote data (Canon, Nikon, Sony) plus EXIF SubjectArea/SubjectLocation with orientation-aware mapping and robust coordinate scaling.
 
 ## 🚀 Quick Start
 
@@ -85,6 +85,7 @@ This is a **pre-filtering tool**, letting you go through hundreds of RAW files e
 - **`↓`**: Move current image to Discard folder
 - **Delete**: Delete current image (with confirmation)
 - **`H`**: Show or hide the single-image histogram strip
+- **`F`**: Toggle dashed focus/subject indicator overlay (amber = maker AF, lime = EXIF subject area)
 
 ## 🔎 Gallery search (Gallery view)
 
@@ -113,9 +114,15 @@ Separate tokens with spaces. Filters use `key:value` or comparison forms.
 
 Optional: **stronger semantic models** (advanced). The app bundle uses **MobileCLIP2-S0** for speed and size. From the same MobileCLIP2 family, **S2** or **B** checkpoints usually score better on open-vocabulary retrieval at the cost of a larger Core ML package and slower indexing—export with `python scripts/export_mobileclip2_coreml.py --model MobileCLIP2-S2` (today’s `--for-app` flow names files `mobileclip2_s0_*`; you can replace those mlpackages after export or adjust filenames to match). You can also set environment variable **`RAWVIEWER_MOBILECLIP_VARIANT=s2`** to prefer Apple’s downloadable **MobileCLIP S2** Core ML models (a different architecture than MobileCLIP2, but often strong for general photo text queries).
 
+Bundled macOS Core ML models are discovered automatically in common app/resource paths.  
+Both naming schemes are supported:
+
+- Apple Hub naming: `mobileclip_s2_image.mlpackage` + `mobileclip_s2_text.mlpackage`
+- App export naming (`--for-app`): `mobileclip2_s0_image.mlpackage` + `mobileclip2_s0_text.mlpackage`
+
 ## 🖱️ Mouse Controls
 
-- **Double-click**: Toggle zoom mode
+- **Double-click**: Zoom in to the clicked point (from fit), or zoom out to fit
 - **Pinch (Mac/Windows Trackpad) or Ctrl+Scroll**: Smoothly zoom in/out with smart cursor anchoring
 - **Click and drag**: Pan image when zoomed in
 - **Drag and drop**: Open images or folders
@@ -123,6 +130,11 @@ Optional: **stronger semantic models** (advanced). The app bundle uses **MobileC
 - **Scroll Wheel (zoom mode)**: Pan image vertically
 - **Horizontal Wheel (zoom mode)**: Pan image horizontally (left/right)
 - **Scroll Wheel (Gallery View)**: Scroll through the image grid
+
+When focus/subject indicator is enabled (`F`):
+
+- **Space** from fit-to-window zooms to the focus/subject box center.
+- **Double-click** still zooms to your clicked point (same as normal mode).
 
 ## 📁 Supported Formats
 
@@ -206,6 +218,10 @@ All dependencies are listed in `requirements.txt`:
   2. Click the **+** button and add `RAWviewer.app`.
   3. Toggle it to **ON**.
 - **"Open with" behavior**: For the very first launch, if you see a malware warning, open the app directly via Right-click -> "Open". This "registers" the app with macOS, after which "Right-click -> Open with" will work perfectly.
+- **"Semantic search unavailable" / asks to download models even in packaged app**:
+  1. Open `RAWviewer.app/Contents/Resources/models/mobileclip2_coreml/`.
+  2. Confirm either **S2** pair (`mobileclip_s2_*`) or **S0 app-export** pair (`mobileclip2_s0_*`) exists, plus `bpe_simple_vocab_16e6.txt.gz`.
+  3. If missing, rebuild with `models/mobileclip2_coreml/` present before running `python build.py`.
 
 ## 🚧 Upcoming Features
 
