@@ -4886,6 +4886,11 @@ class RAWImageViewer(QMainWindow):
         print("  [RAWImageViewer] ImageLoadManager initialized", flush=True)
         print("  [RAWImageViewer] Connecting ImageLoadManager signals...", flush=True)
         self._connect_image_manager_signals()
+        self._save_session_debounce_timer = QTimer(self)
+        self._save_session_debounce_timer.setSingleShot(True)
+        self._save_session_debounce_timer.setInterval(420)
+        self._save_session_debounce_timer.timeout.connect(self.save_session_state)
+        self._defer_post_deletion_load_generation = 0
         print("  [RAWImageViewer] ImageLoadManager signals connected", flush=True)
 
         # Thumbnail display preferences
@@ -5787,25 +5792,32 @@ class RAWImageViewer(QMainWindow):
         self.search_expand_layout = QStackedLayout(self.search_expand_container)
         self.search_expand_layout.setContentsMargins(0, 0, 0, 0)
 
+        self.gallery_search_panel = QWidget()
+        _gsp = QVBoxLayout(self.gallery_search_panel)
+        _gsp.setContentsMargins(0, 0, 0, 0)
+        _gsp.setSpacing(4)
+
         self.gallery_search_status_label = QLabel("")
         self.gallery_search_status_label.setAlignment(
             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
         )
-        self.gallery_search_status_label.setStyleSheet("""
+        self.gallery_search_status_label.setWordWrap(False)
+        self.gallery_search_style_status = """
             QLabel {
                 color: #B0B0B0;
-                font-size: 13px;
+                font-size: 12px;
                 font-weight: 500;
-                padding: 6px 0px 6px 6px;
+                padding: 0px 0px 0px 6px;
             }
-        """)
-        self.search_expand_layout.addWidget(self.gallery_search_status_label)
+        """
+        self.gallery_search_status_label.setStyleSheet(self.gallery_search_style_status)
+        self.gallery_search_status_label.hide()
 
         self.gallery_search_input = QLineEdit()
         self.gallery_search_input.setPlaceholderText("Search gallery")
         self.gallery_search_input.setClearButtonEnabled(True)
         self.gallery_search_input.setFixedWidth(560)
-        self.gallery_search_input.setStyleSheet("""
+        self.gallery_search_style_input = """
             QLineEdit {
                 color: #E0E0E0;
                 background-color: #2A2A2A;
@@ -5817,11 +5829,15 @@ class RAWImageViewer(QMainWindow):
             QLineEdit:focus {
                 border: 1px solid #5A5A5A;
             }
-        """)
+        """
+        self.gallery_search_input.setStyleSheet(self.gallery_search_style_input)
         self.gallery_search_input.returnPressed.connect(self._semantic_search_from_bar)
         self.gallery_search_input.textChanged.connect(self._on_gallery_search_text_changed)
-        self.search_expand_layout.addWidget(self.gallery_search_input)
-        self.search_expand_layout.setCurrentWidget(self.gallery_search_status_label)
+
+        _gsp.addWidget(self.gallery_search_status_label)
+        _gsp.addWidget(self.gallery_search_input)
+        self.search_expand_layout.addWidget(self.gallery_search_panel)
+        self.search_expand_layout.setCurrentWidget(self.gallery_search_panel)
         self._search_panel_target_width = 560
         self._search_panel_expanded = False
         self._search_panel_animation = None
@@ -6021,17 +6037,19 @@ class RAWImageViewer(QMainWindow):
     def _set_gallery_search_status(self, message: str):
         if hasattr(self, "gallery_search_status_label") and self.gallery_search_status_label is not None:
             self.gallery_search_status_label.setText(message or "")
+            if message and str(message).strip():
+                self.gallery_search_status_label.show()
+            else:
+                self.gallery_search_status_label.hide()
         if getattr(self, "view_mode", "single") != "gallery":
             return
-        if hasattr(self, "search_expand_layout") and hasattr(self, "gallery_search_status_label"):
-            self.search_expand_layout.setCurrentWidget(self.gallery_search_status_label)
         self._set_search_panel_expanded(True)
 
     def _set_gallery_search_input_visible(self):
         if getattr(self, "view_mode", "single") != "gallery":
             return
-        if hasattr(self, "search_expand_layout") and hasattr(self, "gallery_search_input"):
-            self.search_expand_layout.setCurrentWidget(self.gallery_search_input)
+        if hasattr(self, "search_expand_layout") and hasattr(self, "gallery_search_panel"):
+            self.search_expand_layout.setCurrentWidget(self.gallery_search_panel)
         self._set_search_panel_expanded(True)
 
     def _set_search_panel_expanded(self, expanded: bool, animate: bool = True):
@@ -6141,6 +6159,10 @@ class RAWImageViewer(QMainWindow):
             f"(pending {len(pending_files)})"
         )
         worker = _SemanticIndexWorker(token, list(pending_files), index, signals)
+        self._gallery_search_placeholder_saved = self.gallery_search_input.placeholderText()
+        self.gallery_search_input.setPlaceholderText(
+            "EXIF/metadata: indexed rows only • CLIP resumes when indexing finishes"
+        )
         QThreadPool.globalInstance().start(worker)
 
     def _on_semantic_index_progress(self, token, i, n, basename):
@@ -6161,6 +6183,14 @@ class RAWImageViewer(QMainWindow):
         self._semantic_index_signals = None
         self._semantic_index_progress_base = 0
         self._semantic_index_progress_total = 0
+        try:
+            if hasattr(self, "gallery_search_input") and self.gallery_search_input is not None:
+                ph = getattr(self, "_gallery_search_placeholder_saved", "") or "Search gallery"
+                self.gallery_search_input.setPlaceholderText(ph)
+                self._gallery_search_placeholder_saved = ""
+        except Exception:
+            pass
+        self._set_gallery_search_status("")
         self._set_gallery_search_input_visible()
         if (
             getattr(self, "view_mode", "single") == "gallery"
@@ -6183,6 +6213,14 @@ class RAWImageViewer(QMainWindow):
         self._semantic_index_signals = None
         self._semantic_index_progress_base = 0
         self._semantic_index_progress_total = 0
+        try:
+            if hasattr(self, "gallery_search_input") and self.gallery_search_input is not None:
+                ph = getattr(self, "_gallery_search_placeholder_saved", "") or "Search gallery"
+                self.gallery_search_input.setPlaceholderText(ph)
+                self._gallery_search_placeholder_saved = ""
+        except Exception:
+            pass
+        self._set_gallery_search_input_visible()
         self._set_gallery_search_status("Semantic index initialization failed")
         self.status_bar.showMessage(f"Semantic index failed: {error}", 5000)
 
@@ -6387,7 +6425,13 @@ class RAWImageViewer(QMainWindow):
                 base_files = [p for p in self.image_files if os.path.isfile(p)]
             if self._semantic_search_backup_files is None:
                 self._semantic_search_backup_files = list(base_files)
-            self.status_bar.showMessage("Running semantic search...")
+            if getattr(self, "_semantic_indexing_in_progress", False):
+                self.status_bar.showMessage(
+                    "Searching while indexing… EXIF/metadata uses indexed rows only; DB may briefly wait.",
+                    4500,
+                )
+            else:
+                self.status_bar.showMessage("Running search...")
             QApplication.processEvents()
             
             sort_newest = self.get_sort_preference()
@@ -6474,7 +6518,7 @@ class RAWImageViewer(QMainWindow):
         except Exception as e:
             QMessageBox.warning(self, "Semantic Search", str(e))
 
-    def _clear_semantic_search_results(self, silent=False):
+    def _clear_semantic_search_results(self, silent=False, exit_to_gallery=False):
         if not self._semantic_search_backup_files and not self._semantic_search_corpus_files:
             if not silent:
                 self.status_bar.showMessage("No active semantic search filter", 2500)
@@ -6498,7 +6542,11 @@ class RAWImageViewer(QMainWindow):
         else:
             self.current_file_index = 0
             self.current_file_path = self.image_files[0]
-        if getattr(self, "view_mode", "single") == "gallery":
+        if exit_to_gallery:
+            self.view_mode = "gallery"
+            self._stop_slideshow()
+            self._show_gallery_view()
+        elif getattr(self, "view_mode", "single") == "gallery":
             self._sync_gallery_scrollbar_policy()
             self._update_gallery_view()
         else:
@@ -6782,9 +6830,10 @@ class RAWImageViewer(QMainWindow):
             self._update_gallery_counter()
         if self._semantic_indexing_in_progress:
             self._set_gallery_search_status(self.gallery_search_status_label.text() or "Initializing semantic index...")
-        elif self._search_panel_expanded and hasattr(self, "search_expand_layout") and hasattr(self, "gallery_search_input"):
-            # Keep whichever expanded panel view is currently active.
-            self.search_expand_layout.setCurrentWidget(self.gallery_search_input)
+        elif self._search_panel_expanded and hasattr(self, "search_expand_layout") and hasattr(
+            self, "gallery_search_panel"
+        ):
+            self.search_expand_layout.setCurrentWidget(self.gallery_search_panel)
         # Show sort button in gallery mode
         if hasattr(self, 'sort_toggle_button'):
             self.sort_toggle_button.show()
@@ -11570,7 +11619,7 @@ class RAWImageViewer(QMainWindow):
                 self._restore_start_scroll_x = None
                 self._restore_start_scroll_y = None
             self.perform_deletion()
-        self.save_session_state()
+        self.schedule_save_session_state()
 
     def confirm_deletion(self):
         """Show confirmation dialog for file deletion with custom MD3 design"""
@@ -11596,25 +11645,8 @@ class RAWImageViewer(QMainWindow):
             normalized_path = os.path.normpath(file_to_delete)
 
             # Before deleting, cancel any preload tasks for this file and clear cache
-            if hasattr(self, 'preload_manager'):
-                # Cancel preload for this specific file if it's in the active threads
-                if file_to_delete in self.preload_manager.active_threads:
-                    thread = self.preload_manager.active_threads[file_to_delete]
-                    try:
-                        if hasattr(thread, 'cleanup'):
-                            thread.cleanup()
-                        elif hasattr(thread, 'stop_processing'):
-                            thread.stop_processing()
-                            thread.quit()
-                            thread.wait(100)
-                    except Exception as e:
-                        import logging
-                        logger = logging.getLogger(__name__)
-                        logger.debug(f"Error cancelling preload for {filename}: {e}")
-                    finally:
-                        if file_to_delete in self.preload_manager.active_threads:
-                            del self.preload_manager.active_threads[file_to_delete]
-            
+            self._cancel_load_and_preload_for_path(file_to_delete)
+
             # Clear cache for this file
             from image_cache import get_image_cache
             cache = get_image_cache()
@@ -11625,9 +11657,9 @@ class RAWImageViewer(QMainWindow):
             from send2trash import send2trash
             send2trash(normalized_path)
 
+            self._drop_discarded_from_semantic_corpus(file_to_delete)
             # Remove from image files list
-            if file_to_delete in self.image_files:
-                self.image_files.remove(file_to_delete)
+            self._remove_file_from_active_image_list(file_to_delete)
 
             # Update status
             self.status_bar.showMessage(f"Deleted: {filename}")
@@ -11642,7 +11674,26 @@ class RAWImageViewer(QMainWindow):
     def handle_post_deletion_navigation(self):
         """Handle navigation after a file has been deleted"""
         if not self.image_files:
-            # No more images in folder
+            # Semantic / gallery search narrows ``image_files``; discarding the last hit yields an
+            # empty list while the folder may still contain other files — restore corpus + gallery.
+            had_semantic_scope = bool(
+                self._semantic_search_backup_files or self._semantic_search_corpus_files
+            )
+            if had_semantic_scope:
+                self._clear_semantic_search_results(silent=True, exit_to_gallery=True)
+                inp = getattr(self, "gallery_search_input", None)
+                if inp is not None:
+                    inp.blockSignals(True)
+                    try:
+                        inp.clear()
+                    finally:
+                        inp.blockSignals(False)
+                if self.image_files:
+                    self.status_bar.showMessage("Search cleared — showing full folder", 4500)
+                    self.schedule_save_session_state()
+                    return
+
+            # No more images in folder (truly empty)
             self.current_file_path = None
             self.current_file_index = -1
             self.current_pixmap = None
@@ -11663,7 +11714,19 @@ class RAWImageViewer(QMainWindow):
         if self.current_file_index >= len(self.image_files):
             self.current_file_index = len(self.image_files) - 1
 
-        # Load the next image (or previous if we were at the end)
+        # Defer decoding the next image so rapid discard bursts can process key events /
+        # coalesced timer work before kicking off heavy load_raw_image.
+        self._defer_post_deletion_load_generation += 1
+        gen = self._defer_post_deletion_load_generation
+        QTimer.singleShot(0, lambda g=gen: self._run_deferred_post_deletion_load(g))
+
+    def _run_deferred_post_deletion_load(self, generation: int) -> None:
+        if generation != self._defer_post_deletion_load_generation:
+            return
+        if not self.image_files:
+            return
+        if self.current_file_index >= len(self.image_files):
+            self.current_file_index = len(self.image_files) - 1
         if self.current_file_index >= 0:
             self.load_raw_image(self.image_files[self.current_file_index])
 
@@ -13160,37 +13223,20 @@ class RAWImageViewer(QMainWindow):
                     discard_folder, f"{base}_discarded_{counter}{ext}")
                 counter += 1
             
-            # Before moving, cancel any preload tasks for this file and clear cache
-            if hasattr(self, 'preload_manager'):
-                # Cancel preload for this specific file if it's in the active threads
-                if file_to_move in self.preload_manager.active_threads:
-                    thread = self.preload_manager.active_threads[file_to_move]
-                    try:
-                        if hasattr(thread, 'cleanup'):
-                            thread.cleanup()
-                        elif hasattr(thread, 'stop_processing'):
-                            thread.stop_processing()
-                            thread.quit()
-                            thread.wait(100)
-                    except Exception as e:
-                        import logging
-                        logger = logging.getLogger(__name__)
-                        logger.debug(f"Error cancelling preload for {filename}: {e}")
-                    finally:
-                        if file_to_move in self.preload_manager.active_threads:
-                            del self.preload_manager.active_threads[file_to_move]
-            
+            # Before moving, cancel any preload / manager tasks for this file and clear cache
+            self._cancel_load_and_preload_for_path(file_to_move)
+
             # Clear cache for this file
             from image_cache import get_image_cache
             cache = get_image_cache()
             cache.invalidate_file(file_to_move)
-            
+
             # Now move the file
             os.rename(file_to_move, target_path)
-            
+
+            self._drop_discarded_from_semantic_corpus(file_to_move)
             # Remove from image files list
-            if file_to_move in self.image_files:
-                self.image_files.remove(file_to_move)
+            self._remove_file_from_active_image_list(file_to_move)
             self.status_bar.showMessage(f"Moved to Discard: {filename}")
             # --- Preserve zoom/pan state for next image (like navigation/discard) ---
             if not self.fit_to_window:
@@ -13212,7 +13258,7 @@ class RAWImageViewer(QMainWindow):
                 self._restore_start_scroll_x = None
                 self._restore_start_scroll_y = None
             self.handle_post_deletion_navigation()
-            self.save_session_state()
+            self.schedule_save_session_state()
         except Exception as e:
             error_msg = f"Could not move file to Discard folder:\n{str(e)}"
             self.show_error("Discard Error", error_msg)
@@ -13485,6 +13531,63 @@ class RAWImageViewer(QMainWindow):
             self.show_error("Folder Load Error", f"Unexpected error loading folder:\n{str(e)}")
             self._hide_all_loading_indicators()
 
+    def schedule_save_session_state(self) -> None:
+        """Coalesce frequent QSettings writes (e.g. rapid Down-arrow discard) onto a debounced timer."""
+        t = getattr(self, "_save_session_debounce_timer", None)
+        if t is None:
+            self.save_session_state()
+            return
+        t.start()
+
+    def _cancel_load_and_preload_for_path(self, file_path: str) -> None:
+        """Stop in-flight loads for a path we're about to rename/delete (keeps discard responsive)."""
+        if not file_path:
+            return
+        try:
+            if getattr(self, "image_manager", None) is not None:
+                self.image_manager.cancel_task(file_path)
+        except Exception:
+            pass
+        preload = getattr(self, "preload_manager", None)
+        if preload is None or not hasattr(preload, "active_threads"):
+            return
+        if file_path not in preload.active_threads:
+            return
+        thread = preload.active_threads.pop(file_path, None)
+        if thread is None:
+            return
+        try:
+            if hasattr(thread, "cleanup"):
+                thread.cleanup()
+            elif hasattr(thread, "stop_processing"):
+                thread.stop_processing()
+                thread.quit()
+                thread.wait(40)
+        except Exception:
+            pass
+
+    def _remove_file_from_active_image_list(self, file_path: str) -> None:
+        """Remove ``file_path`` from ``image_files`` with a cheap path when it's the current index."""
+        if not file_path or not self.image_files:
+            return
+        i = self.current_file_index
+        if 0 <= i < len(self.image_files) and self.image_files[i] == file_path:
+            del self.image_files[i]
+            return
+        try:
+            self.image_files.remove(file_path)
+        except ValueError:
+            pass
+
+    def _drop_discarded_from_semantic_corpus(self, file_path: str) -> None:
+        lst = getattr(self, "_semantic_search_corpus_files", None)
+        if not lst:
+            return
+        try:
+            lst.remove(file_path)
+        except ValueError:
+            pass
+
     def save_session_state(self):
         settings = self.get_settings()
         if self.current_folder and self.current_file_index >= 0 and self.image_files:
@@ -13599,6 +13702,8 @@ class RAWImageViewer(QMainWindow):
         logger.info("[CLOSE] Application close event triggered, starting cleanup...")
         
         try:
+            if getattr(self, "_save_session_debounce_timer", None) is not None:
+                self._save_session_debounce_timer.stop()
             # Save session state first
             self.save_session_state()
             logger.info("[CLOSE] Session state saved")

@@ -355,7 +355,9 @@ class MobileCLIPCoreMLBackend:
     def encode_image(self, file_path: str) -> np.ndarray:
         self._load_models()
         CoreML = self._CoreML
-        im = _load_index_source_image(file_path, max_size=512).resize(
+        # Core ML encoder input is fixed (typically 256×256 NCHW in our exports). Loading a richer
+        # source (preview/thumbnail) before bicubic resize to 256 can help vs loading tiny 512-max inputs.
+        im = _load_index_source_image(file_path, max_size=1024).resize(
             (256, 256), Image.Resampling.BICUBIC
         )
         desc = self._image_model.modelDescription()
@@ -654,9 +656,12 @@ class SemanticImageIndex:
         self.model_name = model_name
         self._model = None
         self._reverse_geocoder = None
-        self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
+        self._conn = sqlite3.connect(
+            self.db_path, check_same_thread=False, timeout=60.0
+        )
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA synchronous=NORMAL")
+        self._conn.execute("PRAGMA busy_timeout=60000")
         self._init_db()
 
     def _init_db(self) -> None:
@@ -1222,9 +1227,14 @@ class SemanticImageIndex:
         indexed = 0
         skipped = 0
         failed = 0
+        batch_writes = 0
+        # Committing every row forces fsync churn; batch for much faster bulk builds.
+        commit_every = 40
         for i, fp in enumerate(file_paths, start=1):
             if progress_callback:
-                progress_callback(i, total, fp)
+                # Throttle UI / callback overhead on huge folders.
+                if i <= 2 or i >= total or (i % 12 == 0):
+                    progress_callback(i, total, fp)
             if not fp or not os.path.isfile(fp):
                 failed += 1
                 continue
@@ -1302,11 +1312,14 @@ class SemanticImageIndex:
                     ),
                 )
                 indexed += 1
-                # Persist each successful file so interrupted sessions can resume accurately.
-                self._conn.commit()
+                batch_writes += 1
+                if batch_writes >= commit_every:
+                    self._conn.commit()
+                    batch_writes = 0
             except Exception:
                 failed += 1
-        self._conn.commit()
+        if batch_writes:
+            self._conn.commit()
         return {"indexed": indexed, "skipped": skipped, "failed": failed, "total": total}
 
     def get_index_coverage(self, file_paths: Sequence[str]) -> Dict[str, int]:
