@@ -214,7 +214,7 @@ class ThumbnailExtractor(QObject):
             if not image.isNull():
                 arr = _qimage_to_rgb_array(image)
                 if arr is not None:
-                    return arr, None
+                    return arr
         except Exception:
             pass
 
@@ -231,12 +231,12 @@ class ThumbnailExtractor(QObject):
                 if img.mode != 'RGB':
                     img = img.convert('RGB')
 
-                return np.array(img), None
+                return np.array(img)
 
         except Exception:
             pass
 
-        return None, None
+        return None
 
 
 class EXIFExtractor(QObject):
@@ -380,22 +380,23 @@ class EXIFExtractor(QObject):
                         should_check_rawpy = True
                         # logger.debug(f"[ORIENTATION] EXIFExtractor: Orientation is 1 for RAW, forcing rawpy check to verify")
 
-                # Fallback to rawpy for dimensions/orientation if needed
-                if should_check_rawpy and self._is_raw_file(file_path):
+                # For RAW files, rawpy is the authoritative source for dimensions and orientation.
+                # exifread often picks up embedded preview dimensions instead.
+                if self._is_raw_file(file_path):
                     try:
                         import rawpy
                         with rawpy.imread(file_path) as raw:
                             sizes = raw.sizes
-                            if original_width is None: original_width = sizes.width
-                            if original_height is None: original_height = sizes.height
+                            # Always overwrite with rawpy dimensions for RAW files
+                            original_width = sizes.width
+                            original_height = sizes.height
                             
                             # CRITICAL: If EXIF orientation was missing/default, use rawpy's flip
                             if orientation == 1 and sizes.flip != 0:
                                 # rawpy's flip mapping corresponds to EXIF
                                 orientation = sizes.flip
                                 print(f"[ORIENTATION] EXIFExtractor: Using rawpy flip fallback = {orientation}")
-                    except Exception as e:
-                        # logger.warning(f"Failed to read rawpy metadata: {e}")
+                    except Exception:
                         pass
 
                 # Extract technical metadata for top-level cache columns
@@ -520,7 +521,7 @@ class OptimizedRAWProcessor(QObject):
             'use_camera_wb': True,
             'use_auto_wb': False,
             'output_bps': 8,  # 8-bit for speed
-            'no_auto_bright': False,
+            'no_auto_bright': True,
             'gamma': (2.222, 4.5),  # Standard sRGB gamma
             'bright': 1.0,
             # 'highlight': 0,  # Removed for rawpy 0.25.0 compatibility

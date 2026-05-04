@@ -40,9 +40,15 @@ if exist *.spec del /q *.spec 2>nul
 REM Build the application
 echo Building RAWviewer...
 python build.py
+if %errorlevel% neq 0 (
+    echo.
+    echo [ERROR] Build failed! Check the error messages above.
+    pause
+    exit /b %errorlevel%
+)
 
 echo.
-echo Build completed!
+echo Build completed successfully!
 echo.
 echo You can find the executable at:
 echo   - dist\RAWviewer.exe

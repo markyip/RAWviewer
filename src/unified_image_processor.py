@@ -247,14 +247,20 @@ class UnifiedImageProcessor:
                preview = self.thumbnail_extractor.extract_preview_from_raw(file_path, max_size=1920)
                
                if preview is not None:
-                   # Apply Orientation to Preview
-                   orientation = exif_data.get('orientation', 1) if exif_data else 1
-                   if orientation != 1:
-                       preview = self._apply_orientation_correction(preview, orientation, exif_data)
-                   
-                   # Cache Preview
-                   self.cache.put_preview(file_path, preview)
-                   return preview
+                   # Check if preview is large enough for a good "Fit" view
+                   # Many phone DNGs have tiny previews (e.g. 1024px) that look bad
+                   h, w = preview.shape[:2]
+                   if max(h, w) >= 1600:
+                       # Apply Orientation to Preview
+                       orientation = exif_data.get('orientation', 1) if exif_data else 1
+                       if orientation != 1:
+                           preview = self._apply_orientation_correction(preview, orientation, exif_data)
+                       
+                       # Cache Preview
+                       self.cache.put_preview(file_path, preview)
+                       return preview
+                   else:
+                       print(f"[PREVIEW] Embedded preview is too small ({w}x{h}), falling back to RAW processing for better quality")
                
                # Fallback to RAW processing if preview extraction fails
                print(f"[PREVIEW] Preview extraction failed, falling back to RAW processing")

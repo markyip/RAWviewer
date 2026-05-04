@@ -1699,7 +1699,17 @@ class PixmapConverter(QThread):
             if self._should_stop:
                 return
             
-            height, width, channels = self.rgb_image.shape
+            if not hasattr(self.rgb_image, 'shape'):
+                # Fallback or error handling
+                if hasattr(self.rgb_image, 'width') and hasattr(self.rgb_image, 'height'):
+                    height, width = self.rgb_image.height(), self.rgb_image.width()
+                    channels = 3
+                else:
+                    return
+            else:
+                shape = self.rgb_image.shape
+                height, width = shape[0], shape[1]
+                channels = shape[2] if len(shape) > 2 else 1
             bytes_per_line = channels * width
             
             # Ensure the data is contiguous
@@ -1716,9 +1726,15 @@ class PixmapConverter(QThread):
             if self._should_stop:
                 return
             
-            # Create QImage and QPixmap
+            # Create QImage and QPixmap with appropriate format
+            q_format = QImage.Format.Format_RGB888
+            if channels == 1:
+                q_format = QImage.Format.Format_Grayscale8
+            elif channels == 4:
+                q_format = QImage.Format.Format_RGBA8888
+
             q_image = QImage(image_data, width, height,
-                             bytes_per_line, QImage.Format.Format_RGB888)
+                             bytes_per_line, q_format)
             pixmap = QPixmap.fromImage(q_image)
             
             if self._should_stop:
@@ -4794,6 +4810,8 @@ class RAWImageViewer(QMainWindow):
         # Highest max dimension already shown for current file (drops late stale thumbnails)
         self._manager_display_track_path = None
         self._manager_displayed_max_dim = 0
+        # Path whose pixel data last written to ``current_pixmap`` (reject stale pixmap vs new file guards)
+        self._displayed_content_path = None
         self.thumbnail_cache = {}  # Cache for thumbnails
         self._histogram_user_hidden = False
         self.thumbnail_threads = []  # Track running thumbnail threads
@@ -4820,6 +4838,8 @@ class RAWImageViewer(QMainWindow):
         self._last_navigation_time = 0  # Timestamp of last navigation for rate limiting
         self._pending_navigation = None  # Store pending navigation request (file_path) for debouncing
         self._navigation_timer = None  # QTimer for debouncing rapid navigation
+        # Navigate while zoomed: request full decode first & apply one-step zoom restore
+        self._preserve_nav_zoom_active = False
 
         self._slideshow_timer = None
         self._slideshow_force_fit_next = False
@@ -5034,25 +5054,66 @@ class RAWImageViewer(QMainWindow):
             return
             
         # Check resolution to see if this is "Full" or "Preview"
-        max_dim = max(image.shape[0], image.shape[1])
-        is_full_resolution = max_dim >= 4000 # Consider >4000px as full resolution
+        if hasattr(image, 'shape'):
+            shape = image.shape
+            height, width = shape[0], shape[1]
+            channels = shape[2] if len(shape) > 2 else 1
+        elif hasattr(image, 'width') and hasattr(image, 'height'):
+            # It's likely a QPixmap or QImage
+            height, width = image.height(), image.width()
+            channels = 3 # Assume RGB
+        else:
+            logger.error(f"[MANAGER] Invalid image object type: {type(image)}")
+            return
+            
+        max_dim = max(height, width)
+        is_full_resolution = max_dim >= 3000 # Consider >3000px as full resolution (most previews are <=1920px)
         
         if is_full_resolution:
-            logger.info(f"[MANAGER] High-resolution image loaded ({image.shape[1]}x{image.shape[0]}). maintain_zoom flag set.")
+            logger.info(f"[MANAGER] High-resolution image loaded ({width}x{height}). maintain_zoom flag set.")
             self._full_resolution_loading = False
-            # If we have a pending zoom or just want to upgrade quality without resetting view:
+            self._is_half_size_displayed = False
+            # Match legacy behavior (e.g. 40b9ade): only bump maintain flag when we actually have a sharper buffer.
             self._maintain_zoom_on_navigation = True
+        else:
+            self._is_half_size_displayed = True
         
         # Mark that orientation is already applied (UnifiedImageProcessor applies it)
         # logger.debug(f"[MANAGER] Setting _orientation_already_applied = True before display_numpy_image")
         self._orientation_already_applied = True
         
+        # CRITICAL: Prevent resolution downgrade within the SAME file: a late small preview must not
+        # replace a higher-resolution image we already showed for this path. When switching files,
+        # ``current_pixmap`` may still hold the *previous* image — do not compare dimensions then.
+        displayed_for = getattr(self, "_displayed_content_path", None)
+        pixmap_is_for_this_file = (
+            displayed_for is not None
+            and _norm_path(displayed_for) == _norm_path(file_path)
+        )
+        current_max_dim = 0
+        if self.current_pixmap and pixmap_is_for_this_file:
+            current_max_dim = max(self.current_pixmap.width(), self.current_pixmap.height())
+        
+        if (
+            pixmap_is_for_this_file
+            and max_dim < current_max_dim
+            and _norm_path(file_path) == _norm_path(getattr(self, "current_file_path", None))
+        ):
+            logger.info(f"[MANAGER] Ignoring lower-resolution preview ({width}x{height}) as higher-resolution image ({current_max_dim}px) is already displayed.")
+            # Still update status bar and focus if needed, but don't redisplay
+            self._orientation_already_applied = False
+            return
+        
         self.display_numpy_image(image)
         
         # logger.debug(f"[MANAGER] Resetting _orientation_already_applied = False after display_numpy_image")
         self._orientation_already_applied = False  # Reset flag
-        self._manager_displayed_max_dim = max(
-            getattr(self, "_manager_displayed_max_dim", 0), max_dim
+        
+        # Track the max dimension seen for this specific file path to prevent downgrades
+        if not hasattr(self, "_file_max_dim_map"):
+            self._file_max_dim_map = {}
+        self._file_max_dim_map[_norm_path(file_path)] = max(
+            self._file_max_dim_map.get(_norm_path(file_path), 0), max_dim
         )
 
         self.status_bar.showMessage(f"Loaded {os.path.basename(file_path)}")
@@ -5063,7 +5124,14 @@ class RAWImageViewer(QMainWindow):
         # replace the click-based center with the image center.
 
         # CRITICAL: Ensure metadata is updated after image is displayed
-        self.update_status_bar()
+        # Try to get original dimensions from cache to show in status bar immediately
+        orig_w, orig_h = None, None
+        cached_exif = self.image_cache.get_exif(file_path)
+        if cached_exif:
+            orig_w = cached_exif.get('original_width')
+            orig_h = cached_exif.get('original_height')
+            
+        self.update_status_bar(width=orig_w, height=orig_h)
         
         self.setFocus()
         self.save_session_state()
@@ -8455,133 +8523,162 @@ class RAWImageViewer(QMainWindow):
         self.setFocus()
 
     def image_double_click_event(self, event):
-        if not self.current_pixmap:
-            return
-        if event.button() == Qt.MouseButton.LeftButton:
-            self._stop_slideshow()
-            import logging
-            logger = logging.getLogger(__name__)
-            logger.info(f"[TRACK] User double-clicked to zoom - file: {os.path.basename(self.current_file_path) if hasattr(self, 'current_file_path') and self.current_file_path else 'Unknown'}")
-            if self.fit_to_window:
-                # Zooming in from fit-to-window mode
-                click_pos = event.pos()
-                displayed_pixmap = self.image_label.pixmap()
+        try:
+            if not self.current_pixmap:
+                # If image is loading, set pending zoom
+                if hasattr(self, 'current_file_path') and self.current_file_path:
+                    self._pending_zoom_toggle = True
+                    logger.info("Double-click recorded while image is loading, will zoom once ready.")
+                return
+            if event.button() == Qt.MouseButton.LeftButton:
+                self._stop_slideshow()
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.info(f"[TRACK] User double-clicked to zoom - file: {os.path.basename(self.current_file_path) if hasattr(self, 'current_file_path') and self.current_file_path else 'Unknown'}")
+                if self.fit_to_window:
+                    # Zooming in from fit-to-window mode
+                    click_pos = event.pos()
+                    displayed_pixmap = self.image_label.pixmap()
 
-                if displayed_pixmap:
-                    # Calculate where the click occurred relative to the displayed image
-                    label_size = self.image_label.size()
-                    displayed_size = displayed_pixmap.size()
+                    if displayed_pixmap:
+                        # Calculate where the click occurred relative to the displayed image
+                        label_size = self.image_label.size()
+                        displayed_size = displayed_pixmap.size()
 
-                    # Calculate image offset within the label (image is centered in label)
-                    image_x_offset = (label_size.width() -
-                                      displayed_size.width()) / 2
-                    image_y_offset = (label_size.height() -
-                                      displayed_size.height()) / 2
+                        # Calculate image offset within the label (image is centered in label)
+                        image_x_offset = (label_size.width() -
+                                          displayed_size.width()) / 2
+                        image_y_offset = (label_size.height() -
+                                          displayed_size.height()) / 2
 
-                    # Adjust click position relative to the displayed image
-                    adjusted_click_x = click_pos.x() - image_x_offset
-                    adjusted_click_y = click_pos.y() - image_y_offset
+                        # Adjust click position relative to the displayed image
+                        adjusted_click_x = click_pos.x() - image_x_offset
+                        adjusted_click_y = click_pos.y() - image_y_offset
 
-                    # Check if click is within the displayed image bounds
-                    if (0 <= adjusted_click_x < displayed_size.width() and
-                            0 <= adjusted_click_y < displayed_size.height()):
+                        # Check if click is within the displayed image bounds
+                        if (0 <= adjusted_click_x < displayed_size.width() and
+                                0 <= adjusted_click_y < displayed_size.height()):
 
-                        # Calculate the ratio of the click position within the displayed image
-                        click_ratio_x = adjusted_click_x / displayed_size.width()
-                        click_ratio_y = adjusted_click_y / displayed_size.height()
+                            # Calculate the ratio of the click position within the displayed image
+                            click_ratio_x = adjusted_click_x / displayed_size.width()
+                            click_ratio_y = adjusted_click_y / displayed_size.height()
 
-                        # Map this ratio to the full-size image coordinates
-                        full_size = self.current_pixmap.size()
-                        image_click_x = int(click_ratio_x * full_size.width())
-                        image_click_y = int(click_ratio_y * full_size.height())
+                            # Map this ratio to the full-size image coordinates
+                            full_size = self.current_pixmap.size()
+                            image_click_x = int(click_ratio_x * full_size.width())
+                            image_click_y = int(click_ratio_y * full_size.height())
 
-                        # Clamp to valid coordinates
-                        image_click_x = max(
-                            0, min(image_click_x, full_size.width() - 1))
-                        image_click_y = max(
-                            0, min(image_click_y, full_size.height() - 1))
+                            # Clamp to valid coordinates
+                            image_click_x = max(
+                                0, min(image_click_x, full_size.width() - 1))
+                            image_click_y = max(
+                                0, min(image_click_y, full_size.height() - 1))
 
-                        self.zoom_center_point = QPoint(
-                            image_click_x, image_click_y)
+                            self.zoom_center_point = QPoint(
+                                image_click_x, image_click_y)
+                        else:
+                            # Click outside image, center on image center
+                            self.zoom_center_point = QPoint(
+                                self.current_pixmap.width() // 2,
+                                self.current_pixmap.height() // 2)
                     else:
-                        # Click outside image, center on image center
+                        # No displayed pixmap, center on image center
                         self.zoom_center_point = QPoint(
                             self.current_pixmap.width() // 2,
                             self.current_pixmap.height() // 2)
-                else:
-                    # No displayed pixmap, center on image center
-                    self.zoom_center_point = QPoint(
-                        self.current_pixmap.width() // 2,
-                        self.current_pixmap.height() // 2)
 
-                # Switch to 100% zoom mode
-                # If currently displaying half_size and user zooms in, load full resolution FIRST
-                if hasattr(self, '_is_half_size_displayed') and self._is_half_size_displayed:
-                    if not hasattr(self, '_full_resolution_loading') or not self._full_resolution_loading:
-                        import logging
-                        logger = logging.getLogger(__name__)
-                        logger.info("User double-clicked to zoom in - triggering full resolution load")
-                        # Check if full resolution is already cached - if so, load it immediately
-                        cached_full = self.image_cache.get_full_image(self.current_file_path)
-                        if cached_full is not None:
-                            cached_max_dim = max(cached_full.shape[1], cached_full.shape[0])
-                            if cached_max_dim > 5000:
-                                logger.info("Full resolution image already cached, loading immediately...")
-                                self._full_resolution_loading = True
-                                # Set flag to prevent display_pixmap from resetting fit_to_window
-                                # We're about to zoom in, so we want to preserve that intent
-                                self._maintain_zoom_on_navigation = True
-                                # CRITICAL: UnifiedImageProcessor caches already-oriented images.
-                                # Mark as oriented to prevent double rotation in display_numpy_image.
-                                self._orientation_already_applied = True
-                                
-                                old_current_size = self.current_pixmap.size() if self.current_pixmap else None
-                                
-                                self.display_numpy_image(cached_full)
-                                self._is_half_size_displayed = False
-                                self._full_resolution_loading = False
-                                
-                            # Recalculate zoom center point for full resolution image
-                            if self.current_pixmap and old_current_size:
-                                # Scale the zoom center point from half_size to full resolution
-                                scale_x = self.current_pixmap.width() / old_current_size.width() if old_current_size.width() > 0 else 1.0
-                                scale_y = self.current_pixmap.height() / old_current_size.height() if old_current_size.height() > 0 else 1.0
-                                if hasattr(self, 'zoom_center_point') and self.zoom_center_point:
-                                    self.zoom_center_point = QPoint(
-                                        int(self.zoom_center_point.x() * scale_x),
-                                        int(self.zoom_center_point.y() * scale_y)
+                    # Switch to 100% zoom mode
+                    # Check if we should upgrade to full resolution
+                    should_upgrade = False
+                    if hasattr(self, '_is_half_size_displayed') and self._is_half_size_displayed:
+                        should_upgrade = True
+                    else:
+                        # Safety check: compare current size to original size from cache
+                        cached_exif = self.image_cache.get_exif(self.current_file_path)
+                        if cached_exif and self.current_pixmap:
+                            original_max = max(cached_exif.get('original_width', 0), cached_exif.get('original_height', 0))
+                            current_max = max(self.current_pixmap.width(), self.current_pixmap.height())
+                            if original_max > 0 and current_max < original_max * 0.8:
+                                should_upgrade = True
+                    
+                    if should_upgrade:
+                        if not hasattr(self, '_full_resolution_loading') or not self._full_resolution_loading:
+                            import logging
+                            logger = logging.getLogger(__name__)
+                            logger.info("User double-clicked to zoom in - triggering full resolution load")
+                            # Check if full resolution is already cached - if so, load it immediately
+                            cached_full = self.image_cache.get_full_image(self.current_file_path)
+                            if cached_full is not None:
+                                # Safe shape access
+                                if hasattr(cached_full, 'shape'):
+                                    cached_h, cached_w = cached_full.shape[0], cached_full.shape[1]
+                                elif hasattr(cached_full, 'width') and hasattr(cached_full, 'height'):
+                                    cached_h, cached_w = cached_full.height(), cached_full.width()
+                                else:
+                                    cached_h, cached_w = 0, 0
+                                cached_max_dim = max(cached_w, cached_h)
+                                if cached_max_dim >= 3000:
+                                    logger.info("Full resolution image already cached, loading immediately...")
+                                    self._full_resolution_loading = True
+                                    # Set flag to prevent display_pixmap from resetting fit_to_window
+                                    self._maintain_zoom_on_navigation = True
+                                    # CRITICAL: UnifiedImageProcessor caches already-oriented images.
+                                    self._orientation_already_applied = True
+                                    
+                                    old_current_size = self.current_pixmap.size() if self.current_pixmap else None
+                                    
+                                    self.display_numpy_image(cached_full)
+                                    self._is_half_size_displayed = False
+                                    self._full_resolution_loading = False
+                                    
+                                    # Recalculate zoom center point for full resolution image
+                                    if self.current_pixmap and old_current_size:
+                                        # Scale the zoom center point from half_size to full resolution
+                                        scale_x = self.current_pixmap.width() / old_current_size.width() if old_current_size.width() > 0 else 1.0
+                                        scale_y = self.current_pixmap.height() / old_current_size.height() if old_current_size.height() > 0 else 1.0
+                                        if hasattr(self, 'zoom_center_point') and self.zoom_center_point:
+                                            self.zoom_center_point = QPoint(
+                                                int(self.zoom_center_point.x() * scale_x),
+                                                int(self.zoom_center_point.y() * scale_y)
+                                            )
+                                    # Clear the flag after display
+                                    if hasattr(self, '_maintain_zoom_on_navigation'):
+                                        delattr(self, '_maintain_zoom_on_navigation')
+                                    # Now execute the zoom after displaying full resolution
+                                    self.fit_to_window = False
+                                    self.current_zoom_level = 1.0
+                                    self.zoom_to_point()
+                                    return  # Exit early since we've handled the zoom
+                                else:
+                                    logger.info(
+                                        "Cached RGB is still preview-sized — decoding full resolution before 100%% zoom..."
                                     )
-                            # Clear the flag after display
-                            if hasattr(self, '_maintain_zoom_on_navigation'):
-                                delattr(self, '_maintain_zoom_on_navigation')
-                            # Now execute the zoom after displaying full resolution
-                            self.fit_to_window = False
-                            self.current_zoom_level = 1.0
-                            self.zoom_to_point()
-                            return  # Exit early since we've handled the zoom
-                        else:
-                            # Start loading full resolution in background
-                            self._load_full_resolution_on_demand()
-                            # Store zoom intent for when full resolution is ready
-                            self._pending_zoom = True
-                            # Store the calculated zoom center point and thumbnail size for scaling
-                            self._pending_zoom_center = self.zoom_center_point if hasattr(self, 'zoom_center_point') else None
-                            self._pending_zoom_thumbnail_size = self.current_pixmap.size() if self.current_pixmap else None
-                            return  # Don't zoom yet - wait for full resolution
 
-                self.fit_to_window = False
-                self.current_zoom_level = 1.0
-                self.zoom_to_point()
-            else:
-                # Zooming out to fit-to-window mode
-                self.fit_to_window = True
-                self.current_zoom_level = 1.0
-                self.zoom_center_point = None
-                self.scale_image_to_fit()
-                self.image_label.setCursor(QCursor(Qt.CursorShape.ArrowCursor))
+                            self._load_full_resolution_on_demand()
+                            self._pending_zoom = True
+                            self._pending_zoom_center = (
+                                self.zoom_center_point if hasattr(self, 'zoom_center_point') and self.zoom_center_point else None
+                            )
+                            self._pending_zoom_thumbnail_size = self.current_pixmap.size() if self.current_pixmap else None
+                            self.status_bar.showMessage("Loading full resolution for 100% zoom...")
+                            return
+
+                    self.fit_to_window = False
+                    self.current_zoom_level = 1.0
+                    self.zoom_to_point()
+                else:
+                    # Zooming out to fit-to-window mode
+                    self.fit_to_window = True
+                    self.current_zoom_level = 1.0
+                    self.zoom_center_point = None
+                    self.scale_image_to_fit()
+                    self.image_label.setCursor(QCursor(Qt.CursorShape.ArrowCursor))
 
             self.update_status_bar()
             self.setFocus()
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).error(f"Error in image_double_click_event: {e}", exc_info=True)
 
     def zoom_to_point(self):
         if not self.current_pixmap:
@@ -8637,6 +8734,27 @@ class RAWImageViewer(QMainWindow):
         image_y = int(widget_pos.y() * scale_y)
 
         return QPoint(image_x, image_y)
+
+    def _zoom_anchor_for_navigation_restore(self):
+        """Image-space point to preserve framing when navigating (pinch may leave zoom_center_point unset)."""
+        if self.zoom_center_point is not None:
+            return QPoint(self.zoom_center_point)
+        pm = getattr(self, "current_pixmap", None)
+        if pm is None or pm.isNull():
+            return QPoint(0, 0)
+        if not hasattr(self, "scroll_area") or self.scroll_area is None or not hasattr(self, "image_label"):
+            return QPoint(max(0, pm.width() // 2), max(0, pm.height() // 2))
+        try:
+            vp = self.scroll_area.viewport()
+            ctr = vp.rect().center()
+            gp = vp.mapToGlobal(ctr)
+            lp = self.image_label.mapFromGlobal(gp)
+            return self.convert_widget_to_image_coords(lp)
+        except Exception:
+            return QPoint(max(0, pm.width() // 2), max(0, pm.height() // 2))
+
+    def _finish_nav_zoom_preserve(self) -> None:
+        self._preserve_nav_zoom_active = False
 
     def apply_pan_offset(self):
         # Deprecated: direct panning is now handled in mouse events
@@ -8966,7 +9084,8 @@ class RAWImageViewer(QMainWindow):
             # proper concurrency control
             
             # Reset flags when loading new image
-            self._is_half_size_displayed = False
+            # Note: We set this to True initially because we almost always start with a preview/half-size
+            self._is_half_size_displayed = True
             self._full_resolution_loading = False
             # ONLY reset orientation if we don't have a cached full resolution image
             # with orientation already applied.
@@ -8994,6 +9113,7 @@ class RAWImageViewer(QMainWindow):
             _same_path_reload = _prev_fp and _norm_path(_prev_fp) == _norm_path(requested_file_path)
             if _prev_fp and not _same_path_reload:
                 self.image_manager.cancel_task(_prev_fp)
+                self._displayed_content_path = None
             if _same_path_reload:
                 # Same file (e.g. after on-disk rotation): drop "already displayed N px" gate so
                 # thumbnail/image handlers don't skip updates and leave the loading overlay stuck.
@@ -9160,11 +9280,16 @@ class RAWImageViewer(QMainWindow):
             manager_start = time.time()
             logger.info(f"[LOAD] Requesting image load via ImageLoadManager for: {requested_file_path}")
             try:
-                # PERFORMANCE FIX: Always use Preview resolution (1920px) initially
-                # This ensures fast loading and low memory usage.
-                # Full resolution (RAW) is only loaded when user Zooms in.
-                request_full_res = False
-                logger.info(f"[LOAD] Requesting Preview resolution (use_full_resolution=False) for fast display")
+                # When navigating zoomed-in, decode full-resolution first and skip the thumbnail stage so we
+                # never show a sharpened-zoom on a soft preview followed by another zoom swap.
+                preserve_zoom_navigation = bool(getattr(self, "_preserve_nav_zoom_active", False))
+                request_full_res = preserve_zoom_navigation
+                load_stages = {"exif", "full"} if preserve_zoom_navigation else None
+                
+                logger.info(
+                    f"[LOAD] ImageLoadManager — use_full_resolution={request_full_res}, "
+                    f"stages={load_stages or 'default'}, preserve_nav_zoom={preserve_zoom_navigation}"
+                )
                 
                 if self._loading_from_gallery:
                     # Clear the flag after using it
@@ -9175,7 +9300,8 @@ class RAWImageViewer(QMainWindow):
                     file_path=requested_file_path,
                     priority=Priority.CURRENT,
                     cancel_existing=True,
-                    use_full_resolution=request_full_res
+                    use_full_resolution=request_full_res,
+                    stages=load_stages,
                 )
                 logger.info(f"[LOAD] Image load requested via ImageLoadManager")
             except Exception as manager_error:
@@ -9341,14 +9467,21 @@ class RAWImageViewer(QMainWindow):
         if not self.fit_to_window:
             return False
 
+        if getattr(self, "_preserve_nav_zoom_active", False):
+            return False
+
         # Don't show thumbnail if we're maintaining zoom state from navigation
         # (user was previously at 100% zoom checking sharpness)
         if hasattr(self, '_maintain_zoom_on_navigation'):
             return False
 
+        if getattr(self, "_pending_zoom_restore", False):
+            return False
+
         # Don't show thumbnail if we're restoring zoom state to 100%
-        if (hasattr(self, '_restore_zoom_center') and
-                self._restore_zoom_center is not None):
+        if getattr(self, "_restore_zoom_center", None) is not None:
+            return False
+        if getattr(self, "_restore_zoom_level", None) is not None:
             return False
 
         # Show thumbnail in fit-to-window mode for quick overview
@@ -9362,76 +9495,89 @@ class RAWImageViewer(QMainWindow):
         display_start = time.time()
         
         try:
-            height, width, channels = rgb_image.shape
+            if hasattr(rgb_image, 'shape'):
+                shape = rgb_image.shape
+                height, width = shape[0], shape[1]
+                channels = shape[2] if len(shape) > 2 else 1
+            elif hasattr(rgb_image, 'width') and hasattr(rgb_image, 'height'):
+                height, width = rgb_image.height(), rgb_image.width()
+                channels = 3
+            else:
+                logger.error(f"Invalid image type in display_numpy_image: {type(rgb_image)}")
+                return
+                
+            max_dim = max(height, width)
+            
+            # Check for resolution downgrade for the CURRENT file
+            if hasattr(self, 'current_file_path') and self.current_file_path:
+                norm_current = _norm_path(self.current_file_path)
+                if hasattr(self, "_file_max_dim_map") and norm_current in self._file_max_dim_map:
+                    if max_dim < self._file_max_dim_map[norm_current] * 0.9:
+                        logger.info(f"[DISPLAY] Ignoring resolution downgrade for {os.path.basename(self.current_file_path)}: {width}x{height} < cached max")
+                        return
+                
+                # Update map
+                if not hasattr(self, "_file_max_dim_map"):
+                    self._file_max_dim_map = {}
+                self._file_max_dim_map[norm_current] = max(self._file_max_dim_map.get(norm_current, 0), max_dim)
+            
             logger.info(f"[DISPLAY] ========== display_numpy_image() STARTED at {display_start:.3f} ==========")
             logger.info(f"[DISPLAY] Image dimensions: {width}x{height}, channels: {channels}")
             
             # Check if we have a cached pixmap first (fastest path)
-            # BUT: if this is a full resolution image (max dimension > 5000px), don't use cached half_size pixmap
             if hasattr(self, 'current_file_path') and self.current_file_path:
-                height, width, channels = rgb_image.shape
                 # Use max dimension to handle both portrait and landscape orientations
                 max_dimension = max(width, height)
-                is_full_resolution = max_dimension > 5000
+                is_full_resolution = max_dimension >= 3000
                 logger.info(f"[DISPLAY] Full resolution check: {is_full_resolution} (max dimension: {max_dimension}, {width}x{height})")
                 
                 if is_full_resolution:
-                    # For full resolution images, always convert and display the new image
-                    # Don't use cached pixmap which might be half_size
                     logger.info(f"[DISPLAY] Full resolution image ({width}x{height}), converting and displaying")
                 else:
-                    # For thumbnails or half_size, check cache first
                     logger.info(f"[DISPLAY] Checking for cached pixmap")
                     cached_pixmap = self.image_cache.get_pixmap(self.current_file_path)
                     if cached_pixmap is not None:
-                        # Aspect ratio validation: ensure the cached pixmap orientation matches the new image
-                        # If input is Portrait (h > w) but cache is Landscape (w > h), ignore cache
                         input_aspect = width / height
                         cached_aspect = cached_pixmap.width() / cached_pixmap.height()
-                        
-                        # Use a small tolerance for floating point comparison
                         aspect_mismatch = (input_aspect > 1.0 and cached_aspect < 1.0) or (input_aspect < 1.0 and cached_aspect > 1.0)
                         
                         if aspect_mismatch:
-                            logger.warning(f"[DISPLAY] Cache aspect mismatch! Input: {width}x{height}, Cache: {cached_pixmap.width()}x{cached_pixmap.height()}. Ignoring cache.")
+                            logger.warning(f"[DISPLAY] Aspect ratio mismatch (input={input_aspect:.2f}, cached={cached_aspect:.2f}), ignoring cache")
                             cached_pixmap = None
                         
                         if cached_pixmap is not None:
                             logger.info(f"[DISPLAY] Using cached pixmap for {width}x{height} image")
-                            # Orientation check for cached pixmap
-                            # ... (rest of the logic)
                             if not getattr(self, '_orientation_already_applied', False):
                                 orientation = self.get_orientation_from_exif(self.current_file_path)
                                 if orientation != 1:
                                     logger.info(f"[DISPLAY] Applying orientation {orientation} to cached pixmap")
                                     cached_pixmap = self.apply_orientation_to_pixmap(cached_pixmap, orientation)
-                                    self._orientation_already_applied = True
-                                else:
-                                    self._orientation_already_applied = True
                             
                             self.display_pixmap(cached_pixmap)
                             return
-                    else:
-                        logger.info(f"[DISPLAY] No cached pixmap found, will convert")
             
-            # Convert numpy array to QPixmap
+            # Convert to QPixmap
             bytes_per_line = channels * width
             logger.info(f"[DISPLAY] Converting numpy array to QPixmap - bytes_per_line: {bytes_per_line}")
 
-            # Ensure the data is contiguous
             if not rgb_image.flags['C_CONTIGUOUS']:
                 logger.info(f"[DISPLAY] Making array contiguous")
                 rgb_image = np.ascontiguousarray(rgb_image)
 
-            # Convert to bytes for PyQt6 compatibility
             conversion_start = time.time()
             logger.info(f"[DISPLAY] Converting to bytes")
             image_data = rgb_image.data.tobytes() if hasattr(
                 rgb_image.data, 'tobytes') else bytes(rgb_image.data)
             logger.info(f"[DISPLAY] Bytes conversion completed, creating QImage")
 
+            q_format = QImage.Format.Format_RGB888
+            if channels == 1:
+                q_format = QImage.Format.Format_Grayscale8
+            elif channels == 4:
+                q_format = QImage.Format.Format_RGBA8888
+
             q_image = QImage(image_data, width, height,
-                             bytes_per_line, QImage.Format.Format_RGB888)
+                             bytes_per_line, q_format)
             logger.info(f"[DISPLAY] QImage created, creating QPixmap")
             pixmap = QPixmap.fromImage(q_image)
             conversion_time = time.time() - conversion_start
@@ -9464,7 +9610,7 @@ class RAWImageViewer(QMainWindow):
             # Set _is_half_size_displayed flag based on image dimensions
             # This is important for zoom detection - if user zooms in, we need to load full resolution
             max_dimension = max(width, height)
-            is_half_size = max_dimension < 5000  # Assume full resolution is typically >5000px
+            is_half_size = max_dimension < 3000  # Assume full resolution is >=3000px
             self._is_half_size_displayed = is_half_size
             
             if is_half_size:
@@ -9504,17 +9650,16 @@ class RAWImageViewer(QMainWindow):
                 if hasattr(self, '_restore_start_scroll_x') and hasattr(self, '_restore_start_scroll_y'):
                     self.start_scroll_x = self._restore_start_scroll_x
                     self.start_scroll_y = self._restore_start_scroll_y
-                # Apply zoom
-                if self.zoom_center_point:
-                    self.zoom_to_point()
-                else:
-                    self.apply_zoom_and_pan()
+                # Must use fractional zoom scaling (pinch/trackpad/Ctrl-wheel); zoom_to_point() pins to native pixmap.
+                self.apply_zoom_and_pan()
+                self.update_status_bar()
                 # Clean up
                 if hasattr(self, '_pending_zoom_center'):
                     delattr(self, '_pending_zoom_center')
                 if hasattr(self, '_pending_zoom_level'):
                     delattr(self, '_pending_zoom_level')
                 logger.info(f"[DISPLAY] Zoom state restored after full resolution display")
+                self._finish_nav_zoom_preserve()
             total_time = time.time() - display_start
             logger.info(f"[DISPLAY] RAW image displayed successfully: {width}x{height} (pixmap display: {pixmap_display_time:.3f}s, total: {total_time:.3f}s)")
             print(f"[PERF] 🖼️  DISPLAY COMPLETE: {width}x{height} (pixmap: {pixmap_display_time*1000:.1f}ms, total: {total_time*1000:.1f}ms)")
@@ -9922,6 +10067,7 @@ class RAWImageViewer(QMainWindow):
         self._base_display_pixmap = pixmap
         pixmap = self._apply_visual_rotation_for_current(pixmap)
         self.current_pixmap = pixmap
+        self._displayed_content_path = getattr(self, "current_file_path", None)
         self._sync_single_image_histogram()
         # Memory / cache redraws (e.g. _show_single_view "already in memory") skip on_manager_*,
         # so stale thumbnail_ready must still see the real on-screen resolution here.
@@ -9935,18 +10081,32 @@ class RAWImageViewer(QMainWindow):
         if hasattr(self, '_pending_zoom_toggle') and self._pending_zoom_toggle:
             logger.info("[DISPLAY_PIXMAP] Handling pending zoom toggle")
             self._pending_zoom_toggle = False
-            # Toggle zoom now that pixmap is ready
+            # Toggle zoom now that pixmap is set
             self.toggle_zoom()
             return  # Don't continue with normal display logic
 
-        # Check if we're restoring zoom state - if so, don't reset fit_to_window
-        has_restore_zoom = hasattr(self, '_restore_zoom_center') and self._restore_zoom_center is not None
-        logger.info(f"[DISPLAY_PIXMAP] Checking zoom restoration - has_restore_zoom_center: {has_restore_zoom}, "
-                   f"_restore_zoom_center: {getattr(self, '_restore_zoom_center', None)}, "
-                   f"fit_to_window: {self.fit_to_window}, pixmap_size: {pixmap.width()}x{pixmap.height()}")
+        # Zoom / navigation restore: _restore_zoom_center alone misses pinch (center may still be unset).
+        has_restore_zoom = (
+            getattr(self, "_preserve_nav_zoom_active", False)
+            or getattr(self, "_pending_zoom_restore", False)
+            or getattr(self, "_restore_zoom_center", None) is not None
+            or getattr(self, "_restore_zoom_level", None) is not None
+        )
+        logger.info(
+            f"[DISPLAY_PIXMAP] Checking zoom restoration - has_restore_zoom: {has_restore_zoom}, "
+            f"preserve_nav_zoom: {getattr(self, '_preserve_nav_zoom_active', False)}, "
+            f"pending_zoom_restore: {getattr(self, '_pending_zoom_restore', False)}, "
+            f"_restore_zoom_center: {getattr(self, '_restore_zoom_center', None)}, "
+            f"_restore_zoom_level: {getattr(self, '_restore_zoom_level', None)}, "
+            f"fit_to_window: {self.fit_to_window}, pixmap_size: {pixmap.width()}x{pixmap.height()}"
+        )
         if has_restore_zoom:
-            # Zoom restoration will be handled below, don't reset fit_to_window here
-            logger.info(f"[DISPLAY_PIXMAP] Zoom restoration pending, preserving zoom state")
+            if hasattr(self, "_maintain_zoom_on_navigation"):
+                try:
+                    delattr(self, "_maintain_zoom_on_navigation")
+                except AttributeError:
+                    pass
+            logger.info("[DISPLAY_PIXMAP] Zoom restoration pending, preserving zoom state")
         elif not hasattr(self, '_maintain_zoom_on_navigation'):
             # CRITICAL: Check current fit_to_window state before resetting
             # If user has zoomed in (fit_to_window = False), preserve that state
@@ -9966,11 +10126,20 @@ class RAWImageViewer(QMainWindow):
                 # Check if this is a half_size image - if so, temporarily show fit-to-window
                 # and wait for full resolution before applying zoom
                 pixmap_max_dim = max(pixmap.width(), pixmap.height())
-                is_pixmap_half_size = pixmap_max_dim < 5000
+                is_pixmap_half_size = pixmap_max_dim < 3000
                 if is_pixmap_half_size:
-                    logger.info(f"[DISPLAY_PIXMAP] Half-size image detected ({pixmap.width()}x{pixmap.height()}), "
-                               f"optimistically applying zoom (fuzzy preview) while full resolution loads")
-                    self.apply_zoom_and_pan()
+                    logger.info(f"[DISPLAY_PIXMAP] Half-size image ({pixmap.width()}x{pixmap.height()}), "
+                               "showing Fit preview until a full-resolution buffer arrives (avoid fake zoom upscale).")
+                    hold_z = self.current_zoom_level
+                    hold_pt = self.zoom_center_point
+                    hold_fit = self.fit_to_window
+                    self.fit_to_window = True
+                    self.current_zoom_level = 1.0
+                    self.zoom_center_point = None
+                    self.scale_image_to_fit()
+                    self.fit_to_window = hold_fit
+                    self.current_zoom_level = hold_z
+                    self.zoom_center_point = hold_pt
                 else:
                     # Full resolution image - apply zoom now
                     logger.info(f"[DISPLAY_PIXMAP] Full resolution image, applying zoom immediately")
@@ -9984,7 +10153,7 @@ class RAWImageViewer(QMainWindow):
 
         # Handle zoom restoration
         # Handle zoom restoration
-        if hasattr(self, '_restore_zoom_center') and self._restore_zoom_center is not None:
+        if has_restore_zoom:
             self.fit_to_window = False
             logger.info(f"[DISPLAY_PIXMAP] Processing zoom restoration - half_size={getattr(self, '_is_half_size_displayed', False)}, "
                        f"pixmap_size={pixmap.width()}x{pixmap.height()}, "
@@ -9993,7 +10162,7 @@ class RAWImageViewer(QMainWindow):
             
             # If restoring zoom and currently displaying half_size, load full resolution FIRST
             pixmap_max_dim = max(pixmap.width(), pixmap.height())
-            is_pixmap_half_size = pixmap_max_dim < 5000
+            is_pixmap_half_size = pixmap_max_dim < 3000
             
             if (hasattr(self, '_is_half_size_displayed') and self._is_half_size_displayed) or is_pixmap_half_size:
                 if is_pixmap_half_size:
@@ -10004,7 +10173,7 @@ class RAWImageViewer(QMainWindow):
                     cached_full = self.image_cache.get_full_image(self.current_file_path)
                     if cached_full is not None:
                         cached_max_dim = max(cached_full.shape[1], cached_full.shape[0])
-                        if cached_max_dim > 5000:
+                        if cached_max_dim >= 3000:
                             logger.info("[DISPLAY_PIXMAP] Full resolution image already cached, loading immediately for zoom restoration...")
                             self._full_resolution_loading = True
                             # Store zoom restoration intent BEFORE displaying
@@ -10021,14 +10190,23 @@ class RAWImageViewer(QMainWindow):
                             # Start loading full resolution in background
                             logger.info("[DISPLAY_PIXMAP] Cached image is half_size, starting full resolution load for zoom restoration")
                             self._load_full_resolution_on_demand()
-                            # Store zoom restoration intent for when full resolution is ready
                             self._pending_zoom_restore = True
                             self._pending_zoom_center = self._restore_zoom_center
                             self._pending_zoom_level = self._restore_zoom_level
                             self._restore_zoom_center = None
                             self._restore_zoom_level = None
-                            logger.info(f"[DISPLAY_PIXMAP] Stored zoom restoration - center: {self._pending_zoom_center}, level: {self._pending_zoom_level}")
-                            return  # Don't restore zoom yet - wait for full resolution
+                            # Like 40b9ade: avoid a two-step zoomed-soft-thumb UX — show preview fit until sharp buffer arrives.
+                            if hasattr(self, '_maintain_zoom_on_navigation'):
+                                delattr(self, '_maintain_zoom_on_navigation')
+                            self.fit_to_window = True
+                            self.current_zoom_level = 1.0
+                            self.zoom_center_point = None
+                            self.scale_image_to_fit()
+                            logger.info(
+                                "[DISPLAY_PIXMAP] Preview fit-to-window while full resolution loads for zoom restore "
+                                f"(pending center={self._pending_zoom_center}, level={self._pending_zoom_level})"
+                            )
+                            return
                     else:
                         # Fallback: start loading full resolution
                         logger.info("[DISPLAY_PIXMAP] No cached full resolution, starting load for zoom restoration")
@@ -10038,14 +10216,30 @@ class RAWImageViewer(QMainWindow):
                         self._pending_zoom_level = self._restore_zoom_level
                         self._restore_zoom_center = None
                         self._restore_zoom_level = None
-                        logger.info(f"[DISPLAY_PIXMAP] Stored zoom restoration - center: {self._pending_zoom_center}, level: {self._pending_zoom_level}")
+                        if hasattr(self, '_maintain_zoom_on_navigation'):
+                            delattr(self, '_maintain_zoom_on_navigation')
+                        self.fit_to_window = True
+                        self.current_zoom_level = 1.0
+                        self.zoom_center_point = None
+                        self.scale_image_to_fit()
+                        logger.info(
+                            "[DISPLAY_PIXMAP] Preview fit-to-window while full resolution loads for zoom restore "
+                            f"(pending center={self._pending_zoom_center}, level={self._pending_zoom_level})"
+                        )
                         return
 
-            # Restore zoom state with coordinate scaling if pixmap size changed
-            self.current_zoom_level = self._restore_zoom_level or 1.0
-            
+            # Effective zoom target: half->full deferral moves *_restore_* into _pending_* before this path.
+            eff_level = getattr(self, "_restore_zoom_level", None)
+            if eff_level is None:
+                eff_level = getattr(self, "_pending_zoom_level", None)
+            eff_center = getattr(self, "_restore_zoom_center", None)
+            if eff_center is None:
+                eff_center = getattr(self, "_pending_zoom_center", None)
+
+            self.current_zoom_level = eff_level or 1.0
+
             # Scale zoom center point if pixmap size changed (half-size -> full-res)
-            if hasattr(self, '_restore_pixmap_size') and self._restore_pixmap_size and self._restore_zoom_center:
+            if hasattr(self, '_restore_pixmap_size') and self._restore_pixmap_size and eff_center is not None:
                 old_size = self._restore_pixmap_size
                 new_size = pixmap.size()
                 
@@ -10055,25 +10249,36 @@ class RAWImageViewer(QMainWindow):
                     scale_y = new_size.height() / old_size.height() if old_size.height() > 0 else 1.0
                     
                     scaled_center = QPoint(
-                        int(self._restore_zoom_center.x() * scale_x),
-                        int(self._restore_zoom_center.y() * scale_y)
+                        int(eff_center.x() * scale_x),
+                        int(eff_center.y() * scale_y)
                     )
-                    logger.debug(f"Scaled zoom center from {self._restore_zoom_center} ({old_size.width()}x{old_size.height()}) to {scaled_center} ({new_size.width()}x{new_size.height()})")
+                    logger.debug(f"Scaled zoom center from {eff_center} ({old_size.width()}x{old_size.height()}) to {scaled_center} ({new_size.width()}x{new_size.height()})")
                     self.zoom_center_point = scaled_center
                 else:
-                    self.zoom_center_point = self._restore_zoom_center
+                    self.zoom_center_point = eff_center
                 
                 self._restore_pixmap_size = None
             else:
-                self.zoom_center_point = self._restore_zoom_center
-            
-            self.apply_zoom_and_pan()
+                c = eff_center
+                self.zoom_center_point = (
+                    c
+                    if c is not None
+                    else QPoint(max(0, pixmap.width() // 2), max(0, pixmap.height() // 2))
+                )
             self._restore_zoom_center = None
             self._restore_zoom_level = None
+            if getattr(self, "_pending_zoom_restore", False):
+                self._pending_zoom_restore = False
+            if hasattr(self, "_pending_zoom_center"):
+                delattr(self, "_pending_zoom_center")
+            if hasattr(self, "_pending_zoom_level"):
+                delattr(self, "_pending_zoom_level")
+            self.apply_zoom_and_pan()
+            self._finish_nav_zoom_preserve()
         
         # Handle pending zoom from double-click on thumbnail
         # Check actual pixmap size to be extra safe
-        actual_is_half_size = max(pixmap.width(), pixmap.height()) < 5000
+        actual_is_half_size = max(pixmap.width(), pixmap.height()) < 3000
         
         if hasattr(self, '_pending_zoom') and self._pending_zoom and not actual_is_half_size:
             logger.info("[DISPLAY_PIXMAP] Handling pending zoom with full resolution image")
@@ -10107,7 +10312,7 @@ class RAWImageViewer(QMainWindow):
         # Track image fully loaded and rendered
         display_time = time.time() - display_start
         max_dim = max(pixmap.width(), pixmap.height())
-        is_full_res = max_dim > 5000
+        is_full_res = max_dim > 3000
         logger.info(f"[TRACK] Image completely loaded and rendered - file: {current_file}, size: {pixmap.width()}x{pixmap.height()}, full_res: {is_full_res}, time: {display_time:.3f}s")
 
     def _load_full_resolution_on_demand(self):
@@ -10121,9 +10326,9 @@ class RAWImageViewer(QMainWindow):
         # Check if full resolution is already cached
         cached_full = self.image_cache.get_full_image(self.current_file_path)
         if cached_full is not None:
-            # Check if cached image is full resolution (width > 5000px)
+            # Check if cached image is full resolution (width >= 3000px)
             cached_max_dim = max(cached_full.shape[1], cached_full.shape[0])
-            if cached_max_dim > 5000:
+            if cached_max_dim >= 3000:
                 logger.info("Full resolution image already cached, loading...")
                 self._full_resolution_loading = True
                 # Display the full resolution image
@@ -10400,8 +10605,13 @@ class RAWImageViewer(QMainWindow):
                 logger.debug(f"[PROCESS] Setting _is_half_size_displayed=False for loaded pixmap")
                 
                 # CRITICAL: Check for zoom restoration FIRST before resetting fit_to_window
-                # This ensures zoom state is preserved when navigating from a zoomed image
-                has_restore_zoom = hasattr(self, '_restore_zoom_center') and self._restore_zoom_center is not None
+                # Preserve-nav / pinch paths may set level + anchor without a prior zoom_center_point.
+                has_restore_zoom = (
+                    getattr(self, "_preserve_nav_zoom_active", False)
+                    or getattr(self, "_pending_zoom_restore", False)
+                    or getattr(self, "_restore_zoom_center", None) is not None
+                    or getattr(self, "_restore_zoom_level", None) is not None
+                )
                 has_maintain_zoom = hasattr(self, '_maintain_zoom_on_navigation')
                 logger.debug(f"on_image_processed (QPixmap): has_restore_zoom={has_restore_zoom}, has_maintain_zoom={has_maintain_zoom}, current fit_to_window={self.fit_to_window}")
                 
@@ -10410,7 +10620,8 @@ class RAWImageViewer(QMainWindow):
                     logger.info(f"on_image_processed (QPixmap): Restoring zoom state - center={self._restore_zoom_center}, level={getattr(self, '_restore_zoom_level', 'N/A')}")
                     self.fit_to_window = False
                     self.current_zoom_level = self._restore_zoom_level or 1.0
-                    self.zoom_center_point = self._restore_zoom_center
+                    c = self._restore_zoom_center
+                    self.zoom_center_point = c if c is not None else QPoint(pixmap.width() // 2, pixmap.height() // 2)
                     self.start_scroll_x = self.scroll_area.horizontalScrollBar().value()
                     self.start_scroll_y = self.scroll_area.verticalScrollBar().value()
                     self.apply_zoom_and_pan()
@@ -10421,6 +10632,7 @@ class RAWImageViewer(QMainWindow):
                     # Clean up _maintain_zoom_on_navigation if it exists
                     if has_maintain_zoom:
                         delattr(self, '_maintain_zoom_on_navigation')
+                    self._finish_nav_zoom_preserve()
                 elif not has_maintain_zoom:
                     # No zoom restoration needed and not maintaining zoom - reset to fit-to-window
                     logger.debug(f"on_image_processed (QPixmap): No zoom state to restore, resetting to fit-to-window")
@@ -10444,7 +10656,17 @@ class RAWImageViewer(QMainWindow):
             else:
                 # RAW: successful processing with numpy array
                 try:
-                    height, width, channels = rgb_image.shape
+                    if hasattr(rgb_image, 'shape'):
+                        shape = rgb_image.shape
+                        height, width = shape[0], shape[1]
+                        channels = shape[2] if len(shape) > 2 else 1
+                    elif hasattr(rgb_image, 'width') and hasattr(rgb_image, 'height'):
+                        height, width = rgb_image.height(), rgb_image.width()
+                        channels = 3
+                    else:
+                        logger.error(f"Invalid image type in on_image_processed: {type(rgb_image)}")
+                        return
+                        
                     bytes_per_line = channels * width
 
                     # Ensure the data is contiguous and convert to bytes for PyQt6 compatibility
@@ -10457,7 +10679,7 @@ class RAWImageViewer(QMainWindow):
                     # Typical full resolution: 6000-8000px in largest dimension, half_size: 3000-4000px
                     # Check both width and height to handle both portrait and landscape orientations
                     max_dimension = max(width, height)
-                    is_half_size = max_dimension < 5000  # Assume full resolution is typically >5000px in largest dimension
+                    is_half_size = max_dimension < 3000  # Assume full resolution is typically >=3000px in largest dimension
                     self._is_half_size_displayed = is_half_size
                     import logging
                     logger = logging.getLogger(__name__)
@@ -10467,7 +10689,13 @@ class RAWImageViewer(QMainWindow):
                         logger.info(f"Detected full resolution image: {width}x{height} (max: {max_dimension})")
                     
                     # Check if we need to restore zoom - if so, skip half_size display and load full resolution directly
-                    if hasattr(self, '_restore_zoom_center') and self._restore_zoom_center is not None:
+                    navigate_zoom_restore = (
+                        getattr(self, "_preserve_nav_zoom_active", False)
+                        or getattr(self, "_pending_zoom_restore", False)
+                        or getattr(self, "_restore_zoom_center", None) is not None
+                        or getattr(self, "_restore_zoom_level", None) is not None
+                    )
+                    if navigate_zoom_restore:
                         if is_half_size:
                             logger.debug(f"Zoom restoration needed: center={self._restore_zoom_center}, level={getattr(self, '_restore_zoom_level', 'N/A')}, skipping half_size display")
                             if not hasattr(self, '_full_resolution_loading') or not self._full_resolution_loading:
@@ -10475,7 +10703,7 @@ class RAWImageViewer(QMainWindow):
                                 cached_full = self.image_cache.get_full_image(self.current_file_path)
                                 if cached_full is not None:
                                     cached_max_dim = max(cached_full.shape[1], cached_full.shape[0])
-                                    if cached_max_dim > 5000:
+                                    if cached_max_dim >= 3000:
                                         logger.debug("Full resolution image already cached, loading immediately for zoom restoration...")
                                         self._full_resolution_loading = True
                                         self.display_numpy_image(cached_full)
@@ -10520,8 +10748,14 @@ class RAWImageViewer(QMainWindow):
                             image_data = rgb_image.data.tobytes() if hasattr(
                                 rgb_image.data, 'tobytes') else bytes(rgb_image.data)
 
+                            q_format = QImage.Format.Format_RGB888
+                            if channels == 1:
+                                q_format = QImage.Format.Format_Grayscale8
+                            elif channels == 4:
+                                q_format = QImage.Format.Format_RGBA8888
+
                             q_image = QImage(image_data, width, height,
-                                             bytes_per_line, QImage.Format.Format_RGB888)
+                                             bytes_per_line, q_format)
                             pixmap = QPixmap.fromImage(q_image)
                             self.current_pixmap = pixmap
                             
@@ -10533,7 +10767,7 @@ class RAWImageViewer(QMainWindow):
                             pixmap = cached_pixmap
                             # Check if cached pixmap is half_size
                             pixmap_max_dim = max(pixmap.width(), pixmap.height())
-                            if pixmap_max_dim < 5000:
+                            if pixmap_max_dim < 3000:
                                 logger.debug(f"Cached pixmap is half_size: {pixmap.width()}x{pixmap.height()}, will load full resolution on zoom")
                             self.current_pixmap = pixmap
                     else:
@@ -10542,8 +10776,14 @@ class RAWImageViewer(QMainWindow):
                         image_data = rgb_image.data.tobytes() if hasattr(
                             rgb_image.data, 'tobytes') else bytes(rgb_image.data)
 
+                        q_format = QImage.Format.Format_RGB888
+                        if channels == 1:
+                            q_format = QImage.Format.Format_Grayscale8
+                        elif channels == 4:
+                            q_format = QImage.Format.Format_RGBA8888
+
                         q_image = QImage(image_data, width, height,
-                                         bytes_per_line, QImage.Format.Format_RGB888)
+                                         bytes_per_line, q_format)
                         pixmap = QPixmap.fromImage(q_image)
                         
                         # CRITICAL: Apply orientation correction to pixmap before caching
@@ -10560,7 +10800,13 @@ class RAWImageViewer(QMainWindow):
                         logger.info(f"[PROCESS] Full resolution pixmap cached: {pixmap.width()}x{pixmap.height()}")
                     
                     # Check if we need to restore zoom - if so, skip half_size display and load full resolution directly
-                    if hasattr(self, '_restore_zoom_center') and self._restore_zoom_center is not None:
+                    navigate_zoom_restore = (
+                        getattr(self, "_preserve_nav_zoom_active", False)
+                        or getattr(self, "_pending_zoom_restore", False)
+                        or getattr(self, "_restore_zoom_center", None) is not None
+                        or getattr(self, "_restore_zoom_level", None) is not None
+                    )
+                    if navigate_zoom_restore:
                         if is_half_size:
                             logger.debug(f"Zoom restoration needed: skipping half_size display (converted from numpy)")
                             if not hasattr(self, '_full_resolution_loading') or not self._full_resolution_loading:
@@ -10568,7 +10814,7 @@ class RAWImageViewer(QMainWindow):
                                 cached_full = self.image_cache.get_full_image(self.current_file_path)
                                 if cached_full is not None:
                                     cached_max_dim = max(cached_full.shape[1], cached_full.shape[0])
-                                    if cached_max_dim > 5000:
+                                    if cached_max_dim >= 3000:
                                         logger.debug("Full resolution image already cached, loading immediately for zoom restoration...")
                                         self._full_resolution_loading = True
                                         self.display_numpy_image(cached_full)
@@ -10957,8 +11203,9 @@ class RAWImageViewer(QMainWindow):
                 # Only maintain zoom state if not in fit-to-window mode
                 if not self.fit_to_window:
                     logger.debug("Maintaining zoom state for navigation")
+                    self._preserve_nav_zoom_active = True
                     self._maintain_zoom_on_navigation = True
-                    self._restore_zoom_center = self.zoom_center_point
+                    self._restore_zoom_center = self._zoom_anchor_for_navigation_restore()
                     self._restore_zoom_level = self.current_zoom_level
                     # Store current pixmap size for coordinate scaling
                     if self.current_pixmap:
@@ -10990,6 +11237,7 @@ class RAWImageViewer(QMainWindow):
                         self._restore_start_scroll_y = 0
                 else:
                     logger.debug("Not maintaining zoom state (fit-to-window mode)")
+                    self._preserve_nav_zoom_active = False
                     if hasattr(self, '_maintain_zoom_on_navigation'):
                         delattr(self, '_maintain_zoom_on_navigation')
                     self._restore_zoom_center = None
@@ -11105,8 +11353,9 @@ class RAWImageViewer(QMainWindow):
                            f"zoom_center_point: {self.zoom_center_point}")
                 if not self.fit_to_window:
                     logger.info("[NAV_NEXT] Maintaining zoom state for navigation")
+                    self._preserve_nav_zoom_active = True
                     self._maintain_zoom_on_navigation = True
-                    self._restore_zoom_center = self.zoom_center_point
+                    self._restore_zoom_center = self._zoom_anchor_for_navigation_restore()
                     self._restore_zoom_level = self.current_zoom_level
                     # Store current pixmap size for coordinate scaling
                     if self.current_pixmap:
@@ -11138,6 +11387,7 @@ class RAWImageViewer(QMainWindow):
                         self._restore_start_scroll_y = 0
                 else:
                     logger.info("[NAV_NEXT] Not maintaining zoom state (fit-to-window mode)")
+                    self._preserve_nav_zoom_active = False
                     if hasattr(self, '_maintain_zoom_on_navigation'):
                         delattr(self, '_maintain_zoom_on_navigation')
                     self._restore_zoom_center = None
@@ -11211,9 +11461,12 @@ class RAWImageViewer(QMainWindow):
         if self.confirm_deletion():
             # Only maintain zoom state if not in fit-to-window mode
             if not self.fit_to_window:
+                self._preserve_nav_zoom_active = True
                 self._maintain_zoom_on_navigation = True
-                self._restore_zoom_center = self.zoom_center_point
+                self._restore_zoom_center = self._zoom_anchor_for_navigation_restore()
                 self._restore_zoom_level = self.current_zoom_level
+                if self.current_pixmap:
+                    self._restore_pixmap_size = self.current_pixmap.size()
                 # Save current scroll position instead of start_scroll_x/y
                 try:
                     # Ensure scroll_area exists and is valid before accessing
@@ -11236,6 +11489,7 @@ class RAWImageViewer(QMainWindow):
                     self._restore_start_scroll_x = 0
                     self._restore_start_scroll_y = 0
             else:
+                self._preserve_nav_zoom_active = False
                 if hasattr(self, '_maintain_zoom_on_navigation'):
                     delattr(self, '_maintain_zoom_on_navigation')
                 self._restore_zoom_center = None
@@ -11362,25 +11616,25 @@ class RAWImageViewer(QMainWindow):
             # Switch to 100% zoom mode - center on image center
             self.fit_to_window = False
             
-            # Check if we're displaying a thumbnail or half_size image
-            # Compare current pixmap size with original dimensions from cache
+            # Prefer the half-size preview flag — EXIF embedded-preview WxH often matches pixmap and poison the cache comparison.
             should_load_full_resolution = False
             if self.current_pixmap:
-                # Get original dimensions from cache
-                cached_exif = self.image_cache.get_exif(self.current_file_path)
-                if cached_exif and cached_exif.get('original_width') and cached_exif.get('original_height'):
-                    original_width = cached_exif['original_width']
-                    original_height = cached_exif['original_height']
-                    current_max = max(self.current_pixmap.width(), self.current_pixmap.height())
-                    original_max = max(original_width, original_height)
-                    # If current display is significantly smaller than original, load full resolution
-                    if current_max < original_max * 0.8:
-                        should_load_full_resolution = True
-                        logger.info(f"User zoomed in - current display ({self.current_pixmap.width()}x{self.current_pixmap.height()}) is smaller than original ({original_width}x{original_height}), loading full resolution")
-                elif hasattr(self, '_is_half_size_displayed') and self._is_half_size_displayed:
-                    # Fallback: use the flag if original dimensions not available
+                if hasattr(self, '_is_half_size_displayed') and self._is_half_size_displayed:
                     should_load_full_resolution = True
-                    logger.info("User zoomed in - _is_half_size_displayed is True, loading full resolution")
+                    logger.info("User zoomed in — preview/half-resolution display, loading full resolution")
+                else:
+                    cached_exif = self.image_cache.get_exif(self.current_file_path)
+                    if cached_exif and cached_exif.get('original_width') and cached_exif.get('original_height'):
+                        original_width = cached_exif['original_width']
+                        original_height = cached_exif['original_height']
+                        current_max = max(self.current_pixmap.width(), self.current_pixmap.height())
+                        original_max = max(original_width, original_height)
+                        if original_max > 0 and current_max < original_max * 0.8:
+                            should_load_full_resolution = True
+                            logger.info(
+                                "User zoomed in — pixmap smaller than cached original "
+                                f"({self.current_pixmap.width()}x{self.current_pixmap.height()} vs {original_width}x{original_height}), loading full resolution"
+                            )
             
             # If currently displaying thumbnail/half_size and user zooms in, load full resolution FIRST
             if should_load_full_resolution:
@@ -11389,7 +11643,7 @@ class RAWImageViewer(QMainWindow):
                     cached_full = self.image_cache.get_full_image(self.current_file_path)
                     if cached_full is not None:
                         cached_max_dim = max(cached_full.shape[1], cached_full.shape[0])
-                        if cached_max_dim > 5000:
+                        if cached_max_dim >= 3000:
                             logger.info("Full resolution image already cached, loading immediately...")
                             self._full_resolution_loading = True
                             # Set flag to prevent display_pixmap from resetting fit_to_window
@@ -12177,47 +12431,88 @@ class RAWImageViewer(QMainWindow):
         display_width = None
         display_height = None
         
-            # Get original dimensions from cache (authoritative source)
+        # Get original dimensions from cache (authoritative source)
         cached_exif = self.image_cache.get_exif(self.current_file_path)
         if cached_exif:
             # CRITICAL: Always check for original_width and original_height in cache
-            # These are stored when RAW file is opened, before processing
             original_width = cached_exif.get('original_width')
             original_height = cached_exif.get('original_height')
-            # Log for debugging
-            import logging
-            logger = logging.getLogger(__name__)
-            if original_width and original_height:
-                logger.info(f"[STATUS] Found original dimensions in cache: {original_width}x{original_height}")
-            else:
-                logger.warning(f"[STATUS] No original dimensions in cache for {os.path.basename(self.current_file_path)}")
-                # Try to extract from EXIF if not in cache
-                if not original_width or not original_height:
-                    try:
-                        import exifread
-                        # Suppress exifread warnings for unsupported file formats
-                        with warnings.catch_warnings():
-                            warnings.filterwarnings('ignore', category=UserWarning, module='exifread')
-                            with open(self.current_file_path, 'rb') as f:
-                                tags = exifread.process_file(f, details=False)
-                                if 'EXIF ExifImageWidth' in tags:
-                                    original_width = int(str(tags['EXIF ExifImageWidth']))
-                                if 'EXIF ExifImageLength' in tags:
-                                    original_height = int(str(tags['EXIF ExifImageLength']))
-                                if original_width and original_height:
-                                    logger.info(f"[STATUS] Extracted original dimensions from EXIF: {original_width}x{original_height}")
-                                    # Update cache
-                                    cached_exif['original_width'] = original_width
-                                    cached_exif['original_height'] = original_height
-                                    self.image_cache.put_exif(self.current_file_path, cached_exif)
-                    except Exception as e:
-                        logger.debug(f"[STATUS] Could not extract dimensions from EXIF: {e}")
+            
+            # Sanity check: if RAW but dimensions are suspiciously small (<=1920), 
+            # they are likely from a preview. Force re-extraction.
+            raw_map = {'.arw', '.cr2', '.cr3', '.nef', '.dng', '.raf', '.orf', '.rw2'}
+            is_raw = os.path.splitext(self.current_file_path)[1].lower() in raw_map
+            
+            if is_raw and original_width and original_height and max(original_width, original_height) <= 1920:
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.info(f"[STATUS] Suspiciously small dimensions ({original_width}x{original_height}) for RAW file, forcing re-extraction")
+                original_width = None
+                original_height = None
+
+        if not original_width or not original_height:
+            # Try to extract original dimensions for RAW files using rawpy
+            raw_map = {'.arw', '.cr2', '.cr3', '.nef', '.dng', '.raf', '.orf', '.rw2'}
+            is_raw = os.path.splitext(self.current_file_path)[1].lower() in raw_map
+            
+            if is_raw:
+                try:
+                    import rawpy
+                    with rawpy.imread(self.current_file_path) as raw:
+                        original_width = raw.sizes.width
+                        original_height = raw.sizes.height
+                        import logging
+                        logger = logging.getLogger(__name__)
+                        logger.info(f"[STATUS] Extracted real RAW dimensions via rawpy: {original_width}x{original_height}")
+                        
+                        # Update cache if we have cached_exif (even if it was missing dimensions)
+                        if cached_exif:
+                            cached_exif['original_width'] = original_width
+                            cached_exif['original_height'] = original_height
+                            self.image_cache.put_exif(self.current_file_path, cached_exif)
+                except Exception as e:
+                    pass
+            
+            # Fallback to exifread for other files or if rawpy fails
+            if not original_width or not original_height:
+                try:
+                    import exifread
+                    with warnings.catch_warnings():
+                        warnings.filterwarnings('ignore', category=UserWarning, module='exifread')
+                        with open(self.current_file_path, 'rb') as f:
+                            tags = exifread.process_file(f, details=False)
+                            for w_tag in ('EXIF ExifImageWidth', 'Image ImageWidth', 'Image Width'):
+                                if w_tag in tags:
+                                    original_width = int(str(tags[w_tag]))
+                                    break
+                            for h_tag in ('EXIF ExifImageLength', 'Image ImageLength', 'Image Height', 'Image Length', 'EXIF ExifImageHeight'):
+                                if h_tag in tags:
+                                    original_height = int(str(tags[h_tag]))
+                                    break
+                            
+                            if original_width and original_height and cached_exif:
+                                cached_exif['original_width'] = original_width
+                                cached_exif['original_height'] = original_height
+                                self.image_cache.put_exif(self.current_file_path, cached_exif)
+                except Exception:
+                    pass
         
         # Get current display dimensions (from pixmap)
         if self.current_pixmap:
             display_width = self.current_pixmap.width()
             display_height = self.current_pixmap.height()
-        
+
+        if is_raw_file(self.current_file_path) and original_width and original_height and display_width and display_height:
+            om = max(int(original_width), int(original_height))
+            dm = max(int(display_width), int(display_height))
+            if getattr(self, '_is_half_size_displayed', False) and dm > 0 and abs(om - dm) <= max(2.0, dm * 0.015):
+                import logging
+
+                logging.getLogger(__name__).info(
+                    f"[STATUS] Cached dimensions match preview pixmap ({original_width}x{original_height}); re-resolve sensor size via rawpy"
+                )
+                original_width = original_height = None
+
         # Use provided dimensions if available, otherwise use original dimensions
         # CRITICAL: Always prioritize original_width/original_height over display dimensions
         if width is None or height is None:
@@ -12620,7 +12915,7 @@ class RAWImageViewer(QMainWindow):
                         self.scale_image_to_fit()
                         self.update_status_bar()
                         return True
-                    # Limit maximum zoom to 100% (1.0)
+                    # Cap at native 100% of the displayed pixmap — smooth / predictable pinch zoom.
                     self.current_zoom_level = max(fit_scale, min(self.current_zoom_level, 1.0))
 
                     mouse_global = event.globalPosition().toPoint()
@@ -12633,6 +12928,7 @@ class RAWImageViewer(QMainWindow):
                     return True
                 elif event.gestureType() == Qt.NativeGestureType.SmartZoomNativeGesture:
                     self._stop_slideshow()
+                    # Ensure smart zoom (pinch tap) also triggers full resolution
                     self.toggle_zoom()
                     return True
 
@@ -12675,7 +12971,8 @@ class RAWImageViewer(QMainWindow):
                             self.scale_image_to_fit()
                             self.update_status_bar()
                             return True
-                            
+
+                        # Cap at native 100% — same as pinch for a smooth Ctrl+wheel / trackpad UX.
                         self.current_zoom_level = max(fit_scale, min(self.current_zoom_level, 1.0))
 
                         mouse_global = wheel_event.globalPosition().toPoint()
@@ -12783,14 +13080,20 @@ class RAWImageViewer(QMainWindow):
                 self.image_files.remove(file_to_move)
             self.status_bar.showMessage(f"Moved to Discard: {filename}")
             # --- Preserve zoom/pan state for next image (like navigation/discard) ---
-            self._maintain_zoom_on_navigation = True
             if not self.fit_to_window:
-                self._restore_zoom_center = self.zoom_center_point
+                self._preserve_nav_zoom_active = True
+                self._maintain_zoom_on_navigation = True
+                self._restore_zoom_center = self._zoom_anchor_for_navigation_restore()
                 self._restore_zoom_level = self.current_zoom_level
+                if getattr(self, "current_pixmap", None):
+                    self._restore_pixmap_size = self.current_pixmap.size()
                 # Save current scroll position instead of start_scroll_x/y
                 self._restore_start_scroll_x = self.scroll_area.horizontalScrollBar().value()
                 self._restore_start_scroll_y = self.scroll_area.verticalScrollBar().value()
             else:
+                self._preserve_nav_zoom_active = False
+                if hasattr(self, "_maintain_zoom_on_navigation"):
+                    delattr(self, "_maintain_zoom_on_navigation")
                 self._restore_zoom_center = None
                 self._restore_zoom_level = None
                 self._restore_start_scroll_x = None
