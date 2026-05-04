@@ -91,3 +91,6 @@ icon.iconset/
 
 # Tests directory (local scripts and reports)
 tests/
+*.ARW
+*.NEF
+*.CR3
