@@ -124,6 +124,8 @@ class JustifiedGallery(QWidget):
 
             # Finish setup
             QTimer.singleShot(50, self._delayed_initial_build)
+            # Ensure first visible batch is scheduled even if caller switched modes rapidly.
+            QTimer.singleShot(80, self.load_visible_images)
         except Exception:
             logger.exception("[GALLERY] _post_init failed")
 
@@ -683,7 +685,17 @@ class JustifiedGallery(QWidget):
         if not p:
             return
         if self.load_manager is None:
-            return
+            # Lazy recovery: in rare startup races _post_init may not have completed yet.
+            try:
+                if self.parent_viewer is not None and hasattr(self.parent_viewer, "image_manager") and self.parent_viewer.image_manager:
+                    self.load_manager = self.parent_viewer.image_manager
+                else:
+                    self.load_manager = get_image_load_manager()
+            except Exception:
+                self.load_manager = None
+            if self.load_manager is None:
+                QTimer.singleShot(60, self.load_visible_images)
+                return
 
         v_port = p.viewport()
         scrollbar = p.verticalScrollBar()
