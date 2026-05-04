@@ -160,7 +160,7 @@ def main():
     # Install dependencies first
     if not install_dependencies():
         print("[ERROR] Dependency installation failed.")
-        return
+        sys.exit(1)
 
     print("")
     print("Building RAWviewer executable...")
@@ -170,7 +170,7 @@ def main():
         import PyQt6
     except ImportError:
         print("[ERROR] PyQt6 not available after installation")
-        return
+        sys.exit(1)
 
     # Clean previous builds
     print("Cleaning previous builds...")
@@ -212,9 +212,9 @@ def main():
                     os.remove(exe_path)
                     print(f"  Removed {exe_name}")
                 except PermissionError:
-                    print(f"[ERROR] Cannot delete {exe_name} - it may be running.")
+                    print("[ERROR] Cannot delete {exe_name} - it may be running.")
                     print("  Please close RAWviewer and try again.")
-                    return
+                    sys.exit(1)
                 except Exception as e:
                     print(f"[WARNING] Could not delete {exe_name}: {e}")
             
@@ -326,7 +326,7 @@ def main():
     print(f"Running: {' '.join(cmd_base)}")
     if not run_command(cmd_base):
         print("[ERROR] Build failed.")
-        return
+        sys.exit(1)
     if platform.system() == 'Windows':
         exe_path = Path('dist/RAWviewer.exe')
     else:
@@ -345,4 +345,11 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    try:
+        main()
+    except Exception as e:
+        print(f"[CRITICAL ERROR] Build script crashed: {e}")
+        sys.exit(1)
+    
+    # If main() returns None/0 but we want to check if it really succeeded
+    # Actually main() doesn't return anything, so we should check for failures inside main()
