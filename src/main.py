@@ -7316,11 +7316,9 @@ class RAWImageViewer(QMainWindow):
             """)
             
             # Create JustifiedGallery widget
-            # IMPORTANT: main.py also contains a legacy JustifiedGallery class further down.
-            # Import here with an alias to ensure we always use the optimized implementation
-            # from rawviewer_ui (pixel-smooth scrolling + stage-aware loading).
-            from rawviewer_ui.gallery_view import JustifiedGallery as RVJustifiedGallery
-            justified_gallery = RVJustifiedGallery([], self)  # Empty list initially, will be populated
+            # Use the in-file gallery implementation for now; this path is the most stable
+            # with current main.py lifecycle hooks and avoids startup race regressions.
+            justified_gallery = JustifiedGallery([], self)  # Empty list initially, will be populated
             gallery_scroll.setWidget(justified_gallery)
             gallery_layout.addWidget(gallery_scroll)
             
