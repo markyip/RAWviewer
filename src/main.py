@@ -9687,9 +9687,12 @@ class RAWImageViewer(QMainWindow):
             self.image_label.setAlignment(Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter)
             # Full-screen overlay: skip when arrow-navigating while zoomed in — keeps prior image
             # visible until the next one is ready (avoids flashing "Loading Image..." every step).
+            # Also skip for prev/next (debounced navigation) and when opening from gallery: keep prior
+            # pixels visible until the new decode lands instead of a blocking popup.
             skip_loading_overlay = (
-                not self.fit_to_window
-                and getattr(self, "_maintain_zoom_on_navigation", False)
+                (not self.fit_to_window and getattr(self, "_maintain_zoom_on_navigation", False))
+                or getattr(self, "_navigation_in_progress", False)
+                or getattr(self, "_loading_from_gallery", False)
             )
             if hasattr(self, "loading_overlay") and not skip_loading_overlay:
                 self.loading_overlay.show_loading("Loading Image...")
