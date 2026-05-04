@@ -7176,6 +7176,18 @@ class RAWImageViewer(QMainWindow):
         self._stop_slideshow()
         if hasattr(self, "loading_overlay"):
             self.loading_overlay.hide_loading()
+        # Entering gallery: drop leftover single-view decode/preload work so scrolling
+        # thumbnails doesn't compete with stale full-image tasks.
+        try:
+            if hasattr(self, "image_manager") and self.image_manager is not None:
+                if hasattr(self.image_manager, "flush_queue"):
+                    self.image_manager.flush_queue()
+                else:
+                    self.image_manager.cancel_all_tasks()
+            if hasattr(self, "preload_manager") and self.preload_manager is not None:
+                self.preload_manager.cancel_all_preloads()
+        except Exception:
+            pass
 
         # Track gallery loading start time for performance monitoring
         if hasattr(self, 'gallery_justified') and self.gallery_justified:
@@ -7430,7 +7442,10 @@ class RAWImageViewer(QMainWindow):
                 # Defensive refresh: on some startup/folder-switch timing paths, set_images()
                 # can finish before viewport geometry fully settles, leaving no visible widgets
                 # instantiated yet. Force a second pass to populate visible thumbnails.
-                QTimer.singleShot(0, self.gallery_justified.force_layout_update)
+                if hasattr(self.gallery_justified, "force_layout_update"):
+                    QTimer.singleShot(0, self.gallery_justified.force_layout_update)
+                elif hasattr(self.gallery_justified, "_handle_resize_rebuild"):
+                    QTimer.singleShot(0, self.gallery_justified._handle_resize_rebuild)
                 QTimer.singleShot(30, self.gallery_justified.load_visible_images)
                 QTimer.singleShot(120, self.gallery_justified.load_visible_images)
             except Exception as e:
