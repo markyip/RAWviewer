@@ -6493,11 +6493,12 @@ class RAWImageViewer(QMainWindow):
         self._semantic_coverage_cache_ts = now
         return coverage
 
-    def _start_semantic_index_build_background(self, corpus_files):
+    def _start_semantic_index_build_background(self, corpus_files, coverage=None):
         if self._semantic_indexing_in_progress:
             return
         index = self._get_semantic_index()
-        coverage = index.get_index_coverage(corpus_files)
+        if coverage is None:
+            coverage = index.get_index_coverage(corpus_files)
         pending_files = index.get_pending_paths(corpus_files)
         total_files = int(coverage.get("total", len(corpus_files)))
         indexed_files = max(0, int(coverage.get("indexed", 0)))
@@ -6733,8 +6734,11 @@ class RAWImageViewer(QMainWindow):
                     self.status_bar.showMessage("Semantic index ready", 2500)
                 else:
                     self.status_bar.showMessage(f"Semantic index available ({indexed}/{total}).", 3500)
+                # Ensure we finish indexing the rest in the background
+                if indexed < total:
+                    self._start_semantic_index_build_background(corpus_files, coverage=coverage)
             else:
-                self._start_semantic_index_build_background(corpus_files)
+                self._start_semantic_index_build_background(corpus_files, coverage=coverage)
         except Exception as e:
             self._set_gallery_search_status(f"Search error: {e}")
 
@@ -10542,6 +10546,7 @@ class RAWImageViewer(QMainWindow):
             self._pending_zoom_toggle = False
             # Toggle zoom now that pixmap is set
             self.toggle_zoom()
+            self._maybe_refresh_focus_subject_outline_after_display()
             return  # Don't continue with normal display logic
 
         # Zoom / navigation restore: _restore_zoom_center alone misses pinch (center may still be unset).
@@ -10644,6 +10649,7 @@ class RAWImageViewer(QMainWindow):
                             self.display_numpy_image(cached_full)
                             self._is_half_size_displayed = False
                             self._full_resolution_loading = False
+                            self._maybe_refresh_focus_subject_outline_after_display()
                             return # Zoom restoration handled by display_numpy_image
                         else:
                             # Start loading full resolution in background
@@ -14437,7 +14443,7 @@ def main():
 
         # Set application properties
         app.setApplicationName("RAW Image Viewer")
-        app.setApplicationVersion("2.0.0")
+        app.setApplicationVersion("2.0.1")
 
         # macOS: force dark UI to better match our dark theme (including title bar).
         # Using Qt's palette is more reliable than trying to hard-set NSWindow colors.
