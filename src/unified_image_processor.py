@@ -307,8 +307,15 @@ class UnifiedImageProcessor:
                 with rawpy.imread(file_path) as raw:
                     rgb_image = raw.postprocess(**params)
             
-            # 應用方向校正
+            # 應用方向校正 - 確保使用最新的 EXIFExtractor 邏輯
+            if not exif_data or exif_data.get('orientation', 1) == 1:
+                # Last-minute check: if we think it's 1, try a deep extraction just in case
+                exif_data = self.exif_extractor.extract_exif_data(file_path)
+            
             orientation = exif_data.get('orientation', 1) if exif_data else 1
+            if os.environ.get("RAWVIEWER_VERBOSE_ORIENTATION_LOGS") == "1":
+                print(f"[ORIENTATION] UnifiedImageProcessor (RAW): {os.path.basename(file_path)} final_orientation={orientation}")
+                
             if orientation != 1 and rgb_image is not None:
                 rgb_image = self._apply_orientation_correction(rgb_image, orientation, exif_data)
             
@@ -432,8 +439,24 @@ class UnifiedImageProcessor:
             print(f"[ORIENTATION] Before correction: shape = {original_shape}")
         
         if orientation == 1:
-            if _verbose_orientation_logs():
+            if os.environ.get("RAWVIEWER_VERBOSE_ORIENTATION_LOGS") == "1":
                 print(f"[ORIENTATION] Numpy operation: No operation (orientation = 1)")
+            return image_array
+            
+        # SAFETY CHECK: If the image dimensions already match the "corrected" dimensions
+        # (e.g. it's already a portrait image but EXIF still says Orientation 6), 
+        # it might have been pre-rotated by the loader/camera.
+        h, w = image_array.shape[:2]
+        if os.environ.get("RAWVIEWER_VERBOSE_ORIENTATION_LOGS") == "1":
+            print(f"[ORIENTATION] UnifiedImageProcessor: Applying correction for Orientation {orientation} to {w}x{h} image")
+
+        if orientation in (5, 6, 7, 8) and h > w:
+            if os.environ.get("RAWVIEWER_VERBOSE_ORIENTATION_LOGS") == "1":
+                print(f"[ORIENTATION] UnifiedImageProcessor: Image is already portrait ({w}x{h}), skipping manual rotation for Orientation {orientation}")
+            return image_array
+        if orientation in (3, 4) and h < w:
+            # For 180 flips, this is less certain, but we keep it as a placeholder
+            pass
         # Rotation needed?
         import logging
         logger = logging.getLogger(__name__)

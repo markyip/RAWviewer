@@ -19,6 +19,11 @@
 - **Windows Frameless UI**: Clean, modern aesthetic with a hidden menu bar and optimized system-shell integration.
 - **Non-Destructive Rotation**: Instantly rotate any image (including RAW) by 90° steps in the viewer without modifying the original file.
 
+### 🔧 Orientation & Metadata Fixes
+- **Hardened Metadata Parser**: Fixed "Silent Failures" where minor EXIF errors (ISO/Aperture) would reset rotation to default.
+- **Deep Metadata Re-Sync**: Mandatory cache invalidation (v6) forces a clean re-scan of all RAW images to purge legacy rotation errors.
+- **Sony & Fuji MakerNote Support**: Added native support for manufacturer-specific orientation tags, ensuring vertical shots from Sony ARW and Fujifilm RAF stay upright.
+
 ---
 
 ## 🚀 Version 1.8.0
