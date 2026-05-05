@@ -4798,6 +4798,10 @@ class RAWImageViewer(QMainWindow):
         self._semantic_index_active_token = None
         self._semantic_indexing_in_progress = False
         self._semantic_asset_download_in_progress = False
+        
+        # Ensure main window can handle shortcuts immediately
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setFocus()
         self._semantic_asset_download_signals = None
         self._mobileclip_download_dismissed_this_session = False
         self._last_semantic_query = ""
@@ -5956,6 +5960,7 @@ class RAWImageViewer(QMainWindow):
         self.open_button.setToolTip("Open Image File")
         self.open_button.clicked.connect(self.open_file)
         self.open_button.setStyleSheet(bottom_icon_btn_style)
+        self.open_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         left_buttons_layout.addWidget(self.open_button, 0, alignment=Qt.AlignmentFlag.AlignVCenter)
         
         # Sort toggle button (left side) - Material Design 3 text button style
@@ -5985,6 +5990,7 @@ class RAWImageViewer(QMainWindow):
                 background-color: rgba(255, 255, 255, 0.1);
             }
         """)
+        self.sort_toggle_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         left_buttons_layout.addWidget(self.sort_toggle_button)
         self.sort_toggle_button.hide()  # Hidden by default (single view)
         
@@ -6005,6 +6011,7 @@ class RAWImageViewer(QMainWindow):
         self.view_mode_button.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         self.view_mode_button.clicked.connect(self.toggle_view_mode)
         self.view_mode_button.setStyleSheet(bottom_icon_btn_style)
+        self.view_mode_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         left_buttons_layout.addWidget(self.view_mode_button, 0, alignment=Qt.AlignmentFlag.AlignVCenter)
         self.view_mode_button.hide()  # Hidden by default until images are loaded
 
@@ -6015,6 +6022,7 @@ class RAWImageViewer(QMainWindow):
         self.share_bottom_button.setIconSize(QSize(20, 20))
         self.share_bottom_button.setStyleSheet(bottom_icon_btn_style)
         self.share_bottom_button.clicked.connect(self._share_current_image_os)
+        self.share_bottom_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.share_bottom_button.hide()
 
         self.slideshow_bottom_button = QPushButton()
@@ -6034,6 +6042,7 @@ class RAWImageViewer(QMainWindow):
             """
         )
         self.slideshow_bottom_button.toggled.connect(self._on_slideshow_bottom_toggled)
+        self.slideshow_bottom_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.slideshow_bottom_button.hide()
         left_buttons_layout.addWidget(self.slideshow_bottom_button, 0, alignment=Qt.AlignmentFlag.AlignVCenter)
 
@@ -6044,6 +6053,7 @@ class RAWImageViewer(QMainWindow):
         self.rotate_bottom_button.setIconSize(QSize(20, 20))
         self.rotate_bottom_button.setStyleSheet(bottom_icon_btn_style)
         self.rotate_bottom_button.clicked.connect(self._rotate_current_image_clockwise_persist)
+        self.rotate_bottom_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.rotate_bottom_button.hide()
         left_buttons_layout.addWidget(self.rotate_bottom_button, 0, alignment=Qt.AlignmentFlag.AlignVCenter)
 
@@ -6060,6 +6070,7 @@ class RAWImageViewer(QMainWindow):
             self.search_bottom_button.setText("Search")
         self.search_bottom_button.setStyleSheet(bottom_icon_btn_style)
         self.search_bottom_button.clicked.connect(self._on_search_bottom_clicked)
+        self.search_bottom_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.search_bottom_button.hide()
         left_buttons_layout.addWidget(self.search_bottom_button, 0, alignment=Qt.AlignmentFlag.AlignVCenter)
 
@@ -7164,6 +7175,7 @@ class RAWImageViewer(QMainWindow):
         logger.info(f"[VIEW_MODE] Show UI elements: {ui_time:.3f}s")
         if self.current_file_path:
             logger.info(f"[VIEW_MODE] Image reload: {load_time:.3f}s")
+        self.setFocus()
         logger.info(f"[VIEW_MODE] ========== SINGLE VIEW RENDERING COMPLETED in {total_time:.3f}s ==========")
     
     # GALLERY FUNCTIONALITY COMMENTED OUT
@@ -8946,6 +8958,7 @@ class RAWImageViewer(QMainWindow):
                 self.start_scroll_y = self.scroll_area.verticalScrollBar().value()
                 self.image_label.setCursor(
                     QCursor(Qt.CursorShape.ClosedHandCursor))
+            self.setFocus()
 
     def image_mouse_move_event(self, event):
         if self.panning and self.current_pixmap and self._can_pan():
@@ -14429,7 +14442,7 @@ def main():
 
         # Set application properties
         app.setApplicationName("RAW Image Viewer")
-        app.setApplicationVersion("2.0.2")
+        app.setApplicationVersion("2.0.3")
 
         # macOS: force dark UI to better match our dark theme (including title bar).
         # Using Qt's palette is more reliable than trying to hard-set NSWindow colors.
