@@ -1,5 +1,7 @@
 import sys
 import os
+# Force verbose orientation logs for debugging rotation issues
+os.environ["RAWVIEWER_VERBOSE_ORIENTATION_LOGS"] = "1"
 
 # PyInstaller + multiprocessing/process pools:
 # When using ProcessPoolExecutor in a frozen onefile app on Windows, child processes
@@ -5685,7 +5687,7 @@ class RAWImageViewer(QMainWindow):
         # Set window to frameless for custom title bar only on Windows
         if platform.system() == 'Windows':
             self.setWindowFlags(Qt.WindowType.FramelessWindowHint)
-        self.setWindowTitle('RAW Image Viewer')
+        self.setWindowTitle('RAWviewer v2.0.0')
         
         # Set simple background style (no rounded corners - simplifies window resizing)
         self.setStyleSheet("""
@@ -5736,7 +5738,7 @@ class RAWImageViewer(QMainWindow):
         
         # Create custom title bar only on Windows
         if platform.system() == 'Windows':
-            self.title_bar = CustomTitleBar(self, title="RAW Image Viewer")
+            self.title_bar = CustomTitleBar(self, title="RAWviewer v2.0.0")
         else:
             self.title_bar = None
         
@@ -14426,7 +14428,7 @@ def main():
         # Use is_windows variable to avoid calling platform.system() again
         if is_windows:
             safe_print("  [Windows] Setting AppUserModelID...", flush=True)
-            myappid = 'RAWviewer.1.8.0'
+            myappid = 'RAWviewer.2.0.0'
             ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
             safe_print("  [Windows] AppUserModelID set", flush=True)
 
@@ -14435,7 +14437,7 @@ def main():
 
         # Set application properties
         app.setApplicationName("RAW Image Viewer")
-        app.setApplicationVersion("1.8.0")
+        app.setApplicationVersion("2.0.0")
 
         # macOS: force dark UI to better match our dark theme (including title bar).
         # Using Qt's palette is more reliable than trying to hard-set NSWindow colors.

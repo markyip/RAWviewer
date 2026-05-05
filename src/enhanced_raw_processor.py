@@ -26,7 +26,8 @@ import metadata_backend
 from raw_file_extensions import RAW_FILE_EXTENSIONS
 
 # Cached EXIF rows without this version used embedded-JPEG dimensions as "original" (e.g. 1920×1080).
-RAW_EXIF_SENSOR_META_VER = 3
+# Cached EXIF rows without this version used buggy orientation logic (e.g. LibRaw 5 mis-mapped, Sony MakerNote missing, or Silent Failures).
+RAW_EXIF_SENSOR_META_VER = 6
 
 
 def _qimage_to_rgb_array(image: QImage) -> Optional[np.ndarray]:
@@ -253,20 +254,64 @@ class EXIFExtractor(QObject):
         # Check SQLite cache first
         cached = self.cache.get_exif(file_path)
         if cached:
-            return cached
+            # Check if cache version matches current logic
+            cached_ver = cached.get('raw_exif_sensor_meta_ver', 0)
+            if cached_ver < RAW_EXIF_SENSOR_META_VER:
+                if os.environ.get("RAWVIEWER_VERBOSE_ORIENTATION_LOGS") == "1":
+                    print(f"[ORIENTATION] EXIFExtractor: Stale cache version ({cached_ver} < {RAW_EXIF_SENSOR_META_VER}) for {os.path.basename(file_path)}, forcing re-extraction...")
+            else:
+                if os.environ.get("RAWVIEWER_VERBOSE_ORIENTATION_LOGS") == "1":
+                    print(f"[ORIENTATION] EXIFExtractor: Found valid cached orientation={cached.get('orientation')} for {os.path.basename(file_path)}")
+                return cached
 
         try:
             # First pass: standard exifread (works for JPEGs and many RAW containers)
             with open(file_path, 'rb') as f:
                 tags = exifread.process_file(f, details=False)
             
+            # Standard orientation tags
             orientation = 1
-            orientation_tag = tags.get('Image Orientation')
-            if orientation_tag:
-                try:
-                    orientation = int(orientation_tag.values[0])
-                except: pass
+            orientation_tag_found = None
+            
+            # DEBUG: Log all potential orientation tags to help troubleshoot
+            if os.environ.get("RAWVIEWER_VERBOSE_ORIENTATION_LOGS") == "1":
+                orient_tags = {k: v for k, v in tags.items() if 'orient' in k.lower()}
+                if orient_tags:
+                    print(f"[ORIENTATION] EXIFExtractor debug for {os.path.basename(file_path)}: Found orientation-like tags: {orient_tags}")
 
+            for tag_name in ('Image Orientation', 'EXIF Orientation', 'Orientation', 'MakerNote Orientation', 'EXIF SceneType', 'Sony Orientation', 'Sony Orientation 2'):
+                tag = tags.get(tag_name)
+                if tag:
+                    # Try to get the numeric value directly
+                    try:
+                        if hasattr(tag, 'values') and tag.values:
+                            val = tag.values[0]
+                            if isinstance(val, int):
+                                orientation = val
+                                orientation_tag_found = tag_name
+                                break
+                    except: pass
+                    
+                    # Fallback to string mapping (same as main.py)
+                    orientation_str = str(tag).strip()
+                    orientation_map = {
+                        'Horizontal (normal)': 1,
+                        'Mirrored horizontal': 2,
+                        'Rotated 180': 3,
+                        'Mirrored vertical': 4,
+                        'Mirrored horizontal then rotated 90 CCW': 5,
+                        'Rotated 90 CW': 6,
+                        'Mirrored horizontal then rotated 90 CW': 7,
+                        'Rotated 90 CCW': 8
+                    }
+                    if orientation_str in orientation_map:
+                        orientation = orientation_map[orientation_str]
+                        orientation_tag_found = tag_name
+                        break
+            
+            if os.environ.get("RAWVIEWER_VERBOSE_ORIENTATION_LOGS") == "1" and orientation != 1:
+                print(f"[ORIENTATION] EXIFExtractor: Found orientation={orientation} via tag '{orientation_tag_found}' for {os.path.basename(file_path)}")
+            
             camera_make = str(tags.get('Image Make', '')).strip()
             camera_model = str(tags.get('Image Model', '')).strip()
             
@@ -296,14 +341,21 @@ class EXIFExtractor(QObject):
                         original_width = sizes.width
                         original_height = sizes.height
                         if orientation == 1 and sizes.flip != 0:
-                            orientation = sizes.flip
+                            # Map LibRaw flip codes to EXIF Orientation
+                            # LibRaw flip: 0=0, 3=180, 5=90CCW, 6=90CW
+                            # EXIF Orient: 1=0, 3=180, 8=90CCW, 6=90CW
+                            flip_map = {0: 1, 3: 3, 5: 8, 6: 6}
+                            orientation = flip_map.get(sizes.flip, sizes.flip)
+                            if os.environ.get("RAWVIEWER_VERBOSE_ORIENTATION_LOGS") == "1":
+                                print(f"[ORIENTATION] EXIFExtractor: Falling back to LibRaw flip={sizes.flip} -> Orientation {orientation} for {os.path.basename(file_path)}")
                     else:
                         with rawpy.imread(file_path) as raw:
                             sizes = raw.sizes
                             original_width = sizes.width
                             original_height = sizes.height
                             if orientation == 1 and sizes.flip != 0:
-                                orientation = sizes.flip
+                                flip_map = {0: 1, 3: 3, 5: 8, 6: 6}
+                                orientation = flip_map.get(sizes.flip, sizes.flip)
                 except Exception:
                     pass
 
@@ -351,7 +403,8 @@ class EXIFExtractor(QObject):
                         break
                     except: pass
 
-            return {
+            # Build return dict
+            result = {
                 'orientation': orientation,
                 'camera_make': camera_make,
                 'camera_model': camera_model,
@@ -362,18 +415,26 @@ class EXIFExtractor(QObject):
                 'focal_length': focal_length,
                 'aperture': aperture,
                 'iso': iso,
-                'verified_orientation': True,  # Mark this extraction as verified with new logic
+                'verified_orientation': True,
                 'raw_exif_sensor_meta_ver': RAW_EXIF_SENSOR_META_VER,
             }
-        except Exception:
+            
+            if os.environ.get("RAWVIEWER_VERBOSE_ORIENTATION_LOGS") == "1":
+                print(f"[ORIENTATION] EXIFExtractor: Successfully returning metadata with orientation={orientation} for {os.path.basename(file_path)}")
+            
+            return result
+            
+        except Exception as e:
+            if os.environ.get("RAWVIEWER_VERBOSE_ORIENTATION_LOGS") == "1":
+                print(f"[ORIENTATION] EXIFExtractor error for {os.path.basename(file_path)}: {e}")
             pass
 
         return {
-            'orientation': 1,
-            'camera_make': '',
-            'camera_model': '',
+            'orientation': orientation if 'orientation' in locals() else 1,
+            'camera_make': camera_make if 'camera_make' in locals() else '',
+            'camera_model': camera_model if 'camera_model' in locals() else '',
             'exif_data': {},
-            'verified_orientation': True  # Even failed extractions are "verified" to prevent loops
+            'verified_orientation': True
         }
 
 
