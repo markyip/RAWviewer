@@ -2345,6 +2345,35 @@ class SemanticImageIndex:
                     face_count = self._detect_face_count(original)
                     self._store_face_count(original, int(face_count or 0))
             
+            # Lazy metadata repair: If we have GPS but no location names (city/country),
+            # it might have been indexed when the geocoder was unavailable. 
+            # Try to fix it on the fly.
+            city = str(row["city"] or "")
+            admin1 = str(row["admin1"] or "")
+            country = str(row["country"] or "")
+            gps_lat = row["gps_lat"]
+            gps_lon = row["gps_lon"]
+            
+            if not city and gps_lat is not None and gps_lon is not None:
+                geo = self._ensure_reverse_geocoder()
+                if geo:
+                    try:
+                        recs = geo.search([(float(gps_lat), float(gps_lon))], mode=1)
+                        if recs:
+                            rec = recs[0] or {}
+                            city = str(rec.get("name", "") or "")
+                            admin1 = str(rec.get("admin1", "") or "")
+                            cc = str(rec.get("cc", "") or "").upper()
+                            country = self._country_name_from_code(cc)
+                            # Update DB so we don't have to geocode this file again
+                            self._conn.execute(
+                                "UPDATE semantic_index SET city=?, admin1=?, country=?, country_code=? WHERE file_path=?",
+                                (city, admin1, country, cc, original)
+                            )
+                            self._conn.commit()
+                    except Exception:
+                        pass
+
             rows.append(
                 {
                     "file_path": original,
@@ -2355,11 +2384,11 @@ class SemanticImageIndex:
                     "iso": int(row["iso"] or 0),
                     "width": int(row["width"] or 0),
                     "height": int(row["height"] or 0),
-                    "gps_lat": row["gps_lat"],
-                    "gps_lon": row["gps_lon"],
-                    "city": str(row["city"] or ""),
-                    "admin1": str(row["admin1"] or ""),
-                    "country": str(row["country"] or ""),
+                    "gps_lat": gps_lat,
+                    "gps_lon": gps_lon,
+                    "city": city,
+                    "admin1": admin1,
+                    "country": country,
                     "country_code": str(row["country_code"] or ""),
                     "face_count": int(face_count or 0),
                 }

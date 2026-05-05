@@ -915,8 +915,8 @@ class ImageCache(QObject):
     def put_thumbnail(self, file_path: str, thumbnail: np.ndarray, jpeg_data: bytes = None) -> None:
         """Cache a thumbnail image."""
         if thumbnail is not None:
-            # Ensure thumbnail is reasonable size (max 512x512)
-            if thumbnail.shape[0] > 512 or thumbnail.shape[1] > 512:
+            # Ensure thumbnail is reasonable size (max 1024x1024)
+            if thumbnail.shape[0] > 1024 or thumbnail.shape[1] > 1024:
                 # This should be handled by the caller, but safety check
                 return
             # Cache in memory

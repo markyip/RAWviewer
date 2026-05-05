@@ -99,6 +99,8 @@ class JustifiedGallery(QWidget):
         self._scroll_settle_timer = None
         self._resize_timer = None
         self._last_scroll_y = -1
+        self._last_scroll_time = time.time()
+        self._current_scroll_speed = 0.0
         self._is_scrolling_fast = False
         self._scroll_optimize_threshold = 6000
 
@@ -541,10 +543,12 @@ class JustifiedGallery(QWidget):
     def _on_scroll(self, value):
         now = time.time()
         if self._last_scroll_y >= 0:
-            dt = now - self._last_scroll_time
+            last_time = getattr(self, "_last_scroll_time", 0)
+            dt = now - last_time
             if dt > 0.01:
+                current_speed = getattr(self, "_current_scroll_speed", 0.0)
                 speed = abs(value - self._last_scroll_y) / dt
-                self._current_scroll_speed = (self._current_scroll_speed * 0.4) + (speed * 0.6)
+                self._current_scroll_speed = (current_speed * 0.4) + (speed * 0.6)
                 self._is_scrolling_fast = self._current_scroll_speed > self._scroll_optimize_threshold
 
         self._last_scroll_y = value

@@ -103,3 +103,6 @@ tests/
 *.ARW
 *.NEF
 *.CR3
+
+# Development scratch
+scratch/
