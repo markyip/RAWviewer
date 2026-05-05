@@ -16,6 +16,7 @@ REM Force unbuffered output with -u flag
 set RAWVIEWER_USE_PROCESS_POOL=0
 set RAWVIEWER_VERBOSE_INFO_LOGS=0
 set RAWVIEWER_VERBOSE_CONSOLE=0
+set RAWVIEWER_FOCUS_GALLERY_SWITCH=1
 echo.
 echo ========================================
 echo Starting Python application...

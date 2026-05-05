@@ -1,5 +1,26 @@
 # RAWviewer Release Notes
 
+## 🚀 Version 2.0.0
+**Release Date: May 5, 2026**
+
+### 🌟 Major Performance Breakthrough
+- **Single-Pass RAW Pipeline**: Significant architectural refactor in `UnifiedImageProcessor`. The app now opens RAW files exactly once to extract both metadata and previews, halving Disk I/O and CPU overhead.
+- **High-Velocity Gallery Engine**: Restored and improved the aggressive scheduling budget from v1.6.0. Visible thumbnails are now requested up to 3x faster, with a refined "per-tick" budget of 16 tasks.
+- **Intelligent Layout Debouncing**: New threshold-based layout logic prevents "rebuild storms" in large folders (500+ images). The UI remains perfectly responsive even while background indexing is active.
+- **Scroll-Aware Loading**: Rendering and background scheduling now yield priority to active scroll gestures, ensuring a buttery-smooth frame rate during navigation.
+
+### 🔍 Search & Metadata
+- **MobileCLIP2 Semantic Search (macOS)**: Native CoreML support for natural-language image ranking. Search for "blue jet", "sunset", or "crowd" without tags.
+- **Structured Filters**: Power-user syntax for `camera:`, `lens:`, `iso:`, `format:`, and `ext:`. Combine phrases like `sunset format:cr3`.
+- **Precision Focus Detection**: Overlays camera focus points using MakerNote data for Canon, Nikon, and Sony.
+
+### 🎨 UI & UX
+- **Native macOS Polish**: Deep integration with Finder, native Share sheet support, and trackpad pinch-to-zoom with smart cursor anchoring.
+- **Windows Frameless UI**: Clean, modern aesthetic with a hidden menu bar and optimized system-shell integration.
+- **Non-Destructive Rotation**: Instantly rotate any image (including RAW) by 90° steps in the viewer without modifying the original file.
+
+---
+
 ## 🚀 Version 1.8.0
 **Release Date: May 3, 2026**
 
