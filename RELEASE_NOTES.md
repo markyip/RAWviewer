@@ -1,70 +1,25 @@
 # RAWviewer Release Notes
 
-## 🚀 Version 2.0.4
-**Release Date: May 5, 2026**
-
-### Rendering & Interaction Hardening
-- **Image Rendering Watchdog**: Added a safety layer that explicitly clears the view and shows "Loading..." during folder transitions, preventing stale pixels or "white screen" flashes.
-- **Safety Fallback**: Implemented null-pixmap detection in the display pipeline; the viewer now displays "Failed to load image" instead of a blank screen if an image cannot be decoded.
-- **Folder Switch Reliability**: Hardened state management in `main.py` by resetting all zoom and navigation persistence flags during folder changes to ensure a clean start for every folder.
-- **Semantic Search Optimization**: Re-architected search initialization with lazy backend loading, eliminating the "initialization pause" when switching folders or opening the search panel.
-
----
-
-## 🚀 Version 2.0.3
-**Release Date: May 5, 2026**
-
-### Focus & Interaction Reliability
-- **Hardened Shortcut Responsiveness**: Fixed an issue where Spacebar or Double-click would occasionally fail on the first attempt. This was caused by UI buttons (like "Gallery" or "Open") stealing focus.
-- **Focus-Resilient UI**: Configured all status bar controls with `NoFocus` policy, ensuring the main interaction area always handles keyboard and mouse events.
-- **Automatic Focus Restoration**: The application now explicitly regains focus after folder switches and view-mode transitions to guarantee immediate shortcut availability.
-
----
-
-## 🚀 Version 2.0.2
-**Release Date: May 5, 2026**
-
-### Stability & Navigation
-- **Fixed folder-switch rendering**: Resolved a race condition where the first image in a new folder would occasionally fail to render or stay stuck on a thumbnail.
-- **Fixed inconsistent double-click zoom**: Resolved a UI conflict where double-clicking would sometimes maximize/restore the window instead of zooming into the image. Added proper event propagation control.
-- **Improved RAW format coverage**: Ensured consistent high-resolution loading for all supported RAW formats (PEF, X3F, etc.) when switching from gallery to single view.
-
----
-
-## 🚀 Version 2.0.1
-**Release Date: May 5, 2026**
-
-### Performance & Stability
-- **Instant semantic search initialization**: Restored batch-lookup strategy and persistent Core ML compilation caching for the v2.0 architecture. Search panel opens instantly and processing starts immediately after one-time setup.
-- **Improved navigation responsiveness**: Optimized the display pipeline to maintain focus indicator (AF point) persistence across all navigation paths, including zoomed-in states and high-resolution deferrals.
-- **Path resolution caching**: Re-implemented LRU caching for path canonicalization to ensure fluid album scanning on macOS.
-
----
-
-
 ## 🚀 Version 2.0.0
 **Release Date: May 5, 2026**
 
-### 🌟 Major Performance Breakthrough
+### 🌟 Major Performance & Stability Breakthrough
+- **High-Definition Thumbnail Support**: Increased thumbnail resolution to 1024px for crystal-clear previews on Retina and 4K displays.
+- **Lazy Metadata Repair**: Automatically geocodes and repairs stale location metadata on-the-fly, ensuring images are always searchable by city and country.
 - **Single-Pass RAW Pipeline**: Significant architectural refactor in `UnifiedImageProcessor`. The app now opens RAW files exactly once to extract both metadata and previews, halving Disk I/O and CPU overhead.
-- **High-Velocity Gallery Engine**: Restored and improved the aggressive scheduling budget from v1.6.0. Visible thumbnails are now requested up to 3x faster, with a refined "per-tick" budget of 16 tasks.
-- **Intelligent Layout Debouncing**: New threshold-based layout logic prevents "rebuild storms" in large folders (500+ images). The UI remains perfectly responsive even while background indexing is active.
-- **Scroll-Aware Loading**: Rendering and background scheduling now yield priority to active scroll gestures, ensuring a buttery-smooth frame rate during navigation.
+- **Focus-Resilient UI**: Optimized bottom-bar layout with fixed-height controls (28px) to eliminate vertical shifting and focus-stealing during navigation.
+- **Intelligent Layout Debouncing**: New threshold-based layout logic prevents "rebuild storms" in large folders (500+ images).
 
 ### 🔍 Search & Metadata
 - **MobileCLIP2 Semantic Search (macOS)**: Native CoreML support for natural-language image ranking. Search for "blue jet", "sunset", or "crowd" without tags.
 - **Structured Filters**: Power-user syntax for `camera:`, `lens:`, `iso:`, `format:`, and `ext:`. Combine phrases like `sunset format:cr3`.
 - **Precision Focus Detection**: Overlays camera focus points using MakerNote data for Canon, Nikon, and Sony.
 
-### 🎨 UI & UX
+### 🎨 UI & UX Refresh
+- **Layout Stability**: Definitive fixes for "squeezed" thumbnails and horizontal button padding inconsistency.
 - **Native macOS Polish**: Deep integration with Finder, native Share sheet support, and trackpad pinch-to-zoom with smart cursor anchoring.
-- **Windows Frameless UI**: Clean, modern aesthetic with a hidden menu bar and optimized system-shell integration.
 - **Non-Destructive Rotation**: Instantly rotate any image (including RAW) by 90° steps in the viewer without modifying the original file.
 
-### 🔧 Orientation & Metadata Fixes
-- **Hardened Metadata Parser**: Fixed "Silent Failures" where minor EXIF errors (ISO/Aperture) would reset rotation to default.
-- **Deep Metadata Re-Sync**: Mandatory cache invalidation (v6) forces a clean re-scan of all RAW images to purge legacy rotation errors.
-- **Sony & Fuji MakerNote Support**: Added native support for manufacturer-specific orientation tags, ensuring vertical shots from Sony ARW and Fujifilm RAF stay upright.
 
 ---
 

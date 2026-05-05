@@ -4,7 +4,7 @@ Build script for RAW Image Viewer Windows/macOS executable
 Handles dependency installation and executable creation.
 """
 
-VERSION = "2.0.0"
+VERSION = "2.0.4"
 
 import os
 import subprocess

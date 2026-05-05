@@ -5922,14 +5922,14 @@ class RAWImageViewer(QMainWindow):
         status_layout = QHBoxLayout(status_widget)
         # Add left padding to balance with right padding of counter (12px)
         status_layout.setContentsMargins(12, 0, 0, 0)
-        status_layout.setSpacing(20)
+        status_layout.setSpacing(12)
         
         # Left side buttons container
         left_buttons_widget = QWidget()
         left_buttons_layout = QHBoxLayout(left_buttons_widget)
         left_buttons_layout.setContentsMargins(0, 0, 0, 0)
-        # Add 12px spacing between buttons (🗁 and Gallery)
-        left_buttons_layout.setSpacing(12)
+        # Add 8px spacing between buttons
+        left_buttons_layout.setSpacing(8)
 
         import qtawesome as qta
         bottom_icon_btn_style = """
@@ -5942,6 +5942,8 @@ class RAWImageViewer(QMainWindow):
                 background: transparent;
                 text-align: center;
                 letter-spacing: 0.25px;
+                min-height: 28px;
+                max-height: 28px;
             }
             QPushButton:hover {
                 color: #E0E0E0;
@@ -5981,11 +5983,13 @@ class RAWImageViewer(QMainWindow):
                 color: #B0B0B0;
                 font-size: 13px;
                 font-weight: 500;
-                padding: 6px 12px;
+                padding: 4px 10px;
                 border: none;
                 background: transparent;
                 text-align: left;
                 letter-spacing: 0.25px;
+                min-height: 28px;
+                max-height: 28px;
             }
             QPushButton:hover {
                 color: #E0E0E0;
@@ -6038,14 +6042,8 @@ class RAWImageViewer(QMainWindow):
         self.slideshow_bottom_button.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         self.slideshow_bottom_button.setIcon(qta.icon("fa5s.play", color="#B0B0B0"))
         self.slideshow_bottom_button.setIconSize(QSize(20, 20))
-        self.slideshow_bottom_button.setFixedSize(28, 28)
         self.slideshow_bottom_button.setStyleSheet(
             bottom_icon_btn_style
-            + """
-            QPushButton#slideshowBottomButton {
-                padding: 0px;
-            }
-            """
         )
         self.slideshow_bottom_button.toggled.connect(self._on_slideshow_bottom_toggled)
         self.slideshow_bottom_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
@@ -6129,8 +6127,10 @@ class RAWImageViewer(QMainWindow):
                 background-color: #2A2A2A;
                 border: 1px solid #3A3A3A;
                 border-radius: 6px;
-                padding: 6px 10px;
+                padding: 4px 10px;
                 font-size: 13px;
+                min-height: 20px;
+                max-height: 28px;
             }
             QLineEdit:focus {
                 border: 1px solid #5A5A5A;
@@ -14474,7 +14474,7 @@ def main():
 
         # Set application properties
         app.setApplicationName("RAW Image Viewer")
-        app.setApplicationVersion("2.0.4")
+        app.setApplicationVersion("2.0.0")
 
         # macOS: force dark UI to better match our dark theme (including title bar).
         # Using Qt's palette is more reliable than trying to hard-set NSWindow colors.

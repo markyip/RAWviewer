@@ -78,7 +78,7 @@ def extract_embedded_jpeg_by_scan(file_path: str, max_size: int) -> Optional[np.
             if miss_key in _embedded_scan_miss_cache:
                 return None
 
-        if max_size <= 512:
+        if max_size <= 1024:
             read_limit = 32 * 1024 * 1024
         elif max_size <= 2048:
             read_limit = 64 * 1024 * 1024
@@ -140,7 +140,7 @@ class ThumbnailExtractor(QObject):
     def __init__(self):
         super().__init__()
 
-    def extract_thumbnail_from_raw(self, file_path: str, max_size: int = 512,
+    def extract_thumbnail_from_raw(self, file_path: str, max_size: int = 1024,
                                    allow_scan_fallback: bool = True,
                                    raw_object: Optional[rawpy.RawPy] = None) -> Optional[np.ndarray]:
         """Extract embedded thumbnail from RAW file and resize to max_size."""
@@ -200,7 +200,7 @@ class ThumbnailExtractor(QObject):
             allow_scan_fallback=allow_scan_fallback,
         )
 
-    def extract_thumbnail_from_image(self, file_path: str, max_size: int = 512,
+    def extract_thumbnail_from_image(self, file_path: str, max_size: int = 1024,
                                      target_size: Optional[QSize] = None) -> Optional[Union[np.ndarray, QImage]]:
         """Extract thumbnail from regular image file. Returns QImage (preferred) or np.ndarray."""
         try:
@@ -211,9 +211,10 @@ class ThumbnailExtractor(QObject):
                 w, h = size.width(), size.height()
                 
                 # OPTIMIZATION: If we have a target_size, scale directly to it during decode.
-                # This is much faster than decoding to 512px and then scaling again.
+                # Use KeepAspectRatioByExpanding so we have enough pixels to crop later
+                # without stretching (which happens if we just set target_size directly).
                 if target_size is not None and isinstance(target_size, QSize) and target_size.isValid():
-                    reader.setScaledSize(target_size)
+                    reader.setScaledSize(size.scaled(target_size, Qt.AspectRatioMode.KeepAspectRatioByExpanding))
                 elif w > max_size or h > max_size:
                     scale = min(max_size / w, max_size / h)
                     reader.setScaledSize(QSize(max(1, int(w * scale)), max(1, int(h * scale))))
@@ -357,6 +358,21 @@ class EXIFExtractor(QObject):
                                 flip_map = {0: 1, 3: 3, 5: 8, 6: 6}
                                 orientation = flip_map.get(sizes.flip, sizes.flip)
                 except Exception:
+                    pass
+
+            # Third pass: If dimensions are still 0 (e.g. non-RAW missing tags), use QImageReader (fast header read)
+            if original_width <= 0 or original_height <= 0:
+                try:
+                    reader = QImageReader(file_path)
+                    size = reader.size()
+                    if size.isValid():
+                        # QImageReader.size() takes autoTransform into account if set.
+                        # Since we want to provide dimensions that will be combined with 
+                        # 'orientation' later, we should be careful.
+                        # But standard JPEGs with missing tags usually have orientation=1.
+                        original_width = size.width()
+                        original_height = size.height()
+                except:
                     pass
 
             # Extract technical metadata for top-level cache columns

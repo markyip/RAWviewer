@@ -61,7 +61,7 @@ class UnifiedImageProcessor:
     def process_thumbnail(self, file_path: str, allow_heavy_fallback: bool = True,
                           target_size: Optional[QSize] = None) -> Optional[np.ndarray]:
         """處理縮圖（統一接口）"""
-        MAX_THUMB_DIM = 512
+        MAX_THUMB_DIM = 1024
 
         # 檢查快取
         cached = self.cache.get_thumbnail(file_path)
