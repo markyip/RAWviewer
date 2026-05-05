@@ -88,7 +88,7 @@ class JustifiedGallery(QWidget):
         self._last_scroll_time = 0
         self._current_scroll_speed = 0
         self._is_scrolling_fast = False
-        self._scroll_optimize_threshold = 3000
+        self._scroll_optimize_threshold = 6000
 
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
@@ -107,7 +107,12 @@ class JustifiedGallery(QWidget):
                 self.load_manager.thumbnail_ready.disconnect(self.on_thumbnail_ready)
             except Exception:
                 pass
+            try:
+                self.load_manager.error_occurred.disconnect(self.on_thumbnail_error)
+            except Exception:
+                pass
             self.load_manager.thumbnail_ready.connect(self.on_thumbnail_ready)
+            self.load_manager.error_occurred.connect(self.on_thumbnail_error)
 
             # Timer Management
             self._load_timer = QTimer(self)
@@ -124,8 +129,6 @@ class JustifiedGallery(QWidget):
 
             # Finish setup
             QTimer.singleShot(50, self._delayed_initial_build)
-            # Ensure first visible batch is scheduled even if caller switched modes rapidly.
-            QTimer.singleShot(80, self.load_visible_images)
         except Exception:
             logger.exception("[GALLERY] _post_init failed")
 
@@ -174,6 +177,7 @@ class JustifiedGallery(QWidget):
 
             self._gallery_generation += 1
             self.images = new_images
+            self._active_tasks.clear()
 
             if bulk_metadata:
                 self._metadata_cache.update(bulk_metadata)
@@ -357,19 +361,6 @@ class JustifiedGallery(QWidget):
         except Exception:
             logger.exception("[GALLERY] resize rebuild failed")
 
-    def force_layout_update(self):
-        """
-        Compatibility hook used by main.py.
-        Rebuild after geometry settles, then populate visible tiles.
-        """
-        try:
-            if self._resize_timer is not None and self._resize_timer.isActive():
-                self._resize_timer.stop()
-        except Exception:
-            pass
-        QTimer.singleShot(0, self._handle_resize_rebuild)
-        QTimer.singleShot(30, self.load_visible_images)
-
     def _delayed_initial_build(self):
         self._setup_scroll_tracking()
         if self.width() > 0:
@@ -509,10 +500,7 @@ class JustifiedGallery(QWidget):
 
         # Throttle (do NOT restart continuously): allow periodic updates while scrolling.
         # The settle timer below guarantees a final update when scrolling stops.
-        if self._is_scrollbar_dragging:
-            interval = 140
-        else:
-            interval = 50 if not self._is_scrolling_fast else 150
+        interval = 50 if not self._is_scrolling_fast else 150
         if not self._load_timer.isActive():
             self._load_timer.start(interval)
 
@@ -678,21 +666,6 @@ class JustifiedGallery(QWidget):
     def load_visible_images(self):
         if self._building:
             return
-        # Startup race guard: callers may trigger this before _post_init finished.
-        if self._load_timer is None:
-            self._load_timer = QTimer(self)
-            self._load_timer.setSingleShot(True)
-            self._load_timer.timeout.connect(self.load_visible_images)
-        if self._scroll_settle_timer is None:
-            self._scroll_settle_timer = QTimer(self)
-            self._scroll_settle_timer.setSingleShot(True)
-            self._scroll_settle_timer.timeout.connect(self._on_scroll_settled)
-        if self._resize_timer is None:
-            self._resize_timer = QTimer(self)
-            self._resize_timer.setSingleShot(True)
-            self._resize_timer.timeout.connect(self._handle_resize_rebuild)
-        if self._scroll_area is None:
-            self._setup_scroll_tracking()
 
         p = self.parent()
         while p and not isinstance(p, QScrollArea):
@@ -700,22 +673,6 @@ class JustifiedGallery(QWidget):
         if not p:
             return
         if self.load_manager is None:
-            # Lazy recovery: in rare startup races _post_init may not have completed yet.
-            try:
-                if self.parent_viewer is not None and hasattr(self.parent_viewer, "image_manager") and self.parent_viewer.image_manager:
-                    self.load_manager = self.parent_viewer.image_manager
-                else:
-                    self.load_manager = get_image_load_manager()
-            except Exception:
-                self.load_manager = None
-            if self.load_manager is None:
-                QTimer.singleShot(60, self.load_visible_images)
-                return
-
-        # If we have images but no computed layout yet, schedule a rebuild first.
-        if self.images and not self._gallery_layout_items:
-            QTimer.singleShot(0, self.build_gallery)
-            QTimer.singleShot(40, self.load_visible_images)
             return
 
         v_port = p.viewport()
@@ -747,8 +704,7 @@ class JustifiedGallery(QWidget):
         # Fast scroll policy:
         # - still keep visible thumbnails loading (small budget)
         # - avoid heavy prefetch
-        is_thumb_drag = bool(self._is_scrollbar_dragging)
-        is_fast = self._is_scrolling_fast or is_thumb_drag
+        is_fast = self._is_scrolling_fast
         allow_prefetch = not is_fast
 
         # If the user jumped far (typical when dragging scrollbar), flush stale queue so new
@@ -778,6 +734,8 @@ class JustifiedGallery(QWidget):
                 self.load_manager.cancel_task(fp)
             except Exception:
                 pass
+            if fp in self._active_tasks:
+                del self._active_tasks[fp]
         self._requested_thumbnail_paths = wanted_paths
 
         load_tasks = []
@@ -785,13 +743,8 @@ class JustifiedGallery(QWidget):
         scheduled_tasks = 0
 
         # Reduce per-tick work when fast scrolling (keep things responsive)
-        if is_thumb_drag:
-            # Thumb-drag mode: prioritize immediate viewport response over throughput.
-            max_widgets = 2
-            max_tasks = 3
-        else:
-            max_widgets = 4 if is_fast else self._max_widgets_per_tick
-            max_tasks = 6 if is_fast else self._max_tasks_per_tick
+        max_widgets = 4 if is_fast else self._max_widgets_per_tick
+        max_tasks = 8 if is_fast else self._max_tasks_per_tick
 
         # Create/update widgets for visible items and schedule loads for missing thumbnails.
         for idx, item in visible_indices_items:
@@ -825,32 +778,40 @@ class JustifiedGallery(QWidget):
                         pass
                 w.mousePressEvent = _on_thumb_click
                 created_widgets += 1
+                self._visible_widgets[idx] = w
+            else:
+                w = self._visible_widgets[idx]
+                w.file_path = path
+                w.index = idx
+                if w.geometry() != rect:
+                    w.setGeometry(rect)
+                if w.size() != rect.size():
+                    w.setFixedSize(rect.size())
 
-                cache_hit = False
-                scaled_key = self._scaled_cache_key(path, rect.size())
-                cached_scaled = self._thumbnail_cache.get(scaled_key)
-                if cached_scaled:
-                    w.setPixmap(cached_scaled)
+            cache_hit = False
+            scaled_key = self._scaled_cache_key(path, rect.size())
+            cached_scaled = self._thumbnail_cache.get(scaled_key)
+            if cached_scaled:
+                w.setPixmap(cached_scaled)
+                w.setText("")
+                cache_hit = True
+            else:
+                base = self._thumbnail_cache.get((path, self._thumb_base_key))
+                if base:
+                    rotated_base = self._apply_visual_rotation_for_path(path, base)
+                    scaled = self._scale_crop_to_fit(rotated_base, rect.size())
+                    self._thumbnail_cache.put(scaled_key, scaled)
+                    w.setPixmap(scaled)
                     w.setText("")
                     cache_hit = True
                 else:
-                    base = self._thumbnail_cache.get((path, self._thumb_base_key))
-                    if base:
-                        rotated_base = self._apply_visual_rotation_for_path(path, base)
-                        scaled = self._scale_crop_to_fit(rotated_base, rect.size())
-                        self._thumbnail_cache.put(scaled_key, scaled)
-                        w.setPixmap(scaled)
-                        w.setText("")
-                        cache_hit = True
-                    else:
-                        # Avoid expensive text updates during scroll; placeholder paint will cover.
-                        w.setText("")
+                    # Avoid expensive text updates during scroll; placeholder paint will cover.
+                    w.setPixmap(QPixmap())
+                    w.setText("")
 
-                w.show()
-                self._visible_widgets[idx] = w
-
-                if not cache_hit:
-                    load_tasks.append((path, Priority.CURRENT, rect.size()))
+            w.show()
+            if not cache_hit and path not in self._active_tasks:
+                load_tasks.append((path, Priority.CURRENT, rect.size()))
 
         if allow_prefetch:
             for path in prefetch_paths:
@@ -858,7 +819,10 @@ class JustifiedGallery(QWidget):
                     continue
                 # If neither base nor bucket exists, schedule preload
                 # (we don't know exact bucket here; base check is enough)
-                if not self._thumbnail_cache.get((path, self._thumb_base_key)):
+                if (
+                    not self._thumbnail_cache.get((path, self._thumb_base_key))
+                    and path not in self._active_tasks
+                ):
                     load_tasks.append((path, Priority.PRELOAD_NEXT, None))
 
         # Schedule with budget and target-sized thumbnails for visible tiles.
@@ -869,22 +833,33 @@ class JustifiedGallery(QWidget):
                     self._load_timer.start(16)
                 break
             if target_size is not None:
+                request_size = target_size
+                if is_fast:
+                    # During fast scroll, request a smaller thumbnail to reduce decode/scaling cost.
+                    request_size = QSize(
+                        max(64, int(target_size.width() * 0.75)),
+                        max(64, int(target_size.height() * 0.75)),
+                    )
                 self.load_manager.load_image(
                     path,
                     priority=priority,
                     cancel_existing=False,
                     stages={"thumbnail"},
-                    thumbnail_target_size=QSize(target_size.width(), target_size.height()),
+                    thumbnail_target_size=QSize(request_size.width(), request_size.height()),
                     thumbnail_fit="crop",
                 )
             else:
                 self.load_manager.load_image(path, priority=priority, cancel_existing=False, stages={"thumbnail"})
+            self._active_tasks[path] = time.time()
             scheduled += 1
         scheduled_tasks = scheduled
 
         # (perf logging removed)
 
     def on_thumbnail_ready(self, file_path, thumbnail_data):
+        # Mark path as no longer in-flight regardless of whether we can render it now.
+        if file_path in self._active_tasks:
+            del self._active_tasks[file_path]
         # Single-image view uses RAWImageViewer.on_manager_thumbnail_ready; skip gallery
         # work to avoid duplicate handling and any re-entrant UI paths on the same signal.
         if self.parent_viewer is not None and getattr(
@@ -937,8 +912,17 @@ class JustifiedGallery(QWidget):
                 w.setPixmap(fitted)
                 w.setText("")
 
+        # Continue scheduling when new thumbnails arrive so visible blanks are filled quickly.
+        if not self._is_scrolling_fast:
+            QTimer.singleShot(0, self.load_visible_images)
+
+    def on_thumbnail_error(self, file_path, _error_message):
         if file_path in self._active_tasks:
             del self._active_tasks[file_path]
+        if self.parent_viewer is not None and getattr(
+            self.parent_viewer, "view_mode", "gallery"
+        ) == "gallery":
+            QTimer.singleShot(0, self.load_visible_images)
 
     def show_loading_message(self, message="Loading gallery..."):
         """Show loading message overlay - Simplified for better performance"""

@@ -76,8 +76,29 @@ if sys.platform == 'win32':
 
 # Safe print function for PyInstaller --windowed builds
 # In windowed mode, sys.stdout/stderr may be None
+def _env_true(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _is_primary_process() -> bool:
+    try:
+        import multiprocessing
+        return multiprocessing.current_process().name == "MainProcess"
+    except Exception:
+        return True
+
+
+_VERBOSE_CONSOLE = _env_true("RAWVIEWER_VERBOSE_CONSOLE", default=False)
+
+
 def safe_print(*args, **kwargs):
     """Safely print to stdout, handling None case in windowed builds"""
+    force = bool(kwargs.pop("force", False))
+    if not force and (not _VERBOSE_CONSOLE or not _is_primary_process()):
+        return
     if sys.stdout is not None:
         try:
             print(*args, **kwargs)
@@ -86,6 +107,7 @@ def safe_print(*args, **kwargs):
 
 def safe_print_err(*args, **kwargs):
     """Safely print to stderr, handling None case in windowed builds"""
+    _ = kwargs.pop("force", False)
     if sys.stderr is not None:
         try:
             print(*args, file=sys.stderr, **kwargs)
@@ -104,7 +126,7 @@ def _norm_path(p: str) -> str:
         return p or ""
 
 
-# Print immediately to verify script is running
+# Print immediately to verify script is running (main process only, opt-in verbosity)
 safe_print("=" * 80, flush=True)
 safe_print("RAWviewer: Starting imports...", flush=True)
 safe_print(f"Python: {sys.version}", flush=True)
@@ -401,6 +423,33 @@ except Exception as e:
 safe_print("All imports completed successfully!", flush=True)
 
 
+class NoisyInfoFilter(logging.Filter):
+    """Drop extremely chatty INFO logs unless explicitly enabled."""
+
+    _noisy_prefixes = (
+        "[RAW_PROC]",
+        "[GALLERY]",
+        "[DISPLAY]",
+        "[DISPLAY_PIXMAP]",
+        "[LOAD]",
+        "[VIEW_MODE]",
+        "[WINDOW_RESIZE]",
+        "[PERF]",
+    )
+
+    def __init__(self, enabled: bool):
+        super().__init__()
+        self.enabled = enabled
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if self.enabled:
+            return True
+        if record.levelno != logging.INFO:
+            return True
+        msg = record.getMessage()
+        return not msg.startswith(self._noisy_prefixes)
+
+
 def setup_logging():
     """Setup logging configuration with file and console handlers"""
     try:
@@ -420,10 +469,12 @@ def setup_logging():
 
         # Always attach a console/stream handler when possible.
         stream = sys.stdout if sys.stdout is not None else getattr(sys, "__stdout__", None)
+        verbose_info = _env_true("RAWVIEWER_VERBOSE_INFO_LOGS", default=False)
         if stream is not None:
             console_handler = logging.StreamHandler(stream)
             console_handler.setLevel(logging.INFO)
             console_handler.setFormatter(formatter)
+            console_handler.addFilter(NoisyInfoFilter(verbose_info))
             root_logger.addHandler(console_handler)
         else:
             # Windowed builds can have no stdout; keep logging silent unless file logging is enabled.
@@ -441,6 +492,7 @@ def setup_logging():
             file_handler = logging.FileHandler(log_file, encoding='utf-8', mode='w')
             file_handler.setLevel(logging.DEBUG)
             file_handler.setFormatter(formatter)
+            file_handler.addFilter(NoisyInfoFilter(verbose_info))
             root_logger.addHandler(file_handler)
 
             return log_file
@@ -4887,6 +4939,8 @@ class RAWImageViewer(QMainWindow):
         self._last_semantic_query = ""
         self._semantic_index_progress_base = 0
         self._semantic_index_progress_total = 0
+        self._semantic_coverage_cache = None
+        self._semantic_coverage_cache_ts = 0.0
         # Gallery: user hid search strip during index/download — skip auto-expand from status updates.
         self._gallery_search_user_collapsed_while_busy = False
 
@@ -5579,6 +5633,17 @@ class RAWImageViewer(QMainWindow):
             return
         
         logger.error(f"[MANAGER] Error loading {os.path.basename(file_path)}: {error_message}")
+        # Avoid modal-dialog storms from repeated async retries of the same failure.
+        # Repeated QMessageBox.exec() blocks user input and can look like folder switching is broken.
+        import time
+        now = time.time()
+        last_key = getattr(self, "_last_manager_error_key", None)
+        last_t = getattr(self, "_last_manager_error_ts", 0.0)
+        key = (_norm_path(file_path), str(error_message))
+        if key == last_key and (now - last_t) < 2.0:
+            return
+        self._last_manager_error_key = key
+        self._last_manager_error_ts = now
         self.show_error("Load Error", f"Failed to load image: {error_message}")
 
     def on_manager_progress(self, file_path: str, status_message: str):
@@ -6383,6 +6448,8 @@ class RAWImageViewer(QMainWindow):
         self._semantic_index_signals = None
         self._semantic_index_progress_base = 0
         self._semantic_index_progress_total = 0
+        self._semantic_coverage_cache = None
+        self._semantic_coverage_cache_ts = 0.0
         self._gallery_search_user_collapsed_while_busy = False
         # Collapse first so clearing status does not re-trigger expand-with-new-width while still open.
         try:
@@ -6510,8 +6577,22 @@ class RAWImageViewer(QMainWindow):
         anim.start()
 
     def _is_semantic_index_ready(self, corpus_files):
+        now = time.time()
+        cache = getattr(self, "_semantic_coverage_cache", None)
+        if cache and (now - getattr(self, "_semantic_coverage_cache_ts", 0.0)) < 2.0:
+            same_folder = cache.get("folder") == getattr(self, "current_folder", None)
+            same_count = cache.get("count") == len(corpus_files)
+            if same_folder and same_count:
+                return cache.get("coverage", {})
         idx = self._get_semantic_index()
-        return idx.get_index_coverage(corpus_files)
+        coverage = idx.get_index_coverage(corpus_files)
+        self._semantic_coverage_cache = {
+            "folder": getattr(self, "current_folder", None),
+            "count": len(corpus_files),
+            "coverage": coverage,
+        }
+        self._semantic_coverage_cache_ts = now
+        return coverage
 
     def _start_semantic_index_build_background(self, corpus_files):
         if self._semantic_indexing_in_progress:
@@ -6701,70 +6782,62 @@ class RAWImageViewer(QMainWindow):
     def _on_search_bottom_clicked(self):
         if getattr(self, "view_mode", "single") != "gallery":
             return
+            
+        safe_print(
+            f"[SEARCH_DEBUG] Search button clicked. Current expansion state: {getattr(self, '_search_panel_expanded', False)}"
+        )
+        
         if self._search_panel_expanded:
+            safe_print("[SEARCH_DEBUG] Collapsing search panel.")
             if self._semantic_indexing_in_progress or self._semantic_asset_download_in_progress:
                 self._gallery_search_user_collapsed_while_busy = True
             self._set_search_panel_expanded(False)
             return
+            
+        start_time = time.time()
         self._gallery_search_user_collapsed_while_busy = False
-        corpus_files = [p for p in self._semantic_search_corpus_files if os.path.isfile(p)]
+        self._set_gallery_search_input_visible()
+        if hasattr(self, "gallery_search_input") and self.gallery_search_input is not None:
+            self.gallery_search_input.setFocus()
+            
+        # Synchronous check for indexing/backend availability (Stable Version)
+        raw_corpus = getattr(self, "_semantic_search_corpus_files", []) or self.image_files
+        
+        corpus_files = list(raw_corpus)
+        
         if not corpus_files:
-            corpus_files = [p for p in self.image_files if os.path.isfile(p)]
-        if not corpus_files:
+            safe_print("[SEARCH_DEBUG] No valid files found for search.")
             self._set_gallery_search_status("No images available for semantic search")
             return
+            
         try:
             index = self._get_semantic_index()
             backend_available = index.semantic_backend_available()
             coverage = self._is_semantic_index_ready(corpus_files)
-            indexed = int(coverage.get("indexed", 0))
-            total = int(coverage.get("total", len(corpus_files)))
+            
+            ready = int(coverage.get("ready", 0)) == 1
             if not backend_available:
                 backend_error = index.semantic_backend_error()
-                if (
-                    "Missing MobileCLIP" in backend_error
-                    and index.mobileclip_supports_hub_download()
-                ):
-                    if self._mobileclip_download_dismissed_this_session:
-                        self._set_gallery_search_input_visible()
-                        if hasattr(self, "gallery_search_input") and self.gallery_search_input is not None:
-                            self.gallery_search_input.setFocus()
-                        message = "EXIF search only. MobileCLIP download skipped for this session."
-                        self.status_bar.showMessage(message, 5000)
-                    else:
+                if "Missing MobileCLIP" in backend_error and index.mobileclip_supports_hub_download():
+                    if not getattr(self, "_mobileclip_download_dismissed_this_session", False):
                         dialog = MobileCLIPDownloadDialog(self)
                         if dialog.exec() == QDialog.DialogCode.Accepted:
                             self._start_semantic_asset_download_background(corpus_files)
                         else:
                             self._mobileclip_download_dismissed_this_session = True
-                            self._set_gallery_search_input_visible()
-                            if hasattr(self, "gallery_search_input") and self.gallery_search_input is not None:
-                                self.gallery_search_input.setFocus()
-                            message = "EXIF search only. MobileCLIP download skipped for this session."
-                            self.status_bar.showMessage(message, 5000)
                 else:
-                    self._set_gallery_search_input_visible()
-                    if hasattr(self, "gallery_search_input") and self.gallery_search_input is not None:
-                        self.gallery_search_input.setFocus()
-                    message = f"EXIF search only. Semantic backend unavailable: {backend_error}"
-                    self._set_gallery_search_status(message)
-                    self._set_gallery_search_input_visible()
-                    self.status_bar.showMessage(message, 7000)
-            elif indexed > 0:
-                self._set_gallery_search_input_visible()
-                if hasattr(self, "gallery_search_input") and self.gallery_search_input is not None:
-                    self.gallery_search_input.setFocus()
-                if int(coverage.get("ready", 0)) == 1:
+                    self._set_gallery_search_status(f"EXIF search only. Backend: {backend_error}")
+            elif coverage.get("indexed", 0) > 0:
+                indexed = int(coverage.get("indexed", 0))
+                total = int(coverage.get("total", len(corpus_files)))
+                if ready:
                     self.status_bar.showMessage("Semantic index ready", 2500)
                 else:
-                    self.status_bar.showMessage(
-                        f"Semantic index available ({indexed}/{total}). Search uses indexed images.",
-                        3500,
-                    )
+                    self.status_bar.showMessage(f"Semantic index available ({indexed}/{total}).", 3500)
             else:
                 self._start_semantic_index_build_background(corpus_files)
         except Exception as e:
-            self._set_gallery_search_status(f"Semantic search unavailable: {e}")
+            self._set_gallery_search_status(f"Search error: {e}")
 
     def _build_semantic_index_current_folder(self):
         # Legacy menu path retained for compatibility; use same gallery button flow.
@@ -6837,12 +6910,12 @@ class RAWImageViewer(QMainWindow):
         try:
             index = self._get_semantic_index()
             base_files = (
-                [p for p in self._semantic_search_corpus_files if os.path.isfile(p)]
+                list(self._semantic_search_corpus_files)
                 if self._semantic_search_corpus_files
                 else []
             )
             if not base_files:
-                base_files = [p for p in self.image_files if os.path.isfile(p)]
+                base_files = list(self.image_files)
             if self._semantic_search_backup_files is None:
                 self._semantic_search_backup_files = list(base_files)
             if getattr(self, "_semantic_indexing_in_progress", False):
@@ -6852,7 +6925,8 @@ class RAWImageViewer(QMainWindow):
                 )
             else:
                 self.status_bar.showMessage("Running search...")
-            QApplication.processEvents()
+            # Avoid forced synchronous event pumping here; it can trigger re-entrant
+            # gallery work and make search feel janky on large folders.
             
             sort_newest = self.get_sort_preference()
             metadata_hits, semantic_query = index.search_metadata_text(
@@ -6870,9 +6944,7 @@ class RAWImageViewer(QMainWindow):
             else:
                 # EXIF/GPS/loose metadata terms are hard filters. Only the files
                 # that survived those filters are eligible for semantic ranking.
-                metadata_candidate_paths = [
-                    h.file_path for h in metadata_hits if os.path.isfile(h.file_path)
-                ]
+                metadata_candidate_paths = [h.file_path for h in metadata_hits]
                 hits = index.search_text(
                     semantic_query,
                     metadata_candidate_paths,
@@ -6900,7 +6972,7 @@ class RAWImageViewer(QMainWindow):
                 self._last_semantic_query = query
                 return
 
-            ranked_paths = [h.file_path for h in hits if os.path.isfile(h.file_path)]
+            ranked_paths = [h.file_path for h in hits]
             if not ranked_paths:
                 self.image_files = []
                 self.current_file_index = -1
@@ -7526,7 +7598,9 @@ class RAWImageViewer(QMainWindow):
                                 if data.get("capture_time"):
                                     continue
                                 try:
-                                    tags = process_file_from_path(fp, details=False)
+                                    tags = process_file_from_path(
+                                        fp, details=False, stop_tag="EXIF DateTimeOriginal"
+                                    )
                                     dt_tag = (
                                         tags.get("EXIF DateTimeOriginal")
                                         or tags.get("Image DateTime")
@@ -13741,6 +13815,17 @@ class RAWImageViewer(QMainWindow):
             self.image_files = image_files
             self._semantic_search_corpus_files = list(image_files)
             self._gallery_bulk_metadata = bulk_metadata
+            # Folder switched: invalidate render/task state from previous folder so
+            # stale async callbacks cannot keep the old content visible.
+            try:
+                if getattr(self, "image_manager", None) is not None:
+                    self.image_manager.cancel_all_tasks()
+            except Exception:
+                pass
+            self._displayed_content_path = None
+            self._manager_display_track_path = None
+            self._manager_displayed_max_dim = 0
+            self._last_loaded_path = None
 
             try:
                 if start_file:
@@ -13766,8 +13851,16 @@ class RAWImageViewer(QMainWindow):
                 if not hasattr(self, 'gallery_widget') or not self.gallery_widget:
                     self._create_gallery_widget()
                 self._show_gallery_view()
+                # Force a second pass after layout settles to avoid "empty gallery"
+                # race when switching folders quickly.
+                QTimer.singleShot(0, self._update_gallery_view)
+                QTimer.singleShot(120, self._update_gallery_view)
             else:
                 self._show_single_view()
+                # Force explicit reload for new folder head file; _show_single_view has
+                # conditional cache paths that can occasionally skip expected refreshes.
+                if self.current_file_path:
+                    self.load_raw_image(self.current_file_path)
                 if hasattr(self, 'gallery_justified') and self.gallery_justified:
                     self.gallery_justified._background_loading_active = False
                     if hasattr(self.gallery_justified, '_load_timer') and self.gallery_justified._load_timer:

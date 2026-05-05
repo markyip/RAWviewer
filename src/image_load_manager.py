@@ -8,7 +8,7 @@
 import os
 import threading
 import queue
-import sys
+from collections import defaultdict
 from enum import Enum
 from typing import Optional, Dict, Any, Tuple
 import numpy as np
@@ -18,6 +18,13 @@ from PyQt6.QtGui import QPixmap, QImage
 import concurrent.futures
 from image_cache import get_image_cache
 # UnifiedImageProcessor will be imported lazily to avoid circular import issues
+
+
+def _env_true(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
 
 
 class Priority(Enum):
@@ -47,6 +54,7 @@ class ImageLoadTask:
         self.thumbnail_target_size = thumbnail_target_size
         self.thumbnail_fit = thumbnail_fit
         self.task_key = None
+        self._counted_raw_slot = False
         self._cancelled = False
         self._lock = threading.Lock()
     
@@ -125,13 +133,19 @@ class ImageLoadWorker(QRunnable):
                     tgt = self.task.thumbnail_target_size
                     if tgt is not None and isinstance(tgt, QSize) and tgt.isValid():
                         try:
-                            arr = np.ascontiguousarray(thumbnail)
-                            if arr is not None and hasattr(arr, 'shape'):
+                            if isinstance(thumbnail, QImage):
+                                qimg = thumbnail
+                                if qimg.format() != QImage.Format.Format_RGB888:
+                                    qimg = qimg.convertToFormat(QImage.Format.Format_RGB888)
+                                if qimg.isNull():
+                                    raise ValueError("Null QImage thumbnail")
+                            else:
+                                arr = np.ascontiguousarray(thumbnail)
+                                if arr is None or not hasattr(arr, 'shape'):
+                                    raise AttributeError("Invalid thumbnail array structure")
                                 h, w = arr.shape[:2]
                                 bpl = arr.strides[0]
                                 qimg = QImage(arr.data, w, h, bpl, QImage.Format.Format_RGB888).copy()
-                            else:
-                                raise AttributeError("Invalid thumbnail array structure")
                             if self.task.thumbnail_fit == "crop":
                                 scaled = qimg.scaled(
                                     tgt,
@@ -227,7 +241,9 @@ class ImageLoadManager(QObject):
         # CRITICAL: 對於 QObject 子類，必須在最開始就調用 super().__init__()
         # 不能在調用 super().__init__() 之前訪問任何實例屬性（包括 hasattr）
         import sys
-        print("[ImageLoadManager.__init__] Starting initialization...", flush=True)
+        verbose_init = _env_true("RAWVIEWER_VERBOSE_MANAGER_INIT", default=False)
+        if verbose_init:
+            print("[ImageLoadManager.__init__] Starting initialization...", flush=True)
         
         # Ensure QApplication exists before initializing QObject
         from PyQt6.QtWidgets import QApplication
@@ -236,11 +252,13 @@ class ImageLoadManager(QObject):
             print("[ImageLoadManager.__init__] ERROR: QApplication instance not found!", file=sys.stderr, flush=True)
             raise RuntimeError("QApplication must be created before ImageLoadManager")
         
-        print("[ImageLoadManager.__init__] Calling super().__init__(app)...", flush=True)
+        if verbose_init:
+            print("[ImageLoadManager.__init__] Calling super().__init__(app)...", flush=True)
         try:
             # Root the manager in the application's lifecycle to prevent premature deletion.
             super().__init__(app)
-            print("[ImageLoadManager.__init__] super().__init__(app) completed", flush=True)
+            if verbose_init:
+                print("[ImageLoadManager.__init__] super().__init__(app) completed", flush=True)
         except Exception as e:
             print(f"[ImageLoadManager.__init__] ERROR in super().__init__(): {e}", file=sys.stderr, flush=True)
             import traceback
@@ -249,7 +267,8 @@ class ImageLoadManager(QObject):
         
         # 避免重複初始化實例變量
         if hasattr(self, '_initialized') and self._initialized:
-            print("[ImageLoadManager.__init__] Already initialized, skipping instance variables", flush=True)
+            if verbose_init:
+                print("[ImageLoadManager.__init__] Already initialized, skipping instance variables", flush=True)
             return
         
         self._work_queue = queue.PriorityQueue()
@@ -263,25 +282,27 @@ class ImageLoadManager(QObject):
             max_workers = default_workers
             
         self._thread_pool.setMaxThreadCount(max_workers)
-        
-        # PROCESS POOL: For heavy RAW processing to bypass GIL.
-        # Windows spawn re-imports the main module in child processes; this project has heavy
-        # top-level startup/import work, so default to thread-only on Windows for smoother UI.
-        # Set RAWVIEWER_ENABLE_PROCESS_POOL=1 to opt in.
-        enable_process_pool_env = os.environ.get("RAWVIEWER_ENABLE_PROCESS_POOL", "").strip().lower()
-        if enable_process_pool_env:
-            enable_process_pool = enable_process_pool_env in ("1", "true", "yes", "on")
-        else:
-            enable_process_pool = sys.platform != "win32"
-        self._process_pool = (
-            concurrent.futures.ProcessPoolExecutor(max_workers=max(2, core_count // 2))
-            if enable_process_pool
-            else None
-        )
+
+        # PROCESS POOL (optional): on Windows debug/startup paths, process spawn can
+        # re-import heavy modules and hurt first-load latency. Keep it opt-in.
+        use_process_pool = os.environ.get("RAWVIEWER_USE_PROCESS_POOL", "").strip().lower() in {
+            "1", "true", "yes", "on"
+        }
+        self._process_pool = None
+        if use_process_pool:
+            self._process_pool = concurrent.futures.ProcessPoolExecutor(
+                max_workers=max(2, core_count // 2)
+            )
         
         self._active_tasks: Dict[Tuple, ImageLoadTask] = {}
+        self._task_keys_by_path = defaultdict(set)
         self._cache = get_image_cache()
         self._queue_lock = threading.Lock()
+        
+        # RAW throttling: Limit concurrent heavy RAW decodes
+        self._raw_load_limit = 4
+        self._active_raw_tasks = 0
+        
         self._stopped = False  # Flag to stop scheduling new tasks
         self._initialized = True
     
@@ -322,6 +343,9 @@ class ImageLoadManager(QObject):
                     if key and key[0] == file_path and task.priority.value > priority.value:
                         task.cancel()
                         del self._active_tasks[key]
+                        self._task_keys_by_path[file_path].discard(key)
+                if not self._task_keys_by_path[file_path]:
+                    self._task_keys_by_path.pop(file_path, None)
         
         # 創建任務
         task = ImageLoadTask(
@@ -338,6 +362,7 @@ class ImageLoadManager(QObject):
             if existing and not existing.is_cancelled():
                 return
             self._active_tasks[task_key] = task
+            self._task_keys_by_path[file_path].add(task_key)
         
         # 添加到工作隊列
         self._work_queue.put(task)
@@ -346,10 +371,12 @@ class ImageLoadManager(QObject):
     def cancel_task(self, file_path: str):
         """取消任務（非阻塞）"""
         with self._queue_lock:
-            for key, task in list(self._active_tasks.items()):
-                if key and key[0] == file_path:
+            keys = list(self._task_keys_by_path.get(file_path, ()))
+            for key in keys:
+                task = self._active_tasks.pop(key, None)
+                if task is not None:
                     task.cancel()
-                    del self._active_tasks[key]
+            self._task_keys_by_path.pop(file_path, None)
     
     def cancel_all_tasks(self):
         """取消所有任務"""
@@ -357,6 +384,10 @@ class ImageLoadManager(QObject):
             for task in self._active_tasks.values():
                 task.cancel()
             self._active_tasks.clear()
+            self._task_keys_by_path.clear()
+            # Reset RAW slot counter when dropping all tracked tasks; otherwise old
+            # running tasks can leak the counter and block future RAW scheduling.
+            self._active_raw_tasks = 0
         
         # 清空工作隊列
         while not self._work_queue.empty():
@@ -374,7 +405,9 @@ class ImageLoadManager(QObject):
             for task in self._active_tasks.values():
                 task.cancel()
             self._active_tasks.clear()
+            self._task_keys_by_path.clear()
             self._work_queue = queue.PriorityQueue()
+            self._active_raw_tasks = 0
 
     def shutdown(self):
         """關閉管理器並清理資源"""
@@ -399,6 +432,12 @@ class ImageLoadManager(QObject):
             key = getattr(task, 'task_key', None)
             if key in self._active_tasks and self._active_tasks[key] is task:
                 del self._active_tasks[key]
+                self._task_keys_by_path[task.file_path].discard(key)
+                if not self._task_keys_by_path[task.file_path]:
+                    self._task_keys_by_path.pop(task.file_path, None)
+            if getattr(task, "_counted_raw_slot", False):
+                self._active_raw_tasks = max(0, self._active_raw_tasks - 1)
+                task._counted_raw_slot = False
         self._schedule_next_task()
 
     @staticmethod
@@ -465,29 +504,46 @@ class ImageLoadManager(QObject):
         return any_terminal_hit
     
     def _schedule_next_task(self):
-        """調度下一個任務到線程池"""
-        # Don't schedule new tasks if stopped
+        """調度下一個任務到線程池，實現 RAW 限制"""
         if self._stopped:
             return
             
+        from common_image_loader import is_raw_file
         with self._queue_lock:
             if self._work_queue.empty():
                 return
             
             try:
-                # Fill available thread pool capacity, skipping cancelled tasks.
+                # We want to fill the thread pool, but limit heavy RAW tasks
+                # JPEGs can always proceed if threads are free.
                 while (
                     not self._work_queue.empty()
                     and self._thread_pool.activeThreadCount() < self._thread_pool.maxThreadCount()
                 ):
+                    # Peek at top task without removing yet
+                    # queue.PriorityQueue doesn't support peek, so we have to pull and re-queue
+                    # or manage a separate pending list. For simplicity, we pull and decide.
                     task = self._work_queue.get_nowait()
 
-                    # Skip cancelled tasks quickly (they still sit in PriorityQueue)
                     if task.is_cancelled():
                         key = getattr(task, 'task_key', None)
                         if key in self._active_tasks and self._active_tasks[key] is task:
                             del self._active_tasks[key]
+                            self._task_keys_by_path[task.file_path].discard(key)
+                            if not self._task_keys_by_path[task.file_path]:
+                                self._task_keys_by_path.pop(task.file_path, None)
                         continue
+
+                    is_raw = is_raw_file(task.file_path)
+                    if is_raw and self._active_raw_tasks >= self._raw_load_limit:
+                        # Too many RAWs running, re-queue this one and STOP scheduling for now
+                        # (to avoid spinning on the queue if it's all RAWs)
+                        self._work_queue.put(task)
+                        break
+                    
+                    if is_raw:
+                        self._active_raw_tasks += 1
+                        task._counted_raw_slot = True
 
                     worker = ImageLoadWorker(task, self)
                     self._thread_pool.start(worker)

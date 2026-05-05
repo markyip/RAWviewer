@@ -85,7 +85,8 @@ class UnifiedImageProcessor:
                     return cached
         
         # 提取縮圖 (Max 512px for Gallery)
-        if self._is_raw_file(file_path):
+        is_raw = self._is_raw_file(file_path)
+        if is_raw:
             thumbnail = self.thumbnail_extractor.extract_thumbnail_from_raw(
                 file_path,
                 max_size=MAX_THUMB_DIM,
@@ -94,87 +95,62 @@ class UnifiedImageProcessor:
         else:
             thumbnail = self.thumbnail_extractor.extract_thumbnail_from_image(file_path, max_size=MAX_THUMB_DIM)
         
-        if thumbnail is not None:
-            # 獲取 EXIF 數據以獲取 orientation
-            exif_data = self.exif_extractor.extract_exif_data(file_path)
-            orientation = exif_data.get('orientation', 1) if exif_data else 1
-            if orientation != 1:
-                import logging
-                logger = logging.getLogger(__name__)
-                # Apply orientation correction
-                thumbnail = self._apply_orientation_correction(thumbnail, orientation, exif_data)
+        if thumbnail is None:
+            return None
+
+        # Non-RAW reader path can return QImage directly.
+        # Keep it as QImage to avoid fragile sip.voidptr -> numpy conversions
+        # that have caused intermittent native crashes on PyQt6/Windows.
+        # Downstream handlers support QImage thumbnails.
+        if isinstance(thumbnail, QImage):
+            return thumbnail
+
+        # For RAW or fallback paths that return np.ndarray:
+        # 獲取 EXIF 數據以獲取 orientation
+        exif_data = self.exif_extractor.extract_exif_data(file_path)
+        orientation = exif_data.get('orientation', 1) if exif_data else 1
+        if orientation != 1:
+            thumbnail = self._apply_orientation_correction(thumbnail, orientation, exif_data)
         
         # 快取縮圖（優化：Resize & Encode to JPEG）
-        if thumbnail is not None:
-            try:
-                from PIL import Image
-                import io
-                
-                # Convert numpy array to PIL Image
-                # Handle different array types
-                if thumbnail.dtype != np.uint8:
-                    thumbnail = thumbnail.astype(np.uint8)
-                
-                # Check channel count
-                if len(thumbnail.shape) == 2:
-                    # Grayscale
-                    pil_img = Image.fromarray(thumbnail, 'L')
-                elif len(thumbnail.shape) == 3:
-                     # RGB
-                    pil_img = Image.fromarray(thumbnail, 'RGB')
-                else:
-                    # Unknown format
-                    return thumbnail
-
-                # 1. Resize efficient usage (max 512px)
-                w, h = pil_img.size
-                max_dim = MAX_THUMB_DIM
-                
-                # OPTIMIZATION: If already smaller than max_dim, skip resize
-                if w <= max_dim and h <= max_dim:
-                    thumbnail_small_pil = pil_img
-                    thumbnail_small = thumbnail
-                else:
-                    scale = min(max_dim / w, max_dim / h)
-                    new_w = max(1, int(w * scale))
-                    new_h = max(1, int(h * scale))
-                    # Use Bilinear for better speed vs Lanczos for thumbnails
-                    thumbnail_small_pil = pil_img.resize((new_w, new_h), Image.Resampling.BILINEAR)
-                    thumbnail_small = np.array(thumbnail_small_pil)
-                
-                # 2. Encode to JPEG for efficient disk caching
-                # We cache the PROCESSED (Oriented + Resized) thumbnail
-                # This ensures next load is fast and correct
-                buffer = io.BytesIO()
-                thumbnail_small_pil.save(buffer, format='JPEG', quality=85)
-                jpeg_data_optimized = buffer.getvalue()
-                
-                self.cache.put_thumbnail(file_path, thumbnail_small, jpeg_data_optimized)
-                
-                # Return the resized version for immediate display
-                return thumbnail_small
-                
-            except Exception as e:
-                import logging
-                logger = logging.getLogger(__name__)
-                logger.warning(f"Error processing thumbnail with PIL: {e}")
-                # Fallback: ensure we still don't return/caches oversized thumbnails
-                try:
-                    if thumbnail is not None and hasattr(thumbnail, "shape"):
-                        h0, w0 = thumbnail.shape[:2]
-                        if max(h0, w0) > MAX_THUMB_DIM:
-                            scale = MAX_THUMB_DIM / max(h0, w0)
-                            new_w = max(1, int(w0 * scale))
-                            new_h = max(1, int(h0 * scale))
-                            pil_fallback = Image.fromarray(thumbnail.astype(np.uint8), 'RGB')
-                            pil_fallback = pil_fallback.resize((new_w, new_h), Image.Resampling.BILINEAR)
-                            thumbnail = np.array(pil_fallback)
-                except Exception:
-                    pass
-                self.cache.put_thumbnail(file_path, thumbnail)
-                return thumbnail
+        try:
+            from PIL import Image
+            import io
             
-        return thumbnail
+            if thumbnail.dtype != np.uint8:
+                thumbnail = thumbnail.astype(np.uint8)
+            
+            if len(thumbnail.shape) == 2:
+                pil_img = Image.fromarray(thumbnail, 'L')
+            elif len(thumbnail.shape) == 3:
+                pil_img = Image.fromarray(thumbnail, 'RGB')
+            else:
+                return thumbnail
+
+            w, h = pil_img.size
+            if w <= MAX_THUMB_DIM and h <= MAX_THUMB_DIM:
+                thumbnail_small = thumbnail
+                thumbnail_small_pil = pil_img
+            else:
+                scale = min(MAX_THUMB_DIM / w, MAX_THUMB_DIM / h)
+                new_w = max(1, int(w * scale))
+                new_h = max(1, int(h * scale))
+                thumbnail_small_pil = pil_img.resize((new_w, new_h), Image.Resampling.BILINEAR)
+                thumbnail_small = np.array(thumbnail_small_pil)
+            
+            buffer = io.BytesIO()
+            thumbnail_small_pil.save(buffer, format='JPEG', quality=85)
+            jpeg_data = buffer.getvalue()
+            
+            self.cache.put_thumbnail(file_path, thumbnail_small, jpeg_data)
+            return thumbnail_small
+            
+        except Exception as e:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.warning(f"Error processing thumbnail with PIL: {e}")
+            self.cache.put_thumbnail(file_path, thumbnail)
+            return thumbnail
     
     def process_full_image(self, file_path: str, 
                           use_full_resolution: bool = False,
