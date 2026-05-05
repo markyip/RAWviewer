@@ -4893,6 +4893,12 @@ class RAWImageViewer(QMainWindow):
 
     def _set_single_view_pixmap(self, base: QPixmap) -> None:
         """Set image_label pixmap with optional dashed focus / subject outline."""
+        if base is None or base.isNull():
+            self.image_label.setPixmap(QPixmap())
+            self.image_label.setText("Failed to load image")
+            self.image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            return
+
         blended = base
         ow = self.current_pixmap.width() if self.current_pixmap else 0
         oh = self.current_pixmap.height() if self.current_pixmap else 0
@@ -5866,7 +5872,7 @@ class RAWImageViewer(QMainWindow):
             "Horizontal wheel (zoom mode): Scroll left/right to pan the image"
         )
         self.image_label.setStyleSheet(
-            "QLabel { color: #666; font-size: 14px; }")
+            "QLabel { color: #666; font-size: 14px; background-color: transparent; }")
         self.image_label.setMinimumSize(400, 300)
         self.image_label.setMouseTracking(True)
         self.image_label.mousePressEvent = self.image_mouse_press_event
@@ -10515,6 +10521,13 @@ class RAWImageViewer(QMainWindow):
         current_file = os.path.basename(self.current_file_path) if hasattr(self, 'current_file_path') and self.current_file_path else "Unknown"
         logger.info(f"[DISPLAY_PIXMAP] ========== display_pixmap() STARTED at {display_start:.3f} ==========")
         logger.info(f"[DISPLAY_PIXMAP] File: {current_file}, Pixmap size: {pixmap.width()}x{pixmap.height()}")
+        
+        if pixmap is None or pixmap.isNull():
+            logger.error(f"[DISPLAY_PIXMAP] Received null pixmap for {current_file}")
+            self._set_single_view_pixmap(pixmap)
+            if hasattr(self, "loading_overlay"):
+                self.loading_overlay.hide_loading()
+            return
 
         if getattr(self, "_slideshow_force_fit_next", False):
             sb = getattr(self, "slideshow_bottom_button", None)
@@ -13741,6 +13754,25 @@ class RAWImageViewer(QMainWindow):
             # temporarily show stale dimensions/pixels from the old folder.
             self.current_image = None
             self.current_pixmap = None
+            self._displayed_content_path = None
+            self._manager_displayed_max_dim = 0
+            self._is_half_size_displayed = False
+            self._full_resolution_loading = False
+            self._preserve_nav_zoom_active = False
+            self._pending_zoom_restore = False
+            self._restore_zoom_center = None
+            self._restore_zoom_level = None
+            if hasattr(self, '_maintain_zoom_on_navigation'):
+                try:
+                    delattr(self, "_maintain_zoom_on_navigation")
+                except AttributeError:
+                    pass
+            
+            # Immediately clear the image view to prevent stale pixels
+            self.image_label.setPixmap(QPixmap())
+            self.image_label.setText("Loading folder...")
+            self.image_label.adjustSize()
+            self.scroll_area.updateGeometry()
             try:
                 if hasattr(self, "image_label") and self.image_label is not None:
                     self.image_label.clear()
@@ -14442,7 +14474,7 @@ def main():
 
         # Set application properties
         app.setApplicationName("RAW Image Viewer")
-        app.setApplicationVersion("2.0.3")
+        app.setApplicationVersion("2.0.4")
 
         # macOS: force dark UI to better match our dark theme (including title bar).
         # Using Qt's palette is more reliable than trying to hard-set NSWindow colors.

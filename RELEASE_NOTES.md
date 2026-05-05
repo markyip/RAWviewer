@@ -1,5 +1,16 @@
 # RAWviewer Release Notes
 
+## 🚀 Version 2.0.4
+**Release Date: May 5, 2026**
+
+### Rendering & Interaction Hardening
+- **Image Rendering Watchdog**: Added a safety layer that explicitly clears the view and shows "Loading..." during folder transitions, preventing stale pixels or "white screen" flashes.
+- **Safety Fallback**: Implemented null-pixmap detection in the display pipeline; the viewer now displays "Failed to load image" instead of a blank screen if an image cannot be decoded.
+- **Folder Switch Reliability**: Hardened state management in `main.py` by resetting all zoom and navigation persistence flags during folder changes to ensure a clean start for every folder.
+- **Semantic Search Optimization**: Re-architected search initialization with lazy backend loading, eliminating the "initialization pause" when switching folders or opening the search panel.
+
+---
+
 ## 🚀 Version 2.0.3
 **Release Date: May 5, 2026**
 
