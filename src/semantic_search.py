@@ -842,15 +842,27 @@ class SemanticImageIndex:
             os.makedirs(cache_dir, exist_ok=True)
             db_path = os.path.join(cache_dir, "semantic_index.db")
         self.db_path = db_path
-        self.db_path = db_path
-        self._mobileclip_backend = resolve_mobileclip_backend()
-        
-        if model_name is None:
-            if hasattr(self._mobileclip_backend, "MODEL_ID"):
-                model_name = self._mobileclip_backend.MODEL_ID
+        self._mobileclip_backend = None # Lazy load
+        self._model_name = model_name
+        self._index_conn = None
+        self._init_db_if_needed()
+
+    @property
+    def backend(self):
+        if self._mobileclip_backend is None:
+            self._mobileclip_backend = resolve_mobileclip_backend()
+        return self._mobileclip_backend
+
+    @property
+    def model_name(self):
+        if self._model_name is None:
+            if hasattr(self.backend, "MODEL_ID"):
+                self._model_name = self.backend.MODEL_ID
             else:
-                model_name = "clip-ViT-B-32"
-        self.model_name = model_name
+                self._model_name = "unknown"
+        return self._model_name
+
+    def _init_db_if_needed(self):
         self._model = None
         self._reverse_geocoder = None
         self._conn = sqlite3.connect(
