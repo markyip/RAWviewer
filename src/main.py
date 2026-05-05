@@ -7141,23 +7141,11 @@ class RAWImageViewer(QMainWindow):
                 # CRITICAL: Ensure metadata is updated when displaying already loaded image
                 logger.info(f"[VIEW_MODE] Updating status bar to ensure metadata is displayed")
                 self.update_status_bar()
-            elif not cached_pixmap or cached_pixmap.isNull():
-                # Load full image in background
-                self.load_raw_image(self.current_file_path)
             else:
-                # RAW files logic
-                import os
-                file_ext = os.path.splitext(self.current_file_path)[1].lower()
-                raw_extensions = ['.arw', '.cr2', '.nef', '.raf', '.orf', '.dng', '.cr3', '.rw2', '.rwl', '.srw']
-                if file_ext in raw_extensions:
-                    self.load_raw_image(self.current_file_path)
-                else:
-                    logger.info(f"[VIEW_MODE] Using cached pixmap, skipping reload for non-RAW file")
-                    if hasattr(self, "loading_overlay"):
-                        self.loading_overlay.hide_loading()
-                    # CRITICAL: Ensure metadata is updated when displaying cached pixmap
-                    logger.info(f"[VIEW_MODE] Updating status bar to ensure metadata is displayed for cached pixmap")
-                    self.update_status_bar()
+                # Always trigger load_raw_image for consistency, especially after folder switch.
+                # load_raw_image has internal logic to use cached full-res pixmaps instantly.
+                logger.info(f"[VIEW_MODE] Triggering load_raw_image for {os.path.basename(self.current_file_path)}")
+                self.load_raw_image(self.current_file_path)
             load_time = time.time() - load_start
             logger.info(f"[VIEW_MODE] Step 4: Image reload completed (elapsed: {load_time:.3f}s)")
         else:
@@ -9088,6 +9076,7 @@ class RAWImageViewer(QMainWindow):
 
             self.update_status_bar()
             self.setFocus()
+            event.accept()
         except Exception as e:
             import logging
             logging.getLogger(__name__).error(f"Error in image_double_click_event: {e}", exc_info=True)
@@ -13787,10 +13776,7 @@ class RAWImageViewer(QMainWindow):
                 QTimer.singleShot(120, self._update_gallery_view)
             else:
                 self._show_single_view()
-                # Force explicit reload for new folder head file; _show_single_view has
-                # conditional cache paths that can occasionally skip expected refreshes.
-                if self.current_file_path:
-                    self.load_raw_image(self.current_file_path)
+                # _show_single_view handles its own load_raw_image() call if current_file_path is set.
                 if hasattr(self, 'gallery_justified') and self.gallery_justified:
                     self.gallery_justified._background_loading_active = False
                     if hasattr(self.gallery_justified, '_load_timer') and self.gallery_justified._load_timer:
@@ -14443,7 +14429,7 @@ def main():
 
         # Set application properties
         app.setApplicationName("RAW Image Viewer")
-        app.setApplicationVersion("2.0.1")
+        app.setApplicationVersion("2.0.2")
 
         # macOS: force dark UI to better match our dark theme (including title bar).
         # Using Qt's palette is more reliable than trying to hard-set NSWindow colors.
