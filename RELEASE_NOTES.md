@@ -1,5 +1,16 @@
 # RAWviewer Release Notes
 
+## 🚀 Version 2.0.1
+**Release Date: May 5, 2026**
+
+### Performance & Stability
+- **Instant semantic search initialization**: Restored batch-lookup strategy and persistent Core ML compilation caching for the v2.0 architecture. Search panel opens instantly and processing starts immediately after one-time setup.
+- **Improved navigation responsiveness**: Optimized the display pipeline to maintain focus indicator (AF point) persistence across all navigation paths, including zoomed-in states and high-resolution deferrals.
+- **Path resolution caching**: Re-implemented LRU caching for path canonicalization to ensure fluid album scanning on macOS.
+
+---
+
+
 ## 🚀 Version 2.0.0
 **Release Date: May 5, 2026**
 

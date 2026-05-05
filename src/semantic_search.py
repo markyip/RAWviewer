@@ -318,9 +318,34 @@ class MobileCLIPCoreMLBackend:
 
         def _load_one(path: str):
             url = Foundation.NSURL.fileURLWithPath_(path)
-            compiled_url, compile_error = CoreML.MLModel.compileModelAtURL_error_(url, None)
-            if compile_error is not None or compiled_url is None:
-                raise RuntimeError(f"Failed to compile Core ML model: {compile_error}")
+            
+            # Persistent cache for compiled models to avoid O(seconds) re-compilation
+            cache_dir = os.path.expanduser("~/.rawviewer_cache/compiled_models")
+            os.makedirs(cache_dir, exist_ok=True)
+            
+            try:
+                st = os.stat(path)
+                mtime = int(st.st_mtime)
+            except Exception:
+                mtime = 0
+            
+            h = hashlib.md5(f"{path}_{mtime}".encode()).hexdigest()
+            compiled_path = os.path.join(cache_dir, f"{os.path.basename(path)}_{h}.mlmodelc")
+            compiled_url = Foundation.NSURL.fileURLWithPath_(compiled_path)
+            
+            if not os.path.exists(compiled_path):
+                tmp_url, compile_error = CoreML.MLModel.compileModelAtURL_error_(url, None)
+                if compile_error is not None or tmp_url is None:
+                    raise RuntimeError(f"Failed to compile Core ML model: {compile_error}")
+                
+                mgr = Foundation.NSFileManager.defaultManager()
+                if os.path.exists(compiled_path):
+                    mgr.removeItemAtURL_error_(compiled_url, None)
+                
+                success, move_error = mgr.moveItemAtURL_toURL_error_(tmp_url, compiled_url, None)
+                if not success:
+                    compiled_url = tmp_url
+            
             model, load_error = CoreML.MLModel.modelWithContentsOfURL_error_(compiled_url, None)
             if load_error is not None or model is None:
                 raise RuntimeError(f"Failed to load Core ML model: {load_error}")
@@ -1102,6 +1127,7 @@ class SemanticImageIndex:
             return False
 
     @staticmethod
+    @lru_cache(maxsize=16384)
     def _canonical_path(file_path: str) -> str:
         if not file_path:
             return ""
