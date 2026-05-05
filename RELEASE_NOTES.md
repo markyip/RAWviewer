@@ -1,5 +1,15 @@
 # RAWviewer Release Notes
 
+## 🚀 Version 2.0.2
+**Release Date: May 5, 2026**
+
+### Stability & Navigation
+- **Fixed folder-switch rendering**: Resolved a race condition where the first image in a new folder would occasionally fail to render or stay stuck on a thumbnail.
+- **Fixed inconsistent double-click zoom**: Resolved a UI conflict where double-clicking would sometimes maximize/restore the window instead of zooming into the image. Added proper event propagation control.
+- **Improved RAW format coverage**: Ensured consistent high-resolution loading for all supported RAW formats (PEF, X3F, etc.) when switching from gallery to single view.
+
+---
+
 ## 🚀 Version 2.0.1
 **Release Date: May 5, 2026**
 
