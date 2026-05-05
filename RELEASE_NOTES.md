@@ -1,5 +1,15 @@
 # RAWviewer Release Notes
 
+## 🚀 Version 2.0.3
+**Release Date: May 5, 2026**
+
+### Focus & Interaction Reliability
+- **Hardened Shortcut Responsiveness**: Fixed an issue where Spacebar or Double-click would occasionally fail on the first attempt. This was caused by UI buttons (like "Gallery" or "Open") stealing focus.
+- **Focus-Resilient UI**: Configured all status bar controls with `NoFocus` policy, ensuring the main interaction area always handles keyboard and mouse events.
+- **Automatic Focus Restoration**: The application now explicitly regains focus after folder switches and view-mode transitions to guarantee immediate shortcut availability.
+
+---
+
 ## 🚀 Version 2.0.2
 **Release Date: May 5, 2026**
 
