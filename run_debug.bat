@@ -13,6 +13,9 @@ if exist "rawviewer_env\Scripts\activate.bat" (
 REM Run the application with Python to see console output
 REM Use errorlevel to check if the application crashed
 REM Force unbuffered output with -u flag
+set RAWVIEWER_USE_PROCESS_POOL=0
+set RAWVIEWER_VERBOSE_INFO_LOGS=0
+set RAWVIEWER_VERBOSE_CONSOLE=0
 echo.
 echo ========================================
 echo Starting Python application...

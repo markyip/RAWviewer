@@ -27,9 +27,6 @@ from raw_file_extensions import RAW_FILE_EXTENSIONS
 
 # Cached EXIF rows without this version used embedded-JPEG dimensions as "original" (e.g. 1920×1080).
 RAW_EXIF_SENSOR_META_VER = 3
-_EXIF_STALE_RECHECK_COOLDOWN_SEC = 30.0
-_stale_orientation_recheck_guard: Dict[str, Dict[str, Any]] = {}
-_stale_orientation_recheck_lock = threading.Lock()
 
 
 def _qimage_to_rgb_array(image: QImage) -> Optional[np.ndarray]:
@@ -207,8 +204,8 @@ class ThumbnailExtractor(QObject):
             allow_scan_fallback=allow_scan_fallback,
         )
 
-    def extract_thumbnail_from_image(self, file_path: str, max_size: int = 512) -> Optional[np.ndarray]:
-        """Extract thumbnail from regular image file."""
+    def extract_thumbnail_from_image(self, file_path: str, max_size: int = 512) -> Optional[Union[np.ndarray, QImage]]:
+        """Extract thumbnail from regular image file. Returns QImage (preferred) or np.ndarray."""
         try:
             reader = QImageReader(file_path)
             reader.setAutoTransform(True)
@@ -218,29 +215,20 @@ class ThumbnailExtractor(QObject):
                 if w > max_size or h > max_size:
                     scale = min(max_size / w, max_size / h)
                     reader.setScaledSize(QSize(max(1, int(w * scale)), max(1, int(h * scale))))
+            
             image = reader.read()
             if not image.isNull():
-                arr = _qimage_to_rgb_array(image)
-                if arr is not None:
-                    return arr
+                # OPTIMIZATION: Return QImage directly to avoid Numpy conversion
+                return image
         except Exception:
             pass
 
         try:
             with Image.open(file_path) as img:
-                # UnifiedImageProcessor will handle EXIF orientation correction
-                # consistently across all paths. We remove redundant correct here
-                # to prevent "double-rotation" for JPEGs.
-                
-                # Calculate thumbnail size maintaining aspect ratio
                 img.thumbnail((max_size, max_size), Image.Resampling.BILINEAR)
-
-                # Convert to RGB if needed
                 if img.mode != 'RGB':
                     img = img.convert('RGB')
-
                 return np.array(img)
-
         except Exception:
             pass
 
@@ -269,38 +257,9 @@ class EXIFExtractor(QObject):
              is_verified = cached_exif.get('verified_orientation', False)
              
              if is_raw and orientation == 1 and not is_verified:
-                 # INVALIDATE CACHE - Force fresh extraction with new logic, but throttle
-                 # duplicate re-checks for the same unchanged file to avoid I/O storms.
-                 import logging
-                 logger = logging.getLogger(__name__)
-                 now = time.time()
-                 try:
-                     stat = os.stat(file_path)
-                     sig = (stat.st_size, stat.st_mtime_ns)
-                 except OSError:
-                     sig = (None, None)
-                 force_recheck = True
-                 with _stale_orientation_recheck_lock:
-                     prev = _stale_orientation_recheck_guard.get(file_path)
-                     if (
-                         prev is not None
-                         and prev.get("sig") == sig
-                         and (now - float(prev.get("ts", 0.0))) < _EXIF_STALE_RECHECK_COOLDOWN_SEC
-                     ):
-                         force_recheck = False
-                     else:
-                         _stale_orientation_recheck_guard[file_path] = {"sig": sig, "ts": now}
-                 if force_recheck:
-                     logger.info(
-                         f"[EXIF] Found potentially stale orientation 1 for "
-                         f"{os.path.basename(file_path)}, forcing re-check."
-                     )
-                     cached_exif = None
-                 else:
-                     logger.debug(
-                         f"[EXIF] Throttling stale-orientation re-check for "
-                         f"{os.path.basename(file_path)} (cooldown active)."
-                     )
+                 # Only re-check if we haven't already marked this as verified in this session
+                 # to prevent infinite loops in folders where '1' is actually correct.
+                 cached_exif = None
              # RAW: drop cache if it predates sensor-dimension fix (preview JPEG size was stored as original_*).
              if cached_exif is not None and is_raw:
                  if cached_exif.get('raw_exif_sensor_meta_ver', 0) < RAW_EXIF_SENSOR_META_VER:
@@ -311,9 +270,6 @@ class EXIFExtractor(QObject):
             return cached_exif
 
         # Extract fresh EXIF data
-        import logging
-        logger = logging.getLogger(__name__)
-        logger.info(f"[EXIF] EXIFExtractor: Extracting fresh EXIF from {os.path.basename(file_path)}")
         exif_data = self._extract_exif_from_file(file_path)
 
         # Cache the result
@@ -331,7 +287,14 @@ class EXIFExtractor(QObject):
     def _extract_exif_from_file(self, file_path: str) -> Dict[str, Any]:
         """Extract EXIF data from file."""
         try:
-            tags = metadata_backend.process_file_from_path(file_path, details=False)
+            # OPTIMIZATION: Use stop_tag for JPEGs during bulk scans to avoid heavy parsing
+            is_raw = self._is_raw_file(file_path)
+            stop_tag = None
+            if not is_raw:
+                # For JPEGs, we usually just need the date for sorting
+                stop_tag = 'EXIF DateTimeOriginal'
+                
+            tags = metadata_backend.process_file_from_path(file_path, details=False, stop_tag=stop_tag)
             orientation = 1
             camera_make = ''
             camera_model = ''
@@ -340,8 +303,6 @@ class EXIFExtractor(QObject):
             orientation_tag = tags.get('Image Orientation') or tags.get('EXIF Orientation')
             if orientation_tag:
                 orientation_str = str(orientation_tag)
-                # Console log: Show what orientation string we got
-                print(f"[ORIENTATION] EXIFExtractor: Raw orientation tag string = '{orientation_str}'")
                 orientation_map = {
                     'Horizontal (normal)': 1,
                     'Mirrored horizontal': 2,
@@ -735,7 +696,7 @@ class EnhancedRAWProcessor(QThread):
 
         if thumbnail is not None:
             # Cache the thumbnail
-            self.cache.put_thumbnail(self.file_path, thumbnail, jpeg_data)
+            self.cache.put_thumbnail(self.file_path, thumbnail, None)
 
             # Emit thumbnail
             self.thumbnail_ready.emit(thumbnail)
