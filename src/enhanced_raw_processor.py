@@ -140,59 +140,54 @@ class ThumbnailExtractor(QObject):
         super().__init__()
 
     def extract_thumbnail_from_raw(self, file_path: str, max_size: int = 512,
-                                   allow_scan_fallback: bool = True) -> Optional[np.ndarray]:
+                                   allow_scan_fallback: bool = True,
+                                   raw_object: Optional[rawpy.RawPy] = None) -> Optional[np.ndarray]:
         """Extract embedded thumbnail from RAW file and resize to max_size."""
         try:
+            if raw_object is not None:
+                return self._extract_from_raw_obj(raw_object, file_path, max_size)
+                
             with rawpy.imread(file_path) as raw:
-                thumb = raw.extract_thumb()
+                return self._extract_from_raw_obj(raw, file_path, max_size)
+        except Exception:
+            if not allow_scan_fallback:
+                return None
+            return extract_embedded_jpeg_by_scan(file_path, max_size)
 
-                if thumb.format == rawpy.ThumbFormat.JPEG:
-                    # Convert JPEG bytes to numpy array
-                    from PIL import Image
-                    jpeg_image = Image.open(io.BytesIO(thumb.data))
+    def _extract_from_raw_obj(self, raw, file_path, max_size):
+        """Internal helper to extract thumb from an open rawpy object."""
+        try:
+            thumb = raw.extract_thumb()
+            
+            if thumb.format == rawpy.ThumbFormat.JPEG:
+                from PIL import Image
+                jpeg_image = Image.open(io.BytesIO(thumb.data))
+                
+                if jpeg_image.mode != 'RGB':
+                    jpeg_image = jpeg_image.convert('RGB')
                     
-                    # We NO LONGER use exif_transpose here because orientation correction
-                    # is handled consistently by the caller (UnifiedImageProcessor) 
-                    # using the manual _apply_orientation_correction method.
-                    # This prevents double-rotation issues.
-                        
-                    if jpeg_image.mode != 'RGB':
-                        jpeg_image = jpeg_image.convert('RGB')
-                        
-                    # Resize if larger than max_size
-                    w, h = jpeg_image.size
-                    if w > max_size or h > max_size:
-                        jpeg_image.thumbnail((max_size, max_size), Image.Resampling.BILINEAR)
-                        
-                    thumb_array = np.array(jpeg_image)
+                w, h = jpeg_image.size
+                if w > max_size or h > max_size:
+                    jpeg_image.thumbnail((max_size, max_size), Image.Resampling.BILINEAR)
                     
-                elif thumb.format == rawpy.ThumbFormat.BITMAP:
-                    # Already a numpy array, but some cameras provide full-size bitmaps (e.g. Sony A7 IV)
-                    # We MUST respect max_size to avoid poisoning the cache with huge images
-                    thumb_array = thumb.data.copy()
-                    if thumb_array is not None and hasattr(thumb_array, 'shape'):
-                        h, w = thumb_array.shape[:2]
-                    else:
-                        return None # Exit early if invalid data
-                    
-                    if w > max_size or h > max_size:
-                         from PIL import Image
-                         pil_thumb = Image.fromarray(thumb_array)
-                         pil_thumb.thumbnail((max_size, max_size), Image.Resampling.BILINEAR)
-                         thumb_array = np.array(pil_thumb)
-                         if hasattr(thumb_array, 'shape') and len(thumb_array.shape) >= 2:
-                             pass # logger.debug could go here with safe shape access
-
+                return np.array(jpeg_image)
+                
+            elif thumb.format == rawpy.ThumbFormat.BITMAP:
+                thumb_array = thumb.data.copy()
+                if thumb_array is None or not hasattr(thumb_array, 'shape'):
+                    return None
+                
+                h, w = thumb_array.shape[:2]
+                if w > max_size or h > max_size:
+                     from PIL import Image
+                     pil_thumb = Image.fromarray(thumb_array)
+                     pil_thumb.thumbnail((max_size, max_size), Image.Resampling.BILINEAR)
+                     return np.array(pil_thumb)
                 return thumb_array
-
-        except Exception as e:
-            # Log the error for debugging
-            # print(f"Thumbnail extraction error: {str(e)}")
+            
             return None
-
-        if not allow_scan_fallback:
+        except Exception:
             return None
-        return extract_embedded_jpeg_by_scan(file_path, max_size)
 
     def extract_preview_from_raw(self, file_path: str, max_size: int = 2048,
                                  allow_scan_fallback: bool = True) -> Optional[np.ndarray]:
@@ -204,7 +199,8 @@ class ThumbnailExtractor(QObject):
             allow_scan_fallback=allow_scan_fallback,
         )
 
-    def extract_thumbnail_from_image(self, file_path: str, max_size: int = 512) -> Optional[Union[np.ndarray, QImage]]:
+    def extract_thumbnail_from_image(self, file_path: str, max_size: int = 512,
+                                     target_size: Optional[QSize] = None) -> Optional[Union[np.ndarray, QImage]]:
         """Extract thumbnail from regular image file. Returns QImage (preferred) or np.ndarray."""
         try:
             reader = QImageReader(file_path)
@@ -212,7 +208,12 @@ class ThumbnailExtractor(QObject):
             size = reader.size()
             if size.isValid() and size.width() > 0 and size.height() > 0:
                 w, h = size.width(), size.height()
-                if w > max_size or h > max_size:
+                
+                # OPTIMIZATION: If we have a target_size, scale directly to it during decode.
+                # This is much faster than decoding to 512px and then scaling again.
+                if target_size is not None and isinstance(target_size, QSize) and target_size.isValid():
+                    reader.setScaledSize(target_size)
+                elif w > max_size or h > max_size:
                     scale = min(max_size / w, max_size / h)
                     reader.setScaledSize(QSize(max(1, int(w * scale)), max(1, int(h * scale))))
             
@@ -225,7 +226,11 @@ class ThumbnailExtractor(QObject):
 
         try:
             with Image.open(file_path) as img:
-                img.thumbnail((max_size, max_size), Image.Resampling.BILINEAR)
+                if target_size is not None and isinstance(target_size, QSize):
+                    img.thumbnail((target_size.width(), target_size.height()), Image.Resampling.BILINEAR)
+                else:
+                    img.thumbnail((max_size, max_size), Image.Resampling.BILINEAR)
+                
                 if img.mode != 'RGB':
                     img = img.convert('RGB')
                 return np.array(img)
@@ -235,6 +240,7 @@ class ThumbnailExtractor(QObject):
         return None
 
 
+
 class EXIFExtractor(QObject):
     """Fast EXIF data extractor with caching."""
 
@@ -242,141 +248,63 @@ class EXIFExtractor(QObject):
         super().__init__()
         self.cache = get_image_cache()
 
-    def extract_exif_data(self, file_path: str) -> Dict[str, Any]:
-        """Extract EXIF data with caching."""
-        # Check cache first
-        cached_exif = self.cache.get_exif(file_path)
-        
-        # Validate cache for stale orientation 1 on RAW files
-        if cached_exif is not None:
-             # Fix for stuck orientation 1:
-             # If cached orientation is 1 and it's a RAW file, but missing 'verified_orientation' flag,
-             # we force a re-check because it might be a stale bad read.
-             is_raw = self._is_raw_file(file_path)
-             orientation = cached_exif.get('orientation', 1)
-             is_verified = cached_exif.get('verified_orientation', False)
-             
-             if is_raw and orientation == 1 and not is_verified:
-                 # Only re-check if we haven't already marked this as verified in this session
-                 # to prevent infinite loops in folders where '1' is actually correct.
-                 cached_exif = None
-             # RAW: drop cache if it predates sensor-dimension fix (preview JPEG size was stored as original_*).
-             if cached_exif is not None and is_raw:
-                 if cached_exif.get('raw_exif_sensor_meta_ver', 0) < RAW_EXIF_SENSOR_META_VER:
-                     cached_exif = None
-        
-        if cached_exif is not None:
-            # logger.debug(f"[EXIF] Using cached EXIF for {os.path.basename(file_path)}")
-            return cached_exif
+    def extract_exif_data(self, file_path: str, raw_object: Optional[rawpy.RawPy] = None) -> Optional[Dict[str, Any]]:
+        """Extract EXIF data from image file with RAW-specific orientation fallbacks."""
+        # Check SQLite cache first
+        cached = self.cache.get_exif(file_path)
+        if cached:
+            return cached
 
-        # Extract fresh EXIF data
-        exif_data = self._extract_exif_from_file(file_path)
-
-        # Cache the result
-        if exif_data:
-            self.cache.put_exif(file_path, exif_data)
-            # logger.debug(f"[EXIF] Cached fresh EXIF for {os.path.basename(file_path)}")
-
-        return exif_data
-
-    def _is_raw_file(self, file_path: str) -> bool:
-        """Helper to check if file is raw."""
-        ext = os.path.splitext(file_path)[1].lower().lstrip(".")
-        return ext in RAW_FILE_EXTENSIONS
-
-    def _extract_exif_from_file(self, file_path: str) -> Dict[str, Any]:
-        """Extract EXIF data from file."""
         try:
-            # OPTIMIZATION: Use stop_tag for JPEGs during bulk scans to avoid heavy parsing
-            is_raw = self._is_raw_file(file_path)
-            stop_tag = None
-            if not is_raw:
-                # For JPEGs, we usually just need the date for sorting
-                stop_tag = 'EXIF DateTimeOriginal'
-                
-            tags = metadata_backend.process_file_from_path(file_path, details=False, stop_tag=stop_tag)
-            orientation = 1
-            camera_make = ''
-            camera_model = ''
-
-            # Get orientation - Check multiple possible tags
-            orientation_tag = tags.get('Image Orientation') or tags.get('EXIF Orientation')
-            if orientation_tag:
-                orientation_str = str(orientation_tag)
-                orientation_map = {
-                    'Horizontal (normal)': 1,
-                    'Mirrored horizontal': 2,
-                    'Rotated 180': 3,
-                    'Mirrored vertical': 4,
-                    'Mirrored horizontal then rotated 90 CCW': 5,
-                    'Rotated 90 CW': 6,
-                    'Mirrored horizontal then rotated 90 CW': 7,
-                    'Rotated 90 CCW': 8,
-                    # Add numeric string support
-                    '1': 1, '2': 2, '3': 3, '4': 4,
-                    '5': 5, '6': 6, '7': 7, '8': 8
-                }
-                orientation = orientation_map.get(orientation_str, 1)
-                # print(f"[ORIENTATION] EXIFExtractor: Mapped orientation value = {orientation}")
-                if orientation == 1 and orientation_str not in orientation_map:
-                    # Try to parse as int just in case
-                    try:
-                        orientation = int(orientation_str)
-                        if orientation < 1 or orientation > 8:
-                            orientation = 1
-                    except ValueError:
-                        print(f"[ORIENTATION] EXIFExtractor: WARNING - Orientation string '{orientation_str}' not in map, defaulting to 1")
-            else:
-                # logger.debug(f"[ORIENTATION] EXIFExtractor: No 'Image Orientation' tag found, defaulting to 1")
-                pass
-
-            # Get camera info
-            make_tag = tags.get('Image Make')
-            if make_tag:
-                camera_make = str(make_tag).strip()
-
-            model_tag = tags.get('Image Model')
-            if model_tag:
-                camera_model = str(model_tag).strip()
-
-            # Convert all tags to serializable format
-            exif_dict = {}
-            original_width = None
-            original_height = None
+            # First pass: standard exifread (works for JPEGs and many RAW containers)
+            with open(file_path, 'rb') as f:
+                tags = exifread.process_file(f, details=False)
             
-            for key, value in tags.items():
+            orientation = 1
+            orientation_tag = tags.get('Image Orientation')
+            if orientation_tag:
                 try:
-                    str_val = str(value)
-                    exif_dict[key] = str_val
-                    
-                    # Extract dimensions from tags
-                    if key in ('Image ImageWidth', 'EXIF ExifImageWidth', 'Image Width'):
-                        try:
-                            original_width = int(str_val)
-                        except:
-                            pass
-                    elif key in ('Image ImageLength', 'EXIF ExifImageLength', 'Image Height', 'Image Length', 'EXIF ExifImageHeight'):
-                        try:
-                            original_height = int(str_val)
-                        except:
-                            pass
-                except:
-                    pass
+                    orientation = int(orientation_tag.values[0])
+                except: pass
 
-            # RAW: EXIF ExifImageWidth/Length often describe embedded preview dimensions, not sensor size.
-            # Prefer LibRaw/rawpy bitmap geometry when metadata read succeeds. Some cameras report
-            # orientation as "normal" in EXIF while sizes.flip differs — trust flip in that case.
+            camera_make = str(tags.get('Image Make', '')).strip()
+            camera_model = str(tags.get('Image Model', '')).strip()
+            
+            exif_dict = {k: str(v) for k, v in tags.items()}
+            
+            # Dimensions
+            original_width = 0
+            original_height = 0
+            for tag in ('EXIF ExifImageWidth', 'Image ImageWidth'):
+                if tag in tags:
+                    try: 
+                        original_width = int(tags[tag].values[0])
+                        break
+                    except: pass
+            for tag in ('EXIF ExifImageLength', 'Image ImageLength'):
+                if tag in tags:
+                    try:
+                        original_height = int(tags[tag].values[0])
+                        break
+                    except: pass
+
+            # Second pass: If it's a RAW file, use rawpy to verify dimensions and orientation (flip)
             if self._is_raw_file(file_path):
                 try:
-                    with rawpy.imread(file_path) as raw:
-                        sizes = raw.sizes
+                    if raw_object is not None:
+                        sizes = raw_object.sizes
                         original_width = sizes.width
                         original_height = sizes.height
                         if orientation == 1 and sizes.flip != 0:
                             orientation = sizes.flip
-                            print(f"[ORIENTATION] EXIFExtractor: Using rawpy flip fallback = {orientation}")
+                    else:
+                        with rawpy.imread(file_path) as raw:
+                            sizes = raw.sizes
+                            original_width = sizes.width
+                            original_height = sizes.height
+                            if orientation == 1 and sizes.flip != 0:
+                                orientation = sizes.flip
                 except Exception:
-                    # Keep EXIF-derived dimensions if rawpy fails (offline / corrupt edge cases).
                     pass
 
             # Extract technical metadata for top-level cache columns

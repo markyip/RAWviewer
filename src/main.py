@@ -414,7 +414,7 @@ except Exception:
 # UI Modules
 try:
     from rawviewer_ui.widgets import ThumbnailLabel
-    from rawviewer_ui.gallery_view import JustifiedGallery
+    from rawviewer_ui.gallery_view import JustifiedGallery as ExternalJustifiedGallery
     safe_print("  - ui modules: OK", flush=True)
 except Exception as e:
     safe_print_err(f"  - ui modules: ERROR - {e}", flush=True)
@@ -450,6 +450,25 @@ class NoisyInfoFilter(logging.Filter):
         return not msg.startswith(self._noisy_prefixes)
 
 
+class FocusGallerySwitchFilter(logging.Filter):
+    """Keep only gallery-switch related logs (plus warnings/errors)."""
+
+    _allow_prefixes = (
+        "[MODESWITCH]",
+        "[VIEW_MODE]",
+        "[GALLERY]",
+        "[FOLDER]",
+        "[MAIN]",
+    )
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        # Always keep warnings/errors for troubleshooting.
+        if record.levelno >= logging.WARNING:
+            return True
+        msg = record.getMessage()
+        return msg.startswith(self._allow_prefixes)
+
+
 def setup_logging():
     """Setup logging configuration with file and console handlers"""
     try:
@@ -469,12 +488,15 @@ def setup_logging():
 
         # Always attach a console/stream handler when possible.
         stream = sys.stdout if sys.stdout is not None else getattr(sys, "__stdout__", None)
-        verbose_info = _env_true("RAWVIEWER_VERBOSE_INFO_LOGS", default=False)
+        focus_gallery_switch = _env_true("RAWVIEWER_FOCUS_GALLERY_SWITCH", default=False)
+        verbose_info = _env_true("RAWVIEWER_VERBOSE_INFO_LOGS", default=False) or focus_gallery_switch
         if stream is not None:
             console_handler = logging.StreamHandler(stream)
             console_handler.setLevel(logging.INFO)
             console_handler.setFormatter(formatter)
             console_handler.addFilter(NoisyInfoFilter(verbose_info))
+            if focus_gallery_switch:
+                console_handler.addFilter(FocusGallerySwitchFilter())
             root_logger.addHandler(console_handler)
         else:
             # Windowed builds can have no stdout; keep logging silent unless file logging is enabled.
@@ -493,6 +515,8 @@ def setup_logging():
             file_handler.setLevel(logging.DEBUG)
             file_handler.setFormatter(formatter)
             file_handler.addFilter(NoisyInfoFilter(verbose_info))
+            if focus_gallery_switch:
+                file_handler.addFilter(FocusGallerySwitchFilter())
             root_logger.addHandler(file_handler)
 
             return log_file
@@ -2256,178 +2280,15 @@ class ImageLoadTask(QRunnable):
 # stable single image viewing. Uncomment when ready to resume gallery development.
 # ============================================================================
 
-class JustifiedGallery(QWidget):
-    """
-    Adaptive justified gallery layout - based on reference code.
-    Uses adaptive row height with ±25% tolerance for better space utilization.
-    Stores original pixmaps and rebuilds layout on resize.
-    Implements lazy loading for faster initial display.
-    """
-    TARGET_ROW_HEIGHT = 200
-    HEIGHT_TOLERANCE = 0.25  # allow ±25% adjustment
-    MIN_SPACING = 4
-    
-    def __init__(self, images, parent=None):
-        super().__init__(parent)
-        import logging
-        self.logger = logging.getLogger(__name__)
-        self.parent_viewer = parent  # Reference to RAWImageViewer for loading images
-        
-        # Store original pixmaps (never scale twice)
-        self.images = images  # List of file paths or pixmaps
-        
-        # Virtualization and Layout Layout
-        self._gallery_layout_items = []  # List of {rect, file_path, aspect}
-        self._visible_widgets = {}  # {file_path: ThumbnailLabel}
-        self._widget_pool = []  # List of unused ThumbnailLabel widgets
-        self._total_content_height = 0
-        
-        # Recursion protection
-        self._building = False
-        self._build_count = 0 # Track active recursive calls
-        self._resize_in_progress = False
-        self._last_viewport_width = None
-        self._ignore_resize_events = False
-        
-        # Recursion protection for image loading
-        self._loading_visible = False
-        
-        # Persistent Metadata Cache - avoids redundant DB/Disk hits during layout
-        self._metadata_cache = {} 
-        
-        # Thread pool for background image loading
-        from PyQt6.QtCore import QThreadPool
-        self.thread_pool = QThreadPool()
-        # Increase thread count for faster parallel loading
-        self.thread_pool.setMaxThreadCount(16)
-        
-        # Signal for image loading
-        self.loader_signal = ImageLoaded()
-        self.loader_signal.loaded.connect(self.apply_thumbnail)
-        
-        # Generation counter
-        self._gallery_generation = 0
-        self._active_tasks = {} # Track active tasks for cancellation
-        
-        # Monitoring and Batching
-        self._load_timer = None
-        self._resize_timer = None
-        self._loading_tiles = set()
-        self._background_loading_active = False  # Flag to prevent concurrent background loading
-        self._gallery_load_start_time = None  # Track when gallery loading starts
-        self._visible_images_to_load = 0  # Track how many visible images need loading
-        self._visible_images_loaded = 0  # Track how many visible images have loaded
-        
-        # Rate limiting
-        self._load_queue = []
-        self._priority_queue = []  # Separate queue for visible/priority images
-        self._loads_per_second = 8
-        self._batch_size = 8  # For background images
-        self._priority_batch_size = 20  # Larger batch for visible images
-        self._raw_load_limit = 3  # Keep RAW decodes bounded for responsive gallery paint
-        
-        # Scroll Optimization
-        self._last_scroll_y = -1
-        self._last_scroll_time = 0
-        self._current_scroll_speed = 0 # pixels per second
-        self._scroll_check_timer = None
-        self._is_scrolling_fast = False
-        self._scroll_optimize_threshold = 2000 # pixels/sec - threshold for "fast" scrolling
-        self._scroll_settle_timer = None # Timer to detect when scrolling stops
-        
-        # Cache - Uses specialized LRU to keep thousands of thumbnails responsive
-        from image_cache import LRUCache
-        self._thumbnail_cache = LRUCache(2000)
-        self._row_height_buckets = [160, 200, 240, 280, 320] # More buckets for better hit rate
-        
-        # Transparent overlay for loading message
-        self._loading_label = None
-        
-        # Initialize widget attributes
-        from PyQt6.QtCore import Qt
-        self.setMouseTracking(True)
-        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-        
-        from PyQt6.QtCore import QTimer
-        QTimer.singleShot(100, self._delayed_build)
-        
-    def _setup_scroll_tracking(self):
-        """Connect to parent scrollbar for speed tracking"""
-        try:
-            parent_scroll = self.parent_viewer.scroll_area if hasattr(self.parent_viewer, 'scroll_area') else None
-            if parent_scroll:
-                scrollbar = parent_scroll.verticalScrollBar()
-                # Disconnect first to avoid duplicates
-                try: scrollbar.valueChanged.disconnect(self._on_scroll)
-                except: pass
-                scrollbar.valueChanged.connect(self._on_scroll)
-                self.logger.info("[GALLERY] Scroll tracking connected")
-        except Exception as e:
-            self.logger.error(f"[GALLERY] Failed to setup scroll tracking: {e}")
+class LegacyJustifiedGallery(ExternalJustifiedGallery):
+    """Deprecated alias kept for backward compatibility.
 
-    def _on_scroll(self, value):
-        """Track scroll speed and optimize loading"""
-        import time
-        now = time.time()
-        
-        # Update loading label position if visible
-        if self._loading_label and self._loading_label.isVisible():
-             self._update_loading_label_geometry()
-        
-        if self._last_scroll_y >= 0:
-            dy = abs(value - self._last_scroll_y)
-            dt = now - self._last_scroll_time
-            
-            if dt > 0.01: # Avoid division by zero
-                current_speed = dy / dt
-                # Smoothing
-                self._current_scroll_speed = (self._current_scroll_speed * 0.3) + (current_speed * 0.7)
-                
-                # Check threshold
-                was_fast = self._is_scrolling_fast
-                self._is_scrolling_fast = self._current_scroll_speed > self._scroll_optimize_threshold
-                
-                if self._is_scrolling_fast != was_fast:
-                    if self._is_scrolling_fast:
-                        # self.logger.debug(f"[GALLERY] Fast scrolling started: {self._current_scroll_speed:.0f} px/s")
-                        pass
-                    else:
-                        # self.logger.debug(f"[GALLERY] Fast scrolling stopped")
-                        # Trigger load immediately when dropping below threshold
-                        from PyQt6.QtCore import QTimer
-                        QTimer.singleShot(50, self.load_visible_images)
-        
-        self._last_scroll_y = value
-        self._last_scroll_time = now
-        
-        # Reset settle timer
-        from PyQt6.QtCore import QTimer
-        if self._scroll_settle_timer:
-            self._scroll_settle_timer.stop()
-        
-        self._scroll_settle_timer = QTimer()
-        self._scroll_settle_timer.setSingleShot(True)
-        self._scroll_settle_timer.timeout.connect(self._on_scroll_settled)
-        self._scroll_settle_timer.start(150) # 150ms settle time
-        
-    def _on_scroll_settled(self):
-        """Called when scrolling stops"""
-        self._current_scroll_speed = 0
-        self._is_scrolling_fast = False
-        # self.logger.debug("[GALLERY] Scroll settled, loading images")
-        self.load_visible_images()
+    Single source of truth is `rawviewer_ui.gallery_view.JustifiedGallery`.
+    """
+    pass
 
-    
-    def _delayed_build(self):
-        """Delayed initial build to ensure widget has proper size"""
-        self._setup_scroll_tracking() # Ensure scroll tracking is set up
-        if self.width() > 0:
-            self.build_gallery()
-        else:
-            # If still no width, try again
-            from PyQt6.QtCore import QTimer
-            QTimer.singleShot(100, self._delayed_build)
-    
+
+class _LegacyGalleryCompatBlock:
     def show_loading_message(self, message="Loading gallery..."):
         """Show loading message overlay - Simplified for better performance"""
         from PyQt6.QtWidgets import QLabel
@@ -4877,6 +4738,7 @@ class RAWImageViewer(QMainWindow):
 
         self._is_half_size_displayed = False  # Track if currently displaying half_size image
         self._full_resolution_loading = False  # Track if full resolution is being loaded
+        self._suppress_single_manager_callbacks = False  # Hard gate for single-view callbacks
         self._original_image_size = None  # Store original image dimensions (width, height) from EXIF or RAW metadata
         # Panning state
         self.panning = False
@@ -5319,6 +5181,13 @@ class RAWImageViewer(QMainWindow):
         import logging
         logger = logging.getLogger(__name__)
         from PyQt6.QtGui import QImage, QPixmap
+
+        # In gallery mode, thumbnail rendering is handled by rawviewer_ui.gallery_view.
+        # Ignore single-view manager callbacks to prevent cross-mode repaint churn.
+        if getattr(self, "_suppress_single_manager_callbacks", False):
+            return
+        if getattr(self, "view_mode", "single") != "single":
+            return
         
         # Only handle current file's thumbnail (normalize for Windows path format differences)
         if _norm_path(file_path) != _norm_path(getattr(self, "current_file_path", None)):
@@ -5391,6 +5260,10 @@ class RAWImageViewer(QMainWindow):
 
     def on_manager_image_ready(self, file_path: str, image):
         """處理 ImageLoadManager 的完整圖像就緒信號"""
+        if getattr(self, "_suppress_single_manager_callbacks", False):
+            return
+        if getattr(self, "view_mode", "single") != "single":
+            return
         if hasattr(self, 'loading_overlay'):
             self.loading_overlay.hide_loading()
             
@@ -5497,6 +5370,11 @@ class RAWImageViewer(QMainWindow):
         import logging
         logger = logging.getLogger(__name__)
 
+        if getattr(self, "_suppress_single_manager_callbacks", False):
+            return
+        if getattr(self, "view_mode", "single") != "single":
+            return
+
         # Only handle current file's pixmap (normalize for Windows path format differences)
         if _norm_path(file_path) != _norm_path(getattr(self, "current_file_path", None)):
             logger.debug(f"[MANAGER] Pixmap for different file: {os.path.basename(file_path)}")
@@ -5572,12 +5450,30 @@ class RAWImageViewer(QMainWindow):
     def on_manager_exif_ready(self, file_path: str, exif_data: dict):
         """處理 ImageLoadManager 的 EXIF 數據就緒信號"""
         import logging
+        import time
         logger = logging.getLogger(__name__)
+
+        if getattr(self, "_suppress_single_manager_callbacks", False):
+            return
+        if getattr(self, "view_mode", "single") != "single":
+            return
         
         # Only handle current file's EXIF (normalize for Windows path format differences)
         if _norm_path(file_path) != _norm_path(getattr(self, "current_file_path", None)):
             logger.debug(f"[MANAGER] EXIF for different file: {os.path.basename(file_path)}")
             return
+
+        # De-bounce duplicate EXIF-ready signals for the same current file.
+        # During rapid folder/view transitions multiple paths may request EXIF for the same file;
+        # repeated immediate status rewrites can make folder switch appear "stuck".
+        now = time.time()
+        last_path = getattr(self, "_last_manager_exif_path", None)
+        last_ts = float(getattr(self, "_last_manager_exif_ts", 0.0) or 0.0)
+        if _norm_path(last_path) == _norm_path(file_path) and (now - last_ts) < 0.35:
+            logger.debug(f"[MANAGER] Skipping duplicate EXIF-ready burst for {os.path.basename(file_path)}")
+            return
+        self._last_manager_exif_path = file_path
+        self._last_manager_exif_ts = now
         
         logger.info(f"[MANAGER] EXIF data ready for {os.path.basename(file_path)}")
         
@@ -5609,10 +5505,11 @@ class RAWImageViewer(QMainWindow):
             self.image_cache.put_exif(file_path, exif_data)
             logger.debug(f"[MANAGER] Stored EXIF data in cache for {os.path.basename(file_path)}")
         
-        # CRITICAL: Update status bar immediately when EXIF data is ready
-        # This ensures metadata is displayed as soon as it's available, even before image is fully loaded
-        logger.info(f"[MANAGER] EXIF data ready, updating status bar immediately (will read from cache)")
-        self.update_status_bar()
+        # CRITICAL: In single mode, update metadata immediately.
+        # In gallery mode, skip heavy metadata composition work.
+        if getattr(self, "view_mode", "single") == "single":
+            logger.info(f"[MANAGER] EXIF data ready, updating status bar immediately (will read from cache)")
+            self.update_status_bar()
         
         # Also ensure status bar is visible in single view mode
         if self.view_mode == 'single' and hasattr(self, 'status_metadata_label'):
@@ -7084,6 +6981,7 @@ class RAWImageViewer(QMainWindow):
         """Toggle between single image view and gallery view"""
         import logging
         logger = logging.getLogger(__name__)
+        logger.warning("[MODESWITCH] toggle_view_mode called; current=%s", self.view_mode)
         logger.info(f"[VIEW_MODE] ========== toggle_view_mode() STARTED ==========")
         
         if self.view_mode == 'single':
@@ -7103,6 +7001,7 @@ class RAWImageViewer(QMainWindow):
             self._show_gallery_view()
         else:
             self._show_single_view()
+        logger.warning("[MODESWITCH] toggle_view_mode finished; current=%s", self.view_mode)
         
         logger.info(f"[VIEW_MODE] ========== toggle_view_mode() COMPLETED in 0.004s ==========")
     
@@ -7114,6 +7013,7 @@ class RAWImageViewer(QMainWindow):
         logger = logging.getLogger(__name__)
         start_time = time.time()
         logger.info(f"[VIEW_MODE] ========== _show_single_view() STARTED at {start_time} ==========")
+        self._suppress_single_manager_callbacks = False
         
         # Stop all gallery background loading when switching to single view
         if hasattr(self, 'gallery_justified') and self.gallery_justified:
@@ -7280,6 +7180,8 @@ class RAWImageViewer(QMainWindow):
         import time
         from PyQt6.QtCore import QTimer
         logger = logging.getLogger(__name__)
+        self._suppress_single_manager_callbacks = True
+        logger.warning("[MODESWITCH] _show_gallery_view entered; files=%d", len(self.image_files))
         logger.info(f"[GALLERY] Showing gallery view")
         self._stop_slideshow()
         if hasattr(self, "loading_overlay"):
@@ -7366,6 +7268,7 @@ class RAWImageViewer(QMainWindow):
         
         # Update gallery content
         QTimer.singleShot(50, self._update_gallery_view)
+        logger.warning("[MODESWITCH] _show_gallery_view scheduled gallery update")
     
     def _create_gallery_widget(self):
             """Create the gallery view widget - based on JustifiedGallery reference code"""
@@ -7423,10 +7326,8 @@ class RAWImageViewer(QMainWindow):
                 }
             """)
             
-            # Create JustifiedGallery widget
-            # Use the in-file gallery implementation for now; this path is the most stable
-            # with current main.py lifecycle hooks and avoids startup race regressions.
-            justified_gallery = JustifiedGallery([], self)  # Empty list initially, will be populated
+            # Create optimized justified gallery widget from rawviewer_ui module.
+            justified_gallery = ExternalJustifiedGallery([], self)  # Empty list initially, will be populated
             gallery_scroll.setWidget(justified_gallery)
             gallery_layout.addWidget(gallery_scroll)
             
@@ -7487,9 +7388,14 @@ class RAWImageViewer(QMainWindow):
                                 timestamp = os.path.getmtime(fp)
                             except OSError:
                                 timestamp = 0
-                        return (timestamp, os.path.basename(fp).lower())
+                        base_name = os.path.basename(fp).lower()
+                        stem = os.path.splitext(base_name)[0]
+                        ext = os.path.splitext(base_name)[1]
+                        raw_rank = 1 if is_raw_file(fp) else 0
+                        primary_ts = -timestamp if newest_first else timestamp
+                        return (primary_ts, stem, raw_rank, ext, base_name)
 
-                    sorted_files = sorted(self.image_files, key=_sort_key, reverse=newest_first)
+                    sorted_files = sorted(self.image_files, key=_sort_key)
                     if sorted_files != self.image_files:
                         self.image_files = sorted_files
                         if current_file in self.image_files:
@@ -7516,6 +7422,8 @@ class RAWImageViewer(QMainWindow):
             import logging
             import time
             logger = logging.getLogger(__name__)
+            logger.warning("[MODESWITCH] _update_gallery_view called; widget=%s justified=%s files=%d",
+                           bool(self.gallery_widget), bool(self.gallery_justified), len(self.image_files))
             start_time = time.time()
             logger.info(f"[GALLERY] ========== _update_gallery_view() STARTED ==========")
             self._update_gallery_counter()
@@ -7546,13 +7454,8 @@ class RAWImageViewer(QMainWindow):
                 current_file = getattr(self, "current_file_path", None)
                 if current_file and hasattr(self.gallery_justified, "scroll_to_file"):
                     self.gallery_justified.scroll_to_file(current_file)
-                # Defensive refresh: on some startup/folder-switch timing paths, set_images()
-                # can finish before viewport geometry fully settles, leaving no visible widgets
-                # instantiated yet. Force a second pass to populate visible thumbnails.
-                if hasattr(self.gallery_justified, "force_layout_update"):
-                    QTimer.singleShot(0, self.gallery_justified.force_layout_update)
-                elif hasattr(self.gallery_justified, "_handle_resize_rebuild"):
-                    QTimer.singleShot(0, self.gallery_justified._handle_resize_rebuild)
+                # Avoid forced rebuild loops; set_images() already schedules build/layout.
+                # Only nudge visible-load passes after initial layout is expected ready.
                 QTimer.singleShot(30, self.gallery_justified.load_visible_images)
                 QTimer.singleShot(120, self.gallery_justified.load_visible_images)
             except Exception as e:
@@ -7592,44 +7495,10 @@ class RAWImageViewer(QMainWindow):
                             from datetime import datetime
                             from image_cache import get_image_cache
                             cache = get_image_cache()
+                            # OPTIMIZATION: In large folders, avoid hitting the disk for every file
+                            # in a background thread while the gallery is also loading thumbnails.
+                            # Just use what's in the SQLite cache (opportunistic like v1.6.0).
                             meta = cache.get_multiple_exif(self_inner.files, fast_mode=True)
-                            for fp in self_inner.files:
-                                data = meta.get(fp, {}) or {}
-                                if data.get("capture_time"):
-                                    continue
-                                try:
-                                    tags = process_file_from_path(
-                                        fp, details=False, stop_tag="EXIF DateTimeOriginal"
-                                    )
-                                    dt_tag = (
-                                        tags.get("EXIF DateTimeOriginal")
-                                        or tags.get("Image DateTime")
-                                        or tags.get("EXIF DateTime")
-                                    )
-                                    if not dt_tag:
-                                        continue
-                                    dt = datetime.strptime(str(dt_tag), "%Y:%m:%d %H:%M:%S")
-                                    data["capture_time"] = dt.strftime("%H:%M:%S %Y-%m-%d")
-                                    orient = tags.get("Image Orientation")
-                                    if orient:
-                                        orientation_map = {
-                                            'Horizontal (normal)': 1,
-                                            'Mirrored horizontal': 2,
-                                            'Rotated 180': 3,
-                                            'Mirrored vertical': 4,
-                                            'Mirrored horizontal then rotated 90 CCW': 5,
-                                            'Rotated 90 CW': 6,
-                                            'Mirrored horizontal then rotated 90 CW': 7,
-                                            'Rotated 90 CCW': 8,
-                                        }
-                                        data["orientation"] = orientation_map.get(str(orient), data.get("orientation", 1))
-                                    meta[fp] = data
-                                    try:
-                                        cache.put_exif(fp, data)
-                                    except Exception:
-                                        pass
-                                except Exception:
-                                    continue
                             self_inner.signals.ready.emit(meta, self_inner.folder_path)
                         except Exception as e:
                             import logging
@@ -10973,13 +10842,16 @@ class RAWImageViewer(QMainWindow):
 
         current_path = self.current_file_path
 
-        # Preload neighboring files' *pixels* (memory only). Do not use check_cache_for_image():
-        # it treats EXIF-only as a hit, which skipped decode when gallery/metadata warmed EXIF first.
-        next_count = min(5, len(self.image_files) - 1)
+        # For mixed JPG/RAW folders, full-image preload can starve the current file path
+        # with expensive RAW decodes. Keep navigation prefetch lightweight here.
+        preload_stages = {"thumbnail", "exif"}
+        next_count = min(4, len(self.image_files) - 1)
         for i in range(1, next_count + 1):  # Preload next images (more aggressive)
             next_index = (self.current_file_index + i) % len(self.image_files)
             next_file = self.image_files[next_index]
             if _norm_path(next_file) == _norm_path(current_path):
+                continue
+            if self.image_cache.get_thumbnail(next_file) is not None:
                 continue
             cached_item, cache_type = check_memory_cache_for_image(
                 next_file, use_full_resolution=False
@@ -10989,15 +10861,18 @@ class RAWImageViewer(QMainWindow):
                     file_path=next_file,
                     priority=Priority.PRELOAD_NEXT,
                     cancel_existing=False,
-                    use_full_resolution=False
+                    use_full_resolution=False,
+                    stages=preload_stages,
                 )
 
-        # Previous images (lower priority) - increased from 2 to 3
+        # Previous images (lower priority)
         prev_count = min(3, len(self.image_files) - 1)
         for i in range(1, prev_count + 1):  # Preload previous images (more aggressive)
             prev_index = (self.current_file_index - i) % len(self.image_files)
             prev_file = self.image_files[prev_index]
             if _norm_path(prev_file) == _norm_path(current_path):
+                continue
+            if self.image_cache.get_thumbnail(prev_file) is not None:
                 continue
             cached_item, cache_type = check_memory_cache_for_image(
                 prev_file, use_full_resolution=False
@@ -11007,7 +10882,8 @@ class RAWImageViewer(QMainWindow):
                     file_path=prev_file,
                     priority=Priority.PRELOAD_PREV,
                     cancel_existing=False,
-                    use_full_resolution=False
+                    use_full_resolution=False,
+                    stages=preload_stages,
                 )
         
         # Legacy preload manager (for backward compatibility)
@@ -13011,6 +12887,15 @@ class RAWImageViewer(QMainWindow):
                 bool(self.image_files) and self.view_mode == "gallery"
             )
 
+        # Gallery mode should stay lightweight: avoid expensive per-image EXIF/status
+        # recomputation (fallback reads can block UI and delay gallery paint).
+        if self.view_mode != 'single':
+            if hasattr(self, 'status_metadata_label'):
+                self.status_metadata_label.setVisible(False)
+            if hasattr(self, 'status_counter_label'):
+                self._update_gallery_counter()
+            return
+
         if not self.current_file_path:
             # Hide metadata when no image is loaded
             if hasattr(self, 'status_metadata_label'):
@@ -13185,9 +13070,16 @@ class RAWImageViewer(QMainWindow):
         exif_info = []
         cached_exif = self.image_cache.get_exif(self.current_file_path)
         import logging
+        import time
         logger = logging.getLogger(__name__)
         exif_tags = None
         metadata_extracted_from_cache = False
+        # Avoid repeatedly running expensive fallback EXIF probes in UI thread
+        # when the file has sparse/unsupported EXIF fields.
+        now_ts = time.time()
+        _probe_ts = getattr(self, "_status_exif_probe_ts", {})
+        last_probe_ts = float(_probe_ts.get(self.current_file_path, 0.0) or 0.0)
+        allow_expensive_exif_probe = (now_ts - last_probe_ts) >= 8.0
         
         if cached_exif:
             exif_data_dict = cached_exif.get('exif_data')
@@ -13358,7 +13250,9 @@ class RAWImageViewer(QMainWindow):
                 metadata_extracted_from_cache = False
         
         # Fallback: If no exif_tags OR if we didn't extract any metadata from cache, try direct extraction
-        if not exif_tags or not metadata_extracted_from_cache:
+        if (not exif_tags or not metadata_extracted_from_cache) and allow_expensive_exif_probe:
+            _probe_ts[self.current_file_path] = now_ts
+            self._status_exif_probe_ts = _probe_ts
             logger.info(f"[STATUS] Using fallback EXIF extraction - exif_tags: {exif_tags is not None}, metadata_extracted: {metadata_extracted_from_cache}")
             try:
                 # Try direct EXIF extraction from file
@@ -13394,9 +13288,14 @@ class RAWImageViewer(QMainWindow):
                         self.image_cache.put_exif(self.current_file_path, cached_exif)
             except Exception as e:
                 logger.warning(f"[STATUS] Fallback EXIF extraction failed: {e}")
+        elif not exif_tags or not metadata_extracted_from_cache:
+            logger.debug(
+                "[STATUS] Skip fallback EXIF probe for %s (cooldown active)",
+                os.path.basename(self.current_file_path),
+            )
         
         # Final fallback: direct EXIF read (pyexiv2 preferred, else exifread)
-        if not exif_info and self.current_file_path:
+        if not exif_info and self.current_file_path and allow_expensive_exif_probe:
             logger.warning(
                 "[STATUS] No metadata from cache/fallback; direct EXIF read "
                 "(metadata_backend)."
@@ -13826,14 +13725,37 @@ class RAWImageViewer(QMainWindow):
             self._manager_display_track_path = None
             self._manager_displayed_max_dim = 0
             self._last_loaded_path = None
+            self._last_manager_exif_path = None
+            self._last_manager_exif_ts = 0.0
+            # Clear previously displayed single-view content so the new folder does not
+            # temporarily show stale dimensions/pixels from the old folder.
+            self.current_image = None
+            self.current_pixmap = None
+            try:
+                if hasattr(self, "image_label") and self.image_label is not None:
+                    self.image_label.clear()
+            except Exception:
+                pass
 
             try:
                 if start_file:
                     start_file_path = None
+                    # Windows-friendly matching for file-open/folder-switch flows:
+                    # caller may pass full path, basename, or different casing/slashes.
+                    start_file_norm = _norm_path(start_file)
+                    start_file_base_norm = os.path.normcase(os.path.basename(start_file))
                     for img_file in self.image_files:
-                        if os.path.basename(img_file) == start_file or img_file == start_file:
+                        if (
+                            _norm_path(img_file) == start_file_norm
+                            or os.path.normcase(os.path.basename(img_file)) == start_file_base_norm
+                        ):
                             start_file_path = img_file
                             break
+                    if start_file_path is None:
+                        logger.warning(
+                            "[FOLDER] Requested start_file not found after scan: %s",
+                            start_file,
+                        )
                     idx = self.image_files.index(start_file_path) if start_file_path in self.image_files else 0
                 else:
                     idx = 0
@@ -14001,12 +13923,18 @@ class RAWImageViewer(QMainWindow):
                                         timestamp = 0
                                 if timestamp == 0:
                                     timestamp = file_stats.get(fp, (0, 0))[1]
-                                sort_keys[fp] = (timestamp, os.path.basename(fp).lower())
+                                base_name = os.path.basename(fp).lower()
+                                stem = os.path.splitext(base_name)[0]
+                                ext = os.path.splitext(base_name)[1]
+                                # Keep DNG+JPEG backup pairs adjacent while preferring
+                                # display-friendly non-RAW variants first.
+                                raw_rank = 1 if is_raw_file(fp) else 0
+                                primary_ts = -timestamp if self_inner.newest_first else timestamp
+                                sort_keys[fp] = (primary_ts, stem, raw_rank, ext, base_name)
 
                             image_files = sorted(
                                 image_files,
                                 key=lambda fp: sort_keys[fp],
-                                reverse=self_inner.newest_first,
                             )
                         sort_time = time.time() - sort_start
 

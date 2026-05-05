@@ -7,7 +7,8 @@
 
 import os
 import numpy as np
-from typing import Optional, Dict, Any, Union
+from typing import Optional, Dict, Any, Union, Tuple
+from PyQt6.QtCore import QSize
 from PyQt6.QtGui import QPixmap, QImage
 # PIL Image, rawpy, and exifread will be imported lazily to avoid import delays
 
@@ -23,6 +24,15 @@ from common_image_loader import (
     load_pixmap_safe,
     use_libraw_consistent_preview_first,
 )
+
+
+def _verbose_orientation_logs() -> bool:
+    return os.environ.get("RAWVIEWER_VERBOSE_ORIENTATION_LOGS", "0").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
 
 
 def decode_raw_file(file_path: str, params: Dict[str, Any]) -> np.ndarray:
@@ -48,7 +58,8 @@ class UnifiedImageProcessor:
         """檢查是否為 RAW 文件"""
         return is_raw_file(file_path)
     
-    def process_thumbnail(self, file_path: str, allow_heavy_fallback: bool = True) -> Optional[np.ndarray]:
+    def process_thumbnail(self, file_path: str, allow_heavy_fallback: bool = True,
+                          target_size: Optional[QSize] = None) -> Optional[np.ndarray]:
         """處理縮圖（統一接口）"""
         MAX_THUMB_DIM = 512
 
@@ -57,9 +68,10 @@ class UnifiedImageProcessor:
         if cached is not None:
             # Hard safety: never return an oversized "thumbnail" (e.g. RAW BITMAP thumb)
             try:
-                h0, w0 = cached.shape[:2]
-                if max(h0, w0) > MAX_THUMB_DIM:
-                    cached = None
+                if hasattr(cached, 'shape'):
+                    h0, w0 = cached.shape[:2]
+                    if max(h0, w0) > MAX_THUMB_DIM:
+                        cached = None
             except Exception:
                 cached = None
 
@@ -81,7 +93,7 @@ class UnifiedImageProcessor:
                             self.cache.exif_cache.remove(file_path)
                             cached = None # Force re-processing
                 
-                if cached is not None and hasattr(cached, 'shape'):
+                if cached is not None:
                     return cached
         
         # 提取縮圖 (Max 512px for Gallery)
@@ -93,16 +105,20 @@ class UnifiedImageProcessor:
                 allow_scan_fallback=allow_heavy_fallback,
             )
         else:
-            thumbnail = self.thumbnail_extractor.extract_thumbnail_from_image(file_path, max_size=MAX_THUMB_DIM)
+            thumbnail = self.thumbnail_extractor.extract_thumbnail_from_image(
+                file_path, 
+                max_size=MAX_THUMB_DIM,
+                target_size=target_size
+            )
         
         if thumbnail is None:
             return None
 
         # Non-RAW reader path can return QImage directly.
-        # Keep it as QImage to avoid fragile sip.voidptr -> numpy conversions
-        # that have caused intermittent native crashes on PyQt6/Windows.
-        # Downstream handlers support QImage thumbnails.
         if isinstance(thumbnail, QImage):
+            # If we decoded to target_size, it's already perfect.
+            # Don't cache custom-sized QImages in the global persistent cache
+            # (which expects 512px JPEGs), but return it for immediate UI display.
             return thumbnail
 
         # For RAW or fallback paths that return np.ndarray:
@@ -113,10 +129,14 @@ class UnifiedImageProcessor:
             thumbnail = self._apply_orientation_correction(thumbnail, orientation, exif_data)
         
         # 快取縮圖（優化：Resize & Encode to JPEG）
+        # NOTE: Only cache the standard 512px version to keep the persistent cache predictable.
         try:
             from PIL import Image
             import io
             
+            if not isinstance(thumbnail, np.ndarray):
+                return thumbnail
+                
             if thumbnail.dtype != np.uint8:
                 thumbnail = thumbnail.astype(np.uint8)
             
@@ -151,6 +171,7 @@ class UnifiedImageProcessor:
             logger.warning(f"Error processing thumbnail with PIL: {e}")
             self.cache.put_thumbnail(file_path, thumbnail)
             return thumbnail
+
     
     def process_full_image(self, file_path: str, 
                           use_full_resolution: bool = False,
@@ -173,11 +194,13 @@ class UnifiedImageProcessor:
                     
                     # Check for orientation mismatch (Portrait metadata but Landscape cached image)
                     if orientation in (6, 8) and w > h:
-                        print(f"[ORIENTATION] UnifiedImageProcessor: Cached full_image for {os.path.basename(file_path)} is UNROTATED (stale). Re-processing.")
+                        if _verbose_orientation_logs():
+                            print(f"[ORIENTATION] UnifiedImageProcessor: Cached full_image for {os.path.basename(file_path)} is UNROTATED (stale). Re-processing.")
                         cached_image = None
                     
                     if cached_image is not None:
-                        print(f"[ORIENTATION] Using VALID cached full_image for {os.path.basename(file_path)}. Shape: {w}x{h}")
+                        if _verbose_orientation_logs():
+                            print(f"[ORIENTATION] Using VALID cached full_image for {os.path.basename(file_path)}. Shape: {w}x{h}")
                         return cached_image
                 else:
                     return cached_image
@@ -187,11 +210,13 @@ class UnifiedImageProcessor:
         if not is_raw:
             cached_pixmap = self.cache.get_pixmap(file_path)
             if cached_pixmap is not None:
-                print(f"[ORIENTATION] Using cached pixmap for {os.path.basename(file_path)} (non-RAW file)")
+                if _verbose_orientation_logs():
+                    print(f"[ORIENTATION] Using cached pixmap for {os.path.basename(file_path)} (non-RAW file)")
                 return cached_pixmap
         else:
             # For RAW files, don't use cached pixmap - always process fresh
-            print(f"[ORIENTATION] RAW file {os.path.basename(file_path)} - skipping pixmap cache, will process as RAW")
+            if _verbose_orientation_logs():
+                print(f"[ORIENTATION] RAW file {os.path.basename(file_path)} - skipping pixmap cache, will process as RAW")
         
         # 處理圖像
         if is_raw:
@@ -221,11 +246,13 @@ class UnifiedImageProcessor:
                # Check Preview Cache
                cached_preview = self.cache.get_preview(file_path)
                if cached_preview is not None:
-                   print(f"[PREVIEW] Using cached preview for {os.path.basename(file_path)}")
+                   if _verbose_orientation_logs():
+                       print(f"[PREVIEW] Using cached preview for {os.path.basename(file_path)}")
                    return cached_preview
                
                # Extract Preview
-               print(f"[PREVIEW] Extracting preview from RAW for {os.path.basename(file_path)}")
+               if _verbose_orientation_logs():
+                   print(f"[PREVIEW] Extracting preview from RAW for {os.path.basename(file_path)}")
                preview = self.thumbnail_extractor.extract_preview_from_raw(file_path, max_size=1920)
                
                if preview is not None:
@@ -242,10 +269,12 @@ class UnifiedImageProcessor:
                        self.cache.put_preview(file_path, preview)
                        return preview
                    else:
-                       print(f"[PREVIEW] Embedded preview is too small ({w}x{h}), falling back to RAW processing for better quality")
+                       if _verbose_orientation_logs():
+                           print(f"[PREVIEW] Embedded preview is too small ({w}x{h}), falling back to RAW processing for better quality")
                
                # Fallback to RAW processing if preview extraction fails
-               print(f"[PREVIEW] Preview extraction failed, falling back to RAW processing")
+               if _verbose_orientation_logs():
+                   print(f"[PREVIEW] Preview extraction failed, falling back to RAW processing")
 
             # 獲取處理器參數
             params = self.raw_processor.get_optimized_processing_params(
@@ -330,12 +359,50 @@ class UnifiedImageProcessor:
             return None
     
     def process_exif(self, file_path: str) -> Optional[Dict[str, Any]]:
-        """處理 EXIF 數據（統一接口）
-        
-        必須經 EXIFExtractor：SQLite 直返會略過 RAW 感測器尺寸與 raw_exif_sensor_meta_ver 驗證，
-        導致狀態列長期顯示內嵌預覽解析度（例如 1920×1080）。
-        """
+        """處理 EXIF 數據（統一接口）"""
         return self.exif_extractor.extract_exif_data(file_path)
+
+    def process_metadata_and_thumbnail(self, file_path: str, allow_heavy_fallback: bool = True,
+                                      target_size: Optional[QSize] = None) -> Tuple[Optional[Dict[str, Any]], Optional[np.ndarray]]:
+        """
+        COMBINED OPTIMIZATION: Extract both metadata and thumbnail in a single pass.
+        This is crucial for RAW files to avoid opening the large file twice.
+        """
+        is_raw = self._is_raw_file(file_path)
+        
+        if not is_raw:
+            # For non-RAW, standard sequential calls are fine as they use different backends
+            exif = self.process_exif(file_path)
+            thumb = self.process_thumbnail(file_path, allow_heavy_fallback, target_size)
+            return exif, thumb
+
+        # RAW Path: Open once, extract both
+        import rawpy
+        try:
+            with rawpy.imread(file_path) as raw:
+                # 1. Extract EXIF (verified with rawpy sensor sizes)
+                exif = self.exif_extractor.extract_exif_data(file_path, raw_object=raw)
+                
+                # 2. Extract Thumbnail
+                thumb = self.thumbnail_extractor.extract_thumbnail_from_raw(
+                    file_path,
+                    max_size=512,
+                    allow_scan_fallback=allow_heavy_fallback,
+                    raw_object=raw
+                )
+                
+                # Apply orientation to thumbnail if needed
+                if thumb is not None and exif:
+                    orientation = exif.get('orientation', 1)
+                    if orientation != 1:
+                        thumb = self._apply_orientation_correction(thumb, orientation, exif)
+                
+                return exif, thumb
+        except Exception:
+            # Fallback to sequential if single-pass fails
+            exif = self.process_exif(file_path)
+            thumb = self.process_thumbnail(file_path, allow_heavy_fallback, target_size)
+            return exif, thumb
     
     def _apply_orientation_correction(
         self,
@@ -356,54 +423,65 @@ class UnifiedImageProcessor:
         8 = Rotated 270° CW (i.e., 90° CCW)
         """
         if image_array is None:
-            print(f"[ORIENTATION] Error: image_array is None in _apply_orientation_correction")
+            if _verbose_orientation_logs():
+                print(f"[ORIENTATION] Error: image_array is None in _apply_orientation_correction")
             return None
             
         original_shape = image_array.shape
-        print(f"[ORIENTATION] Before correction: shape = {original_shape}")
+        if _verbose_orientation_logs():
+            print(f"[ORIENTATION] Before correction: shape = {original_shape}")
         
         if orientation == 1:
-            print(f"[ORIENTATION] Numpy operation: No operation (orientation = 1)")
+            if _verbose_orientation_logs():
+                print(f"[ORIENTATION] Numpy operation: No operation (orientation = 1)")
         # Rotation needed?
         import logging
         logger = logging.getLogger(__name__)
 
         if orientation == 2:
             # Mirror left-right
-            print(f"[ORIENTATION] Numpy operation: np.fliplr(image_array) - Mirror left-right")
+            if _verbose_orientation_logs():
+                print(f"[ORIENTATION] Numpy operation: np.fliplr(image_array) - Mirror left-right")
             result = np.fliplr(image_array)
         elif orientation == 3:
             # Rotate 180°
-            print(f"[ORIENTATION] Numpy operation: np.rot90(image_array, 2) - Rotate 180°")
+            if _verbose_orientation_logs():
+                print(f"[ORIENTATION] Numpy operation: np.rot90(image_array, 2) - Rotate 180°")
             result = np.rot90(image_array, 2)
         elif orientation == 4:
             # Mirror top-bottom
-            print(f"[ORIENTATION] Numpy operation: np.flipud(image_array) - Mirror top-bottom")
+            if _verbose_orientation_logs():
+                print(f"[ORIENTATION] Numpy operation: np.flipud(image_array) - Mirror top-bottom")
             result = np.flipud(image_array)
         elif orientation == 5:
             # Mirror LR + rotate 270° CW (k=1 CCW)
-            print(f"[ORIENTATION] Numpy operation: np.rot90(np.fliplr(image_array), 1) - Mirror LR + rotate 90° CCW")
+            if _verbose_orientation_logs():
+                print(f"[ORIENTATION] Numpy operation: np.rot90(np.fliplr(image_array), 1) - Mirror LR + rotate 90° CCW")
             result = np.rot90(np.fliplr(image_array), 1)
         elif orientation == 6:
             # Orientation 6: Image is rotated 90° CW.
             # We need to rotate it 90° CW (k=3) to fix it.
-            print(f"[ORIENTATION] Numpy operation: np.rot90(image_array, 3) - Rotate 90° CW")
+            if _verbose_orientation_logs():
+                print(f"[ORIENTATION] Numpy operation: np.rot90(image_array, 3) - Rotate 90° CW")
             result = np.rot90(image_array, 3)
         elif orientation == 7:
             # Mirror LR + rotate 90° CW
-            print(f"[ORIENTATION] Numpy operation: np.rot90(np.fliplr(image_array), 3) - Mirror LR + rotate 270° CCW (90° CW)")
+            if _verbose_orientation_logs():
+                print(f"[ORIENTATION] Numpy operation: np.rot90(np.fliplr(image_array), 3) - Mirror LR + rotate 270° CCW (90° CW)")
             result = np.rot90(np.fliplr(image_array), 3)
         elif orientation == 8:
             # Orientation 8: Image is rotated 270° CW (90° CCW).
             # We need to rotate it 90° CCW (k=1) to fix it.
-            print(f"[ORIENTATION] Numpy operation: np.rot90(image_array, 1) - Rotate 90° CCW")
+            if _verbose_orientation_logs():
+                print(f"[ORIENTATION] Numpy operation: np.rot90(image_array, 1) - Rotate 90° CCW")
             result = np.rot90(image_array, 1)
         else:
             # Unknown orientation
             result = image_array
         
         final_shape = result.shape
-        print(f"[ORIENTATION] After correction: shape = {final_shape}")
+        if _verbose_orientation_logs():
+            print(f"[ORIENTATION] After correction: shape = {final_shape}")
         return result
 
 

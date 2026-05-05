@@ -100,74 +100,52 @@ class ImageLoadWorker(QRunnable):
             return
         
         file_path = self.task.file_path
-        
         try:
             stages = self.task.stages or set()
-            # 發送進度更新
             if self._safe_emit() and not self.task.is_cancelled():
                 self.manager.progress_updated.emit(file_path, "Loading image...")
             
-            # 獲取處理器（延遲初始化）
             processor = self._get_processor()
             
-            # EXIF before thumbnail when both stages run: lightweight metadata (true dimensions)
-            # should land in the UI before heavier embedded-preview decode (common case: 1920px JPEG).
-            if 'exif' in stages and not self.task.is_cancelled():
+            # COMBINED OPTIMIZATION: If both exif and thumbnail are needed, do them in one pass.
+            if 'exif' in stages and 'thumbnail' in stages and not self.task.is_cancelled():
                 if self._safe_emit():
-                    self.manager.progress_updated.emit(file_path, "Reading metadata...")
-                exif_data = processor.process_exif(file_path)
+                    self.manager.progress_updated.emit(file_path, "Reading metadata & preview...")
+                
+                allow_heavy_fallback = (self.task.priority == Priority.CURRENT and "full" in stages)
+                exif_data, thumbnail = processor.process_metadata_and_thumbnail(
+                    file_path,
+                    allow_heavy_fallback=allow_heavy_fallback,
+                    target_size=self.task.thumbnail_target_size
+                )
+                
                 if exif_data and not self.task.is_cancelled():
                     if self._safe_emit():
                         self.manager.exif_data_ready.emit(file_path, exif_data)
-            
-            # 處理縮圖
-            if 'thumbnail' in stages and not self.task.is_cancelled():
-                if self._safe_emit():
-                    self.manager.progress_updated.emit(file_path, "Extracting preview...")
-                thumbnail = processor.process_thumbnail(
-                    file_path,
-                    allow_heavy_fallback=self.task.priority == Priority.CURRENT,
-                )
+                
                 if thumbnail is not None and not self.task.is_cancelled():
-                    # Optional: pre-scale/crop thumbnail in worker thread (emit QImage)
-                    tgt = self.task.thumbnail_target_size
-                    if tgt is not None and isinstance(tgt, QSize) and tgt.isValid():
-                        try:
-                            if isinstance(thumbnail, QImage):
-                                qimg = thumbnail
-                                if qimg.format() != QImage.Format.Format_RGB888:
-                                    qimg = qimg.convertToFormat(QImage.Format.Format_RGB888)
-                                if qimg.isNull():
-                                    raise ValueError("Null QImage thumbnail")
-                            else:
-                                arr = np.ascontiguousarray(thumbnail)
-                                if arr is None or not hasattr(arr, 'shape'):
-                                    raise AttributeError("Invalid thumbnail array structure")
-                                h, w = arr.shape[:2]
-                                bpl = arr.strides[0]
-                                qimg = QImage(arr.data, w, h, bpl, QImage.Format.Format_RGB888).copy()
-                            if self.task.thumbnail_fit == "crop":
-                                scaled = qimg.scaled(
-                                    tgt,
-                                    aspectRatioMode=Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-                                    transformMode=Qt.TransformationMode.SmoothTransformation,
-                                )
-                                x = max(0, (scaled.width() - tgt.width()) // 2)
-                                y = max(0, (scaled.height() - tgt.height()) // 2)
-                                qimg_out = scaled.copy(x, y, tgt.width(), tgt.height())
-                            else:
-                                qimg_out = qimg.scaled(
-                                    tgt,
-                                    aspectRatioMode=Qt.AspectRatioMode.KeepAspectRatio,
-                                    transformMode=Qt.TransformationMode.SmoothTransformation,
-                                )
-                            if self._safe_emit():
-                                self.manager.thumbnail_ready.emit(file_path, qimg_out)
-                        except Exception as e:
-                            print(f"[PERF] Worker scale error for {file_path}: {e}")
-                    else:
+                    self._handle_thumbnail_result(file_path, thumbnail)
+            else:
+                # Sequential or partial stages
+                if 'exif' in stages and not self.task.is_cancelled():
+                    if self._safe_emit():
+                        self.manager.progress_updated.emit(file_path, "Reading metadata...")
+                    exif_data = processor.process_exif(file_path)
+                    if exif_data and not self.task.is_cancelled():
                         if self._safe_emit():
-                            self.manager.thumbnail_ready.emit(file_path, thumbnail)
+                            self.manager.exif_data_ready.emit(file_path, exif_data)
+                
+                if 'thumbnail' in stages and not self.task.is_cancelled():
+                    if self._safe_emit():
+                        self.manager.progress_updated.emit(file_path, "Extracting preview...")
+                    allow_heavy_fallback = (self.task.priority == Priority.CURRENT and "full" in stages)
+                    thumbnail = processor.process_thumbnail(
+                        file_path,
+                        allow_heavy_fallback=allow_heavy_fallback,
+                        target_size=self.task.thumbnail_target_size,
+                    )
+                    if thumbnail is not None and not self.task.is_cancelled():
+                        self._handle_thumbnail_result(file_path, thumbnail)
             
             # 處理完整圖像（只在需要時）
             if 'full' in stages and not self.task.is_cancelled():
@@ -211,6 +189,38 @@ class ImageLoadWorker(QRunnable):
             # 任務完成，調度下一個
             if self._safe_emit():
                 self.manager._task_finished(self.task)
+
+    def _handle_thumbnail_result(self, file_path, thumbnail):
+        """Internal helper to process and emit thumbnail results."""
+        tgt = self.task.thumbnail_target_size
+        if tgt is not None and isinstance(tgt, QSize) and tgt.isValid():
+            try:
+                if isinstance(thumbnail, QImage):
+                    qimg = thumbnail
+                else:
+                    arr = np.ascontiguousarray(thumbnail)
+                    h, w = arr.shape[:2]
+                    bpl = arr.strides[0]
+                    qimg = QImage(arr.data, w, h, bpl, QImage.Format.Format_RGB888).copy()
+                
+                if qimg.isNull(): return
+                
+                if self.task.thumbnail_fit == "crop":
+                    scaled = qimg.scaled(tgt, Qt.AspectRatioMode.KeepAspectRatioByExpanding, Qt.TransformationMode.SmoothTransformation)
+                    x = max(0, (scaled.width() - tgt.width()) // 2)
+                    y = max(0, (scaled.height() - tgt.height()) // 2)
+                    qimg_out = scaled.copy(x, y, tgt.width(), tgt.height())
+                else:
+                    qimg_out = qimg.scaled(tgt, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+                
+                if self._safe_emit():
+                    self.manager.thumbnail_ready.emit(file_path, qimg_out)
+                    return
+            except Exception:
+                pass
+
+        if self._safe_emit():
+            self.manager.thumbnail_ready.emit(file_path, thumbnail)
 
     def _safe_emit(self) -> bool:
         """Verify the manager still exists before emitting signals from background thread."""
@@ -516,13 +526,11 @@ class ImageLoadManager(QObject):
             try:
                 # We want to fill the thread pool, but limit heavy RAW tasks
                 # JPEGs can always proceed if threads are free.
+                deferred_raw_tasks = []
                 while (
                     not self._work_queue.empty()
                     and self._thread_pool.activeThreadCount() < self._thread_pool.maxThreadCount()
                 ):
-                    # Peek at top task without removing yet
-                    # queue.PriorityQueue doesn't support peek, so we have to pull and re-queue
-                    # or manage a separate pending list. For simplicity, we pull and decide.
                     task = self._work_queue.get_nowait()
 
                     if task.is_cancelled():
@@ -535,18 +543,24 @@ class ImageLoadManager(QObject):
                         continue
 
                     is_raw = is_raw_file(task.file_path)
-                    if is_raw and self._active_raw_tasks >= self._raw_load_limit:
-                        # Too many RAWs running, re-queue this one and STOP scheduling for now
-                        # (to avoid spinning on the queue if it's all RAWs)
-                        self._work_queue.put(task)
-                        break
+                    # HEAVY TASK CHECK: Only throttle RAW tasks that perform full-resolution processing.
+                    # Metadata and thumbnail extraction (extract_thumb) are lightweight enough to bypass
+                    # the 4-slot limit, preventing gallery starvation in mixed folders.
+                    is_heavy = is_raw and 'full' in (task.stages or set())
                     
-                    if is_raw:
+                    if is_heavy and self._active_raw_tasks >= self._raw_load_limit:
+                        # Keep throttled heavy RAW aside for now and continue scanning queue.
+                        deferred_raw_tasks.append(task)
+                        continue
+                    
+                    if is_heavy:
                         self._active_raw_tasks += 1
                         task._counted_raw_slot = True
 
                     worker = ImageLoadWorker(task, self)
                     self._thread_pool.start(worker)
+                for deferred in deferred_raw_tasks:
+                    self._work_queue.put(deferred)
             except queue.Empty:
                 pass
     

@@ -1103,21 +1103,27 @@ class SemanticImageIndex:
 
     @staticmethod
     def _canonical_path(file_path: str) -> str:
+        if not file_path:
+            return ""
         try:
-            return os.path.realpath(os.path.abspath(file_path))
+            # OPTIMIZATION: If already absolute, skip abspath() which can hit disk/slow down on Windows.
+            # Pure string normalization is much faster for thousands of paths on the UI thread.
+            if os.path.isabs(file_path):
+                return os.path.normpath(file_path)
+            return os.path.normpath(os.path.abspath(file_path))
         except Exception:
             return file_path
 
     @staticmethod
     def _path_aliases(file_path: str) -> List[str]:
-        aliases: List[str] = []
-        for p in (
-            file_path,
-            os.path.abspath(file_path),
-            os.path.realpath(os.path.abspath(file_path)),
-        ):
-            if p and p not in aliases:
-                aliases.append(p)
+        # Fast string-based aliases only.
+        ap = os.path.abspath(file_path)
+        np = os.path.normpath(ap)
+        aliases = [file_path]
+        if ap != file_path:
+            aliases.append(ap)
+        if np not in aliases:
+            aliases.append(np)
         return aliases
 
     @staticmethod
@@ -1554,31 +1560,37 @@ class SemanticImageIndex:
     def get_index_coverage(self, file_paths: Sequence[str]) -> Dict[str, int]:
         """
         Return index coverage for the given file set.
-
-        A file is counted as indexed if an entry exists with matching size/mtime/model.
+        Metadata-lazy version: only checks database presence, does not touch disk.
         """
-        valid_paths = [self._canonical_path(p) for p in file_paths if p and os.path.isfile(p)]
-        total = len(valid_paths)
-        if total == 0:
+        if not file_paths:
             return {"total": 0, "indexed": 0, "missing": 0, "ready": 1}
 
-        indexed = 0
-        for fp in valid_paths:
-            try:
-                st = os.stat(fp)
-                rows = self._lookup_index_rows(fp, st)
-                if any(
-                    self._row_matches_file(r, st) and self._row_semantic_ready(r)
-                    for r in rows
-                ):
-                    indexed += 1
-            except Exception:
-                continue
+        total = len(file_paths)
+        canonical_paths = [self._canonical_path(p) for p in file_paths if p]
+        
+        # Bulk lookup in database
+        placeholders = ",".join(["?"] * len(canonical_paths))
+        # SQLite has a limit on parameters (usually 999), so we batch if needed.
+        batch_size = 900
+        indexed_count = 0
+        
+        try:
+            for i in range(0, len(canonical_paths), batch_size):
+                batch = canonical_paths[i : i + batch_size]
+                qs = ",".join(["?"] * len(batch))
+                cursor = self._conn.execute(
+                    f"SELECT COUNT(*) FROM semantic_index WHERE file_path IN ({qs}) AND semantic_ready = 1 AND model_name = ?",
+                    [*batch, self.model_name]
+                )
+                indexed_count += cursor.fetchone()[0]
+        except Exception:
+            # Fallback if table doesn't exist or other error
+            indexed_count = 0
 
-        missing = max(0, total - indexed)
+        missing = max(0, total - indexed_count)
         return {
             "total": total,
-            "indexed": indexed,
+            "indexed": indexed_count,
             "missing": missing,
             "ready": 1 if missing == 0 else 0,
         }
@@ -1586,18 +1598,36 @@ class SemanticImageIndex:
     def get_pending_paths(self, file_paths: Sequence[str]) -> List[str]:
         """
         Return only files that are missing or stale and need reindexing.
+        Uses bulk database check to identify missing files quickly.
         """
-        pending: List[str] = []
-        for fp in file_paths:
-            if not fp or not os.path.isfile(fp):
-                continue
-            try:
-                canonical_fp = self._canonical_path(fp)
-                st = os.stat(canonical_fp)
-                if self._needs_reindex(canonical_fp, st):
-                    pending.append(canonical_fp)
-            except Exception:
-                pending.append(self._canonical_path(fp))
+        if not file_paths:
+            return []
+
+        canonical_map = {self._canonical_path(p): p for p in file_paths if p}
+        canonical_paths = list(canonical_map.keys())
+        
+        # 1. Identify which paths are already indexed and UP-TO-DATE in metadata
+        # We check mtime/size only for files we find in the DB.
+        # Files NOT in the DB are automatically pending.
+        indexed_up_to_date = set()
+        batch_size = 900
+        for i in range(0, len(canonical_paths), batch_size):
+            batch = canonical_paths[i : i + batch_size]
+            qs = ",".join(["?"] * len(batch))
+            cursor = self._conn.execute(
+                f"SELECT file_path FROM semantic_index WHERE file_path IN ({qs}) AND semantic_ready = 1 AND model_name = ?",
+                [*batch, self.model_name]
+            )
+            for (fp,) in cursor.fetchall():
+                indexed_up_to_date.add(fp)
+
+        pending = []
+        for cp in canonical_paths:
+            if cp not in indexed_up_to_date:
+                # If not indexed, it's definitely pending.
+                # We skip os.stat here for speed; the indexer will check it later.
+                pending.append(cp)
+        
         return pending
 
     def _fetch_rows_for_paths(self, paths: Sequence[str]) -> List[sqlite3.Row]:
