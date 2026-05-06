@@ -224,14 +224,32 @@ class ThumbnailExtractor(QObject):
                 # Use KeepAspectRatioByExpanding so we have enough pixels to crop later
                 # without stretching (which happens if we just set target_size directly).
                 if target_size is not None and isinstance(target_size, QSize) and target_size.isValid():
-                    reader.setScaledSize(size.scaled(target_size, Qt.AspectRatioMode.KeepAspectRatioByExpanding))
+                    # HIGH FIDELITY: Load at 2x the target size (oversampling) for sharper downscaling
+                    load_w, load_h = target_size.width() * 2, target_size.height() * 2
+                    if load_w < w and load_h < h:
+                        reader.setScaledSize(size.scaled(QSize(load_w, load_h), Qt.AspectRatioMode.KeepAspectRatioByExpanding))
+                    else:
+                        reader.setScaledSize(size.scaled(target_size, Qt.AspectRatioMode.KeepAspectRatioByExpanding))
                 elif w > max_size or h > max_size:
                     scale = min(max_size / w, max_size / h)
-                    reader.setScaledSize(QSize(max(1, int(w * scale)), max(1, int(h * scale))))
+                    # For standard gallery thumbnails, load at 1.5x for better quality/speed balance
+                    load_max = int(max_size * 1.5)
+                    if w > load_max or h > load_max:
+                        new_w = max(1, int(w * scale * 1.5))
+                        new_h = max(1, int(h * scale * 1.5))
+                        reader.setScaledSize(QSize(new_w, new_h))
+                    else:
+                        reader.setScaledSize(QSize(max(1, int(w * scale)), max(1, int(h * scale))))
             
             image = reader.read()
             if not image.isNull():
-                # OPTIMIZATION: Return QImage directly to avoid Numpy conversion
+                # Perform high-quality final scaling if the loaded image is still larger than needed
+                if target_size is not None and isinstance(target_size, QSize) and target_size.isValid():
+                    if image.size().width() > target_size.width() or image.size().height() > target_size.height():
+                        image = image.scaled(target_size, Qt.AspectRatioMode.KeepAspectRatioByExpanding, Qt.TransformationMode.SmoothTransformation)
+                elif image.width() > max_size or image.height() > max_size:
+                    image = image.scaled(max_size, max_size, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+                
                 return image
         except Exception:
             pass

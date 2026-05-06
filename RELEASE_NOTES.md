@@ -3,36 +3,27 @@
 ## 🚀 Version 2.0.0
 **Release Date: May 6, 2026**
 
+### 🌟 High-Fidelity & Startup Optimization
+- **LANCZOS Thumbnail Resampling**: Replaced bilinear scaling with high-quality LANCZOS resampling across all image pipelines. Thumbnails are now significantly sharper on High-DPI (Retina/4K) displays.
+- **JPEG Oversampling**: New high-fidelity loader for phone JPEGs that utilizes 2x oversampling and smooth downscaling to eliminate blurriness in the gallery view.
+- **Flicker-Free Startup**: Fully synchronized the PyInstaller boot-splash with the Qt application splash screen. The transition is now seamless, eliminating the "double-flicker" during application initialization.
+- **High-Quality RAW Fallback**: Implemented a mandatory 400px threshold for embedded thumbnails; RAW files with poor-quality previews now automatically trigger a high-quality "fast RAW decode" fallback.
+
 ### 🌍 Enhanced Geographical Awareness
 - **Massive Location Expansion**: Added ~150+ major world cities and popular travel destinations (Bali, Santorini, Phuket, etc.) to the strict contradiction filter.
 - **Multi-word Location Intelligence**: Smart detection for places like "Hong Kong", "New York", and "United Kingdom" to prevent splitting search terms.
 - **Metadata Authority**: Hardened search pipeline ensures verified GPS data always overrides AI "guessing", eliminating location hallucinations.
 
-### 🔒 Privacy & UX
+### 🔒 Privacy & Search Polish
 - **Anonymized Progress Reporting**: Filenames are now hidden from the status bar during metadata scanning and AI processing (e.g., "Scanning metadata...").
 - **Search Transparency**: New detailed logging categories (`[SEARCH]`) to help power users understand how queries are parsed into metadata vs. semantic hits.
-
----
-
-## 🚀 Version 2.0.0
-**Release Date: May 5, 2026**
-
-### 🌟 Major Performance & Stability Breakthrough
-- **High-Definition Thumbnail Support**: Increased thumbnail resolution to 1024px for crystal-clear previews on Retina and 4K displays.
-- **Lazy Metadata Repair**: Automatically geocodes and repairs stale location metadata on-the-fly, ensuring images are always searchable by city and country.
-- **Single-Pass RAW Pipeline**: Significant architectural refactor in `UnifiedImageProcessor`. The app now opens RAW files exactly once to extract both metadata and previews, halving Disk I/O and CPU overhead.
-- **Focus-Resilient UI**: Optimized bottom-bar layout with fixed-height controls (28px) to eliminate vertical shifting and focus-stealing during navigation.
-- **Intelligent Layout Debouncing**: New threshold-based layout logic prevents "rebuild storms" in large folders (500+ images).
-
-### 🔍 Search & Metadata
-- **MobileCLIP2 Semantic Search (macOS)**: Native CoreML support for natural-language image ranking. Search for "blue jet", "sunset", or "crowd" without tags.
-- **Structured Filters**: Power-user syntax for `camera:`, `lens:`, `iso:`, `format:`, and `ext:`. Combine phrases like `sunset format:cr3`.
+- **Single-Pass RAW Pipeline**: Refactored `UnifiedImageProcessor` to open RAW files exactly once for both metadata and previews, significantly reducing Disk I/O.
 - **Precision Focus Detection**: Overlays camera focus points using MakerNote data for Canon, Nikon, and Sony.
 
 ### 🎨 UI & UX Refresh
-- **Layout Stability**: Definitive fixes for "squeezed" thumbnails and horizontal button padding inconsistency.
 - **Native macOS Polish**: Deep integration with Finder, native Share sheet support, and trackpad pinch-to-zoom with smart cursor anchoring.
 - **Non-Destructive Rotation**: Instantly rotate any image (including RAW) by 90° steps in the viewer without modifying the original file.
+- **Layout Stability**: Definitive fixes for "squeezed" thumbnails and horizontal button padding inconsistency.
 
 
 ---

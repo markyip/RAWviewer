@@ -38,6 +38,7 @@ This is a **pre-filtering tool**, letting you go through hundreds of RAW files e
 
 - **Cross-platform support**: Windows and macOS
 - **Ultra-Fast Performance**: Instant folder loading (scans thousands of images in milliseconds) using optimized algorithms
+- **High-Fidelity Thumbnails**: Uses high-quality **LANCZOS resampling** and **2x oversampling** for crystal-clear previews on Retina and 4K displays.
 - **Smart Prefetching**: Predictively loads relevant images in the background for zero-latency navigation
 - **Memory-First Cache (Default)**: Uses fast in-memory caching by default with no disk/SQLite writes
 - **Optional Persistent Cache**: Set `RAWVIEWER_PERSISTENT_CACHE=1` to re-enable disk/SQLite cache persistence
@@ -54,6 +55,7 @@ This is a **pre-filtering tool**, letting you go through hundreds of RAW files e
 - **Session persistence**: Remembers your last opened folder, image, and view mode
 - **Single-image histogram**: Press `H` to show or hide the strip while viewing one image
 - **Portable executable**: No Python installation required for users
+- **Professional Startup**: Synchronized native and Qt splash screens for a flicker-free, premium launch experience.
 - **Modern UI**: Material Design 3 aesthetics with Font Awesome icons (via qtawesome) and non-intrusive loading indicators
 - **Platform-specific chrome**: On Windows, the bottom bar omits Share (no stable system share without WinRT interop); **Share** remains on macOS.
 - **Non-destructive visual rotate**: Rotate in viewer by 90° steps without modifying original files (including RAW), with gallery-visible tiles refreshed immediately.
