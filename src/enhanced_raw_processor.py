@@ -119,7 +119,7 @@ def extract_embedded_jpeg_by_scan(file_path: str, max_size: int) -> Optional[np.
                 work = im
                 if w > max_size or h > max_size:
                     work = im.copy()
-                    work.thumbnail((max_size, max_size), Image.Resampling.BILINEAR)
+                    work.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
                 best_arr = np.array(work)
             except Exception:
                 continue
@@ -168,8 +168,13 @@ class ThumbnailExtractor(QObject):
                     jpeg_image = jpeg_image.convert('RGB')
                     
                 w, h = jpeg_image.size
+                
+                # Reject tiny thumbnails (often found in phone DNGs) to force high-quality fallback
+                if w < 400 or h < 400:
+                    return None
+                    
                 if w > max_size or h > max_size:
-                    jpeg_image.thumbnail((max_size, max_size), Image.Resampling.BILINEAR)
+                    jpeg_image.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
                     
                 return np.array(jpeg_image)
                 
@@ -179,10 +184,15 @@ class ThumbnailExtractor(QObject):
                     return None
                 
                 h, w = thumb_array.shape[:2]
+                
+                # Reject tiny thumbnails
+                if w < 400 or h < 400:
+                    return None
+                    
                 if w > max_size or h > max_size:
                      from PIL import Image
                      pil_thumb = Image.fromarray(thumb_array)
-                     pil_thumb.thumbnail((max_size, max_size), Image.Resampling.BILINEAR)
+                     pil_thumb.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
                      return np.array(pil_thumb)
                 return thumb_array
             
@@ -229,9 +239,9 @@ class ThumbnailExtractor(QObject):
         try:
             with Image.open(file_path) as img:
                 if target_size is not None and isinstance(target_size, QSize):
-                    img.thumbnail((target_size.width(), target_size.height()), Image.Resampling.BILINEAR)
+                    img.thumbnail((target_size.width(), target_size.height()), Image.Resampling.LANCZOS)
                 else:
-                    img.thumbnail((max_size, max_size), Image.Resampling.BILINEAR)
+                    img.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
                 
                 if img.mode != 'RGB':
                     img = img.convert('RGB')
@@ -335,7 +345,7 @@ class EXIFExtractor(QObject):
                     except: pass
 
             # Second pass: If it's a RAW file, use rawpy to verify dimensions and orientation (flip)
-            if self._is_raw_file(file_path):
+            if metadata_backend.is_raw_file(file_path):
                 try:
                     if raw_object is not None:
                         sizes = raw_object.sizes

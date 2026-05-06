@@ -4,7 +4,7 @@ Build script for RAW Image Viewer Windows/macOS executable
 Handles dependency installation and executable creation.
 """
 
-VERSION = "2.0.4"
+VERSION = "2.0.0"
 
 import os
 import subprocess
@@ -484,7 +484,13 @@ def main():
         cmd_base.append("--onedir")
         cmd_base.extend(["--osx-bundle-identifier", "com.markyip.rawviewer"])
     else:
+        # User requested --onefile; we use --splash to provide immediate feedback during extraction.
         cmd_base.append("--onefile")
+        if os.path.exists(icon_path):
+            # Using the png version for the splash screen
+            splash_img = os.path.join('icons', 'appicon.png')
+            if os.path.exists(splash_img):
+                cmd_base.extend(["--splash", splash_img])
         
     if icon_arg:
         if platform.system() == 'Windows':

@@ -112,7 +112,29 @@ class UnifiedImageProcessor:
             )
         
         if thumbnail is None:
-            return None
+            if allow_heavy_fallback:
+                # Fallback: If no embedded thumbnail found, or it was rejected as too small,
+                # do a fast half-size RAW decode to get a high-quality thumbnail.
+                try:
+                    import logging
+                    logger = logging.getLogger(__name__)
+                    logger.debug(f"No usable thumbnail for {file_path}, falling back to fast RAW decode")
+                    
+                    # Use OptimizedRAWProcessor for a fast decode
+                    params = self.raw_processor.get_optimized_processing_params(file_path, None)
+                    params['half_size'] = True
+                    params['user_flip'] = 0 # Handle orientation manually
+                    
+                    import rawpy
+                    with rawpy.imread(file_path) as raw:
+                        thumbnail = raw.postprocess(**params)
+                except Exception as e:
+                    import logging
+                    logger = logging.getLogger(__name__)
+                    logger.warning(f"Heavy thumbnail fallback failed for {file_path}: {e}")
+                    return None
+            else:
+                return None
 
         # Non-RAW reader path can return QImage directly.
         if isinstance(thumbnail, QImage):
@@ -155,7 +177,7 @@ class UnifiedImageProcessor:
                 scale = min(MAX_THUMB_DIM / w, MAX_THUMB_DIM / h)
                 new_w = max(1, int(w * scale))
                 new_h = max(1, int(h * scale))
-                thumbnail_small_pil = pil_img.resize((new_w, new_h), Image.Resampling.BILINEAR)
+                thumbnail_small_pil = pil_img.resize((new_w, new_h), Image.Resampling.LANCZOS)
                 thumbnail_small = np.array(thumbnail_small_pil)
             
             buffer = io.BytesIO()

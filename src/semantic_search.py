@@ -18,6 +18,8 @@ import sys
 import gzip
 import urllib.request
 import tempfile
+import threading
+import concurrent.futures
 from io import BytesIO
 from functools import lru_cache
 from dataclasses import dataclass
@@ -845,6 +847,7 @@ class SemanticImageIndex:
         self._mobileclip_backend = None # Lazy load
         self._model_name = model_name
         self._index_conn = None
+        self._rg_lock = threading.Lock()
         self._init_db_if_needed()
 
     @property
@@ -1010,21 +1013,34 @@ class SemanticImageIndex:
     def _ensure_reverse_geocoder(self):
         if self._reverse_geocoder is not None:
             return self._reverse_geocoder
-        try:
-            import reverse_geocoder as rg  # type: ignore
-        except ImportError:
-            self._reverse_geocoder = False
-            return False
-        self._reverse_geocoder = rg
-        return rg
+        with self._rg_lock:
+            if self._reverse_geocoder is not None:
+                return self._reverse_geocoder
+            try:
+                import reverse_geocoder as rg  # type: ignore
+            except ImportError:
+                self._reverse_geocoder = False
+                return False
+            self._reverse_geocoder = rg
+            return rg
 
     @staticmethod
     def _country_name_from_code(code: str) -> str:
         cc = (code or "").strip().upper()
         if not cc:
             return ""
-        if cc == "TW":
-            return "Taiwan"
+
+        # Hardcoded fallbacks for common regions to ensure search reliability
+        _FALLBACKS = {
+            "JP": "Japan",
+            "US": "United States",
+            "GB": "United Kingdom",
+            "UK": "United Kingdom",
+            "TW": "Taiwan",
+        }
+        if cc in _FALLBACKS:
+            return _FALLBACKS[cc]
+
         if pycountry is not None:
             try:
                 c = pycountry.countries.get(alpha_2=cc)
@@ -1164,12 +1180,82 @@ class SemanticImageIndex:
             aliases.append(np)
         return aliases
 
+    def _upsert_metadata(self, canonical_fp: str, st: os.stat_result, meta: Dict[str, Any]) -> None:
+        """Helper to insert or update metadata in the index."""
+        file_name = os.path.basename(canonical_fp)
+        file_signature = self._file_signature_from_stat(canonical_fp, st)
+        mtime_ns = self._mtime_ns_from_stat(st)
+        
+        self._conn.execute(
+            """
+            INSERT INTO semantic_index (
+                file_path, file_name, file_signature, file_size, file_mtime, mtime_ns,
+                semantic_ready,
+                model_name, dim, embedding,
+                capture_time, camera_model, lens_model, iso, width, height,
+                gps_lat, gps_lon, gps_raw, city, admin1, country, country_code, face_count, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(file_path) DO UPDATE SET
+                file_name=excluded.file_name,
+                file_signature=excluded.file_signature,
+                file_size=excluded.file_size,
+                file_mtime=excluded.file_mtime,
+                mtime_ns=excluded.mtime_ns,
+                semantic_ready=excluded.semantic_ready,
+                model_name=excluded.model_name,
+                dim=excluded.dim,
+                embedding=excluded.embedding,
+                capture_time=excluded.capture_time,
+                camera_model=excluded.camera_model,
+                lens_model=excluded.lens_model,
+                iso=excluded.iso,
+                width=excluded.width,
+                height=excluded.height,
+                gps_lat=excluded.gps_lat,
+                gps_lon=excluded.gps_lon,
+                gps_raw=excluded.gps_raw,
+                city=excluded.city,
+                admin1=excluded.admin1,
+                country=excluded.country,
+                country_code=excluded.country_code,
+                face_count=excluded.face_count,
+                updated_at=excluded.updated_at
+            """,
+            (
+                canonical_fp,
+                file_name,
+                file_signature,
+                int(st.st_size),
+                float(st.st_mtime),
+                mtime_ns,
+                0,  # semantic_ready = 0 until Phase 2
+                self.model_name,
+                0,
+                b"",
+                str(meta.get("capture_time") or ""),
+                str(meta.get("camera_model") or ""),
+                str(meta.get("lens_model") or ""),
+                int(meta.get("iso") or 0),
+                int(meta.get("width") or 0),
+                int(meta.get("height") or 0),
+                float(meta["gps_lat"]) if meta.get("gps_lat") is not None else None,
+                float(meta["gps_lon"]) if meta.get("gps_lon") is not None else None,
+                str(meta.get("gps_raw") or ""),
+                str(meta.get("city") or ""),
+                str(meta.get("admin1") or ""),
+                str(meta.get("country") or ""),
+                str(meta.get("country_code") or ""),
+                int(meta["face_count"]) if meta.get("face_count") is not None else None,
+                float(time.time()),
+            ),
+        )
+
     @staticmethod
     def _mtime_ns_from_stat(st: os.stat_result) -> int:
-        try:
+        """Extract nanosecond mtime if available, otherwise fallback to float."""
+        if hasattr(st, "st_mtime_ns"):
             return int(st.st_mtime_ns)
-        except Exception:
-            return int(float(st.st_mtime) * 1_000_000_000)
+        return int(st.st_mtime * 1e9)
 
     @classmethod
     def _file_signature_from_stat(cls, file_path: str, st: os.stat_result) -> str:
@@ -1229,18 +1315,40 @@ class SemanticImageIndex:
         except Exception:
             return None
 
-    def _gps_to_decimal(self, gps_vals, ref: str) -> Optional[float]:
+    def _gps_to_decimal(self, gps_vals: Any, ref: str) -> Optional[float]:
         try:
+            # If gps_vals is an IfdTag/IfdTagLite, it has a .values attribute
             vals = getattr(gps_vals, "values", gps_vals)
-            if not vals or len(vals) < 3:
+            
+            # If it's a string from some backends, try to parse it
+            if isinstance(vals, str):
+                # Common formats: "25/1 10/1 0/1" or "25, 10, 0"
+                import re
+                parts = re.split(r"[\s,]+", vals.strip())
+                if len(parts) >= 3:
+                    parsed = []
+                    for p in parts:
+                        if "/" in p:
+                            num, den = p.split("/", 1)
+                            parsed.append(float(num) / (float(den) if float(den) != 0 else 1.0))
+                        else:
+                            parsed.append(float(p))
+                    vals = parsed
+
+            if not vals or not isinstance(vals, (list, tuple)) or len(vals) < 3:
                 return None
+                
             d = self._ratio_to_float(vals[0])
             m = self._ratio_to_float(vals[1])
             s = self._ratio_to_float(vals[2])
+            
             if d is None or m is None or s is None:
                 return None
+                
             dec = float(d) + float(m) / 60.0 + float(s) / 3600.0
-            if (ref or "").strip().upper() in ("S", "W"):
+            
+            ref_str = str(ref or "").strip().upper()
+            if ref_str in ("S", "W"):
                 dec = -dec
             return dec
         except Exception:
@@ -1313,31 +1421,39 @@ class SemanticImageIndex:
                 w, h = self._pil_dimensions(file_path)
                 result["width"] = int(result["width"] or w)
                 result["height"] = int(result["height"] or h)
-            lat = tags.get("GPS GPSLatitude")
-            lon = tags.get("GPS GPSLongitude")
-            lat_ref = str(tags.get("GPS GPSLatitudeRef", "")).strip()
-            lon_ref = str(tags.get("GPS GPSLongitudeRef", "")).strip()
+            # GPS Extraction
+            lat = tags.get("GPS GPSLatitude") or tags.get("EXIF GPSLatitude") or tags.get("GPSLatitude")
+            lon = tags.get("GPS GPSLongitude") or tags.get("EXIF GPSLongitude") or tags.get("GPSLongitude")
+            lat_ref = self._tag_text(tags, "GPS GPSLatitudeRef", "EXIF GPSLatitudeRef", "GPSLatitudeRef")
+            lon_ref = self._tag_text(tags, "GPS GPSLongitudeRef", "EXIF GPSLongitudeRef", "GPSLongitudeRef")
+            
             result["gps_lat"] = self._gps_to_decimal(lat, lat_ref) if lat else None
             result["gps_lon"] = self._gps_to_decimal(lon, lon_ref) if lon else None
+            
             if lat and lon:
                 result["gps_raw"] = f"{lat_ref} {lat} | {lon_ref} {lon}"
+            
+            # Reverse Geocoding
             if result["gps_lat"] is not None and result["gps_lon"] is not None:
-                geo = self._ensure_reverse_geocoder()
-                if geo:
-                    try:
-                        recs = geo.search(
-                            [(float(result["gps_lat"]), float(result["gps_lon"]))],
-                            mode=1,
-                        )
-                        if recs:
-                            rec = recs[0] or {}
-                            result["city"] = str(rec.get("name", "") or "")
-                            result["admin1"] = str(rec.get("admin1", "") or "")
-                            cc = str(rec.get("cc", "") or "").upper()
-                            result["country_code"] = cc
-                            result["country"] = self._country_name_from_code(cc)
-                    except Exception:
-                        pass
+                # Skip (0,0) as it's often a placeholder for no-fix
+                if abs(result["gps_lat"]) > 0.001 or abs(result["gps_lon"]) > 0.001:
+                    geo = self._ensure_reverse_geocoder()
+                    if geo:
+                        try:
+                            # Use a small timeout or limit to avoid blocking too long if multiple calls
+                            recs = geo.search(
+                                [(float(result["gps_lat"]), float(result["gps_lon"]))],
+                                mode=1,
+                            )
+                            if recs:
+                                rec = recs[0] or {}
+                                result["city"] = str(rec.get("name", "") or "")
+                                result["admin1"] = str(rec.get("admin1", "") or "")
+                                cc = str(rec.get("cc", "") or "").upper()
+                                result["country_code"] = cc
+                                result["country"] = self._country_name_from_code(cc)
+                        except Exception:
+                            pass
             if include_face:
                 result["face_count"] = self._detect_face_count(file_path)
         except Exception:
@@ -1462,102 +1578,106 @@ class SemanticImageIndex:
         indexed = 0
         skipped = 0
         failed = 0
-        batch_writes = 0
-        # Committing every row forces fsync churn; batch for much faster bulk builds.
-        commit_every = 40
         pending_for_semantic: List[tuple[str, os.stat_result]] = []
+        
+        # 1.1 Pre-fetch existing metadata in bulk to avoid thousands of small SQL queries
+        existing_meta = {} # {canonical_path: (mtime, size, semantic_ready)}
+        canonical_map = {self._canonical_path(fp): fp for fp in file_paths if fp}
+        unique_canonical = list(canonical_map.keys())
+        
+        chunk_size = 900
+        for i in range(0, len(unique_canonical), chunk_size):
+            chunk = unique_canonical[i:i+chunk_size]
+            qs = ",".join(["?"] * len(chunk))
+            cursor = self._conn.execute(
+                f"SELECT file_path, file_mtime, file_size, semantic_ready, gps_lat, city FROM semantic_index WHERE file_path IN ({qs})",
+                chunk
+            )
+            for row in cursor.fetchall():
+                existing_meta[row[0]] = {
+                    "mtime": row[1],
+                    "size": row[2],
+                    "semantic_ready": row[3],
+                    "gps_lat": row[4],
+                    "city": row[5]
+                }
 
-        # Phase 1: metadata-first pass (fast). This makes EXIF search available early.
-        # Do not spam progress callbacks here; UI progress should focus on the slower
-        # semantic embedding phase.
-        for i, fp in enumerate(file_paths, start=1):
-            if not fp or not os.path.isfile(fp):
+        def needs_reindex_local(cp, st):
+            if cp not in existing_meta:
+                return True
+            row = existing_meta[cp]
+            if not self._mtime_matches(row["mtime"], st):
+                return True
+            if int(row["size"]) != int(st.st_size):
+                return True
+            
+            # AUTO-REPAIR: If we have GPS but no city/location metadata, re-index to try and fix it
+            if row["gps_lat"] is not None and not str(row["city"] or "").strip():
+                return True
+                
+            return False
+
+        # 1.2 Identify files that actually need metadata extraction
+        to_extract = []
+        for fp in file_paths:
+            if not fp: continue
+            canonical_fp = self._canonical_path(fp)
+            try:
+                st = os.stat(canonical_fp)
+                if needs_reindex_local(canonical_fp, st):
+                    to_extract.append((canonical_fp, st))
+                else:
+                    row = existing_meta[canonical_fp]
+                    if not row["semantic_ready"]:
+                        pending_for_semantic.append((canonical_fp, st))
+                    else:
+                        skipped += 1
+            except OSError:
                 failed += 1
                 continue
-            try:
-                canonical_fp = self._canonical_path(fp)
-                st = os.stat(canonical_fp)
-                if not self._needs_reindex(canonical_fp, st):
-                    skipped += 1
-                    continue
-                file_name = os.path.basename(canonical_fp)
-                file_signature = self._file_signature_from_stat(canonical_fp, st)
-                mtime_ns = self._mtime_ns_from_stat(st)
-                meta = self._extract_exif_brief(canonical_fp, include_face=True)
-                self._conn.execute(
-                    """
-                    INSERT INTO semantic_index (
-                        file_path, file_name, file_signature, file_size, file_mtime, mtime_ns,
-                        semantic_ready,
-                        model_name, dim, embedding,
-                        capture_time, camera_model, lens_model, iso, width, height,
-                        gps_lat, gps_lon, gps_raw, city, admin1, country, country_code, face_count, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(file_path) DO UPDATE SET
-                        file_name=excluded.file_name,
-                        file_signature=excluded.file_signature,
-                        file_size=excluded.file_size,
-                        file_mtime=excluded.file_mtime,
-                        mtime_ns=excluded.mtime_ns,
-                        semantic_ready=excluded.semantic_ready,
-                        model_name=excluded.model_name,
-                        dim=excluded.dim,
-                        embedding=excluded.embedding,
-                        capture_time=excluded.capture_time,
-                        camera_model=excluded.camera_model,
-                        lens_model=excluded.lens_model,
-                        iso=excluded.iso,
-                        width=excluded.width,
-                        height=excluded.height,
-                        gps_lat=excluded.gps_lat,
-                        gps_lon=excluded.gps_lon,
-                        gps_raw=excluded.gps_raw,
-                        city=excluded.city,
-                        admin1=excluded.admin1,
-                        country=excluded.country,
-                        country_code=excluded.country_code,
-                        face_count=excluded.face_count,
-                        updated_at=excluded.updated_at
-                    """,
-                    (
-                        canonical_fp,
-                        file_name,
-                        file_signature,
-                        int(st.st_size),
-                        float(st.st_mtime),
-                        mtime_ns,
-                        0,
-                        self.model_name,
-                        0,
-                        b"",
-                        str(meta["capture_time"]),
-                        str(meta["camera_model"]),
-                        str(meta["lens_model"]),
-                        int(meta["iso"]),
-                        int(meta["width"]),
-                        int(meta["height"]),
-                        float(meta["gps_lat"]) if meta["gps_lat"] is not None else None,
-                        float(meta["gps_lon"]) if meta["gps_lon"] is not None else None,
-                        str(meta["gps_raw"]),
-                        str(meta["city"]),
-                        str(meta["admin1"]),
-                        str(meta["country"]),
-                        str(meta["country_code"]),
-                        int(meta["face_count"]) if meta.get("face_count") is not None else None,
-                        float(time.time()),
-                    ),
-                )
-                pending_for_semantic.append((canonical_fp, st))
-                batch_writes += 1
-                if batch_writes >= commit_every:
-                    self._conn.commit()
-                    batch_writes = 0
-            except Exception:
-                failed += 1
 
-        if batch_writes:
-            self._conn.commit()
+        # 1.3 Parallel extraction of metadata
+        total_extract = len(to_extract)
         batch_writes = 0
+        commit_every = 40
+        
+        if total_extract > 0:
+            max_workers = min(8, os.cpu_count() or 4)
+            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                def extract_task(item):
+                    cp, st = item
+                    try:
+                        meta = self._extract_exif_brief(cp, include_face=True)
+                        return cp, st, meta
+                    except Exception:
+                        return cp, st, None
+
+                futures = [executor.submit(extract_task, item) for item in to_extract]
+                
+                for i, future in enumerate(concurrent.futures.as_completed(futures), start=1):
+                    cp, st, meta = future.result()
+                    if meta:
+                        try:
+                            self._upsert_metadata(cp, st, meta)
+                            pending_for_semantic.append((cp, st))
+                            batch_writes += 1
+                            # Do not increment 'indexed' here; it will be incremented in Phase 2
+                            # when the semantic embedding is actually ready.
+                            
+                            if batch_writes >= commit_every:
+                                self._conn.commit()
+                                batch_writes = 0
+                        except Exception:
+                            failed += 1
+                    else:
+                        failed += 1
+                    
+                    if progress_callback and (i <= 2 or i >= total_extract or i % 10 == 0):
+                        progress_callback(i, total_extract, "Scanning metadata...")
+
+            if batch_writes > 0:
+                self._conn.commit()
+                batch_writes = 0
 
         # Phase 2: semantic embeddings (slow). Update existing rows in-place.
         total_sem = len(pending_for_semantic)
@@ -1565,7 +1685,7 @@ class SemanticImageIndex:
             if progress_callback:
                 # Keep callback signature unchanged while reporting semantic pass progress.
                 if i <= 2 or i >= total_sem or (i % 12 == 0):
-                    progress_callback(i, total_sem, canonical_fp)
+                    progress_callback(i, total_sem, "Processing AI features...")
             try:
                 vec = self._encode_image(canonical_fp)
                 self._conn.execute(
@@ -1845,6 +1965,10 @@ class SemanticImageIndex:
         raw = self._normalize_loose_metadata_query(raw)
 
         parts = [p for p in raw.split() if p.strip()]
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.info(f"[SEARCH] Raw query: '{query_text}' -> Normalized: '{raw}'")
+        
         semantic_terms: List[str] = []
         filtered = list(rows)
 
@@ -1962,6 +2086,34 @@ class SemanticImageIndex:
             if low in self._FACE_COUNT_NEGATIVE_TOKENS:
                 matched = True
                 filtered = [r for r in filtered if int(r["face_count"] or 0) <= 0]
+                continue
+
+            if low == "has:gps":
+                matched = True
+                filtered = [r for r in filtered if r["gps_lat"] is not None]
+                continue
+
+            if low == "no:gps":
+                matched = True
+                filtered = [r for r in filtered if r["gps_lat"] is None]
+                continue
+
+            if low.startswith("gps:"):
+                matched = True
+                try:
+                    parts = low[4:].split(",")
+                    if len(parts) == 2:
+                        target_lat = float(parts[0])
+                        target_lon = float(parts[1])
+                        # Filter by images within ~50km radius (approx 0.5 degrees)
+                        filtered = [
+                            r for r in filtered 
+                            if r["gps_lat"] is not None and 
+                            abs(float(r["gps_lat"]) - target_lat) < 0.5 and 
+                            abs(float(r["gps_lon"]) - target_lon) < 0.5
+                        ]
+                except Exception:
+                    pass
                 continue
 
             m = num_pat.match(low)
@@ -2092,6 +2244,24 @@ class SemanticImageIndex:
             text,
             flags=re.I,
         )
+        
+        # Multi-word location detection pass
+        # This joins known multi-word places into single tokens to prevent splitting
+        _MULTI_WORD_LOCATIONS = [
+            "hong kong", "new york", "san francisco", "los angeles", "united states", 
+            "united kingdom", "south korea", "north korea", "saudi arabia", "south africa",
+            "kuala Lumpur", "ho chi minh", "san diego", "las vegas", "new zealand",
+            "buenos aires", "rio de janeiro", "mexico city", "cape town", "saint petersburg",
+            "san jose", "nha trang", "da nang", "koh samui", "koh phangan", "bora bora",
+            "puerto rico", "costa rica", "el salvador", "gran canaria", "san sebastian"
+        ]
+        for loc in _MULTI_WORD_LOCATIONS:
+            # Match word boundaries to avoid partial matches (e.g., "Hong Kong" vs "Hong Konger")
+            pattern = rf"\b{re.escape(loc)}\b"
+            if re.search(pattern, text, re.I):
+                # Convert to underscore-joined city:token
+                token = "_".join(loc.split())
+                text = re.sub(pattern, f"city:{token}", text, flags=re.I)
 
         fmt_hints = self._FORMAT_HINT_FILENAME_TOKENS
 
@@ -2148,7 +2318,74 @@ class SemanticImageIndex:
             text,
             flags=re.I,
         )
+
+        # GPS / Location shortcuts
+        text = re.sub(r"\b(?:with|has|include|containing|containing\s+exif)\s+gps\b", "has:gps", text, flags=re.I)
+        text = re.sub(r"\b(?:no|without|missing|missing\s+exif)\s+gps\b", "no:gps", text, flags=re.I)
+        text = re.sub(r"\bcoords?:\s*(-?\d+(?:\.\d+)?)\s*[,/ ]\s*(-?\d+(?:\.\d+)?)\b", r"gps:\1,\2", text, flags=re.I)
+        
         return text.strip()
+
+    @lru_cache(maxsize=128)
+    def _is_strictly_location_name(self, term: str) -> bool:
+        """
+        Check if a term is strictly a known country or major city name.
+        This is used to prevent semantic search 'guessing' when metadata contradicts.
+        """
+        needle = term.strip().lower()
+        if len(needle) < 3:
+            return False
+            
+        # Hardcoded set of common countries, cities, and travel destinations for quick check
+        _LOCATIONS = {
+            # Countries
+            "japan", "korea", "china", "taiwan", "usa", "uk", "canada", "france", 
+            "germany", "italy", "spain", "russia", "australia", "india", "brazil", 
+            "mexico", "thailand", "vietnam", "singapore", "malaysia", "indonesia",
+            "philippines", "switzerland", "austria", "netherlands", "greece", "turkey",
+            "egypt", "south africa", "new zealand", "united states", "united kingdom",
+            "south korea", "north korea",
+            
+            # Major Cities & Capitals
+            "tokyo", "seoul", "london", "paris", "berlin", "new york", "los angeles",
+            "san francisco", "hong kong", "beijing", "shanghai", "bangkok", "singapore",
+            "sydney", "melbourne", "toronto", "vancouver", "rome", "milan", "madrid",
+            "barcelona", "amsterdam", "vienna", "zurich", "geneva", "mumbai", "delhi",
+            "bangalore", "jakarta", "manila", "ho chi minh", "hanoi", "taipei", "macao",
+            "moscow", "istanbul", "dubai", "abu dhabi", "riyadh", "cairo", "nairobi",
+            "chicago", "boston", "seattle", "miami", "munich", "frankfurt", "lyon",
+            "prague", "budapest", "warsaw", "stockholm", "oslo", "copenhagen", "helsinki",
+            "lisbon", "athens", "dublin", "tel aviv", "mexico city", "buenos aires",
+            "sao paulo", "rio de janeiro", "santiago", "lima", "bogota",
+            
+            # Popular Travel Destinations (FB/IG Hotspots)
+            "santorini", "mykonos", "bali", "phuket", "kyoto", "osaka", "nara", "hokkaido",
+            "jeju", "busan", "boracay", "cebu", "nha trang", "da nang", "koh samui",
+            "krabi", "chiang mai", "luang prabang", "angkor wat", "siem reap", "halong bay",
+            "maldives", "fiji", "bora bora", "tahiti", "maui", "honolulu", "oahu", "kauai",
+            "ibiza", "mallorca", "tenerife", "capri", "amalfi", "positano", "venice",
+            "florence", "tuscany", "provence", "cannes", "nice", "monaco", "st moritz",
+            "zermatt", "interlaken", "hallstatt", "salzburg", "innsbruck", "banff",
+            "whistler", "yellowstone", "yosemite", "grand canyon", "sedona", "reykjavik",
+            "blue lagoon", "cappadocia", "petra", "machu picchu", "cusco", "uyuni",
+            "patagonia", "queenstown", "rotorua", "milford sound"
+        }
+        if needle in _LOCATIONS:
+            return True
+            
+        if pycountry is not None:
+            try:
+                # Check for country names
+                for c in pycountry.countries:
+                    if c.name.lower() == needle:
+                        return True
+                    if hasattr(c, 'common_name') and c.common_name.lower() == needle:
+                        return True
+                    if hasattr(c, 'official_name') and c.official_name.lower() == needle:
+                        return True
+            except Exception:
+                pass
+        return False
 
     def _auto_match_metadata_keywords(
         self, rows: Sequence[sqlite3.Row], semantic_terms: Sequence[str]
@@ -2160,6 +2397,9 @@ class SemanticImageIndex:
         filtered = list(rows)
         remaining: List[str] = []
         metadata_fields = ("city", "admin1", "country", "country_code", "camera_model", "lens_model", "file_name")
+
+        import logging
+        logger = logging.getLogger(__name__)
 
         for term in semantic_terms:
             needle = (term or "").strip().lower()
@@ -2180,12 +2420,38 @@ class SemanticImageIndex:
                 for r in filtered
                 if any(self._contains_loose(str(self._row_value(r, field) or ""), needle) for field in metadata_fields)
             ]
-            # Any metadata hit satisfies this token. Requiring the match to narrow
-            # the set breaks folders where every image shares the same camera/city.
             if matched_rows:
+                logger.info(f"[SEARCH] Metadata match for '{needle}' found in {len(matched_rows)} image(s)")
                 filtered = matched_rows
             else:
-                remaining.append(term)
+                # CONTRADICTION FILTER: If this is a location name (e.g. "Korea") but 
+                # doesn't match any image in the folder, check if any images HAVE 
+                # verified location metadata. If an image says "Japan", and we search 
+                # "Korea", we should exclude it rather than letting AI "guess".
+                if self._is_strictly_location_name(needle):
+                    new_filtered = []
+                    contradiction_count = 0
+                    for r in filtered:
+                        city = str(self._row_value(r, "city") or "").lower()
+                        country = str(self._row_value(r, "country") or "").lower()
+                        # If the image HAS location metadata, it must match the term
+                        if city or country:
+                            if self._contains_loose(city, needle) or self._contains_loose(country, needle):
+                                new_filtered.append(r)
+                            else:
+                                # Contradiction! (Has location, but it's different)
+                                contradiction_count += 1
+                                pass
+                        else:
+                            # No location metadata - keep it for semantic guessing
+                            new_filtered.append(r)
+                    
+                    if contradiction_count > 0:
+                        logger.warning(f"[SEARCH] Contradiction Filter: Excluded {contradiction_count} image(s) from '{needle}' due to conflicting GPS metadata")
+                    filtered = new_filtered
+                else:
+                    logger.debug(f"[SEARCH] No metadata match for '{needle}', passing to semantic AI")
+                    remaining.append(term)
 
         return filtered, remaining
 

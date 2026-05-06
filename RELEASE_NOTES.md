@@ -1,6 +1,20 @@
 # RAWviewer Release Notes
 
 ## 🚀 Version 2.0.0
+**Release Date: May 6, 2026**
+
+### 🌍 Enhanced Geographical Awareness
+- **Massive Location Expansion**: Added ~150+ major world cities and popular travel destinations (Bali, Santorini, Phuket, etc.) to the strict contradiction filter.
+- **Multi-word Location Intelligence**: Smart detection for places like "Hong Kong", "New York", and "United Kingdom" to prevent splitting search terms.
+- **Metadata Authority**: Hardened search pipeline ensures verified GPS data always overrides AI "guessing", eliminating location hallucinations.
+
+### 🔒 Privacy & UX
+- **Anonymized Progress Reporting**: Filenames are now hidden from the status bar during metadata scanning and AI processing (e.g., "Scanning metadata...").
+- **Search Transparency**: New detailed logging categories (`[SEARCH]`) to help power users understand how queries are parsed into metadata vs. semantic hits.
+
+---
+
+## 🚀 Version 2.0.0
 **Release Date: May 5, 2026**
 
 ### 🌟 Major Performance & Stability Breakthrough

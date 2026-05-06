@@ -1,7 +1,122 @@
 import sys
 import os
+
+# PyInstaller Splash Screen: Helper to close the boot-time splash
+def close_native_splash():
+    try:
+        import pyi_splash
+        pyi_splash.close()
+    except ImportError:
+        pass
+
+# Ultra Fast Splash: Initialize Qt and show splash BEFORE parsing the rest of the file
+try:
+    from PyQt6.QtWidgets import QApplication, QSplashScreen
+    from PyQt6.QtGui import QPixmap, QColor, QPainter, QPen
+    from PyQt6.QtCore import Qt, QEvent
+    
+    def resource_path(relative_path):
+        """ Get absolute path to resource, works for dev and for PyInstaller """
+        try:
+            # PyInstaller creates a temp folder and stores path in _MEIPASS
+            base_path = sys._MEIPASS
+        except Exception:
+            # The script is in src/, so we go one level up to the project root
+            base_path = os.path.abspath(os.path.join(
+                os.path.dirname(os.path.abspath(__file__)), ".."))
+        return os.path.join(base_path, relative_path)
+
+    class RAWApplication(QApplication):
+        """Custom QApplication to handle macOS FileOpen events"""
+        def __init__(self, argv):
+            super().__init__(argv)
+            self.viewer = None
+            self.pending_files = []
+
+        def set_viewer(self, viewer):
+            """Set the main viewer window and load any pending files"""
+            self.viewer = viewer
+            for file_path in self.pending_files:
+                self._load_file(file_path)
+            self.pending_files.clear()
+
+        def event(self, event):
+            """Intercept application-level events"""
+            if event.type() == QEvent.Type.FileOpen:
+                file_path = event.file()
+                if file_path:
+                    if self.viewer:
+                        self._load_file(file_path)
+                    else:
+                        self.pending_files.append(file_path)
+                return True
+            return super().event(event)
+
+        def _load_file(self, path):
+            """Load a file into the viewer"""
+            if os.path.isfile(path):
+                self.viewer.load_folder_images(os.path.dirname(path), start_file=os.path.basename(path))
+            elif os.path.isdir(path):
+                self.viewer.load_folder_images(path)
+
+    # We need a temporary app just to show the splash
+    _temp_app = QApplication.instance()
+    if not _temp_app:
+        _temp_app = RAWApplication(sys.argv)
+    
+    # Try to load appicon.png as splash
+    _icon_path = resource_path(os.path.join('icons', 'appicon.png'))
+    if os.path.exists(_icon_path):
+        _splash_pixmap = QPixmap(_icon_path)
+        # Scale to reasonable splash size if needed (e.g. 512x512)
+        if _splash_pixmap.width() > 512:
+            _splash_pixmap = _splash_pixmap.scaled(512, 512, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+    else:
+        # Fallback to generated if icon missing
+        _splash_pixmap = QPixmap(400, 400)
+        _splash_pixmap.fill(QColor(30, 30, 30))
+        _painter = QPainter(_splash_pixmap)
+        _painter.setPen(QPen(QColor(70, 130, 180), 4))
+        _font = _painter.font()
+        _font.setPointSize(48)
+        _font.setBold(True)
+        _painter.setFont(_font)
+        _painter.drawText(_splash_pixmap.rect(), Qt.AlignmentFlag.AlignCenter, "RAW")
+        _painter.end()
+    
+    _startup_splash = QSplashScreen(_splash_pixmap, Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.FramelessWindowHint)
+    _startup_splash.showMessage("Starting RAWviewer...", Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignCenter, Qt.GlobalColor.white)
+    _startup_splash.show()
+    _temp_app.processEvents()
+    
+    # Now that the Qt splash is visible, close the native one to handover
+    close_native_splash()
+except Exception:
+    _startup_splash = None
+
 # Force verbose orientation logs for debugging rotation issues
 os.environ["RAWVIEWER_VERBOSE_ORIENTATION_LOGS"] = "1"
+
+# Global placeholders for lazy-loaded modules
+rawpy = None
+np = None
+exifread = None
+qta = None
+SemanticImageIndex = None
+get_image_cache = None
+initialize_cache = None
+EnhancedRAWProcessor = None
+PreloadManager = None
+ThumbnailExtractor = None
+get_image_load_manager = None
+Priority = None
+is_raw_file = None
+load_pixmap_safe = None
+check_memory_cache_for_image = None
+use_libraw_consistent_preview_first = None
+ImageHistogramWidget = None
+ThumbnailLabel = None
+ExternalJustifiedGallery = None
 
 # PyInstaller + multiprocessing/process pools:
 # When using ProcessPoolExecutor in a frozen onefile app on Windows, child processes
@@ -339,90 +454,83 @@ except Exception as e:
     safe_print_err(f"  - qtawesome: ERROR - {e}", flush=True)
     qta = None  # Set to None if import fails
 
-safe_print("Third-party imports done, importing local modules...", flush=True)
+safe_print("PyQt6 imported successfully. Ready for splash screen.", flush=True)
 
-# Import enhanced performance modules
-try:
-    from image_cache import get_image_cache, initialize_cache
-    safe_print("  - image_cache: OK", flush=True)
-except Exception as e:
-    safe_print_err(f"  - image_cache: ERROR - {e}", flush=True)
-    import traceback
-    safe_print_err(traceback.format_exc(), flush=True)
-    raise
+# Heavy third-party imports moved to lazy-loading to speed up splash display
+# (Globals are initialized at the top of the file)
 
-try:
-    from enhanced_raw_processor import EnhancedRAWProcessor, PreloadManager, ThumbnailExtractor
-    safe_print("  - enhanced_raw_processor: OK", flush=True)
-except Exception as e:
-    safe_print_err(f"  - enhanced_raw_processor: ERROR - {e}", flush=True)
-    import traceback
-    safe_print_err(traceback.format_exc(), flush=True)
-    raise
+def _lazy_import_heavy_modules(splash=None):
+    """Import heavy modules while splash screen is visible."""
+    global rawpy, np, exifread, qta, SemanticImageIndex, get_image_cache, initialize_cache, \
+           EnhancedRAWProcessor, PreloadManager, ThumbnailExtractor, get_image_load_manager, \
+           Priority, is_raw_file, load_pixmap_safe, check_memory_cache_for_image, \
+           use_libraw_consistent_preview_first, ImageHistogramWidget, ThumbnailLabel, ExternalJustifiedGallery
+    
+    def _update_splash(msg):
+        if splash:
+            splash.showMessage(msg, Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignCenter, Qt.GlobalColor.white)
+            QApplication.instance().processEvents()
 
-safe_print("Enhanced modules imported, importing new unified architecture...", flush=True)
+    _update_splash("Loading RAW processor...")
+    import rawpy as _rawpy
+    rawpy = _rawpy
+    
+    _update_splash("Loading math libraries...")
+    import numpy as _np
+    np = _np
+    
+    _update_splash("Loading metadata engine...")
+    import exifread as _exifread
+    exifread = _exifread
+    
+    _update_splash("Loading iconography...")
+    import qtawesome as _qta
+    qta = _qta
+    
+    _update_splash("Loading AI search engine...")
+    try:
+        from semantic_search import SemanticImageIndex as _SemanticImageIndex
+        SemanticImageIndex = _SemanticImageIndex
+    except Exception as e:
+        safe_print(f"  - semantic_search: WARNING - {e}", flush=True)
+        
+    _update_splash("Loading core architecture...")
+    from image_cache import get_image_cache as _get_image_cache, initialize_cache as _initialize_cache
+    get_image_cache = _get_image_cache
+    initialize_cache = _initialize_cache
+    
+    from enhanced_raw_processor import EnhancedRAWProcessor as _EnhancedRAWProcessor, \
+                                       PreloadManager as _PreloadManager, \
+                                       ThumbnailExtractor as _ThumbnailExtractor
+    EnhancedRAWProcessor = _EnhancedRAWProcessor
+    PreloadManager = _PreloadManager
+    ThumbnailExtractor = _ThumbnailExtractor
+    
+    from image_load_manager import get_image_load_manager as _get_image_load_manager, \
+                                   Priority as _Priority
+    get_image_load_manager = _get_image_load_manager
+    Priority = _Priority
+    
+    from common_image_loader import is_raw_file as _is_raw_file, \
+                                    load_pixmap_safe as _load_pixmap_safe, \
+                                    check_memory_cache_for_image as _check_memory_cache_for_image
+    is_raw_file = _is_raw_file
+    load_pixmap_safe = _load_pixmap_safe
+    check_memory_cache_for_image = _check_memory_cache_for_image
+    
+    from common_image_loader import use_libraw_consistent_preview_first as _use_libraw_consistent_preview_first
+    use_libraw_consistent_preview_first = _use_libraw_consistent_preview_first
+    
+    from image_histogram import ImageHistogramWidget as _ImageHistogramWidget
+    ImageHistogramWidget = _ImageHistogramWidget
 
-# Import new unified architecture
-try:
-    from image_load_manager import get_image_load_manager, Priority
-    safe_print("  - image_load_manager: OK", flush=True)
-except Exception as e:
-    safe_print_err(f"  - image_load_manager: ERROR - {e}", flush=True)
-    import traceback
-    safe_print_err(traceback.format_exc(), flush=True)
-    raise
-
-try:
-    from common_image_loader import (
-        check_memory_cache_for_image,
-        is_raw_file,
-        load_pixmap_safe,
-        use_libraw_consistent_preview_first,
-    )
-    safe_print("  - common_image_loader: OK", flush=True)
-except Exception as e:
-    safe_print_err(f"  - common_image_loader: ERROR - {e}", flush=True)
-    import traceback
-    safe_print_err(traceback.format_exc(), flush=True)
-    raise
-
-try:
-    from image_histogram import ImageHistogramWidget
-    safe_print("  - image_histogram: OK", flush=True)
-except Exception as e:
-    safe_print_err(f"  - image_histogram: ERROR - {e}", flush=True)
-    import traceback
-    safe_print_err(traceback.format_exc(), flush=True)
-    raise
-
-try:
-    from semantic_search import SemanticImageIndex
-    safe_print("  - semantic_search: OK", flush=True)
-except Exception as e:
-    safe_print(f"  - semantic_search: WARNING - {e}", flush=True)
-    SemanticImageIndex = None
-
-try:
-    import exif_subject_area  # noqa: F401 — ensure PyInstaller ships pyexiv2 focus/subject helpers
-except Exception:
-    pass
-
-try:
-    import exifread_af  # noqa: F401 — MakerNote AF (exifread)
-except Exception:
-    pass
-
-
-# UI Modules
-try:
-    from rawviewer_ui.widgets import ThumbnailLabel
-    from rawviewer_ui.gallery_view import JustifiedGallery as ExternalJustifiedGallery
-    safe_print("  - ui modules: OK", flush=True)
-except Exception as e:
-    safe_print_err(f"  - ui modules: ERROR - {e}", flush=True)
-    raise
-
-safe_print("All imports completed successfully!", flush=True)
+    _update_splash("Loading UI components...")
+    from rawviewer_ui.widgets import ThumbnailLabel as _ThumbnailLabel
+    from rawviewer_ui.gallery_view import JustifiedGallery as _ExternalJustifiedGallery
+    ThumbnailLabel = _ThumbnailLabel
+    ExternalJustifiedGallery = _ExternalJustifiedGallery
+    
+    _update_splash("Startup complete")
 
 
 class NoisyInfoFilter(logging.Filter):
@@ -547,16 +655,6 @@ def setup_logging():
         raise  # Re-raise to let caller handle it
 
 
-def resource_path(relative_path):
-    """ Get absolute path to resource, works for dev and for PyInstaller """
-    try:
-        # PyInstaller creates a temp folder and stores path in _MEIPASS
-        base_path = sys._MEIPASS
-    except Exception:
-        # The script is in src/, so we go one level up to the project root
-        base_path = os.path.abspath(os.path.join(
-            os.path.dirname(os.path.abspath(__file__)), ".."))
-    return os.path.join(base_path, relative_path)
 
 
 class RAWProcessor(QThread):
@@ -2275,19 +2373,7 @@ class ImageLoadTask(QRunnable):
             logger.error(f"[IMAGE_LOAD_TASK] Error loading image {os.path.basename(self.file_path) if self.file_path else 'unknown'}: {e}", exc_info=True)
 
 
-# ============================================================================
-# GALLERY FUNCTIONALITY - COMMENTED OUT FOR STABLE RELEASE
-# ============================================================================
-# Gallery view functionality has been temporarily disabled to focus on
-# stable single image viewing. Uncomment when ready to resume gallery development.
-# ============================================================================
-
-class LegacyJustifiedGallery(ExternalJustifiedGallery):
-    """Deprecated alias kept for backward compatibility.
-
-    Single source of truth is `rawviewer_ui.gallery_view.JustifiedGallery`.
-    """
-    pass
+# Legacy classes removed as they now use unified imports
 
 
 class _LegacyGalleryCompatBlock:
@@ -5729,7 +5815,20 @@ class RAWImageViewer(QMainWindow):
         # Spacing: 4 gaps * 4px = 16px
         # Margins: 8px * 2 = 16px
         # Total: 1335 + 16 + 16 = 1367px, round up to 1400px for comfortable display
-        self.setGeometry(100, 100, 1400, 800)
+        # Restore window geometry from session or center on screen
+        settings = self.get_settings()
+        if settings.contains("window_geometry"):
+            self.restoreGeometry(settings.value("window_geometry"))
+            if settings.contains("window_state"):
+                self.restoreState(settings.value("window_state"))
+        else:
+            # Default size and center
+            width, height = 1400, 800
+            screen = QApplication.primaryScreen().availableGeometry()
+            x = (screen.width() - width) // 2
+            y = (screen.height() - height) // 2
+            self.setGeometry(x, y, width, height)
+            
         self.setMinimumSize(800, 600)
         self.setAcceptDrops(True)
         
@@ -6579,9 +6678,12 @@ class RAWImageViewer(QMainWindow):
             self._semantic_index_progress_base + max(0, int(i)),
         )
         total = max(done, self._semantic_index_progress_total)
-        self._set_gallery_search_status(
-            f"Semantic ready {done}/{total}"
-        )
+        
+        status = f"Semantic ready {done}/{total}"
+        if basename and (basename.startswith("Scanning") or basename.startswith("Processing")):
+            status = f"{basename} ({done}/{total})"
+            
+        self._set_gallery_search_status(status)
 
     def _on_semantic_index_done(self, token, result):
         if token != self._semantic_index_active_token:
@@ -12664,7 +12766,9 @@ class RAWImageViewer(QMainWindow):
                 return
 
             # Sort files according to user preference
-            self.image_files = self.sort_image_files(image_files)
+            # Ensure we only take the sorted file list (sort_image_files returns a tuple of (list, metadata_dict))
+            sorted_files, _ = self.sort_image_files(image_files)
+            self.image_files = sorted_files
             # Keep semantic search corpus aligned with the currently scanned folder.
             self._semantic_search_corpus_files = list(self.image_files)
             self._semantic_search_backup_files = None
@@ -14069,6 +14173,11 @@ class RAWImageViewer(QMainWindow):
 
     def save_session_state(self):
         settings = self.get_settings()
+        
+        # Always save window geometry and state
+        settings.setValue("window_geometry", self.saveGeometry())
+        settings.setValue("window_state", self.saveState())
+        
         if self.current_folder and self.current_file_index >= 0 and self.image_files:
             filename = os.path.basename(
                 self.image_files[self.current_file_index])
@@ -14318,38 +14427,7 @@ class RAWImageViewer(QMainWindow):
             super().closeEvent(event)
     
 
-class RAWApplication(QApplication):
-    """Custom QApplication to handle macOS FileOpen events"""
-    def __init__(self, argv):
-        super().__init__(argv)
-        self.viewer = None
-        self.pending_files = []
-
-    def set_viewer(self, viewer):
-        """Set the main viewer window and load any pending files"""
-        self.viewer = viewer
-        for file_path in self.pending_files:
-            self._load_file(file_path)
-        self.pending_files.clear()
-
-    def event(self, event):
-        """Intercept application-level events"""
-        if event.type() == QEvent.Type.FileOpen:
-            file_path = event.file()
-            if file_path:
-                if self.viewer:
-                    self._load_file(file_path)
-                else:
-                    self.pending_files.append(file_path)
-            return True
-        return super().event(event)
-
-    def _load_file(self, path):
-        """Load a file into the viewer"""
-        if os.path.isfile(path):
-            self.viewer.load_folder_images(os.path.dirname(path), start_file=os.path.basename(path))
-        elif os.path.isdir(path):
-            self.viewer.load_folder_images(path)
+# RAWApplication class moved to top for Ultra Fast Splash support
 
 
 def main():
@@ -14460,97 +14538,83 @@ def main():
     
     safe_print("Entering main try block...", flush=True)
     try:
-        safe_print("Creating QApplication...", flush=True)
-        # Set AppUserModelID to ensure the icon is displayed correctly on the taskbar on Windows
-        # Use is_windows variable to avoid calling platform.system() again
-        if is_windows:
-            safe_print("  [Windows] Setting AppUserModelID...", flush=True)
-            myappid = 'RAWviewer.2.0.0'
-            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
-            safe_print("  [Windows] AppUserModelID set", flush=True)
+        global _startup_splash
+        splash = _startup_splash
+        try:
+            # 1. Use pre-created Application instance
+            app = QApplication.instance()
+            if not app:
+                app = RAWApplication(sys.argv)
+            safe_print("Application instance ready", flush=True)
 
-        app = RAWApplication(sys.argv)
-        safe_print("RAWApplication created successfully", flush=True)
+            # 2. Update existing splash if present
+            if splash:
+                splash.showMessage("Initializing core components...", Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignCenter, Qt.GlobalColor.white)
+                app.processEvents()
+                safe_print("Splash screen updated", flush=True)
+            else:
+                # Fallback splash if top-level creation failed
+                icon_path_fallback = resource_path(os.path.join('icons', 'appicon.png'))
+                if os.path.exists(icon_path_fallback):
+                    splash_pixmap = QPixmap(icon_path_fallback)
+                    if splash_pixmap.width() > 512:
+                        splash_pixmap = splash_pixmap.scaled(512, 512, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+                else:
+                    splash_pixmap = QPixmap(400, 400)
+                    splash_pixmap.fill(QColor(30, 30, 30))
+                    painter = QPainter(splash_pixmap)
+                    painter.setPen(QPen(QColor(70, 130, 180), 4))
+                    font = painter.font()
+                    font.setPointSize(48)
+                    font.setBold(True)
+                    painter.setFont(font)
+                    painter.drawText(splash_pixmap.rect(), Qt.AlignmentFlag.AlignCenter, "RAW")
+                    painter.end()
+                
+                splash = QSplashScreen(splash_pixmap, Qt.WindowType.WindowStaysOnTopHint)
+                splash.show()
+                app.processEvents()
+                safe_print("Fallback splash screen displayed", flush=True)
 
-        # Set application properties
-        app.setApplicationName("RAW Image Viewer")
-        app.setApplicationVersion("2.0.0")
+            # 3. Import heavy modules while splash is visible
+            _lazy_import_heavy_modules(splash)
 
-        # macOS: force dark UI to better match our dark theme (including title bar).
-        # Using Qt's palette is more reliable than trying to hard-set NSWindow colors.
-        if sys.platform == "darwin":
-            try:
-                app.setStyle("Fusion")
-                palette = QPalette()
-                palette.setColor(QPalette.ColorRole.Window, QColor(30, 30, 30))
-                palette.setColor(QPalette.ColorRole.WindowText, QColor(224, 224, 224))
-                palette.setColor(QPalette.ColorRole.Base, QColor(18, 18, 18))
-                palette.setColor(QPalette.ColorRole.AlternateBase, QColor(42, 42, 42))
-                palette.setColor(QPalette.ColorRole.ToolTipBase, QColor(30, 30, 30))
-                palette.setColor(QPalette.ColorRole.ToolTipText, QColor(224, 224, 224))
-                palette.setColor(QPalette.ColorRole.Text, QColor(224, 224, 224))
-                palette.setColor(QPalette.ColorRole.Button, QColor(30, 30, 30))
-                palette.setColor(QPalette.ColorRole.ButtonText, QColor(224, 224, 224))
-                palette.setColor(QPalette.ColorRole.BrightText, QColor(255, 0, 0))
-                palette.setColor(QPalette.ColorRole.Highlight, QColor(90, 90, 90))
-                palette.setColor(QPalette.ColorRole.HighlightedText, QColor(255, 255, 255))
-                app.setPalette(palette)
-            except Exception:
-                pass
+        finally:
+            # 4. Continue with initialization
+            if is_windows:
+                safe_print("  [Windows] Setting AppUserModelID...", flush=True)
+                myappid = 'RAWviewer.2.0.0'
+                ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
+                safe_print("  [Windows] AppUserModelID set", flush=True)
 
-        # macOS native title bar tweaks disabled for stability.
+            # Set application properties
+            app.setApplicationName("RAW Image Viewer")
+            app.setApplicationVersion("2.0.0")
 
-        # Create and show splash screen
-        safe_print("Creating splash screen...", flush=True)
-        splash_pixmap = None
-        # Use resource_path to find icon, ensuring it works when bundled
-        splash_path = resource_path(os.path.join('icons', 'appicon.png'))
-        if os.path.exists(splash_path):
-            splash_pixmap = QPixmap(splash_path)
-            # Scale to a reasonable size for splash screen (e.g., 400x400)
-            if not splash_pixmap.isNull():
-                splash_pixmap = splash_pixmap.scaled(400, 400, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
-        else:
-            # Create a simple splash screen if icon not found
-            splash_pixmap = QPixmap(400, 400)
-            splash_pixmap.fill(QColor(173, 216, 230))  # Light blue background
-            painter = QPainter(splash_pixmap)
-            painter.setPen(QPen(QColor(70, 130, 180), 4))  # Darker blue
-            font = painter.font()
-            font.setPointSize(48)
-            font.setBold(True)
-            painter.setFont(font)
-            painter.drawText(splash_pixmap.rect(), Qt.AlignmentFlag.AlignCenter, "RAW")
-            painter.end()
-        
-        splash = QSplashScreen(splash_pixmap, Qt.WindowType.WindowStaysOnTopHint)
-        splash.show()
-        app.processEvents()  # Process events to show splash screen immediately
-        safe_print("Splash screen displayed", flush=True)
-
-        # Create and show main window
-        safe_print("Creating RAWImageViewer...", flush=True)
-        viewer = RAWImageViewer()
-        safe_print("RAWImageViewer created successfully", flush=True)
-        
-        # Connect viewer to application to handle macOS file open events
-        app.set_viewer(viewer)
-        
-        # Check for file or folder argument
-        if len(sys.argv) > 1:
-            path = sys.argv[1]
-            if os.path.isfile(path):
-                # If it's a file, load the folder containing that file
-                viewer.load_folder_images(os.path.dirname(path), start_file=os.path.basename(path))
-            elif os.path.isdir(path):
-                # If it's a folder, load the folder
-                viewer.load_folder_images(path)
-        
-        # Show main window and close splash screen
-        viewer.show()
-        # macOS native title bar tweaks disabled for stability.
-        splash.finish(viewer)  # Close splash screen when main window is ready
-        safe_print("Splash screen closed, main window displayed", flush=True)
+            # Create and show main window
+            safe_print("Creating RAWImageViewer...", flush=True)
+            viewer = RAWImageViewer()
+            safe_print("RAWImageViewer created successfully", flush=True)
+            
+            # Connect viewer to application to handle macOS file open events
+            app.set_viewer(viewer)
+            
+            # Check for file or folder argument
+            if len(sys.argv) > 1:
+                path = sys.argv[1]
+                if os.path.isfile(path):
+                    # If it's a file, load the folder containing that file
+                    viewer.load_folder_images(os.path.dirname(path), start_file=os.path.basename(path))
+                elif os.path.isdir(path):
+                    # If it's a folder, load the folder
+                    viewer.load_folder_images(path)
+            
+            # Show main window and close splash screen
+            viewer.show()
+            # macOS native title bar tweaks disabled for stability.
+            if splash:
+                splash.finish(viewer)  # Close splash screen when main window is ready
+            safe_print("Splash screen closed, main window displayed", flush=True)
 
         # Run application
         logger.info(f"[MAIN] Starting Qt event loop")
@@ -14609,6 +14673,12 @@ def main():
         
         # Try to show error dialog if possible
         try:
+            # IMPORTANT: Close the splash screen so the error dialog is visible!
+            # We use a broad check for any QSplashScreen in the app
+            for top_level in QApplication.topLevelWidgets():
+                if isinstance(top_level, QSplashScreen):
+                    top_level.close()
+
             app = QApplication.instance()
             if app is not None:
                 from PyQt6.QtWidgets import QMessageBox
