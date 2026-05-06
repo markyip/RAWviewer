@@ -103,6 +103,12 @@ tests/
 *.ARW
 *.NEF
 *.CR3
+*.JPG
+*.JPEG
+*.DNG
+*.PNG
+*.TIF
+*.TIFF
 
 # Development scratch
 scratch/
