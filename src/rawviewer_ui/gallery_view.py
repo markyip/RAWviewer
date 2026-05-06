@@ -891,7 +891,10 @@ class JustifiedGallery(QWidget):
                     w.setFixedSize(rect.size())
 
             cache_hit = False
-            scaled_key = self._scaled_cache_key(path, rect.size())
+            # Account for Device Pixel Ratio (Retina/4K)
+            dpr = self.devicePixelRatio()
+            physical_size = QSize(int(rect.width() * dpr), int(rect.height() * dpr))
+            scaled_key = self._scaled_cache_key(path, physical_size)
             cached_scaled = self._thumbnail_cache.get(scaled_key)
             if cached_scaled:
                 w.setPixmap(cached_scaled)
@@ -901,7 +904,7 @@ class JustifiedGallery(QWidget):
                 base = self._thumbnail_cache.get((path, self._thumb_base_key))
                 if base:
                     rotated_base = self._apply_visual_rotation_for_path(path, base)
-                    scaled = self._scale_crop_to_fit(rotated_base, rect.size())
+                    scaled = self._scale_crop_to_fit(rotated_base, physical_size)
                     self._thumbnail_cache.put(scaled_key, scaled)
                     w.setPixmap(scaled)
                     w.setText("")
@@ -958,12 +961,16 @@ class JustifiedGallery(QWidget):
                         max(64, int(target_size.width() * 0.75)),
                         max(64, int(target_size.height() * 0.75)),
                     )
+                # Account for Device Pixel Ratio (Retina/4K) to avoid blurry thumbnails
+                dpr = self.devicePixelRatio()
+                request_size_physical = QSize(int(request_size.width() * dpr), int(request_size.height() * dpr))
+                
                 self.load_manager.load_image(
                     path,
                     priority=priority,
                     cancel_existing=False,
                     stages={"thumbnail", "exif"},
-                    thumbnail_target_size=QSize(request_size.width(), request_size.height()),
+                    thumbnail_target_size=request_size_physical,
                     thumbnail_fit="crop",
                 )
             else:
@@ -1030,17 +1037,21 @@ class JustifiedGallery(QWidget):
 
         # Update ANY widget displaying this path that is currently visible
         indices = self._path_to_indices.get(file_path, [])
+        dpr = self.devicePixelRatio()
         for idx in indices:
             if idx in self._visible_widgets:
                 w = self._visible_widgets[idx]
-                target_size = w.size()
+                logical_size = w.size()
+                physical_size = QSize(int(logical_size.width() * dpr), int(logical_size.height() * dpr))
                 rotated = self._apply_visual_rotation_for_path(file_path, pixmap)
+                
                 # If worker already emitted a target-fitted image, avoid re-scaling here.
-                if rotated.width() == target_size.width() and rotated.height() == target_size.height():
+                if rotated.width() == physical_size.width() and rotated.height() == physical_size.height():
                     fitted = rotated
                 else:
-                    fitted = self._scale_crop_to_fit(rotated, target_size)
-                self._thumbnail_cache.put(self._scaled_cache_key(file_path, target_size), fitted)
+                    fitted = self._scale_crop_to_fit(rotated, physical_size)
+                
+                self._thumbnail_cache.put(self._scaled_cache_key(file_path, physical_size), fitted)
                 w.setPixmap(fitted)
                 w.setText("")
 
