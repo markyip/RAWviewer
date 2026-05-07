@@ -6510,13 +6510,17 @@ class RAWImageViewer(QMainWindow):
         self._gallery_search_status_full = (message or "").strip()
         old_target = getattr(self, "_search_panel_target_width", 300)
         
-        # Responsive: Hide indexing status if window is too narrow (e.g. < 1000px)
+        # Responsive: Hide indexing status if window is too narrow (e.g. < 1200px)
         # to prevent overlapping with the search bar or other menu elements.
         window_width = self.width()
-        show_label = has_msg and window_width >= 1000
+        show_label = has_msg and window_width >= 1200
         
+        # If showing label but window is somewhat narrow, use a shorter message
+        if show_label and window_width < 1400:
+            message = message.replace("Processing AI features", "AI Indexing").replace("Indexing folder", "Indexing")
+
         # One horizontal row with the rest of the bottom bar: compact input + capped status width.
-        new_target = 500 if show_label else 300
+        new_target = 500 if show_label else 250
         self._search_panel_target_width = new_target
 
         if hasattr(self, "gallery_search_status_label") and self.gallery_search_status_label is not None:
@@ -12458,8 +12462,9 @@ class RAWImageViewer(QMainWindow):
         # GALLERY FUNCTIONALITY COMMENTED OUT
         # Update gallery layout if in gallery view mode (justified layout rebuilds automatically on resize)
         # Update bottom bar responsive elements (hide/show indexing status based on width)
-        if hasattr(self, '_gallery_search_status_full') and self._gallery_search_status_full:
-            self._set_gallery_search_status(self._gallery_search_status_full, animate=False)
+        if hasattr(self, '_gallery_search_status_full'):
+            # Force update even if status is empty to handle search panel width
+            self._set_gallery_search_status(self._gallery_search_status_full or "", animate=False)
     
     def mousePressEvent(self, event):
         """Handle mouse press for window resizing"""
