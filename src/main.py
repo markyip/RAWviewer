@@ -6505,16 +6505,22 @@ class RAWImageViewer(QMainWindow):
         lab.setText(elided)
         lab.setToolTip(full if elided != full else "")
 
-    def _set_gallery_search_status(self, message: str):
+    def _set_gallery_search_status(self, message: str, animate: bool = True):
         has_msg = bool(message and str(message).strip())
         self._gallery_search_status_full = (message or "").strip()
         old_target = getattr(self, "_search_panel_target_width", 300)
+        
+        # Responsive: Hide indexing status if window is too narrow (e.g. < 1000px)
+        # to prevent overlapping with the search bar or other menu elements.
+        window_width = self.width()
+        show_label = has_msg and window_width >= 1000
+        
         # One horizontal row with the rest of the bottom bar: compact input + capped status width.
-        new_target = 500 if has_msg else 300
+        new_target = 500 if show_label else 300
         self._search_panel_target_width = new_target
 
         if hasattr(self, "gallery_search_status_label") and self.gallery_search_status_label is not None:
-            if has_msg:
+            if show_label:
                 self.gallery_search_status_label.show()
                 self._apply_gallery_search_status_elide()
             else:
@@ -6534,9 +6540,9 @@ class RAWImageViewer(QMainWindow):
             and getattr(self, "_search_panel_expanded", False)
             and not user_collapsed
         ):
-            self._set_search_panel_expanded(True, animate=True)
+            self._set_search_panel_expanded(True, animate=animate)
         elif has_msg and not user_collapsed:
-            self._set_search_panel_expanded(True)
+            self._set_search_panel_expanded(True, animate=animate)
 
     def _set_gallery_search_input_visible(self):
         if getattr(self, "view_mode", "single") != "gallery":
@@ -12451,10 +12457,9 @@ class RAWImageViewer(QMainWindow):
             self.scale_image_to_fit()
         # GALLERY FUNCTIONALITY COMMENTED OUT
         # Update gallery layout if in gallery view mode (justified layout rebuilds automatically on resize)
-        # JustifiedGallery handles its own resizeEvent, so we don't need to manually update
-        # if self.view_mode == 'gallery' and self.gallery_justified and self.gallery_justified.isVisible():
-        #     # JustifiedGallery will handle resize in its own resizeEvent
-        #     pass
+        # Update bottom bar responsive elements (hide/show indexing status based on width)
+        if hasattr(self, '_gallery_search_status_full') and self._gallery_search_status_full:
+            self._set_gallery_search_status(self._gallery_search_status_full, animate=False)
     
     def mousePressEvent(self, event):
         """Handle mouse press for window resizing"""
