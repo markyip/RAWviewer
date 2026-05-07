@@ -26,6 +26,23 @@ desktop.ini
 *.tmp
 *.temp
 
+# Image and RAW files (keep root clean)
+*.ARW
+*.NEF
+*.CR2
+*.CR3
+*.DNG
+*.ORF
+*.SRF
+*.SRW
+*.RAF
+*.GPR
+*.JPG
+*.JPEG
+*.PNG
+*.TIF
+*.TIFF
+
 # Log files
 *.log
 rawviewer_debug_*.log
@@ -69,10 +86,6 @@ models/mobileclip2_coreml/**
 models/mobileclip_onnx/
 !models/mobileclip_onnx/.gitkeep
 
-# Test RAW files
-!DSC00738.ARW
-!DSC_4526.NEF
-!IMG_0159.CR3
 
 # Distribution packages
 *.zip
@@ -100,15 +113,5 @@ icon.iconset/
 
 # Tests directory (local scripts and reports)
 tests/
-*.ARW
-*.NEF
-*.CR3
-*.JPG
-*.JPEG
-*.DNG
-*.PNG
-*.TIF
-*.TIFF
-
 # Development scratch
 scratch/
