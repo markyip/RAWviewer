@@ -1,5 +1,13 @@
 import sys
 import os
+import platform
+import ctypes
+import time
+import logging
+import traceback
+import threading
+import warnings
+from datetime import datetime
 
 # PyInstaller Splash Screen: Helper to close the boot-time splash
 def close_native_splash():
@@ -117,6 +125,12 @@ use_libraw_consistent_preview_first = None
 ImageHistogramWidget = None
 ThumbnailLabel = None
 ExternalJustifiedGallery = None
+
+# metadata_backend symbols
+exif_backend_mode = None
+exif_orientation_after_cw90 = None
+has_pyexiv2 = None
+process_file_from_path = None
 
 # PyInstaller + multiprocessing/process pools:
 # When using ProcessPoolExecutor in a frozen onefile app on Windows, child processes
@@ -249,11 +263,6 @@ safe_print("RAWviewer: Starting imports...", flush=True)
 safe_print(f"Python: {sys.version}", flush=True)
 safe_print(f"Working directory: {os.getcwd()}", flush=True)
 safe_print("=" * 80, flush=True)
-
-import logging
-import traceback
-import threading
-import warnings
 
 # Suppress noisy warnings from third-party libraries
 warnings.filterwarnings('ignore', category=UserWarning, module='exifread')
@@ -398,63 +407,8 @@ from PyQt6.QtGui import (QPixmap, QImage, QAction, QKeySequence, QShortcut, QGui
                          QTransform, QRegion, QPainterPath, QPainter, QColor, QPen, QBrush, QPalette)
 safe_print("PyQt6 imported successfully", flush=True)
 
-safe_print("Importing third-party libraries...", flush=True)
-try:
-    import rawpy
-    safe_print("  - rawpy: OK", flush=True)
-except Exception as e:
-    safe_print_err(f"  - rawpy: ERROR - {e}", flush=True)
-    raise
-
-try:
-    import numpy as np
-    safe_print("  - numpy: OK", flush=True)
-except Exception as e:
-    safe_print_err(f"  - numpy: ERROR - {e}", flush=True)
-    raise
-
-# natsort and send2trash will be imported lazily when needed
-# These modules can cause import delays or hangs, so we import them on-demand
-safe_print("  - natsort: Will be imported on demand", flush=True)
-safe_print("  - send2trash: Will be imported on demand", flush=True)
-
-try:
-    import exifread
-    safe_print("  - exifread: OK", flush=True)
-except Exception as e:
-    safe_print_err(f"  - exifread: ERROR - {e}", flush=True)
-    raise
-
-try:
-    from metadata_backend import (
-        exif_backend_mode,
-        exif_orientation_after_cw90,
-        has_pyexiv2,
-        process_file_from_path,
-    )
-
-    safe_print(
-        f"  - metadata_backend: pyexiv2={'yes' if has_pyexiv2() else 'no'}, "
-        f"RAWVIEWER_EXIF_BACKEND={exif_backend_mode()}",
-        flush=True,
-    )
-except Exception as e:
-    safe_print_err(f"  - metadata_backend: ERROR - {e}", flush=True)
-    raise
-
-from datetime import datetime
-import platform
-import ctypes
-import time
-
-try:
-    import qtawesome as qta
-    safe_print("  - qtawesome: OK", flush=True)
-except Exception as e:
-    safe_print_err(f"  - qtawesome: ERROR - {e}", flush=True)
-    qta = None  # Set to None if import fails
-
-safe_print("PyQt6 imported successfully. Ready for splash screen.", flush=True)
+# Heavy third-party imports moved to lazy-loading to speed up splash display
+# (Globals are initialized at the top of the file)
 
 # Heavy third-party imports moved to lazy-loading to speed up splash display
 # (Globals are initialized at the top of the file)
@@ -464,7 +418,8 @@ def _lazy_import_heavy_modules(splash=None):
     global rawpy, np, exifread, qta, SemanticImageIndex, get_image_cache, initialize_cache, \
            EnhancedRAWProcessor, PreloadManager, ThumbnailExtractor, get_image_load_manager, \
            Priority, is_raw_file, load_pixmap_safe, check_memory_cache_for_image, \
-           use_libraw_consistent_preview_first, ImageHistogramWidget, ThumbnailLabel, ExternalJustifiedGallery
+           use_libraw_consistent_preview_first, ImageHistogramWidget, ThumbnailLabel, ExternalJustifiedGallery, \
+           exif_backend_mode, exif_orientation_after_cw90, has_pyexiv2, process_file_from_path
     
     def _update_splash(msg):
         if splash:
@@ -484,8 +439,27 @@ def _lazy_import_heavy_modules(splash=None):
     exifread = _exifread
     
     _update_splash("Loading iconography...")
-    import qtawesome as _qta
-    qta = _qta
+    try:
+        import qtawesome as _qta
+        qta = _qta
+    except Exception:
+        qta = None
+        
+    _update_splash("Loading metadata backend...")
+    from metadata_backend import exif_backend_mode as _ebm, \
+                                    exif_orientation_after_cw90 as _eocw, \
+                                    has_pyexiv2 as _hp2, \
+                                    process_file_from_path as _pfp
+    exif_backend_mode = _ebm
+    exif_orientation_after_cw90 = _eocw
+    has_pyexiv2 = _hp2
+    process_file_from_path = _pfp
+    
+    # Log metadata backend status on the splash if possible
+    try:
+        _update_splash(f"Metadata engine: {'pyexiv2' if has_pyexiv2() else 'exifread'}")
+    except Exception:
+        pass
     
     _update_splash("Loading AI search engine...")
     try:
@@ -11535,8 +11509,10 @@ class RAWImageViewer(QMainWindow):
         sb.setValue(nval)
         return True
 
-    def _handle_app_shortcut(self, key):
+    def _handle_app_shortcut(self, event):
         """Handle application-wide shortcuts for better consistency and focus-resilience."""
+        key = event.key()
+        modifiers = event.modifiers()
         vm = getattr(self, "view_mode", "single")
         
         if key == Qt.Key.Key_Space:
@@ -11582,14 +11558,15 @@ class RAWImageViewer(QMainWindow):
             if vm == "single":
                 self.toggle_view_mode()
                 return True
-        elif key == Qt.Key.Key_H:
+        # Handle H (Histogram) separately to ensure it works even when no image is loaded
+        # but only in single view mode.
+        if key == Qt.Key.Key_H:
             if vm == "single":
                 # Toggle histogram visibility and preference
                 self._histogram_overlay_visible = not getattr(self, "_histogram_overlay_visible", True)
                 self._histogram_user_hidden = not self._histogram_overlay_visible
                 
                 if hasattr(self, "single_image_histogram"):
-                    # Only show if we actually have a pixmap, otherwise keep hidden but save preference
                     pm = getattr(self, "current_pixmap", None)
                     if pm is not None and not pm.isNull():
                         self.single_image_histogram.setVisible(self._histogram_overlay_visible)
@@ -11601,6 +11578,7 @@ class RAWImageViewer(QMainWindow):
                     c.relayout_histogram()
                 return True
                 
+                
         return False
 
     def keyPressEvent(self, event):
@@ -11608,7 +11586,7 @@ class RAWImageViewer(QMainWindow):
         vm = getattr(self, "view_mode", "single")
 
         # Try to handle common app shortcuts first
-        if self._handle_app_shortcut(key):
+        if self._handle_app_shortcut(event):
             event.accept()
             return
 

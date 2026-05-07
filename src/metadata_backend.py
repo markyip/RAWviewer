@@ -19,16 +19,23 @@ import re
 from dataclasses import dataclass
 from typing import Any, BinaryIO, Mapping
 
-_HAS_PYEXIV2 = False
+# pyexiv2 will be imported lazily within functions to avoid startup overhead
+_HAS_PYEXIV2 = None
 _pyexiv2 = None  # type: ignore
 
-try:
-    import pyexiv2 as _pyexiv2  # type: ignore
-
-    _HAS_PYEXIV2 = True
-except Exception:
-    _pyexiv2 = None
-    _HAS_PYEXIV2 = False
+def _ensure_pyexiv2():
+    global _HAS_PYEXIV2, _pyexiv2
+    if _HAS_PYEXIV2 is not None:
+        return _HAS_PYEXIV2
+    
+    try:
+        import pyexiv2 as _p
+        _pyexiv2 = _p
+        _HAS_PYEXIV2 = True
+    except Exception:
+        _pyexiv2 = None
+        _HAS_PYEXIV2 = False
+    return _HAS_PYEXIV2
 
 _BACKEND = os.environ.get("RAWVIEWER_EXIF_BACKEND", "auto").strip().lower()
 
@@ -38,7 +45,7 @@ def exif_backend_mode() -> str:
 
 
 def has_pyexiv2() -> bool:
-    return bool(_HAS_PYEXIV2 and _pyexiv2 is not None)
+    return _ensure_pyexiv2()
 
 
 def read_exif_raw_string_dict(path: str) -> dict[str, str] | None:
