@@ -370,12 +370,14 @@ def main():
         except Exception as e:
             print(f"[WARNING] Error cleaning dist directory: {e}")
     # Platform-agnostic icon
+    is_aviation = os.environ.get("RAWVIEWER_AVIATION_BUILD", "").strip().lower() in ("1", "true", "yes")
+    
     if platform.system() == 'Windows':
-        icon_file = os.path.join('icons', 'appicon.ico')
+        icon_file = os.path.join('icons', 'appicon_aviation.ico' if is_aviation else 'appicon.ico')
     elif platform.system() == 'Darwin':
-        icon_file = os.path.join('icons', 'appicon.icns')
+        icon_file = os.path.join('icons', 'appicon_aviation.icns' if is_aviation else 'appicon.icns')
     else:
-        icon_file = os.path.join('icons', 'appicon.ico')  # fallback
+        icon_file = os.path.join('icons', 'appicon_aviation.ico' if is_aviation else 'appicon.ico')  # fallback
     icon_path = os.path.abspath(icon_file)
     if not os.path.exists(icon_path):
         print(f"[WARNING] Icon file not found: {icon_path}")
