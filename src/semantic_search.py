@@ -611,7 +611,8 @@ class MobileCLIPONNXBackend:
                 repo_id=self.HUB_REPO_ID,
                 filename=remote_path,
                 local_dir=self.model_dir,
-                local_dir_use_symlinks=False
+                local_dir_use_symlinks=False,
+                disable_tqdm=True
             )
             
             # Handle nesting created by local_dir
@@ -837,7 +838,8 @@ class AviationSigLIPONNXBackend(MobileCLIPONNXBackend):
                     repo_id=self.HUB_REPO_ID,
                     filename=remote_path,
                     local_dir=self.model_dir,
-                    local_dir_use_symlinks=False
+                    local_dir_use_symlinks=False,
+                    disable_tqdm=True # Prevent crash in windowed EXE (sys.stdout is None)
                 )
                 
                 target_path = os.path.normpath(os.path.join(self.model_dir, local_name))
