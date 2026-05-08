@@ -453,6 +453,21 @@ def main():
     except ImportError:
         print("[WARNING] onnxruntime not found; specialist models may be disabled.")
 
+    # Bundling HuggingFace Hub and Tokenizers for on-demand model acquisition
+    try:
+        import huggingface_hub
+        cmd_base.extend(["--hidden-import", "huggingface_hub", "--collect-all", "huggingface_hub"])
+        print("[INFO] PyInstaller: bundling huggingface_hub with --collect-all.")
+    except ImportError:
+        print("[WARNING] huggingface_hub not found; model download will fail.")
+
+    try:
+        import tokenizers
+        cmd_base.extend(["--hidden-import", "tokenizers", "--collect-all", "tokenizers"])
+        print("[INFO] PyInstaller: bundling tokenizers with --collect-all.")
+    except ImportError:
+        print("[WARNING] tokenizers not found; specialist search will fail.")
+
     if platform.system() == "Darwin":
         cmd_base.extend([
             "--hidden-import", "objc",
@@ -468,7 +483,6 @@ def main():
             "--exclude-module", "transformers",
             "--exclude-module", "sklearn",
             "--exclude-module", "scipy",
-            "--exclude-module", "tokenizers",
             "--exclude-module", "safetensors",
         ])
     elif platform.system() == "Windows":

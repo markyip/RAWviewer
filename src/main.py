@@ -6796,9 +6796,13 @@ class RAWImageViewer(QMainWindow):
             return
         self._semantic_asset_download_in_progress = False
         self._semantic_asset_download_signals = None
-        self._set_gallery_search_status("MobileCLIP asset download failed")
+        error_msg = str(error)
+        if "Aviation" in error_msg:
+            self._set_gallery_search_status(f"Aviation model download failed: {error_msg}")
+        else:
+            self._set_gallery_search_status(f"MobileCLIP asset download failed: {error_msg}")
         self._gallery_search_user_collapsed_while_busy = False
-        self.status_bar.showMessage(f"MobileCLIP download failed: {error}", 7000)
+        self.status_bar.showMessage(f"Semantic model download failed: {error_msg}", 7000)
 
     def _on_search_bottom_clicked(self):
         if getattr(self, "view_mode", "single") != "gallery":
