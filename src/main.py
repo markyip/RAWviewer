@@ -6978,7 +6978,7 @@ class RAWImageViewer(QMainWindow):
                     semantic_query,
                     metadata_candidate_paths,
                     top_k=min(500, len(base_files)),
-                    min_score=0.20,
+                    min_score=0.15,
                 )
                 used_semantic_backend = True
             if not hits:

@@ -1880,7 +1880,7 @@ class SemanticImageIndex:
             
         return results
 
-    def _detect_aircraft_zero_shot(self, image_vec: np.ndarray, threshold: float = 0.18) -> str:
+    def _detect_aircraft_zero_shot(self, image_vec: np.ndarray, threshold: float = 0.15) -> str:
         """Identify specific aircraft models using competitive zero-shot ranking."""
         label_embs = self._get_aviation_label_embeddings()
         
@@ -1901,11 +1901,8 @@ class SemanticImageIndex:
             return ""
             
         # Minimal confidence floor to avoid tagging pure noise.
-        # SigLIP scores can be very low or negative; we use a permissive floor.
-        is_siglip = "siglip" in self.model_name
-        floor = -0.05 if is_siglip else 0.05
-        
-        if top_score > floor:
+        # SigLIP scores can be very low; we use the threshold.
+        if top_score > threshold:
             return top_label
             
         return ""
