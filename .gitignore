@@ -115,5 +115,4 @@ scratch/
 
 # Aviation Specialist AI
 aviation_model_v2/
-src/models/super_specialist.onnx
 old_semantic.py

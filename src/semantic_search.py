@@ -649,9 +649,35 @@ class MobileCLIPONNXBackend:
         if self._image_session is not None:
             return
         import onnxruntime as ort
-        # Use CPU provider for maximum compatibility, especially for small models
-        self._image_session = ort.InferenceSession(self.image_model_path, providers=["CPUExecutionProvider"])
-        self._text_session = ort.InferenceSession(self.text_model_path, providers=["CPUExecutionProvider"])
+        import logging
+        logger = logging.getLogger(__name__)
+        
+        so = ort.SessionOptions()
+        so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+        
+        # Prioritize high-performance providers
+        providers = [
+            "CUDAExecutionProvider", 
+            "TensorrtExecutionProvider", 
+            "DmlExecutionProvider", 
+            "CPUExecutionProvider"
+        ]
+        
+        try:
+            self._image_session = ort.InferenceSession(self.image_model_path, sess_options=so, providers=providers)
+            active_p = self._image_session.get_providers()
+            logger.warning(f"[SYSTEM] AI Image Session initialized with: {active_p[0] if active_p else 'Unknown'}")
+        except Exception as e:
+            logger.error(f"[SYSTEM] AI Image Session GPU init failed ({e}), falling back to CPU")
+            self._image_session = ort.InferenceSession(self.image_model_path, sess_options=so, providers=["CPUExecutionProvider"])
+            
+        try:
+            self._text_session = ort.InferenceSession(self.text_model_path, sess_options=so, providers=providers)
+            active_p = self._text_session.get_providers()
+            logger.warning(f"[SYSTEM] AI Text Session initialized with: {active_p[0] if active_p else 'Unknown'}")
+        except Exception as e:
+            logger.error(f"[SYSTEM] AI Text Session GPU init failed ({e}), falling back to CPU")
+            self._text_session = ort.InferenceSession(self.text_model_path, sess_options=so, providers=["CPUExecutionProvider"])
 
     def _ensure_tokenizer(self):
         if self._tokenizer is None:
@@ -712,12 +738,22 @@ class MilitaryAircraftClassifier:
     ]
 
     def __init__(self):
-        # Prefer the local super-specialist model we just trained
+        # 1. Check for bundled model (PyInstaller standalone EXE)
+        if hasattr(sys, '_MEIPASS'):
+            bundled_path = os.path.join(sys._MEIPASS, "models", "super_specialist.onnx")
+            if os.path.exists(bundled_path):
+                self.onnx_path = bundled_path
+                self.model_dir = os.path.dirname(bundled_path)
+                self._session = None
+                return
+
+        # 2. Check for local custom model (Development environment)
         local_custom_path = r"D:\Development\RAWviewer\src\models\super_specialist.onnx"
         if os.path.exists(local_custom_path):
             self.onnx_path = local_custom_path
             self.model_dir = os.path.dirname(local_custom_path)
         else:
+            # 3. Fallback to cache folder
             self.model_dir = os.path.expanduser("~/.rawviewer_cache/military_classifier")
             self.onnx_path = os.path.join(self.model_dir, "model.onnx")
             
@@ -779,11 +815,22 @@ class MilitaryAircraftClassifier:
             if self._session is None:
                 so = ort.SessionOptions()
                 so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-                # Support DirectML (GPU), Azure (Cloud/Optimized), or CPU
-                providers = ["DmlExecutionProvider", "AzureExecutionProvider", "CPUExecutionProvider"]
+                # Prioritize high-performance providers: CUDA (NVIDIA), TensorRT, then DirectML (Windows Generic)
+                providers = [
+                    "CUDAExecutionProvider", 
+                    "TensorrtExecutionProvider", 
+                    "DmlExecutionProvider", 
+                    "AzureExecutionProvider", 
+                    "CPUExecutionProvider"
+                ]
                 try:
                     self._session = ort.InferenceSession(self.onnx_path, sess_options=so, providers=providers)
-                except Exception:
+                    active_p = self._session.get_providers()
+                    import logging
+                    logging.getLogger(__name__).warning(f"[AVIATION AI] Specialist Session initialized with: {active_p[0] if active_p else 'Unknown'}")
+                except Exception as e:
+                    import logging
+                    logging.getLogger(__name__).error(f"[AVIATION AI] Specialist GPU init failed ({e}), falling back to CPU")
                     self._session = ort.InferenceSession(self.onnx_path, sess_options=so, providers=["CPUExecutionProvider"])
             
             # Preprocess: Faster resampling + vectorized normalization
@@ -2177,20 +2224,18 @@ class SemanticImageIndex:
             logger.warning(f"[DEBUG AI] get_pending_paths: is_aviation={is_aviation} model_name='{current_model}'")
             
             if is_aviation:
-                query = f"SELECT file_path, model_name, semantic_ready FROM semantic_index WHERE file_path IN ({qs})"
-            else:
-                query = f"SELECT file_path, model_name FROM semantic_index WHERE file_path IN ({qs}) AND semantic_ready = 1 AND model_name = ?"
-            
-            if is_aviation:
+                # In aviation mode, we also need to know if detected_aircraft was already populated.
+                query = f"SELECT file_path, model_name, semantic_ready, detected_aircraft FROM semantic_index WHERE file_path IN ({qs})"
                 cursor = self._conn.execute(query, [*batch])
-                for fp, mname, s_ready in cursor.fetchall():
+                for fp, mname, s_ready, d_air in cursor.fetchall():
                     # In aviation mode, only count as up-to-date if it's the specialist model
-                    # AND it is actually marked as ready.
-                    if mname == current_model and int(s_ready or 0) == 1:
+                    # AND it is actually marked as ready AND it has an aircraft identification.
+                    if mname == current_model and int(s_ready or 0) == 1 and str(d_air or "").strip():
                         indexed_up_to_date.add(fp)
                     else:
-                        logger.warning(f"[DEBUG AI] File '{os.path.basename(fp)}' not ready: model='{mname}' ready={s_ready} (Expected: '{current_model}' ready=1)")
+                        logger.warning(f"[DEBUG AI] File '{os.path.basename(fp)}' needs processing: model='{mname}' ready={s_ready} aircraft='{d_air}' (Expected: '{current_model}' ready=1)")
             else:
+                query = f"SELECT file_path, model_name FROM semantic_index WHERE file_path IN ({qs}) AND semantic_ready = 1 AND model_name = ?"
                 cursor = self._conn.execute(query, [*batch, current_model])
                 for (fp,) in cursor.fetchall():
                     indexed_up_to_date.add(fp)
@@ -2224,10 +2269,9 @@ class SemanticImageIndex:
             return []
 
         # 2. Bulk fetch by file_path
-        all_rows = []
+        db_rows = {} # canonical -> Row
         self._conn.row_factory = sqlite3.Row
         
-        # SQLite parameter limit is usually 999; use 500 to be safe
         chunk_size = 500
         for i in range(0, len(unique_canonical), chunk_size):
             chunk = unique_canonical[i:i+chunk_size]
@@ -2238,9 +2282,40 @@ class SemanticImageIndex:
                 WHERE model_name = ? AND file_path IN ({placeholders})
             """
             rows = self._conn.execute(query, [self.model_name, *chunk]).fetchall()
-            all_rows.extend(rows)
-            
-        return all_rows
+            for r in rows:
+                db_rows[r["file_path"]] = r
+        
+        # 3. Build final result list ensuring every requested path is represented
+        all_results = []
+        for cp in unique_canonical:
+            if cp in db_rows:
+                all_results.append(db_rows[cp])
+            else:
+                # MOCK ROW: Ensure file is visible in search even if not indexed yet
+                orig_path = canonical_to_original[cp]
+                all_results.append({
+                    "file_path": cp,
+                    "file_name": os.path.basename(orig_path),
+                    "file_signature": None,
+                    "file_size": 0,
+                    "file_mtime": 0,
+                    "semantic_ready": 0,
+                    "model_name": self.model_name,
+                    "embedding": None,
+                    "camera_model": None,
+                    "lens_model": None,
+                    "iso": 0,
+                    "width": 0,
+                    "height": 0,
+                    "gps_lat": None,
+                    "gps_lon": None,
+                    "city": None,
+                    "country": None,
+                    "face_count": 0,
+                    "detected_aircraft": None
+                })
+                
+        return all_results
 
     @staticmethod
     def _parse_capture_year(capture_time: str) -> int:

@@ -418,6 +418,14 @@ def main():
                 f'--add-data "{mo.resolve()}{add_data_sep}models/mobileclip_onnx"'
             )
             print("[INFO] Bundling MobileCLIP2 ONNX from models/mobileclip_onnx/")
+        
+        # Bundle custom Aviation Specialist
+        av_model = Path("src/models/super_specialist.onnx")
+        if av_model.exists():
+            add_data_args.append(
+                f'--add-data "{av_model.resolve()}{add_data_sep}models"'
+            )
+            print("[INFO] Bundling Custom Aviation Specialist ONNX")
     add_data_arg_str = " ".join(add_data_args)
 
     src_path = os.path.abspath('src')
