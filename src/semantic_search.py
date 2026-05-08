@@ -610,7 +610,7 @@ class MobileCLIPONNXBackend:
         }
         
         for remote_path, local_name in files_to_download.items():
-            _progress(f"Fetching {local_name}...")
+            _progress(f"Downloading AI model component: {local_name}...")
             hf_hub_download(
                 repo_id=self.HUB_REPO_ID,
                 filename=remote_path,
@@ -836,7 +836,7 @@ class AviationSigLIPONNXBackend(MobileCLIPONNXBackend):
         
         try:
             for remote_path, local_name in files_to_download.items():
-                _progress(f"Downloading SigLIP model component: {local_name}...")
+                _progress(f"Downloading AI model component: {local_name}...")
                 logger.info(f"[AVIATION AI] Downloading {remote_path} to {local_name}")
                 
                 actual_path = hf_hub_download(
