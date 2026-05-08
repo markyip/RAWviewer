@@ -599,6 +599,10 @@ class MobileCLIPONNXBackend:
         except ImportError:
             raise RuntimeError("MobileCLIP download requires 'huggingface_hub' (pip install huggingface_hub)")
 
+        from huggingface_hub import hf_hub_download
+        from huggingface_hub.utils import disable_progress_bars
+        disable_progress_bars()
+
         # Mapping of remote path in HF repo to local filename expected by RAWviewer
         files_to_download = {
             "onnx/s0/vision_model.onnx": self.IMAGE_MODEL_FILE,
@@ -611,8 +615,7 @@ class MobileCLIPONNXBackend:
                 repo_id=self.HUB_REPO_ID,
                 filename=remote_path,
                 local_dir=self.model_dir,
-                local_dir_use_symlinks=False,
-                disable_tqdm=True
+                local_dir_use_symlinks=False
             )
             
             # Handle nesting created by local_dir
@@ -826,6 +829,8 @@ class AviationSigLIPONNXBackend(MobileCLIPONNXBackend):
         }
         
         from huggingface_hub import hf_hub_download
+        from huggingface_hub.utils import disable_progress_bars
+        disable_progress_bars()
         import logging
         logger = logging.getLogger(__name__)
         
@@ -838,8 +843,7 @@ class AviationSigLIPONNXBackend(MobileCLIPONNXBackend):
                     repo_id=self.HUB_REPO_ID,
                     filename=remote_path,
                     local_dir=self.model_dir,
-                    local_dir_use_symlinks=False,
-                    disable_tqdm=True # Prevent crash in windowed EXE (sys.stdout is None)
+                    local_dir_use_symlinks=False
                 )
                 
                 target_path = os.path.normpath(os.path.join(self.model_dir, local_name))
