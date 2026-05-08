@@ -442,7 +442,7 @@ class MobileCLIPCoreMLBackend:
         feature = None
         if in_type == CoreML.MLFeatureTypeMultiArray:
             rgb = np.asarray(im.convert("RGB"), dtype=np.float32) / 255.0
-            nchw = np.transpose(rgb, (2, 0, 1))[np.newaxis, ...]
+            nchw = np.transpose(rgb, (2, 0, 1))[np.newaxis, ...].astype(np.float32)
             multi = self._float32_multi_array_nchw(nchw)
             feature = CoreML.MLFeatureValue.featureValueWithMultiArray_(multi)
         elif in_type == CoreML.MLFeatureTypeImage:
@@ -668,7 +668,7 @@ class MobileCLIPONNXBackend:
         # MobileCLIP2-S0 typically uses 256x256
         im = _load_index_source_image(file_path, max_size=1024).resize((256, 256), Image.Resampling.BICUBIC)
         rgb = np.asarray(im.convert("RGB"), dtype=np.float32) / 255.0
-        nchw = np.transpose(rgb, (2, 0, 1))[np.newaxis, ...]
+        nchw = np.transpose(rgb, (2, 0, 1))[np.newaxis, ...].astype(np.float32)
         
         inputs = {self._image_session.get_inputs()[0].name: nchw}
         outputs = self._image_session.run(None, inputs)
@@ -762,10 +762,10 @@ class MilitaryAircraftClassifier:
             im = _load_index_source_image(file_path, max_size=1024).resize((224, 224), Image.Resampling.BICUBIC)
             rgb = np.asarray(im.convert("RGB"), dtype=np.float32) / 255.0
             # Normalize (ViT standard)
-            mean = np.array([0.5, 0.5, 0.5])
-            std = np.array([0.5, 0.5, 0.5])
+            mean = np.array([0.5, 0.5, 0.5], dtype=np.float32)
+            std = np.array([0.5, 0.5, 0.5], dtype=np.float32)
             rgb = (rgb - mean) / std
-            nchw = np.transpose(rgb, (2, 0, 1))[np.newaxis, ...]
+            nchw = np.transpose(rgb, (2, 0, 1))[np.newaxis, ...].astype(np.float32)
             
             # Run inference
             inputs = {self._session.get_inputs()[0].name: nchw}
@@ -914,7 +914,7 @@ class AviationSigLIPONNXBackend(MobileCLIPONNXBackend):
         std = np.array([0.5, 0.5, 0.5], dtype=np.float32)
         rgb = (rgb - mean) / std
         
-        nchw = np.transpose(rgb, (2, 0, 1))[np.newaxis, ...]
+        nchw = np.transpose(rgb, (2, 0, 1))[np.newaxis, ...].astype(np.float32)
         
         inputs = {self._image_session.get_inputs()[0].name: nchw}
         outputs = self._image_session.run(["pooler_output"], inputs)
