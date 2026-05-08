@@ -4310,7 +4310,9 @@ class MobileCLIPDownloadDialog(QDialog):
         main_layout.setContentsMargins(24, 22, 24, 22)
         main_layout.setSpacing(12)
 
-        title_label = QLabel("Enable Semantic Search")
+        is_aviation = os.environ.get("RAWVIEWER_AVIATION_MODE") == "1"
+        title_text = "Enable Aviation Specialist Search" if is_aviation else "Enable Semantic Search"
+        title_label = QLabel(title_text)
         title_label.setStyleSheet("""
             QLabel {
                 color: #E0E0E0;
@@ -4321,10 +4323,12 @@ class MobileCLIPDownloadDialog(QDialog):
         """)
         main_layout.addWidget(title_label)
 
-        message_label = QLabel(
-            "RAWviewer can download the MobileCLIP Core ML assets now. "
-            "This is a one-time download used for local, offline semantic indexing."
+        msg_text = (
+            "RAWviewer can download the Aviation Specialist AI models now. " if is_aviation else
+            "RAWviewer can download the MobileCLIP AI models now. "
         )
+        msg_text += "This is a one-time download used for local, offline identification and indexing."
+        message_label = QLabel(msg_text)
         message_label.setWordWrap(True)
         message_label.setStyleSheet("""
             QLabel {
@@ -6594,15 +6598,29 @@ class RAWImageViewer(QMainWindow):
         return coverage
 
     def _start_semantic_index_build_background(self, corpus_files, coverage=None):
+        import logging
+        logger = logging.getLogger(__name__)
         if self._semantic_indexing_in_progress:
             return
         index = self._get_semantic_index()
+        # AUTO-DOWNLOAD: If backend is missing, start download automatically.
+        if not index.semantic_backend_available():
+            backend_error = index.semantic_backend_error()
+            is_aviation_model = getattr(index.backend, "MODEL_ID", "") == "aviation-specialist-siglip-p16-512"
+            if (is_aviation_model or "Missing SigLIP" in backend_error or "Missing Aviation" in backend_error) and index.mobileclip_supports_hub_download():
+                logger.warning("[SYSTEM] Aviation Specialist model missing; starting automatic download...")
+                self._start_semantic_asset_download_background(corpus_files)
+                return
         if coverage is None:
             coverage = index.get_index_coverage(corpus_files)
         pending_files = index.get_pending_paths(corpus_files)
+        logger.warning(f"[DEBUG AI] Indexing requested for {len(corpus_files)} files. Pending: {len(pending_files)}")
+        
         total_files = int(coverage.get("total", len(corpus_files)))
         indexed_files = max(0, int(coverage.get("indexed", 0)))
+        
         if not pending_files:
+            logger.warning("[DEBUG AI] No pending files found. Index is considered UP TO DATE.")
             self._set_gallery_search_input_visible()
             if (
                 getattr(self, "view_mode", "single") == "gallery"
@@ -6821,7 +6839,8 @@ class RAWImageViewer(QMainWindow):
             ready = int(coverage.get("ready", 0)) == 1
             if not backend_available:
                 backend_error = index.semantic_backend_error()
-                if "Missing MobileCLIP" in backend_error and index.mobileclip_supports_hub_download():
+                is_aviation_model = getattr(index.backend, "MODEL_ID", "") == "aviation-specialist-siglip-p16-512"
+                if (is_aviation_model or "Missing MobileCLIP" in backend_error or "Missing Aviation" in backend_error or "Missing SigLIP" in backend_error) and index.mobileclip_supports_hub_download():
                     if not getattr(self, "_mobileclip_download_dismissed_this_session", False):
                         dialog = MobileCLIPDownloadDialog(self)
                         if dialog.exec() == QDialog.DialogCode.Accepted:
@@ -7195,6 +7214,26 @@ class RAWImageViewer(QMainWindow):
         if self.current_file_path:
             load_start = time.time()
             logger.info(f"[VIEW_MODE] Step 4: Starting image reload: {os.path.basename(self.current_file_path)}")
+            
+            # FORCE LOG: Checking AI Metadata Status
+            try:
+                logger.warning(f"[DEBUG AI] INSPECTING: {os.path.basename(self.current_file_path)}")
+                idx = self._get_semantic_index()
+                # Check if DB file exists
+                if not os.path.exists(idx.db_path):
+                    logger.warning(f"[DEBUG AI] DATABASE FILE MISSING at {idx.db_path}")
+                
+                rows = idx._fetch_rows_for_paths([self.current_file_path])
+                if rows:
+                    r = rows[0]
+                    aircraft = str(idx._row_value(r, "detected_aircraft", "EMPTY"))
+                    ready = str(idx._row_value(r, "semantic_ready", "0"))
+                    model = str(idx._row_value(r, "model_name", "UNKNOWN"))
+                    logger.warning(f"[DEBUG AI] DATABASE MATCH: READY={ready} | MODEL={model} | AIRCRAFT='{aircraft}'")
+                else:
+                    logger.warning(f"[DEBUG AI] STATUS: NOT IN DATABASE (needs indexing)")
+            except Exception as e:
+                logger.warning(f"[DEBUG AI] CRITICAL ERROR during inspection: {e}")
             
             # Try to use cached pixmap from gallery or image cache for instant display
             cached_pixmap = None
@@ -13184,6 +13223,13 @@ class RAWImageViewer(QMainWindow):
         # Try to get EXIF data from cache first (faster) - matching reference version
         exif_info = []
         cached_exif = self.image_cache.get_exif(self.current_file_path)
+        
+        # Display AI-detected aircraft model if available in cache
+        if cached_exif:
+            aircraft = cached_exif.get('detected_aircraft')
+            if aircraft:
+                exif_info.append(f"AI: {aircraft}")
+                
         import logging
         import time
         logger = logging.getLogger(__name__)
@@ -13928,6 +13974,13 @@ class RAWImageViewer(QMainWindow):
             )
             self._hide_all_loading_indicators()
             self.save_session_state()
+            
+            # Start semantic indexing in the background automatically
+            if getattr(self, "_semantic_search_corpus_files", []):
+                try:
+                    self._start_semantic_index_build_background(self._semantic_search_corpus_files)
+                except Exception as e:
+                    logger.warning(f"[SYSTEM] Could not start automatic indexing: {e}")
         except Exception as e:
             logger.error(f"Error updating gallery view for folder {folder_path}: {e}", exc_info=True)
             self._hide_all_loading_indicators()
@@ -13941,6 +13994,14 @@ class RAWImageViewer(QMainWindow):
         self._reset_semantic_search_for_new_folder()
 
         try:
+            # SMART DETECTION: Enable Aviation Mode if the folder path suggests it
+            folder_lower = str(folder_path or "").lower()
+            if "mach loop" in folder_lower or "aviation" in folder_lower:
+                if os.environ.get("RAWVIEWER_AVIATION_MODE") != "1":
+                    os.environ["RAWVIEWER_AVIATION_MODE"] = "1"
+                    logger.warning(f"[SYSTEM] >>> SMART-DETECTED AVIATION FOLDER: Enabling Specialist AI <<<")
+                    # Force reset the semantic index to pick up the new backend
+                    self._semantic_index = None
             if not folder_path:
                 self.show_error("Invalid Folder", "No folder path provided")
                 self._hide_all_loading_indicators()
@@ -14093,6 +14154,7 @@ class RAWImageViewer(QMainWindow):
                             f"Unexpected error loading folder:\n{str(e)}",
                         )
 
+            # Start background load...
             worker = _FolderLoadWorker(token, folder_path, extensions, newest_first, start_file, start_view, signals)
             self._active_folder_load_worker = worker
             QThreadPool.globalInstance().start(worker)
@@ -14520,6 +14582,21 @@ def main():
         
         # Note: Setting up structured exception handling in Python is complex
         # We'll rely on Python's exception handling and add more defensive checks
+        import argparse
+        parser = argparse.ArgumentParser(description="RAWviewer")
+        parser.add_argument("folder", nargs="?", help="Folder to open")
+        parser.add_argument("--aviation", action="store_true", help="Force Aviation Mode (Specialist Military AI)")
+        parser.add_argument("--debug", action="store_true", help="Enable debug logging")
+        args = parser.parse_args()
+
+        if args.aviation or (args.folder and ("Mach Loop" in args.folder or "Aviation" in args.folder)):
+            os.environ["RAWVIEWER_AVIATION_MODE"] = "1"
+            logger.warning("[SYSTEM] >>> FORCING AVIATION MODE (via flag or smart-detection) <<<")
+        
+        if args.debug:
+            logger.setLevel(logging.DEBUG)
+            logger.warning("[SYSTEM] Debug logging enabled")
+
         safe_print("  [Windows] Exception handler setup complete", flush=True)
     else:
         safe_print("  [Non-Windows] Skipping Windows exception handler", flush=True)

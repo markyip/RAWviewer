@@ -23,6 +23,13 @@ from typing import Any, BinaryIO, Mapping
 _HAS_PYEXIV2 = None
 _pyexiv2 = None  # type: ignore
 
+from raw_file_extensions import RAW_FILE_EXTENSIONS
+
+def is_raw_file(file_path: str) -> bool:
+    """Check if file is a RAW format (case-insensitive extension check)."""
+    ext = os.path.splitext(file_path)[1].lower().lstrip(".")
+    return ext in RAW_FILE_EXTENSIONS
+
 def _ensure_pyexiv2():
     global _HAS_PYEXIV2, _pyexiv2
     if _HAS_PYEXIV2 is not None:

@@ -199,7 +199,12 @@ def install_dependencies():
         'qtawesome', # Required for icons in main.py
         'pyqtgraph',  # Optional/Future dependency included in requirements.txt
         'reverse-geocoder',  # Offline city/country lookup from GPS EXIF
-        'pycountry',  # ISO country code -> full country name
+        'pycountry',         # ISO country code -> full country name
+        'onnxruntime',       # Cross-platform model execution (Aviation Specialist)
+        'sentencepiece',     # SigLIP tokenizer dependency
+        'protobuf',          # ONNX/Transformers dependency
+        'torchvision',       # Optimized image processing for ViT
+        'onnxscript',        # Required for ONNX model export
     ]
 
     if system_name == "Windows":
@@ -436,6 +441,14 @@ def main():
             "[WARNING] pyexiv2 not importable; build continues without pyexiv2 bundling. "
             "Install pyexiv2 before packaging for EXIF read/write in the app."
         )
+    
+    # Bundling ONNX Runtime for lightweight specialist models (cross-platform)
+    try:
+        import onnxruntime
+        cmd_base.extend(["--hidden-import", "onnxruntime", "--collect-all", "onnxruntime"])
+        print("[INFO] PyInstaller: bundling onnxruntime with --collect-all.")
+    except ImportError:
+        print("[WARNING] onnxruntime not found; specialist models may be disabled.")
 
     if platform.system() == "Darwin":
         cmd_base.extend([
@@ -461,13 +474,6 @@ def main():
             "--hidden-import", "pythoncom",
             "--hidden-import", "pywintypes",
         ])
-        # Bundling ONNX Runtime for lightweight semantic search
-        try:
-            import onnxruntime
-            cmd_base.extend(["--hidden-import", "onnxruntime", "--collect-all", "onnxruntime"])
-            print("[INFO] PyInstaller: bundling onnxruntime with --collect-all.")
-        except ImportError:
-            print("[WARNING] onnxruntime not found; semantic search may be disabled on Windows.")
             
         # Exclude heavy libraries on Windows to keep the build "Light"
         cmd_base.extend([

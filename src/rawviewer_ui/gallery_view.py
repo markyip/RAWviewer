@@ -915,6 +915,13 @@ class JustifiedGallery(QWidget):
                     w.setText("")
 
             w.show()
+            
+            # Update Tooltip with AI detection info if available
+            meta = self._metadata_cache.get(path)
+            if meta and isinstance(meta, dict) and meta.get('detected_aircraft'):
+                w.setToolTip(f"AI: {meta.get('detected_aircraft')}")
+            else:
+                w.setToolTip(os.path.basename(path))
             if not cache_hit and path not in self._active_tasks:
                 load_tasks.append((path, Priority.CURRENT, rect.size()))
 

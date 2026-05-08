@@ -21,3 +21,7 @@ pyobjc-framework-Quartz>=12.0; sys_platform == "darwin"
 pyobjc-framework-Vision>=12.0; sys_platform == "darwin"
 pyobjc-framework-Cocoa>=10.0; sys_platform == "darwin"
 pywin32>=306; sys_platform == "win32"
+sentencepiece>=0.2.1
+protobuf>=4.25.0
+torchvision>=0.26.0
+onnxscript>=0.7.0

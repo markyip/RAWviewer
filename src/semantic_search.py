@@ -8,6 +8,8 @@ MVP goals:
 """
 
 from __future__ import annotations
+import logging
+logger = logging.getLogger(__name__)
 
 import os
 import re
@@ -116,6 +118,7 @@ class SearchHit:
     country: str = ""
     country_code: str = ""
     face_count: int = 0
+    detected_aircraft: str = ""
 
 
 class MobileCLIPCoreMLBackend:
@@ -676,25 +679,252 @@ class MobileCLIPONNXBackend:
         return arr
 
 
+class MilitaryAircraftClassifier:
+    """Specialist ViT classifier for precise military aircraft identification."""
+    HUB_REPO_ID = "dima806/military_aircraft_image_detection"
+    MODEL_ID = "military-aircraft-vit-224"
+    LABELS = [
+        "A10", "A400M", "AG600", "AV8B", "B1", "B2", "B52", "Be200", "C130", "C17", 
+        "C2", "C5", "E2", "E7", "EF2000", "F117", "F14", "F15", "F16", "F18", 
+        "F22", "F35", "F4", "H6", "J10", "J20", "JAS39", "JF17", "KC135", "MQ9", 
+        "Mig31", "Mirage2000", "P3", "RQ4", "Rafale", "SR71", "Su24", "Su25", 
+        "Su34", "Su57", "Tornado", "Tu160", "Tu22M", "Tu95", "U2", "US2", "V22", 
+        "Vulcan", "XB70", "YF23"
+    ]
+
+    def __init__(self):
+        self.model_dir = os.path.expanduser("~/.rawviewer_cache/military_classifier")
+        self.onnx_path = os.path.join(self.model_dir, "model.onnx")
+        self._session = None
+    def _ensure_model(self, progress_callback=None):
+        if os.path.exists(self.onnx_path):
+            return
+        
+        os.makedirs(self.model_dir, exist_ok=True)
+        
+        # Strategy: Try to download pre-exported ONNX if possible, 
+        # or export it locally if torch is available (dev environment).
+        try:
+            from huggingface_hub import hf_hub_download
+            if progress_callback:
+                progress_callback("Downloading Specialist AI (ONNX Optimized)...")
+            
+            # Check if there's a known ONNX export we can grab
+            # If not, we'll fall back to local export
+            hf_hub_download(
+                repo_id=self.HUB_REPO_ID,
+                filename="model.onnx",
+                local_dir=self.model_dir,
+                local_dir_use_symlinks=False
+            )
+            if os.path.exists(self.onnx_path):
+                return
+        except Exception:
+            # If download fails, we try local export (only works in dev env with torch)
+            pass
+
+        if progress_callback:
+            progress_callback("Exporting Military Specialist AI (Local)...")
+
+        try:
+            import torch
+            from transformers import ViTForImageClassification
+            
+            model = ViTForImageClassification.from_pretrained(self.HUB_REPO_ID)
+            model.eval()
+            
+            dummy_input = torch.randn(1, 3, 224, 224)
+            torch.onnx.export(
+                model, dummy_input, self.onnx_path,
+                opset_version=14, input_names=["pixel_values"], output_names=["logits"],
+                dynamic_axes={"pixel_values": {0: "batch_size"}, "logits": {0: "batch_size"}}
+            )
+        except ImportError:
+            raise RuntimeError(
+                "Military Specialist model (ONNX) is missing and cannot be exported "
+                "because 'torch' is not installed. Please download the model manually "
+                "or run in a development environment."
+            )
+
+
+    def classify(self, file_path: str, progress_callback=None) -> str:
+        try:
+            self._ensure_model(progress_callback)
+            import onnxruntime as ort
+            if self._session is None:
+                self._session = ort.InferenceSession(self.onnx_path, providers=["CPUExecutionProvider"])
+            
+            # Preprocess
+            im = _load_index_source_image(file_path, max_size=1024).resize((224, 224), Image.Resampling.BICUBIC)
+            rgb = np.asarray(im.convert("RGB"), dtype=np.float32) / 255.0
+            # Normalize (ViT standard)
+            mean = np.array([0.5, 0.5, 0.5])
+            std = np.array([0.5, 0.5, 0.5])
+            rgb = (rgb - mean) / std
+            nchw = np.transpose(rgb, (2, 0, 1))[np.newaxis, ...]
+            
+            # Run inference
+            inputs = {self._session.get_inputs()[0].name: nchw}
+            logits = self._session.run(None, inputs)[0]
+            
+            # Argmax
+            idx = int(np.argmax(logits))
+            if idx < len(self.LABELS):
+                label = self.LABELS[idx]
+                import logging
+                logging.getLogger(__name__).info(f"[AVIATION AI] {os.path.basename(file_path)} identified as {label}")
+                return label
+        except Exception as e:
+            import logging
+            import traceback
+            logger = logging.getLogger(__name__)
+            logger.error(f"[AVIATION AI] Error classifying {file_path}: {e}")
+            logger.error(traceback.format_exc())
+            pass
+        return ""
+
+
+class AviationSigLIPONNXBackend(MobileCLIPONNXBackend):
+    """
+    State-of-the-art SigLIP-Base (Patch 16) with 512x512 resolution.
+    Significantly higher accuracy for fine-grained aircraft identification.
+    """
+    MODEL_ID = "aviation-specialist-siglip-p16-512"
+    HUB_REPO_ID = "Xenova/siglip-base-patch16-512"
+    
+    # SigLIP specific ONNX paths in Xenova repo
+    IMAGE_MODEL_FILE = "vision_model.onnx"
+    TEXT_MODEL_FILE = "text_model.onnx"
+
+    def __init__(self):
+        super().__init__()
+        self._tokenizer = None
+
+    @staticmethod
+    def _candidate_model_dirs() -> List[str]:
+        dirs: List[str] = []
+        dirs.append(os.path.expanduser("~/.rawviewer_cache/aviation-specialist-siglip-p16-512"))
+        return dirs
+
+    def download_assets(self, progress_callback: Optional[Callable[[str], None]] = None):
+        def _progress(message: str) -> None:
+            if progress_callback:
+                progress_callback(message)
+
+        os.makedirs(self.model_dir, exist_ok=True)
+        
+        # Files needed for ONNX and Tokenizer
+        files_to_download = {
+            "onnx/vision_model.onnx": self.IMAGE_MODEL_FILE,
+            "onnx/text_model.onnx": self.TEXT_MODEL_FILE,
+            "tokenizer.json": "tokenizer.json",
+            "tokenizer_config.json": "tokenizer_config.json",
+            "spiece.model": "spiece.model",
+            "special_tokens_map.json": "special_tokens_map.json",
+            "config.json": "config.json"
+        }
+        
+        from huggingface_hub import hf_hub_download
+        
+        for remote_path, local_name in files_to_download.items():
+            _progress(f"Downloading SigLIP model component: {local_name}...")
+            actual_path = hf_hub_download(
+                repo_id=self.HUB_REPO_ID,
+                filename=remote_path,
+                local_dir=self.model_dir,
+                local_dir_use_symlinks=False
+            )
+            
+            target_path = os.path.normpath(os.path.join(self.model_dir, local_name))
+            actual_norm = os.path.normpath(actual_path)
+            
+            if actual_norm != target_path:
+                if os.path.exists(target_path):
+                    os.remove(target_path)
+                os.rename(actual_norm, target_path)
+
+        # Cleanup if Xenova's onnx/ structure was partially created
+        onnx_dir = os.path.join(self.model_dir, "onnx")
+        if os.path.exists(onnx_dir):
+            import shutil
+            shutil.rmtree(onnx_dir, ignore_errors=True)
+            
+        return self.model_dir
+
+    def _ensure_sessions(self):
+        if self._image_session is not None:
+            return
+
+        import onnxruntime as ort
+        
+        img_path = os.path.join(self.model_dir, self.IMAGE_MODEL_FILE)
+        txt_path = os.path.join(self.model_dir, self.TEXT_MODEL_FILE)
+        
+        if not os.path.exists(img_path) or not os.path.exists(txt_path):
+            self.download_assets()
+
+        self._image_session = ort.InferenceSession(img_path, providers=['CPUExecutionProvider'])
+        self._text_session = ort.InferenceSession(txt_path, providers=['CPUExecutionProvider'])
+        
+        # SigLIP uses a different tokenizer
+        from transformers import AutoTokenizer
+        self._tokenizer = AutoTokenizer.from_pretrained(self.model_dir, local_files_only=True)
+
+    def encode_image(self, file_path: str) -> np.ndarray:
+        self._ensure_sessions()
+        # SigLIP-512 uses 512x512
+        im = _load_index_source_image(file_path, max_size=1024).resize((512, 512), Image.Resampling.BICUBIC)
+        rgb = np.asarray(im.convert("RGB"), dtype=np.float32) / 255.0
+        
+        # SigLIP normalization: (x - 0.5) / 0.5
+        mean = np.array([0.5, 0.5, 0.5], dtype=np.float32)
+        std = np.array([0.5, 0.5, 0.5], dtype=np.float32)
+        rgb = (rgb - mean) / std
+        
+        nchw = np.transpose(rgb, (2, 0, 1))[np.newaxis, ...]
+        
+        inputs = {self._image_session.get_inputs()[0].name: nchw}
+        outputs = self._image_session.run(["pooler_output"], inputs)
+        return self._normalize(outputs[0])
+
+    def encode_text(self, text: str) -> np.ndarray:
+        self._ensure_sessions()
+        
+        # SigLIP tokenization
+        tokens = self._tokenizer(
+            text, 
+            padding="max_length", 
+            max_length=64, 
+            truncation=True, 
+            return_tensors="np"
+        )
+        
+        inputs = {
+            "input_ids": tokens["input_ids"].astype(np.int64)
+        }
+        
+        outputs = self._text_session.run(["pooler_output"], inputs)
+        # SigLIP text model in ONNX returns pre-pooled embedding in pooler_output
+        return self._normalize(outputs[0])
+
+
 def resolve_mobileclip_backend() -> Any:
-    """Prefer platform-native; then ONNX; then Core ML fallback."""
-    if sys.platform == "darwin":
-        # Prefer Core ML on macOS (single shipped class: MobileCLIPCoreMLBackend / S2)
-        for cls in (MobileCLIPCoreMLBackend,):
-            inst = cls()
-            if inst.available():
-                return inst
-        # Try ONNX on macOS too if Core ML fails
-        inst = MobileCLIPONNXBackend()
-        if inst.available():
-            return inst
-        return MobileCLIPCoreMLBackend()
-    else:
-        # Windows/Linux prefer ONNX
-        inst = MobileCLIPONNXBackend()
-        if inst.available():
-            return inst
-        return inst # Return anyway for download_assets availability
+    """Detects and returns the appropriate ONNX semantic backend."""
+    import logging
+    logger = logging.getLogger(__name__)
+    
+    use_aviation = os.environ.get("RAWVIEWER_AVIATION_MODE") == "1"
+    
+    if use_aviation:
+        logger.warning("[SYSTEM] >>> AVIATION MODE ENABLED <<< (Using SigLIP-512 + Military Specialist)")
+        return AviationSigLIPONNXBackend()
+    
+    logger.info("[SYSTEM] Aviation Mode disabled. (Using Standard MobileCLIP-S0)")
+    # Windows/Linux prefer ONNX for standard mode
+    inst = MobileCLIPONNXBackend()
+    if inst.available():
+        return inst
+    return inst
 
 
 def _bytes_to_unicode() -> Dict[int, str]:
@@ -951,6 +1181,8 @@ class SemanticImageIndex:
             self._conn.execute("ALTER TABLE semantic_index ADD COLUMN country_code TEXT")
         if "face_count" not in cols:
             self._conn.execute("ALTER TABLE semantic_index ADD COLUMN face_count INTEGER")
+        if "detected_aircraft" not in cols:
+            self._conn.execute("ALTER TABLE semantic_index ADD COLUMN detected_aircraft TEXT")
         self._conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_semantic_signature_model ON semantic_index(file_signature, model_name)"
         )
@@ -973,10 +1205,10 @@ class SemanticImageIndex:
         self._model = SentenceTransformer(self.model_name)
         return self._model
 
-    @staticmethod
-    def semantic_backend_available() -> bool:
-        if resolve_mobileclip_backend().available():
-            return True
+    def semantic_backend_available(self) -> bool:
+        if self.model_name.startswith("mobileclip-") or self.model_name.startswith("aviation-"):
+            backend = self._mobileclip_backend or resolve_mobileclip_backend()
+            return backend.available()
         try:
             import sentence_transformers  # noqa: F401
             return True
@@ -984,7 +1216,7 @@ class SemanticImageIndex:
             return False
 
     def semantic_backend_error(self) -> str:
-        if self.model_name.startswith("mobileclip-"):
+        if self.model_name.startswith("mobileclip-") or self.model_name.startswith("aviation-"):
             backend = self._mobileclip_backend or resolve_mobileclip_backend()
             return backend.availability_error()
         try:
@@ -995,15 +1227,15 @@ class SemanticImageIndex:
 
     def mobileclip_supports_hub_download(self) -> bool:
         return bool(
-            self.model_name.startswith("mobileclip-")
-            and self._mobileclip_backend is not None
-            and getattr(self._mobileclip_backend, "SUPPORTS_HUB_DOWNLOAD", False)
+            (self.model_name.startswith("mobileclip-") or self.model_name.startswith("aviation-"))
+            and self.backend is not None
+            and getattr(self.backend, "SUPPORTS_HUB_DOWNLOAD", False)
         )
 
     def download_semantic_backend_assets(
         self, progress_callback: Optional[Callable[[str], None]] = None
     ) -> str:
-        if self.model_name.startswith("mobileclip-"):
+        if self.model_name.startswith("mobileclip-") or self.model_name.startswith("aviation-"):
             backend = self._mobileclip_backend or resolve_mobileclip_backend()
             path = backend.download_assets(progress_callback=progress_callback)
             self._mobileclip_backend = backend
@@ -1547,11 +1779,11 @@ class SemanticImageIndex:
         return True
 
     def _encode_image(self, file_path: str) -> np.ndarray:
-        if self.model_name.startswith("mobileclip-"):
+        if self.model_name.startswith("mobileclip-") or self.model_name.startswith("aviation-"):
             backend = self._mobileclip_backend or resolve_mobileclip_backend()
             err = backend.availability_error()
             if err:
-                raise RuntimeError(f"MobileCLIP backend unavailable: {err}")
+                raise RuntimeError(f"{backend.__class__.__name__} backend unavailable: {err}")
             return backend.encode_image(file_path)
         model = self._ensure_model()
         try:
@@ -1564,14 +1796,89 @@ class SemanticImageIndex:
             ) from exc
 
     def _encode_text(self, text: str) -> np.ndarray:
-        if self.model_name.startswith("mobileclip-"):
+        if self.model_name.startswith("mobileclip-") or self.model_name.startswith("aviation-"):
             backend = self._mobileclip_backend or resolve_mobileclip_backend()
             err = backend.availability_error()
             if err:
-                raise RuntimeError(f"MobileCLIP backend unavailable: {err}")
+                raise RuntimeError(f"{backend.__class__.__name__} backend unavailable: {err}")
             return backend.encode_text(text)
         model = self._ensure_model()
         return np.asarray(model.encode(text, normalize_embeddings=True), dtype=np.float32)
+
+    # --- Aviation Specialist Features ---
+
+    _AVIATION_LABELS = (
+        "F-16 Fighting Falcon", "F-22 Raptor", "F-35 Lightning II", "F-15 Eagle",
+        "A-10 Thunderbolt II", "Boeing 747", "Boeing 737-800", "Boeing 737 MAX",
+        "Boeing 777", "Boeing 787 Dreamliner", "Airbus A320neo", "Airbus A321",
+        "Airbus A330", "Airbus A350", "Airbus A380", "Concorde", "Sukhoi Su-57",
+        "Eurofighter Typhoon", "Dassault Rafale", "Lockheed SR-71 Blackbird",
+        "Northrop Grumman B-2 Spirit", "Spitfire", "P-51 Mustang", "Messerschmitt Bf 109",
+        "Cessna 172 Skyhawk", "Piper Cub", "Apache Helicopter", "Chinook", "V-22 Osprey",
+        "B-52 Stratofortress", "B-1 Lancer", "F/A-18 Hornet", "E-2 Hawkeye",
+        "C-130 Hercules", "C-17 Globemaster III", "Embraer E190", "Bombardier CRJ"
+    )
+
+    _AVIATION_NEGATIVES = (
+        "nature", "building", "person", "crowd", "trees", "car", "water", 
+        "inside of a plane", "airport terminal", "cockpit", "airplane seats",
+        "ground crew", "sky with clouds", "macro photo"
+    )
+
+    @lru_cache(maxsize=1)
+    def _get_aviation_label_embeddings(self):
+        backend = self._mobileclip_backend or resolve_mobileclip_backend()
+        prompts = [
+            "a photo of a {} aircraft",
+            "an aircraft model: {}",
+            "the {} airplane",
+            "a picture of a {}"
+        ]
+        
+        results = []
+        # Encode main models with ensembling
+        for label in self._AVIATION_LABELS:
+            embs = [backend.encode_text(p.format(label)) for p in prompts]
+            avg_emb = np.mean(embs, axis=0)
+            avg_emb /= np.linalg.norm(avg_emb)
+            results.append((label, avg_emb, False)) # False = not a negative
+            
+        # Encode negatives with single prompt
+        for neg in self._AVIATION_NEGATIVES:
+            emb = backend.encode_text(f"a photo of {neg}")
+            results.append((neg, emb, True))
+            
+        return results
+
+    def _detect_aircraft_zero_shot(self, image_vec: np.ndarray, threshold: float = 0.18) -> str:
+        """Identify specific aircraft models using competitive zero-shot ranking."""
+        label_embs = self._get_aviation_label_embeddings()
+        
+        scores = []
+        for label, label_vec, is_negative in label_embs:
+            # Cosine similarity (dot product of normalized vectors)
+            score = float(np.dot(image_vec, label_vec))
+            scores.append((label, score, is_negative))
+            
+        # Sort by score descending to find the "winner"
+        scores.sort(key=lambda x: x[1], reverse=True)
+        
+        top_label, top_score, is_negative = scores[0]
+        
+        # If the winner is a negative rejector (e.g. "nature", "building"), 
+        # we return empty string to avoid false positives.
+        if is_negative:
+            return ""
+            
+        # Minimal confidence floor to avoid tagging pure noise.
+        # SigLIP scores can be very low or negative; we use a permissive floor.
+        is_siglip = "siglip" in self.model_name
+        floor = -0.05 if is_siglip else 0.05
+        
+        if top_score > floor:
+            return top_label
+            
+        return ""
 
     def build_index(self, file_paths: Sequence[str], progress_callback: ProgressCallback = None) -> Dict[str, int]:
         total = len(file_paths)
@@ -1589,17 +1896,19 @@ class SemanticImageIndex:
         for i in range(0, len(unique_canonical), chunk_size):
             chunk = unique_canonical[i:i+chunk_size]
             qs = ",".join(["?"] * len(chunk))
+            self._conn.row_factory = sqlite3.Row
             cursor = self._conn.execute(
-                f"SELECT file_path, file_mtime, file_size, semantic_ready, gps_lat, city FROM semantic_index WHERE file_path IN ({qs})",
+                f"SELECT * FROM semantic_index WHERE file_path IN ({qs})",
                 chunk
             )
             for row in cursor.fetchall():
-                existing_meta[row[0]] = {
-                    "mtime": row[1],
-                    "size": row[2],
-                    "semantic_ready": row[3],
-                    "gps_lat": row[4],
-                    "city": row[5]
+                existing_meta[row["file_path"]] = {
+                    "mtime": row["file_mtime"],
+                    "size": row["file_size"],
+                    "semantic_ready": row["semantic_ready"],
+                    "gps_lat": row["gps_lat"],
+                    "city": row["city"],
+                    "detected_aircraft": self._row_value(row, "detected_aircraft", "")
                 }
 
         def needs_reindex_local(cp, st):
@@ -1628,7 +1937,8 @@ class SemanticImageIndex:
                     to_extract.append((canonical_fp, st))
                 else:
                     row = existing_meta[canonical_fp]
-                    if not row["semantic_ready"]:
+                    # RE-INDEX TRIGGER: If semantic_ready is 0, OR if we are on aviation branch and haven't identified this yet.
+                    if not row["semantic_ready"] or (self.model_name.startswith("aviation-") and not str(row.get("detected_aircraft") or "").strip()):
                         pending_for_semantic.append((canonical_fp, st))
                     else:
                         skipped += 1
@@ -1688,15 +1998,36 @@ class SemanticImageIndex:
                     progress_callback(i, total_sem, "Processing AI features...")
             try:
                 vec = self._encode_image(canonical_fp)
+                
+                # AVIATION SPECIALIST ENRICHMENT:
+                # Perform zero-shot classification to identify aircraft models if on aviation branch
+                detected_aircraft = ""
+                if self.model_name.startswith("aviation-"):
+                    try:
+                        # Use the Specialist Military Classifier for precise model identification
+                        if not hasattr(self, "_aviation_classifier") or self._aviation_classifier is None:
+                            self._aviation_classifier = MilitaryAircraftClassifier()
+                        
+                        detected_aircraft = self._aviation_classifier.classify(
+                            canonical_fp, 
+                            progress_callback=lambda msg: progress_callback(i, total_sem, msg) if progress_callback else None
+                        )
+                        # Fallback to zero-shot if specialist returns nothing (though unlikely)
+                        if not detected_aircraft:
+                            detected_aircraft = self._detect_aircraft_zero_shot(vec)
+                    except Exception as e:
+                        logger.error(f"[AVIATION AI] Enrichment failed for {os.path.basename(canonical_fp)}: {e}")
+
                 self._conn.execute(
                     """
                     UPDATE semantic_index
-                    SET dim = ?, embedding = ?, semantic_ready = 1, updated_at = ?
+                    SET dim = ?, embedding = ?, semantic_ready = 1, detected_aircraft = ?, updated_at = ?
                     WHERE file_path = ? AND model_name = ? AND file_size = ? AND mtime_ns = ?
                     """,
                     (
                         int(vec.size),
                         self._to_blob(vec),
+                        detected_aircraft,
                         float(time.time()),
                         canonical_fp,
                         self.model_name,
@@ -1772,12 +2103,28 @@ class SemanticImageIndex:
         for i in range(0, len(canonical_paths), batch_size):
             batch = canonical_paths[i : i + batch_size]
             qs = ",".join(["?"] * len(batch))
-            cursor = self._conn.execute(
-                f"SELECT file_path FROM semantic_index WHERE file_path IN ({qs}) AND semantic_ready = 1 AND model_name = ?",
-                [*batch, self.model_name]
-            )
-            for (fp,) in cursor.fetchall():
-                indexed_up_to_date.add(fp)
+            is_aviation = os.environ.get("RAWVIEWER_AVIATION_MODE") == "1"
+            current_model = self.model_name
+            logger.warning(f"[DEBUG AI] get_pending_paths: is_aviation={is_aviation} model_name='{current_model}'")
+            
+            if is_aviation:
+                query = f"SELECT file_path, model_name, semantic_ready FROM semantic_index WHERE file_path IN ({qs})"
+            else:
+                query = f"SELECT file_path, model_name FROM semantic_index WHERE file_path IN ({qs}) AND semantic_ready = 1 AND model_name = ?"
+            
+            if is_aviation:
+                cursor = self._conn.execute(query, [*batch])
+                for fp, mname, s_ready in cursor.fetchall():
+                    # In aviation mode, only count as up-to-date if it's the specialist model
+                    # AND it is actually marked as ready.
+                    if mname == current_model and int(s_ready or 0) == 1:
+                        indexed_up_to_date.add(fp)
+                    else:
+                        logger.warning(f"[DEBUG AI] File '{os.path.basename(fp)}' not ready: model='{mname}' ready={s_ready} (Expected: '{current_model}' ready=1)")
+            else:
+                cursor = self._conn.execute(query, [*batch, current_model])
+                for (fp,) in cursor.fetchall():
+                    indexed_up_to_date.add(fp)
 
         pending = []
         for cp in canonical_paths:
@@ -1817,10 +2164,7 @@ class SemanticImageIndex:
             chunk = unique_canonical[i:i+chunk_size]
             placeholders = ",".join(["?"] * len(chunk))
             query = f"""
-                SELECT file_path, file_name, file_signature, dim, embedding, capture_time, 
-                       camera_model, lens_model, iso, gps_lat, gps_lon, width, height, 
-                       city, admin1, country, country_code, face_count, semantic_ready,
-                       file_size, file_mtime, mtime_ns, model_name
+                SELECT *
                 FROM semantic_index
                 WHERE model_name = ? AND file_path IN ({placeholders})
             """
@@ -1915,7 +2259,12 @@ class SemanticImageIndex:
         n = str(needle or "").strip().lower()
         if not n:
             return False
-        variants = {n, n.replace("_", " "), n.replace(" ", "_")}
+        variants = {
+            n, 
+            n.replace("_", " "), n.replace(" ", "_"), 
+            n.replace("-", ""), # Handle dashes
+            n.replace(" ", "-"), n.replace("-", " ") 
+        }
         return any(v and v in h for v in variants)
 
     def _apply_filters(
@@ -2396,7 +2745,16 @@ class SemanticImageIndex:
         """
         filtered = list(rows)
         remaining: List[str] = []
-        metadata_fields = ("city", "admin1", "country", "country_code", "camera_model", "lens_model", "file_name")
+        metadata_fields = (
+            "city",
+            "admin1",
+            "country",
+            "country_code",
+            "camera_model",
+            "lens_model",
+            "file_name",
+            "detected_aircraft",
+        )
 
         import logging
         logger = logging.getLogger(__name__)
@@ -2415,13 +2773,17 @@ class SemanticImageIndex:
                 if matched_rows:
                     filtered = matched_rows
                     continue
-            matched_rows = [
-                r
-                for r in filtered
-                if any(self._contains_loose(str(self._row_value(r, field) or ""), needle) for field in metadata_fields)
-            ]
+            matched_rows = []
+            matching_field = None
+            for r in filtered:
+                for field in metadata_fields:
+                    if self._contains_loose(str(self._row_value(r, field) or ""), needle):
+                        matched_rows.append(r)
+                        matching_field = field
+                        break
+            
             if matched_rows:
-                logger.info(f"[SEARCH] Metadata match for '{needle}' found in {len(matched_rows)} image(s)")
+                logger.info(f"[SEARCH] Metadata match for '{needle}' found in {len(matched_rows)} image(s) (e.g. via '{matching_field}')")
                 filtered = matched_rows
             else:
                 # CONTRADICTION FILTER: If this is a location name (e.g. "Korea") but 
@@ -2579,7 +2941,8 @@ class SemanticImageIndex:
                 admin1=str(r["admin1"] or ""),
                 country=str(r["country"] or ""),
                 country_code=str(r["country_code"] or ""),
-                face_count=int(r["face_count"] or 0),
+                face_count=int(self._row_value(r, "face_count", 0)),
+                detected_aircraft=str(self._row_value(r, "detected_aircraft", "")),
             )
             for r in filtered
         ]
