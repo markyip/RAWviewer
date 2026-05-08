@@ -256,6 +256,8 @@ def _norm_path(p: str) -> str:
     except Exception:
         return p or ""
 
+logger = logging.getLogger(__name__)
+
 
 # Print immediately to verify script is running (main process only, opt-in verbosity)
 safe_print("=" * 80, flush=True)

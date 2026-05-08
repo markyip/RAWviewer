@@ -693,17 +693,34 @@ class MilitaryAircraftClassifier:
     HUB_REPO_ID = "dima806/military_aircraft_image_detection"
     MODEL_ID = "military-aircraft-vit-224"
     LABELS = [
-        "A10", "A400M", "AG600", "AV8B", "B1", "B2", "B52", "Be200", "C130", "C17", 
-        "C2", "C5", "E2", "E7", "EF2000", "F117", "F14", "F15", "F16", "F18", 
-        "F22", "F35", "F4", "H6", "J10", "J20", "JAS39", "JF17", "KC135", "MQ9", 
-        "Mig31", "Mirage2000", "P3", "RQ4", "Rafale", "SR71", "Su24", "Su25", 
-        "Su34", "Su57", "Tornado", "Tu160", "Tu22M", "Tu95", "U2", "US2", "V22", 
-        "Vulcan", "XB70", "YF23"
+        "A10", "A400M", "AG600", "AH64", "AKINCI", "ATR 42", "ATR 72", "AV8B", "Airbus A220", "Airbus A318",
+        "Airbus A319", "Airbus A320", "Airbus A330", "Airbus A350", "Airbus A380", "Airbus a321", "An124", "An22", "An225", "An72",
+        "Avro Lancaster", "B1", "B2", "B21", "B52", "Bayraktar_TB2_drone", "Be200", "Bell P-63 Kingcobra", "Boeing 737 NG", "Boeing 737 max",
+        "Boeing 747", "Boeing 767", "Boeing 777", "Boeing 777X", "Boeing 787", "Boeing B-17 Flying Fortress", "Boeing B-29 Superfortress", "Boeing P-26 Peashooter", "Brewster F2A Buffalo", "C1",
+        "C130", "C17", "C2", "C390", "C5", "CH47", "CH53", "CL415", "Cessna_172_training_aircraft", "Consolidated PBY Catalina",
+        "Curtiss P-40 Warhawk", "Diamond_DA20_trainer", "Douglas A-20 Havoc", "Douglas C-47 Skytrain", "Douglas SBD Dauntless", "Douglas TBD Devastator", "E2", "E7", "EF2000", "EMB314",
+        "F117", "F14", "F15", "F16", "F18", "F2", "F22", "F35", "F4", "FCK1",
+        "Focke-Wulf Fw 190", "Global_Hawk_UAV", "Grumman F6F Hellcat", "Grumman F7F Tigercat", "Grumman TBF Avenger", "H6", "Hawker Hurricane", "Il76", "J10", "J20",
+        "J35", "J36", "J50", "JAS39", "JF17", "JH7", "Junkers Ju 87", "KAAN", "KC135", "KF21",
+        "KIZILELMA", "KJ600", "Ka27", "Ka52", "Lockheed P-38 Lightning", "MQ-9_Reaper_drone", "MQ20", "MQ25", "MQ28", "Messerschmitt Bf 109",
+        "Mi24", "Mi26", "Mi28", "Mi8", "Mig29", "Mig31", "Mirage2000", "Mitsubishi A6M Zero", "NH90", "North American P51 Mustang",
+        "Northrop P-61 Black Widow", "P3", "Piper_PA-28_Cherokee", "Predator_drone_aircraft", "RQ4", "Rafale", "Republic P-43 Lancer", "Republic P-47 Thunderbolt", "SR71", "Seversky P-35",
+        "Su24", "Su25", "Su34", "Su47", "Su57", "Supermarine Spitfire", "T50", "TB001", "TB2", "Tejas",
+        "Tornado", "Tu160", "Tu22M", "Tu95", "U2", "UH60", "US2", "V22", "V280", "Vought F4U Corsair",
+        "Vulcan", "WZ10", "WZ7", "WZ9", "Waco CG-4", "X29", "X32", "XB70", "XQ58", "Y20",
+        "YF23", "Z10", "Z19", "de Havilland Mosquito"
     ]
 
     def __init__(self):
-        self.model_dir = os.path.expanduser("~/.rawviewer_cache/military_classifier")
-        self.onnx_path = os.path.join(self.model_dir, "model.onnx")
+        # Prefer the local super-specialist model we just trained
+        local_custom_path = r"D:\Development\RAWviewer\src\models\super_specialist.onnx"
+        if os.path.exists(local_custom_path):
+            self.onnx_path = local_custom_path
+            self.model_dir = os.path.dirname(local_custom_path)
+        else:
+            self.model_dir = os.path.expanduser("~/.rawviewer_cache/military_classifier")
+            self.onnx_path = os.path.join(self.model_dir, "model.onnx")
+            
         self._session = None
     def _ensure_model(self, progress_callback=None):
         if os.path.exists(self.onnx_path):
@@ -723,8 +740,7 @@ class MilitaryAircraftClassifier:
             hf_hub_download(
                 repo_id=self.HUB_REPO_ID,
                 filename="model.onnx",
-                local_dir=self.model_dir,
-                local_dir_use_symlinks=False
+                local_dir=self.model_dir
             )
             if os.path.exists(self.onnx_path):
                 return
@@ -745,7 +761,7 @@ class MilitaryAircraftClassifier:
             dummy_input = torch.randn(1, 3, 224, 224)
             torch.onnx.export(
                 model, dummy_input, self.onnx_path,
-                opset_version=14, input_names=["pixel_values"], output_names=["logits"],
+                opset_version=18, input_names=["pixel_values"], output_names=["logits"],
                 dynamic_axes={"pixel_values": {0: "batch_size"}, "logits": {0: "batch_size"}}
             )
         except ImportError:
@@ -761,15 +777,21 @@ class MilitaryAircraftClassifier:
             self._ensure_model(progress_callback)
             import onnxruntime as ort
             if self._session is None:
-                self._session = ort.InferenceSession(self.onnx_path, providers=["CPUExecutionProvider"])
+                so = ort.SessionOptions()
+                so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+                # Support DirectML (GPU), Azure (Cloud/Optimized), or CPU
+                providers = ["DmlExecutionProvider", "AzureExecutionProvider", "CPUExecutionProvider"]
+                try:
+                    self._session = ort.InferenceSession(self.onnx_path, sess_options=so, providers=providers)
+                except Exception:
+                    self._session = ort.InferenceSession(self.onnx_path, sess_options=so, providers=["CPUExecutionProvider"])
             
-            # Preprocess
-            im = _load_index_source_image(file_path, max_size=1024).resize((224, 224), Image.Resampling.BICUBIC)
-            rgb = np.asarray(im.convert("RGB"), dtype=np.float32) / 255.0
-            # Normalize (ViT standard)
-            mean = np.array([0.5, 0.5, 0.5], dtype=np.float32)
-            std = np.array([0.5, 0.5, 0.5], dtype=np.float32)
-            rgb = (rgb - mean) / std
+            # Preprocess: Faster resampling + vectorized normalization
+            im = _load_index_source_image(file_path, max_size=1024).resize((224, 224), Image.Resampling.BILINEAR)
+            rgb = np.asarray(im.convert("RGB"), dtype=np.float32)
+            # Optimized normalization: (x / 255.0 - 0.5) / 0.5  =>  x / 127.5 - 1.0
+            rgb = (rgb / 127.5) - 1.0
+            
             nchw = np.transpose(rgb, (2, 0, 1))[np.newaxis, ...].astype(np.float32)
             
             # Run inference
@@ -1830,6 +1852,7 @@ class SemanticImageIndex:
     def _encode_image(self, file_path: str) -> np.ndarray:
         if self.model_name.startswith("mobileclip-") or self.model_name.startswith("aviation-"):
             backend = self._mobileclip_backend or resolve_mobileclip_backend()
+            self._mobileclip_backend = backend
             err = backend.availability_error()
             if err:
                 raise RuntimeError(f"{backend.__class__.__name__} backend unavailable: {err}")
