@@ -201,6 +201,7 @@ def install_dependencies():
         'reverse-geocoder',  # Offline city/country lookup from GPS EXIF
         'pycountry',         # ISO country code -> full country name
         'onnxruntime',       # Cross-platform model execution (Aviation Specialist)
+        'tokenizers',        # Lightweight tokenizer for SigLIP (Aviation Specialist)
         'sentencepiece',     # SigLIP tokenizer dependency
         'protobuf',          # ONNX/Transformers dependency
         'torchvision',       # Optimized image processing for ViT

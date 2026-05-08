@@ -825,31 +825,41 @@ class AviationSigLIPONNXBackend(MobileCLIPONNXBackend):
         }
         
         from huggingface_hub import hf_hub_download
+        import logging
+        logger = logging.getLogger(__name__)
         
-        for remote_path, local_name in files_to_download.items():
-            _progress(f"Downloading SigLIP model component: {local_name}...")
-            actual_path = hf_hub_download(
-                repo_id=self.HUB_REPO_ID,
-                filename=remote_path,
-                local_dir=self.model_dir,
-                local_dir_use_symlinks=False
-            )
-            
-            target_path = os.path.normpath(os.path.join(self.model_dir, local_name))
-            actual_norm = os.path.normpath(actual_path)
-            
-            if actual_norm != target_path:
-                if os.path.exists(target_path):
-                    os.remove(target_path)
-                os.rename(actual_norm, target_path)
+        try:
+            for remote_path, local_name in files_to_download.items():
+                _progress(f"Downloading SigLIP model component: {local_name}...")
+                logger.info(f"[AVIATION AI] Downloading {remote_path} to {local_name}")
+                
+                actual_path = hf_hub_download(
+                    repo_id=self.HUB_REPO_ID,
+                    filename=remote_path,
+                    local_dir=self.model_dir,
+                    local_dir_use_symlinks=False
+                )
+                
+                target_path = os.path.normpath(os.path.join(self.model_dir, local_name))
+                actual_norm = os.path.normpath(actual_path)
+                
+                if actual_norm != target_path:
+                    if os.path.exists(target_path):
+                        os.remove(target_path)
+                    os.rename(actual_norm, target_path)
 
-        # Cleanup if Xenova's onnx/ structure was partially created
-        onnx_dir = os.path.join(self.model_dir, "onnx")
-        if os.path.exists(onnx_dir):
-            import shutil
-            shutil.rmtree(onnx_dir, ignore_errors=True)
-            
-        return self.model_dir
+            # Cleanup if Xenova's onnx/ structure was partially created
+            onnx_dir = os.path.join(self.model_dir, "onnx")
+            if os.path.exists(onnx_dir):
+                import shutil
+                shutil.rmtree(onnx_dir, ignore_errors=True)
+                
+            return self.model_dir
+        except Exception as e:
+            logger.error(f"[AVIATION AI] Download failed: {str(e)}")
+            import traceback
+            logger.error(traceback.format_exc())
+            raise RuntimeError(f"Aviation model download failed: {str(e)}")
 
     def _ensure_sessions(self):
         if self._image_session is not None:
@@ -863,12 +873,29 @@ class AviationSigLIPONNXBackend(MobileCLIPONNXBackend):
         if not os.path.exists(img_path) or not os.path.exists(txt_path):
             self.download_assets()
 
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.info(f"[AVIATION AI] Loading SigLIP sessions from: {self.model_dir}")
+
         self._image_session = ort.InferenceSession(img_path, providers=['CPUExecutionProvider'])
         self._text_session = ort.InferenceSession(txt_path, providers=['CPUExecutionProvider'])
         
-        # SigLIP uses a different tokenizer
-        from transformers import AutoTokenizer
-        self._tokenizer = AutoTokenizer.from_pretrained(self.model_dir, local_files_only=True)
+        # SigLIP uses a different tokenizer. We use the lightweight 'tokenizers' library
+        # instead of the full 'transformers' package to keep the EXE small.
+        from tokenizers import Tokenizer
+        tok_path = os.path.join(self.model_dir, "tokenizer.json")
+        logger.info(f"[AVIATION AI] Loading SigLIP tokenizer from: {tok_path}")
+        self._tokenizer = Tokenizer.from_file(tok_path)
+        
+        # Configure padding and truncation to match SigLIP requirements
+        # SigLIP-Base uses max_length 64
+        self._tokenizer.enable_padding(pad_id=1, length=64) # pad_id=1 is standard for SigLIP
+        self._tokenizer.enable_truncation(max_length=64)
+        
+        if self._tokenizer:
+            logger.info("[AVIATION AI] SigLIP tokenizer loaded successfully.")
+        else:
+            logger.error("[AVIATION AI] SigLIP tokenizer FAILED to load.")
 
     def encode_image(self, file_path: str) -> np.ndarray:
         self._ensure_sessions()
@@ -890,22 +917,19 @@ class AviationSigLIPONNXBackend(MobileCLIPONNXBackend):
     def encode_text(self, text: str) -> np.ndarray:
         self._ensure_sessions()
         
-        # SigLIP tokenization
-        tokens = self._tokenizer(
-            text, 
-            padding="max_length", 
-            max_length=64, 
-            truncation=True, 
-            return_tensors="np"
-        )
+        if self._tokenizer is None:
+            raise RuntimeError(f"Tokenizer for {self.MODEL_ID} failed to initialize. Check if all required files exist in {self.model_dir}")
+
+        # SigLIP tokenization using lightweight tokenizers library
+        encoded = self._tokenizer.encode(text)
         
         inputs = {
-            "input_ids": tokens["input_ids"].astype(np.int64)
+            "input_ids": np.array([encoded.ids], dtype=np.int64)
         }
         
         outputs = self._text_session.run(["pooler_output"], inputs)
         # SigLIP text model in ONNX returns pre-pooled embedding in pooler_output
-        return self._normalize(outputs[0])
+        return self._normalize(outputs[0][0]) # [0][0] because outputs is [batch, dim]
 
 
 def resolve_mobileclip_backend() -> Any:
