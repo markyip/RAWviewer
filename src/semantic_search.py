@@ -595,13 +595,12 @@ class MobileCLIPONNXBackend:
         os.makedirs(self.model_dir, exist_ok=True)
         _progress("Downloading MobileCLIP ONNX models...")
         try:
-            from huggingface_hub import hf_hub_download
+            from huggingface_hub import hf_hub_url
+            from huggingface_hub.utils import disable_progress_bars
+            import requests
+            disable_progress_bars()
         except ImportError:
-            raise RuntimeError("MobileCLIP download requires 'huggingface_hub' (pip install huggingface_hub)")
-
-        from huggingface_hub import hf_hub_download
-        from huggingface_hub.utils import disable_progress_bars
-        disable_progress_bars()
+            raise RuntimeError("MobileCLIP download requires 'huggingface_hub' and 'requests'")
 
         # Mapping of remote path in HF repo to local filename expected by RAWviewer
         files_to_download = {
@@ -610,22 +609,28 @@ class MobileCLIPONNXBackend:
         }
         
         for remote_path, local_name in files_to_download.items():
-            _progress(f"Downloading AI model component: {local_name}...")
-            hf_hub_download(
-                repo_id=self.HUB_REPO_ID,
-                filename=remote_path,
-                local_dir=self.model_dir,
-                local_dir_use_symlinks=False
-            )
-            
-            # Handle nesting created by local_dir
-            downloaded_path = os.path.join(self.model_dir, remote_path)
             target_path = os.path.join(self.model_dir, local_name)
+            if os.path.exists(target_path):
+                continue
+
+            url = hf_hub_url(repo_id=self.HUB_REPO_ID, filename=remote_path)
+            response = requests.get(url, stream=True, timeout=30)
+            response.raise_for_status()
             
-            if os.path.exists(downloaded_path):
-                if os.path.exists(target_path):
-                    os.remove(target_path)
-                os.rename(downloaded_path, target_path)
+            total_size = int(response.headers.get('content-length', 0))
+            os.makedirs(os.path.dirname(target_path), exist_ok=True)
+            
+            downloaded = 0
+            with open(target_path, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=1024*1024):
+                    if chunk:
+                        f.write(chunk)
+                        downloaded += len(chunk)
+                        if total_size > 0:
+                            percent = (downloaded / total_size) * 100
+                            _progress(f"Downloading AI model component: {local_name} ({percent:.1f}%)")
+                        else:
+                            _progress(f"Downloading AI model component: {local_name}...")
 
         # Clean up empty subdirectories
         onnx_dir = os.path.join(self.model_dir, "onnx")
@@ -828,31 +833,45 @@ class AviationSigLIPONNXBackend(MobileCLIPONNXBackend):
             "config.json": "config.json"
         }
         
-        from huggingface_hub import hf_hub_download
+        from huggingface_hub import hf_hub_url
         from huggingface_hub.utils import disable_progress_bars
+        import requests
         disable_progress_bars()
         import logging
         logger = logging.getLogger(__name__)
         
         try:
             for remote_path, local_name in files_to_download.items():
-                _progress(f"Downloading AI model component: {local_name}...")
+                target_path = os.path.normpath(os.path.join(self.model_dir, local_name))
+                
+                # Check if already exists
+                if os.path.exists(target_path):
+                    logger.info(f"[AVIATION AI] {local_name} already exists, skipping download.")
+                    continue
+
                 logger.info(f"[AVIATION AI] Downloading {remote_path} to {local_name}")
                 
-                actual_path = hf_hub_download(
-                    repo_id=self.HUB_REPO_ID,
-                    filename=remote_path,
-                    local_dir=self.model_dir,
-                    local_dir_use_symlinks=False
-                )
+                url = hf_hub_url(repo_id=self.HUB_REPO_ID, filename=remote_path)
+                response = requests.get(url, stream=True, timeout=30)
+                response.raise_for_status()
                 
-                target_path = os.path.normpath(os.path.join(self.model_dir, local_name))
-                actual_norm = os.path.normpath(actual_path)
+                total_size = int(response.headers.get('content-length', 0))
                 
-                if actual_norm != target_path:
-                    if os.path.exists(target_path):
-                        os.remove(target_path)
-                    os.rename(actual_norm, target_path)
+                os.makedirs(os.path.dirname(target_path), exist_ok=True)
+                
+                downloaded = 0
+                with open(target_path, 'wb') as f:
+                    for chunk in response.iter_content(chunk_size=1024*1024): # 1MB chunks
+                        if chunk:
+                            f.write(chunk)
+                            downloaded += len(chunk)
+                            if total_size > 0:
+                                percent = (downloaded / total_size) * 100
+                                _progress(f"Downloading AI model component: {local_name} ({percent:.1f}%)")
+                            else:
+                                _progress(f"Downloading AI model component: {local_name}...")
+                
+                logger.info(f"[AVIATION AI] Successfully downloaded {local_name}")
 
             # Cleanup if Xenova's onnx/ structure was partially created
             onnx_dir = os.path.join(self.model_dir, "onnx")
