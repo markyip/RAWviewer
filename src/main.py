@@ -20,8 +20,8 @@ def close_native_splash():
 # Ultra Fast Splash: Initialize Qt and show splash BEFORE parsing the rest of the file
 try:
     from PyQt6.QtWidgets import QApplication, QSplashScreen
-    from PyQt6.QtGui import QPixmap, QColor, QPainter, QPen
-    from PyQt6.QtCore import Qt, QEvent
+    from PyQt6.QtGui import QPixmap, QColor, QPainter, QPen, QIcon
+    from PyQt6.QtCore import Qt, QEvent, QSize, QPoint
     
     def resource_path(relative_path):
         """ Get absolute path to resource, works for dev and for PyInstaller """
@@ -3955,8 +3955,8 @@ class CustomTitleBar(QFrame):
         """)
         
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(12, 0, 6, 0)
-        layout.setSpacing(8)
+        layout.setContentsMargins(12, 0, 0, 0)
+        layout.setSpacing(0)
         
         # Logo Icon (Favicon)
         self.icon_label = QLabel()
@@ -4023,32 +4023,40 @@ class CustomTitleBar(QFrame):
         layout.addStretch()
         
         # Window Controls - Smaller buttons
+        import qtawesome as qta
+        
         control_btn_style = """
             QPushButton {
                 background-color: transparent;
-                color: #E0E0E0;
                 border: none;
-                width: 36px;
-                height: 28px;
-                font-size: 14px;
+                width: 46px;
+                height: 40px;
+                margin: 0px;
+                padding: 0px;
             }
             QPushButton:hover { 
                 background-color: rgba(255, 255, 255, 0.1); 
             }
         """
         
-        self.min_btn = QPushButton("—")
+        self.min_btn = QPushButton()
+        self.min_btn.setIcon(qta.icon('fa5s.minus', color='#E0E0E0'))
+        self.min_btn.setIconSize(QSize(12, 12))
         self.min_btn.setStyleSheet(control_btn_style)
         self.min_btn.clicked.connect(self.parent.showMinimized)
         layout.addWidget(self.min_btn)
         
-        self.max_btn = QPushButton("⬜")
+        self.max_btn = QPushButton()
+        self.max_btn.setIcon(qta.icon('fa5.square', color='#E0E0E0'))
+        self.max_btn.setIconSize(QSize(12, 12))
         self.max_btn.setStyleSheet(control_btn_style)
         self.max_btn.clicked.connect(self._toggle_maximize)
         layout.addWidget(self.max_btn)
         
-        self.close_btn = QPushButton("✕")
-        self.close_btn.setStyleSheet(control_btn_style + "QPushButton:hover { background-color: #f44336; color: white; }")
+        self.close_btn = QPushButton()
+        self.close_btn.setIcon(qta.icon('fa5s.times', color='#E0E0E0'))
+        self.close_btn.setIconSize(QSize(12, 12))
+        self.close_btn.setStyleSheet(control_btn_style + "QPushButton:hover { background-color: #f44336; }")
         self.close_btn.clicked.connect(self.parent.close)
         layout.addWidget(self.close_btn)
         
@@ -4057,12 +4065,13 @@ class CustomTitleBar(QFrame):
         self._drag_pos = None
 
     def _toggle_maximize(self):
+        import qtawesome as qta
         if self._is_maximized:
             self.parent.showNormal()
-            self.max_btn.setText("⬜")
+            self.max_btn.setIcon(qta.icon('fa5.square', color='#E0E0E0'))
         else:
             self.parent.showMaximized()
-            self.max_btn.setText("❐")
+            self.max_btn.setIcon(qta.icon('fa5s.clone', color='#E0E0E0'))
         self._is_maximized = not self._is_maximized
         # Update title bar state
         if hasattr(self.parent, 'title_bar') and self.parent.title_bar is not None:
