@@ -12,6 +12,7 @@ import platform
 import shutil
 import time
 import sys
+import json
 from pathlib import Path
 
 # Repository root (directory containing this script)
@@ -534,11 +535,26 @@ def main():
         print("[ERROR] Build failed.")
         sys.exit(1)
     if platform.system() == 'Windows':
-        exe_path = Path('dist/SkySpotter.exe')
+        exe_path = Path('dist/SkySpotter/SkySpotter.exe')
     else:
         exe_path = Path('dist/SkySpotter.app')
     if exe_path.exists():
         print(f"[SUCCESS] Executable created: {exe_path}")
+        
+        # Windows-specific post-build steps: Uninstall script and Installer
+        if platform.system() == 'Windows':
+            print("Preparing Windows distribution extras...")
+            dist_dir = REPO_ROOT / "dist" / "SkySpotter"
+            
+            # 1. Copy uninstall.bat to dist folder
+            uninst_src = REPO_ROOT / "uninstall.bat"
+            if uninst_src.exists():
+                shutil.copy2(uninst_src, dist_dir / "uninstall.bat")
+                print(f"  Copied uninstall.bat to {dist_dir}")
+            
+            # 2. Build Installer EXE
+            build_installer()
+
         if platform.system() == 'Darwin':
             print("Patching macOS Info.plist...")
             update_macos_plist(str(exe_path))
@@ -548,6 +564,44 @@ def main():
             run_command(['xattr', '-cr', str(exe_path)])
     else:
         print("[ERROR] Executable was not created!")
+
+
+
+def build_installer():
+    """Build the standalone installer EXE on Windows"""
+    print("")
+    print("Building SkySpotter Installer...")
+    
+    if platform.system() != 'Windows':
+        print("[SKIP] Installer build only supported on Windows.")
+        return
+
+    installer_script = REPO_ROOT / "installer.py"
+    if not installer_script.exists():
+        print(f"[ERROR] Installer script not found: {installer_script}")
+        return
+
+    icon_path = REPO_ROOT / "icons" / "appicon.ico"
+    
+    cmd = [
+        sys.executable, "-m", "PyInstaller",
+        "--onefile",
+        "--windowed",
+        "--name", "SkySpotter_Setup",
+        "--icon", str(icon_path) if icon_path.exists() else "",
+        "--add-data", f"dist/SkySpotter;SkySpotter",
+        "--clean",
+        "installer.py"
+    ]
+    
+    # Remove empty strings from cmd (like if icon_path didn't exist)
+    cmd = [c for c in cmd if c]
+    
+    print(f"Running: {' '.join(cmd)}")
+    if run_command(cmd):
+        print("[SUCCESS] Installer created: dist/SkySpotter_Setup.exe")
+    else:
+        print("[ERROR] Installer build failed.")
 
 
 if __name__ == '__main__':

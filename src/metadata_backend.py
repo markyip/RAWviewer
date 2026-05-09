@@ -2,7 +2,7 @@
 EXIF read path: prefer pyexiv2 (Exiv2), fall back to exifread.
 
 Environment:
-  RAWVIEWER_EXIF_BACKEND=auto|pyexiv2|exifread
+  SkySpotter_EXIF_BACKEND=auto|pyexiv2|exifread
     auto   — try pyexiv2 first when installed, else exifread (default)
     pyexiv2 — only pyexiv2 (raises / empty dict if unusable)
     exifread — only exifread
@@ -44,7 +44,7 @@ def _ensure_pyexiv2():
         _HAS_PYEXIV2 = False
     return _HAS_PYEXIV2
 
-_BACKEND = os.environ.get("RAWVIEWER_EXIF_BACKEND", "auto").strip().lower()
+_BACKEND = os.environ.get("SkySpotter_EXIF_BACKEND", "auto").strip().lower()
 
 
 def exif_backend_mode() -> str:

@@ -251,7 +251,7 @@ class ImageLoadManager(QObject):
         # CRITICAL: 對於 QObject 子類，必須在最開始就調用 super().__init__()
         # 不能在調用 super().__init__() 之前訪問任何實例屬性（包括 hasattr）
         import sys
-        verbose_init = _env_true("RAWVIEWER_VERBOSE_MANAGER_INIT", default=False)
+        verbose_init = _env_true("SkySpotter_VERBOSE_MANAGER_INIT", default=False)
         if verbose_init:
             print("[ImageLoadManager.__init__] Starting initialization...", flush=True)
         
@@ -295,7 +295,7 @@ class ImageLoadManager(QObject):
 
         # PROCESS POOL (optional): on Windows debug/startup paths, process spawn can
         # re-import heavy modules and hurt first-load latency. Keep it opt-in.
-        use_process_pool = os.environ.get("RAWVIEWER_USE_PROCESS_POOL", "").strip().lower() in {
+        use_process_pool = os.environ.get("SkySpotter_USE_PROCESS_POOL", "").strip().lower() in {
             "1", "true", "yes", "on"
         }
         self._process_pool = None

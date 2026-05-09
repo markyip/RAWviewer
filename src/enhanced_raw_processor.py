@@ -286,10 +286,10 @@ class EXIFExtractor(QObject):
             # Check if cache version matches current logic
             cached_ver = cached.get('raw_exif_sensor_meta_ver', 0)
             if cached_ver < RAW_EXIF_SENSOR_META_VER:
-                if os.environ.get("RAWVIEWER_VERBOSE_ORIENTATION_LOGS") == "1":
+                if os.environ.get("SkySpotter_VERBOSE_ORIENTATION_LOGS") == "1":
                     print(f"[ORIENTATION] EXIFExtractor: Stale cache version ({cached_ver} < {RAW_EXIF_SENSOR_META_VER}) for {os.path.basename(file_path)}, forcing re-extraction...")
             else:
-                if os.environ.get("RAWVIEWER_VERBOSE_ORIENTATION_LOGS") == "1":
+                if os.environ.get("SkySpotter_VERBOSE_ORIENTATION_LOGS") == "1":
                     print(f"[ORIENTATION] EXIFExtractor: Found valid cached orientation={cached.get('orientation')} for {os.path.basename(file_path)}")
                 return cached
 
@@ -303,7 +303,7 @@ class EXIFExtractor(QObject):
             orientation_tag_found = None
             
             # DEBUG: Log all potential orientation tags to help troubleshoot
-            if os.environ.get("RAWVIEWER_VERBOSE_ORIENTATION_LOGS") == "1":
+            if os.environ.get("SkySpotter_VERBOSE_ORIENTATION_LOGS") == "1":
                 orient_tags = {k: v for k, v in tags.items() if 'orient' in k.lower()}
                 if orient_tags:
                     print(f"[ORIENTATION] EXIFExtractor debug for {os.path.basename(file_path)}: Found orientation-like tags: {orient_tags}")
@@ -338,7 +338,7 @@ class EXIFExtractor(QObject):
                         orientation_tag_found = tag_name
                         break
             
-            if os.environ.get("RAWVIEWER_VERBOSE_ORIENTATION_LOGS") == "1" and orientation != 1:
+            if os.environ.get("SkySpotter_VERBOSE_ORIENTATION_LOGS") == "1" and orientation != 1:
                 print(f"[ORIENTATION] EXIFExtractor: Found orientation={orientation} via tag '{orientation_tag_found}' for {os.path.basename(file_path)}")
             
             camera_make = str(tags.get('Image Make', '')).strip()
@@ -375,7 +375,7 @@ class EXIFExtractor(QObject):
                             # EXIF Orient: 1=0, 3=180, 8=90CCW, 6=90CW
                             flip_map = {0: 1, 3: 3, 5: 8, 6: 6}
                             orientation = flip_map.get(sizes.flip, sizes.flip)
-                            if os.environ.get("RAWVIEWER_VERBOSE_ORIENTATION_LOGS") == "1":
+                            if os.environ.get("SkySpotter_VERBOSE_ORIENTATION_LOGS") == "1":
                                 print(f"[ORIENTATION] EXIFExtractor: Falling back to LibRaw flip={sizes.flip} -> Orientation {orientation} for {os.path.basename(file_path)}")
                     else:
                         with rawpy.imread(file_path) as raw:
@@ -463,13 +463,13 @@ class EXIFExtractor(QObject):
                 'raw_exif_sensor_meta_ver': RAW_EXIF_SENSOR_META_VER,
             }
             
-            if os.environ.get("RAWVIEWER_VERBOSE_ORIENTATION_LOGS") == "1":
+            if os.environ.get("SkySpotter_VERBOSE_ORIENTATION_LOGS") == "1":
                 print(f"[ORIENTATION] EXIFExtractor: Successfully returning metadata with orientation={orientation} for {os.path.basename(file_path)}")
             
             return result
             
         except Exception as e:
-            if os.environ.get("RAWVIEWER_VERBOSE_ORIENTATION_LOGS") == "1":
+            if os.environ.get("SkySpotter_VERBOSE_ORIENTATION_LOGS") == "1":
                 print(f"[ORIENTATION] EXIFExtractor error for {os.path.basename(file_path)}: {e}")
             pass
 

@@ -125,7 +125,7 @@ class MobileCLIPCoreMLBackend:
     """Optional macOS Core ML backend for MobileCLIP.
 
     Model assets are expected in:
-    - RAWVIEWER_MOBILECLIP_MODEL_DIR, or
+    - SkySpotter_MOBILECLIP_MODEL_DIR, or
     - ~/.rawviewer_cache/mobileclip_coreml
 
     Recognized bundle pairs (first match wins under ``model_dir``):
@@ -196,7 +196,7 @@ class MobileCLIPCoreMLBackend:
     @staticmethod
     def _candidate_model_dirs() -> List[str]:
         dirs: List[str] = []
-        env_dir = os.environ.get("RAWVIEWER_MOBILECLIP_MODEL_DIR")
+        env_dir = os.environ.get("SkySpotter_MOBILECLIP_MODEL_DIR")
         if env_dir:
             dirs.append(env_dir)
         dirs.append(os.path.expanduser("~/.rawviewer_cache/mobileclip_coreml"))
@@ -543,7 +543,7 @@ class MobileCLIPONNXBackend:
     @staticmethod
     def _candidate_model_dirs() -> List[str]:
         dirs: List[str] = []
-        env_dir = os.environ.get("RAWVIEWER_MOBILECLIP_MODEL_DIR")
+        env_dir = os.environ.get("SkySpotter_MOBILECLIP_MODEL_DIR")
         if env_dir:
             dirs.append(env_dir)
             
@@ -737,27 +737,33 @@ class MilitaryAircraftClassifier:
         "YF23", "Z10", "Z19", "de Havilland Mosquito"
     ]
 
-    def __init__(self):
+    def __init__(self, progress_callback=None):
         # 1. Check for bundled model (PyInstaller standalone EXE)
         if hasattr(sys, '_MEIPASS'):
             bundled_path = os.path.join(sys._MEIPASS, "models", "super_specialist.onnx")
             if os.path.exists(bundled_path):
                 self.onnx_path = bundled_path
                 self.model_dir = os.path.dirname(bundled_path)
-                self._session = None
-                return
-
-        # 2. Check for local custom model (Development environment)
-        local_custom_path = r"D:\Development\RAWviewer\src\models\super_specialist.onnx"
-        if os.path.exists(local_custom_path):
-            self.onnx_path = local_custom_path
-            self.model_dir = os.path.dirname(local_custom_path)
+            else:
+                self.model_dir = os.path.expanduser("~/.rawviewer_cache/military_classifier")
+                self.onnx_path = os.path.join(self.model_dir, "model.onnx")
         else:
-            # 3. Fallback to cache folder
-            self.model_dir = os.path.expanduser("~/.rawviewer_cache/military_classifier")
-            self.onnx_path = os.path.join(self.model_dir, "model.onnx")
+            # 2. Check for local custom model (Development environment)
+            local_custom_path = r"D:\Development\RAWviewer\src\models\super_specialist.onnx"
+            if os.path.exists(local_custom_path):
+                self.onnx_path = local_custom_path
+                self.model_dir = os.path.dirname(local_custom_path)
+            else:
+                # 3. Fallback to cache folder
+                self.model_dir = os.path.expanduser("~/.rawviewer_cache/military_classifier")
+                self.onnx_path = os.path.join(self.model_dir, "model.onnx")
             
         self._session = None
+
+    def _ensure_model(self, progress_callback=None):
+        if os.path.exists(self.onnx_path):
+            return
+
         # Strategy: Download from GitHub repository if missing.
         # This keeps the installer small and allows on-demand acquisition.
         model_url = "https://github.com/markyip/RAWviewer/raw/feature/aviation-specialist/src/models/super_specialist.onnx"
@@ -765,7 +771,10 @@ class MilitaryAircraftClassifier:
         try:
             import requests
             import logging
+            from huggingface_hub import hf_hub_download
             logger = logging.getLogger(__name__)
+            
+            os.makedirs(self.model_dir, exist_ok=True)
             
             logger.info(f"[AVIATION AI] Model missing at {self.onnx_path}. Downloading from {model_url}...")
             if progress_callback:
@@ -791,27 +800,26 @@ class MilitaryAircraftClassifier:
                                 progress_callback(f"Downloading SkySpotter AI...")
             
             logger.info(f"[AVIATION AI] Successfully downloaded model to {self.onnx_path}")
+            return
             
         except Exception as e:
-            import traceback
-            logger.error(f"[AVIATION AI] Failed to download model: {e}")
-            logger.error(traceback.format_exc())
-            raise RuntimeError(f"Could not acquire SkySpotter AI model: {e}")
-            if progress_callback:
-                progress_callback("Downloading Specialist AI (ONNX Optimized)...")
-            
-            # Check if there's a known ONNX export we can grab
-            # If not, we'll fall back to local export
-            hf_hub_download(
-                repo_id=self.HUB_REPO_ID,
-                filename="model.onnx",
-                local_dir=self.model_dir
-            )
-            if os.path.exists(self.onnx_path):
-                return
-        except Exception:
-            # If download fails, we try local export (only works in dev env with torch)
-            pass
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.warning(f"[AVIATION AI] GitHub download failed ({e}), trying HuggingFace fallback...")
+            try:
+                from huggingface_hub import hf_hub_download
+                if progress_callback:
+                    progress_callback("Downloading Specialist AI (HuggingFace)...")
+                
+                hf_hub_download(
+                    repo_id=self.HUB_REPO_ID,
+                    filename="model.onnx",
+                    local_dir=self.model_dir
+                )
+                if os.path.exists(self.onnx_path):
+                    return
+            except Exception as hfe:
+                logger.error(f"[AVIATION AI] All downloads failed: {hfe}")
 
         if progress_callback:
             progress_callback("Exporting Military Specialist AI (Local)...")
@@ -829,11 +837,9 @@ class MilitaryAircraftClassifier:
                 opset_version=18, input_names=["pixel_values"], output_names=["logits"],
                 dynamic_axes={"pixel_values": {0: "batch_size"}, "logits": {0: "batch_size"}}
             )
-        except ImportError:
+        except Exception as e:
             raise RuntimeError(
-                "Military Specialist model (ONNX) is missing and cannot be exported "
-                "because 'torch' is not installed. Please download the model manually "
-                "or run in a development environment."
+                f"Military Specialist model (ONNX) is missing and cannot be acquired: {e}"
             )
 
 
@@ -1060,7 +1066,9 @@ def resolve_mobileclip_backend() -> Any:
     import logging
     logger = logging.getLogger(__name__)
     
-    use_aviation = os.environ.get("RAWVIEWER_AVIATION_MODE") == "1"
+    logger.info("[SYSTEM] Detecting best semantic backend...")
+    use_aviation = os.environ.get("SkySpotter_AVIATION_MODE") == "1"
+    logger.info(f"[SYSTEM] Aviation Mode status: {use_aviation}")
     
     if use_aviation:
         logger.warning("[SYSTEM] >>> AVIATION MODE ENABLED <<< (Using SigLIP-512 + Military Specialist)")
@@ -1245,6 +1253,8 @@ class SemanticImageIndex:
     def _init_db_if_needed(self):
         self._model = None
         self._reverse_geocoder = None
+        start = time.time()
+        logger.info(f"[INDEX] Initializing database at {self.db_path}...")
         self._conn = sqlite3.connect(
             self.db_path, check_same_thread=False, timeout=60.0
         )
@@ -1252,6 +1262,7 @@ class SemanticImageIndex:
         self._conn.execute("PRAGMA synchronous=NORMAL")
         self._conn.execute("PRAGMA busy_timeout=60000")
         self._init_db()
+        logger.info(f"[INDEX] Database initialized in {time.time() - start:.3f}s")
 
     def _init_db(self) -> None:
         self._conn.execute(
@@ -1312,6 +1323,18 @@ class SemanticImageIndex:
             self._conn.execute(
                 "UPDATE semantic_index SET semantic_ready = 1 WHERE semantic_ready IS NULL"
             )
+        if "capture_time" not in cols:
+            self._conn.execute("ALTER TABLE semantic_index ADD COLUMN capture_time TEXT")
+        if "camera_model" not in cols:
+            self._conn.execute("ALTER TABLE semantic_index ADD COLUMN camera_model TEXT")
+        if "lens_model" not in cols:
+            self._conn.execute("ALTER TABLE semantic_index ADD COLUMN lens_model TEXT")
+        if "iso" not in cols:
+            self._conn.execute("ALTER TABLE semantic_index ADD COLUMN iso INTEGER")
+        if "width" not in cols:
+            self._conn.execute("ALTER TABLE semantic_index ADD COLUMN width INTEGER")
+        if "height" not in cols:
+            self._conn.execute("ALTER TABLE semantic_index ADD COLUMN height INTEGER")
         if "gps_lat" not in cols:
             self._conn.execute("ALTER TABLE semantic_index ADD COLUMN gps_lat REAL")
         if "gps_lon" not in cols:
@@ -1337,7 +1360,8 @@ class SemanticImageIndex:
             "CREATE INDEX IF NOT EXISTS idx_semantic_ready_model ON semantic_index(semantic_ready, model_name)"
         )
         self._conn.commit()
-        self._backfill_file_signatures()
+        # Backfill in a background thread to prevent UI freeze on large databases
+        threading.Thread(target=self._backfill_file_signatures, daemon=True).start()
 
     def _ensure_model(self):
         if self._model is not None:
@@ -2248,7 +2272,7 @@ class SemanticImageIndex:
         for i in range(0, len(canonical_paths), batch_size):
             batch = canonical_paths[i : i + batch_size]
             qs = ",".join(["?"] * len(batch))
-            is_aviation = os.environ.get("RAWVIEWER_AVIATION_MODE") == "1"
+            is_aviation = os.environ.get("SkySpotter_AVIATION_MODE") == "1"
             current_model = self.model_name
             logger.warning(f"[DEBUG AI] get_pending_paths: is_aviation={is_aviation} model_name='{current_model}'")
             
@@ -2264,7 +2288,7 @@ class SemanticImageIndex:
                     else:
                         logger.warning(f"[DEBUG AI] File '{os.path.basename(fp)}' needs processing: model='{mname}' ready={s_ready} aircraft='{d_air}' (Expected: '{current_model}' ready=1)")
             else:
-                query = f"SELECT file_path, model_name FROM semantic_index WHERE file_path IN ({qs}) AND semantic_ready = 1 AND model_name = ?"
+                query = f"SELECT file_path FROM semantic_index WHERE file_path IN ({qs}) AND semantic_ready = 1 AND model_name = ?"
                 cursor = self._conn.execute(query, [*batch, current_model])
                 for (fp,) in cursor.fetchall():
                     indexed_up_to_date.add(fp)
@@ -2333,13 +2357,16 @@ class SemanticImageIndex:
                     "embedding": None,
                     "camera_model": None,
                     "lens_model": None,
+                    "capture_time": None,
                     "iso": 0,
                     "width": 0,
                     "height": 0,
                     "gps_lat": None,
                     "gps_lon": None,
                     "city": None,
+                    "admin1": None,
                     "country": None,
+                    "country_code": None,
                     "face_count": 0,
                     "detected_aircraft": None
                 })
@@ -3101,19 +3128,19 @@ class SemanticImageIndex:
         filtered, semantic_query = self._apply_filters(rows, raw_query)
         hits = [
             SearchHit(
-                file_path=str(r["file_path"]),
+                file_path=str(self._row_value(r, "file_path")),
                 score=1.0,
-                file_name=str(r.get("file_name") or os.path.basename(str(r["file_path"]))),
-                capture_time=str(r["capture_time"] or ""),
-                camera_model=str(r["camera_model"] or ""),
-                lens_model=str(r["lens_model"] or ""),
-                iso=int(r["iso"] or 0),
-                gps_lat=float(r["gps_lat"]) if r["gps_lat"] is not None else None,
-                gps_lon=float(r["gps_lon"]) if r["gps_lon"] is not None else None,
-                city=str(r["city"] or ""),
-                admin1=str(r["admin1"] or ""),
-                country=str(r["country"] or ""),
-                country_code=str(r["country_code"] or ""),
+                file_name=str(self._row_value(r, "file_name") or os.path.basename(str(self._row_value(r, "file_path")))),
+                capture_time=str(self._row_value(r, "capture_time")),
+                camera_model=str(self._row_value(r, "camera_model")),
+                lens_model=str(self._row_value(r, "lens_model")),
+                iso=int(self._row_value(r, "iso", 0)),
+                gps_lat=float(self._row_value(r, "gps_lat", 0)) if self._row_value(r, "gps_lat") is not None else None,
+                gps_lon=float(self._row_value(r, "gps_lon", 0)) if self._row_value(r, "gps_lon") is not None else None,
+                city=str(self._row_value(r, "city")),
+                admin1=str(self._row_value(r, "admin1")),
+                country=str(self._row_value(r, "country")),
+                country_code=str(self._row_value(r, "country_code")),
                 face_count=int(self._row_value(r, "face_count", 0)),
                 detected_aircraft=str(self._row_value(r, "detected_aircraft", "")),
             )
@@ -3179,19 +3206,19 @@ class SemanticImageIndex:
             rows.append(
                 {
                     "file_path": original,
-                    "file_name": str(row["file_name"] or os.path.basename(original)),
-                    "capture_time": str(row["capture_time"] or ""),
-                    "camera_model": str(row["camera_model"] or ""),
-                    "lens_model": str(row["lens_model"] or ""),
-                    "iso": int(row["iso"] or 0),
-                    "width": int(row["width"] or 0),
-                    "height": int(row["height"] or 0),
+                    "file_name": str(self._row_value(row, "file_name") or os.path.basename(original)),
+                    "capture_time": str(self._row_value(row, "capture_time")),
+                    "camera_model": str(self._row_value(row, "camera_model")),
+                    "lens_model": str(self._row_value(row, "lens_model")),
+                    "iso": int(self._row_value(row, "iso", 0)),
+                    "width": int(self._row_value(row, "width", 0)),
+                    "height": int(self._row_value(row, "height", 0)),
                     "gps_lat": gps_lat,
                     "gps_lon": gps_lon,
                     "city": city,
                     "admin1": admin1,
                     "country": country,
-                    "country_code": str(row["country_code"] or ""),
+                    "country_code": str(self._row_value(row, "country_code")),
                     "face_count": int(face_count or 0),
                 }
             )

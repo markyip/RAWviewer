@@ -16,10 +16,10 @@ from raw_file_extensions import RAW_FILE_EXTENSIONS
 def use_libraw_consistent_preview_first() -> bool:
     """
     When True (default), single-image RAW avoids embedded-JPEG preview paths so fit and zoom
-    share the same LibRaw postprocess look. Set RAWVIEWER_LIBRAW_CONSISTENT_PREVIEW=0 to restore
+    share the same LibRaw postprocess look. Set SkySpotter_LIBRAW_CONSISTENT_PREVIEW=0 to restore
     the faster embedded-preview first paint.
     """
-    v = os.environ.get("RAWVIEWER_LIBRAW_CONSISTENT_PREVIEW", "1").strip().lower()
+    v = os.environ.get("SkySpotter_LIBRAW_CONSISTENT_PREVIEW", "1").strip().lower()
     return v not in ("0", "false", "no", "off")
 
 

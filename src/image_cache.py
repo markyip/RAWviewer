@@ -1153,7 +1153,7 @@ def get_image_cache() -> ImageCache:
     """Get the global image cache instance."""
     global _global_cache
     if _global_cache is None:
-        persistent = os.environ.get("RAWVIEWER_PERSISTENT_CACHE", "").lower() in {"1", "true", "yes", "on"}
+        persistent = os.environ.get("SkySpotter_PERSISTENT_CACHE", "").lower() in {"1", "true", "yes", "on"}
         if not persistent:
             _cleanup_legacy_disk_cache_once()
         _global_cache = ImageCache(persistent_cache_enabled=persistent)

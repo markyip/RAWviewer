@@ -27,7 +27,7 @@ from common_image_loader import (
 
 
 def _verbose_orientation_logs() -> bool:
-    return os.environ.get("RAWVIEWER_VERBOSE_ORIENTATION_LOGS", "0").strip().lower() in {
+    return os.environ.get("SkySpotter_VERBOSE_ORIENTATION_LOGS", "0").strip().lower() in {
         "1",
         "true",
         "yes",
@@ -78,7 +78,7 @@ class UnifiedImageProcessor:
             if cached is not None:
                 # Keep cache hits cheap for gallery scrolling. The old self-healing orientation
                 # check touched EXIF/SQLite on every hit; enable it only when repairing caches.
-                if os.environ.get("RAWVIEWER_VALIDATE_THUMB_CACHE") == "1":
+                if os.environ.get("SkySpotter_VALIDATE_THUMB_CACHE") == "1":
                     exif_data = self.exif_extractor.extract_exif_data(file_path)
                     orientation = exif_data.get('orientation', 1) if exif_data else 1
                     if orientation in (6, 8) and hasattr(cached, 'shape'):
@@ -335,7 +335,7 @@ class UnifiedImageProcessor:
                 exif_data = self.exif_extractor.extract_exif_data(file_path)
             
             orientation = exif_data.get('orientation', 1) if exif_data else 1
-            if os.environ.get("RAWVIEWER_VERBOSE_ORIENTATION_LOGS") == "1":
+            if os.environ.get("SkySpotter_VERBOSE_ORIENTATION_LOGS") == "1":
                 print(f"[ORIENTATION] UnifiedImageProcessor (RAW): {os.path.basename(file_path)} final_orientation={orientation}")
                 
             if orientation != 1 and rgb_image is not None:
@@ -461,7 +461,7 @@ class UnifiedImageProcessor:
             print(f"[ORIENTATION] Before correction: shape = {original_shape}")
         
         if orientation == 1:
-            if os.environ.get("RAWVIEWER_VERBOSE_ORIENTATION_LOGS") == "1":
+            if os.environ.get("SkySpotter_VERBOSE_ORIENTATION_LOGS") == "1":
                 print(f"[ORIENTATION] Numpy operation: No operation (orientation = 1)")
             return image_array
             
@@ -469,11 +469,11 @@ class UnifiedImageProcessor:
         # (e.g. it's already a portrait image but EXIF still says Orientation 6), 
         # it might have been pre-rotated by the loader/camera.
         h, w = image_array.shape[:2]
-        if os.environ.get("RAWVIEWER_VERBOSE_ORIENTATION_LOGS") == "1":
+        if os.environ.get("SkySpotter_VERBOSE_ORIENTATION_LOGS") == "1":
             print(f"[ORIENTATION] UnifiedImageProcessor: Applying correction for Orientation {orientation} to {w}x{h} image")
 
         if orientation in (5, 6, 7, 8) and h > w:
-            if os.environ.get("RAWVIEWER_VERBOSE_ORIENTATION_LOGS") == "1":
+            if os.environ.get("SkySpotter_VERBOSE_ORIENTATION_LOGS") == "1":
                 print(f"[ORIENTATION] UnifiedImageProcessor: Image is already portrait ({w}x{h}), skipping manual rotation for Orientation {orientation}")
             return image_array
         if orientation in (3, 4) and h < w:

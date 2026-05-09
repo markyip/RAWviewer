@@ -1,10 +1,10 @@
 """Compatibility shim for gallery view module.
 
 Single source of truth:
-`rawviewer_ui.gallery_view.JustifiedGallery`
+`SkySpotter_ui.gallery_view.JustifiedGallery`
 """
 
-from rawviewer_ui.gallery_view import JustifiedGallery
+from SkySpotter_ui.gallery_view import JustifiedGallery
 
 __all__ = ["JustifiedGallery"]
 import time
