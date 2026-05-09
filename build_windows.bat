@@ -1,5 +1,5 @@
 @echo off
-echo RAWviewer Windows Build Script
+echo SkySpotter Windows Build Script
 echo ===============================
 echo.
 
@@ -22,9 +22,9 @@ REM Install/upgrade dependencies
 echo Installing dependencies...
 pip install --upgrade PyQt6 rawpy send2trash pyinstaller natsort exifread pyexiv2 Pillow psutil numpy qtawesome pyqtgraph sentence-transformers reverse-geocoder pycountry pywin32
 
-REM Try to close any running RAWviewer.exe instances
-echo Checking for running RAWviewer instances...
-taskkill /F /IM RAWviewer.exe /T >nul 2>&1
+REM Try to close any running SkySpotter.exe instances
+echo Checking for running SkySpotter instances...
+taskkill /F /IM SkySpotter.exe /T >nul 2>&1
 if %errorlevel% == 0 (
     echo Closed running RAWviewer.exe instances
     timeout /t 1 /nobreak >nul
@@ -35,14 +35,14 @@ echo Cleaning previous builds...
 if exist build rmdir /s /q build 2>nul
 if exist dist (
     REM Try to delete exe first
-    if exist dist\RAWviewer.exe del /f /q dist\RAWviewer.exe 2>nul
+    if exist dist\SkySpotter.exe del /f /q dist\SkySpotter.exe 2>nul
     REM Then try to remove directory
     rmdir /s /q dist 2>nul
 )
 if exist *.spec del /q *.spec 2>nul
 
 REM Build the application
-echo Building RAWviewer...
+echo Building SkySpotter...
 python build.py
 if %errorlevel% neq 0 (
     echo.
@@ -54,12 +54,11 @@ if %errorlevel% neq 0 (
 echo.
 echo Build completed successfully!
 echo.
-echo You can find the executable at:
-echo   - dist\RAWviewer.exe
+echo You can find the application at:
+echo   - dist\SkySpotter\
 echo.
 echo To run the app:
-echo   1. Double-click RAWviewer.exe in File Explorer
-echo   2. Run: dist\RAWviewer.exe
-echo   3. Run: .\dist\RAWviewer.exe
+echo   1. Double-click SkySpotter.exe in dist\SkySpotter\
+echo   2. Run: dist\SkySpotter\SkySpotter.exe
 
 pause 

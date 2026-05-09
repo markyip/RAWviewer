@@ -1,5 +1,5 @@
 @echo off
-echo Running RAWviewer in debug mode...
+echo Running SkySpotter in debug mode...
 echo All debug logs will be displayed in this console window.
 echo.
 echo Press Ctrl+C to stop the application.
