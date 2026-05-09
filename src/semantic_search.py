@@ -758,16 +758,45 @@ class MilitaryAircraftClassifier:
             self.onnx_path = os.path.join(self.model_dir, "model.onnx")
             
         self._session = None
-    def _ensure_model(self, progress_callback=None):
-        if os.path.exists(self.onnx_path):
-            return
+        # Strategy: Download from GitHub repository if missing.
+        # This keeps the installer small and allows on-demand acquisition.
+        model_url = "https://github.com/markyip/RAWviewer/raw/feature/aviation-specialist/src/models/super_specialist.onnx"
         
-        os.makedirs(self.model_dir, exist_ok=True)
-        
-        # Strategy: Try to download pre-exported ONNX if possible, 
-        # or export it locally if torch is available (dev environment).
         try:
-            from huggingface_hub import hf_hub_download
+            import requests
+            import logging
+            logger = logging.getLogger(__name__)
+            
+            logger.info(f"[AVIATION AI] Model missing at {self.onnx_path}. Downloading from {model_url}...")
+            if progress_callback:
+                progress_callback("Connecting to model repository...")
+                
+            response = requests.get(model_url, stream=True, timeout=30)
+            response.raise_for_status()
+            
+            total_size = int(response.headers.get('content-length', 0))
+            downloaded = 0
+            
+            with open(self.onnx_path, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=1024*1024): # 1MB chunks
+                    if chunk:
+                        f.write(chunk)
+                        downloaded += len(chunk)
+                        if total_size > 0:
+                            percent = (downloaded / total_size) * 100
+                            if progress_callback:
+                                progress_callback(f"Downloading SkySpotter AI: {percent:.1f}%")
+                        else:
+                            if progress_callback:
+                                progress_callback(f"Downloading SkySpotter AI...")
+            
+            logger.info(f"[AVIATION AI] Successfully downloaded model to {self.onnx_path}")
+            
+        except Exception as e:
+            import traceback
+            logger.error(f"[AVIATION AI] Failed to download model: {e}")
+            logger.error(traceback.format_exc())
+            raise RuntimeError(f"Could not acquire SkySpotter AI model: {e}")
             if progress_callback:
                 progress_callback("Downloading Specialist AI (ONNX Optimized)...")
             

@@ -1,4 +1,4 @@
-import sys
+﻿import sys
 import os
 import platform
 import ctypes
@@ -93,7 +93,7 @@ try:
         _painter.end()
     
     _startup_splash = QSplashScreen(_splash_pixmap, Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.FramelessWindowHint)
-    _startup_splash.showMessage("Starting RAWviewer...", Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignCenter, Qt.GlobalColor.white)
+    _startup_splash.showMessage("Starting SkySpotter...", Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignCenter, Qt.GlobalColor.white)
     _startup_splash.show()
     _temp_app.processEvents()
     
@@ -103,7 +103,7 @@ except Exception:
     _startup_splash = None
 
 # Force verbose orientation logs for debugging rotation issues
-os.environ["RAWVIEWER_VERBOSE_ORIENTATION_LOGS"] = "1"
+os.environ["SkySpotter_VERBOSE_ORIENTATION_LOGS"] = "1"
 
 # Global placeholders for lazy-loaded modules
 rawpy = None
@@ -148,7 +148,7 @@ except Exception:
 def _redirect_stdio_to_file_if_needed():
     try:
         # Opt-in only: do not create log folders/files in normal releases.
-        if os.environ.get("RAWVIEWER_REDIRECT_STDIO", "").strip() not in ("1", "true", "True", "YES", "yes"):
+        if os.environ.get("SkySpotter_REDIRECT_STDIO", "").strip() not in ("1", "true", "True", "YES", "yes"):
             return
 
         is_frozen = bool(getattr(sys, "frozen", False))
@@ -179,7 +179,7 @@ def _redirect_stdio_to_file_if_needed():
         from datetime import datetime
 
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        path = os.path.join(log_dir, f"rawviewer_console_{ts}.log")
+        path = os.path.join(log_dir, f"SkySpotter_console_{ts}.log")
         f = open(path, "a", encoding="utf-8", buffering=1)  # line-buffered
         if sys.stdout is None:
             sys.stdout = f
@@ -222,7 +222,7 @@ def _is_primary_process() -> bool:
         return True
 
 
-_VERBOSE_CONSOLE = _env_true("RAWVIEWER_VERBOSE_CONSOLE", default=False)
+_VERBOSE_CONSOLE = _env_true("SkySpotter_VERBOSE_CONSOLE", default=False)
 
 
 def safe_print(*args, **kwargs):
@@ -261,7 +261,7 @@ logger = logging.getLogger(__name__)
 
 # Print immediately to verify script is running (main process only, opt-in verbosity)
 safe_print("=" * 80, flush=True)
-safe_print("RAWviewer: Starting imports...", flush=True)
+safe_print("SkySpotter: Starting imports...", flush=True)
 safe_print(f"Python: {sys.version}", flush=True)
 safe_print(f"Working directory: {os.getcwd()}", flush=True)
 safe_print("=" * 80, flush=True)
@@ -501,8 +501,8 @@ def _lazy_import_heavy_modules(splash=None):
     ImageHistogramWidget = _ImageHistogramWidget
 
     _update_splash("Loading UI components...")
-    from rawviewer_ui.widgets import ThumbnailLabel as _ThumbnailLabel
-    from rawviewer_ui.gallery_view import JustifiedGallery as _ExternalJustifiedGallery
+    from SkySpotter_ui.widgets import ThumbnailLabel as _ThumbnailLabel
+    from SkySpotter_ui.gallery_view import JustifiedGallery as _ExternalJustifiedGallery
     ThumbnailLabel = _ThumbnailLabel
     ExternalJustifiedGallery = _ExternalJustifiedGallery
     
@@ -574,8 +574,8 @@ def setup_logging():
 
         # Always attach a console/stream handler when possible.
         stream = sys.stdout if sys.stdout is not None else getattr(sys, "__stdout__", None)
-        focus_gallery_switch = _env_true("RAWVIEWER_FOCUS_GALLERY_SWITCH", default=False)
-        verbose_info = _env_true("RAWVIEWER_VERBOSE_INFO_LOGS", default=False) or focus_gallery_switch
+        focus_gallery_switch = _env_true("SkySpotter_FOCUS_GALLERY_SWITCH", default=False)
+        verbose_info = _env_true("SkySpotter_VERBOSE_INFO_LOGS", default=False) or focus_gallery_switch
         if stream is not None:
             console_handler = logging.StreamHandler(stream)
             console_handler.setLevel(logging.INFO)
@@ -589,13 +589,13 @@ def setup_logging():
             root_logger.addHandler(logging.NullHandler())
 
         # Optional file logging (opt-in) to avoid creating a logs folder in normal releases.
-        enable_file_log = os.environ.get("RAWVIEWER_FILE_LOG", "").strip() in ("1", "true", "True", "YES", "yes")
+        enable_file_log = os.environ.get("SkySpotter_FILE_LOG", "").strip() in ("1", "true", "True", "YES", "yes")
         if enable_file_log:
             log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'logs')
             os.makedirs(log_dir, exist_ok=True)
 
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-            log_file = os.path.join(log_dir, f'rawviewer_{timestamp}.log')
+            log_file = os.path.join(log_dir, f'SkySpotter_{timestamp}.log')
 
             file_handler = logging.FileHandler(log_file, encoding='utf-8', mode='w')
             file_handler.setLevel(logging.DEBUG)
@@ -619,7 +619,7 @@ def setup_logging():
         # Try to write to a fallback log file
         try:
             # Only attempt fallback file logging if explicitly enabled.
-            if os.environ.get("RAWVIEWER_FILE_LOG", "").strip() in ("1", "true", "True", "YES", "yes"):
+            if os.environ.get("SkySpotter_FILE_LOG", "").strip() in ("1", "true", "True", "YES", "yes"):
                 fallback_log = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'logs', 'error.log')
                 os.makedirs(os.path.dirname(fallback_log), exist_ok=True)
                 with open(fallback_log, 'a', encoding='utf-8') as f:
@@ -1274,8 +1274,8 @@ class RAWProcessor(QThread):
                             if thumb is not None and thumb.format == rawpy.ThumbFormat.JPEG:
                                 # Successfully extracted embedded JPEG thumbnail
                                 embedded_time = time.time() - embedded_start
-                                logger.info(f"[RAW_PROC] ⚡ FAST: Extracted embedded JPEG thumbnail in {embedded_time*1000:.1f}ms")
-                                safe_print(f"[PERF] ⚡ FAST THUMBNAIL: Embedded JPEG extracted in {embedded_time*1000:.1f}ms")
+                                logger.info(f"[RAW_PROC] ??FAST: Extracted embedded JPEG thumbnail in {embedded_time*1000:.1f}ms")
+                                safe_print(f"[PERF] ??FAST THUMBNAIL: Embedded JPEG extracted in {embedded_time*1000:.1f}ms")
                                 
                                 # Convert JPEG bytes to numpy array
                                 from io import BytesIO
@@ -1492,10 +1492,10 @@ class RAWProcessor(QThread):
                                                     extracted_thumbnail = thumb.data
                                                 thumb_size = f"{extracted_thumbnail.shape[1]}x{extracted_thumbnail.shape[0]}" if extracted_thumbnail is not None else 'N/A'
                                                 logger.debug(f"Thumbnail extracted using existing raw handle: {thumb_size}")
-                                                safe_print(f"[PERF] ⚡ FAST THUMBNAIL: Extracted using existing raw handle ({thumb_size})")
+                                                safe_print(f"[PERF] ??FAST THUMBNAIL: Extracted using existing raw handle ({thumb_size})")
                                         except Exception as thumb_extract_error:
                                             logger.debug(f"Failed to extract thumbnail from raw handle: {thumb_extract_error}")
-                                            safe_print(f"[PERF] ⚠️  Raw handle extraction failed, falling back")
+                                            safe_print(f"[PERF] ?��?  Raw handle extraction failed, falling back")
                                 
                                 # Fallback: Use ThumbnailExtractor if raw handle extraction failed
                                 if extracted_thumbnail is None:
@@ -1504,7 +1504,7 @@ class RAWProcessor(QThread):
                                     extracted_thumbnail = self.thumbnail_extractor.extract_thumbnail_from_raw(self.file_path)
                                     fallback_time = time.time() - fallback_start
                                     if extracted_thumbnail is not None:
-                                        safe_print(f"[PERF] 🔄 FALLBACK THUMBNAIL: Extracted via ThumbnailExtractor in {fallback_time*1000:.1f}ms")
+                                        safe_print(f"[PERF] ?? FALLBACK THUMBNAIL: Extracted via ThumbnailExtractor in {fallback_time*1000:.1f}ms")
                                 
                                 if self._should_stop:
                                     return
@@ -1974,7 +1974,7 @@ class ThumbnailLabel(QLabel):
 
 
 # -----------------------------
-# Signal carrier (thread → UI)
+# Signal carrier (thread ??UI)
 # -----------------------------
 class ImageLoaded(QObject):
     """Signal carrier for image loading - thread to UI communication"""
@@ -2990,7 +2990,7 @@ class _LegacyGalleryCompatBlock:
                 label.setPixmap(scaled)
                 label.setFixedSize(scaled.size())
                 label.set_original_pixmap(item)
-                label.setText("")  # Clear "Loading…" text
+                label.setText("")  # Clear "Loading?? text
                 self.tiles.append((label, None, target_width, target_height))  # No file path needed
             
             row_layout.addWidget(label)
@@ -3684,7 +3684,7 @@ class _LegacyGalleryCompatBlock:
         for file_path, label in self._visible_widgets.items():
             try:
                 # Check if widget shows loading text
-                if label.text() in ("Loading...", "Loading…"):
+                if label.text() in ("Loading...", "Loading??):
                     all_visible_loaded = False
                 else:
                     # Also check if widget has a valid pixmap (for cached images)
@@ -4299,7 +4299,7 @@ class CustomConfirmDialog(QDialog):
 
 
 class MobileCLIPDownloadDialog(QDialog):
-    """RAWviewer-styled prompt for downloading optional MobileCLIP assets."""
+    """SkySpotter-styled prompt for downloading optional MobileCLIP assets."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -4321,7 +4321,7 @@ class MobileCLIPDownloadDialog(QDialog):
         main_layout.setContentsMargins(24, 22, 24, 22)
         main_layout.setSpacing(12)
 
-        is_aviation = os.environ.get("RAWVIEWER_AVIATION_MODE") == "1"
+        is_aviation = os.environ.get("SkySpotter_AVIATION_MODE") == "1"
         title_text = "Enable Aviation Specialist Search" if is_aviation else "Enable Semantic Search"
         title_label = QLabel(title_text)
         title_label.setStyleSheet("""
@@ -4335,8 +4335,8 @@ class MobileCLIPDownloadDialog(QDialog):
         main_layout.addWidget(title_label)
 
         msg_text = (
-            "RAWviewer can download the Aviation Specialist AI models now. " if is_aviation else
-            "RAWviewer can download the MobileCLIP AI models now. "
+            "SkySpotter can download the Aviation Specialist AI models now. " if is_aviation else
+            "SkySpotter can download the MobileCLIP AI models now. "
         )
         msg_text += "This is a one-time download used for local, offline identification and indexing."
         message_label = QLabel(msg_text)
@@ -4576,8 +4576,8 @@ def _windows_shell_verb_suggests_share(verb_name: object) -> bool:
         return True
     plain = s.replace("&", "")
     for token in (
-        "\u5171\u7528",  # zh-TW: 共用
-        "\u5206\u4eab",  # zh-CN: 分享
+        "\u5171\u7528",  # zh-TW: ?�用
+        "\u5206\u4eab",  # zh-CN: ?�享
         "partage",
         "teilen",
         "condividi",
@@ -4884,7 +4884,7 @@ class RAWImageViewer(QMainWindow):
         self._semantic_index_progress_total = 0
         self._semantic_coverage_cache = None
         self._semantic_coverage_cache_ts = 0.0
-        # Gallery: user hid search strip during index/download — skip auto-expand from status updates.
+        # Gallery: user hid search strip during index/download ??skip auto-expand from status updates.
         self._gallery_search_user_collapsed_while_busy = False
 
         # Focus-area dashed outline from EXIF / maker AF (toggle with F)
@@ -4946,7 +4946,7 @@ class RAWImageViewer(QMainWindow):
         safe_print("  [RAWImageViewer] Getting cache stats...", flush=True)
         cache_stats = self.image_cache.get_cache_stats()
         memory_info = cache_stats['memory_info']
-        safe_print(f"✓ Enhanced image cache initialized", flush=True)
+        safe_print(f"??Enhanced image cache initialized", flush=True)
         safe_print(f"  Cache budget: {cache_stats['cache_budget_mb']}MB", flush=True)
         safe_print(
             f"  Max full images: {cache_stats['full_image_cache']['max_size']}", flush=True)
@@ -4956,14 +4956,14 @@ class RAWImageViewer(QMainWindow):
             f"  Available memory: {memory_info['system_available_gb']:.1f}GB", flush=True)
         QTimer.singleShot(1000, self._cleanup_old_image_cache)
 
-        # Restore last folder / file / view mode (opt-out: RAWVIEWER_DISABLE_SESSION_RESTORE=1)
-        if os.environ.get("RAWVIEWER_DISABLE_SESSION_RESTORE", "0").strip() != "1":
+        # Restore last folder / file / view mode (opt-out: SkySpotter_DISABLE_SESSION_RESTORE=1)
+        if os.environ.get("SkySpotter_DISABLE_SESSION_RESTORE", "0").strip() != "1":
             safe_print("  [RAWImageViewer] Restoring session state...", flush=True)
             if self.restore_session_state():
                 if hasattr(self, "view_mode") and self.view_mode == "gallery":
                     self._show_gallery_view()
         else:
-            safe_print("  [RAWImageViewer] Session restore skipped (RAWVIEWER_DISABLE_SESSION_RESTORE)", flush=True)
+            safe_print("  [RAWImageViewer] Session restore skipped (SkySpotter_DISABLE_SESSION_RESTORE)", flush=True)
         safe_print("  [RAWImageViewer] Initialization complete!", flush=True)
 
     def _set_single_view_pixmap(self, base: QPixmap) -> None:
@@ -5065,7 +5065,7 @@ class RAWImageViewer(QMainWindow):
 
         if should_upgrade:
             if not getattr(self, "_full_resolution_loading", False):
-                logger.info("Zoom-to-point — triggering full resolution load path")
+                logger.info("Zoom-to-point ??triggering full resolution load path")
                 cached_full = self.image_cache.get_full_image(self.current_file_path)
                 if cached_full is not None:
                     if hasattr(cached_full, "shape"):
@@ -5159,7 +5159,7 @@ class RAWImageViewer(QMainWindow):
         if self._focus_subject_outline_active:
             self._refresh_focus_subject_rect_from_exif()
             self.status_bar.showMessage(
-                "Focus outline ON — amber dashed = maker AF; lime = Subject / CIPA. "
+                "Focus outline ON ??amber dashed = maker AF; lime = Subject / CIPA. "
                 "From fit: Space centers on the box; double-click zooms to the click. F = off.",
                 6500,
             )
@@ -5240,23 +5240,23 @@ class RAWImageViewer(QMainWindow):
             )
 
     def _connect_image_manager_signals(self):
-        """連接 ImageLoadManager 的永久信號（事件驅動架構）"""
-        # 縮圖就緒
+        """??�� ImageLoadManager ?�永久信?��?事件驅�??��?�?""
+        # 縮�?就�?
         self.image_manager.thumbnail_ready.connect(self.on_manager_thumbnail_ready)
-        # 完整圖像就緒
+        # 完整?��?就�?
         self.image_manager.image_ready.connect(self.on_manager_image_ready)
-        # QPixmap 就緒（非 RAW 文件）
+        # QPixmap 就�?（�? RAW ?�件�?
         self.image_manager.pixmap_ready.connect(self.on_manager_pixmap_ready)
-        # EXIF 數據就緒
+        # EXIF ?��?就�?
         self.image_manager.exif_data_ready.connect(self.on_manager_exif_ready)
-        # 錯誤處理
+        # ?�誤?��?
         self.image_manager.error_occurred.connect(self.on_manager_error)
-        # 進度更新
+        # ?�度?�新
         self.image_manager.progress_updated.connect(self.on_manager_progress)
 
     def _hide_all_loading_indicators(self):
         """Helper to hide all loading indicators across modes"""
-        # Always clear gallery toast if the widget exists — view_mode may have
+        # Always clear gallery toast if the widget exists ??view_mode may have
         # switched to single during folder scan, leaving a stale "Scanning folder..." label.
         if self.gallery_justified:
             self.gallery_justified.hide_loading_message()
@@ -5264,12 +5264,12 @@ class RAWImageViewer(QMainWindow):
             self.loading_overlay.hide_loading()
 
     def on_manager_thumbnail_ready(self, file_path: str, thumbnail):
-        """處理 ImageLoadManager 的縮圖就緒信號"""
+        """?��? ImageLoadManager ?�縮?�就緒信??""
         import logging
         logger = logging.getLogger(__name__)
         from PyQt6.QtGui import QImage, QPixmap
 
-        # In gallery mode, thumbnail rendering is handled by rawviewer_ui.gallery_view.
+        # In gallery mode, thumbnail rendering is handled by SkySpotter_ui.gallery_view.
         # Ignore single-view manager callbacks to prevent cross-mode repaint churn.
         if getattr(self, "_suppress_single_manager_callbacks", False):
             return
@@ -5308,7 +5308,7 @@ class RAWImageViewer(QMainWindow):
             return
 
         # If thumbnail is already very large (near full embedded JPEG), skip displaying it and wait for image_ready.
-        # Threshold was 1600px which skipped typical 1920px camera embeds — users saw no preview for seconds.
+        # Threshold was 1600px which skipped typical 1920px camera embeds ??users saw no preview for seconds.
         # 3840: show normal ~2K/3K embeds immediately; only skip huge thumbs to limit double-render cost.
         if max_dim >= 3840:
             try:
@@ -5346,7 +5346,7 @@ class RAWImageViewer(QMainWindow):
             self._orientation_already_applied = False  # Reset flag
 
     def on_manager_image_ready(self, file_path: str, image):
-        """處理 ImageLoadManager 的完整圖像就緒信號"""
+        """?��? ImageLoadManager ?��??��??�就緒信??""
         if getattr(self, "_suppress_single_manager_callbacks", False):
             return
         if getattr(self, "view_mode", "single") != "single":
@@ -5399,7 +5399,7 @@ class RAWImageViewer(QMainWindow):
         
         # CRITICAL: Prevent resolution downgrade within the SAME file: a late small preview must not
         # replace a higher-resolution image we already showed for this path. When switching files,
-        # ``current_pixmap`` may still hold the *previous* image — do not compare dimensions then.
+        # ``current_pixmap`` may still hold the *previous* image ??do not compare dimensions then.
         displayed_for = getattr(self, "_displayed_content_path", None)
         pixmap_is_for_this_file = (
             displayed_for is not None
@@ -5453,7 +5453,7 @@ class RAWImageViewer(QMainWindow):
         self._start_preloading()
 
     def on_manager_pixmap_ready(self, file_path: str, pixmap):
-        """處理 ImageLoadManager 的 QPixmap 就緒信號（非 RAW 文件）"""
+        """?��? ImageLoadManager ??QPixmap 就�?信�?（�? RAW ?�件�?""
         import logging
         logger = logging.getLogger(__name__)
 
@@ -5535,7 +5535,7 @@ class RAWImageViewer(QMainWindow):
         self._start_preloading()
 
     def on_manager_exif_ready(self, file_path: str, exif_data: dict):
-        """處理 ImageLoadManager 的 EXIF 數據就緒信號"""
+        """?��? ImageLoadManager ??EXIF ?��?就�?信�?"""
         import logging
         import time
         logger = logging.getLogger(__name__)
@@ -5604,7 +5604,7 @@ class RAWImageViewer(QMainWindow):
             logger.debug(f"[MANAGER] Ensured status metadata label is visible in single view mode")
 
     def on_manager_error(self, file_path: str, error_message: str):
-        """處理 ImageLoadManager 的錯誤信號"""
+        """?��? ImageLoadManager ?�錯誤信??""
         if hasattr(self, 'loading_overlay'):
             self.loading_overlay.hide_loading()
             
@@ -5631,7 +5631,7 @@ class RAWImageViewer(QMainWindow):
         self.show_error("Load Error", f"Failed to load image: {error_message}")
 
     def on_manager_progress(self, file_path: str, status_message: str):
-        """處理 ImageLoadManager 的進度更新信號"""
+        """?��? ImageLoadManager ?�進度?�新信�?"""
         import logging
         logger = logging.getLogger(__name__)
         
@@ -5772,7 +5772,7 @@ class RAWImageViewer(QMainWindow):
         # Set window to frameless for custom title bar only on Windows
         if platform.system() == 'Windows':
             self.setWindowFlags(Qt.WindowType.FramelessWindowHint)
-        self.setWindowTitle('RAWviewer v2.0.0')
+        self.setWindowTitle('SkySpotter v2.0.0')
         
         # Set simple background style (no rounded corners - simplifies window resizing)
         self.setStyleSheet("""
@@ -5836,7 +5836,7 @@ class RAWImageViewer(QMainWindow):
         
         # Create custom title bar only on Windows
         if platform.system() == 'Windows':
-            self.title_bar = CustomTitleBar(self, title="RAWviewer v2.0.0")
+            self.title_bar = CustomTitleBar(self, title="SkySpotter v2.0.0")
         else:
             self.title_bar = None
         
@@ -5943,10 +5943,10 @@ class RAWImageViewer(QMainWindow):
         # Center the label in viewport, but left-align the text content
         self.image_label.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
         # Create instruction text with modern folder icon
-        # Use modern folder icon (📁) instead of old style (🗁)
+        # Use modern folder icon (??) instead of old style (??)
         self.image_label.setText(
             "No image loaded\n\n"
-            "Click 📁 or drag and drop a folder or image to load it\n"
+            "Click ?? or drag and drop a folder or image to load it\n"
             "Press Space to toggle between fit-to-window and 100% zoom\n"
             "Double-click image to zoom in/out\n"
             "Click and drag to pan when zoomed\n"
@@ -5955,7 +5955,7 @@ class RAWImageViewer(QMainWindow):
             "Press Down Arrow to move the current image to Discard folder\n"
             "Press Delete to remove the current image\n"
             "Press H to show or hide histogram\n"
-            "Press F — show dashed focus / subject outline from EXIF (amber = maker AF; lime = Subject / CIPA)\n"
+            "Press F ??show dashed focus / subject outline from EXIF (amber = maker AF; lime = Subject / CIPA)\n"
             "Scroll wheel (fit-to-window): Scroll down = previous image, Scroll up = next image\n"
             "Horizontal wheel (zoom mode): Scroll left/right to pan the image"
         )
@@ -6293,7 +6293,7 @@ class RAWImageViewer(QMainWindow):
         )
         self.status_counter_label.setStyleSheet(_counter_label_style)
 
-        # Trailing block: [share][i] — fixed gap — [counter] (avoids whole status bar 20px gap)
+        # Trailing block: [share][i] ??fixed gap ??[counter] (avoids whole status bar 20px gap)
         self.right_status_trailing = QWidget()
         _rtl = QHBoxLayout(self.right_status_trailing)
         _rtl.setContentsMargins(0, 0, 0, 0)
@@ -6960,7 +6960,7 @@ class RAWImageViewer(QMainWindow):
                 self._semantic_search_backup_files = list(base_files)
             if getattr(self, "_semantic_indexing_in_progress", False):
                 self.status_bar.showMessage(
-                    "Searching while indexing… EXIF/metadata covers whole album; semantic ranking improves as indexing progresses.",
+                    "Searching while indexing??EXIF/metadata covers whole album; semantic ranking improves as indexing progresses.",
                     4500,
                 )
             else:
@@ -7087,7 +7087,7 @@ class RAWImageViewer(QMainWindow):
             self.status_bar.showMessage("Semantic search filter cleared", 3000)
 
     def get_settings(self):
-        return QSettings("RAWviewer", "RAWviewer")
+        return QSettings("SkySpotter", "SkySpotter")
     
     def get_sort_preference(self):
         """Get user's preferred sorting method - Newest (True) or Oldest (False)"""
@@ -7478,7 +7478,7 @@ class RAWImageViewer(QMainWindow):
                 }
             """)
             
-            # Create optimized justified gallery widget from rawviewer_ui module.
+            # Create optimized justified gallery widget from SkySpotter_ui module.
             justified_gallery = ExternalJustifiedGallery([], self)  # Empty list initially, will be populated
             gallery_scroll.setWidget(justified_gallery)
             gallery_layout.addWidget(gallery_scroll)
@@ -7500,7 +7500,7 @@ class RAWImageViewer(QMainWindow):
             # Hide it initially - it will be shown by _show_gallery_view() when needed
             gallery_container.hide()
             
-            # NOTE: rawviewer_ui.gallery_view.JustifiedGallery already wires scrollbar events
+            # NOTE: SkySpotter_ui.gallery_view.JustifiedGallery already wires scrollbar events
             # internally (valueChanged + sliderPressed/Released). Avoid duplicate connections
             # here; they can trigger redundant scheduling and visible scroll lag.
     
@@ -8815,9 +8815,9 @@ class RAWImageViewer(QMainWindow):
         """Update the sort toggle button text based on current preference"""
         if hasattr(self, 'sort_toggle_button'):
             if self.get_sort_preference():
-                self.sort_toggle_button.setText("⇅ Newest")
+                self.sort_toggle_button.setText("??Newest")
             else:
-                self.sort_toggle_button.setText("⇅ Oldest")
+                self.sort_toggle_button.setText("??Oldest")
     
     def resort_current_folder(self):
         """Resort the current folder with new sorting preference"""
@@ -8972,7 +8972,7 @@ class RAWImageViewer(QMainWindow):
         
         sort_time = time.time() - sort_start
         logger.info(f"[SORT] Bulk metadata fetch & sort of {len(file_paths)} files took {sort_time:.3f}s")
-        safe_print(f"[PERF] 🔄 Sorted {len(file_paths)} files in {sort_time*1000:.1f}ms")
+        safe_print(f"[PERF] ?? Sorted {len(file_paths)} files in {sort_time*1000:.1f}ms")
         return sorted_files, bulk_metadata
     
     def sort_image_files(self, file_paths, file_stats=None):
@@ -9014,14 +9014,14 @@ class RAWImageViewer(QMainWindow):
     def _keyboard_shortcuts_help_text(self):
         """Plain-text shortcuts list for tooltips and the shortcuts dialog."""
         return (
-            "Space — Toggle fit-to-window / 100% zoom\n"
-            "Double-click — Toggle fit-to-window / 100% zoom\n"
-            "Trackpad Pinch / Ctrl+Scroll — Smooth zoom in/out\n"
-            "Left / Right Arrow — Previous / next image\n"
-            "Down Arrow — Move image to Discard folder\n"
-            "Delete — Delete current image\n"
-            "H — Show or hide histogram (single-image view)\n"
-            "F — Focus / subject outline from EXIF (amber = maker AF; lime = Subject / CIPA). "
+            "Space ??Toggle fit-to-window / 100% zoom\n"
+            "Double-click ??Toggle fit-to-window / 100% zoom\n"
+            "Trackpad Pinch / Ctrl+Scroll ??Smooth zoom in/out\n"
+            "Left / Right Arrow ??Previous / next image\n"
+            "Down Arrow ??Move image to Discard folder\n"
+            "Delete ??Delete current image\n"
+            "H ??Show or hide histogram (single-image view)\n"
+            "F ??Focus / subject outline from EXIF (amber = maker AF; lime = Subject / CIPA). "
             "With outline on, from fit: Space centers on the box; double-click zooms to the click. Zoomed: Space/double-click = fit.\n\n"
             "You can drag and drop files or folders onto the window."
         )
@@ -9493,7 +9493,7 @@ class RAWImageViewer(QMainWindow):
 
         self._smooth_zoom_full_request_sent = True
         logging.getLogger(__name__).info(
-            "[ZOOM] Preview at native pixels — starting full-resolution decode"
+            "[ZOOM] Preview at native pixels ??starting full-resolution decode"
         )
         self._load_full_resolution_on_demand()
 
@@ -9735,7 +9735,7 @@ class RAWImageViewer(QMainWindow):
             # Clean up current processing (simplified with new architecture)
             cleanup_start = time.time()
             logger.info(f"[LOAD] Starting cleanup of current processing (if any)")
-            # Cancel in-flight loads only when switching files — same-path reload must not cancel
+            # Cancel in-flight loads only when switching files ??same-path reload must not cancel
             # the active task (e.g. duplicate load_raw_image after folder change).
             _prev_fp = getattr(self, "current_file_path", None)
             _same_path_reload = _prev_fp and _norm_path(_prev_fp) == _norm_path(requested_file_path)
@@ -9790,7 +9790,7 @@ class RAWImageViewer(QMainWindow):
             self._exif_data_ready = False
 
             # PERFORMANCE FIX: Check full image cache for ALL files (including RAW)
-            # This restores the fast cache behavior from RAWviewer-1.0
+            # This restores the fast cache behavior from SkySpotter-1.0
             # Cached images are valid and should be used for instant display
             logger.info(f"[LOAD] Checking for cached full image")
             cache_check_start = time.time()
@@ -9798,7 +9798,7 @@ class RAWImageViewer(QMainWindow):
             cache_check_time = time.time() - cache_check_start
             if cached_image is not None:
                 logger.info(f"[LOAD] Cache hit: full image found for {filename}, shape: {cached_image.shape}")
-                safe_print(f"[PERF] ✅ CACHE HIT: Full image loaded from cache in {cache_check_time*1000:.1f}ms")
+                safe_print(f"[PERF] ??CACHE HIT: Full image loaded from cache in {cache_check_time*1000:.1f}ms")
                 self.status_bar.showMessage(f"Loaded {filename} from cache")
                 try:
                     logger.info(f"[LOAD] Displaying cached full image")
@@ -9820,7 +9820,7 @@ class RAWImageViewer(QMainWindow):
                             self.current_file_index = self.image_files.index(requested_file_path)
                     except ValueError:
                         pass
-                    # Only preload after successful display (matches RAWviewer-1.0 behavior)
+                    # Only preload after successful display (matches SkySpotter-1.0 behavior)
                     self._start_preloading()
                     logger.info(f"[LOAD] Successfully displayed cached full image for {filename} (total: {time.time() - load_start:.3f}s)")
                     if hasattr(self, "loading_overlay"):
@@ -9849,7 +9849,7 @@ class RAWImageViewer(QMainWindow):
                 cache_check_time = time.time() - cache_check_start
                 if cached_pixmap is not None:
                     logger.info(f"[LOAD] Cache hit: pixmap found for {filename}, size: {cached_pixmap.width()}x{cached_pixmap.height()}")
-                    safe_print(f"[PERF] ✅ CACHE HIT: Pixmap loaded from cache in {cache_check_time*1000:.1f}ms")
+                    safe_print(f"[PERF] ??CACHE HIT: Pixmap loaded from cache in {cache_check_time*1000:.1f}ms")
                     self.status_bar.showMessage(f"Loaded {filename} from cache")
                     try:
                         # CRITICAL: Apply orientation correction to cached pixmap
@@ -9895,12 +9895,12 @@ class RAWImageViewer(QMainWindow):
             # No cache hit, use new unified image load manager
             cache_miss_time = time.time() - load_start
             logger.info(f"[LOAD] No cache hit, starting unified image load manager (elapsed: {cache_miss_time:.3f}s)")
-            safe_print(f"[PERF] ❌ CACHE MISS: Starting processing (cache check took {cache_miss_time*1000:.1f}ms)")
+            safe_print(f"[PERF] ??CACHE MISS: Starting processing (cache check took {cache_miss_time*1000:.1f}ms)")
             self.status_bar.showMessage(f"Loading {filename}...")
             # Set loading message with proper alignment (centered both vertically and horizontally)
             # Ensure label fills the viewport for proper centering
             self.image_label.setAlignment(Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter)
-            # Full-screen overlay: skip when arrow-navigating while zoomed in — keeps prior image
+            # Full-screen overlay: skip when arrow-navigating while zoomed in ??keeps prior image
             # visible until the next one is ready (avoids flashing "Loading Image..." every step).
             # Also skip for prev/next (debounced navigation) and when opening from gallery: keep prior
             # pixels visible until the new decode lands instead of a blocking popup.
@@ -9932,7 +9932,7 @@ class RAWImageViewer(QMainWindow):
                 )
                 
                 logger.info(
-                    f"[LOAD] ImageLoadManager — use_full_resolution={request_full_res}, "
+                    f"[LOAD] ImageLoadManager ??use_full_resolution={request_full_res}, "
                     f"stages={load_stages or 'default'}, preserve_nav_zoom={preserve_zoom_navigation}, "
                     f"libraw_consistent_fit={libraw_fit}"
                 )
@@ -9973,14 +9973,14 @@ class RAWImageViewer(QMainWindow):
             
             manager_request_time = time.time() - manager_start
             logger.info(f"[LOAD] Image load requested in {manager_request_time:.3f}s")
-            safe_print(f"[PERF] 📊 SETUP TIME: {manager_request_time*1000:.1f}ms (cleanup: {cleanup_time*1000:.1f}ms)")
+            safe_print(f"[PERF] ?? SETUP TIME: {manager_request_time*1000:.1f}ms (cleanup: {cleanup_time*1000:.1f}ms)")
 
             self.setFocus()
             # Save session state when image changes
             self.save_session_state()
             
             # Update index for preloading (but don't start yet - wait for image to display)
-            # This matches RAWviewer-1.0 behavior and reduces resource competition
+            # This matches SkySpotter-1.0 behavior and reduces resource competition
             try:
                 if self.image_files and requested_file_path in self.image_files:
                     self.current_file_index = self.image_files.index(requested_file_path)
@@ -9992,14 +9992,14 @@ class RAWImageViewer(QMainWindow):
             
             total_time = time.time() - load_start
             logger.info(f"[LOAD] ========== load_raw_image() COMPLETED for {filename} in {total_time:.3f}s ==========")
-            safe_print(f"[PERF] ✅ LOAD COMPLETE: {os.path.basename(requested_file_path)} in {total_time*1000:.1f}ms")
+            safe_print(f"[PERF] ??LOAD COMPLETE: {os.path.basename(requested_file_path)} in {total_time*1000:.1f}ms")
         except Exception as e:
             total_time = time.time() - load_start
             logger.error(f"[LOAD] ========== CRITICAL ERROR in load_raw_image (at {time.time():.3f}, duration: {total_time:.3f}s) ==========")
             logger.error(f"[LOAD] Exception type: {type(e).__name__}, message: {e}", exc_info=True)
             logger.error(f"[LOAD] Full traceback:\n{traceback.format_exc()}")
             requested_file_name = requested_file_path if 'requested_file_path' in locals() else (file_path if 'file_path' in locals() else 'unknown')
-            safe_print(f"[PERF] ❌ LOAD ERROR: {os.path.basename(requested_file_name)} failed after {total_time*1000:.1f}ms - {type(e).__name__}: {e}")
+            safe_print(f"[PERF] ??LOAD ERROR: {os.path.basename(requested_file_name)} failed after {total_time*1000:.1f}ms - {type(e).__name__}: {e}")
             if hasattr(self, "loading_overlay"):
                 self.loading_overlay.hide_loading()
             # Try to show error to user
@@ -10015,7 +10015,7 @@ class RAWImageViewer(QMainWindow):
         logger = logging.getLogger(__name__)
         logger.info(f"Thumbnail fallback: Loading thumbnail...")
         self.status_bar.showMessage(
-            f"⚠️ {message} - Image quality may be reduced")
+            f"?��? {message} - Image quality may be reduced")
 
     def on_thumbnail_ready(self, thumbnail):
         """Handle when thumbnail is ready for immediate display."""
@@ -10101,7 +10101,7 @@ class RAWImageViewer(QMainWindow):
 
     def on_memory_warning(self, memory_percent):
         """Handle memory warning events."""
-        safe_print(f"⚠️ Memory usage high: {memory_percent:.1f}%")
+        safe_print(f"?��? Memory usage high: {memory_percent:.1f}%")
 
     def _should_show_thumbnail(self):
         """Determine if we should show thumbnail immediately or wait for full image."""
@@ -10303,7 +10303,7 @@ class RAWImageViewer(QMainWindow):
                 self._finish_nav_zoom_preserve()
             total_time = time.time() - display_start
             logger.info(f"[DISPLAY] RAW image displayed successfully: {width}x{height} (pixmap display: {pixmap_display_time:.3f}s, total: {total_time:.3f}s)")
-            safe_print(f"[PERF] 🖼️  DISPLAY COMPLETE: {width}x{height} (pixmap: {pixmap_display_time*1000:.1f}ms, total: {total_time*1000:.1f}ms)")
+            safe_print(f"[PERF] ?���? DISPLAY COMPLETE: {width}x{height} (pixmap: {pixmap_display_time*1000:.1f}ms, total: {total_time*1000:.1f}ms)")
 
         except Exception as e:
             total_time = time.time() - display_start
@@ -10351,7 +10351,7 @@ class RAWImageViewer(QMainWindow):
 
     def _slideshow_interval_ms(self) -> int:
         try:
-            return max(500, int(os.environ.get("RAWVIEWER_SLIDESHOW_INTERVAL_MS", "5000")))
+            return max(500, int(os.environ.get("SkySpotter_SLIDESHOW_INTERVAL_MS", "5000")))
         except ValueError:
             return 5000
 
@@ -10434,7 +10434,7 @@ class RAWImageViewer(QMainWindow):
             QTimer.singleShot(0, lambda fp=path: self._share_windows_ui_chain(fp))
             return
         self._copy_current_file_path_to_clipboard()
-        self.status_bar.showMessage("Share unavailable — path copied to clipboard", 4000)
+        self.status_bar.showMessage("Share unavailable ??path copied to clipboard", 4000)
 
     def _share_windows_ui_chain(self, path: str):
         """Run after the next event-loop tick so Shell share UI can attach to a pumped UI thread."""
@@ -10455,16 +10455,16 @@ class RAWImageViewer(QMainWindow):
             return
         if _share_windows_clipboard_cf_hdrop(path):
             self.status_bar.showMessage(
-                "File copied to clipboard — paste into Mail, Teams, or other apps", 4500
+                "File copied to clipboard ??paste into Mail, Teams, or other apps", 4500
             )
             return
         if _share_windows_clipboard_file_via_powershell(path):
             self.status_bar.showMessage(
-                "File copied to clipboard — paste into Mail, Teams, or other apps", 4500
+                "File copied to clipboard ??paste into Mail, Teams, or other apps", 4500
             )
             return
         self._copy_current_file_path_to_clipboard()
-        self.status_bar.showMessage("Share unavailable — path copied to clipboard", 4000)
+        self.status_bar.showMessage("Share unavailable ??path copied to clipboard", 4000)
 
     def _share_macos(self, path: str) -> bool:
         try:
@@ -10553,7 +10553,7 @@ class RAWImageViewer(QMainWindow):
     def _rotate_raster_pil_cw90(self, path: str) -> None:
         from PIL import Image, ImageOps
 
-        tmp = path + ".rawviewer_rotate_tmp"
+        tmp = path + ".SkySpotter_rotate_tmp"
         im = None
         try:
             im = Image.open(path)
@@ -10815,7 +10815,7 @@ class RAWImageViewer(QMainWindow):
                             self._pending_zoom_level = self._restore_zoom_level
                             self._restore_zoom_center = None
                             self._restore_zoom_level = None
-                            # Like 40b9ade: avoid a two-step zoomed-soft-thumb UX — show preview fit until sharp buffer arrives.
+                            # Like 40b9ade: avoid a two-step zoomed-soft-thumb UX ??show preview fit until sharp buffer arrives.
                             if hasattr(self, '_maintain_zoom_on_navigation'):
                                 delattr(self, '_maintain_zoom_on_navigation')
                             self.fit_to_window = True
@@ -11177,7 +11177,7 @@ class RAWImageViewer(QMainWindow):
             
             if processor_file and processor_file != current_file:
                 logger.warning(f"[PROCESS] Signal mismatch: processor file ({os.path.basename(processor_file)}) != current file ({current_file_basename}). Skipping processing to avoid displaying wrong image.")
-                safe_print(f"[PERF] ⚠️  SKIP PROCESSING: File changed (processor: {os.path.basename(processor_file)}, current: {current_file_basename})")
+                safe_print(f"[PERF] ?��?  SKIP PROCESSING: File changed (processor: {os.path.basename(processor_file)}, current: {current_file_basename})")
                 # Skip processing - this image is no longer relevant
                 return
         
@@ -11446,7 +11446,7 @@ class RAWImageViewer(QMainWindow):
                     # Use display_pixmap to handle zoom restoration if needed
                     self.display_pixmap(pixmap)
                     
-                    # PERFORMANCE FIX: Start preloading after image is displayed (matches RAWviewer-1.0 behavior)
+                    # PERFORMANCE FIX: Start preloading after image is displayed (matches SkySpotter-1.0 behavior)
                     # This reduces resource competition with current image loading
                     self._start_preloading()
                     
@@ -11462,10 +11462,10 @@ class RAWImageViewer(QMainWindow):
                     if hasattr(self, '_last_navigation_start'):
                         total_time = time.time() - self._last_navigation_start
                         logger.info(f"RAW image displayed successfully: {width}x{height} (total from navigation: {total_time:.3f}s)")
-                        safe_print(f"[PERF] 🖼️  IMAGE DISPLAYED: {width}x{height} (total navigation time: {total_time*1000:.1f}ms)")
+                        safe_print(f"[PERF] ?���? IMAGE DISPLAYED: {width}x{height} (total navigation time: {total_time*1000:.1f}ms)")
                     else:
                         logger.info(f"RAW image displayed successfully: {width}x{height}")
-                        safe_print(f"[PERF] 🖼️  IMAGE DISPLAYED: {width}x{height}")
+                        safe_print(f"[PERF] ?���? IMAGE DISPLAYED: {width}x{height}")
                 except Exception as e:
                     import logging
                     import traceback
@@ -11517,7 +11517,7 @@ class RAWImageViewer(QMainWindow):
                 try:
                     self.display_numpy_image(self._pending_thumbnail)
                     self.status_bar.showMessage(
-                        "⚠️ Using preview - full processing failed")
+                        "?��? Using preview - full processing failed")
                     self._pending_thumbnail = None
                     return
                 except Exception as display_error:
@@ -11680,7 +11680,7 @@ class RAWImageViewer(QMainWindow):
         # 3. Users should be able to navigate quickly if the previous navigation completed
         if nav_in_progress:
             logger.warning(f"[NAV_CHECK] Navigation BLOCKED: navigation already in progress")
-            safe_print(f"[PERF] 🚫 NAVIGATION BLOCKED: Already in progress")
+            safe_print(f"[PERF] ?�� NAVIGATION BLOCKED: Already in progress")
             return False
         
         logger.debug(f"[NAV_CHECK] Navigation ALLOWED")
@@ -11703,7 +11703,7 @@ class RAWImageViewer(QMainWindow):
         if self._navigation_timer is not None:
             self._navigation_timer.stop()
             if had_pending:
-                safe_print(f"[PERF] 🔄 DEBOUNCE: Cancelled previous navigation, queued new {direction} request")
+                safe_print(f"[PERF] ?? DEBOUNCE: Cancelled previous navigation, queued new {direction} request")
         
         # Create a new timer with short delay (50ms) to batch rapid key presses
         # This allows users to press keys rapidly, but only the last navigation within 50ms will execute
@@ -11714,7 +11714,7 @@ class RAWImageViewer(QMainWindow):
         
         logger.debug(f"[NAV_DEBOUNCE] Navigation request queued: {direction}")
         if not had_pending:
-            safe_print(f"[PERF] ⏱️  DEBOUNCE: Navigation {direction} queued (50ms delay)")
+            safe_print(f"[PERF] ?��?  DEBOUNCE: Navigation {direction} queued (50ms delay)")
     
     def _execute_pending_navigation(self):
         """Execute the pending navigation after debounce delay"""
@@ -11731,7 +11731,7 @@ class RAWImageViewer(QMainWindow):
         
         logger.debug(f"[NAV_DEBOUNCE] Executing pending navigation: {direction}")
         nav_start = time.time()
-        safe_print(f"[PERF] ▶️  EXECUTING: Navigation {direction} (after debounce)")
+        safe_print(f"[PERF] ?��?  EXECUTING: Navigation {direction} (after debounce)")
         
         if direction == 'prev':
             self.navigate_to_previous_image()
@@ -11739,7 +11739,7 @@ class RAWImageViewer(QMainWindow):
             self.navigate_to_next_image()
         
         nav_time = time.time() - nav_start
-        safe_print(f"[PERF] ✅ NAVIGATION COMPLETE: {direction} took {nav_time*1000:.1f}ms")
+        safe_print(f"[PERF] ??NAVIGATION COMPLETE: {direction} took {nav_time*1000:.1f}ms")
     
     def start_navigation(self):
         """Mark navigation as started"""
@@ -12175,7 +12175,7 @@ class RAWImageViewer(QMainWindow):
         """Handle navigation after a file has been deleted"""
         if not self.image_files:
             # Semantic / gallery search narrows ``image_files``; discarding the last hit yields an
-            # empty list while the folder may still contain other files — restore corpus + gallery.
+            # empty list while the folder may still contain other files ??restore corpus + gallery.
             had_semantic_scope = bool(
                 self._semantic_search_backup_files or self._semantic_search_corpus_files
             )
@@ -12189,7 +12189,7 @@ class RAWImageViewer(QMainWindow):
                     finally:
                         inp.blockSignals(False)
                 if self.image_files:
-                    self.status_bar.showMessage("Search cleared — showing full folder", 4500)
+                    self.status_bar.showMessage("Search cleared ??showing full folder", 4500)
                     self.schedule_save_session_state()
                     return
 
@@ -12252,12 +12252,12 @@ class RAWImageViewer(QMainWindow):
             # Switch to 100% zoom mode - center on image center
             self.fit_to_window = False
             
-            # Prefer the half-size preview flag — EXIF embedded-preview WxH often matches pixmap and poison the cache comparison.
+            # Prefer the half-size preview flag ??EXIF embedded-preview WxH often matches pixmap and poison the cache comparison.
             should_load_full_resolution = False
             if self.current_pixmap:
                 if hasattr(self, '_is_half_size_displayed') and self._is_half_size_displayed:
                     should_load_full_resolution = True
-                    logger.info("User zoomed in — preview/half-resolution display, loading full resolution")
+                    logger.info("User zoomed in ??preview/half-resolution display, loading full resolution")
                 else:
                     cached_exif = self.image_cache.get_exif(self.current_file_path)
                     if cached_exif and cached_exif.get('original_width') and cached_exif.get('original_height'):
@@ -12268,7 +12268,7 @@ class RAWImageViewer(QMainWindow):
                         if original_max > 0 and current_max < original_max * 0.8:
                             should_load_full_resolution = True
                             logger.info(
-                                "User zoomed in — pixmap smaller than cached original "
+                                "User zoomed in ??pixmap smaller than cached original "
                                 f"({self.current_pixmap.width()}x{self.current_pixmap.height()} vs {original_width}x{original_height}), loading full resolution"
                             )
             
@@ -13192,7 +13192,7 @@ class RAWImageViewer(QMainWindow):
             else:
                 width = height = 0
 
-        # RAW: cache often holds embedded‑preview WxH until EXIFExtractor fills sensor size — kick async refresh early.
+        # RAW: cache often holds embedded?�preview WxH until EXIFExtractor fills sensor size ??kick async refresh early.
         _fp_sb = getattr(self, "current_file_path", None)
         if _fp_sb and is_raw_file(_fp_sb):
             _dm_sb = max(display_width or 0, display_height or 0)
@@ -14012,8 +14012,8 @@ class RAWImageViewer(QMainWindow):
             # SMART DETECTION: Enable Aviation Mode if the folder path suggests it
             folder_lower = str(folder_path or "").lower()
             if "mach loop" in folder_lower or "aviation" in folder_lower:
-                if os.environ.get("RAWVIEWER_AVIATION_MODE") != "1":
-                    os.environ["RAWVIEWER_AVIATION_MODE"] = "1"
+                if os.environ.get("SkySpotter_AVIATION_MODE") != "1":
+                    os.environ["SkySpotter_AVIATION_MODE"] = "1"
                     logger.warning(f"[SYSTEM] >>> SMART-DETECTED AVIATION FOLDER: Enabling Specialist AI <<<")
                     # Force reset the semantic index to pick up the new backend
                     self._semantic_index = None
@@ -14598,14 +14598,14 @@ def main():
         # Note: Setting up structured exception handling in Python is complex
         # We'll rely on Python's exception handling and add more defensive checks
         import argparse
-        parser = argparse.ArgumentParser(description="RAWviewer")
+        parser = argparse.ArgumentParser(description="SkySpotter")
         parser.add_argument("folder", nargs="?", help="Folder to open")
         parser.add_argument("--aviation", action="store_true", help="Force Aviation Mode (Specialist Military AI)")
         parser.add_argument("--debug", action="store_true", help="Enable debug logging")
         args = parser.parse_args()
 
         if args.aviation or (args.folder and ("Mach Loop" in args.folder or "Aviation" in args.folder)):
-            os.environ["RAWVIEWER_AVIATION_MODE"] = "1"
+            os.environ["SkySpotter_AVIATION_MODE"] = "1"
             logger.warning("[SYSTEM] >>> FORCING AVIATION MODE (via flag or smart-detection) <<<")
         
         if args.debug:
@@ -14663,7 +14663,7 @@ def main():
             # 4. Continue with initialization
             if is_windows:
                 safe_print("  [Windows] Setting AppUserModelID...", flush=True)
-                myappid = 'RAWviewer.2.0.0'
+                myappid = 'SkySpotter.2.0.0'
                 ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
                 safe_print("  [Windows] AppUserModelID set", flush=True)
 
@@ -14777,7 +14777,7 @@ def main():
 if __name__ == '__main__':
     # Print startup message to console immediately
     safe_print("=" * 80, flush=True)
-    safe_print("RAWviewer Starting...", flush=True)
+    safe_print("SkySpotter Starting...", flush=True)
     safe_print("=" * 80, flush=True)
     
     # Setup logging before anything else
@@ -14800,3 +14800,4 @@ if __name__ == '__main__':
         safe_print_err(f"Traceback:\n{traceback.format_exc()}", flush=True)
         safe_print_err(f"{'='*80}\n", flush=True)
         raise
+
