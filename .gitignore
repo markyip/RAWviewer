@@ -26,6 +26,23 @@ desktop.ini
 *.tmp
 *.temp
 
+# Image and RAW files (keep root clean)
+*.ARW
+*.NEF
+*.CR2
+*.CR3
+*.DNG
+*.ORF
+*.SRF
+*.SRW
+*.RAF
+*.GPR
+*.JPG
+*.JPEG
+*.PNG
+*.TIF
+*.TIFF
+
 # Log files
 *.log
 rawviewer_debug_*.log
@@ -100,15 +117,10 @@ icon.iconset/
 
 # Tests directory (local scripts and reports)
 tests/
-*.ARW
-*.NEF
-*.CR3
-*.JPG
-*.JPEG
-*.DNG
-*.PNG
-*.TIF
-*.TIFF
 
 # Development scratch
 scratch/
+
+# Aviation Specialist AI
+aviation_model_v2/
+old_semantic.py
