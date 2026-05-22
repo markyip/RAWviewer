@@ -230,7 +230,7 @@ All dependencies are listed in `requirements.txt`:
 
 #### 🛠️ The Ultimate Fix: Build Locally (Solves Both Issues Above)
 If you are on macOS 12 or older, OR if you simply want to permanently bypass all Gatekeeper/Quarantine warnings forever, you can build the app directly on your own machine. It takes about 2 minutes:
-1. **Install Python 3.8+** (We recommend the official installer from [python.org](https://www.python.org/downloads/macos/)).
+1. **Install Python 3.10, 3.11, or 3.12** (We recommend the official installer from [python.org](https://www.python.org/downloads/macos/)).
 2. **Open Terminal** and run these commands to download and build:
    ```bash
    git clone https://github.com/markyip/RAWviewer.git
@@ -239,10 +239,26 @@ If you are on macOS 12 or older, OR if you simply want to permanently bypass all
    ```
 This will automatically create a perfectly compatible, warning-free `RAWviewer.app` inside the `dist/` folder!
 
+#### 🔧 Local Build Troubleshooting
+- **Error: "No matching distribution found for pyexiv2"**
+  - **Why it happens**: You are using an older version of Python (like macOS Monterey's default Python 3.9) on an Apple Silicon (M1/M2) Mac. `pyexiv2` does not provide pre-compiled packages for that specific combination.
+  - **The Fix**: 
+    1. Install a newer version of Python (e.g., Python 3.11).
+    2. **CRITICAL:** If you previously ran the build script, it created a virtual environment stuck on the old Python version. Delete it by running `rm -rf rawviewer_env`.
+    3. Re-run `./build_macos.sh` (If it still uses 3.9, explicitly point to your new Python, e.g., `/usr/local/bin/python3 ./build_macos.sh`).
+
+- **Error: Massive C++ compilation failures / PyQt6 missing wheels**
+  - **Why it happens**: You are using a bleeding-edge version of Python (like Python 3.14). It takes the open-source community several months to build pre-compiled packages for brand-new Python versions. Without a wheel, the installer attempts to compile massive UI frameworks like PyQt6 from raw C++ source code, which usually fails.
+  - **The Fix**: Roll back to a widely supported "sweet spot" version like **Python 3.11** or **3.12**, where every single required library has highly stable, pre-compiled macOS packages ready to download instantly. Remember to delete your old `rawviewer_env` folder before rebuilding!
+
+- **Homebrew delays on macOS 12 Monterey or older**: 
+  - Homebrew has officially dropped "binary bottle" support for Monterey. However, **it still works**. When the build script attempts to `brew install inih gettext`, Homebrew will simply compile them from source on your machine. This is completely normal but may take 2-3 extra minutes.
+
 - **Permission Denied / Cannot Read Folder**: Modern macOS requires explicit permission for apps to access the Desktop or Documents. 
   1. Go to **System Settings** > **Privacy & Security** > **Full Disk Access**.
   2. Click the **+** button and add `RAWviewer.app`.
   3. Toggle it to **ON**.
+
 - **"Semantic search unavailable" / asks to download models even in packaged app**:
   1. Open `RAWviewer.app/Contents/Resources/models/mobileclip2_coreml/`.
   2. Confirm either **S2** pair (`mobileclip_s2_*`) or **S0 app-export** pair (`mobileclip2_s0_*`) exists, plus `bpe_simple_vocab_16e6.txt.gz`.
