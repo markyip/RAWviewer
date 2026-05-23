@@ -119,21 +119,30 @@ class ImageLoadWorker(QRunnable):
                     target_size=self.task.thumbnail_target_size
                 )
                 
-                if exif_data and not self.task.is_cancelled():
+                if exif_data is not None and not self.task.is_cancelled():
                     if self._safe_emit():
                         self.manager.exif_data_ready.emit(file_path, exif_data)
+                elif exif_data is None and not self.task.is_cancelled():
+                    if self._safe_emit():
+                        self.manager.exif_data_ready.emit(file_path, {})
                 
                 if thumbnail is not None and not self.task.is_cancelled():
                     self._handle_thumbnail_result(file_path, thumbnail)
+                elif thumbnail is None and not self.task.is_cancelled():
+                    if self._safe_emit():
+                        self.manager.error_occurred.emit(file_path, "Thumbnail extraction returned None")
             else:
                 # Sequential or partial stages
                 if 'exif' in stages and not self.task.is_cancelled():
                     if self._safe_emit():
                         self.manager.progress_updated.emit(file_path, "Reading metadata...")
                     exif_data = processor.process_exif(file_path)
-                    if exif_data and not self.task.is_cancelled():
+                    if exif_data is not None and not self.task.is_cancelled():
                         if self._safe_emit():
                             self.manager.exif_data_ready.emit(file_path, exif_data)
+                    elif exif_data is None and not self.task.is_cancelled():
+                        if self._safe_emit():
+                            self.manager.exif_data_ready.emit(file_path, {})
                 
                 if 'thumbnail' in stages and not self.task.is_cancelled():
                     if self._safe_emit():
@@ -146,6 +155,9 @@ class ImageLoadWorker(QRunnable):
                     )
                     if thumbnail is not None and not self.task.is_cancelled():
                         self._handle_thumbnail_result(file_path, thumbnail)
+                    elif thumbnail is None and not self.task.is_cancelled():
+                        if self._safe_emit():
+                            self.manager.error_occurred.emit(file_path, "Thumbnail extraction returned None")
             
             # 處理完整圖像（只在需要時）
             if 'full' in stages and not self.task.is_cancelled():
@@ -202,8 +214,10 @@ class ImageLoadWorker(QRunnable):
                     h, w = arr.shape[:2]
                     bpl = arr.strides[0]
                     qimg = QImage(arr.data, w, h, bpl, QImage.Format.Format_RGB888).copy()
-                
-                if qimg.isNull(): return
+                if qimg.isNull():
+                    if self._safe_emit():
+                        self.manager.error_occurred.emit(file_path, "Created QImage was null")
+                    return
                 
                 if self.task.thumbnail_fit == "crop":
                     scaled = qimg.scaled(tgt, Qt.AspectRatioMode.KeepAspectRatioByExpanding, Qt.TransformationMode.SmoothTransformation)
@@ -243,6 +257,7 @@ class ImageLoadManager(QObject):
     image_ready = pyqtSignal(str, np.ndarray)  # file_path, full_image
     pixmap_ready = pyqtSignal(str, QPixmap)  # file_path, pixmap
     error_occurred = pyqtSignal(str, str)  # file_path, error_message
+    task_completed = pyqtSignal(str)  # file_path
     progress_updated = pyqtSignal(str, str)  # file_path, status_message
     exif_data_ready = pyqtSignal(str, dict)  # file_path, exif_data
     
@@ -448,6 +463,7 @@ class ImageLoadManager(QObject):
             if getattr(task, "_counted_raw_slot", False):
                 self._active_raw_tasks = max(0, self._active_raw_tasks - 1)
                 task._counted_raw_slot = False
+        self.task_completed.emit(task.file_path)
         self._schedule_next_task()
 
     @staticmethod

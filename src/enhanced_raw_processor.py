@@ -12,6 +12,7 @@ import warnings
 import numpy as np
 import rawpy
 import exifread
+import sys
 from typing import Optional, Dict, Any, Tuple, Union
 from PyQt6.QtCore import QThread, pyqtSignal, QObject, QSize
 from PyQt6.QtGui import QPixmap, QImage, QImageReader
@@ -105,8 +106,10 @@ def extract_embedded_jpeg_by_scan(file_path: str, max_size: int) -> Optional[np.
 
         for segment in segments:
             try:
+                from PIL import Image, ImageOps
                 im = Image.open(io.BytesIO(segment))
                 im.load()
+
                 if im.mode != "RGB":
                     im = im.convert("RGB")
                 w, h = im.size
@@ -144,16 +147,96 @@ class ThumbnailExtractor(QObject):
                                    allow_scan_fallback: bool = True,
                                    raw_object: Optional[rawpy.RawPy] = None) -> Optional[np.ndarray]:
         """Extract embedded thumbnail from RAW file and resize to max_size."""
+        thumb = None
         try:
             if raw_object is not None:
-                return self._extract_from_raw_obj(raw_object, file_path, max_size)
-                
-            with rawpy.imread(file_path) as raw:
-                return self._extract_from_raw_obj(raw, file_path, max_size)
-        except Exception:
-            if not allow_scan_fallback:
-                return None
-            return extract_embedded_jpeg_by_scan(file_path, max_size)
+                thumb = self._extract_from_raw_obj(raw_object, file_path, max_size)
+            else:
+                with rawpy.imread(file_path) as raw:
+                    thumb = self._extract_from_raw_obj(raw, file_path, max_size)
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning(f"raw.extract_thumb failed or errored: {e}")
+
+        if thumb is not None:
+            import logging
+            logging.getLogger(__name__).info(f"Thumbnail extracted successfully by rawpy, shape: {thumb.shape}")
+            return thumb
+
+        # If rawpy fails entirely (e.g. unsupported DNG) or returns None, we MUST scan for the embedded JPEG or use sips.
+        if thumb is None:
+            thumb = extract_embedded_jpeg_by_scan(file_path, max_size)
+            if thumb is None and sys.platform == 'darwin':
+                try:
+                    import subprocess
+                    import tempfile
+                    import os
+                    from PIL import Image
+                    tmp_name = None
+                    try:
+                        with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as tmp:
+                            tmp_name = tmp.name
+                        
+                        result = subprocess.run(['sips', '-Z', str(max_size), '-s', 'format', 'jpeg', file_path, '--out', tmp_name],
+                                     capture_output=True)
+                        
+                        if os.path.exists(tmp_name) and os.path.getsize(tmp_name) > 0:
+                            jpeg_image = Image.open(tmp_name)
+                            if jpeg_image.mode != 'RGB':
+                                jpeg_image = jpeg_image.convert('RGB')
+                            thumb = np.array(jpeg_image)
+                            jpeg_image.close()
+                        else:
+                            import logging
+                            logging.getLogger(__name__).warning(f"[SIPS] Failed to generate thumbnail for {file_path}. Exit code: {result.returncode}, Error: {result.stderr.decode('utf-8', 'ignore')}")
+                            
+                            # Fallback to QuickLook (qlmanage)
+                            try:
+                                ql_dir = tempfile.mkdtemp()
+                                subprocess.run(['qlmanage', '-t', '-s', str(max_size), '-o', ql_dir, file_path], capture_output=True)
+                                
+                                ql_out = None
+                                for f in os.listdir(ql_dir):
+                                    if f.endswith('.png'):
+                                        ql_out = os.path.join(ql_dir, f)
+                                        break
+                                        
+                                if ql_out and os.path.exists(ql_out) and os.path.getsize(ql_out) > 0:
+                                    ql_image = Image.open(ql_out)
+                                    if ql_image.mode != 'RGB':
+                                        ql_image = ql_image.convert('RGB')
+                                    thumb = np.array(ql_image)
+                                    ql_image.close()
+                            except Exception as ql_e:
+                                logging.getLogger(__name__).warning(f"[QLMANAGE] Fallback failed: {ql_e}")
+                            finally:
+                                if 'ql_dir' in locals() and os.path.exists(ql_dir):
+                                    import shutil
+                                    shutil.rmtree(ql_dir, ignore_errors=True)
+                                    
+                            # Ultimate Fallback: QImageReader (can read many RAWs on macOS)
+                            if thumb is None:
+                                try:
+                                    from PyQt6.QtGui import QImageReader, QImage
+                                    from PyQt6.QtCore import Qt
+                                    reader = QImageReader(file_path)
+                                    reader.setScaledSize(reader.size().scaled(max_size, max_size, Qt.AspectRatioMode.KeepAspectRatio)) # Keep Aspect Ratio
+                                    qimg = reader.read()
+                                    if not qimg.isNull():
+                                        arr = _qimage_to_rgb_array(qimg)
+                                        if arr is not None:
+                                            thumb = arr
+                                except Exception as qt_e:
+                                    logging.getLogger(__name__).warning(f"[QImageReader] Ultimate fallback failed: {qt_e}")
+                                    
+                    finally:
+                        if tmp_name and os.path.exists(tmp_name):
+                            try:
+                                os.remove(tmp_name)
+                            except: pass
+                except Exception:
+                    pass
+        return thumb
 
     def _extract_from_raw_obj(self, raw, file_path, max_size):
         """Internal helper to extract thumb from an open rawpy object."""
@@ -161,18 +244,14 @@ class ThumbnailExtractor(QObject):
             thumb = raw.extract_thumb()
             
             if thumb.format == rawpy.ThumbFormat.JPEG:
-                from PIL import Image
+                from PIL import Image, ImageOps
                 jpeg_image = Image.open(io.BytesIO(thumb.data))
+                
                 
                 if jpeg_image.mode != 'RGB':
                     jpeg_image = jpeg_image.convert('RGB')
                     
                 w, h = jpeg_image.size
-                
-                # Reject tiny thumbnails (often found in phone DNGs) to force high-quality fallback
-                if w < 400 or h < 400:
-                    return None
-                    
                 if w > max_size or h > max_size:
                     jpeg_image.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
                     
@@ -184,11 +263,6 @@ class ThumbnailExtractor(QObject):
                     return None
                 
                 h, w = thumb_array.shape[:2]
-                
-                # Reject tiny thumbnails
-                if w < 400 or h < 400:
-                    return None
-                    
                 if w > max_size or h > max_size:
                      from PIL import Image
                      pil_thumb = Image.fromarray(thumb_array)
@@ -294,9 +368,14 @@ class EXIFExtractor(QObject):
                 return cached
 
         try:
+            tags = {}
             # First pass: standard exifread (works for JPEGs and many RAW containers)
-            with open(file_path, 'rb') as f:
-                tags = exifread.process_file(f, details=False)
+            try:
+                with open(file_path, 'rb') as f:
+                    tags = exifread.process_file(f, details=False)
+            except Exception as e:
+                import logging
+                logging.getLogger(__name__).warning(f"exifread failed on {file_path}: {e}")
             
             # Standard orientation tags
             orientation = 1
@@ -349,21 +428,49 @@ class EXIFExtractor(QObject):
             # Dimensions
             original_width = 0
             original_height = 0
-            for tag in ('EXIF ExifImageWidth', 'Image ImageWidth'):
-                if tag in tags:
-                    try: 
-                        original_width = int(tags[tag].values[0])
-                        break
-                    except: pass
-            for tag in ('EXIF ExifImageLength', 'Image ImageLength'):
-                if tag in tags:
+            
+            # 1. Try DNG DefaultCropSize (often found in Apple ProRAW and Android DNGs)
+            crop_size = tags.get('Image DefaultCropSize')
+            if crop_size and hasattr(crop_size, 'values') and len(crop_size.values) >= 2:
+                try:
+                    original_width = int(crop_size.values[0])
+                    original_height = int(crop_size.values[1])
+                except: pass
+
+            # 2. Try DNG ActiveArea (Top, Left, Bottom, Right)
+            if original_width <= 0 or original_height <= 0:
+                active_area = tags.get('Image ActiveArea')
+                if active_area and hasattr(active_area, 'values') and len(active_area.values) >= 4:
                     try:
-                        original_height = int(tags[tag].values[0])
-                        break
+                        # Values: Top, Left, Bottom, Right
+                        top = int(active_area.values[0])
+                        left = int(active_area.values[1])
+                        bottom = int(active_area.values[2])
+                        right = int(active_area.values[3])
+                        original_height = bottom - top
+                        original_width = right - left
                     except: pass
+            
+            # 3. Fallback to standard EXIF width/height
+            if original_width <= 0:
+                for tag in ('EXIF ExifImageWidth', 'Image ImageWidth'):
+                    if tag in tags:
+                        try: 
+                            original_width = int(tags[tag].values[0])
+                            break
+                        except: pass
+            
+            if original_height <= 0:
+                for tag in ('EXIF ExifImageLength', 'Image ImageLength'):
+                    if tag in tags:
+                        try:
+                            original_height = int(tags[tag].values[0])
+                            break
+                        except: pass
 
             # Second pass: If it's a RAW file, use rawpy to verify dimensions and orientation (flip)
-            if metadata_backend.is_raw_file(file_path):
+            import common_image_loader
+            if common_image_loader.is_raw_file(file_path):
                 try:
                     if raw_object is not None:
                         sizes = raw_object.sizes
@@ -401,6 +508,29 @@ class EXIFExtractor(QObject):
                         original_width = size.width()
                         original_height = size.height()
                 except:
+                    pass
+
+            # Fourth pass: If on macOS and missing dimensions or orientation, fallback to native sips
+            if (original_width <= 0 or original_height <= 0 or orientation == 1) and sys.platform == 'darwin':
+                try:
+                    import subprocess
+                    result = subprocess.run(['sips', '-g', 'pixelWidth', '-g', 'pixelHeight', '-g', 'orientation', file_path], 
+                                          capture_output=True, text=True)
+                    for line in result.stdout.splitlines():
+                        if 'pixelWidth:' in line and original_width <= 0:
+                            original_width = int(line.split(':')[1].strip())
+                        elif 'pixelHeight:' in line and original_height <= 0:
+                            original_height = int(line.split(':')[1].strip())
+                        elif 'orientation:' in line and orientation == 1:
+                            val = line.split(':')[1].strip()
+                            # sips returns e.g. "1 (Normal)", "6 (Rotated 90 CW)", "8 (Rotated 90 CCW)"
+                            import re
+                            m = re.match(r'^(\d+)', val)
+                            if m:
+                                orientation = int(m.group(1))
+                    if os.environ.get("RAWVIEWER_VERBOSE_ORIENTATION_LOGS") == "1":
+                        print(f"[EXIF] Extracted via sips: {original_width}x{original_height}, orientation={orientation} for {os.path.basename(file_path)}")
+                except Exception:
                     pass
 
             # Extract technical metadata for top-level cache columns
