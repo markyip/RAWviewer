@@ -6446,6 +6446,11 @@ class RAWImageViewer(QMainWindow):
 
     def _reset_semantic_search_for_new_folder(self):
         """Clear gallery search UI and stale query when the folder scope changes."""
+        if self._semantic_index is not None:
+            try:
+                self._semantic_index.cancel_index_build()
+            except Exception:
+                pass
         self._semantic_search_backup_files = None
         self._last_semantic_query = ""
         self._semantic_indexing_in_progress = False
@@ -6668,8 +6673,13 @@ class RAWImageViewer(QMainWindow):
                             self_inner.token, i, n, os.path.basename(fp)
                         )
 
+                    def _stop():
+                        return self_inner.token != getattr(self, "_semantic_index_active_token", None)
+
                     result = self_inner.index.build_index(
-                        self_inner.files, progress_callback=_progress
+                        self_inner.files, 
+                        progress_callback=_progress,
+                        stop_check=_stop
                     )
                     self_inner.signals.done.emit(self_inner.token, result)
                 except Exception as e:
@@ -13622,7 +13632,7 @@ class RAWImageViewer(QMainWindow):
     def eventFilter(self, obj, event):
         if event.type() == QEvent.Type.KeyPress:
             # Handle application-wide shortcuts even when sub-widgets (like viewport) have focus
-            if self._handle_app_shortcut(event.key()):
+            if self._handle_app_shortcut(event):
                 return True
         
         # Handle trackpad pinch-to-zoom on Mac

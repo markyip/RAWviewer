@@ -31,6 +31,7 @@ import numpy as np
 from PIL import Image, ImageOps
 
 import metadata_backend
+from exif_subject_area import pixmap_ltwh_focus_hint
 
 from raw_file_extensions import RAW_FILE_EXTENSIONS
 
@@ -718,30 +719,17 @@ class MilitaryAircraftClassifier:
     """Specialist ViT classifier for precise military aircraft identification."""
     HUB_REPO_ID = "dima806/military_aircraft_image_detection"
     MODEL_ID = "military-aircraft-vit-224"
-    LABELS = [
-        "A10", "A400M", "AG600", "AH64", "AKINCI", "ATR 42", "ATR 72", "AV8B", "Airbus A220", "Airbus A318",
-        "Airbus A319", "Airbus A320", "Airbus A330", "Airbus A350", "Airbus A380", "Airbus a321", "An124", "An22", "An225", "An72",
-        "Avro Lancaster", "B1", "B2", "B21", "B52", "Bayraktar_TB2_drone", "Be200", "Bell P-63 Kingcobra", "Boeing 737 NG", "Boeing 737 max",
-        "Boeing 747", "Boeing 767", "Boeing 777", "Boeing 777X", "Boeing 787", "Boeing B-17 Flying Fortress", "Boeing B-29 Superfortress", "Boeing P-26 Peashooter", "Brewster F2A Buffalo", "C1",
-        "C130", "C17", "C2", "C390", "C5", "CH47", "CH53", "CL415", "Cessna_172_training_aircraft", "Consolidated PBY Catalina",
-        "Curtiss P-40 Warhawk", "Diamond_DA20_trainer", "Douglas A-20 Havoc", "Douglas C-47 Skytrain", "Douglas SBD Dauntless", "Douglas TBD Devastator", "E2", "E7", "EF2000", "EMB314",
-        "F117", "F14", "F15", "F16", "F18", "F2", "F22", "F35", "F4", "FCK1",
-        "Focke-Wulf Fw 190", "Global_Hawk_UAV", "Grumman F6F Hellcat", "Grumman F7F Tigercat", "Grumman TBF Avenger", "H6", "Hawker Hurricane", "Il76", "J10", "J20",
-        "J35", "J36", "J50", "JAS39", "JF17", "JH7", "Junkers Ju 87", "KAAN", "KC135", "KF21",
-        "KIZILELMA", "KJ600", "Ka27", "Ka52", "Lockheed P-38 Lightning", "MQ-9_Reaper_drone", "MQ20", "MQ25", "MQ28", "Messerschmitt Bf 109",
-        "Mi24", "Mi26", "Mi28", "Mi8", "Mig29", "Mig31", "Mirage2000", "Mitsubishi A6M Zero", "NH90", "North American P51 Mustang",
-        "Northrop P-61 Black Widow", "P3", "Piper_PA-28_Cherokee", "Predator_drone_aircraft", "RQ4", "Rafale", "Republic P-43 Lancer", "Republic P-47 Thunderbolt", "SR71", "Seversky P-35",
-        "Su24", "Su25", "Su34", "Su47", "Su57", "Supermarine Spitfire", "T50", "TB001", "TB2", "Tejas",
-        "Tornado", "Tu160", "Tu22M", "Tu95", "U2", "UH60", "US2", "V22", "V280", "Vought F4U Corsair",
-        "Vulcan", "WZ10", "WZ7", "WZ9", "Waco CG-4", "X29", "X32", "XB70", "XQ58", "Y20",
-        "YF23", "Z10", "Z19", "de Havilland Mosquito"
-    ]
+    LABELS = [] # Will be loaded dynamically
 
     def __init__(self, progress_callback=None):
         # 1. Check for bundled model (PyInstaller standalone EXE)
         if hasattr(sys, '_MEIPASS'):
+            bundled_path_q = os.path.join(sys._MEIPASS, "models", "super_specialist_quantized.onnx")
             bundled_path = os.path.join(sys._MEIPASS, "models", "super_specialist.onnx")
-            if os.path.exists(bundled_path):
+            if os.path.exists(bundled_path_q):
+                self.onnx_path = bundled_path_q
+                self.model_dir = os.path.dirname(bundled_path_q)
+            elif os.path.exists(bundled_path):
                 self.onnx_path = bundled_path
                 self.model_dir = os.path.dirname(bundled_path)
             else:
@@ -749,8 +737,13 @@ class MilitaryAircraftClassifier:
                 self.onnx_path = os.path.join(self.model_dir, "model.onnx")
         else:
             # 2. Check for local custom model (Development environment)
+            local_custom_path_q = r"D:\Development\RAWviewer\src\models\super_specialist_quantized.onnx"
             local_custom_path = r"D:\Development\RAWviewer\src\models\super_specialist.onnx"
-            if os.path.exists(local_custom_path):
+            
+            if os.path.exists(local_custom_path_q):
+                self.onnx_path = local_custom_path_q
+                self.model_dir = os.path.dirname(local_custom_path_q)
+            elif os.path.exists(local_custom_path):
                 self.onnx_path = local_custom_path
                 self.model_dir = os.path.dirname(local_custom_path)
             else:
@@ -759,6 +752,41 @@ class MilitaryAircraftClassifier:
                 self.onnx_path = os.path.join(self.model_dir, "model.onnx")
             
         self._session = None
+        self._load_labels()
+
+    def _load_labels(self):
+        # Try to find labels.txt in the same directory as the model
+        labels_path = os.path.join(self.model_dir, "labels.txt")
+        if os.path.exists(labels_path):
+            try:
+                with open(labels_path, "r") as f:
+                    self.LABELS = [line.strip() for line in f if line.strip()]
+                import logging
+                logging.getLogger(__name__).info(f"[AVIATION AI] Loaded {len(self.LABELS)} labels from {labels_path}")
+                return
+            except Exception as e:
+                import logging
+                logging.getLogger(__name__).error(f"[AVIATION AI] Failed to load labels.txt: {e}")
+        
+        # Fallback to hardcoded list if file is missing
+        self.LABELS = [
+            "A10", "A400M", "AG600", "AH64", "AKINCI", "ATR 42", "ATR 72", "AV8B", "Airbus A220", "Airbus A318",
+            "Airbus A319", "Airbus A320", "Airbus A330", "Airbus A350", "Airbus A380", "Airbus a321", "An124", "An22", "An225", "An72",
+            "Avro Lancaster", "B1", "B2", "B21", "B52", "Bayraktar_TB2_drone", "Be200", "Bell P-63 Kingcobra", "Boeing 737 NG", "Boeing 737 max",
+            "Boeing 747", "Boeing 767", "Boeing 777", "Boeing 777X", "Boeing 787", "Boeing B-17 Flying Fortress", "Boeing B-29 Superfortress", "Boeing P-26 Peashooter", "Brewster F2A Buffalo", "C1",
+            "C130", "C17", "C2", "C390", "C5", "CH47", "CH53", "CL415", "Cessna_172_training_aircraft", "Consolidated PBY Catalina",
+            "Curtiss P-40 Warhawk", "Diamond_DA20_trainer", "Douglas A-20 Havoc", "Douglas C-47 Skytrain", "Douglas SBD Dauntless", "Douglas TBD Devastator", "E2", "E7", "EF2000", "EMB314",
+            "F117", "F14", "F15", "F16", "F18", "F2", "F22", "F35", "F4", "FCK1",
+            "Focke-Wulf Fw 190", "Global_Hawk_UAV", "Grumman F6F Hellcat", "Grumman F7F Tigercat", "Grumman TBF Avenger", "H6", "Hawker Hurricane", "Il76", "J10", "J20",
+            "J35", "J36", "J50", "JAS39", "JF17", "JH7", "Junkers Ju 87", "KAAN", "KC135", "KF21",
+            "KIZILELMA", "KJ600", "Ka27", "Ka52", "Lockheed P-38 Lightning", "MQ-9_Reaper_drone", "MQ20", "MQ25", "MQ28", "Messerschmitt Bf 109",
+            "Mi24", "Mi26", "Mi28", "Mi8", "Mig29", "Mig31", "Mirage2000", "Mitsubishi A6M Zero", "NH90", "North American P51 Mustang",
+            "Northrop P-61 Black Widow", "P3", "Piper_PA-28_Cherokee", "Predator_drone_aircraft", "RQ4", "Rafale", "Republic P-43 Lancer", "Republic P-47 Thunderbolt", "SR71", "Seversky P-35",
+            "Su24", "Su25", "Su34", "Su47", "Su57", "Supermarine Spitfire", "T50", "TB001", "TB2", "Tejas",
+            "Tornado", "Tu160", "Tu22M", "Tu95", "U2", "UH60", "US2", "V22", "V280", "Vought F4U Corsair",
+            "Vulcan", "WZ10", "WZ7", "WZ9", "Waco CG-4", "X29", "X32", "XB70", "XQ58", "Y20",
+            "YF23", "Z10", "Z19", "de Havilland Mosquito"
+        ]
 
     def _ensure_model(self, progress_callback=None):
         if os.path.exists(self.onnx_path):
@@ -843,6 +871,36 @@ class MilitaryAircraftClassifier:
             )
 
 
+    def _predict_im(self, im: Image.Image) -> tuple[str, float, np.ndarray]:
+        """Perform a single inference pass on a PIL image."""
+        import onnxruntime as ort
+        w, h = im.size
+        scale = 384 / max(w, h)
+        new_w, new_h = int(w * scale), int(h * scale)
+        resized = im.resize((new_w, new_h), Image.Resampling.BILINEAR)
+        
+        # Create black canvas and paste centered
+        canvas = Image.new("RGB", (384, 384), (0, 0, 0))
+        canvas.paste(resized, ((384 - new_w) // 2, (384 - new_h) // 2))
+        rgb = np.asarray(canvas.convert("RGB"), dtype=np.float32)
+        # Optimized normalization: (x / 255.0 - 0.5) / 0.5  =>  x / 127.5 - 1.0
+        rgb = (rgb / 127.5) - 1.0
+        
+        nchw = np.transpose(rgb, (2, 0, 1))[np.newaxis, ...].astype(np.float32)
+        
+        # Run inference
+        inputs = {self._session.get_inputs()[0].name: nchw}
+        logits = self._session.run(None, inputs)[0][0]
+        
+        # Apply Softmax to get probabilities
+        exp_logits = np.exp(logits - np.max(logits))
+        probs = exp_logits / np.sum(exp_logits)
+        
+        idx = int(np.argmax(probs))
+        conf = float(probs[idx])
+        label = self.LABELS[idx] if idx < len(self.LABELS) else ""
+        return label, conf, probs
+
     def classify(self, file_path: str, progress_callback=None) -> str:
         try:
             self._ensure_model(progress_callback)
@@ -868,24 +926,61 @@ class MilitaryAircraftClassifier:
                     logging.getLogger(__name__).error(f"[AVIATION AI] Specialist GPU init failed ({e}), falling back to CPU")
                     self._session = ort.InferenceSession(self.onnx_path, sess_options=so, providers=["CPUExecutionProvider"])
             
-            # Preprocess: Faster resampling + vectorized normalization
-            im = _load_index_source_image(file_path, max_size=1024).resize((224, 224), Image.Resampling.BILINEAR)
-            rgb = np.asarray(im.convert("RGB"), dtype=np.float32)
-            # Optimized normalization: (x / 255.0 - 0.5) / 0.5  =>  x / 127.5 - 1.0
-            rgb = (rgb / 127.5) - 1.0
+            # Preprocess: Letterbox (Maintain Aspect Ratio) + Padding to 384x384
+            # Attempt to get focus hint first to decide load resolution
+            # Note: We don't know dimensions yet, so we'll load a 2048px preview if possible to be safe for cropping
+            orig_im = _load_index_source_image(file_path, max_size=2048).convert("RGB")
             
-            nchw = np.transpose(rgb, (2, 0, 1))[np.newaxis, ...].astype(np.float32)
+            # Pass 1: Global inference
+            label, conf, _ = self._predict_im(orig_im)
             
-            # Run inference
-            inputs = {self._session.get_inputs()[0].name: nchw}
-            logits = self._session.run(None, inputs)[0]
-            
-            # Argmax
-            idx = int(np.argmax(logits))
-            if idx < len(self.LABELS):
-                label = self.LABELS[idx]
+            # Pass 2: Attention Adjusted Crop (if hint available)
+            try:
+                focus_hint = pixmap_ltwh_focus_hint(file_path, orig_im.width, orig_im.height)
+                if focus_hint:
+                    ltwh, source = focus_hint
+                    # center point of the focus area
+                    cx = ltwh[0] + ltwh[2] // 2
+                    cy = ltwh[1] + ltwh[3] // 2
+                    
+                    # Context window: increase to 70% of shorter dimension
+                    # This ensures the whole aircraft is captured even if AF point was just on cockpit/tail
+                    crop_size = int(min(orig_im.width, orig_im.height) * 0.7)
+                    crop_size = max(384, crop_size) # Don't go smaller than model input
+                    
+                    left = max(0, cx - crop_size // 2)
+                    top = max(0, cy - crop_size // 2)
+                    right = min(orig_im.width, left + crop_size)
+                    bottom = min(orig_im.height, top + crop_size)
+                    
+                    # Re-center if we hit edges
+                    if right - left < crop_size: left = max(0, right - crop_size)
+                    if bottom - top < crop_size: top = max(0, bottom - crop_size)
+                    
+                    crop_im = orig_im.crop((left, top, right, bottom))
+                    label_crop, conf_crop, _ = self._predict_im(crop_im)
+                    
+                    # Merge logic: Prefer crop if it's more confident or if global is ambiguous
+                    if (conf_crop > conf) or (conf < 0.45 and conf_crop > 0.35):
+                        import logging
+                        logger = logging.getLogger(__name__)
+                        logger.info(f"[AVIATION AI] {os.path.basename(file_path)}: Attention-adjusted crop ({label_crop} @ {conf_crop:.2f} via {source}) preferred over global ({label} @ {conf:.2f})")
+                        label, conf = label_crop, conf_crop
+            except Exception as ce:
+                # Silently continue if focus hint or crop fails; global result is already available
+                pass
+
+            if label:
                 import logging
-                logging.getLogger(__name__).info(f"[AVIATION AI] {os.path.basename(file_path)} identified as {label}")
+                logger = logging.getLogger(__name__)
+                
+                # Confidence thresholding (Combine knowledge logic)
+                # If confidence is too low, we return empty so the caller can fallback to SigLIP Zero-Shot
+                if conf < 0.40:
+                    logger.warning(f"[AVIATION AI] {os.path.basename(file_path)}: Ambiguous classification ({label} @ {conf:.2f}). Leaving unidentified.")
+                    return ""
+                    
+                logger.info(f"[AVIATION AI] {os.path.basename(file_path)} identified as {label} (Conf: {conf:.2f})")
                 return label
         except Exception as e:
             import logging
@@ -1234,6 +1329,7 @@ class SemanticImageIndex:
         self._index_conn = None
         self._rg_lock = threading.Lock()
         self._init_db_if_needed()
+        self._stop_requested = False
 
     @property
     def backend(self):
@@ -1979,6 +2075,23 @@ class SemanticImageIndex:
 
     # --- Aviation Specialist Features ---
 
+    _AVIATION_AIRLINES = [
+        "Lufthansa", "Emirates", "Qatar Airways", "Singapore Airlines", "Cathay Pacific", "Air France", 
+        "British Airways", "KLM", "Delta Air Lines", "United Airlines", "American Airlines", "Southwest Airlines", 
+        "JetBlue", "Alaska Airlines", "Air Canada", "Turkish Airlines", "Swiss International Air Lines", 
+        "Austrian Airlines", "Finnair", "SAS", "Iberia", "TAP Air Portugal", "Alitalia", "ITA Airways", 
+        "LOT Polish Airlines", "Aeroflot", "S7 Airlines", "Air China", "China Eastern", "China Southern", 
+        "Hainan Airlines", "ANA", "JAL", "Korean Air", "Asiana Airlines", "EVA Air", "China Airlines", 
+        "Thai Airways", "Malaysia Airlines", "Vietnam Airlines", "Garuda Indonesia", "Philippine Airlines", 
+        "Qantas", "Air New Zealand", "Virgin Australia", "LATAM", "Avianca", "Copa Airlines", "Aeromexico", 
+        "Ethiopian Airlines", "Kenya Airways", "South African Airways", "EgyptAir", "Royal Air Maroc", 
+        "Saudia", "Etihad Airways", "Gulf Air", "Kuwait Airways", "Oman Air", "Royal Jordanian", "Air India", 
+        "IndiGo", "Vistara", "SpiceJet", "AirAsia", "Lion Air", "Cebu Pacific", "Ryanair", "EasyJet", 
+        "Wizz Air", "Vueling", "Norwegian", "Jetstar", "Peach", "Scoot", "WestJet", "Condor", "TUI", "SunExpress",
+        "Air Baltic", "Icelandair", "Brussels Airlines", "Luxair", "Pegasus Airlines", "Flydubai", "Air Arabia",
+        "Royal Brunei", "SilkAir", "Bamboo Airways", "Jetstar Asia", "VietJet Air", "Spring Airlines", "Juneyao Airlines"
+    ]
+
     _AVIATION_LABELS = (
         "F-16 Fighting Falcon", "F-22 Raptor", "F-35 Lightning II", "F-15 Eagle",
         "A-10 Thunderbolt II", "Boeing 747", "Boeing 737-800", "Boeing 737 MAX",
@@ -1998,7 +2111,7 @@ class SemanticImageIndex:
     )
 
     @lru_cache(maxsize=1)
-    def _get_aviation_label_embeddings(self):
+    def _get_aviation_label_embeddings_cached(self, labels: tuple):
         backend = self._mobileclip_backend or resolve_mobileclip_backend()
         prompts = [
             "a photo of a {} aircraft",
@@ -2009,7 +2122,7 @@ class SemanticImageIndex:
         
         results = []
         # Encode main models with ensembling
-        for label in self._AVIATION_LABELS:
+        for label in labels:
             embs = [backend.encode_text(p.format(label)) for p in prompts]
             avg_emb = np.mean(embs, axis=0)
             avg_emb /= np.linalg.norm(avg_emb)
@@ -2022,23 +2135,52 @@ class SemanticImageIndex:
             
         return results
 
+    def _identify_airline_zero_shot(self, image_vec: np.ndarray, threshold: float = 0.12) -> str:
+        """Attempt to identify the airline livery using SigLIP zero-shot matching."""
+        label_embs = self._get_aviation_label_embeddings_cached(tuple(self._AVIATION_AIRLINES))
+        
+        scores = []
+        for label, label_vec, _ in label_embs:
+            score = float(np.dot(image_vec, label_vec))
+            scores.append((label, score))
+            
+        scores.sort(key=lambda x: x[1], reverse=True)
+        top_label, top_score = scores[0]
+        
+        if top_score > threshold:
+            import logging
+            logging.getLogger(__name__).info(f"[AVIATION AI] Airline identified: {top_label} (Score: {top_score:.3f})")
+            return top_label
+            
+        return ""
+
+    def _get_aviation_label_embeddings(self):
+        # Default labels
+        return self._get_aviation_label_embeddings_cached(self._AVIATION_LABELS)
+
     def _detect_aircraft_zero_shot(self, image_vec: np.ndarray, threshold: float = 0.15) -> str:
         """Identify specific aircraft models using competitive zero-shot ranking."""
-        label_embs = self._get_aviation_label_embeddings()
+        # Dynamic labels from the specialist classifier if available
+        labels_to_use = self._AVIATION_LABELS
+        if hasattr(self, "_aviation_classifier") and self._aviation_classifier and self._aviation_classifier.LABELS:
+            labels_to_use = self._aviation_classifier.LABELS
+
+        label_embs = self._get_aviation_label_embeddings_cached(tuple(labels_to_use))
         
         scores = []
         for label, label_vec, is_negative in label_embs:
-            # Cosine similarity (dot product of normalized vectors)
+            # Cosine similarity
             score = float(np.dot(image_vec, label_vec))
             scores.append((label, score, is_negative))
             
-        # Sort by score descending to find the "winner"
         scores.sort(key=lambda x: x[1], reverse=True)
         
         top_label, top_score, is_negative = scores[0]
         
-        # If the winner is a negative rejector (e.g. "nature", "building"), 
-        # we return empty string to avoid false positives.
+        # Log ensemble cross-check
+        import logging
+        logging.getLogger(__name__).info(f"[AVIATION AI] Zero-shot ensemble suggested: {top_label} (Score: {top_score:.3f})")
+
         if is_negative:
             return ""
             
@@ -2049,7 +2191,12 @@ class SemanticImageIndex:
             
         return ""
 
-    def build_index(self, file_paths: Sequence[str], progress_callback: ProgressCallback = None) -> Dict[str, int]:
+    def build_index(
+        self, 
+        file_paths: Sequence[str], 
+        progress_callback: ProgressCallback = None,
+        stop_check: Optional[Callable[[], bool]] = None
+    ) -> Dict[str, int]:
         total = len(file_paths)
         indexed = 0
         skipped = 0
@@ -2063,6 +2210,8 @@ class SemanticImageIndex:
         
         chunk_size = 900
         for i in range(0, len(unique_canonical), chunk_size):
+            if stop_check and stop_check():
+                break
             chunk = unique_canonical[i:i+chunk_size]
             qs = ",".join(["?"] * len(chunk))
             self._conn.row_factory = sqlite3.Row
@@ -2134,6 +2283,9 @@ class SemanticImageIndex:
                 futures = [executor.submit(extract_task, item) for item in to_extract]
                 
                 for i, future in enumerate(concurrent.futures.as_completed(futures), start=1):
+                    if stop_check and stop_check():
+                        executor.shutdown(wait=False, cancel_futures=True)
+                        break
                     cp, st, meta = future.result()
                     if meta:
                         try:
@@ -2161,6 +2313,8 @@ class SemanticImageIndex:
         # Phase 2: semantic embeddings (slow). Update existing rows in-place.
         total_sem = len(pending_for_semantic)
         for i, (canonical_fp, st) in enumerate(pending_for_semantic, start=1):
+            if stop_check and stop_check():
+                break
             if progress_callback:
                 # Keep callback signature unchanged while reporting semantic pass progress.
                 if i <= 2 or i >= total_sem or (i % 12 == 0):
@@ -2181,9 +2335,16 @@ class SemanticImageIndex:
                             canonical_fp, 
                             progress_callback=lambda msg: progress_callback(i, total_sem, msg) if progress_callback else None
                         )
-                        # Fallback to zero-shot if specialist returns nothing (though unlikely)
-                        if not detected_aircraft:
-                            detected_aircraft = self._detect_aircraft_zero_shot(vec)
+                        
+                        # AIRLINE ENRICHMENT:
+                        # If a civilian aircraft is identified, try to enrich it with the airline name
+                        if detected_aircraft and any(x in detected_aircraft.lower() for x in ["airbus", "boeing", "atr", "embraer", "bombardier", "cessna", "piper", "douglas"]):
+                            try:
+                                airline = self._identify_airline_zero_shot(vec)
+                                if airline:
+                                    detected_aircraft = f"{airline} {detected_aircraft}"
+                            except Exception:
+                                pass
                     except Exception as e:
                         logger.error(f"[AVIATION AI] Enrichment failed for {os.path.basename(canonical_fp)}: {e}")
 
@@ -2213,7 +2374,16 @@ class SemanticImageIndex:
                 failed += 1
         if batch_writes:
             self._conn.commit()
+            
+        if stop_check and stop_check():
+            import logging
+            logging.getLogger(__name__).warning("[SYSTEM] Semantic indexing cancelled by user/folder switch")
+            
         return {"indexed": indexed, "skipped": skipped, "failed": failed, "total": total}
+
+    def cancel_index_build(self):
+        """No longer used; cancellation is handled via stop_check callback."""
+        pass
 
     def get_index_coverage(self, file_paths: Sequence[str]) -> Dict[str, int]:
         """
@@ -2459,13 +2629,25 @@ class SemanticImageIndex:
         n = str(needle or "").strip().lower()
         if not n:
             return False
+        
+        # 1. Try standard variants (fastest)
         variants = {
             n, 
             n.replace("_", " "), n.replace(" ", "_"), 
             n.replace("-", ""), # Handle dashes
             n.replace(" ", "-"), n.replace("-", " ") 
         }
-        return any(v and v in h for v in variants)
+        if any(v and v in h for v in variants):
+            return True
+            
+        # 2. Try normalized "stripped" match (most robust for aircraft/technical IDs)
+        # Removes all common separators from both to catch "F-35" vs "F35"
+        h_stripped = h.replace("-", "").replace("_", "").replace(" ", "")
+        n_stripped = n.replace("-", "").replace("_", "").replace(" ", "")
+        if n_stripped and len(n_stripped) >= 2 and n_stripped in h_stripped:
+            return True
+            
+        return False
 
     def _apply_filters(
         self, rows: Sequence[sqlite3.Row], query_text: str

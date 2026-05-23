@@ -1,0 +1,154 @@
+A10
+A400M
+AG600
+AH64
+AKINCI
+ATR 42
+ATR 72
+AV8B
+Airbus A220
+Airbus A318
+Airbus A319
+Airbus A320
+Airbus A330
+Airbus A350
+Airbus A380
+Airbus a321
+An124
+An22
+An225
+An72
+Avro Lancaster
+B1
+B2
+B21
+B52
+Bayraktar_TB2_drone
+Be200
+Bell P-63 Kingcobra
+Boeing 737 NG
+Boeing 737 max
+Boeing 747
+Boeing 767
+Boeing 777
+Boeing 777X
+Boeing 787
+Boeing B-17 Flying Fortress
+Boeing B-29 Superfortress
+Boeing P-26 Peashooter
+Brewster F2A Buffalo
+C1
+C130
+C17
+C2
+C390
+C5
+CH47
+CH53
+CL415
+Cessna_172_training_aircraft
+Consolidated PBY Catalina
+Curtiss P-40 Warhawk
+Diamond_DA20_trainer
+Douglas A-20 Havoc
+Douglas C-47 Skytrain
+Douglas SBD Dauntless
+Douglas TBD Devastator
+E2
+E7
+EF2000
+EMB314
+F117
+F14
+F15
+F16
+F18
+F2
+F22
+F35
+F4
+FCK1
+Focke-Wulf Fw 190
+Global_Hawk_UAV
+Grumman F6F Hellcat
+Grumman F7F Tigercat
+Grumman TBF Avenger
+H6
+Hawker Hurricane
+Il76
+J10
+J20
+J35
+J36
+J50
+JAS39
+JF17
+JH7
+Junkers Ju 87
+KAAN
+KC135
+KF21
+KIZILELMA
+KJ600
+Ka27
+Ka52
+Lockheed P-38 Lightning
+MQ-9_Reaper_drone
+MQ20
+MQ25
+MQ28
+Messerschmitt Bf 109
+Mi24
+Mi26
+Mi28
+Mi8
+Mig29
+Mig31
+Mirage2000
+Mitsubishi A6M Zero
+NH90
+North American P51 Mustang
+Northrop P-61 Black Widow
+P3
+Piper_PA-28_Cherokee
+Predator_drone_aircraft
+RQ4
+Rafale
+Republic P-43 Lancer
+Republic P-47 Thunderbolt
+SR71
+Seversky P-35
+Su24
+Su25
+Su34
+Su47
+Su57
+Supermarine Spitfire
+T50
+TB001
+TB2
+Tejas
+Tornado
+Tu160
+Tu22M
+Tu95
+U2
+UH60
+US2
+V22
+V280
+Vought F4U Corsair
+Vulcan
+WZ10
+WZ7
+WZ9
+Waco CG-4
+X29
+X32
+XB70
+XQ58
+Y20
+YF23
+Z10
+Z19
+de Havilland Mosquito
