@@ -936,6 +936,17 @@ class MilitaryAircraftClassifier:
             # Note: We don't know dimensions yet, so we'll load a 2048px preview if possible to be safe for cropping
             orig_im = _load_index_source_image(file_path, max_size=2048).convert("RGB")
             
+            # --- BACKGROUND REMOVAL ---
+            try:
+                from background_removal import get_background_remover
+                remover = get_background_remover()
+                orig_im = remover.remove_background(orig_im)
+                import logging
+                logging.getLogger(__name__).info(f"[AVIATION AI] Background removed for {os.path.basename(file_path)}")
+            except Exception as e:
+                import logging
+                logging.getLogger(__name__).warning(f"[AVIATION AI] Background removal failed/skipped for {os.path.basename(file_path)}: {e}")
+            
             # Pass 1: Global inference
             label, conf, _ = self._predict_im(orig_im)
             

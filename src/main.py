@@ -3958,11 +3958,7 @@ class CustomTitleBar(QFrame):
         
         layout = QHBoxLayout(self)
         layout.setContentsMargins(12, 0, 0, 0)
-<<<<<<< HEAD
         layout.setSpacing(10)
-=======
-        layout.setSpacing(0)
->>>>>>> main
         
         # Logo Icon (Favicon)
         self.icon_label = QLabel()
@@ -5777,11 +5773,7 @@ class RAWImageViewer(QMainWindow):
         # Set window to frameless for custom title bar only on Windows
         if platform.system() == 'Windows':
             self.setWindowFlags(Qt.WindowType.FramelessWindowHint)
-<<<<<<< HEAD
-        self.setWindowTitle('SkySpotter v2.0.0')
-=======
-        self.setWindowTitle('RAWviewer v2.0.1')
->>>>>>> main
+        self.setWindowTitle('SkySpotter v2.0.1')
         
         # Set simple background style (no rounded corners - simplifies window resizing)
         self.setStyleSheet("""
