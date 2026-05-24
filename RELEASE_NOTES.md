@@ -1,5 +1,14 @@
 # RAWviewer Release Notes
 
+## 🚀 Version 2.0.1
+**Release Date: May 23, 2026**
+
+🛠️ Fixes & improvements
+- **Google Pixel DNG Support**: Fixed critical crashes in the `QImageReader` and `EXIFExtractor` fallbacks that prevented Google Pixel DNG files from rendering on macOS.
+- **Gallery Aspect Ratio Fix**: Fixed a bug where thumbnail crops were improperly bypassed, ensuring that all gallery tiles now correctly display cropped square previews without distorted aspect ratios or zoomed-in glitches.
+
+---
+
 ## 🚀 Version 2.0.0
 **Release Date: May 7, 2026**
 

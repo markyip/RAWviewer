@@ -3958,7 +3958,11 @@ class CustomTitleBar(QFrame):
         
         layout = QHBoxLayout(self)
         layout.setContentsMargins(12, 0, 0, 0)
+<<<<<<< HEAD
         layout.setSpacing(10)
+=======
+        layout.setSpacing(0)
+>>>>>>> main
         
         # Logo Icon (Favicon)
         self.icon_label = QLabel()
@@ -5773,7 +5777,11 @@ class RAWImageViewer(QMainWindow):
         # Set window to frameless for custom title bar only on Windows
         if platform.system() == 'Windows':
             self.setWindowFlags(Qt.WindowType.FramelessWindowHint)
+<<<<<<< HEAD
         self.setWindowTitle('SkySpotter v2.0.0')
+=======
+        self.setWindowTitle('RAWviewer v2.0.1')
+>>>>>>> main
         
         # Set simple background style (no rounded corners - simplifies window resizing)
         self.setStyleSheet("""
@@ -5837,7 +5845,7 @@ class RAWImageViewer(QMainWindow):
         
         # Create custom title bar only on Windows
         if platform.system() == 'Windows':
-            self.title_bar = CustomTitleBar(self, title="SkySpotter v2.0.0")
+            self.title_bar = CustomTitleBar(self, title="SkySpotter v2.0.1")
         else:
             self.title_bar = None
         
@@ -14683,13 +14691,13 @@ def main():
             # 4. Continue with initialization
             if is_windows:
                 safe_print("  [Windows] Setting AppUserModelID...", flush=True)
-                myappid = 'SkySpotter.2.0.0'
+                myappid = 'SkySpotter.2.0.1'
                 ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
                 safe_print("  [Windows] AppUserModelID set", flush=True)
 
             # Set application properties
             app.setApplicationName("SkySpotter")
-            app.setApplicationVersion("2.0.0")
+            app.setApplicationVersion("2.0.1")
 
             # Create and show main window
             safe_print("Creating RAWImageViewer...", flush=True)

@@ -664,8 +664,13 @@ class MobileCLIPONNXBackend:
             "CPUExecutionProvider"
         ]
         
+        available_providers = ort.get_available_providers()
+        selected_providers = [p for p in providers if p in available_providers]
+        from main import safe_print
+        safe_print(f"[SemanticSearch] Initializing MobileCLIP ONNX session. Available providers: {available_providers}, using: {selected_providers}", flush=True)
+        
         try:
-            self._image_session = ort.InferenceSession(self.image_model_path, sess_options=so, providers=providers)
+            self._image_session = ort.InferenceSession(self.image_model_path, sess_options=so, providers=selected_providers)
             active_p = self._image_session.get_providers()
             logger.warning(f"[SYSTEM] AI Image Session initialized with: {active_p[0] if active_p else 'Unknown'}")
         except Exception as e:
@@ -673,7 +678,7 @@ class MobileCLIPONNXBackend:
             self._image_session = ort.InferenceSession(self.image_model_path, sess_options=so, providers=["CPUExecutionProvider"])
             
         try:
-            self._text_session = ort.InferenceSession(self.text_model_path, sess_options=so, providers=providers)
+            self._text_session = ort.InferenceSession(self.text_model_path, sess_options=so, providers=selected_providers)
             active_p = self._text_session.get_providers()
             logger.warning(f"[SYSTEM] AI Text Session initialized with: {active_p[0] if active_p else 'Unknown'}")
         except Exception as e:
@@ -2492,9 +2497,9 @@ class SemanticImageIndex:
             return []
 
         # 2. Bulk fetch by file_path
-        db_rows = {} # canonical -> Row
+        found_map = {}
         self._conn.row_factory = sqlite3.Row
-        
+        # SQLite parameter limit is usually 999; use 500 to be safe
         chunk_size = 500
         for i in range(0, len(unique_canonical), chunk_size):
             chunk = unique_canonical[i:i+chunk_size]
@@ -2506,42 +2511,51 @@ class SemanticImageIndex:
             """
             rows = self._conn.execute(query, [self.model_name, *chunk]).fetchall()
             for r in rows:
-                db_rows[r["file_path"]] = r
+                found_map[r["file_path"]] = r
         
-        # 3. Build final result list ensuring every requested path is represented
-        all_results = []
+        # 3. Assemble results in original order, injecting mock rows for missing files
+        # This ensures that newly added files appear in search results (as unindexed) 
+        # instead of being filtered out.
+        results = []
         for cp in unique_canonical:
-            if cp in db_rows:
-                all_results.append(db_rows[cp])
+            if cp in found_map:
+                results.append(found_map[cp])
             else:
-                # MOCK ROW: Ensure file is visible in search even if not indexed yet
-                orig_path = canonical_to_original[cp]
-                all_results.append({
-                    "file_path": cp,
-                    "file_name": os.path.basename(orig_path),
-                    "file_signature": None,
-                    "file_size": 0,
-                    "file_mtime": 0,
-                    "semantic_ready": 0,
-                    "model_name": self.model_name,
-                    "embedding": None,
-                    "camera_model": None,
-                    "lens_model": None,
-                    "capture_time": None,
-                    "iso": 0,
-                    "width": 0,
-                    "height": 0,
-                    "gps_lat": None,
-                    "gps_lon": None,
-                    "city": None,
-                    "admin1": None,
-                    "country": None,
-                    "country_code": None,
-                    "face_count": 0,
-                    "detected_aircraft": None
-                })
+                # Create a mock row for files not yet indexed
+                full_path = canonical_to_original[cp]
+                file_name = os.path.basename(full_path)
                 
-        return all_results
+                # Use a dictionary as a proxy for sqlite3.Row
+                # RAWviewer's UI components are hardened to handle missing metadata
+                mock_row = {
+                    'file_path': cp,
+                    'file_name': file_name,
+                    'file_signature': "",
+                    'dim': 0,
+                    'embedding': None,
+                    'capture_time': "",
+                    'camera_model': "",
+                    'lens_model': "",
+                    'iso': 0,
+                    'gps_lat': None,
+                    'gps_lon': None,
+                    'width': 0,
+                    'height': 0,
+                    'city': "",
+                    'admin1': "",
+                    'country': "",
+                    'country_code': "",
+                    'face_count': 0,
+                    'detected_aircraft': "",
+                    'semantic_ready': 0,
+                    'file_size': 0,
+                    'file_mtime': 0,
+                    'mtime_ns': 0,
+                    'model_name': self.model_name
+                }
+                results.append(mock_row)
+                
+        return results
 
     @staticmethod
     def _parse_capture_year(capture_time: str) -> int:

@@ -1,10 +1,10 @@
-# RAWviewer v2.0.0
+# RAWviewer v2.0.1
 
 <p align="center">
   <img src="icons/appicon.ico" alt="RAWviewer Icon" width="256">
 </p>
 
-![Version](https://img.shields.io/badge/version-2.0.0-blue)
+![Version](https://img.shields.io/badge/version-2.0.1-blue)
 ![Downloads](https://img.shields.io/github/downloads/markyip/RAWviewer/total) 
 ![License](https://img.shields.io/badge/license-MIT-green)
 [![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-Donate-orange?logo=buy-me-a-coffee)](https://www.buymeacoffee.com/markyip)
@@ -73,10 +73,13 @@ This is a **pre-filtering tool**, letting you go through hundreds of RAW files e
 
 #### macOS
 1. Download the latest release from the [Releases Page](https://github.com/markyip/RAWviewer/releases/latest)
-2. Download and extract `RAWviewer-v2.0.0-macOS.zip`
-3. Drag `RAWviewer.app` to your Applications folder
-4. Double-click to launch from Applications or Launchpad
-5. **First launch**: Right-click → "Open" if blocked by Gatekeeper
+2. Download and extract `RAWviewer-v2.0.1-macOS.zip`
+3. Drag `RAWviewer.app` to your **Applications** folder.
+4. **CRITICAL FIRST STEP:** Because this is an open-source app not signed via the paid Apple Developer program, macOS Gatekeeper will incorrectly label it as "Damaged" or block it. **You must run this command in your Terminal once** to remove the download quarantine flag:
+   ```bash
+   xattr -cr /Applications/RAWviewer.app
+   ```
+5. You can now double-click to launch it normally from Applications or Launchpad!
 
 ## ⌨️ Keyboard Shortcuts
 
@@ -213,13 +216,49 @@ All dependencies are listed in `requirements.txt`:
 - **AttributeError with stdout**: This is normal for windowed builds - the application runs without a console window
 
 ### macOS
-- **"App is damaged" or "Unverified Developer"**: This is common for locally built apps. Our build script automatically clears the quarantine flag, but if it persists, run `xattr -cr dist/RAWviewer.app` in your terminal.
-- **Gatekeeper warnings**: Right-click the app → "Open" → "Open" anyway. This "registers" the app with macOS.
+- **"App is damaged and should be moved to the Trash" / "Apple could not verify RAWviewer is free of malware"**: 
+  - **Why it happens**: Apple heavily restricts apps downloaded outside the App Store that aren't signed with a paid developer certificate. On newer macOS versions (especially Apple Silicon M1/M2/M3), macOS breaks the app's ad-hoc signature and aggressively blocks opening it.
+  - **The Fix (Fastest)**: Open your **Terminal** app and run the following command to remove the quarantine flag:
+    ```bash
+    xattr -cr /Applications/RAWviewer.app
+    ```
+    *(Note: If you placed the app somewhere other than the Applications folder, update the path accordingly).*
+
+- **"Symbol not found: (_mkfifoat)" or App crashes instantly on macOS 12 (Monterey) or older**:
+  - **Why it happens**: The pre-built release is compiled using a newer macOS 13+ SDK. Older macOS versions do not have the required system files to run it.
+  - **The Fix**: You must build the app locally (see the "Ultimate Fix" below).
+
+#### 🛠️ The Ultimate Fix: Build Locally (Solves Both Issues Above)
+If you are on macOS 12 or older, OR if you simply want to permanently bypass all Gatekeeper/Quarantine warnings forever, you can build the app directly on your own machine. It takes about 2 minutes:
+1. **Install Python 3.10, 3.11, or 3.12** (We recommend the official installer from [python.org](https://www.python.org/downloads/macos/)).
+2. **Open Terminal** and run these commands to download and build:
+   ```bash
+   git clone https://github.com/markyip/RAWviewer.git
+   cd RAWviewer
+   ./build_macos.sh
+   ```
+This will automatically create a perfectly compatible, warning-free `RAWviewer.app` inside the `dist/` folder!
+
+#### 🔧 Local Build Troubleshooting
+- **Error: "No matching distribution found for pyexiv2"**
+  - **Why it happens**: You are using an older version of Python (like macOS Monterey's default Python 3.9) on an Apple Silicon (M1/M2) Mac. `pyexiv2` does not provide pre-compiled packages for that specific combination.
+  - **The Fix**: 
+    1. Install a newer version of Python (e.g., Python 3.11).
+    2. **CRITICAL:** If you previously ran the build script, it created a virtual environment stuck on the old Python version. Delete it by running `rm -rf rawviewer_env`.
+    3. Re-run `./build_macos.sh` (If it still uses 3.9, explicitly point to your new Python, e.g., `/usr/local/bin/python3 ./build_macos.sh`).
+
+- **Error: Massive C++ compilation failures / PyQt6 missing wheels**
+  - **Why it happens**: You are using a bleeding-edge version of Python (like Python 3.14). It takes the open-source community several months to build pre-compiled packages for brand-new Python versions. Without a wheel, the installer attempts to compile massive UI frameworks like PyQt6 from raw C++ source code, which usually fails.
+  - **The Fix**: Roll back to a widely supported "sweet spot" version like **Python 3.11** or **3.12**, where every single required library has highly stable, pre-compiled macOS packages ready to download instantly. Remember to delete your old `rawviewer_env` folder before rebuilding!
+
+- **Homebrew delays on macOS 12 Monterey or older**: 
+  - Homebrew has officially dropped "binary bottle" support for Monterey. However, **it still works**. When the build script attempts to `brew install inih gettext`, Homebrew will simply compile them from source on your machine. This is completely normal but may take 2-3 extra minutes.
+
 - **Permission Denied / Cannot Read Folder**: Modern macOS requires explicit permission for apps to access the Desktop or Documents. 
   1. Go to **System Settings** > **Privacy & Security** > **Full Disk Access**.
   2. Click the **+** button and add `RAWviewer.app`.
   3. Toggle it to **ON**.
-- **"Open with" behavior**: For the very first launch, if you see a malware warning, open the app directly via Right-click -> "Open". This "registers" the app with macOS, after which "Right-click -> Open with" will work perfectly.
+
 - **"Semantic search unavailable" / asks to download models even in packaged app**:
   1. Open `RAWviewer.app/Contents/Resources/models/mobileclip2_coreml/`.
   2. Confirm either **S2** pair (`mobileclip_s2_*`) or **S0 app-export** pair (`mobileclip2_s0_*`) exists, plus `bpe_simple_vocab_16e6.txt.gz`.
