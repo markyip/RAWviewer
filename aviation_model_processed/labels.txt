@@ -1,0 +1,34 @@
+AV-8B Harrier II
+Airbus A220
+Airbus A318
+Airbus A319
+Airbus A350
+Airbus A380
+Airbus A400M Atlas
+Avro Lancaster
+Bell Boeing V-22 Osprey
+Boeing AH-64 Apache
+Boeing B-17 Flying Fortress
+Boeing B-29 Superfortress
+Boeing B-52 stratofortress
+Boeing B737
+Boeing B747
+Boeing B767
+Boeing B777
+Boeing B787
+Boeing C-17 Globemaster III
+Boeing F-18 Super Hornet
+Eurofighter Typhoon
+Fairchild Republic A-10 Warhog
+Grumman F-14
+Lockheed C-5 Galaxy
+Lockheed Martin C-130 Hercules
+Lockheed Martin F-16 Viper
+Lockheed Martin F-22 Raptor
+Lockheed Martin F-35 Lightning
+Lockheed P-38 Lightning
+McDonnell Douglas F-15 Eagle
+North American P51 Mustang
+Northrop B-2 Spirit
+Rockwell B-1B Lancer
+Saab JAS39
