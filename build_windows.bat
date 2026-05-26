@@ -21,6 +21,7 @@ python scripts/download_mobileclip_onnx.py
 REM Install/upgrade dependencies
 echo Installing dependencies...
 pip install --upgrade PyQt6 rawpy send2trash pyinstaller natsort exifread pyexiv2 Pillow psutil numpy qtawesome pyqtgraph sentence-transformers reverse-geocoder pycountry pywin32
+pip install tokenizers==0.22.2
 
 REM Try to close any running SkySpotter.exe instances
 echo Checking for running SkySpotter instances...

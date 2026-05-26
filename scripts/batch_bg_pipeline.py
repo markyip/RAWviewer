@@ -15,8 +15,8 @@ sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'src'))
 from exif_subject_area import pixmap_ltwh_focus_hint
 
 MODEL_DIR = "./aviation_model_processed"
-INPUT_DIR = r"D:\Development\F-35"
-OUTPUT_DIR = r"D:\Development\F-35_bg_removed_trimmed"
+INPUT_DIR = r"D:\Development\Test Image set"
+OUTPUT_DIR = r"D:\Development\Test_Images_Pipeline_Results"
 
 MIN_WIDTH = 350
 MIN_HEIGHT = 350
@@ -48,8 +48,8 @@ def main():
     print("Initializing rembg session with isnet-general-use...")
     session = new_session("isnet-general-use")
 
-    files = [f for f in os.listdir(INPUT_DIR) if f.lower().endswith('.arw')]
-    print(f"Found {len(files)} ARW files to process in {INPUT_DIR}.")
+    files = [f for f in os.listdir(INPUT_DIR) if f.lower().endswith('.arw') or f.lower().endswith('.jpg') or f.lower().endswith('.jpeg')]
+    print(f"Found {len(files)} files to process in {INPUT_DIR}.")
 
     csv_path = os.path.join(OUTPUT_DIR, "classification_results.csv")
     
@@ -63,9 +63,12 @@ def main():
             
             try:
                 # 1. Load Image
-                with rawpy.imread(filepath) as raw:
-                    rgb = raw.postprocess(half_size=True, use_camera_wb=True)
-                img = Image.fromarray(rgb)
+                if filepath.lower().endswith('.arw'):
+                    with rawpy.imread(filepath) as raw:
+                        rgb = raw.postprocess(half_size=True, use_camera_wb=True)
+                    img = Image.fromarray(rgb)
+                else:
+                    img = Image.open(filepath).convert("RGB")
                 
                 # Get focus point
                 focus_point = get_focus_point(filepath, img.width, img.height)
