@@ -26,7 +26,7 @@ from torchvision.transforms import (
 )
 
 # --- CONFIGURATION ---
-DATA_PATH = r"D:\Development\Processed" 
+DATA_PATH = r"./Processed"
 # We use the high-resolution 384px ViT as our foundation
 MODEL_ID = "google/vit-base-patch16-384"
 OUTPUT_DIR = "./aviation_model_processed"

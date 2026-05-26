@@ -4,8 +4,8 @@ from transformers import ViTForImageClassification
 from onnxruntime.quantization import quantize_dynamic, QuantType
 
 # --- CONFIGURATION ---
-CHECKPOINT_DIR = r"D:\Development\RAWviewer\aviation_model_v3" 
-ONNX_OUTPUT = r"D:\Development\RAWviewer\src\models\super_specialist.onnx"
+CHECKPOINT_DIR = r"./aviation_model_v3"
+ONNX_OUTPUT = r"../src/models/super_specialist.onnx"
 
 def export():
     if not os.path.exists(CHECKPOINT_DIR):

@@ -15,8 +15,8 @@ sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'src'))
 from exif_subject_area import pixmap_ltwh_focus_hint
 
 MODEL_DIR = "./aviation_model_processed"
-INPUT_DIR = r"D:\Development\Test Image set"
-OUTPUT_DIR = r"D:\Development\Test_Images_Pipeline_Results"
+INPUT_DIR = r"./Test_Image_set"
+OUTPUT_DIR = r"./Test_Images_Pipeline_Results"
 
 MIN_WIDTH = 350
 MIN_HEIGHT = 350
