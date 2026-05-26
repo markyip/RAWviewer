@@ -5630,6 +5630,12 @@ class RAWImageViewer(QMainWindow):
         self._last_manager_error_key = key
         self._last_manager_error_ts = now
         self.show_error("Load Error", f"Failed to load image: {error_message}")
+        
+        # Graceful handling for ejected volumes or missing files
+        if not os.path.exists(file_path):
+            parent_dir = os.path.dirname(file_path)
+            if not os.path.exists(parent_dir):
+                self.reset_to_initial_state()
 
     def on_manager_progress(self, file_path: str, status_message: str):
         """Internal signal/callback handler."""
@@ -10020,6 +10026,12 @@ class RAWImageViewer(QMainWindow):
             # Try to show error to user
             try:
                 self.show_error("Load Error", f"Failed to load image: {str(e)}")
+                # Graceful handling for ejected volumes or missing files
+                target_path = requested_file_path if 'requested_file_path' in locals() else (file_path if 'file_path' in locals() else None)
+                if target_path and not os.path.exists(target_path):
+                    parent_dir = os.path.dirname(target_path)
+                    if not os.path.exists(parent_dir):
+                        self.reset_to_initial_state()
             except:
                 pass
             raise
@@ -12857,6 +12869,53 @@ class RAWImageViewer(QMainWindow):
             logger.error(f"Error scanning folder: {e}", exc_info=True)
             error_msg = f"Error scanning folder:\n{str(e)}"
             self.show_error("Folder Scan Error", error_msg)
+
+    def reset_to_initial_state(self):
+        """Reset the UI to its initial state when no image or folder is loaded (e.g. volume ejected)."""
+        self.current_pixmap = None
+        self.current_image = None
+        self.current_file_path = None
+        self.image_files = []
+        self.current_file_index = -1
+        if hasattr(self, 'folder_path'):
+            self.folder_path = None
+        self._sync_single_image_histogram()
+        
+        message = (
+            "No image loaded\n\n"
+            "Click 📁 or drag and drop a folder or image to load it\n"
+            "Press Space to toggle between fit-to-window and 100% zoom\n"
+            "Double-click image to zoom in/out\n"
+            "Click and drag to pan when zoomed\n"
+            "Use Left/Right arrow keys to navigate between images (preserves zoom if zoomed in)\n"
+            "Bottom bar: Share and other controls when images are loaded\n"
+            "Press Down Arrow to move the current image to Discard folder\n"
+            "Press Delete to remove the current image\n"
+            "Press H to show or hide histogram\n"
+            "Press F — show dashed focus / subject outline from EXIF (amber = maker AF; lime = Subject / CIPA)\n"
+            "Scroll wheel (fit-to-window): Scroll down = previous image, Scroll up = next image\n"
+            "Horizontal wheel (zoom mode): Scroll left/right to pan the image"
+        )
+        
+        if hasattr(self, 'view_mode') and self.view_mode == 'gallery' and hasattr(self, 'gallery_justified') and self.gallery_justified:
+            self.gallery_justified.show_empty_message("No image loaded\nClick 📁 or drag and drop a folder or image to load it")
+        else:
+            if hasattr(self, 'image_label'):
+                self.image_label.setText(message)
+                self.image_label.setStyleSheet("QLabel { color: #666; font-size: 14px; background-color: transparent; }")
+            
+        if hasattr(self, 'status_metadata_label'):
+            self.status_metadata_label.setVisible(False)
+        if hasattr(self, 'status_counter_label'):
+            self.status_counter_label.setVisible(False)
+        if hasattr(self, 'sort_toggle_button'):
+            self.sort_toggle_button.setVisible(False)
+            
+        if hasattr(self, 'status_bar'):
+            self.status_bar.showMessage("Ready")
+        self.setWindowTitle('RAW Image Viewer')
+        if hasattr(self, 'title_bar') and self.title_bar is not None:
+            self.title_bar.set_title('RAW Image Viewer')
 
     def show_no_images_message(self, supported_extensions):
         """Display 'No images found' message in the main viewing area"""
