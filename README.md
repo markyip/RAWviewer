@@ -162,6 +162,22 @@ When focus/subject indicator is enabled (`F`):
 - **TIFF**: TIF, TIFF
 - **HEIF**: HEIF
 
+## 🧠 Training a Custom Image Classifier (e.g., Bird Watching, Cars)
+
+RAWviewer is equipped with scripts that make it incredibly easy to train a custom image classifier on your own datasets (e.g., classifying bird species instead of aircraft).
+
+1. **Organize Your Data**: Create a folder (e.g., `./CustomDataSet`) and inside it, create a subfolder for each class (e.g., `./CustomDataSet/Eagle/`, `./CustomDataSet/Sparrow/`). Place your training images inside their respective subfolders.
+2. **Background Removal (Highly Recommended)**: Training your model on images with backgrounds removed forces the model to learn the true shape of the subject rather than background context (e.g., blue skies vs. trees). You can use our `scripts/batch_bg_pipeline.py` to strip the backgrounds and tightly crop your images before training.
+3. **Train the Model**: Open `scripts/train_aviation_specialist.py` (or duplicate it) and modify the `DATA_PATH` to point to your new dataset folder. Then run it:
+   ```bash
+   python scripts/train_aviation_specialist.py
+   ```
+4. **Export to ONNX**: The training script will output a PyTorch model directory. Open `scripts/export_to_onnx.py`, point `CHECKPOINT_DIR` to your newly trained model directory, and set `ONNX_OUTPUT` to your desired save location. Run it:
+   ```bash
+   python scripts/export_to_onnx.py
+   ```
+   *You can then replace the default `.onnx` model in the `src/models/` folder with your newly trained model!*
+
 ## 🏗️ Building from Source
 
 ### Prerequisites
