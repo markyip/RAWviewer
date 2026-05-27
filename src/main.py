@@ -5160,7 +5160,7 @@ class RAWImageViewer(QMainWindow):
                             simulated_zoom = ow / cw
                 self.fit_to_window = False
                 self.current_zoom_level = simulated_zoom
-                self.zoom_to_point()
+                self.apply_zoom_and_pan()
                 return
 
         self.fit_to_window = False
@@ -9257,6 +9257,7 @@ class RAWImageViewer(QMainWindow):
                     self.fit_to_window = True
                     self.current_zoom_level = 1.0
                     self.zoom_center_point = None
+                    self._pending_zoom = False
                     self.scale_image_to_fit()
                     self.image_label.setCursor(QCursor(Qt.CursorShape.ArrowCursor))
 
@@ -11930,6 +11931,7 @@ class RAWImageViewer(QMainWindow):
                             delattr(self, '_pending_zoom_center')
                         if hasattr(self, '_pending_zoom_level'):
                             delattr(self, '_pending_zoom_level')
+                    self._pending_zoom = False
 
                 # Load the current image (at new_index)
                 current_file = self.image_files[self.current_file_index]
@@ -12093,6 +12095,7 @@ class RAWImageViewer(QMainWindow):
                             delattr(self, '_pending_zoom_center')
                         if hasattr(self, '_pending_zoom_level'):
                             delattr(self, '_pending_zoom_level')
+                    self._pending_zoom = False
 
                 # Load the current image (at new_index)
                 current_file = self.image_files[self.current_file_index]
@@ -12390,7 +12393,7 @@ class RAWImageViewer(QMainWindow):
                             self.fit_to_window = False
                             self.current_zoom_level = simulated_zoom
                             self.zoom_center_point = self._pending_zoom_center
-                            self.zoom_to_point()
+                            self.apply_zoom_and_pan()
                             self.update_status_bar()
                             self.setFocus()
                             return
@@ -12414,7 +12417,7 @@ class RAWImageViewer(QMainWindow):
                         self.fit_to_window = False
                         self.current_zoom_level = simulated_zoom
                         self.zoom_center_point = self._pending_zoom_center
-                        self.zoom_to_point()
+                        self.apply_zoom_and_pan()
                         self.update_status_bar()
                         self.setFocus()
                         return
