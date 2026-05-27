@@ -5148,6 +5148,19 @@ class RAWImageViewer(QMainWindow):
                     self.current_pixmap.size() if self.current_pixmap else None
                 )
                 self.status_bar.showMessage("Loading full resolution for 100% zoom...")
+                
+                # Apply simulated zoom immediately on thumbnail
+                simulated_zoom = 1.0
+                if self.current_pixmap:
+                    cached_exif = self.image_cache.get_exif(self.current_file_path)
+                    if cached_exif:
+                        ow = cached_exif.get("original_width", 0) or 0
+                        cw = self.current_pixmap.width()
+                        if ow > 0 and cw > 0:
+                            simulated_zoom = ow / cw
+                self.fit_to_window = False
+                self.current_zoom_level = simulated_zoom
+                self.zoom_to_point()
                 return
 
         self.fit_to_window = False
@@ -11829,6 +11842,12 @@ class RAWImageViewer(QMainWindow):
         if hasattr(self, 'current_processor') and self.current_processor:
             processor_state = f"Active (thread_id={self.current_processor.thread().currentThreadId() if hasattr(self.current_processor, 'thread') else 'N/A'})"
         logger.debug(f"[NAV_PREV] Current processor state: {processor_state}")
+
+        # Clear any pending zoom requests for the current image
+        if hasattr(self, '_pending_zoom'):
+            self._pending_zoom = False
+            if hasattr(self, '_pending_zoom_center'): delattr(self, '_pending_zoom_center')
+            if hasattr(self, '_pending_zoom_thumbnail_size'): delattr(self, '_pending_zoom_thumbnail_size')
         
         # Check if navigation is allowed BEFORE starting navigation
         if not self.can_navigate():
@@ -11977,6 +11996,12 @@ class RAWImageViewer(QMainWindow):
         logger.debug(f"[NAV_NEXT] Current state - index: {self.current_file_index}, "
                     f"total_files: {len(self.image_files) if self.image_files else 0}, "
                     f"current_file: {os.path.basename(self.current_file_path) if self.current_file_path else 'None'}")
+
+        # Clear any pending zoom requests for the current image
+        if hasattr(self, '_pending_zoom'):
+            self._pending_zoom = False
+            if hasattr(self, '_pending_zoom_center'): delattr(self, '_pending_zoom_center')
+            if hasattr(self, '_pending_zoom_thumbnail_size'): delattr(self, '_pending_zoom_thumbnail_size')
         
         # Check processor state
         processor_state = "None"
@@ -12352,6 +12377,20 @@ class RAWImageViewer(QMainWindow):
                             self._pending_zoom_thumbnail_size = self.current_pixmap.size() if self.current_pixmap else None
                             logger.debug("Stored pending 100% zoom - full decode first")
                             self.status_bar.showMessage("Loading full resolution for 100% zoom...")
+                            
+                            # Apply simulated zoom immediately on thumbnail
+                            simulated_zoom = 1.0
+                            if self.current_pixmap:
+                                cached_exif = self.image_cache.get_exif(self.current_file_path)
+                                if cached_exif:
+                                    ow = cached_exif.get("original_width", 0) or 0
+                                    cw = self.current_pixmap.width()
+                                    if ow > 0 and cw > 0:
+                                        simulated_zoom = ow / cw
+                            self.fit_to_window = False
+                            self.current_zoom_level = simulated_zoom
+                            self.zoom_center_point = self._pending_zoom_center
+                            self.zoom_to_point()
                             self.update_status_bar()
                             self.setFocus()
                             return
@@ -12362,6 +12401,20 @@ class RAWImageViewer(QMainWindow):
                         self._pending_zoom_thumbnail_size = self.current_pixmap.size() if self.current_pixmap else None
                         logger.debug("Stored pending 100% zoom - full decode first")
                         self.status_bar.showMessage("Loading full resolution for 100% zoom...")
+                        
+                        # Apply simulated zoom immediately on thumbnail
+                        simulated_zoom = 1.0
+                        if self.current_pixmap:
+                            cached_exif = self.image_cache.get_exif(self.current_file_path)
+                            if cached_exif:
+                                ow = cached_exif.get("original_width", 0) or 0
+                                cw = self.current_pixmap.width()
+                                if ow > 0 and cw > 0:
+                                    simulated_zoom = ow / cw
+                        self.fit_to_window = False
+                        self.current_zoom_level = simulated_zoom
+                        self.zoom_center_point = self._pending_zoom_center
+                        self.zoom_to_point()
                         self.update_status_bar()
                         self.setFocus()
                         return
