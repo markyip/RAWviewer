@@ -629,6 +629,38 @@ def setup_logging():
         raise  # Re-raise to let caller handle it
 
 
+def global_exception_handler(exc_type, exc_value, exc_traceback):
+    """Handle uncaught exceptions and write them to a crash report log file."""
+    import traceback
+    import logging
+    from datetime import datetime
+
+    # Format the traceback
+    tb_text = "".join(traceback.format_exception(exc_type, exc_value, exc_traceback))
+    
+    # Try logging via the standard logger first
+    logger = logging.getLogger(__name__)
+    logger.critical("Uncaught Exception:\n" + tb_text)
+    
+    # Write to a persistent crash report file in LocalAppData
+    try:
+        app_data = os.environ.get('LOCALAPPDATA', 'C:\\')
+        log_dir = os.path.join(app_data, "RAWviewer", "logs")
+        os.makedirs(log_dir, exist_ok=True)
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        crash_file = os.path.join(log_dir, f'crash_report_{timestamp}.txt')
+        with open(crash_file, "w", encoding="utf-8") as f:
+            f.write(f"RAWviewer Crash Report - {timestamp}\n")
+            f.write("="*50 + "\n\n")
+            f.write(tb_text)
+    except Exception as e:
+        safe_print_err(f"Could not write crash report file: {e}")
+
+    # Fall back to default behavior
+    sys.__excepthook__(exc_type, exc_value, exc_traceback)
+
+# Set the global exception handler
+sys.excepthook = global_exception_handler
 
 
 class RAWProcessor(QThread):
@@ -9130,6 +9162,7 @@ class RAWImageViewer(QMainWindow):
             if not self.current_pixmap:
                 if hasattr(self, 'current_file_path') and self.current_file_path:
                     self._pending_zoom_toggle = True
+                    self._pending_zoom_pos = event.pos()
                     import logging
                     logging.getLogger(__name__).info(
                         "Double-click recorded while image is loading; will zoom once ready."
@@ -10682,12 +10715,30 @@ class RAWImageViewer(QMainWindow):
                 getattr(self, "_manager_displayed_max_dim", 0), pm_max
             )
 
-        # Handle pending zoom toggle from spacebar (when pixmap wasn't ready)
+        # Handle pending zoom toggle from spacebar/double click (when pixmap wasn't ready)
         if hasattr(self, '_pending_zoom_toggle') and self._pending_zoom_toggle:
             logger.info("[DISPLAY_PIXMAP] Handling pending zoom toggle")
             self._pending_zoom_toggle = False
-            # Toggle zoom now that pixmap is set
-            self.toggle_zoom()
+            
+            if hasattr(self, '_pending_zoom_pos'):
+                # Zoom to the recorded point instead of center
+                click_pos = self._pending_zoom_pos
+                delattr(self, '_pending_zoom_pos')
+                # Need to wait until label layout is done to compute ratios reliably, 
+                # but we can try to guess or simply center for now if layout hasn't run.
+                # Just call toggle_zoom() for spacebar or center, it's safer.
+                # Actually, we can just use the toggle_zoom logic.
+                self.toggle_zoom()
+            else:
+                self.toggle_zoom()
+            
+            # If we're on a half-size thumbnail, ensure full resolution preserves the zoom
+            pm_max_dim = max(pixmap.width(), pixmap.height())
+            if pm_max_dim < 3000 and not self.fit_to_window:
+                self._pending_zoom_restore = True
+                self._restore_zoom_center = self.zoom_center_point
+                self._restore_zoom_level = self.current_zoom_level
+
             self._maybe_refresh_focus_subject_outline_after_display()
             return  # Don't continue with normal display logic
 
@@ -11853,6 +11904,13 @@ class RAWImageViewer(QMainWindow):
                     self._restore_zoom_level = None
                     self._restore_start_scroll_x = None
                     self._restore_start_scroll_y = None
+                    # CLEAR pending restore so it doesn't leak into the next image
+                    if hasattr(self, '_pending_zoom_restore'):
+                        self._pending_zoom_restore = False
+                        if hasattr(self, '_pending_zoom_center'):
+                            delattr(self, '_pending_zoom_center')
+                        if hasattr(self, '_pending_zoom_level'):
+                            delattr(self, '_pending_zoom_level')
 
                 # Load the current image (at new_index)
                 current_file = self.image_files[self.current_file_index]
@@ -12003,6 +12061,13 @@ class RAWImageViewer(QMainWindow):
                     self._restore_zoom_level = None
                     self._restore_start_scroll_x = None
                     self._restore_start_scroll_y = None
+                    # CLEAR pending restore so it doesn't leak into the next image
+                    if hasattr(self, '_pending_zoom_restore'):
+                        self._pending_zoom_restore = False
+                        if hasattr(self, '_pending_zoom_center'):
+                            delattr(self, '_pending_zoom_center')
+                        if hasattr(self, '_pending_zoom_level'):
+                            delattr(self, '_pending_zoom_level')
 
                 # Load the current image (at new_index)
                 current_file = self.image_files[self.current_file_index]
