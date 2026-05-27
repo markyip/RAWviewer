@@ -5472,7 +5472,7 @@ class RAWImageViewer(QMainWindow):
         is_raw_file = file_ext in raw_extensions
         
         if is_raw_file:
-            safe_print(f"[ORIENTATION] WARNING: RAW file {os.path.basename(file_path)} received as pixmap! Ensuring it is oriented.")
+            # safe_print(f"[ORIENTATION] WARNING: RAW file {os.path.basename(file_path)} received as pixmap! Ensuring it is oriented.")
             # If it's a RAW file coming through here, it should ideally be oriented by the processor.
             # But as a safety measure, we check if we need to apply it ourselves.
             if not getattr(self, '_orientation_already_applied', False):
@@ -5486,7 +5486,7 @@ class RAWImageViewer(QMainWindow):
         # Set flag so display_pixmap doesn't apply it again
         self._orientation_already_applied = True
         
-        safe_print(f"[ORIENTATION] on_manager_pixmap_ready: _orientation_already_applied = {self._orientation_already_applied}")
+        # safe_print(f"[ORIENTATION] on_manager_pixmap_ready: _orientation_already_applied = {self._orientation_already_applied}")
         # Pixmap from manager is always full resolution for non-RAW files
         self._is_half_size_displayed = False
         logger.debug(f"[MANAGER] Setting _is_half_size_displayed=False for full resolution pixmap")
@@ -7105,7 +7105,7 @@ class RAWImageViewer(QMainWindow):
         """Toggle between single image view and gallery view"""
         import logging
         logger = logging.getLogger(__name__)
-        logger.warning("[MODESWITCH] toggle_view_mode called; current=%s", self.view_mode)
+        logger.debug("[MODESWITCH] toggle_view_mode called; current=%s", self.view_mode)
         logger.info(f"[VIEW_MODE] ========== toggle_view_mode() STARTED ==========")
         
         if self.view_mode == 'single':
@@ -7125,7 +7125,7 @@ class RAWImageViewer(QMainWindow):
             self._show_gallery_view()
         else:
             self._show_single_view()
-        logger.warning("[MODESWITCH] toggle_view_mode finished; current=%s", self.view_mode)
+        logger.debug("[MODESWITCH] toggle_view_mode finished; current=%s", self.view_mode)
         
         logger.info(f"[VIEW_MODE] ========== toggle_view_mode() COMPLETED in 0.004s ==========")
     
@@ -7294,7 +7294,7 @@ class RAWImageViewer(QMainWindow):
         from PyQt6.QtCore import QTimer
         logger = logging.getLogger(__name__)
         self._suppress_single_manager_callbacks = True
-        logger.warning("[MODESWITCH] _show_gallery_view entered; files=%d", len(self.image_files))
+        logger.debug("[MODESWITCH] _show_gallery_view entered; files=%d", len(self.image_files))
         logger.info(f"[GALLERY] Showing gallery view")
         self._stop_slideshow()
         if hasattr(self, "loading_overlay"):
@@ -7381,7 +7381,7 @@ class RAWImageViewer(QMainWindow):
         
         # Update gallery content
         QTimer.singleShot(50, self._update_gallery_view)
-        logger.warning("[MODESWITCH] _show_gallery_view scheduled gallery update")
+        logger.debug("[MODESWITCH] _show_gallery_view scheduled gallery update")
     
     def _create_gallery_widget(self):
             """Create the gallery view widget - based on JustifiedGallery reference code"""
@@ -7535,7 +7535,7 @@ class RAWImageViewer(QMainWindow):
             import logging
             import time
             logger = logging.getLogger(__name__)
-            logger.warning("[MODESWITCH] _update_gallery_view called; widget=%s justified=%s files=%d",
+            logger.debug("[MODESWITCH] _update_gallery_view called; widget=%s justified=%s files=%d",
                            bool(self.gallery_widget), bool(self.gallery_justified), len(self.image_files))
             start_time = time.time()
             logger.info(f"[GALLERY] ========== _update_gallery_view() STARTED ==========")
@@ -7558,9 +7558,29 @@ class RAWImageViewer(QMainWindow):
 
             # IMPORTANT: Switching to gallery should be instant.
             # Do NOT block the UI thread on metadata fetch for thousands of files.
-            # 1) Show gallery immediately with a fast layout (default aspect ratios).
-            bulk_metadata = getattr(self, '_gallery_bulk_metadata', None)
+            # 1) Show gallery immediately with a fast layout (default aspect ratios or cached).
+            bulk_metadata = getattr(self, '_gallery_bulk_metadata', None) or {}
             try:
+                # Pre-seed layout metadata from the fast semantic index if available
+                # to prevent the gallery from flashing as async EXIF arrives
+                try:
+                    idx = self._get_semantic_index()
+                    if idx and self.image_files:
+                        layout_meta = idx.get_layout_metadata_for_paths(self.image_files)
+                        if layout_meta:
+                            for fp, meta in layout_meta.items():
+                                if fp not in bulk_metadata:
+                                    bulk_metadata[fp] = {}
+                                # Don't overwrite if EXIF already arrived
+                                if "original_width" not in bulk_metadata[fp] and meta.get("width"):
+                                    bulk_metadata[fp]["original_width"] = meta.get("width")
+                                if "original_height" not in bulk_metadata[fp] and meta.get("height"):
+                                    bulk_metadata[fp]["original_height"] = meta.get("height")
+                                if "orientation" not in bulk_metadata[fp] and meta.get("orientation"):
+                                    bulk_metadata[fp]["orientation"] = meta.get("orientation")
+                except Exception as ex:
+                    logger.warning(f"[GALLERY] Could not pre-seed semantic metadata: {ex}")
+
                 self.gallery_justified.set_images(
                     self.image_files, bulk_metadata if bulk_metadata else None
                 )
@@ -10203,7 +10223,7 @@ class RAWImageViewer(QMainWindow):
                 # Check if orientation was already applied (e.g., by UnifiedImageProcessor)
                 orientation_already_applied = getattr(self, '_orientation_already_applied', False)
                 # Console log: _orientation_already_applied value in display_numpy_image
-                safe_print(f"[ORIENTATION] display_numpy_image: _orientation_already_applied = {orientation_already_applied}")
+                # safe_print(f"[ORIENTATION] display_numpy_image: _orientation_already_applied = {orientation_already_applied}")
                 if not orientation_already_applied:
                     orientation = self.get_orientation_from_exif(self.current_file_path)
                     if orientation != 1:
@@ -10213,7 +10233,7 @@ class RAWImageViewer(QMainWindow):
                         logger.debug(f"[DISPLAY] Orientation is 1 (normal), no correction needed")
                 else:
                     logger.debug(f"[DISPLAY] Orientation already applied by processor, skipping")
-                    safe_print(f"[ORIENTATION] display_numpy_image: Skipping orientation correction (already applied)")
+                    # safe_print(f"[ORIENTATION] display_numpy_image: Skipping orientation correction (already applied)")
             # Set _is_half_size_displayed flag based on image dimensions
             # This is important for zoom detection - if user zooms in, we need to load full resolution
             max_dimension = max(width, height)

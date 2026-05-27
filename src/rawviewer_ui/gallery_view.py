@@ -211,7 +211,7 @@ class JustifiedGallery(QWidget):
                 self._post_init()
             new_images = images or []
             if _focus_gallery_switch_logs():
-                logger.warning(
+                logger.debug(
                     "[MODESWITCH] gallery.set_images called; count=%d load_manager=%s",
                     len(new_images),
                     self.load_manager is not None,
@@ -585,7 +585,7 @@ class JustifiedGallery(QWidget):
         if self._building or not self.images:
             return
         if _focus_gallery_switch_logs():
-            logger.warning(
+            logger.debug(
                 "[MODESWITCH] gallery.build_gallery start; images=%d width=%d",
                 len(self.images),
                 self._get_viewport_width(),
@@ -626,19 +626,18 @@ class JustifiedGallery(QWidget):
         self._last_layout_viewport_width = viewport_width
         should_load_visible = False
         try:
-            for w in self._visible_widgets.values():
-                w.hide()
-                self._widget_pool.append(w)
-            self._visible_widgets.clear()
             self._gallery_layout_items.clear()
             self._path_to_indices.clear()
 
             if bulk_metadata:
                 self._metadata_cache.update(bulk_metadata)
-            if not self._metadata_cache and self.parent_viewer and hasattr(self.parent_viewer, "image_cache"):
+            if self.parent_viewer and hasattr(self.parent_viewer, "image_cache"):
                 paths = [img for img in self.images if isinstance(img, str)]
-                if paths:
-                    self._metadata_cache = self.parent_viewer.image_cache.get_multiple_exif(paths)
+                missing_paths = [p for p in paths if p not in self._metadata_cache]
+                if missing_paths:
+                    bulk_fetched = self.parent_viewer.image_cache.get_multiple_exif(missing_paths)
+                    if bulk_fetched:
+                        self._metadata_cache.update(bulk_fetched)
 
             current_y = 10
             left_margin = 24
@@ -669,21 +668,20 @@ class JustifiedGallery(QWidget):
                 current_y += row_h + self.MIN_SPACING
 
             for item in self.images:
-                aspect = 1.333
+                aspect = 1.5
                 if isinstance(item, str):
                     base = self._thumbnail_cache.get((item, self._thumb_base_key))
                     if base and not base.isNull() and base.height() > 0:
                         aspect = base.width() / base.height()
                     else:
                         m = self._metadata_cache.get(item)
-                        if m and m.get("original_width"):
+                        if m and m.get("original_width") and m.get("original_height"):
                             w, h = m["original_width"], m["original_height"]
                             if m.get("orientation", 1) in (5, 6, 7, 8):
                                 w, h = h, w
-                            aspect = w / h
+                            aspect = w / h if h > 0 else 1.5
                         else:
-                            # IMPORTANT: Keep initial layout build non-blocking.
-                            aspect = 1.333
+                            aspect = 1.5
 
                 row.append((item, aspect))
                 aspect_sum += aspect
@@ -706,7 +704,7 @@ class JustifiedGallery(QWidget):
             self.update()
             self._last_build_ts = time.time()
             if _focus_gallery_switch_logs():
-                logger.warning(
+                logger.debug(
                     "[MODESWITCH] gallery.build_gallery done; items=%d content_h=%d",
                     len(self._gallery_layout_items),
                     self._total_content_height,
@@ -756,7 +754,7 @@ class JustifiedGallery(QWidget):
             return
         if self.load_manager is None:
             if _focus_gallery_switch_logs():
-                logger.warning("[MODESWITCH] gallery.load_visible_images skipped; load_manager is None")
+                logger.debug("[MODESWITCH] gallery.load_visible_images skipped; load_manager is None")
             return
 
         # Drop stale in-flight markers so failed/missed thumbnails can be retried.
@@ -773,7 +771,7 @@ class JustifiedGallery(QWidget):
         buffer_rect = QRect(0, scroll_y, v_port.width(), v_h)
         visible_indices_items = self._get_visible_range(buffer_rect)
         if _focus_gallery_switch_logs():
-            logger.warning(
+            logger.debug(
                 "[MODESWITCH] gallery.load_visible_images visible=%d cached_tasks=%d",
                 len(visible_indices_items),
                 len(self._active_tasks),
@@ -795,6 +793,9 @@ class JustifiedGallery(QWidget):
             if idx not in visible_indices_set:
                 w = self._visible_widgets.pop(idx)
                 w.hide()
+                w.clear()
+                w.file_path = None
+                w.original_pixmap = None
                 self._widget_pool.append(w)
 
         # Fast scroll policy:
@@ -902,6 +903,21 @@ class JustifiedGallery(QWidget):
                 cache_hit = True
             else:
                 base = self._thumbnail_cache.get((path, self._thumb_base_key))
+                if not base:
+                    try:
+                        from image_cache import get_image_cache
+                        global_thumb = get_image_cache().get_thumbnail(path)
+                        if global_thumb is not None:
+                            arr = np.ascontiguousarray(global_thumb)
+                            h_img, w_img = arr.shape[:2]
+                            bytes_per_line = arr.strides[0]
+                            qimg = QImage(arr.data, w_img, h_img, bytes_per_line, QImage.Format.Format_RGB888).copy()
+                            base = QPixmap.fromImage(qimg)
+                            if base and not base.isNull():
+                                self._thumbnail_cache.put((path, self._thumb_base_key), base)
+                    except Exception as e:
+                        logger.debug(f"Sync get_thumbnail failed for {path}: {e}")
+                
                 if base:
                     scaled = self._scale_crop_to_fit(base, physical_size)
                     scaled.setDevicePixelRatio(dpr)
@@ -910,14 +926,15 @@ class JustifiedGallery(QWidget):
                     w.setText("")
                     cache_hit = True
                 else:
-                    w.setPixmap(QPixmap())
+                    if w.file_path != path or not w.pixmap() or w.pixmap().isNull():
+                        w.setPixmap(QPixmap())
                     w.setText("")
 
             w.show()
             thumb_missing = not cache_hit
             
             m = self._metadata_cache.get(path)
-            exif_missing = not m or not m.get("original_width") or not m.get("original_height")
+            exif_missing = not m or m.get("original_width") is None or m.get("original_height") is None
             
             stages = set()
             if thumb_missing:
@@ -937,7 +954,7 @@ class JustifiedGallery(QWidget):
                 thumb_missing = not self._thumbnail_cache.get((path, self._thumb_base_key))
                 
                 m = self._metadata_cache.get(path)
-                exif_missing = not m or not m.get("original_width") or not m.get("original_height")
+                exif_missing = not m or m.get("original_width") is None or m.get("original_height") is None
                 
                 stages = set()
                 if thumb_missing:
@@ -959,7 +976,7 @@ class JustifiedGallery(QWidget):
         active_cap = 16 if not is_fast else 10
         if len(self._active_tasks) >= active_cap:
             if _focus_gallery_switch_logs():
-                logger.warning(
+                logger.debug(
                     "[MODESWITCH] gallery.load_visible_images skipped scheduling; active cap reached (%d)",
                     len(self._active_tasks),
                 )
@@ -983,7 +1000,7 @@ class JustifiedGallery(QWidget):
 
         # (perf logging removed)
         if _focus_gallery_switch_logs():
-            logger.warning(
+            logger.debug(
                 "[MODESWITCH] gallery.load_visible_images scheduled=%d visible=%d active=%d",
                 scheduled_tasks,
                 len(visible_indices_items),
@@ -1045,13 +1062,14 @@ class JustifiedGallery(QWidget):
             changed = False
             for idx in indices:
                 if idx < len(self._gallery_layout_items):
-                    old_aspect = self._gallery_layout_items[idx].get("aspect", 1.333)
+                    old_aspect = self._gallery_layout_items[idx].get("aspect", 1.5)
                     if abs(old_aspect - aspect) > 0.05:
                         self._gallery_layout_items[idx]["aspect"] = aspect
                         changed = True
             
             if changed:
                 self._metadata_changed_paths.add(file_path)
+                logger.debug(f"[GALLERY_DEBUG] Timer started by on_thumbnail_ready for {file_path}")
                 if not self._metadata_rebuild_timer.isActive():
                     self._metadata_rebuild_timer.start(500)
 
@@ -1127,7 +1145,7 @@ class JustifiedGallery(QWidget):
         changed = False
         for idx in indices:
             if idx < len(self._gallery_layout_items):
-                old_aspect = self._gallery_layout_items[idx].get("aspect", 1.333)
+                old_aspect = self._gallery_layout_items[idx].get("aspect", 1.5)
                 if abs(old_aspect - aspect) > 0.05:
                     self._gallery_layout_items[idx]["aspect"] = aspect
                     changed = True
@@ -1143,9 +1161,11 @@ class JustifiedGallery(QWidget):
             if not self._metadata_rebuild_timer.isActive():
                 # Initial populates get a longer debounce to let things settle
                 debounce = 2000 if len(self._metadata_cache) < (len(self.images) * 0.5) else 800
+                logger.debug(f"[GALLERY_DEBUG] Timer started by on_exif_ready (long) for {file_path}")
                 self._metadata_rebuild_timer.start(debounce)
             elif len(self._metadata_changed_paths) >= rebuild_threshold:
                 # If we hit the threshold, force a rebuild sooner
+                logger.debug(f"[GALLERY_DEBUG] Timer started by on_exif_ready (short) for {file_path}")
                 self._metadata_rebuild_timer.start(500)
 
     def _handle_metadata_rebuild(self):
@@ -1158,7 +1178,7 @@ class JustifiedGallery(QWidget):
             
         self._metadata_changed_paths.clear()
         if _focus_gallery_switch_logs():
-            logger.warning("[GALLERY] metadata rebuild triggered")
+            logger.debug("[GALLERY] metadata rebuild triggered")
             
         # Use existing metadata cache to avoid re-extraction
         self.build_gallery(bulk_metadata=None, force=True)

@@ -54,7 +54,7 @@ This is a **pre-filtering tool**, letting you go through hundreds of RAW files e
 - **EXIF data display**: View camera settings, focal length, ISO, aperture, and capture information with robust metadata extraction
 - **Session persistence**: Remembers your last opened folder, image, and view mode
 - **Single-image histogram**: Press `H` to show or hide the strip while viewing one image
-- **Portable executable**: No Python installation required for users
+- **Modern Installer**: Lightweight executable that automatically provisions a self-contained Python environment and downloads AI models on first launch
 - **Professional Startup**: Synchronized native and Qt splash screens for a flicker-free, premium launch experience.
 - **Modern UI**: Material Design 3 aesthetics with Font Awesome icons (via qtawesome) and non-intrusive loading indicators
 - **Platform-specific chrome**: On Windows, the bottom bar omits Share (no stable system share without WinRT interop); **Share** remains on macOS.
@@ -68,8 +68,8 @@ This is a **pre-filtering tool**, letting you go through hundreds of RAW files e
 #### Windows
 1. Download the latest release from the [Releases Page](https://github.com/markyip/RAWviewer/releases/latest)
 2. Download `RAWviewer.exe` directly (no zip extraction needed)
-3. Double-click `RAWviewer.exe` to launch
-4. **Optional**: Create a desktop shortcut or pin to taskbar
+3. Double-click `RAWviewer.exe` to initiate the installation process. It will automatically download the necessary dependencies and AI models to a destination of your choice.
+4. Launch RAWviewer from the Desktop shortcut created during installation! (You can safely delete the original `RAWviewer.exe` installer afterwards).
 
 #### macOS
 1. Download the latest release from the [Releases Page](https://github.com/markyip/RAWviewer/releases/latest)

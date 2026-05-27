@@ -153,10 +153,13 @@ class JustifiedGallery(QWidget):
             
             # Metadata Prep
             if bulk_metadata: self._metadata_cache.update(bulk_metadata)
-            if not self._metadata_cache and self.parent_viewer and hasattr(self.parent_viewer, 'image_cache'):
+            if self.parent_viewer and hasattr(self.parent_viewer, 'image_cache'):
                 paths = [img for img in self.images if isinstance(img, str)]
-                if paths:
-                    self._metadata_cache = self.parent_viewer.image_cache.get_multiple_exif(paths)
+                missing_paths = [p for p in paths if p not in self._metadata_cache]
+                if missing_paths:
+                    bulk_fetched = self.parent_viewer.image_cache.get_multiple_exif(missing_paths)
+                    if bulk_fetched:
+                        self._metadata_cache.update(bulk_fetched)
 
             viewport_width = self._get_viewport_width()
             net_width = viewport_width - (self.MIN_SPACING * 2) - 16

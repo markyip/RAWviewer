@@ -1,0 +1,37 @@
+[workspace]
+name = "rawviewer"
+version = "1.0.0"
+description = "RAWviewer - Professional RAW Image Viewer with Semantic Search"
+authors = ["Mark Yip"]
+channels = ["conda-forge"]
+platforms = ["win-64"]
+
+[tasks]
+start = "python src/main.py"
+start-windowless = "pythonw src/main.py"
+
+[dependencies]
+python = ">=3.10,<3.13"
+pip = "*"
+
+[pypi-dependencies]
+PyQt6 = ">=6.6.0"
+rawpy = ">=0.25.0"
+numpy = ">=2.0.0"
+Pillow = ">=10.0.0"
+send2trash = ">=1.8.0"
+natsort = ">=8.4.0"
+exifread = ">=3.0.0"
+psutil = ">=5.9.0"
+pyqtgraph = ">=0.13.0"
+qtawesome = ">=1.2.0"
+pycountry = "*"
+onnxruntime-directml = ">=1.18.0"
+pyexiv2 = "*"
+pywin32 = "*"
+tokenizers = "*"
+sentencepiece = "*"
+mediapipe = "*"
+opencv-python-headless = "*"
+huggingface_hub = "*"
+requests = "*"

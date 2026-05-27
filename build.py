@@ -203,9 +203,10 @@ def install_dependencies():
     ]
 
     if system_name == "Windows":
-        # Windows semantic backend will move to ONNX; keep sentence-transformers out of
-        # the default macOS test build so PyTorch is not bundled.
-        dependencies.append('sentence-transformers')
+        # Windows semantic backend will move to ONNX
+        dependencies.append('onnxruntime-directml')
+        dependencies.append('mediapipe')
+        dependencies.append('opencv-python-headless')
     elif system_name == "Darwin":
         dependencies.append('huggingface-hub')
         dependencies.append('pyobjc-framework-CoreML')
@@ -404,12 +405,8 @@ def main():
             )
             print("[INFO] Bundling MobileCLIP2 Core ML from models/mobileclip2_coreml/")
     elif platform.system() == "Windows":
-        mo = Path("models/mobileclip_onnx")
-        if mo.is_dir() and (mo / "image_encoder.onnx").exists():
-            add_data_args.append(
-                f'--add-data "{mo.resolve()}{add_data_sep}models/mobileclip_onnx"'
-            )
-            print("[INFO] Bundling MobileCLIP2 ONNX from models/mobileclip_onnx/")
+        add_data_args.append('--add-data "uninstall.bat;."')
+        add_data_args.append('--add-data "scripts;scripts"')
     add_data_arg_str = " ".join(add_data_args)
 
     src_path = os.path.abspath('src')
@@ -461,15 +458,7 @@ def main():
             "--hidden-import", "pythoncom",
             "--hidden-import", "pywintypes",
         ])
-        # Bundling ONNX Runtime for lightweight semantic search
-        try:
-            import onnxruntime
-            cmd_base.extend(["--hidden-import", "onnxruntime", "--collect-all", "onnxruntime"])
-            print("[INFO] PyInstaller: bundling onnxruntime with --collect-all.")
-        except ImportError:
-            print("[WARNING] onnxruntime not found; semantic search may be disabled on Windows.")
-            
-        # Exclude heavy libraries on Windows to keep the build "Light"
+        # Windows uses Pixi bootstrap. Exclude everything except PyQt6 and standard libs
         cmd_base.extend([
             "--exclude-module", "torch",
             "--exclude-module", "torchvision",
@@ -478,19 +467,25 @@ def main():
             "--exclude-module", "transformers",
             "--exclude-module", "scipy",
             "--exclude-module", "matplotlib",
+            "--exclude-module", "onnxruntime",
+            "--exclude-module", "rawpy",
+            "--exclude-module", "numpy",
+            "--exclude-module", "PIL",
+            "--exclude-module", "pyexiv2",
+            "--exclude-module", "pyqtgraph",
+            "--exclude-module", "natsort",
+            "--exclude-module", "send2trash",
+            "--exclude-module", "exifread",
         ])
+        
+        add_data_args.append('--add-data "pixi.toml;."')
+        add_data_args.append('--add-data "src;src"')
     
     if platform.system() == 'Darwin':
         cmd_base.append("--onedir")
         cmd_base.extend(["--osx-bundle-identifier", "com.markyip.rawviewer"])
     else:
-        # User requested --onefile; we use --splash to provide immediate feedback during extraction.
         cmd_base.append("--onefile")
-        if os.path.exists(icon_path):
-            # Using the png version for the splash screen
-            splash_img = os.path.join('icons', 'appicon.png')
-            if os.path.exists(splash_img):
-                cmd_base.extend(["--splash", splash_img])
         
     if icon_arg:
         if platform.system() == 'Windows':
@@ -502,7 +497,10 @@ def main():
     for arg in add_data_args:
         cmd_base.extend(["--add-data", arg.split('--add-data ')[-1].strip('"')])
         
-    cmd_base.append("src/main.py")
+    if platform.system() == 'Windows':
+        cmd_base.append("src/bootstrap.py")
+    else:
+        cmd_base.append("src/main.py")
 
     print(f"Running: {' '.join(cmd_base)}")
     if not run_command(cmd_base):
@@ -523,6 +521,9 @@ def main():
             run_command(['xattr', '-cr', str(exe_path)])
     else:
         print("[ERROR] Executable was not created!")
+        
+    if platform.system() == 'Windows' and exe_path.exists():
+        print("Build completed successfully.")
 
 
 if __name__ == '__main__':

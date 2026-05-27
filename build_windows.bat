@@ -20,7 +20,7 @@ python scripts/download_mobileclip_onnx.py
 
 REM Install/upgrade dependencies
 echo Installing dependencies...
-pip install --upgrade PyQt6 rawpy send2trash pyinstaller natsort exifread pyexiv2 Pillow psutil numpy qtawesome pyqtgraph sentence-transformers reverse-geocoder pycountry pywin32
+pip install --upgrade PyQt6 rawpy send2trash pyinstaller natsort exifread pyexiv2 Pillow psutil numpy qtawesome pyqtgraph onnxruntime-directml reverse-geocoder pycountry pywin32 opencv-python-headless
 
 REM Try to close any running RAWviewer.exe instances
 echo Checking for running RAWviewer instances...

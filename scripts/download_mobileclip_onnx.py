@@ -18,6 +18,7 @@ def main():
 
     print(f"[INFO] Downloading MobileCLIP2-S0 ONNX models to {MODELS_DIR}...")
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
+    os.environ['HF_HUB_DISABLE_PROGRESS_BARS'] = '1'
 
     # Mapping of remote path in HF repo to local filename expected by RAWviewer
     files_to_download = {
@@ -30,8 +31,7 @@ def main():
         hf_hub_download(
             repo_id=REPO_ID,
             filename=remote_path,
-            local_dir=str(MODELS_DIR),
-            local_dir_use_symlinks=False
+            local_dir=str(MODELS_DIR)
         )
         
         # hf_hub_download with local_dir often creates subdirectories

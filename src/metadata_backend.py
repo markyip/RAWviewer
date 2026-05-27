@@ -240,7 +240,7 @@ def _maybe_gps_tag_lite(exiv_key: str, val: str) -> IfdTagLite:
 
 
 def _pyexiv2_tags(path: str) -> dict[str, Any] | None:
-    if not _HAS_PYEXIV2 or _pyexiv2 is None:
+    if not has_pyexiv2() or _pyexiv2 is None:
         return None
     try:
         with _pyexiv2.Image(path) as img:
@@ -315,10 +315,18 @@ def process_file_from_path(
         return _exifread_process_path(path, details=False, stop_tag=stop_tag)
 
     # auto
-    if mode == "auto" and has_pyexiv2():
-        tags = _pyexiv2_tags(path)
-        if tags and len(tags) >= 2:
-            return tags
+    if mode == "auto":
+        # Check if the file is a RAW/DNG file. If so, prefer the high-performance exifread path,
+        # which reads only headers and avoids pyexiv2/Exiv2 loading the huge raw sensor data (700ms -> 1ms).
+        ext = os.path.splitext(path)[1].lower().lstrip(".")
+        from raw_file_extensions import RAW_FILE_EXTENSIONS
+        if ext in RAW_FILE_EXTENSIONS:
+            return _exifread_process_path(path, details=False, stop_tag=stop_tag)
+
+        if has_pyexiv2():
+            tags = _pyexiv2_tags(path)
+            if tags and len(tags) >= 2:
+                return tags
     return _exifread_process_path(path, details=False, stop_tag=stop_tag)
 
 
