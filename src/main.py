@@ -4042,6 +4042,8 @@ class CustomTitleBar(QFrame):
                 font-size: 14px;
             """)
         layout.addWidget(self.icon_label)
+        # Keep icon-to-title padding visually aligned with left outer padding.
+        layout.addSpacing(12)
         
         self.title_label = QLabel(title)
         self.title_label.setStyleSheet("""

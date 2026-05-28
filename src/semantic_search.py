@@ -854,6 +854,8 @@ class SemanticImageIndex:
             "faces",
             "person",
             "people",
+            "human",
+            "humans",
             "portrait",
         }
     )
@@ -863,6 +865,8 @@ class SemanticImageIndex:
             "no:faces",
             "no:people",
             "no:person",
+            "no:human",
+            "no:humans",
         }
     )
 
@@ -3178,5 +3182,13 @@ class SemanticImageIndex:
 
     @staticmethod
     def _query_needs_face_detection(query: str) -> bool:
-        return bool(re.search(r"\b(?:has:faces?|no:faces?|faces?)\b", query or "", flags=re.I))
+        return bool(
+            re.search(
+                r"\b(?:has:faces?|has:people|has:person|has:humans?"
+                r"|no:faces?|no:people|no:person|no:humans?"
+                r"|faces?|people|person|humans?)\b",
+                query or "",
+                flags=re.I,
+            )
+        )
 
