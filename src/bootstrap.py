@@ -61,7 +61,12 @@ class InstallWorker(QObject):
             
             src_dir = os.path.join(target_dir, "src")
             if os.path.exists(src_dir): shutil.rmtree(src_dir)
-            shutil.copytree(os.path.join(BUNDLE_DIR, "src"), src_dir, dirs_exist_ok=True)
+            shutil.copytree(
+                os.path.join(BUNDLE_DIR, "src"),
+                src_dir,
+                dirs_exist_ok=True,
+                ignore=shutil.ignore_patterns("logs", "*.log"),
+            )
             
             assets_dir = os.path.join(target_dir, "icons")
             if os.path.exists(assets_dir): shutil.rmtree(assets_dir)

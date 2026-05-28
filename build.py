@@ -365,6 +365,15 @@ def main():
                 print(f"[WARNING] Could not fully clean dist directory: {e}")
         except Exception as e:
             print(f"[WARNING] Error cleaning dist directory: {e}")
+
+    # Prevent stale local logs from being packed into installer payload ("src;src").
+    logs_dir = Path("src") / "logs"
+    if logs_dir.exists():
+        try:
+            print("Cleaning src/logs before packaging...")
+            shutil.rmtree(logs_dir)
+        except Exception as e:
+            print(f"[WARNING] Could not clean src/logs: {e}")
     # Platform-agnostic icon
     if platform.system() == 'Windows':
         icon_file = os.path.join('icons', 'appicon.ico')

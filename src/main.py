@@ -145,6 +145,15 @@ except Exception:
 
 # In PyInstaller --windowed builds there is no console, so stdout/stderr can be None.
 # Redirect them to a file early so all existing safe_print() debug output is preserved.
+def _runtime_log_dir() -> str:
+    """
+    Central runtime log directory.
+    Use LocalAppData for both installed and dev runs to avoid packaging stale src/logs.
+    """
+    app_data = os.environ.get("LOCALAPPDATA", "C:\\")
+    return os.path.join(app_data, "RAWviewer", "logs")
+
+
 def _redirect_stdio_to_file_if_needed():
     try:
         # Opt-in only: do not create log folders/files in normal releases.
@@ -157,23 +166,10 @@ def _redirect_stdio_to_file_if_needed():
         if sys.stdout is not None and sys.stderr is not None:
             return
 
-        # Prefer writing next to the project-style logs folder when present.
-        # Fallback to a local "logs" folder in current working directory.
-        base_dir = os.getcwd()
-        candidate_dirs = [
-            os.path.join(base_dir, "src", "logs"),
-            os.path.join(base_dir, "logs"),
-        ]
-        log_dir = None
-        for d in candidate_dirs:
-            try:
-                os.makedirs(d, exist_ok=True)
-                log_dir = d
-                break
-            except OSError:
-                continue
-
-        if not log_dir:
+        log_dir = _runtime_log_dir()
+        try:
+            os.makedirs(log_dir, exist_ok=True)
+        except OSError:
             return
 
         from datetime import datetime
@@ -204,21 +200,10 @@ def _enable_fatal_crash_dump_if_needed():
         import faulthandler
         from datetime import datetime
 
-        base_dir = os.getcwd()
-        candidates = [
-            os.path.join(base_dir, "src", "logs"),
-            os.path.join(base_dir, "logs"),
-            os.path.join(os.environ.get("LOCALAPPDATA", "C:\\"), "RAWviewer", "logs"),
-        ]
-        dump_dir = None
-        for d in candidates:
-            try:
-                os.makedirs(d, exist_ok=True)
-                dump_dir = d
-                break
-            except OSError:
-                continue
-        if not dump_dir:
+        dump_dir = _runtime_log_dir()
+        try:
+            os.makedirs(dump_dir, exist_ok=True)
+        except OSError:
             return
 
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -631,7 +616,7 @@ def setup_logging():
         # Optional file logging (opt-in) to avoid creating a logs folder in normal releases.
         enable_file_log = os.environ.get("RAWVIEWER_FILE_LOG", "").strip() in ("1", "true", "True", "YES", "yes")
         if enable_file_log:
-            log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'logs')
+            log_dir = _runtime_log_dir()
             os.makedirs(log_dir, exist_ok=True)
 
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -660,7 +645,7 @@ def setup_logging():
         try:
             # Only attempt fallback file logging if explicitly enabled.
             if os.environ.get("RAWVIEWER_FILE_LOG", "").strip() in ("1", "true", "True", "YES", "yes"):
-                fallback_log = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'logs', 'error.log')
+                fallback_log = os.path.join(_runtime_log_dir(), 'error.log')
                 os.makedirs(os.path.dirname(fallback_log), exist_ok=True)
                 with open(fallback_log, 'a', encoding='utf-8') as f:
                     f.write(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} - {error_msg}\n")
@@ -686,8 +671,7 @@ def global_exception_handler(exc_type, exc_value, exc_traceback):
     
     # Write to a persistent crash report file in LocalAppData
     try:
-        app_data = os.environ.get('LOCALAPPDATA', 'C:\\')
-        log_dir = os.path.join(app_data, "RAWviewer", "logs")
+        log_dir = _runtime_log_dir()
         os.makedirs(log_dir, exist_ok=True)
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         crash_file = os.path.join(log_dir, f'crash_report_{timestamp}.txt')
