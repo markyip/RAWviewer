@@ -1,0 +1,42 @@
+# Launch scripts
+
+Scripts for local development and packaging. All paths assume the **repository root** as the working directory (each script `cd`s there automatically).
+
+## Windows (`.bat`)
+
+| Script | Purpose |
+|--------|---------|
+| [`bat/run_debug.bat`](bat/run_debug.bat) | Run `src/main.py` with debug logging and `rawviewer_env` if present |
+| [`bat/build_windows.bat`](bat/build_windows.bat) | Create `rawviewer_env`, install deps, run `build.py` |
+
+From repo root:
+
+```batch
+scripts\Launch\bat\run_debug.bat
+scripts\Launch\bat\build_windows.bat
+```
+
+## macOS / Linux (shell)
+
+| Script | Purpose |
+|--------|---------|
+| [`shell/launch_dev.sh`](shell/launch_dev.sh) | Run `src/main.py` with verbose dev env vars |
+| [`shell/build_macos.sh`](shell/build_macos.sh) | macOS build via `rawviewer_env` + `build.py` |
+
+```bash
+chmod +x scripts/Launch/shell/*.sh
+./scripts/Launch/shell/launch_dev.sh
+./scripts/Launch/shell/build_macos.sh
+```
+
+## Virtual environments
+
+| Path | Used by |
+|------|---------|
+| `rawviewer_env/` | `run_debug.bat`, `build_windows.bat`, `build_macos.sh`, `build.py` |
+| `.pixi/envs/default/` | `pixi install` / `pixi run start` (see root `pixi.toml`) |
+| `.venv/` | Not referenced by these scripts; optional IDE/local use |
+
+**Recommended for day-to-day dev:** `pixi run start` or `scripts/Launch/bat/run_debug.bat` (Windows) / `scripts/Launch/shell/launch_dev.sh` (macOS).
+
+Root-level `run_debug.bat`, `build_windows.bat`, `launch_dev.sh`, and `build_macos.sh` are thin wrappers that forward here.

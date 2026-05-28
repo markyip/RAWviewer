@@ -1,10 +1,10 @@
-# RAWviewer v2.0.1
+# RAWviewer v2.1.0
 
 <p align="center">
   <img src="icons/appicon.ico" alt="RAWviewer Icon" width="256">
 </p>
 
-![Version](https://img.shields.io/badge/version-2.0.1-blue)
+![Version](https://img.shields.io/badge/version-2.1.0-blue)
 ![Downloads](https://img.shields.io/github/downloads/markyip/RAWviewer/total) 
 ![License](https://img.shields.io/badge/license-MIT-green)
 [![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-Donate-orange?logo=buy-me-a-coffee)](https://www.buymeacoffee.com/markyip)
@@ -73,8 +73,10 @@ This is a **pre-filtering tool**, letting you go through hundreds of RAW files e
 4. Launch RAWviewer from the Desktop shortcut created during installation! (You can safely delete the original `RAWviewer.exe` installer afterwards).
 
 #### macOS
+> **Minimum supported macOS (official prebuilt release): macOS 13 Ventura or newer.**
+
 1. Download the latest release from the [Releases Page](https://github.com/markyip/RAWviewer/releases/latest)
-2. Download and extract `RAWviewer-v2.0.1-macOS.zip`
+2. Download and extract `RAWviewer-v2.1.0-macOS.zip`
 3. Drag `RAWviewer.app` to your **Applications** folder.
 4. **CRITICAL FIRST STEP:** Because this is an open-source app not signed via the paid Apple Developer program, macOS Gatekeeper will incorrectly label it as "Damaged" or block it. **You must run this command in your Terminal once** to remove the download quarantine flag:
    ```bash
@@ -85,13 +87,12 @@ This is a **pre-filtering tool**, letting you go through hundreds of RAW files e
 ## ⌨️ Keyboard Shortcuts
 
 - **Space**: Toggle between fit-to-window and 100% zoom
-- **`G`**: Toggle between Gallery View and Single Image View
 - **`Esc`**: Return to Gallery View (from Single View)
 - **`←`/`→` arrows**: Navigate between images
 - **`↓`**: Move current image to Discard folder
 - **Delete**: Delete current image (with confirmation)
 - **`H`**: Show or hide the single-image histogram strip
-- **`F`**: Toggle dashed focus/subject indicator overlay (amber = maker AF, lime = EXIF subject area)
+- **`F`**: Focus / subject outline
 
 ## 🔎 Gallery search (Gallery view)
 
@@ -177,6 +178,17 @@ When focus/subject indicator is enabled (`F`):
 - **TIFF**: TIF, TIFF
 - **HEIF**: HEIF
 
+## 🛠️ Development (run from source)
+
+Launch scripts live under [`scripts/Launch/`](scripts/Launch/README.md). Root-level `run_debug.bat` / `launch_dev.sh` forward there.
+
+| Platform | Debug run | Build |
+|----------|-----------|-------|
+| Windows | `scripts\Launch\bat\run_debug.bat` | `scripts\Launch\bat\build_windows.bat` |
+| macOS | `./scripts/Launch/shell/launch_dev.sh` | `./scripts/Launch/shell/build_macos.sh` |
+
+**Virtual environments:** `pixi install` → `pixi run start` uses `.pixi/`. Build/debug batch scripts use `rawviewer_env/` (created automatically). `.venv/` is optional for IDE use only.
+
 ## 🏗️ Building from Source
 
 ### Prerequisites
@@ -186,7 +198,7 @@ When focus/subject indicator is enabled (`F`):
 **Option 1: Using batch script (recommended)**
 ```batch
 # Run the automated build script (manages its own venv)
-build_windows.bat
+scripts\Launch\bat\build_windows.bat
 ```
 
 **Option 2: Manual build with Pixi**
@@ -205,7 +217,7 @@ pixi run python build.py
 **Option 1: Using shell script (recommended)**
 ```bash
 # Run the automated build script (manages its own venv)
-./build_macos.sh
+./scripts/Launch/shell/build_macos.sh
 ```
 
 **Option 2: Manual build with Pixi**
@@ -221,7 +233,7 @@ pixi run python build.py
 ```
 
 ### Dependencies
-All project dependencies are managed via `pixi.toml` instead of `requirements.txt`. The automated build scripts (`build_windows.bat` and `build_macos.sh`) install required pip packages dynamically within a local `rawviewer_env` virtual environment.
+All project dependencies are managed via `pixi.toml` instead of `requirements.txt`. Launch and build scripts live under [`scripts/Launch/`](scripts/Launch/README.md) (`bat/` on Windows, `shell/` on macOS). They install required pip packages into a local `rawviewer_env` virtual environment when building.
 
 ## 🐛 Troubleshooting
 
@@ -230,13 +242,18 @@ All project dependencies are managed via `pixi.toml` instead of `requirements.tx
 - **Antivirus warnings**: Add RAWviewer to your antivirus exclusions
 - **Performance issues**: Try running as administrator
 - **AttributeError with stdout**: This is normal for windowed builds - the application runs without a console window
+- **Installer stuck on "Downloading MobileCLIP ONNX Models" / `No module named 'requests'`**:
+  - Fixed in 2.1.0+ (`requests` in `pixi.toml`). Re-run the installer from a fresh build, or in the install folder run `_internal\pixi\pixi.exe install` then retry.
+  - Public Hugging Face models download **without** an account or token.
+
 - **Crash code `-1073741819` / `0xC0000005` (access violation)**:
   - This is a native crash (Qt/LibRaw/ONNX/driver layer), not always a Python exception.
-  - Check logs in both locations:
-    - `src/logs/` (project-local when enabled)
-    - `%LOCALAPPDATA%\RAWviewer\logs\` (persistent crash reports / fatal dumps)
+  - Check `%LOCALAPPDATA%\RAWviewer\logs\` (persistent crash reports / fatal dumps). Dev runs via `scripts\Launch\bat\run_debug.bat` may also write under `src\logs\`.
 
 ### macOS
+- **Minimum supported macOS (official prebuilt app): 13.0 (Ventura)**
+  - macOS 12 and older may fail to launch the prebuilt binary; use a local Pixi build instead.
+
 - **"App is damaged and should be moved to the Trash" / "Apple could not verify RAWviewer is free of malware"**: 
   - **Why it happens**: Apple heavily restricts apps downloaded outside the App Store that aren't signed with a paid developer certificate. On newer macOS versions (especially Apple Silicon M1/M2/M3), macOS breaks the app's ad-hoc signature and aggressively blocks opening it.
   - **The Fix (Fastest)**: Open your **Terminal** app and run the following command to remove the quarantine flag:
@@ -246,8 +263,8 @@ All project dependencies are managed via `pixi.toml` instead of `requirements.tx
     *(Note: If you placed the app somewhere other than the Applications folder, update the path accordingly).*
 
 - **"Symbol not found: (_mkfifoat)" or App crashes instantly on macOS 12 (Monterey) or older**:
-  - **Why it happens**: The pre-built release is compiled using a newer macOS 13+ SDK. Older macOS versions do not have the required system files to run it.
-  - **The Fix**: You must build the app locally (see the "Ultimate Fix" below).
+  - **Why it happens**: The official prebuilt release targets macOS 13+ and newer system SDK/runtime symbols.
+  - **The Fix**: Build locally with Pixi (see below).
 
 #### 🛠️ The Ultimate Fix: Build Locally (Solves Both Issues Above)
 If you are on macOS 12 or older, OR if you simply want to permanently bypass all Gatekeeper/Quarantine warnings forever, you can build the app directly on your own machine. It takes about 2 minutes and is managed entirely by Pixi, which automatically downloads the correct Python version for you:

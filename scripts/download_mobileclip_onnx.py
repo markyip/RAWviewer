@@ -11,9 +11,15 @@ MODELS_DIR = Path(__file__).resolve().parent.parent / "models" / "mobileclip_onn
 
 def main():
     try:
-        from huggingface_hub import hf_hub_download
+        import requests  # noqa: F401 — required by huggingface_hub.file_download
     except ImportError:
-        print("[ERROR] Missing 'huggingface-hub'. Run: pip install huggingface-hub")
+        print("[ERROR] Missing 'requests'. Run: pip install requests")
+        return 1
+    try:
+        from huggingface_hub import hf_hub_download
+    except ImportError as exc:
+        print(f"[ERROR] Missing 'huggingface-hub': {exc}")
+        print("Run: pip install huggingface-hub requests")
         return 1
 
     print(f"[INFO] Downloading MobileCLIP2-S0 ONNX models to {MODELS_DIR}...")

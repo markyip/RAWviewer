@@ -1,5 +1,26 @@
 # RAWviewer Release Notes
 
+## 🚀 Version 2.1.0
+**Release Date: May 28, 2026**
+
+🎯 What's New
+- **Film strip (single-image view)**: Bottom thumbnail strip on pointer hover; dismisses when leaving the strip or entering the status bar.
+- **Launch scripts**: Debug and build entry points moved to `scripts/Launch/` (`bat/` on Windows, `shell/` on macOS); root scripts forward for compatibility.
+- **Semantic + face indexing (Windows)**: Phased indexing (metadata → MobileCLIP embeddings → background face backfill), resume from `semantic_index.db`, DirectML-accelerated ONNX on Windows when available.
+
+🛠️ Fixes & improvements
+- **Installer model download**: Added `requests` to Pixi dependencies so `huggingface_hub` can download MobileCLIP ONNX models on first install (no HF account required for public models).
+- **Indexing stability**: Stronger RAW thumbnail fallbacks, skip permanently unindexable files, conservative face-scan warm-up defaults, clearer progress phases.
+- **Delete confirmation dialog**: Centered on the main window using global coordinates.
+- **Face detection threshold**: YuNet / SSD confidence raised to **0.75** (fewer false positives).
+- **Logging**: Persistent logs under `%LOCALAPPDATA%\RAWviewer\logs\`; installer no longer bundles old `src/logs`.
+- **Dependencies**: `pixi.toml` is the source of truth; legacy `requirements.txt` removed.
+- **Docs**: Pixi-first build instructions, minimum macOS 13 for prebuilt releases.
+
+Includes fixes from **2.0.1** (Pixel DNG, gallery aspect ratio, DNG single-view zoom).
+
+---
+
 ## 🚀 Version 2.0.1
 **Release Date: May 23, 2026**
 

@@ -4,7 +4,7 @@ Build script for RAW Image Viewer Windows/macOS executable
 Handles dependency installation and executable creation.
 """
 
-VERSION = "2.0.1"
+VERSION = "2.1.0"
 
 import os
 import subprocess
@@ -40,7 +40,7 @@ def _should_use_project_venv_for_build() -> bool:
     """
     Prefer ./rawviewer_env so ``pip install`` / PyInstaller do not hit system Python limits.
 
-    - macOS: always (matches ``build_macos.sh``; Homebrew 3.14 may block pip without an
+    - macOS: always (matches ``scripts/Launch/shell/build_macos.sh``; Homebrew 3.14 may block pip without an
       ``EXTERNALLY-MANAGED`` file under ``sys.prefix``).
     - Linux: when PEP 668 marker is present.
     Set ``RAWVIEWER_USE_SYSTEM_PYTHON_BUILD=1`` to skip and use the current interpreter.
@@ -64,7 +64,7 @@ def ensure_project_venv_and_reexec() -> None:
     """
     Create ./rawviewer_env if needed and re-exec this script with that interpreter.
 
-    Skips when already using ./rawviewer_env (e.g. ``./build_macos.sh``) or when
+    Skips when already using ./rawviewer_env (e.g. ``scripts/Launch/shell/build_macos.sh``) or when
     ``RAWVIEWER_USE_SYSTEM_PYTHON_BUILD=1``.
     """
     if not _should_use_project_venv_for_build():
@@ -91,7 +91,7 @@ def ensure_project_venv_and_reexec() -> None:
         if rc != 0 or not vpy.is_file():
             print(
                 "[ERROR] Could not create ./rawviewer_env. From the repo root try:\n"
-                "  ./build_macos.sh\n"
+                "  ./scripts/Launch/shell/build_macos.sh\n"
                 "or:  python3 -m venv rawviewer_env && ./rawviewer_env/bin/python3 -m pip install -U pip && "
                 "./rawviewer_env/bin/python3 build.py"
             )
@@ -207,6 +207,8 @@ def install_dependencies():
         dependencies.append('onnxruntime-directml')
         dependencies.append('mediapipe')
         dependencies.append('opencv-python-headless')
+        dependencies.append('huggingface-hub')
+        dependencies.append('requests')
     elif system_name == "Darwin":
         dependencies.append('huggingface-hub')
         dependencies.append('pyobjc-framework-CoreML')

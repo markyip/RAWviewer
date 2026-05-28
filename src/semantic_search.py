@@ -1665,7 +1665,7 @@ class SemanticImageIndex:
                             model=model_path,
                             config="",
                             input_size=(w, h),
-                            score_threshold=0.6,
+                            score_threshold=0.75,
                             nms_threshold=0.3,
                             top_k=5000,
                             backend_id=cv2.dnn.DNN_BACKEND_OPENCV,
@@ -1735,7 +1735,7 @@ class SemanticImageIndex:
                     face_count = 0
                     for i in range(detections.shape[2]):
                         confidence = detections[0, 0, i, 2]
-                        if confidence > 0.6: # 60% confidence threshold
+                        if confidence > 0.75:  # 75% confidence threshold
                             face_count += 1
                             
                     return face_count

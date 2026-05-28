@@ -73,6 +73,12 @@ rawviewer_env/
 venv/
 .venv_mobileclip2_export/
 
+# Pixi local environment (commit pixi.lock; ignore installed env)
+.pixi/
+
+# Local agent / IDE scratch (not part of the app)
+.agent/
+
 # Local MobileCLIP2 / OpenCLIP Core ML export trees (not part of the app bundle)
 .build/
 .hf_cache_mobileclip/
