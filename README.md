@@ -50,6 +50,7 @@ This is a **pre-filtering tool**, letting you go through hundreds of RAW files e
 - **macOS File Association**: Fully integrated with macOS Finder; can be set as the default viewer and supports double-click to open
 - **Intuitive navigation**: Keyboard shortcuts, mouse controls, and scroll wheel support
 - **Zoom functionality**: Fit-to-window and 100% zoom modes with smooth panning, including native Mac trackpad pinch-to-zoom
+- **DNG zoom reliability**: Single-view DNG now prioritizes full-resolution decoding to keep Space / double-click 100% zoom behavior consistent
 - **File management**: Move images to discard folder or delete permanently
 - **EXIF data display**: View camera settings, focal length, ISO, aperture, and capture information with robust metadata extraction
 - **Session persistence**: Remembers your last opened folder, image, and view mode
