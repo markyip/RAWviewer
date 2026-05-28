@@ -23,6 +23,7 @@ import io
 warnings.filterwarnings('ignore', category=UserWarning, module='exifread')
 
 from image_cache import get_image_cache
+from common_image_loader import normalize_capture_time_string
 import metadata_backend
 from raw_file_extensions import RAW_FILE_EXTENSIONS
 
@@ -65,32 +66,8 @@ _embedded_scan_miss_lock = threading.Lock()
 _embedded_scan_miss_cache_max = 4096
 
 
-def extract_embedded_jpeg_by_scan(file_path: str, max_size: int) -> Optional[np.ndarray]:
-    """
-    When LibRaw cannot open a file, scan for embedded JPEG (SOI … EOI) and decode with PIL.
-    Many damaged or newer ARW/RAW containers still carry a JPEG preview readable without rawpy.
-    Picks the largest successfully decoded JPEG (by pixel area), skips tiny icons.
-    """
-    try:
-        stat = os.stat(file_path)
-        size = stat.st_size
-        miss_key = (file_path, size, stat.st_mtime, max_size)
-        with _embedded_scan_miss_lock:
-            if miss_key in _embedded_scan_miss_cache:
-                return None
-
-        if max_size <= 1024:
-            read_limit = 32 * 1024 * 1024
-        elif max_size <= 2048:
-            read_limit = 64 * 1024 * 1024
-        else:
-            read_limit = 120 * 1024 * 1024
-        to_read = min(size, read_limit)
-        with open(file_path, "rb") as f:
-            blob = f.read(to_read)
-    except OSError:
-        return None
-
+def _largest_jpeg_from_blob(blob: bytes, max_size: int) -> Optional[np.ndarray]:
+    """Find the largest decodable JPEG segment inside a byte blob."""
     best_arr = None
     best_area = 0
     start = 0
@@ -106,10 +83,8 @@ def extract_embedded_jpeg_by_scan(file_path: str, max_size: int) -> Optional[np.
 
         for segment in segments:
             try:
-                from PIL import Image, ImageOps
                 im = Image.open(io.BytesIO(segment))
                 im.load()
-
                 if im.mode != "RGB":
                     im = im.convert("RGB")
                 w, h = im.size
@@ -127,6 +102,60 @@ def extract_embedded_jpeg_by_scan(file_path: str, max_size: int) -> Optional[np.
             except Exception:
                 continue
         start = idx + 3
+    return best_arr
+
+
+def _thumbnail_via_qimage_reader(file_path: str, max_size: int) -> Optional[np.ndarray]:
+    """OS codec fallback for RAW when LibRaw cannot open the container (common on Windows)."""
+    try:
+        from PyQt6.QtCore import Qt
+
+        reader = QImageReader(file_path)
+        size = reader.size()
+        if size.isValid():
+            reader.setScaledSize(
+                size.scaled(max_size, max_size, Qt.AspectRatioMode.KeepAspectRatio)
+            )
+        qimg = reader.read()
+        if qimg is None or qimg.isNull():
+            return None
+        return _qimage_to_rgb_array(qimg)
+    except Exception:
+        return None
+
+
+def extract_embedded_jpeg_by_scan(file_path: str, max_size: int) -> Optional[np.ndarray]:
+    """
+    When LibRaw cannot open a file, scan for embedded JPEG (SOI … EOI) and decode with PIL.
+    Many damaged or newer ARW/RAW containers still carry a JPEG preview readable without rawpy.
+    Picks the largest successfully decoded JPEG (by pixel area), skips tiny icons.
+    Scans both file head and tail (Sony ARW previews are often near the end).
+    """
+    try:
+        stat = os.stat(file_path)
+        size = stat.st_size
+        miss_key = (file_path, size, stat.st_mtime, max_size)
+        with _embedded_scan_miss_lock:
+            if miss_key in _embedded_scan_miss_cache:
+                return None
+
+        if max_size <= 1024:
+            read_limit = 32 * 1024 * 1024
+        elif max_size <= 2048:
+            read_limit = 64 * 1024 * 1024
+        else:
+            read_limit = 120 * 1024 * 1024
+        chunk = min(size, read_limit)
+        with open(file_path, "rb") as f:
+            head = f.read(chunk)
+        best_arr = _largest_jpeg_from_blob(head, max_size)
+        if best_arr is None and size > chunk:
+            with open(file_path, "rb") as f:
+                f.seek(max(0, size - chunk))
+                tail = f.read(chunk)
+            best_arr = _largest_jpeg_from_blob(tail, max_size)
+    except OSError:
+        return None
 
     if best_arr is None:
         with _embedded_scan_miss_lock:
@@ -156,17 +185,24 @@ class ThumbnailExtractor(QObject):
                     thumb = self._extract_from_raw_obj(raw, file_path, max_size)
         except Exception as e:
             import logging
-            logging.getLogger(__name__).warning(f"raw.extract_thumb failed or errored: {e}")
+            # Expected for some ARW/RAW; fallbacks (embedded JPEG scan, etc.) follow.
+            logging.getLogger(__name__).debug(
+                "raw.extract_thumb failed for %s: %s",
+                os.path.basename(file_path),
+                e,
+            )
 
         if thumb is not None:
             import logging
             logging.getLogger(__name__).info(f"Thumbnail extracted successfully by rawpy, shape: {thumb.shape}")
             return thumb
 
-        # If rawpy fails entirely (e.g. unsupported DNG) or returns None, we MUST scan for the embedded JPEG or use sips.
-        if thumb is None:
+        # If rawpy fails entirely (e.g. unsupported DNG) or returns None, use non-LibRaw fallbacks.
+        if thumb is None and allow_scan_fallback:
             thumb = extract_embedded_jpeg_by_scan(file_path, max_size)
-            if thumb is None and sys.platform == 'darwin':
+        if thumb is None and allow_scan_fallback:
+            thumb = _thumbnail_via_qimage_reader(file_path, max_size)
+        if thumb is None and allow_scan_fallback and sys.platform == "darwin":
                 try:
                     import subprocess
                     import tempfile
@@ -213,22 +249,6 @@ class ThumbnailExtractor(QObject):
                                 if 'ql_dir' in locals() and os.path.exists(ql_dir):
                                     import shutil
                                     shutil.rmtree(ql_dir, ignore_errors=True)
-                                    
-                            # Ultimate Fallback: QImageReader (can read many RAWs on macOS)
-                            if thumb is None:
-                                try:
-                                    from PyQt6.QtGui import QImageReader, QImage
-                                    from PyQt6.QtCore import Qt
-                                    reader = QImageReader(file_path)
-                                    reader.setScaledSize(reader.size().scaled(max_size, max_size, Qt.AspectRatioMode.KeepAspectRatio)) # Keep Aspect Ratio
-                                    qimg = reader.read()
-                                    if not qimg.isNull():
-                                        arr = _qimage_to_rgb_array(qimg)
-                                        if arr is not None:
-                                            thumb = arr
-                                except Exception as qt_e:
-                                    logging.getLogger(__name__).warning(f"[QImageReader] Ultimate fallback failed: {qt_e}")
-                                    
                     finally:
                         if tmp_name and os.path.exists(tmp_name):
                             try:
@@ -590,7 +610,13 @@ class EXIFExtractor(QObject):
                 'exif_data': exif_dict,
                 'original_width': original_width,
                 'original_height': original_height,
-                'capture_time': exif_dict.get('EXIF DateTimeOriginal') or exif_dict.get('Image DateTime'),
+                'capture_time': (
+                    normalize_capture_time_string(
+                        exif_dict.get('EXIF DateTimeOriginal') or exif_dict.get('Image DateTime')
+                    )
+                    or exif_dict.get('EXIF DateTimeOriginal')
+                    or exif_dict.get('Image DateTime')
+                ),
                 'focal_length': focal_length,
                 'aperture': aperture,
                 'iso': iso,

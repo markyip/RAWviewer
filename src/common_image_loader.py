@@ -5,12 +5,91 @@
 """
 
 import os
-from typing import Optional, Tuple, Any
+from datetime import datetime
+from typing import Any, Dict, Optional, Tuple
+
 from PyQt6.QtGui import QPixmap, QImage
 # PIL Image will be imported lazily to avoid import delays
 
 from image_cache import get_image_cache
 from raw_file_extensions import RAW_FILE_EXTENSIONS
+
+
+_CAPTURE_TIME_FORMATS = (
+    "%H:%M:%S %Y-%m-%d",  # normalized display / cache
+    "%Y:%m:%d %H:%M:%S",  # EXIF / exifread default
+    "%Y-%m-%d %H:%M:%S",
+)
+
+
+def parse_capture_time_to_timestamp(capture_time: Optional[str]) -> float:
+    """Parse EXIF-style capture time strings to a Unix timestamp (0 if unknown)."""
+    if not capture_time:
+        return 0.0
+    s = str(capture_time).strip()
+    if not s:
+        return 0.0
+    for fmt in _CAPTURE_TIME_FORMATS:
+        try:
+            return datetime.strptime(s, fmt).timestamp()
+        except ValueError:
+            continue
+    return 0.0
+
+
+def normalize_capture_time_string(capture_time: Optional[str]) -> Optional[str]:
+    """Canonical form used for sorting and status display."""
+    ts = parse_capture_time_to_timestamp(capture_time)
+    if ts <= 0:
+        return None
+    return datetime.fromtimestamp(ts).strftime("%H:%M:%S %Y-%m-%d")
+
+
+def probe_capture_timestamp_from_file(file_path: str) -> float:
+    """Lightweight EXIF DateTime probe when cache has no capture_time."""
+    try:
+        import exifread
+        with open(file_path, "rb") as f:
+            tags = exifread.process_file(f, details=False)
+        for tag_name in (
+            "EXIF DateTimeOriginal",
+            "EXIF DateTimeDigitized",
+            "Image DateTime",
+            "EXIF DateTime",
+        ):
+            if tag_name in tags:
+                ts = parse_capture_time_to_timestamp(str(tags[tag_name]))
+                if ts > 0:
+                    return ts
+    except Exception:
+        pass
+    return 0.0
+
+
+def capture_timestamp_for_sort(
+    file_path: str,
+    metadata: Optional[Dict[str, Any]] = None,
+    file_mtime: float = 0.0,
+    *,
+    probe_file: bool = True,
+) -> float:
+    """
+    Timestamp for folder/gallery sort: EXIF capture time when available, else file mtime.
+    """
+    if metadata:
+        ts = parse_capture_time_to_timestamp(metadata.get("capture_time"))
+        if ts > 0:
+            return ts
+    if probe_file and file_path:
+        ts = probe_capture_timestamp_from_file(file_path)
+        if ts > 0:
+            return ts
+    if file_mtime > 0:
+        return file_mtime
+    try:
+        return os.path.getmtime(file_path)
+    except OSError:
+        return 0.0
 
 
 def use_libraw_consistent_preview_first() -> bool:

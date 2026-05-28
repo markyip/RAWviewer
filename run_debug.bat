@@ -17,6 +17,8 @@ set RAWVIEWER_USE_PROCESS_POOL=0
 set RAWVIEWER_VERBOSE_INFO_LOGS=0
 set RAWVIEWER_VERBOSE_CONSOLE=0
 set RAWVIEWER_FOCUS_GALLERY_SWITCH=1
+set RAWVIEWER_FILE_LOG=1
+set RAWVIEWER_FATAL_DUMP=1
 echo.
 echo ========================================
 echo Starting Python application...
@@ -32,7 +34,7 @@ if %EXIT_CODE% EQU 0 (
 ) else (
     echo Application exited with error code: %EXIT_CODE%
     echo.
-    echo Check the log file in src\logs\ for detailed error information.
+    echo Check logs in src\logs\ and %%LOCALAPPDATA%%\RAWviewer\logs.
 )
 echo ========================================
 echo.

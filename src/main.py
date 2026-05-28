@@ -191,6 +191,48 @@ def _redirect_stdio_to_file_if_needed():
 
 _redirect_stdio_to_file_if_needed()
 
+
+def _enable_fatal_crash_dump_if_needed():
+    """
+    Enable low-level fatal crash dumps (access violation/segfault) very early.
+    This catches crashes that bypass Python exception handlers.
+    """
+    try:
+        if os.environ.get("RAWVIEWER_FATAL_DUMP", "1").strip().lower() in ("0", "false", "no", "off"):
+            return
+        import signal
+        import faulthandler
+        from datetime import datetime
+
+        base_dir = os.getcwd()
+        candidates = [
+            os.path.join(base_dir, "src", "logs"),
+            os.path.join(base_dir, "logs"),
+            os.path.join(os.environ.get("LOCALAPPDATA", "C:\\"), "RAWviewer", "logs"),
+        ]
+        dump_dir = None
+        for d in candidates:
+            try:
+                os.makedirs(d, exist_ok=True)
+                dump_dir = d
+                break
+            except OSError:
+                continue
+        if not dump_dir:
+            return
+
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        dump_path = os.path.join(dump_dir, f"fatal_dump_{ts}.log")
+        f = open(dump_path, "a", encoding="utf-8", buffering=1)
+        faulthandler.enable(file=f, all_threads=True)
+        faulthandler.register(signal.SIGABRT, file=f, all_threads=True)
+    except Exception:
+        # Never block startup due to diagnostics setup.
+        pass
+
+
+_enable_fatal_crash_dump_if_needed()
+
 # Force unbuffered output for Windows console
 # Note: In PyInstaller --windowed builds, sys.stdout/stderr may be None
 if sys.platform == 'win32':
@@ -4490,27 +4532,121 @@ class MobileCLIPDownloadDialog(QDialog):
 # Single-image area: full-bleed scroll + draggable histogram overlay
 # -----------------------------
 class SingleImageViewOverlay(QWidget):
-    """Scroll area fills the widget; histogram floats on top (same width as image pane)."""
+    """Scroll area fills the widget; histogram + film strip float on top."""
 
     _HIST_MARGIN = 8
+    _FILMSTRIP_HEIGHT = 88
+    _BOTTOM_HOTZONE = 72
 
-    def __init__(self, scroll_area, histogram_widget, parent=None):
+    def __init__(self, scroll_area, histogram_widget, viewer=None, parent=None):
         super().__init__(parent)
+        self._viewer = viewer
         self._scroll = scroll_area
         self._hist = histogram_widget
         self._hist_user_placed = False
+        self._filmstrip_pointer_active = False
+        self._filmstrip_reveal = False
         scroll_area.setParent(self)
         histogram_widget.setParent(self)
         self.setObjectName("single_view_container")
         self.setStyleSheet("#single_view_container { background-color: #1E1E1E; }")
         self.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.setMouseTracking(True)
+
+        from rawviewer_ui.filmstrip_view import FilmStripBar
+        self._filmstrip = FilmStripBar(self, viewer=viewer)
+        self._filmstrip.hide()
+        self._hide_filmstrip_timer = QTimer(self)
+        self._hide_filmstrip_timer.setSingleShot(True)
+        self._hide_filmstrip_timer.timeout.connect(self._hide_filmstrip_if_inactive)
+
+    def filmstrip_widget(self):
+        return getattr(self, "_filmstrip", None)
+
+    def set_filmstrip_pointer_active(self, active: bool) -> None:
+        self._filmstrip_pointer_active = bool(active)
+        if active:
+            self._hide_filmstrip_timer.stop()
+            self._reveal_filmstrip()
+            if self._viewer is not None:
+                self._viewer._filmstrip_pointer_active = True
+        else:
+            if self._viewer is not None:
+                self._viewer._filmstrip_pointer_active = False
+            self._schedule_hide_filmstrip()
+
+    def _schedule_hide_filmstrip(self) -> None:
+        self._hide_filmstrip_timer.start(450)
+
+    def _hide_filmstrip_if_inactive(self) -> None:
+        if self._filmstrip_pointer_active:
+            return
+        if self._pointer_in_bottom_hotzone():
+            return
+        self._filmstrip_reveal = False
+        self._filmstrip.hide()
+        if self._viewer is not None:
+            self._viewer._filmstrip_pointer_active = False
+
+    def _pointer_in_bottom_hotzone(self) -> bool:
+        pos = self.mapFromGlobal(QCursor.pos())
+        return pos.y() >= self.height() - self._BOTTOM_HOTZONE
+
+    def _local_pos_from_global(self, global_pos) -> QPoint:
+        if hasattr(global_pos, "toPoint"):
+            global_pos = global_pos.toPoint()
+        return self.mapFromGlobal(global_pos)
+
+    def handle_pointer_for_filmstrip(self, global_pos) -> None:
+        """Reveal/hide film strip when pointer moves over scroll area (child widgets)."""
+        if not self._filmstrip.isEnabled():
+            return
+        pos = self._local_pos_from_global(global_pos)
+        in_hot = pos.y() >= self.height() - self._BOTTOM_HOTZONE
+        over_strip = self._filmstrip.isVisible() and self._filmstrip.geometry().contains(pos)
+        if in_hot or over_strip or self._filmstrip.underMouse():
+            self._hide_filmstrip_timer.stop()
+            self._reveal_filmstrip()
+        elif not self._filmstrip_pointer_active:
+            self._schedule_hide_filmstrip()
+
+    def _reveal_filmstrip(self) -> None:
+        if not self._filmstrip.isEnabled():
+            return
+        if not self._filmstrip.isVisible():
+            self._filmstrip_reveal = True
+            self._filmstrip.show()
+            self._layout_filmstrip()
+            self._filmstrip.raise_()
+            self._hist.raise_()
+            if hasattr(self._filmstrip, "refresh_visible_thumbnails"):
+                QTimer.singleShot(0, lambda: self._filmstrip.refresh_visible_thumbnails(
+                    refresh_cache=True
+                ))
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
+        # Scroll area stays full size; film strip overlays the bottom (no image reflow).
         self._scroll.setGeometry(0, 0, self.width(), self.height())
         self._scroll.lower()
+        self._layout_filmstrip()
         self._layout_histogram()
+
+    def _layout_filmstrip(self):
+        if not self._filmstrip.isVisible():
+            return
+        fh = self._FILMSTRIP_HEIGHT
+        self._filmstrip.setGeometry(0, self.height() - fh, self.width(), fh)
+        self._filmstrip.raise_()
+
+    def mouseMoveEvent(self, event):
+        self.handle_pointer_for_filmstrip(event.globalPosition())
+        super().mouseMoveEvent(event)
+
+    def leaveEvent(self, event):
+        self._schedule_hide_filmstrip()
+        super().leaveEvent(event)
 
     def _layout_histogram(self):
         h = self._hist
@@ -4867,6 +5003,8 @@ class RAWImageViewer(QMainWindow):
         
         # View mode: 'single' for single image view, 'gallery' for gallery view
         self.view_mode = 'single'  # Default to single image view
+        self._filmstrip_pointer_active = False
+        self._filmstrip_warmed_paths = set()
         # Gallery functionality enabled
         self.gallery_widget = None  # Gallery view widget
         self.gallery_justified = None  # JustifiedGallery widget
@@ -4900,6 +5038,9 @@ class RAWImageViewer(QMainWindow):
         self._semantic_search_corpus_files = []
         self._semantic_index_active_token = None
         self._semantic_indexing_in_progress = False
+        self._face_index_active_token = None
+        self._face_indexing_in_progress = False
+        self._face_index_signals = None
         self._semantic_asset_download_in_progress = False
         
         # Ensure main window can handle shortcuts immediately
@@ -5304,6 +5445,128 @@ class RAWImageViewer(QMainWindow):
         # 進度更新
         self.image_manager.progress_updated.connect(self.on_manager_progress)
 
+    def _wire_filmstrip(self) -> None:
+        bar = self._filmstrip_bar()
+        if bar is None:
+            return
+        bar.committed.connect(self._on_filmstrip_committed)
+        bar.thumbnails_needed.connect(self._on_filmstrip_thumbnails_needed)
+        bar.setEnabled(False)
+        bar.hide()
+
+    def _filmstrip_bar(self):
+        container = getattr(self, "single_view_container", None)
+        if container is None or not hasattr(container, "filmstrip_widget"):
+            return None
+        return container.filmstrip_widget()
+
+    def _filmstrip_handles_input(self) -> bool:
+        if getattr(self, "view_mode", "single") != "single":
+            return False
+        bar = self._filmstrip_bar()
+        if bar is None or not bar.isVisible() or not bar.isEnabled():
+            return False
+        container = getattr(self, "single_view_container", None)
+        if container is None:
+            return False
+        if getattr(container, "_filmstrip_pointer_active", False):
+            return True
+        if getattr(self, "_filmstrip_pointer_active", False):
+            return True
+        return container._pointer_in_bottom_hotzone()
+
+    def _ensure_filmstrip_synced(self) -> None:
+        """Lazy sync when folder list exists but strip was never enabled (e.g. session restore)."""
+        bar = self._filmstrip_bar()
+        if bar is None:
+            return
+        files = getattr(self, "image_files", []) or []
+        if len(files) > 1 and not bar.isEnabled():
+            self._sync_filmstrip_to_folder()
+
+    def _sync_filmstrip_to_folder(self) -> None:
+        bar = self._filmstrip_bar()
+        if bar is None:
+            return
+        if getattr(self, "view_mode", "single") != "single":
+            bar.hide()
+            bar.setEnabled(False)
+            return
+        files = list(getattr(self, "image_files", []) or [])
+        enabled = len(files) > 1
+        bar.setEnabled(enabled)
+        if not enabled:
+            bar.hide()
+            return
+        bulk = getattr(self, "_gallery_bulk_metadata", None) or {}
+        bar.set_files(files, bulk_metadata=bulk)
+        self._sync_filmstrip_index(center=True)
+
+    def _sync_filmstrip_index(self, center: bool = False) -> None:
+        bar = self._filmstrip_bar()
+        if bar is None or not bar.isEnabled():
+            return
+        idx = getattr(self, "current_file_index", -1)
+        if idx >= 0:
+            bar.set_current_index(idx, center=center)
+            bar.refresh_visible_thumbnails(refresh_cache=True)
+
+    def _on_filmstrip_committed(self, index: int) -> None:
+        files = getattr(self, "image_files", None) or []
+        if index < 0 or index >= len(files):
+            return
+        path = files[index]
+        if _norm_path(path) == _norm_path(getattr(self, "current_file_path", "")):
+            return
+        self.current_file_index = index
+        self.load_raw_image(path)
+
+    def _note_filmstrip_thumbnail_warmed(self, path: str) -> None:
+        if path:
+            self._filmstrip_warmed_paths.add(path)
+
+    def _collect_filmstrip_warm_paths(self):
+        paths = set(getattr(self, "_filmstrip_warmed_paths", None) or ())
+        bar = self._filmstrip_bar()
+        if bar is not None and hasattr(bar, "paths_with_displayed_thumbnails"):
+            paths.update(bar.paths_with_displayed_thumbnails())
+        return list(paths)
+
+    def _warm_gallery_from_filmstrip_cache(self) -> None:
+        """Reuse film-strip / global thumbnails when entering gallery view."""
+        gj = getattr(self, "gallery_justified", None)
+        if gj is None or getattr(self, "view_mode", "") != "gallery":
+            return
+        paths = self._collect_filmstrip_warm_paths()
+        if not paths:
+            return
+        warmed = gj.warm_thumbnails_from_global_cache(paths)
+        if warmed > 0 and hasattr(gj, "_request_load_visible_images"):
+            gj._request_load_visible_images(0)
+
+    def _on_filmstrip_thumbnails_needed(self, paths) -> None:
+        if getattr(self, "view_mode", "single") != "single":
+            return
+        from image_load_manager import Priority
+
+        bar = self._filmstrip_bar()
+        for path in paths:
+            if bar is not None:
+                cached = self.image_cache.get_thumbnail(path)
+                if cached is not None:
+                    bar.apply_thumbnail(path, cached)
+                    self._note_filmstrip_thumbnail_warmed(path)
+                    continue
+            # Same standard thumbnail task as gallery (no target size) so decode
+            # populates global ImageCache once and dedupes with gallery loads.
+            self.image_manager.load_image(
+                file_path=path,
+                priority=Priority.BACKGROUND,
+                cancel_existing=False,
+                use_full_resolution=False,
+                stages={"thumbnail"},
+            )
+
     def _hide_all_loading_indicators(self):
         """Helper to hide all loading indicators across modes"""
         # Always clear gallery toast if the widget exists — view_mode may have
@@ -5323,6 +5586,11 @@ class RAWImageViewer(QMainWindow):
         # Ignore single-view manager callbacks to prevent cross-mode repaint churn.
         if getattr(self, "_suppress_single_manager_callbacks", False):
             return
+        if getattr(self, "view_mode", "single") == "single":
+            bar = self._filmstrip_bar()
+            if bar is not None and bar.wants_thumbnail(file_path):
+                bar.apply_thumbnail(file_path, thumbnail)
+                self._note_filmstrip_thumbnail_warmed(file_path)
         if getattr(self, "view_mode", "single") != "single":
             return
         
@@ -6026,12 +6294,14 @@ class RAWImageViewer(QMainWindow):
         self.scroll_area.setWidget(self.image_label)
         
         # Install event filter on scroll area to handle wheel events for navigation
+        self.scroll_area.viewport().setMouseTracking(True)
         self.scroll_area.viewport().installEventFilter(self)
 
         self.single_image_histogram = ImageHistogramWidget()
         self._histogram_overlay_visible = True
         self.single_view_container = SingleImageViewOverlay(
-            self.scroll_area, self.single_image_histogram)
+            self.scroll_area, self.single_image_histogram, viewer=self)
+        self._wire_filmstrip()
         main_layout.addWidget(self.single_view_container)
         # --- Status bar with Material Design 3 styling ---
         # Material Design 3 color scheme:
@@ -6674,6 +6944,10 @@ class RAWImageViewer(QMainWindow):
         total_files = int(coverage.get("total", len(corpus_files)))
         indexed_files = max(0, int(coverage.get("indexed", 0)))
         if not pending_files:
+            try:
+                self._start_face_index_background(corpus_files)
+            except Exception:
+                pass
             self._set_gallery_search_input_visible()
             if (
                 getattr(self, "view_mode", "single") == "gallery"
@@ -6683,11 +6957,14 @@ class RAWImageViewer(QMainWindow):
                 self.gallery_search_input.setFocus()
             self.status_bar.showMessage("Semantic index already up-to-date", 2500)
             return
+        folder = getattr(self, "current_folder", None)
+        if folder:
+            self._set_semantic_index_incomplete(folder, True)
         token = time.time_ns()
         self._semantic_index_active_token = token
         self._semantic_indexing_in_progress = True
         self._semantic_index_progress_total = max(total_files, indexed_files + len(pending_files))
-        self._semantic_index_progress_base = min(indexed_files, self._semantic_index_progress_total)
+        self._semantic_index_progress_base = 0
         signals = SemanticIndexSignals()
         self._semantic_index_signals = signals
         signals.progress.connect(self._on_semantic_index_progress)
@@ -6695,22 +6972,44 @@ class RAWImageViewer(QMainWindow):
         signals.error.connect(self._on_semantic_index_error)
 
         class _SemanticIndexWorker(QRunnable):
-            def __init__(self_inner, token, files, index, signals):
+            def __init__(
+                self_inner,
+                token,
+                files,
+                index,
+                signals,
+                album_total,
+                album_indexed_base,
+            ):
                 super().__init__()
                 self_inner.token = token
                 self_inner.files = files
                 self_inner.index = index
                 self_inner.signals = signals
+                self_inner.album_total = album_total
+                self_inner.album_indexed_base = album_indexed_base
 
             def run(self_inner):
                 try:
-                    def _progress(i, n, fp):
+                    def _progress(done, total, message):
                         self_inner.signals.progress.emit(
-                            self_inner.token, i, n, os.path.basename(fp)
+                            self_inner.token, done, total, str(message)
                         )
 
+                    defer_faces = self_inner.index._defer_face_scan_during_build()
                     result = self_inner.index.build_index(
-                        self_inner.files, progress_callback=_progress
+                        self_inner.files,
+                        progress_callback=_progress,
+                        album_total=self_inner.album_total,
+                        album_indexed_base=self_inner.album_indexed_base,
+                        run_face_scan=not defer_faces,
+                    )
+                    result["faces_deferred"] = bool(
+                        result.get("faces_deferred")
+                        or (
+                            defer_faces
+                            and result.get("faces_pending", 0) > 0
+                        )
                     )
                     self_inner.signals.done.emit(self_inner.token, result)
                 except Exception as e:
@@ -6718,27 +7017,35 @@ class RAWImageViewer(QMainWindow):
 
         self._set_gallery_search_status(
             "Semantic ready "
-            f"{self._semantic_index_progress_base}/{self._semantic_index_progress_total}"
+            f"{indexed_files}/{self._semantic_index_progress_total}"
         )
-        worker = _SemanticIndexWorker(token, list(pending_files), index, signals)
+        worker = _SemanticIndexWorker(
+            token,
+            list(pending_files),
+            index,
+            signals,
+            self._semantic_index_progress_total,
+            indexed_files,
+        )
         self._gallery_search_placeholder_saved = self.gallery_search_input.placeholderText()
         self.gallery_search_input.setPlaceholderText("EXIF only")
         QThreadPool.globalInstance().start(worker)
 
-    def _on_semantic_index_progress(self, token, i, n, basename):
+    def _on_semantic_index_progress(self, token, i, n, message):
         if token != self._semantic_index_active_token:
             return
-        done = min(
-            self._semantic_index_progress_total,
-            self._semantic_index_progress_base + max(0, int(i)),
-        )
-        total = max(done, self._semantic_index_progress_total)
-        
-        status = f"Semantic ready {done}/{total}"
-        if basename and (basename.startswith("Scanning") or basename.startswith("Processing")):
-            status = f"{basename} ({done}/{total})"
-            
-        self._set_gallery_search_status(status)
+        total = max(1, int(n) if n else self._semantic_index_progress_total)
+        done = min(total, max(0, int(i)))
+        msg = str(message or "").strip()
+        # Phase messages (metadata / faces / warm-up) already include their own x/y.
+        # Do not append album "Semantic ready" counter — it stays 0 until the AI pass.
+        if msg.startswith("Scanning") or msg.startswith("Warming"):
+            self._set_gallery_search_status(msg)
+            return
+        if msg.startswith("Processing"):
+            self._set_gallery_search_status(f"{msg} · {done}/{total}")
+            return
+        self._set_gallery_search_status(f"Semantic ready {done}/{total}")
 
     def _on_semantic_index_done(self, token, result):
         if token != self._semantic_index_active_token:
@@ -6748,6 +7055,9 @@ class RAWImageViewer(QMainWindow):
         self._semantic_index_signals = None
         self._semantic_index_progress_base = 0
         self._semantic_index_progress_total = 0
+        folder = getattr(self, "current_folder", None)
+        if folder:
+            self._set_semantic_index_incomplete(folder, False)
         try:
             if hasattr(self, "gallery_search_input") and self.gallery_search_input is not None:
                 ph = getattr(self, "_gallery_search_placeholder_saved", "") or "Search gallery"
@@ -6772,6 +7082,99 @@ class RAWImageViewer(QMainWindow):
             f"failed {result.get('failed', 0)}",
             5000,
         )
+        corpus = (
+            getattr(self, "_semantic_search_corpus_files", None)
+            or getattr(self, "image_files", None)
+        )
+        if corpus:
+            self._start_face_index_background(corpus)
+
+    def _start_face_index_background(self, corpus_files) -> None:
+        """Second pass: face_count backfill after semantic search is usable."""
+        if getattr(self, "_face_indexing_in_progress", False):
+            return
+        if getattr(self, "_semantic_indexing_in_progress", False):
+            return
+        try:
+            index = self._get_semantic_index()
+            pending = index.get_face_pending_count(corpus_files)
+            if pending <= 0:
+                return
+        except Exception:
+            return
+
+        token = time.time_ns()
+        self._face_index_active_token = token
+        self._face_indexing_in_progress = True
+        total_files = len(corpus_files)
+        try:
+            self.status_bar.showMessage(f"Scanning faces in background ({pending} pending)...", 3000)
+        except Exception:
+            pass
+        signals = SemanticIndexSignals()
+        self._face_index_signals = signals
+        signals.progress.connect(self._on_face_index_progress)
+        signals.done.connect(self._on_face_index_done)
+        signals.error.connect(self._on_face_index_error)
+
+        class _FaceIndexWorker(QRunnable):
+            def __init__(self_inner, token, files, index, signals, album_total):
+                super().__init__()
+                self_inner.token = token
+                self_inner.files = files
+                self_inner.index = index
+                self_inner.signals = signals
+                self_inner.album_total = album_total
+
+            def run(self_inner):
+                try:
+                    def _progress(done, total, message):
+                        self_inner.signals.progress.emit(
+                            self_inner.token, done, total, str(message)
+                        )
+
+                    count = self_inner.index.backfill_face_counts(
+                        self_inner.files,
+                        progress_callback=_progress,
+                        album_total=self_inner.album_total,
+                        album_indexed_base=0,
+                    )
+                    self_inner.signals.done.emit(
+                        self_inner.token, {"faces_scanned": count}
+                    )
+                except Exception as e:
+                    self_inner.signals.error.emit(self_inner.token, str(e))
+
+        self._set_gallery_search_status(f"Scanning faces… 0/{pending}")
+        worker = _FaceIndexWorker(token, list(corpus_files), index, signals, total_files)
+        QThreadPool.globalInstance().start(worker)
+
+    def _on_face_index_progress(self, token, i, n, message):
+        if token != getattr(self, "_face_index_active_token", None):
+            return
+        msg = str(message or "").strip()
+        if msg:
+            self._set_gallery_search_status(msg)
+
+    def _on_face_index_done(self, token, result):
+        if token != getattr(self, "_face_index_active_token", None):
+            return
+        self._face_indexing_in_progress = False
+        self._face_index_active_token = None
+        self._face_index_signals = None
+        self._set_gallery_search_status("")
+        count = int(result.get("faces_scanned", 0))
+        if count > 0:
+            self.status_bar.showMessage(f"Face scan complete ({count} files)", 4000)
+
+    def _on_face_index_error(self, token, error):
+        if token != getattr(self, "_face_index_active_token", None):
+            return
+        self._face_indexing_in_progress = False
+        self._face_index_active_token = None
+        self._face_index_signals = None
+        self._set_gallery_search_status("")
+        self.status_bar.showMessage(f"Face scan failed: {error}", 5000)
 
     def _on_semantic_index_error(self, token, error):
         if token != self._semantic_index_active_token:
@@ -7125,6 +7528,66 @@ class RAWImageViewer(QMainWindow):
 
     def get_settings(self):
         return QSettings("RAWviewer", "RAWviewer")
+
+    def _semantic_folder_settings_key(self, folder: str) -> str:
+        import hashlib
+
+        norm = os.path.normcase(os.path.normpath(folder or ""))
+        digest = hashlib.sha256(norm.encode("utf-8")).hexdigest()[:24]
+        return f"semantic_index_incomplete/{digest}"
+
+    def _set_semantic_index_incomplete(self, folder: str, incomplete: bool) -> None:
+        if not folder:
+            return
+        settings = self.get_settings()
+        key = self._semantic_folder_settings_key(folder)
+        if incomplete:
+            settings.setValue(key, True)
+        else:
+            settings.remove(key)
+
+    def _is_semantic_index_incomplete(self, folder: str) -> bool:
+        if not folder:
+            return False
+        return bool(
+            self.get_settings().value(self._semantic_folder_settings_key(folder), False)
+        )
+
+    def _maybe_resume_semantic_indexing(self) -> None:
+        """Resume background semantic indexing after folder load or session restore."""
+        flag = os.environ.get("RAWVIEWER_AUTO_RESUME_SEMANTIC_INDEX", "1").strip().lower()
+        if flag in ("0", "false", "no", "off"):
+            return
+        if self._semantic_indexing_in_progress:
+            return
+        folder = getattr(self, "current_folder", None)
+        corpus = getattr(self, "_semantic_search_corpus_files", None) or getattr(
+            self, "image_files", None
+        )
+        if not folder or not corpus:
+            return
+        if not self._is_semantic_index_incomplete(folder):
+            return
+        try:
+            index = self._get_semantic_index()
+            if not index.semantic_backend_available():
+                return
+            coverage = self._is_semantic_index_ready(corpus)
+            if int(coverage.get("ready", 0)) == 1:
+                self._set_semantic_index_incomplete(folder, False)
+                self._start_face_index_background(corpus)
+                return
+            pending = index.get_pending_paths(corpus)
+            if not pending:
+                self._set_semantic_index_incomplete(folder, False)
+                self._start_face_index_background(corpus)
+                return
+            QTimer.singleShot(
+                800,
+                lambda: self._start_semantic_index_build_background(corpus, coverage=coverage),
+            )
+        except Exception:
+            pass
     
     def get_sort_preference(self):
         """Get user's preferred sorting method - Newest (True) or Oldest (False)"""
@@ -7328,6 +7791,7 @@ class RAWImageViewer(QMainWindow):
             logger.info(f"[VIEW_MODE] Step 4: No image to reload, status bar updated")
 
         self._sync_single_image_histogram()
+        QTimer.singleShot(0, self._sync_filmstrip_to_folder)
         
         total_time = time.time() - start_time
         logger.info(f"[VIEW_MODE] ========== TIMING BREAKDOWN ==========")
@@ -7350,6 +7814,10 @@ class RAWImageViewer(QMainWindow):
         from PyQt6.QtCore import QTimer
         logger = logging.getLogger(__name__)
         self._suppress_single_manager_callbacks = True
+        bar = self._filmstrip_bar()
+        if bar is not None:
+            bar.hide()
+            bar.setEnabled(False)
         logger.debug("[MODESWITCH] _show_gallery_view entered; files=%d", len(self.image_files))
         logger.info(f"[GALLERY] Showing gallery view")
         self._stop_slideshow()
@@ -7542,17 +8010,14 @@ class RAWImageViewer(QMainWindow):
                     current_file = getattr(self, "current_file_path", None)
                     newest_first = self.get_sort_preference()
 
+                    from common_image_loader import capture_timestamp_for_sort
+
                     def _sort_key(fp):
-                        timestamp = 0
                         data = meta.get(fp) if meta else None
-                        if data and data.get("capture_time"):
-                            try:
-                                timestamp = datetime.strptime(
-                                    data["capture_time"], "%H:%M:%S %Y-%m-%d"
-                                ).timestamp()
-                            except Exception:
-                                timestamp = 0
-                        if timestamp == 0:
+                        timestamp = capture_timestamp_for_sort(
+                            fp, data, probe_file=False
+                        )
+                        if timestamp <= 0:
                             try:
                                 timestamp = os.path.getmtime(fp)
                             except OSError:
@@ -7645,6 +8110,7 @@ class RAWImageViewer(QMainWindow):
                     self.gallery_justified.scroll_to_file(current_file)
                 # Avoid forced rebuild loops; set_images() already schedules build/layout.
                 # Only nudge visible-load passes after initial layout is expected ready.
+                self._warm_gallery_from_filmstrip_cache()
                 QTimer.singleShot(30, self.gallery_justified.load_visible_images)
                 QTimer.singleShot(120, self.gallery_justified.load_visible_images)
             except Exception as e:
@@ -8901,14 +9367,11 @@ class RAWImageViewer(QMainWindow):
             cache = get_image_cache()
             cached_exif = cache.get_exif(file_path)
             
-            if cached_exif and 'capture_time' in cached_exif and cached_exif['capture_time']:
-                # Parse cached capture time string (format: "HH:MM:SS YYYY-MM-DD")
-                try:
-                    time_str = cached_exif['capture_time']
-                    dt = datetime.strptime(time_str, "%H:%M:%S %Y-%m-%d")
-                    return dt.timestamp()
-                except (ValueError, AttributeError):
-                    pass
+            if cached_exif and cached_exif.get('capture_time'):
+                from common_image_loader import parse_capture_time_to_timestamp
+                ts = parse_capture_time_to_timestamp(cached_exif['capture_time'])
+                if ts > 0:
+                    return ts
             
             # If not in cache, try to extract from EXIF
             try:
@@ -8974,30 +9437,17 @@ class RAWImageViewer(QMainWindow):
         
         # 2. Pre-calculate sorting keys to avoid repeated strptime calls
         # This is a MASSIVE optimization for thousands of files
+        from common_image_loader import capture_timestamp_for_sort
+
         sort_keys = {}
         for fp in file_paths:
-            timestamp = 0
-            if fp in bulk_metadata:
-                m = bulk_metadata[fp]
-                if 'capture_time' in m and m['capture_time']:
-                    try:
-                        time_str = m['capture_time']
-                        # Format is "HH:MM:SS YYYY-MM-DD" in cache
-                        dt = datetime.strptime(time_str, "%H:%M:%S %Y-%m-%d")
-                        timestamp = dt.timestamp()
-                    except:
-                        pass
-            
-            # Fallback to file mtime if no capture time
-            if timestamp == 0:
-                try:
-                    if file_stats and fp in file_stats:
-                        timestamp = file_stats[fp][1]
-                    else:
-                        timestamp = os.path.getmtime(fp)
-                except:
-                    timestamp = 0
-            
+            mtime = 0.0
+            if file_stats and fp in file_stats:
+                mtime = file_stats[fp][1]
+            meta = bulk_metadata.get(fp) if bulk_metadata else None
+            timestamp = capture_timestamp_for_sort(
+                fp, meta, mtime, probe_file=True
+            )
             sort_keys[fp] = (timestamp, os.path.basename(fp).lower())
         
         # 3. Perform the sort using pre-calculated keys
@@ -9803,6 +10253,7 @@ class RAWImageViewer(QMainWindow):
             self._last_loaded_path = requested_file_path # Track for view switching optimizations
             if self.image_files and requested_file_path in self.image_files:
                 self.current_file_index = self.image_files.index(requested_file_path)
+            self._sync_filmstrip_index(center=False)
             np_req = _norm_path(requested_file_path)
             if getattr(self, "_manager_display_track_path", None) != np_req:
                 self._manager_display_track_path = np_req
@@ -10067,12 +10518,21 @@ class RAWImageViewer(QMainWindow):
             raise
 
     def on_thumbnail_fallback(self, message):
-        """Handle when thumbnail fallback is used"""
+        """RAW fast preview (embedded JPEG / cache). Normal path — not a user-facing warning."""
         import logging
+
         logger = logging.getLogger(__name__)
-        logger.info(f"Thumbnail fallback: Loading thumbnail...")
-        self.status_bar.showMessage(
-            f"⚠️ {message} - Image quality may be reduced")
+        logger.debug("RAW preview thumbnail: %s", message)
+        # Optional dev-only status hint (default off — avoids truncated "warning thumbnail…" text).
+        if os.environ.get("RAWVIEWER_VERBOSE_RAW_PREVIEW", "").strip().lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        ):
+            if self.current_file_path:
+                name = os.path.basename(self.current_file_path)
+                self.status_bar.showMessage(f"{name}: Loading preview…")
 
     def on_thumbnail_ready(self, thumbnail):
         """Handle when thumbnail is ready for immediate display."""
@@ -11604,8 +12064,7 @@ class RAWImageViewer(QMainWindow):
                 logger.debug("Using pending thumbnail as fallback")
                 try:
                     self.display_numpy_image(self._pending_thumbnail)
-                    self.status_bar.showMessage(
-                        "⚠️ Using preview - full processing failed")
+                    self.status_bar.showMessage("Showing preview", 3000)
                     self._pending_thumbnail = None
                     return
                 except Exception as display_error:
@@ -11678,12 +12137,28 @@ class RAWImageViewer(QMainWindow):
                 return True
         elif key == Qt.Key.Key_Left:
             if vm == "single":
+                if self._filmstrip_handles_input():
+                    bar = self._filmstrip_bar()
+                    if bar:
+                        bar.move_selection(-1)
+                        return True
                 self._debounced_navigate("prev")
                 return True
         elif key == Qt.Key.Key_Right:
             if vm == "single":
+                if self._filmstrip_handles_input():
+                    bar = self._filmstrip_bar()
+                    if bar:
+                        bar.move_selection(1)
+                        return True
                 self._debounced_navigate("next")
                 return True
+        elif key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            if vm == "single" and self._filmstrip_handles_input():
+                bar = self._filmstrip_bar()
+                if bar:
+                    bar.commit_selection()
+                    return True
         elif key == Qt.Key.Key_Down:
             if vm == "single":
                 self.move_current_image_to_discard()
@@ -13805,8 +14280,20 @@ class RAWImageViewer(QMainWindow):
     def eventFilter(self, obj, event):
         if event.type() == QEvent.Type.KeyPress:
             # Handle application-wide shortcuts even when sub-widgets (like viewport) have focus
-            if self._handle_app_shortcut(event.key()):
+            if self._handle_app_shortcut(event):
                 return True
+
+        # Film strip hot zone: pointer events hit the scroll viewport / image label, not the overlay.
+        if event.type() == QEvent.Type.MouseMove and getattr(self, "view_mode", "single") == "single":
+            container = getattr(self, "single_view_container", None)
+            if container is not None and obj in (
+                self.scroll_area.viewport(),
+                self.image_label,
+                self.scroll_area,
+            ):
+                self._ensure_filmstrip_synced()
+                gp = event.globalPosition()
+                container.handle_pointer_for_filmstrip(gp)
         
         # Handle trackpad pinch-to-zoom on Mac
         if event.type() == QEvent.Type.NativeGesture:
@@ -13864,6 +14351,15 @@ class RAWImageViewer(QMainWindow):
             if (hasattr(self, 'view_mode') and self.view_mode == 'single' and
                 hasattr(self, 'scroll_area') and obj == self.scroll_area.viewport()):
                 self._stop_slideshow()
+                if self._filmstrip_handles_input():
+                    bar = self._filmstrip_bar()
+                    if bar is not None:
+                        wheel_event = event
+                        delta = wheel_event.angleDelta().y() or wheel_event.angleDelta().x()
+                        if delta:
+                            steps = delta // 120 if abs(delta) >= 120 else (1 if delta > 0 else -1)
+                            bar.scroll_by_steps(steps)
+                            return True
                 from PyQt6.QtGui import QWheelEvent
                 wheel_event = event
                 
@@ -14077,6 +14573,7 @@ class RAWImageViewer(QMainWindow):
             self.current_folder = folder_path
             self.image_files = image_files
             self._semantic_search_corpus_files = list(image_files)
+            self._filmstrip_warmed_paths = set()
             self._gallery_bulk_metadata = bulk_metadata
             # Folder switched: invalidate render/task state from previous folder so
             # stale async callbacks cannot keep the old content visible.
@@ -14162,6 +14659,7 @@ class RAWImageViewer(QMainWindow):
                 QTimer.singleShot(120, self._update_gallery_view)
             else:
                 self._show_single_view()
+                QTimer.singleShot(0, self._sync_filmstrip_to_folder)
                 # _show_single_view handles its own load_raw_image() call if current_file_path is set.
                 if hasattr(self, 'gallery_justified') and self.gallery_justified:
                     self.gallery_justified._background_loading_active = False
@@ -14177,6 +14675,7 @@ class RAWImageViewer(QMainWindow):
             )
             self._hide_all_loading_indicators()
             self.save_session_state()
+            self._maybe_resume_semantic_indexing()
         except Exception as e:
             logger.error(f"Error updating gallery view for folder {folder_path}: {e}", exc_info=True)
             self._hide_all_loading_indicators()
@@ -14291,18 +14790,15 @@ class RAWImageViewer(QMainWindow):
                             cache = get_image_cache()
                             bulk_metadata = cache.get_multiple_exif(image_files, file_stats)
 
+                            from common_image_loader import capture_timestamp_for_sort
+
                             sort_keys = {}
                             for fp in image_files:
-                                timestamp = 0
                                 meta = bulk_metadata.get(fp)
-                                if meta and meta.get('capture_time'):
-                                    try:
-                                        dt = datetime.strptime(meta['capture_time'], "%H:%M:%S %Y-%m-%d")
-                                        timestamp = dt.timestamp()
-                                    except Exception:
-                                        timestamp = 0
-                                if timestamp == 0:
-                                    timestamp = file_stats.get(fp, (0, 0))[1]
+                                mtime = file_stats.get(fp, (0, 0))[1]
+                                timestamp = capture_timestamp_for_sort(
+                                    fp, meta, mtime, probe_file=True
+                                )
                                 base_name = os.path.basename(fp).lower()
                                 stem = os.path.splitext(base_name)[0]
                                 ext = os.path.splitext(base_name)[1]
@@ -14532,6 +15028,14 @@ class RAWImageViewer(QMainWindow):
             # Save session state first
             self.save_session_state()
             logger.info("[CLOSE] Session state saved")
+
+            if getattr(self, "_semantic_indexing_in_progress", False):
+                folder = getattr(self, "current_folder", None)
+                if folder:
+                    self._set_semantic_index_incomplete(folder, True)
+                self._semantic_index_active_token = None
+                self._semantic_indexing_in_progress = False
+                logger.info("[CLOSE] Semantic index interrupted; will resume on next launch")
             
             # Clean up current processor
             if hasattr(self, 'current_processor') and self.current_processor is not None:

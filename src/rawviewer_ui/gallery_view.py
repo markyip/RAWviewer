@@ -26,6 +26,27 @@ def _focus_gallery_switch_logs() -> bool:
     }
 
 
+def _thumbnail_data_to_base_pixmap(thumbnail_data) -> Optional[QPixmap]:
+    """Convert manager/cache thumbnail payload to a gallery base QPixmap."""
+    if thumbnail_data is None:
+        return None
+    if isinstance(thumbnail_data, QPixmap):
+        return thumbnail_data if not thumbnail_data.isNull() else None
+    if isinstance(thumbnail_data, np.ndarray):
+        arr = np.ascontiguousarray(thumbnail_data)
+        h, w = arr.shape[:2]
+        if h <= 0 or w <= 0:
+            return None
+        bytes_per_line = arr.strides[0]
+        qimg = QImage(arr.data, w, h, bytes_per_line, QImage.Format.Format_RGB888).copy()
+        if qimg.isNull():
+            return None
+        return QPixmap.fromImage(qimg)
+    if isinstance(thumbnail_data, QImage):
+        return QPixmap.fromImage(thumbnail_data) if not thumbnail_data.isNull() else None
+    return None
+
+
 class JustifiedGallery(QWidget):
     """
     Adaptive justified gallery layout with high-performance virtualization.
@@ -1007,6 +1028,34 @@ class JustifiedGallery(QWidget):
                 len(self._active_tasks),
             )
 
+    def warm_thumbnails_from_global_cache(self, paths: List[str]) -> int:
+        """Seed gallery pixmap cache from global ImageCache (e.g. after film strip)."""
+        if not paths:
+            return 0
+        from image_cache import get_image_cache
+
+        global_cache = get_image_cache()
+        warmed = 0
+        image_set = set(self.images) if self.images else set()
+        for path in paths:
+            if not path or path not in image_set:
+                continue
+            if self._thumbnail_cache.get((path, self._thumb_base_key)):
+                continue
+            thumb = global_cache.get_thumbnail(path)
+            if thumb is None:
+                continue
+            pixmap = _thumbnail_data_to_base_pixmap(thumb)
+            if pixmap is None or pixmap.isNull():
+                continue
+            self._thumbnail_cache.put((path, self._thumb_base_key), pixmap)
+            warmed += 1
+        if warmed and _focus_gallery_switch_logs():
+            logger.debug(
+                "[GALLERY] Warmed %d tile(s) from global thumbnail cache", warmed
+            )
+        return warmed
+
     def on_thumbnail_ready(self, file_path, thumbnail_data):
         # Mark path as no longer in-flight regardless of whether we can render it now.
         if file_path in self._active_tasks:
@@ -1020,19 +1069,7 @@ class JustifiedGallery(QWidget):
         if file_path not in self._path_to_indices:
             return
 
-        if isinstance(thumbnail_data, np.ndarray):
-            arr = np.ascontiguousarray(thumbnail_data)
-            h, w = arr.shape[:2]
-            bytes_per_line = arr.strides[0]
-            qimg = QImage(arr.data, w, h, bytes_per_line, QImage.Format.Format_RGB888).copy()
-            if qimg.isNull():
-                self.on_thumbnail_error(file_path, "Null QImage from ndarray")
-                return
-            pixmap = QPixmap.fromImage(qimg)
-        elif isinstance(thumbnail_data, QImage):
-            pixmap = QPixmap.fromImage(thumbnail_data)
-        else:
-            pixmap = thumbnail_data
+        pixmap = _thumbnail_data_to_base_pixmap(thumbnail_data)
 
         if not pixmap or pixmap.isNull():
             self.on_thumbnail_error(file_path, "Null pixmap in on_thumbnail_ready")

@@ -103,6 +103,20 @@ Open the bottom search panel. The search field placeholder is **Search gallery**
 - You can combine a description with structured filters on one line (see examples).
 - **Clear** the field or use the **×** control to restore the full folder.
 
+### Semantic + face indexing behavior (current default)
+
+- Semantic indexing and face detection are both enabled by default.
+- To keep the app responsive on very large RAW folders, indexing runs in two passes:
+  1. metadata + semantic embeddings (search-ready first)
+  2. face-count backfill in background
+- Background face pass starts automatically after semantic indexing is ready and resumes from persisted DB state.
+- Thumbnail warm-up before face scan is conservative by default to avoid long "warming" stalls on multi-thousand-image folders.
+- Advanced environment switches:
+  - `RAWVIEWER_INDEX_DEFER_FACE_SCAN=1` (default): run face scan after semantic pass
+  - `RAWVIEWER_FACE_SCAN_WARM_THUMBS=0` (default): disable full warm-up prepass
+  - `RAWVIEWER_FACE_SCAN_WARM_MAX_FILES=256` (default): cap warm-up batch size
+  - `RAWVIEWER_FACE_SCAN_WARM_MAX_SECONDS=25` (default): cap warm-up wall time
+
 ### Gallery search syntax examples
 
 Separate tokens with spaces. Filters use `key:value` or comparison forms.
@@ -215,6 +229,11 @@ All dependencies are listed in `requirements.txt`:
 - **Antivirus warnings**: Add RAWviewer to your antivirus exclusions
 - **Performance issues**: Try running as administrator
 - **AttributeError with stdout**: This is normal for windowed builds - the application runs without a console window
+- **Crash code `-1073741819` / `0xC0000005` (access violation)**:
+  - This is a native crash (Qt/LibRaw/ONNX/driver layer), not always a Python exception.
+  - Check logs in both locations:
+    - `src/logs/` (project-local when enabled)
+    - `%LOCALAPPDATA%\RAWviewer\logs\` (persistent crash reports / fatal dumps)
 
 ### macOS
 - **"App is damaged and should be moved to the Trash" / "Apple could not verify RAWviewer is free of malware"**: 
