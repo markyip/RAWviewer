@@ -3999,7 +3999,7 @@ class _LegacyGalleryCompatBlock:
 
 class CustomTitleBar(QFrame):
     """Material Design 3 style custom title bar for frameless window."""
-    def __init__(self, parent=None, title="RAW Image Viewer"):
+    def __init__(self, parent=None, title="RAWviewer"):
         super().__init__(parent)
         self.parent = parent
         self.setFixedHeight(40)  # Smaller height
@@ -4180,7 +4180,7 @@ class CustomConfirmDialog(QDialog):
     """Material Design 3 style confirmation dialog with custom title bar."""
     def __init__(self, parent=None, title="Confirm Delete", message="", informative_text=""):
         super().__init__(parent)
-        self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
+        self.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setModal(True)
         
@@ -4240,7 +4240,7 @@ class CustomConfirmDialog(QDialog):
         button_layout = QHBoxLayout()
         button_layout.setContentsMargins(0, 8, 0, 0)
         button_layout.setSpacing(12)
-        button_layout.addStretch()
+        button_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
         
         # Cancel button (MD3 style - outlined)
         cancel_btn = QPushButton("Cancel")
@@ -4297,9 +4297,6 @@ class CustomConfirmDialog(QDialog):
         delete_btn.setFocus()
         button_layout.addWidget(delete_btn)
         
-        # Add stretch after buttons to center them
-        button_layout.addStretch()
-        
         content_layout.addLayout(button_layout)
         main_layout.addWidget(content_widget)
         
@@ -4314,10 +4311,8 @@ class CustomConfirmDialog(QDialog):
         
         # Center on parent
         if parent:
-            parent_geometry = parent.geometry()
-            dialog_x = parent_geometry.x() + (parent_geometry.width() - self.width()) // 2
-            dialog_y = parent_geometry.y() + (parent_geometry.height() - self.height()) // 2
-            self.move(dialog_x, dialog_y)
+            center_global = parent.mapToGlobal(parent.rect().center())
+            self.move(center_global.x() - self.width() // 2, center_global.y() - self.height() // 2)
         
         # Store result
         self.result_value = False
@@ -4361,7 +4356,7 @@ class MobileCLIPDownloadDialog(QDialog):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
+        self.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setModal(True)
 
@@ -4561,7 +4556,7 @@ class SingleImageViewOverlay(QWidget):
             self._schedule_hide_filmstrip()
 
     def _schedule_hide_filmstrip(self) -> None:
-        self._hide_filmstrip_timer.start(450)
+        self._hide_filmstrip_timer.start(0)
 
     def _hide_filmstrip_if_inactive(self) -> None:
         if self._filmstrip_pointer_active:
@@ -4575,7 +4570,7 @@ class SingleImageViewOverlay(QWidget):
 
     def _pointer_in_bottom_hotzone(self) -> bool:
         pos = self.mapFromGlobal(QCursor.pos())
-        return pos.y() >= self.height() - self._BOTTOM_HOTZONE
+        return self.rect().contains(pos) and (pos.y() >= self.height() - self._BOTTOM_HOTZONE)
 
     def _local_pos_from_global(self, global_pos) -> QPoint:
         if hasattr(global_pos, "toPoint"):
@@ -4587,7 +4582,7 @@ class SingleImageViewOverlay(QWidget):
         if not self._filmstrip.isEnabled():
             return
         pos = self._local_pos_from_global(global_pos)
-        in_hot = pos.y() >= self.height() - self._BOTTOM_HOTZONE
+        in_hot = self.rect().contains(pos) and (pos.y() >= self.height() - self._BOTTOM_HOTZONE)
         over_strip = self._filmstrip.isVisible() and self._filmstrip.geometry().contains(pos)
         if in_hot or over_strip or self._filmstrip.underMouse():
             self._hide_filmstrip_timer.stop()
@@ -4604,6 +4599,8 @@ class SingleImageViewOverlay(QWidget):
             self._layout_filmstrip()
             self._filmstrip.raise_()
             self._hist.raise_()
+            if hasattr(self._filmstrip, "center_on_current"):
+                QTimer.singleShot(0, lambda: self._filmstrip.center_on_current())
             if hasattr(self._filmstrip, "refresh_visible_thumbnails"):
                 QTimer.singleShot(0, lambda: self._filmstrip.refresh_visible_thumbnails(
                     refresh_cache=True
@@ -5502,6 +5499,35 @@ class RAWImageViewer(QMainWindow):
         path = files[index]
         if _norm_path(path) == _norm_path(getattr(self, "current_file_path", "")):
             return
+            
+        # Maintain zoom state if not in fit-to-window mode
+        if not getattr(self, "fit_to_window", True):
+            self._preserve_nav_zoom_active = True
+            self._maintain_zoom_on_navigation = True
+            if hasattr(self, "_zoom_anchor_for_navigation_restore"):
+                self._restore_zoom_center = self._zoom_anchor_for_navigation_restore()
+            self._restore_zoom_level = getattr(self, "current_zoom_level", 1.0)
+            if getattr(self, "current_pixmap", None):
+                self._restore_pixmap_size = self.current_pixmap.size()
+            try:
+                if not hasattr(self, 'scroll_area') or self.scroll_area is None:
+                    self._restore_start_scroll_x = 0
+                    self._restore_start_scroll_y = 0
+                else:
+                    self._restore_start_scroll_x = self.scroll_area.horizontalScrollBar().value()
+                    self._restore_start_scroll_y = self.scroll_area.verticalScrollBar().value()
+            except Exception:
+                self._restore_start_scroll_x = 0
+                self._restore_start_scroll_y = 0
+        else:
+            self._preserve_nav_zoom_active = False
+            if hasattr(self, '_maintain_zoom_on_navigation'):
+                delattr(self, '_maintain_zoom_on_navigation')
+            self._restore_zoom_center = None
+            self._restore_zoom_level = None
+            self._restore_start_scroll_x = None
+            self._restore_start_scroll_y = None
+                
         self.current_file_index = index
         self.load_raw_image(path)
 
@@ -6255,15 +6281,14 @@ class RAWImageViewer(QMainWindow):
         self.image_label.setText(
             "No image loaded\n\n"
             "Click 📁 or drag and drop a folder or image to load it\n"
-            "Press Space to toggle between fit-to-window and 100% zoom\n"
-            "Double-click image to zoom in/out\n"
+            "Press Space or Double-click to toggle fit-to-window / 100% zoom\n"
             "Click and drag to pan when zoomed\n"
             "Use Left/Right arrow keys to navigate between images (preserves zoom if zoomed in)\n"
             "Bottom bar: Share and other controls when images are loaded\n"
             "Press Down Arrow to move the current image to Discard folder\n"
             "Press Delete to remove the current image\n"
-            "Press H to show or hide histogram\n"
-            "Press F — show dashed focus / subject outline from EXIF (amber = maker AF; lime = Subject / CIPA)\n"
+            "H — Show/hide histogram\n"
+            "F — Show/hide focus point\n"
             "Scroll wheel (fit-to-window): Scroll down = previous image, Scroll up = next image\n"
             "Horizontal wheel (zoom mode): Scroll left/right to pan the image"
         )
@@ -7606,6 +7631,8 @@ class RAWImageViewer(QMainWindow):
     # GALLERY FUNCTIONALITY COMMENTED OUT
     def toggle_view_mode(self):
         """Toggle between single image view and gallery view"""
+        if getattr(self, '_is_delete_dialog_open', False):
+            return
         import logging
         logger = logging.getLogger(__name__)
         logger.debug("[MODESWITCH] toggle_view_mode called; current=%s", self.view_mode)
@@ -7830,9 +7857,9 @@ class RAWImageViewer(QMainWindow):
         # Update title bar to show current folder name instead of file name
         if hasattr(self, 'current_folder') and self.current_folder:
             folder_name = os.path.basename(self.current_folder)
-            title = f"RAW Image Viewer - {folder_name}"
+            title = f"RAWviewer - {folder_name}"
         else:
-            title = "RAW Image Viewer"
+            title = "RAWviewer"
         
         self.setWindowTitle(title)
         if hasattr(self, 'title_bar') and self.title_bar is not None:
@@ -9485,15 +9512,13 @@ class RAWImageViewer(QMainWindow):
     def _keyboard_shortcuts_help_text(self):
         """Plain-text shortcuts list for tooltips and the shortcuts dialog."""
         return (
-            "Space — Toggle fit-to-window / 100% zoom\n"
-            "Double-click — Toggle fit-to-window / 100% zoom\n"
+            "Space / Double-click — Toggle fit-to-window / 100% zoom\n"
             "Trackpad Pinch / Ctrl+Scroll — Smooth zoom in/out\n"
             "Left / Right Arrow — Previous / next image\n"
             "Down Arrow — Move image to Discard folder\n"
             "Delete — Delete current image\n"
-            "H — Show or hide histogram (single-image view)\n"
-            "F — Focus / subject outline from EXIF (amber = maker AF; lime = Subject / CIPA). "
-            "With outline on, from fit: Space centers on the box; double-click zooms to the click. Zoomed: Space/double-click = fit.\n\n"
+            "H — Show/hide histogram\n"
+            "F — Show/hide focus point\n\n"
             "You can drag and drop files or folders onto the window."
         )
 
@@ -10184,8 +10209,12 @@ class RAWImageViewer(QMainWindow):
             # proper concurrency control
             
             # Reset flags when loading new image
-            # Assume preview-first until a full-resolution buffer is confirmed on-screen.
-            self._is_half_size_displayed = True
+            # Assume preview-first until a full-resolution buffer is confirmed on-screen, but ONLY for RAW files
+            raw_extensions = {'.cr2', '.cr3', '.nef', '.arw', '.dng', '.orf', '.rw2', 
+                             '.pef', '.srw', '.x3f', '.raf', '.3fr', '.fff', '.iiq', 
+                             '.cap', '.erf', '.mef', '.mos', '.nrw', '.rwl', '.srf'}
+            is_raw = os.path.splitext(requested_file_path)[1].lower() in raw_extensions
+            self._is_half_size_displayed = is_raw
             self._full_resolution_loading = False
             self._smooth_zoom_full_request_sent = False
             self._raw_status_exif_refresh_path = None
@@ -10254,11 +10283,14 @@ class RAWImageViewer(QMainWindow):
             # Note: current_file_path is now set above (after cleanup check)
             # to prevent false cancellations during normal navigation
             filename = os.path.basename(requested_file_path)
-            logger.debug(f"Setting window title to: {filename}")
-            self.setWindowTitle(f"RAW Image Viewer - {filename}")
+            folder_name = os.path.basename(os.path.dirname(requested_file_path))
+            title_text = f"{folder_name} / {filename}" if folder_name else filename
+            
+            logger.debug(f"Setting window title to: {title_text}")
+            self.setWindowTitle(title_text)
             # Update custom title bar
             if hasattr(self, 'title_bar') and self.title_bar is not None:
-                self.title_bar.set_title(f"RAW Image Viewer - {filename}")
+                self.title_bar.set_title(title_text)
 
             # Reset EXIF data ready flag for new image
             self._exif_data_ready = False
@@ -10296,6 +10328,12 @@ class RAWImageViewer(QMainWindow):
                         pass
                     # Only preload after successful display (matches RAWviewer-1.0 behavior)
                     self._start_preloading()
+                    
+                    # Ensure EXIF is loaded even on cache hit
+                    if not self.image_cache.get_exif(requested_file_path):
+                        logger.info(f"[LOAD] Cache hit for image, but missing EXIF. Requesting EXIF load.")
+                        self.image_manager.request_load(requested_file_path, priority=False, stages={"exif"})
+                        
                     logger.info(f"[LOAD] Successfully displayed cached full image for {filename} (total: {time.time() - load_start:.3f}s)")
                     if hasattr(self, "loading_overlay"):
                         self.loading_overlay.hide_loading()
@@ -10353,6 +10391,12 @@ class RAWImageViewer(QMainWindow):
                         except ValueError:
                             pass
                         self._start_preloading()
+                        
+                        # Ensure EXIF is loaded even on cache hit
+                        if not self.image_cache.get_exif(requested_file_path):
+                            logger.info(f"[LOAD] Cache hit for pixmap, but missing EXIF. Requesting EXIF load.")
+                            self.image_manager.request_load(requested_file_path, priority=False, stages={"exif"})
+                            
                         logger.info(f"[LOAD] Successfully displayed cached pixmap for {filename} (total: {time.time() - load_start:.3f}s)")
                         if hasattr(self, "loading_overlay"):
                             self.loading_overlay.hide_loading()
@@ -10895,6 +10939,11 @@ class RAWImageViewer(QMainWindow):
         self._debounced_navigate("next", from_slideshow=True)
 
     def _on_slideshow_bottom_toggled(self, on: bool):
+        if getattr(self, '_is_delete_dialog_open', False):
+            b = getattr(self, "slideshow_bottom_button", None)
+            if b is not None:
+                b.setChecked(False)
+            return
         if on:
             if getattr(self, "view_mode", "single") != "single" or not self.image_files:
                 b = getattr(self, "slideshow_bottom_button", None)
@@ -11264,7 +11313,11 @@ class RAWImageViewer(QMainWindow):
                 # Check if this is a half_size image - if so, temporarily show fit-to-window
                 # and wait for full resolution before applying zoom
                 pixmap_max_dim = max(pixmap.width(), pixmap.height())
-                is_pixmap_half_size = pixmap_max_dim < 3000
+                raw_exts = {'.cr2', '.cr3', '.nef', '.arw', '.dng', '.orf', '.rw2', 
+                            '.pef', '.srw', '.x3f', '.raf', '.3fr', '.fff', '.iiq', 
+                            '.cap', '.erf', '.mef', '.mos', '.nrw', '.rwl', '.srf'}
+                is_raw = os.path.splitext(getattr(self, "current_file_path", ""))[-1].lower() in raw_exts
+                is_pixmap_half_size = (pixmap_max_dim < 3000) and is_raw
                 if is_pixmap_half_size:
                     logger.info(f"[DISPLAY_PIXMAP] Half-size image ({pixmap.width()}x{pixmap.height()}), "
                                "showing Fit preview until a full-resolution buffer arrives (avoid fake zoom upscale).")
@@ -11300,7 +11353,11 @@ class RAWImageViewer(QMainWindow):
             
             # If restoring zoom and currently displaying half_size, load full resolution FIRST
             pixmap_max_dim = max(pixmap.width(), pixmap.height())
-            is_pixmap_half_size = pixmap_max_dim < 3000
+            raw_exts = {'.cr2', '.cr3', '.nef', '.arw', '.dng', '.orf', '.rw2', 
+                        '.pef', '.srw', '.x3f', '.raf', '.3fr', '.fff', '.iiq', 
+                        '.cap', '.erf', '.mef', '.mos', '.nrw', '.rwl', '.srf'}
+            is_raw = os.path.splitext(getattr(self, "current_file_path", ""))[-1].lower() in raw_exts
+            is_pixmap_half_size = (pixmap_max_dim < 3000) and is_raw
             
             if (hasattr(self, '_is_half_size_displayed') and self._is_half_size_displayed) or is_pixmap_half_size:
                 if is_pixmap_half_size:
@@ -11412,6 +11469,13 @@ class RAWImageViewer(QMainWindow):
                 delattr(self, "_pending_zoom_center")
             if hasattr(self, "_pending_zoom_level"):
                 delattr(self, "_pending_zoom_level")
+            
+            # Apply saved scroll position before applying zoom and pan
+            if hasattr(self, '_restore_start_scroll_x') and hasattr(self, '_restore_start_scroll_y'):
+                if self._restore_start_scroll_x is not None and self._restore_start_scroll_y is not None:
+                    self.start_scroll_x = self._restore_start_scroll_x
+                    self.start_scroll_y = self._restore_start_scroll_y
+            
             self.apply_zoom_and_pan()
             self._finish_nav_zoom_preserve()
         
@@ -11763,8 +11827,15 @@ class RAWImageViewer(QMainWindow):
                     self.current_zoom_level = self._restore_zoom_level or 1.0
                     c = self._restore_zoom_center
                     self.zoom_center_point = c if c is not None else QPoint(pixmap.width() // 2, pixmap.height() // 2)
-                    self.start_scroll_x = self.scroll_area.horizontalScrollBar().value()
-                    self.start_scroll_y = self.scroll_area.verticalScrollBar().value()
+                    
+                    if hasattr(self, '_restore_start_scroll_x') and hasattr(self, '_restore_start_scroll_y'):
+                        if self._restore_start_scroll_x is not None and self._restore_start_scroll_y is not None:
+                            self.start_scroll_x = self._restore_start_scroll_x
+                            self.start_scroll_y = self._restore_start_scroll_y
+                    else:
+                        self.start_scroll_x = self.scroll_area.horizontalScrollBar().value()
+                        self.start_scroll_y = self.scroll_area.verticalScrollBar().value()
+                        
                     self.apply_zoom_and_pan()
                     self._restore_zoom_center = None
                     self._restore_zoom_level = None
@@ -12068,10 +12139,10 @@ class RAWImageViewer(QMainWindow):
                 self._clear_single_image_histogram()
                 self.status_bar.showMessage("Error loading image")
                 # Reset window title on error
-                self.setWindowTitle('RAW Image Viewer')
+                self.setWindowTitle('RAWviewer')
                 # Update custom title bar
                 if hasattr(self, 'title_bar') and self.title_bar is not None:
-                    self.title_bar.set_title('RAW Image Viewer')
+                    self.title_bar.set_title('RAWviewer')
             except Exception as ui_error:
                 logger.error(f"Error updating UI on processing error: {ui_error}")
         except Exception as e:
@@ -12183,6 +12254,9 @@ class RAWImageViewer(QMainWindow):
         return False
 
     def keyPressEvent(self, event):
+        if getattr(self, '_is_delete_dialog_open', False):
+            event.ignore()
+            return
         key = event.key()
         vm = getattr(self, "view_mode", "single")
 
@@ -12321,6 +12395,8 @@ class RAWImageViewer(QMainWindow):
         logger.debug(f"[NAV_FINISH] Navigation flag cleared - _navigation_in_progress={self._navigation_in_progress}")
 
     def navigate_to_previous_image(self):
+        if getattr(self, '_is_delete_dialog_open', False):
+            return
         import logging
         import traceback
         import time
@@ -12479,6 +12555,8 @@ class RAWImageViewer(QMainWindow):
                        f"(total duration: {outer_finally_time - nav_start_time:.3f}s) ==========")
 
     def navigate_to_next_image(self):
+        if getattr(self, '_is_delete_dialog_open', False):
+            return
         import logging
         import time
         import traceback
@@ -12707,8 +12785,12 @@ class RAWImageViewer(QMainWindow):
             informative_text=f"File: {filename}\n\nThis will move the file to the Recycle Bin."
         )
         
-        result = dialog.exec()
-        return dialog.result_value
+        self._is_delete_dialog_open = True
+        try:
+            result = dialog.exec()
+            return dialog.result_value
+        finally:
+            self._is_delete_dialog_open = False
 
     def perform_deletion(self):
         """Perform the actual file deletion"""
@@ -12778,10 +12860,10 @@ class RAWImageViewer(QMainWindow):
                 "Use File > Open to load another image"
             )
             self.status_bar.showMessage("No images remaining in folder")
-            self.setWindowTitle('RAW Image Viewer')
+            self.setWindowTitle('RAWviewer')
             # Update custom title bar
             if hasattr(self, 'title_bar') and self.title_bar is not None:
-                self.title_bar.set_title('RAW Image Viewer')
+                self.title_bar.set_title('RAWviewer')
             self.update_status_bar()
             return
 
@@ -12821,13 +12903,9 @@ class RAWImageViewer(QMainWindow):
         if not self.current_pixmap:
             # If image is currently loading, wait a bit and try again
             if hasattr(self, 'current_file_path') and self.current_file_path:
-                if hasattr(self, '_full_resolution_loading') and self._full_resolution_loading:
-                    logger.debug("Image is loading, spacebar toggle will be available once image is ready")
-                    return
-                # If we have a file path but no pixmap, the image might be loading
-                # Set a flag to toggle zoom once the image is ready
+                # Always set the pending flag so we don't drop the user's spacebar press
                 self._pending_zoom_toggle = True
-                logger.debug("Pixmap not ready yet, will toggle zoom once image is loaded")
+                logger.debug("Pixmap not ready yet or still loading, will toggle zoom once image is loaded")
                 return
             return
         self._stop_slideshow()
@@ -13464,15 +13542,14 @@ class RAWImageViewer(QMainWindow):
         message = (
             "No image loaded\n\n"
             "Click 📁 or drag and drop a folder or image to load it\n"
-            "Press Space to toggle between fit-to-window and 100% zoom\n"
-            "Double-click image to zoom in/out\n"
+            "Press Space or Double-click to toggle fit-to-window / 100% zoom\n"
             "Click and drag to pan when zoomed\n"
             "Use Left/Right arrow keys to navigate between images (preserves zoom if zoomed in)\n"
             "Bottom bar: Share and other controls when images are loaded\n"
             "Press Down Arrow to move the current image to Discard folder\n"
             "Press Delete to remove the current image\n"
-            "Press H to show or hide histogram\n"
-            "Press F — show dashed focus / subject outline from EXIF (amber = maker AF; lime = Subject / CIPA)\n"
+            "H — Show/hide histogram\n"
+            "F — Show/hide focus point\n"
             "Scroll wheel (fit-to-window): Scroll down = previous image, Scroll up = next image\n"
             "Horizontal wheel (zoom mode): Scroll left/right to pan the image"
         )
@@ -13493,9 +13570,9 @@ class RAWImageViewer(QMainWindow):
             
         if hasattr(self, 'status_bar'):
             self.status_bar.showMessage("Ready")
-        self.setWindowTitle('RAW Image Viewer')
+        self.setWindowTitle('RAWviewer')
         if hasattr(self, 'title_bar') and self.title_bar is not None:
-            self.title_bar.set_title('RAW Image Viewer')
+            self.title_bar.set_title('RAWviewer')
 
     def show_no_images_message(self, supported_extensions):
         """Display 'No images found' message in the main viewing area"""
@@ -13535,10 +13612,10 @@ class RAWImageViewer(QMainWindow):
         self.status_bar.showMessage("No images found")
         
         # Reset window title
-        self.setWindowTitle('RAW Image Viewer')
+        self.setWindowTitle('RAWviewer')
         # Update custom title bar
         if hasattr(self, 'title_bar') and self.title_bar is not None:
-            self.title_bar.set_title('RAW Image Viewer')
+            self.title_bar.set_title('RAWviewer')
 
     def show_error(self, title, message):
         """Show error message dialog"""
@@ -15313,7 +15390,7 @@ def main():
                 safe_print("  [Windows] AppUserModelID set", flush=True)
 
             # Set application properties
-            app.setApplicationName("RAW Image Viewer")
+            app.setApplicationName("RAWviewer")
             app.setApplicationVersion("2.0.1")
 
             # Create and show main window

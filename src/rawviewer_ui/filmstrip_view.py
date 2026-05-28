@@ -106,7 +106,9 @@ class FilmStripBar(QFrame):
         self._path_to_index: Dict[str, int] = {}
         self._generation = 0
 
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._scroll = QScrollArea(self)
+        self._scroll.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._scroll.setWidgetResizable(False)
         self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self._scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
@@ -115,6 +117,7 @@ class FilmStripBar(QFrame):
         self._scroll.viewport().setStyleSheet("background: transparent;")
 
         self._content = QWidget(self._scroll)
+        self._content.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._content.setStyleSheet("background: transparent;")
         self._scroll.setWidget(self._content)
 
@@ -196,6 +199,10 @@ class FilmStripBar(QFrame):
         if center:
             self._scroll_to_index_centered()
         self.refresh_visible_thumbnails(refresh_cache=True)
+
+    def center_on_current(self) -> None:
+        """Scrolls the filmstrip to center the currently selected image."""
+        self._scroll_to_index_centered()
 
     def refresh_visible_thumbnails(
         self, force: bool = False, refresh_cache: bool = True
@@ -323,6 +330,7 @@ class FilmStripBar(QFrame):
         self._update_selection_style()
         self._scroll_to_index_centered()
         self.selection_changed.emit(idx)
+        self.commit_selection()
 
     def commit_selection(self) -> None:
         if not self._files or self._pending_index < 0:
