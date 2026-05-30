@@ -1,5 +1,16 @@
 # RAWviewer Release Notes
 
+## 🚀 Version 2.2.0
+**Release Date: May 30, 2026**
+
+🎯 What's New
+- **Search from single-image view**: Search button in single view; submitting a query switches to gallery with filtered results.
+- **Fast single-file open**: Opening one image no longer waits for full folder scan and EXIF sort on large libraries.
+
+🛠️ Fixes & improvements
+- **Gallery refresh after EXIF sort**: Gallery auto-updates when background capture-time refinement completes.
+- **Search navigation**: Film strip and arrow keys stay within active search results until the filter is cleared.
+
 ## 🚀 Version 2.1.0
 **Release Date: May 28, 2026**
 

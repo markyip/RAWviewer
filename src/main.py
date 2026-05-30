@@ -2045,6 +2045,10 @@ class FolderLoadSignals(QObject):
     ready = pyqtSignal(object, object, object, object, str, object, object, float, float)
     error = pyqtSignal(object, str, str)
 
+class QuickFolderIndexSignals(QObject):
+    """Fast scandir + mtime sort for single-file open (navigation before EXIF sort finishes)."""
+    ready = pyqtSignal(object, object, object, int, float)  # token, files, file_stats, start_idx, scan_s
+
 class SemanticIndexSignals(QObject):
     """Signal carrier for background semantic index build."""
     progress = pyqtSignal(object, int, int, str)  # token, current, total, basename
@@ -6106,7 +6110,7 @@ class RAWImageViewer(QMainWindow):
         # Set window to frameless for custom title bar only on Windows
         if platform.system() == 'Windows':
             self.setWindowFlags(Qt.WindowType.FramelessWindowHint)
-        self.setWindowTitle('RAWviewer v2.1.0')
+        self.setWindowTitle('RAWviewer v2.2.0')
         
         # Set simple background style (no rounded corners - simplifies window resizing)
         self.setStyleSheet("""
@@ -6170,7 +6174,7 @@ class RAWImageViewer(QMainWindow):
         
         # Create custom title bar only on Windows
         if platform.system() == 'Windows':
-            self.title_bar = CustomTitleBar(self, title="RAWviewer v2.1.0")
+            self.title_bar = CustomTitleBar(self, title="RAWviewer v2.2.0")
         else:
             self.title_bar = None
         
@@ -6857,7 +6861,8 @@ class RAWImageViewer(QMainWindow):
                 self.gallery_search_status_label.hide()
         
         if getattr(self, "view_mode", "single") != "gallery":
-            return
+            if not getattr(self, "_search_panel_expanded", False):
+                return
 
         user_collapsed = getattr(
             self, "_gallery_search_user_collapsed_while_busy", False
@@ -6873,11 +6878,17 @@ class RAWImageViewer(QMainWindow):
             self._set_search_panel_expanded(True, animate=animate)
 
     def _set_gallery_search_input_visible(self):
-        if getattr(self, "view_mode", "single") != "gallery":
-            return
         if hasattr(self, "search_expand_layout") and hasattr(self, "gallery_search_panel"):
             self.search_expand_layout.setCurrentWidget(self.gallery_search_panel)
         self._set_search_panel_expanded(True)
+
+    def _switch_to_gallery_for_search(self):
+        """Enter gallery mode to show semantic search results or empty state."""
+        if getattr(self, "view_mode", "single") == "gallery":
+            return
+        self.view_mode = "gallery"
+        self._stop_slideshow()
+        self._show_gallery_view()
 
     def _set_search_panel_expanded(self, expanded: bool, animate: bool = True):
         if not hasattr(self, "search_expand_container") or self.search_expand_container is None:
@@ -6959,7 +6970,7 @@ class RAWImageViewer(QMainWindow):
                 pass
             self._set_gallery_search_input_visible()
             if (
-                getattr(self, "view_mode", "single") == "gallery"
+                getattr(self, "_search_panel_expanded", False)
                 and hasattr(self, "gallery_search_input")
                 and self.gallery_search_input is not None
             ):
@@ -7079,7 +7090,7 @@ class RAWImageViewer(QMainWindow):
         if not user_hid:
             self._set_gallery_search_input_visible()
             if (
-                getattr(self, "view_mode", "single") == "gallery"
+                getattr(self, "_search_panel_expanded", False)
                 and hasattr(self, "gallery_search_input")
                 and self.gallery_search_input is not None
             ):
@@ -7266,9 +7277,6 @@ class RAWImageViewer(QMainWindow):
         self.status_bar.showMessage(f"MobileCLIP download failed: {error}", 7000)
 
     def _on_search_bottom_clicked(self):
-        if getattr(self, "view_mode", "single") != "gallery":
-            return
-            
         safe_print(
             f"[SEARCH_DEBUG] Search button clicked. Current expansion state: {getattr(self, '_search_panel_expanded', False)}"
         )
@@ -7449,7 +7457,8 @@ class RAWImageViewer(QMainWindow):
                 empty_msg = (
                     "Semantic search unavailable" if backend_missing else "No matching images"
                 )
-                if getattr(self, "view_mode", "single") == "gallery" and hasattr(self, "gallery_justified") and self.gallery_justified:
+                self._switch_to_gallery_for_search()
+                if hasattr(self, "gallery_justified") and self.gallery_justified:
                     self.gallery_justified.clear_thumbnail_widgets()
                     self.gallery_justified.set_images([])
                     self.gallery_justified.show_empty_message(empty_msg)
@@ -7466,7 +7475,8 @@ class RAWImageViewer(QMainWindow):
                 self.image_files = []
                 self.current_file_index = -1
                 self.current_file_path = None
-                if getattr(self, "view_mode", "single") == "gallery" and hasattr(self, "gallery_justified") and self.gallery_justified:
+                self._switch_to_gallery_for_search()
+                if hasattr(self, "gallery_justified") and self.gallery_justified:
                     self.gallery_justified.clear_thumbnail_widgets()
                     self.gallery_justified.set_images([])
                     self.gallery_justified.show_empty_message("No matching images")
@@ -7479,15 +7489,13 @@ class RAWImageViewer(QMainWindow):
             self.image_files = ranked_paths
             self.current_file_index = 0
             self.current_file_path = self.image_files[0]
-            self._update_gallery_counter()
 
-            if getattr(self, "view_mode", "single") == "gallery":
-                if hasattr(self, "gallery_justified") and self.gallery_justified:
-                    self.gallery_justified.hide_empty_message()
-                self._sync_gallery_scrollbar_policy()
-                self._update_gallery_view()
-            else:
-                self.load_raw_image(self.current_file_path)
+            self._switch_to_gallery_for_search()
+            self._update_gallery_counter()
+            if hasattr(self, "gallery_justified") and self.gallery_justified:
+                self.gallery_justified.hide_empty_message()
+            self._sync_gallery_scrollbar_policy()
+            self._update_gallery_view()
 
             top = hits[0]
             if used_semantic_backend:
@@ -7717,9 +7725,12 @@ class RAWImageViewer(QMainWindow):
         if hasattr(self, 'view_mode_button'):
             self.view_mode_button.show()
         if hasattr(self, "search_bottom_button"):
-            self.search_bottom_button.hide()
+            self.search_bottom_button.setVisible(bool(self.image_files))
         if hasattr(self, "search_expand_container") and self.search_expand_container:
-            self.search_expand_container.hide()
+            if getattr(self, "_search_panel_expanded", False):
+                self._set_search_panel_expanded(True, animate=False)
+            else:
+                self.search_expand_container.hide()
         # Update icon if using qtawesome
         if qta is not None:
             try:
@@ -13783,9 +13794,7 @@ class RAWImageViewer(QMainWindow):
             show_rotate = bool(vis and cp and os.path.isfile(cp))
             self.rotate_bottom_button.setVisible(show_rotate)
         if hasattr(self, "search_bottom_button"):
-            self.search_bottom_button.setVisible(
-                bool(self.image_files) and self.view_mode == "gallery"
-            )
+            self.search_bottom_button.setVisible(bool(self.image_files))
 
         # Gallery mode should stay lightweight: avoid expensive per-image EXIF/status
         # recomputation (fallback reads can block UI and delay gallery paint).
@@ -14598,9 +14607,261 @@ class RAWImageViewer(QMainWindow):
         except (OSError, PermissionError):
             pass
 
+    def _resolve_start_file_path(self, folder_path: str, start_file: str) -> str | None:
+        """Resolve start_file (basename or path) to an absolute file path in folder_path."""
+        if not folder_path or not start_file:
+            return None
+        if os.path.isabs(start_file) and os.path.isfile(start_file):
+            return os.path.abspath(start_file)
+        direct = os.path.join(folder_path, start_file)
+        if os.path.isfile(direct):
+            return os.path.abspath(direct)
+        base_norm = os.path.normcase(os.path.basename(start_file))
+        try:
+            with os.scandir(folder_path) as it:
+                for entry in it:
+                    if not entry.is_file(follow_symlinks=False):
+                        continue
+                    if os.path.normcase(entry.name) == base_norm:
+                        return os.path.abspath(entry.path)
+        except OSError:
+            pass
+        return None
+
+    def _should_fast_open_single_file(self, start_file, start_view) -> bool:
+        """True when opening one file for single view (Explorer, drag-drop, Open File)."""
+        if not start_file:
+            return False
+        if start_view == "gallery":
+            return False
+        if start_view == "single":
+            return True
+        return getattr(self, "view_mode", "single") == "single"
+
+    def _mtime_sort_image_files(self, image_files, file_stats, newest_first=None):
+        """Order folder entries by file mtime (and RAW/JPEG tie-breakers); no EXIF reads."""
+        if not image_files:
+            return []
+        if newest_first is None:
+            newest_first = self.get_sort_preference()
+        sort_keys = {}
+        for fp in image_files:
+            mtime = file_stats.get(fp, (0, 0))[1]
+            base_name = os.path.basename(fp).lower()
+            stem = os.path.splitext(base_name)[0]
+            ext = os.path.splitext(base_name)[1]
+            raw_rank = 1 if is_raw_file(fp) else 0
+            primary_ts = -mtime if newest_first else mtime
+            sort_keys[fp] = (primary_ts, stem, raw_rank, ext, base_name)
+        return sorted(image_files, key=lambda fp: sort_keys[fp])
+
+    def _scan_folder_image_paths(self, folder_path: str):
+        """Yield absolute paths and file stats for supported images (top level only)."""
+        extensions = set(self.get_supported_extensions())
+        seen_paths = set()
+        for full_path, stat_info in self._scan_folder_generator(folder_path, extensions):
+            ap = os.path.abspath(full_path)
+            if ap in seen_paths:
+                continue
+            seen_paths.add(ap)
+            yield ap, stat_info
+
+    def _build_quick_folder_image_list(self, folder_path: str, start_path: str | None = None):
+        """Scandir + mtime sort only. Returns (image_files, file_stats, start_index)."""
+        image_files = []
+        file_stats = {}
+        for ap, stat_info in self._scan_folder_image_paths(folder_path):
+            image_files.append(ap)
+            file_stats[ap] = (stat_info.st_size, stat_info.st_mtime)
+
+        if not image_files:
+            if start_path:
+                return [os.path.abspath(start_path)], {}, 0
+            return [], {}, 0
+
+        image_files = self._mtime_sort_image_files(image_files, file_stats)
+        start_idx = 0
+        if start_path:
+            start_norm = _norm_path(start_path)
+            for i, fp in enumerate(image_files):
+                if _norm_path(fp) == start_norm:
+                    start_idx = i
+                    break
+        return image_files, file_stats, start_idx
+
+    def _start_quick_folder_index(self, folder_path: str, start_path: str, token: int) -> None:
+        """Background scandir to expand the fast-open navigation list before EXIF sort completes."""
+        signals = QuickFolderIndexSignals()
+        signals.ready.connect(self._on_quick_folder_index_ready)
+        self._active_quick_folder_index_signals = signals
+        viewer = self
+
+        class _QuickFolderIndexWorker(QRunnable):
+            def run(self_inner):
+                import time
+
+                try:
+                    t0 = time.time()
+                    files, stats, start_idx = viewer._build_quick_folder_image_list(
+                        folder_path, start_path
+                    )
+                    scan_s = time.time() - t0
+                    signals.ready.emit(token, files, stats, start_idx, scan_s)
+                except Exception:
+                    pass
+
+        QThreadPool.globalInstance().start(_QuickFolderIndexWorker())
+
+    def _on_quick_folder_index_ready(
+        self, token, image_files, file_stats, start_idx, scan_s
+    ) -> None:
+        if token != getattr(self, "_folder_load_generation", None):
+            return
+        if token != getattr(self, "_folder_fast_open_token", None):
+            return
+        if not image_files:
+            return
+
+        import logging
+
+        logger = logging.getLogger(__name__)
+        preserved = self.current_file_path
+        self.image_files = list(image_files)
+        self._semantic_search_corpus_files = list(image_files)
+        self._quick_folder_file_stats = file_stats
+
+        if preserved:
+            preserved_norm = _norm_path(preserved)
+            idx = start_idx
+            for i, fp in enumerate(image_files):
+                if _norm_path(fp) == preserved_norm:
+                    idx = i
+                    break
+            self.current_file_index = idx
+            self.current_file_path = image_files[idx]
+        else:
+            self.current_file_index = start_idx
+            self.current_file_path = image_files[start_idx]
+
+        self._sync_filmstrip_to_folder()
+        self.update_status_bar()
+        logger.info(
+            "[FOLDER] Quick folder index ready: %d images in %.3fs (navigation enabled)",
+            len(image_files),
+            scan_s,
+        )
+        if len(image_files) > 1:
+            self._schedule_folder_sort_refinement(token, file_stats)
+
+    def _apply_instant_single_file_open(self, folder_path: str, start_path: str, token: int) -> None:
+        """Show the requested image immediately while the folder scan continues in background."""
+        import logging
+
+        logger = logging.getLogger(__name__)
+        self._folder_fast_open_token = token
+        self.current_folder = folder_path
+        self.image_files = [start_path]
+        self._semantic_search_corpus_files = [start_path]
+        self.current_file_index = 0
+        self.current_file_path = start_path
+        self._quick_folder_file_stats = {}
+        self._filmstrip_warmed_paths = set()
+        self._gallery_bulk_metadata = {}
+        try:
+            if getattr(self, "image_manager", None) is not None:
+                self.image_manager.cancel_all_tasks()
+        except Exception:
+            pass
+        self._displayed_content_path = None
+        self._manager_display_track_path = None
+        self._manager_displayed_max_dim = 0
+        self._last_loaded_path = None
+        self._last_manager_exif_path = None
+        self._last_manager_exif_ts = 0.0
+        self.current_image = None
+        self.current_pixmap = None
+        self._is_half_size_displayed = False
+        self._full_resolution_loading = False
+        self._preserve_nav_zoom_active = False
+        self._pending_zoom_restore = False
+        self._restore_zoom_center = None
+        self._restore_zoom_level = None
+        if hasattr(self, "_maintain_zoom_on_navigation"):
+            try:
+                delattr(self, "_maintain_zoom_on_navigation")
+            except AttributeError:
+                pass
+        if hasattr(self, "image_label"):
+            self.image_label.clear()
+        if hasattr(self, "loading_overlay"):
+            self.loading_overlay.show_loading("Loading image...")
+        if getattr(self, "view_mode", "single") != "single":
+            self.view_mode = "single"
+        logger.info(
+            "[FOLDER] Fast single-file open: %s (quick index + EXIF sort continue in background)",
+            os.path.basename(start_path),
+        )
+        self._show_single_view()
+        self._start_quick_folder_index(folder_path, start_path, token)
+
+    def _schedule_folder_sort_refinement(self, token: int, file_stats: dict) -> None:
+        """Refine mtime-based folder order to EXIF capture-time order in the background."""
+        if token != getattr(self, "_folder_load_generation", None):
+            return
+        if getattr(self, "_folder_sort_refinement_token", None) == token:
+            return
+        paths = list(getattr(self, "image_files", []) or [])
+        if len(paths) <= 1:
+            return
+        self._folder_sort_refinement_token = token
+        newest_first = self.get_sort_preference()
+        viewer = self
+
+        class _FolderSortRefineWorker(QRunnable):
+            def run(self_inner):
+                try:
+                    sorted_files, bulk_metadata = viewer.sort_files_by_capture_time(
+                        paths,
+                        newest_first=newest_first,
+                        file_stats=file_stats,
+                    )
+                except Exception:
+                    return
+
+                def _apply():
+                    viewer._apply_folder_sort_refinement(token, sorted_files, bulk_metadata)
+
+                QTimer.singleShot(0, _apply)
+
+        QThreadPool.globalInstance().start(_FolderSortRefineWorker())
+
+    def _apply_folder_sort_refinement(self, token: int, sorted_files: list, bulk_metadata: dict) -> None:
+        if token != getattr(self, "_folder_load_generation", None):
+            return
+        if not sorted_files:
+            return
+        preserved = self.current_file_path
+        self.image_files = sorted_files
+        self._semantic_search_corpus_files = list(sorted_files)
+        if bulk_metadata:
+            self._gallery_bulk_metadata = bulk_metadata
+        if preserved:
+            preserved_norm = _norm_path(preserved)
+            for i, fp in enumerate(sorted_files):
+                if _norm_path(fp) == preserved_norm:
+                    self.current_file_index = i
+                    self.current_file_path = fp
+                    break
+        self._sync_filmstrip_to_folder()
+        self.update_status_bar()
+        if getattr(self, "view_mode", "single") == "gallery":
+            self._update_gallery_view()
+
     def _on_folder_load_error(self, token, title, message):
         if token != getattr(self, "_folder_load_generation", None):
             return
+        if getattr(self, "_folder_fast_open_token", None) == token:
+            self._folder_fast_open_token = None
         self._active_folder_load_worker = None
         self._active_folder_load_signals = None
         self._hide_all_loading_indicators()
@@ -14617,6 +14878,10 @@ class RAWImageViewer(QMainWindow):
         apply_start = time.time()
         self._active_folder_load_worker = None
         self._active_folder_load_signals = None
+        was_fast_open = getattr(self, "_folder_fast_open_token", None) == token
+        if was_fast_open:
+            self._folder_fast_open_token = None
+        preserved_path = self.current_file_path if was_fast_open else None
 
         try:
             extensions = self.get_supported_extensions()
@@ -14636,50 +14901,58 @@ class RAWImageViewer(QMainWindow):
             self._semantic_search_corpus_files = list(image_files)
             self._filmstrip_warmed_paths = set()
             self._gallery_bulk_metadata = bulk_metadata
-            # Folder switched: invalidate render/task state from previous folder so
-            # stale async callbacks cannot keep the old content visible.
-            try:
-                if getattr(self, "image_manager", None) is not None:
-                    self.image_manager.cancel_all_tasks()
-            except Exception:
-                pass
-            self._displayed_content_path = None
-            self._manager_display_track_path = None
-            self._manager_displayed_max_dim = 0
-            self._last_loaded_path = None
-            self._last_manager_exif_path = None
-            self._last_manager_exif_ts = 0.0
-            # Clear previously displayed single-view content so the new folder does not
-            # temporarily show stale dimensions/pixels from the old folder.
-            self.current_image = None
-            self.current_pixmap = None
-            self._displayed_content_path = None
-            self._manager_displayed_max_dim = 0
-            self._is_half_size_displayed = False
-            self._full_resolution_loading = False
-            self._preserve_nav_zoom_active = False
-            self._pending_zoom_restore = False
-            self._restore_zoom_center = None
-            self._restore_zoom_level = None
-            if hasattr(self, '_maintain_zoom_on_navigation'):
+            if not was_fast_open:
+                # Folder switched: invalidate render/task state from previous folder so
+                # stale async callbacks cannot keep the old content visible.
                 try:
-                    delattr(self, "_maintain_zoom_on_navigation")
-                except AttributeError:
+                    if getattr(self, "image_manager", None) is not None:
+                        self.image_manager.cancel_all_tasks()
+                except Exception:
                     pass
-            
-            # Immediately clear the image view to prevent stale pixels
-            self.image_label.setPixmap(QPixmap())
-            self.image_label.setText("Loading folder...")
-            self.image_label.adjustSize()
-            self.scroll_area.updateGeometry()
-            try:
-                if hasattr(self, "image_label") and self.image_label is not None:
-                    self.image_label.clear()
-            except Exception:
-                pass
+                self._displayed_content_path = None
+                self._manager_display_track_path = None
+                self._manager_displayed_max_dim = 0
+                self._last_loaded_path = None
+                self._last_manager_exif_path = None
+                self._last_manager_exif_ts = 0.0
+                # Clear previously displayed single-view content so the new folder does not
+                # temporarily show stale dimensions/pixels from the old folder.
+                self.current_image = None
+                self.current_pixmap = None
+                self._displayed_content_path = None
+                self._manager_displayed_max_dim = 0
+                self._is_half_size_displayed = False
+                self._full_resolution_loading = False
+                self._preserve_nav_zoom_active = False
+                self._pending_zoom_restore = False
+                self._restore_zoom_center = None
+                self._restore_zoom_level = None
+                if hasattr(self, '_maintain_zoom_on_navigation'):
+                    try:
+                        delattr(self, "_maintain_zoom_on_navigation")
+                    except AttributeError:
+                        pass
+
+                # Immediately clear the image view to prevent stale pixels
+                self.image_label.setPixmap(QPixmap())
+                self.image_label.setText("Loading folder...")
+                self.image_label.adjustSize()
+                self.scroll_area.updateGeometry()
+                try:
+                    if hasattr(self, "image_label") and self.image_label is not None:
+                        self.image_label.clear()
+                except Exception:
+                    pass
 
             try:
-                if start_file:
+                idx = 0
+                if preserved_path:
+                    preserved_norm = _norm_path(preserved_path)
+                    for i, img_file in enumerate(self.image_files):
+                        if _norm_path(img_file) == preserved_norm:
+                            idx = i
+                            break
+                elif start_file:
                     start_file_path = None
                     # Windows-friendly matching for file-open/folder-switch flows:
                     # caller may pass full path, basename, or different casing/slashes.
@@ -14698,14 +14971,19 @@ class RAWImageViewer(QMainWindow):
                             start_file,
                         )
                     idx = self.image_files.index(start_file_path) if start_file_path in self.image_files else 0
-                else:
-                    idx = 0
                 self.current_file_index = idx
                 self.current_file_path = self.image_files[idx]
             except Exception:
                 logger.exception("Error determining start file")
                 self.current_file_index = 0
                 self.current_file_path = self.image_files[0] if self.image_files else None
+
+            skip_single_reload = bool(
+                was_fast_open
+                and preserved_path
+                and self.current_file_path
+                and _norm_path(preserved_path) == _norm_path(self.current_file_path)
+            )
 
             if hasattr(self, 'view_mode') and self.view_mode == 'gallery' and getattr(self, 'gallery_justified', None):
                 self.gallery_justified.show_loading_message("Preparing gallery...")
@@ -14718,6 +14996,15 @@ class RAWImageViewer(QMainWindow):
                 # race when switching folders quickly.
                 QTimer.singleShot(0, self._update_gallery_view)
                 QTimer.singleShot(120, self._update_gallery_view)
+            elif skip_single_reload:
+                QTimer.singleShot(0, self._sync_filmstrip_to_folder)
+                self.update_status_bar()
+                logger.info(
+                    "[FOLDER] Folder index ready (%d images); kept fast-opened image on screen",
+                    len(self.image_files),
+                )
+                if len(self.image_files) > 1:
+                    self._schedule_folder_sort_refinement(token, file_stats)
             else:
                 self._show_single_view()
                 QTimer.singleShot(0, self._sync_filmstrip_to_folder)
@@ -14769,6 +15056,19 @@ class RAWImageViewer(QMainWindow):
                 # Legacy behavior: opening a specific file from gallery focuses single view.
                 self.view_mode = "single"
 
+            self._folder_load_generation = getattr(self, "_folder_load_generation", 0) + 1
+            token = self._folder_load_generation
+            extensions = set(self.get_supported_extensions())
+            newest_first = self.get_sort_preference()
+
+            fast_open = self._should_fast_open_single_file(start_file, start_view)
+            if fast_open:
+                start_path = self._resolve_start_file_path(folder_path, start_file)
+                if start_path:
+                    self._apply_instant_single_file_open(folder_path, start_path, token)
+                else:
+                    fast_open = False
+
             if hasattr(self, 'view_mode'):
                 if self.view_mode == 'gallery':
                     if not hasattr(self, 'gallery_widget') or not self.gallery_widget:
@@ -14780,19 +15080,17 @@ class RAWImageViewer(QMainWindow):
                         self.gallery_widget.show()
                 else:
                     if hasattr(self, 'loading_overlay'):
-                        self.loading_overlay.show_loading("Scanning folder...")
-                    if hasattr(self, 'image_label'):
+                        if not fast_open:
+                            self.loading_overlay.show_loading("Scanning folder...")
+                    if hasattr(self, 'image_label') and not fast_open:
                         self.image_label.clear()
-
-            self._folder_load_generation = getattr(self, "_folder_load_generation", 0) + 1
-            token = self._folder_load_generation
-            extensions = set(self.get_supported_extensions())
-            newest_first = self.get_sort_preference()
 
             signals = FolderLoadSignals()
             signals.ready.connect(self._on_folder_load_ready)
             signals.error.connect(self._on_folder_load_error)
             self._active_folder_load_signals = signals
+            self._folder_sort_refinement_token = None
+            viewer = self
 
             class _FolderLoadWorker(QRunnable):
                 def __init__(self_inner, token, folder_path, extensions, newest_first,
@@ -14831,14 +15129,9 @@ class RAWImageViewer(QMainWindow):
                         scan_start = time.time()
                         image_files = []
                         file_stats = {}
-                        seen_paths = set()
-                        for full_path, stat_info in self_inner._scan_top_level_only(
+                        for ap, stat_info in viewer._scan_folder_image_paths(
                             self_inner.folder_path
                         ):
-                            ap = os.path.abspath(full_path)
-                            if ap in seen_paths:
-                                continue
-                            seen_paths.add(ap)
                             image_files.append(ap)
                             file_stats[ap] = (stat_info.st_size, stat_info.st_mtime)
 
@@ -14847,32 +15140,37 @@ class RAWImageViewer(QMainWindow):
                         sort_start = time.time()
                         bulk_metadata = {}
                         if image_files:
-                            from image_cache import get_image_cache
-                            cache = get_image_cache()
-                            bulk_metadata = cache.get_multiple_exif(image_files, file_stats)
-
                             from common_image_loader import capture_timestamp_for_sort
 
-                            sort_keys = {}
-                            for fp in image_files:
-                                meta = bulk_metadata.get(fp)
-                                mtime = file_stats.get(fp, (0, 0))[1]
-                                timestamp = capture_timestamp_for_sort(
-                                    fp, meta, mtime, probe_file=True
+                            if self_inner.start_file:
+                                image_files = viewer._mtime_sort_image_files(
+                                    image_files, file_stats, self_inner.newest_first
                                 )
-                                base_name = os.path.basename(fp).lower()
-                                stem = os.path.splitext(base_name)[0]
-                                ext = os.path.splitext(base_name)[1]
-                                # Keep DNG+JPEG backup pairs adjacent while preferring
-                                # display-friendly non-RAW variants first.
-                                raw_rank = 1 if is_raw_file(fp) else 0
-                                primary_ts = -timestamp if self_inner.newest_first else timestamp
-                                sort_keys[fp] = (primary_ts, stem, raw_rank, ext, base_name)
+                            else:
+                                from image_cache import get_image_cache
+                                cache = get_image_cache()
+                                bulk_metadata = cache.get_multiple_exif(image_files, file_stats)
 
-                            image_files = sorted(
-                                image_files,
-                                key=lambda fp: sort_keys[fp],
-                            )
+                                sort_keys = {}
+                                for fp in image_files:
+                                    meta = bulk_metadata.get(fp)
+                                    mtime = file_stats.get(fp, (0, 0))[1]
+                                    timestamp = capture_timestamp_for_sort(
+                                        fp, meta, mtime, probe_file=True
+                                    )
+                                    base_name = os.path.basename(fp).lower()
+                                    stem = os.path.splitext(base_name)[0]
+                                    ext = os.path.splitext(base_name)[1]
+                                    # Keep DNG+JPEG backup pairs adjacent while preferring
+                                    # display-friendly non-RAW variants first.
+                                    raw_rank = 1 if is_raw_file(fp) else 0
+                                    primary_ts = -timestamp if self_inner.newest_first else timestamp
+                                    sort_keys[fp] = (primary_ts, stem, raw_rank, ext, base_name)
+
+                                image_files = sorted(
+                                    image_files,
+                                    key=lambda fp: sort_keys[fp],
+                                )
                         sort_time = time.time() - sort_start
 
                         self_inner.signals.ready.emit(
@@ -15385,13 +15683,13 @@ def main():
             # 4. Continue with initialization
             if is_windows:
                 safe_print("  [Windows] Setting AppUserModelID...", flush=True)
-                myappid = 'RAWviewer.2.1.0'
+                myappid = 'RAWviewer.2.2.0'
                 ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
                 safe_print("  [Windows] AppUserModelID set", flush=True)
 
             # Set application properties
             app.setApplicationName("RAWviewer")
-            app.setApplicationVersion("2.1.0")
+            app.setApplicationVersion("2.2.0")
 
             # Create and show main window
             safe_print("Creating RAWImageViewer...", flush=True)
