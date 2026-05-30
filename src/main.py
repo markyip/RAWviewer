@@ -4801,6 +4801,68 @@ def _share_windows_clipboard_file_via_powershell(path: str) -> bool:
         return False
 
 
+def _resolve_windows_share_helper_exe():
+    """Locate built WindowsShareHelper.exe (dev tree or bundled install)."""
+    rel = os.path.join(
+        "windows_share_helper",
+        "bin",
+        "Release",
+        "net8.0-windows10.0.19041.0",
+        "WindowsShareHelper.exe",
+    )
+    here = os.path.dirname(os.path.abspath(__file__))
+    candidates = [os.path.join(here, rel)]
+    if getattr(sys, "frozen", False):
+        exe_dir = os.path.dirname(os.path.abspath(sys.executable))
+        candidates.append(os.path.join(exe_dir, "WindowsShareHelper.exe"))
+        meipass = getattr(sys, "_MEIPASS", None)
+        if meipass:
+            candidates.append(os.path.join(meipass, "WindowsShareHelper.exe"))
+    for candidate in candidates:
+        if candidate and os.path.isfile(candidate):
+            return candidate
+    return None
+
+
+def _share_windows_via_helper(path: str, owner_hwnd: int) -> bool:
+    """Launch the .NET helper that wraps IDataTransferManagerInterop."""
+    import subprocess
+
+    if not owner_hwnd:
+        return False
+    helper = _resolve_windows_share_helper_exe()
+    if not helper:
+        return False
+    abs_path = os.path.abspath(path)
+    if not os.path.isfile(abs_path):
+        return False
+    flags = 0
+    if hasattr(subprocess, "CREATE_NO_WINDOW"):
+        flags = subprocess.CREATE_NO_WINDOW  # type: ignore[attr-defined]
+    try:
+        proc = subprocess.Popen(
+            [helper, str(int(owner_hwnd)), abs_path],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=flags,
+        )
+        return proc.poll() is None or proc.returncode == 0
+    except Exception:
+        return False
+
+
+def _share_windows_via_winrt(path: str, owner_hwnd: int) -> bool:
+    """In-process WinRT share sheet (DataTransferManager + interop)."""
+    if not owner_hwnd:
+        return False
+    try:
+        from windows_share import share_file_windows
+
+        return bool(share_file_windows(path, owner_hwnd))
+    except Exception:
+        return False
+
+
 class RAWImageViewer(QMainWindow):
     def _load_pixmap_safe(self, file_path):
         """Safely load QPixmap, using rawpy for RAW files and PIL for TIFF files to avoid Qt warnings"""
@@ -10998,7 +11060,7 @@ class RAWImageViewer(QMainWindow):
         self.status_bar.showMessage("Share unavailable — path copied to clipboard", 4000)
 
     def _share_windows_ui_chain(self, path: str):
-        """Run after the next event-loop tick so Shell share UI can attach to a pumped UI thread."""
+        """Run after the next event-loop tick so share UI can attach to a pumped UI thread."""
         owner = 0
         wh = self.windowHandle()
         if wh is not None:
@@ -11011,6 +11073,12 @@ class RAWImageViewer(QMainWindow):
                 owner = int(self.effectiveWinId())
             except Exception:
                 owner = 0
+        if _share_windows_via_winrt(path, owner):
+            self.status_bar.showMessage("Share", 1500)
+            return
+        if _share_windows_via_helper(path, owner):
+            self.status_bar.showMessage("Share", 1500)
+            return
         if self._share_windows_shell(path, owner):
             self.status_bar.showMessage("Share", 1500)
             return
@@ -11046,21 +11114,9 @@ class RAWImageViewer(QMainWindow):
             return False
 
     def _share_windows_shell(self, path: str, owner_hwnd: int = 0) -> bool:
-        """Invoke Windows share where available.
-
-        Microsoft documents programmatic sharing for desktop apps via WinRT
-        ``DataTransferManager`` + ``IDataTransferManagerInterop`` (GetForWindow /
-        ShowShareUIForWindow), not via the legacy Explorer ``share`` shell verb:
-        https://learn.microsoft.com/en-us/windows/apps/develop/ui/display-ui-objects
-
-        Calling ``ShellExecute*`` with verb ``share`` often raises Win32 error 1155 /
-        "no application is associated with this file" for many paths (including
-        common image types) because that verb is not a guaranteed shell association.
-        We therefore avoid ShellExecute-based share here and rely on Explorer COM
-        verbs first, then clipboard fallbacks in ``_share_windows_ui_chain``.
-        """
+        """Legacy Explorer shell verb fallback when WinRT share is unavailable."""
         abs_path = _norm_path(os.path.abspath(path))
-        _ = owner_hwnd  # reserved for a future WinRT (IDataTransferManagerInterop) implementation
+        _ = owner_hwnd
         try:
             import win32com.client  # type: ignore
 
@@ -13787,8 +13843,7 @@ class RAWImageViewer(QMainWindow):
             )
         if hasattr(self, "share_bottom_button"):
             vis = bool(self.image_files) and self.view_mode == "single"
-            # Share is not offered on Windows (no stable system share UX without WinRT interop).
-            self.share_bottom_button.setVisible(vis and sys.platform != "win32")
+            self.share_bottom_button.setVisible(vis)
             self.slideshow_bottom_button.setVisible(vis)
             cp = getattr(self, "current_file_path", None)
             show_rotate = bool(vis and cp and os.path.isfile(cp))

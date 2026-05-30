@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using System.Windows.Forms;
 using Windows.ApplicationModel.DataTransfer;
 using Windows.Storage;
 using WinRT;
@@ -20,6 +21,7 @@ internal static class Program
         void ShowShareUIForWindow(IntPtr appWindow);
     }
 
+    [STAThread]
     private static int Main(string[] args)
     {
         if (args.Length < 2)
@@ -41,7 +43,14 @@ internal static class Program
 
         try
         {
-            return ShareFile(hwndValue, path) ? 0 : 1;
+            if (!ShareFile(hwndValue, path))
+            {
+                return 1;
+            }
+
+            // Keep pumping messages until DataRequested completes or the user dismisses share UI.
+            Application.Run(new ApplicationContext());
+            return 0;
         }
         catch (Exception ex)
         {
@@ -73,6 +82,7 @@ internal static class Program
     {
         if (!PendingPaths.TryGetValue(hwndValue, out var path) || string.IsNullOrEmpty(path))
         {
+            Application.ExitThread();
             return;
         }
 
@@ -87,6 +97,7 @@ internal static class Program
         finally
         {
             deferral.Complete();
+            Application.ExitThread();
         }
     }
 }
