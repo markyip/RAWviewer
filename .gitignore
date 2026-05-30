@@ -127,6 +127,10 @@ tests/
 # Development scratch
 scratch/
 
+# .NET build output (Windows share helper)
+src/windows_share_helper/bin/
+src/windows_share_helper/obj/
+
 # Aviation Specialist AI
 aviation_model_v2/
 old_semantic.py
