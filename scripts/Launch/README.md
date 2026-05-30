@@ -40,3 +40,14 @@ chmod +x scripts/Launch/shell/*.sh
 **Recommended for day-to-day dev:** `pixi run start` or `scripts/Launch/bat/run_debug.bat` (Windows) / `scripts/Launch/shell/launch_dev.sh` (macOS).
 
 Root-level `run_debug.bat`, `build_windows.bat`, `launch_dev.sh`, and `build_macos.sh` are thin wrappers that forward here.
+
+## Windows share helper (optional, dev)
+
+Sources live under `src/windows_share_helper/`. Build the Release helper when testing WinRT share fallbacks (macOS uses the native share sheet; the shipping Windows bottom-bar button opens **Open with another app** instead):
+
+```batch
+cd src\windows_share_helper
+dotnet build -c Release
+```
+
+Output: `src/windows_share_helper/bin/Release/net8.0-windows10.0.19041.0/WindowsShareHelper.exe` (ignored by git; rebuild locally as needed).

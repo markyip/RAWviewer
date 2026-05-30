@@ -1,10 +1,10 @@
-# RAWviewer v2.2.0
+# RAWviewer v2.2.1
 
 <p align="center">
   <img src="icons/appicon.ico" alt="RAWviewer Icon" width="256">
 </p>
 
-![Version](https://img.shields.io/badge/version-2.2.0-blue)
+![Version](https://img.shields.io/badge/version-2.2.1-blue)
 ![Downloads](https://img.shields.io/github/downloads/markyip/RAWviewer/total) 
 ![License](https://img.shields.io/badge/license-MIT-green)
 [![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-Donate-orange?logo=buy-me-a-coffee)](https://www.buymeacoffee.com/markyip)
@@ -58,7 +58,7 @@ This is a **pre-filtering tool**, letting you go through hundreds of RAW files e
 - **Modern Installer**: Lightweight executable that automatically provisions a self-contained Python environment and downloads AI models on first launch
 - **Professional Startup**: Synchronized native and Qt splash screens for a flicker-free, premium launch experience.
 - **Modern UI**: Material Design 3 aesthetics with Font Awesome icons (via qtawesome) and non-intrusive loading indicators
-- **Platform-specific chrome**: On Windows, the bottom bar omits Share (no stable system share without WinRT interop); **Share** remains on macOS.
+- **Platform-specific chrome**: **Share** (macOS system share sheet) on macOS; **Open with another app** (native Windows picker) on Windows — send or edit the current file in Lightroom, Photoshop, etc.
 - **Non-destructive visual rotate**: Rotate in viewer by 90° steps without modifying original files (including RAW), with gallery-visible tiles refreshed immediately.
 - **Precision Focus Area Detection**: Overlays the camera's focus point(s) using manufacturer-specific MakerNote data (Canon, Nikon, Sony) plus EXIF SubjectArea/SubjectLocation with orientation-aware mapping and robust coordinate scaling.
 
@@ -76,7 +76,7 @@ This is a **pre-filtering tool**, letting you go through hundreds of RAW files e
 > **Minimum supported macOS (official prebuilt release): macOS 13 Ventura or newer.**
 
 1. Download the latest release from the [Releases Page](https://github.com/markyip/RAWviewer/releases/latest)
-2. Download and extract `RAWviewer-v2.2.0-macOS.zip`
+2. Download and extract `RAWviewer-v2.2.1-macOS.zip`
 3. Drag `RAWviewer.app` to your **Applications** folder.
 4. **CRITICAL FIRST STEP:** Because this is an open-source app not signed via the paid Apple Developer program, macOS Gatekeeper will incorrectly label it as "Damaged" or block it. **You must run this command in your Terminal once** to remove the download quarantine flag:
    ```bash
@@ -189,6 +189,14 @@ Launch scripts live under [`scripts/Launch/`](scripts/Launch/README.md). Root-le
 
 **Virtual environments:** `pixi install` → `pixi run start` uses `.pixi/`. Build/debug batch scripts use `rawviewer_env/` (created automatically). `.venv/` is optional for IDE use only.
 
+**Optional dev toggles:**
+
+| Variable | Effect |
+|----------|--------|
+| `RAWVIEWER_GPU_VIEW=1` | Use the experimental GPU-accelerated single-image viewport (smoother zoom/pan; default remains the classic scroll area) |
+| `RAWVIEWER_GPU_VIEW_NO_GL=1` | Force raster viewport when GPU view is enabled (debug / fallback) |
+| `RAWVIEWER_PERSISTENT_CACHE=1` | Enable disk/SQLite cache persistence (off by default) |
+
 ## 🏗️ Building from Source
 
 ### Prerequisites
@@ -241,6 +249,7 @@ All project dependencies are managed via `pixi.toml` instead of `requirements.tx
 - **"Windows protected your PC"**: Click "More info" → "Run anyway"
 - **Antivirus warnings**: Add RAWviewer to your antivirus exclusions
 - **Performance issues**: Try running as administrator
+- **"Open with another app" does nothing**: Ensure a file is loaded in single-image view; restart the app after upgrading. The picker uses the native `OpenAs_RunDLLW` API (Unicode paths supported).
 - **AttributeError with stdout**: This is normal for windowed builds - the application runs without a console window
 - **Installer stuck on "Downloading MobileCLIP ONNX Models" / `No module named 'requests'`**:
   - Fixed in 2.1.0+ (`requests` in `pixi.toml`). Re-run the installer from a fresh build, or in the install folder run `_internal\pixi\pixi.exe install` then retry.

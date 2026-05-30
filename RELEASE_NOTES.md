@@ -1,5 +1,19 @@
 # RAWviewer Release Notes
 
+## 🚀 Version 2.2.1
+**Release Date: May 30, 2026**
+
+🎯 What's New
+- **Windows — Open with another app**: Bottom-bar button opens the native “Open with” picker (Lightroom, Photoshop, etc.) via `OpenAs_RunDLLW` / `SHOpenWithDialog` with `OAIF_EXEC`.
+- **Experimental GPU single-image view**: Opt in with `RAWVIEWER_GPU_VIEW=1` for smoother zoom/pan on supported hardware (classic scroll area remains the default).
+
+🛠️ Fixes & improvements
+- **Search → gallery navigation**: Clicking a search result opens the correct image; film strip and arrow keys stay within filtered results.
+- **Film strip**: Fixed phantom selection, recursion on hover, and sync to search-filtered lists instead of the full folder.
+- **Search panel UI**: Collapsing the search field no longer shifts nearby status-bar icons.
+- **Gallery thumbnails**: Click handler uses the widget’s current path so reordered/filtered grids navigate correctly.
+- **Windows share helper** (sources retained for future WinRT share work): Uses an in-process hidden Form HWND for reliable foreground share UI when invoked from dev builds.
+
 ## 🚀 Version 2.2.0
 **Release Date: May 30, 2026**
 

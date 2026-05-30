@@ -888,11 +888,16 @@ class JustifiedGallery(QWidget):
                 w.index = idx  # Keep track of index on the widget
                 w.setGeometry(rect)
                 w.setFixedSize(rect.size())
-                def _on_thumb_click(e, p=path):
+                def _on_thumb_click(e, _w=w):
                     try:
                         if e.button() == Qt.MouseButton.LeftButton:
                             e.accept()
-                            self.parent_viewer._gallery_item_clicked(p)
+                            # Read the widget's CURRENT file_path. Widgets are pooled and
+                            # reused by index, so a captured path can go stale when the
+                            # image list changes (e.g. after a search filter).
+                            target_path = getattr(_w, "file_path", None)
+                            if target_path:
+                                self.parent_viewer._gallery_item_clicked(target_path)
                             return
                     except Exception:
                         pass

@@ -6,11 +6,43 @@ using WinRT;
 
 namespace RawViewerShare;
 
+internal static class NativeMethods
+{
+    private const int GwlpHwndParent = -8;
+
+    [DllImport("user32.dll", EntryPoint = "SetWindowLong")]
+    private static extern IntPtr SetWindowLong32(IntPtr hWnd, int nIndex, IntPtr dwNewLong);
+
+    [DllImport("user32.dll", EntryPoint = "SetWindowLongPtr")]
+    private static extern IntPtr SetWindowLong64(IntPtr hWnd, int nIndex, IntPtr dwNewLong);
+
+    [DllImport("user32.dll")]
+    internal static extern bool SetForegroundWindow(IntPtr hWnd);
+
+    internal static void SetWindowOwner(IntPtr child, IntPtr owner)
+    {
+        if (child == IntPtr.Zero || owner == IntPtr.Zero)
+        {
+            return;
+        }
+
+        if (IntPtr.Size == 8)
+        {
+            SetWindowLong64(child, GwlpHwndParent, owner);
+        }
+        else
+        {
+            SetWindowLong32(child, GwlpHwndParent, owner);
+        }
+    }
+}
+
 internal static class Program
 {
     private static readonly Guid DtmIid = new(0xa5caee9b, 0x8708, 0x49d1, 0x8d, 0x36, 0x67, 0xd2, 0x5a, 0x8d, 0xa0, 0x0c);
     private static readonly Dictionary<long, string> PendingPaths = new();
     private static readonly HashSet<long> RegisteredHwnds = new();
+    private static Form? _hostForm;
 
     [ComImport]
     [Guid("3A3DCD6C-3EAB-43DC-BCDE-45671CE800C8")]
@@ -26,11 +58,11 @@ internal static class Program
     {
         if (args.Length < 2)
         {
-            Console.Error.WriteLine("usage: WindowsShareHelper <hwnd> <file-path>");
+            Console.Error.WriteLine("usage: WindowsShareHelper <owner-hwnd> <file-path>");
             return 2;
         }
 
-        if (!long.TryParse(args[0], out var hwndValue) || hwndValue == 0)
+        if (!long.TryParse(args[0], out var ownerHwndValue))
         {
             return 3;
         }
@@ -43,7 +75,7 @@ internal static class Program
 
         try
         {
-            if (!ShareFile(hwndValue, path))
+            if (!ShareFile(ownerHwndValue, path))
             {
                 return 1;
             }
@@ -59,28 +91,71 @@ internal static class Program
         }
     }
 
-    private static bool ShareFile(long hwndValue, string path)
+    private static IntPtr EnsureHostWindow(IntPtr ownerHwnd)
     {
-        PendingPaths[hwndValue] = path;
-        var hwnd = new IntPtr(hwndValue);
-        var interop = DataTransferManager.As<IDataTransferManagerInterop>();
-
-        if (!RegisteredHwnds.Contains(hwndValue))
+        if (_hostForm == null || _hostForm.IsDisposed)
         {
-            var raw = interop.GetForWindow(hwnd, DtmIid);
-            var manager = MarshalInterface<DataTransferManager>.FromAbi(raw);
-            var capturedHwnd = hwndValue;
-            manager.DataRequested += (_, args) => OnDataRequested(capturedHwnd, args);
-            RegisteredHwnds.Add(hwndValue);
+            _hostForm = new Form
+            {
+                ShowInTaskbar = false,
+                FormBorderStyle = FormBorderStyle.None,
+                StartPosition = FormStartPosition.CenterScreen,
+                Width = 1,
+                Height = 1,
+                Opacity = 0,
+            };
         }
 
-        interop.ShowShareUIForWindow(hwnd);
+        if (!_hostForm.IsHandleCreated)
+        {
+            _hostForm.CreateControl();
+        }
+
+        if (!_hostForm.Visible)
+        {
+            // Keep a real (but invisible) top-level window alive for WinRT on first use.
+            _hostForm.Show();
+        }
+
+        var hostHwnd = _hostForm.Handle;
+        NativeMethods.SetWindowOwner(hostHwnd, ownerHwnd);
+        return hostHwnd;
+    }
+
+    private static bool ShareFile(long ownerHwndValue, string path)
+    {
+        // WinRT share APIs require a window handle owned by the calling process.
+        // The Python/Qt HWND is only used as an owner for z-order; DTM calls use
+        // a hidden helper-owned form handle in this process.
+        var ownerHwnd = ownerHwndValue == 0 ? IntPtr.Zero : new IntPtr(ownerHwndValue);
+        var hostHwnd = EnsureHostWindow(ownerHwnd);
+        var hostKey = hostHwnd.ToInt64();
+        PendingPaths[hostKey] = path;
+
+        if (ownerHwnd != IntPtr.Zero)
+        {
+            NativeMethods.SetForegroundWindow(ownerHwnd);
+        }
+
+        var interop = DataTransferManager.As<IDataTransferManagerInterop>();
+
+        if (!RegisteredHwnds.Contains(hostKey))
+        {
+            var raw = interop.GetForWindow(hostHwnd, DtmIid);
+            var manager = MarshalInterface<DataTransferManager>.FromAbi(raw);
+            var capturedKey = hostKey;
+            manager.DataRequested += (_, args) => OnDataRequested(capturedKey, args);
+            RegisteredHwnds.Add(hostKey);
+        }
+
+        Application.DoEvents();
+        interop.ShowShareUIForWindow(hostHwnd);
         return true;
     }
 
-    private static async void OnDataRequested(long hwndValue, DataRequestedEventArgs args)
+    private static async void OnDataRequested(long hostKey, DataRequestedEventArgs args)
     {
-        if (!PendingPaths.TryGetValue(hwndValue, out var path) || string.IsNullOrEmpty(path))
+        if (!PendingPaths.TryGetValue(hostKey, out var path) || string.IsNullOrEmpty(path))
         {
             Application.ExitThread();
             return;

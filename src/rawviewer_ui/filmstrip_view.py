@@ -160,13 +160,22 @@ class FilmStripBar(QFrame):
         self._rebuild_layout_slots()
         QTimer.singleShot(0, self._reload_visible)
 
-    def set_files(self, files: List[str], bulk_metadata: Optional[dict] = None) -> None:
+    def current_files(self) -> tuple:
+        return tuple(self._files)
+
+    def set_files(
+        self,
+        files: List[str],
+        bulk_metadata: Optional[dict] = None,
+        *,
+        select_index: Optional[int] = None,
+    ) -> None:
         self._generation += 1
+        # Recycle every live cell — do not just clear the dict. Orphaned QLabel
+        # widgets would stay visible with stale thumbnails/selection styling.
+        for idx in list(self._cells.keys()):
+            self._recycle_cell(idx)
         self._files = list(files) if files else []
-        self._cells.clear()
-        for w in list(self._cell_pool):
-            w.hide()
-            w.setParent(self._content)
         self._active_paths.clear()
         self._thumb_gen.clear()
         self._rebuild_path_index()
@@ -175,8 +184,9 @@ class FilmStripBar(QFrame):
         self._fetch_missing_metadata()
         self._rebuild_layout_slots()
         if self._files:
-            idx = max(0, min(self._current_index, len(self._files) - 1))
-            if self._current_index < 0:
+            if select_index is not None and select_index >= 0:
+                idx = max(0, min(select_index, len(self._files) - 1))
+            else:
                 idx = 0
             self._current_index = idx
             self._pending_index = idx
@@ -459,9 +469,13 @@ class FilmStripBar(QFrame):
         cell = self._cells.pop(index, None)
         if cell is not None:
             path = self._files[index] if 0 <= index < len(self._files) else None
+            if not path:
+                path = getattr(cell, "_filmstrip_path", None)
             if path:
                 self._active_paths.discard(path)
             self._clear_cell_thumbnail(cell)
+            cell.setObjectName("filmstrip_cell")
+            cell.setStyleSheet("")
             cell.hide()
             self._cell_pool.append(cell)
 
@@ -472,6 +486,8 @@ class FilmStripBar(QFrame):
         if self._cell_pool:
             cell = self._cell_pool.pop()
             self._clear_cell_thumbnail(cell)
+            cell.setObjectName("filmstrip_cell")
+            cell.setStyleSheet("")
         else:
             cell = QLabel(self._content)
             cell.setObjectName("filmstrip_cell")
