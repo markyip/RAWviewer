@@ -1,10 +1,10 @@
-# RAWviewer v2.2.1
+# RAWviewer v2.2.2
 
 <p align="center">
   <img src="icons/appicon.ico" alt="RAWviewer Icon" width="256">
 </p>
 
-![Version](https://img.shields.io/badge/version-2.2.1-blue)
+![Version](https://img.shields.io/badge/version-2.2.2-blue)
 ![Downloads](https://img.shields.io/github/downloads/markyip/RAWviewer/total) 
 ![License](https://img.shields.io/badge/license-MIT-green)
 [![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-Donate-orange?logo=buy-me-a-coffee)](https://www.buymeacoffee.com/markyip)
@@ -44,6 +44,8 @@ This is a **pre-filtering tool**, letting you go through hundreds of RAW files e
 - **Optional Persistent Cache**: Set `RAWVIEWER_PERSISTENT_CACHE=1` to re-enable disk/SQLite cache persistence
 - **Gallery View**: Justified grid layout with virtualized rendering, EXIF-aware ordering, and current-image positioning
 - **Gallery search (macOS + Core ML bundle)**: Free-text semantic ranking plus structured metadata filters (`camera:`, ISO, GPS, **`format:`** / **`ext:`**, and more — see README table below)
+- **Search from single-image view**: Submit a query from single view to jump into gallery with filtered results; arrow keys and the film strip stay within that result set until you clear the filter
+- **Film strip (single-image view)**: Bottom thumbnail strip fades in when the pointer nears the lower edge (extended hot zone above the strip); fades out when you leave. Click a thumbnail to jump; stays synced with search filters.
 - **Wide RAW format support**: Canon (CR2, CR3), Nikon (NEF), Sony (ARW), Adobe DNG, and many more
 - **Robust Orientation Handling**: Definitive fixes for Sony ARW and other RAW formats, ensuring images are always displayed upright
 - **Pillarbox-Free Gallery**: Accurately calculates aspect ratios to prevent black bars in the gallery view
@@ -76,7 +78,7 @@ This is a **pre-filtering tool**, letting you go through hundreds of RAW files e
 > **Minimum supported macOS (official prebuilt release): macOS 13 Ventura or newer.**
 
 1. Download the latest release from the [Releases Page](https://github.com/markyip/RAWviewer/releases/latest)
-2. Download and extract `RAWviewer-v2.2.1-macOS.zip`
+2. Download and extract `RAWviewer-v2.2.2-macOS.zip`
 3. Drag `RAWviewer.app` to your **Applications** folder.
 4. **CRITICAL FIRST STEP:** Because this is an open-source app not signed via the paid Apple Developer program, macOS Gatekeeper will incorrectly label it as "Damaged" or block it. **You must run this command in your Terminal once** to remove the download quarantine flag:
    ```bash
@@ -151,6 +153,7 @@ Both naming schemes are supported:
 - **Scroll Wheel (zoom mode)**: Pan image vertically
 - **Horizontal Wheel (zoom mode)**: Pan image horizontally (left/right)
 - **Scroll Wheel (Gallery View)**: Scroll through the image grid
+- **Film strip (Single View)**: Move the pointer toward the bottom of the image area to reveal a fading thumbnail strip; move away to dismiss. The strip includes thumbnails from the current folder or active search filter.
 
 When focus/subject indicator is enabled (`F`):
 

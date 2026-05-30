@@ -428,7 +428,7 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QMessageBox, QScrollArea, QSizePolicy, QPushButton, QFrame,
                              QGridLayout, QScrollBar, QDialog, QSplashScreen, QInputDialog,
                              QLineEdit, QStackedLayout, QGraphicsOpacityEffect)
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QPoint, QEvent, QSettings, QSize, QRect, QObject, QRunnable, QThreadPool, QTimer, QPropertyAnimation, QEasingCurve
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QPoint, QEvent, QSettings, QSize, QRect, QObject, QRunnable, QThreadPool, QTimer, QPropertyAnimation, QEasingCurve, QAbstractAnimation
 from PyQt6.QtGui import (QPixmap, QImage, QAction, QKeySequence, QShortcut, QGuiApplication,
                          QDragEnterEvent, QDropEvent, QCursor, QIcon,
                          QTransform, QRegion, QPainterPath, QPainter, QColor, QPen, QBrush, QPalette)
@@ -4519,7 +4519,11 @@ class SingleImageViewOverlay(QWidget):
 
     _HIST_MARGIN = 8
     _FILMSTRIP_HEIGHT = 88
-    _BOTTOM_HOTZONE = 72
+    # Hot zone extends above the strip so reveal starts before the cursor reaches thumbnails.
+    _FILMSTRIP_HOTZONE_EXTRA = 40
+    _BOTTOM_HOTZONE = _FILMSTRIP_HEIGHT + _FILMSTRIP_HOTZONE_EXTRA
+    _FILMSTRIP_FADE_MS = 200
+    _FILMSTRIP_HIDE_DELAY_MS = 90
 
     def __init__(self, scroll_area, histogram_widget, viewer=None, parent=None,
                  gpu_view=None):
@@ -4543,10 +4547,116 @@ class SingleImageViewOverlay(QWidget):
 
         from rawviewer_ui.filmstrip_view import FilmStripBar
         self._filmstrip = FilmStripBar(self, viewer=viewer)
+        self._filmstrip_opacity = QGraphicsOpacityEffect(self._filmstrip)
+        self._filmstrip.setGraphicsEffect(self._filmstrip_opacity)
+        self._filmstrip_opacity.setOpacity(0.0)
+        self._filmstrip_fade_anim = None
         self._filmstrip.hide()
         self._hide_filmstrip_timer = QTimer(self)
         self._hide_filmstrip_timer.setSingleShot(True)
         self._hide_filmstrip_timer.timeout.connect(self._hide_filmstrip_if_inactive)
+
+    def _stop_filmstrip_fade(self) -> None:
+        anim = getattr(self, "_filmstrip_fade_anim", None)
+        if anim is not None and anim.state() == QAbstractAnimation.State.Running:
+            anim.stop()
+        self._filmstrip_fade_anim = None
+
+    def _filmstrip_opacity_value(self) -> float:
+        try:
+            return float(self._filmstrip_opacity.opacity())
+        except Exception:
+            return 0.0
+
+    def _filmstrip_accepts_pointer(self) -> bool:
+        return (
+            self._filmstrip.isVisible()
+            and self._filmstrip_opacity_value() > 0.35
+        )
+
+    def _update_filmstrip_hit_testing(self) -> None:
+        accept = self._filmstrip_accepts_pointer()
+        self._filmstrip.setAttribute(
+            Qt.WidgetAttribute.WA_TransparentForMouseEvents, not accept
+        )
+
+    def _animate_filmstrip_opacity(self, target: float, on_finished=None) -> None:
+        target = max(0.0, min(1.0, float(target)))
+        current = self._filmstrip_opacity_value()
+        if abs(current - target) < 0.02:
+            self._filmstrip_opacity.setOpacity(target)
+            self._update_filmstrip_hit_testing()
+            if on_finished is not None:
+                on_finished()
+            return
+
+        self._stop_filmstrip_fade()
+        anim = QPropertyAnimation(self._filmstrip_opacity, b"opacity", self)
+        anim.setDuration(self._FILMSTRIP_FADE_MS)
+        anim.setStartValue(current)
+        anim.setEndValue(target)
+        if target >= current:
+            anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        else:
+            anim.setEasingCurve(QEasingCurve.Type.InCubic)
+
+        def _on_value_changed(_value):
+            self._update_filmstrip_hit_testing()
+
+        def _on_finished():
+            self._filmstrip_fade_anim = None
+            self._update_filmstrip_hit_testing()
+            if on_finished is not None:
+                on_finished()
+
+        anim.valueChanged.connect(_on_value_changed)
+        anim.finished.connect(_on_finished)
+        self._filmstrip_fade_anim = anim
+        anim.start()
+
+    def _fade_in_filmstrip(self) -> None:
+        if not self._filmstrip.isEnabled():
+            return
+        self._hide_filmstrip_timer.stop()
+        starting = not self._filmstrip.isVisible()
+        if not starting and self._filmstrip_opacity_value() >= 0.99:
+            return
+        anim = getattr(self, "_filmstrip_fade_anim", None)
+        if (
+            not starting
+            and anim is not None
+            and anim.state() == QAbstractAnimation.State.Running
+            and float(anim.endValue()) >= 0.99
+        ):
+            return
+        self._stop_filmstrip_fade()
+        if starting:
+            self._filmstrip_reveal = True
+            self._filmstrip_opacity.setOpacity(0.0)
+            self._filmstrip.show()
+            self._layout_filmstrip()
+            if hasattr(self._filmstrip, "center_on_current"):
+                QTimer.singleShot(0, lambda: self._filmstrip.center_on_current())
+            if hasattr(self._filmstrip, "refresh_visible_thumbnails"):
+                QTimer.singleShot(0, lambda: self._filmstrip.refresh_visible_thumbnails(
+                    refresh_cache=True
+                ))
+        self._filmstrip.raise_()
+        self._hist.raise_()
+        self._animate_filmstrip_opacity(1.0)
+
+    def _fade_out_filmstrip(self) -> None:
+        if not self._filmstrip.isVisible():
+            return
+
+        def _finish_hide():
+            self._filmstrip.hide()
+            self._filmstrip_opacity.setOpacity(0.0)
+            self._update_filmstrip_hit_testing()
+            if self._viewer is not None:
+                self._viewer._filmstrip_pointer_active = False
+
+        self._animate_filmstrip_opacity(0.0, on_finished=_finish_hide)
 
     def filmstrip_widget(self):
         return getattr(self, "_filmstrip", None)
@@ -4557,7 +4667,7 @@ class SingleImageViewOverlay(QWidget):
                 return
             self._filmstrip_pointer_active = True
             self._hide_filmstrip_timer.stop()
-            self._reveal_filmstrip()
+            self._fade_in_filmstrip()
             if self._viewer is not None:
                 self._viewer._filmstrip_pointer_active = True
             return
@@ -4567,7 +4677,7 @@ class SingleImageViewOverlay(QWidget):
         self._schedule_hide_filmstrip()
 
     def _schedule_hide_filmstrip(self) -> None:
-        self._hide_filmstrip_timer.start(0)
+        self._hide_filmstrip_timer.start(self._FILMSTRIP_HIDE_DELAY_MS)
 
     def _hide_filmstrip_if_inactive(self) -> None:
         if self._filmstrip_pointer_active:
@@ -4575,9 +4685,7 @@ class SingleImageViewOverlay(QWidget):
         if self._pointer_in_bottom_hotzone():
             return
         self._filmstrip_reveal = False
-        self._filmstrip.hide()
-        if self._viewer is not None:
-            self._viewer._filmstrip_pointer_active = False
+        self._fade_out_filmstrip()
 
     def _pointer_in_bottom_hotzone(self) -> bool:
         pos = self.mapFromGlobal(QCursor.pos())
@@ -4594,28 +4702,19 @@ class SingleImageViewOverlay(QWidget):
             return
         pos = self._local_pos_from_global(global_pos)
         in_hot = self.rect().contains(pos) and (pos.y() >= self.height() - self._BOTTOM_HOTZONE)
-        over_strip = self._filmstrip.isVisible() and self._filmstrip.geometry().contains(pos)
+        over_strip = (
+            self._filmstrip_accepts_pointer()
+            and self._filmstrip.geometry().contains(pos)
+        )
         if in_hot or over_strip or self._filmstrip.underMouse():
             self._hide_filmstrip_timer.stop()
-            self._reveal_filmstrip()
+            self._fade_in_filmstrip()
         elif not self._filmstrip_pointer_active:
             self._schedule_hide_filmstrip()
 
     def _reveal_filmstrip(self) -> None:
-        if not self._filmstrip.isEnabled():
-            return
-        if not self._filmstrip.isVisible():
-            self._filmstrip_reveal = True
-            self._filmstrip.show()
-            self._layout_filmstrip()
-            self._filmstrip.raise_()
-            self._hist.raise_()
-            if hasattr(self._filmstrip, "center_on_current"):
-                QTimer.singleShot(0, lambda: self._filmstrip.center_on_current())
-            if hasattr(self._filmstrip, "refresh_visible_thumbnails"):
-                QTimer.singleShot(0, lambda: self._filmstrip.refresh_visible_thumbnails(
-                    refresh_cache=True
-                ))
+        """Backward-compatible alias for fade-in."""
+        self._fade_in_filmstrip()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -4630,7 +4729,7 @@ class SingleImageViewOverlay(QWidget):
         self._layout_histogram()
 
     def _layout_filmstrip(self):
-        if not self._filmstrip.isVisible():
+        if not self._filmstrip.isVisible() and self._filmstrip_opacity_value() <= 0.0:
             return
         fh = self._FILMSTRIP_HEIGHT
         self._filmstrip.setGeometry(0, self.height() - fh, self.width(), fh)
@@ -6503,7 +6602,7 @@ class RAWImageViewer(QMainWindow):
         # Set window to frameless for custom title bar only on Windows
         if platform.system() == 'Windows':
             self.setWindowFlags(Qt.WindowType.FramelessWindowHint)
-        self.setWindowTitle('RAWviewer v2.2.1')
+        self.setWindowTitle('RAWviewer v2.2.2')
         
         # Set simple background style (no rounded corners - simplifies window resizing)
         self.setStyleSheet("""
@@ -6567,7 +6666,7 @@ class RAWImageViewer(QMainWindow):
         
         # Create custom title bar only on Windows
         if platform.system() == 'Windows':
-            self.title_bar = CustomTitleBar(self, title="RAWviewer v2.2.1")
+            self.title_bar = CustomTitleBar(self, title="RAWviewer v2.2.2")
         else:
             self.title_bar = None
         
@@ -16258,7 +16357,7 @@ def main():
             # 4. Continue with initialization
             if is_windows:
                 safe_print("  [Windows] Setting AppUserModelID...", flush=True)
-                myappid = 'RAWviewer.2.2.1'
+                myappid = 'RAWviewer.2.2.2'
                 ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
                 safe_print("  [Windows] AppUserModelID set", flush=True)
 

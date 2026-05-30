@@ -1,5 +1,11 @@
 # RAWviewer Release Notes
 
+## 🚀 Version 2.2.2
+**Release Date: May 30, 2026**
+
+🛠️ Fixes & improvements
+- **Film strip animation**: Smooth fade-in/out when revealing or dismissing the single-image thumbnail strip; extended bottom hot zone so the strip appears before the cursor reaches the thumbnails.
+
 ## 🚀 Version 2.2.1
 **Release Date: May 30, 2026**
 
