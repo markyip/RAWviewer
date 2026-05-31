@@ -7353,33 +7353,41 @@ class RAWImageViewer(QMainWindow):
         lab.setText(elided)
         lab.setToolTip(full if elided != full else "")
 
-    def _set_gallery_search_status(self, message: str, animate: bool = True):
+    def _set_gallery_search_status(
+        self, message: str, animate: bool = False, *, relayout: bool = True
+    ):
         has_msg = bool(message and str(message).strip())
         self._gallery_search_status_full = (message or "").strip()
-        old_target = getattr(self, "_search_panel_target_width", 300)
-        
-        # Responsive: Hide indexing status if window is too narrow (e.g. < 1200px)
-        # to prevent overlapping with the search bar or other menu elements.
-        window_width = self.width()
-        show_label = has_msg and window_width >= 1200
-        
-        # If showing label but window is somewhat narrow, use a shorter message
-        if show_label and window_width < 1400:
-            message = message.replace("Processing AI features", "AI Indexing").replace("Indexing folder", "Indexing")
 
-        # One horizontal row with the rest of the bottom bar: compact input + capped status width.
-        new_target = 500 if show_label else 250
-        self._search_panel_target_width = new_target
+        busy = bool(
+            getattr(self, "_gallery_search_busy", False)
+            or getattr(self, "_semantic_indexing_in_progress", False)
+            or getattr(self, "_semantic_asset_download_in_progress", False)
+        )
+        inp = getattr(self, "gallery_search_input", None)
+        if inp is not None:
+            if busy or has_msg:
+                if busy and not inp.isReadOnly():
+                    self._set_gallery_search_busy(True)
+                self._apply_gallery_search_placeholder_elide()
+            elif inp.isReadOnly():
+                self._set_gallery_search_busy(False)
+            elif not has_msg:
+                inp.setToolTip("")
 
-        if hasattr(self, "gallery_search_status_label") and self.gallery_search_status_label is not None:
-            if show_label:
-                self.gallery_search_status_label.show()
-                self._apply_gallery_search_status_elide()
-            else:
-                self.gallery_search_status_label.setText("")
-                self.gallery_search_status_label.setToolTip("")
-                self.gallery_search_status_label.hide()
-        
+        if not has_msg and hasattr(self, "status_bar") and self.status_bar is not None:
+            try:
+                self.status_bar.clearMessage()
+            except Exception:
+                pass
+
+        if not relayout:
+            return
+
+        self._search_panel_target_width = int(
+            getattr(self, "_search_panel_target_width_idle", 300) or 300
+        )
+
         if getattr(self, "view_mode", "single") != "gallery":
             if not getattr(self, "_search_panel_expanded", False):
                 return
@@ -7387,14 +7395,9 @@ class RAWImageViewer(QMainWindow):
         user_collapsed = getattr(
             self, "_gallery_search_user_collapsed_while_busy", False
         )
-        # If target changed and we are already expanded, re-run expansion to update width
-        if (
-            old_target != new_target
-            and getattr(self, "_search_panel_expanded", False)
-            and not user_collapsed
-        ):
-            self._set_search_panel_expanded(True, animate=animate)
-        elif has_msg and not user_collapsed:
+        if user_collapsed:
+            return
+        if busy or has_msg or getattr(self, "_search_panel_expanded", False):
             self._set_search_panel_expanded(True, animate=animate)
 
     def _set_gallery_search_input_visible(self):
