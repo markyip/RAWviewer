@@ -92,10 +92,13 @@ try:
         _painter.drawText(_splash_pixmap.rect(), Qt.AlignmentFlag.AlignCenter, "RAW")
         _painter.end()
     
-    _startup_splash = QSplashScreen(_splash_pixmap, Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.FramelessWindowHint)
-    _startup_splash.showMessage("Starting RAWviewer...", Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignCenter, Qt.GlobalColor.white)
-    _startup_splash.show()
-    _temp_app.processEvents()
+    if getattr(sys, 'frozen', False):
+        _startup_splash = QSplashScreen(_splash_pixmap, Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.FramelessWindowHint)
+        _startup_splash.showMessage("Starting RAWviewer...", Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignCenter, Qt.GlobalColor.white)
+        _startup_splash.show()
+        _temp_app.processEvents()
+    else:
+        _startup_splash = None
     
     # Now that the Qt splash is visible, close the native one to handover
     close_native_splash()
@@ -427,7 +430,7 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QLabel, QFileDialog,
                              QMessageBox, QScrollArea, QSizePolicy, QPushButton, QFrame,
                              QGridLayout, QScrollBar, QDialog, QSplashScreen, QInputDialog,
-                             QLineEdit, QStackedLayout, QGraphicsOpacityEffect)
+                             QLineEdit, QStackedLayout, QGraphicsOpacityEffect, QStyleOptionButton)
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QPoint, QEvent, QSettings, QSize, QRect, QObject, QRunnable, QThreadPool, QTimer, QPropertyAnimation, QEasingCurve, QAbstractAnimation
 from PyQt6.QtGui import (QPixmap, QImage, QAction, QKeySequence, QShortcut, QGuiApplication,
                          QDragEnterEvent, QDropEvent, QCursor, QIcon,
@@ -1323,65 +1326,71 @@ class RAWProcessor(QThread):
                         self.image_processed.emit(thumbnail_data)
                         logger.info(f"[RAW_PROC] Cached thumbnail emitted successfully")
                 else:
-                    logger.debug(f"Thumbnail not in cache, will try embedded JPEG first: {os.path.basename(self.file_path)}")
-                    # OPTIMIZATION: Try to extract embedded JPEG thumbnail BEFORE opening RAW file
-                    # This is much faster than opening the entire RAW file
-                    try:
-                        import rawpy
-                        import time
-                        embedded_start = time.time()
-                        # Quick check: try to extract embedded thumbnail without full RAW processing
-                        with rawpy.imread(self.file_path) as raw_quick:
-                            thumb = raw_quick.extract_thumb()
-                            if thumb is not None and thumb.format == rawpy.ThumbFormat.JPEG:
-                                # Successfully extracted embedded JPEG thumbnail
-                                embedded_time = time.time() - embedded_start
-                                logger.info(f"[RAW_PROC] ⚡ FAST: Extracted embedded JPEG thumbnail in {embedded_time*1000:.1f}ms")
-                                safe_print(f"[PERF] ⚡ FAST THUMBNAIL: Embedded JPEG extracted in {embedded_time*1000:.1f}ms")
-                                
-                                # Convert JPEG bytes to numpy array
-                                from io import BytesIO
-                                from PIL import Image, ImageOps
-                                jpeg_data = thumb.data
-                                
-                                # Save to disk cache for future use (much faster than extracting again)
-                                try:
-                                    cache.disk_thumbnail_cache.put(self.file_path, jpeg_data)
-                                    logger.debug(f"[RAW_PROC] Saved embedded JPEG to disk cache")
-                                except Exception as cache_error:
-                                    logger.debug(f"[RAW_PROC] Failed to save to disk cache: {cache_error}")
-                                
-                                # Load JPEG and apply EXIF orientation
-                                pil_image = Image.open(BytesIO(jpeg_data))
-                                pil_image = ImageOps.exif_transpose(pil_image)
-                                if pil_image.mode != 'RGB':
-                                    pil_image = pil_image.convert('RGB')
-                                
-                                thumbnail_data = np.array(pil_image, dtype=np.uint8)
-                                
-                                # Apply orientation correction
-                                orientation = self.get_orientation_from_exif(self.file_path)
-                                thumbnail_data = self.apply_orientation_correction(thumbnail_data, orientation)
-                                
-                                # Cache the thumbnail
-                                cache.put_thumbnail(self.file_path, thumbnail_data)
-                                logger.info(f"[RAW_PROC] Embedded JPEG thumbnail cached: {os.path.basename(self.file_path)} ({thumbnail_data.shape[1]}x{thumbnail_data.shape[0]})")
-                                
-                                # Emit thumbnail immediately for fast display
-                                if not self.use_full_resolution:
-                                    logger.info(f"[RAW_PROC] Emitting embedded JPEG thumbnail immediately")
-                                    self.thumbnail_fallback_used.emit("Loading thumbnail...")
-                                    self.image_processed.emit(thumbnail_data)
-                                    logger.info(f"[RAW_PROC] Embedded JPEG thumbnail emitted successfully")
-                                
-                                # Mark that we have thumbnail from embedded JPEG
-                                # We still need to open RAW file for full image processing, but thumbnail is done
-                                # thumbnail_data is now set, so subsequent code will skip thumbnail extraction
-                            else:
-                                logger.debug(f"[RAW_PROC] No embedded JPEG thumbnail found, will process RAW")
-                    except Exception as embedded_error:
-                        # If embedded extraction fails, continue with normal RAW processing
-                        logger.debug(f"[RAW_PROC] Embedded JPEG extraction failed (will process RAW): {embedded_error}")
+                    if use_libraw_consistent_preview_first():
+                        logger.debug(
+                            f"[RAW_PROC] LibRaw-consistent preview: skipping embedded JPEG for "
+                            f"{os.path.basename(self.file_path)}"
+                        )
+                    else:
+                        logger.debug(f"Thumbnail not in cache, will try embedded JPEG first: {os.path.basename(self.file_path)}")
+                        # OPTIMIZATION: Try to extract embedded JPEG thumbnail BEFORE opening RAW file
+                        # This is much faster than opening the entire RAW file
+                        try:
+                            import rawpy
+                            import time
+                            embedded_start = time.time()
+                            # Quick check: try to extract embedded thumbnail without full RAW processing
+                            with rawpy.imread(self.file_path) as raw_quick:
+                                thumb = raw_quick.extract_thumb()
+                                if thumb is not None and thumb.format == rawpy.ThumbFormat.JPEG:
+                                    # Successfully extracted embedded JPEG thumbnail
+                                    embedded_time = time.time() - embedded_start
+                                    logger.info(f"[RAW_PROC] ⚡ FAST: Extracted embedded JPEG thumbnail in {embedded_time*1000:.1f}ms")
+                                    safe_print(f"[PERF] ⚡ FAST THUMBNAIL: Embedded JPEG extracted in {embedded_time*1000:.1f}ms")
+                                    
+                                    # Convert JPEG bytes to numpy array
+                                    from io import BytesIO
+                                    from PIL import Image, ImageOps
+                                    jpeg_data = thumb.data
+                                    
+                                    # Save to disk cache for future use (much faster than extracting again)
+                                    try:
+                                        cache.disk_thumbnail_cache.put(self.file_path, jpeg_data)
+                                        logger.debug(f"[RAW_PROC] Saved embedded JPEG to disk cache")
+                                    except Exception as cache_error:
+                                        logger.debug(f"[RAW_PROC] Failed to save to disk cache: {cache_error}")
+                                    
+                                    # Load JPEG and apply EXIF orientation
+                                    pil_image = Image.open(BytesIO(jpeg_data))
+                                    pil_image = ImageOps.exif_transpose(pil_image)
+                                    if pil_image.mode != 'RGB':
+                                        pil_image = pil_image.convert('RGB')
+                                    
+                                    thumbnail_data = np.array(pil_image, dtype=np.uint8)
+                                    
+                                    # Apply orientation correction
+                                    orientation = self.get_orientation_from_exif(self.file_path)
+                                    thumbnail_data = self.apply_orientation_correction(thumbnail_data, orientation)
+                                    
+                                    # Cache the thumbnail
+                                    cache.put_thumbnail(self.file_path, thumbnail_data)
+                                    logger.info(f"[RAW_PROC] Embedded JPEG thumbnail cached: {os.path.basename(self.file_path)} ({thumbnail_data.shape[1]}x{thumbnail_data.shape[0]})")
+                                    
+                                    # Emit thumbnail immediately for fast display
+                                    if not self.use_full_resolution:
+                                        logger.info(f"[RAW_PROC] Emitting embedded JPEG thumbnail immediately")
+                                        self.thumbnail_fallback_used.emit("Loading thumbnail...")
+                                        self.image_processed.emit(thumbnail_data)
+                                        logger.info(f"[RAW_PROC] Embedded JPEG thumbnail emitted successfully")
+                                    
+                                    # Mark that we have thumbnail from embedded JPEG
+                                    # We still need to open RAW file for full image processing, but thumbnail is done
+                                    # thumbnail_data is now set, so subsequent code will skip thumbnail extraction
+                                else:
+                                    logger.debug(f"[RAW_PROC] No embedded JPEG thumbnail found, will process RAW")
+                        except Exception as embedded_error:
+                            # If embedded extraction fails, continue with normal RAW processing
+                            logger.debug(f"[RAW_PROC] Embedded JPEG extraction failed (will process RAW): {embedded_error}")
                 
                 # Get orientation from cached EXIF if available, otherwise extract
                 # CRITICAL: Always extract orientation from file to ensure accuracy
@@ -1528,6 +1537,7 @@ class RAWProcessor(QThread):
                         # But if we already emitted cached thumbnail above, skip extraction
                         # Also skip if we already extracted embedded JPEG thumbnail above
                         elif thumbnail_data is None:
+                            libraw_consistent = use_libraw_consistent_preview_first()
                             # OPTIMIZATION: Try to extract thumbnail using already-opened raw handle first
                             # This avoids reopening the file, which is much faster
                             logger.debug(f"Extracting thumbnail: {os.path.basename(self.file_path)}")
@@ -1537,36 +1547,37 @@ class RAWProcessor(QThread):
                                 
                                 # OPTIMIZATION: Use already-opened raw handle if available (faster)
                                 extracted_thumbnail = None
-                                with self._raw_handle_lock:
-                                    if self._raw_handle is not None and self._raw_handle == raw:
-                                        # Use existing raw handle to extract thumbnail (much faster)
-                                        try:
-                                            thumb = raw.extract_thumb()
-                                            if thumb is not None:
-                                                if thumb.format == rawpy.ThumbFormat.JPEG:
-                                                    import io
-                                                    from PIL import Image
-                                                    jpeg_image = Image.open(io.BytesIO(thumb.data))
-                                                    if jpeg_image.mode != 'RGB':
-                                                        jpeg_image = jpeg_image.convert('RGB')
-                                                    extracted_thumbnail = np.array(jpeg_image)
-                                                elif thumb.format == rawpy.ThumbFormat.BITMAP:
-                                                    extracted_thumbnail = thumb.data
-                                                thumb_size = f"{extracted_thumbnail.shape[1]}x{extracted_thumbnail.shape[0]}" if extracted_thumbnail is not None else 'N/A'
-                                                logger.debug(f"Thumbnail extracted using existing raw handle: {thumb_size}")
-                                                safe_print(f"[PERF] ⚡ FAST THUMBNAIL: Extracted using existing raw handle ({thumb_size})")
-                                        except Exception as thumb_extract_error:
-                                            logger.debug(f"Failed to extract thumbnail from raw handle: {thumb_extract_error}")
-                                            safe_print(f"[PERF] ⚠️  Raw handle extraction failed, falling back")
-                                
-                                # Fallback: Use ThumbnailExtractor if raw handle extraction failed
-                                if extracted_thumbnail is None:
-                                    logger.debug(f"Falling back to ThumbnailExtractor for thumbnail extraction")
-                                    fallback_start = time.time()
-                                    extracted_thumbnail = self.thumbnail_extractor.extract_thumbnail_from_raw(self.file_path)
-                                    fallback_time = time.time() - fallback_start
-                                    if extracted_thumbnail is not None:
-                                        safe_print(f"[PERF] 🔄 FALLBACK THUMBNAIL: Extracted via ThumbnailExtractor in {fallback_time*1000:.1f}ms")
+                                if not libraw_consistent:
+                                    with self._raw_handle_lock:
+                                        if self._raw_handle is not None and self._raw_handle == raw:
+                                            # Use existing raw handle to extract thumbnail (much faster)
+                                            try:
+                                                thumb = raw.extract_thumb()
+                                                if thumb is not None:
+                                                    if thumb.format == rawpy.ThumbFormat.JPEG:
+                                                        import io
+                                                        from PIL import Image
+                                                        jpeg_image = Image.open(io.BytesIO(thumb.data))
+                                                        if jpeg_image.mode != 'RGB':
+                                                            jpeg_image = jpeg_image.convert('RGB')
+                                                        extracted_thumbnail = np.array(jpeg_image)
+                                                    elif thumb.format == rawpy.ThumbFormat.BITMAP:
+                                                        extracted_thumbnail = thumb.data
+                                                    thumb_size = f"{extracted_thumbnail.shape[1]}x{extracted_thumbnail.shape[0]}" if extracted_thumbnail is not None else 'N/A'
+                                                    logger.debug(f"Thumbnail extracted using existing raw handle: {thumb_size}")
+                                                    safe_print(f"[PERF] ⚡ FAST THUMBNAIL: Extracted using existing raw handle ({thumb_size})")
+                                            except Exception as thumb_extract_error:
+                                                logger.debug(f"Failed to extract thumbnail from raw handle: {thumb_extract_error}")
+                                                safe_print(f"[PERF] ⚠️  Raw handle extraction failed, falling back")
+                                    
+                                    # Fallback: Use ThumbnailExtractor if raw handle extraction failed
+                                    if extracted_thumbnail is None:
+                                        logger.debug(f"Falling back to ThumbnailExtractor for thumbnail extraction")
+                                        fallback_start = time.time()
+                                        extracted_thumbnail = self.thumbnail_extractor.extract_thumbnail_from_raw(self.file_path)
+                                        fallback_time = time.time() - fallback_start
+                                        if extracted_thumbnail is not None:
+                                            safe_print(f"[PERF] 🔄 FALLBACK THUMBNAIL: Extracted via ThumbnailExtractor in {fallback_time*1000:.1f}ms")
                                 
                                 if self._should_stop:
                                     return
@@ -1586,7 +1597,7 @@ class RAWProcessor(QThread):
                                             # Convert to PIL Image for resizing
                                             if len(thumbnail_data.shape) == 3:
                                                 pil_image = Image.fromarray(thumbnail_data)
-                                                pil_image.thumbnail((max_thumb_size, max_thumb_size), Image.Resampling.LANCZOS)
+                                                pil_image.thumbnail((max_thumb_size, max_thumb_size), Image.Resampling.HAMMING)
                                                 thumbnail_data = np.array(pil_image, dtype=np.uint8)
                                                 logger.debug(f"Thumbnail resized to: {thumbnail_data.shape[1]}x{thumbnail_data.shape[0]}")
                                     
@@ -1675,7 +1686,7 @@ class RAWProcessor(QThread):
                                         max_thumb_size = 1024
                                         if pil_image.width > max_thumb_size or pil_image.height > max_thumb_size:
                                             logger.debug(f"Resizing processed thumbnail from {pil_image.size} to max {max_thumb_size}x{max_thumb_size}")
-                                            pil_image.thumbnail((max_thumb_size, max_thumb_size), Image.Resampling.LANCZOS)
+                                            pil_image.thumbnail((max_thumb_size, max_thumb_size), Image.Resampling.HAMMING)
                                         
                                         # Convert back to numpy array
                                         thumbnail_data = np.array(pil_image, dtype=np.uint8)
@@ -2378,7 +2389,7 @@ class ImageLoadTask(QRunnable):
                         sw = max(1, sw)
                         sh = max(1, sh)
                         
-                        img = img.resize((sw, sh), Image.Resampling.LANCZOS)
+                        img = img.resize((sw, sh), Image.Resampling.HAMMING)
                         if img.mode != 'RGB':
                             img = img.convert('RGB')
                         
@@ -4007,9 +4018,33 @@ class _LegacyGalleryCompatBlock:
 # Refactored: Legacy code (RAWProcessor, JustifiedGallery) removed.
 # Components moved to src/ui/ and src/enhanced_raw_processor.py
 
+class ResizeGripIndicator(QWidget):
+    """Bottom-right resize grip shown on hover (frameless window)."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(16, 16)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
+        self.hide()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(176, 176, 176, 200))
+        # Classic lower-right dotted grip (3 diagonal rows).
+        for row, count in enumerate((1, 2, 3)):
+            for col in range(count):
+                x = 10 - col * 4
+                y = 10 - row * 4
+                painter.drawEllipse(x, y, 2, 2)
+        painter.end()
+
+
 class CustomTitleBar(QFrame):
     """Material Design 3 style custom title bar for frameless window."""
-    def __init__(self, parent=None, title="RAWviewer"):
+    def __init__(self, parent=None):
         super().__init__(parent)
         self.parent = parent
         self.setFixedHeight(40)  # Smaller height
@@ -4078,19 +4113,33 @@ class CustomTitleBar(QFrame):
                 font-size: 14px;
             """)
         layout.addWidget(self.icon_label)
-        # Keep icon-to-title padding visually aligned with left outer padding.
-        layout.addSpacing(12)
+
+        # Reserved for API compatibility; title bar shows icon only (no app name/version).
+        self.title_label = QLabel("")
+        self.title_label.hide()
         
-        self.title_label = QLabel(title)
-        self.title_label.setStyleSheet("""
-            color: #E0E0E0;
-            font-size: 13px;
+        layout.addStretch(1)
+
+        self.metadata_label = QLabel("")
+        self.metadata_label.setAlignment(
+            Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter
+        )
+        self.metadata_label.setAttribute(
+            Qt.WidgetAttribute.WA_TransparentForMouseEvents, True
+        )
+        self.metadata_label.setStyleSheet("""
+            color: #B0B0B0;
+            font-size: 12px;
             font-weight: 500;
-            font-family: 'Roboto', 'Segoe UI', sans-serif;
+            padding: 0px 8px;
+            letter-spacing: 0.15px;
+            background: transparent;
+            border: none;
         """)
-        layout.addWidget(self.title_label)
-        
-        layout.addStretch()
+        self.metadata_label.hide()
+        layout.addWidget(self.metadata_label, 0, alignment=Qt.AlignmentFlag.AlignCenter)
+
+        layout.addStretch(1)
         
         # Window Controls - Smaller buttons
         import qtawesome as qta
@@ -4156,6 +4205,10 @@ class CustomTitleBar(QFrame):
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
+            # Top frame strip is reserved for window resize (handled by parent event filter).
+            if event.position().y() <= 10:
+                super().mousePressEvent(event)
+                return
             self._dragging = True
             self._drag_pos = event.globalPosition().toPoint() - self.parent.frameGeometry().topLeft()
             event.accept()
@@ -4182,83 +4235,177 @@ class CustomTitleBar(QFrame):
             event.accept()
     
     def set_title(self, title):
-        """Update the title text"""
-        self.title_label.setText(title)
+        """No-op: custom title bar displays icon only (window title uses setWindowTitle)."""
+        return
+
+    def set_metadata(self, text: str) -> None:
+        """Center EXIF / image metadata in the title bar (SkySpotter-style)."""
+        display = (text or "").strip()
+        self.metadata_label.setText(display)
+        self.metadata_label.setVisible(bool(display))
+        if display:
+            self.metadata_label.setToolTip(display)
+        else:
+            self.metadata_label.setToolTip("")
+
+
+class TopMetadataBar(QFrame):
+    """Centered EXIF strip for macOS (no custom title bar)."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedHeight(28)
+        self.setStyleSheet("""
+            QFrame {
+                background-color: #1E1E1E;
+                border-bottom: 1px solid #2E2E2E;
+            }
+        """)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(12, 0, 12, 0)
+        layout.setSpacing(0)
+        layout.addStretch(1)
+        self.metadata_label = QLabel("")
+        self.metadata_label.setAlignment(
+            Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter
+        )
+        self.metadata_label.setStyleSheet("""
+            color: #B0B0B0;
+            font-size: 12px;
+            font-weight: 500;
+            padding: 0px 8px;
+            letter-spacing: 0.15px;
+            background: transparent;
+            border: none;
+        """)
+        self.metadata_label.hide()
+        layout.addWidget(self.metadata_label, 0, alignment=Qt.AlignmentFlag.AlignCenter)
+        layout.addStretch(1)
+        self.hide()
+
+    def set_metadata(self, text: str) -> None:
+        display = (text or "").strip()
+        self.metadata_label.setText(display)
+        visible = bool(display)
+        self.metadata_label.setVisible(visible)
+        self.setVisible(visible)
+        if display:
+            self.metadata_label.setToolTip(display)
+        else:
+            self.metadata_label.setToolTip("")
+
+
+class _ConfirmDialogButton(QPushButton):
+    """Pill button that uses stylesheet :focus for the whole control, not an inner focus rect."""
+
+    def initStyleOption(self, option) -> None:
+        super().initStyleOption(option)
+        option.features &= ~QStyleOptionButton.ButtonFeature.HasFocus
 
 
 class CustomConfirmDialog(QDialog):
     """Material Design 3 style confirmation dialog with custom title bar."""
+
+    _DIALOG_MIN_WIDTH = 420
+    _DIALOG_MAX_WIDTH = 480
+    _CONTENT_MARGIN_H = 24
+    _CONTENT_MARGIN_V = 20
+
     def __init__(self, parent=None, title="Confirm Delete", message="", informative_text=""):
         super().__init__(parent)
-        self.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
+        self.setWindowFlags(
+            Qt.WindowType.Dialog
+            | Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint
+        )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setModal(True)
-        
-        # Main container with rounded corners and shadow effect
+
         self.container = QWidget(self)
+        self.container.setObjectName("confirmDialogContainer")
         self.container.setStyleSheet("""
-            QWidget {
+            #confirmDialogContainer {
                 background-color: #1E1E1E;
                 border-radius: 12px;
+                border: 1px solid #2E2E2E;
             }
         """)
-        
-        # Main layout
+
         main_layout = QVBoxLayout(self.container)
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(0)
-        
-        # Remove title bar - no title bar for delete dialog
-        # Content area
+
         content_widget = QWidget()
-        content_widget.setStyleSheet("""
-            QWidget {
-                background-color: #1E1E1E;
-            }
-        """)
+        content_widget.setObjectName("confirmDialogContent")
+        content_widget.setStyleSheet("#confirmDialogContent { background-color: transparent; }")
         content_layout = QVBoxLayout(content_widget)
-        content_layout.setContentsMargins(24, 24, 24, 24)
-        content_layout.setSpacing(16)
-        
-        # Message text (no icon)
-        message_label = QLabel(message)
-        message_label.setWordWrap(True)
-        message_label.setStyleSheet("""
+        content_layout.setContentsMargins(
+            self._CONTENT_MARGIN_H,
+            self._CONTENT_MARGIN_V,
+            self._CONTENT_MARGIN_H,
+            self._CONTENT_MARGIN_V,
+        )
+        content_layout.setSpacing(10)
+
+        self._message_label = QLabel(message)
+        self._message_label.setWordWrap(True)
+        self._message_label.setAlignment(
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop
+        )
+        self._message_label.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum
+        )
+        self._message_label.setStyleSheet("""
             QLabel {
                 color: #E0E0E0;
                 font-size: 16px;
                 font-weight: 500;
                 font-family: 'Roboto', 'Segoe UI', sans-serif;
+                padding: 0px;
+                margin: 0px;
             }
         """)
-        content_layout.addWidget(message_label)
-        
+        content_layout.addWidget(self._message_label)
+
+        self._info_label = None
         if informative_text:
-            info_label = QLabel(informative_text)
-            info_label.setWordWrap(True)
-            info_label.setStyleSheet("""
+            self._info_label = QLabel(informative_text)
+            self._info_label.setWordWrap(True)
+            self._info_label.setAlignment(
+                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop
+            )
+            self._info_label.setSizePolicy(
+                QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum
+            )
+            self._info_label.setStyleSheet("""
                 QLabel {
                     color: #B0B0B0;
                     font-size: 14px;
                     font-family: 'Roboto', 'Segoe UI', sans-serif;
-                    line-height: 1.5;
+                    padding: 0px;
+                    margin: 0px;
                 }
             """)
-            content_layout.addWidget(info_label)
-        
-        # Buttons - horizontally centered
+            content_layout.addWidget(self._info_label)
+
+        content_layout.addSpacing(6)
+
         button_layout = QHBoxLayout()
-        button_layout.setContentsMargins(0, 8, 0, 0)
+        button_layout.setContentsMargins(0, 0, 0, 0)
         button_layout.setSpacing(12)
-        button_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        
-        # Cancel button (MD3 style - outlined)
-        cancel_btn = QPushButton("Cancel")
-        cancel_btn.setFixedHeight(40)
-        cancel_btn.setMinimumWidth(100)
-        cancel_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        cancel_btn.setStyleSheet("""
-            QPushButton {
+        button_layout.addStretch(1)
+
+        self.cancel_btn = _ConfirmDialogButton("Cancel")
+        self.cancel_btn.setObjectName("confirmCancelBtn")
+        self.cancel_btn.setFixedHeight(40)
+        self.cancel_btn.setMinimumWidth(108)
+        self.cancel_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.cancel_btn.setAutoDefault(True)
+        self.cancel_btn.setDefault(True)
+        self.cancel_btn.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.cancel_btn.setAttribute(Qt.WidgetAttribute.WA_MacShowFocusRect, False)
+        self.cancel_btn.setStyleSheet("""
+            QPushButton#confirmCancelBtn {
                 background-color: transparent;
                 color: #E0E0E0;
                 border: 1px solid #4A4A4A;
@@ -4267,74 +4414,147 @@ class CustomConfirmDialog(QDialog):
                 font-weight: 500;
                 font-family: 'Roboto', 'Segoe UI', sans-serif;
                 padding: 0px 24px;
+                outline: none;
             }
-            QPushButton:hover {
+            QPushButton#confirmCancelBtn:hover:!focus {
                 background-color: rgba(255, 255, 255, 0.05);
                 border-color: #5A5A5A;
             }
-            QPushButton:pressed {
-                background-color: rgba(255, 255, 255, 0.1);
+            QPushButton#confirmCancelBtn:focus {
+                background-color: rgba(255, 255, 255, 0.16);
+                color: #FFFFFF;
+                border: 1px solid #D0D0D0;
+                outline: none;
+            }
+            QPushButton#confirmCancelBtn:pressed {
+                background-color: rgba(255, 255, 255, 0.12);
             }
         """)
-        cancel_btn.clicked.connect(self.reject)
-        button_layout.addWidget(cancel_btn)
-        
-        # Delete button (MD3 style - filled, with warning color)
-        delete_btn = QPushButton("Delete")
-        delete_btn.setFixedHeight(40)
-        delete_btn.setMinimumWidth(100)
-        delete_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        delete_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #FF5252;
-                color: white;
-                border: none;
+        self.cancel_btn.clicked.connect(self.reject)
+
+        self.delete_btn = _ConfirmDialogButton("Delete")
+        self.delete_btn.setObjectName("confirmDeleteBtn")
+        self.delete_btn.setFixedHeight(40)
+        self.delete_btn.setMinimumWidth(108)
+        self.delete_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.delete_btn.setAutoDefault(False)
+        self.delete_btn.setDefault(False)
+        self.delete_btn.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.delete_btn.setAttribute(Qt.WidgetAttribute.WA_MacShowFocusRect, False)
+        self.delete_btn.setStyleSheet("""
+            QPushButton#confirmDeleteBtn {
+                background-color: transparent;
+                color: #E0E0E0;
+                border: 1px solid #4A4A4A;
                 border-radius: 20px;
                 font-size: 14px;
                 font-weight: 500;
                 font-family: 'Roboto', 'Segoe UI', sans-serif;
                 padding: 0px 24px;
+                outline: none;
             }
-            QPushButton:hover {
-                background-color: #FF6B6B;
+            QPushButton#confirmDeleteBtn:hover:!focus {
+                background-color: rgba(255, 82, 82, 0.12);
+                border-color: #FF5252;
+                color: #FF8A80;
             }
-            QPushButton:pressed {
+            QPushButton#confirmDeleteBtn:focus {
+                background-color: #FF5252;
+                color: #FFFFFF;
+                border: 1px solid #FF5252;
+                outline: none;
+            }
+            QPushButton#confirmDeleteBtn:pressed {
                 background-color: #FF4444;
             }
         """)
-        delete_btn.clicked.connect(self.accept)
-        delete_btn.setDefault(True)
-        delete_btn.setFocus()
-        button_layout.addWidget(delete_btn)
-        
+        self.delete_btn.clicked.connect(self.accept)
+
+        button_layout.addWidget(self.cancel_btn)
+        button_layout.addWidget(self.delete_btn)
         content_layout.addLayout(button_layout)
         main_layout.addWidget(content_widget)
-        
-        # Set container size and position
-        self.container.setFixedSize(420, 220)
+
         container_layout = QVBoxLayout(self)
         container_layout.setContentsMargins(0, 0, 0, 0)
         container_layout.addWidget(self.container)
-        
-        # Set dialog size (slightly larger for shadow effect)
-        self.setFixedSize(420, 220)
-        
-        # Center on parent
+
+        self._apply_dialog_size()
+
         if parent:
             center_global = parent.mapToGlobal(parent.rect().center())
-            self.move(center_global.x() - self.width() // 2, center_global.y() - self.height() // 2)
-        
-        # Store result
+            self.move(
+                center_global.x() - self.width() // 2,
+                center_global.y() - self.height() // 2,
+            )
+
         self.result_value = False
-    
+
+    def _apply_dialog_size(self) -> None:
+        """Size from text/button metrics — QLabel sizeHint alone is too narrow when wrapped."""
+        margin_h = self._CONTENT_MARGIN_H * 2
+        inner_min = self._DIALOG_MIN_WIDTH - margin_h
+
+        fm = self._message_label.fontMetrics()
+        text_lines = [self._message_label.text() or ""]
+        if self._info_label is not None:
+            text_lines.extend((self._info_label.text() or "").splitlines())
+
+        text_w = 0
+        for line in text_lines:
+            if line.strip():
+                text_w = max(text_w, fm.horizontalAdvance(line))
+
+        buttons_w = self.cancel_btn.minimumWidth() + self.delete_btn.minimumWidth() + 12
+        inner_w = max(inner_min, text_w, buttons_w)
+        dialog_w = max(
+            self._DIALOG_MIN_WIDTH,
+            min(self._DIALOG_MAX_WIDTH, inner_w + margin_h),
+        )
+        inner_w = dialog_w - margin_h
+
+        self._message_label.setMinimumWidth(inner_w)
+        self._message_label.setMaximumWidth(inner_w)
+        if self._info_label is not None:
+            self._info_label.setMinimumWidth(inner_w)
+            self._info_label.setMaximumWidth(inner_w)
+
+        self.container.setMinimumWidth(dialog_w)
+        self.container.setMaximumWidth(dialog_w)
+        self.container.adjustSize()
+        dialog_h = max(160, self.container.sizeHint().height())
+        self.container.setFixedSize(dialog_w, dialog_h)
+        self.setFixedSize(dialog_w, dialog_h)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.cancel_btn.setFocus(Qt.FocusReason.OtherFocusReason)
+
+    def keyPressEvent(self, event):
+        key = event.key()
+        if key == Qt.Key.Key_Escape:
+            self.reject()
+            event.accept()
+            return
+        if key in (Qt.Key.Key_Left, Qt.Key.Key_Right):
+            if self.cancel_btn.hasFocus() and key == Qt.Key.Key_Right:
+                self.delete_btn.setFocus(Qt.FocusReason.TabFocusReason)
+                event.accept()
+                return
+            if self.delete_btn.hasFocus() and key == Qt.Key.Key_Left:
+                self.cancel_btn.setFocus(Qt.FocusReason.TabFocusReason)
+                event.accept()
+                return
+        super().keyPressEvent(event)
+
     def accept(self):
         self.result_value = True
         super().accept()
-    
+
     def reject(self):
         self.result_value = False
         super().reject()
-    
+
     def mousePressEvent(self, event):
         """Allow dragging the dialog"""
         if event.button() == Qt.MouseButton.LeftButton:
@@ -4530,6 +4750,8 @@ class SingleImageViewOverlay(QWidget):
     _BOTTOM_HOTZONE = _FILMSTRIP_HEIGHT + _FILMSTRIP_HOTZONE_EXTRA
     _FILMSTRIP_FADE_MS = 200
     _FILMSTRIP_HIDE_DELAY_MS = 90
+    _FILMSTRIP_SHOW_DELAY_MS = 350
+    _FILMSTRIP_SHOW_DELAY_DIRECT_MS = 120
 
     def __init__(self, scroll_area, histogram_widget, viewer=None, parent=None,
                  gpu_view=None):
@@ -4544,6 +4766,7 @@ class SingleImageViewOverlay(QWidget):
         scroll_area.setParent(self)
         if gpu_view is not None:
             gpu_view.setParent(self)
+            gpu_view.viewport().installEventFilter(self)
         histogram_widget.setParent(self)
         self.setObjectName("single_view_container")
         self.setStyleSheet("#single_view_container { background-color: #1E1E1E; }")
@@ -4561,6 +4784,9 @@ class SingleImageViewOverlay(QWidget):
         self._hide_filmstrip_timer = QTimer(self)
         self._hide_filmstrip_timer.setSingleShot(True)
         self._hide_filmstrip_timer.timeout.connect(self._hide_filmstrip_if_inactive)
+        self._show_filmstrip_timer = QTimer(self)
+        self._show_filmstrip_timer.setSingleShot(True)
+        self._show_filmstrip_timer.timeout.connect(self._show_filmstrip_if_still_in_hotzone)
 
     def _stop_filmstrip_fade(self) -> None:
         anim = getattr(self, "_filmstrip_fade_anim", None)
@@ -4623,20 +4849,23 @@ class SingleImageViewOverlay(QWidget):
     def _fade_in_filmstrip(self) -> None:
         if not self._filmstrip.isEnabled():
             return
+        self._show_filmstrip_timer.stop()
         self._hide_filmstrip_timer.stop()
-        starting = not self._filmstrip.isVisible()
-        if not starting and self._filmstrip_opacity_value() >= 0.99:
+        if self._filmstrip_opacity_value() >= 0.99:
             return
         anim = getattr(self, "_filmstrip_fade_anim", None)
         if (
-            not starting
-            and anim is not None
+            anim is not None
             and anim.state() == QAbstractAnimation.State.Running
             and float(anim.endValue()) >= 0.99
         ):
             return
         self._stop_filmstrip_fade()
-        if starting:
+        needs_setup = (
+            not self._filmstrip.isVisible()
+            or self._filmstrip_opacity_value() <= 0.01
+        )
+        if needs_setup:
             self._filmstrip_reveal = True
             self._filmstrip_opacity.setOpacity(0.0)
             self._filmstrip.show()
@@ -4647,8 +4876,7 @@ class SingleImageViewOverlay(QWidget):
                 QTimer.singleShot(0, lambda: self._filmstrip.refresh_visible_thumbnails(
                     refresh_cache=True
                 ))
-        self._filmstrip.raise_()
-        self._hist.raise_()
+        self._raise_single_view_layers()
         self._animate_filmstrip_opacity(1.0)
 
     def _fade_out_filmstrip(self) -> None:
@@ -4685,6 +4913,57 @@ class SingleImageViewOverlay(QWidget):
     def _schedule_hide_filmstrip(self) -> None:
         self._hide_filmstrip_timer.start(self._FILMSTRIP_HIDE_DELAY_MS)
 
+    def _cancel_show_filmstrip(self) -> None:
+        self._show_filmstrip_timer.stop()
+        if (
+            self._filmstrip.isVisible()
+            and self._filmstrip_opacity_value() <= 0.01
+            and not self._filmstrip_pointer_active
+        ):
+            self._filmstrip.hide()
+            self._filmstrip_reveal = False
+            self._update_filmstrip_hit_testing()
+
+    def _prepare_filmstrip_reveal(self) -> None:
+        """Warm layout and thumbnails while the hover delay runs (opacity stays 0)."""
+        if not self._filmstrip.isEnabled():
+            return
+        if self._filmstrip.isVisible() and self._filmstrip_opacity_value() > 0.01:
+            return
+        self._filmstrip_reveal = True
+        self._filmstrip_opacity.setOpacity(0.0)
+        self._filmstrip.show()
+        self._layout_filmstrip()
+        self._update_filmstrip_hit_testing()
+        if hasattr(self._filmstrip, "center_on_current"):
+            self._filmstrip.center_on_current()
+        if hasattr(self._filmstrip, "refresh_visible_thumbnails"):
+            self._filmstrip.refresh_visible_thumbnails(refresh_cache=True)
+
+    def _schedule_show_filmstrip(self, delay_ms: int | None = None) -> None:
+        if self._filmstrip_opacity_value() >= 0.99:
+            return
+        delay = (
+            int(self._FILMSTRIP_SHOW_DELAY_MS)
+            if delay_ms is None
+            else max(0, int(delay_ms))
+        )
+        if self._show_filmstrip_timer.isActive():
+            remaining = self._show_filmstrip_timer.remainingTime()
+            if remaining >= 0 and remaining <= delay:
+                return
+        self._prepare_filmstrip_reveal()
+        self._show_filmstrip_timer.start(delay)
+
+    def _show_filmstrip_if_still_in_hotzone(self) -> None:
+        if not self._filmstrip.isEnabled():
+            return
+        if self._filmstrip.underMouse():
+            self._fade_in_filmstrip()
+            return
+        if self._pointer_in_bottom_hotzone():
+            self._fade_in_filmstrip()
+
     def _hide_filmstrip_if_inactive(self) -> None:
         if self._filmstrip_pointer_active:
             return
@@ -4695,7 +4974,18 @@ class SingleImageViewOverlay(QWidget):
 
     def _pointer_in_bottom_hotzone(self) -> bool:
         pos = self.mapFromGlobal(QCursor.pos())
-        return self.rect().contains(pos) and (pos.y() >= self.height() - self._BOTTOM_HOTZONE)
+        return self._pointer_in_bottom_hotzone_at(pos)
+
+    def _pointer_in_bottom_hotzone_at(self, pos: QPoint) -> bool:
+        return self.rect().contains(pos) and (
+            pos.y() >= self.height() - self._BOTTOM_HOTZONE
+        )
+
+    def _pointer_in_filmstrip_band_at(self, pos: QPoint) -> bool:
+        """Bottom strip band (where thumbnails appear), not the wider approach zone."""
+        return self.rect().contains(pos) and (
+            pos.y() >= self.height() - self._FILMSTRIP_HEIGHT
+        )
 
     def _local_pos_from_global(self, global_pos) -> QPoint:
         if hasattr(global_pos, "toPoint"):
@@ -4707,16 +4997,37 @@ class SingleImageViewOverlay(QWidget):
         if not self._filmstrip.isEnabled():
             return
         pos = self._local_pos_from_global(global_pos)
-        in_hot = self.rect().contains(pos) and (pos.y() >= self.height() - self._BOTTOM_HOTZONE)
+        in_hot = self._pointer_in_bottom_hotzone_at(pos)
+        in_strip_band = self._pointer_in_filmstrip_band_at(pos)
         over_strip = (
             self._filmstrip_accepts_pointer()
             and self._filmstrip.geometry().contains(pos)
         )
-        if in_hot or over_strip or self._filmstrip.underMouse():
+        strip_visible = self._filmstrip_opacity_value() > 0.35
+        if over_strip or self._filmstrip.underMouse():
+            self._cancel_show_filmstrip()
             self._hide_filmstrip_timer.stop()
             self._fade_in_filmstrip()
-        elif not self._filmstrip_pointer_active:
-            self._schedule_hide_filmstrip()
+        elif in_hot:
+            self._hide_filmstrip_timer.stop()
+            if strip_visible:
+                self._cancel_show_filmstrip()
+            elif in_strip_band:
+                self._schedule_show_filmstrip(self._FILMSTRIP_SHOW_DELAY_DIRECT_MS)
+            else:
+                self._schedule_show_filmstrip(self._FILMSTRIP_SHOW_DELAY_MS)
+        else:
+            self._cancel_show_filmstrip()
+            if not self._filmstrip_pointer_active:
+                self._schedule_hide_filmstrip()
+
+    def eventFilter(self, watched, event):
+        from PyQt6.QtCore import QEvent
+
+        if self._gpu_view is not None and watched is self._gpu_view.viewport():
+            if event.type() == QEvent.Type.MouseMove:
+                self.handle_pointer_for_filmstrip(event.globalPosition())
+        return False
 
     def _reveal_filmstrip(self) -> None:
         """Backward-compatible alias for fade-in."""
@@ -4728,24 +5039,34 @@ class SingleImageViewOverlay(QWidget):
         self._scroll.setGeometry(0, 0, self.width(), self.height())
         self._scroll.lower()
         if self._gpu_view is not None:
-            # GPU view fills the container, stacked above the (now idle) scroll area.
             self._gpu_view.setGeometry(0, 0, self.width(), self.height())
-            self._gpu_view.raise_()
         self._layout_filmstrip()
         self._layout_histogram()
+        self._raise_single_view_layers()
+
+    def _raise_single_view_layers(self) -> None:
+        """Keep image view under filmstrip / histogram chrome."""
+        self._scroll.lower()
+        if self._gpu_view is not None:
+            self._gpu_view.raise_()
+        if self._filmstrip.isVisible() or self._filmstrip_opacity_value() > 0.01:
+            self._filmstrip.raise_()
+        if self._hist.isVisible():
+            self._hist.raise_()
 
     def _layout_filmstrip(self):
         if not self._filmstrip.isVisible() and self._filmstrip_opacity_value() <= 0.0:
             return
         fh = self._FILMSTRIP_HEIGHT
         self._filmstrip.setGeometry(0, self.height() - fh, self.width(), fh)
-        self._filmstrip.raise_()
+        self._raise_single_view_layers()
 
     def mouseMoveEvent(self, event):
         self.handle_pointer_for_filmstrip(event.globalPosition())
         super().mouseMoveEvent(event)
 
     def leaveEvent(self, event):
+        self._cancel_show_filmstrip()
         self._schedule_hide_filmstrip()
         super().leaveEvent(event)
 
@@ -5113,6 +5434,10 @@ def _share_windows_via_winrt(path: str, owner_hwnd: int) -> bool:
 
 
 class RAWImageViewer(QMainWindow):
+    # Adjacent thumbnail+EXIF prefetch (after current image is displayed).
+    _PRELOAD_NEXT_COUNT = 6
+    _PRELOAD_PREV_COUNT = 4
+
     def _load_pixmap_safe(self, file_path):
         """Safely load QPixmap, using rawpy for RAW files and PIL for TIFF files to avoid Qt warnings"""
         import os
@@ -5318,6 +5643,7 @@ class RAWImageViewer(QMainWindow):
         self.gallery_widget = None  # Gallery view widget
         self.gallery_justified = None  # JustifiedGallery widget
         self.gallery_scroll = None  # Gallery scroll area
+        self.gallery_frame_gutter = None  # Overlay on gallery right edge for frame resize
         self.gallery_row_height = 200  # Fixed row height (matching reference)
         self.gallery_pixmaps = {}  # Cache for gallery pixmaps (store original pixmaps)
         self.gallery_aspect_cache = {}  # Cache aspect ratios
@@ -5325,6 +5651,7 @@ class RAWImageViewer(QMainWindow):
         self._gallery_load_tracking = {}  # Track loading status
         self._gallery_load_start_time = None  # Track loading start time
         self._loading_from_gallery = False  # Flag for gallery loading
+        self._loading_from_filmstrip = False  # Flag for filmstrip loading
         
         # Background task tracking for stability
         self._active_metadata_fetcher = None  # Store QRunnable to prevent GC
@@ -5332,8 +5659,6 @@ class RAWImageViewer(QMainWindow):
         self._gallery_metadata_fetch_in_progress = False
         self._navigation_in_progress = False  # Flag to prevent overlapping navigations
         self._last_navigation_time = 0  # Timestamp of last navigation for rate limiting
-        self._pending_navigation = None  # Store pending navigation request (file_path) for debouncing
-        self._navigation_timer = None  # QTimer for debouncing rapid navigation
         # Navigate while zoomed: request full decode first & apply one-step zoom restore
         self._preserve_nav_zoom_active = False
 
@@ -5341,6 +5666,7 @@ class RAWImageViewer(QMainWindow):
         self._slideshow_force_fit_next = False
         # Non-destructive per-file visual rotation (clockwise degrees: 0/90/180/270)
         self._visual_rotation_degrees = {}
+        self._load_persisted_visual_rotations()
         self._semantic_index = None
         self._semantic_search_backup_files = None
         self._semantic_search_result_paths = None
@@ -5365,6 +5691,8 @@ class RAWImageViewer(QMainWindow):
         self._semantic_coverage_cache_ts = 0.0
         # Gallery: user hid search strip during index/download — skip auto-expand from status updates.
         self._gallery_search_user_collapsed_while_busy = False
+        self._gallery_search_placeholder_saved = ""
+        self._gallery_search_index_session_key = None
 
         # Focus-area dashed outline from EXIF / maker AF (toggle with F)
         self._focus_subject_outline_active = False
@@ -5372,6 +5700,8 @@ class RAWImageViewer(QMainWindow):
         self._focus_subject_rect_image: QRect | None = None
         # "makernote_af" (exifread Canon AF) vs "exif_subject" (SubjectArea/Location via Exiv2)
         self._focus_rect_source: str | None = None
+        # After arrow-key nav while zoomed + focus outline: re-anchor on the new image's box.
+        self._recenter_on_focus_after_nav = False
 
         # Resize event handling
         self._is_resizing = False  # Flag to track when window is being actively resized
@@ -5680,9 +6010,12 @@ class RAWImageViewer(QMainWindow):
                                 )
                         if hasattr(self, "_maintain_zoom_on_navigation"):
                             delattr(self, "_maintain_zoom_on_navigation")
-                        self.fit_to_window = False
-                        self.current_zoom_level = 1.0
-                        self.zoom_to_point()
+                        if getattr(self, "gpu_view", None) is not None:
+                            self._gpu_zoom_in_to_point_finish()
+                        else:
+                            self.fit_to_window = False
+                            self.current_zoom_level = 1.0
+                            self.zoom_to_point()
                         return
 
                 self._load_full_resolution_on_demand()
@@ -5698,6 +6031,10 @@ class RAWImageViewer(QMainWindow):
                 self.status_bar.showMessage("Loading full resolution for 100% zoom...")
                 # Do not simulate zoom on half-size buffer; wait for full-res.
                 return
+
+        if getattr(self, "gpu_view", None) is not None:
+            self._gpu_zoom_in_to_point_finish()
+            return
 
         self.fit_to_window = False
         self.current_zoom_level = 1.0
@@ -5717,6 +6054,63 @@ class RAWImageViewer(QMainWindow):
         else:
             self.zoom_to_point()
 
+    def _single_view_is_fit_mode(self) -> bool:
+        gv = getattr(self, "gpu_view", None)
+        if gv is not None:
+            return gv.is_fit_mode()
+        return bool(getattr(self, "fit_to_window", True))
+
+    def _gpu_zoom_in_to_point_finish(self) -> None:
+        """Apply 100% zoom centered on ``zoom_center_point`` in GPU view."""
+        gv = getattr(self, "gpu_view", None)
+        if gv is None or not gv.has_pixmap():
+            return
+        pt = getattr(self, "zoom_center_point", None)
+        if pt is None:
+            w, h = gv.image_size()
+            pt = QPoint(max(0, w // 2), max(0, h // 2))
+            self.zoom_center_point = pt
+        gv.zoom_to_actual_at(float(pt.x()), float(pt.y()))
+        self._gpu_request_full_resolution_if_needed()
+        self.update_status_bar()
+
+    def _on_gpu_double_clicked(self, scene_pt) -> None:
+        """Double-click: zoom to click point from fit, or zoom out when already zoomed."""
+        import logging
+
+        logger = logging.getLogger(__name__)
+        gv = getattr(self, "gpu_view", None)
+        if gv is None:
+            return
+        if not self.current_pixmap or self.current_pixmap.isNull():
+            if getattr(self, "current_file_path", None):
+                self._pending_zoom_toggle = True
+                self._pending_gpu_zoom_point = scene_pt
+                logger.info(
+                    "GPU double-click recorded while image is loading; will zoom once ready."
+                )
+            return
+        self._stop_slideshow()
+        logger.info(
+            "[TRACK] User double-clicked to zoom (GPU) - file: %s",
+            os.path.basename(self.current_file_path)
+            if getattr(self, "current_file_path", None)
+            else "Unknown",
+        )
+        if (
+            getattr(self, "_focus_subject_outline_active", False)
+            and not gv.is_fit_mode()
+        ):
+            gv.fit_to_window()
+        elif gv.is_fit_mode():
+            self._recenter_on_focus_after_nav = False
+            self.zoom_center_point = QPoint(int(scene_pt.x()), int(scene_pt.y()))
+            self._zoom_in_to_image_point_finish()
+        else:
+            gv.fit_to_window()
+        self.update_status_bar()
+        self.setFocus()
+
     def _focus_jump_to_subject_center(self) -> bool:
         """With focus outline on: center zoom on EXIF / maker AF rectangle (fit-to-window)."""
         if not self.current_pixmap or self.current_pixmap.isNull():
@@ -5728,7 +6122,17 @@ class RAWImageViewer(QMainWindow):
         cx = rect.left() + rect.width() // 2
         cy = rect.top() + rect.height() // 2
         self._stop_slideshow()
+        self._recenter_on_focus_after_nav = False
         self.zoom_center_point = QPoint(cx, cy)
+        gv = getattr(self, "gpu_view", None)
+        if gv is not None and gv.has_pixmap():
+            if gv.is_fit_mode():
+                self._zoom_in_to_image_point_finish()
+            else:
+                gv.center_on_image_point(float(cx), float(cy))
+            self.update_status_bar()
+            self.setFocus()
+            return True
         if self.fit_to_window:
             self._zoom_in_to_image_point_finish()
         else:
@@ -5822,6 +6226,27 @@ class RAWImageViewer(QMainWindow):
         ):
             return
         self._refresh_focus_subject_rect_from_exif()
+        
+        # Re-anchor to the EXIF focus box only after arrow-key navigation while zoomed.
+        # Space and double-click set zoom_center_point explicitly — do not override them here.
+        if (
+            not self._single_view_is_fit_mode()
+            and getattr(self, "_recenter_on_focus_after_nav", False)
+        ):
+            self._recenter_on_focus_after_nav = False
+            rect = getattr(self, "_focus_subject_rect_image", None)
+            if rect is not None and not rect.isNull() and rect.width() >= 1 and rect.height() >= 1:
+                cx = rect.left() + rect.width() // 2
+                cy = rect.top() + rect.height() // 2
+                self.zoom_center_point = QPoint(cx, cy)
+                gv = getattr(self, "gpu_view", None)
+                if gv is not None and gv.has_pixmap():
+                    gv.center_on_image_point(float(cx), float(cy))
+                else:
+                    # Clear restored scroll positions to force re-centering on the new focus point
+                    self._restore_start_scroll_x = None
+                    self._restore_start_scroll_y = None
+                
         self._redraw_single_view_pixmap_without_relayout()
 
     def _redraw_single_view_pixmap_without_relayout(self) -> None:
@@ -5973,10 +6398,27 @@ class RAWImageViewer(QMainWindow):
         finally:
             self._sync_filmstrip_in_progress = False
 
-    def _sync_filmstrip_index(self, center: bool = False) -> None:
+    def _filmstrip_is_visible_enough(self) -> bool:
+        """True when the bottom filmstrip is shown enough to keep selection in view."""
+        if getattr(self, "view_mode", "single") != "single":
+            return False
+        bar = self._filmstrip_bar()
+        container = getattr(self, "single_view_container", None)
+        if bar is None or container is None or not bar.isEnabled():
+            return False
+        try:
+            if not bar.isVisible():
+                return False
+            return float(container._filmstrip_opacity_value()) > 0.35
+        except Exception:
+            return False
+
+    def _sync_filmstrip_index(self, center: bool | None = None) -> None:
         bar = self._filmstrip_bar()
         if bar is None or not bar.isEnabled():
             return
+        if center is None:
+            center = self._filmstrip_is_visible_enough()
         files = self._navigation_files()
         idx = getattr(self, "current_file_index", -1)
         path = getattr(self, "current_file_path", None)
@@ -6006,6 +6448,8 @@ class RAWImageViewer(QMainWindow):
         if not getattr(self, "fit_to_window", True):
             self._preserve_nav_zoom_active = True
             self._maintain_zoom_on_navigation = True
+            if getattr(self, "_focus_subject_outline_active", False):
+                self._recenter_on_focus_after_nav = True
             if hasattr(self, "_zoom_anchor_for_navigation_restore"):
                 self._restore_zoom_center = self._zoom_anchor_for_navigation_restore()
             self._restore_zoom_level = getattr(self, "current_zoom_level", 1.0)
@@ -6031,6 +6475,7 @@ class RAWImageViewer(QMainWindow):
             self._restore_start_scroll_y = None
                 
         self.current_file_index = index
+        self._loading_from_filmstrip = True
         self.load_raw_image(path)
 
     def _note_filmstrip_thumbnail_warmed(self, path: str) -> None:
@@ -6100,9 +6545,12 @@ class RAWImageViewer(QMainWindow):
             return
         if getattr(self, "view_mode", "single") == "single":
             bar = self._filmstrip_bar()
-            if bar is not None and bar.wants_thumbnail(file_path):
-                bar.apply_thumbnail(file_path, thumbnail)
-                self._note_filmstrip_thumbnail_warmed(file_path)
+            if bar is not None:
+                if bar.wants_thumbnail(file_path):
+                    bar.apply_thumbnail(file_path, thumbnail)
+                    self._note_filmstrip_thumbnail_warmed(file_path)
+                elif hasattr(bar, "note_cached_thumbnail"):
+                    bar.note_cached_thumbnail(file_path, thumbnail)
         if getattr(self, "view_mode", "single") != "single":
             return
         
@@ -6428,10 +6876,9 @@ class RAWImageViewer(QMainWindow):
             logger.info(f"[MANAGER] EXIF data ready, updating status bar immediately (will read from cache)")
             self.update_status_bar()
         
-        # Also ensure status bar is visible in single view mode
-        if self.view_mode == 'single' and hasattr(self, 'status_metadata_label'):
-            self.status_metadata_label.setVisible(True)
-            logger.debug(f"[MANAGER] Ensured status metadata label is visible in single view mode")
+        # Also ensure top metadata strip is refreshed in single view mode
+        if self.view_mode == 'single':
+            self.update_status_bar()
 
     def on_manager_error(self, file_path: str, error_message: str):
         """處理 ImageLoadManager 的錯誤信號"""
@@ -6608,12 +7055,20 @@ class RAWImageViewer(QMainWindow):
         # Set window to frameless for custom title bar only on Windows
         if platform.system() == 'Windows':
             self.setWindowFlags(Qt.WindowType.FramelessWindowHint)
-        self.setWindowTitle('RAWviewer v2.2.2')
+        self.setWindowTitle('RAWviewer')
         
         # Set simple background style (no rounded corners - simplifies window resizing)
         self.setStyleSheet("""
             QMainWindow {
                 background-color: #1E1E1E;
+            }
+            QToolTip {
+                color: #E0E0E0;
+                background-color: #2A2A2A;
+                border: 1px solid #444444;
+                border-radius: 4px;
+                padding: 0px;
+                font-size: 12px;
             }
         """)
         
@@ -6672,7 +7127,7 @@ class RAWImageViewer(QMainWindow):
         
         # Create custom title bar only on Windows
         if platform.system() == 'Windows':
-            self.title_bar = CustomTitleBar(self, title="RAWviewer v2.2.2")
+            self.title_bar = CustomTitleBar(self)
         else:
             self.title_bar = None
         
@@ -6690,6 +7145,13 @@ class RAWImageViewer(QMainWindow):
         # Add title bar first if it exists
         if hasattr(self, 'title_bar') and self.title_bar is not None:
             main_layout.addWidget(self.title_bar)
+            self.title_bar.setMouseTracking(True)
+            self.title_bar.installEventFilter(self)
+            self.status_metadata_label = self.title_bar.metadata_label
+        else:
+            self.top_metadata_bar = TopMetadataBar(self)
+            main_layout.addWidget(self.top_metadata_bar)
+            self.status_metadata_label = self.top_metadata_bar.metadata_label
         # Native menu bar (File, View, keyboard shortcuts)
         self.create_menu_bar()
         # Windows uses a frameless window: the system menu bar is often invisible; embed it in-window.
@@ -6791,7 +7253,7 @@ class RAWImageViewer(QMainWindow):
             "Press Delete to remove the current image\n"
             "H — Show/hide histogram\n"
             "F — Show/hide focus point\n"
-            "Scroll wheel (fit-to-window): Scroll down = previous image, Scroll up = next image\n"
+            "Scroll wheel (fit-to-window): Scroll down = next image, Scroll up = previous image\n"
             "Horizontal wheel (zoom mode): Scroll left/right to pan the image"
         )
         self.image_label.setStyleSheet(
@@ -6824,6 +7286,7 @@ class RAWImageViewer(QMainWindow):
                 self.gpu_view.wheelNavigate.connect(self._on_gpu_wheel_navigate)
                 self.gpu_view.fitModeChanged.connect(self._on_gpu_fit_mode_changed)
                 self.gpu_view.zoomChanged.connect(self._on_gpu_zoom_changed)
+                self.gpu_view.doubleClickedAt.connect(self._on_gpu_double_clicked)
             except Exception as _gpu_exc:
                 import logging
                 logging.getLogger(__name__).warning(
@@ -6846,15 +7309,15 @@ class RAWImageViewer(QMainWindow):
         # Create status bar
         self.status_bar = self.statusBar()
         self.status_bar.showMessage("")  # Empty message when no image loaded
-        # Enable resize grip (dotted triangle in bottom-right corner)
-        self.status_bar.setSizeGripEnabled(True)
-        # Set simple status bar style (no rounded corners)
+        # Edge resize is handled on the frameless window; grip only adds dead space on the right.
+        self.status_bar.setSizeGripEnabled(False)
+        # Symmetric horizontal padding — was 20px right-only effective inset vs ~12px left.
         self.status_bar.setStyleSheet("""
             QStatusBar {
                 background-color: #1E1E1E !important;
                 color: #E0E0E0;
                 border-top: 1px solid #2E2E2E;
-                padding: 10px 20px;
+                padding: 10px 12px;
                 font-size: 13px;
                 font-weight: 400;
             }
@@ -6867,12 +7330,14 @@ class RAWImageViewer(QMainWindow):
         status_widget = QWidget()
         status_widget.setObjectName("status_widget")  # Set object name for finding it later
         status_layout = QHBoxLayout(status_widget)
-        # Add left padding to balance with right padding of counter (12px)
-        status_layout.setContentsMargins(12, 0, 0, 0)
+        status_layout.setContentsMargins(0, 0, 0, 0)
         status_layout.setSpacing(12)
         
-        # Left side buttons container
+        # Left side buttons container — fixed footprint; search field overlays beside it.
         left_buttons_widget = QWidget()
+        left_buttons_widget.setSizePolicy(
+            QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Preferred
+        )
         left_buttons_layout = QHBoxLayout(left_buttons_widget)
         left_buttons_layout.setContentsMargins(0, 0, 0, 0)
         # Add 8px spacing between buttons
@@ -7032,11 +7497,6 @@ class RAWImageViewer(QMainWindow):
 
         # Search panel: expands from search button (gallery mode only)
         self.search_expand_container = QWidget()
-        self.search_expand_container.setSizePolicy(
-            QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred
-        )
-        self.search_expand_container.setMinimumWidth(0)
-        self.search_expand_container.setMaximumWidth(0)
         self.search_expand_layout = QStackedLayout(self.search_expand_container)
         self.search_expand_layout.setContentsMargins(0, 0, 0, 0)
 
@@ -7069,7 +7529,7 @@ class RAWImageViewer(QMainWindow):
         self.gallery_search_input.setPlaceholderText("Search gallery")
         self.gallery_search_input.setClearButtonEnabled(True)
         self.gallery_search_input.setMinimumWidth(140)
-        self.gallery_search_input.setMaximumWidth(260)
+        self.gallery_search_input.setMaximumWidth(300)
         self.gallery_search_input.setSizePolicy(
             QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed
         )
@@ -7079,7 +7539,7 @@ class RAWImageViewer(QMainWindow):
                 background-color: #2A2A2A;
                 border: 1px solid #3A3A3A;
                 border-radius: 6px;
-                padding: 4px 10px;
+                padding: 4px 28px 4px 10px;
                 font-size: 13px;
                 min-height: 20px;
                 max-height: 28px;
@@ -7098,17 +7558,18 @@ class RAWImageViewer(QMainWindow):
         self.search_expand_layout.addWidget(self.gallery_search_panel)
         self.search_expand_layout.setCurrentWidget(self.gallery_search_panel)
         self._gallery_search_status_full = ""
-        self._search_panel_target_width = 300
+        self._search_input_width_idle = 300
+        self._search_input_width_max = 500
+        self._search_panel_target_width = 310
+        self._search_panel_target_width_idle = 310
         self._search_panel_expanded = False
-        self._search_panel_animation = None
-        left_buttons_layout.addWidget(self.search_expand_container, 0, alignment=Qt.AlignmentFlag.AlignVCenter)
 
         self.shortcuts_hint_button = QPushButton("i")
         self.shortcuts_hint_button.setFlat(True)
         self.shortcuts_hint_button.setCursor(QCursor(Qt.CursorShape.ArrowCursor))
         self.shortcuts_hint_button.setFixedSize(22, 22)
         self.shortcuts_hint_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.shortcuts_hint_button.setToolTip(self._keyboard_shortcuts_help_text())
+        self.shortcuts_hint_button.setToolTip(self._keyboard_shortcuts_tooltip())
         self.shortcuts_hint_button.setStyleSheet("""
             QPushButton {
                 color: #888888;
@@ -7132,22 +7593,13 @@ class RAWImageViewer(QMainWindow):
             }
         """)
 
-        self.right_status_actions = QWidget()
-        right_status_actions_layout = QHBoxLayout(self.right_status_actions)
-        right_status_actions_layout.setContentsMargins(0, 0, 0, 0)
-        right_status_actions_layout.setSpacing(8)
-        right_status_actions_layout.addWidget(
-            self.share_bottom_button, 0, alignment=Qt.AlignmentFlag.AlignVCenter)
-        right_status_actions_layout.addWidget(
-            self.shortcuts_hint_button, 0, alignment=Qt.AlignmentFlag.AlignVCenter)
-
-        # Image counter (right-aligned text); lives in a trailing strip with share + shortcuts hint
+        # Image counter (right-aligned text); share, hint, and counter share one row with even spacing.
         _counter_label_style = """
             QLabel {
                 color: #B0B0B0;
                 font-size: 13px;
                 font-weight: 400;
-                padding: 4px 12px 4px 4px;
+                padding: 4px 8px 4px 0px;
                 letter-spacing: 0.25px;
             }
         """
@@ -7157,61 +7609,44 @@ class RAWImageViewer(QMainWindow):
         )
         self.status_counter_label.setStyleSheet(_counter_label_style)
 
-        # Trailing block: [share][i] — fixed gap — [counter] (avoids whole status bar 20px gap)
         self.right_status_trailing = QWidget()
         _rtl = QHBoxLayout(self.right_status_trailing)
         _rtl.setContentsMargins(0, 0, 0, 0)
-        _rtl.setSpacing(12)
-        _rtl.addWidget(self.right_status_actions, 0, alignment=Qt.AlignmentFlag.AlignVCenter)
+        _rtl.setSpacing(8)
+        _rtl.addWidget(self.share_bottom_button, 0, alignment=Qt.AlignmentFlag.AlignVCenter)
+        _rtl.addWidget(self.shortcuts_hint_button, 0, alignment=Qt.AlignmentFlag.AlignVCenter)
         _rtl.addWidget(self.status_counter_label, 0, alignment=Qt.AlignmentFlag.AlignVCenter)
 
-        # Add left buttons to main layout
+        # Add left buttons to main layout; EXIF/metadata lives in the top bar (center).
         status_layout.addWidget(left_buttons_widget)
-
-        counter_placeholder = QLabel("999/999")
-        counter_placeholder.setStyleSheet(_counter_label_style)
-        counter_placeholder.adjustSize()
-        _gap = _rtl.spacing()
-        right_cluster_width = (
-            self.right_status_actions.sizeHint().width()
-            + _gap
-            + counter_placeholder.width()
-        )
-
-        left_buttons_width = left_buttons_widget.sizeHint().width()
-
-        # Left spacer - accounts for left buttons width to center metadata
-        left_spacer = QWidget()
-        left_spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-        left_spacer.setMinimumWidth(left_buttons_width)  # Match left side width
-        status_layout.addWidget(left_spacer)
-        
-        # Center area: metadata only (single-image mode)
-        self.status_metadata_label = QLabel("")
-        self.status_metadata_label.setAlignment(Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter)
-        self.status_metadata_label.setStyleSheet("""
-            QLabel {
-                color: #E0E0E0;
-                font-size: 15px;
-                font-weight: 500;
-                padding: 6px 0px;
-                letter-spacing: 0.15px;
-            }
-        """)
-        status_layout.addWidget(self.status_metadata_label, 0, alignment=Qt.AlignmentFlag.AlignHCenter)
-        
-        # Right spacer - balances left spacer (reserve trailing cluster + layout gaps)
-        right_spacer = QWidget()
-        right_spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-        _sb = status_layout.spacing()
-        right_spacer.setMinimumWidth(right_cluster_width + 2 * _sb)
-        status_layout.addWidget(right_spacer)
-
+        status_layout.addStretch(1)
         status_layout.addWidget(self.right_status_trailing, 0, alignment=Qt.AlignmentFlag.AlignVCenter)
         self._set_shortcuts_hint_hovered(True)
+
+        # Search field floats over the status row (does not widen the button cluster).
+        self.status_bar_widget = status_widget
+        self.left_buttons_widget = left_buttons_widget
+        self.search_expand_container.setParent(status_widget)
+        self.search_expand_container.setSizePolicy(
+            QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed
+        )
+        self.search_expand_container.hide()
         
         # Add custom widget to status bar
         self.status_bar.addPermanentWidget(status_widget, 1)
+
+        # Hover-only size grip for frameless edge resize (does not consume layout space).
+        self._resize_grip = ResizeGripIndicator(self)
+        self._position_resize_grip()
+
+        # Track mouse over client area so edge cursors / grip appear without clicking first.
+        self.setMouseTracking(True)
+        cw = self.centralWidget()
+        if cw is not None:
+            cw.setMouseTracking(True)
+            cw.installEventFilter(self)
+        self.status_bar.setMouseTracking(True)
+        self.status_bar.installEventFilter(self)
         
         # Status bar created - no rounded corners to update
         
@@ -7221,6 +7656,12 @@ class RAWImageViewer(QMainWindow):
         # Install event filter to intercept arrow keys
         self.scroll_area.installEventFilter(self)
         self.image_label.installEventFilter(self)
+        self.single_view_container.installEventFilter(self)
+        if self.gpu_view is not None:
+            self.gpu_view.setMouseTracking(True)
+            self.gpu_view.viewport().setMouseTracking(True)
+            self.gpu_view.installEventFilter(self)
+            self.gpu_view.viewport().installEventFilter(self)
 
         # F must work even when no child widget accepts keyboard focus (QLabel default
         # is NoFocus). WindowShortcut fires while this window is active.
@@ -7236,6 +7677,8 @@ class RAWImageViewer(QMainWindow):
         )
 
         self._sync_single_image_histogram()
+
+        self._setup_file_drop_targets()
 
     def create_menu_bar(self):
         """Create the menu bar with File and Keyboard Shortcuts action"""
@@ -7339,25 +7782,229 @@ class RAWImageViewer(QMainWindow):
             self.gallery_search_input.setPlaceholderText(ph)
             self._gallery_search_placeholder_saved = ""
 
-    def _apply_gallery_search_status_elide(self):
-        """Single-row status: show truncated text; full string in tooltip when clipped."""
-        full = (getattr(self, "_gallery_search_status_full", None) or "").strip()
-        lab = getattr(self, "gallery_search_status_label", None)
-        if lab is None:
+    def _is_gallery_search_indexing_active(self) -> bool:
+        return bool(
+            getattr(self, "_semantic_indexing_in_progress", False)
+            or getattr(self, "_semantic_asset_download_in_progress", False)
+            or getattr(self, "_face_indexing_in_progress", False)
+        )
+
+    def _invalidate_semantic_coverage_cache(self) -> None:
+        self._semantic_coverage_cache = None
+        self._semantic_coverage_cache_ts = 0.0
+
+    def _gallery_search_index_corpus(self) -> list:
+        """Full folder corpus for indexing — not filtered search results."""
+        corpus = getattr(self, "_semantic_search_corpus_files", None)
+        if corpus:
+            return list(corpus)
+        return list(getattr(self, "image_files", []) or [])
+
+    def _gallery_search_index_session_key_for(self, corpus_files) -> str:
+        import hashlib
+
+        folder = getattr(self, "current_folder", "") or ""
+        try:
+            model = self._get_semantic_index().model_name or ""
+        except Exception:
+            model = ""
+        digest = hashlib.sha256("\n".join(sorted(corpus_files)).encode()).hexdigest()[:16]
+        return f"{folder}|{model}|{digest}"
+
+    def _mark_gallery_search_index_session_complete(self, corpus_files) -> None:
+        if corpus_files:
+            self._gallery_search_index_session_key = (
+                self._gallery_search_index_session_key_for(corpus_files)
+            )
+
+    def _is_gallery_search_index_session_complete(self, corpus_files) -> bool:
+        key = getattr(self, "_gallery_search_index_session_key", None)
+        if not key or not corpus_files:
+            return False
+        return key == self._gallery_search_index_session_key_for(corpus_files)
+
+    def _gallery_search_needs_index_work(self, corpus_files) -> tuple[bool, bool]:
+        """Return (needs_semantic, needs_face) for the given corpus."""
+        try:
+            index = self._get_semantic_index()
+            if not index.semantic_backend_available():
+                return False, False
+            if index.get_pending_paths(corpus_files):
+                return True, False
+            return False, index.get_face_pending_count(corpus_files) > 0
+        except Exception:
+            return False, False
+
+    def _is_gallery_search_fully_indexed(self, corpus_files) -> bool:
+        if not corpus_files:
+            return False
+        needs_semantic, needs_face = self._gallery_search_needs_index_work(corpus_files)
+        return not needs_semantic and not needs_face
+
+    def _reset_gallery_search_to_idle(self) -> None:
+        """Restore the search field to the normal idle placeholder (no index progress)."""
+        self._gallery_search_status_full = ""
+        self._gallery_search_placeholder_saved = ""
+        inp = getattr(self, "gallery_search_input", None)
+        if inp is not None:
+            inp.setPlaceholderText("Search gallery")
+            inp.setToolTip("")
+            self._reset_gallery_search_panel_width()
+        self._sync_gallery_search_input_editable()
+
+    def _restore_gallery_search_placeholder(self) -> None:
+        inp = getattr(self, "gallery_search_input", None)
+        if inp is None:
             return
-        if not full:
+        ph = getattr(self, "_gallery_search_placeholder_saved", "") or "Search gallery"
+        if self._should_show_search_index_progress(ph):
+            ph = "Search gallery"
+        inp.setPlaceholderText(ph)
+        self._gallery_search_placeholder_saved = ""
+
+    def _clear_stale_gallery_search_index_progress(self) -> None:
+        """Drop leftover index progress when no background pass is running."""
+        if self._is_gallery_search_indexing_active():
+            return
+        full = (getattr(self, "_gallery_search_status_full", "") or "").strip()
+        if full and self._should_show_search_index_progress(full):
+            self._reset_gallery_search_to_idle()
+            return
+        inp = getattr(self, "gallery_search_input", None)
+        if inp is None:
+            return
+        ph = (inp.placeholderText() or "").strip()
+        if ph and self._should_show_search_index_progress(ph):
+            self._reset_gallery_search_to_idle()
+
+    def _sync_gallery_search_input_editable(self) -> None:
+        """Lock the search field only while a background index pass is running."""
+        inp = getattr(self, "gallery_search_input", None)
+        if inp is None:
+            return
+        locked = self._is_gallery_search_indexing_active()
+        inp.setReadOnly(locked)
+        if locked:
+            inp.setCursor(QCursor(Qt.CursorShape.ArrowCursor))
+        else:
+            inp.setCursor(QCursor(Qt.CursorShape.IBeamCursor))
+
+    def _apply_gallery_search_status_placeholder(self) -> None:
+        """Show indexing progress inside the search field placeholder."""
+        inp = getattr(self, "gallery_search_input", None)
+        lab = getattr(self, "gallery_search_status_label", None)
+        if lab is not None:
+            lab.hide()
             lab.setText("")
             lab.setToolTip("")
+        if inp is None:
             return
+        full = (getattr(self, "_gallery_search_status_full", None) or "").strip()
+        indexing = self._is_gallery_search_indexing_active()
+        if full and self._should_show_search_index_progress(full) and not indexing:
+            full = ""
+            self._gallery_search_status_full = ""
+        if full:
+            inp.setPlaceholderText(full)
+            cap = int(getattr(self, "_search_input_width_max", 500) or 500)
+            w = self._gallery_search_input_width_for_text(full)
+            inp.setToolTip(full if w >= cap else "")
+            return
+        inp.setToolTip("")
+        if not indexing:
+            ph = getattr(self, "_gallery_search_placeholder_saved", "") or "Search gallery"
+            if self._should_show_search_index_progress(ph):
+                ph = "Search gallery"
+            inp.setPlaceholderText(ph)
+
+    def _gallery_search_panel_is_visible(self) -> bool:
+        return bool(
+            getattr(self, "_search_panel_expanded", False)
+            and not getattr(self, "_gallery_search_user_collapsed_while_busy", False)
+        )
+
+    def _release_gallery_search_panel_width(self) -> None:
+        """Let the expand strip collapse to zero without child min-width fighting layout."""
+        inp = getattr(self, "gallery_search_input", None)
+        panel = getattr(self, "gallery_search_panel", None)
+        if inp is not None:
+            inp.setMinimumWidth(0)
+            inp.setMaximumWidth(16777215)
+        if panel is not None:
+            panel.setMinimumWidth(0)
+            panel.setMaximumWidth(16777215)
+
+    def _reapply_gallery_search_panel_width_from_status(self) -> None:
+        """Restore search-field width after the expand strip opens."""
+        panel = getattr(self, "gallery_search_panel", None)
+        inp = getattr(self, "gallery_search_input", None)
+        if panel is not None:
+            panel.setMinimumWidth(0)
+            panel.setMaximumWidth(16777215)
+        if inp is None:
+            return
+        full = (getattr(self, "_gallery_search_status_full", "") or "").strip()
+        if full:
+            w = self._gallery_search_input_width_for_text(full)
+            if inp.minimumWidth() == w and inp.maximumWidth() == w:
+                return
+            self._apply_gallery_search_input_width(w, progress=True)
+            self._search_panel_target_width = self._gallery_search_status_panel_width(full)
+        else:
+            input_idle = int(getattr(self, "_search_input_width_idle", 300) or 300)
+            if inp.minimumWidth() == input_idle and inp.maximumWidth() == input_idle:
+                return
+            self._reset_gallery_search_panel_width()
+
+    def _apply_gallery_search_input_width(self, width: int, *, progress: bool = False) -> None:
+        """Apply search-field width; pin min=max whenever progress or idle-expanded."""
+        inp = getattr(self, "gallery_search_input", None)
+        if inp is None:
+            return
+        idle = int(getattr(self, "_search_input_width_idle", 300) or 300)
+        w = max(140, int(width))
+        pin = progress or w <= idle
+        if pin:
+            inp.setMinimumWidth(w)
+            inp.setMaximumWidth(w)
+        else:
+            inp.setMinimumWidth(140)
+            inp.setMaximumWidth(max(idle, w))
+
+    def _gallery_search_input_width_for_text(self, text: str) -> int:
+        """Fit placeholder progress text without shrinking font (13px)."""
+        idle = int(getattr(self, "_search_input_width_idle", 300) or 300)
+        cap = int(getattr(self, "_search_input_width_max", 500) or 500)
+        display = (text or "").strip()
+        if not display:
+            return idle
+        inp = getattr(self, "gallery_search_input", None)
+        if inp is None:
+            return idle
         from PyQt6.QtGui import QFontMetrics
-        w = lab.maximumWidth()
-        if w <= 0:
-            w = 220
-        max_px = max(48, int(w) - 6)
-        fm = QFontMetrics(lab.font())
-        elided = fm.elidedText(full, Qt.TextElideMode.ElideRight, max_px)
-        lab.setText(elided)
-        lab.setToolTip(full if elided != full else "")
+
+        fm = QFontMetrics(inp.font())
+        try:
+            text_w = fm.horizontalAdvance(display)
+        except AttributeError:
+            text_w = fm.width(display)
+        # Padding, border, and clear-button affordance (Windows needs extra room).
+        needed = int(text_w) + 72
+        return min(max(idle, needed), cap)
+
+    def _gallery_search_status_panel_width(self, text: str) -> int:
+        """Expandable strip width tracks the search field (progress in placeholder)."""
+        input_w = self._gallery_search_input_width_for_text(text)
+        return input_w + 10
+
+    def _reset_gallery_search_panel_width(self) -> None:
+        idle = int(getattr(self, "_search_panel_target_width_idle", 310) or 310)
+        self._search_panel_target_width = idle
+        inp = getattr(self, "gallery_search_input", None)
+        if inp is not None:
+            input_idle = int(getattr(self, "_search_input_width_idle", 300) or 300)
+            self._apply_gallery_search_input_width(input_idle, progress=False)
+            inp.setToolTip("")
 
     def _set_gallery_search_status(
         self, message: str, animate: bool = False, *, relayout: bool = True
@@ -7365,21 +8012,23 @@ class RAWImageViewer(QMainWindow):
         has_msg = bool(message and str(message).strip())
         self._gallery_search_status_full = (message or "").strip()
 
-        busy = bool(
-            getattr(self, "_gallery_search_busy", False)
-            or getattr(self, "_semantic_indexing_in_progress", False)
-            or getattr(self, "_semantic_asset_download_in_progress", False)
-        )
+        busy = self._is_gallery_search_indexing_active()
+        panel_visible = self._gallery_search_panel_is_visible()
         inp = getattr(self, "gallery_search_input", None)
         if inp is not None:
-            if busy or has_msg:
-                if busy and not inp.isReadOnly():
-                    self._set_gallery_search_busy(True)
-                self._apply_gallery_search_placeholder_elide()
-            elif inp.isReadOnly():
-                self._set_gallery_search_busy(False)
-            elif not has_msg:
-                inp.setToolTip("")
+            if has_msg:
+                w = self._gallery_search_input_width_for_text(
+                    self._gallery_search_status_full
+                )
+                self._search_panel_target_width = self._gallery_search_status_panel_width(
+                    self._gallery_search_status_full
+                )
+                if panel_visible:
+                    self._apply_gallery_search_input_width(w, progress=True)
+            elif panel_visible:
+                self._reset_gallery_search_panel_width()
+            self._apply_gallery_search_status_placeholder()
+            self._sync_gallery_search_input_editable()
 
         if not has_msg and hasattr(self, "status_bar") and self.status_bar is not None:
             try:
@@ -7390,9 +8039,12 @@ class RAWImageViewer(QMainWindow):
         if not relayout:
             return
 
-        self._search_panel_target_width = int(
-            getattr(self, "_search_panel_target_width_idle", 300) or 300
-        )
+        if not has_msg:
+            self._reset_gallery_search_panel_width()
+        else:
+            self._search_panel_target_width = self._gallery_search_status_panel_width(
+                self._gallery_search_status_full
+            )
 
         if getattr(self, "view_mode", "single") != "gallery":
             if not getattr(self, "_search_panel_expanded", False):
@@ -7404,12 +8056,103 @@ class RAWImageViewer(QMainWindow):
         if user_collapsed:
             return
         if busy or has_msg or getattr(self, "_search_panel_expanded", False):
-            self._set_search_panel_expanded(True, animate=animate)
+            self._apply_search_expand_container_width(
+                self._search_panel_target_width, animate=animate
+            )
+
+    def _search_expand_overlay_anchor(self) -> tuple | None:
+        """Top-left anchor (x, y, height) for the floating search field."""
+        btn = getattr(self, "search_bottom_button", None)
+        host = getattr(self, "status_bar_widget", None)
+        if btn is None or host is None or not btn.isVisible():
+            return None
+        origin = btn.mapTo(host, QPoint(0, 0))
+        gap = 8
+        h = max(btn.height(), 28)
+        return origin.x() + btn.width() + gap, origin.y(), h
+
+    def _apply_search_expand_overlay_geometry(
+        self, width: int, *, expanded: bool | None = None
+    ) -> None:
+        """Place the search field beside the search icon without changing layout width."""
+        container = getattr(self, "search_expand_container", None)
+        if container is None:
+            return
+        if expanded is None:
+            expanded = bool(getattr(self, "_search_panel_expanded", False))
+        anchor = self._search_expand_overlay_anchor()
+        if anchor is None:
+            container.hide()
+            container.setEnabled(False)
+            return
+        x, y, h = anchor
+        w = max(0, int(width)) if expanded else 0
+        if w <= 0:
+            container.hide()
+            container.setEnabled(False)
+            self._release_gallery_search_panel_width()
+            return
+        container.setGeometry(x, y, w, h)
+        container.show()
+        container.setEnabled(True)
+        container.raise_()
+        self._reapply_gallery_search_panel_width_from_status()
+
+    def _sync_search_expand_overlay(self) -> None:
+        if getattr(self, "_search_panel_expanded", False):
+            left = getattr(self, "left_buttons_widget", None)
+            host = getattr(self, "status_bar_widget", None)
+            if left is not None:
+                left.updateGeometry()
+            if host is not None and host.layout() is not None:
+                host.layout().activate()
+            self._apply_search_expand_overlay_geometry(
+                getattr(self, "_search_panel_target_width", 0),
+                expanded=True,
+            )
+        else:
+            self._apply_search_expand_overlay_geometry(0, expanded=False)
+
+    def _schedule_search_expand_overlay_sync(self, delay_ms: int = 0) -> None:
+        """Re-anchor the floating search field after the status bar relayouts."""
+        timer = getattr(self, "_search_overlay_sync_timer", None)
+        if timer is None:
+            timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.timeout.connect(self._sync_search_expand_overlay)
+            self._search_overlay_sync_timer = timer
+        timer.start(max(0, int(delay_ms)))
+
+    def _apply_search_expand_container_width(self, target: int, *, animate: bool = False) -> None:
+        """Resize the floating search strip; skip redundant geometry updates."""
+        if not hasattr(self, "search_expand_container") or self.search_expand_container is None:
+            return
+        target = max(0, int(target))
+        expanded = target > 0
+        container = self.search_expand_container
+        current_w = container.width() if container.isVisible() else 0
+        if (
+            current_w == target
+            and bool(getattr(self, "_search_panel_expanded", False)) == expanded
+        ):
+            return
+        self._set_search_panel_expanded(expanded, animate=False)
 
     def _set_gallery_search_input_visible(self):
+        self._clear_stale_gallery_search_index_progress()
         if hasattr(self, "search_expand_layout") and hasattr(self, "gallery_search_panel"):
             self.search_expand_layout.setCurrentWidget(self.gallery_search_panel)
-        self._set_search_panel_expanded(True)
+        full = (getattr(self, "_gallery_search_status_full", "") or "").strip()
+        if full:
+            self._search_panel_target_width = self._gallery_search_status_panel_width(full)
+        else:
+            self._search_panel_target_width = int(
+                getattr(self, "_search_panel_target_width_idle", 310) or 310
+            )
+        self._apply_search_expand_container_width(
+            self._search_panel_target_width, animate=False
+        )
+        self._sync_gallery_search_input_editable()
 
     def _switch_to_gallery_for_search(self):
         """Enter gallery mode to show semantic search results or empty state."""
@@ -7422,49 +8165,28 @@ class RAWImageViewer(QMainWindow):
     def _set_search_panel_expanded(self, expanded: bool, animate: bool = True):
         if not hasattr(self, "search_expand_container") or self.search_expand_container is None:
             return
+        if expanded:
+            full = (getattr(self, "_gallery_search_status_full", "") or "").strip()
+            if full:
+                self._search_panel_target_width = self._gallery_search_status_panel_width(full)
+            else:
+                self._search_panel_target_width = int(
+                    getattr(self, "_search_panel_target_width_idle", 310) or 310
+                )
         target = self._search_panel_target_width if expanded else 0
         self._search_panel_expanded = bool(expanded)
 
-        # Keep the container in the layout at all times (never hide() on collapse).
-        # Hiding/showing a layout item discretely adds/removes the row's inter-item
-        # spacing, which makes the neighbouring icons jump by a few pixels. By keeping
-        # it visible and only animating its width, the row stays glitch-free; we just
-        # disable it when collapsed so its zero-width input can't grab focus/Tab.
-        self.search_expand_container.show()
-        self.search_expand_container.setEnabled(bool(expanded))
+        if not expanded:
+            self._release_gallery_search_panel_width()
+            if hasattr(self, "gallery_search_input") and self.gallery_search_input is not None:
+                try:
+                    self.gallery_search_input.clearFocus()
+                except Exception:
+                    pass
+            if not self._is_gallery_search_indexing_active():
+                self._reset_gallery_search_to_idle()
 
-        if not expanded and hasattr(self, "gallery_search_input") and self.gallery_search_input is not None:
-            try:
-                self.gallery_search_input.clearFocus()
-            except Exception:
-                pass
-        if self._search_panel_animation is not None:
-            try:
-                self._search_panel_animation.stop()
-            except Exception:
-                pass
-            self._search_panel_animation = None
-            
-        if not animate:
-            self.search_expand_container.setMinimumWidth(target)
-            self.search_expand_container.setMaximumWidth(target)
-            return
-            
-        anim = QPropertyAnimation(self.search_expand_container, b"maximumWidth")
-        anim.setDuration(180)
-        anim.setStartValue(self.search_expand_container.maximumWidth())
-        anim.setEndValue(target)
-        anim.setEasingCurve(QEasingCurve.Type.OutCubic)
-        self.search_expand_container.setMinimumWidth(0)
-        self._search_panel_animation = anim
-
-        def _finish():
-            self.search_expand_container.setMinimumWidth(target)
-            self.search_expand_container.setMaximumWidth(target)
-            self._search_panel_animation = None
-
-        anim.finished.connect(_finish)
-        anim.start()
+        self._apply_search_expand_overlay_geometry(target, expanded=expanded)
 
     def _is_semantic_index_ready(self, corpus_files):
         now = time.time()
@@ -7494,18 +8216,23 @@ class RAWImageViewer(QMainWindow):
         total_files = int(coverage.get("total", len(corpus_files)))
         indexed_files = max(0, int(coverage.get("indexed", 0)))
         if not pending_files:
+            self._clear_stale_gallery_search_index_progress()
             try:
                 self._start_face_index_background(corpus_files)
             except Exception:
                 pass
-            self._set_gallery_search_input_visible()
-            if (
-                getattr(self, "_search_panel_expanded", False)
-                and hasattr(self, "gallery_search_input")
-                and self.gallery_search_input is not None
-            ):
-                self.gallery_search_input.setFocus()
-            self.status_bar.showMessage("Semantic index already up-to-date", 2500)
+            if not self._is_gallery_search_indexing_active():
+                self._mark_gallery_search_index_session_complete(corpus_files)
+                self._reset_gallery_search_to_idle()
+                if (
+                    getattr(self, "_search_panel_expanded", False)
+                    and hasattr(self, "gallery_search_input")
+                    and self.gallery_search_input is not None
+                ):
+                    self.gallery_search_input.setFocus()
+                    self._sync_gallery_search_input_editable()
+            self.status_bar.showMessage("", 0)
+            self._invalidate_semantic_coverage_cache()
             return
         folder = getattr(self, "current_folder", None)
         if folder:
@@ -7565,9 +8292,18 @@ class RAWImageViewer(QMainWindow):
                 except Exception as e:
                     self_inner.signals.error.emit(self_inner.token, str(e))
 
+        if hasattr(self, "gallery_search_input") and self.gallery_search_input is not None:
+            ph = self.gallery_search_input.placeholderText() or "Search gallery"
+            if self._should_show_search_index_progress(ph):
+                ph = "Search gallery"
+            if not getattr(self, "_gallery_search_placeholder_saved", ""):
+                self._gallery_search_placeholder_saved = ph
         self._set_gallery_search_status(
-            "Semantic ready "
-            f"{indexed_files}/{self._semantic_index_progress_total}"
+            self._format_index_progress(
+                "Semantic",
+                indexed_files,
+                self._semantic_index_progress_total,
+            )
         )
         worker = _SemanticIndexWorker(
             token,
@@ -7577,25 +8313,44 @@ class RAWImageViewer(QMainWindow):
             self._semantic_index_progress_total,
             indexed_files,
         )
-        self._gallery_search_placeholder_saved = self.gallery_search_input.placeholderText()
-        self.gallery_search_input.setPlaceholderText("EXIF only")
         QThreadPool.globalInstance().start(worker)
+
+    def _format_index_progress(self, stage: str, done: int, total: int) -> str:
+        try:
+            from semantic_search import format_index_progress
+
+            return format_index_progress(stage, done, total)
+        except Exception:
+            total_i = max(0, int(total))
+            done_i = max(0, min(int(done), total_i))
+            if total_i <= 0:
+                return stage
+            return f"{stage}: {done_i}/{total_i}"
+
+    def _should_show_search_index_progress(self, message: str) -> bool:
+        msg = (message or "").strip()
+        if not msg:
+            return False
+        lowered = msg.lower()
+        if lowered.startswith("preparing thumbnail"):
+            return False
+        # Only the three search-index phases belong in the search field.
+        return lowered.startswith(
+            ("metadata:", "semantic:", "face:")
+        )
 
     def _on_semantic_index_progress(self, token, i, n, message):
         if token != self._semantic_index_active_token:
             return
-        total = max(1, int(n) if n else self._semantic_index_progress_total)
-        done = min(total, max(0, int(i)))
         msg = str(message or "").strip()
-        # Phase messages (metadata / faces / warm-up) already include their own x/y.
-        # Do not append album "Semantic ready" counter — it stays 0 until the AI pass.
-        if msg.startswith("Scanning") or msg.startswith("Warming"):
+        if msg and self._should_show_search_index_progress(msg):
             self._set_gallery_search_status(msg)
             return
-        if msg.startswith("Processing"):
-            self._set_gallery_search_status(f"{msg} · {done}/{total}")
-            return
-        self._set_gallery_search_status(f"Semantic ready {done}/{total}")
+        total = max(1, int(n) if n else self._semantic_index_progress_total)
+        done = min(total, max(0, int(i)))
+        self._set_gallery_search_status(
+            self._format_index_progress("Semantic", done, total)
+        )
 
     def _on_semantic_index_done(self, token, result):
         if token != self._semantic_index_active_token:
@@ -7608,14 +8363,22 @@ class RAWImageViewer(QMainWindow):
         folder = getattr(self, "current_folder", None)
         if folder:
             self._set_semantic_index_incomplete(folder, False)
-        try:
-            if hasattr(self, "gallery_search_input") and self.gallery_search_input is not None:
-                ph = getattr(self, "_gallery_search_placeholder_saved", "") or "Search gallery"
-                self.gallery_search_input.setPlaceholderText(ph)
-                self._gallery_search_placeholder_saved = ""
-        except Exception:
-            pass
-        self._set_gallery_search_status("")
+        corpus = self._gallery_search_index_corpus()
+        face_pending = 0
+        if corpus:
+            try:
+                face_pending = self._get_semantic_index().get_face_pending_count(corpus)
+            except Exception:
+                face_pending = 0
+        will_run_face = False
+        if corpus and face_pending > 0:
+            try:
+                will_run_face = self._get_semantic_index().get_face_pending_count(corpus) > 0
+            except Exception:
+                will_run_face = face_pending > 0
+        if not will_run_face:
+            self._mark_gallery_search_index_session_complete(corpus)
+            self._reset_gallery_search_to_idle()
         user_hid = getattr(self, "_gallery_search_user_collapsed_while_busy", False)
         if not user_hid:
             self._set_gallery_search_input_visible()
@@ -7626,17 +8389,9 @@ class RAWImageViewer(QMainWindow):
             ):
                 self.gallery_search_input.setFocus()
         self._gallery_search_user_collapsed_while_busy = False
-        self.status_bar.showMessage(
-            "Semantic index ready: "
-            f"indexed {result.get('indexed', 0)}, skipped {result.get('skipped', 0)}, "
-            f"failed {result.get('failed', 0)}",
-            5000,
-        )
-        corpus = (
-            getattr(self, "_semantic_search_corpus_files", None)
-            or getattr(self, "image_files", None)
-        )
-        if corpus:
+        self._sync_gallery_search_input_editable()
+        self._invalidate_semantic_coverage_cache()
+        if will_run_face:
             self._start_face_index_background(corpus)
 
     def _start_face_index_background(self, corpus_files) -> None:
@@ -7657,10 +8412,6 @@ class RAWImageViewer(QMainWindow):
         self._face_index_active_token = token
         self._face_indexing_in_progress = True
         total_files = len(corpus_files)
-        try:
-            self.status_bar.showMessage(f"Scanning faces in background ({pending} pending)...", 3000)
-        except Exception:
-            pass
         signals = SemanticIndexSignals()
         self._face_index_signals = signals
         signals.progress.connect(self._on_face_index_progress)
@@ -7695,7 +8446,9 @@ class RAWImageViewer(QMainWindow):
                 except Exception as e:
                     self_inner.signals.error.emit(self_inner.token, str(e))
 
-        self._set_gallery_search_status(f"Scanning faces… 0/{pending}")
+        self._set_gallery_search_status(
+            self._format_index_progress("Face", 0, pending)
+        )
         worker = _FaceIndexWorker(token, list(corpus_files), index, signals, total_files)
         QThreadPool.globalInstance().start(worker)
 
@@ -7703,8 +8456,14 @@ class RAWImageViewer(QMainWindow):
         if token != getattr(self, "_face_index_active_token", None):
             return
         msg = str(message or "").strip()
-        if msg:
+        if msg and self._should_show_search_index_progress(msg):
             self._set_gallery_search_status(msg)
+            return
+        total = max(1, int(n) if n else 1)
+        done = min(total, max(0, int(i)))
+        self._set_gallery_search_status(
+            self._format_index_progress("Face", done, total)
+        )
 
     def _on_face_index_done(self, token, result):
         if token != getattr(self, "_face_index_active_token", None):
@@ -7712,10 +8471,10 @@ class RAWImageViewer(QMainWindow):
         self._face_indexing_in_progress = False
         self._face_index_active_token = None
         self._face_index_signals = None
-        self._set_gallery_search_status("")
-        count = int(result.get("faces_scanned", 0))
-        if count > 0:
-            self.status_bar.showMessage(f"Face scan complete ({count} files)", 4000)
+        corpus = self._gallery_search_index_corpus()
+        self._mark_gallery_search_index_session_complete(corpus)
+        self._reset_gallery_search_to_idle()
+        self._invalidate_semantic_coverage_cache()
 
     def _on_face_index_error(self, token, error):
         if token != getattr(self, "_face_index_active_token", None):
@@ -7723,8 +8482,13 @@ class RAWImageViewer(QMainWindow):
         self._face_indexing_in_progress = False
         self._face_index_active_token = None
         self._face_index_signals = None
-        self._set_gallery_search_status("")
-        self.status_bar.showMessage(f"Face scan failed: {error}", 5000)
+        try:
+            self._reset_gallery_search_to_idle()
+        except Exception:
+            pass
+        self._sync_gallery_search_input_editable()
+        self._invalidate_semantic_coverage_cache()
+        self.status_bar.showMessage(f"Face search failed: {error}", 5000)
 
     def _on_semantic_index_error(self, token, error):
         if token != self._semantic_index_active_token:
@@ -7735,18 +8499,16 @@ class RAWImageViewer(QMainWindow):
         self._semantic_index_progress_base = 0
         self._semantic_index_progress_total = 0
         try:
-            if hasattr(self, "gallery_search_input") and self.gallery_search_input is not None:
-                ph = getattr(self, "_gallery_search_placeholder_saved", "") or "Search gallery"
-                self.gallery_search_input.setPlaceholderText(ph)
-                self._gallery_search_placeholder_saved = ""
+            self._restore_gallery_search_placeholder()
         except Exception:
             pass
         user_hid = getattr(self, "_gallery_search_user_collapsed_while_busy", False)
         if not user_hid:
             self._set_gallery_search_input_visible()
-        self._set_gallery_search_status("Semantic index initialization failed")
+        self._set_gallery_search_status("Semantic indexing failed")
         self._gallery_search_user_collapsed_while_busy = False
-        self.status_bar.showMessage(f"Semantic index failed: {error}", 5000)
+        self._sync_gallery_search_input_editable()
+        self.status_bar.showMessage(f"Semantic indexing failed: {error}", 5000)
 
     def _start_semantic_asset_download_background(self, corpus_files):
         if self._semantic_asset_download_in_progress:
@@ -7780,21 +8542,20 @@ class RAWImageViewer(QMainWindow):
                 except Exception as e:
                     self_inner.signals.error.emit(self_inner.token, str(e))
 
-        self._set_gallery_search_status("Downloading MobileCLIP semantic assets...")
+        self._set_gallery_search_status("Downloading assets…")
         worker = _SemanticAssetDownloadWorker(token, index, list(corpus_files), signals)
         QThreadPool.globalInstance().start(worker)
 
     def _on_semantic_asset_download_progress(self, token, message):
         if not self._semantic_asset_download_in_progress:
             return
-        self._set_gallery_search_status(message or "Downloading MobileCLIP semantic assets...")
+        self._set_gallery_search_status(message or "Downloading assets…")
 
     def _on_semantic_asset_download_done(self, token, asset_path, corpus_files):
         if not self._semantic_asset_download_in_progress:
             return
         self._semantic_asset_download_in_progress = False
         self._semantic_asset_download_signals = None
-        self.status_bar.showMessage(f"MobileCLIP assets ready: {asset_path}", 4000)
         self._start_semantic_index_build_background(corpus_files)
 
     def _on_semantic_asset_download_error(self, token, error):
@@ -7802,9 +8563,9 @@ class RAWImageViewer(QMainWindow):
             return
         self._semantic_asset_download_in_progress = False
         self._semantic_asset_download_signals = None
-        self._set_gallery_search_status("MobileCLIP asset download failed")
+        self._set_gallery_search_status("Asset download failed")
         self._gallery_search_user_collapsed_while_busy = False
-        self.status_bar.showMessage(f"MobileCLIP download failed: {error}", 7000)
+        self.status_bar.showMessage(f"Asset download failed: {error}", 7000)
 
     def _on_search_bottom_clicked(self):
         safe_print(
@@ -7813,33 +8574,34 @@ class RAWImageViewer(QMainWindow):
         
         if self._search_panel_expanded:
             safe_print("[SEARCH_DEBUG] Collapsing search panel.")
-            if self._semantic_indexing_in_progress or self._semantic_asset_download_in_progress:
+            if self._is_gallery_search_indexing_active():
                 self._gallery_search_user_collapsed_while_busy = True
-            self._set_search_panel_expanded(False)
+            self._set_search_panel_expanded(False, animate=False)
             return
             
         start_time = time.time()
         self._gallery_search_user_collapsed_while_busy = False
+        self._reset_gallery_search_to_idle()
+        self._invalidate_semantic_coverage_cache()
+        corpus_files = self._gallery_search_index_corpus()
         self._set_gallery_search_input_visible()
         if hasattr(self, "gallery_search_input") and self.gallery_search_input is not None:
             self.gallery_search_input.setFocus()
-            
-        # Synchronous check for indexing/backend availability (Stable Version)
-        raw_corpus = getattr(self, "_semantic_search_corpus_files", []) or self.image_files
-        
-        corpus_files = list(raw_corpus)
-        
+            self._sync_gallery_search_input_editable()
+
+        # Semantic indexing (MobileCLIP + optional face backfill) starts here only —
+        # not on gallery/folder load — so it does not compete with thumbnail/metadata work.
         if not corpus_files:
             safe_print("[SEARCH_DEBUG] No valid files found for search.")
             self._set_gallery_search_status("No images available for semantic search")
             return
-            
+
+        if self._is_gallery_search_index_session_complete(corpus_files):
+            return
+
         try:
             index = self._get_semantic_index()
             backend_available = index.semantic_backend_available()
-            coverage = self._is_semantic_index_ready(corpus_files)
-            
-            ready = int(coverage.get("ready", 0)) == 1
             if not backend_available:
                 backend_error = index.semantic_backend_error()
                 if "Missing MobileCLIP" in backend_error and index.mobileclip_supports_hub_download():
@@ -7851,18 +8613,24 @@ class RAWImageViewer(QMainWindow):
                             self._mobileclip_download_dismissed_this_session = True
                 else:
                     self._set_gallery_search_status(f"EXIF search only. Backend: {backend_error}")
-            elif coverage.get("indexed", 0) > 0:
-                indexed = int(coverage.get("indexed", 0))
-                total = int(coverage.get("total", len(corpus_files)))
-                if ready:
-                    self.status_bar.showMessage("Semantic index ready", 2500)
-                else:
-                    self.status_bar.showMessage(f"Semantic index available ({indexed}/{total}).", 3500)
-                # Ensure we finish indexing the rest in the background
-                if indexed < total:
-                    self._start_semantic_index_build_background(corpus_files, coverage=coverage)
-            else:
+                return
+
+            needs_semantic, needs_face = self._gallery_search_needs_index_work(corpus_files)
+            if not needs_semantic and not needs_face:
+                self._mark_gallery_search_index_session_complete(corpus_files)
+                self._reset_gallery_search_to_idle()
+                return
+
+            if needs_semantic:
+                coverage = index.get_index_coverage(corpus_files)
                 self._start_semantic_index_build_background(corpus_files, coverage=coverage)
+                return
+
+            if needs_face:
+                self._start_face_index_background(corpus_files)
+            else:
+                self._mark_gallery_search_index_session_complete(corpus_files)
+                self._reset_gallery_search_to_idle()
         except Exception as e:
             self._set_gallery_search_status(f"Search error: {e}")
 
@@ -7946,10 +8714,20 @@ class RAWImageViewer(QMainWindow):
             if self._semantic_search_backup_files is None:
                 self._semantic_search_backup_files = list(base_files)
             if getattr(self, "_semantic_indexing_in_progress", False):
-                self.status_bar.showMessage(
-                    "Searching while indexing… EXIF/metadata covers whole album; semantic ranking improves as indexing progresses.",
-                    4500,
-                )
+                progress = (
+                    getattr(self, "_gallery_search_status_full", "") or ""
+                ).strip()
+                if progress:
+                    self.status_bar.showMessage(
+                        f"Searching while indexing — {progress}",
+                        4500,
+                    )
+                else:
+                    self.status_bar.showMessage(
+                        "Searching while indexing — EXIF/metadata filters apply now; "
+                        "semantic ranking improves as indexing continues.",
+                        4500,
+                    )
             else:
                 self.status_bar.showMessage("Running search...")
             # Avoid forced synchronous event pumping here; it can trigger re-entrant
@@ -8081,6 +8859,58 @@ class RAWImageViewer(QMainWindow):
     def get_settings(self):
         return QSettings("RAWviewer", "RAWviewer")
 
+    def _load_persisted_visual_rotations(self) -> None:
+        """Restore non-destructive visual rotations from QSettings (cross-session)."""
+        import json
+
+        try:
+            raw = self.get_settings().value("visual_rotations", "")
+            if not raw:
+                return
+            if isinstance(raw, (bytes, bytearray)):
+                raw = raw.decode("utf-8", errors="ignore")
+            data = json.loads(raw)
+            if not isinstance(data, dict):
+                return
+            loaded = {}
+            for k, v in data.items():
+                try:
+                    deg = int(v) % 360
+                    if deg and isinstance(k, str):
+                        loaded[_norm_path(k)] = deg
+                except (TypeError, ValueError):
+                    continue
+            self._visual_rotation_degrees = loaded
+        except Exception:
+            pass
+
+    def _save_persisted_visual_rotations(self) -> None:
+        """Persist non-destructive visual rotations to QSettings."""
+        import json
+
+        try:
+            data = {
+                k: int(v) % 360
+                for k, v in self._visual_rotation_degrees.items()
+                if int(v) % 360
+            }
+            self.get_settings().setValue(
+                "visual_rotations",
+                json.dumps(data, separators=(",", ":")),
+            )
+        except Exception:
+            pass
+
+    def _migrate_visual_rotation_path(self, old_path: str, new_path: str) -> None:
+        old_k = _norm_path(old_path)
+        new_k = _norm_path(new_path)
+        if old_k == new_k:
+            return
+        deg = self._visual_rotation_degrees.pop(old_k, None)
+        if deg:
+            self._visual_rotation_degrees[new_k] = deg
+            self._save_persisted_visual_rotations()
+
     def _semantic_folder_settings_key(self, folder: str) -> str:
         import hashlib
 
@@ -8106,7 +8936,11 @@ class RAWImageViewer(QMainWindow):
         )
 
     def _maybe_resume_semantic_indexing(self) -> None:
-        """Resume background semantic indexing after folder load or session restore."""
+        """Resume indexing only when the user previously started search indexing
+        for this folder and it was interrupted (e.g. app closed mid-pass).
+
+        Fresh folder opens without the incomplete flag do not start indexing here.
+        """
         flag = os.environ.get("RAWVIEWER_AUTO_RESUME_SEMANTIC_INDEX", "1").strip().lower()
         if flag in ("0", "false", "no", "off"):
             return
@@ -8232,6 +9066,7 @@ class RAWImageViewer(QMainWindow):
         hide_start = time.time()
         if hasattr(self, 'gallery_widget') and self.gallery_widget:
             self.gallery_widget.hide()
+            self._position_gallery_frame_grip()
         hide_time = time.time() - hide_start
         logger.info(f"[VIEW_MODE] Step 1: Gallery widget hidden (elapsed: {hide_time:.3f}s)")
         
@@ -8249,8 +9084,6 @@ class RAWImageViewer(QMainWindow):
         # Show status bar footer (metadata and image counter)
         if hasattr(self, 'status_bar'):
             self.status_bar.show()
-        if hasattr(self, 'status_metadata_label'):
-            self.status_metadata_label.show()
         if hasattr(self, 'status_counter_label'):
             self.status_counter_label.show()
         
@@ -8261,12 +9094,6 @@ class RAWImageViewer(QMainWindow):
             self.view_mode_button.show()
         if hasattr(self, "search_bottom_button"):
             self.search_bottom_button.setVisible(bool(self.image_files))
-        if hasattr(self, "search_expand_container") and self.search_expand_container:
-            # Keep the (possibly zero-width) container in the layout so toggling search
-            # never adds/removes the row spacing and shifts the neighbouring icons.
-            self._set_search_panel_expanded(
-                getattr(self, "_search_panel_expanded", False), animate=False
-            )
         # Update icon if using qtawesome
         if qta is not None:
             try:
@@ -8278,6 +9105,7 @@ class RAWImageViewer(QMainWindow):
                 self.view_mode_button.setText("Gallery")
         else:
             self.view_mode_button.setText("Gallery")
+        self._schedule_search_expand_overlay_sync()
         
         ui_time = time.time() - ui_start
         logger.info(f"[VIEW_MODE] Step 3: UI elements shown (elapsed: {ui_time:.3f}s)")
@@ -8290,56 +9118,62 @@ class RAWImageViewer(QMainWindow):
             
             # Try to use cached pixmap from gallery or image cache for instant display
             cached_pixmap = None
-            try:
-                # GALLERY FUNCTIONALITY COMMENTED OUT
-                # First check gallery cache (might have embedded preview)
-                # if hasattr(self, 'gallery_pixmaps') and self.current_file_path in self.gallery_pixmaps:
-                #     cached_pixmap = self.gallery_pixmaps[self.current_file_path]
-                #     if cached_pixmap and not cached_pixmap.isNull():
-                #         logger.info(f"[VIEW_MODE] Using cached pixmap from gallery for instant display")
-                #         # Display cached pixmap immediately for smooth transition
-                #         self.display_pixmap(cached_pixmap)
-                #         # Also ensure it's in global cache
-                #         try:
-                #             self.image_cache.put_pixmap(self.current_file_path, cached_pixmap)
-                #         except:
-                #             pass
-                # Also check global image cache
-                if (not cached_pixmap or cached_pixmap.isNull()) and hasattr(self, 'image_cache'):
-                    cached_pixmap = self.image_cache.get_pixmap(self.current_file_path)
-                    if cached_pixmap and not cached_pixmap.isNull():
-                        logger.info(f"[VIEW_MODE] Using cached pixmap from image cache for instant display")
-                        # Apply orientation correction to cached pixmap if needed
-                        orientation = self.get_orientation_from_exif(self.current_file_path)
-                        if orientation != 1:
-                            cached_pixmap = self.apply_orientation_to_pixmap(cached_pixmap, orientation)
-                            self._orientation_already_applied = True
-                        else:
-                            self._orientation_already_applied = True
-                        self.display_pixmap(cached_pixmap)
-                        if hasattr(self, "loading_overlay"):
-                            self.loading_overlay.hide_loading()
-            except Exception as e:
-                logger.debug(f"[VIEW_MODE] Error using cached pixmap: {e}")
-            
-            # Only load full image if we don't have a good cached version OR it's a RAW file
-            # However, if we ALREADY have the full pixmap in memory for this file, skip loading
-            is_already_loaded = (hasattr(self, 'current_pixmap') and self.current_pixmap and 
-                               not self.current_pixmap.isNull() and 
-                               getattr(self, '_last_loaded_path', None) == self.current_file_path)
-            
+            is_already_loaded = (
+                getattr(self, "_last_loaded_path", None) == self.current_file_path
+                and (
+                    (
+                        getattr(self, "_base_display_pixmap", None) is not None
+                        and not self._base_display_pixmap.isNull()
+                    )
+                    or (
+                        getattr(self, "current_pixmap", None) is not None
+                        and not self.current_pixmap.isNull()
+                    )
+                )
+            )
+
             if is_already_loaded:
                 logger.info(f"[VIEW_MODE] Image already in memory, skipping reload")
-                self.display_pixmap(self.current_pixmap)
+                base = getattr(self, "_base_display_pixmap", None)
+                if base is not None and not base.isNull():
+                    self.display_pixmap(base)
+                elif (
+                    getattr(self, "current_pixmap", None) is not None
+                    and not self.current_pixmap.isNull()
+                    and not self._get_visual_rotation_degrees(self.current_file_path)
+                ):
+                    self.display_pixmap(self.current_pixmap)
+                else:
+                    self.load_raw_image(self.current_file_path)
                 if hasattr(self, "loading_overlay"):
                     self.loading_overlay.hide_loading()
-                # CRITICAL: Ensure metadata is updated when displaying already loaded image
                 logger.info(f"[VIEW_MODE] Updating status bar to ensure metadata is displayed")
                 self.update_status_bar()
             else:
-                # Always trigger load_raw_image for consistency, especially after folder switch.
-                # load_raw_image has internal logic to use cached full-res pixmaps instantly.
-                logger.info(f"[VIEW_MODE] Triggering load_raw_image for {os.path.basename(self.current_file_path)}")
+                try:
+                    if hasattr(self, "image_cache"):
+                        cached_pixmap = self.image_cache.get_pixmap(self.current_file_path)
+                        if cached_pixmap and not cached_pixmap.isNull():
+                            logger.info(
+                                f"[VIEW_MODE] Using cached pixmap from image cache for instant display"
+                            )
+                            orientation = self.get_orientation_from_exif(self.current_file_path)
+                            if orientation != 1:
+                                cached_pixmap = self.apply_orientation_to_pixmap(
+                                    cached_pixmap, orientation
+                                )
+                                self._orientation_already_applied = True
+                            else:
+                                self._orientation_already_applied = True
+                            self.display_pixmap(cached_pixmap)
+                            if hasattr(self, "loading_overlay"):
+                                self.loading_overlay.hide_loading()
+                except Exception as e:
+                    logger.debug(f"[VIEW_MODE] Error using cached pixmap: {e}")
+
+                logger.info(
+                    f"[VIEW_MODE] Triggering load_raw_image for {os.path.basename(self.current_file_path)}"
+                )
                 self.load_raw_image(self.current_file_path)
             load_time = time.time() - load_start
             logger.info(f"[VIEW_MODE] Step 4: Image reload completed (elapsed: {load_time:.3f}s)")
@@ -8430,12 +9264,22 @@ class RAWImageViewer(QMainWindow):
             self.status_bar.show()  # Keep status_bar visible to show sort button
             self.status_bar.showMessage("")  # Clear message
         if hasattr(self, 'status_metadata_label'):
-            self.status_metadata_label.hide()
+            self._apply_top_metadata_text("")
         if hasattr(self, 'status_counter_label'):
             self._update_gallery_counter()
-        if self._semantic_indexing_in_progress:
-            self._set_gallery_search_status(self.gallery_search_status_label.text() or "Initializing semantic index...")
-        elif self._search_panel_expanded and hasattr(self, "search_expand_layout") and hasattr(
+        if self._is_gallery_search_indexing_active():
+            progress = (getattr(self, "_gallery_search_status_full", "") or "").strip()
+            if not progress and self._semantic_indexing_in_progress:
+                total = max(
+                    1, int(getattr(self, "_semantic_index_progress_total", 0) or 0)
+                )
+                base = int(getattr(self, "_semantic_index_progress_base", 0) or 0)
+                progress = self._format_index_progress("Semantic", base, total)
+            if progress:
+                self._set_gallery_search_status(progress)
+        else:
+            self._clear_stale_gallery_search_index_progress()
+        if self._search_panel_expanded and hasattr(self, "search_expand_layout") and hasattr(
             self, "gallery_search_panel"
         ):
             self.search_expand_layout.setCurrentWidget(self.gallery_search_panel)
@@ -8444,10 +9288,6 @@ class RAWImageViewer(QMainWindow):
             self.sort_toggle_button.show()
         if hasattr(self, "search_bottom_button"):
             self.search_bottom_button.show()
-        # Restore search panel state
-        if hasattr(self, "search_expand_container") and self.search_expand_container:
-            expanded = getattr(self, "_search_panel_expanded", False)
-            self._set_search_panel_expanded(expanded, animate=False)
         # Single-image actions stay in update_status_bar for single mode only; hide here
         # because we do not call update_status_bar() when entering gallery (counter text differs).
         if hasattr(self, "share_bottom_button"):
@@ -8456,10 +9296,12 @@ class RAWImageViewer(QMainWindow):
             self.slideshow_bottom_button.hide()
         if hasattr(self, "rotate_bottom_button"):
             self.rotate_bottom_button.hide()
+        self._schedule_search_expand_overlay_sync()
         
         # Show gallery
         self.gallery_widget.show()
         self.gallery_widget.raise_()
+        self._position_gallery_frame_grip()
         
         # Update gallery content
         QTimer.singleShot(50, self._update_gallery_view)
@@ -8525,6 +9367,13 @@ class RAWImageViewer(QMainWindow):
             justified_gallery = ExternalJustifiedGallery([], self)  # Empty list initially, will be populated
             gallery_scroll.setWidget(justified_gallery)
             gallery_layout.addWidget(gallery_scroll)
+
+            # Overlay on the scrollbar's frame-side margin — captures resize drags without
+            # shrinking the scroll area (layout gutter was stealing 6px from the viewport).
+            gallery_grip = QWidget(gallery_container)
+            gallery_grip.setStyleSheet("background: transparent;")
+            gallery_grip.setMouseTracking(True)
+            gallery_grip.hide()
             
             # Insert gallery widget into main layout (after single-image row: scroll + histogram)
             main_layout = self.centralWidget().layout()
@@ -8538,7 +9387,19 @@ class RAWImageViewer(QMainWindow):
             
             self.gallery_widget = gallery_container
             self.gallery_scroll = gallery_scroll
+            self.gallery_frame_gutter = gallery_grip
             self.gallery_justified = justified_gallery
+            gallery_scroll.setMouseTracking(True)
+            gallery_scroll.viewport().setMouseTracking(True)
+            gallery_scroll.installEventFilter(self)
+            gallery_scroll.viewport().installEventFilter(self)
+            gallery_grip.installEventFilter(self)
+            v_scrollbar = gallery_scroll.verticalScrollBar()
+            v_scrollbar.setMouseTracking(True)
+            v_scrollbar.installEventFilter(self)
+            gallery_container.installEventFilter(self)
+            self._position_gallery_frame_grip()
+            self._setup_file_drop_targets()
             
             # Hide it initially - it will be shown by _show_gallery_view() when needed
             gallery_container.hide()
@@ -8669,6 +9530,8 @@ class RAWImageViewer(QMainWindow):
                 # Avoid forced rebuild loops; set_images() already schedules build/layout.
                 # Only nudge visible-load passes after initial layout is expected ready.
                 self._warm_gallery_from_filmstrip_cache()
+                if hasattr(self.gallery_justified, "sync_visual_rotations"):
+                    self.gallery_justified.sync_visual_rotations()
                 QTimer.singleShot(30, self.gallery_justified.load_visible_images)
                 QTimer.singleShot(120, self.gallery_justified.load_visible_images)
             except Exception as e:
@@ -9879,6 +10742,7 @@ class RAWImageViewer(QMainWindow):
                 self.sort_toggle_button.setText("⇅ Newest")
             else:
                 self.sort_toggle_button.setText("⇅ Oldest")
+        self._schedule_search_expand_overlay_sync()
     
     def resort_current_folder(self):
         """Resort the current folder with new sorting preference"""
@@ -10056,6 +10920,14 @@ class RAWImageViewer(QMainWindow):
             self.load_folder_images(folder_path)
             settings.setValue("last_opened_dir", folder_path)
 
+    def _format_shortcut_line_html(self, line: str) -> str:
+        """Bold the shortcut keyword before the em dash for quick scanning."""
+        line = line.strip()
+        if " — " in line:
+            key, desc = line.split(" — ", 1)
+            return f"<b>{key.strip()}</b> — {desc.strip()}"
+        return f"<b>{line}</b>"
+
     def _keyboard_shortcuts_help_text(self):
         """Plain-text shortcuts list for tooltips and the shortcuts dialog."""
         return (
@@ -10065,8 +10937,22 @@ class RAWImageViewer(QMainWindow):
             "Down Arrow — Move image to Discard folder\n"
             "Delete — Delete current image\n"
             "H — Show/hide histogram\n"
-            "F — Show/hide focus point\n\n"
-            "You can drag and drop files or folders onto the window."
+            "F — Show/hide focus point"
+        )
+
+    def _keyboard_shortcuts_tooltip(self) -> str:
+        """Rich tooltip for the status-bar hint button (padded, no drag-and-drop note)."""
+        lines = [
+            ln.strip()
+            for ln in self._keyboard_shortcuts_help_text().split("\n")
+            if ln.strip()
+        ]
+        body = "<br/>".join(self._format_shortcut_line_html(ln) for ln in lines)
+        return (
+            "<html><head/><body style='margin:0;'>"
+            "<div style='padding:10px 14px; line-height:1.45;'>"
+            f"{body}"
+            "</div></body></html>"
         )
 
     def _set_shortcuts_hint_hovered(self, hovered: bool):
@@ -10121,20 +11007,20 @@ class RAWImageViewer(QMainWindow):
 
     def show_keyboard_shortcuts(self):
         """Show keyboard shortcuts dialog"""
-        raw = self._keyboard_shortcuts_help_text().strip()
-        if "\n\n" in raw:
-            main, footer = raw.split("\n\n", 1)
-            bullets = "\n".join(
-                f"- {ln}" for ln in main.split("\n") if ln.strip())
-            body = bullets + "\n\n" + footer.strip()
-        else:
-            body = "\n".join(
-                f"- {ln}" for ln in raw.split("\n") if ln.strip())
+        lines = [
+            ln.strip()
+            for ln in self._keyboard_shortcuts_help_text().split("\n")
+            if ln.strip()
+        ]
+        body = "<br/>".join(self._format_shortcut_line_html(ln) for ln in lines)
         msg_box = QMessageBox()
         msg_box.setIcon(QMessageBox.Icon.Information)
         msg_box.setWindowTitle("Keyboard Shortcuts")
         msg_box.setText("Available Keyboard Shortcuts:")
-        msg_box.setInformativeText(body)
+        msg_box.setTextFormat(Qt.TextFormat.RichText)
+        msg_box.setInformativeText(
+            f"<div style='line-height:1.5;padding:4px 2px 0 2px;'>{body}</div>"
+        )
         msg_box.exec()
 
     def image_mouse_press_event(self, event):
@@ -10207,7 +11093,7 @@ class RAWImageViewer(QMainWindow):
                 # always zooms toward the clicked point (same as outline off).
                 if (
                     getattr(self, "_focus_subject_outline_active", False)
-                    and not self.fit_to_window
+                    and not self._single_view_is_fit_mode()
                 ):
                     self.fit_to_window = True
                     self.current_zoom_level = 1.0
@@ -10216,8 +11102,9 @@ class RAWImageViewer(QMainWindow):
                     self.image_label.setCursor(
                         QCursor(Qt.CursorShape.ArrowCursor)
                     )
-                elif self.fit_to_window:
+                elif self._single_view_is_fit_mode():
                     # Zooming in from fit-to-window mode
+                    self._recenter_on_focus_after_nav = False
                     click_pos = event.pos()
                     displayed_pixmap = self.image_label.pixmap()
 
@@ -10502,16 +11389,19 @@ class RAWImageViewer(QMainWindow):
         else:
             self.image_label.setCursor(QCursor(Qt.CursorShape.ArrowCursor))
 
+    _MAX_PINCH_ZOOM_LEVEL = 4.0  # 400% — pinch / Ctrl+wheel only; Space / double-click stay at 100%
+
     def _max_smooth_zoom_level(self) -> float:
         """Ceiling for trackpad pinch / Ctrl+wheel zoom relative to ``current_pixmap`` pixels."""
+        cap = self._MAX_PINCH_ZOOM_LEVEL
         if not getattr(self, "_is_half_size_displayed", False):
-            return 1.0
+            return cap
         pm = getattr(self, "current_pixmap", None)
         if pm is None or pm.isNull():
-            return max(1.0, min(8.0, 4.0))
+            return max(1.0, cap)
         preview_long = max(pm.width(), pm.height())
         if preview_long <= 0:
-            return max(1.0, min(8.0, 4.0))
+            return max(1.0, cap)
         try:
             exif = self.image_cache.get_exif(self.current_file_path)
             if exif:
@@ -10520,10 +11410,10 @@ class RAWImageViewer(QMainWindow):
                     sensor_long = max(int(ow), int(oh))
                     if sensor_long > preview_long * 1.08:
                         r = sensor_long / float(preview_long)
-                        return max(1.0, min(r, 8.0))
+                        return max(1.0, min(r, cap))
         except Exception:
             pass
-        return max(1.0, min(8.0, 4.0))
+        return max(1.0, cap)
 
     def _maybe_request_full_res_for_smooth_zoom(self) -> None:
         if not getattr(self, "_is_half_size_displayed", False):
@@ -10572,47 +11462,85 @@ class RAWImageViewer(QMainWindow):
 
         QTimer.singleShot(0, _job)
 
+    def _accept_drag_urls(self, mime_data) -> bool:
+        """True when mime data contains a local folder or supported image file."""
+        if mime_data is None or not mime_data.hasUrls():
+            return False
+        exts = self.get_supported_extensions()
+        for url in mime_data.urls():
+            if not url.isLocalFile():
+                continue
+            file_path = url.toLocalFile()
+            if os.path.isdir(file_path):
+                return True
+            if os.path.splitext(file_path)[1].lower() in exts:
+                return True
+        return False
+
+    def _process_dropped_urls(self, mime_data) -> bool:
+        """Open a dropped folder or image file. Returns True if handled."""
+        if mime_data is None or not mime_data.hasUrls():
+            return False
+        exts = self.get_supported_extensions()
+        for url in mime_data.urls():
+            if not url.isLocalFile():
+                continue
+            file_path = url.toLocalFile()
+            if os.path.isdir(file_path):
+                self.load_folder_images(file_path)
+                return True
+            if os.path.splitext(file_path)[1].lower() in exts:
+                folder_path = os.path.dirname(file_path)
+                filename = os.path.basename(file_path)
+                self.load_folder_images(folder_path, start_file=filename)
+                return True
+        return False
+
+    def _register_file_drop_target(self, widget) -> None:
+        """Enable drag-and-drop on a child widget and route events via eventFilter."""
+        if widget is None:
+            return
+        targets = getattr(self, "_file_drop_targets", None)
+        if targets is None:
+            self._file_drop_targets = set()
+            targets = self._file_drop_targets
+        if widget in targets:
+            return
+        targets.add(widget)
+        widget.setAcceptDrops(True)
+        widget.installEventFilter(self)
+
+    def _setup_file_drop_targets(self) -> None:
+        """Child widgets stacked over the main window must accept drops themselves."""
+        self._register_file_drop_target(self.centralWidget())
+        self._register_file_drop_target(getattr(self, "single_view_container", None))
+        self._register_file_drop_target(getattr(self, "scroll_area", None))
+        sa = getattr(self, "scroll_area", None)
+        if sa is not None:
+            self._register_file_drop_target(sa.viewport())
+        self._register_file_drop_target(getattr(self, "image_label", None))
+        self._register_file_drop_target(getattr(self, "gpu_view", None))
+        gv = getattr(self, "gpu_view", None)
+        if gv is not None:
+            self._register_file_drop_target(gv.viewport())
+        gs = getattr(self, "gallery_scroll", None)
+        if gs is not None:
+            self._register_file_drop_target(gs)
+            self._register_file_drop_target(gs.viewport())
+
     def dragEnterEvent(self, event: QDragEnterEvent):
         """Handle drag enter events for file and folder dropping"""
-        if event.mimeData().hasUrls():
-            urls = event.mimeData().urls()
-            for url in urls:
-                if url.isLocalFile():
-                    file_path = url.toLocalFile()
-                    # Check if it's a folder
-                    if os.path.isdir(file_path):
-                        event.acceptProposedAction()
-                        return
-                    # Check if it's a supported image file
-                    file_ext = os.path.splitext(file_path)[1].lower()
-                    if file_ext in self.get_supported_extensions():
-                        event.acceptProposedAction()
-                        return
-        event.ignore()
+        if self._accept_drag_urls(event.mimeData()):
+            event.acceptProposedAction()
+        else:
+            event.ignore()
 
     def dropEvent(self, event: QDropEvent):
         """Handle drop events for file and folder dropping"""
-        urls = event.mimeData().urls()
-        for url in urls:
-            if url.isLocalFile():
-                file_path = url.toLocalFile()
-                # Check if it's a folder
-                if os.path.isdir(file_path):
-                    # Load folder images
-                    self.load_folder_images(file_path)
-                    event.acceptProposedAction()
-                    return
-                # Check if it's a supported image file
-                file_ext = os.path.splitext(file_path)[1].lower()
-                if file_ext in self.get_supported_extensions():
-                    # If it's an image file, load the folder containing it
-                    # This matches the behavior when opening a file from command line
-                    folder_path = os.path.dirname(file_path)
-                    filename = os.path.basename(file_path)
-                    self.load_folder_images(folder_path, start_file=filename)
-                    event.acceptProposedAction()
-                    return
-        event.ignore()
+        if self._process_dropped_urls(event.mimeData()):
+            event.acceptProposedAction()
+        else:
+            event.ignore()
 
     def _cleanup_current_processing(self):
         """Clean up current processing threads and resources"""
@@ -10805,7 +11733,7 @@ class RAWImageViewer(QMainWindow):
             # Update current_file_path immediately after cleanup
             # This ensures we have the correct value for subsequent operations
             # NOTE: We removed the post-cleanup cancellation check because:
-            # 1. The debounce mechanism already handles rapid navigation
+            # 1. can_navigate() / _navigation_in_progress already guard overlapping navigations
             # 2. The check was causing false cancellations during normal navigation
             # 3. current_file_path is always different from requested_file_path at this point
             #    (it's the old file), so the check would always cancel
@@ -10813,7 +11741,7 @@ class RAWImageViewer(QMainWindow):
             self._last_loaded_path = requested_file_path # Track for view switching optimizations
             if self.image_files and requested_file_path in self.image_files:
                 self.current_file_index = self.image_files.index(requested_file_path)
-            self._sync_filmstrip_index(center=False)
+            self._sync_filmstrip_index()
             np_req = _norm_path(requested_file_path)
             if getattr(self, "_manager_display_track_path", None) != np_req:
                 self._manager_display_track_path = np_req
@@ -10830,14 +11758,12 @@ class RAWImageViewer(QMainWindow):
             # Note: current_file_path is now set above (after cleanup check)
             # to prevent false cancellations during normal navigation
             filename = os.path.basename(requested_file_path)
-            folder_name = os.path.basename(os.path.dirname(requested_file_path))
-            title_text = f"{folder_name} / {filename}" if folder_name else filename
-            
-            logger.debug(f"Setting window title to: {title_text}")
-            self.setWindowTitle(title_text)
-            # Update custom title bar
+            app_title = "RAWviewer"
+            # Taskbar/window manager may show the filename; title bar left label stays app-only
+            # (folder/file live in the centered EXIF HUD).
+            self.setWindowTitle(f"{filename} — {app_title}")
             if hasattr(self, 'title_bar') and self.title_bar is not None:
-                self.title_bar.set_title(title_text)
+                self.title_bar.set_title(app_title)
 
             # Reset EXIF data ready flag for new image
             self._exif_data_ready = False
@@ -10967,12 +11893,13 @@ class RAWImageViewer(QMainWindow):
             self.image_label.setAlignment(Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter)
             # Full-screen overlay: skip when arrow-navigating while zoomed in — keeps prior image
             # visible until the next one is ready (avoids flashing "Loading Image..." every step).
-            # Also skip for prev/next (debounced navigation) and when opening from gallery: keep prior
+            # Also skip for prev/next keyboard navigation and when opening from gallery: keep prior
             # pixels visible until the new decode lands instead of a blocking popup.
             skip_loading_overlay = (
                 (not self.fit_to_window and getattr(self, "_maintain_zoom_on_navigation", False))
                 or getattr(self, "_navigation_in_progress", False)
                 or getattr(self, "_loading_from_gallery", False)
+                or getattr(self, "_loading_from_filmstrip", False)
             )
             if hasattr(self, "loading_overlay") and not skip_loading_overlay:
                 self.loading_overlay.show_loading("Loading Image...")
@@ -11012,6 +11939,8 @@ class RAWImageViewer(QMainWindow):
                 if self._loading_from_gallery:
                     # Clear the flag after using it
                     self._loading_from_gallery = False
+                if getattr(self, "_loading_from_filmstrip", False):
+                    self._loading_from_filmstrip = False
                 
                 # Request image load with highest priority
                 self.image_manager.load_image(
@@ -11741,18 +12670,59 @@ class RAWImageViewer(QMainWindow):
             self._visual_rotation_degrees[k] = updated
 
         gj = getattr(self, "gallery_justified", None)
-        if gj is not None and hasattr(gj, "refresh_visible_tile_for_path"):
-            try:
-                gj.refresh_visible_tile_for_path(path)
-            except Exception:
-                pass
+        if gj is not None:
+            if hasattr(gj, "on_visual_rotation_changed"):
+                try:
+                    gj.on_visual_rotation_changed(path)
+                except Exception:
+                    pass
+            elif hasattr(gj, "refresh_visible_tile_for_path"):
+                try:
+                    gj.refresh_visible_tile_for_path(path)
+                except Exception:
+                    pass
+
+        bar = self._filmstrip_bar()
+        if bar is not None:
+            if hasattr(bar, "on_visual_rotation_changed"):
+                try:
+                    bar.on_visual_rotation_changed(path)
+                except Exception:
+                    pass
+            elif hasattr(bar, "refresh_cell_for_path"):
+                try:
+                    bar.refresh_cell_for_path(path)
+                except Exception:
+                    pass
 
         # Re-render from the current base pixmap if available; otherwise load from cache/source.
         base_pixmap = getattr(self, "_base_display_pixmap", None)
+        prev_w = prev_h = 0
+        cur_pm = getattr(self, "current_pixmap", None)
+        if cur_pm is not None and not cur_pm.isNull():
+            prev_w, prev_h = cur_pm.width(), cur_pm.height()
         if base_pixmap is not None and not base_pixmap.isNull():
             self.display_pixmap(base_pixmap)
         else:
             self.load_raw_image(path)
+        new_pm = getattr(self, "current_pixmap", None)
+        aspect_swapped = (
+            prev_w > 0
+            and prev_h > 0
+            and new_pm is not None
+            and not new_pm.isNull()
+            and (
+                new_pm.width() != prev_w
+                or new_pm.height() != prev_h
+            )
+        )
+        if aspect_swapped:
+            gv = getattr(self, "gpu_view", None)
+            if gv is not None and gv.is_fit_mode():
+                gv.fit_to_window()
+            elif getattr(self, "fit_to_window", False):
+                self.scale_image_to_fit()
+        self._save_persisted_visual_rotations()
         self.status_bar.showMessage(f"Rotated view {updated}°", 1800)
 
     def _copy_current_file_path_to_clipboard(self):
@@ -11783,12 +12753,29 @@ class RAWImageViewer(QMainWindow):
         except Exception:
             self.status_bar.showMessage("Could not open file manager", 2000)
 
+    def _resolve_display_pixmap_base(self, pixmap: QPixmap) -> QPixmap:
+        """Ensure display_pixmap never treats an already rotated buffer as the base."""
+        if pixmap is None or pixmap.isNull():
+            return pixmap
+        base = getattr(self, "_base_display_pixmap", None)
+        current = getattr(self, "current_pixmap", None)
+        if (
+            base is not None
+            and not base.isNull()
+            and pixmap is current
+            and pixmap is not base
+            and self._get_visual_rotation_degrees()
+        ):
+            return base
+        return pixmap
+
     def display_pixmap(self, pixmap):
         """Display a QPixmap."""
         import logging
         import time
         logger = logging.getLogger(__name__)
         display_start = time.time()
+        pixmap = self._resolve_display_pixmap_base(pixmap)
         
         # Get current file name for logging context
         current_file = os.path.basename(self.current_file_path) if hasattr(self, 'current_file_path') and self.current_file_path else "Unknown"
@@ -11869,11 +12856,45 @@ class RAWImageViewer(QMainWindow):
                 except AttributeError:
                     pass
 
-            if getattr(self, "_pending_zoom_toggle", False):
+            pending_gpu_pt = getattr(self, "_pending_gpu_zoom_point", None)
+            if pending_gpu_pt is not None:
+                try:
+                    delattr(self, "_pending_gpu_zoom_point")
+                except AttributeError:
+                    pass
+                self.zoom_center_point = QPoint(
+                    int(pending_gpu_pt.x()), int(pending_gpu_pt.y())
+                )
+                self._zoom_in_to_image_point_finish()
+            elif (
+                getattr(self, "_pending_zoom", False)
+                and getattr(self, "_pending_zoom_center", None) is not None
+                and not getattr(self, "_full_resolution_loading", False)
+            ):
+                logger.info("[DISPLAY_PIXMAP] GPU: applying pending zoom-to-point")
+                thumb_size = getattr(self, "_pending_zoom_thumbnail_size", None)
+                pending_center = self._pending_zoom_center
+                if thumb_size is not None and thumb_size.width() > 0 and thumb_size.height() > 0:
+                    scale_x = pixmap.width() / thumb_size.width()
+                    scale_y = pixmap.height() / thumb_size.height()
+                    self.zoom_center_point = QPoint(
+                        int(pending_center.x() * scale_x),
+                        int(pending_center.y() * scale_y),
+                    )
+                else:
+                    self.zoom_center_point = pending_center
+                self._pending_zoom = False
+                self._pending_zoom_center = None
+                self._pending_zoom_thumbnail_size = None
+                self._gpu_zoom_in_to_point_finish()
+            elif getattr(self, "_pending_zoom_toggle", False):
                 self._pending_zoom_toggle = False
-                gv.toggle_fit()
-                if not gv.is_fit_mode():
-                    self._gpu_request_full_resolution_if_needed()
+                if getattr(self, "zoom_center_point", None) is not None:
+                    self._gpu_zoom_in_to_point_finish()
+                else:
+                    gv.toggle_fit()
+                    if not gv.is_fit_mode():
+                        self._gpu_request_full_resolution_if_needed()
             if hasattr(self, "loading_overlay"):
                 self.loading_overlay.hide_loading()
             self._update_gpu_status()
@@ -12239,8 +13260,8 @@ class RAWImageViewer(QMainWindow):
         # For mixed JPG/RAW folders, full-image preload can starve the current file path
         # with expensive RAW decodes. Keep navigation prefetch lightweight here.
         preload_stages = {"thumbnail", "exif"}
-        next_count = min(4, len(self.image_files) - 1)
-        for i in range(1, next_count + 1):  # Preload next images (more aggressive)
+        next_count = min(self._PRELOAD_NEXT_COUNT, len(self.image_files) - 1)
+        for i in range(1, next_count + 1):  # Preload next images (higher priority)
             next_index = (self.current_file_index + i) % len(self.image_files)
             next_file = self.image_files[next_index]
             if _norm_path(next_file) == _norm_path(current_path):
@@ -12260,8 +13281,8 @@ class RAWImageViewer(QMainWindow):
                 )
 
         # Previous images (lower priority)
-        prev_count = min(3, len(self.image_files) - 1)
-        for i in range(1, prev_count + 1):  # Preload previous images (more aggressive)
+        prev_count = min(self._PRELOAD_PREV_COUNT, len(self.image_files) - 1)
+        for i in range(1, prev_count + 1):
             prev_index = (self.current_file_index - i) % len(self.image_files)
             prev_file = self.image_files[prev_index]
             if _norm_path(prev_file) == _norm_path(current_path):
@@ -12817,7 +13838,7 @@ class RAWImageViewer(QMainWindow):
                 if getattr(self, "_focus_subject_outline_active", False):
                     # When already zoomed in, Space must still zoom out like normal;
                     # only from fit-to-window does Space jump to the focus box center.
-                    if self.fit_to_window:
+                    if self._single_view_is_fit_mode():
                         if self._focus_jump_to_subject_center():
                             return True
                     else:
@@ -12943,59 +13964,14 @@ class RAWImageViewer(QMainWindow):
         return True
     
     def _debounced_navigate(self, direction, from_slideshow=False):
-        """Debounced navigation to handle rapid key presses efficiently"""
-        import logging
-        from PyQt6.QtCore import QTimer
-        logger = logging.getLogger(__name__)
-
+        """Navigate immediately on key press (no debounce delay)."""
         if not from_slideshow:
             self._stop_slideshow()
 
-        # Store the navigation direction
-        had_pending = self._pending_navigation is not None
-        self._pending_navigation = direction
-        
-        # Cancel any existing timer
-        if self._navigation_timer is not None:
-            self._navigation_timer.stop()
-            if had_pending:
-                safe_print(f"[PERF] 🔄 DEBOUNCE: Cancelled previous navigation, queued new {direction} request")
-        
-        # Create a new timer with short delay (50ms) to batch rapid key presses
-        # This allows users to press keys rapidly, but only the last navigation within 50ms will execute
-        self._navigation_timer = QTimer()
-        self._navigation_timer.setSingleShot(True)
-        self._navigation_timer.timeout.connect(lambda: self._execute_pending_navigation())
-        self._navigation_timer.start(50)  # 50ms debounce delay
-        
-        logger.debug(f"[NAV_DEBOUNCE] Navigation request queued: {direction}")
-        if not had_pending:
-            safe_print(f"[PERF] ⏱️  DEBOUNCE: Navigation {direction} queued (50ms delay)")
-    
-    def _execute_pending_navigation(self):
-        """Execute the pending navigation after debounce delay"""
-        import logging
-        import time
-        logger = logging.getLogger(__name__)
-        
-        if self._pending_navigation is None:
-            return
-        
-        direction = self._pending_navigation
-        self._pending_navigation = None
-        self._navigation_timer = None
-        
-        logger.debug(f"[NAV_DEBOUNCE] Executing pending navigation: {direction}")
-        nav_start = time.time()
-        safe_print(f"[PERF] ▶️  EXECUTING: Navigation {direction} (after debounce)")
-        
-        if direction == 'prev':
+        if direction == "prev":
             self.navigate_to_previous_image()
-        elif direction == 'next':
+        elif direction == "next":
             self.navigate_to_next_image()
-        
-        nav_time = time.time() - nav_start
-        safe_print(f"[PERF] ✅ NAVIGATION COMPLETE: {direction} took {nav_time*1000:.1f}ms")
     
     def start_navigation(self):
         """Mark navigation as started"""
@@ -13091,6 +14067,8 @@ class RAWImageViewer(QMainWindow):
                     logger.debug("Maintaining zoom state for navigation")
                     self._preserve_nav_zoom_active = True
                     self._maintain_zoom_on_navigation = True
+                    if getattr(self, "_focus_subject_outline_active", False):
+                        self._recenter_on_focus_after_nav = True
                     self._restore_zoom_center = self._zoom_anchor_for_navigation_restore()
                     self._restore_zoom_level = self.current_zoom_level
                     # Store current pixmap size for coordinate scaling
@@ -13257,6 +14235,8 @@ class RAWImageViewer(QMainWindow):
                     logger.info("[NAV_NEXT] Maintaining zoom state for navigation")
                     self._preserve_nav_zoom_active = True
                     self._maintain_zoom_on_navigation = True
+                    if getattr(self, "_focus_subject_outline_active", False):
+                        self._recenter_on_focus_after_nav = True
                     self._restore_zoom_center = self._zoom_anchor_for_navigation_restore()
                     self._restore_zoom_level = self.current_zoom_level
                     # Store current pixmap size for coordinate scaling
@@ -13814,6 +14794,9 @@ class RAWImageViewer(QMainWindow):
         
         # Skip logging and scaling during active resize to prevent intermediate updates
         if getattr(self, '_is_resizing', False):
+            grip = getattr(self, "_resize_grip", None)
+            if grip is not None:
+                grip.hide()
             return
         
         # Log window size change
@@ -13870,228 +14853,361 @@ class RAWImageViewer(QMainWindow):
         # GALLERY FUNCTIONALITY COMMENTED OUT
         # Update gallery layout if in gallery view mode (justified layout rebuilds automatically on resize)
         # Update bottom bar responsive elements (hide/show indexing status based on width)
-        if hasattr(self, '_gallery_search_status_full'):
-            # Force update even if status is empty to handle search panel width
-            self._set_gallery_search_status(self._gallery_search_status_full or "", animate=False)
+        if hasattr(self, "_gallery_search_status_full"):
+            full = (self._gallery_search_status_full or "").strip()
+            if self._is_gallery_search_indexing_active():
+                self._set_gallery_search_status(full, animate=False)
+            elif full and not self._should_show_search_index_progress(full):
+                self._set_gallery_search_status(full, animate=False)
+            elif full:
+                self._clear_stale_gallery_search_index_progress()
+                self._sync_gallery_search_input_editable()
+            else:
+                self._set_gallery_search_status("", animate=False)
+        self._schedule_search_expand_overlay_sync()
+        self._position_resize_grip()
+        self._position_gallery_frame_grip()
     
-    def mousePressEvent(self, event):
-        """Handle mouse press for window resizing"""
-        if event.button() == Qt.MouseButton.LeftButton:
-            # Check if mouse is near window edge (but not on title bar)
-            pos = event.position().toPoint()
-            
-            # Don't resize if clicking on title bar area
-            if hasattr(self, 'title_bar') and self.title_bar is not None and pos.y() < self.title_bar.height():
-                super().mousePressEvent(event)
-                return
-            
-            # Don't resize if clicking on scrollbar area (but allow in status bar)
-            if hasattr(self, 'scroll_area'):
-                v_scrollbar = self.scroll_area.verticalScrollBar()
-                if v_scrollbar.isVisible():
-                    scrollbar_width = v_scrollbar.width()
-                    # Get status bar height
-                    status_bar_height = 0
-                    if hasattr(self, 'status_bar'):
-                        status_bar_height = self.status_bar.height()
-                    # If mouse is in scrollbar area, don't start resize
-                    # UNLESS we're in the status bar area (bottom)
-                    if pos.x() >= self.width() - scrollbar_width and pos.y() < self.height() - status_bar_height:
-                        super().mousePressEvent(event)
-                        return
-            
-            edge = self._get_resize_edge(pos)
-            if edge:
-                self._resize_edge_active = edge
-                self._resize_start_pos = event.globalPosition().toPoint()
-                self._resize_start_geometry = self.geometry()
-                self._is_resizing = True  # Mark that we're actively resizing
-                
-                # Ignore resize events during drag
-                if hasattr(self, 'view_mode') and self.view_mode == 'gallery':
-                    if hasattr(self, 'gallery_justified') and self.gallery_justified:
-                        self.gallery_justified._ignore_resize_events = True
-                
-                event.accept()
-                return
-        
-        super().mousePressEvent(event)
-    
-    def mouseMoveEvent(self, event):
-        """Handle mouse move for window resizing and cursor updates"""
-        # Update cursor based on edge position
-        pos = event.position().toPoint()
-        
-        # Don't show resize cursor on title bar
-        if hasattr(self, 'title_bar') and self.title_bar is not None and pos.y() < self.title_bar.height():
-            self.unsetCursor()
-            super().mouseMoveEvent(event)
+    def _position_gallery_frame_grip(self) -> None:
+        """Place the gallery right-edge resize overlay over the scrollbar frame margin."""
+        overlay = getattr(self, "gallery_frame_gutter", None)
+        container = getattr(self, "gallery_widget", None)
+        if overlay is None or container is None:
             return
-        
-        # Get status bar height (footer area where resizing should still work)
-        status_bar_height = 0
-        if hasattr(self, 'status_bar'):
-            status_bar_height = self.status_bar.height()
-        
-        # Check if mouse is over scrollbar area - if so, don't show resize cursor
-        # BUT allow resizing in status bar area (bottom edge)
-        scrollbar_width = 0
-        if hasattr(self, 'scroll_area'):
-            v_scrollbar = self.scroll_area.verticalScrollBar()
-            if v_scrollbar.isVisible():
-                scrollbar_width = v_scrollbar.width()
-                # If mouse is in scrollbar area (rightmost scrollbar_width pixels), don't resize
-                # UNLESS we're in the status bar area (bottom)
-                if pos.x() >= self.width() - scrollbar_width and pos.y() < self.height() - status_bar_height:
-                    self.setCursor(Qt.CursorShape.ArrowCursor)
-                    super().mouseMoveEvent(event)
-                    return
-        
-        # Thickness of resize zone (in pixels)
-        border = 10  # Increased area to make resizing easier
+        in_gallery = getattr(self, "view_mode", "") == "gallery" and container.isVisible()
+        if not in_gallery:
+            overlay.hide()
+            return
+        strip = self._GALLERY_FRAME_RIGHT_GUTTER
+        overlay.setGeometry(
+            max(0, container.width() - strip),
+            0,
+            strip,
+            container.height(),
+        )
+        overlay.show()
+        overlay.raise_()
+
+    def _position_resize_grip(self) -> None:
+        grip = getattr(self, "_resize_grip", None)
+        if grip is None:
+            return
+        inset = 2
+        grip.move(
+            max(0, self.width() - grip.width() - inset),
+            max(0, self.height() - grip.height() - inset),
+        )
+        grip.raise_()
+
+    def _bottom_right_grip_rect(self, *, margin: int = 6) -> QRect:
+        """Screen hit area for the hover-only resize grip (wider than the 10px edge band)."""
+        grip = getattr(self, "_resize_grip", None)
+        if grip is None:
+            return QRect()
+        inset = 2
+        gx = max(0, self.width() - grip.width() - inset)
+        gy = max(0, self.height() - grip.height() - inset)
+        pad = max(0, int(margin))
+        return QRect(
+            gx - pad,
+            gy - pad,
+            grip.width() + 2 * pad,
+            grip.height() + 2 * pad,
+        )
+
+    def _pointer_near_bottom_right_grip(self, pos: QPoint) -> bool:
+        hit = self._bottom_right_grip_rect()
+        return not hit.isNull() and hit.contains(pos)
+
+    def _resize_pos_from_event(self, event) -> QPoint:
+        if hasattr(event, "globalPosition"):
+            gp = event.globalPosition().toPoint()
+        else:
+            gp = event.globalPos()
+        return self.mapFromGlobal(gp)
+
+    _FRAME_RESIZE_BORDER = 10
+    # Matches gallery scrollbar handle horizontal margin (2px 6px 2px 6px in CSS).
+    _GALLERY_SCROLLBAR_HANDLE_MARGIN = 6
+    _GALLERY_FRAME_RIGHT_GUTTER = _GALLERY_SCROLLBAR_HANDLE_MARGIN
+
+    def _frame_resize_border(self) -> int:
+        return self._FRAME_RESIZE_BORDER
+
+    def _gallery_frame_right_gutter(self) -> int:
+        gutter = getattr(self, "gallery_frame_gutter", None)
+        if gutter is not None and gutter.isVisible():
+            return gutter.width()
+        if getattr(self, "view_mode", "") == "gallery":
+            return self._GALLERY_FRAME_RIGHT_GUTTER
+        return 0
+
+    def _active_vertical_scrollbar(self):
+        if getattr(self, "view_mode", "") == "gallery":
+            gs = getattr(self, "gallery_scroll", None)
+            if gs is not None:
+                return gs.verticalScrollBar()
+        if hasattr(self, "scroll_area"):
+            return self.scroll_area.verticalScrollBar()
+        return None
+
+    def _visible_vertical_scrollbar_width(self) -> int:
+        sb = self._active_vertical_scrollbar()
+        if sb is not None and sb.isVisible():
+            return sb.width()
+        return 0
+
+    def _title_bar_blocks_resize_at(self, pos: QPoint) -> bool:
+        if not (hasattr(self, "title_bar") and self.title_bar is not None):
+            return False
+        if pos.y() >= self.title_bar.height():
+            return False
+        return pos.y() > self._frame_resize_border()
+
+    def _scrollbar_blocks_resize_at(self, pos: QPoint) -> bool:
+        gutter = self._gallery_frame_right_gutter()
+        if pos.x() >= self.width() - max(gutter, self._frame_resize_border()):
+            return False
+        sb_w = self._visible_vertical_scrollbar_width()
+        if sb_w <= 0:
+            return False
+        status_bar_height = self.status_bar.height() if hasattr(self, "status_bar") else 0
+        if pos.y() >= self.height() - status_bar_height:
+            return False
+        return pos.x() >= self.width() - sb_w
+
+    def _resize_blocked_at(self, pos: QPoint) -> bool:
+        if self.isMaximized():
+            return True
+        if self._title_bar_blocks_resize_at(pos):
+            return True
+        if self._scrollbar_blocks_resize_at(pos):
+            return True
+        return False
+
+    def _begin_resize_if_edge(self, event, pos: QPoint) -> bool:
+        if event.button() != Qt.MouseButton.LeftButton:
+            return False
+        if self._resize_blocked_at(pos):
+            return False
+        edge = self._get_resize_edge(pos)
+        if not edge:
+            return False
+        self._resize_edge_active = edge
+        if hasattr(event, "globalPosition"):
+            self._resize_start_pos = event.globalPosition().toPoint()
+        else:
+            self._resize_start_pos = event.globalPos()
+        self._resize_start_geometry = self.geometry()
+        self._is_resizing = True
+        grip = getattr(self, "_resize_grip", None)
+        if grip is not None:
+            grip.hide()
+        if hasattr(self, "view_mode") and self.view_mode == "gallery":
+            gallery = getattr(self, "gallery_justified", None)
+            if gallery is not None:
+                gallery._ignore_resize_events = True
+        try:
+            self.grabMouse()
+        except Exception:
+            pass
+        return True
+
+    def _continue_resize_drag(self, event) -> bool:
+        if not self._resize_edge_active:
+            return False
+        if hasattr(event, "globalPosition"):
+            current_pos = event.globalPosition().toPoint()
+        else:
+            current_pos = event.globalPos()
+        delta = current_pos - self._resize_start_pos
+        new_geometry = QRect(self._resize_start_geometry)
+        if "left" in self._resize_edge_active:
+            new_geometry.setLeft(self._resize_start_geometry.left() + delta.x())
+        if "right" in self._resize_edge_active:
+            new_geometry.setRight(self._resize_start_geometry.right() + delta.x())
+        if "top" in self._resize_edge_active:
+            new_geometry.setTop(self._resize_start_geometry.top() + delta.y())
+        if "bottom" in self._resize_edge_active:
+            new_geometry.setBottom(self._resize_start_geometry.bottom() + delta.y())
+        if (
+            new_geometry.width() >= self.minimumWidth()
+            and new_geometry.height() >= self.minimumHeight()
+        ):
+            self.setGeometry(new_geometry)
+        return True
+
+    def _finish_resize_drag(self) -> bool:
+        if not self._resize_edge_active:
+            return False
+        self._resize_edge_active = None
+        self._is_resizing = False
+        self.unsetCursor()
+        grip = getattr(self, "_resize_grip", None)
+        if grip is not None:
+            grip.hide()
+        try:
+            self.releaseMouse()
+        except Exception:
+            pass
+        if hasattr(self, "view_mode") and self.view_mode == "gallery":
+            gallery = getattr(self, "gallery_justified", None)
+            if gallery is not None:
+                try:
+                    gallery._ignore_resize_events = False
+                    from PyQt6.QtCore import QTimer
+
+                    QTimer.singleShot(100, gallery.force_layout_update)
+                except Exception:
+                    pass
+        if hasattr(self, "view_mode") and self.view_mode == "single":
+            if getattr(self, "current_pixmap", None) is not None and getattr(
+                self, "fit_to_window", False
+            ):
+                from PyQt6.QtCore import QTimer
+
+                QTimer.singleShot(100, self.scale_image_to_fit)
+        try:
+            self._update_resize_edge_hover(self.mapFromGlobal(QCursor.pos()))
+        except Exception:
+            pass
+        return True
+
+    def _handle_frame_resize_event(self, event) -> bool:
+        """Edge resize from the main window or filtered child widgets."""
+        et = event.type()
+        if et == QEvent.Type.MouseButtonRelease:
+            return self._finish_resize_drag()
+        if et == QEvent.Type.MouseMove and self._resize_edge_active:
+            return self._continue_resize_drag(event)
+        pos = self._resize_pos_from_event(event)
+        if not self.rect().contains(pos):
+            return False
+        if et == QEvent.Type.MouseButtonPress:
+            return self._begin_resize_if_edge(event, pos)
+        if et == QEvent.Type.MouseMove:
+            self._update_resize_edge_hover(pos)
+        return False
+
+    def _update_resize_edge_hover(self, pos) -> None:
+        """Update resize cursor and bottom-right grip while hovering near window edges."""
+        if getattr(self, "_resize_edge_active", None):
+            return
+
+        grip = getattr(self, "_resize_grip", None)
+
+        if self.isMaximized():
+            self.unsetCursor()
+            if grip is not None:
+                grip.hide()
+            return
+
+        if self._title_bar_blocks_resize_at(pos):
+            self.unsetCursor()
+            if grip is not None:
+                grip.hide()
+            return
+
+        if self._scrollbar_blocks_resize_at(pos):
+            self.setCursor(Qt.CursorShape.ArrowCursor)
+            if grip is not None:
+                grip.hide()
+            return
+
+        border = self._frame_resize_border()
         w = self.width()
         h = self.height()
-        
-        # Adjust right border to exclude scrollbar area (but allow in status bar)
-        right_border_start = w - border - scrollbar_width
-        
-        # --- Corner cursors ---
+
         if pos.x() <= border and pos.y() <= border:
             self.setCursor(Qt.CursorShape.SizeFDiagCursor)
-        elif pos.x() >= right_border_start and pos.x() < w - scrollbar_width and pos.y() <= border:
+        elif pos.x() >= w - border and pos.y() <= border:
             self.setCursor(Qt.CursorShape.SizeBDiagCursor)
         elif pos.x() <= border and pos.y() >= h - border:
             self.setCursor(Qt.CursorShape.SizeBDiagCursor)
-        elif pos.x() >= right_border_start and pos.x() < w - scrollbar_width and pos.y() >= h - border:
+        elif pos.x() >= w - border and pos.y() >= h - border:
             self.setCursor(Qt.CursorShape.SizeFDiagCursor)
-        # --- Edge cursors ---
         elif pos.x() <= border:
             self.setCursor(Qt.CursorShape.SizeHorCursor)
-        elif pos.x() >= right_border_start and pos.x() < w - scrollbar_width:
+        elif pos.x() >= w - border:
             self.setCursor(Qt.CursorShape.SizeHorCursor)
         elif pos.y() <= border:
             self.setCursor(Qt.CursorShape.SizeVerCursor)
         elif pos.y() >= h - border:
-            # Bottom edge: always allow resizing (including in status bar area)
             self.setCursor(Qt.CursorShape.SizeVerCursor)
-        # --- Normal area ---
         else:
-            self.setCursor(Qt.CursorShape.ArrowCursor)
-        
-        # Handle window resizing if active
-        if self._resize_edge_active:
-            current_pos = event.globalPosition().toPoint()
-            delta = current_pos - self._resize_start_pos
-            new_geometry = QRect(self._resize_start_geometry)
-            
-            if 'left' in self._resize_edge_active:
-                new_geometry.setLeft(self._resize_start_geometry.left() + delta.x())
-            if 'right' in self._resize_edge_active:
-                new_geometry.setRight(self._resize_start_geometry.right() + delta.x())
-            if 'top' in self._resize_edge_active:
-                new_geometry.setTop(self._resize_start_geometry.top() + delta.y())
-            if 'bottom' in self._resize_edge_active:
-                new_geometry.setBottom(self._resize_start_geometry.bottom() + delta.y())
-            
-            # Ensure minimum size
-            if new_geometry.width() >= self.minimumWidth() and new_geometry.height() >= self.minimumHeight():
-                self.setGeometry(new_geometry)
+            self.unsetCursor()
+
+        edge = self._get_resize_edge(pos)
+        near_grip = self._pointer_near_bottom_right_grip(pos)
+        if grip is not None:
+            if edge == "bottom_right" or near_grip:
+                self._position_resize_grip()
+                grip.show()
+                grip.raise_()
+            else:
+                grip.hide()
+
+    def mousePressEvent(self, event):
+        """Handle mouse press for window resizing"""
+        if self._begin_resize_if_edge(event, event.position().toPoint()):
             event.accept()
             return
-        
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        """Handle mouse move for window resizing and cursor updates"""
+        if self._continue_resize_drag(event):
+            event.accept()
+            return
+        self._update_resize_edge_hover(event.position().toPoint())
         super().mouseMoveEvent(event)
-    
+
     def mouseReleaseEvent(self, event):
         """Handle mouse release to stop window resizing"""
         try:
-            if self._resize_edge_active:
-                self._resize_edge_active = None
-                self._is_resizing = False  # Mark that resizing has ended
-                self.unsetCursor()
-
-                # Re-enable resize events and trigger layout update.
-                # Guard against deleted Qt wrappers during mode/widget transitions.
-                if hasattr(self, 'view_mode') and self.view_mode == 'gallery':
-                    gallery = getattr(self, 'gallery_justified', None)
-                    if gallery is not None:
-                        try:
-                            gallery._ignore_resize_events = False
-                            from PyQt6.QtCore import QTimer
-                            QTimer.singleShot(100, gallery.force_layout_update)
-                        except Exception:
-                            pass
-
-                # Scale image to fit after resize completes (for single view mode)
-                if hasattr(self, 'view_mode') and self.view_mode == 'single':
-                    if getattr(self, 'current_pixmap', None) is not None and getattr(self, 'fit_to_window', False):
-                        from PyQt6.QtCore import QTimer
-                        QTimer.singleShot(100, self.scale_image_to_fit)
-
+            if self._finish_resize_drag():
                 event.accept()
                 return
-
             super().mouseReleaseEvent(event)
         except Exception as e:
-            # Unhandled Python exceptions inside Qt event handlers can abort the app on macOS.
             safe_print(f"mouseReleaseEvent error (ignored): {e}")
             self._resize_edge_active = None
             self._is_resizing = False
             try:
                 self.unsetCursor()
+                self.releaseMouse()
             except Exception:
                 pass
             event.accept()
-    
+
     def _get_resize_edge(self, pos):
         """Determine which edge the mouse is near"""
         if self.isMaximized():
             return None
         
-        # Thickness of resize zone (in pixels)
-        border = 10  # Increased area to make resizing easier
+        border = self._frame_resize_border()
         w = self.width()
         h = self.height()
         x, y = pos.x(), pos.y()
-        
-        # Get status bar height (footer area where resizing should still work)
-        status_bar_height = 0
-        if hasattr(self, 'status_bar'):
-            status_bar_height = self.status_bar.height()
-        
-        # Check if vertical scrollbar is visible and get its width
-        scrollbar_width = 0
-        if hasattr(self, 'scroll_area'):
-            v_scrollbar = self.scroll_area.verticalScrollBar()
-            if v_scrollbar.isVisible():
-                scrollbar_width = v_scrollbar.width()
-        
-        # Adjust right border to exclude scrollbar area (but allow in status bar)
-        right_border_start = w - border - scrollbar_width
-        
-        # --- Corner resize zones (larger area helps accuracy) ---
+
         if x <= border and y <= border:
             return 'top_left'
-        # Top-right corner: exclude scrollbar area
-        if x >= right_border_start and x < w - scrollbar_width and y <= border:
+        if x >= w - border and y <= border:
             return 'top_right'
         if x <= border and y >= h - border:
             return 'bottom_left'
-        # Bottom-right corner: exclude scrollbar area, but allow in status bar
-        if x >= right_border_start and x < w - scrollbar_width and y >= h - border:
+        if x >= w - border and y >= h - border:
             return 'bottom_right'
-        
-        # --- Edge resize zones ---
+
         if x <= border:
             return 'left'
-        # Right edge: exclude scrollbar area (but allow in status bar)
-        if x >= right_border_start and x < w - scrollbar_width:
+        if x >= w - border:
             return 'right'
         if y <= border:
             return 'top'
-        # Bottom edge: always allow resizing (including in status bar area)
         if y >= h - border:
             return 'bottom'
-        
+
         return None
     
 
@@ -14179,6 +15295,7 @@ class RAWImageViewer(QMainWindow):
                 self._semantic_search_backup_files = None
                 self._semantic_search_result_paths = None
                 self._last_semantic_query = ""
+                self._gallery_search_index_session_key = None
                 self.current_file_index = -1
                 self.current_file_path = None
                 self.current_folder = None
@@ -14193,6 +15310,7 @@ class RAWImageViewer(QMainWindow):
             self._semantic_search_backup_files = None
             self._semantic_search_result_paths = None
             self._last_semantic_query = ""
+            self._gallery_search_index_session_key = None
 
             # Find current file index
             self.current_file_index = -1
@@ -14243,7 +15361,7 @@ class RAWImageViewer(QMainWindow):
             "Press Delete to remove the current image\n"
             "H — Show/hide histogram\n"
             "F — Show/hide focus point\n"
-            "Scroll wheel (fit-to-window): Scroll down = previous image, Scroll up = next image\n"
+            "Scroll wheel (fit-to-window): Scroll down = next image, Scroll up = previous image\n"
             "Horizontal wheel (zoom mode): Scroll left/right to pan the image"
         )
         
@@ -14255,7 +15373,7 @@ class RAWImageViewer(QMainWindow):
                 self.image_label.setStyleSheet("QLabel { color: #666; font-size: 14px; background-color: transparent; }")
             
         if hasattr(self, 'status_metadata_label'):
-            self.status_metadata_label.setVisible(False)
+            self._apply_top_metadata_text("")
         if hasattr(self, 'status_counter_label'):
             self.status_counter_label.setVisible(False)
         if hasattr(self, 'sort_toggle_button'):
@@ -14288,14 +15406,8 @@ class RAWImageViewer(QMainWindow):
             self.image_label.setStyleSheet(
                 "QLabel { color: #B0B0B0; font-size: 14px; }")
         
-        # Hide metadata, image counter, and sort button when no files
-        if hasattr(self, 'status_metadata_label'):
-            # Only hide in gallery mode, show in single view mode
-            if self.view_mode == 'single':
-                self.status_metadata_label.setVisible(True)
-                self.status_metadata_label.setText("")
-            else:
-                self.status_metadata_label.setVisible(False)
+        # Clear top metadata when no files
+        self._apply_top_metadata_text("")
         if hasattr(self, 'status_counter_label'):
             self.status_counter_label.setVisible(False)
         if hasattr(self, 'sort_toggle_button'):
@@ -14319,113 +15431,51 @@ class RAWImageViewer(QMainWindow):
         msg_box.exec()
 
     def extract_exif_data(self, file_path):
-        """Extract EXIF data from image file"""
-        exif_data = {
-            'focal_length': None,
-            'aperture': None,
-            'iso': None,
-            'capture_time': None
+        """Extract HUD-oriented EXIF fields via the shared EXIFExtractor (cached)."""
+        empty = {
+            "focal_length": None,
+            "aperture": None,
+            "iso": None,
+            "capture_time": None,
         }
-
+        if not file_path:
+            return empty
         try:
-            tags = process_file_from_path(file_path, details=False)
+            from enhanced_raw_processor import EXIFExtractor
 
-            # Extract focal length - try multiple possible tag keys
-            focal_length_tags = [
-                "EXIF FocalLength",
-                "EXIF FocalLengthIn35mmFilm",
-            ]
-            for tag_name in focal_length_tags:
-                if tag_name in tags:
-                    focal_length_raw = tags[tag_name]
-                    try:
-                        # Handle different focal length formats
-                        focal_str = str(focal_length_raw)
-                        if "/" in focal_str:
-                            # Handle fraction format (e.g., "24/1")
-                            num, den = focal_str.split("/")
-                            focal_length = round(float(num) / float(den))
-                        else:
-                            # Handle decimal format
-                            focal_length = round(float(focal_str))
-                        if focal_length and focal_length > 0:
-                            exif_data["focal_length"] = f"{focal_length}mm"
-                            break
-                    except (ValueError, AttributeError, ZeroDivisionError):
-                        continue
-
-            # Extract aperture - try multiple possible tag keys
-            aperture_tags = ["EXIF FNumber", "EXIF ApertureValue"]
-            for tag_name in aperture_tags:
-                if tag_name in tags:
-                    aperture_raw = tags[tag_name]
-                    try:
-                        # Handle different aperture formats
-                        aperture_str = str(aperture_raw)
-                        if "/" in aperture_str:
-                            # Handle fraction format (e.g., "28/10")
-                            num, den = aperture_str.split("/")
-                            aperture = float(num) / float(den)
-                        else:
-                            # Handle decimal format
-                            aperture = float(aperture_str)
-                        if aperture and aperture > 0:
-                            exif_data["aperture"] = f"f/{aperture:.1f}"
-                            break
-                    except (ValueError, AttributeError, ZeroDivisionError):
-                        continue
-
-            # Extract ISO - try multiple possible tag keys
-            iso_tags = [
-                "EXIF ISOSpeedRatings",
-                "EXIF ISO",
-                "EXIF PhotographicSensitivity",
-            ]
-            for tag_name in iso_tags:
-                if tag_name in tags:
-                    iso_raw = tags[tag_name]
-                    try:
-                        iso_str = str(iso_raw)
-                        # Handle fraction format for ISO
-                        if "/" in iso_str:
-                            num, den = iso_str.split("/")
-                            iso = int(float(num) / float(den))
-                        else:
-                            iso = int(iso_str)
-                        if iso and iso > 0:
-                            exif_data["iso"] = f"ISO {iso}"
-                            break
-                    except (ValueError, AttributeError, ZeroDivisionError):
-                        continue
-
-            # Extract capture time
-            datetime_tags = [
-                "EXIF DateTimeOriginal",
-                "Image DateTime",
-                "EXIF DateTime",
-            ]
-            for tag_name in datetime_tags:
-                if tag_name in tags:
-                    datetime_raw = tags[tag_name]
-                    try:
-                        datetime_str = str(datetime_raw)
-                        # Parse datetime string (format: "YYYY:MM:DD HH:MM:SS")
-                        dt = datetime.strptime(
-                            datetime_str, "%Y:%m:%d %H:%M:%S"
-                        )
-                        # Format as "HH:MM:SS YYYY-MM-DD"
-                        exif_data["capture_time"] = dt.strftime(
-                            "%H:%M:%S %Y-%m-%d"
-                        )
-                        break  # Use first available datetime
-                    except (ValueError, AttributeError):
-                        continue
-
+            data = EXIFExtractor().extract_exif_data(file_path)
+            if not isinstance(data, dict):
+                return empty
+            return {
+                "focal_length": data.get("focal_length"),
+                "aperture": data.get("aperture"),
+                "iso": data.get("iso"),
+                "capture_time": data.get("capture_time"),
+            }
         except Exception:
-            # If any error occurs during EXIF extraction, return empty data
-            pass
+            return empty
 
-        return exif_data
+    def _metadata_file_label(self, file_path: str) -> str:
+        """Folder + filename prefix for the centered EXIF HUD."""
+        if not file_path:
+            return ""
+        filename = os.path.basename(file_path)
+        parent = os.path.dirname(os.path.normpath(file_path))
+        folder_name = os.path.basename(parent) if parent else ""
+        if folder_name and folder_name not in (".", filename):
+            return f"{folder_name} / {filename}"
+        return filename
+
+    def _apply_top_metadata_text(self, text: str) -> None:
+        """Show EXIF / image info centered in the top bar (title bar or macOS strip)."""
+        display = (text or "").strip()
+        if hasattr(self, "title_bar") and self.title_bar is not None:
+            self.title_bar.set_metadata(display)
+        elif hasattr(self, "top_metadata_bar") and self.top_metadata_bar is not None:
+            self.top_metadata_bar.set_metadata(display)
+        elif hasattr(self, "status_metadata_label") and self.status_metadata_label is not None:
+            self.status_metadata_label.setText(display)
+            self.status_metadata_label.setVisible(bool(display))
 
     def update_status_bar(self, width=None, height=None):
         """Update status bar with comprehensive information including EXIF data
@@ -14445,11 +15495,8 @@ class RAWImageViewer(QMainWindow):
         
         # Show metadata, counter, and sort button when there are files
         # Only show metadata in single view mode, hide in gallery mode
-        if hasattr(self, 'status_metadata_label'):
-            if self.view_mode == 'single':
-                self.status_metadata_label.setVisible(True)  # Show metadata in single view
-            else:
-                self.status_metadata_label.setVisible(False)  # Hide metadata in gallery view
+        if self.view_mode != "single":
+            self._apply_top_metadata_text("")
         if hasattr(self, 'status_counter_label'):
             if self.view_mode == 'single':
                 self.status_counter_label.setVisible(True)  # Show counter in single view
@@ -14476,30 +15523,29 @@ class RAWImageViewer(QMainWindow):
             self.rotate_bottom_button.setVisible(show_rotate)
         if hasattr(self, "search_bottom_button"):
             self.search_bottom_button.setVisible(bool(self.image_files))
+        if getattr(self, "_search_panel_expanded", False):
+            self._schedule_search_expand_overlay_sync()
 
         # Gallery mode should stay lightweight: avoid expensive per-image EXIF/status
         # recomputation (fallback reads can block UI and delay gallery paint).
         if self.view_mode != 'single':
-            if hasattr(self, 'status_metadata_label'):
-                self.status_metadata_label.setVisible(False)
+            self._apply_top_metadata_text("")
             if hasattr(self, 'status_counter_label'):
                 self._update_gallery_counter()
             return
 
         if not self.current_file_path:
-            # Hide metadata when no image is loaded
-            if hasattr(self, 'status_metadata_label'):
-                if self.view_mode == 'single':
-                    self.status_metadata_label.setVisible(True)
-                    self.status_metadata_label.setText("")
-                else:
-                    self.status_metadata_label.setVisible(False)
+            # Clear top metadata when no image is loaded
+            if self.view_mode == 'single':
+                self._apply_top_metadata_text("")
+            else:
+                self._apply_top_metadata_text("")
             if hasattr(self, 'status_counter_label'):
                 self.status_counter_label.setText("")
             return
 
-        # Get filename
-        filename = os.path.basename(self.current_file_path)
+        # Get filename (folder + name shown only in the centered EXIF HUD)
+        file_label = self._metadata_file_label(self.current_file_path)
 
         # Get image dimensions - ALWAYS prefer original dimensions from cache
         # This ensures we show the original resolution even when displaying a thumbnail
@@ -14975,11 +16021,10 @@ class RAWImageViewer(QMainWindow):
         display_height_final = original_height if original_height else height
         
         if display_width_final > 0 and display_height_final > 0:
-            # Show original resolution, and optionally indicate if displaying thumbnail
             # Show original resolution (no thumbnail indicator needed)
-            metadata_parts.append(f"{filename} - {display_width_final}x{display_height_final}")
+            metadata_parts.append(f"{file_label} - {display_width_final}x{display_height_final}")
         else:
-            metadata_parts.append(filename)
+            metadata_parts.append(file_label)
 
         # Add zoom level
         metadata_parts.append(zoom_level)
@@ -14990,23 +16035,21 @@ class RAWImageViewer(QMainWindow):
 
         # Join all parts with separator
         metadata_text = " - ".join(metadata_parts)
-        # Show and set metadata text in single view mode
-        if hasattr(self, 'status_metadata_label'):
-            if self.view_mode == 'single':
-                self.status_metadata_label.setVisible(True)
-                self.status_metadata_label.setText(metadata_text)
-                # Track metadata display
-                import logging
-                logger = logging.getLogger(__name__)
-                # Extract individual EXIF fields for tracking
-                has_focal = any('mm' in str(item) for item in exif_info) if exif_info else False
-                has_aperture = any('f/' in str(item) for item in exif_info) if exif_info else False
-                has_iso = any('ISO' in str(item) for item in exif_info) if exif_info else False
-                has_datetime = any(':' in str(item) and '-' in str(item) for item in exif_info) if exif_info else False
-                logger.info(f"[TRACK] Metadata displayed - file: {filename}, full_text: {metadata_text}, "
-                          f"exif_fields: {len(exif_info)}, focal: {has_focal}, aperture: {has_aperture}, iso: {has_iso}, datetime: {has_datetime}")
-            else:
-                self.status_metadata_label.setVisible(False)
+        # Show and set metadata text in single view mode (top bar, centered).
+        if self.view_mode == 'single':
+            self._apply_top_metadata_text(metadata_text)
+            # Track metadata display
+            import logging
+            logger = logging.getLogger(__name__)
+            # Extract individual EXIF fields for tracking
+            has_focal = any('mm' in str(item) for item in exif_info) if exif_info else False
+            has_aperture = any('f/' in str(item) for item in exif_info) if exif_info else False
+            has_iso = any('ISO' in str(item) for item in exif_info) if exif_info else False
+            has_datetime = any(':' in str(item) and '-' in str(item) for item in exif_info) if exif_info else False
+            logger.info(f"[TRACK] Metadata displayed - file: {file_label}, full_text: {metadata_text}, "
+                      f"exif_fields: {len(exif_info)}, focal: {has_focal}, aperture: {has_aperture}, iso: {has_iso}, datetime: {has_datetime}")
+        else:
+            self._apply_top_metadata_text("")
 
         # Update image counter (right label)
         if getattr(self, "view_mode", "single") == "gallery":
@@ -15029,6 +16072,42 @@ class RAWImageViewer(QMainWindow):
         return pixmap_size.width() > viewport_size.width() or pixmap_size.height() > viewport_size.height()
 
     def eventFilter(self, obj, event):
+        et = event.type()
+        drop_targets = getattr(self, "_file_drop_targets", None)
+        if drop_targets and obj in drop_targets:
+            if et in (QEvent.Type.DragEnter, QEvent.Type.DragMove):
+                if self._accept_drag_urls(event.mimeData()):
+                    event.acceptProposedAction()
+                else:
+                    event.ignore()
+                return True
+            if et == QEvent.Type.Drop:
+                if self._process_dropped_urls(event.mimeData()):
+                    event.acceptProposedAction()
+                else:
+                    event.ignore()
+                return True
+
+        if event.type() in (
+            QEvent.Type.MouseMove,
+            QEvent.Type.MouseButtonPress,
+            QEvent.Type.MouseButtonRelease,
+        ):
+            if self._handle_frame_resize_event(event):
+                return True
+
+        if (
+            event.type() == QEvent.Type.Resize
+            and obj is getattr(self, "gallery_widget", None)
+        ):
+            self._position_gallery_frame_grip()
+
+        if event.type() == QEvent.Type.Leave and not getattr(self, "_resize_edge_active", None):
+            grip = getattr(self, "_resize_grip", None)
+            if grip is not None:
+                grip.hide()
+            self.unsetCursor()
+
         if event.type() == QEvent.Type.KeyPress:
             # Handle application-wide shortcuts even when sub-widgets (like viewport) have focus
             if self._handle_app_shortcut(event):
@@ -15037,11 +16116,15 @@ class RAWImageViewer(QMainWindow):
         # Film strip hot zone: pointer events hit the scroll viewport / image label, not the overlay.
         if event.type() == QEvent.Type.MouseMove and getattr(self, "view_mode", "single") == "single":
             container = getattr(self, "single_view_container", None)
-            if container is not None and obj in (
+            gpu_view = getattr(self, "gpu_view", None)
+            filmstrip_targets = (
                 self.scroll_area.viewport(),
                 self.image_label,
                 self.scroll_area,
-            ):
+            )
+            if gpu_view is not None:
+                filmstrip_targets = (*filmstrip_targets, gpu_view, gpu_view.viewport())
+            if container is not None and obj in filmstrip_targets:
                 self._ensure_filmstrip_synced()
                 gp = event.globalPosition()
                 container.handle_pointer_for_filmstrip(gp)
@@ -15169,11 +16252,11 @@ class RAWImageViewer(QMainWindow):
                     # Horizontal wheel is disabled for navigation
                     if abs(vertical_delta) > 0:
                         if vertical_delta > 0:
-                            # Scroll down = previous image (like going back in history)
+                            # Wheel up (Qt positive delta) = previous image
                             self._debounced_navigate('prev')
                             return True  # Event handled
                         elif vertical_delta < 0:
-                            # Scroll up = next image (like going forward)
+                            # Wheel down (Qt negative delta) = next image
                             self._debounced_navigate('next')
                             return True  # Event handled
                 else:
@@ -15236,6 +16319,7 @@ class RAWImageViewer(QMainWindow):
 
             # Now move the file
             os.rename(file_to_move, target_path)
+            self._migrate_visual_rotation_path(file_to_move, target_path)
 
             self._drop_discarded_from_semantic_corpus(file_to_move)
             # Remove from image files list
@@ -15409,6 +16493,7 @@ class RAWImageViewer(QMainWindow):
         preserved = self.current_file_path
         self.image_files = list(image_files)
         self._semantic_search_corpus_files = list(image_files)
+        self._gallery_search_index_session_key = None
         self._quick_folder_file_stats = file_stats
 
         if preserved:
@@ -15443,6 +16528,7 @@ class RAWImageViewer(QMainWindow):
         self.current_folder = folder_path
         self.image_files = [start_path]
         self._semantic_search_corpus_files = [start_path]
+        self._gallery_search_index_session_key = None
         self.current_file_index = 0
         self.current_file_path = start_path
         self._quick_folder_file_stats = {}
@@ -15526,6 +16612,7 @@ class RAWImageViewer(QMainWindow):
         preserved = self.current_file_path
         self.image_files = sorted_files
         self._semantic_search_corpus_files = list(sorted_files)
+        self._gallery_search_index_session_key = None
         if bulk_metadata:
             self._gallery_bulk_metadata = bulk_metadata
         if preserved:
@@ -15574,6 +16661,7 @@ class RAWImageViewer(QMainWindow):
                 self.current_folder = None
                 self.image_files = []
                 self._semantic_search_corpus_files = []
+                self._gallery_search_index_session_key = None
                 self.current_file_index = -1
                 self.current_file_path = None
                 self.update_status_bar()
@@ -15582,6 +16670,7 @@ class RAWImageViewer(QMainWindow):
             self.current_folder = folder_path
             self.image_files = image_files
             self._semantic_search_corpus_files = list(image_files)
+            self._gallery_search_index_session_key = None
             self._filmstrip_warmed_paths = set()
             self._gallery_bulk_metadata = bulk_metadata
             if not was_fast_open:
@@ -15965,6 +17054,7 @@ class RAWImageViewer(QMainWindow):
             settings.remove("last_session_folder")
             settings.remove("last_session_file")
             settings.remove("last_session_view_mode")
+        self._save_persisted_visual_rotations()
 
     def restore_session_state(self):
         """Restore the last session's folder and file, with error handling for unavailable drives"""
@@ -16071,13 +17161,19 @@ class RAWImageViewer(QMainWindow):
             self.save_session_state()
             logger.info("[CLOSE] Session state saved")
 
-            if getattr(self, "_semantic_indexing_in_progress", False):
+            if getattr(self, "_semantic_indexing_in_progress", False) or getattr(
+                self, "_face_indexing_in_progress", False
+            ):
                 folder = getattr(self, "current_folder", None)
                 if folder:
                     self._set_semantic_index_incomplete(folder, True)
                 self._semantic_index_active_token = None
                 self._semantic_indexing_in_progress = False
-                logger.info("[CLOSE] Semantic index interrupted; will resume on next launch")
+                self._face_index_active_token = None
+                self._face_indexing_in_progress = False
+                logger.info(
+                    "[CLOSE] Search indexing interrupted; will resume on next launch"
+                )
             
             # Clean up current processor
             if hasattr(self, 'current_processor') and self.current_processor is not None:
@@ -16335,7 +17431,7 @@ def main():
                 splash.showMessage("Initializing core components...", Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignCenter, Qt.GlobalColor.white)
                 app.processEvents()
                 safe_print("Splash screen updated", flush=True)
-            else:
+            elif getattr(sys, 'frozen', False):
                 # Fallback splash if top-level creation failed
                 icon_path_fallback = resource_path(os.path.join('icons', 'appicon.png'))
                 if os.path.exists(icon_path_fallback):
@@ -16358,6 +17454,8 @@ def main():
                 splash.show()
                 app.processEvents()
                 safe_print("Fallback splash screen displayed", flush=True)
+            else:
+                splash = None
 
             # 3. Import heavy modules while splash is visible
             _lazy_import_heavy_modules(splash)
@@ -16366,7 +17464,7 @@ def main():
             # 4. Continue with initialization
             if is_windows:
                 safe_print("  [Windows] Setting AppUserModelID...", flush=True)
-                myappid = 'RAWviewer.2.2.2'
+                myappid = 'RAWviewer.2.2'
                 ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
                 safe_print("  [Windows] AppUserModelID set", flush=True)
 

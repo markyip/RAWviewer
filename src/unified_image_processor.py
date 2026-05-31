@@ -177,7 +177,7 @@ class UnifiedImageProcessor:
                 scale = min(MAX_THUMB_DIM / w, MAX_THUMB_DIM / h)
                 new_w = max(1, int(w * scale))
                 new_h = max(1, int(h * scale))
-                thumbnail_small_pil = pil_img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+                thumbnail_small_pil = pil_img.resize((new_w, new_h), Image.Resampling.HAMMING)
                 thumbnail_small = np.array(thumbnail_small_pil)
             
             buffer = io.BytesIO()

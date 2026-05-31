@@ -1,35 +1,47 @@
 # RAWviewer Release Notes
 
-## 🚀 Version 2.2.2
+## 🚀 Version 2.2
 **Release Date: May 30, 2026**
 
-🛠️ Fixes & improvements
-- **Film strip animation**: Smooth fade-in/out when revealing or dismissing the single-image thumbnail strip; extended bottom hot zone so the strip appears before the cursor reaches the thumbnails.
+Unified 2.2 release — search, gallery, film strip, frameless window polish, RAW loading consistency, and indexing improvements.
 
-## 🚀 Version 2.2.1
-**Release Date: May 30, 2026**
-
-🎯 What's New
-- **Windows — Open with another app**: Bottom-bar button opens the native “Open with” picker (Lightroom, Photoshop, etc.) via `OpenAs_RunDLLW` / `SHOpenWithDialog` with `OAIF_EXEC`.
-- **Experimental GPU single-image view**: Opt in with `RAWVIEWER_GPU_VIEW=1` for smoother zoom/pan on supported hardware (classic scroll area remains the default).
-
-🛠️ Fixes & improvements
-- **Search → gallery navigation**: Clicking a search result opens the correct image; film strip and arrow keys stay within filtered results.
-- **Film strip**: Fixed phantom selection, recursion on hover, and sync to search-filtered lists instead of the full folder.
-- **Search panel UI**: Collapsing the search field no longer shifts nearby status-bar icons.
-- **Gallery thumbnails**: Click handler uses the widget’s current path so reordered/filtered grids navigate correctly.
-- **Windows share helper** (sources retained for future WinRT share work): Uses an in-process hidden Form HWND for reliable foreground share UI when invoked from dev builds.
-
-## 🚀 Version 2.2.0
-**Release Date: May 30, 2026**
-
-🎯 What's New
+### 🎯 What's New
 - **Search from single-image view**: Search button in single view; submitting a query switches to gallery with filtered results.
 - **Fast single-file open**: Opening one image no longer waits for full folder scan and EXIF sort on large libraries.
+- **Windows — Open with another app**: Bottom-bar button opens the native “Open with” picker (Lightroom, Photoshop, etc.) via `OpenAs_RunDLLW` / `SHOpenWithDialog` with `OAIF_EXEC`.
+- **Experimental GPU single-image view**: Opt in with `RAWVIEWER_GPU_VIEW=1` for smoother zoom/pan on supported hardware (classic scroll area remains the default).
+- **Consistent RAW color (fit ↔ zoom)**: Single-image RAW defaults to LibRaw half-res for fit view and full decode at 100% zoom (`RAWVIEWER_LIBRAW_CONSISTENT_PREVIEW=1`), avoiding embedded-JPEG color snap. Gallery thumbnails still use fast embedded previews.
+- **Unified EXIF dual-backend**: Metadata routes through `metadata_backend` — fast header reads for RAW, optional `pyexiv2` for JPEG/TIFF (`RAWVIEWER_EXIF_BACKEND=auto`).
+- **Frameless window resize (Windows)**: Drag any window edge (including top strip and bottom-right grip) to resize; gallery scrollbar keeps original 24px / 6px padding with a non-layout overlay for right-edge grip.
 
-🛠️ Fixes & improvements
+### 🛠️ Fixes & improvements
+
+**Search & gallery**
+- **Search → gallery navigation**: Clicking a search result opens the correct image; film strip and arrow keys stay within filtered results.
 - **Gallery refresh after EXIF sort**: Gallery auto-updates when background capture-time refinement completes.
-- **Search navigation**: Film strip and arrow keys stay within active search results until the filter is cleared.
+- **Gallery thumbnails**: Click handler uses the widget’s current path so reordered/filtered grids navigate correctly.
+- **Search panel UI**: Collapsing the search field no longer shifts nearby status-bar icons; fixed width jump when clearing the query.
+- **Search indexing UX**: No flash of stale `Semantic/Face X/10` progress after search completes; session-aware index status.
+- **Semantic indexing**: Skip duplicate RAW companion files when writing to the index; improved progress formatting and accelerator logging.
+
+**Film strip & rotation**
+- **Film strip animation**: Smooth fade-in/out when revealing or dismissing the single-image thumbnail strip; extended bottom hot zone.
+- **Film strip hover**: Tuned show delays (350ms / 120ms direct) with prefetch so the strip feels responsive without flicker.
+- **Film strip sync**: Fixed phantom selection, recursion on hover, and sync to search-filtered lists instead of the full folder.
+- **Rotation consistency**: Non-destructive rotation stays aligned across single view, film strip, and gallery after `R` or arrow navigation.
+
+**Performance & image pipeline**
+- **CPU downscaling**: Replaced LANCZOS with HAMMING for thumbnail downscales (faster, cleaner edges on CPU).
+- **GPU viewport scaling**: Experimental GPU view uses hardware-accelerated scaling where enabled.
+- **Multi-core RAW postprocess**: Process pool for LibRaw when `RAWVIEWER_USE_PROCESS_POOL=1` (default on 4+ cores).
+- **Progressive RAW load**: Optional embedded-first path via `RAWVIEWER_PROGRESSIVE_RAW_LOAD=1` (off by default).
+
+**Platform & docs**
+- **Windows share helper** (sources retained for future WinRT share work): In-process hidden Form HWND for reliable foreground share UI in dev builds.
+- **Launch scripts**: Documented env vars and platform scope (official Windows/macOS releases only).
+- **Environment**: `activation.env` with `PYTHONNOUSERSITE=1` to prevent global package leaks and splash issues.
+
+---
 
 ## 🚀 Version 2.1.0
 **Release Date: May 28, 2026**

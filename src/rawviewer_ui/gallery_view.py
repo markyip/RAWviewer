@@ -47,6 +47,16 @@ def _thumbnail_data_to_base_pixmap(thumbnail_data) -> Optional[QPixmap]:
     return None
 
 
+def _rotate_pixmap_cw(pixmap: QPixmap, degrees: int) -> QPixmap:
+    """Rotate pixmap clockwise for on-screen display (matches single-image view)."""
+    degrees = int(degrees) % 360
+    if pixmap is None or pixmap.isNull() or degrees == 0:
+        return pixmap
+    transform = QTransform()
+    transform.rotate(degrees)
+    return pixmap.transformed(transform, Qt.TransformationMode.SmoothTransformation)
+
+
 class JustifiedGallery(QWidget):
     """
     Adaptive justified gallery layout with high-performance virtualization.
@@ -376,6 +386,32 @@ class JustifiedGallery(QWidget):
         except Exception:
             return 0
 
+    def _display_aspect(self, file_path: str, base_aspect: float) -> float:
+        """Aspect ratio after non-destructive visual rotation."""
+        if base_aspect <= 0:
+            return base_aspect
+        if self._get_rotation_degrees_for_path(file_path) in (90, 270):
+            return 1.0 / base_aspect
+        return base_aspect
+
+    def _base_aspect_for_path(self, file_path: str) -> float:
+        base = self._thumbnail_cache.get((file_path, self._thumb_base_key))
+        if base and not base.isNull() and base.height() > 0:
+            return base.width() / base.height()
+        m = self._metadata_cache.get(file_path)
+        if m and m.get("original_width") and m.get("original_height"):
+            w, h = m["original_width"], m["original_height"]
+            if m.get("orientation", 1) in (5, 6, 7, 8):
+                w, h = h, w
+            return w / h if h > 0 else 1.5
+        return 1.5
+
+    def _fit_rotated_thumbnail(self, file_path: str, base: QPixmap, target_size):
+        """Apply visual rotation then crop-to-fit for a gallery tile."""
+        rot = self._get_rotation_degrees_for_path(file_path)
+        oriented = _rotate_pixmap_cw(base, rot)
+        return self._scale_crop_to_fit(oriented, target_size)
+
     def invalidate_thumbnails_for_path(self, file_path: str) -> None:
         """Drop cached gallery pixmaps for a path (e.g. after on-disk rotation)."""
         try:
@@ -407,14 +443,21 @@ class JustifiedGallery(QWidget):
         if not indices:
             return
         base = self._thumbnail_cache.get((file_path, self._thumb_base_key))
+        dpr = self.devicePixelRatio()
         for idx in indices:
             if idx not in self._visible_widgets:
                 continue
             w = self._visible_widgets[idx]
-            target_size = w.size()
+            logical_size = w.size()
+            physical_size = QSize(
+                int(logical_size.width() * dpr), int(logical_size.height() * dpr)
+            )
             if base and not base.isNull():
-                fitted = self._scale_crop_to_fit(base, target_size)
-                self._thumbnail_cache.put(self._scaled_cache_key(file_path, target_size), fitted)
+                fitted = self._fit_rotated_thumbnail(file_path, base, physical_size)
+                fitted.setDevicePixelRatio(dpr)
+                self._thumbnail_cache.put(
+                    self._scaled_cache_key(file_path, physical_size), fitted
+                )
                 w.setPixmap(fitted)
                 w.setText("")
             elif self.load_manager is not None:
@@ -425,6 +468,38 @@ class JustifiedGallery(QWidget):
                     cancel_existing=False,
                     stages={"thumbnail"}
                 )
+
+    def on_visual_rotation_changed(self, file_path: str) -> None:
+        """Update layout and visible tiles when single-view rotation changes."""
+        if not file_path:
+            return
+        self._invalidate_scaled_thumbnails_for_path(file_path)
+        if file_path not in self._path_to_indices:
+            return
+        display_aspect = self._display_aspect(file_path, self._base_aspect_for_path(file_path))
+        changed = False
+        for idx in self._path_to_indices.get(file_path, []):
+            if idx < len(self._gallery_layout_items):
+                old_aspect = self._gallery_layout_items[idx].get("aspect", 1.5)
+                if abs(old_aspect - display_aspect) > 0.05:
+                    self._gallery_layout_items[idx]["aspect"] = display_aspect
+                    changed = True
+        if changed and self._gallery_layout_items:
+            self._metadata_changed_paths.add(file_path)
+            self.build_gallery(force=True)
+        else:
+            self.refresh_visible_tile_for_path(file_path)
+
+    def sync_visual_rotations(self) -> None:
+        """Refresh gallery tiles/layout for any paths with stored visual rotation."""
+        paths = [
+            p for p in (self.images or [])
+            if isinstance(p, str) and self._get_rotation_degrees_for_path(p)
+        ]
+        if not paths:
+            return
+        for path in paths:
+            self.on_visual_rotation_changed(path)
 
     def resizeEvent(self, event):
         # Debounce expensive rebuilds during window resize.
@@ -720,14 +795,14 @@ class JustifiedGallery(QWidget):
                 if isinstance(item, str):
                     base = self._thumbnail_cache.get((item, self._thumb_base_key))
                     if base and not base.isNull() and base.height() > 0:
-                        aspect = base.width() / base.height()
+                        aspect = self._display_aspect(item, base.width() / base.height())
                     else:
                         m = self._metadata_cache.get(item)
                         if m and m.get("original_width") and m.get("original_height"):
                             w, h = m["original_width"], m["original_height"]
                             if m.get("orientation", 1) in (5, 6, 7, 8):
                                 w, h = h, w
-                            aspect = w / h if h > 0 else 1.5
+                            aspect = self._display_aspect(item, w / h if h > 0 else 1.5)
                         else:
                             aspect = 1.5
 
@@ -972,7 +1047,7 @@ class JustifiedGallery(QWidget):
                         logger.debug(f"Sync get_thumbnail failed for {path}: {e}")
                 
                 if base:
-                    scaled = self._scale_crop_to_fit(base, physical_size)
+                    scaled = self._fit_rotated_thumbnail(path, base, physical_size)
                     scaled.setDevicePixelRatio(dpr)
                     self._thumbnail_cache.put(scaled_key, scaled)
                     w.setPixmap(scaled)
@@ -1125,9 +1200,9 @@ class JustifiedGallery(QWidget):
         # Update ANY widget displaying this path that is currently visible
         indices = self._path_to_indices.get(file_path, [])
         
-        # Ensure layout aspect ratio matches the actual thumbnail
+        # Ensure layout aspect ratio matches the displayed (rotated) thumbnail
         if pixmap.width() > 0 and pixmap.height() > 0:
-            aspect = pixmap.width() / pixmap.height()
+            aspect = self._display_aspect(file_path, pixmap.width() / pixmap.height())
             changed = False
             for idx in indices:
                 if idx < len(self._gallery_layout_items):
@@ -1148,11 +1223,7 @@ class JustifiedGallery(QWidget):
                 w = self._visible_widgets[idx]
                 logical_size = w.size()
                 physical_size = QSize(int(logical_size.width() * dpr), int(logical_size.height() * dpr))
-                # If worker already emitted a target-fitted image, avoid re-scaling here.
-                if pixmap.width() == physical_size.width() and pixmap.height() == physical_size.height():
-                    fitted = pixmap
-                else:
-                    fitted = self._scale_crop_to_fit(pixmap, physical_size)
+                fitted = self._fit_rotated_thumbnail(file_path, pixmap, physical_size)
                 
                 fitted.setDevicePixelRatio(dpr)
                 self._thumbnail_cache.put(self._scaled_cache_key(file_path, physical_size), fitted)
@@ -1196,6 +1267,12 @@ class JustifiedGallery(QWidget):
             
         # Store in local metadata cache
         self._metadata_cache[file_path] = exif_data
+        try:
+            from image_cache import get_image_cache
+
+            get_image_cache().put_exif(file_path, exif_data)
+        except Exception:
+            pass
         
         # Calculate real aspect ratio
         w = exif_data.get("original_width")
@@ -1206,7 +1283,7 @@ class JustifiedGallery(QWidget):
         orientation = exif_data.get("orientation", 1)
         if orientation in (5, 6, 7, 8):
             w, h = h, w
-        aspect = w / h
+        aspect = self._display_aspect(file_path, w / h)
         
         # Check if we need to update layout (if it differs from default 1.333 or previous cache)
         # Find all occurrences of this path in layout

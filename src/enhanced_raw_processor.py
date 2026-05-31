@@ -97,7 +97,7 @@ def _largest_jpeg_from_blob(blob: bytes, max_size: int) -> Optional[np.ndarray]:
                 work = im
                 if w > max_size or h > max_size:
                     work = im.copy()
-                    work.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
+                    work.thumbnail((max_size, max_size), Image.Resampling.HAMMING)
                 best_arr = np.array(work)
             except Exception:
                 continue
@@ -273,7 +273,7 @@ class ThumbnailExtractor(QObject):
                     
                 w, h = jpeg_image.size
                 if w > max_size or h > max_size:
-                    jpeg_image.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
+                    jpeg_image.thumbnail((max_size, max_size), Image.Resampling.HAMMING)
                     
                 return np.array(jpeg_image)
                 
@@ -286,7 +286,7 @@ class ThumbnailExtractor(QObject):
                 if w > max_size or h > max_size:
                      from PIL import Image
                      pil_thumb = Image.fromarray(thumb_array)
-                     pil_thumb.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
+                     pil_thumb.thumbnail((max_size, max_size), Image.Resampling.HAMMING)
                      return np.array(pil_thumb)
                 return thumb_array
             
@@ -351,9 +351,9 @@ class ThumbnailExtractor(QObject):
         try:
             with Image.open(file_path) as img:
                 if target_size is not None and isinstance(target_size, QSize):
-                    img.thumbnail((target_size.width(), target_size.height()), Image.Resampling.LANCZOS)
+                    img.thumbnail((target_size.width(), target_size.height()), Image.Resampling.HAMMING)
                 else:
-                    img.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
+                    img.thumbnail((max_size, max_size), Image.Resampling.HAMMING)
                 
                 if img.mode != 'RGB':
                     img = img.convert('RGB')
@@ -371,6 +371,15 @@ class EXIFExtractor(QObject):
     def __init__(self):
         super().__init__()
         self.cache = get_image_cache()
+
+    def _persist_exif_result(self, file_path: str, result: Optional[Dict[str, Any]]) -> None:
+        """Write freshly extracted metadata to memory + persistent EXIF cache."""
+        if not file_path or not isinstance(result, dict) or not result:
+            return
+        try:
+            self.cache.put_exif(file_path, result)
+        except Exception:
+            pass
 
     def extract_exif_data(self, file_path: str, raw_object: Optional[rawpy.RawPy] = None) -> Optional[Dict[str, Any]]:
         """Extract EXIF data from image file with RAW-specific orientation fallbacks."""
@@ -390,15 +399,15 @@ class EXIFExtractor(QObject):
                 return cached
 
         try:
+            import metadata_backend
+
+            tags = metadata_backend.process_file_from_path(file_path, details=False)
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning(f"metadata_backend failed on {file_path}: {e}")
             tags = {}
-            # First pass: standard exifread (works for JPEGs and many RAW containers)
-            try:
-                with open(file_path, 'rb') as f:
-                    tags = exifread.process_file(f, details=False)
-            except Exception as e:
-                import logging
-                logging.getLogger(__name__).warning(f"exifread failed on {file_path}: {e}")
-            
+
+        try:
             # Standard orientation tags
             orientation = 1
             orientation_tag_found = None
@@ -627,7 +636,8 @@ class EXIFExtractor(QObject):
             if os.environ.get("RAWVIEWER_VERBOSE_ORIENTATION_LOGS") == "1":
                 # print(f"[ORIENTATION] EXIFExtractor: Successfully returning metadata with orientation={orientation} for {os.path.basename(file_path)}")
                 pass
-            
+
+            self._persist_exif_result(file_path, result)
             return result
             
         except Exception as e:

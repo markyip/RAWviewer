@@ -481,7 +481,6 @@ class ImageLoadManager(QObject):
         wanted = stages if stages is not None else {'thumbnail', 'exif', 'full'}
 
         cache = self._cache
-        any_terminal_hit = False
 
         # 1) Thumbnail stage: memory-only thumbnail cache (numpy)
         if 'thumbnail' in wanted:
@@ -492,10 +491,9 @@ class ImageLoadManager(QObject):
                     return True
                 # Not terminal if callers also requested EXIF/full image work.
 
-        # 2) EXIF stage: check memory cache and emit if found
+        # 2) EXIF stage: check memory + persistent cache and emit if found
         if 'exif' in wanted:
-            # Check memory cache (now always available via ImageCache.exif_memory_cache)
-            exif_data = cache.exif_memory_cache.get(file_path)
+            exif_data = cache.get_exif(file_path)
             if exif_data is not None:
                 self._emit_cached_result_later(self.exif_data_ready, file_path, exif_data)
                 # Note: EXIF hit alone doesn't terminate processing if pixels are also wanted
@@ -528,7 +526,25 @@ class ImageLoadManager(QObject):
                     self._emit_cached_result_later(self.pixmap_ready, file_path, pixmap)
                     return True
 
-        return any_terminal_hit
+        thumb_ok = (
+            "thumbnail" not in wanted
+            or cache.thumbnail_cache.get(file_path) is not None
+        )
+        exif_ok = "exif" not in wanted or cache.get_exif(file_path) is not None
+        full_ok = "full" not in wanted
+        if "full" in wanted:
+            if is_raw:
+                if use_full_resolution:
+                    full_ok = cache.full_image_cache.get(file_path) is not None
+                elif libraw_first:
+                    full_ok = cache.get_full_image(file_path) is not None
+                else:
+                    full_ok = cache.preview_cache.get(file_path) is not None
+            else:
+                px = cache.pixmap_cache.get(file_path)
+                full_ok = px is not None and not px.isNull()
+
+        return thumb_ok and exif_ok and full_ok
     
     def _schedule_next_task(self):
         """調度下一個任務到線程池，實現 RAW 限制"""

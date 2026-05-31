@@ -16,11 +16,13 @@ scripts\Launch\bat\run_debug.bat
 scripts\Launch\bat\build_windows.bat
 ```
 
-## macOS / Linux (shell)
+## macOS (shell)
+
+Official macOS release only; there is no Linux build or installer.
 
 | Script | Purpose |
 |--------|---------|
-| [`shell/launch_dev.sh`](shell/launch_dev.sh) | Run `src/main.py` with verbose dev env vars |
+| [`shell/launch_dev.sh`](shell/launch_dev.sh) | Run `src/main.py` with verbose dev env vars (macOS dev) |
 | [`shell/build_macos.sh`](shell/build_macos.sh) | macOS build via `rawviewer_env` + `build.py` |
 
 ```bash

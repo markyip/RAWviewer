@@ -41,6 +41,189 @@ except Exception:
 ProgressCallback = Optional[Callable[[int, int, str], None]]
 
 
+def format_index_progress(stage: str, done: int, total: int) -> str:
+    """Concise progress for the search field, e.g. 'Semantic: 12/48'."""
+    try:
+        total_i = max(0, int(total))
+        done_i = max(0, int(done))
+    except (TypeError, ValueError):
+        return stage
+    if total_i <= 0:
+        return stage
+    done_i = min(done_i, total_i)
+    return f"{stage}: {done_i}/{total_i}"
+
+
+def resolve_onnx_execution_providers(
+    available: Optional[Sequence[str]] = None,
+) -> List[str]:
+    """Pick ONNX Runtime EPs for the current OS and GPU vendor.
+
+    Windows: CUDA / TensorRT first when installed (NVIDIA); DirectML next for
+    AMD / Intel or when CUDA is unavailable (default pixi build uses DirectML only).
+    macOS: Core ML EP when using ONNX fallback; otherwise app uses native Core ML.
+    Other Unix (no official Linux release): CUDA / ROCm / OpenVINO when present in a
+    custom onnxruntime build, else CPU — source-only, not tested as a product target.
+    Override with RAWVIEWER_ORT_PROVIDERS (comma-separated EP names).
+    """
+    try:
+        import onnxruntime as ort
+    except ImportError:
+        return ["CPUExecutionProvider"]
+
+    if available is None:
+        available = list(ort.get_available_providers())
+
+    override = os.environ.get("RAWVIEWER_ORT_PROVIDERS", "").strip()
+    if override:
+        names = [p.strip() for p in override.split(",") if p.strip()]
+        selected = [p for p in names if p in available]
+        return selected or ["CPUExecutionProvider"]
+
+    if sys.platform == "win32":
+        preferred = [
+            "CUDAExecutionProvider",
+            "TensorrtExecutionProvider",
+            "DmlExecutionProvider",
+            "OpenVINOExecutionProvider",
+            "CPUExecutionProvider",
+        ]
+    elif sys.platform == "darwin":
+        preferred = [
+            "CoreMLExecutionProvider",
+            "CPUExecutionProvider",
+        ]
+    else:
+        preferred = [
+            "CUDAExecutionProvider",
+            "ROCMExecutionProvider",
+            "OpenVINOExecutionProvider",
+            "CPUExecutionProvider",
+        ]
+
+    selected = [p for p in preferred if p in available]
+    return selected or ["CPUExecutionProvider"]
+
+
+def resolve_opencv_dnn_backend_target() -> tuple:
+    """OpenCV DNN backend/target for YuNet / SSD face models (Windows).
+
+    Tries OpenCL (AMD/Intel iGPU) and CUDA (NVIDIA OpenCV builds) before CPU.
+    Override with RAWVIEWER_FACE_DNN_TARGET=cpu|opencl|cuda|openvino.
+    """
+    import cv2
+
+    override = os.environ.get("RAWVIEWER_FACE_DNN_TARGET", "").strip().lower()
+    backend_opencv = cv2.dnn.DNN_BACKEND_OPENCV
+    target_cpu = cv2.dnn.DNN_TARGET_CPU
+
+    if override == "cpu":
+        return backend_opencv, target_cpu
+    if override == "opencl":
+        return backend_opencv, cv2.dnn.DNN_TARGET_OPENCL
+    if override == "cuda":
+        return cv2.dnn.DNN_BACKEND_CUDA, cv2.dnn.DNN_TARGET_CUDA
+    if override == "openvino":
+        return cv2.dnn.DNN_BACKEND_INFERENCE_ENGINE, target_cpu
+
+    try:
+        if cv2.ocl.haveOpenCL():
+            cv2.ocl.setUseOpenCL(True)
+            if cv2.ocl.useOpenCL():
+                return backend_opencv, cv2.dnn.DNN_TARGET_OPENCL
+    except Exception:
+        pass
+    try:
+        if cv2.cuda.getCudaEnabledDeviceCount() > 0:
+            return cv2.dnn.DNN_BACKEND_CUDA, cv2.dnn.DNN_TARGET_CUDA
+    except Exception:
+        pass
+    return backend_opencv, target_cpu
+
+
+def _apply_opencv_dnn_acceleration(net) -> None:
+    """Set preferable backend/target on an OpenCV dnn.Net (best-effort)."""
+    import cv2
+
+    backend_id, target_id = resolve_opencv_dnn_backend_target()
+    try:
+        net.setPreferableBackend(backend_id)
+        net.setPreferableTarget(target_id)
+    except Exception:
+        try:
+            net.setPreferableBackend(cv2.dnn.DNN_BACKEND_OPENCV)
+            net.setPreferableTarget(cv2.dnn.DNN_TARGET_CPU)
+        except Exception:
+            pass
+
+
+def _coreml_compute_units():
+    """Core ML compute-unit preference for MobileCLIP on macOS."""
+    import CoreML
+
+    raw = os.environ.get("RAWVIEWER_COREML_COMPUTE_UNITS", "all").strip().lower()
+    mapping = {
+        "cpu": CoreML.MLComputeUnitsCPUOnly,
+        "gpu": CoreML.MLComputeUnitsCPUAndGPU,
+        "ane": CoreML.MLComputeUnitsCPUAndNeuralEngine,
+        "all": CoreML.MLComputeUnitsAll,
+    }
+    return mapping.get(raw, CoreML.MLComputeUnitsAll)
+
+
+_ACCEL_PROFILE_LOGGED = False
+
+
+def log_inference_acceleration_profile(force: bool = False) -> None:
+    """Log once which inference accelerators are active (semantic + face)."""
+    global _ACCEL_PROFILE_LOGGED
+    if _ACCEL_PROFILE_LOGGED and not force:
+        return
+    _ACCEL_PROFILE_LOGGED = True
+
+    import logging
+
+    logger = logging.getLogger(__name__)
+    parts: List[str] = []
+
+    if sys.platform == "darwin":
+        parts.append("semantic=Core ML (Apple GPU/ANE when available)")
+    else:
+        try:
+            import onnxruntime as ort
+
+            available = list(ort.get_available_providers())
+            selected = resolve_onnx_execution_providers(available)
+            parts.append(f"semantic=ONNX [{', '.join(selected)}]")
+        except Exception:
+            parts.append("semantic=ONNX [CPUExecutionProvider]")
+
+    if sys.platform == "darwin":
+        parts.append("face=Apple Vision")
+    else:
+        try:
+            import cv2
+
+            b, t = resolve_opencv_dnn_backend_target()
+            try:
+                bname = cv2.dnn.getBackendName(b)
+            except Exception:
+                bname = str(b)
+            parts.append(f"face=OpenCV YuNet backend={bname} target={t}")
+        except Exception:
+            parts.append("face=OpenCV YuNet (CPU)")
+
+    gpu_view = os.environ.get("RAWVIEWER_GPU_VIEW", "").strip().lower()
+    if gpu_view in ("1", "true", "yes", "on"):
+        no_gl = os.environ.get("RAWVIEWER_GPU_VIEW_NO_GL", "").strip().lower()
+        if no_gl in ("1", "true", "yes", "on"):
+            parts.append("display=Qt raster viewport")
+        else:
+            parts.append("display=Qt OpenGL viewport (vendor-agnostic)")
+
+    logger.info("[ACCEL] Inference profile: %s", "; ".join(parts))
+
+
 def _load_index_source_image(file_path: str, max_size: int = 1024) -> Image.Image:
     """Load a small RGB image suitable for indexing/detection, preferring app caches."""
     import threading
@@ -371,16 +554,25 @@ class MobileCLIPCoreMLBackend:
                 tmp_url, compile_error = CoreML.MLModel.compileModelAtURL_error_(url, None)
                 if compile_error is not None or tmp_url is None:
                     raise RuntimeError(f"Failed to compile Core ML model: {compile_error}")
-                
+
                 mgr = Foundation.NSFileManager.defaultManager()
                 if os.path.exists(compiled_path):
                     mgr.removeItemAtURL_error_(compiled_url, None)
-                
+
                 success, move_error = mgr.moveItemAtURL_toURL_error_(tmp_url, compiled_url, None)
                 if not success:
                     compiled_url = tmp_url
-            
-            model, load_error = CoreML.MLModel.modelWithContentsOfURL_error_(compiled_url, None)
+
+            config = CoreML.MLModelConfiguration.alloc().init()
+            try:
+                config.setComputeUnits_(_coreml_compute_units())
+            except Exception:
+                pass
+            model, load_error = CoreML.MLModel.modelWithContentsOfURL_configuration_error_(
+                compiled_url, config, None
+            )
+            if load_error is not None or model is None:
+                model, load_error = CoreML.MLModel.modelWithContentsOfURL_error_(compiled_url, None)
             if load_error is not None or model is None:
                 raise RuntimeError(f"Failed to load Core ML model: {load_error}")
             return model
@@ -546,7 +738,7 @@ class MobileCLIPCoreMLBackend:
 
 
 class MobileCLIPONNXBackend:
-    """Windows/Linux ONNX backend for MobileCLIP2-S0.
+    """Windows ONNX backend for MobileCLIP2-S0 (official non-macOS release path).
     
     Requires 'onnxruntime' and 'numpy'.
     """
@@ -669,22 +861,24 @@ class MobileCLIPONNXBackend:
         if self._image_session is not None:
             return
         import onnxruntime as ort
-        
-        # Priority-ordered list of high-performance execution providers
-        providers = [
-            'CUDAExecutionProvider',    # NVIDIA GPU
-            'TensorrtExecutionProvider', # NVIDIA TensorRT
-            'DmlExecutionProvider',     # Windows DirectML (AMD/Intel/NVIDIA)
-            'CPUExecutionProvider'       # Fallback
-        ]
-        
-        available_providers = ort.get_available_providers()
-        selected_providers = [p for p in providers if p in available_providers]
-        
-        print(f"[SemanticSearch] Initializing MobileCLIP ONNX session. Available providers: {available_providers}, using: {selected_providers}", flush=True)
-        
-        self._image_session = ort.InferenceSession(self.image_model_path, providers=selected_providers)
-        self._text_session = ort.InferenceSession(self.text_model_path, providers=selected_providers)
+
+        available = list(ort.get_available_providers())
+        selected_providers = resolve_onnx_execution_providers(available)
+
+        import logging
+
+        logging.getLogger(__name__).info(
+            "[SemanticSearch] MobileCLIP ONNX providers available=%s using=%s",
+            available,
+            selected_providers,
+        )
+
+        self._image_session = ort.InferenceSession(
+            self.image_model_path, providers=selected_providers
+        )
+        self._text_session = ort.InferenceSession(
+            self.text_model_path, providers=selected_providers
+        )
 
     def _ensure_tokenizer(self):
         if self._tokenizer is None:
@@ -735,7 +929,7 @@ def resolve_mobileclip_backend() -> Any:
             return inst
         return MobileCLIPCoreMLBackend()
     else:
-        # Windows/Linux prefer ONNX
+        # Windows prefer ONNX (official release); macOS uses Core ML above.
         inst = MobileCLIPONNXBackend()
         if inst.available():
             return inst
@@ -1661,17 +1855,34 @@ class SemanticImageIndex:
                     if not hasattr(_THREAD_LOCAL_DETECTORS, 'yunet'):
                         import logging
                         logging.getLogger(__name__).info("[VISION] Initializing OpenCV YuNet thread-local instance...")
-                        _THREAD_LOCAL_DETECTORS.yunet = cv2.FaceDetectorYN.create(
-                            model=model_path,
-                            config="",
-                            input_size=(w, h),
-                            score_threshold=0.75,
-                            nms_threshold=0.3,
-                            top_k=5000,
-                            backend_id=cv2.dnn.DNN_BACKEND_OPENCV,
-                            target_id=cv2.dnn.DNN_TARGET_CPU
+                        backend_id, target_id = resolve_opencv_dnn_backend_target()
+                        try:
+                            _THREAD_LOCAL_DETECTORS.yunet = cv2.FaceDetectorYN.create(
+                                model=model_path,
+                                config="",
+                                input_size=(w, h),
+                                score_threshold=0.75,
+                                nms_threshold=0.3,
+                                top_k=5000,
+                                backend_id=backend_id,
+                                target_id=target_id,
+                            )
+                        except Exception:
+                            _THREAD_LOCAL_DETECTORS.yunet = cv2.FaceDetectorYN.create(
+                                model=model_path,
+                                config="",
+                                input_size=(w, h),
+                                score_threshold=0.75,
+                                nms_threshold=0.3,
+                                top_k=5000,
+                                backend_id=cv2.dnn.DNN_BACKEND_OPENCV,
+                                target_id=cv2.dnn.DNN_TARGET_CPU,
+                            )
+                        logging.getLogger(__name__).info(
+                            "[VISION] OpenCV YuNet initialized (backend=%s target=%s).",
+                            backend_id,
+                            target_id,
                         )
-                        logging.getLogger(__name__).info("[VISION] OpenCV YuNet thread-local instance initialized successfully.")
                     
                     detector = _THREAD_LOCAL_DETECTORS.yunet
                     # Crucial: input size must match the actual image size for YuNet
@@ -1683,7 +1894,7 @@ class SemanticImageIndex:
                     import logging
                     logging.getLogger(__name__).debug(f"[VISION] OpenCV YuNet failed on {file_path}, trying OpenCV DNN: {yn_err}")
 
-                # 2. Windows / Linux fallback using OpenCV DNN Face Detector
+                # 2. Windows fallback using OpenCV DNN Face Detector
                 try:
                     import cv2
                     import numpy as np
@@ -1721,6 +1932,7 @@ class SemanticImageIndex:
                                         caffemodel_path
                                     )
                                 _FACE_DETECTOR_NET = cv2.dnn.readNetFromCaffe(prototxt_path, caffemodel_path)
+                                _apply_opencv_dnn_acceleration(_FACE_DETECTOR_NET)
                     
                     # Convert PIL image to BGR for OpenCV DNN
                     img_bgr = np.array(im.convert('RGB'))[:, :, ::-1].copy()
@@ -2004,7 +2216,11 @@ class SemanticImageIndex:
                 if _warm_one(path):
                     warmed += 1
                 if progress_callback and (i <= 2 or i >= total or i % 20 == 0):
-                    progress_callback(i, total, "Warming thumbnails...")
+                    progress_callback(
+                        i,
+                        total,
+                        format_index_progress("Preparing thumbnails", i, total),
+                    )
         else:
             completed = 0
             with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
@@ -2042,7 +2258,13 @@ class SemanticImageIndex:
                         if progress_callback and (
                             completed <= 2 or completed >= total or completed % 20 == 0
                         ):
-                            progress_callback(completed, total, "Warming thumbnails...")
+                            progress_callback(
+                                completed,
+                                total,
+                                format_index_progress(
+                                    "Preparing thumbnails", completed, total
+                                ),
+                            )
                     futures = set(not_done)
                 for future in futures:
                     future.cancel()
@@ -2079,7 +2301,8 @@ class SemanticImageIndex:
     def get_face_pending_count(self, file_paths: Sequence[str]) -> int:
         if not file_paths:
             return 0
-        canonical = [self._canonical_path(p) for p in file_paths if p]
+        indexable_paths, _ = self._filter_duplicate_raw_companions(file_paths)
+        canonical = [self._canonical_path(p) for p in indexable_paths if p]
         if not canonical:
             return 0
         try:
@@ -2112,6 +2335,12 @@ class SemanticImageIndex:
         try:
             face_pending = self._face_pending_paths(conn, unique_canonical)
             if face_pending:
+                if progress_callback:
+                    progress_callback(
+                        album_indexed_base,
+                        album_total or len(file_paths),
+                        format_index_progress("Face", 0, len(face_pending)),
+                    )
                 self._run_parallel_face_scan(
                     face_pending,
                     conn,
@@ -2143,15 +2372,6 @@ class SemanticImageIndex:
             return
 
         warm_cb = None
-        if progress_callback:
-
-            def warm_cb(local_i, local_n, msg):
-                progress_callback(
-                    progress_indexed_base,
-                    progress_album_total or local_n,
-                    f"Warming thumbnails… {local_i}/{local_n}",
-                )
-
         self._warm_thumbnail_cache_for_face_scan(face_pending, warm_cb)
 
         workers = self._face_scan_worker_count()
@@ -2180,7 +2400,7 @@ class SemanticImageIndex:
                     progress_callback(
                         progress_indexed_base,
                         progress_album_total,
-                        f"Scanning faces… {idx}/{total_face}",
+                        format_index_progress("Face", idx, total_face),
                     )
                 cp, face_count = _scan_one(cp)
                 with lock:
@@ -2226,7 +2446,7 @@ class SemanticImageIndex:
                     progress_callback(
                         progress_indexed_base,
                         progress_album_total,
-                        f"Scanning faces… {completed}/{total_face}",
+                        format_index_progress("Face", completed, total_face),
                     )
 
         if batch_writes > 0:
@@ -2242,6 +2462,42 @@ class SemanticImageIndex:
             (dur / total_face) * 1000.0 if total_face else 0,
         )
 
+    @staticmethod
+    def _raw_companion_key(fp: str) -> str:
+        base = os.path.basename(fp)
+        parts = base.split(".")
+        if len(parts) > 1:
+            for idx, part in enumerate(parts):
+                if part.startswith("RAW-"):
+                    return ".".join(parts[:idx]).lower()
+            return ".".join(parts[:-1]).lower()
+        return base.lower()
+
+    @classmethod
+    def _filter_duplicate_raw_companions(
+        cls, file_paths: Sequence[str]
+    ) -> tuple[List[str], List[str]]:
+        """Return (indexable paths, skipped RAW paths with a non-raw companion)."""
+        filtered_paths: List[str] = []
+        skipped_raw: List[str] = []
+        non_raw_keys: set = set()
+        for fp in file_paths:
+            if not fp:
+                continue
+            ext = os.path.splitext(fp)[1].lower().lstrip(".")
+            if ext and ext not in RAW_FILE_EXTENSIONS:
+                non_raw_keys.add((os.path.dirname(fp), cls._raw_companion_key(fp)))
+        for fp in file_paths:
+            if not fp:
+                continue
+            ext = os.path.splitext(fp)[1].lower().lstrip(".")
+            if ext in RAW_FILE_EXTENSIONS:
+                if (os.path.dirname(fp), cls._raw_companion_key(fp)) in non_raw_keys:
+                    skipped_raw.append(fp)
+                    continue
+            filtered_paths.append(fp)
+        return filtered_paths, skipped_raw
+
     def build_index(
         self,
         file_paths: Sequence[str],
@@ -2256,47 +2512,23 @@ class SemanticImageIndex:
         import sqlite3
         logger = logging.getLogger(__name__)
         t_start = time.time()
+        log_inference_acceleration_profile()
         logger.info(f"[INDEX] Starting indexing of {len(file_paths)} file paths.")
         if sys.platform != "darwin":
-            logger.info("[VISION] Using OpenCV offline face scanner for Windows.")
-            
-        # Identify raw files that have a companion non-raw image to avoid duplicate indexing and slash indexing times
-        filtered_paths = []
-        skipped_companions = 0
-        
-        # Build a set of non-raw companion base keys in each directory
-        def get_companion_key(fp: str) -> str:
-            base = os.path.basename(fp)
-            parts = base.split('.')
-            if len(parts) > 1:
-                for idx, part in enumerate(parts):
-                    if part.startswith("RAW-"):
-                        return ".".join(parts[:idx]).lower()
-                return ".".join(parts[:-1]).lower()
-            return base.lower()
+            logger.info("[VISION] Using OpenCV offline face scanner on Windows.")
 
-        # Find all non-raw files in the list
-        non_raw_keys = set()
-        for fp in file_paths:
-            if not fp: continue
-            ext = os.path.splitext(fp)[1].lower().lstrip(".")
-            if ext and ext not in RAW_FILE_EXTENSIONS:
-                dirname = os.path.dirname(fp)
-                non_raw_keys.add((dirname, get_companion_key(fp)))
-
-        for fp in file_paths:
-            if not fp: continue
-            ext = os.path.splitext(fp)[1].lower().lstrip(".")
-            if ext in RAW_FILE_EXTENSIONS:
-                dirname = os.path.dirname(fp)
-                comp_key = get_companion_key(fp)
-                if (dirname, comp_key) in non_raw_keys:
-                    skipped_companions += 1
-                    logger.info(f"[INDEX] Skipping RAW companion file to avoid duplicate results: {os.path.basename(fp)}")
-                    continue
-            filtered_paths.append(fp)
-            
-        logger.info(f"[INDEX] Filtered out {skipped_companions} RAW companion files. Actual files to evaluate: {len(filtered_paths)}")
+        filtered_paths, skipped_raw_paths = self._filter_duplicate_raw_companions(file_paths)
+        skipped_companions = len(skipped_raw_paths)
+        for fp in skipped_raw_paths:
+            logger.info(
+                "[INDEX] Skipping RAW companion file to avoid duplicate results: %s",
+                os.path.basename(fp),
+            )
+        logger.info(
+            "[INDEX] Filtered out %d RAW companion files. Actual files to evaluate: %d",
+            skipped_companions,
+            len(filtered_paths),
+        )
             
         total = len(file_paths)
         indexed = 0
@@ -2311,7 +2543,17 @@ class SemanticImageIndex:
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
         conn.execute("PRAGMA busy_timeout=60000")
-        
+
+        if skipped_raw_paths:
+            for fp in skipped_raw_paths:
+                try:
+                    cp = self._canonical_path(fp)
+                    st = os.stat(cp)
+                    self._mark_semantic_skipped(cp, st, conn)
+                except OSError:
+                    pass
+            conn.commit()
+
         total_face = 0
         run_face_inline = False
         try:
@@ -2380,6 +2622,12 @@ class SemanticImageIndex:
             
             if total_extract > 0:
                 logger.info(f"[INDEX] Starting parallel metadata extraction for {total_extract} files using ThreadPoolExecutor...")
+                if progress_callback:
+                    progress_callback(
+                        progress_indexed_base,
+                        progress_album_total,
+                        format_index_progress("Metadata", 0, total_extract),
+                    )
                 t_meta_start = time.time()
                 max_workers = min(3, os.cpu_count() or 2)
                 with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -2421,7 +2669,9 @@ class SemanticImageIndex:
                             progress_callback(
                                 progress_indexed_base,
                                 progress_album_total,
-                                f"Scanning metadata… {i}/{total_extract}",
+                                format_index_progress(
+                                    "Metadata", i, total_extract
+                                ),
                             )
 
                 if batch_writes > 0:
@@ -2445,15 +2695,21 @@ class SemanticImageIndex:
             # Phase 2: semantic embeddings (search-critical). Run before face scan.
             if total_sem > 0:
                 logger.info(f"[INDEX] Starting AI features neural pass (MobileCLIP) for {total_sem} files...")
+                if progress_callback:
+                    progress_callback(
+                        progress_indexed_base,
+                        progress_album_total,
+                        format_index_progress("Semantic", 0, total_sem),
+                    )
                 t_sem_start = time.time()
                 for i, (canonical_fp, st) in enumerate(pending_for_semantic, start=1):
                     time.sleep(0.15)  # breathing room for MobileCLIP on GPU
                     if progress_callback:
-                        if i <= 2 or i >= total_sem or (i % 12 == 0):
+                        if i <= 2 or i >= total_sem or (i % 5 == 0):
                             progress_callback(
                                 progress_indexed_base + i,
                                 progress_album_total,
-                                "Processing AI features…",
+                                format_index_progress("Semantic", i, total_sem),
                             )
                     try:
                         t_single_neural = time.time()
@@ -2515,6 +2771,12 @@ class SemanticImageIndex:
                     total_face,
                     total_sem,
                 )
+                if progress_callback:
+                    progress_callback(
+                        progress_indexed_base,
+                        progress_album_total,
+                        format_index_progress("Face", 0, total_face),
+                    )
                 self._run_parallel_face_scan(
                     face_pending,
                     conn,
@@ -2547,8 +2809,9 @@ class SemanticImageIndex:
         if not file_paths:
             return {"total": 0, "indexed": 0, "missing": 0, "ready": 1}
 
-        total = len(file_paths)
-        canonical_paths = [self._canonical_path(p) for p in file_paths if p]
+        indexable_paths, _ = self._filter_duplicate_raw_companions(file_paths)
+        total = len(indexable_paths)
+        canonical_paths = [self._canonical_path(p) for p in indexable_paths if p]
         
         # Bulk lookup in database
         placeholders = ",".join(["?"] * len(canonical_paths))
@@ -2585,7 +2848,8 @@ class SemanticImageIndex:
         if not file_paths:
             return []
 
-        canonical_map = {self._canonical_path(p): p for p in file_paths if p}
+        indexable_paths, _ = self._filter_duplicate_raw_companions(file_paths)
+        canonical_map = {self._canonical_path(p): p for p in indexable_paths if p}
         pending: List[str] = []
         for cp, original in canonical_map.items():
             try:

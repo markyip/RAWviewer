@@ -1,10 +1,10 @@
-# RAWviewer v2.2.2
+# RAWviewer v2.2
 
 <p align="center">
   <img src="icons/appicon.ico" alt="RAWviewer Icon" width="256">
 </p>
 
-![Version](https://img.shields.io/badge/version-2.2.2-blue)
+![Version](https://img.shields.io/badge/version-2.2-blue)
 ![Downloads](https://img.shields.io/github/downloads/markyip/RAWviewer/total) 
 ![License](https://img.shields.io/badge/license-MIT-green)
 [![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-Donate-orange?logo=buy-me-a-coffee)](https://www.buymeacoffee.com/markyip)
@@ -32,11 +32,13 @@ RAWviewer is a lightweight, focused image viewer built specifically for photogra
 This is a **pre-filtering tool**, letting you go through hundreds of RAW files efficiently **before** committing to editing them in Lightroom or Photoshop.
 
 ## 🔍 What is RAWviewer?
-**RAWviewer** is a fast, modern, cross-platform image viewer for Windows and macOS, built with PyQt6. It supports advanced zooming, panning, and direct file association, allowing RAW files to be opened with a double-click.
+**RAWviewer** is a fast, modern image viewer for **Windows and macOS** (official releases), built with PyQt6. It supports advanced zooming, panning, and direct file association, allowing RAW files to be opened with a double-click.
+
+> **Platform note:** Official prebuilt releases are **Windows** and **macOS** only. There is no official Linux package; running from source on Linux is unsupported and may require manual dependency setup.
 
 ## ✨ Features
 
-- **Cross-platform support**: Windows and macOS
+- **Official platform support**: Windows and macOS prebuilt releases
 - **Ultra-Fast Performance**: Instant folder loading (scans thousands of images in milliseconds) using optimized algorithms
 - **High-Fidelity Thumbnails**: Uses high-quality **LANCZOS resampling** and **2x oversampling** for crystal-clear previews on Retina and 4K displays.
 - **Smart Prefetching**: Predictively loads relevant images in the background for zero-latency navigation
@@ -53,6 +55,7 @@ This is a **pre-filtering tool**, letting you go through hundreds of RAW files e
 - **Intuitive navigation**: Keyboard shortcuts, mouse controls, and scroll wheel support
 - **Zoom functionality**: Fit-to-window and 100% zoom modes with smooth panning, including native Mac trackpad pinch-to-zoom
 - **DNG zoom reliability**: Single-view DNG now prioritizes full-resolution decoding to keep Space / double-click 100% zoom behavior consistent
+- **Consistent RAW color (fit ↔ zoom)**: By default, single-image RAW skips in-camera embedded JPEG previews and uses LibRaw half-res for fit view and full decode at 100% zoom (same postprocess — no color snap). Gallery thumbnails still use fast embedded previews.
 - **File management**: Move images to discard folder or delete permanently
 - **EXIF data display**: View camera settings, focal length, ISO, aperture, and capture information with robust metadata extraction
 - **Session persistence**: Remembers your last opened folder, image, and view mode
@@ -68,6 +71,8 @@ This is a **pre-filtering tool**, letting you go through hundreds of RAW files e
 
 ### Download Executable
 
+Official releases are published for **Windows** and **macOS** only.
+
 #### Windows
 1. Download the latest release from the [Releases Page](https://github.com/markyip/RAWviewer/releases/latest)
 2. Download `RAWviewer.exe` directly (no zip extraction needed)
@@ -78,7 +83,7 @@ This is a **pre-filtering tool**, letting you go through hundreds of RAW files e
 > **Minimum supported macOS (official prebuilt release): macOS 13 Ventura or newer.**
 
 1. Download the latest release from the [Releases Page](https://github.com/markyip/RAWviewer/releases/latest)
-2. Download and extract `RAWviewer-v2.2.2-macOS.zip`
+2. Download and extract `RAWviewer-v2.2-macOS.zip`
 3. Drag `RAWviewer.app` to your **Applications** folder.
 4. **CRITICAL FIRST STEP:** Because this is an open-source app not signed via the paid Apple Developer program, macOS Gatekeeper will incorrectly label it as "Damaged" or block it. **You must run this command in your Terminal once** to remove the download quarantine flag:
    ```bash
@@ -196,9 +201,13 @@ Launch scripts live under [`scripts/Launch/`](scripts/Launch/README.md). Root-le
 
 | Variable | Effect |
 |----------|--------|
+| `RAWVIEWER_LIBRAW_CONSISTENT_PREVIEW=1` | **Default.** Single-image RAW uses LibRaw half-res for fit view and full decode at 100% zoom — same color pipeline, no embedded-JPEG color snap. Set `=0` for faster embedded-preview first paint. |
+| `RAWVIEWER_PROGRESSIVE_RAW_LOAD=1` | Show embedded preview first, then upgrade to LibRaw in background (may color-shift). Off by default. |
+| `RAWVIEWER_USE_PROCESS_POOL=1` | LibRaw postprocess in worker processes (multi-core). Default on when CPU count ≥ 4. |
 | `RAWVIEWER_GPU_VIEW=1` | Use the experimental GPU-accelerated single-image viewport (smoother zoom/pan; default remains the classic scroll area) |
 | `RAWVIEWER_GPU_VIEW_NO_GL=1` | Force raster viewport when GPU view is enabled (debug / fallback) |
 | `RAWVIEWER_PERSISTENT_CACHE=1` | Enable disk/SQLite cache persistence (off by default) |
+| `RAWVIEWER_EXIF_BACKEND=auto` | EXIF via pyexiv2 (JPEG/TIFF) + exifread (RAW headers); `exifread` or `pyexiv2` to force one backend |
 
 ## 🏗️ Building from Source
 

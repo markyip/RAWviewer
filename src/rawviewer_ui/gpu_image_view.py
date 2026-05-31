@@ -4,6 +4,9 @@ A self-contained ``QGraphicsView`` that renders one image and performs fit / zoo
 pan as GPU matrix transforms instead of re-scaling the pixmap on the CPU every frame.
 This gives QuickLook-style smoothness for wheel/pinch zoom and drag pan.
 
+The optional ``QOpenGLWidget`` viewport is vendor-agnostic (NVIDIA / AMD / Intel on
+Windows; Qt typically uses a Metal-backed GL stack on macOS).
+
 Opt-in via the ``RAWVIEWER_GPU_VIEW=1`` environment variable; the legacy
 ``QScrollArea`` + ``QLabel`` path remains the default. The widget is intentionally
 decoupled from the main window: it exposes a small API plus a few signals so the
@@ -44,10 +47,12 @@ class GpuImageView(QGraphicsView):
     zoomChanged = pyqtSignal(float)
     # int: +1 request next image, -1 request previous image (plain wheel in fit mode)
     wheelNavigate = pyqtSignal(int)
-    doubleClicked = pyqtSignal()
+    # Image pixel coordinates (scene space) where the user double-clicked.
+    doubleClickedAt = pyqtSignal(QPointF)
 
     MIN_SCALE = 0.01
-    MAX_SCALE = 60.0
+    # Pinch / wheel cap (400%). Space and double-click use zoom_to_actual() at 100%.
+    MAX_SCALE = 4.0
 
     def __init__(self, parent=None, background="#1E1E1E"):
         super().__init__(parent)
@@ -230,15 +235,32 @@ class GpuImageView(QGraphicsView):
         self.zoomChanged.emit(self.current_scale())
 
     def zoom_to_actual(self) -> None:
-        """100% — one image pixel per view pixel."""
+        """100% — one image pixel per view pixel, centered on the image middle."""
+        w, h = self._img_w, self._img_h
+        cx = w * 0.5 if w > 0 else 0.0
+        cy = h * 0.5 if h > 0 else 0.0
+        self.zoom_to_actual_at(cx, cy)
+
+    def zoom_to_actual_at(self, scene_x: float, scene_y: float) -> None:
+        """100% zoom with the given image pixel centered in the viewport."""
         self._fit_mode = False
         if not self._has_pixmap:
             return
+        x = max(0.0, min(float(scene_x), max(0, self._img_w - 1)))
+        y = max(0.0, min(float(scene_y), max(0, self._img_h - 1)))
         self.resetTransform()
         self.scale(1.0, 1.0)
-        self.centerOn(self._item)
+        self.centerOn(QPointF(x, y))
         self.fitModeChanged.emit(False)
         self.zoomChanged.emit(1.0)
+
+    def center_on_image_point(self, scene_x: float, scene_y: float) -> None:
+        """Pan so an image pixel is centered without changing zoom scale."""
+        if not self._has_pixmap:
+            return
+        x = max(0.0, min(float(scene_x), max(0, self._img_w - 1)))
+        y = max(0.0, min(float(scene_y), max(0, self._img_h - 1)))
+        self.centerOn(QPointF(x, y))
 
     def toggle_fit(self) -> None:
         if self._fit_mode:
@@ -269,6 +291,12 @@ class GpuImageView(QGraphicsView):
         self.zoomChanged.emit(self.current_scale())
 
     # ------------------------------------------------------------------ events
+    def mouseMoveEvent(self, event) -> None:
+        host = self.parentWidget()
+        if host is not None and hasattr(host, "handle_pointer_for_filmstrip"):
+            host.handle_pointer_for_filmstrip(event.globalPosition())
+        super().mouseMoveEvent(event)
+
     def wheelEvent(self, event) -> None:
         delta = event.angleDelta().y()
         if delta == 0:
@@ -277,15 +305,22 @@ class GpuImageView(QGraphicsView):
         ctrl = bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
         # Match legacy UX: plain wheel while fit-to-window navigates images.
         if self._fit_mode and not ctrl:
-            self.wheelNavigate.emit(1 if delta > 0 else -1)
+            # Qt: delta>0 = wheel up, delta<0 = wheel down — down advances to next image.
+            self.wheelNavigate.emit(-1 if delta > 0 else 1)
             event.accept()
             return
         self.zoom_by(1.25 if delta > 0 else 0.8)
         event.accept()
 
     def mouseDoubleClickEvent(self, event) -> None:
-        self.doubleClicked.emit()
-        self.toggle_fit()
+        if event.button() == Qt.MouseButton.LeftButton and self._has_pixmap:
+            scene_pt = self.mapToScene(event.position().toPoint())
+            self.doubleClickedAt.emit(
+                QPointF(
+                    max(0.0, min(scene_pt.x(), max(0, self._img_w - 1))),
+                    max(0.0, min(scene_pt.y(), max(0, self._img_h - 1))),
+                )
+            )
         event.accept()
 
     def resizeEvent(self, event) -> None:
