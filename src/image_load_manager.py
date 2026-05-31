@@ -310,9 +310,10 @@ class ImageLoadManager(QObject):
 
         # PROCESS POOL (optional): on Windows debug/startup paths, process spawn can
         # re-import heavy modules and hurt first-load latency. Keep it opt-in.
-        use_process_pool = os.environ.get("RAWVIEWER_USE_PROCESS_POOL", "").strip().lower() in {
-            "1", "true", "yes", "on"
-        }
+        # PROCESS POOL: LibRaw postprocess in worker processes (multi-core on Windows).
+        from common_image_loader import use_raw_process_pool
+
+        use_process_pool = use_raw_process_pool()
         self._process_pool = None
         if use_process_pool:
             self._process_pool = concurrent.futures.ProcessPoolExecutor(

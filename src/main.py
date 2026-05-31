@@ -445,7 +445,7 @@ def _lazy_import_heavy_modules(splash=None):
     global rawpy, np, exifread, qta, SemanticImageIndex, get_image_cache, initialize_cache, \
            EnhancedRAWProcessor, PreloadManager, ThumbnailExtractor, get_image_load_manager, \
            Priority, is_raw_file, load_pixmap_safe, check_memory_cache_for_image, \
-           use_libraw_consistent_preview_first, ImageHistogramWidget, ThumbnailLabel, ExternalJustifiedGallery, \
+           use_libraw_consistent_preview_first, use_progressive_raw_loading, metadata_index_idle_delay_ms, ImageHistogramWidget, ThumbnailLabel, ExternalJustifiedGallery, \
            exif_backend_mode, exif_orientation_after_cw90, has_pyexiv2, process_file_from_path
     
     def _update_splash(msg):
@@ -521,6 +521,12 @@ def _lazy_import_heavy_modules(splash=None):
     
     from common_image_loader import use_libraw_consistent_preview_first as _use_libraw_consistent_preview_first
     use_libraw_consistent_preview_first = _use_libraw_consistent_preview_first
+    from common_image_loader import (
+        use_progressive_raw_loading as _use_progressive_raw_loading,
+        metadata_index_idle_delay_ms as _metadata_index_idle_delay_ms,
+    )
+    use_progressive_raw_loading = _use_progressive_raw_loading
+    metadata_index_idle_delay_ms = _metadata_index_idle_delay_ms
     
     from image_histogram import ImageHistogramWidget as _ImageHistogramWidget
     ImageHistogramWidget = _ImageHistogramWidget
