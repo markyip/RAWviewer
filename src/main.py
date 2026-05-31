@@ -14681,7 +14681,7 @@ class RAWImageViewer(QMainWindow):
                 logger.info(f"[STATUS] Using cached EXIF data with {len(exif_tags)} tags, sample: {sample_tags}")
                 metadata_extracted_from_cache = True
             else:
-                logger.warning(f"[STATUS] Cached EXIF data missing or empty - cached_exif keys: {list(cached_exif.keys()) if cached_exif else None}, "
+                logger.debug(f"[STATUS] Cached EXIF data missing or empty - cached_exif keys: {list(cached_exif.keys()) if cached_exif else None}, "
                            f"exif_data type: {type(exif_data_dict)}, exif_data len: {len(exif_data_dict) if isinstance(exif_data_dict, dict) else 'N/A'}")
         else:
             logger.debug(f"[STATUS] No cached EXIF data found for {os.path.basename(self.current_file_path)}")
@@ -16397,6 +16397,17 @@ def main():
             # macOS native title bar tweaks disabled for stability.
             if splash:
                 splash.finish(viewer)  # Close splash screen when main window is ready
+                splash.close()         # Force close the splash screen
+            
+            # Broad check to close any remaining or orphaned QSplashScreen in the app
+            try:
+                for top_level in QApplication.topLevelWidgets():
+                    if isinstance(top_level, QSplashScreen):
+                        top_level.close()
+                app.processEvents()
+            except Exception as e:
+                logger.warning(f"[MAIN] Error closing orphaned splash screens: {e}")
+                
             safe_print("Splash screen closed, main window displayed", flush=True)
 
         # Run application

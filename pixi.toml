@@ -10,6 +10,9 @@ platforms = ["win-64"]
 start = "python src/main.py"
 start-windowless = "pythonw src/main.py"
 
+[activation.env]
+PYTHONNOUSERSITE = "1"
+
 [dependencies]
 python = ">=3.10,<3.13"
 pip = "*"
