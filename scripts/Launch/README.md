@@ -8,7 +8,9 @@ Scripts for local development and packaging. All paths assume the **repository r
 |--------|---------|
 | [`bat/run_debug.bat`](bat/run_debug.bat) | Run `src/main.py` with debug logging and `rawviewer_env` if present |
 | [`bat/clear_cache.bat`](bat/clear_cache.bat) | Wipe memory/disk image caches, semantic index DB, logs, and QSettings (full fresh start) |
-| [`bat/build_windows.bat`](bat/build_windows.bat) | Create `rawviewer_env`, install deps, run `build.py` |
+| [`bat/build_windows.bat`](bat/build_windows.bat) | Build Windows app with selectable backend (`cuda` default, or `directml`) |
+| [`bat/build_windows_cuda.bat`](bat/build_windows_cuda.bat) | Build Windows app with CUDA backend (`onnxruntime-gpu`) |
+| [`bat/build_windows_directml.bat`](bat/build_windows_directml.bat) | Build Windows app with DirectML backend (`onnxruntime-directml`) |
 
 From repo root:
 
@@ -16,6 +18,10 @@ From repo root:
 scripts\Launch\bat\run_debug.bat
 scripts\Launch\bat\clear_cache.bat
 scripts\Launch\bat\build_windows.bat
+scripts\Launch\bat\build_windows.bat cuda
+scripts\Launch\bat\build_windows.bat directml
+scripts\Launch\bat\build_windows_cuda.bat
+scripts\Launch\bat\build_windows_directml.bat
 clear_cache.bat
 ```
 

@@ -163,7 +163,6 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/32/36/4c242f81fdcbfa4fb62a5645f6af79191f4097a0577bd5460c24f19cc4ef/pyqtgraph-0.14.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/35/d9/0e7dffa06c5ab081f75b1b786f0aefc88365825dfcd0ac544bdb7b2b6853/charset_normalizer-3.4.7-cp312-cp312-win_amd64.whl
       - pypi: https://files.pythonhosted.org/packages/3f/f9/2b3ff4e56e5fa7debfaf9eb135d0da96f3e9a1d5b27222223c7296336e5f/typer-0.25.1-py3-none-any.whl
-      - pypi: https://files.pythonhosted.org/packages/43/e3/7d92a15f894aa0c9c4b49b8ee9ac9850d6e63b03c9c32c0367a13ae62209/mpmath-1.3.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/4a/90/b338326131ccb2aaa3c2c85d00f41822c0050139a4bfe723cfd95455bd2d/opencv_python_headless-4.13.0.92-cp37-abi3-win_amd64.whl
       - pypi: https://files.pythonhosted.org/packages/4f/fb/575e98824ba8b4807f463869bef8211aebe17aff884ebaf3e7088f11a5c8/winrt_windows_applicationmodel_datatransfer-3.2.1-cp312-cp312-win_amd64.whl
       - pypi: https://files.pythonhosted.org/packages/56/fb/3c754322c080477633644e453bdaebfeb5177249859c37302ad392a93a0e/rawpy-0.27.0-cp312-cp312-win_amd64.whl
@@ -178,11 +177,10 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/81/47/dd9a212ef6e343a6857485ffe25bba537304f1913bdbed446a23f7f592e1/filelock-3.29.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/82/3b/64d4899d73f91ba49a8c18a8ff3f0ea8f1c1d75481760df8c68ef5235bf5/rich-15.0.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/86/bf/899e81e4cce32febab4fb42bb97dcdf66bc135272882d1987881a4b519e9/pyyaml-6.0.3-cp312-cp312-win_amd64.whl
-      - pypi: https://files.pythonhosted.org/packages/88/ea/33814eb0ec96775eda4c1d30b0d86e91d7d2cd0d84c66d3915aef0e06fa3/onnxruntime_directml-1.24.4-cp312-cp312-win_amd64.whl
       - pypi: https://files.pythonhosted.org/packages/9c/42/7703bd45b62fecd44cd7d3495423097e2f7d28bc2e99e7c1af68892ab157/pycountry-26.2.16-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/a0/f4/c67b0b3f1b9245e8d266f0f112c500d50e5b4e83cb6f3b71b6528104182a/requests-2.34.2-py3-none-any.whl
-      - pypi: https://files.pythonhosted.org/packages/a2/09/77d55d46fd61b4a135c444fc97158ef34a095e5681d0a6c10b75bf356191/sympy-1.14.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/a2/84/dc08d77fbf3d87d3ee27f6a0c6dcce1de5829a64f2eae85a0ecc1f0daa73/scipy-1.17.1-cp312-cp312-win_amd64.whl
+      - pypi: https://files.pythonhosted.org/packages/a4/e4/9b378a5466ea0bed65e5beb8e09254973c580a6522810a38afbcc45e5105/onnxruntime_gpu-1.26.0-cp312-cp312-win_amd64.whl
       - pypi: https://files.pythonhosted.org/packages/a7/ab/547fbd9e16d879dd13c167478f8ae0a83a428008ca07a5e06acdc23ad473/protobuf-7.35.0-cp310-abi3-win_amd64.whl
       - pypi: https://files.pythonhosted.org/packages/ab/ca/feab00bd44aa5fe1ad2c18f08b4d3bb92e26484b0b1d1443897809ed528c/numpy-2.4.6-cp312-cp312-win_amd64.whl
       - pypi: https://files.pythonhosted.org/packages/af/37/1b6def445c567286b50aa3b33828158e135b1be44938dde59f11382a500c/hf_xet-1.5.0-cp37-abi3-win_amd64.whl
@@ -1033,19 +1031,6 @@ packages:
   - rich>=13.8.0
   - annotated-doc>=0.0.2
   requires_python: '>=3.10'
-- pypi: https://files.pythonhosted.org/packages/43/e3/7d92a15f894aa0c9c4b49b8ee9ac9850d6e63b03c9c32c0367a13ae62209/mpmath-1.3.0-py3-none-any.whl
-  name: mpmath
-  version: 1.3.0
-  sha256: a0b2b9fe80bbcd81a6647ff13108738cfb482d481d826cc0e02f5b35e5c88d2c
-  requires_dist:
-  - pytest>=4.6 ; extra == 'develop'
-  - pycodestyle ; extra == 'develop'
-  - pytest-cov ; extra == 'develop'
-  - codecov ; extra == 'develop'
-  - wheel ; extra == 'develop'
-  - sphinx ; extra == 'docs'
-  - gmpy2>=2.1.0a4 ; platform_python_implementation != 'PyPy' and extra == 'gmpy'
-  - pytest>=4.6 ; extra == 'tests'
 - pypi: https://files.pythonhosted.org/packages/46/27/47598e701d284497216bf97bf8b6a69f5e61412e716c232ff2b7e6cb2100/pyqt6_sip-13.11.1-cp312-cp312-macosx_10_9_universal2.whl
   name: pyqt6-sip
   version: 13.11.1
@@ -1285,17 +1270,6 @@ packages:
   version: 6.0.3
   sha256: 5fcd34e47f6e0b794d17de1b4ff496c00986e1c83f7ab2fb8fcfe9616ff7477b
   requires_python: '>=3.8'
-- pypi: https://files.pythonhosted.org/packages/88/ea/33814eb0ec96775eda4c1d30b0d86e91d7d2cd0d84c66d3915aef0e06fa3/onnxruntime_directml-1.24.4-cp312-cp312-win_amd64.whl
-  name: onnxruntime-directml
-  version: 1.24.4
-  sha256: f2ecb68b7b7b259d2ef3112ae760149f9b5a1e7c0fbb73d539da6250a648a614
-  requires_dist:
-  - flatbuffers
-  - numpy>=1.21.6
-  - packaging
-  - protobuf
-  - sympy
-  requires_python: '>=3.11'
 - pypi: https://files.pythonhosted.org/packages/89/a0/6cf41a19a1f2f3feab0e9c0b74134aa2ce6849093d5517a0c550fe37a648/pyyaml-6.0.3-cp312-cp312-macosx_11_0_arm64.whl
   name: pyyaml
   version: 6.0.3
@@ -1330,15 +1304,6 @@ packages:
   - pysocks>=1.5.6,!=1.5.7 ; extra == 'socks'
   - chardet>=3.0.2,<8 ; extra == 'use-chardet-on-py3'
   requires_python: '>=3.10'
-- pypi: https://files.pythonhosted.org/packages/a2/09/77d55d46fd61b4a135c444fc97158ef34a095e5681d0a6c10b75bf356191/sympy-1.14.0-py3-none-any.whl
-  name: sympy
-  version: 1.14.0
-  sha256: e091cc3e99d2141a0ba2847328f5479b05d94a6635cb96148ccb3f34671bd8f5
-  requires_dist:
-  - mpmath>=1.1.0,<1.4
-  - pytest>=7.1.0 ; extra == 'dev'
-  - hypothesis>=6.70.0 ; extra == 'dev'
-  requires_python: '>=3.9'
 - pypi: https://files.pythonhosted.org/packages/a2/84/dc08d77fbf3d87d3ee27f6a0c6dcce1de5829a64f2eae85a0ecc1f0daa73/scipy-1.17.1-cp312-cp312-win_amd64.whl
   name: scipy
   version: 1.17.1
@@ -1382,6 +1347,23 @@ packages:
   - pycodestyle ; extra == 'dev'
   - ruff>=0.12.0 ; extra == 'dev'
   - cython-lint>=0.12.2 ; extra == 'dev'
+  requires_python: '>=3.11'
+- pypi: https://files.pythonhosted.org/packages/a4/e4/9b378a5466ea0bed65e5beb8e09254973c580a6522810a38afbcc45e5105/onnxruntime_gpu-1.26.0-cp312-cp312-win_amd64.whl
+  name: onnxruntime-gpu
+  version: 1.26.0
+  sha256: 5f49c44689894650990e4c8a857d2edafc276fbd79bba57ceb224bd18d25d491
+  requires_dist:
+  - flatbuffers
+  - numpy>=1.21.6
+  - packaging
+  - protobuf
+  - sympy ; extra == 'symbolic'
+  - ml-dtypes ; extra == 'quantization'
+  - nvidia-cuda-nvrtc-cu12~=12.0 ; extra == 'cuda'
+  - nvidia-cuda-runtime-cu12~=12.0 ; extra == 'cuda'
+  - nvidia-cufft-cu12~=11.0 ; extra == 'cuda'
+  - nvidia-curand-cu12~=10.0 ; extra == 'cuda'
+  - nvidia-cudnn-cu12~=9.0 ; extra == 'cudnn'
   requires_python: '>=3.11'
 - pypi: https://files.pythonhosted.org/packages/a7/ab/547fbd9e16d879dd13c167478f8ae0a83a428008ca07a5e06acdc23ad473/protobuf-7.35.0-cp310-abi3-win_amd64.whl
   name: protobuf

@@ -34,8 +34,12 @@ opencv-python-headless = "*"
 huggingface_hub = "*"
 requests = "*"
 
+# Windows semantic search (MobileCLIP ONNX). Default for `pixi install` / `pixi run`.
+# - Local dev: onnxruntime-gpu (CUDA EP when a GPU is available).
+# - Installer variants: build scripts swap this to onnxruntime-directml for DirectML builds
+#   (see scripts/Launch/bat/build_windows_directml.bat and build.py --windows-accel).
 [target.win-64.pypi-dependencies]
-onnxruntime-directml = ">=1.18.0"
+onnxruntime-gpu = ">=1.18.0"
 pyexiv2 = "*"
 pywin32 = "*"
 comtypes = "*"

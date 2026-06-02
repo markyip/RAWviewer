@@ -12,6 +12,7 @@ import platform
 import shutil
 import time
 import sys
+import argparse
 from pathlib import Path
 
 # Repository root (directory containing this script)
@@ -182,7 +183,7 @@ def update_macos_plist(app_path):
         return False
 
 
-def install_dependencies():
+def install_dependencies(windows_accel: str = "cuda"):
     """Install required dependencies"""
     print("Installing/upgrading dependencies...")
     system_name = platform.system()
@@ -203,8 +204,15 @@ def install_dependencies():
     ]
 
     if system_name == "Windows":
-        # Windows semantic backend will move to ONNX
-        dependencies.append('onnxruntime-directml')
+        # Windows semantic backend uses ONNX with selectable acceleration backend.
+        accel = (windows_accel or "cuda").strip().lower()
+        if accel == "cuda":
+            dependencies.append('onnxruntime-gpu')
+        elif accel == "directml":
+            dependencies.append('onnxruntime-directml')
+        else:
+            print(f"[ERROR] Unsupported Windows acceleration backend: {windows_accel}")
+            return False
         dependencies.append('mediapipe')
         dependencies.append('opencv-python-headless')
         dependencies.append('huggingface-hub')
@@ -280,12 +288,42 @@ def _darwin_preflight_pyexiv2_import() -> None:
         sys.exit(1)
 
 
+def _prepare_windows_pixi_manifest(accel: str) -> Path:
+    """
+    Create a backend-specific pixi.toml copy for Windows installer payload.
+    The bundled bootstrap always copies this file as `pixi.toml`.
+    """
+    src = REPO_ROOT / "pixi.toml"
+    raw = src.read_text(encoding="utf-8")
+    if accel == "cuda":
+        raw = raw.replace("onnxruntime-directml", "onnxruntime-gpu")
+    elif accel == "directml":
+        raw = raw.replace("onnxruntime-gpu", "onnxruntime-directml")
+    else:
+        raise ValueError(f"Unsupported Windows acceleration backend: {accel}")
+    tmp_dir = REPO_ROOT / "build" / "_pixi_variants"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    out = tmp_dir / f"pixi.windows.{accel}.toml"
+    out.write_text(raw, encoding="utf-8")
+    return out
+
+
 def main():
+    parser = argparse.ArgumentParser(description="Build RAWviewer executable")
+    parser.add_argument(
+        "--windows-accel",
+        choices=["cuda", "directml"],
+        default=os.environ.get("RAWVIEWER_WINDOWS_ACCEL", "cuda").strip().lower() or "cuda",
+        help="Windows ONNX acceleration backend (default: cuda).",
+    )
+    args = parser.parse_args()
+
     ensure_project_venv_and_reexec()
 
     system_name = platform.system()
     if system_name == 'Windows':
         print("RAWviewer Windows Build Script")
+        print(f"[INFO] Windows acceleration backend: {args.windows_accel}")
     elif system_name == 'Darwin':
         print(f"RAWviewer macOS Build Script v{VERSION}")
     else:
@@ -294,7 +332,7 @@ def main():
     print("")
 
     # Install dependencies first
-    if not install_dependencies():
+    if not install_dependencies(windows_accel=args.windows_accel):
         print("[ERROR] Dependency installation failed.")
         sys.exit(1)
 
@@ -408,6 +446,7 @@ def main():
         f'--add-data "{imageformats_src}{add_data_sep}imageformats"',
         f'--add-data "icons{add_data_sep}icons"'
     ]
+    windows_pixi_manifest = None
     if platform.system() == "Darwin":
         m2 = Path("models/mobileclip2_coreml")
         if m2.is_dir() and list(m2.glob("*_image.mlpackage")):
@@ -418,6 +457,8 @@ def main():
     elif platform.system() == "Windows":
         add_data_args.append('--add-data "uninstall.bat;."')
         add_data_args.append('--add-data "scripts;scripts"')
+        windows_pixi_manifest = _prepare_windows_pixi_manifest(args.windows_accel)
+        print(f"[INFO] Bundling Windows pixi manifest for backend: {args.windows_accel}")
     add_data_arg_str = " ".join(add_data_args)
 
     src_path = os.path.abspath('src')
@@ -489,7 +530,12 @@ def main():
             "--exclude-module", "exifread",
         ])
         
-        add_data_args.append('--add-data "pixi.toml;."')
+        pixi_src = (
+            str(windows_pixi_manifest).replace("\\", "/")
+            if windows_pixi_manifest is not None
+            else "pixi.toml"
+        )
+        add_data_args.append(f'--add-data "{pixi_src};pixi.toml"')
         add_data_args.append('--add-data "src;src"')
     
     if platform.system() == 'Darwin':

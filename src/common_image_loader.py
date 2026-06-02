@@ -795,7 +795,8 @@ def sort_probe_worker_count(
         return min(3, max(2, cpu))
 
     if sample_path and is_slow_storage_path(sample_path):
-        return min(3, max(2, cpu))
+        # Network/UNC paths have high latency. We need *more* workers to hide the I/O wait.
+        return max(8, cpu * 2)
 
     # Local SSD/NVMe: I/O-bound header reads; scale past 3 workers (old hard cap under-used CPU).
     return min(12, max(4, cpu - 1))
@@ -820,13 +821,15 @@ def index_metadata_worker_count(total_files: int) -> int:
 
 def raw_concurrent_load_limit() -> int:
     """Max concurrent LibRaw full/preview decodes in ImageLoadManager."""
-    return _env_int_bounded("RAWVIEWER_RAW_LOAD_LIMIT", 4, minimum=1, maximum=12)
+    cpu = os.cpu_count() or 4
+    default = max(4, cpu)
+    return _env_int_bounded("RAWVIEWER_RAW_LOAD_LIMIT", default, minimum=1, maximum=32)
 
 
 def process_pool_worker_count() -> int:
     """LibRaw postprocess process-pool size when RAWVIEWER_USE_PROCESS_POOL is on."""
     cpu = os.cpu_count() or 4
-    default = max(2, cpu // 2)
-    return _env_int_bounded("RAWVIEWER_PROCESS_POOL_WORKERS", default, minimum=1, maximum=16)
+    default = max(2, cpu - 1)
+    return _env_int_bounded("RAWVIEWER_PROCESS_POOL_WORKERS", default, minimum=1, maximum=32)
 
 

@@ -193,6 +193,18 @@ class ThumbnailExtractor(QObject):
                                    raw_object: Optional[rawpy.RawPy] = None) -> Optional[np.ndarray]:
         """Extract embedded thumbnail from RAW file and resize to max_size."""
         thumb = None
+        
+        # For slow storage (UNC network shares), reading the whole RAW file via LibRaw is very slow.
+        # Prioritize reading just the head/tail for the embedded JPEG via scan to get an instant preview.
+        from common_image_loader import is_slow_storage_path
+        is_slow = is_slow_storage_path(file_path)
+        
+        if is_slow and allow_scan_fallback and raw_object is None:
+            scan_max = max_size if max_size > 0 else 8192
+            thumb = extract_embedded_jpeg_by_scan(file_path, scan_max)
+            if thumb is not None:
+                return thumb
+
         try:
             if raw_object is not None:
                 thumb = self._extract_from_raw_obj(raw_object, file_path, max_size)
@@ -214,7 +226,7 @@ class ThumbnailExtractor(QObject):
             return thumb
 
         # If rawpy fails entirely (e.g. unsupported DNG) or returns None, use non-LibRaw fallbacks.
-        if thumb is None and allow_scan_fallback:
+        if thumb is None and allow_scan_fallback and not is_slow:
             thumb = extract_embedded_jpeg_by_scan(file_path, max_size)
         if thumb is None and allow_scan_fallback:
             thumb = _thumbnail_via_qimage_reader(file_path, max_size)
