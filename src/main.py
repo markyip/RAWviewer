@@ -13742,8 +13742,9 @@ class RAWImageViewer(QMainWindow):
                 force_full_res_for_dng = (
                     is_dng_file and getattr(self, "view_mode", "single") == "single"
                 )
+                from_gallery = getattr(self, "_loading_from_gallery", False)
                 request_full_res = (
-                    preserve_zoom_navigation or force_full_res_for_dng or nav_single_step
+                    preserve_zoom_navigation or force_full_res_for_dng or nav_single_step or from_gallery
                 )
                 # Allow embedded JPEG first frame (libraw_fit = False) if:
                 # 1. Progressive RAW load is explicitly set
@@ -13763,6 +13764,7 @@ class RAWImageViewer(QMainWindow):
                         or libraw_fit
                         or force_full_res_for_dng
                         or nav_single_step
+                        or from_gallery
                         or self._display_quality_buffer_cached(requested_file_path)
                     )
                     else None
