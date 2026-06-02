@@ -18816,6 +18816,31 @@ class RAWImageViewer(QMainWindow):
         self._gallery_search_index_session_key = None
         self._quick_folder_file_stats = file_stats
 
+        # --- OPTIMIZATION: INSTANT EXIF SORT IF FULLY CACHED ---
+        try:
+            idx = self._get_semantic_index()
+            if idx and len(self.image_files) > 1:
+                coverage = idx.get_index_coverage(self.image_files)
+                if coverage and coverage.get("missing", 1) == 0:
+                    logger.info("[FOLDER] Folder is 100% cached in database. Performing instant EXIF sort refinement on main thread.")
+                    newest_first = self.get_sort_preference()
+                    sorted_files, merged_meta = self.sort_files_by_capture_time(
+                        self.image_files,
+                        newest_first=newest_first,
+                        file_stats=file_stats,
+                        probe_uncached=False,
+                    )
+                    if sorted_files:
+                        self.image_files = sorted_files
+                        self._semantic_search_corpus_files = list(sorted_files)
+                        self._folder_sort_refinement_applied_token = token
+                        if merged_meta:
+                            if not self._gallery_bulk_metadata:
+                                self._gallery_bulk_metadata = {}
+                            self._gallery_bulk_metadata.update(merged_meta)
+        except Exception as e:
+            logger.warning(f"[FOLDER] Instant EXIF sort failed: {e}")
+
         if preserved:
             preserved_norm = _norm_path(preserved)
             idx = start_idx
@@ -19090,6 +19115,8 @@ class RAWImageViewer(QMainWindow):
             self._filmstrip_warmed_paths = set()
             self._gallery_bulk_metadata = bulk_metadata
             if not was_fast_open:
+                # Standard folder load already performed full capture-time sorting in background
+                self._folder_sort_refinement_applied_token = token
                 # Folder switched: invalidate render/task state from previous folder so
                 # stale async callbacks cannot keep the old content visible.
                 try:
