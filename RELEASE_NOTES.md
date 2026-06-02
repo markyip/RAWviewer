@@ -41,6 +41,7 @@ Unified 2.2 release — search, gallery, film strip, frameless window polish, RA
 - **Progressive RAW load**: Optional embedded-first path via `RAWVIEWER_PROGRESSIVE_RAW_LOAD=1` (off by default).
 
 **Platform & docs**
+- **`clear_cache.bat`**: Full dev/session reset — `%USERPROFILE%\.rawviewer_cache`, logs, and `HKCU\Software\RAWviewer` QSettings. Canonical script: `scripts\Launch\bat\clear_cache.bat`; repo-root `clear_cache.bat` forwards there.
 - **Windows share helper** (sources retained for future WinRT share work): In-process hidden Form HWND for reliable foreground share UI in dev builds.
 - **Launch scripts**: Documented env vars and platform scope (official Windows/macOS releases only).
 - **Environment**: `activation.env` with `PYTHONNOUSERSITE=1` to prevent global package leaks and splash issues.

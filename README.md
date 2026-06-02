@@ -193,6 +193,7 @@ Launch scripts live under [`scripts/Launch/`](scripts/Launch/README.md). Root-le
 | Platform | Debug run | Build |
 |----------|-----------|-------|
 | Windows | `scripts\Launch\bat\run_debug.bat` | `scripts\Launch\bat\build_windows.bat` |
+| Windows (cache wipe) | `clear_cache.bat` or `scripts\Launch\bat\clear_cache.bat` | — |
 | macOS | `./scripts/Launch/shell/launch_dev.sh` | `./scripts/Launch/shell/build_macos.sh` |
 
 **Virtual environments:** `pixi install` → `pixi run start` uses `.pixi/`. Build/debug batch scripts use `rawviewer_env/` (created automatically). `.venv/` is optional for IDE use only.
