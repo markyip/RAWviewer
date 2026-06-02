@@ -54,6 +54,19 @@ def format_index_progress(stage: str, done: int, total: int) -> str:
     return f"{stage}: {done_i}/{total_i}"
 
 
+def semantic_embeddings_enabled() -> bool:
+    """Check if semantic search embeddings are enabled via environment."""
+    flag = os.environ.get("RAWVIEWER_ENABLE_SEMANTIC_SEARCH", "0").strip().lower()
+    return flag in ("1", "true", "yes", "on")
+
+
+def metadata_auto_index_enabled() -> bool:
+    """Check if auto metadata indexing is enabled via environment."""
+    flag = os.environ.get("RAWVIEWER_AUTO_METADATA_INDEX", "1").strip().lower()
+    return flag in ("1", "true", "yes", "on")
+
+
+
 def resolve_onnx_execution_providers(
     available: Optional[Sequence[str]] = None,
 ) -> List[str]:
@@ -1030,6 +1043,130 @@ class _ClipBPETokenizer:
         return tokens + [0] * (context_length - len(tokens))
 
 
+_semantic_sort_read_local = threading.local()
+
+
+def _semantic_sort_read_conn(db_path: str) -> sqlite3.Connection:
+    """Per-thread read connection for capture_time lookups during background folder sort."""
+    conn = getattr(_semantic_sort_read_local, "conn", None)
+    if conn is None or getattr(_semantic_sort_read_local, "db_path", None) != db_path:
+        conn = sqlite3.connect(db_path, check_same_thread=False, timeout=30.0)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=60000")
+        try:
+            conn.execute("PRAGMA query_only=ON")
+        except sqlite3.OperationalError:
+            pass
+        _semantic_sort_read_local.conn = conn
+        _semantic_sort_read_local.db_path = db_path
+    return conn
+
+
+def get_semantic_capture_times_for_paths(
+    paths: Sequence[str],
+    db_path: Optional[str] = None,
+) -> Dict[str, str]:
+    """
+    Thread-safe bulk read of capture_time from semantic_index.db.
+
+    Used by folder-load / refinement workers (not only the UI thread) so navigation
+    order matches the semantic index instead of degrading to mtime when EXIF cache is cold.
+    """
+    if not paths:
+        return {}
+    if db_path is None:
+        cache_dir = os.path.expanduser("~/.rawviewer_cache")
+        db_path = os.path.join(cache_dir, "semantic_index.db")
+    if not os.path.isfile(db_path):
+        return {}
+
+    canonical_to_original: Dict[str, str] = {}
+    unique_canonical: List[str] = []
+    for p in paths:
+        if not p:
+            continue
+        cp = SemanticImageIndex._canonical_path(p)
+        if cp not in canonical_to_original:
+            canonical_to_original[cp] = p
+            unique_canonical.append(cp)
+    if not unique_canonical:
+        return {}
+
+    conn = _semantic_sort_read_conn(db_path)
+    result_map: Dict[str, str] = {}
+    chunk_size = 500
+    for i in range(0, len(unique_canonical), chunk_size):
+        chunk = unique_canonical[i : i + chunk_size]
+        placeholders = ",".join(["?"] * len(chunk))
+        rows = conn.execute(
+            f"""
+            SELECT file_path, capture_time
+            FROM semantic_index
+            WHERE lower(file_path) IN ({placeholders})
+              AND capture_time IS NOT NULL AND capture_time != ''
+            ORDER BY rowid DESC
+            """,
+            chunk,
+        ).fetchall()
+        for fp, ct in rows:
+            if fp in result_map:
+                continue
+            orig = canonical_to_original.get(fp)
+            if orig and ct:
+                result_map[orig] = str(ct)
+    return result_map
+
+
+def get_semantic_capture_times_for_folder(
+    folder_path: str,
+    db_path: Optional[str] = None,
+) -> Dict[str, str]:
+    """Bulk read capture_time for all indexed files under folder_path (any thread)."""
+    if not folder_path:
+        return {}
+    if db_path is None:
+        cache_dir = os.path.expanduser("~/.rawviewer_cache")
+        db_path = os.path.join(cache_dir, "semantic_index.db")
+    if not os.path.isfile(db_path):
+        return {}
+    try:
+        root = SemanticImageIndex._canonical_path(
+            os.path.abspath(folder_path)
+        )
+    except OSError:
+        return {}
+    if not root:
+        return {}
+    root_lower = root.rstrip("\\/").lower()
+    if os.sep == "\\":
+        prefix = root_lower + "\\%"
+    else:
+        prefix = root_lower.replace("\\", "/") + "/%"
+    path_expr = (
+        "lower(replace(file_path, '/', '\\\\'))"
+        if os.sep == "\\"
+        else "lower(replace(file_path, '\\\\', '/'))"
+    )
+    conn = _semantic_sort_read_conn(db_path)
+    result_map: Dict[str, str] = {}
+    rows = conn.execute(
+        f"""
+        SELECT file_path, capture_time
+        FROM semantic_index
+        WHERE {path_expr} LIKE ?
+          AND capture_time IS NOT NULL AND capture_time != ''
+        ORDER BY rowid DESC
+        """,
+        (prefix,),
+    ).fetchall()
+    for fp, ct in rows:
+        if fp in result_map:
+            continue
+        if ct:
+            result_map[fp] = str(ct)
+    return result_map
+
+
 class SemanticImageIndex:
     """SQLite-backed CLIP embedding index for local semantic search."""
 
@@ -1095,7 +1232,49 @@ class SemanticImageIndex:
         self._model_name = model_name
         self._index_conn = None
         self._rg_lock = threading.Lock()
+        self._paused = False
+        self._pause_lock = threading.Lock()
         self._init_db_if_needed()
+
+    def pause_indexing(self, pause: bool) -> None:
+        """Pause or resume the background indexing loops."""
+        with self._pause_lock:
+            self._paused = pause
+
+    def _wait_if_paused(self) -> None:
+        """Helper to sleep/wait while the indexing process is paused."""
+        flag = os.environ.get("RAWVIEWER_INDEX_PAUSE_IN_GALLERY", "1").strip().lower()
+        if flag not in ("1", "true", "yes", "on"):
+            return
+        while True:
+            with self._pause_lock:
+                if not self._paused:
+                    break
+            time.sleep(0.5)
+
+    def _mark_metadata_ready_without_embedding(
+        self,
+        canonical_fp: str,
+        st: os.stat_result,
+        conn: sqlite3.Connection,
+    ) -> None:
+        """Mark file as metadata ready but without semantic embeddings (dim = 0)."""
+        conn.execute(
+            """
+            UPDATE semantic_index
+            SET semantic_ready = 1, dim = 0, embedding = ?, updated_at = ?
+            WHERE file_path = ? AND model_name = ? AND file_size = ? AND mtime_ns = ?
+            """,
+            (
+                b"",
+                float(time.time()),
+                canonical_fp,
+                self.model_name,
+                int(st.st_size),
+                self._mtime_ns_from_stat(st),
+            ),
+        )
+
 
     @property
     def backend(self):
@@ -1375,6 +1554,11 @@ class SemanticImageIndex:
 
     @staticmethod
     def _pil_dimensions(file_path: str) -> tuple[int, int]:
+        """Fallback dimensions when EXIF tags omit width/height.
+
+        For RAW, prefer rawpy header read only (PIL often fails on ARW). On network
+        drives this can still take seconds per file under parallel indexing.
+        """
         # Check thread-local cache first
         global _THREAD_LOCAL_DETECTORS
         if '_THREAD_LOCAL_DETECTORS' in globals() and hasattr(_THREAD_LOCAL_DETECTORS, 'last_original_sizes'):
@@ -1382,15 +1566,26 @@ class SemanticImageIndex:
             if w > 0 and h > 0:
                 return w, h
 
+        ext = os.path.splitext(file_path)[1].lower().lstrip(".")
+        if ext in RAW_FILE_EXTENSIONS:
+            try:
+                import rawpy  # type: ignore
+
+                with rawpy.imread(file_path) as raw:
+                    w = int(raw.sizes.width)
+                    h = int(raw.sizes.height)
+                    flip = int(getattr(raw.sizes, "flip", 0) or 0)
+                    if flip in (5, 6, 7, 8):
+                        w, h = h, w
+                    if w > 0 and h > 0:
+                        return w, h
+            except Exception:
+                pass
+            return 0, 0
+
         try:
             with Image.open(file_path) as im:
                 return int(im.width), int(im.height)
-        except Exception:
-            pass
-        try:
-            import rawpy  # type: ignore
-            with rawpy.imread(file_path) as raw:
-                return int(raw.sizes.width), int(raw.sizes.height)
         except Exception:
             pass
         return 0, 0
@@ -1631,7 +1826,12 @@ class SemanticImageIndex:
         except Exception:
             return None
 
-    def _extract_exif_brief(self, file_path: str, include_face: bool = False) -> Dict[str, object]:
+    def _extract_exif_brief(
+        self,
+        file_path: str,
+        include_face: bool = False,
+        file_stat: Optional[os.stat_result] = None,
+    ) -> Dict[str, object]:
         result = {
             "capture_time": "",
             "camera_model": "",
@@ -1657,9 +1857,17 @@ class SemanticImageIndex:
                 except Exception:
                     pass
 
+            t_exif = time.time()
+            # Stop after GPS block when possible; RAW uses exifread (header-only) in auto mode.
             tags = metadata_backend.process_file_from_path(
-                file_path, details=False
+                file_path,
+                details=False,
+                stop_tag="GPS GPSLongitudeRef",
             )
+            dur_exif = time.time() - t_exif
+            dur_dims = 0.0
+            dur_geo = 0.0
+            dur_cache = 0.0
             result["capture_time"] = self._tag_text(
                 tags,
                 "EXIF DateTimeOriginal",
@@ -1690,20 +1898,26 @@ class SemanticImageIndex:
             result["width"] = self._tag_int(
                 tags,
                 "EXIF ExifImageWidth",
+                "EXIF ImageWidth",
                 "Image ImageWidth",
                 "Image Width",
                 "EXIF PixelXDimension",
+                "MakerNote ImageWidth",
             )
             result["height"] = self._tag_int(
                 tags,
                 "EXIF ExifImageLength",
+                "EXIF ImageLength",
                 "Image ImageLength",
                 "Image Height",
                 "Image Length",
                 "EXIF PixelYDimension",
+                "MakerNote ImageHeight",
             )
             if not result["width"] or not result["height"]:
+                t_dims = time.time()
                 w, h = self._pil_dimensions(file_path)
+                dur_dims = time.time() - t_dims
                 result["width"] = int(result["width"] or w)
                 result["height"] = int(result["height"] or h)
                 
@@ -1732,11 +1946,14 @@ class SemanticImageIndex:
                     geo = self._ensure_reverse_geocoder()
                     if geo:
                         try:
-                            # Use a small timeout or limit to avoid blocking too long if multiple calls
-                            recs = geo.search(
-                                [(float(result["gps_lat"]), float(result["gps_lon"]))],
-                                mode=1,
-                            )
+                            t_geo = time.time()
+                            # reverse_geocoder is not thread-safe; serialize lookups.
+                            with self._rg_lock:
+                                recs = geo.search(
+                                    [(float(result["gps_lat"]), float(result["gps_lon"]))],
+                                    mode=1,
+                                )
+                            dur_geo = time.time() - t_geo
                             if recs:
                                 rec = recs[0] or {}
                                 result["city"] = str(rec.get("name", "") or "")
@@ -1766,6 +1983,8 @@ class SemanticImageIndex:
                             pass
 
                 from image_cache import get_image_cache
+
+                t_cache = time.time()
                 cache = get_image_cache()
                 cache_dict = {
                     "orientation": int(orientation),
@@ -1785,10 +2004,31 @@ class SemanticImageIndex:
                         "iso": int(result["iso"] or 0),
                     }
                 }
-                cache.put_exif(file_path, cache_dict)
+                if file_stat is not None:
+                    cache.put_exif(
+                        file_path,
+                        cache_dict,
+                        file_size=int(file_stat.st_size),
+                        file_mtime=float(file_stat.st_mtime),
+                    )
+                else:
+                    cache.put_exif(file_path, cache_dict)
+                dur_cache = time.time() - t_cache
             except Exception as e:
                 import logging
                 logging.getLogger(__name__).warning(f"[INDEX] Could not populate ImageCache for {file_path}: {e}")
+            total_dur = dur_exif + dur_dims + dur_geo + dur_cache
+            if total_dur > 2.0:
+                import logging
+                logging.getLogger(__name__).warning(
+                    "[INDEX] Slow metadata phases for %s: total=%.3fs exif=%.3fs dims=%.3fs geo=%.3fs cache_put=%.3fs",
+                    os.path.basename(file_path),
+                    total_dur,
+                    dur_exif,
+                    dur_dims,
+                    dur_geo,
+                    dur_cache,
+                )
         except Exception:
             pass
         return result
@@ -2506,6 +2746,7 @@ class SemanticImageIndex:
         album_total: int = 0,
         album_indexed_base: int = 0,
         run_face_scan: Optional[bool] = None,
+        run_semantic_embeddings: Optional[bool] = None,
     ) -> Dict[str, int]:
         import logging
         import sys
@@ -2513,6 +2754,8 @@ class SemanticImageIndex:
         logger = logging.getLogger(__name__)
         t_start = time.time()
         log_inference_acceleration_profile()
+        if run_semantic_embeddings is None:
+            run_semantic_embeddings = semantic_embeddings_enabled()
         logger.info(f"[INDEX] Starting indexing of {len(file_paths)} file paths.")
         if sys.platform != "darwin":
             logger.info("[VISION] Using OpenCV offline face scanner on Windows.")
@@ -2629,16 +2872,32 @@ class SemanticImageIndex:
                         format_index_progress("Metadata", 0, total_extract),
                     )
                 t_meta_start = time.time()
-                max_workers = min(3, os.cpu_count() or 2)
+                if total_extract > 2000:
+                    max_workers = 1
+                else:
+                    max_workers = min(2, os.cpu_count() or 2)
+                logger.info(
+                    "[INDEX] Metadata workers=%d for %d files",
+                    max_workers,
+                    total_extract,
+                )
                 with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
                     def extract_task(item):
+                        self._wait_if_paused()
                         cp, st = item
                         try:
                             t_single_start = time.time()
-                            meta = self._extract_exif_brief(cp, include_face=False)
+                            meta = self._extract_exif_brief(
+                                cp, include_face=False, file_stat=st
+                            )
                             t_single_dur = time.time() - t_single_start
-                            if t_single_dur > 0.1:
-                                logger.warning(f"[INDEX] Slow metadata extraction (>100ms) for {os.path.basename(cp)}: {t_single_dur:.4f}s")
+                            if t_single_dur > 2.0:
+                                logger.warning(
+                                    "[INDEX] Slow metadata extraction for %s: %.3fs "
+                                    "(often EXIF cache lock vs folder sort refinement)",
+                                    os.path.basename(cp),
+                                    t_single_dur,
+                                )
                             return cp, st, meta
                         except Exception as e:
                             logger.error(f"[INDEX] Failed to extract EXIF for {os.path.basename(cp)}: {e}")
@@ -2694,75 +2953,86 @@ class SemanticImageIndex:
 
             # Phase 2: semantic embeddings (search-critical). Run before face scan.
             if total_sem > 0:
-                logger.info(f"[INDEX] Starting AI features neural pass (MobileCLIP) for {total_sem} files...")
-                if progress_callback:
-                    progress_callback(
-                        progress_indexed_base,
-                        progress_album_total,
-                        format_index_progress("Semantic", 0, total_sem),
-                    )
-                t_sem_start = time.time()
-                for i, (canonical_fp, st) in enumerate(pending_for_semantic, start=1):
-                    time.sleep(0.15)  # breathing room for MobileCLIP on GPU
+                self._wait_if_paused()
+                if run_semantic_embeddings:
+                    logger.info(f"[INDEX] Starting AI features neural pass (MobileCLIP) for {total_sem} files...")
                     if progress_callback:
-                        if i <= 2 or i >= total_sem or (i % 5 == 0):
-                            progress_callback(
-                                progress_indexed_base + i,
-                                progress_album_total,
-                                format_index_progress("Semantic", i, total_sem),
-                            )
-                    try:
-                        t_single_neural = time.time()
-                        vec = self._encode_image(canonical_fp)
-                        t_neural_dur = time.time() - t_single_neural
-                        if t_neural_dur > 0.5:
-                            logger.info(f"[INDEX] MobileCLIP encoding for {os.path.basename(canonical_fp)} took {t_neural_dur:.4f}s")
-                        conn.execute(
-                            """
-                            UPDATE semantic_index
-                            SET dim = ?, embedding = ?, semantic_ready = 1, updated_at = ?
-                            WHERE file_path = ? AND model_name = ? AND file_size = ? AND mtime_ns = ?
-                            """,
-                            (
-                                int(vec.size),
-                                self._to_blob(vec),
-                                float(time.time()),
-                                canonical_fp,
-                                self.model_name,
-                                int(st.st_size),
-                                self._mtime_ns_from_stat(st),
-                            ),
+                        progress_callback(
+                            progress_indexed_base,
+                            progress_album_total,
+                            format_index_progress("Semantic", 0, total_sem),
                         )
-                        indexed += 1
-                        batch_writes += 1
-                        if batch_writes >= commit_every:
-                            conn.commit()
-                            batch_writes = 0
-                    except Exception as e:
-                        logger.warning(
-                            "[INDEX] Skipping semantic embedding for %s: %s",
-                            os.path.basename(canonical_fp),
-                            e,
-                        )
-                        failed += 1
+                    t_sem_start = time.time()
+                    for i, (canonical_fp, st) in enumerate(pending_for_semantic, start=1):
+                        self._wait_if_paused()
+                        time.sleep(0.15)  # breathing room for MobileCLIP on GPU
+                        if progress_callback:
+                            if i <= 2 or i >= total_sem or (i % 5 == 0):
+                                progress_callback(
+                                    progress_indexed_base + i,
+                                    progress_album_total,
+                                    format_index_progress("Semantic", i, total_sem),
+                                )
                         try:
-                            self._mark_semantic_skipped(canonical_fp, st, conn)
-                            self._store_face_count(
-                                canonical_fp, 0, conn=conn, commit=False
+                            t_single_neural = time.time()
+                            vec = self._encode_image(canonical_fp)
+                            t_neural_dur = time.time() - t_single_neural
+                            if t_neural_dur > 0.5:
+                                logger.info(f"[INDEX] MobileCLIP encoding for {os.path.basename(canonical_fp)} took {t_neural_dur:.4f}s")
+                            conn.execute(
+                                """
+                                UPDATE semantic_index
+                                SET dim = ?, embedding = ?, semantic_ready = 1, updated_at = ?
+                                WHERE file_path = ? AND model_name = ? AND file_size = ? AND mtime_ns = ?
+                                """,
+                                (
+                                    int(vec.size),
+                                    self._to_blob(vec),
+                                    float(time.time()),
+                                    canonical_fp,
+                                    self.model_name,
+                                    int(st.st_size),
+                                    self._mtime_ns_from_stat(st),
+                                ),
                             )
+                            indexed += 1
                             batch_writes += 1
                             if batch_writes >= commit_every:
                                 conn.commit()
                                 batch_writes = 0
-                        except Exception as mark_exc:
-                            logger.debug(
-                                "[INDEX] Could not mark skipped for %s: %s",
+                        except Exception as e:
+                            logger.warning(
+                                "[INDEX] Skipping semantic embedding for %s: %s",
                                 os.path.basename(canonical_fp),
-                                mark_exc,
+                                e,
                             )
-                if batch_writes:
+                            failed += 1
+                            try:
+                                self._mark_semantic_skipped(canonical_fp, st, conn)
+                                self._store_face_count(
+                                    canonical_fp, 0, conn=conn, commit=False
+                                )
+                                batch_writes += 1
+                                if batch_writes >= commit_every:
+                                    conn.commit()
+                                    batch_writes = 0
+                            except Exception as mark_exc:
+                                logger.debug(
+                                    "[INDEX] Could not mark skipped for %s: %s",
+                                    os.path.basename(canonical_fp),
+                                    mark_exc,
+                                )
+                    if batch_writes:
+                        conn.commit()
+                        batch_writes = 0
+                    logger.info(f"[INDEX] Completed AI neural pass in {time.time() - t_sem_start:.4f}s.")
+                else:
+                    logger.info(f"[INDEX] Skipping AI features neural pass (MobileCLIP) for {total_sem} files (metadata-only index).")
+                    for canonical_fp, st in pending_for_semantic:
+                        self._wait_if_paused()
+                        self._mark_metadata_ready_without_embedding(canonical_fp, st, conn)
+                        indexed += 1
                     conn.commit()
-                logger.info(f"[INDEX] Completed AI neural pass in {time.time() - t_sem_start:.4f}s.")
 
             # Phase 3: face scan (optional; skipped when deferred to a follow-up worker).
             if run_face_inline:
@@ -2848,18 +3118,93 @@ class SemanticImageIndex:
         if not file_paths:
             return []
 
+        import time
+        t0 = time.time()
+
         indexable_paths, _ = self._filter_duplicate_raw_companions(file_paths)
-        canonical_map = {self._canonical_path(p): p for p in indexable_paths if p}
+        if not indexable_paths:
+            return []
+
+        # Bulk fetch rows in one (or a few) database queries!
+        rows = self._fetch_rows_for_paths(indexable_paths)
+        
+        # Build map of canonical path to row
+        row_map = {}
+        for r in rows:
+            fp = r['file_path']
+            row_map[self._canonical_path(fp)] = r
+
         pending: List[str] = []
+        
+        canonical_map = {self._canonical_path(p): p for p in indexable_paths if p}
         for cp, original in canonical_map.items():
             try:
                 st = os.stat(cp)
             except OSError:
                 pending.append(original)
                 continue
-            if self._needs_reindex(cp, st):
+
+            row = row_map.get(cp)
+            if not row or int(row.get('semantic_ready') or 0) == 0:
                 pending.append(original)
+                continue
+
+            # Check if file changed on disk (mtime or size mismatch)
+            row_size = row.get('file_size')
+            if row_size is None or int(row_size) != int(st.st_size):
+                pending.append(original)
+                continue
+
+            row_mtime_ns = row.get('mtime_ns')
+            if row_mtime_ns is not None:
+                try:
+                    if int(row_mtime_ns) != self._mtime_ns_from_stat(st):
+                        pending.append(original)
+                        continue
+                except Exception:
+                    pass
+            else:
+                row_mtime = row.get('file_mtime')
+                if row_mtime is None or not self._mtime_matches(float(row_mtime), st):
+                    pending.append(original)
+                    continue
+
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.info(
+            "[INDEX] Pending scan: %d pending of %d paths in %.4fs (bulk)",
+            len(pending),
+            len(file_paths),
+            time.time() - t0
+        )
         return pending
+
+    def get_pending_embedding_paths(self, file_paths: Sequence[str]) -> List[str]:
+        """
+        Return paths that have metadata in database but are missing semantic embeddings (dim = 0).
+        """
+        if not file_paths:
+            return []
+        
+        indexable_paths, _ = self._filter_duplicate_raw_companions(file_paths)
+        if not indexable_paths:
+            return []
+
+        rows = self._fetch_rows_for_paths(indexable_paths)
+        row_map = {}
+        for r in rows:
+            fp = r['file_path']
+            row_map[self._canonical_path(fp)] = r
+
+        pending: List[str] = []
+        canonical_map = {self._canonical_path(p): p for p in indexable_paths if p}
+        for cp, original in canonical_map.items():
+            row = row_map.get(cp)
+            if row and int(row.get('semantic_ready') or 0) == 1 and int(row.get('dim') or 0) == 0:
+                pending.append(original)
+                
+        return pending
+
 
     def _fetch_rows_for_paths(self, paths: Sequence[str]) -> List[sqlite3.Row]:
         """Bulk fetch rows for a list of paths using optimized batch queries."""

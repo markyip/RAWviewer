@@ -23,13 +23,17 @@ import io
 warnings.filterwarnings('ignore', category=UserWarning, module='exifread')
 
 from image_cache import get_image_cache
-from common_image_loader import normalize_capture_time_string
+from common_image_loader import (
+    decode_embedded_jpeg_bytes,
+    normalize_capture_time_string,
+    orientation_from_embedded_jpeg_bytes,
+)
 import metadata_backend
 from raw_file_extensions import RAW_FILE_EXTENSIONS
 
 # Cached EXIF rows without this version used embedded-JPEG dimensions as "original" (e.g. 1920×1080).
 # Cached EXIF rows without this version used buggy orientation logic (e.g. LibRaw 5 mis-mapped, Sony MakerNote missing, or Silent Failures).
-RAW_EXIF_SENSOR_META_VER = 6
+RAW_EXIF_SENSOR_META_VER = 7
 
 
 def _qimage_to_rgb_array(image: QImage) -> Optional[np.ndarray]:
@@ -83,26 +87,38 @@ def _largest_jpeg_from_blob(blob: bytes, max_size: int) -> Optional[np.ndarray]:
 
         for segment in segments:
             try:
-                im = Image.open(io.BytesIO(segment))
-                im.load()
-                if im.mode != "RGB":
-                    im = im.convert("RGB")
-                w, h = im.size
+                arr = decode_embedded_jpeg_bytes(segment, max_size)
+                if arr is None:
+                    continue
+                h, w = arr.shape[:2]
                 if w < 32 or h < 32:
                     continue
                 area = w * h
                 if area <= best_area:
                     continue
                 best_area = area
-                work = im
-                if w > max_size or h > max_size:
-                    work = im.copy()
-                    work.thumbnail((max_size, max_size), Image.Resampling.HAMMING)
-                best_arr = np.array(work)
+                best_arr = arr
             except Exception:
                 continue
         start = idx + 3
     return best_arr
+
+
+def _orientation_from_embedded_preview(
+    file_path: str, raw_object: Optional[rawpy.RawPy] = None
+) -> int:
+    """Orientation from LibRaw embedded JPEG EXIF (container tags are often missing/wrong)."""
+    try:
+        if raw_object is not None:
+            thumb = raw_object.extract_thumb()
+        else:
+            with rawpy.imread(file_path) as raw:
+                thumb = raw.extract_thumb()
+        if thumb is None or thumb.format != rawpy.ThumbFormat.JPEG:
+            return 1
+        return orientation_from_embedded_jpeg_bytes(thumb.data)
+    except Exception:
+        return 1
 
 
 def _thumbnail_via_qimage_reader(file_path: str, max_size: int) -> Optional[np.ndarray]:
@@ -112,7 +128,7 @@ def _thumbnail_via_qimage_reader(file_path: str, max_size: int) -> Optional[np.n
 
         reader = QImageReader(file_path)
         size = reader.size()
-        if size.isValid():
+        if max_size > 0 and size.isValid():
             reader.setScaledSize(
                 size.scaled(max_size, max_size, Qt.AspectRatioMode.KeepAspectRatio)
             )
@@ -206,7 +222,6 @@ class ThumbnailExtractor(QObject):
                 try:
                     import subprocess
                     import tempfile
-                    import os
                     from PIL import Image
                     tmp_name = None
                     try:
@@ -264,18 +279,7 @@ class ThumbnailExtractor(QObject):
             thumb = raw.extract_thumb()
             
             if thumb.format == rawpy.ThumbFormat.JPEG:
-                from PIL import Image, ImageOps
-                jpeg_image = Image.open(io.BytesIO(thumb.data))
-                
-                
-                if jpeg_image.mode != 'RGB':
-                    jpeg_image = jpeg_image.convert('RGB')
-                    
-                w, h = jpeg_image.size
-                if w > max_size or h > max_size:
-                    jpeg_image.thumbnail((max_size, max_size), Image.Resampling.HAMMING)
-                    
-                return np.array(jpeg_image)
+                return decode_embedded_jpeg_bytes(thumb.data, max_size)
                 
             elif thumb.format == rawpy.ThumbFormat.BITMAP:
                 thumb_array = thumb.data.copy()
@@ -283,7 +287,7 @@ class ThumbnailExtractor(QObject):
                     return None
                 
                 h, w = thumb_array.shape[:2]
-                if w > max_size or h > max_size:
+                if max_size > 0 and (w > max_size or h > max_size):
                      from PIL import Image
                      pil_thumb = Image.fromarray(thumb_array)
                      pil_thumb.thumbnail((max_size, max_size), Image.Resampling.HAMMING)
@@ -301,6 +305,16 @@ class ThumbnailExtractor(QObject):
         return self.extract_thumbnail_from_raw(
             file_path,
             max_size=max_size,
+            allow_scan_fallback=allow_scan_fallback,
+        )
+
+    def extract_embedded_native_preview(
+        self, file_path: str, allow_scan_fallback: bool = True
+    ) -> Optional[np.ndarray]:
+        """Extract embedded JPEG at native resolution (max_size=0 disables downscaling)."""
+        return self.extract_thumbnail_from_raw(
+            file_path,
+            max_size=0,
             allow_scan_fallback=allow_scan_fallback,
         )
 
@@ -528,6 +542,12 @@ class EXIFExtractor(QObject):
                                 orientation = flip_map.get(sizes.flip, sizes.flip)
                 except Exception:
                     pass
+
+            # When container EXIF lacks orientation, read it from the embedded JPEG preview (Sony ARW, etc.).
+            if common_image_loader.is_raw_file(file_path) and orientation <= 1:
+                embedded_o = _orientation_from_embedded_preview(file_path, raw_object)
+                if embedded_o not in (1, orientation):
+                    orientation = embedded_o
 
             # Third pass: If dimensions are still 0 (e.g. non-RAW missing tags), use QImageReader (fast header read)
             if original_width <= 0 or original_height <= 0:

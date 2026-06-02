@@ -23,8 +23,19 @@ SIDE_MARGIN = 4
 MIN_CELL_W = 14
 MAX_CELL_W = 140
 DEFAULT_ASPECT = 1.5
-BUFFER_PX = 120
-BUFFER_CELLS = 2
+def _filmstrip_env_int(name: str, default: int, *, minimum: int = 1) -> int:
+    try:
+        return max(minimum, int(os.environ.get(name, str(default)).strip()))
+    except (TypeError, ValueError):
+        return default
+
+
+BUFFER_PX = _filmstrip_env_int("RAWVIEWER_FILMSTRIP_BUFFER_PX", 180, minimum=80)
+BUFFER_CELLS = _filmstrip_env_int("RAWVIEWER_FILMSTRIP_BUFFER_CELLS", 4, minimum=1)
+_LAZY_WARM_THRESHOLD = _filmstrip_env_int(
+    "RAWVIEWER_FILMSTRIP_LAZY_WARM_THRESHOLD", 400, minimum=50
+)
+_WARM_BAND = _filmstrip_env_int("RAWVIEWER_FILMSTRIP_WARM_BAND", 56, minimum=8)
 # Uniform inset inside each cell so portrait/landscape share the same padding.
 CELL_BORDER = 2
 THUMB_PAD_V = 5
@@ -193,13 +204,19 @@ class FilmStripBar(QFrame):
         if bulk_metadata:
             self._metadata_cache.update(bulk_metadata)
         self._fetch_missing_metadata()
-        self._warm_slot_widths_from_cache()
-        self._rebuild_layout_slots()
         if self._files:
             if select_index is not None and select_index >= 0:
                 idx = max(0, min(select_index, len(self._files) - 1))
             else:
                 idx = 0
+        else:
+            idx = -1
+        if len(self._files) > _LAZY_WARM_THRESHOLD and idx >= 0:
+            self._warm_slot_widths_from_cache(center_index=idx)
+        else:
+            self._warm_slot_widths_from_cache()
+        self._rebuild_layout_slots()
+        if self._files:
             self._current_index = idx
             self._pending_index = idx
         else:
@@ -239,7 +256,11 @@ class FilmStripBar(QFrame):
                 self._clear_cell_thumbnail(cell)
         elif refresh_cache:
             before = len(self._measured_widths)
-            self._warm_slot_widths_from_cache()
+            center = self._current_index if self._current_index >= 0 else self._pending_index
+            if len(self._files) > _LAZY_WARM_THRESHOLD and center >= 0:
+                self._warm_slot_widths_from_cache(center_index=center)
+            else:
+                self._warm_slot_widths_from_cache()
             if len(self._measured_widths) != before:
                 self._rebuild_layout_slots()
             for idx, cell in list(self._cells.items()):
@@ -394,10 +415,11 @@ class FilmStripBar(QFrame):
         if viewer is None or not hasattr(viewer, "image_cache"):
             return None
         try:
-            thumb = viewer.image_cache.get_thumbnail(path)
+            # FAST IN-MEMORY CHECK ONLY to avoid blocking UI thread on thousands of files!
+            thumb = viewer.image_cache.thumbnail_cache.get(path)
+            if thumb is None:
+                return None
         except Exception:
-            return None
-        if thumb is None:
             return None
         pixmap = _thumbnail_to_pixmap(thumb)
         if pixmap is None or pixmap.isNull():
@@ -550,9 +572,19 @@ class FilmStripBar(QFrame):
         sb = self._scroll.horizontalScrollBar()
         sb.setValue(sb.value() - steps * max(80, ROW_H + MIN_GAP))
 
-    def _warm_slot_widths_from_cache(self) -> None:
+    def _warm_slot_widths_from_cache(self, *, center_index: Optional[int] = None) -> None:
         """Pre-measure slot widths for any thumbnails already in the global cache."""
-        for path in self._files:
+        files = self._files
+        if not files:
+            return
+        if center_index is not None and len(files) > _LAZY_WARM_THRESHOLD:
+            idx = max(0, min(center_index, len(files) - 1))
+            lo = max(0, idx - _WARM_BAND)
+            hi = min(len(files), idx + _WARM_BAND + 1)
+            paths = files[lo:hi]
+        else:
+            paths = files
+        for path in paths:
             key = _path_key(path)
             if key in self._measured_widths:
                 continue
@@ -561,18 +593,8 @@ class FilmStripBar(QFrame):
                 self._measured_widths[key] = self._cell_width_for_scaled(scaled)
 
     def _fetch_missing_metadata(self) -> None:
-        viewer = self._viewer
-        if viewer is None or not hasattr(viewer, "image_cache"):
-            return
-        missing = [p for p in self._files if p not in self._metadata_cache]
-        if not missing:
-            return
-        try:
-            bulk = viewer.image_cache.get_multiple_exif(missing)
-            if bulk:
-                self._metadata_cache.update(bulk)
-        except Exception:
-            pass
+        """Disabled to prevent expensive synchronous SQLite queries on the UI thread."""
+        pass
 
     def _recompute_slot_starts(self) -> None:
         """Repack x positions after per-cell width tweaks (keep _widths/_aspects)."""

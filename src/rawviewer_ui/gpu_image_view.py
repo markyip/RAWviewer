@@ -50,9 +50,11 @@ class GpuImageView(QGraphicsView):
     # Image pixel coordinates (scene space) where the user double-clicked.
     doubleClickedAt = pyqtSignal(QPointF)
 
+    # Absolute floor for set_scale; wheel zoom cannot go below fit_scale() (fit-to-window).
     MIN_SCALE = 0.01
     # Pinch / wheel cap (400%). Space and double-click use zoom_to_actual() at 100%.
     MAX_SCALE = 4.0
+    _FIT_SCALE_EPS = 1.002  # treat within ~0.2% of fit as fit-to-window
 
     def __init__(self, parent=None, background="#1E1E1E"):
         super().__init__(parent)
@@ -68,6 +70,7 @@ class GpuImageView(QGraphicsView):
         self._overlay_item = None
 
         self._fit_mode = True
+        self._zoom_intent_100 = False
         self._has_pixmap = False
         self._img_w = 0
         self._img_h = 0
@@ -123,8 +126,35 @@ class GpuImageView(QGraphicsView):
     def is_fit_mode(self) -> bool:
         return self._fit_mode
 
+    def is_at_fit_scale(self) -> bool:
+        """True when the view transform matches fit-to-window (within tolerance)."""
+        if not self._has_pixmap:
+            return True
+        return self.current_scale() <= self.fit_scale() * self._FIT_SCALE_EPS
+
+    def wants_zoom_in_toggle(self) -> bool:
+        """Whether Space / double-click should enter 100% zoom (not zoom out to fit)."""
+        return self._fit_mode or self.is_at_fit_scale()
+
+    def _sync_fit_mode_flag(self) -> None:
+        """Align ``_fit_mode`` with the live transform (fixes stale-flag toggle bugs)."""
+        if not self._has_pixmap:
+            return
+        if self.is_at_fit_scale():
+            self._fit_mode = True
+        elif self.current_scale() >= 1.0 - 1e-4:
+            self._fit_mode = False
+
     def current_scale(self) -> float:
         return float(self.transform().m11())
+
+    def fit_scale(self) -> float:
+        """View pixels per image pixel when the image is scaled to fit the viewport."""
+        if not self._has_pixmap or self._img_w <= 0 or self._img_h <= 0:
+            return self.MIN_SCALE
+        vw = max(1, self.viewport().width())
+        vh = max(1, self.viewport().height())
+        return min(vw / self._img_w, vh / self._img_h)
 
     def image_size(self):
         return (self._img_w, self._img_h)
@@ -210,8 +240,15 @@ class GpuImageView(QGraphicsView):
         self._update_placeholder()
 
         if self._fit_mode or not capture:
-            if self._fit_mode:
+            if self._fit_mode and not getattr(self, "_zoom_intent_100", False):
                 self.fit_to_window()
+            elif not capture:
+                # Stale state: _fit_mode False but transform still at fit scale (e.g. zoom
+                # requested before the first pixmap arrived). Refit so Space/double-click
+                # toggles predictably instead of staying stuck at ~fit%.
+                if self.is_at_fit_scale() and not getattr(self, "_zoom_intent_100", False):
+                    self.fit_to_window()
+            self._sync_fit_mode_flag()
             return
 
         # Preserve on-screen image scale: s_new * new_w == s_old * old_w
@@ -219,6 +256,7 @@ class GpuImageView(QGraphicsView):
         self.resetTransform()
         self.scale(s_new, s_new)
         self.centerOn(QPointF(fx * new_w, fy * new_h))
+        self._sync_fit_mode_flag()
         self.zoomChanged.emit(self.current_scale())
 
     def clear(self) -> None:
@@ -227,6 +265,7 @@ class GpuImageView(QGraphicsView):
     # ------------------------------------------------------------------ zoom
     def fit_to_window(self) -> None:
         self._fit_mode = True
+        self._zoom_intent_100 = False
         if not self._has_pixmap:
             return
         self.resetTransform()
@@ -243,9 +282,10 @@ class GpuImageView(QGraphicsView):
 
     def zoom_to_actual_at(self, scene_x: float, scene_y: float) -> None:
         """100% zoom with the given image pixel centered in the viewport."""
-        self._fit_mode = False
         if not self._has_pixmap:
             return
+        self._fit_mode = False
+        self._zoom_intent_100 = True
         x = max(0.0, min(float(scene_x), max(0, self._img_w - 1)))
         y = max(0.0, min(float(scene_y), max(0, self._img_h - 1)))
         self.resetTransform()
@@ -263,13 +303,20 @@ class GpuImageView(QGraphicsView):
         self.centerOn(QPointF(x, y))
 
     def toggle_fit(self) -> None:
-        if self._fit_mode:
+        if not self._has_pixmap:
+            return
+        if self.wants_zoom_in_toggle():
             self.zoom_to_actual()
         else:
             self.fit_to_window()
 
     def set_scale(self, scale: float) -> None:
-        scale = max(self.MIN_SCALE, min(self.MAX_SCALE, float(scale)))
+        fit = self.fit_scale()
+        scale = float(scale)
+        if scale <= fit * self._FIT_SCALE_EPS:
+            self.fit_to_window()
+            return
+        scale = max(fit, min(self.MAX_SCALE, scale))
         self.resetTransform()
         self.scale(scale, scale)
         self._fit_mode = False
@@ -279,18 +326,28 @@ class GpuImageView(QGraphicsView):
     def zoom_by(self, factor: float) -> None:
         if not self._has_pixmap or factor <= 0:
             return
+        fit = self.fit_scale()
         cur = self.current_scale()
         new = cur * factor
-        if new < self.MIN_SCALE:
-            factor = self.MIN_SCALE / cur
-        elif new > self.MAX_SCALE:
-            factor = self.MAX_SCALE / cur
-        self.scale(factor, factor)
+        if factor < 1.0 and new <= fit * self._FIT_SCALE_EPS:
+            self.fit_to_window()
+            return
+        new = max(fit, min(self.MAX_SCALE, new))
+        if abs(new - cur) < 1e-9:
+            return
+        self.scale(new / cur, new / cur)
         self._fit_mode = False
         self.fitModeChanged.emit(False)
         self.zoomChanged.emit(self.current_scale())
 
     # ------------------------------------------------------------------ events
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._update_placeholder()
+        if self._has_pixmap and not self._fit_mode:
+            if self.current_scale() < self.fit_scale() * self._FIT_SCALE_EPS:
+                self.fit_to_window()
+
     def mouseMoveEvent(self, event) -> None:
         host = self.parentWidget()
         if host is not None and hasattr(host, "handle_pointer_for_filmstrip"):
@@ -303,14 +360,21 @@ class GpuImageView(QGraphicsView):
             super().wheelEvent(event)
             return
         ctrl = bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
-        # Match legacy UX: plain wheel while fit-to-window navigates images.
-        if self._fit_mode and not ctrl:
-            # Qt: delta>0 = wheel up, delta<0 = wheel down — down advances to next image.
+        if ctrl:
+            # Control + Scroll: Zoom smoothly
+            self.zoom_by(1.25 if delta > 0 else 0.8)
+            event.accept()
+            return
+
+        # Plain wheel (no Control Modifier)
+        if self._fit_mode:
+            # Fit-to-window: navigate images (Qt: delta > 0 = up, delta < 0 = down)
             self.wheelNavigate.emit(-1 if delta > 0 else 1)
             event.accept()
             return
-        self.zoom_by(1.25 if delta > 0 else 0.8)
-        event.accept()
+
+        # Zoomed in: pan vertically by delegating to QGraphicsView scroll behavior
+        super().wheelEvent(event)
 
     def mouseDoubleClickEvent(self, event) -> None:
         if event.button() == Qt.MouseButton.LeftButton and self._has_pixmap:

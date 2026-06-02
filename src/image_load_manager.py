@@ -299,11 +299,16 @@ class ImageLoadManager(QObject):
         self._work_queue = queue.PriorityQueue()
         self._thread_pool = QThreadPool()
         
-        # INCREASED CONCURRENCY: Scale with CPU cores
-        # For I/O bound tasks (thumbnails), we can have many threads
+        # INCREASED CONCURRENCY: Scale with CPU cores (embedded JPEG thumbnails are I/O-light).
         core_count = os.cpu_count() or 4
-        default_workers = max(12, core_count * 2) 
-        if max_workers == 4: # If default was used, upgrade it
+        default_workers = max(16, core_count * 2)
+        env_workers = os.environ.get("RAWVIEWER_LOAD_MAX_WORKERS", "").strip()
+        if env_workers:
+            try:
+                default_workers = max(4, int(env_workers))
+            except ValueError:
+                pass
+        if max_workers == 4:  # If default was used, upgrade it
             max_workers = default_workers
             
         self._thread_pool.setMaxThreadCount(max_workers)
@@ -474,7 +479,11 @@ class ImageLoadManager(QObject):
     
     def _check_cache(self, file_path: str, use_full_resolution: bool, stages: Optional[set] = None) -> bool:
         """檢查快取，如果存在則直接發送信號（只檢查記憶體快取以避免阻塞 UI）"""
-        from common_image_loader import is_raw_file, use_libraw_consistent_preview_first
+        from common_image_loader import (
+            image_covers_sensor_resolution,
+            is_raw_file,
+            use_libraw_consistent_preview_first,
+        )
 
         is_raw = is_raw_file(file_path)
         libraw_first = use_libraw_consistent_preview_first()
@@ -506,9 +515,25 @@ class ImageLoadManager(QObject):
                     if full_img is not None:
                         self._emit_cached_result_later(self.image_ready, file_path, full_img)
                         return True
+                    exif_data = cache.exif_cache.get(file_path)
+                    preview = cache.preview_cache.get(file_path)
+                    if preview is not None:
+                        h, w = preview.shape[:2]
+                        if image_covers_sensor_resolution(w, h, exif_data):
+                            self._emit_cached_result_later(self.image_ready, file_path, preview)
+                            return True
                 else:
                     # Prefer any LibRaw buffer already in memory (fit ↔ zoom consistency)
                     if libraw_first:
+                        exif_data = cache.exif_cache.get(file_path)
+                        preview = cache.preview_cache.get(file_path)
+                        if preview is not None:
+                            h, w = preview.shape[:2]
+                            if image_covers_sensor_resolution(w, h, exif_data):
+                                self._emit_cached_result_later(
+                                    self.image_ready, file_path, preview
+                                )
+                                return True
                         full_img = cache.get_full_image(file_path)
                         if full_img is not None:
                             self._emit_cached_result_later(self.image_ready, file_path, full_img)

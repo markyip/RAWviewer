@@ -19,9 +19,13 @@ from enhanced_raw_processor import (
     OptimizedRAWProcessor
 )
 from common_image_loader import (
+    array_matches_exif_display,
+    exif_display_dimensions,
+    image_covers_sensor_resolution,
     is_raw_file,
     is_tiff_file,
     load_pixmap_safe,
+    use_full_embedded_raw_preview,
     use_libraw_consistent_preview_first,
 )
 
@@ -75,33 +79,33 @@ class UnifiedImageProcessor:
             except Exception:
                 cached = None
 
-            if cached is not None:
-                # Keep cache hits cheap for gallery scrolling. The old self-healing orientation
-                # check touched EXIF/SQLite on every hit; enable it only when repairing caches.
-                if os.environ.get("RAWVIEWER_VALIDATE_THUMB_CACHE") == "1":
+            if cached is not None and hasattr(cached, "shape"):
+                exif_data = self.cache.get_exif(file_path)
+                if exif_data is None:
                     exif_data = self.exif_extractor.extract_exif_data(file_path)
-                    orientation = exif_data.get('orientation', 1) if exif_data else 1
-                    if orientation in (6, 8) and hasattr(cached, 'shape'):
-                        h, w = cached.shape[:2]
-                        if w > h:
-                            import logging
-                            logger = logging.getLogger(__name__)
-                            logger.debug(
-                                "Cached thumbnail orientation mismatch; invalidating %s",
-                                os.path.basename(file_path),
-                            )
-                            self.cache.exif_cache.remove(file_path)
-                            cached = None # Force re-processing
-                
-                if cached is not None:
-                    return cached
+                if exif_data and not array_matches_exif_display(
+                    cached.shape[1], cached.shape[0], exif_data
+                ):
+                    import logging
+
+                    logging.getLogger(__name__).debug(
+                        "Thumbnail orientation mismatch; re-extracting %s",
+                        os.path.basename(file_path),
+                    )
+                    self.cache.thumbnail_cache.remove(file_path)
+                    self.cache.disk_thumbnail_cache.remove(file_path)
+                    cached = None
+
+            if cached is not None:
+                return cached
         
-        # 提取縮圖 (Max 512px for Gallery)
+        # 提取縮圖 (Max 1024px for Gallery, 1920px for progressive single-image)
         is_raw = self._is_raw_file(file_path)
         if is_raw:
+            max_size_val = 1920 if target_size is None else MAX_THUMB_DIM
             thumbnail = self.thumbnail_extractor.extract_thumbnail_from_raw(
                 file_path,
-                max_size=MAX_THUMB_DIM,
+                max_size=max_size_val,
                 allow_scan_fallback=allow_heavy_fallback,
             )
         else:
@@ -150,8 +154,6 @@ class UnifiedImageProcessor:
         if orientation != 1:
             thumbnail = self._apply_orientation_correction(thumbnail, orientation, exif_data)
         
-        # 快取縮圖（優化：Resize & Encode to JPEG）
-        # NOTE: Only cache the standard 512px version to keep the persistent cache predictable.
         try:
             from PIL import Image
             import io
@@ -169,28 +171,56 @@ class UnifiedImageProcessor:
             else:
                 return thumbnail
 
+            # --- Structured Mipmap (Multi-Scale) Caching Pipeline ---
             w, h = pil_img.size
-            if w <= MAX_THUMB_DIM and h <= MAX_THUMB_DIM:
-                thumbnail_small = thumbnail
-                thumbnail_small_pil = pil_img
+            
+            # Level 1: Preview (Max 1920px)
+            if w <= 1920 and h <= 1920:
+                preview_pil = pil_img
             else:
-                scale = min(MAX_THUMB_DIM / w, MAX_THUMB_DIM / h)
-                new_w = max(1, int(w * scale))
-                new_h = max(1, int(h * scale))
-                thumbnail_small_pil = pil_img.resize((new_w, new_h), Image.Resampling.HAMMING)
-                thumbnail_small = np.array(thumbnail_small_pil)
+                scale_1 = min(1920 / w, 1920 / h)
+                new_w1 = max(1, int(w * scale_1))
+                new_h1 = max(1, int(h * scale_1))
+                preview_pil = pil_img.resize((new_w1, new_h1), Image.Resampling.HAMMING)
+                
+            buffer_p = io.BytesIO()
+            preview_pil.save(buffer_p, format='JPEG', quality=85)
+            self.cache.put_preview(file_path, np.array(preview_pil), buffer_p.getvalue())
+
+            # Level 2: Grid Mipmap (Max 512px)
+            if w <= 512 and h <= 512:
+                grid_pil = pil_img
+            else:
+                scale_2 = min(512 / w, 512 / h)
+                new_w2 = max(1, int(w * scale_2))
+                new_h2 = max(1, int(h * scale_2))
+                grid_pil = pil_img.resize((new_w2, new_h2), Image.Resampling.HAMMING)
+                
+            buffer_g = io.BytesIO()
+            grid_pil.save(buffer_g, format='JPEG', quality=85)
+            self.cache.put_grid(file_path, np.array(grid_pil), buffer_g.getvalue())
+
+            # Level 3: Filmstrip / Standard Thumbnail (Max 256px)
+            if w <= 256 and h <= 256:
+                thumb_pil = pil_img
+            else:
+                scale_3 = min(256 / w, 256 / h)
+                new_w3 = max(1, int(w * scale_3))
+                new_h3 = max(1, int(h * scale_3))
+                thumb_pil = pil_img.resize((new_w3, new_h3), Image.Resampling.HAMMING)
+                
+            buffer_t = io.BytesIO()
+            thumb_pil.save(buffer_t, format='JPEG', quality=85)
+            thumb_np = np.array(thumb_pil)
+            self.cache.put_thumbnail(file_path, thumb_np, buffer_t.getvalue())
             
-            buffer = io.BytesIO()
-            thumbnail_small_pil.save(buffer, format='JPEG', quality=85)
-            jpeg_data = buffer.getvalue()
-            
-            self.cache.put_thumbnail(file_path, thumbnail_small, jpeg_data)
-            return thumbnail_small
+            # Return Level 2 (Grid Mipmap - 512px) as the default layout image for high fidelity
+            return np.array(grid_pil)
             
         except Exception as e:
             import logging
             logger = logging.getLogger(__name__)
-            logger.warning(f"Error processing thumbnail with PIL: {e}")
+            logger.warning(f"Error processing structured mipmaps with PIL: {e}")
             self.cache.put_thumbnail(file_path, thumbnail)
             return thumbnail
 
@@ -250,6 +280,48 @@ class UnifiedImageProcessor:
         else:
             return self._process_regular_image(file_path)
     
+    def _try_full_embedded_raw_preview(
+        self, file_path: str, exif_data: Optional[Dict[str, Any]]
+    ) -> Optional[np.ndarray]:
+        """
+        Return oriented embedded JPEG when it covers sensor resolution; cache as preview + full.
+        """
+        if not use_full_embedded_raw_preview():
+            return None
+
+        for cached in (
+            self.cache.get_full_image(file_path),
+            self.cache.get_preview(file_path),
+        ):
+            if cached is not None:
+                h, w = cached.shape[:2]
+                if image_covers_sensor_resolution(w, h, exif_data):
+                    return cached
+
+        embedded = self.thumbnail_extractor.extract_embedded_native_preview(file_path)
+        if embedded is None:
+            return None
+
+        h, w = embedded.shape[:2]
+        if not image_covers_sensor_resolution(w, h, exif_data):
+            return None
+
+        orientation = exif_data.get("orientation", 1) if exif_data else 1
+        if orientation != 1:
+            embedded = self._apply_orientation_correction(embedded, orientation, exif_data)
+
+        self.cache.put_preview(file_path, embedded)
+        self.cache.put_full_image(file_path, embedded)
+        import logging
+
+        logging.getLogger(__name__).info(
+            "[PREVIEW] Using full-resolution embedded JPEG for %s (%dx%d)",
+            os.path.basename(file_path),
+            w,
+            h,
+        )
+        return embedded
+
     def _process_raw_image(self, file_path: str, 
                           use_full_resolution: bool = False,
                           executor: Optional[Any] = None) -> Optional[np.ndarray]:
@@ -258,6 +330,10 @@ class UnifiedImageProcessor:
         try:
             # 獲取 EXIF 數據（用於處理參數）
             exif_data = self.exif_extractor.extract_exif_data(file_path)
+            
+            full_embedded = self._try_full_embedded_raw_preview(file_path, exif_data)
+            if full_embedded is not None:
+                return full_embedded
             
             # 檢查文件大小以決定處理策略
             file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
@@ -323,12 +399,22 @@ class UnifiedImageProcessor:
             params['user_flip'] = 0
             
             # 處理 RAW - 使用 Process Pool 繞過 GIL
+            rgb_image = None
             if executor:
-                # logger = logging.getLogger(__name__)
-                # logger.info(f"[PIL/PROCESS_POOL] Offloading RAW postprocess to pool for {file_path}")
-                future = executor.submit(decode_raw_file, file_path, params)
-                rgb_image = future.result()
-            else:
+                try:
+                    # logger = logging.getLogger(__name__)
+                    # logger.info(f"[PIL/PROCESS_POOL] Offloading RAW postprocess to pool for {file_path}")
+                    future = executor.submit(decode_raw_file, file_path, params)
+                    rgb_image = future.result()
+                except Exception as pool_err:
+                    import logging
+                    logger = logging.getLogger(__name__)
+                    logger.warning(
+                        f"[PROCESS_POOL] Process pool decode failed for {os.path.basename(file_path)}: {pool_err}. "
+                        "Falling back to in-process RAW decode."
+                    )
+            
+            if rgb_image is None:
                 import rawpy
                 with rawpy.imread(file_path) as raw:
                     rgb_image = raw.postprocess(**params)
@@ -355,7 +441,15 @@ class UnifiedImageProcessor:
         except Exception as e:
             import logging
             logger = logging.getLogger(__name__)
-            logger.error(f"Error processing RAW image {file_path}: {e}", exc_info=True)
+            
+            is_unsupported = "unsupported" in str(e).lower() or "not recognized" in str(e).lower()
+            if is_unsupported:
+                logger.warning(
+                    f"RAW file unsupported by LibRaw (e.g., composite DNG): {os.path.basename(file_path)}. Error: {e}"
+                )
+            else:
+                logger.error(f"Error processing RAW image {file_path}: {e}", exc_info=True)
+
             # LibRaw failed entirely; try byte-scan for embedded JPEG (already used in thumbnail
             # path, but preview may have been skipped or a different limit may help).
             try:
@@ -410,6 +504,39 @@ class UnifiedImageProcessor:
             thumb = self.process_thumbnail(file_path, allow_heavy_fallback, target_size)
             return exif, thumb
 
+        # Gallery tiles: try cache + embedded JPEG without parsing the full RAW container.
+        cached_exif = self.cache.get_exif(file_path)
+        cached_thumb = self.cache.get_thumbnail(file_path)
+        if cached_thumb is None and target_size is None:
+            cached_thumb = self.cache.get_preview(file_path)
+
+        if cached_exif is not None and cached_thumb is not None:
+            return cached_exif, cached_thumb
+
+        exif = cached_exif or self.exif_extractor.extract_exif_data(file_path)
+        thumb = cached_thumb
+        if thumb is None:
+            if target_size is not None:
+                tw = int(target_size.width()) if target_size.width() > 0 else 512
+                th = int(target_size.height()) if target_size.height() > 0 else 512
+                max_dim = max(256, min(512, tw, th))
+            else:
+                max_dim = 512
+            thumb = self.thumbnail_extractor.extract_thumbnail_from_raw(
+                file_path,
+                max_size=max_dim,
+                allow_scan_fallback=True,
+                raw_object=None,
+            )
+            if thumb is not None and exif:
+                orientation = exif.get("orientation", 1)
+                if orientation != 1:
+                    thumb = self._apply_orientation_correction(
+                        thumb, orientation, exif
+                    )
+        if thumb is not None and exif is not None:
+            return exif, thumb
+
         # RAW Path: Open once, extract both
         import rawpy
         try:
@@ -418,9 +545,12 @@ class UnifiedImageProcessor:
                 exif = self.exif_extractor.extract_exif_data(file_path, raw_object=raw)
                 
                 # 2. Extract Thumbnail
+                # Standard gallery thumbnails specify target_size;
+                # single-image progressive preview should extract a larger high-quality preview (1920px).
+                max_size_val = 1920 if target_size is None else 512
                 thumb = self.thumbnail_extractor.extract_thumbnail_from_raw(
                     file_path,
-                    max_size=512,
+                    max_size=max_size_val,
                     allow_scan_fallback=allow_heavy_fallback,
                     raw_object=raw
                 )
@@ -467,28 +597,18 @@ class UnifiedImageProcessor:
             # print(f"[ORIENTATION] Before correction: shape = {original_shape}")
             pass
         
-        if orientation == 1:
-            if os.environ.get("RAWVIEWER_VERBOSE_ORIENTATION_LOGS") == "1":
-                # print(f"[ORIENTATION] Numpy operation: No operation (orientation = 1)")
-                pass
-            return image_array
-            
-        # SAFETY CHECK: If the image dimensions already match the "corrected" dimensions
-        # (e.g. it's already a portrait image but EXIF still says Orientation 6), 
-        # it might have been pre-rotated by the loader/camera.
         h, w = image_array.shape[:2]
-        if os.environ.get("RAWVIEWER_VERBOSE_ORIENTATION_LOGS") == "1":
-            # print(f"[ORIENTATION] UnifiedImageProcessor: Applying correction for Orientation {orientation} to {w}x{h} image")
-            pass
+        if exif_data:
+            ow = int(exif_data.get("original_width") or 0)
+            oh = int(exif_data.get("original_height") or 0)
+            if ow > 0 and oh > 0:
+                dw, dh = exif_display_dimensions(ow, oh, orientation)
+                if (dh > dw) == (h > w):
+                    return image_array
 
-        if orientation in (5, 6, 7, 8) and h > w:
-            if os.environ.get("RAWVIEWER_VERBOSE_ORIENTATION_LOGS") == "1":
-                # print(f"[ORIENTATION] UnifiedImageProcessor: Image is already portrait ({w}x{h}), skipping manual rotation for Orientation {orientation}")
-                pass
+        if orientation == 1:
             return image_array
-        if orientation in (3, 4) and h < w:
-            # For 180 flips, this is less certain, but we keep it as a placeholder
-            pass
+
         # Rotation needed?
         import logging
         logger = logging.getLogger(__name__)

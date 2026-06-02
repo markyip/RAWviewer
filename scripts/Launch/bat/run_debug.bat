@@ -3,18 +3,24 @@ REM Run from repo root (scripts\Launch\bat -> ..\..\..)
 cd /d "%~dp0..\..\.."
 
 echo Running RAWviewer in debug mode...
+echo To wipe caches/logs/settings: scripts\Launch\bat\clear_cache.bat
 echo GPU single-image view: enabled (RAWVIEWER_GPU_VIEW=1)
 echo All debug logs will be displayed in this console window.
 echo.
 echo Press Ctrl+C to stop the application.
 echo.
 
-set RAWVIEWER_USE_PROCESS_POOL=0
+set RAWVIEWER_USE_PROCESS_POOL=1
 set RAWVIEWER_VERBOSE_INFO_LOGS=0
 set RAWVIEWER_VERBOSE_CONSOLE=0
 set RAWVIEWER_FOCUS_GALLERY_SWITCH=1
 set RAWVIEWER_FILE_LOG=1
 set RAWVIEWER_FATAL_DUMP=1
+set RAWVIEWER_PROGRESSIVE_RAW_LOAD=1
+set RAWVIEWER_NAV_PRELOAD_DISPLAY=1
+set RAWVIEWER_AUTO_METADATA_INDEX=1
+set RAWVIEWER_ENABLE_SEMANTIC_SEARCH=0
+set RAWVIEWER_INDEX_PAUSE_IN_GALLERY=1
 REM GPU-accelerated single-image view (QGraphicsView + OpenGL). Set =0 to test legacy scroll area.
 set RAWVIEWER_GPU_VIEW=1
 

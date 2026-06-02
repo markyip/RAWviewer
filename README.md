@@ -204,8 +204,11 @@ Launch scripts live under [`scripts/Launch/`](scripts/Launch/README.md). Root-le
 | `RAWVIEWER_LIBRAW_CONSISTENT_PREVIEW=1` | **Default.** Single-image RAW uses LibRaw half-res for fit view and full decode at 100% zoom — same color pipeline, no embedded-JPEG color snap. Set `=0` for faster embedded-preview first paint. |
 | `RAWVIEWER_PROGRESSIVE_RAW_LOAD=1` | Show embedded preview first, then upgrade to LibRaw in background (may color-shift). Off by default. |
 | `RAWVIEWER_USE_PROCESS_POOL=1` | LibRaw postprocess in worker processes (multi-core). Default on when CPU count ≥ 4. |
-| `RAWVIEWER_GPU_VIEW=1` | Use the experimental GPU-accelerated single-image viewport (smoother zoom/pan; default remains the classic scroll area) |
+| `RAWVIEWER_GPU_VIEW=1` | Use the experimental GPU-accelerated single-image viewport (smoother zoom/pan; default remains the classic scroll area). Space / double-click toggle fit ↔ 100% pixel zoom; arrow keys browse in single view with prefetch. |
 | `RAWVIEWER_GPU_VIEW_NO_GL=1` | Force raster viewport when GPU view is enabled (debug / fallback) |
+| `RAWVIEWER_NAV_PRELOAD_DISPLAY=1` | Prefetch display-quality buffers for nearby files while navigating in single view (enabled in `run_debug.bat`) |
+| `RAWVIEWER_RESOLUTION_CROSSFADE_MS` | Duration (ms) of preview→full crossfade in single view when GPU/legacy crossfade is enabled (default `280`) |
+| `RAWVIEWER_DISABLE_CROSSFADE=1` | Disable viewport crossfade on resolution upgrades |
 | `RAWVIEWER_PERSISTENT_CACHE=1` | Enable disk/SQLite cache persistence (off by default) |
 | `RAWVIEWER_EXIF_BACKEND=auto` | EXIF via pyexiv2 (JPEG/TIFF) + exifread (RAW headers); `exifread` or `pyexiv2` to force one backend |
 

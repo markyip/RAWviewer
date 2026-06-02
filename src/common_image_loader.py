@@ -4,9 +4,12 @@
 這個模組提供統一的圖像載入函數，避免重複代碼。
 """
 
+import io
 import os
 from datetime import datetime
 from typing import Any, Dict, Optional, Tuple
+
+import numpy as np
 
 from PyQt6.QtGui import QPixmap, QImage
 # PIL Image will be imported lazily to avoid import delays
@@ -35,6 +38,49 @@ def parse_capture_time_to_timestamp(capture_time: Optional[str]) -> float:
         except ValueError:
             continue
     return 0.0
+
+
+def decode_embedded_jpeg_bytes(
+    jpeg_bytes: bytes,
+    max_size: int = 0,
+) -> Optional[np.ndarray]:
+    """Decode embedded JPEG to RGB; applies the JPEG segment's own EXIF orientation."""
+    try:
+        from PIL import Image, ImageOps
+
+        im = Image.open(io.BytesIO(jpeg_bytes))
+        im = ImageOps.exif_transpose(im)
+        if im.mode != "RGB":
+            im = im.convert("RGB")
+        w, h = im.size
+        if max_size > 0 and (w > max_size or h > max_size):
+            work = im.copy()
+            work.thumbnail((max_size, max_size), Image.Resampling.HAMMING)
+            im = work
+        return np.array(im)
+    except Exception:
+        return None
+
+
+def orientation_from_embedded_jpeg_bytes(jpeg_bytes: bytes) -> int:
+    """EXIF Orientation (1–8) from an embedded JPEG; portrait pixels → 6 if tag missing."""
+    try:
+        from PIL import Image
+
+        im = Image.open(io.BytesIO(jpeg_bytes))
+        exif = im.getexif()
+        if exif:
+            o = exif.get(274)
+            if o is None:
+                o = exif.get(0x0112)
+            if isinstance(o, int) and 1 <= o <= 8:
+                return o
+        w, h = im.size
+        if h > w:
+            return 6
+    except Exception:
+        pass
+    return 1
 
 
 def normalize_capture_time_string(capture_time: Optional[str]) -> Optional[str]:
@@ -71,25 +117,95 @@ def capture_timestamp_for_sort(
     metadata: Optional[Dict[str, Any]] = None,
     file_mtime: float = 0.0,
     *,
+    file_birthtime: float = 0.0,
     probe_file: bool = True,
+    semantic_capture_time: Optional[str] = None,
+    shell_capture_timestamp: float = 0.0,
 ) -> float:
+    """Timestamp for folder/gallery sort (see resolve_folder_sort_timestamp)."""
+    _has_capture, ts, _source = resolve_folder_sort_timestamp(
+        file_path,
+        metadata,
+        file_mtime,
+        file_birthtime=file_birthtime,
+        probe_file=probe_file,
+        semantic_capture_time=semantic_capture_time,
+        shell_capture_timestamp=shell_capture_timestamp,
+    )
+    return ts
+
+
+def resolve_folder_sort_timestamp(
+    file_path: str,
+    metadata: Optional[Dict[str, Any]] = None,
+    file_mtime: float = 0.0,
+    *,
+    file_birthtime: float = 0.0,
+    probe_file: bool = True,
+    semantic_capture_time: Optional[str] = None,
+    shell_capture_timestamp: float = 0.0,
+    probed_capture_timestamp: float = 0.0,
+) -> Tuple[bool, float, str]:
     """
-    Timestamp for folder/gallery sort: EXIF capture time when available, else file mtime.
-    """
+    Returns (has_capture_time, sort_timestamp, sort_source).
+
+    Priority for sort_timestamp:
+      1. EXIF / semantic / probe / Shell capture time
+      2. Filesystem birth time (creation on Windows/macOS), when no capture time
+      3. File modification time (mtime)
+
+    All files share one timeline (camera + AI exports interleave by these rules).
+  """
     if metadata:
         ts = parse_capture_time_to_timestamp(metadata.get("capture_time"))
         if ts > 0:
-            return ts
+            return True, ts, "cache"
+    if semantic_capture_time:
+        ts = parse_capture_time_to_timestamp(semantic_capture_time)
+        if ts > 0:
+            return True, ts, "semantic"
+    if probed_capture_timestamp > 0:
+        return True, float(probed_capture_timestamp), "probe"
     if probe_file and file_path:
         ts = probe_capture_timestamp_from_file(file_path)
         if ts > 0:
-            return ts
-    if file_mtime > 0:
-        return file_mtime
-    try:
-        return os.path.getmtime(file_path)
-    except OSError:
-        return 0.0
+            return True, ts, "probe"
+    if shell_capture_timestamp and shell_capture_timestamp > 0:
+        return True, float(shell_capture_timestamp), "shell"
+
+    birth = float(file_birthtime or 0.0)
+    mtime = float(file_mtime or 0.0)
+    if file_path:
+        try:
+            st = os.stat(file_path)
+            if birth <= 0:
+                birth = float(getattr(st, "st_birthtime", st.st_mtime))
+            if mtime <= 0:
+                mtime = float(st.st_mtime)
+        except OSError:
+            pass
+    if birth > 0:
+        return False, birth, "birth"
+    if mtime > 0:
+        return False, mtime, "mtime"
+    return False, 0.0, "unknown"
+
+
+def folder_sort_key_tuple(
+    file_path: str,
+    timestamp: float,
+    newest_first: bool,
+    *,
+    has_capture_time: bool = True,
+) -> tuple:
+    """Stable folder/gallery ordering on one chronological axis."""
+    del has_capture_time  # kept for call-site compatibility
+    base_name = os.path.basename(file_path).lower()
+    stem = os.path.splitext(base_name)[0]
+    ext = os.path.splitext(base_name)[1]
+    raw_rank = 1 if is_raw_file(file_path) else 0
+    primary_ts = -timestamp if newest_first else timestamp
+    return (primary_ts, stem, raw_rank, ext, base_name)
 
 
 def use_libraw_consistent_preview_first() -> bool:
@@ -97,9 +213,62 @@ def use_libraw_consistent_preview_first() -> bool:
     When True (default), single-image RAW avoids embedded-JPEG preview paths so fit and zoom
     share the same LibRaw postprocess look. Set RAWVIEWER_LIBRAW_CONSISTENT_PREVIEW=0 to restore
     the faster embedded-preview first paint.
+
+    Full-resolution embedded JPEGs (see use_full_embedded_raw_preview) bypass LibRaw even when
+    this flag is on.
     """
-    v = os.environ.get("RAWVIEWER_LIBRAW_CONSISTENT_PREVIEW", "1").strip().lower()
+    v = os.environ.get("RAWVIEWER_LIBRAW_CONSISTENT_PREVIEW", "0").strip().lower()
     return v not in ("0", "false", "no", "off")
+
+
+# Embedded JPEG long edge must reach this fraction of sensor long edge to count as "full size".
+FULL_EMBEDDED_SENSOR_COVERAGE = 0.92
+
+
+def use_full_embedded_raw_preview() -> bool:
+    """
+    When True (default), use camera-embedded JPEG for fit/zoom when it covers sensor resolution,
+    avoiding LibRaw demosaic. Set RAWVIEWER_USE_FULL_EMBEDDED_JPEG=0 to always prefer LibRaw.
+    """
+    v = os.environ.get("RAWVIEWER_USE_FULL_EMBEDDED_JPEG", "1").strip().lower()
+    return v not in ("0", "false", "no", "off")
+
+
+def sensor_pixel_dimensions(exif_data: Optional[Dict[str, Any]]) -> Optional[Tuple[int, int]]:
+    """Sensor / full-frame pixel size from EXIF cache, if known."""
+    if not exif_data:
+        return None
+    ow = exif_data.get("original_width")
+    oh = exif_data.get("original_height")
+    try:
+        w, h = int(ow), int(oh)
+    except (TypeError, ValueError):
+        return None
+    if w > 0 and h > 0:
+        return w, h
+    return None
+
+
+def image_covers_sensor_resolution(
+    img_width: int,
+    img_height: int,
+    exif_data: Optional[Dict[str, Any]],
+    *,
+    coverage: float = FULL_EMBEDDED_SENSOR_COVERAGE,
+) -> bool:
+    """
+    True when displayed/embedded pixels are large enough to treat as full resolution for zoom
+    (no on-demand LibRaw full decode required).
+    """
+    if img_width <= 0 or img_height <= 0:
+        return False
+    sensor = sensor_pixel_dimensions(exif_data)
+    if not sensor:
+        return max(img_width, img_height) >= 3000
+    sw, sh = sensor
+    sensor_long = max(sw, sh)
+    img_long = max(img_width, img_height)
+    return img_long >= sensor_long * coverage
 
 
 def check_cache_for_image(file_path: str, use_full_resolution: bool = False) -> Tuple[Optional[Any], Optional[str]]:
@@ -118,6 +287,13 @@ def check_cache_for_image(file_path: str, use_full_resolution: bool = False) -> 
         full_image = cache.get_full_image(file_path)
         if full_image is not None:
             return full_image, 'full_image'
+        if is_raw_file(file_path) and use_full_embedded_raw_preview():
+            exif_data = cache.get_exif(file_path)
+            preview = cache.get_preview(file_path)
+            if preview is not None:
+                h, w = preview.shape[:2]
+                if image_covers_sensor_resolution(w, h, exif_data):
+                    return preview, 'full_image'
             
     # 2. 檢查 Pixmap 快取 (常用於 QSS/一般顯示)
     pixmap = cache.get_pixmap(file_path)
@@ -152,6 +328,13 @@ def check_memory_cache_for_image(file_path: str, use_full_resolution: bool = Fal
         full_image = cache.full_image_cache.get(file_path)
         if full_image is not None:
             return full_image, 'full_image'
+        if is_raw_file(file_path) and use_full_embedded_raw_preview():
+            exif_data = cache.exif_cache.get(file_path)
+            preview = cache.preview_cache.get(file_path)
+            if preview is not None:
+                h, w = preview.shape[:2]
+                if image_covers_sensor_resolution(w, h, exif_data):
+                    return preview, 'full_image'
             
     # 2. 檢查 Pixmap 快取
     pixmap = cache.pixmap_cache.get(file_path)
@@ -163,11 +346,17 @@ def check_memory_cache_for_image(file_path: str, use_full_resolution: bool = Fal
         thumbnail = cache.thumbnail_cache.get(file_path)
         if thumbnail is not None:
             return thumbnail, 'thumbnail'
-        # 單圖導覽常以 preview_cache 為「半成品」載入結果；thumbnail_cache 不一定有資料
-        if is_raw_file(file_path) and not use_libraw_consistent_preview_first():
+        # 單圖導覽常以 preview_cache 為載入結果；全尺寸內嵌 JPEG 時等同完整像素
+        if is_raw_file(file_path):
             preview = cache.preview_cache.get(file_path)
             if preview is not None:
-                return preview, 'preview'
+                exif_data = cache.exif_cache.get(file_path)
+                if image_covers_sensor_resolution(
+                    preview.shape[1], preview.shape[0], exif_data
+                ):
+                    return preview, 'preview'
+                if not use_libraw_consistent_preview_first():
+                    return preview, 'preview'
 
     return None, None
 
@@ -262,6 +451,131 @@ def load_pixmap_safe(file_path: str) -> QPixmap:
     return pixmap
 
 
+def exif_display_dimensions(
+    width: int,
+    height: int,
+    orientation: int,
+) -> Tuple[int, int]:
+    """Pixel width/height after EXIF orientation is applied (display size).
+
+    Sensor dimensions are often stored landscape (w > h) while orientation 6/8
+  means the image should display portrait — swap only when w > h.
+    """
+    w, h = int(width or 0), int(height or 0)
+    if w <= 0 or h <= 0:
+        return w, h
+    o = int(orientation or 1)
+    if o in (5, 6, 7, 8) and w > h:
+        return h, w
+    return w, h
+
+
+def exif_display_aspect_ratio(
+    width: int,
+    height: int,
+    orientation: int,
+) -> float:
+    """Width/height ratio for layout after EXIF orientation."""
+    dw, dh = exif_display_dimensions(width, height, orientation)
+    if dh <= 0:
+        return 1.5
+    return dw / dh
+
+
+def pixmap_matches_exif_display(
+    pixmap_width: int,
+    pixmap_height: int,
+    original_width: int,
+    original_height: int,
+    orientation: int,
+    *,
+    tolerance: float = 0.14,
+) -> bool:
+    """True when pixmap pixels already match EXIF display orientation (no extra rotation)."""
+    pw, ph = int(pixmap_width or 0), int(pixmap_height or 0)
+    if pw <= 0 or ph <= 0:
+        return False
+    dw, dh = exif_display_dimensions(original_width, original_height, orientation)
+    if dw <= 0 or dh <= 0:
+        return False
+    if (ph > pw) != (dh > dw):
+        return False
+    exp_ar = dw / dh
+    act_ar = pw / ph
+    if exp_ar <= 0 or act_ar <= 0:
+        return False
+    ratio = exp_ar / act_ar if exp_ar >= act_ar else act_ar / exp_ar
+    return ratio <= (1.0 + tolerance)
+
+
+def array_matches_exif_display(
+    pixel_width: int,
+    pixel_height: int,
+    exif_data: Optional[Dict[str, Any]],
+    *,
+    tolerance: float = 0.14,
+) -> bool:
+    """True when RGB/thumbnail pixels already match container EXIF display orientation."""
+    if not exif_data:
+        return True
+    ow = int(exif_data.get("original_width") or 0)
+    oh = int(exif_data.get("original_height") or 0)
+    if ow <= 0 or oh <= 0:
+        return True
+    return pixmap_matches_exif_display(
+        pixel_width,
+        pixel_height,
+        ow,
+        oh,
+        int(exif_data.get("orientation", 1) or 1),
+        tolerance=tolerance,
+    )
+
+
+def exif_rotation_degrees_for_pixmap(
+    pixmap_width: int,
+    pixmap_height: int,
+    original_width: int,
+    original_height: int,
+    orientation: int,
+) -> int:
+    """Clockwise rotation (0/90/180/270) to align pixmap with EXIF display orientation."""
+    pw, ph = int(pixmap_width or 0), int(pixmap_height or 0)
+    if pw <= 0 or ph <= 0:
+        return 0
+    o = int(orientation or 1)
+    ow, oh = int(original_width or 0), int(original_height or 0)
+    act_portrait = ph > pw
+
+    if ow > 0 and oh > 0:
+        dw, dh = exif_display_dimensions(ow, oh, o)
+        exp_portrait = dh > dw
+        if exp_portrait == act_portrait:
+            return 0
+        if not exp_portrait and act_portrait:
+            # Thumbnail already portrait; metadata still landscape — trust pixels.
+            return 0
+        if o == 3:
+            return 180
+        if o == 6:
+            return 90
+        if o == 8:
+            return 270
+        if o <= 1 and oh > ow:
+            return 90
+        return 0
+
+    if act_portrait and o in (6, 8):
+        return 0
+    if o == 3:
+        return 180
+    if o == 6:
+        return 90
+    if o == 8:
+        return 270
+    return 0
+
+
 def get_image_aspect_ratio(file_path: str) -> float:
     """獲取圖像寬高比（不載入完整圖像）"""
     cache = get_image_cache()
@@ -274,11 +588,9 @@ def get_image_aspect_ratio(file_path: str) -> float:
         orientation = exif_data.get('orientation', 1)
         
         if original_width and original_height and original_height > 0:
-            # Handle orientation swap
-            # EXIF tags like ExifImageWidth often refer to the SENSOR width
-            if orientation in (5, 6, 7, 8):
-                return original_height / original_width
-            return original_width / original_height
+            return exif_display_aspect_ratio(
+                int(original_width), int(original_height), int(orientation or 1)
+            )
     
     # 對於 RAW 文件，嘗試從快取獲取尺寸，否則使用 rawpy 快速獲取
     if is_raw_file(file_path):
@@ -288,9 +600,9 @@ def get_image_aspect_ratio(file_path: str) -> float:
             orig_h = exif_data.get('original_height')
             orient = exif_data.get('orientation', 1)
             if orig_w and orig_h and orig_h > 0:
-                if orient in (5, 6, 7, 8):
-                    return orig_h / orig_w
-                return orig_w / orig_h
+                return exif_display_aspect_ratio(
+                    int(orig_w), int(orig_h), int(orient or 1)
+                )
                 
         try:
             import rawpy

@@ -7,12 +7,14 @@ Scripts for local development and packaging. All paths assume the **repository r
 | Script | Purpose |
 |--------|---------|
 | [`bat/run_debug.bat`](bat/run_debug.bat) | Run `src/main.py` with debug logging and `rawviewer_env` if present |
+| [`bat/clear_cache.bat`](bat/clear_cache.bat) | Wipe memory/disk image caches, semantic index DB, logs, and QSettings (full fresh start) |
 | [`bat/build_windows.bat`](bat/build_windows.bat) | Create `rawviewer_env`, install deps, run `build.py` |
 
 From repo root:
 
 ```batch
 scripts\Launch\bat\run_debug.bat
+scripts\Launch\bat\clear_cache.bat
 scripts\Launch\bat\build_windows.bat
 ```
 
