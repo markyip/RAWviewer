@@ -906,9 +906,10 @@ class JustifiedGallery(QWidget):
         if self._last_scroll_y >= 0:
             last_time = getattr(self, "_last_scroll_time", 0)
             dt = now - last_time
-            if dt > 0.01:
+            # Support higher frequency scrolling (e.g. 8ms wheel timer or precision touchpad)
+            if dt > 0.002:
                 current_speed = getattr(self, "_current_scroll_speed", 0.0)
-                speed = abs(value - self._last_scroll_y) / dt
+                speed = abs(value - self._last_scroll_y) / max(0.001, dt)
                 self._current_scroll_speed = (current_speed * 0.4) + (speed * 0.6)
                 self._is_scrolling_fast = self._current_scroll_speed > self._scroll_optimize_threshold
 
