@@ -20,6 +20,51 @@ from PyQt6.QtGui import QPixmap, QImage
 from PyQt6.QtCore import QObject, pyqtSignal
 
 
+def disk_preview_max_edge() -> int:
+    """Max long edge for JPEG files under ~/.rawviewer_cache/previews (grid tier is separate)."""
+    raw = os.environ.get("RAWVIEWER_DISK_PREVIEW_MAX", "512").strip()
+    try:
+        v = int(raw)
+    except Exception:
+        v = 512
+    return max(256, min(v, 1024))
+
+
+def memory_preview_max_edge() -> int:
+    """Max in-memory preview for progressive single-image RAW display (not disk size)."""
+    raw = os.environ.get("RAWVIEWER_MEMORY_PREVIEW_MAX", "1920").strip()
+    try:
+        v = int(raw)
+    except Exception:
+        v = 1920
+    return max(512, min(v, 4096))
+
+
+def _jpeg_bytes_max_edge(jpeg_data: bytes, max_edge: int) -> bytes:
+    """Downscale JPEG bytes so disk cache entries stay thumbnail-sized."""
+    if not jpeg_data or max_edge <= 0:
+        return jpeg_data
+    try:
+        from PIL import Image
+        import io
+
+        pil_image = Image.open(io.BytesIO(jpeg_data))
+        w, h = pil_image.size
+        if max(w, h) <= max_edge:
+            return jpeg_data
+        scale = max_edge / float(max(w, h))
+        new_w = max(1, int(w * scale))
+        new_h = max(1, int(h * scale))
+        resized = pil_image.resize((new_w, new_h), Image.Resampling.HAMMING)
+        if resized.mode != "RGB":
+            resized = resized.convert("RGB")
+        out = io.BytesIO()
+        resized.save(out, format="JPEG", quality=85)
+        return out.getvalue()
+    except Exception:
+        return jpeg_data
+
+
 def _exif_cache_path_key(file_path: str) -> str:
     """Normalized path for exif_cache row keys and lookups (case- and slash-tolerant on Windows)."""
     if not file_path:
@@ -985,7 +1030,7 @@ class PersistentGridCache(PersistentThumbnailCache):
 
 
 class PersistentPreviewCache(PersistentThumbnailCache):
-    """Persistent disk cache for larger JPEG previews (e.g., 2048px)."""
+    """Persistent disk cache for medium JPEG previews (default max edge 512px)."""
     
     def __init__(self, cache_dir: str = None):
         if cache_dir is None:
@@ -1237,7 +1282,7 @@ class ImageCache(QObject):
             except Exception:
                 pass
                 
-        # 2. Downsample from Preview cache (1920px) if available
+        # 2. Downsample from preview cache (memory or disk, up to ~512px) if available
         preview = self.preview_cache.get(file_path)
         if preview is None:
             preview_jpeg = self.disk_preview_cache.get(file_path)
@@ -1321,7 +1366,7 @@ class ImageCache(QObject):
             except Exception:
                 self.disk_grid_cache.remove(file_path)
 
-        # 3. Dynamic Mipmap Fallback 1: Downsample from Preview (1920px)
+        # 3. Dynamic Mipmap Fallback 1: Downsample from preview tier
         preview = self.preview_cache.get(file_path)
         if preview is None:
             preview_jpeg = self.disk_preview_cache.get(file_path)
@@ -1433,6 +1478,8 @@ class ImageCache(QObject):
 
         # Check disk cache for previews
         jpeg_data = self.disk_preview_cache.get(file_path)
+        if jpeg_data is None:
+            jpeg_data = self.disk_grid_cache.get(file_path)
         if jpeg_data is not None:
              try:
                 from PIL import Image
@@ -1452,10 +1499,12 @@ class ImageCache(QObject):
         return None
 
     def put_preview(self, file_path: str, preview: np.ndarray, jpeg_data: bytes = None) -> None:
-        """Cache a preview image."""
+        """Cache a preview image (memory); optional disk JPEG clamped to disk_preview_max_edge()."""
         if preview is not None:
             self.preview_cache.put(file_path, preview.copy())
             if jpeg_data is not None:
+                cap = disk_preview_max_edge()
+                jpeg_data = _jpeg_bytes_max_edge(jpeg_data, cap)
                 self.disk_preview_cache.put(file_path, jpeg_data)
 
     def get_full_image(self, file_path: str) -> Optional[np.ndarray]:

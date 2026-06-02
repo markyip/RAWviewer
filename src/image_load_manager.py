@@ -511,7 +511,7 @@ class ImageLoadManager(QObject):
                 self._emit_cached_result_later(self.exif_data_ready, file_path, exif_data)
                 # Note: EXIF hit alone doesn't terminate processing if pixels are also wanted
         
-        # 3) Full stage: treat RAW preview (1920) as "full" when use_full_resolution=False
+        # 3) Full stage: treat in-memory RAW preview as "full" when use_full_resolution=False
         if 'full' in wanted:
             if is_raw:
                 if use_full_resolution:

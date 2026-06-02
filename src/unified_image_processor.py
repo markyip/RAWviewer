@@ -12,7 +12,11 @@ from PyQt6.QtCore import QSize
 from PyQt6.QtGui import QPixmap, QImage
 # PIL Image, rawpy, and exifread will be imported lazily to avoid import delays
 
-from image_cache import get_image_cache
+from image_cache import (
+    disk_preview_max_edge,
+    get_image_cache,
+    memory_preview_max_edge,
+)
 from enhanced_raw_processor import (
     ThumbnailExtractor, 
     EXIFExtractor, 
@@ -99,10 +103,10 @@ class UnifiedImageProcessor:
             if cached is not None:
                 return cached
         
-        # 提取縮圖 (Max 1024px for Gallery, 1920px for progressive single-image)
+        # Gallery / folder thumbnails: disk tier is 512px grid; avoid 1920px extraction.
         is_raw = self._is_raw_file(file_path)
         if is_raw:
-            max_size_val = 1920 if target_size is None else MAX_THUMB_DIM
+            max_size_val = disk_preview_max_edge() if target_size is None else MAX_THUMB_DIM
             thumbnail = self.thumbnail_extractor.extract_thumbnail_from_raw(
                 file_path,
                 max_size=max_size_val,
@@ -174,18 +178,16 @@ class UnifiedImageProcessor:
             # --- Structured Mipmap (Multi-Scale) Caching Pipeline ---
             w, h = pil_img.size
             
-            # Level 1: Preview (Max 1920px)
-            if w <= 1920 and h <= 1920:
+            # Level 1: In-memory preview only (512px). Persisted grid JPEG is Level 2.
+            pv_max = disk_preview_max_edge()
+            if w <= pv_max and h <= pv_max:
                 preview_pil = pil_img
             else:
-                scale_1 = min(1920 / w, 1920 / h)
+                scale_1 = min(pv_max / w, pv_max / h)
                 new_w1 = max(1, int(w * scale_1))
                 new_h1 = max(1, int(h * scale_1))
                 preview_pil = pil_img.resize((new_w1, new_h1), Image.Resampling.HAMMING)
-                
-            buffer_p = io.BytesIO()
-            preview_pil.save(buffer_p, format='JPEG', quality=85)
-            self.cache.put_preview(file_path, np.array(preview_pil), buffer_p.getvalue())
+            self.cache.put_preview(file_path, np.array(preview_pil))
 
             # Level 2: Grid Mipmap (Max 512px)
             if w <= 512 and h <= 512:
@@ -342,8 +344,7 @@ class UnifiedImageProcessor:
             # 處理 RAW 文件
             # Check if we should use Preview (embedded JPEG) instead of processing RAW
             if not use_full_resolution and not libraw_first:
-               # OPTIMIZATION: Try to get/create a high-quality preview (e.g. 1920px) 
-               # instead of processing the RAW data (even at half size, raw processing is slow/heavy)
+               # OPTIMIZATION: Try embedded / cached preview instead of full RAW demosaic.
                
                # Check Preview Cache
                cached_preview = self.cache.get_preview(file_path)
@@ -355,13 +356,17 @@ class UnifiedImageProcessor:
                # Extract Preview
                if _verbose_orientation_logs():
                    print(f"[PREVIEW] Extracting preview from RAW for {os.path.basename(file_path)}")
-               preview = self.thumbnail_extractor.extract_preview_from_raw(file_path, max_size=1920)
+               mem_max = memory_preview_max_edge()
+               preview = self.thumbnail_extractor.extract_preview_from_raw(
+                   file_path, max_size=mem_max
+               )
                
                if preview is not None:
                    # Check if preview is large enough for a good "Fit" view
                    # Many phone DNGs have tiny previews (e.g. 1024px) that look bad
                    h, w = preview.shape[:2]
-                   if max(h, w) >= 1600:
+                   fit_min = max(1024, int(mem_max * 0.75))
+                   if max(h, w) >= fit_min:
                        # Apply Orientation to Preview
                        orientation = exif_data.get('orientation', 1) if exif_data else 1
                        if orientation != 1:
@@ -454,7 +459,7 @@ class UnifiedImageProcessor:
             # path, but preview may have been skipped or a different limit may help).
             try:
                 from enhanced_raw_processor import extract_embedded_jpeg_by_scan
-                lim = 8192 if use_full_resolution else 1920
+                lim = 8192 if use_full_resolution else memory_preview_max_edge()
                 scanned = extract_embedded_jpeg_by_scan(file_path, lim)
                 if scanned is not None:
                     exif_data = self.exif_extractor.extract_exif_data(file_path)
@@ -546,8 +551,8 @@ class UnifiedImageProcessor:
                 
                 # 2. Extract Thumbnail
                 # Standard gallery thumbnails specify target_size;
-                # single-image progressive preview should extract a larger high-quality preview (1920px).
-                max_size_val = 1920 if target_size is None else 512
+                # Folder/gallery pass: stay at grid size; single-image uses process_full_image.
+                max_size_val = disk_preview_max_edge() if target_size is None else 512
                 thumb = self.thumbnail_extractor.extract_thumbnail_from_raw(
                     file_path,
                     max_size=max_size_val,
