@@ -12373,6 +12373,12 @@ class RAWImageViewer(QMainWindow):
             current_file = self.current_file_path
             old_index = self.current_file_index
             
+            # Determine scroll anchor in gallery mode before sorting
+            anchor_file = None
+            in_gallery = (self.view_mode == 'gallery' and hasattr(self, 'gallery_widget') and self.gallery_widget.isVisible())
+            if in_gallery and hasattr(self, 'gallery_justified') and self.gallery_justified:
+                anchor_file = self.gallery_justified.get_scroll_anchor_path()
+            
             # Resort the files
             self.image_files, bulk_metadata = self.sort_image_files(self.image_files)
             # Store bulk_metadata for use in gallery updates
@@ -12394,14 +12400,13 @@ class RAWImageViewer(QMainWindow):
                 self.update_status_bar()
                 
                 # Update gallery view if in gallery mode
-                if self.view_mode == 'gallery' and hasattr(self, 'gallery_widget') and self.gallery_widget.isVisible():
-                    if self.gallery_justified:
-                        self.gallery_justified.set_images(self.image_files.copy(), bulk_metadata)
-                    if hasattr(self, 'gallery_justified') and self.gallery_justified:
-                        # Sync gallery image list with new sorted order
-                        # Use set_images() to properly handle folder changes
-                        self.gallery_justified.set_images(self.image_files.copy())
-                        self._gallery_update_needed = False
+                if in_gallery:
+                    self._sync_gallery_to_folder_files(
+                        bulk_metadata=bulk_metadata,
+                        scroll_to_current=False,
+                        scroll_anchor_path=anchor_file or current_file,
+                        force=True
+                    )
     
     def get_image_capture_time(self, file_path):
         """Extract image capture time from EXIF data (DateTimeOriginal)"""
