@@ -16,7 +16,10 @@ From repo root:
 scripts\Launch\bat\run_debug.bat
 scripts\Launch\bat\clear_cache.bat
 scripts\Launch\bat\build_windows.bat
+clear_cache.bat
 ```
+
+**Windows capture-time benchmark (POC):** `python scripts\compare_shell_capture_times.py "<folder>"` — see [`docs/POC_SHELL_CAPTURE_TIMES.md`](../../docs/POC_SHELL_CAPTURE_TIMES.md).
 
 ## macOS (shell)
 

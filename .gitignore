@@ -126,6 +126,13 @@ tests/
 
 # Development scratch
 scratch/
+Untitled
+
+# POC / benchmark script outputs (regenerate with compare_shell_capture_times.py)
+scripts/output/
+
+# Local one-off profiling scripts (hardcoded paths)
+scripts/profile_*.py
 
 # .NET build output (Windows share helper)
 src/windows_share_helper/bin/

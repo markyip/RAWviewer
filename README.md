@@ -198,6 +198,12 @@ Launch scripts live under [`scripts/Launch/`](scripts/Launch/README.md). Root-le
 
 **Virtual environments:** `pixi install` → `pixi run start` uses `.pixi/`. Build/debug batch scripts use `rawviewer_env/` (created automatically). `.venv/` is optional for IDE use only.
 
+**Folder sort (capture time):** Gallery and folder load sort by **EXIF** (`metadata_backend` probe when cold; bulk cache when warm). Windows Explorer `DateTaken` via Shell was evaluated and rejected for production — see [`docs/POC_SHELL_CAPTURE_TIMES.md`](docs/POC_SHELL_CAPTURE_TIMES.md). To reproduce timings on Windows:
+
+```batch
+python scripts\compare_shell_capture_times.py "D:\Photos\YourFolder" --limit 1000
+```
+
 **Optional dev toggles:**
 
 | Variable | Effect |
@@ -212,6 +218,7 @@ Launch scripts live under [`scripts/Launch/`](scripts/Launch/README.md). Root-le
 | `RAWVIEWER_DISABLE_CROSSFADE=1` | Disable viewport crossfade on resolution upgrades |
 | `RAWVIEWER_PERSISTENT_CACHE=1` | Enable disk/SQLite cache persistence (off by default) |
 | `RAWVIEWER_EXIF_BACKEND=auto` | EXIF via pyexiv2 (JPEG/TIFF) + exifread (RAW headers); `exifread` or `pyexiv2` to force one backend |
+| `RAWVIEWER_USE_SHELL_SORT_DATES` | **Dev/POC only.** When `1` on Windows, enables `windows_shell_meta` for scripts — **not** used for gallery folder sort (see [`docs/POC_SHELL_CAPTURE_TIMES.md`](docs/POC_SHELL_CAPTURE_TIMES.md)) |
 
 ## 🏗️ Building from Source
 
