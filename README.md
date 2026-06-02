@@ -38,34 +38,20 @@ This is a **pre-filtering tool**, letting you go through hundreds of RAW files e
 
 ## ✨ Features
 
-- **Official platform support**: Windows and macOS prebuilt releases
-- **Ultra-Fast Performance**: Instant folder loading (scans thousands of images in milliseconds) using optimized algorithms
-- **High-Fidelity Thumbnails**: Uses high-quality **LANCZOS resampling** and **2x oversampling** for crystal-clear previews on Retina and 4K displays.
-- **Smart Prefetching**: Predictively loads relevant images in the background for zero-latency navigation
-- **Memory-First Cache (Default)**: Uses fast in-memory caching by default with no disk/SQLite writes
-- **Optional Persistent Cache**: Set `RAWVIEWER_PERSISTENT_CACHE=1` to re-enable disk/SQLite cache persistence
-- **Gallery View**: Justified grid layout with virtualized rendering, EXIF-aware ordering, and current-image positioning
-- **Gallery search (macOS + Core ML bundle)**: Free-text semantic ranking plus structured metadata filters (`camera:`, ISO, GPS, **`format:`** / **`ext:`**, and more — see README table below)
-- **Search from single-image view**: Submit a query from single view to jump into gallery with filtered results; arrow keys and the film strip stay within that result set until you clear the filter
-- **Film strip (single-image view)**: Bottom thumbnail strip fades in when the pointer nears the lower edge (extended hot zone above the strip); fades out when you leave. Click a thumbnail to jump; stays synced with search filters.
-- **Wide RAW format support**: Canon (CR2, CR3), Nikon (NEF), Sony (ARW), Adobe DNG, and many more
-- **Robust Orientation Handling**: Definitive fixes for Sony ARW and other RAW formats, ensuring images are always displayed upright
-- **Pillarbox-Free Gallery**: Accurately calculates aspect ratios to prevent black bars in the gallery view
-- **macOS File Association**: Fully integrated with macOS Finder; can be set as the default viewer and supports double-click to open
-- **Intuitive navigation**: Keyboard shortcuts, mouse controls, and scroll wheel support
-- **Zoom functionality**: Fit-to-window and 100% zoom modes with smooth panning, including native Mac trackpad pinch-to-zoom
-- **DNG zoom reliability**: Single-view DNG now prioritizes full-resolution decoding to keep Space / double-click 100% zoom behavior consistent
-- **Consistent RAW color (fit ↔ zoom)**: By default, single-image RAW skips in-camera embedded JPEG previews and uses LibRaw half-res for fit view and full decode at 100% zoom (same postprocess — no color snap). Gallery thumbnails still use fast embedded previews.
-- **File management**: Move images to discard folder or delete permanently
-- **EXIF data display**: View camera settings, focal length, ISO, aperture, and capture information with robust metadata extraction
-- **Session persistence**: Remembers your last opened folder, image, and view mode
-- **Single-image histogram**: Press `H` to show or hide the strip while viewing one image
-- **Modern Installer**: Lightweight executable that automatically provisions a self-contained Python environment and downloads AI models on first launch
-- **Professional Startup**: Synchronized native and Qt splash screens for a flicker-free, premium launch experience.
-- **Modern UI**: Material Design 3 aesthetics with Font Awesome icons (via qtawesome) and non-intrusive loading indicators
-- **Platform-specific chrome**: **Share** (macOS system share sheet) on macOS; **Open with another app** (native Windows picker) on Windows — send or edit the current file in Lightroom, Photoshop, etc.
-- **Non-destructive visual rotate**: Rotate in viewer by 90° steps without modifying original files (including RAW), with gallery-visible tiles refreshed immediately.
-- **Precision Focus Area Detection**: Overlays the camera's focus point(s) using manufacturer-specific MakerNote data (Canon, Nikon, Sony) plus EXIF SubjectArea/SubjectLocation with orientation-aware mapping and robust coordinate scaling.
+- **Built for speed**: Open large folders quickly and start culling right away.
+- **Easy sharpness check**: Press `Space` for instant 100% zoom, then browse with arrow keys.
+- **Smooth gallery browsing**: Scroll a large grid view without waiting for full imports.
+- **Search in gallery**: Filter by words and metadata like camera, ISO, date, GPS, and format.
+- **Single-view search jump**: Start search from one image and jump directly into filtered gallery results.
+- **Film strip navigation**: A bottom thumbnail strip appears when needed for fast jumping.
+- **Broad format support**: Works with common RAW types (CR2/CR3, NEF, ARW, DNG, RAF, ORF, RW2, and more) plus JPEG/TIFF/HEIF.
+- **Reliable orientation**: Photos display upright consistently across many camera brands.
+- **Clean fit and zoom colors**: RAW preview and 100% zoom stay visually consistent.
+- **Helpful photo info**: See key shooting details like focal length, aperture, ISO, and capture time.
+- **Safe file actions**: Move rejects to Discard or delete with confirmation.
+- **Session memory**: Reopen the app and continue from your last folder and image.
+- **Modern look and controls**: Keyboard, mouse, trackpad pinch, and polished UI.
+- **Windows and macOS releases**: Official prebuilt apps for both platforms.
 
 ## 🚀 Quick Start
 
@@ -198,13 +184,11 @@ Launch scripts live under [`scripts/Launch/`](scripts/Launch/README.md). Root-le
 
 **Virtual environments:** `pixi install` → `pixi run start` uses `.pixi/`. Build/debug batch scripts use `rawviewer_env/` (created automatically). `.venv/` is optional for IDE use only.
 
-**Folder sort (capture time):** Gallery and folder load sort by **EXIF** (`metadata_backend` probe when cold; bulk cache when warm). Default order is **oldest first**; use the gallery **⇅ Oldest / Newest** control to toggle (saved in QSettings). Windows Explorer `DateTaken` via Shell was evaluated and rejected for production — see [`docs/POC_SHELL_CAPTURE_TIMES.md`](docs/POC_SHELL_CAPTURE_TIMES.md). To reproduce timings on Windows:
+**Folder sort (capture time):** Gallery and folder load sort by **EXIF** (`metadata_backend` probe when cold; bulk cache when warm). Default order is **oldest first**; use the gallery **⇅ Oldest / Newest** control to toggle (saved in QSettings). Windows Explorer `DateTaken` via Shell was evaluated and rejected for production. To reproduce timings on Windows:
 
 ```batch
 python scripts\compare_shell_capture_times.py "D:\Photos\YourFolder" --limit 1000
 ```
-
-Parallelism tuning and macOS notes: [`docs/PARALLELIZATION_AND_PLATFORMS.md`](docs/PARALLELIZATION_AND_PLATFORMS.md).
 
 **Optional dev toggles:**
 
@@ -220,7 +204,7 @@ Parallelism tuning and macOS notes: [`docs/PARALLELIZATION_AND_PLATFORMS.md`](do
 | `RAWVIEWER_DISABLE_CROSSFADE=1` | Disable viewport crossfade on resolution upgrades |
 | `RAWVIEWER_PERSISTENT_CACHE=1` | Enable disk/SQLite cache persistence (off by default) |
 | `RAWVIEWER_EXIF_BACKEND=auto` | EXIF via pyexiv2 (JPEG/TIFF) + exifread (RAW headers); `exifread` or `pyexiv2` to force one backend |
-| `RAWVIEWER_USE_SHELL_SORT_DATES` | **Dev/POC only.** When `1` on Windows, enables `windows_shell_meta` for scripts — **not** used for gallery folder sort (see [`docs/POC_SHELL_CAPTURE_TIMES.md`](docs/POC_SHELL_CAPTURE_TIMES.md)) |
+| `RAWVIEWER_USE_SHELL_SORT_DATES` | **Dev/POC only.** When `1` on Windows, enables `windows_shell_meta` for scripts — **not** used for gallery folder sort |
 | `RAWVIEWER_SORT_PROBE_WORKERS` | Parallel EXIF header probes during folder sort (default scales with CPU, up to 12 on local disk; 3 on UNC / `RAWVIEWER_SLOW_STORAGE_PREFIXES`) |
 | `RAWVIEWER_INDEX_METADATA_WORKERS` | Semantic index metadata extraction pool (default 2–6; lower on folders &gt;2000 files) |
 | `RAWVIEWER_RAW_LOAD_LIMIT` | Max concurrent LibRaw decodes in the load manager (default `4`) |

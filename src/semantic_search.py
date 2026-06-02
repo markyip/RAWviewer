@@ -121,7 +121,9 @@ def resolve_onnx_execution_providers(
 def resolve_opencv_dnn_backend_target() -> tuple:
     """OpenCV DNN backend/target for YuNet / SSD face models (Windows).
 
-    Tries OpenCL (AMD/Intel iGPU) and CUDA (NVIDIA OpenCV builds) before CPU.
+    GPU-first policy: prefer CUDA, then CPU.
+    OpenCL is opt-in only via RAWVIEWER_FACE_DNN_TARGET=opencl because some
+    Windows OpenCV ocl4dnn stacks are unstable and can crash the process.
     Override with RAWVIEWER_FACE_DNN_TARGET=cpu|opencl|cuda|openvino.
     """
     import cv2
@@ -133,17 +135,17 @@ def resolve_opencv_dnn_backend_target() -> tuple:
     if override == "cpu":
         return backend_opencv, target_cpu
     if override == "opencl":
+        _log_opencl_runtime_details_once(cv2)
         return backend_opencv, cv2.dnn.DNN_TARGET_OPENCL
     if override == "cuda":
         return cv2.dnn.DNN_BACKEND_CUDA, cv2.dnn.DNN_TARGET_CUDA
     if override == "openvino":
         return cv2.dnn.DNN_BACKEND_INFERENCE_ENGINE, target_cpu
 
+    # Auto policy (GPU-first, stability): CUDA -> CPU.
+    # Keep OpenCL disabled unless explicitly requested.
     try:
-        if cv2.ocl.haveOpenCL():
-            cv2.ocl.setUseOpenCL(True)
-            if cv2.ocl.useOpenCL():
-                return backend_opencv, cv2.dnn.DNN_TARGET_OPENCL
+        cv2.ocl.setUseOpenCL(False)
     except Exception:
         pass
     try:
@@ -159,6 +161,7 @@ def _apply_opencv_dnn_acceleration(net) -> None:
     import cv2
 
     backend_id, target_id = resolve_opencv_dnn_backend_target()
+    _log_face_backend_once(backend_id, target_id, cv2)
     try:
         net.setPreferableBackend(backend_id)
         net.setPreferableTarget(target_id)
@@ -168,6 +171,106 @@ def _apply_opencv_dnn_acceleration(net) -> None:
             net.setPreferableTarget(cv2.dnn.DNN_TARGET_CPU)
         except Exception:
             pass
+
+
+_OPENCL_RUNTIME_LOGGED = False
+_FACE_BACKEND_LOGGED = False
+
+
+def _log_opencl_runtime_details_once(cv2_module=None) -> None:
+    """Best-effort one-time OpenCL runtime/device details for diagnostics."""
+    global _OPENCL_RUNTIME_LOGGED
+    if _OPENCL_RUNTIME_LOGGED:
+        return
+    _OPENCL_RUNTIME_LOGGED = True
+
+    import logging
+
+    logger = logging.getLogger(__name__)
+    try:
+        cv2 = cv2_module
+        if cv2 is None:
+            import cv2 as _cv2
+            cv2 = _cv2
+
+        have = bool(cv2.ocl.haveOpenCL())
+        enabled = bool(cv2.ocl.useOpenCL())
+        if not have:
+            logger.info("[ACCEL] OpenCL runtime: unavailable")
+            return
+
+        try:
+            dev = cv2.ocl.Device_getDefault()
+        except Exception:
+            dev = None
+
+        if dev is None:
+            logger.info("[ACCEL] OpenCL runtime: available, enabled=%s (device details unavailable)", enabled)
+            return
+
+        def _safe(callable_or_attr, default="unknown"):
+            try:
+                v = callable_or_attr() if callable(callable_or_attr) else callable_or_attr
+                return str(v) if v not in (None, "") else default
+            except Exception:
+                return default
+
+        name = _safe(getattr(dev, "name", None))
+        vendor = _safe(getattr(dev, "vendorName", None))
+        version = _safe(getattr(dev, "version", None))
+        driver = _safe(getattr(dev, "driverVersion", None))
+        ocl_c = _safe(getattr(dev, "OpenCL_C_Version", None))
+        logger.info(
+            "[ACCEL] OpenCL runtime: enabled=%s; vendor=%s; device=%s; version=%s; OpenCL_C=%s; driver=%s",
+            enabled,
+            vendor,
+            name,
+            version,
+            ocl_c,
+            driver,
+        )
+    except Exception as e:
+        logger.info("[ACCEL] OpenCL runtime details unavailable: %s", e)
+
+
+def _log_face_backend_once(backend_id: int, target_id: int, cv2_module=None) -> None:
+    """One-time log of the actual selected OpenCV face backend/target."""
+    global _FACE_BACKEND_LOGGED
+    if _FACE_BACKEND_LOGGED:
+        return
+    _FACE_BACKEND_LOGGED = True
+
+    import logging
+
+    logger = logging.getLogger(__name__)
+    try:
+        cv2 = cv2_module
+        if cv2 is None:
+            import cv2 as _cv2
+            cv2 = _cv2
+
+        backend_name = str(backend_id)
+        try:
+            backend_name = cv2.dnn.getBackendName(backend_id)
+        except Exception:
+            pass
+
+        target_name = "CPU"
+        if target_id == cv2.dnn.DNN_TARGET_OPENCL:
+            target_name = "OpenCL"
+        elif target_id == cv2.dnn.DNN_TARGET_CUDA:
+            target_name = "CUDA"
+        elif target_id == getattr(cv2.dnn, "DNN_TARGET_OPENCL_FP16", -1):
+            target_name = "OpenCL FP16"
+
+        logger.info(
+            "[ACCEL] Face DNN backend selected: backend=%s target=%s (id=%s)",
+            backend_name,
+            target_name,
+            target_id,
+        )
+    except Exception as e:
+        logger.info("[ACCEL] Face DNN backend selected: backend_id=%s target_id=%s (%s)", backend_id, target_id, e)
 
 
 def _coreml_compute_units():

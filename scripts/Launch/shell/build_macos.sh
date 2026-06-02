@@ -19,7 +19,7 @@ fi
 
 if ! command -v python3 &> /dev/null; then
     echo "[ERROR] python3 is not installed or not in PATH"
-    echo "Please install Python 3.8 or higher from https://www.python.org/"
+    echo "Please install Python 3.10 or higher from https://www.python.org/"
     exit 1
 fi
 
@@ -56,8 +56,16 @@ fi
 echo "Upgrading pip..."
 "$PYTHON_BIN" -m pip install --upgrade pip
 
-echo "Installing dependencies..."
-"$PYTHON_BIN" -m pip install --upgrade PyQt6 rawpy send2trash pyinstaller natsort exifread pyexiv2 Pillow psutil numpy qtawesome pyqtgraph reverse-geocoder pycountry huggingface-hub requests pyobjc-framework-Cocoa pyobjc-framework-CoreML pyobjc-framework-Quartz pyobjc-framework-Vision
+echo "Installing core dependencies..."
+"$PYTHON_BIN" -m pip install --upgrade PyQt6 rawpy send2trash pyinstaller natsort exifread Pillow psutil numpy qtawesome pyqtgraph reverse-geocoder pycountry huggingface-hub requests pyobjc-framework-Cocoa pyobjc-framework-CoreML pyobjc-framework-Quartz pyobjc-framework-Vision
+
+echo "Installing optional dependency: pyexiv2 (best-effort)..."
+if "$PYTHON_BIN" -m pip install --upgrade pyexiv2; then
+    echo "[INFO] pyexiv2 installed (full focus-point / Exiv2 path enabled)."
+else
+    echo "[WARNING] pyexiv2 install failed on this macOS/Python combo."
+    echo "[WARNING] Continuing build with exifread fallback (focus-point extraction may be less complete)."
+fi
 
 "$PYTHON_BIN" -m pip uninstall -y sentence-transformers torch torchvision transformers scikit-learn scipy tokenizers safetensors coremltools >/dev/null 2>&1 || true
 

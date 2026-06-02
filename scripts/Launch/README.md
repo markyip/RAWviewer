@@ -19,7 +19,7 @@ scripts\Launch\bat\build_windows.bat
 clear_cache.bat
 ```
 
-**Windows capture-time benchmark (POC):** `python scripts\compare_shell_capture_times.py "<folder>"` — see [`docs/POC_SHELL_CAPTURE_TIMES.md`](../../docs/POC_SHELL_CAPTURE_TIMES.md).
+**Windows capture-time benchmark (POC):** `python scripts\compare_shell_capture_times.py "<folder>"`.
 
 ## macOS (shell)
 

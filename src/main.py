@@ -9039,7 +9039,7 @@ class RAWImageViewer(QMainWindow):
             self._reset_gallery_search_to_idle()
 
     def _is_gallery_semantic_search_ready(self, corpus_files=None) -> bool:
-        """True when the user may run gallery semantic / metadata search queries."""
+        """True only when semantic + face indexing are fully complete for this corpus."""
         corpus = list(corpus_files or self._gallery_search_index_corpus() or [])
         if not corpus:
             return False
@@ -9047,21 +9047,26 @@ class RAWImageViewer(QMainWindow):
             return False
         from semantic_search import semantic_embeddings_enabled
 
+        if getattr(self, "_semantic_indexing_in_progress", False):
+            return False
+
         if not semantic_embeddings_enabled():
-            if getattr(self, "_semantic_indexing_in_progress", False):
+            if not bool(getattr(self, "_metadata_index_run_done", False)):
                 return False
-            return bool(getattr(self, "_metadata_index_run_done", False))
+            try:
+                index = self._get_semantic_index()
+                return index.get_face_pending_count(corpus) == 0
+            except Exception:
+                return False
 
         try:
             index = self._get_semantic_index()
             if not index.semantic_backend_available():
                 return False
-            if getattr(self, "_semantic_indexing_in_progress", False) and getattr(
-                self, "_semantic_index_pass_kind", None
-            ) == "user_semantic":
-                return False
             pending_emb = index.get_pending_embedding_paths(corpus)
-            return len(pending_emb) == 0
+            if len(pending_emb) > 0:
+                return False
+            return index.get_face_pending_count(corpus) == 0
         except Exception:
             return False
 
@@ -9765,16 +9770,24 @@ class RAWImageViewer(QMainWindow):
 
     def _start_face_index_background(self, corpus_files) -> None:
         """Second pass: face_count backfill after semantic search is usable."""
+        logger = logging.getLogger(__name__)
         if getattr(self, "_face_indexing_in_progress", False):
+            logger.info("[INDEX][FACE] Skip start: already running")
             return
         if getattr(self, "_semantic_indexing_in_progress", False):
+            logger.info("[INDEX][FACE] Skip start: semantic indexing is running")
             return
         try:
             index = self._get_semantic_index()
             pending = index.get_face_pending_count(corpus_files)
             if pending <= 0:
+                logger.info(
+                    "[INDEX][FACE] Skip start: nothing pending "
+                    f"(pending={int(pending or 0)}, corpus_size={len(corpus_files or [])})"
+                )
                 return
-        except Exception:
+        except Exception as e:
+            logger.warning(f"[INDEX][FACE] Failed to query pending face count: {e}")
             return
 
         token = time.time_ns()
@@ -9817,6 +9830,10 @@ class RAWImageViewer(QMainWindow):
 
         self._set_gallery_search_status(
             self._format_index_progress("Face", 0, pending)
+        )
+        logger.info(
+            "[INDEX][FACE] Start worker "
+            f"(pending={int(pending or 0)}, corpus_size={len(corpus_files or [])})"
         )
         worker = _FaceIndexWorker(token, list(corpus_files), index, signals, total_files)
         QThreadPool.globalInstance().start(worker)
@@ -9960,8 +9977,22 @@ class RAWImageViewer(QMainWindow):
             return
 
         if not semantic_embeddings_enabled():
-            if getattr(self, "_metadata_index_run_done", False):
+            if self._is_gallery_semantic_search_ready(corpus_files):
                 self._finish_gallery_search_unlock(corpus_files)
+            elif getattr(self, "_metadata_index_run_done", False):
+                # Metadata may be complete while face indexing is still pending.
+                try:
+                    face_pending = int(self._get_semantic_index().get_face_pending_count(corpus_files) or 0)
+                except Exception:
+                    face_pending = 0
+                if face_pending > 0:
+                    self._gallery_search_show_index_progress = True
+                    self._set_gallery_search_status(
+                        self._format_index_progress("Face", 0, face_pending)
+                    )
+                    self._start_face_index_background(corpus_files)
+                else:
+                    self._finish_gallery_search_unlock(corpus_files)
             else:
                 self._set_gallery_search_status("Indexing metadata…")
                 self._schedule_silent_metadata_index()
@@ -10017,7 +10048,19 @@ class RAWImageViewer(QMainWindow):
         from semantic_search import semantic_embeddings_enabled
 
         if not semantic_embeddings_enabled():
-            self._finish_gallery_search_unlock(corpus_files)
+            if self._is_gallery_semantic_search_ready(corpus_files):
+                self._finish_gallery_search_unlock(corpus_files)
+                return
+            if int(face_pending or 0) > 0:
+                self._gallery_search_show_index_progress = True
+                self._set_gallery_search_status(
+                    self._format_index_progress("Face", 0, int(face_pending))
+                )
+                self._start_face_index_background(corpus_files)
+                self._sync_gallery_search_input_editable()
+                return
+            self._set_gallery_search_status("Indexing metadata…")
+            self._sync_gallery_search_input_editable()
             return
 
         try:
@@ -10026,23 +10069,32 @@ class RAWImageViewer(QMainWindow):
         except Exception:
             pending_emb = []
 
-        if not pending_emb and not pending:
+        if not pending_emb and not pending and int(face_pending or 0) <= 0:
             self._finish_gallery_search_unlock(corpus_files)
             return
 
         work = pending_emb if pending_emb else list(pending or [])
-        if not work:
-            self._finish_gallery_search_unlock(corpus_files)
+        if work:
+            self._gallery_search_show_index_progress = True
+            self._start_semantic_index_build_background(
+                corpus_files,
+                coverage=coverage,
+                pending_files=work,
+                run_semantic_embeddings=True,
+                show_search_progress=True,
+            )
+            self._sync_gallery_search_input_editable()
             return
 
-        self._gallery_search_show_index_progress = True
-        self._start_semantic_index_build_background(
-            corpus_files,
-            coverage=coverage,
-            pending_files=work,
-            run_semantic_embeddings=True,
-            show_search_progress=True,
-        )
+        # No semantic/metadata work left, but face pass is still pending.
+        if int(face_pending or 0) > 0:
+            self._gallery_search_show_index_progress = True
+            self._set_gallery_search_status(self._format_index_progress("Face", 0, int(face_pending)))
+            self._start_face_index_background(corpus_files)
+            self._sync_gallery_search_input_editable()
+            return
+
+        self._finish_gallery_search_unlock(corpus_files)
         self._sync_gallery_search_input_editable()
 
     def _on_search_bottom_clicked(self):
@@ -10421,28 +10473,79 @@ class RAWImageViewer(QMainWindow):
         )
 
     def _maybe_resume_semantic_indexing(self) -> None:
-        """Do not resume semantic indexing on folder load.
+        """Resume interrupted indexing for the current folder in the background."""
+        try:
+            logger = logging.getLogger(__name__)
+            folder = getattr(self, "current_folder", None)
+            corpus = list(getattr(self, "image_files", []) or [])
+            if not folder or not corpus:
+                logger.info(
+                    "[INDEX][RESUME] Skip: missing folder/corpus "
+                    f"(has_folder={bool(folder)}, corpus_size={len(corpus)})"
+                )
+                return
+            if getattr(self, "_semantic_indexing_in_progress", False) or getattr(
+                self, "_semantic_index_prep_in_progress", False
+            ):
+                logger.info(
+                    "[INDEX][RESUME] Skip: indexing already active "
+                    f"(semantic={getattr(self, '_semantic_indexing_in_progress', False)}, "
+                    f"prep={getattr(self, '_semantic_index_prep_in_progress', False)})"
+                )
+                return
+            if not self._is_semantic_index_incomplete(folder):
+                logger.info(
+                    "[INDEX][RESUME] Skip: folder not marked incomplete "
+                    f"(folder={folder})"
+                )
+                return
 
-        Interrupted semantic passes resume when the user opens the search bar
-        (see ``_start_user_semantic_indexing`` and ``_is_semantic_index_incomplete``).
-        """
-        return
+            # Give folder view setup a short head start, then resume in background.
+            logger.info(
+                "[INDEX][RESUME] Schedule prep in 1200ms "
+                f"(folder={folder}, corpus_size={len(corpus)})"
+            )
+            QTimer.singleShot(
+                1200,
+                lambda f=folder, c=list(corpus): self._trigger_resume_semantic_indexing(f, c),
+            )
+        except Exception as e:
+            logging.getLogger(__name__).warning(
+                f"[INDEX][RESUME] Failed to schedule resume prep: {e}"
+            )
 
     def _trigger_resume_semantic_indexing(self, folder, corpus):
+        logger = logging.getLogger(__name__)
         # Double check folder hasn't changed during the delay
         if getattr(self, "current_folder", None) != folder:
+            logger.info(
+                "[INDEX][RESUME] Cancel: folder changed "
+                f"(expected={folder}, current={getattr(self, 'current_folder', None)})"
+            )
             return
         if self._semantic_indexing_in_progress or getattr(self, "_semantic_index_prep_in_progress", False):
+            logger.info(
+                "[INDEX][RESUME] Cancel: indexing already active "
+                f"(semantic={self._semantic_indexing_in_progress}, "
+                f"prep={getattr(self, '_semantic_index_prep_in_progress', False)})"
+            )
             return
         try:
             index = self._get_semantic_index()
             if not index.semantic_backend_available():
+                logger.info(
+                    "[INDEX][RESUME] Cancel: semantic backend unavailable "
+                    f"({index.semantic_backend_error()})"
+                )
                 return
-            
+            logger.info(
+                "[INDEX][RESUME] Start prep worker "
+                f"(folder={folder}, corpus_size={len(corpus)})"
+            )
             # Spin up the background prep worker instead of doing get_index_coverage and get_pending_paths on UI thread!
             self._run_semantic_index_prep_for_resume(folder, corpus)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"[INDEX][RESUME] Failed before prep worker start: {e}")
 
     def _run_semantic_index_prep_for_resume(self, folder, corpus_files):
         if getattr(self, "_semantic_index_prep_in_progress", False):
@@ -10461,17 +10564,27 @@ class RAWImageViewer(QMainWindow):
 
     def _on_semantic_index_resume_prep_done(self, folder, corpus_files, coverage, pending, face_pending):
         self._semantic_index_prep_in_progress = False
+        logger = logging.getLogger(__name__)
         # Double check folder hasn't changed
         if getattr(self, "current_folder", None) != folder:
+            logger.info(
+                "[INDEX][RESUME] Prep done ignored: folder changed "
+                f"(expected={folder}, current={getattr(self, 'current_folder', None)})"
+            )
             return
             
         # If there are no pending files and no face pending files, mark complete
         needs_semantic = len(pending) > 0
         needs_face = face_pending > 0
+        logger.info(
+            "[INDEX][RESUME] Prep done "
+            f"(pending_semantic={len(pending)}, pending_face={int(face_pending or 0)}, "
+            f"needs_semantic={needs_semantic}, needs_face={needs_face})"
+        )
         
         if not needs_semantic and not needs_face:
             self._set_semantic_index_incomplete(folder, False)
-            self._start_face_index_background(corpus_files)
+            logger.info("[INDEX][RESUME] Nothing pending; marked folder complete")
             return
             
         if needs_semantic:
@@ -10873,7 +10986,7 @@ class RAWImageViewer(QMainWindow):
             self.status_bar.show()  # Keep status_bar visible to show sort button
             self.status_bar.showMessage("")  # Clear message
         if hasattr(self, 'status_metadata_label'):
-            self._apply_top_metadata_text("")
+            self._apply_top_metadata_text(self._current_folder_label())
         if hasattr(self, 'status_counter_label'):
             self._update_gallery_counter()
         self._ensure_gallery_search_collapsed()
@@ -15377,13 +15490,19 @@ class RAWImageViewer(QMainWindow):
         signals = SemanticIndexPrepSignals()
         self._semantic_index_prep_signals = signals
         
-        signals.done.connect(lambda coverage, pending, face_pending: self._on_metadata_index_prep_done(folder, corpus_files, coverage, pending))
+        signals.done.connect(
+            lambda coverage, pending, face_pending: self._on_metadata_index_prep_done(
+                folder, corpus_files, coverage, pending, face_pending
+            )
+        )
         signals.error.connect(self._on_semantic_index_prep_error)
         
         worker = _SemanticIndexPrepWorker(corpus_files, index, signals)
         QThreadPool.globalInstance().start(worker)
 
-    def _on_metadata_index_prep_done(self, folder, corpus_files, coverage, pending):
+    def _on_metadata_index_prep_done(
+        self, folder, corpus_files, coverage, pending, face_pending
+    ):
         self._semantic_index_prep_in_progress = False
         if getattr(self, "current_folder", None) != folder:
             return
@@ -15400,6 +15519,8 @@ class RAWImageViewer(QMainWindow):
                 QTimer.singleShot(
                     0, lambda: self._start_user_semantic_indexing(corpus_files)
                 )
+            elif int(face_pending or 0) > 0:
+                self._start_face_index_background(corpus_files)
             return
 
         self._start_semantic_index_build_background(
@@ -17846,6 +17967,15 @@ class RAWImageViewer(QMainWindow):
             return f"{folder_name} / {filename}"
         return filename
 
+    def _current_folder_label(self) -> str:
+        """Human-readable current folder label for gallery top metadata."""
+        folder = (getattr(self, "current_folder", None) or "").strip()
+        if not folder:
+            return ""
+        norm = os.path.normpath(folder)
+        base = os.path.basename(norm)
+        return base or norm
+
     def _apply_top_metadata_text(self, text: str) -> None:
         """Show EXIF / image info centered in the top bar (title bar or macOS strip)."""
         display = (text or "").strip()
@@ -17873,10 +18003,9 @@ class RAWImageViewer(QMainWindow):
             self.status_bar.showMessage("")
             return
         
-        # Show metadata, counter, and sort button when there are files
-        # Only show metadata in single view mode, hide in gallery mode
+        # Show metadata, counter, and sort button when there are files.
         if self.view_mode != "single":
-            self._apply_top_metadata_text("")
+            self._apply_top_metadata_text(self._current_folder_label())
         # Show/hide sort button based on view mode
         if hasattr(self, 'sort_toggle_button'):
             if self.view_mode == 'gallery':
@@ -17904,7 +18033,7 @@ class RAWImageViewer(QMainWindow):
         # Gallery mode should stay lightweight: avoid expensive per-image EXIF/status
         # recomputation (fallback reads can block UI and delay gallery paint).
         if self.view_mode != 'single':
-            self._apply_top_metadata_text("")
+            self._apply_top_metadata_text(self._current_folder_label())
             if hasattr(self, 'status_counter_label'):
                 self._refresh_image_counter()
             return
