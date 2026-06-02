@@ -198,11 +198,13 @@ Launch scripts live under [`scripts/Launch/`](scripts/Launch/README.md). Root-le
 
 **Virtual environments:** `pixi install` → `pixi run start` uses `.pixi/`. Build/debug batch scripts use `rawviewer_env/` (created automatically). `.venv/` is optional for IDE use only.
 
-**Folder sort (capture time):** Gallery and folder load sort by **EXIF** (`metadata_backend` probe when cold; bulk cache when warm). Windows Explorer `DateTaken` via Shell was evaluated and rejected for production — see [`docs/POC_SHELL_CAPTURE_TIMES.md`](docs/POC_SHELL_CAPTURE_TIMES.md). To reproduce timings on Windows:
+**Folder sort (capture time):** Gallery and folder load sort by **EXIF** (`metadata_backend` probe when cold; bulk cache when warm). Default order is **oldest first**; use the gallery **⇅ Oldest / Newest** control to toggle (saved in QSettings). Windows Explorer `DateTaken` via Shell was evaluated and rejected for production — see [`docs/POC_SHELL_CAPTURE_TIMES.md`](docs/POC_SHELL_CAPTURE_TIMES.md). To reproduce timings on Windows:
 
 ```batch
 python scripts\compare_shell_capture_times.py "D:\Photos\YourFolder" --limit 1000
 ```
+
+Parallelism tuning and macOS notes: [`docs/PARALLELIZATION_AND_PLATFORMS.md`](docs/PARALLELIZATION_AND_PLATFORMS.md).
 
 **Optional dev toggles:**
 
@@ -219,6 +221,11 @@ python scripts\compare_shell_capture_times.py "D:\Photos\YourFolder" --limit 100
 | `RAWVIEWER_PERSISTENT_CACHE=1` | Enable disk/SQLite cache persistence (off by default) |
 | `RAWVIEWER_EXIF_BACKEND=auto` | EXIF via pyexiv2 (JPEG/TIFF) + exifread (RAW headers); `exifread` or `pyexiv2` to force one backend |
 | `RAWVIEWER_USE_SHELL_SORT_DATES` | **Dev/POC only.** When `1` on Windows, enables `windows_shell_meta` for scripts — **not** used for gallery folder sort (see [`docs/POC_SHELL_CAPTURE_TIMES.md`](docs/POC_SHELL_CAPTURE_TIMES.md)) |
+| `RAWVIEWER_SORT_PROBE_WORKERS` | Parallel EXIF header probes during folder sort (default scales with CPU, up to 12 on local disk; 3 on UNC / `RAWVIEWER_SLOW_STORAGE_PREFIXES`) |
+| `RAWVIEWER_INDEX_METADATA_WORKERS` | Semantic index metadata extraction pool (default 2–6; lower on folders &gt;2000 files) |
+| `RAWVIEWER_RAW_LOAD_LIMIT` | Max concurrent LibRaw decodes in the load manager (default `4`) |
+| `RAWVIEWER_PROCESS_POOL_WORKERS` | LibRaw postprocess process pool size when `RAWVIEWER_USE_PROCESS_POOL=1` |
+| `RAWVIEWER_SLOW_STORAGE_PREFIXES` | Comma-separated path prefixes (e.g. `K:\Photos,N:\`) to cap sort-probe parallelism at 3 |
 
 ## 🏗️ Building from Source
 

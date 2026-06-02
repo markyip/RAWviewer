@@ -316,13 +316,17 @@ class ImageLoadManager(QObject):
         # PROCESS POOL (optional): on Windows debug/startup paths, process spawn can
         # re-import heavy modules and hurt first-load latency. Keep it opt-in.
         # PROCESS POOL: LibRaw postprocess in worker processes (multi-core on Windows).
-        from common_image_loader import use_raw_process_pool
+        from common_image_loader import (
+            process_pool_worker_count,
+            raw_concurrent_load_limit,
+            use_raw_process_pool,
+        )
 
         use_process_pool = use_raw_process_pool()
         self._process_pool = None
         if use_process_pool:
             self._process_pool = concurrent.futures.ProcessPoolExecutor(
-                max_workers=max(2, core_count // 2)
+                max_workers=process_pool_worker_count()
             )
         
         self._active_tasks: Dict[Tuple, ImageLoadTask] = {}
@@ -331,7 +335,7 @@ class ImageLoadManager(QObject):
         self._queue_lock = threading.Lock()
         
         # RAW throttling: Limit concurrent heavy RAW decodes
-        self._raw_load_limit = 4
+        self._raw_load_limit = raw_concurrent_load_limit()
         self._active_raw_tasks = 0
         
         self._stopped = False  # Flag to stop scheduling new tasks

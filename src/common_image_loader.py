@@ -740,3 +740,93 @@ def use_raw_process_pool() -> bool:
     return (_os.cpu_count() or 0) >= 4
 
 
+def _env_int_bounded(name: str, default: int, *, minimum: int = 1, maximum: int = 64) -> int:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return max(minimum, min(maximum, int(raw)))
+    except ValueError:
+        return default
+
+
+def is_slow_storage_path(path: str) -> bool:
+    """
+    Heuristic for paths where aggressive parallel reads hurt more than help
+    (UNC shares, user-configured prefixes). Safe on Windows and macOS.
+    """
+    if not path:
+        return False
+    norm = os.path.normpath(path)
+    if norm.startswith("\\\\"):
+        return True
+    prefixes = os.environ.get("RAWVIEWER_SLOW_STORAGE_PREFIXES", "").strip()
+    if prefixes:
+        for prefix in prefixes.split(","):
+            p = prefix.strip()
+            if p and norm.lower().startswith(os.path.normpath(p).lower()):
+                return True
+    return False
+
+
+def sort_probe_worker_count(
+    sample_path: Optional[str] = None,
+    *,
+    conservative: bool = False,
+) -> int:
+    """
+    Thread pool size for cold EXIF header probes during folder sort.
+
+    Override: RAWVIEWER_SORT_PROBE_WORKERS (1–32).
+    Conservative mode (fast-open window): RAWVIEWER_SORT_PROBE_WORKERS_CONSERVATIVE or min(3, default).
+    Slow storage (UNC / RAWVIEWER_SLOW_STORAGE_PREFIXES): capped at 3.
+  """
+    override = os.environ.get("RAWVIEWER_SORT_PROBE_WORKERS", "").strip()
+    if override:
+        return _env_int_bounded("RAWVIEWER_SORT_PROBE_WORKERS", 4, minimum=1, maximum=32)
+
+    cpu = os.cpu_count() or 4
+    if conservative:
+        cons = os.environ.get("RAWVIEWER_SORT_PROBE_WORKERS_CONSERVATIVE", "").strip()
+        if cons:
+            return _env_int_bounded(
+                "RAWVIEWER_SORT_PROBE_WORKERS_CONSERVATIVE", 3, minimum=1, maximum=8
+            )
+        return min(3, max(2, cpu))
+
+    if sample_path and is_slow_storage_path(sample_path):
+        return min(3, max(2, cpu))
+
+    # Local SSD/NVMe: I/O-bound header reads; scale past 3 workers (old hard cap under-used CPU).
+    return min(12, max(4, cpu - 1))
+
+
+def index_metadata_worker_count(total_files: int) -> int:
+    """
+    Parallel metadata extraction during semantic index build.
+
+    Override: RAWVIEWER_INDEX_METADATA_WORKERS.
+    Large folders (>2000) use a lower default to reduce SQLite EXIF cache lock contention.
+    """
+    override = os.environ.get("RAWVIEWER_INDEX_METADATA_WORKERS", "").strip()
+    if override:
+        return _env_int_bounded("RAWVIEWER_INDEX_METADATA_WORKERS", 2, minimum=1, maximum=16)
+
+    cpu = os.cpu_count() or 4
+    if total_files > 2000:
+        return min(3, max(2, cpu // 2))
+    return min(6, max(2, cpu - 1))
+
+
+def raw_concurrent_load_limit() -> int:
+    """Max concurrent LibRaw full/preview decodes in ImageLoadManager."""
+    return _env_int_bounded("RAWVIEWER_RAW_LOAD_LIMIT", 4, minimum=1, maximum=12)
+
+
+def process_pool_worker_count() -> int:
+    """LibRaw postprocess process-pool size when RAWVIEWER_USE_PROCESS_POOL is on."""
+    cpu = os.cpu_count() or 4
+    default = max(2, cpu // 2)
+    return _env_int_bounded("RAWVIEWER_PROCESS_POOL_WORKERS", default, minimum=1, maximum=16)
+
+

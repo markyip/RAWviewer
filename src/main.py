@@ -8,6 +8,7 @@ import traceback
 import threading
 import warnings
 from datetime import datetime
+from typing import Optional
 
 # PyInstaller Splash Screen: Helper to close the boot-time splash
 def close_native_splash():
@@ -10130,14 +10131,35 @@ class RAWImageViewer(QMainWindow):
         if self._semantic_search_backup_files:
             self._clear_semantic_search_results(silent=True)
 
-    def _update_gallery_counter(self):
+    def _should_show_image_counter(self) -> bool:
+        """Hide counter until EXIF capture-time sort is applied (index/total can change)."""
+        return self._is_exif_sort_ready()
+
+    def _refresh_image_counter(self) -> None:
+        """Update or hide the status-bar image counter (gallery total or single index)."""
         if not hasattr(self, "status_counter_label") or self.status_counter_label is None:
             return
+        if not self._should_show_image_counter():
+            self.status_counter_label.hide()
+            self.status_counter_label.setText("")
+            return
+        if getattr(self, "view_mode", "single") == "gallery":
+            total = len(self.image_files) if self.image_files else 0
+            self.status_counter_label.setText(f"{total} images")
+            self.status_counter_label.show()
+        elif self.image_files and self.current_file_index >= 0:
+            total_files = len(self.image_files)
+            current_pos = self.current_file_index + 1
+            self.status_counter_label.setText(f"{current_pos} / {total_files}")
+            self.status_counter_label.show()
+        else:
+            self.status_counter_label.hide()
+            self.status_counter_label.setText("")
+
+    def _update_gallery_counter(self):
         if getattr(self, "view_mode", "single") != "gallery":
             return
-        total = len(self.image_files) if self.image_files else 0
-        self.status_counter_label.setText(f"{total} images")
-        self.status_counter_label.show()
+        self._refresh_image_counter()
 
     def _sync_gallery_scrollbar_policy(self):
         """Hide vertical scrollbar when gallery has nothing to scroll (e.g. no matches)."""
@@ -10469,8 +10491,8 @@ class RAWImageViewer(QMainWindow):
     def get_sort_preference(self):
         """Get user's preferred sorting method - Newest (True) or Oldest (False)"""
         settings = self.get_settings()
-        # Default to Newest (True) - newest images first
-        return settings.value("sort_by_newest", True, type=bool)
+        # Default: oldest images first (capture time ascending)
+        return settings.value("sort_by_newest", False, type=bool)
     
     def toggle_sort_by_newest(self):
         """Toggle to sort by newest (newest images first)"""
@@ -10616,7 +10638,7 @@ class RAWImageViewer(QMainWindow):
         if hasattr(self, 'status_bar'):
             self.status_bar.show()
         if hasattr(self, 'status_counter_label'):
-            self.status_counter_label.show()
+            self._refresh_image_counter()
         
         # In single view mode: hide sort button, show Gallery button only if EXIF sort is ready
         if hasattr(self, 'sort_toggle_button'):
@@ -12485,41 +12507,63 @@ class RAWImageViewer(QMainWindow):
             return float(row[1]), 0.0
         return 0.0, 0.0
 
-    def _parallel_probe_capture_times(self, file_paths, bulk_metadata) -> dict:
+    def _parallel_probe_capture_times(
+        self,
+        file_paths,
+        bulk_metadata,
+        *,
+        sample_path: Optional[str] = None,
+        conservative: bool = False,
+    ) -> dict:
         """Probe capture timestamps in parallel for all paths not cached in bulk_metadata."""
         missing_paths = []
         for fp in file_paths:
             meta = bulk_metadata.get(fp) if bulk_metadata else None
             if not meta or not meta.get("capture_time"):
                 missing_paths.append(fp)
-                
-        probed_timestamps = {}
-        if missing_paths:
-            import os
-            from concurrent.futures import ThreadPoolExecutor
-            from common_image_loader import probe_capture_timestamp_from_file
-            import logging
-            logger = logging.getLogger(__name__)
-            
-            cpu_cnt = os.cpu_count() or 4
-            # Cap parallel workers to 3 to prevent disk I/O seek contention on network/external HDDs,
-            # which would starve the main raw image loader thread.
-            workers = min(3, max(2, cpu_cnt))
-            logger.info(f"[SORT] Probing {len(missing_paths)} uncached files in parallel with {workers} workers...")
-            
-            def _probe_one(p: str) -> tuple[str, float]:
-                try:
-                    return p, probe_capture_timestamp_from_file(p)
-                except Exception:
-                    return p, 0.0
-            
-            with ThreadPoolExecutor(max_workers=workers) as pool:
-                for p, ts in pool.map(_probe_one, missing_paths):
-                    if ts > 0:
-                        probed_timestamps[p] = ts
+
+        probed_timestamps: dict = {}
+        if not missing_paths:
+            return probed_timestamps
+
+        from concurrent.futures import ThreadPoolExecutor
+        from common_image_loader import probe_capture_timestamp_from_file, sort_probe_worker_count
+        import logging
+
+        logger = logging.getLogger(__name__)
+        hint = sample_path or missing_paths[0]
+        workers = sort_probe_worker_count(hint, conservative=conservative)
+        chunksize = max(1, len(missing_paths) // max(workers * 8, 1))
+        logger.info(
+            "[SORT] Probing %d uncached files (%d workers, chunksize=%d, conservative=%s)",
+            len(missing_paths),
+            workers,
+            chunksize,
+            conservative,
+        )
+
+        def _probe_one(p: str) -> tuple[str, float]:
+            try:
+                return p, probe_capture_timestamp_from_file(p)
+            except Exception:
+                return p, 0.0
+
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            for p, ts in pool.map(_probe_one, missing_paths, chunksize=chunksize):
+                if ts > 0:
+                    probed_timestamps[p] = ts
         return probed_timestamps
 
-    def sort_files_by_capture_time(self, file_paths, newest_first=True, file_stats=None):
+    def sort_files_by_capture_time(
+        self,
+        file_paths,
+        newest_first=True,
+        file_stats=None,
+        *,
+        probe_uncached: bool = True,
+        folder_path: Optional[str] = None,
+        sort_probe_conservative: bool = False,
+    ):
         """Sort files by capture time according to user preference (Newest/Oldest)"""
         import time
         import logging
@@ -12536,9 +12580,19 @@ class RAWImageViewer(QMainWindow):
         cache = get_image_cache()
         # Pass the pre-collected file stats to avoid redundant os.stat calls
         bulk_metadata = cache.get_multiple_exif(file_paths, file_stats)
-        
-        # 2. Parallel probe for any uncached files
-        probed_timestamps = self._parallel_probe_capture_times(file_paths, bulk_metadata)
+
+        # 2. Parallel probe for any uncached files (skip when caller only wants cache hits)
+        probed_timestamps: dict = {}
+        if probe_uncached:
+            sample = folder_path
+            if not sample and file_paths:
+                sample = os.path.dirname(os.path.abspath(file_paths[0]))
+            probed_timestamps = self._parallel_probe_capture_times(
+                file_paths,
+                bulk_metadata,
+                sample_path=sample,
+                conservative=sort_probe_conservative,
+            )
         
         # 3. Pre-calculate sorting keys to avoid repeated strptime calls
         # This is a MASSIVE optimization for thousands of files
@@ -17823,11 +17877,6 @@ class RAWImageViewer(QMainWindow):
         # Only show metadata in single view mode, hide in gallery mode
         if self.view_mode != "single":
             self._apply_top_metadata_text("")
-        if hasattr(self, 'status_counter_label'):
-            if self.view_mode == 'single':
-                self.status_counter_label.setVisible(True)  # Show counter in single view
-            else:
-                self.status_counter_label.setVisible(False)  # Hide counter in gallery view
         # Show/hide sort button based on view mode
         if hasattr(self, 'sort_toggle_button'):
             if self.view_mode == 'gallery':
@@ -17857,7 +17906,7 @@ class RAWImageViewer(QMainWindow):
         if self.view_mode != 'single':
             self._apply_top_metadata_text("")
             if hasattr(self, 'status_counter_label'):
-                self._update_gallery_counter()
+                self._refresh_image_counter()
             return
 
         if not self.current_file_path:
@@ -18383,17 +18432,9 @@ class RAWImageViewer(QMainWindow):
         else:
             self._apply_top_metadata_text("")
 
-        # Update image counter (right label)
-        if getattr(self, "view_mode", "single") == "gallery":
-            total_files = len(self.image_files) if self.image_files else 0
-            self.status_counter_label.setVisible(True)
-            self.status_counter_label.setText(f"{total_files} images")
-        elif self.image_files and self.current_file_index >= 0:
-            total_files = len(self.image_files)
-            current_pos = self.current_file_index + 1
-            self.status_counter_label.setText(f"{current_pos} / {total_files}")
-        else:
-            self.status_counter_label.setText("")
+        # Update image counter (hidden until EXIF sort refinement is applied)
+        if hasattr(self, "status_counter_label"):
+            self._refresh_image_counter()
 
     def _can_pan(self):
         # Only allow panning if the image is larger than the viewport
@@ -18856,6 +18897,7 @@ class RAWImageViewer(QMainWindow):
 
         self._sync_filmstrip_to_folder()
         self.update_status_bar()
+        self._refresh_image_counter()
         logger.info(
             "[FOLDER] Quick folder index ready: %d images in %.3fs (navigation enabled)",
             len(image_files),
@@ -18939,10 +18981,14 @@ class RAWImageViewer(QMainWindow):
 
             def run(self_inner):
                 try:
+                    folder_hint = (
+                        os.path.dirname(os.path.abspath(paths[0])) if paths else None
+                    )
                     sorted_files, bulk_metadata = viewer.sort_files_by_capture_time(
                         paths,
                         newest_first=newest_first,
                         file_stats=file_stats,
+                        folder_path=folder_hint,
                     )
                 except Exception as e:
                     import logging
@@ -18966,7 +19012,7 @@ class RAWImageViewer(QMainWindow):
             logging.getLogger(__name__).info(
                 "[FOLDER] Delaying EXIF sort refinement background threads by 2.5s for fast-open load prioritization"
             )
-            QTimer.singleShot(2500, viewer, _start_worker)
+            QTimer.singleShot(2500, _start_worker)
         else:
             _start_worker()
 
@@ -19001,6 +19047,7 @@ class RAWImageViewer(QMainWindow):
                     break
         self._sync_filmstrip_to_folder()
         self.update_status_bar()
+        self._refresh_image_counter()
         if hasattr(self, "status_bar") and self.status_bar:
             self.status_bar.showMessage("Folder sorted by capture time (EXIF)", 3000)
         if getattr(self, "view_mode", "single") == "gallery":

@@ -36,27 +36,36 @@ def _env_int(name: str, default: int, *, minimum: int = 1) -> int:
 def _gallery_prefetch_screens(fast: bool) -> int:
     """Viewport heights to prefetch above/below scroll center (embedded JPEG makes this cheap)."""
     if fast:
-        return _env_int("RAWVIEWER_GALLERY_PREFETCH_SCREENS_FAST", 3, minimum=1)
-    return _env_int("RAWVIEWER_GALLERY_PREFETCH_SCREENS", 4, minimum=1)
+        return _env_int("RAWVIEWER_GALLERY_PREFETCH_SCREENS_FAST", 5, minimum=1)
+    return _env_int("RAWVIEWER_GALLERY_PREFETCH_SCREENS", 6, minimum=1)
+
+
+def _gallery_viewport_buffer_screens() -> float:
+    """Extra viewport heights kept for visible tile widgets above/below the scroll window."""
+    raw = os.environ.get("RAWVIEWER_GALLERY_VIEWPORT_BUFFER_SCREENS", "1.25").strip()
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return 1.25
 
 
 def _gallery_scheduling_budgets(fast: bool) -> tuple[int, int, int]:
     """Return (max_widgets, max_tasks, active_cap) for the current scroll mode."""
     if fast:
         return (
-            _env_int("RAWVIEWER_GALLERY_MAX_WIDGETS_FAST", 8, minimum=1),
-            _env_int("RAWVIEWER_GALLERY_MAX_TASKS_FAST", 10, minimum=1),
-            _env_int("RAWVIEWER_GALLERY_ACTIVE_CAP_FAST", 16, minimum=4),
+            _env_int("RAWVIEWER_GALLERY_MAX_WIDGETS_FAST", 12, minimum=1),
+            _env_int("RAWVIEWER_GALLERY_MAX_TASKS_FAST", 16, minimum=1),
+            _env_int("RAWVIEWER_GALLERY_ACTIVE_CAP_FAST", 24, minimum=4),
         )
     return (
-        _env_int("RAWVIEWER_GALLERY_MAX_WIDGETS", 20, minimum=1),
-        _env_int("RAWVIEWER_GALLERY_MAX_TASKS", 32, minimum=1),
-        _env_int("RAWVIEWER_GALLERY_ACTIVE_CAP", 32, minimum=4),
+        _env_int("RAWVIEWER_GALLERY_MAX_WIDGETS", 28, minimum=1),
+        _env_int("RAWVIEWER_GALLERY_MAX_TASKS", 44, minimum=1),
+        _env_int("RAWVIEWER_GALLERY_ACTIVE_CAP", 44, minimum=4),
     )
 
 
 def _gallery_idle_preload_batch() -> int:
-    return _env_int("RAWVIEWER_GALLERY_IDLE_PRELOAD_BATCH", 52, minimum=4)
+    return _env_int("RAWVIEWER_GALLERY_IDLE_PRELOAD_BATCH", 72, minimum=4)
 
 
 def _gallery_idle_preload_ms() -> int:
@@ -919,6 +928,20 @@ class JustifiedGallery(QWidget):
         if self._thumb_first_after_scroll_t is None:
             self._thumb_first_after_scroll_t = now
 
+        # When the user is dragging the scrollbar thumb, avoid scheduling any image work.
+        # We only want to load once after release (sliderReleased → _on_scroll_settled()).
+        if self._is_scrollbar_dragging:
+            try:
+                if self._load_timer and self._load_timer.isActive():
+                    self._load_timer.stop()
+                if self._scroll_settle_timer and self._scroll_settle_timer.isActive():
+                    self._scroll_settle_timer.stop()
+                if self._idle_preload_timer and self._idle_preload_timer.isActive():
+                    self._idle_preload_timer.stop()
+            except Exception:
+                pass
+            return
+
         # Throttle (do NOT restart continuously): allow periodic updates while scrolling.
         # The settle timer below guarantees a final update when scrolling stops.
         interval = 50 if not self._is_scrolling_fast else 150
@@ -928,8 +951,7 @@ class JustifiedGallery(QWidget):
         # Debounce: after scrolling stops, force a final load near thumb position.
         if self._scroll_settle_timer.isActive():
             self._scroll_settle_timer.stop()
-        # When dragging the scrollbar, don't wait long; we handle release explicitly.
-        self._scroll_settle_timer.start(60 if self._is_scrollbar_dragging else 120)
+        self._scroll_settle_timer.start(120)
 
     def _on_scroll_settled(self):
         """Called after scroll events stop; load thumbnails around thumb position."""
@@ -1209,7 +1231,11 @@ class JustifiedGallery(QWidget):
         scroll_y = scrollbar.value()
         v_h = v_port.height()
 
-        buffer_rect = QRect(0, scroll_y, v_port.width(), v_h)
+        buffer_screens = _gallery_viewport_buffer_screens()
+        buffer_px = int(v_h * buffer_screens)
+        buffer_top = max(0, scroll_y - buffer_px)
+        buffer_h = v_h + (2 * buffer_px)
+        buffer_rect = QRect(0, buffer_top, v_port.width(), buffer_h)
         visible_indices_items = self._get_visible_range(buffer_rect)
         if _focus_gallery_switch_logs():
             logger.debug(
@@ -1226,7 +1252,8 @@ class JustifiedGallery(QWidget):
         center_y = scroll_y + (v_h // 2)
         half_span = int((v_h * screens) // 2)
         prefetch_top = max(0, center_y - half_span)
-        prefetch_rect = QRect(0, prefetch_top, v_port.width(), v_h * screens)
+        prefetch_span = max(v_h * screens, buffer_h)
+        prefetch_rect = QRect(0, prefetch_top, v_port.width(), prefetch_span)
         prefetch_indices_items = self._get_visible_range(prefetch_rect)
         prefetch_paths = {item["file_path"] for idx, item in prefetch_indices_items if item.get("file_path")}
 

@@ -2872,10 +2872,9 @@ class SemanticImageIndex:
                         format_index_progress("Metadata", 0, total_extract),
                     )
                 t_meta_start = time.time()
-                if total_extract > 2000:
-                    max_workers = 1
-                else:
-                    max_workers = min(2, os.cpu_count() or 2)
+                from common_image_loader import index_metadata_worker_count
+
+                max_workers = index_metadata_worker_count(total_extract)
                 logger.info(
                     "[INDEX] Metadata workers=%d for %d files",
                     max_workers,
