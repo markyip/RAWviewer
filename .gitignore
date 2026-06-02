@@ -127,6 +127,7 @@ tests/
 # Development scratch
 scratch/
 Untitled
+.rawviewer_cold_start
 
 # POC / benchmark script outputs (regenerate with compare_shell_capture_times.py)
 scripts/output/

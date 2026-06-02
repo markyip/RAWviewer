@@ -151,6 +151,22 @@ def semantic_encode_prep_workers() -> int:
     return max(1, min(8, os.cpu_count() or 4))
 
 
+def semantic_coreml_chunk_size() -> int:
+    """Paths per encode chunk on macOS Core ML (parallel prep, serial inference)."""
+    raw = os.environ.get("RAWVIEWER_SEMANTIC_COREML_CHUNK", "8").strip()
+    try:
+        v = int(raw)
+    except Exception:
+        v = 8
+    return max(1, min(v, semantic_batch_max()))
+
+
+def semantic_warm_thumbs_before_index() -> bool:
+    """Pre-extract embedded thumbnails before MobileCLIP (avoids per-file rawpy in encode)."""
+    raw = os.environ.get("RAWVIEWER_SEMANTIC_WARM_THUMBS", "1").strip().lower()
+    return raw not in ("0", "false", "no", "off")
+
+
 def semantic_batch_candidates() -> List[int]:
     raw = os.environ.get(
         "RAWVIEWER_SEMANTIC_BATCH_CANDIDATES", "1,2,4,8,16,32,64"
@@ -910,12 +926,38 @@ class MobileCLIPCoreMLBackend:
 
     def encode_image(self, file_path: str) -> np.ndarray:
         self._load_models()
-        CoreML = self._CoreML
-        # Core ML encoder input is fixed (typically 256×256 NCHW in our exports). Loading a richer
-        # source (preview/thumbnail) before bicubic resize to 256 can help vs loading tiny 512-max inputs.
         im = _load_index_source_image(file_path, max_size=1024).resize(
             (256, 256), Image.Resampling.BICUBIC
         )
+        return self._encode_pil_image(im)
+
+    def encode_images(self, file_paths: Sequence[str]) -> List[np.ndarray]:
+        """Parallel load/resize, then serial Core ML inference (I/O bound on large albums)."""
+        self._load_models()
+        paths = [p for p in (file_paths or []) if p]
+        if not paths:
+            return []
+        if len(paths) == 1:
+            return [self.encode_image(paths[0])]
+
+        workers = semantic_encode_prep_workers()
+
+        def _prep(path: str) -> Image.Image:
+            return _load_index_source_image(path, max_size=1024).resize(
+                (256, 256), Image.Resampling.BICUBIC
+            )
+
+        if workers <= 1:
+            images = [_prep(p) for p in paths]
+        else:
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=min(workers, len(paths))
+            ) as executor:
+                images = list(executor.map(_prep, paths))
+        return [self._encode_pil_image(im) for im in images]
+
+    def _encode_pil_image(self, im: Image.Image) -> np.ndarray:
+        CoreML = self._CoreML
         desc = self._image_model.modelDescription()
         input_name = self._native_feature_name(self._image_model, "input")
         output_name = self._native_feature_name(self._image_model, "output")
@@ -2641,6 +2683,13 @@ class SemanticImageIndex:
         if self.model_name.startswith("mobileclip-"):
             backend = self._mobileclip_backend or resolve_mobileclip_backend()
             self._mobileclip_backend = backend
+            if isinstance(backend, MobileCLIPCoreMLBackend):
+                chunk = semantic_coreml_chunk_size()
+                logger.info(
+                    "[INDEX][SPEED] Core ML encode chunk size: %d (parallel prep)",
+                    chunk,
+                )
+                return min(total, chunk)
             if not isinstance(backend, MobileCLIPONNXBackend):
                 return 1
 
@@ -2782,6 +2831,103 @@ class SemanticImageIndex:
             except ValueError:
                 pass
         return 1280
+
+    def _warm_thumbnail_cache_for_semantic_index(
+        self,
+        paths: List[str],
+        progress_callback: ProgressCallback = None,
+    ) -> int:
+        """
+        Pre-extract thumbnails so MobileCLIP encode hits ImageCache instead of rawpy per file.
+        """
+        import logging
+        from image_cache import get_image_cache
+
+        logger = logging.getLogger(__name__)
+        if not paths or not semantic_warm_thumbs_before_index():
+            return 0
+
+        cache = get_image_cache()
+        pending = [p for p in paths if cache.get_thumbnail(p) is None]
+        if not pending:
+            logger.info(
+                "[INDEX] Semantic thumbnail warm-up: all %d paths already cached",
+                len(paths),
+            )
+            return 0
+
+        workers = min(semantic_encode_prep_workers(), 8)
+        t0 = time.time()
+        warmed = 0
+
+        def _warm_one(path: str) -> bool:
+            if cache.get_thumbnail(path) is not None:
+                return True
+            try:
+                from enhanced_raw_processor import (
+                    ThumbnailExtractor,
+                    _thumbnail_via_qimage_reader,
+                    extract_embedded_jpeg_by_scan,
+                )
+
+                arr = extract_embedded_jpeg_by_scan(path, 1024)
+                if arr is None:
+                    arr = _thumbnail_via_qimage_reader(path, 1024)
+                if arr is not None:
+                    cache.put_thumbnail(path, arr, None)
+                    return True
+                thumb = ThumbnailExtractor().extract_thumbnail_from_raw(
+                    path, max_size=1024, allow_scan_fallback=False
+                )
+                if thumb is not None:
+                    cache.put_thumbnail(path, thumb, None)
+                    return True
+            except Exception:
+                pass
+            return False
+
+        logger.info(
+            "[INDEX] Warming thumbnail cache for semantic index: %d/%d files (%d workers)",
+            len(pending),
+            len(paths),
+            workers,
+        )
+        total = len(pending)
+        if workers <= 1 or total < 4:
+            for i, path in enumerate(pending, start=1):
+                if _warm_one(path):
+                    warmed += 1
+                if progress_callback and (i <= 2 or i >= total or i % 25 == 0):
+                    progress_callback(
+                        i,
+                        total,
+                        format_index_progress("Preparing thumbnails", i, total),
+                    )
+        else:
+            completed = 0
+            with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+                futures = {executor.submit(_warm_one, p): p for p in pending}
+                for future in concurrent.futures.as_completed(futures):
+                    completed += 1
+                    if future.result():
+                        warmed += 1
+                    if progress_callback and (
+                        completed <= 2 or completed >= total or completed % 25 == 0
+                    ):
+                        progress_callback(
+                            completed,
+                            total,
+                            format_index_progress(
+                                "Preparing thumbnails", completed, total
+                            ),
+                        )
+        logger.info(
+            "[INDEX] Semantic thumbnail warm-up done: %d/%d in %.2fs",
+            warmed,
+            len(pending),
+            time.time() - t0,
+        )
+        return warmed
 
     def _warm_thumbnail_cache_for_face_scan(
         self,
@@ -3418,6 +3564,10 @@ class SemanticImageIndex:
                             "[INDEX][ACCEL] Could not read active ONNX session providers: %s",
                             provider_exc,
                         )
+                    warm_paths = [cp for cp, _ in pending_for_semantic]
+                    self._warm_thumbnail_cache_for_semantic_index(
+                        warm_paths, progress_callback
+                    )
                     throttle_sec = semantic_gpu_throttle_seconds()
                     batch_size = self._auto_select_semantic_batch_size(
                         pending_for_semantic,

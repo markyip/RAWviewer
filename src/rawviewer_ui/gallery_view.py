@@ -1,3 +1,4 @@
+import sys
 import time
 import os
 import threading
@@ -193,7 +194,12 @@ class JustifiedGallery(QWidget):
         self._last_scroll_time = time.time()
         self._current_scroll_speed = 0.0
         self._is_scrolling_fast = False
-        self._scroll_optimize_threshold = 6000
+        # Trackpads emit many small deltas; a lower threshold causes "fast scroll" mode
+        # and blank tiles. macOS defaults higher; override with RAWVIEWER_GALLERY_FAST_SCROLL_PX_S.
+        default_fast = 12000 if sys.platform == "darwin" else 6000
+        self._scroll_optimize_threshold = _env_int(
+            "RAWVIEWER_GALLERY_FAST_SCROLL_PX_S", default_fast, minimum=2000
+        )
 
         # Metadata tracking for dynamic layout
         self._metadata_changed_paths = set()
@@ -738,6 +744,9 @@ class JustifiedGallery(QWidget):
         """Rebuild justified rows when the scroll viewport width changes."""
         if getattr(self, "_ignore_resize_events", False):
             return
+        # Rebuilding rows during scroll jumps content height and causes visible glitches.
+        if self._is_scrolling_fast or (time.time() - self._last_scroll_event_t) < 0.12:
+            debounce_ms = max(debounce_ms, 280)
         try:
             current_viewport_width = self._get_viewport_width()
             if current_viewport_width <= 0:
@@ -833,22 +842,32 @@ class JustifiedGallery(QWidget):
             self._schedule_viewport_width_rebuild()
             return False
 
-        # Smooth wheel scrolling: translate wheel deltas into pixel scrolling
+        # Wheel: trackpads send pixelDelta — apply immediately (native feel).
+        # Mouse wheels send angleDelta only — use the smoothed step timer.
         if event.type() == QEvent.Type.Wheel and self._scroll_area and obj is self._scroll_area.viewport():
             try:
+                sb = self._scroll_area.verticalScrollBar()
+                if sb is None:
+                    return False
                 pixel = event.pixelDelta()
                 angle = event.angleDelta()
-                if not pixel.isNull():
-                    delta_y = pixel.y()
-                else:
-                    # Typical mouse wheel: 120 units per notch
-                    # Map to pixels (negative y = scroll down in Qt)
-                    notches = angle.y() / 120.0 if angle.y() else 0.0
-                    delta_y = int(notches * 120)  # base magnitude
-                # Qt wheel delta is inverted relative to scrollbar value direction
-                self._wheel_accum_px += -float(delta_y)
-                if not self._wheel_timer.isActive():
-                    self._wheel_timer.start(self._wheel_tick_ms)
+                if not pixel.isNull() and pixel.y() != 0:
+                    self._wheel_timer.stop()
+                    self._wheel_accum_px = 0.0
+                    new_val = int(
+                        max(sb.minimum(), min(sb.maximum(), sb.value() - pixel.y()))
+                    )
+                    sb.setValue(new_val)
+                    event.accept()
+                    return True
+                if angle.y() != 0:
+                    notches = angle.y() / 120.0
+                    delta_y = int(notches * 120)
+                    self._wheel_accum_px += -float(delta_y)
+                    if not self._wheel_timer.isActive():
+                        self._wheel_timer.start(self._wheel_tick_ms)
+                    event.accept()
+                    return True
             except Exception:
                 pass
             event.accept()
@@ -1257,19 +1276,21 @@ class JustifiedGallery(QWidget):
         prefetch_indices_items = self._get_visible_range(prefetch_rect)
         prefetch_paths = {item["file_path"] for idx, item in prefetch_indices_items if item.get("file_path")}
 
+        is_fast = self._is_scrolling_fast
         for idx in list(self._visible_widgets.keys()):
             if idx not in visible_indices_set:
                 w = self._visible_widgets.pop(idx)
                 w.hide()
-                w.clear()
+                # During fast scroll, keep the last pixmap in the pool to avoid blank flashes.
+                if not is_fast:
+                    w.clear()
+                    w.original_pixmap = None
                 w.file_path = None
-                w.original_pixmap = None
                 self._widget_pool.append(w)
 
         # Fast scroll policy:
         # - still keep visible thumbnails loading (small budget)
         # - avoid heavy prefetch
-        is_fast = self._is_scrolling_fast
         # First-paint mode: prioritize visible tiles only until first thumbnail arrives
         # (or a short timeout), then enable prefetch.
         warmup_elapsed = time.time() - float(getattr(self, "_gallery_set_images_ts", 0.0) or 0.0)

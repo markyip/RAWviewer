@@ -2,6 +2,12 @@
 REM Run from repo root (scripts\Launch\bat -> ..\..\..)
 cd /d "%~dp0..\..\.."
 
+if exist ".rawviewer_cold_start" (
+    set RAWVIEWER_DISABLE_SESSION_RESTORE=1
+    del /f /q ".rawviewer_cold_start" >nul 2>&1
+    echo [run_debug] Cold start: session restore disabled for this launch ^(after clear_cache.bat^).
+)
+
 echo Running RAWviewer in debug mode...
 echo To wipe caches/logs/settings: scripts\Launch\bat\clear_cache.bat
 echo GPU single-image view: enabled (RAWVIEWER_GPU_VIEW=1)

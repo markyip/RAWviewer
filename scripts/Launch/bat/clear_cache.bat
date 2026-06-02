@@ -42,16 +42,39 @@ if !ERRORLEVEL! EQU 0 (
 )
 
 echo.
+echo Verifying cold-start state...
+if exist "%USERPROFILE%\.rawviewer_cache" (
+    echo   WARNING: %%USERPROFILE%%\.rawviewer_cache still exists
+    set "FAILED=1"
+) else (
+    echo   OK: %%USERPROFILE%%\.rawviewer_cache removed
+)
+reg query "HKCU\Software\RAWviewer" /v last_session_folder >nul 2>&1
+if !ERRORLEVEL! EQU 0 (
+    echo   WARNING: last_session_folder still in HKCU\Software\RAWviewer
+    set "FAILED=1"
+) else (
+    echo   OK: no last_session_folder in registry
+)
+
+if "!FAILED!"=="0" (
+    echo.>.rawviewer_cold_start
+    echo   Next run_debug.bat will skip session restore ^(one launch^).
+)
+
+echo.
 if "!FAILED!"=="1" (
     echo Finished with warnings. Close RAWviewer and any Python dev instance, then run again.
 ) else if "!CLEARED!"=="1" (
-    echo All cache and session state cleared. Restart RAWviewer for a completely fresh start.
+    echo Cache and session state cleared.
+    echo For a true UI cold start: run scripts\Launch\bat\run_debug.bat next.
 ) else (
     echo Nothing found to clear ^(already clean^).
+    echo.>.rawviewer_cold_start
 )
 echo.
 echo Not removed: %%LOCALAPPDATA%%\RAWviewer application files ^(exe, installer models^).
-echo Tip: set RAWVIEWER_DISABLE_SESSION_RESTORE=1 to skip auto-restore on next launch.
+echo Manual override: set RAWVIEWER_DISABLE_SESSION_RESTORE=1 before run_debug.bat
 echo.
 pause
 exit /b 0

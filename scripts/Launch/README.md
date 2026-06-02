@@ -34,12 +34,15 @@ Official macOS release only; there is no Linux build or installer.
 | Script | Purpose |
 |--------|---------|
 | [`shell/launch_dev.sh`](shell/launch_dev.sh) | Run `src/main.py` with verbose dev env vars (macOS dev) |
+| [`shell/clear_cache.sh`](shell/clear_cache.sh) | Wipe image/EXIF/semantic caches, logs, and QSettings (full fresh start) |
 | [`shell/build_macos.sh`](shell/build_macos.sh) | macOS build via `rawviewer_env` + `build.py` |
 
 ```bash
 chmod +x scripts/Launch/shell/*.sh
 ./scripts/Launch/shell/launch_dev.sh
+./scripts/Launch/shell/clear_cache.sh
 ./scripts/Launch/shell/build_macos.sh
+./clear_cache.sh
 ```
 
 ## Virtual environments
@@ -52,9 +55,9 @@ chmod +x scripts/Launch/shell/*.sh
 
 **Recommended for day-to-day dev:** `pixi run start` or `scripts/Launch/bat/run_debug.bat` (Windows) / `scripts/Launch/shell/launch_dev.sh` (macOS).
 
-Root-level `run_debug.bat`, `build_windows.bat`, `clear_cache.bat`, `launch_dev.sh`, and `build_macos.sh` are thin wrappers that forward here.
+Root-level `run_debug.bat`, `build_windows.bat`, `clear_cache.bat`, `clear_cache.sh`, `launch_dev.sh`, and `build_macos.sh` are thin wrappers that forward here.
 
-**`clear_cache.bat`** closes RAWviewer (and dev `python … main.py` instances), then deletes `~\.rawviewer_cache`, log folders, and the `HKCU\Software\RAWviewer` registry key. It does **not** remove the installed app under `%LOCALAPPDATA%\RAWviewer` (exe, bundled models).
+**`clear_cache.bat`** / **`clear_cache.sh`** close RAWviewer (and dev `python … main.py` instances), then delete `~/.rawviewer_cache`, log folders, and session state (Windows: `HKCU\Software\RAWviewer`; macOS: `~/Library/Preferences/com.RAWviewer.RAWviewer.plist`). They do **not** remove the installed app (Windows: `%LOCALAPPDATA%\RAWviewer`; macOS: `/Applications/RAWviewer.app` or repo `models/`).
 
 ## Windows share helper (optional, dev)
 

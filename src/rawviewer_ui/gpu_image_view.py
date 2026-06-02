@@ -19,7 +19,7 @@ Environment toggles:
 
 import os
 
-from PyQt6.QtCore import Qt, QRectF, QPointF, pyqtSignal
+from PyQt6.QtCore import Qt, QRectF, QPointF, pyqtSignal, QEvent
 from PyQt6.QtGui import QPixmap, QPainter, QColor, QPen
 from PyQt6.QtWidgets import (
     QGraphicsView,
@@ -357,6 +357,20 @@ class GpuImageView(QGraphicsView):
         if host is not None and hasattr(host, "handle_pointer_for_filmstrip"):
             host.handle_pointer_for_filmstrip(event.globalPosition())
         super().mouseMoveEvent(event)
+
+    def event(self, event) -> bool:
+        """Trackpad pinch (macOS) and smart-zoom gestures."""
+        if event.type() == QEvent.Type.NativeGesture and self._has_pixmap:
+            gtype = event.gestureType()
+            if gtype == Qt.NativeGestureType.ZoomNativeGesture:
+                self.zoom_by(1.0 + event.value() * 0.5)
+                event.accept()
+                return True
+            if gtype == Qt.NativeGestureType.SmartZoomNativeGesture:
+                self.toggle_fit()
+                event.accept()
+                return True
+        return super().event(event)
 
     def wheelEvent(self, event) -> None:
         delta = event.angleDelta().y()

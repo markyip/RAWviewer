@@ -324,6 +324,44 @@ def _find_file_index_in_list(files, file_path, *, default: int = -1) -> int:
     return default
 
 
+def _activate_macos_foreground_app() -> None:
+    """Terminal-launched Python is often a background app; file panels need foreground."""
+    if sys.platform != "darwin":
+        return
+    try:
+        import objc
+
+        ns_app = objc.lookUpClass("NSApplication").sharedApplication()
+        if ns_app is not None:
+            # 0 = NSApplicationActivationPolicyRegular
+            ns_app.setActivationPolicy_(0)
+            ns_app.activateIgnoringOtherApps_(True)
+    except Exception:
+        pass
+
+
+def _applescript_escape(value: str) -> str:
+    return (value or "").replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _run_applescript(script: str) -> str:
+    """Run AppleScript; return stdout on success, empty string on cancel/error."""
+    import subprocess
+
+    try:
+        proc = subprocess.run(
+            ["osascript", "-e", script],
+            capture_output=True,
+            text=True,
+            timeout=3600,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    if proc.returncode != 0:
+        return ""
+    return (proc.stdout or "").strip()
+
+
 def _macos_try_force_dark_titlebar():
     """
     Best-effort: request Dark Aqua appearance on macOS so the native title bar
@@ -8652,8 +8690,13 @@ class RAWImageViewer(QMainWindow):
         self.search_bottom_button.hide()
         left_buttons_layout.addWidget(self.search_bottom_button, 0, alignment=Qt.AlignmentFlag.AlignVCenter)
 
-        # Search panel: expands from search button (gallery mode only)
+        # Search panel: in-row width animation (v2.1 layout — avoids overlay blocking Open)
         self.search_expand_container = QWidget()
+        self.search_expand_container.setSizePolicy(
+            QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred
+        )
+        self.search_expand_container.setMinimumWidth(0)
+        self.search_expand_container.setMaximumWidth(0)
         self.search_expand_layout = QStackedLayout(self.search_expand_container)
         self.search_expand_layout.setContentsMargins(0, 0, 0, 0)
 
@@ -8700,12 +8743,18 @@ class RAWImageViewer(QMainWindow):
                 font-size: 13px;
                 min-height: 20px;
                 max-height: 28px;
+                outline: none;
             }
             QLineEdit:focus {
                 border: 1px solid #5A5A5A;
+                outline: none;
             }
         """
         self.gallery_search_input.setStyleSheet(self.gallery_search_style_input)
+        # macOS draws a bright blue native focus ring unless disabled (dialogs already do this).
+        self.gallery_search_input.setAttribute(
+            Qt.WidgetAttribute.WA_MacShowFocusRect, False
+        )
         self.gallery_search_input.returnPressed.connect(self._semantic_search_from_bar)
         self.gallery_search_input.textChanged.connect(self._on_gallery_search_text_changed)
 
@@ -8720,6 +8769,11 @@ class RAWImageViewer(QMainWindow):
         self._search_panel_target_width = 310
         self._search_panel_target_width_idle = 310
         self._search_panel_expanded = False
+        self._search_panel_animation = None
+        left_buttons_layout.addWidget(
+            self.search_expand_container, 0, alignment=Qt.AlignmentFlag.AlignVCenter
+        )
+        self.search_expand_container.hide()
         # Index progress in the search field only after the user opens search (not folder load).
         self._gallery_search_show_index_progress = False
         # User opened search: run/resume semantic indexing, then allow gallery queries.
@@ -8787,15 +8841,9 @@ class RAWImageViewer(QMainWindow):
         status_layout.addWidget(self.right_status_trailing, 0, alignment=Qt.AlignmentFlag.AlignVCenter)
         self._set_shortcuts_hint_hovered(True)
 
-        # Search field floats over the status row (does not widen the button cluster).
         self.status_bar_widget = status_widget
         self.left_buttons_widget = left_buttons_widget
-        self.search_expand_container.setParent(status_widget)
-        self.search_expand_container.setSizePolicy(
-            QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed
-        )
-        self.search_expand_container.hide()
-        
+
         # Add custom widget to status bar
         self.status_bar.addPermanentWidget(status_widget, 1)
 
@@ -8843,6 +8891,19 @@ class RAWImageViewer(QMainWindow):
         self._sync_single_image_histogram()
 
         self._setup_file_drop_targets()
+
+        if platform.system() == "Darwin":
+            QTimer.singleShot(0, self._apply_macos_titlebar_appearance)
+
+    def _apply_macos_titlebar_appearance(self) -> None:
+        """Request dark native title bar on macOS (system-drawn; not pure #000)."""
+        _macos_try_force_dark_titlebar()
+        _macos_try_force_dark_titlebar_for_window(self)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if platform.system() == "Darwin":
+            self._apply_macos_titlebar_appearance()
 
     def create_menu_bar(self):
         """Create the menu bar with File and Keyboard Shortcuts action"""
@@ -9383,44 +9444,19 @@ class RAWImageViewer(QMainWindow):
     def _apply_search_expand_overlay_geometry(
         self, width: int, *, expanded: bool | None = None
     ) -> None:
-        """Place the search field beside the search icon without changing layout width."""
-        container = getattr(self, "search_expand_container", None)
-        if container is None:
-            return
+        """Resize the in-layout search strip (legacy name kept for callers)."""
         if expanded is None:
-            expanded = bool(getattr(self, "_search_panel_expanded", False))
-        anchor = self._search_expand_overlay_anchor()
-        if anchor is None:
-            container.hide()
-            container.setEnabled(False)
-            return
-        x, y, h = anchor
-        w = max(0, int(width)) if expanded else 0
-        if w <= 0:
-            container.hide()
-            container.setEnabled(False)
-            self._release_gallery_search_panel_width()
-            return
-        container.setGeometry(x, y, w, h)
-        container.show()
-        container.setEnabled(True)
-        container.raise_()
-        self._reapply_gallery_search_panel_width_from_status()
+            expanded = int(width) > 0
+        if int(width) > 0:
+            self._search_panel_target_width = int(width)
+        self._set_search_panel_expanded(bool(expanded), animate=False)
 
     def _sync_search_expand_overlay(self) -> None:
-        if getattr(self, "_search_panel_expanded", False):
-            left = getattr(self, "left_buttons_widget", None)
-            host = getattr(self, "status_bar_widget", None)
-            if left is not None:
-                left.updateGeometry()
-            if host is not None and host.layout() is not None:
-                host.layout().activate()
-            self._apply_search_expand_overlay_geometry(
-                getattr(self, "_search_panel_target_width", 0),
-                expanded=True,
-            )
-        else:
-            self._apply_search_expand_overlay_geometry(0, expanded=False)
+        expanded = bool(getattr(self, "_search_panel_expanded", False))
+        self._set_search_panel_expanded(
+            expanded,
+            animate=False,
+        )
 
     def _schedule_search_expand_overlay_sync(self, delay_ms: int = 0) -> None:
         """Re-anchor the floating search field after the status bar relayouts."""
@@ -9433,19 +9469,21 @@ class RAWImageViewer(QMainWindow):
         timer.start(max(0, int(delay_ms)))
 
     def _apply_search_expand_container_width(self, target: int, *, animate: bool = False) -> None:
-        """Resize the floating search strip; skip redundant geometry updates."""
+        """Resize the in-layout search strip; skip redundant updates."""
         if not hasattr(self, "search_expand_container") or self.search_expand_container is None:
             return
         target = max(0, int(target))
         expanded = target > 0
         container = self.search_expand_container
-        current_w = container.width() if container.isVisible() else 0
+        current_w = container.maximumWidth() if container.isVisible() else 0
         if (
             current_w == target
             and bool(getattr(self, "_search_panel_expanded", False)) == expanded
         ):
             return
-        self._set_search_panel_expanded(expanded, animate=False)
+        if target > 0:
+            self._search_panel_target_width = target
+        self._set_search_panel_expanded(expanded, animate=animate)
 
     def _ensure_gallery_search_collapsed(self) -> None:
         """Keep the search field hidden until the user taps the search button."""
@@ -9495,6 +9533,7 @@ class RAWImageViewer(QMainWindow):
                 )
         target = self._search_panel_target_width if expanded else 0
         self._search_panel_expanded = bool(expanded)
+        container = self.search_expand_container
 
         if not expanded:
             self._release_gallery_search_panel_width()
@@ -9506,7 +9545,41 @@ class RAWImageViewer(QMainWindow):
             if not self._is_gallery_search_indexing_active():
                 self._reset_gallery_search_to_idle()
 
-        self._apply_search_expand_overlay_geometry(target, expanded=expanded)
+        if expanded:
+            container.show()
+
+        anim = getattr(self, "_search_panel_animation", None)
+        if anim is not None:
+            try:
+                anim.stop()
+            except Exception:
+                pass
+            self._search_panel_animation = None
+
+        if not animate:
+            container.setMinimumWidth(target)
+            container.setMaximumWidth(target)
+            if not expanded:
+                container.hide()
+            return
+
+        panel_anim = QPropertyAnimation(container, b"maximumWidth")
+        panel_anim.setDuration(180)
+        panel_anim.setStartValue(container.maximumWidth())
+        panel_anim.setEndValue(target)
+        panel_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        container.setMinimumWidth(0)
+        self._search_panel_animation = panel_anim
+
+        def _finish():
+            container.setMinimumWidth(target)
+            container.setMaximumWidth(target)
+            self._search_panel_animation = None
+            if not expanded:
+                container.hide()
+
+        panel_anim.finished.connect(_finish)
+        panel_anim.start()
 
     def _is_semantic_index_ready(self, corpus_files):
         now = time.time()
@@ -9565,14 +9638,17 @@ class RAWImageViewer(QMainWindow):
             return
 
         if needs_semantic:
+            user_semantic = self._user_wants_semantic_embeddings_now()
             from semantic_search import semantic_embeddings_enabled
+
             self._start_semantic_index_build_background(
                 corpus_files,
                 coverage=coverage,
                 pending_files=pending,
-                run_semantic_embeddings=semantic_embeddings_enabled(),
+                run_semantic_embeddings=user_semantic and semantic_embeddings_enabled(),
                 show_search_progress=bool(
-                    getattr(self, "_gallery_search_show_index_progress", False)
+                    user_semantic
+                    and getattr(self, "_gallery_search_show_index_progress", False)
                 ),
             )
             return
@@ -10654,10 +10730,25 @@ class RAWImageViewer(QMainWindow):
             self.get_settings().value(self._semantic_folder_settings_key(folder), False)
         )
 
+    def _user_wants_semantic_embeddings_now(self) -> bool:
+        """True only after the user opens gallery search (not on folder load alone)."""
+        return bool(
+            getattr(self, "_gallery_search_user_wants_semantic", False)
+            or getattr(self, "_defer_semantic_after_metadata", False)
+        )
+
     def _maybe_resume_semantic_indexing(self) -> None:
-        """Resume interrupted indexing for the current folder in the background."""
+        """Resume interrupted indexing only after the user opens gallery search."""
         try:
             logger = logging.getLogger(__name__)
+            if not self._user_wants_semantic_embeddings_now():
+                folder = getattr(self, "current_folder", None)
+                if folder and self._is_semantic_index_incomplete(folder):
+                    logger.info(
+                        "[INDEX][RESUME] Deferred until user opens search (folder=%s)",
+                        folder,
+                    )
+                return
             folder = getattr(self, "current_folder", None)
             corpus = list(getattr(self, "image_files", []) or [])
             if not folder or not corpus:
@@ -10770,12 +10861,24 @@ class RAWImageViewer(QMainWindow):
             return
             
         if needs_semantic:
-            self._start_semantic_index_build_background(
-                corpus_files,
-                coverage=coverage,
-                pending_files=pending,
-                show_search_progress=False,
-            )
+            if self._user_wants_semantic_embeddings_now():
+                from semantic_search import semantic_embeddings_enabled
+
+                self._start_semantic_index_build_background(
+                    corpus_files,
+                    coverage=coverage,
+                    pending_files=pending,
+                    run_semantic_embeddings=semantic_embeddings_enabled(),
+                    show_search_progress=bool(
+                        getattr(self, "_gallery_search_show_index_progress", False)
+                    ),
+                )
+            else:
+                logger.info(
+                    "[INDEX][RESUME] Semantic embeddings deferred until user opens search "
+                    f"(pending={len(pending)})"
+                )
+                self._set_semantic_index_incomplete(folder, True)
             return
 
         if needs_face:
@@ -11139,16 +11242,20 @@ class RAWImageViewer(QMainWindow):
             gj._visible_images_loaded = 0
             logger.info(f"[GALLERY] Gallery load timing started at {gj._gallery_load_start_time:.3f}")
         
-        # Update title bar to show current folder name instead of file name
+        # Update title / top metadata for gallery mode
         if hasattr(self, 'current_folder') and self.current_folder:
             folder_name = os.path.basename(self.current_folder)
             title = f"RAWviewer - {folder_name}"
         else:
             title = "RAWviewer"
-        
-        self.setWindowTitle(title)
-        if hasattr(self, 'title_bar') and self.title_bar is not None:
-            self.title_bar.set_title(title)
+        if platform.system() == "Darwin":
+            self._apply_top_metadata_text(
+                os.path.basename(self.current_folder) if getattr(self, "current_folder", None) else ""
+            )
+        else:
+            self.setWindowTitle(title)
+            if hasattr(self, 'title_bar') and self.title_bar is not None:
+                self.title_bar.set_title(title)
         
         # Create gallery widget if needed
         if not hasattr(self, 'gallery_widget') or not self.gallery_widget:
@@ -12927,20 +13034,211 @@ class RAWImageViewer(QMainWindow):
         newest_first = self.get_sort_preference()  # True = Newest first, False = Oldest first
         return self.sort_files_by_capture_time(file_paths, newest_first=newest_first, file_stats=file_stats)
 
+    def _sanitize_dialog_start_dir(self, last_dir) -> str:
+        """Return an existing directory for QFileDialog, or empty for default location."""
+        path = (last_dir or "").strip()
+        if not path:
+            return ""
+        if os.path.isdir(path):
+            return path
+        parent = os.path.dirname(path)
+        if parent and os.path.isdir(parent):
+            return parent
+        return ""
+
+    def _use_qt_file_dialog(self) -> bool:
+        """Opt-in cross-platform Qt picker (RAWVIEWER_QT_FILE_DIALOG=1). Default: system native."""
+        return os.environ.get("RAWVIEWER_QT_FILE_DIALOG", "").strip() == "1"
+
+    def _prepare_for_modal_dialog(self) -> None:
+        """Bring the main window forward so native file dialogs are not hidden behind it."""
+        try:
+            _activate_macos_foreground_app()
+            app = QApplication.instance()
+            if app is not None:
+                app.setActiveWindow(self)
+            self.raise_()
+            self.activateWindow()
+            if app is not None:
+                app.processEvents()
+        except Exception:
+            pass
+
+    def _create_macos_open_panel(self):
+        """Return an NSOpenPanel instance (can fail when Qt owns NSApplication)."""
+        import objc
+
+        _activate_macos_foreground_app()
+        ns_open_panel = objc.lookUpClass("NSOpenPanel")
+        panel = ns_open_panel.alloc().init()
+        if panel is None:
+            panel = ns_open_panel.openPanel()
+        if panel is None:
+            raise RuntimeError("NSOpenPanel could not be created")
+        return panel
+
+    def _open_file_dialog_macos_applescript(self, last_dir: str) -> str:
+        """Native macOS Finder file picker via AppleScript (works with Qt + Terminal)."""
+        _activate_macos_foreground_app()
+        types = [
+            ext.lstrip(".").lower()
+            for ext in self.get_supported_extensions()
+            if ext
+        ]
+        type_clause = ""
+        if types:
+            type_list = ", ".join(f'"{_applescript_escape(t)}"' for t in types)
+            type_clause = f" of type {{{type_list}}}"
+
+        start = self._sanitize_dialog_start_dir(last_dir)
+        location_clause = ""
+        if start:
+            location_clause = (
+                f' default location (POSIX file "{_applescript_escape(start)}")'
+            )
+
+        script = (
+            f'choose file{type_clause} with prompt "Open Image"{location_clause}\n'
+            "return POSIX path of result"
+        )
+        return _run_applescript(script)
+
+    def _open_folder_dialog_macos_applescript(self, last_dir: str) -> str:
+        _activate_macos_foreground_app()
+        start = self._sanitize_dialog_start_dir(last_dir)
+        location_clause = ""
+        if start:
+            location_clause = (
+                f' default location (POSIX file "{_applescript_escape(start)}")'
+            )
+        script = (
+            f'choose folder with prompt "Open Folder"{location_clause}\n'
+            "return POSIX path of result"
+        )
+        return _run_applescript(script)
+
+    def _open_file_dialog_macos_native(self, last_dir: str) -> str:
+        """Prefer NSOpenPanel; fall back to AppleScript (true Finder UI under Qt)."""
+        import logging
+
+        logger = logging.getLogger(__name__)
+        try:
+            return self._open_file_dialog_macos_nsopenpanel(last_dir)
+        except Exception as exc:
+            logger.warning(
+                "NSOpenPanel unavailable (%s), using AppleScript choose file",
+                exc,
+            )
+        return self._open_file_dialog_macos_applescript(last_dir)
+
+    def _open_folder_dialog_macos_native(self, last_dir: str) -> str:
+        import logging
+
+        logger = logging.getLogger(__name__)
+        try:
+            return self._open_folder_dialog_macos_nsopenpanel(last_dir)
+        except Exception as exc:
+            logger.warning(
+                "NSOpenPanel unavailable (%s), using AppleScript choose folder",
+                exc,
+            )
+        return self._open_folder_dialog_macos_applescript(last_dir)
+
+    def _open_file_dialog_macos_nsopenpanel(self, last_dir: str) -> str:
+        """macOS Finder open panel via AppKit (Qt native QFileDialog fails when run from Terminal)."""
+        from AppKit import NSURL
+
+        _activate_macos_foreground_app()
+        panel = self._create_macos_open_panel()
+        panel.setTitle_("Open Image")
+        panel.setPrompt_("Open")
+        panel.setCanChooseFiles_(True)
+        panel.setCanChooseDirectories_(False)
+        panel.setAllowsMultipleSelection_(False)
+
+        types = [ext.lstrip(".").lower() for ext in self.get_supported_extensions()]
+        if types:
+            panel.setAllowedFileTypes_(types)
+
+        start = self._sanitize_dialog_start_dir(last_dir)
+        if start:
+            panel.setDirectoryURL_(NSURL.fileURLWithPath_(start))
+
+        if panel.runModal() != 1:  # NSModalResponseOK
+            return ""
+        url = panel.URL()
+        return url.path() if url is not None else ""
+
+    def _open_folder_dialog_macos_nsopenpanel(self, last_dir: str) -> str:
+        from AppKit import NSURL
+
+        _activate_macos_foreground_app()
+        panel = self._create_macos_open_panel()
+        panel.setTitle_("Open Folder")
+        panel.setPrompt_("Open")
+        panel.setCanChooseFiles_(False)
+        panel.setCanChooseDirectories_(True)
+        panel.setAllowsMultipleSelection_(False)
+
+        start = self._sanitize_dialog_start_dir(last_dir)
+        if start:
+            panel.setDirectoryURL_(NSURL.fileURLWithPath_(start))
+
+        if panel.runModal() != 1:
+            return ""
+        url = panel.URL()
+        return url.path() if url is not None else ""
+
     def open_file(self):
-        """Open an image file (and its containing folder)"""
+        """Open an image file (and its containing folder).
+
+        Matches GitHub HEAD (d122434): synchronous QFileDialog on the click stack.
+        Deferred timers / processEvents() before the panel break macOS NSOpenPanel.
+        """
+        import logging
+
+        logger = logging.getLogger(__name__)
         settings = self.get_settings()
         last_dir = settings.value("last_opened_dir", "")
-        
-        # Build filter string from supported extensions
+
         exts = self.get_supported_extensions()
-        # Format: "Images (*.jpg *.png ...);;All Files (*)"
         input_exts = " ".join([f"*{e}" for e in exts])
         filter_str = f"Images ({input_exts});;All Files (*)"
-        
-        file_path, _ = QFileDialog.getOpenFileName(
-            self, "Open File", last_dir, filter_str)
-            
+
+        try:
+            if self._use_qt_file_dialog():
+                file_path, _ = QFileDialog.getOpenFileName(
+                    self,
+                    "Open File",
+                    last_dir,
+                    filter_str,
+                    options=QFileDialog.Option.DontUseNativeDialog,
+                )
+            elif sys.platform == "darwin":
+                file_path = self._open_file_dialog_macos_native(last_dir)
+            else:
+                self._prepare_for_modal_dialog()
+                file_path, _ = QFileDialog.getOpenFileName(
+                    self, "Open File", last_dir, filter_str
+                )
+        except Exception as e:
+            logger.error("Open image dialog failed: %s", e, exc_info=True)
+            self.show_error("Open Image", f"Could not open file chooser:\n{e}")
+            return
+
+        if os.environ.get("RAWVIEWER_DEBUG", "").strip() == "1":
+            if self._use_qt_file_dialog():
+                backend = "qt"
+            elif sys.platform == "darwin":
+                backend = "macos-native"
+            else:
+                backend = "qfiledialog"
+            logger.info(
+                "Open image dialog done (backend=%s, selected=%r)",
+                backend,
+                file_path or "",
+            )
+
         if file_path:
             folder_path = os.path.dirname(file_path)
             base = os.path.basename(file_path)
@@ -12952,8 +13250,20 @@ class RAWImageViewer(QMainWindow):
     def open_folder(self):
         settings = self.get_settings()
         last_dir = settings.value("last_opened_dir", "")
-        folder_path = QFileDialog.getExistingDirectory(
-            self, "Open Folder", last_dir)
+        if self._use_qt_file_dialog():
+            folder_path = QFileDialog.getExistingDirectory(
+                self,
+                "Open Folder",
+                last_dir,
+                options=QFileDialog.Option.DontUseNativeDialog,
+            )
+        elif sys.platform == "darwin":
+            folder_path = self._open_folder_dialog_macos_native(last_dir)
+        else:
+            self._prepare_for_modal_dialog()
+            folder_path = QFileDialog.getExistingDirectory(
+                self, "Open Folder", last_dir
+            )
         if folder_path:
             self.load_folder_images(folder_path)
             settings.setValue("last_opened_dir", folder_path)
@@ -13247,22 +13557,37 @@ class RAWImageViewer(QMainWindow):
         if not self.current_pixmap:
             return QPoint(0, 0)
 
-        # Get current displayed image size
-        displayed_image = self.image_label.pixmap()
-        if not displayed_image:
+        original_size = self.current_pixmap.size()
+        if original_size.width() <= 0 or original_size.height() <= 0:
             return QPoint(0, 0)
 
-        # Calculate scaling factor from displayed to original
-        original_size = self.current_pixmap.size()
+        displayed_image = self.image_label.pixmap()
+        if not displayed_image or displayed_image.isNull():
+            return QPoint(
+                original_size.width() // 2,
+                original_size.height() // 2,
+            )
+
         displayed_size = displayed_image.size()
+        if displayed_size.width() <= 0 or displayed_size.height() <= 0:
+            return QPoint(
+                original_size.width() // 2,
+                original_size.height() // 2,
+            )
 
-        scale_x = original_size.width() / displayed_size.width()
-        scale_y = original_size.height() / displayed_size.height()
+        # Image is centered in the label (same math as double-click zoom).
+        label_size = self.image_label.size()
+        image_x_offset = (label_size.width() - displayed_size.width()) / 2
+        image_y_offset = (label_size.height() - displayed_size.height()) / 2
+        adjusted_x = widget_pos.x() - image_x_offset
+        adjusted_y = widget_pos.y() - image_y_offset
 
-        # Convert widget coordinates to image coordinates
-        image_x = int(widget_pos.x() * scale_x)
-        image_y = int(widget_pos.y() * scale_y)
-
+        click_ratio_x = adjusted_x / displayed_size.width()
+        click_ratio_y = adjusted_y / displayed_size.height()
+        image_x = int(click_ratio_x * original_size.width())
+        image_y = int(click_ratio_y * original_size.height())
+        image_x = max(0, min(image_x, original_size.width() - 1))
+        image_y = max(0, min(image_y, original_size.height() - 1))
         return QPoint(image_x, image_y)
 
     def _zoom_anchor_for_navigation_restore(self):
@@ -13902,11 +14227,12 @@ class RAWImageViewer(QMainWindow):
             # to prevent false cancellations during normal navigation
             filename = os.path.basename(requested_file_path)
             app_title = "RAWviewer"
-            # Taskbar/window manager may show the filename; title bar left label stays app-only
-            # (folder/file live in the centered EXIF HUD).
-            self.setWindowTitle(f"{filename} — {app_title}")
-            if hasattr(self, 'title_bar') and self.title_bar is not None:
-                self.title_bar.set_title(app_title)
+            # Windows: taskbar shows filename; centered EXIF HUD uses _apply_top_metadata_text.
+            # macOS: window title is updated from _apply_top_metadata_text (same HUD string).
+            if platform.system() != "Darwin":
+                self.setWindowTitle(f"{filename} — {app_title}")
+                if hasattr(self, 'title_bar') and self.title_bar is not None:
+                    self.title_bar.set_title(app_title)
 
             # Reset EXIF data ready flag for new image
             self._exif_data_ready = False
@@ -17703,10 +18029,35 @@ class RAWImageViewer(QMainWindow):
             return False
         return pos.x() >= self.width() - sb_w
 
+    def _status_bar_blocks_resize_at(self, pos: QPoint) -> bool:
+        """Bottom status row hosts Open / Gallery controls — never treat as resize edge."""
+        sb = getattr(self, "status_bar", None)
+        if sb is None or not sb.isVisible():
+            return False
+        status_h = sb.height()
+        if status_h <= 0:
+            return False
+        return pos.y() >= self.height() - status_h
+
+    def _is_status_bar_chrome_widget(self, obj) -> bool:
+        if obj is getattr(self, "status_bar", None):
+            return True
+        host = getattr(self, "status_bar_widget", None)
+        if host is None:
+            return False
+        w = obj
+        while w is not None:
+            if w is host:
+                return True
+            w = w.parentWidget()
+        return False
+
     def _resize_blocked_at(self, pos: QPoint) -> bool:
         if self.isMaximized():
             return True
         if self._title_bar_blocks_resize_at(pos):
+            return True
+        if self._status_bar_blocks_resize_at(pos):
             return True
         if self._scrollbar_blocks_resize_at(pos):
             return True
@@ -18220,8 +18571,14 @@ class RAWImageViewer(QMainWindow):
         return base or norm
 
     def _apply_top_metadata_text(self, text: str) -> None:
-        """Show EXIF / image info centered in the top bar (title bar or macOS strip)."""
+        """Show EXIF / image info in the top bar (Windows: custom title bar; macOS: window title)."""
         display = (text or "").strip()
+        if platform.system() == "Darwin":
+            # Match Windows: metadata in the title area, not "filename — RAWviewer".
+            self.setWindowTitle(display if display else "RAWviewer")
+            if hasattr(self, "top_metadata_bar") and self.top_metadata_bar is not None:
+                self.top_metadata_bar.hide()
+            return
         if hasattr(self, "title_bar") and self.title_bar is not None:
             self.title_bar.set_metadata(display)
         elif hasattr(self, "top_metadata_bar") and self.top_metadata_bar is not None:
@@ -18838,8 +19195,9 @@ class RAWImageViewer(QMainWindow):
             QEvent.Type.MouseButtonPress,
             QEvent.Type.MouseButtonRelease,
         ):
-            if self._handle_frame_resize_event(event):
-                return True
+            if not self._is_status_bar_chrome_widget(obj):
+                if self._handle_frame_resize_event(event):
+                    return True
 
         if (
             event.type() == QEvent.Type.Resize
@@ -18877,6 +19235,21 @@ class RAWImageViewer(QMainWindow):
         # Handle trackpad pinch-to-zoom on Mac
         if event.type() == QEvent.Type.NativeGesture:
             if hasattr(self, 'view_mode') and self.view_mode == 'single' and getattr(self, 'current_pixmap', None):
+                gpu_view = getattr(self, "gpu_view", None)
+                if gpu_view is not None and gpu_view.has_pixmap():
+                    if event.gestureType() == Qt.NativeGestureType.ZoomNativeGesture:
+                        self._stop_slideshow()
+                        gpu_view.zoom_by(1.0 + event.value() * 0.5)
+                        self.fit_to_window = gpu_view.is_fit_mode()
+                        self.current_zoom_level = float(gpu_view.current_scale())
+                        if not gpu_view.is_fit_mode():
+                            self._gpu_request_full_resolution_if_needed()
+                        self.update_status_bar()
+                        return True
+                    if event.gestureType() == Qt.NativeGestureType.SmartZoomNativeGesture:
+                        self._stop_slideshow()
+                        self.toggle_zoom()
+                        return True
                 if event.gestureType() == Qt.NativeGestureType.ZoomNativeGesture:
                     self._stop_slideshow()
                     fit_scale = self._fit_zoom_level()
@@ -20341,6 +20714,7 @@ def main():
             # Set application properties
             app.setApplicationName("RAWviewer")
             app.setApplicationVersion("2.2.0")
+            _activate_macos_foreground_app()
 
             # Create and show main window
             safe_print("Creating RAWImageViewer...", flush=True)

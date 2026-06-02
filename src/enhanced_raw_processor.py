@@ -222,7 +222,10 @@ class ThumbnailExtractor(QObject):
 
         if thumb is not None:
             import logging
-            logging.getLogger(__name__).info(f"Thumbnail extracted successfully by rawpy, shape: {thumb.shape}")
+            logging.getLogger(__name__).debug(
+                "Embedded thumbnail via rawpy.extract_thumb, shape=%s",
+                getattr(thumb, "shape", thumb),
+            )
             return thumb
 
         # If rawpy fails entirely (e.g. unsupported DNG) or returns None, use non-LibRaw fallbacks.
