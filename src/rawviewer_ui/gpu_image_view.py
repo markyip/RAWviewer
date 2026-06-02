@@ -140,7 +140,7 @@ class GpuImageView(QGraphicsView):
         """Align ``_fit_mode`` with the live transform (fixes stale-flag toggle bugs)."""
         if not self._has_pixmap:
             return
-        if self.is_at_fit_scale():
+        if self.is_at_fit_scale() and not getattr(self, "_zoom_intent_100", False):
             self._fit_mode = True
         elif self.current_scale() >= 1.0 - 1e-4:
             self._fit_mode = False
@@ -251,8 +251,12 @@ class GpuImageView(QGraphicsView):
             self._sync_fit_mode_flag()
             return
 
-        # Preserve on-screen image scale: s_new * new_w == s_old * old_w
-        s_new = max(self.MIN_SCALE, min(self.MAX_SCALE, s_old * old_w / new_w))
+        # If user intended to zoom to 100% (actual pixels), do not scale down to preserve the thumbnail's screen size
+        if getattr(self, "_zoom_intent_100", False) or (s_old is not None and s_old >= 1.0 - 1e-4):
+            s_new = 1.0
+        else:
+            # Preserve on-screen image scale: s_new * new_w == s_old * old_w
+            s_new = max(self.MIN_SCALE, min(self.MAX_SCALE, s_old * old_w / new_w))
         self.resetTransform()
         self.scale(s_new, s_new)
         self.centerOn(QPointF(fx * new_w, fy * new_h))

@@ -2090,6 +2090,10 @@ class QuickFolderIndexSignals(QObject):
     """Fast scandir + mtime sort for single-file open (navigation before EXIF sort finishes)."""
     ready = pyqtSignal(object, object, object, int, float)  # token, files, file_stats, start_idx, scan_s
 
+class FolderSortRefineSignals(QObject):
+    """Signal carrier for background EXIF sort refinement."""
+    ready = pyqtSignal(int, list, dict)  # token, sorted_files, bulk_metadata
+
 class SemanticIndexSignals(QObject):
     """Signal carrier for background semantic index build."""
     progress = pyqtSignal(object, int, int, str)  # token, current, total, basename
@@ -10614,11 +10618,11 @@ class RAWImageViewer(QMainWindow):
         if hasattr(self, 'status_counter_label'):
             self.status_counter_label.show()
         
-        # In single view mode: hide sort button, show Gallery button
+        # In single view mode: hide sort button, show Gallery button only if EXIF sort is ready
         if hasattr(self, 'sort_toggle_button'):
             self.sort_toggle_button.hide()
         if hasattr(self, 'view_mode_button'):
-            self.view_mode_button.show()
+            self.view_mode_button.setVisible(self._is_exif_sort_ready())
         if hasattr(self, "search_bottom_button"):
             self.search_bottom_button.setVisible(bool(self.image_files))
         # Update icon if using qtawesome
@@ -12476,6 +12480,40 @@ class RAWImageViewer(QMainWindow):
             return float(row[1]), 0.0
         return 0.0, 0.0
 
+    def _parallel_probe_capture_times(self, file_paths, bulk_metadata) -> dict:
+        """Probe capture timestamps in parallel for all paths not cached in bulk_metadata."""
+        missing_paths = []
+        for fp in file_paths:
+            meta = bulk_metadata.get(fp) if bulk_metadata else None
+            if not meta or not meta.get("capture_time"):
+                missing_paths.append(fp)
+                
+        probed_timestamps = {}
+        if missing_paths:
+            import os
+            from concurrent.futures import ThreadPoolExecutor
+            from common_image_loader import probe_capture_timestamp_from_file
+            import logging
+            logger = logging.getLogger(__name__)
+            
+            cpu_cnt = os.cpu_count() or 4
+            # Cap parallel workers to 3 to prevent disk I/O seek contention on network/external HDDs,
+            # which would starve the main raw image loader thread.
+            workers = min(3, max(2, cpu_cnt))
+            logger.info(f"[SORT] Probing {len(missing_paths)} uncached files in parallel with {workers} workers...")
+            
+            def _probe_one(p: str) -> tuple[str, float]:
+                try:
+                    return p, probe_capture_timestamp_from_file(p)
+                except Exception:
+                    return p, 0.0
+            
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                for p, ts in pool.map(_probe_one, missing_paths):
+                    if ts > 0:
+                        probed_timestamps[p] = ts
+        return probed_timestamps
+
     def sort_files_by_capture_time(self, file_paths, newest_first=True, file_stats=None):
         """Sort files by capture time according to user preference (Newest/Oldest)"""
         import time
@@ -12494,9 +12532,12 @@ class RAWImageViewer(QMainWindow):
         # Pass the pre-collected file stats to avoid redundant os.stat calls
         bulk_metadata = cache.get_multiple_exif(file_paths, file_stats)
         
-        # 2. Pre-calculate sorting keys to avoid repeated strptime calls
+        # 2. Parallel probe for any uncached files
+        probed_timestamps = self._parallel_probe_capture_times(file_paths, bulk_metadata)
+        
+        # 3. Pre-calculate sorting keys to avoid repeated strptime calls
         # This is a MASSIVE optimization for thousands of files
-        from common_image_loader import capture_timestamp_for_sort
+        from common_image_loader import resolve_folder_sort_timestamp
 
         sort_keys = {}
         for fp in file_paths:
@@ -12504,12 +12545,18 @@ class RAWImageViewer(QMainWindow):
             if file_stats and fp in file_stats:
                 mtime = file_stats[fp][1]
             meta = bulk_metadata.get(fp) if bulk_metadata else None
-            timestamp = capture_timestamp_for_sort(
-                fp, meta, mtime, probe_file=True
+            probed_ts = probed_timestamps.get(fp, 0.0)
+            
+            _has_capture, timestamp, _source = resolve_folder_sort_timestamp(
+                fp,
+                metadata=meta,
+                file_mtime=mtime,
+                probe_file=False,
+                probed_capture_timestamp=probed_ts
             )
             sort_keys[fp] = (timestamp, os.path.basename(fp).lower())
         
-        # 3. Perform the sort using pre-calculated keys
+        # 4. Perform the sort using pre-calculated keys
         sorted_files = sorted(
             file_paths, 
             key=lambda fp: sort_keys[fp],
@@ -14680,6 +14727,10 @@ class RAWImageViewer(QMainWindow):
                     gv.fit_to_window()
                 else:
                     gv.set_pixmap(pixmap)
+                    # Clear pending flags since we have applied the zoom/preserve framing successfully
+                    self._pending_zoom = False
+                    self._pending_zoom_center = None
+                    self._pending_zoom_thumbnail_size = None
 
             if (
                 needs_resolution_crossfade
@@ -15014,27 +15065,31 @@ class RAWImageViewer(QMainWindow):
             and pending_zoom_ready
             and size_upgraded
         ):
-            logger.info("[DISPLAY_PIXMAP] Handling pending zoom with full resolution image")
-            
-            # Scale the zoom center point from thumbnail to full resolution
-            if hasattr(self, '_pending_zoom_center') and self._pending_zoom_center and hasattr(self, '_pending_zoom_thumbnail_size') and self._pending_zoom_thumbnail_size:
-                thumb_size = self._pending_zoom_thumbnail_size
-                scale_x = pixmap.width() / thumb_size.width() if thumb_size.width() > 0 else 1.0
-                scale_y = pixmap.height() / thumb_size.height() if thumb_size.height() > 0 else 1.0
-                self.zoom_center_point = QPoint(
-                    int(self._pending_zoom_center.x() * scale_x),
-                    int(self._pending_zoom_center.y() * scale_y)
-                )
-                logger.debug(f"[DISPLAY_PIXMAP] Scaled zoom center from {self._pending_zoom_center} to {self.zoom_center_point}")
+            if getattr(self, "gpu_view", None) is not None:
+                # Handled inside _apply_gpu_view for the GPU path to avoid asynchronous race conditions
+                pass
+            else:
+                logger.info("[DISPLAY_PIXMAP] Handling pending zoom with full resolution image")
+                
+                # Scale the zoom center point from thumbnail to full resolution
+                if hasattr(self, '_pending_zoom_center') and self._pending_zoom_center and hasattr(self, '_pending_zoom_thumbnail_size') and self._pending_zoom_thumbnail_size:
+                    thumb_size = self._pending_zoom_thumbnail_size
+                    scale_x = pixmap.width() / thumb_size.width() if thumb_size.width() > 0 else 1.0
+                    scale_y = pixmap.height() / thumb_size.height() if thumb_size.height() > 0 else 1.0
+                    self.zoom_center_point = QPoint(
+                        int(self._pending_zoom_center.x() * scale_x),
+                        int(self._pending_zoom_center.y() * scale_y)
+                    )
+                    logger.debug(f"[DISPLAY_PIXMAP] Scaled zoom center from {self._pending_zoom_center} to {self.zoom_center_point}")
 
-            self.fit_to_window = False
-            self.current_zoom_level = 1.0
-            self.zoom_to_point()
-            
-            # Clear pending flags
-            self._pending_zoom = False
-            self._pending_zoom_center = None
-            self._pending_zoom_thumbnail_size = None
+                self.fit_to_window = False
+                self.current_zoom_level = 1.0
+                self.zoom_to_point()
+                
+                # Clear pending flags
+                self._pending_zoom = False
+                self._pending_zoom_center = None
+                self._pending_zoom_thumbnail_size = None
 
 
         # Update status bar immediately with EXIF data
@@ -16107,7 +16162,8 @@ class RAWImageViewer(QMainWindow):
                 return True
         elif key == Qt.Key.Key_Escape:
             if vm == "single":
-                self.toggle_view_mode()
+                if self._is_exif_sort_ready():
+                    self.toggle_view_mode()
                 return True
         # Handle H (Histogram) separately to ensure it works even when no image is loaded
         # but only in single view mode.
@@ -17775,7 +17831,7 @@ class RAWImageViewer(QMainWindow):
         # Gallery toggle only in single-image mode (in gallery you return by tapping a thumbnail)
         if hasattr(self, 'view_mode_button'):
             self.view_mode_button.setVisible(
-                bool(self.image_files) and self.view_mode == "single"
+                bool(self.image_files) and self.view_mode == "single" and self._is_exif_sort_ready()
             )
         if hasattr(self, "share_bottom_button"):
             vis = bool(self.image_files) and self.view_mode == "single"
@@ -18841,7 +18897,14 @@ class RAWImageViewer(QMainWindow):
         newest_first = self.get_sort_preference()
         viewer = self
 
+        signals = FolderSortRefineSignals()
+        signals.ready.connect(viewer._apply_folder_sort_refinement)
+
         class _FolderSortRefineWorker(QRunnable):
+            def __init__(self_inner):
+                super().__init__()
+                self_inner.signals = signals
+
             def run(self_inner):
                 try:
                     sorted_files, bulk_metadata = viewer.sort_files_by_capture_time(
@@ -18849,15 +18912,39 @@ class RAWImageViewer(QMainWindow):
                         newest_first=newest_first,
                         file_stats=file_stats,
                     )
-                except Exception:
+                except Exception as e:
+                    import logging
+                    import traceback
+                    logging.getLogger(__name__).error(
+                        f"[SORT_REFINE] Exception in background refinement sort: {e}\n{traceback.format_exc()}"
+                    )
                     return
 
-                def _apply():
-                    viewer._apply_folder_sort_refinement(token, sorted_files, bulk_metadata)
+                self_inner.signals.ready.emit(token, sorted_files, bulk_metadata)
 
-                QTimer.singleShot(0, _apply)
+        def _start_worker():
+            if token != getattr(viewer, "_folder_load_generation", None):
+                return
+            QThreadPool.globalInstance().start(_FolderSortRefineWorker())
 
-        QThreadPool.globalInstance().start(_FolderSortRefineWorker())
+        # If we are fast-opening a single file, delay the worker startup by 2.5 seconds to
+        # allow the initial image to load quickly without I/O contention.
+        if getattr(self, "_folder_fast_open_token", None) == token:
+            import logging
+            logging.getLogger(__name__).info(
+                "[FOLDER] Delaying EXIF sort refinement background threads by 2.5s for fast-open load prioritization"
+            )
+            QTimer.singleShot(2500, viewer, _start_worker)
+        else:
+            _start_worker()
+
+    def _is_exif_sort_ready(self) -> bool:
+        """Check if the EXIF capture-time sort is ready/applied for the current folder."""
+        current_gen = getattr(self, "_folder_load_generation", None)
+        refinement_applied = (
+            getattr(self, "_folder_sort_refinement_applied_token", None) == current_gen
+        )
+        return refinement_applied or len(getattr(self, "image_files", [])) <= 1
 
     def _apply_folder_sort_refinement(self, token: int, sorted_files: list, bulk_metadata: dict) -> None:
         if token != getattr(self, "_folder_load_generation", None):
@@ -18868,6 +18955,7 @@ class RAWImageViewer(QMainWindow):
             return
         preserved = self.current_file_path
         self.image_files = sorted_files
+        self._folder_sort_refinement_applied_token = token
         self._semantic_search_corpus_files = list(sorted_files)
         self._gallery_search_index_session_key = None
         if bulk_metadata:
@@ -18881,6 +18969,8 @@ class RAWImageViewer(QMainWindow):
                     break
         self._sync_filmstrip_to_folder()
         self.update_status_bar()
+        if hasattr(self, "status_bar") and self.status_bar:
+            self.status_bar.showMessage("Folder sorted by capture time (EXIF)", 3000)
         if getattr(self, "view_mode", "single") == "gallery":
             self._update_gallery_view()
 
@@ -19149,6 +19239,7 @@ class RAWImageViewer(QMainWindow):
 
             self._folder_load_generation = getattr(self, "_folder_load_generation", 0) + 1
             token = self._folder_load_generation
+            self._folder_sort_refinement_applied_token = None
             extensions = set(self.get_supported_extensions())
             newest_first = self.get_sort_preference()
 
@@ -19241,13 +19332,20 @@ class RAWImageViewer(QMainWindow):
                                 from image_cache import get_image_cache
                                 cache = get_image_cache()
                                 bulk_metadata = cache.get_multiple_exif(image_files, file_stats)
+                                probed_timestamps = viewer._parallel_probe_capture_times(image_files, bulk_metadata)
 
                                 sort_keys = {}
                                 for fp in image_files:
                                     meta = bulk_metadata.get(fp)
                                     mtime = file_stats.get(fp, (0, 0))[1]
-                                    timestamp = capture_timestamp_for_sort(
-                                        fp, meta, mtime, probe_file=True
+                                    probed_ts = probed_timestamps.get(fp, 0.0)
+                                    from common_image_loader import resolve_folder_sort_timestamp
+                                    _has_capture, timestamp, _source = resolve_folder_sort_timestamp(
+                                        fp,
+                                        metadata=meta,
+                                        file_mtime=mtime,
+                                        probe_file=False,
+                                        probed_capture_timestamp=probed_ts
                                     )
                                     base_name = os.path.basename(fp).lower()
                                     stem = os.path.splitext(base_name)[0]
