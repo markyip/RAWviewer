@@ -6930,6 +6930,7 @@ class RAWImageViewer(QMainWindow):
         if not self.current_pixmap or self.current_pixmap.isNull():
             if getattr(self, "current_file_path", None):
                 self._pending_zoom_toggle = True
+                self._pending_zoom_target_path = self.current_file_path
                 self._pending_gpu_zoom_point = scene_pt
                 logger.info(
                     "GPU double-click recorded while image is loading; will zoom once ready."
@@ -12934,6 +12935,7 @@ class RAWImageViewer(QMainWindow):
             if not self.current_pixmap:
                 if hasattr(self, 'current_file_path') and self.current_file_path:
                     self._pending_zoom_toggle = True
+                    self._pending_zoom_target_path = self.current_file_path
                     self._pending_zoom_pos = event.pos()
                     import logging
                     logging.getLogger(__name__).info(
@@ -13637,8 +13639,19 @@ class RAWImageViewer(QMainWindow):
                 logger.debug("Clearing _pending_zoom_level")
                 delattr(self, '_pending_zoom_level')
             self._pending_zoom = False
-            if hasattr(self, "_pending_zoom_toggle"):
+            # Keep user-requested pending zoom for the same file currently loading.
+            pending_zoom_target = getattr(self, "_pending_zoom_target_path", None)
+            same_pending_target = (
+                bool(pending_zoom_target)
+                and _norm_path(str(pending_zoom_target)) == _norm_path(str(requested_file_path))
+            )
+            if hasattr(self, "_pending_zoom_toggle") and not same_pending_target:
                 self._pending_zoom_toggle = False
+                if hasattr(self, "_pending_zoom_target_path"):
+                    try:
+                        delattr(self, "_pending_zoom_target_path")
+                    except AttributeError:
+                        pass
             if hasattr(self, "_pending_gpu_zoom_point"):
                 try:
                     delattr(self, "_pending_gpu_zoom_point")
@@ -14965,6 +14978,11 @@ class RAWImageViewer(QMainWindow):
                 self._gpu_zoom_in_to_point_finish()
             elif getattr(self, "_pending_zoom_toggle", False):
                 self._pending_zoom_toggle = False
+                if hasattr(self, "_pending_zoom_target_path"):
+                    try:
+                        delattr(self, "_pending_zoom_target_path")
+                    except AttributeError:
+                        pass
                 if getattr(self, "zoom_center_point", None) is not None:
                     self._gpu_zoom_in_to_point_finish()
                 elif gv.wants_zoom_in_toggle():
@@ -14985,6 +15003,11 @@ class RAWImageViewer(QMainWindow):
         if hasattr(self, '_pending_zoom_toggle') and self._pending_zoom_toggle:
             logger.info("[DISPLAY_PIXMAP] Handling pending zoom toggle")
             self._pending_zoom_toggle = False
+            if hasattr(self, "_pending_zoom_target_path"):
+                try:
+                    delattr(self, "_pending_zoom_target_path")
+                except AttributeError:
+                    pass
             
             if hasattr(self, '_pending_zoom_pos'):
                 # Zoom to the recorded point instead of center
@@ -17030,6 +17053,7 @@ class RAWImageViewer(QMainWindow):
             if hasattr(self, 'current_file_path') and self.current_file_path:
                 # Always set the pending flag so we don't drop the user's spacebar press
                 self._pending_zoom_toggle = True
+                self._pending_zoom_target_path = self.current_file_path
                 logger.debug("Pixmap not ready yet or still loading, will toggle zoom once image is loaded")
                 return
             return
