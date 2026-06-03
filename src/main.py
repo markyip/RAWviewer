@@ -6270,6 +6270,8 @@ class RAWImageViewer(QMainWindow):
         self._gallery_metadata_fetch_in_progress = False
         self._navigation_in_progress = False  # Flag to prevent overlapping navigations
         self._last_navigation_time = 0  # Timestamp of last navigation for rate limiting
+        self._nav_coalesce_delta = 0
+        self._nav_coalesce_timer = None
         # Navigate while zoomed: request full decode first & apply one-step zoom restore
         self._preserve_nav_zoom_active = False
 
@@ -6557,6 +6559,20 @@ class RAWImageViewer(QMainWindow):
             return _env_int("RAWVIEWER_NAV_PREVIEW_MIN_DIM", 512, minimum=256)
         return _env_int("RAWVIEWER_GALLERY_INSTANT_MIN_DIM", 1400, minimum=400)
 
+    def _preview_acceptable_for_single_view(
+        self,
+        image,
+        *,
+        file_path: str | None = None,
+        context: str = "display",
+    ) -> bool:
+        """Whether a cached buffer may be painted (navigation=512+, display=1400+)."""
+        for_navigation = str(context or "").strip().lower() == "navigation"
+        min_dim = self._single_view_cache_min_dim(for_navigation=for_navigation)
+        return self._cache_buffer_suitable_for_single_view(
+            image, min_dim=min_dim, file_path=file_path
+        )
+
     def _cache_buffer_suitable_for_single_view(
         self, image, *, min_dim: int | None = None, file_path: str | None = None
     ) -> bool:
@@ -6599,22 +6615,22 @@ class RAWImageViewer(QMainWindow):
         logger = logging.getLogger(__name__)
         if not file_path or self._single_view_pixels_on_screen(file_path):
             return bool(file_path) and self._single_view_pixels_on_screen(file_path)
-        min_dim = self._single_view_cache_min_dim(for_navigation=True)
         try:
             preview = self.image_cache.get_preview(file_path)
             if preview is not None:
-                if self._cache_buffer_suitable_for_single_view(
-                    preview, min_dim=min_dim, file_path=file_path
+                if self._preview_acceptable_for_single_view(
+                    preview, file_path=file_path, context="navigation"
                 ):
                     return self._display_cached_numpy_for_path(
                         file_path, preview, from_cache="quality_preview"
                     )
                 px = self._cache_buffer_max_dim(preview)
+                nav_min = self._single_view_cache_min_dim(for_navigation=True)
                 logger.info(
                     "[LOAD] Skipping low-res preview cache (%dpx < %d) for %s; "
                     "waiting for embedded thumbnail/full",
                     px,
-                    min_dim,
+                    nav_min,
                     os.path.basename(file_path),
                 )
         except Exception:
@@ -7705,7 +7721,6 @@ class RAWImageViewer(QMainWindow):
         self._skip_resolution_crossfade_once = True
         self._gallery_preview_pending_full = False
         self._clear_pending_resolution_crossfade()
-        nav_min = self._single_view_cache_min_dim(for_navigation=True)
         try:
             full = self.image_cache.get_full_image(file_path)
             if full is not None:
@@ -7716,8 +7731,8 @@ class RAWImageViewer(QMainWindow):
             pass
         try:
             preview = self.image_cache.get_preview(file_path)
-            if preview is not None and self._cache_buffer_suitable_for_single_view(
-                preview, min_dim=nav_min, file_path=file_path
+            if preview is not None and self._preview_acceptable_for_single_view(
+                preview, file_path=file_path, context="navigation"
             ):
                 return self._display_cached_numpy_for_path(
                     file_path, preview, from_cache="nav_preview"
@@ -15140,8 +15155,8 @@ class RAWImageViewer(QMainWindow):
             _prev_fp = getattr(self, "current_file_path", None)
             _same_path_reload = _prev_fp and _norm_path(_prev_fp) == _norm_path(requested_file_path)
             if _prev_fp and not _same_path_reload:
-                # Drop in-flight work for the file we left, not the one we are opening.
-                self.image_manager.cancel_task(_prev_fp)
+                # Drop CURRENT work for the file we left; keep PRELOAD/BACKGROUND prefetch.
+                self.image_manager.cancel_current_priority_tasks(_prev_fp)
                 self._single_view_display_generation = int(
                     getattr(self, "_single_view_display_generation", 0)
                 ) + 1
@@ -15233,13 +15248,10 @@ class RAWImageViewer(QMainWindow):
             cache_check_time = 0.0
 
             preview_cached = self.image_cache.get_preview(requested_file_path)
-            preview_min_dim = self._single_view_cache_min_dim(
-                for_navigation=_is_single_view_step
-            )
-            if preview_cached is not None and not self._cache_buffer_suitable_for_single_view(
+            if preview_cached is not None and not self._preview_acceptable_for_single_view(
                 preview_cached,
-                min_dim=preview_min_dim,
                 file_path=requested_file_path,
+                context="navigation" if _is_single_view_step else "display",
             ):
                 px = self._cache_buffer_max_dim(preview_cached)
                 logger.info(
@@ -17024,7 +17036,8 @@ class RAWImageViewer(QMainWindow):
         return _env_int("RAWVIEWER_NAV_PRELOAD_NEAR", 2, minimum=1)
 
     def _needs_display_buffer_prefetch(self, file_path: str, *, zoomed: bool) -> bool:
-        if self._display_quality_buffer_cached(file_path, min_dim=1200 if not zoomed else 2800):
+        min_dim = 2800 if zoomed else self._single_view_cache_min_dim(for_navigation=False)
+        if self._display_quality_buffer_cached(file_path, min_dim=min_dim):
             return False
         cached_item, _cache_type = check_memory_cache_for_image(
             file_path, use_full_resolution=zoomed
@@ -17040,13 +17053,66 @@ class RAWImageViewer(QMainWindow):
     ) -> None:
         if not self._needs_display_buffer_prefetch(file_path, zoomed=zoomed):
             return
+        if zoomed:
+            stages = {"exif", "full"}
+            use_full = True
+        else:
+            # Fit-mode navigation: warm ~1920px embedded preview, not sensor full decode.
+            stages = {"thumbnail"}
+            use_full = False
         self.image_manager.load_image(
             file_path=file_path,
             priority=priority,
             cancel_existing=False,
-            use_full_resolution=zoomed,
-            stages={"exif", "full"},
+            use_full_resolution=use_full,
+            stages=stages,
         )
+
+    def _paths_within_nav_prefetch_radius(
+        self, center_index: int | None = None
+    ) -> list[str]:
+        if not self.image_files or self.current_file_index < 0:
+            return []
+        idx = self.current_file_index if center_index is None else center_index
+        if idx < 0 or idx >= len(self.image_files):
+            return []
+        radius = self._nav_preload_display_radius()
+        n = len(self.image_files)
+        out: list[str] = []
+        seen = set()
+        for step in range(1, radius + 1):
+            for j in ((idx + step) % n, (idx - step) % n):
+                key = _norm_path(self.image_files[j])
+                if key not in seen:
+                    seen.add(key)
+                    out.append(self.image_files[j])
+        return out
+
+    def _queue_display_tier_prefetch_for_paths(self, paths) -> None:
+        """Background embedded-preview decode for navigation neighbors (not sensor full)."""
+        from image_load_manager import Priority
+
+        for path in paths or []:
+            if not path:
+                continue
+            try:
+                if not is_raw_file(path):
+                    continue
+            except Exception:
+                continue
+            if self._display_quality_buffer_cached(
+                path, min_dim=self._single_view_cache_min_dim(for_navigation=False)
+            ):
+                continue
+            if self.image_manager.has_active_work_for_path(path):
+                continue
+            self.image_manager.load_image(
+                path,
+                priority=Priority.BACKGROUND,
+                cancel_existing=False,
+                use_full_resolution=False,
+                stages={"thumbnail"},
+            )
 
     def _preload_adjacent_display_buffers(self):
         """Prefetch adjacent display buffers (embedded preview / half-res) for navigation."""
@@ -17197,6 +17263,12 @@ class RAWImageViewer(QMainWindow):
             pass
         QTimer.singleShot(0, self._prefetch_filmstrip_thumbnails)
         self._schedule_idle_display_prefetch()
+        try:
+            self._queue_display_tier_prefetch_for_paths(
+                self._paths_within_nav_prefetch_radius()
+            )
+        except Exception:
+            pass
         from semantic_search import metadata_auto_index_enabled
         if metadata_auto_index_enabled():
             if not self._semantic_indexing_in_progress and not getattr(self, "_semantic_index_prep_in_progress", False):
@@ -18206,15 +18278,64 @@ class RAWImageViewer(QMainWindow):
         return True
     
     def _debounced_navigate(self, direction, from_slideshow=False):
-        """Navigate immediately on key press (no debounce delay)."""
+        """Navigate on key/wheel; coalesce rapid steps when enabled."""
         if not from_slideshow:
             self._stop_slideshow()
+        if from_slideshow:
+            if direction == "prev":
+                self.navigate_to_previous_image()
+            elif direction == "next":
+                self.navigate_to_next_image()
+            return
+        delta = -1 if direction == "prev" else 1
+        self._schedule_coalesced_navigation(delta)
 
-        if direction == "prev":
-            self.navigate_to_previous_image()
-        elif direction == "next":
+    def _schedule_coalesced_navigation(self, delta: int) -> None:
+        from PyQt6.QtCore import QTimer
+
+        self._nav_coalesce_delta = int(getattr(self, "_nav_coalesce_delta", 0)) + int(
+            delta
+        )
+        ms = _env_int("RAWVIEWER_NAV_COALESCE_MS", 100, minimum=0)
+        if ms <= 0:
+            self._flush_coalesced_navigation()
+            return
+        timer = getattr(self, "_nav_coalesce_timer", None)
+        if timer is None:
+            timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.timeout.connect(self._flush_coalesced_navigation)
+            self._nav_coalesce_timer = timer
+        timer.start(ms)
+
+    def _flush_coalesced_navigation(self) -> None:
+        import logging
+
+        logger = logging.getLogger(__name__)
+        delta = int(getattr(self, "_nav_coalesce_delta", 0))
+        self._nav_coalesce_delta = 0
+        if delta == 0 or not self.image_files or len(self.image_files) <= 1:
+            return
+        if not self.can_navigate():
+            return
+        n = len(self.image_files)
+        old_index = int(self.current_file_index)
+        new_index = (old_index + delta) % n
+        if new_index == old_index:
+            return
+        logger.info(
+            "[NAV] Coalesced %d step(s): index %d -> %d",
+            abs(delta),
+            old_index,
+            new_index,
+        )
+        if delta > 0:
+            self.current_file_index = (new_index - 1) % n
             self.navigate_to_next_image()
-    
+        else:
+            self.current_file_index = (new_index + 1) % n
+            self.navigate_to_previous_image()
+
     def start_navigation(self):
         """Mark navigation as started"""
         import time
@@ -18227,6 +18348,8 @@ class RAWImageViewer(QMainWindow):
         self._navigation_in_progress = True
         self._last_navigation_time = current_time
         self._cancel_content_crossfade()
+        self._skip_resolution_crossfade_once = True
+        self._clear_pending_resolution_crossfade()
         logger.debug(f"[NAV_START] Navigation flag set - _navigation_in_progress={self._navigation_in_progress}, "
                     f"_last_navigation_time={self._last_navigation_time:.3f}")
     
@@ -18782,10 +18905,7 @@ class RAWImageViewer(QMainWindow):
 
     def _on_gpu_wheel_navigate(self, direction: int):
         """Plain wheel while fit-to-window navigates images (legacy parity)."""
-        if direction > 0:
-            self.navigate_to_next_image()
-        else:
-            self.navigate_to_previous_image()
+        self._schedule_coalesced_navigation(1 if direction > 0 else -1)
 
     def _on_gpu_fit_mode_changed(self, fit_mode: bool):
         # Keep legacy state roughly in sync for any code that still reads it.
@@ -20930,6 +21050,17 @@ class RAWImageViewer(QMainWindow):
         )
         if len(image_files) > 1:
             self._schedule_folder_sort_refinement(token, file_stats)
+        try:
+            from PyQt6.QtCore import QTimer
+
+            QTimer.singleShot(
+                0,
+                lambda: self._queue_display_tier_prefetch_for_paths(
+                    self._paths_within_nav_prefetch_radius(self.current_file_index)
+                ),
+            )
+        except Exception:
+            pass
 
     def _apply_instant_single_file_open(
         self,

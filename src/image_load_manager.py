@@ -563,6 +563,22 @@ class ImageLoadManager(QObject):
                 if task is not None:
                     task.cancel()
             self._task_keys_by_path.pop(file_path, None)
+
+    def cancel_current_priority_tasks(self, file_path: str) -> None:
+        """Cancel only CURRENT-priority work; keep PRELOAD/BACKGROUND prefetch for that path."""
+        if not file_path:
+            return
+        with self._queue_lock:
+            keys = list(self._task_keys_by_path.get(file_path, ()))
+            for key in keys:
+                task = self._active_tasks.get(key)
+                if task is None or task.priority != Priority.CURRENT:
+                    continue
+                task.cancel()
+                self._active_tasks.pop(key, None)
+                self._task_keys_by_path[file_path].discard(key)
+            if not self._task_keys_by_path.get(file_path):
+                self._task_keys_by_path.pop(file_path, None)
     
     def cancel_all_tasks(self):
         """取消所有任務"""
