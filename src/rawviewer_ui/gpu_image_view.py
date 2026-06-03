@@ -329,9 +329,64 @@ class GpuImageView(QGraphicsView):
         y = max(0.0, min(float(scene_y), max(0, self._img_h - 1)))
         self.resetTransform()
         self.scale(1.0, 1.0)
+        
+        # Ensure scrollbars are updated based on the new scale
+        from PyQt6.QtCore import QEventLoop
+        from PyQt6.QtWidgets import QApplication
+
+        QApplication.processEvents(
+            QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents
+        )
+        
         self.centerOn(QPointF(x, y))
+            
         self.fitModeChanged.emit(False)
         self.zoomChanged.emit(1.0)
+
+    def set_pixmap_zoomed_at(
+        self,
+        pixmap: QPixmap,
+        scene_x: float,
+        scene_y: float,
+        *,
+        scale: float = 1.0,
+    ) -> None:
+        """Replace the image and apply zoom in one step (avoids a wrong-frame flash)."""
+        if pixmap is None or pixmap.isNull():
+            self.set_pixmap(QPixmap())
+            return
+        new_w, new_h = pixmap.width(), pixmap.height()
+        self._item.setPixmap(pixmap)
+        self._item.setOffset(0, 0)
+        self._scene.setSceneRect(QRectF(0, 0, new_w, new_h))
+        self._img_w, self._img_h = new_w, new_h
+        self._has_pixmap = True
+        self._fit_mode = False
+        self._zoom_intent_100 = False
+        self._update_placeholder()
+        fit = self.fit_scale()
+        s = float(scale)
+        if s <= fit * self._FIT_SCALE_EPS:
+            self.fit_to_window()
+            return
+        s = max(fit, min(self.MAX_SCALE, s))
+        x = max(0.0, min(float(scene_x), max(0, new_w - 1)))
+        y = max(0.0, min(float(scene_y), max(0, new_h - 1)))
+        self.resetTransform()
+        self.scale(s, s)
+        
+        # Ensure scrollbars are updated based on the new scale
+        from PyQt6.QtCore import QEventLoop
+        from PyQt6.QtWidgets import QApplication
+
+        QApplication.processEvents(
+            QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents
+        )
+        
+        self.centerOn(QPointF(x, y))
+            
+        self.fitModeChanged.emit(False)
+        self.zoomChanged.emit(self.current_scale())
 
     def center_on_image_point(self, scene_x: float, scene_y: float) -> None:
         """Pan so an image pixel is centered without changing zoom scale."""

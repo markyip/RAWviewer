@@ -743,11 +743,17 @@ def global_exception_handler(exc_type, exc_value, exc_traceback):
     from datetime import datetime
 
     # Format the traceback
-    tb_text = "".join(traceback.format_exception(exc_type, exc_value, exc_traceback))
-    
-    # Try logging via the standard logger first
-    logger = logging.getLogger(__name__)
-    logger.critical("Uncaught Exception:\n" + tb_text)
+    try:
+        tb_text = "".join(traceback.format_exception(exc_type, exc_value, exc_traceback))
+    except Exception:
+        tb_text = f"{exc_type}: {exc_value}\n(logging traceback failed)\n"
+
+    # Try logging via the standard logger first (filters can recurse on some errors).
+    try:
+        logger = logging.getLogger(__name__)
+        logger.critical("Uncaught Exception:\n" + tb_text)
+    except Exception:
+        safe_print_err("Uncaught Exception:\n" + tb_text)
     
     # Write to a persistent crash report file in LocalAppData
     try:
@@ -4432,12 +4438,14 @@ class CustomConfirmDialog(QDialog):
         confirm_action: str = "Delete",
     ):
         super().__init__(parent)
-        self.setWindowFlags(
-            Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint
-        )
+        flags = Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint
+        if sys.platform == "darwin":
+            flags |= Qt.WindowType.WindowStaysOnTopHint
+        self.setWindowFlags(flags)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setModal(True)
         self._app_state_connected = False
+        self._ignore_app_inactive_until = 0.0
 
         self.container = QWidget(self)
         self.container.setObjectName("confirmDialogContainer")
@@ -4679,7 +4687,12 @@ class CustomConfirmDialog(QDialog):
 
     def showEvent(self, event):
         super().showEvent(event)
+        _activate_macos_foreground_app()
+        self.raise_()
+        self.activateWindow()
         self.cancel_btn.setFocus(Qt.FocusReason.OtherFocusReason)
+        # macOS: parent deactivation briefly marks the app inactive when a modal opens.
+        self._ignore_app_inactive_until = time.monotonic() + 0.75
         app = QApplication.instance()
         if app and not self._app_state_connected:
             app.applicationStateChanged.connect(self._on_application_state_changed)
@@ -4696,14 +4709,19 @@ class CustomConfirmDialog(QDialog):
         super().hideEvent(event)
 
     def _on_application_state_changed(self, state) -> None:
-        # Close only when the whole app loses focus (another app), not when this
-        # modal dialog opens and the parent window deactivates.
+        # Do not auto-close on ApplicationInactive — macOS fires that when the modal
+        # opens and the main window loses activation (looks like Delete does nothing).
         if not self.isVisible():
             return
-        if state in (
-            Qt.ApplicationState.ApplicationInactive,
-            Qt.ApplicationState.ApplicationHidden,
-        ):
+        if state == Qt.ApplicationState.ApplicationHidden:
+            self.reject()
+            return
+        if state == Qt.ApplicationState.ApplicationInactive:
+            if time.monotonic() < getattr(self, "_ignore_app_inactive_until", 0.0):
+                return
+            # Ignore transient inactive while this dialog is the active modal.
+            if self.isActiveWindow() or self.isVisible():
+                return
             self.reject()
 
     def keyPressEvent(self, event):
@@ -6207,6 +6225,7 @@ class RAWImageViewer(QMainWindow):
         self.current_zoom_level = 1.0  # Current zoom level (1.0 = 100%)
         self.fit_to_window = True  # Whether we're in fit-to-window mode
         self.zoom_center_point = None  # Store center point for zooming
+        self._pending_zoom_focus_subject = False  # Space+focus box zoom waiting for full-res
 
         self._is_half_size_displayed = False  # Track if currently displaying half_size image
         self._full_resolution_loading = False  # Track if full resolution is being loaded
@@ -6335,6 +6354,7 @@ class RAWImageViewer(QMainWindow):
         safe_print("  [RAWImageViewer] PreloadManager initialized", flush=True)
         self.current_processor = None  # Legacy support - will be phased out
         self._pending_thumbnail = None  # Store thumbnail when not immediately displayed
+        self._preview_upgrade_attempted_paths: set[str] = set()
         self._exif_data_ready = False  # Flag to track if EXIF data is available
         
         # Initialize new unified image load manager
@@ -6652,9 +6672,7 @@ class RAWImageViewer(QMainWindow):
 
         def _refit() -> None:
             try:
-                if gv.has_pixmap() and (
-                    gv.is_fit_mode() or gv.is_at_fit_scale()
-                ):
+                if gv.has_pixmap() and self._single_view_is_fit_mode():
                     gv.fit_to_window()
             except Exception:
                 pass
@@ -7231,6 +7249,38 @@ class RAWImageViewer(QMainWindow):
             return gv.is_fit_mode()
         return bool(getattr(self, "fit_to_window", True))
 
+    def _single_view_is_zoomed_in(self) -> bool:
+        return not self._single_view_is_fit_mode()
+
+    def _preserve_zoom_navigation_active(self) -> bool:
+        """True while arrow/filmstrip nav should keep zoom and avoid soft preview tiers."""
+        return bool(
+            getattr(self, "_preserve_nav_zoom_active", False)
+            or getattr(self, "_maintain_zoom_on_navigation", False)
+        )
+
+    def _upgrade_display_quality_on_fit_if_needed(self) -> None:
+        """After zoom-out to fit, replace a soft buffer with cached or queued sensor full."""
+        if getattr(self, "view_mode", "single") != "single":
+            return
+        if not self._needs_full_resolution_upgrade():
+            return
+        fp = getattr(self, "current_file_path", None)
+        if not fp:
+            return
+        try:
+            cached_full = self.image_cache.get_full_image(fp)
+            if cached_full is not None and hasattr(cached_full, "shape"):
+                ch, cw = cached_full.shape[0], cached_full.shape[1]
+                exif = self.image_cache.get_exif(fp)
+                if image_covers_sensor_resolution(cw, ch, exif):
+                    self._orientation_already_applied = True
+                    self.display_numpy_image(cached_full)
+                    return
+        except Exception:
+            pass
+        self._queue_sensor_full_decode(fp, priority_current=True)
+
     def _gpu_zoom_in_to_point_finish(self) -> None:
         """Apply 100% zoom centered on ``zoom_center_point`` in GPU view."""
         gv = getattr(self, "gpu_view", None)
@@ -7244,6 +7294,7 @@ class RAWImageViewer(QMainWindow):
         gv.zoom_to_actual_at(float(pt.x()), float(pt.y()))
         self.fit_to_window = False
         self.current_zoom_level = float(gv.current_scale())
+        self._pending_zoom_focus_subject = False
         self._gpu_request_full_resolution_if_needed()
         self.update_status_bar()
 
@@ -7301,6 +7352,7 @@ class RAWImageViewer(QMainWindow):
         self._stop_slideshow()
         self._recenter_on_focus_after_nav = False
         self.zoom_center_point = QPoint(cx, cy)
+        self._pending_zoom_focus_subject = True
         gv = getattr(self, "gpu_view", None)
         if gv is not None and gv.has_pixmap():
             if gv.is_fit_mode():
@@ -7395,6 +7447,160 @@ class RAWImageViewer(QMainWindow):
             pass
         except Exception:
             pass
+
+    def _resolve_pending_zoom_center_for_pixmap(self, pixmap) -> QPoint | None:
+        """Map a deferred zoom target into *pixmap* pixel coordinates."""
+        if pixmap is None or pixmap.isNull():
+            return None
+        if getattr(self, "_pending_zoom_focus_subject", False):
+            if getattr(self, "_focus_subject_outline_active", False):
+                self._refresh_focus_subject_rect_from_exif()
+                rect = getattr(self, "_focus_subject_rect_image", None)
+                if (
+                    rect is not None
+                    and not rect.isNull()
+                    and rect.width() >= 1
+                    and rect.height() >= 1
+                ):
+                    return QPoint(
+                        rect.left() + rect.width() // 2,
+                        rect.top() + rect.height() // 2,
+                    )
+        pending = getattr(self, "_pending_zoom_center", None)
+        thumb = getattr(self, "_pending_zoom_thumbnail_size", None)
+        if (
+            pending is not None
+            and thumb is not None
+            and thumb.width() > 0
+            and thumb.height() > 0
+        ):
+            return QPoint(
+                int(pending.x() * pixmap.width() / thumb.width()),
+                int(pending.y() * pixmap.height() / thumb.height()),
+            )
+        if pending is not None:
+            return QPoint(pending.x(), pending.y())
+        return QPoint(pixmap.width() // 2, pixmap.height() // 2)
+
+    def _clear_pending_point_zoom_state(self) -> None:
+        self._pending_zoom = False
+        self._pending_zoom_center = None
+        self._pending_zoom_thumbnail_size = None
+        self._pending_zoom_focus_subject = False
+        gv = getattr(self, "gpu_view", None)
+        if gv is not None:
+            gv._zoom_intent_100 = False
+
+    def _apply_pending_gpu_point_zoom_in_place(self, pixmap, gv) -> bool:
+        """Swap to full pixmap and zoom to the pending target in one step (no corner flash)."""
+        if not getattr(self, "_pending_zoom", False):
+            return False
+        if getattr(self, "_full_resolution_loading", False):
+            return False
+        target = self._resolve_pending_zoom_center_for_pixmap(pixmap)
+        if target is None:
+            return False
+        gv.setUpdatesEnabled(False)
+        try:
+            gv.set_pixmap_zoomed_at(
+                pixmap, float(target.x()), float(target.y()), scale=1.0
+            )
+        finally:
+            gv.setUpdatesEnabled(True)
+        self.zoom_center_point = target
+        self.fit_to_window = False
+        self.current_zoom_level = float(gv.current_scale())
+        self._clear_pending_point_zoom_state()
+        return True
+
+    def _gpu_zoom_anchor_for_navigation_restore(self) -> QPoint:
+        """Viewport-centered image pixel for GPU navigation zoom preservation."""
+        if self.zoom_center_point is not None:
+            return QPoint(self.zoom_center_point)
+        gv = getattr(self, "gpu_view", None)
+        pm = getattr(self, "current_pixmap", None)
+        if gv is not None and gv.has_pixmap():
+            try:
+                center_scene = gv.mapToScene(gv.viewport().rect().center())
+                w, h = gv.image_size()
+                if w > 0 and h > 0:
+                    return QPoint(
+                        max(0, min(int(center_scene.x()), w - 1)),
+                        max(0, min(int(center_scene.y()), h - 1)),
+                    )
+            except Exception:
+                pass
+        if pm is not None and not pm.isNull():
+            return QPoint(pm.width() // 2, pm.height() // 2)
+        return QPoint(0, 0)
+
+    def _apply_gpu_navigation_zoom_restore(self, pixmap, gv) -> bool:
+        """Restore zoom level/center on a new file in the GPU view."""
+        preserve = bool(
+            getattr(self, "_preserve_nav_zoom_active", False)
+            or getattr(self, "_maintain_zoom_on_navigation", False)
+        )
+        if not preserve:
+            return False
+
+        eff_level = getattr(self, "_restore_zoom_level", None)
+        if eff_level is None:
+            eff_level = getattr(self, "current_zoom_level", 1.0)
+
+        eff_center = getattr(self, "_restore_zoom_center", None)
+        if eff_center is None:
+            eff_center = getattr(self, "zoom_center_point", None)
+
+        old_size = getattr(self, "_restore_pixmap_size", None)
+        if (
+            eff_center is not None
+            and old_size is not None
+            and pixmap is not None
+            and not pixmap.isNull()
+            and old_size.width() > 0
+            and old_size.height() > 0
+            and (
+                old_size.width() != pixmap.width()
+                or old_size.height() != pixmap.height()
+            )
+        ):
+            sx = pixmap.width() / old_size.width()
+            sy = pixmap.height() / old_size.height()
+            eff_center = QPoint(int(eff_center.x() * sx), int(eff_center.y() * sy))
+
+        if eff_center is None and pixmap is not None and not pixmap.isNull():
+            eff_center = QPoint(pixmap.width() // 2, pixmap.height() // 2)
+
+        gv.setUpdatesEnabled(False)
+        try:
+            fit = gv.fit_scale()
+            level = float(eff_level or 1.0)
+            if level <= fit * gv._FIT_SCALE_EPS:
+                gv.set_pixmap(pixmap, preserve_view=False)
+                gv.fit_to_window()
+                self.fit_to_window = True
+                self.current_zoom_level = float(gv.current_scale())
+            else:
+                target_scale = max(fit, min(gv.MAX_SCALE, level))
+                gv.set_pixmap_zoomed_at(
+                    pixmap,
+                    float(eff_center.x()),
+                    float(eff_center.y()),
+                    scale=target_scale,
+                )
+                self.fit_to_window = False
+                self.current_zoom_level = float(gv.current_scale())
+            self.zoom_center_point = eff_center
+        finally:
+            gv.setUpdatesEnabled(True)
+
+        self._restore_zoom_center = None
+        self._restore_zoom_level = None
+        self._restore_pixmap_size = None
+        self._restore_start_scroll_x = None
+        self._restore_start_scroll_y = None
+        self._finish_nav_zoom_preserve()
+        return True
 
     def _sync_focus_subject_outline_after_display(self) -> None:
         if (
@@ -7608,6 +7814,9 @@ class RAWImageViewer(QMainWindow):
 
         if not file_path:
             return
+        if self._preserve_zoom_navigation_active() or self._single_view_is_zoomed_in():
+            self._queue_sensor_full_decode(file_path, priority_current=True)
+            return
         delay_ms = _env_int("RAWVIEWER_NAV_IDLE_FULL_MS", 1200, minimum=400)
         self._nav_idle_full_generation = int(
             getattr(self, "_nav_idle_full_generation", 0)
@@ -7735,6 +7944,10 @@ class RAWImageViewer(QMainWindow):
         """Request embedded thumbnail / preview upgrade for the current single-view file."""
         if not file_path or not is_raw_file(file_path):
             return
+        norm_fp = _norm_path(file_path)
+        if norm_fp in getattr(self, "_preview_upgrade_attempted_paths", set()):
+            return
+        self._preview_upgrade_attempted_paths.add(norm_fp)
         try:
             from image_load_manager import Priority
 
@@ -7743,7 +7956,7 @@ class RAWImageViewer(QMainWindow):
                 priority=Priority.CURRENT,
                 cancel_existing=False,
                 use_full_resolution=False,
-                stages={"thumbnail"},
+                stages={"thumbnail", "exif", "full"},
             )
         except Exception:
             pass
@@ -7752,6 +7965,7 @@ class RAWImageViewer(QMainWindow):
         """Single-view arrow keys / filmstrip: paint prefetched preview or full before decode."""
         if not file_path or getattr(self, "view_mode", "single") != "single":
             return False
+        preserve_zoom = self._preserve_zoom_navigation_active()
         self._skip_resolution_crossfade_once = True
         self._gallery_preview_pending_full = False
         self._clear_pending_resolution_crossfade()
@@ -7763,6 +7977,8 @@ class RAWImageViewer(QMainWindow):
                 )
         except Exception:
             pass
+        if preserve_zoom:
+            return False
         try:
             preview = self.image_cache.get_preview(file_path)
             if preview is not None and self._preview_acceptable_for_single_view(
@@ -7884,36 +8100,7 @@ class RAWImageViewer(QMainWindow):
         if _norm_path(path) == _norm_path(getattr(self, "current_file_path", "")):
             return
             
-        # Maintain zoom state if not in fit-to-window mode
-        if not getattr(self, "fit_to_window", True):
-            self._preserve_nav_zoom_active = True
-            self._maintain_zoom_on_navigation = True
-            if getattr(self, "_focus_subject_outline_active", False):
-                self._recenter_on_focus_after_nav = True
-            if hasattr(self, "_zoom_anchor_for_navigation_restore"):
-                self._restore_zoom_center = self._zoom_anchor_for_navigation_restore()
-            self._restore_zoom_level = getattr(self, "current_zoom_level", 1.0)
-            if getattr(self, "current_pixmap", None):
-                self._restore_pixmap_size = self.current_pixmap.size()
-            try:
-                if not hasattr(self, 'scroll_area') or self.scroll_area is None:
-                    self._restore_start_scroll_x = 0
-                    self._restore_start_scroll_y = 0
-                else:
-                    self._restore_start_scroll_x = self.scroll_area.horizontalScrollBar().value()
-                    self._restore_start_scroll_y = self.scroll_area.verticalScrollBar().value()
-            except Exception:
-                self._restore_start_scroll_x = 0
-                self._restore_start_scroll_y = 0
-        else:
-            self._preserve_nav_zoom_active = False
-            if hasattr(self, '_maintain_zoom_on_navigation'):
-                delattr(self, '_maintain_zoom_on_navigation')
-            self._restore_zoom_center = None
-            self._restore_zoom_level = None
-            self._restore_start_scroll_x = None
-            self._restore_start_scroll_y = None
-                
+        self._capture_nav_zoom_state_before_load()
         self.current_file_index = index
         self._loading_from_filmstrip = True
         self.load_raw_image(path)
@@ -8012,6 +8199,48 @@ class RAWImageViewer(QMainWindow):
         if hasattr(self, 'loading_overlay'):
             self.loading_overlay.hide_loading()
 
+    def _display_low_res_thumbnail_fallback(
+        self, file_path: str, thumbnail, max_dim: int
+    ) -> None:
+        """Paint a small embedded thumb once so TTFR does not stall on upgrade loops."""
+        if getattr(self, "view_mode", "single") != "single":
+            return
+        if _norm_path(file_path) != _norm_path(getattr(self, "current_file_path", None)):
+            return
+        if self._single_view_pixels_on_screen(file_path):
+            return
+        import logging
+
+        logger = logging.getLogger(__name__)
+        try:
+            self._orientation_already_applied = True
+            if isinstance(thumbnail, QImage):
+                self.display_pixmap(QPixmap.fromImage(thumbnail))
+            else:
+                self.display_numpy_image(thumbnail)
+            self._on_single_view_content_displayed()
+            self._manager_displayed_max_dim = max(
+                getattr(self, "_manager_displayed_max_dim", 0), max_dim
+            )
+            if hasattr(self, "loading_overlay"):
+                self.loading_overlay.hide_loading()
+            self.status_bar.showMessage(
+                f"Low-res preview ({max_dim}px) — loading higher quality…"
+            )
+            logger.info(
+                "[MANAGER] Showing interim low-res preview (%dpx) for %s",
+                max_dim,
+                os.path.basename(file_path),
+            )
+        except Exception as exc:
+            logger.debug(
+                "[MANAGER] Interim low-res preview failed for %s: %s",
+                os.path.basename(file_path),
+                exc,
+            )
+        finally:
+            self._orientation_already_applied = False
+
     def on_manager_thumbnail_ready(self, file_path: str, thumbnail):
         """處理 ImageLoadManager 的縮圖就緒信號"""
         import logging
@@ -8065,6 +8294,10 @@ class RAWImageViewer(QMainWindow):
 
         min_display = _env_int("RAWVIEWER_GALLERY_INSTANT_MIN_DIM", 1400, minimum=400)
         if 0 < max_dim < min_display:
+            norm_fp = _norm_path(file_path)
+            upgrade_attempted = norm_fp in getattr(
+                self, "_preview_upgrade_attempted_paths", set()
+            )
             try:
                 from unified_image_processor import UnifiedImageProcessor
 
@@ -8079,10 +8312,24 @@ class RAWImageViewer(QMainWindow):
                     )
                     thumbnail = upgraded
                     max_dim = udim
+                elif upgrade_attempted:
+                    logger.debug(
+                        "[MANAGER] Low-res thumbnail (%dpx) for %s; upgrade already "
+                        "queued — waiting for preview/full",
+                        max_dim,
+                        os.path.basename(file_path),
+                    )
+                    self._pending_thumbnail = thumbnail
+                    if not self._single_view_pixels_on_screen(file_path):
+                        self._display_low_res_thumbnail_fallback(
+                            file_path, thumbnail, max_dim
+                        )
+                    return
                 else:
+                    self._preview_upgrade_attempted_paths.add(norm_fp)
                     logger.info(
                         "[MANAGER] Skipping low-res thumbnail (%dpx) for %s; "
-                        "waiting for upgraded preview/full",
+                        "requesting preview/full decode",
                         max_dim,
                         os.path.basename(file_path),
                     )
@@ -8094,10 +8341,24 @@ class RAWImageViewer(QMainWindow):
                         priority=_Prio.CURRENT,
                         cancel_existing=True,
                         use_full_resolution=False,
-                        stages={"thumbnail"},
+                        stages={"thumbnail", "exif", "full"},
                     )
                     return
             except Exception:
+                if upgrade_attempted:
+                    logger.debug(
+                        "[MANAGER] Low-res thumbnail (%dpx) for %s; waiting for "
+                        "preview/full (upgrade retry already issued)",
+                        max_dim,
+                        os.path.basename(file_path),
+                    )
+                    self._pending_thumbnail = thumbnail
+                    if not self._single_view_pixels_on_screen(file_path):
+                        self._display_low_res_thumbnail_fallback(
+                            file_path, thumbnail, max_dim
+                        )
+                    return
+                self._preview_upgrade_attempted_paths.add(norm_fp)
                 logger.info(
                     "[MANAGER] Skipping low-res thumbnail (%dpx) for %s; waiting for "
                     "embedded preview/full",
@@ -8105,6 +8366,18 @@ class RAWImageViewer(QMainWindow):
                     os.path.basename(file_path),
                 )
                 self._pending_thumbnail = thumbnail
+                from image_load_manager import Priority as _Prio
+
+                try:
+                    self.image_manager.load_image(
+                        file_path,
+                        priority=_Prio.CURRENT,
+                        cancel_existing=True,
+                        use_full_resolution=False,
+                        stages={"thumbnail", "exif", "full"},
+                    )
+                except Exception:
+                    pass
                 return
 
         # If thumbnail is already very large (near full embedded JPEG), skip displaying it and wait for image_ready.
@@ -8223,6 +8496,22 @@ class RAWImageViewer(QMainWindow):
         except Exception:
             pass
         is_full_resolution = image_covers_sensor_resolution(width, height, exif_for_res)
+
+        # Space/double-click deferred zoom: skip intermediate buffers (avoids a
+        # one-frame fit transform on a large pixmap = upper-left flash).
+        if (
+            getattr(self, "_pending_zoom", False)
+            and not is_full_resolution
+            and _norm_path(file_path) == _norm_path(getattr(self, "current_file_path", "") or "")
+        ):
+            logger.info(
+                "[MANAGER] Holding %dx%d buffer — waiting for sensor-res before pending zoom (%s)",
+                width,
+                height,
+                os.path.basename(file_path),
+            )
+            self._orientation_already_applied = False
+            return
         
         if is_full_resolution:
             logger.info(f"[MANAGER] Full-resolution pixels loaded ({width}x{height}).")
@@ -14772,6 +15061,12 @@ class RAWImageViewer(QMainWindow):
             return False
 
         old_size = self.current_pixmap.size() if self.current_pixmap else None
+        self._pending_zoom = True
+        self._pending_zoom_center = getattr(self, "zoom_center_point", None)
+        self._pending_zoom_thumbnail_size = old_size
+        gv = getattr(self, "gpu_view", None)
+        if gv is not None:
+            gv._zoom_intent_100 = True
         self._orientation_already_applied = True
         logger.info(
             "[ZOOM] Upgrading to cached full resolution before 100%% zoom (%s)",
@@ -14802,13 +15097,16 @@ class RAWImageViewer(QMainWindow):
         if not self._needs_full_resolution_upgrade():
             return False
         if self._try_sync_full_before_zoom():
-            return False
+            return True
         if getattr(self, "_full_resolution_loading", False):
             self._pending_zoom = True
             self._pending_zoom_center = getattr(self, "zoom_center_point", None)
             self._pending_zoom_thumbnail_size = (
                 self.current_pixmap.size() if self.current_pixmap else None
             )
+            gv = getattr(self, "gpu_view", None)
+            if gv is not None:
+                gv._zoom_intent_100 = True
             return True
         self._load_full_resolution_on_demand()
         self._pending_zoom = True
@@ -14816,6 +15114,9 @@ class RAWImageViewer(QMainWindow):
         self._pending_zoom_thumbnail_size = (
             self.current_pixmap.size() if self.current_pixmap else None
         )
+        gv = getattr(self, "gpu_view", None)
+        if gv is not None:
+            gv._zoom_intent_100 = True
         self.status_bar.showMessage("Loading full resolution for 100% zoom...")
         return True
 
@@ -15201,13 +15502,26 @@ class RAWImageViewer(QMainWindow):
             if hasattr(self, '_pending_zoom_restore'):
                 logger.debug("Clearing _pending_zoom_restore")
                 delattr(self, '_pending_zoom_restore')
-            if hasattr(self, '_pending_zoom_center'):
-                logger.debug("Clearing _pending_zoom_center")
-                delattr(self, '_pending_zoom_center')
+            # Keep deferred zoom when the same file is upgrading to full resolution.
+            same_file_reload = _norm_path(requested_file_path) == _norm_path(
+                getattr(self, "current_file_path", "") or ""
+            )
+            keep_pending_point_zoom = bool(
+                getattr(self, "_pending_zoom", False) and same_file_reload
+            )
+            if not keep_pending_point_zoom:
+                self._pending_zoom = False
+                if hasattr(self, "_pending_zoom_center"):
+                    logger.debug("Clearing _pending_zoom_center")
+                    delattr(self, "_pending_zoom_center")
+                if hasattr(self, "_pending_zoom_thumbnail_size"):
+                    try:
+                        delattr(self, "_pending_zoom_thumbnail_size")
+                    except AttributeError:
+                        pass
             if hasattr(self, '_pending_zoom_level'):
                 logger.debug("Clearing _pending_zoom_level")
                 delattr(self, '_pending_zoom_level')
-            self._pending_zoom = False
             # Keep user-requested pending zoom for the same file currently loading.
             pending_zoom_target = getattr(self, "_pending_zoom_target_path", None)
             same_pending_target = (
@@ -15221,6 +15535,10 @@ class RAWImageViewer(QMainWindow):
                         delattr(self, "_pending_zoom_target_path")
                     except AttributeError:
                         pass
+            if hasattr(self, "_pending_zoom_focus_subject") and not (
+                same_pending_target or keep_pending_point_zoom
+            ):
+                self._pending_zoom_focus_subject = False
             if hasattr(self, "_pending_gpu_zoom_point"):
                 try:
                     delattr(self, "_pending_gpu_zoom_point")
@@ -15277,6 +15595,7 @@ class RAWImageViewer(QMainWindow):
             np_req = _norm_path(requested_file_path)
             if getattr(self, "_manager_display_track_path", None) != np_req:
                 self._manager_display_track_path = np_req
+                self._preview_upgrade_attempted_paths.discard(np_req)
                 if not self._display_quality_buffer_cached(requested_file_path):
                     self._manager_displayed_max_dim = 0
             
@@ -15346,7 +15665,8 @@ class RAWImageViewer(QMainWindow):
                     f"using embedded thumbnail pipeline"
                 )
                 preview_cached = None
-            if preview_cached is not None:
+            preserve_zoom_navigation = self._preserve_zoom_navigation_active()
+            if preview_cached is not None and not preserve_zoom_navigation:
                 cache_check_time = time.time() - cache_check_start
                 logger.info(
                     f"[LOAD] Cache hit: display preview for {filename}, "
@@ -15506,7 +15826,7 @@ class RAWImageViewer(QMainWindow):
                 # never show a sharpened-zoom on a soft preview followed by another zoom swap.
                 # DNG single-view path is also forced to full-resolution-first to keep
                 # zoom logic deterministic (no preview/full handoff race on first zoom).
-                preserve_zoom_navigation = bool(getattr(self, "_preserve_nav_zoom_active", False))
+                preserve_zoom_navigation = self._preserve_zoom_navigation_active()
                 nav_single_step = (
                     getattr(self, "view_mode", "single") == "single"
                     and (
@@ -16563,11 +16883,16 @@ class RAWImageViewer(QMainWindow):
         if new_file:
             self._cancel_content_crossfade()
             self._clear_pending_resolution_crossfade()
+        pending_point_zoom = bool(
+            getattr(self, "_pending_zoom", False)
+            and not getattr(self, "_full_resolution_loading", False)
+        )
         use_viewport_crossfade = (
             needs_resolution_crossfade
             and not new_file
             and gv is not None
             and (viewport_fade_snapshot is not None or viewport_fade_pm is not None)
+            and not pending_point_zoom
         )
         defer_display_commit = use_viewport_crossfade
         apply_gen = int(getattr(self, "_single_view_display_generation", 0))
@@ -16599,38 +16924,75 @@ class RAWImageViewer(QMainWindow):
                 getattr(self, "_preserve_nav_zoom_active", False)
                 or getattr(self, "_maintain_zoom_on_navigation", False)
             )
-            def _apply_gpu_view() -> None:
+
+            def _apply_gpu_view() -> bool:
                 if apply_gen != int(getattr(self, "_single_view_display_generation", 0)):
-                    return
+                    return False
+
+                # Deferred zoom: single atomic paint only (never set_pixmap + fit first).
+                if (
+                    getattr(self, "_pending_zoom", False)
+                    and not getattr(self, "_full_resolution_loading", False)
+                ):
+                    return self._apply_pending_gpu_point_zoom_in_place(pixmap, gv)
+
                 pending_user_zoom = bool(
                     getattr(self, "_pending_zoom_toggle", False)
                     or getattr(self, "_pending_zoom", False)
                     or getattr(self, "_pending_gpu_zoom_point", None) is not None
                     or getattr(gv, "_zoom_intent_100", False)
                 )
-                if new_file and not pending_user_zoom:
-                    gv._zoom_intent_100 = False
-                if new_file:
-                    gv.set_pixmap(pixmap, preserve_view=False)
-                    # Refit only when the transform is still at fit scale (not after 100% zoom).
-                    if not pending_user_zoom and gv.is_at_fit_scale():
-                        gv.fit_to_window()
-                elif gv.is_at_fit_scale() and not pending_user_zoom:
-                    if needs_resolution_crossfade:
-                        self._pending_zoom = False
-                        self._pending_zoom_center = None
-                        self._pending_zoom_thumbnail_size = None
-                    gv.set_pixmap(pixmap, preserve_view=False)
-                    if not needs_resolution_crossfade:
-                        gv.fit_to_window()
-                else:
-                    preserve = maintain_zoom or needs_resolution_crossfade
-                    gv.set_pixmap(pixmap, preserve_view=preserve if preserve else None)
-                    # Clear pending flags since we have applied the zoom/preserve framing successfully
-                    self._pending_zoom = False
-                    self._pending_zoom_center = None
-                    self._pending_zoom_thumbnail_size = None
+                nav_preserve = bool(
+                    getattr(self, "_preserve_nav_zoom_active", False)
+                    or getattr(self, "_maintain_zoom_on_navigation", False)
+                )
+                zoomed_in = not self._single_view_is_fit_mode()
 
+                if new_file and (nav_preserve or zoomed_in):
+                    pm_max_dim = max(pixmap.width(), pixmap.height())
+                    is_raw = os.path.splitext(cur_path or "")[-1].lower() in {
+                        '.cr2', '.cr3', '.nef', '.arw', '.dng', '.orf', '.rw2', 
+                        '.pef', '.srw', '.x3f', '.raf', '.3fr', '.fff', '.iiq', 
+                        '.cap', '.erf', '.mef', '.mos', '.nrw', '.rwl', '.srf'}
+                    is_pixmap_half_size = (pm_max_dim < 3000) and is_raw
+                    if is_pixmap_half_size:
+                        # Defer zoom until full resolution arrives
+                        self._pending_zoom = True
+                        self._pending_zoom_center = self.zoom_center_point
+                        self._pending_zoom_thumbnail_size = pixmap.size()
+                        gv.set_pixmap(pixmap, preserve_view=False)
+                        gv.fit_to_window()
+                        # Restore intent so we stay zoomed in logic
+                        self.fit_to_window = False
+                        gv._fit_mode = False
+                        return False
+
+                    if self._apply_gpu_navigation_zoom_restore(pixmap, gv):
+                        return True
+
+                if new_file:
+                    if not pending_user_zoom:
+                        gv._zoom_intent_100 = False
+                    gv.set_pixmap(pixmap, preserve_view=False)
+                    if self._single_view_is_fit_mode() and not pending_user_zoom:
+                        gv.fit_to_window()
+                    return False
+
+                # Same-file buffer upgrade (preview → sensor, etc.)
+                if zoomed_in or nav_preserve or pending_user_zoom:
+                    preserve = zoomed_in or nav_preserve or needs_resolution_crossfade
+                    gv.set_pixmap(pixmap, preserve_view=True if preserve else None)
+                    return False
+
+                if self._single_view_is_fit_mode() and not pending_user_zoom:
+                    gv.set_pixmap(pixmap, preserve_view=False)
+                    gv.fit_to_window()
+                    return False
+
+                gv.set_pixmap(pixmap, preserve_view=False)
+                return False
+
+            pending_zoom_applied = False
             if use_viewport_crossfade:
                 fade_pm = viewport_fade_snapshot or viewport_fade_pm
 
@@ -16650,16 +17012,19 @@ class RAWImageViewer(QMainWindow):
                     on_finished=_on_viewport_crossfade_done,
                 )
             else:
-                _apply_gpu_view()
+                pending_zoom_applied = _apply_gpu_view()
                 self._gpu_last_path = cur_path
-            self._schedule_gpu_viewport_refit()
+            if (
+                not pending_zoom_applied
+                and getattr(self, "fit_to_window", True)
+                and not getattr(self, "_preserve_nav_zoom_active", False)
+            ):
+                self._schedule_gpu_viewport_refit()
 
             # Focus/subject outline lives as a scene overlay; clear stale rect from the
             # previous image, then let the scheduled refresh re-derive it for this one.
             gv.clear_overlay()
 
-            # Navigation zoom-preserve flags are consumed here in GPU mode.
-            self._preserve_nav_zoom_active = False
             if hasattr(self, "_maintain_zoom_on_navigation"):
                 try:
                     delattr(self, "_maintain_zoom_on_navigation")
@@ -16676,27 +17041,6 @@ class RAWImageViewer(QMainWindow):
                     int(pending_gpu_pt.x()), int(pending_gpu_pt.y())
                 )
                 self._zoom_in_to_image_point_finish()
-            elif (
-                getattr(self, "_pending_zoom", False)
-                and getattr(self, "_pending_zoom_center", None) is not None
-                and not getattr(self, "_full_resolution_loading", False)
-            ):
-                logger.info("[DISPLAY_PIXMAP] GPU: applying pending zoom-to-point")
-                thumb_size = getattr(self, "_pending_zoom_thumbnail_size", None)
-                pending_center = self._pending_zoom_center
-                if thumb_size is not None and thumb_size.width() > 0 and thumb_size.height() > 0:
-                    scale_x = pixmap.width() / thumb_size.width()
-                    scale_y = pixmap.height() / thumb_size.height()
-                    self.zoom_center_point = QPoint(
-                        int(pending_center.x() * scale_x),
-                        int(pending_center.y() * scale_y),
-                    )
-                else:
-                    self.zoom_center_point = pending_center
-                self._pending_zoom = False
-                self._pending_zoom_center = None
-                self._pending_zoom_thumbnail_size = None
-                self._gpu_zoom_in_to_point_finish()
             elif getattr(self, "_pending_zoom_toggle", False):
                 self._pending_zoom_toggle = False
                 if hasattr(self, "_pending_zoom_target_path"):
@@ -16989,26 +17333,13 @@ class RAWImageViewer(QMainWindow):
                 pass
             else:
                 logger.info("[DISPLAY_PIXMAP] Handling pending zoom with full resolution image")
-                
-                # Scale the zoom center point from thumbnail to full resolution
-                if hasattr(self, '_pending_zoom_center') and self._pending_zoom_center and hasattr(self, '_pending_zoom_thumbnail_size') and self._pending_zoom_thumbnail_size:
-                    thumb_size = self._pending_zoom_thumbnail_size
-                    scale_x = pixmap.width() / thumb_size.width() if thumb_size.width() > 0 else 1.0
-                    scale_y = pixmap.height() / thumb_size.height() if thumb_size.height() > 0 else 1.0
-                    self.zoom_center_point = QPoint(
-                        int(self._pending_zoom_center.x() * scale_x),
-                        int(self._pending_zoom_center.y() * scale_y)
-                    )
-                    logger.debug(f"[DISPLAY_PIXMAP] Scaled zoom center from {self._pending_zoom_center} to {self.zoom_center_point}")
-
+                target = self._resolve_pending_zoom_center_for_pixmap(pixmap)
+                if target is not None:
+                    self.zoom_center_point = target
                 self.fit_to_window = False
                 self.current_zoom_level = 1.0
                 self.zoom_to_point()
-                
-                # Clear pending flags
-                self._pending_zoom = False
-                self._pending_zoom_center = None
-                self._pending_zoom_thumbnail_size = None
+                self._clear_pending_point_zoom_state()
 
 
         # Update status bar immediately with EXIF data
@@ -17121,7 +17452,7 @@ class RAWImageViewer(QMainWindow):
         )
 
     def _nav_preload_display_radius(self) -> int:
-        return _env_int("RAWVIEWER_NAV_PRELOAD_RADIUS", 2, minimum=1)
+        return _env_int("RAWVIEWER_NAV_PRELOAD_RADIUS", 4, minimum=1)
 
     def _nav_preload_display_near_count(self) -> int:
         return _env_int("RAWVIEWER_NAV_PRELOAD_NEAR", 2, minimum=1)
@@ -17217,7 +17548,7 @@ class RAWImageViewer(QMainWindow):
         if len(self.image_files) <= 1:
             return
 
-        zoomed = not getattr(self, "fit_to_window", True)
+        zoomed = self._single_view_is_zoomed_in()
         radius = self._nav_preload_display_radius()
         n = len(self.image_files)
         for step in range(1, radius + 1):
@@ -18234,8 +18565,8 @@ class RAWImageViewer(QMainWindow):
                     # When already zoomed in, Space must still zoom out like normal;
                     # only from fit-to-window does Space jump to the focus box center.
                     if self._single_view_is_fit_mode():
-                        if self._focus_jump_to_subject_center():
-                            return True
+                        if not self._focus_jump_to_subject_center():
+                            self.toggle_zoom()
                     else:
                         self.toggle_zoom()
                     return True
@@ -18276,7 +18607,10 @@ class RAWImageViewer(QMainWindow):
             if vm == "single":
                 # Consume Up arrow in single view to prevent scrolling/panning glitches
                 return True
-        elif key == Qt.Key.Key_Delete:
+        elif key == Qt.Key.Key_Delete or (
+            sys.platform == "darwin" and key == Qt.Key.Key_Backspace
+        ):
+            # Mac: Backspace key is labeled "delete"; fn+Delete is Key_Delete (forward delete).
             if vm == "gallery" and self._gallery_has_selection():
                 self.delete_gallery_selection()
                 return True
@@ -18399,6 +18733,34 @@ class RAWImageViewer(QMainWindow):
             self._nav_coalesce_timer = timer
         timer.start(ms)
 
+    def _capture_nav_zoom_state_before_load(self) -> None:
+        """Snapshot GPU/legacy zoom so rapid or coalesced navigation can restore it."""
+        if not self._single_view_is_zoomed_in():
+            self._preserve_nav_zoom_active = False
+            if hasattr(self, "_maintain_zoom_on_navigation"):
+                try:
+                    delattr(self, "_maintain_zoom_on_navigation")
+                except AttributeError:
+                    pass
+            self._restore_zoom_center = None
+            self._restore_zoom_level = None
+            self._restore_pixmap_size = None
+            return
+        self._preserve_nav_zoom_active = True
+        self._maintain_zoom_on_navigation = True
+        if getattr(self, "_focus_subject_outline_active", False):
+            self._recenter_on_focus_after_nav = True
+        gv_nav = getattr(self, "gpu_view", None)
+        if gv_nav is not None and gv_nav.has_pixmap():
+            self._restore_zoom_center = self._gpu_zoom_anchor_for_navigation_restore()
+            self._restore_zoom_level = float(gv_nav.current_scale())
+            self.current_zoom_level = self._restore_zoom_level
+        else:
+            self._restore_zoom_center = self._zoom_anchor_for_navigation_restore()
+            self._restore_zoom_level = getattr(self, "current_zoom_level", 1.0)
+        if getattr(self, "current_pixmap", None):
+            self._restore_pixmap_size = self.current_pixmap.size()
+
     def _flush_coalesced_navigation(self) -> None:
         import logging
 
@@ -18420,6 +18782,7 @@ class RAWImageViewer(QMainWindow):
             old_index,
             new_index,
         )
+        self._capture_nav_zoom_state_before_load()
         if delta > 0:
             self.current_file_index = (new_index - 1) % n
             self.navigate_to_next_image()
@@ -18539,60 +18902,7 @@ class RAWImageViewer(QMainWindow):
                     self.current_file_index = old_index  # Restore old index
                     return
                 
-                # Only maintain zoom state if not in fit-to-window mode
-                if not self.fit_to_window:
-                    logger.debug("Maintaining zoom state for navigation")
-                    self._preserve_nav_zoom_active = True
-                    self._maintain_zoom_on_navigation = True
-                    if getattr(self, "_focus_subject_outline_active", False):
-                        self._recenter_on_focus_after_nav = True
-                    self._restore_zoom_center = self._zoom_anchor_for_navigation_restore()
-                    self._restore_zoom_level = self.current_zoom_level
-                    # Store current pixmap size for coordinate scaling
-                    if self.current_pixmap:
-                        self._restore_pixmap_size = self.current_pixmap.size()
-                        logger.debug(f"Saved pixmap size: {self._restore_pixmap_size.width()}x{self._restore_pixmap_size.height()}")
-                    # Save current scroll position instead of start_scroll_x/y
-                    try:
-                        # Ensure scroll_area exists and is valid before accessing
-                        if not hasattr(self, 'scroll_area') or self.scroll_area is None:
-                            logger.warning(f"[NAV_PREV] scroll_area not available, using default scroll position")
-                            self._restore_start_scroll_x = 0
-                            self._restore_start_scroll_y = 0
-                        else:
-                            h_scroll = self.scroll_area.horizontalScrollBar()
-                            v_scroll = self.scroll_area.verticalScrollBar()
-                            if h_scroll is None or v_scroll is None:
-                                logger.warning(f"[NAV_PREV] Scroll bars not available, using default scroll position")
-                                self._restore_start_scroll_x = 0
-                                self._restore_start_scroll_y = 0
-                            else:
-                                current_scroll_x = h_scroll.value()
-                                current_scroll_y = v_scroll.value()
-                                self._restore_start_scroll_x = current_scroll_x
-                                self._restore_start_scroll_y = current_scroll_y
-                                logger.debug(f"Saved scroll position: x={current_scroll_x}, y={current_scroll_y}")
-                    except Exception as scroll_error:
-                        logger.warning(f"[NAV_PREV] Error getting scroll position: {scroll_error}", exc_info=True)
-                        self._restore_start_scroll_x = 0
-                        self._restore_start_scroll_y = 0
-                else:
-                    logger.debug("Not maintaining zoom state (fit-to-window mode)")
-                    self._preserve_nav_zoom_active = False
-                    if hasattr(self, '_maintain_zoom_on_navigation'):
-                        delattr(self, '_maintain_zoom_on_navigation')
-                    self._restore_zoom_center = None
-                    self._restore_zoom_level = None
-                    self._restore_start_scroll_x = None
-                    self._restore_start_scroll_y = None
-                    # CLEAR pending restore so it doesn't leak into the next image
-                    if hasattr(self, '_pending_zoom_restore'):
-                        self._pending_zoom_restore = False
-                        if hasattr(self, '_pending_zoom_center'):
-                            delattr(self, '_pending_zoom_center')
-                        if hasattr(self, '_pending_zoom_level'):
-                            delattr(self, '_pending_zoom_level')
-                    self._pending_zoom = False
+                self._capture_nav_zoom_state_before_load()
 
                 # Load the current image (at new_index)
                 current_file = self.image_files[self.current_file_index]
@@ -18708,59 +19018,7 @@ class RAWImageViewer(QMainWindow):
                 logger.info(f"[NAV_NEXT] Checking zoom state - fit_to_window: {self.fit_to_window}, "
                            f"zoom_level: {self.current_zoom_level}, "
                            f"zoom_center_point: {self.zoom_center_point}")
-                if not self.fit_to_window:
-                    logger.info("[NAV_NEXT] Maintaining zoom state for navigation")
-                    self._preserve_nav_zoom_active = True
-                    self._maintain_zoom_on_navigation = True
-                    if getattr(self, "_focus_subject_outline_active", False):
-                        self._recenter_on_focus_after_nav = True
-                    self._restore_zoom_center = self._zoom_anchor_for_navigation_restore()
-                    self._restore_zoom_level = self.current_zoom_level
-                    # Store current pixmap size for coordinate scaling
-                    if self.current_pixmap:
-                        self._restore_pixmap_size = self.current_pixmap.size()
-                        logger.debug(f"Saved pixmap size: {self._restore_pixmap_size.width()}x{self._restore_pixmap_size.height()}")
-                    # Save current scroll position instead of start_scroll_x/y
-                    try:
-                        # Ensure scroll_area exists and is valid before accessing
-                        if not hasattr(self, 'scroll_area') or self.scroll_area is None:
-                            logger.warning(f"[NAV_NEXT] scroll_area not available, using default scroll position")
-                            self._restore_start_scroll_x = 0
-                            self._restore_start_scroll_y = 0
-                        else:
-                            h_scroll = self.scroll_area.horizontalScrollBar()
-                            v_scroll = self.scroll_area.verticalScrollBar()
-                            if h_scroll is None or v_scroll is None:
-                                logger.warning(f"[NAV_NEXT] Scroll bars not available, using default scroll position")
-                                self._restore_start_scroll_x = 0
-                                self._restore_start_scroll_y = 0
-                            else:
-                                current_scroll_x = h_scroll.value()
-                                current_scroll_y = v_scroll.value()
-                                self._restore_start_scroll_x = current_scroll_x
-                                self._restore_start_scroll_y = current_scroll_y
-                                logger.debug(f"Saved scroll position: x={current_scroll_x}, y={current_scroll_y}")
-                    except Exception as scroll_error:
-                        logger.warning(f"[NAV_NEXT] Error getting scroll position: {scroll_error}", exc_info=True)
-                        self._restore_start_scroll_x = 0
-                        self._restore_start_scroll_y = 0
-                else:
-                    logger.info("[NAV_NEXT] Not maintaining zoom state (fit-to-window mode)")
-                    self._preserve_nav_zoom_active = False
-                    if hasattr(self, '_maintain_zoom_on_navigation'):
-                        delattr(self, '_maintain_zoom_on_navigation')
-                    self._restore_zoom_center = None
-                    self._restore_zoom_level = None
-                    self._restore_start_scroll_x = None
-                    self._restore_start_scroll_y = None
-                    # CLEAR pending restore so it doesn't leak into the next image
-                    if hasattr(self, '_pending_zoom_restore'):
-                        self._pending_zoom_restore = False
-                        if hasattr(self, '_pending_zoom_center'):
-                            delattr(self, '_pending_zoom_center')
-                        if hasattr(self, '_pending_zoom_level'):
-                            delattr(self, '_pending_zoom_level')
-                    self._pending_zoom = False
+                self._capture_nav_zoom_state_before_load()
 
                 # Load the current image (at new_index)
                 current_file = self.image_files[self.current_file_index]
@@ -19001,7 +19259,9 @@ class RAWImageViewer(QMainWindow):
     def _on_gpu_fit_mode_changed(self, fit_mode: bool):
         # Keep legacy state roughly in sync for any code that still reads it.
         self.fit_to_window = bool(fit_mode)
-        if not fit_mode:
+        if fit_mode:
+            self._upgrade_display_quality_on_fit_if_needed()
+        else:
             self._gpu_request_full_resolution_if_needed()
         self._update_gpu_status()
 
@@ -19034,6 +19294,13 @@ class RAWImageViewer(QMainWindow):
             self._stop_slideshow()
             gv = self.gpu_view
             if gv.wants_zoom_in_toggle() and self._needs_full_resolution_upgrade():
+                # Plain Space fit→100%: image center (not stale scroll/viewport coords).
+                if not getattr(self, "_focus_subject_outline_active", False):
+                    pm = self.current_pixmap
+                    if pm is not None and not pm.isNull():
+                        self.zoom_center_point = QPoint(
+                            pm.width() // 2, pm.height() // 2
+                        )
                 if self._defer_zoom_until_full_or_apply():
                     return
             gv.toggle_fit()
@@ -19159,6 +19426,7 @@ class RAWImageViewer(QMainWindow):
             self.zoom_center_point = None
             self._clear_all_zoom_state()
             self.scale_image_to_fit()
+            self._upgrade_display_quality_on_fit_if_needed()
             self.image_label.setCursor(QCursor(Qt.CursorShape.ArrowCursor))
         self.update_status_bar()
         self.setFocus()

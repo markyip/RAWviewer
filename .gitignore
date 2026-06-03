@@ -75,6 +75,13 @@ venv/
 
 # Pixi local environment (commit pixi.lock; ignore installed env)
 .pixi/
+.pixi-cache/
+
+# PyInstaller local cache
+.pyinstaller/
+
+# Accidental Windows-path-style folder name on macOS
+C:/
 
 # Local agent / IDE scratch (not part of the app)
 .agent/
