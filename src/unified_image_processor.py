@@ -591,10 +591,48 @@ class UnifiedImageProcessor:
         """處理 RAW 圖像"""
         libraw_first = use_libraw_consistent_preview_first()
         skip_key = os.path.normcase(os.path.abspath(file_path))
-        if skip_key in _LIBRAW_UNSUPPORTED_PATHS and not use_full_resolution:
-            cached = self.cache.get_preview(file_path)
+        if skip_key in _LIBRAW_UNSUPPORTED_PATHS:
+            cached = self.cache.get_preview(file_path) or self.cache.get_full_image(
+                file_path
+            )
             if cached is not None:
                 return cached
+            if use_full_resolution:
+                exif_data = self.exif_extractor.extract_exif_data(file_path)
+                full_embedded = self._try_full_embedded_raw_preview(file_path, exif_data)
+                if full_embedded is not None:
+                    return full_embedded
+                mem_max = memory_preview_max_edge()
+                preview = self.thumbnail_extractor.extract_preview_from_raw(
+                    file_path, max_size=mem_max
+                )
+                if preview is not None:
+                    orientation = (
+                        exif_data.get("orientation", 1) if exif_data else 1
+                    )
+                    if orientation != 1:
+                        preview = self._apply_orientation_correction(
+                            preview, orientation, exif_data
+                        )
+                    self.cache.put_preview(file_path, preview)
+                    return preview
+                try:
+                    from enhanced_raw_processor import extract_embedded_jpeg_by_scan
+
+                    scanned = extract_embedded_jpeg_by_scan(file_path, mem_max)
+                    if scanned is not None:
+                        orientation = (
+                            exif_data.get("orientation", 1) if exif_data else 1
+                        )
+                        if orientation != 1:
+                            scanned = self._apply_orientation_correction(
+                                scanned, orientation, exif_data
+                            )
+                        self.cache.put_preview(file_path, scanned)
+                        return scanned
+                except Exception:
+                    pass
+                return None
             return None
         try:
             # 獲取 EXIF 數據（用於處理參數）
@@ -738,8 +776,9 @@ class UnifiedImageProcessor:
                         scanned = self._apply_orientation_correction(
                             scanned, orientation, exif_data
                         )
-                    if not use_full_resolution and not libraw_first:
-                        self.cache.put_preview(file_path, scanned)
+                    self.cache.put_preview(file_path, scanned)
+                    if use_full_resolution:
+                        self.cache.put_full_image(file_path, scanned)
                     return scanned
             except Exception:
                 pass

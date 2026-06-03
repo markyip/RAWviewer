@@ -6272,6 +6272,7 @@ class RAWImageViewer(QMainWindow):
         self._last_navigation_time = 0  # Timestamp of last navigation for rate limiting
         self._nav_coalesce_delta = 0
         self._nav_coalesce_timer = None
+        self._nav_idle_full_generation = 0
         # Navigate while zoomed: request full decode first & apply one-step zoom restore
         self._preserve_nav_zoom_active = False
 
@@ -6567,8 +6568,13 @@ class RAWImageViewer(QMainWindow):
         context: str = "display",
     ) -> bool:
         """Whether a cached buffer may be painted (navigation=512+, display=1400+)."""
+        from common_image_loader import dng_prefers_embedded_preview_first
+
         for_navigation = str(context or "").strip().lower() == "navigation"
-        min_dim = self._single_view_cache_min_dim(for_navigation=for_navigation)
+        if file_path and dng_prefers_embedded_preview_first(file_path):
+            min_dim = 256
+        else:
+            min_dim = self._single_view_cache_min_dim(for_navigation=for_navigation)
         return self._cache_buffer_suitable_for_single_view(
             image, min_dim=min_dim, file_path=file_path
         )
@@ -6727,7 +6733,11 @@ class RAWImageViewer(QMainWindow):
         except ValueError:
             pass
         self._start_preloading()
-        if from_cache in ("preview", "nav_preview"):
+        if from_cache == "nav_full":
+            self._maybe_queue_background_full_decode(file_path)
+        elif from_cache == "nav_preview":
+            self._schedule_idle_full_decode_after_nav_preview(file_path)
+        elif from_cache == "preview":
             self._maybe_queue_background_full_decode(file_path)
         if hasattr(self, "loading_overlay"):
             self.loading_overlay.hide_loading()
@@ -7591,6 +7601,30 @@ class RAWImageViewer(QMainWindow):
             return False
         shown = int(getattr(self, "_manager_displayed_max_dim", 0))
         return shown > 0 and max_dim <= int(shown * 1.06)
+
+    def _schedule_idle_full_decode_after_nav_preview(self, file_path: str) -> None:
+        """Queue sensor full only after the user pauses on a grid-tier (512px) nav preview."""
+        from PyQt6.QtCore import QTimer
+
+        if not file_path:
+            return
+        delay_ms = _env_int("RAWVIEWER_NAV_IDLE_FULL_MS", 1200, minimum=400)
+        self._nav_idle_full_generation = int(
+            getattr(self, "_nav_idle_full_generation", 0)
+        ) + 1
+        gen = self._nav_idle_full_generation
+        norm = _norm_path(file_path)
+
+        def _tick(g=gen, fp=file_path, n=norm) -> None:
+            if g != int(getattr(self, "_nav_idle_full_generation", 0)):
+                return
+            if _norm_path(getattr(self, "current_file_path", "") or "") != n:
+                return
+            if not self._needs_full_resolution_upgrade(fp):
+                return
+            self._maybe_queue_background_full_decode(fp)
+
+        QTimer.singleShot(delay_ms, _tick)
 
     def _maybe_queue_background_full_decode(self, file_path: str) -> None:
         """Queue sensor-res decode only when the on-screen buffer is not already full resolution."""
@@ -8464,6 +8498,47 @@ class RAWImageViewer(QMainWindow):
         if not self._single_view_pixels_on_screen(file_path):
             self._try_paint_display_quality_cache(file_path)
 
+    def _retry_composite_dng_embedded_preview(
+        self, file_path: str, error_message: str
+    ) -> bool:
+        """After LibRaw full decode fails on composite HDR DNG, load embedded thumbnail once."""
+        from common_image_loader import dng_prefers_embedded_preview_first, is_raw_file
+        from image_load_manager import Priority
+
+        if not file_path or not is_raw_file(file_path):
+            return False
+        if not dng_prefers_embedded_preview_first(file_path):
+            return False
+        err = str(error_message or "").lower()
+        if "unsupported" not in err and "could not decode" not in err:
+            return False
+        norm = _norm_path(file_path)
+        retried = getattr(self, "_composite_dng_embedded_retry_paths", None)
+        if retried is None:
+            self._composite_dng_embedded_retry_paths = set()
+            retried = self._composite_dng_embedded_retry_paths
+        if norm in retried:
+            return False
+        retried.add(norm)
+        import logging
+
+        logging.getLogger(__name__).info(
+            "[MANAGER] Composite DNG LibRaw failed; retrying embedded preview for %s",
+            os.path.basename(file_path),
+        )
+        self.status_bar.showMessage(
+            f"Loading embedded preview for {os.path.basename(file_path)}…",
+            4000,
+        )
+        self.image_manager.load_image(
+            file_path=file_path,
+            priority=Priority.CURRENT,
+            cancel_existing=True,
+            use_full_resolution=False,
+            stages={"thumbnail"},
+        )
+        return True
+
     def on_manager_error(self, file_path: str, error_message: str):
         """處理 ImageLoadManager 的錯誤信號"""
         if hasattr(self, 'loading_overlay'):
@@ -8480,6 +8555,17 @@ class RAWImageViewer(QMainWindow):
         logger.error(f"[MANAGER] Error loading {os.path.basename(file_path)}: {error_message}")
         if getattr(self, "_defer_sensor_full_decode_path", None):
             self._flush_deferred_sensor_full_decode(file_path)
+        if self._retry_composite_dng_embedded_preview(file_path, error_message):
+            return
+        if (
+            getattr(self, "view_mode", "single") == "single"
+            and not self._single_view_pixels_on_screen(file_path)
+        ):
+            self._clear_stale_single_view_image()
+            self.status_bar.showMessage(
+                f"Could not load {os.path.basename(file_path)}: {error_message}",
+                8000,
+            )
         # Avoid modal-dialog storms from repeated async retries of the same failure.
         # Repeated QMessageBox.exec() blocks user input and can look like folder switching is broken.
         import time
@@ -15155,6 +15241,9 @@ class RAWImageViewer(QMainWindow):
             _prev_fp = getattr(self, "current_file_path", None)
             _same_path_reload = _prev_fp and _norm_path(_prev_fp) == _norm_path(requested_file_path)
             if _prev_fp and not _same_path_reload:
+                self._nav_idle_full_generation = int(
+                    getattr(self, "_nav_idle_full_generation", 0)
+                ) + 1
                 # Drop CURRENT work for the file we left; keep PRELOAD/BACKGROUND prefetch.
                 self.image_manager.cancel_current_priority_tasks(_prev_fp)
                 self._single_view_display_generation = int(
@@ -15230,8 +15319,6 @@ class RAWImageViewer(QMainWindow):
                     self.image_manager.request_load(
                         requested_file_path, priority=False, stages={"exif"}
                     )
-                else:
-                    self._maybe_queue_background_full_decode(requested_file_path)
                 self._queue_single_view_embedded_preview_load(requested_file_path)
                 self._start_preloading()
                 return
@@ -15428,8 +15515,12 @@ class RAWImageViewer(QMainWindow):
                     )
                 )
                 is_dng_file = os.path.splitext(requested_file_path)[1].lower() == ".dng"
+                from common_image_loader import dng_prefers_embedded_preview_first
+
                 force_full_res_for_dng = (
-                    is_dng_file and getattr(self, "view_mode", "single") == "single"
+                    is_dng_file
+                    and getattr(self, "view_mode", "single") == "single"
+                    and not dng_prefers_embedded_preview_first(requested_file_path)
                 )
                 from_gallery = getattr(self, "_loading_from_gallery", False)
                 # Single-step navigation: only request full-res decode if navigating zoomed-in (preserve_zoom_navigation is active)

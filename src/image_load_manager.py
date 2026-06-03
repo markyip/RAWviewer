@@ -54,6 +54,14 @@ def _display_preview_min_dim() -> int:
     return int(memory_preview_max_edge() * 0.85)
 
 
+def _min_acceptable_preview_dim(file_path: str) -> int:
+    from common_image_loader import dng_prefers_embedded_preview_first
+
+    if dng_prefers_embedded_preview_first(file_path):
+        return 256
+    return _display_preview_min_dim()
+
+
 def _skip_low_res_memory_thumb_for_display_tier(
     thumb, wanted: set, use_full_resolution: bool
 ) -> bool:
@@ -172,16 +180,17 @@ class ImageLoadWorker(QRunnable):
                 )
 
                 preview_tier = allow_heavy_fallback
+                min_preview_dim = _min_acceptable_preview_dim(file_path)
                 if preview_tier and thumbnail is not None and not self.task.is_cancelled():
                     if processor._is_raw_file(file_path):
                         if (
                             processor._preview_buffer_max_dim(thumbnail)
-                            < _display_preview_min_dim()
+                            < min_preview_dim
                         ):
                             thumbnail = processor.ensure_display_tier_preview(
                                 file_path, thumbnail
                             )
-                        if processor._preview_buffer_max_dim(thumbnail) < _display_preview_min_dim():
+                        if processor._preview_buffer_max_dim(thumbnail) < min_preview_dim:
                             thumbnail = None
                     if thumbnail is not None:
                         self._maybe_cache_preview_first_warm(
@@ -264,16 +273,17 @@ class ImageLoadWorker(QRunnable):
                         if self._safe_emit():
                             self.manager.exif_data_ready.emit(file_path, exif_data)
                         if allow_heavy_fallback and processor._is_raw_file(file_path):
+                            min_preview_dim = _min_acceptable_preview_dim(file_path)
                             if (
                                 processor._preview_buffer_max_dim(thumbnail)
-                                < _display_preview_min_dim()
+                                < min_preview_dim
                             ):
                                 thumbnail = processor.ensure_display_tier_preview(
                                     file_path, thumbnail
                                 )
                             if (
                                 processor._preview_buffer_max_dim(thumbnail)
-                                < _display_preview_min_dim()
+                                < min_preview_dim
                             ):
                                 thumbnail = None
                             else:

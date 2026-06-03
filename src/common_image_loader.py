@@ -364,6 +364,13 @@ def is_raw_file(file_path: str) -> bool:
     return ext in RAW_FILE_EXTENSIONS
 
 
+def dng_prefers_embedded_preview_first(file_path: str) -> bool:
+    """Composite/HDR DNGs often fail LibRaw; use embedded JPEG before sensor decode."""
+    if os.path.splitext(file_path)[1].lower() != ".dng":
+        return False
+    return "-hdr" in os.path.basename(file_path).lower()
+
+
 def is_tiff_file(file_path: str) -> bool:
     """檢查是否為 TIFF 文件（包括錯誤擴展名的情況）"""
     file_ext = os.path.splitext(file_path)[1].lower()
