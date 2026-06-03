@@ -324,6 +324,20 @@ def _find_file_index_in_list(files, file_path, *, default: int = -1) -> int:
     return default
 
 
+def _share_logger() -> logging.Logger:
+    return logging.getLogger("rawviewer.share")
+
+
+def _share_log(
+    level: int,
+    msg: str,
+    *args,
+    exc_info: bool = False,
+) -> None:
+    """Dedicated share diagnostics (always prefixed; visible at INFO in console)."""
+    _share_logger().log(level, "[SHARE] " + msg, *args, exc_info=exc_info)
+
+
 def _activate_macos_foreground_app() -> None:
     """Terminal-launched Python is often a background app; file panels need foreground."""
     if sys.platform != "darwin":
@@ -336,8 +350,9 @@ def _activate_macos_foreground_app() -> None:
             # 0 = NSApplicationActivationPolicyRegular
             ns_app.setActivationPolicy_(0)
             ns_app.activateIgnoringOtherApps_(True)
-    except Exception:
-        pass
+            _share_log(logging.DEBUG, "NSApplication activateIgnoringOtherApps OK")
+    except Exception as exc:
+        _share_log(logging.WARNING, "NSApplication foreground activation failed: %s", exc)
 
 
 def _applescript_escape(value: str) -> str:
@@ -650,6 +665,7 @@ class FocusGallerySwitchFilter(logging.Filter):
         "[LOAD]",
         "[TTFR]",
         "[MANAGER]",
+        "[SHARE]",
     )
 
     def filter(self, record: logging.LogRecord) -> bool:
@@ -5168,7 +5184,7 @@ class SingleImageViewOverlay(QWidget):
     _FILMSTRIP_FADE_MS = 200
     _FILMSTRIP_HIDE_DELAY_MS = 90
     _FILMSTRIP_SHOW_DELAY_MS = _filmstrip_ui_env_int(
-        "RAWVIEWER_FILMSTRIP_SHOW_DELAY_MS", 220
+        "RAWVIEWER_FILMSTRIP_SHOW_DELAY_MS", 500
     )
     _FILMSTRIP_SHOW_DELAY_DIRECT_MS = _filmstrip_ui_env_int(
         "RAWVIEWER_FILMSTRIP_SHOW_DELAY_DIRECT_MS", 70
@@ -5207,6 +5223,7 @@ class SingleImageViewOverlay(QWidget):
         self._filmstrip_layer.setGraphicsEffect(self._filmstrip_opacity)
         self._filmstrip_opacity.setOpacity(0.0)
         self._filmstrip_fade_anim = None
+        self._filmstrip_fade_gen = 0
         self._filmstrip.hide()
         self._hide_filmstrip_layer()
         self._hide_filmstrip_timer = QTimer(self)
@@ -5267,9 +5284,21 @@ class SingleImageViewOverlay(QWidget):
         layer.update()
 
     def _stop_filmstrip_fade(self) -> None:
+        self._filmstrip_fade_gen += 1
         anim = getattr(self, "_filmstrip_fade_anim", None)
-        if anim is not None and anim.state() == QAbstractAnimation.State.Running:
-            anim.stop()
+        if anim is not None:
+            # Disconnect all signals BEFORE stop() to prevent the synchronous
+            # finished emission from triggering _finish_hide during cancellation.
+            try:
+                anim.finished.disconnect()
+            except (TypeError, RuntimeError):
+                pass
+            try:
+                anim.valueChanged.disconnect()
+            except (TypeError, RuntimeError):
+                pass
+            if anim.state() == QAbstractAnimation.State.Running:
+                anim.stop()
         self._filmstrip_fade_anim = None
 
     def _filmstrip_opacity_value(self) -> float:
@@ -5297,60 +5326,32 @@ class SingleImageViewOverlay(QWidget):
 
     def _animate_filmstrip_opacity(self, target: float, on_finished=None) -> None:
         target = max(0.0, min(1.0, float(target)))
-        current = self._filmstrip_opacity_value()
-        if abs(current - target) < 0.02:
-            self._filmstrip_opacity.setOpacity(target)
-            self._update_filmstrip_hit_testing()
-            if on_finished is not None:
-                on_finished()
-            return
-
         self._stop_filmstrip_fade()
-        anim = QPropertyAnimation(self._filmstrip_opacity, b"opacity", self)
-        anim.setDuration(self._FILMSTRIP_FADE_MS)
-        anim.setStartValue(current)
-        anim.setEndValue(target)
-        if target >= current:
-            anim.setEasingCurve(QEasingCurve.Type.OutCubic)
-        else:
-            anim.setEasingCurve(QEasingCurve.Type.InCubic)
-
-        def _on_value_changed(_value):
-            self._update_filmstrip_hit_testing()
-            self._raise_filmstrip_chrome()
-
-        def _on_finished():
-            self._filmstrip_fade_anim = None
-            self._update_filmstrip_hit_testing()
-            if on_finished is not None:
-                on_finished()
-
-        anim.valueChanged.connect(_on_value_changed)
-        anim.finished.connect(_on_finished)
-        self._filmstrip_fade_anim = anim
-        anim.start()
+        
+        self._filmstrip_opacity.setOpacity(target)
+        self._update_filmstrip_hit_testing()
+        self._raise_filmstrip_chrome()
+        
+        if on_finished is not None:
+            on_finished()
 
     def _fade_in_filmstrip(self) -> None:
         if not self._filmstrip.isEnabled():
             return
         self._show_filmstrip_timer.stop()
         self._hide_filmstrip_timer.stop()
+
+        self._stop_filmstrip_fade()
+        self._filmstrip_reveal = True
+
         if self._filmstrip_opacity_value() >= 0.99:
             return
-        anim = getattr(self, "_filmstrip_fade_anim", None)
-        if (
-            anim is not None
-            and anim.state() == QAbstractAnimation.State.Running
-            and float(anim.endValue()) >= 0.99
-        ):
-            return
-        self._stop_filmstrip_fade()
+
         needs_setup = (
             not self._filmstrip_layer_visible()
             or self._filmstrip_opacity_value() <= 0.01
         )
         if needs_setup:
-            self._filmstrip_reveal = True
             self._filmstrip_opacity.setOpacity(0.0)
             self._show_filmstrip_layer()
             self._layout_filmstrip()
@@ -5440,16 +5441,12 @@ class SingleImageViewOverlay(QWidget):
             remaining = self._show_filmstrip_timer.remainingTime()
             if remaining >= 0 and remaining <= delay:
                 return
-        self._prepare_filmstrip_reveal()
         self._show_filmstrip_timer.start(delay)
 
     def _show_filmstrip_if_still_in_hotzone(self) -> None:
         if not self._filmstrip.isEnabled():
             return
-        if self._filmstrip.underMouse():
-            self._fade_in_filmstrip()
-            return
-        if self._pointer_in_bottom_hotzone():
+        if self._filmstrip.underMouse() or self._pointer_in_bottom_hotzone():
             self._fade_in_filmstrip()
 
     def _hide_filmstrip_if_inactive(self) -> None:
@@ -5511,20 +5508,28 @@ class SingleImageViewOverlay(QWidget):
             and strip_rect.contains(pos)
         )
         strip_visible = self._filmstrip_opacity_value() > 0.35
-        if over_strip or self._filmstrip.underMouse() or (
-            getattr(self, "_filmstrip_layer", None) is not None
-            and self._filmstrip_layer.underMouse()
-        ):
+        
+        # If the filmstrip is already visible and we are hovering over it, keep it visible instantly.
+        is_hovering_visible_strip = strip_visible and (
+            over_strip or self._filmstrip.underMouse() or (
+                getattr(self, "_filmstrip_layer", None) is not None
+                and self._filmstrip_layer.underMouse()
+            )
+        )
+        
+        if is_hovering_visible_strip:
             self._cancel_show_filmstrip()
             self._hide_filmstrip_timer.stop()
             self._fade_in_filmstrip()
         elif in_hot:
             self._hide_filmstrip_timer.stop()
             if strip_visible:
+                # Keep it visible without delay if we are in the hotzone
                 self._cancel_show_filmstrip()
-            elif in_strip_band:
-                self._schedule_show_filmstrip(self._FILMSTRIP_SHOW_DELAY_DIRECT_MS)
+                self._fade_in_filmstrip()
             else:
+                # Force the full 500ms delay when the filmstrip is not visible,
+                # ignoring the 70ms in_strip_band shortcut so it doesn't accidentally trigger.
                 self._schedule_show_filmstrip(self._FILMSTRIP_SHOW_DELAY_MS)
         else:
             self._cancel_show_filmstrip()
@@ -7702,6 +7707,12 @@ class RAWImageViewer(QMainWindow):
         bar.hide()
         self._hide_filmstrip_chrome()
 
+    def set_filmstrip_pointer_active(self, active: bool) -> None:
+        self._filmstrip_pointer_active = active
+        container = getattr(self, "single_view_container", None)
+        if container is not None and hasattr(container, "set_filmstrip_pointer_active"):
+            container.set_filmstrip_pointer_active(active)
+
     def _hide_filmstrip_chrome(self) -> None:
         container = getattr(self, "single_view_container", None)
         if container is None:
@@ -9414,6 +9425,23 @@ class RAWImageViewer(QMainWindow):
         self.share_bottom_button.clicked.connect(self._on_share_bottom_button_clicked)
         self.share_bottom_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.share_bottom_button.hide()
+        if sys.platform == "darwin":
+            try:
+                from AppKit import NSSharingServicePicker  # noqa: F401
+                import objc  # noqa: F401
+
+                # Do not reference the name `logging` here — init_ui() imports logging later,
+                # which would shadow the module and cause UnboundLocalError.
+                _share_logger().info(
+                    "[SHARE] macOS share ready (PyObjC=%s frozen=%s)",
+                    getattr(objc, "__version__", "?"),
+                    getattr(sys, "frozen", False),
+                )
+            except Exception as exc:
+                _share_logger().error(
+                    "[SHARE] macOS share unavailable at startup — install pyobjc-framework-Cocoa: %s",
+                    exc,
+                )
 
         self.slideshow_bottom_button = QPushButton()
         self.slideshow_bottom_button.setObjectName("slideshowBottomButton")
@@ -9614,6 +9642,12 @@ class RAWImageViewer(QMainWindow):
 
         # Add custom widget to status bar
         self.status_bar.addPermanentWidget(status_widget, 1)
+        # Install event filter recursively on status bar and all its children
+        def _install_status_bar_filters(w):
+            w.installEventFilter(self)
+            for child in w.findChildren(QWidget):
+                child.installEventFilter(self)
+        _install_status_bar_filters(self.status_bar)
 
         # Hover-only size grip for frameless edge resize (does not consume layout space).
         self._resize_grip = ResizeGripIndicator(self)
@@ -12073,9 +12107,9 @@ class RAWImageViewer(QMainWindow):
             if hasattr(self, 'title_bar') and self.title_bar is not None:
                 self.title_bar.set_title(title)
         
-        # Create gallery widget if needed
-        if not hasattr(self, 'gallery_widget') or not self.gallery_widget:
-            self._create_gallery_widget()
+        # Create gallery widget if needed (at most one container in the layout)
+        if not self._ensure_gallery_widget():
+            return
         
         # Hide single view elements (image + histogram strip)
         if hasattr(self, 'single_view_container') and self.single_view_container:
@@ -12134,109 +12168,149 @@ class RAWImageViewer(QMainWindow):
         # Update gallery content
         QTimer.singleShot(50, self._update_gallery_view)
         logger.debug("[MODESWITCH] _show_gallery_view scheduled gallery update")
-    
-    def _create_gallery_widget(self):
-            """Create the gallery view widget - based on JustifiedGallery reference code"""
-            from PyQt6.QtWidgets import QWidget, QVBoxLayout, QScrollArea
-            
-            # Create gallery widget container
-            gallery_container = QWidget()
-            gallery_container.setStyleSheet("""
-                QWidget {
-                    background-color: #1E1E1E;
-                }
-            """)
-            gallery_container.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-            gallery_layout = QVBoxLayout(gallery_container)
-            gallery_layout.setContentsMargins(0, 0, 0, 0)
-            gallery_layout.setSpacing(0)
-            
-            # Create scroll area for gallery
-            gallery_scroll = QScrollArea()
-            # False: widget must keep full content height so 1000s of rows scroll correctly.
-            gallery_scroll.setWidgetResizable(False)
-            gallery_scroll.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-            gallery_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-            gallery_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-            gallery_scroll.setStyleSheet("""
-                QScrollArea {
-                    border: none;
-                    background-color: #1E1E1E;
-                }
-                QScrollBar:vertical {
-                    background: transparent;
-                    width: 24px;
-                    margin: 0px;
-                    border: none;
-                }
-                QScrollBar::handle:vertical {
-                    background: rgba(255, 255, 255, 0.2);
-                    min-height: 30px;
-                    border-radius: 6px;
-                    margin: 2px 6px 2px 6px;
-                }
-                QScrollBar::handle:vertical:hover {
-                    background: rgba(255, 255, 255, 0.3);
-                }
-                QScrollBar::handle:vertical:pressed {
-                    background: rgba(255, 255, 255, 0.4);
-                }
-                QScrollBar::add-line:vertical,
-                QScrollBar::sub-line:vertical {
-                    height: 0px;
-                    width: 0px;
-                }
-                QScrollBar::add-page:vertical,
-                QScrollBar::sub-page:vertical {
-                    background: transparent;
-                }
-            """)
-            
-            # Create optimized justified gallery widget from rawviewer_ui module.
-            justified_gallery = ExternalJustifiedGallery([], self)  # Empty list initially, will be populated
-            gallery_scroll.setWidget(justified_gallery)
-            gallery_layout.addWidget(gallery_scroll)
 
-            # Overlay on the scrollbar's frame-side margin — captures resize drags without
-            # shrinking the scroll area (layout gutter was stealing 6px from the viewport).
-            gallery_grip = QWidget(gallery_container)
-            gallery_grip.setStyleSheet("background: transparent;")
-            gallery_grip.setMouseTracking(True)
-            gallery_grip.hide()
-            
-            # Insert gallery widget into main layout (after single-image row: scroll + histogram)
-            main_layout = self.centralWidget().layout()
-            anchor = (
-                self.single_view_container
-                if hasattr(self, "single_view_container") and self.single_view_container
-                else self.scroll_area
-            )
-            scroll_index = main_layout.indexOf(anchor)
-            main_layout.insertWidget(scroll_index + 1, gallery_container)
-            
-            self.gallery_widget = gallery_container
-            self.gallery_scroll = gallery_scroll
-            self.gallery_frame_gutter = gallery_grip
-            self.gallery_justified = justified_gallery
-            gallery_scroll.setMouseTracking(True)
-            gallery_scroll.viewport().setMouseTracking(True)
-            gallery_scroll.installEventFilter(self)
-            gallery_scroll.viewport().installEventFilter(self)
-            gallery_grip.installEventFilter(self)
-            v_scrollbar = gallery_scroll.verticalScrollBar()
-            v_scrollbar.setMouseTracking(True)
-            v_scrollbar.installEventFilter(self)
-            gallery_container.installEventFilter(self)
-            self._position_gallery_frame_grip()
-            self._setup_file_drop_targets()
-            
-            # Hide it initially - it will be shown by _show_gallery_view() when needed
-            gallery_container.hide()
-            
-            # NOTE: rawviewer_ui.gallery_view.JustifiedGallery already wires scrollbar events
-            # internally (valueChanged + sliderPressed/Released). Avoid duplicate connections
-            # here; they can trigger redundant scheduling and visible scroll lag.
-    
+    def _remove_orphan_gallery_containers(self) -> None:
+        """Drop extra gallery shells left in the central layout (defensive)."""
+        cw = self.centralWidget()
+        if cw is None:
+            return
+        layout = cw.layout()
+        if layout is None:
+            return
+        keep = getattr(self, "gallery_widget", None)
+        for i in range(layout.count() - 1, -1, -1):
+            item = layout.itemAt(i)
+            if item is None:
+                continue
+            w = item.widget()
+            if w is None or w is keep:
+                continue
+            if w.objectName() == "rawviewer_gallery_container":
+                layout.removeWidget(w)
+                w.deleteLater()
+
+    def _ensure_gallery_widget(self) -> bool:
+        """Create the gallery UI once; never stack duplicate containers."""
+        self._remove_orphan_gallery_containers()
+        existing = getattr(self, "gallery_widget", None)
+        if existing is not None:
+            try:
+                layout = self.centralWidget().layout() if self.centralWidget() else None
+                if layout is not None and layout.indexOf(existing) >= 0:
+                    return True
+            except RuntimeError:
+                self.gallery_widget = None
+                self.gallery_scroll = None
+                self.gallery_frame_gutter = None
+                self.gallery_justified = None
+        self._create_gallery_widget()
+        return bool(getattr(self, "gallery_widget", None))
+
+    def _create_gallery_widget(self):
+        """Create the gallery view widget - based on JustifiedGallery reference code"""
+        if getattr(self, "gallery_widget", None) is not None:
+            return
+        from PyQt6.QtWidgets import QWidget, QVBoxLayout, QScrollArea
+
+        # Create gallery widget container
+        gallery_container = QWidget()
+        gallery_container.setObjectName("rawviewer_gallery_container")
+        gallery_container.setStyleSheet("""
+            QWidget {
+                background-color: #1E1E1E;
+            }
+        """)
+        gallery_container.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        gallery_layout = QVBoxLayout(gallery_container)
+        gallery_layout.setContentsMargins(0, 0, 0, 0)
+        gallery_layout.setSpacing(0)
+
+        # Create scroll area for gallery
+        gallery_scroll = QScrollArea()
+        # False: widget must keep full content height so 1000s of rows scroll correctly.
+        gallery_scroll.setWidgetResizable(False)
+        gallery_scroll.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        gallery_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        gallery_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        gallery_scroll.setStyleSheet("""
+            QScrollArea {
+                border: none;
+                background-color: #1E1E1E;
+            }
+            QScrollBar:vertical {
+                background: transparent;
+                width: 24px;
+                margin: 0px;
+                border: none;
+            }
+            QScrollBar::handle:vertical {
+                background: rgba(255, 255, 255, 0.2);
+                min-height: 30px;
+                border-radius: 6px;
+                margin: 2px 6px 2px 6px;
+            }
+            QScrollBar::handle:vertical:hover {
+                background: rgba(255, 255, 255, 0.3);
+            }
+            QScrollBar::handle:vertical:pressed {
+                background: rgba(255, 255, 255, 0.4);
+            }
+            QScrollBar::add-line:vertical,
+            QScrollBar::sub-line:vertical {
+                height: 0px;
+                width: 0px;
+            }
+            QScrollBar::add-page:vertical,
+            QScrollBar::sub-page:vertical {
+                background: transparent;
+            }
+        """)
+
+        # Create optimized justified gallery widget from rawviewer_ui module.
+        justified_gallery = ExternalJustifiedGallery([], self)  # Empty list initially, will be populated
+        gallery_scroll.setWidget(justified_gallery)
+        gallery_layout.addWidget(gallery_scroll)
+
+        # Overlay on the scrollbar's frame-side margin — captures resize drags without
+        # shrinking the scroll area (layout gutter was stealing 6px from the viewport).
+        gallery_grip = QWidget(gallery_container)
+        gallery_grip.setStyleSheet("background: transparent;")
+        gallery_grip.setMouseTracking(True)
+        gallery_grip.hide()
+
+        # Insert gallery widget into main layout (after single-image row: scroll + histogram)
+        main_layout = self.centralWidget().layout()
+        anchor = (
+            self.single_view_container
+            if hasattr(self, "single_view_container") and self.single_view_container
+            else self.scroll_area
+        )
+        scroll_index = main_layout.indexOf(anchor)
+        main_layout.insertWidget(scroll_index + 1, gallery_container)
+
+        self.gallery_widget = gallery_container
+        self.gallery_scroll = gallery_scroll
+        self.gallery_frame_gutter = gallery_grip
+        self.gallery_justified = justified_gallery
+        gallery_scroll.setMouseTracking(True)
+        gallery_scroll.viewport().setMouseTracking(True)
+        gallery_scroll.installEventFilter(self)
+        gallery_scroll.viewport().installEventFilter(self)
+        gallery_grip.installEventFilter(self)
+        v_scrollbar = gallery_scroll.verticalScrollBar()
+        v_scrollbar.setMouseTracking(True)
+        v_scrollbar.installEventFilter(self)
+        gallery_container.installEventFilter(self)
+        self._position_gallery_frame_grip()
+        self._setup_file_drop_targets()
+
+        # Hide it initially - it will be shown by _show_gallery_view() when needed
+        gallery_container.hide()
+
+        # NOTE: rawviewer_ui.gallery_view.JustifiedGallery already wires scrollbar events
+        # internally (valueChanged + sliderPressed/Released). Avoid duplicate connections
+        # here; they can trigger redundant scheduling and visible scroll lag.
+
     def _on_gallery_metadata_ready(self, meta, folder_at_request):
         """Thread-safe handler for metadata fetch completion"""
         try:
@@ -16428,12 +16502,39 @@ class RAWImageViewer(QMainWindow):
                 self._slideshow_timer.stop()
             self._sync_slideshow_button_icon(False)
 
+    def _share_status_debug(self, msg: str, ms: int = 8000) -> None:
+        """Surface share diagnostics in the status bar when debug is enabled."""
+        _share_log(logging.INFO, "ui: %s", msg)
+        if not _env_true("RAWVIEWER_SHARE_DEBUG"):
+            return
+        try:
+            if hasattr(self, "status_bar") and self.status_bar:
+                self.status_bar.showMessage(f"Share: {msg}", ms)
+        except Exception:
+            pass
+
     def _on_share_bottom_button_clicked(self):
         """Share or open selected gallery images, or the current file in single view."""
         paths = self._gallery_share_target_paths()
+        _share_log(
+            logging.INFO,
+            "button clicked view_mode=%s paths=%d visible=%s frozen=%s",
+            getattr(self, "view_mode", "?"),
+            len(paths),
+            getattr(getattr(self, "share_bottom_button", None), "isVisible", lambda: None)(),
+            getattr(sys, "frozen", False),
+        )
+        if paths:
+            _share_log(logging.INFO, "targets: %s", paths[:3] if len(paths) > 3 else paths)
         if not paths:
+            _share_log(logging.WARNING, "no share targets (gallery selection or current file)")
             self.status_bar.showMessage("No images selected to share", 2500)
             return
+        paths_copy = list(paths)
+        self._dispatch_share_bottom(paths_copy)
+
+    def _dispatch_share_bottom(self, paths: List[str]) -> None:
+        _share_log(logging.INFO, "dispatch paths=%d platform=%s", len(paths), sys.platform)
         if sys.platform == "darwin":
             self._share_paths_os(paths)
         elif sys.platform == "win32":
@@ -16465,17 +16566,33 @@ class RAWImageViewer(QMainWindow):
 
     def _share_paths_os(self, paths: List[str]) -> None:
         """macOS share sheet or Windows share/clipboard for one or more files."""
+        raw_in = list(paths)
         paths = [os.path.abspath(p) for p in paths if p and os.path.isfile(p)]
+        _share_log(
+            logging.INFO,
+            "share_paths_os raw=%d valid_files=%d",
+            len(raw_in),
+            len(paths),
+        )
+        if len(raw_in) != len(paths):
+            for p in raw_in:
+                if p and not os.path.isfile(os.path.abspath(p)):
+                    _share_log(logging.WARNING, "skipped missing file: %s", p)
         if not paths:
             self.status_bar.showMessage("No file to share", 2000)
             return
         n = len(paths)
         if sys.platform == "darwin":
-            if self._share_macos(paths):
+            ok, detail = self._share_macos(paths)
+            if ok:
+                _share_log(logging.INFO, "macOS share sheet OK (%s)", detail)
                 self.status_bar.showMessage(
                     f"Share {n} image{'s' if n != 1 else ''}", 1500
                 )
-                return
+            else:
+                _share_log(logging.ERROR, "macOS share failed: %s", detail)
+                self._share_status_debug(detail)
+            return
         elif sys.platform == "win32":
             if n == 1:
                 self._share_windows_ui_chain(paths[0])
@@ -16496,7 +16613,14 @@ class RAWImageViewer(QMainWindow):
                 QApplication.clipboard().setText(joined)
             except Exception:
                 pass
-        self.status_bar.showMessage("Share unavailable — path(s) copied to clipboard", 4000)
+        hint = (
+            "Share failed — path(s) copied. "
+            "Set RAWVIEWER_FILE_LOG=1 and retry; check logs for [SHARE]."
+            if sys.platform == "darwin"
+            else "Share unavailable — path(s) copied to clipboard"
+        )
+        _share_log(logging.WARNING, "fallback clipboard (%s)", hint)
+        self.status_bar.showMessage(hint, 6000)
 
     def _share_current_image_os(self):
         """Open the macOS share sheet for the current file path."""
@@ -16559,32 +16683,301 @@ class RAWImageViewer(QMainWindow):
         self._copy_current_file_path_to_clipboard()
         self.status_bar.showMessage("Share unavailable — path copied to clipboard", 4000)
 
-    def _share_macos(self, paths: Union[str, List[str]]) -> bool:
+    def _macos_nsview_from_ptr(self, ptr: int, source: str = "?"):
+        """Bridge a Cocoa view pointer from Qt winId / windowHandle."""
+        if not ptr:
+            _share_log(logging.DEBUG, "%s: null pointer", source)
+            return None
+        import objc
+        from ctypes import c_void_p
+
+        try:
+            view = objc.objc_object(c_void_p=ptr)
+            _share_log(
+                logging.DEBUG,
+                "%s: ptr=0x%x class=%s",
+                source,
+                ptr,
+                view.className() if view is not None else "nil",
+            )
+            return view
+        except Exception as exc:
+            _share_log(logging.WARNING, "%s: bridge failed ptr=0x%x: %s", source, ptr, exc)
+            return None
+
+    def _macos_share_resolve_anchor(self):
+        """
+        Resolve (content_view, ns_window, label) for NSSharingServicePicker.
+
+        Prefer the NSWindow owned by Qt (windowHandle); NSApp.keyWindow often
+        does not match PyQt windows and yields a silent no-op picker.
+        """
+        btn = getattr(self, "share_bottom_button", None)
+        if btn is not None:
+            try:
+                wid = btn.winId()
+                btn_view = self._macos_nsview_from_ptr(int(wid), "qt.share_bottom_button")
+                if btn_view is not None:
+                    try:
+                        ns_win = btn_view.window()
+                    except Exception:
+                        ns_win = None
+                    _share_log(logging.INFO, "anchor=qt.share_bottom_button (raw view)")
+                    return btn_view, ns_win, "qt.share_bottom_button"
+            except Exception as exc:
+                _share_log(logging.WARNING, "failed resolving qt.share_bottom_button: %s", exc)
+
+        candidates = []
+
+        try:
+            wh = self.windowHandle()
+            if wh is not None:
+                candidates.append(("qt.windowHandle", int(wh.winId())))
+        except Exception as exc:
+            _share_log(logging.WARNING, "qt.windowHandle: %s", exc)
+
+        for widget, label in (
+            (self, "qt.mainWindow"),
+            (self.centralWidget(), "qt.centralWidget"),
+        ):
+            if widget is None:
+                continue
+            try:
+                wid = (
+                    widget.effectiveWinId()
+                    if hasattr(widget, "effectiveWinId")
+                    else widget.winId()
+                )
+                candidates.append((label, int(wid)))
+            except Exception as exc:
+                _share_log(logging.DEBUG, "%s winId: %s", label, exc)
+
+        for label, ptr in candidates:
+            view = self._macos_nsview_from_ptr(ptr, label)
+            if view is None:
+                continue
+            try:
+                ns_win = view.window()
+            except Exception as exc:
+                _share_log(logging.WARNING, "%s: view.window() failed: %s", label, exc)
+                ns_win = None
+            if ns_win is not None:
+                try:
+                    content = ns_win.contentView()
+                    if content is not None:
+                        _share_log(logging.INFO, "anchor=%s (contentView via %s)", label, ns_win.title())
+                        return content, ns_win, label
+                except Exception as exc:
+                    _share_log(logging.WARNING, "%s: contentView failed: %s", label, exc)
+            _share_log(logging.INFO, "anchor=%s (raw view)", label)
+            return view, ns_win, label
+
+        try:
+            from AppKit import NSApplication
+
+            ns_app = NSApplication.sharedApplication()
+            for label, win in (
+                ("ns.keyWindow", ns_app.keyWindow()),
+                ("ns.mainWindow", ns_app.mainWindow()),
+            ):
+                if win is None:
+                    _share_log(logging.DEBUG, "%s: None", label)
+                    continue
+                try:
+                    cv = win.contentView()
+                    _share_log(
+                        logging.DEBUG,
+                        "%s: title=%r contentView=%s",
+                        label,
+                        win.title(),
+                        cv.className() if cv is not None else None,
+                    )
+                    if cv is not None:
+                        _share_log(logging.INFO, "anchor=%s (NSApp fallback)", label)
+                        return cv, win, label
+                except Exception as exc:
+                    _share_log(logging.WARNING, "%s inspect: %s", label, exc)
+        except Exception as exc:
+            _share_log(logging.WARNING, "NSApplication: %s", exc, exc_info=True)
+
+        _share_log(logging.ERROR, "no NSView anchor (tried %d Qt ptrs + NSApp windows)", len(candidates))
+        return None, None, ""
+
+    def _macos_share_list_services(self, urls) -> None:
+        try:
+            from AppKit import NSSharingService
+
+            services = NSSharingService.sharingServicesForItems_(urls) or []
+            titles = []
+            for svc in services[:12]:
+                try:
+                    titles.append(str(svc.title()))
+                except Exception:
+                    titles.append("<?>")
+            _share_log(
+                logging.INFO,
+                "NSSharingService count=%d sample=%s",
+                len(services),
+                titles,
+            )
+        except Exception as exc:
+            _share_log(logging.WARNING, "sharingServicesForItems_: %s", exc)
+
+    def _macos_share_via_picker(self, urls, view, ns_window, label: str) -> bool:
+        from AppKit import NSSharingServicePicker, NSMakeRect, NSMinYEdge
+
+        try:
+            if ns_window is not None:
+                ns_window.makeKeyAndOrderFront_(None)
+                _share_log(logging.DEBUG, "makeKeyAndOrderFront on %s", label)
+        except Exception as exc:
+            _share_log(logging.WARNING, "makeKeyAndOrderFront failed: %s", exc)
+
+        try:
+            bounds = view.bounds()
+            _share_log(
+                logging.INFO,
+                "picker anchor=%s view=%s bounds=(%.0f,%.0f,%.0f,%.0f)",
+                label,
+                view.className(),
+                bounds.origin.x,
+                bounds.origin.y,
+                bounds.size.width,
+                bounds.size.height,
+            )
+        except Exception as exc:
+            _share_log(logging.DEBUG, "view.bounds: %s", exc)
+
+        try:
+            if label == "qt.share_bottom_button":
+                w = self.share_bottom_button.width()
+                h = self.share_bottom_button.height()
+                rect = NSMakeRect(0, 0, w, h)
+            else:
+                btn_pos = self.share_bottom_button.mapTo(self, QPoint(0, 0))
+                ns_y = view.bounds().size.height - btn_pos.y() - self.share_bottom_button.height()
+                rect = NSMakeRect(btn_pos.x(), ns_y, self.share_bottom_button.width(), self.share_bottom_button.height())
+        except Exception:
+            bounds = view.bounds()
+            rect = NSMakeRect(bounds.origin.x + bounds.size.width / 2, bounds.origin.y + bounds.size.height / 2, 1, 1)
+
+        picker = NSSharingServicePicker.alloc().initWithItems_(urls)
+        if picker is None:
+            _share_log(logging.ERROR, "NSSharingServicePicker.alloc/init returned None")
+            return False
+        self._macos_share_picker_ref = picker
+        try:
+            picker.showRelativeToRect_ofView_preferredEdge_(rect, view, NSMinYEdge)
+            _share_log(logging.INFO, "picker.showRelativeToRect invoked on %s", label)
+            return True
+        except Exception as exc:
+            _share_log(logging.ERROR, "picker.show failed: %s", exc, exc_info=True)
+            return False
+
+    def _macos_share_via_service_fallback(self, urls) -> bool:
+        """If the picker is a no-op, try the first sharing service that accepts the items."""
+        try:
+            from AppKit import NSSharingService
+        except Exception as exc:
+            _share_log(logging.WARNING, "NSSharingService import: %s", exc)
+            return False
+
+        services = NSSharingService.sharingServicesForItems_(urls) or []
+        for svc in services:
+            try:
+                title = str(svc.title())
+                if not svc.canPerformWithItems_(urls):
+                    _share_log(logging.DEBUG, "skip service (cannot perform): %s", title)
+                    continue
+                _share_log(logging.INFO, "fallback performWithItems: %s", title)
+                svc.performWithItems_(urls)
+                return True
+            except Exception as exc:
+                _share_log(logging.WARNING, "service %s failed: %s", svc, exc)
+        _share_log(logging.WARNING, "no NSSharingService accepted %d item(s)", len(urls))
+        return False
+
+    def _share_macos(self, paths: Union[str, List[str]]) -> tuple:
+        """Return (success, detail_message). Matches the proven v2.1 approach:
+        resolve the share button's native QNSView directly, present the picker
+        synchronously with local bounds and NSMaxYEdge."""
         try:
             from AppKit import NSURL, NSSharingServicePicker, NSMakeRect
             import objc
             from ctypes import c_void_p
 
-            if isinstance(paths, str):
-                file_paths = [paths]
-            else:
-                file_paths = list(paths)
-            urls = []
-            for p in file_paths:
-                if p and os.path.isfile(p):
-                    urls.append(NSURL.fileURLWithPath_(os.path.abspath(p)))
-            if not urls:
-                return False
+            _share_log(logging.INFO, "PyObjC/AppKit import OK")
+        except Exception as exc:
+            msg = f"AppKit unavailable ({exc})"
+            _share_log(logging.ERROR, msg, exc_info=True)
+            return False, msg
+
+        if isinstance(paths, str):
+            file_paths = [paths]
+        else:
+            file_paths = list(paths)
+
+        urls = []
+        for p in file_paths:
+            if p and os.path.isfile(p):
+                abs_p = os.path.abspath(p)
+                urls.append(NSURL.fileURLWithPath_(abs_p))
+                _share_log(logging.DEBUG, "NSURL file:// %s", abs_p)
+        if not urls:
+            return False, "no file URLs built"
+
+        _activate_macos_foreground_app()
+        try:
+            self.raise_()
+            self.activateWindow()
+            app = QApplication.instance()
+            if app is not None:
+                for _ in range(6):
+                    app.processEvents()
+        except Exception as exc:
+            _share_log(logging.WARNING, "Qt activate/processEvents: %s", exc)
+
+        try:
             btn = self.share_bottom_button
-            view = objc.objc_object(c_void_p=int(btn.winId()))
-            w = max(1, btn.width())
-            h = max(1, btn.height())
-            rect = NSMakeRect(0, 0, w, h)
-            picker = NSSharingServicePicker.alloc().initWithItems_(urls)
-            picker.showRelativeToRect_ofView_preferredEdge_(rect, view, 3)
-            return True
-        except Exception:
-            return False
+            
+            from AppKit import NSArray, NSSharingServicePicker, NSMakeRect
+            
+            # Use QTimer to break out of the Qt event loop
+            def show_picker():
+                try:
+                    view = objc.objc_object(c_void_p=int(btn.winId()))
+                    ns_window = view.window()
+                    
+                    if ns_window:
+                        # Try to attach to the window's content view for better native integration
+                        present_view = ns_window.contentView()
+                        
+                        # Calculate rect relative to the content view
+                        btn_pos = btn.mapToGlobal(btn.rect().topLeft())
+                        # Note: Qt global Y is from top, macOS window Y is from bottom
+                        # We'll just use a small rect at the mouse cursor or top-left of window as fallback
+                        rect = NSMakeRect(50, 50, 1, 1) 
+                    else:
+                        present_view = view
+                        rect = NSMakeRect(0, 0, btn.width(), btn.height())
+                        
+                    items = NSArray.alloc().initWithArray_(urls)
+                    picker = NSSharingServicePicker.alloc().initWithItems_(items)
+                    
+                    self._macos_share_items_ref = items
+                    self._macos_share_picker_ref = picker
+                    
+                    picker.showRelativeToRect_ofView_preferredEdge_(rect, present_view, 3) # 3 = NSMaxYEdge
+                    _share_log(logging.INFO, "Native NSSharingServicePicker shown")
+                except Exception as exc:
+                    _share_log(logging.ERROR, "deferred picker show failed: %s", exc, exc_info=True)
+            
+            from PyQt6.QtCore import QTimer
+            QTimer.singleShot(50, show_picker)
+            return True, "qt.share_bottom_button (native_picker_deferred)"
+            
+        except Exception as exc:
+            _share_log(logging.ERROR, "Native share panel setup failed: %s", exc, exc_info=True)
 
     def _share_windows_shell(self, path: str, owner_hwnd: int = 0) -> bool:
         """Legacy Explorer shell verb fallback when WinRT share is unavailable."""
@@ -17095,6 +17488,8 @@ class RAWImageViewer(QMainWindow):
                 self._restore_zoom_level = self.current_zoom_level
 
             self._maybe_refresh_focus_subject_outline_after_display()
+            if hasattr(self, "loading_overlay"):
+                self.loading_overlay.hide_loading()
             return  # Don't continue with normal display logic
 
         # Zoom / navigation restore: _restore_zoom_center alone misses pinch (center may still be unset).
@@ -17233,6 +17628,8 @@ class RAWImageViewer(QMainWindow):
                                 "[DISPLAY_PIXMAP] Preview fit-to-window while full resolution loads for zoom restore "
                                 f"(pending center={self._pending_zoom_center}, level={self._pending_zoom_level})"
                             )
+                            if hasattr(self, "loading_overlay"):
+                                self.loading_overlay.hide_loading()
                             return
                     else:
                         # Fallback: start loading full resolution
@@ -17253,6 +17650,8 @@ class RAWImageViewer(QMainWindow):
                             "[DISPLAY_PIXMAP] Preview fit-to-window while full resolution loads for zoom restore "
                             f"(pending center={self._pending_zoom_center}, level={self._pending_zoom_level})"
                         )
+                        if hasattr(self, "loading_overlay"):
+                            self.loading_overlay.hide_loading()
                         return
 
             # Effective zoom target: half->full deferral moves *_restore_* into _pending_* before this path.
@@ -17348,6 +17747,8 @@ class RAWImageViewer(QMainWindow):
         self._sync_displayed_half_size_flag(cur_path)
         self.update_status_bar()
         self._maybe_refresh_focus_subject_outline_after_display()
+        if hasattr(self, "loading_overlay"):
+            self.loading_overlay.hide_loading()
 
         # Track image fully loaded and rendered
         display_time = time.time() - display_start
@@ -19759,14 +20160,11 @@ class RAWImageViewer(QMainWindow):
         return pos.y() >= self.height() - status_h
 
     def _is_status_bar_chrome_widget(self, obj) -> bool:
-        if obj is getattr(self, "status_bar", None):
-            return True
+        sb = getattr(self, "status_bar", None)
         host = getattr(self, "status_bar_widget", None)
-        if host is None:
-            return False
         w = obj
         while w is not None:
-            if w is host:
+            if w is sb or w is host:
                 return True
             w = w.parentWidget()
         return False
@@ -20949,6 +21347,12 @@ class RAWImageViewer(QMainWindow):
                     event.ignore()
                 return True
 
+        if event.type() in (QEvent.Type.MouseMove, QEvent.Type.Enter) and getattr(self, "view_mode", "single") == "single":
+            if self._is_status_bar_chrome_widget(obj):
+                container = getattr(self, "single_view_container", None)
+                if container is not None:
+                    container.set_filmstrip_pointer_active(False)
+
         if event.type() in (
             QEvent.Type.MouseMove,
             QEvent.Type.MouseButtonPress,
@@ -21809,8 +22213,7 @@ class RAWImageViewer(QMainWindow):
                 self.gallery_justified.show_loading_message("Preparing gallery...")
 
             if hasattr(self, 'view_mode') and self.view_mode == 'gallery':
-                if not hasattr(self, 'gallery_widget') or not self.gallery_widget:
-                    self._create_gallery_widget()
+                self._ensure_gallery_widget()
                 self._show_gallery_view()
                 # Force a second pass after layout settles to avoid "empty gallery"
                 # race when switching folders quickly.
@@ -21916,13 +22319,12 @@ class RAWImageViewer(QMainWindow):
 
             if hasattr(self, 'view_mode'):
                 if self.view_mode == 'gallery':
-                    if not hasattr(self, 'gallery_widget') or not self.gallery_widget:
-                        self._create_gallery_widget()
+                    self._ensure_gallery_widget()
                     if self.gallery_justified:
                         self.gallery_justified.set_images([])
                         self.gallery_justified.show_loading_message("Scanning folder...")
-                    if hasattr(self, 'gallery_widget') and self.gallery_widget:
-                        self.gallery_widget.show()
+                    # Hide single view immediately so gallery mode never stacks two panes.
+                    self._show_gallery_view()
                 else:
                     if hasattr(self, 'loading_overlay'):
                         if not fast_open:
@@ -22393,7 +22795,11 @@ def main():
     """Main function to run the application"""
     import logging
     import traceback
-    
+
+    # Packaged macOS app: enable semantic search by default (dev uses launch_dev.sh).
+    if getattr(sys, "frozen", False) and sys.platform == "darwin":
+        os.environ.setdefault("RAWVIEWER_ENABLE_SEMANTIC_SEARCH", "1")
+
     # Print to console immediately (before logging might be ready)
     safe_print("main() function called", flush=True)
     
