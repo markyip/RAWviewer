@@ -131,6 +131,10 @@ Untitled
 
 # POC / benchmark script outputs (regenerate with compare_shell_capture_times.py)
 scripts/output/
+# load_workflow_poc.py ad-hoc runs (prefer --json-out scripts/output/…)
+scripts/load_workflow_poc_*.json
+scripts/load_workflow_poc_*_run.txt
+scripts/load_workflow_poc_last_run.txt
 
 # Local one-off profiling scripts (hardcoded paths)
 scripts/profile_*.py
