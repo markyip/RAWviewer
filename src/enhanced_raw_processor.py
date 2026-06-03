@@ -70,38 +70,98 @@ _embedded_scan_miss_lock = threading.Lock()
 _embedded_scan_miss_cache_max = 4096
 
 
+def get_jpeg_dimensions(data: bytes) -> Optional[Tuple[int, int]]:
+    """Parse JPEG header bytes to find image width and height without decoding."""
+    if len(data) < 4 or not data.startswith(b'\xff\xd8'):
+        return None
+        
+    offset = 2
+    data_len = len(data)
+    
+    while offset < data_len:
+        # Skip any 0xff padding bytes
+        while offset < data_len and data[offset] == 0xff:
+            offset += 1
+            
+        if offset >= data_len:
+            break
+            
+        marker = data[offset]
+        offset += 1
+        
+        # SOS (Start of Scan) or EOI (End of Image) mean header is over
+        if marker == 0xda or marker == 0xd9:
+            break
+            
+        # Standalone markers with no length/payload
+        if marker in (0x01, 0xd0, 0xd1, 0xd2, 0xd3, 0xd4, 0xd5, 0xd6, 0xd7, 0xd8):
+            continue
+            
+        # Markers with length
+        if offset + 2 > data_len:
+            break
+            
+        segment_len = int.from_bytes(data[offset:offset+2], byteorder='big')
+        
+        # Check if it's an SOF marker (0xc0 - 0xcf except 0xc4, 0xc8, 0xcc)
+        if 0xc0 <= marker <= 0xcf and marker not in (0xc4, 0xc8, 0xcc):
+            if offset + 7 <= data_len:
+                # SOF payload starts after the 2-byte length field:
+                # offset + 2: precision (1 byte)
+                # offset + 3: height (2 bytes)
+                # offset + 5: width (2 bytes)
+                height = int.from_bytes(data[offset+3:offset+5], byteorder='big')
+                width = int.from_bytes(data[offset+5:offset+7], byteorder='big')
+                return width, height
+            break
+            
+        offset += segment_len
+        
+    return None
+
+
 def _largest_jpeg_from_blob(blob: bytes, max_size: int) -> Optional[np.ndarray]:
-    """Find the largest decodable JPEG segment inside a byte blob."""
-    best_arr = None
+    """Find the largest decodable JPEG segment inside a byte blob using fast header parsing."""
+    best_offset = -1
     best_area = 0
+    best_end_offset = -1
+    
     start = 0
+    blob_len = len(blob)
     while True:
         idx = blob.find(b"\xff\xd8\xff", start)
         if idx < 0:
             break
-        end_marker = blob.find(b"\xff\xd9", idx + 3)
-        segments = []
-        if end_marker >= 0:
-            segments.append(blob[idx : end_marker + 2])
-        segments.append(blob[idx:])
-
-        for segment in segments:
-            try:
-                arr = decode_embedded_jpeg_bytes(segment, max_size)
-                if arr is None:
-                    continue
-                h, w = arr.shape[:2]
-                if w < 32 or h < 32:
-                    continue
-                area = w * h
-                if area <= best_area:
-                    continue
+            
+        # Parse JPEG header from the next 64KB (or up to the end of the blob)
+        header_chunk = blob[idx : min(blob_len, idx + 65536)]
+        dims = get_jpeg_dimensions(header_chunk)
+        if dims is not None:
+            w, h = dims
+            area = w * h
+            if area > best_area and w >= 32 and h >= 32:
+                # Find the EOI marker \xff\xd9 for this JPEG
+                end_marker = blob.find(b"\xff\xd9", idx + 3)
                 best_area = area
-                best_arr = arr
-            except Exception:
-                continue
+                best_offset = idx
+                best_end_offset = end_marker + 2 if end_marker >= 0 else -1
+                
         start = idx + 3
-    return best_arr
+        
+    if best_offset >= 0:
+        # Extract the segment
+        if best_end_offset >= 0:
+            segment = blob[best_offset : best_end_offset]
+        else:
+            segment = blob[best_offset:]
+            
+        # Decode only the selected best JPEG segment
+        try:
+            return decode_embedded_jpeg_bytes(segment, max_size)
+        except Exception:
+            pass
+            
+    return None
 
 
 def _orientation_from_embedded_preview(
@@ -142,10 +202,8 @@ def _thumbnail_via_qimage_reader(file_path: str, max_size: int) -> Optional[np.n
 
 def extract_embedded_jpeg_by_scan(file_path: str, max_size: int) -> Optional[np.ndarray]:
     """
-    When LibRaw cannot open a file, scan for embedded JPEG (SOI … EOI) and decode with PIL.
-    Many damaged or newer ARW/RAW containers still carry a JPEG preview readable without rawpy.
-    Picks the largest successfully decoded JPEG (by pixel area), skips tiny icons.
-    Scans both file head and tail (Sony ARW previews are often near the end).
+    Scan for embedded JPEG (SOI … EOI) by reading head and tail chunks,
+    parsing headers to find the largest one, and decoding ONLY that one.
     """
     try:
         stat = os.stat(file_path)
@@ -155,22 +213,89 @@ def extract_embedded_jpeg_by_scan(file_path: str, max_size: int) -> Optional[np.
             if miss_key in _embedded_scan_miss_cache:
                 return None
 
-        if max_size <= 1024:
-            read_limit = 32 * 1024 * 1024
-        elif max_size <= 2048:
-            read_limit = 64 * 1024 * 1024
-        else:
-            read_limit = 120 * 1024 * 1024
-        chunk = min(size, read_limit)
+        # We read the first 4MB and the last 4MB
+        chunk_size = 4 * 1024 * 1024
+        
+        head = b""
+        tail = b""
+        
         with open(file_path, "rb") as f:
-            head = f.read(chunk)
-        best_arr = _largest_jpeg_from_blob(head, max_size)
-        if best_arr is None and size > chunk:
-            with open(file_path, "rb") as f:
-                f.seek(max(0, size - chunk))
-                tail = f.read(chunk)
-            best_arr = _largest_jpeg_from_blob(tail, max_size)
-    except OSError:
+            if size <= chunk_size * 2:
+                # Read entire file if it's small enough
+                head = f.read()
+            else:
+                # Read head
+                head = f.read(chunk_size)
+                # Read tail
+                f.seek(size - chunk_size)
+                tail = f.read(chunk_size)
+                
+        # Scan head and tail
+        # We will collect candidate JPEGs: (area, segment_bytes, abs_offset)
+        candidates = []
+        
+        def scan_chunk(chunk_bytes, base_offset):
+            start = 0
+            chunk_len = len(chunk_bytes)
+            while True:
+                idx = chunk_bytes.find(b"\xff\xd8\xff", start)
+                if idx < 0:
+                    break
+                
+                # Check dimensions
+                header_chunk = chunk_bytes[idx : min(chunk_len, idx + 65536)]
+                dims = get_jpeg_dimensions(header_chunk)
+                if dims is not None:
+                    w, h = dims
+                    area = w * h
+                    if w >= 32 and h >= 32:
+                        end_marker = chunk_bytes.find(b"\xff\xd9", idx + 3)
+                        if end_marker >= 0:
+                            segment = chunk_bytes[idx : end_marker + 2]
+                            candidates.append((area, segment, base_offset + idx))
+                        else:
+                            # Not fully contained in the chunk (cut off).
+                            # We will read the rest of the file from the start of the JPEG on-demand later.
+                            candidates.append((area, None, base_offset + idx))
+                start = idx + 3
+
+        scan_chunk(head, 0)
+        if tail:
+            scan_chunk(tail, size - chunk_size)
+            
+        if not candidates:
+            # Mark as miss
+            with _embedded_scan_miss_lock:
+                if len(_embedded_scan_miss_cache) >= _embedded_scan_miss_cache_max:
+                    _embedded_scan_miss_cache.clear()
+                _embedded_scan_miss_cache.add(miss_key)
+            return None
+            
+        # Select candidate with the largest area
+        candidates.sort(key=lambda x: x[0], reverse=True)
+        best_area, best_segment, best_abs_offset = candidates[0]
+        
+        # If the best segment was cut off, read it now from the file
+        if best_segment is None:
+            try:
+                with open(file_path, "rb") as f:
+                    f.seek(best_abs_offset)
+                    # Previews are usually not larger than 8MB, but we read up to 16MB or to the end
+                    remaining = f.read(16 * 1024 * 1024)
+                    end_marker = remaining.find(b"\xff\xd9")
+                    if end_marker >= 0:
+                        best_segment = remaining[:end_marker + 2]
+                    else:
+                        best_segment = remaining
+            except Exception:
+                return None
+                
+        if best_segment:
+            best_arr = decode_embedded_jpeg_bytes(best_segment, max_size)
+        else:
+            best_arr = None
+            
+    except Exception:
         return None
 
     if best_arr is None:
@@ -194,12 +319,8 @@ class ThumbnailExtractor(QObject):
         """Extract embedded thumbnail from RAW file and resize to max_size."""
         thumb = None
         
-        # For slow storage (UNC network shares), reading the whole RAW file via LibRaw is very slow.
-        # Prioritize reading just the head/tail for the embedded JPEG via scan to get an instant preview.
-        from common_image_loader import is_slow_storage_path
-        is_slow = is_slow_storage_path(file_path)
-        
-        if is_slow and allow_scan_fallback and raw_object is None:
+        # Prioritize reading just the head/tail for the embedded JPEG via fast scan to get an instant preview.
+        if allow_scan_fallback and raw_object is None:
             scan_max = max_size if max_size > 0 else 8192
             thumb = extract_embedded_jpeg_by_scan(file_path, scan_max)
             if thumb is not None:
@@ -410,12 +531,47 @@ class EXIFExtractor(QObject):
         except Exception:
             pass
 
+    def build_minimal_raw_exif(
+        self, file_path: str, raw_object: rawpy.RawPy
+    ) -> Dict[str, Any]:
+        """Fast sensor/orientation metadata from an open rawpy handle (no exiftool)."""
+        orientation = 1
+        original_width = 0
+        original_height = 0
+        try:
+            sizes = raw_object.sizes
+            original_width = int(sizes.width)
+            original_height = int(sizes.height)
+            if sizes.flip != 0:
+                flip_map = {0: 1, 3: 3, 5: 8, 6: 6}
+                orientation = flip_map.get(sizes.flip, sizes.flip)
+        except Exception:
+            pass
+        if orientation <= 1:
+            embedded_o = _orientation_from_embedded_preview(file_path, raw_object)
+            if embedded_o not in (1, orientation):
+                orientation = embedded_o
+        return {
+            "orientation": orientation,
+            "camera_make": "",
+            "camera_model": "",
+            "exif_data": {},
+            "original_width": original_width,
+            "original_height": original_height,
+            "capture_time": None,
+            "focal_length": None,
+            "aperture": None,
+            "iso": None,
+            "verified_orientation": True,
+            "raw_exif_sensor_meta_ver": RAW_EXIF_SENSOR_META_VER,
+            "minimal_preview_exif": True,
+        }
+
     def extract_exif_data(self, file_path: str, raw_object: Optional[rawpy.RawPy] = None) -> Optional[Dict[str, Any]]:
         """Extract EXIF data from image file with RAW-specific orientation fallbacks."""
         # Check SQLite cache first
         cached = self.cache.get_exif(file_path)
-        if cached:
-            # Check if cache version matches current logic
+        if cached and not cached.get("minimal_preview_exif"):
             cached_ver = cached.get('raw_exif_sensor_meta_ver', 0)
             if cached_ver < RAW_EXIF_SENSOR_META_VER:
                 if os.environ.get("RAWVIEWER_VERBOSE_ORIENTATION_LOGS") == "1":

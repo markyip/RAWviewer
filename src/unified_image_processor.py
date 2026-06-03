@@ -43,6 +43,10 @@ def _verbose_orientation_logs() -> bool:
     }
 
 
+# LibRaw cannot open some composite HDR DNGs; avoid repeated preview/decode attempts.
+_LIBRAW_UNSUPPORTED_PATHS: set[str] = set()
+
+
 def decode_raw_file(file_path: str, params: Dict[str, Any]) -> np.ndarray:
     """
     Helper function for process pool to decode RAW files.
@@ -65,11 +69,236 @@ class UnifiedImageProcessor:
     def _is_raw_file(self, file_path: str) -> bool:
         """檢查是否為 RAW 文件"""
         return is_raw_file(file_path)
+
+    def _raw_thumbnail_extract_max_size(
+        self,
+        target_size: Optional[QSize],
+        *,
+        allow_heavy_fallback: bool,
+    ) -> int:
+        """Gallery grid uses disk tier (~512px); single-view CURRENT uses memory preview tier (~1920px)."""
+        if target_size is not None:
+            tw = int(target_size.width()) if target_size.width() > 0 else 512
+            th = int(target_size.height()) if target_size.height() > 0 else 512
+            return max(256, min(1024, tw, th))
+        if allow_heavy_fallback:
+            return memory_preview_max_edge()
+        return disk_preview_max_edge()
+
+    def _single_view_display_thumbnail(self, target_size: Optional[QSize], allow_heavy_fallback: bool) -> bool:
+        return target_size is None and bool(allow_heavy_fallback)
+
+    def _cached_preview_meets_display_tier(self, cached_thumb) -> bool:
+        if cached_thumb is None:
+            return False
+        try:
+            min_px = int(memory_preview_max_edge() * 0.85)
+            if hasattr(cached_thumb, "shape"):
+                return max(int(cached_thumb.shape[0]), int(cached_thumb.shape[1])) >= min_px
+            if hasattr(cached_thumb, "width"):
+                return max(int(cached_thumb.height()), int(cached_thumb.width())) >= min_px
+        except Exception:
+            pass
+        return False
+
+    def _cache_display_tier_result(
+        self,
+        file_path: str,
+        thumbnail: np.ndarray,
+        exif_data: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Memory-cache display-tier preview for preview-first warm opens only.
+
+        Single ``put_preview`` copy (no duplicate thumbnail_cache write) so
+        thumb+exif / full_pipeline cold paths are not penalized.
+        """
+        if thumbnail is None:
+            return
+        try:
+            if self._cached_preview_meets_display_tier(
+                self.cache.get_preview(file_path)
+            ):
+                return
+            self.cache.put_preview(file_path, thumbnail)
+        except Exception:
+            pass
+        if exif_data:
+            try:
+                cur = self.cache.get_exif(file_path)
+                if cur is not None and not cur.get("minimal_preview_exif"):
+                    return
+                self.cache.put_exif(
+                    file_path,
+                    exif_data,
+                    persist_disk=not bool(exif_data.get("minimal_preview_exif")),
+                )
+            except Exception:
+                pass
+
+    def _extract_raw_preview_before_full_exiftool(
+        self,
+        file_path: str,
+        cached_exif: Optional[Dict[str, Any]],
+        cached_thumb,
+    ) -> Optional[Tuple[Optional[Dict[str, Any]], Optional[np.ndarray]]]:
+        """Single rawpy open: embedded preview first, defer exiftool to a follow-up task."""
+        if cached_exif is not None and self._cached_preview_meets_display_tier(cached_thumb):
+            return cached_exif, cached_thumb
+        import rawpy
+
+        try:
+            with rawpy.imread(file_path) as raw:
+                max_size_val = self._raw_thumbnail_extract_max_size(
+                    None, allow_heavy_fallback=True
+                )
+                thumb = cached_thumb
+                if not self._cached_preview_meets_display_tier(thumb):
+                    thumb = self.thumbnail_extractor.extract_thumbnail_from_raw(
+                        file_path,
+                        max_size=max_size_val,
+                        allow_scan_fallback=True,
+                        raw_object=raw,
+                    )
+                if thumb is None:
+                    return None
+                exif = cached_exif
+                if exif is None or exif.get("minimal_preview_exif"):
+                    exif = self.exif_extractor.build_minimal_raw_exif(file_path, raw)
+                if exif and exif.get("orientation", 1) != 1:
+                    thumb = self._apply_orientation_correction(
+                        thumb, exif["orientation"], exif
+                    )
+                return exif, thumb
+        except Exception:
+            return None
+
+    def ensure_display_tier_preview(
+        self, file_path: str, thumbnail: Optional[np.ndarray]
+    ) -> Optional[np.ndarray]:
+        """Upgrade sub-1400px worker thumbs to ~1920 embedded preview when possible."""
+        if thumbnail is None or not self._is_raw_file(file_path):
+            return thumbnail
+        try:
+            min_px = int(memory_preview_max_edge() * 0.85)
+            if hasattr(thumbnail, "shape"):
+                md = max(int(thumbnail.shape[0]), int(thumbnail.shape[1]))
+            elif hasattr(thumbnail, "width"):
+                md = max(int(thumbnail.width()), int(thumbnail.height()))
+            else:
+                return thumbnail
+            if md >= min_px:
+                return thumbnail
+        except Exception:
+            return thumbnail
+        import logging
+
+        logger = logging.getLogger(__name__)
+        target = memory_preview_max_edge()
+        try:
+            from enhanced_raw_processor import extract_embedded_jpeg_by_scan
+
+            scanned = extract_embedded_jpeg_by_scan(file_path, target)
+            if scanned is not None:
+                smd = max(int(scanned.shape[0]), int(scanned.shape[1]))
+                if smd >= min_px:
+                    logger.info(
+                        "[PREVIEW] Scan fallback raised preview to %dpx for %s",
+                        smd,
+                        os.path.basename(file_path),
+                    )
+                    return scanned
+        except Exception:
+            pass
+        pair = self._extract_raw_preview_before_full_exiftool(file_path, None, None)
+        if pair is not None and pair[1] is not None:
+            thumb = pair[1]
+            if hasattr(thumb, "shape"):
+                smd = max(int(thumb.shape[0]), int(thumb.shape[1]))
+                if smd >= min_px:
+                    logger.info(
+                        "[PREVIEW] Rawpy fallback raised preview to %dpx for %s",
+                        smd,
+                        os.path.basename(file_path),
+                    )
+                    return thumb
+        half = self.try_half_size_display_preview(file_path)
+        if half is not None:
+            try:
+                smd = max(int(half.shape[0]), int(half.shape[1]))
+                if smd >= min_px:
+                    logger.info(
+                        "[PREVIEW] Half-size fallback raised preview to %dpx for %s",
+                        smd,
+                        os.path.basename(file_path),
+                    )
+                    return half
+            except Exception:
+                pass
+        logger.warning(
+            "[PREVIEW] Could not reach display tier (%dpx) for %s (stuck at %dpx)",
+            min_px,
+            os.path.basename(file_path),
+            self._preview_buffer_max_dim(thumbnail),
+        )
+        return None
+
+    @staticmethod
+    def _preview_buffer_max_dim(buf) -> int:
+        try:
+            if hasattr(buf, "shape"):
+                return max(int(buf.shape[0]), int(buf.shape[1]))
+            if hasattr(buf, "width") and hasattr(buf, "height"):
+                return max(int(buf.width()), int(buf.height()))
+        except Exception:
+            pass
+        return 0
+
+    def try_half_size_display_preview(self, file_path: str) -> Optional[np.ndarray]:
+        """Fast LibRaw half-size decode when embedded JPEG tiers are unusable."""
+        if not self._is_raw_file(file_path):
+            return None
+        import logging
+
+        logger = logging.getLogger(__name__)
+        target = memory_preview_max_edge()
+        try:
+            import rawpy
+
+            with rawpy.imread(file_path) as raw:
+                rgb = raw.postprocess(
+                    half_size=True,
+                    use_camera_wb=True,
+                    no_auto_bright=False,
+                    output_bps=8,
+                )
+            if rgb is None or rgb.size == 0:
+                return None
+            from PIL import Image
+
+            pil = Image.fromarray(rgb.astype("uint8"), "RGB")
+            w, h = pil.size
+            scale = min(target / max(w, h, 1), 1.0)
+            if scale < 1.0:
+                pil = pil.resize(
+                    (max(1, int(w * scale)), max(1, int(h * scale))),
+                    Image.Resampling.BILINEAR,
+                )
+            return np.array(pil)
+        except Exception as exc:
+            logger.debug(
+                "Half-size display preview failed for %s: %s",
+                os.path.basename(file_path),
+                exc,
+            )
+            return None
     
     def process_thumbnail(self, file_path: str, allow_heavy_fallback: bool = True,
                           target_size: Optional[QSize] = None) -> Optional[np.ndarray]:
         """處理縮圖（統一接口）"""
         MAX_THUMB_DIM = 1024
+        single_view_preview = self._single_view_display_thumbnail(
+            target_size, allow_heavy_fallback
+        )
 
         # 檢查快取
         cached = self.cache.get_thumbnail(file_path)
@@ -101,12 +330,23 @@ class UnifiedImageProcessor:
                     cached = None
 
             if cached is not None:
-                return cached
+                if single_view_preview and hasattr(cached, "shape"):
+                    try:
+                        if max(int(cached.shape[0]), int(cached.shape[1])) < int(
+                            memory_preview_max_edge() * 0.85
+                        ):
+                            cached = None
+                    except Exception:
+                        pass
+                if cached is not None:
+                    return cached
         
-        # Gallery / folder thumbnails: disk tier is 512px grid; avoid 1920px extraction.
+        # Gallery grid: disk tier (~512px). Single-view CURRENT: memory preview tier (~1920px).
         is_raw = self._is_raw_file(file_path)
         if is_raw:
-            max_size_val = disk_preview_max_edge() if target_size is None else MAX_THUMB_DIM
+            max_size_val = self._raw_thumbnail_extract_max_size(
+                target_size, allow_heavy_fallback=allow_heavy_fallback
+            )
             thumbnail = self.thumbnail_extractor.extract_thumbnail_from_raw(
                 file_path,
                 max_size=max_size_val,
@@ -153,10 +393,27 @@ class UnifiedImageProcessor:
 
         # For RAW or fallback paths that return np.ndarray:
         # 獲取 EXIF 數據以獲取 orientation
-        exif_data = self.exif_extractor.extract_exif_data(file_path)
+        exif_data = self.cache.get_exif(file_path)
+        if exif_data is None or exif_data.get("minimal_preview_exif"):
+            if single_view_preview and self._is_raw_file(file_path):
+                try:
+                    import rawpy
+
+                    with rawpy.imread(file_path) as raw:
+                        exif_data = self.exif_extractor.build_minimal_raw_exif(
+                            file_path, raw
+                        )
+                except Exception:
+                    exif_data = None
+            else:
+                exif_data = None
+        if exif_data is None:
+            exif_data = self.exif_extractor.extract_exif_data(file_path)
         orientation = exif_data.get('orientation', 1) if exif_data else 1
         if orientation != 1:
             thumbnail = self._apply_orientation_correction(thumbnail, orientation, exif_data)
+        if exif_data and exif_data.get("minimal_preview_exif"):
+            self.cache.put_exif(file_path, exif_data, persist_disk=False)
         
         try:
             from PIL import Image
@@ -177,9 +434,12 @@ class UnifiedImageProcessor:
 
             # --- Structured Mipmap (Multi-Scale) Caching Pipeline ---
             w, h = pil_img.size
-            
-            # Level 1: In-memory preview only (512px). Persisted grid JPEG is Level 2.
-            pv_max = disk_preview_max_edge()
+
+            pv_max = (
+                memory_preview_max_edge()
+                if single_view_preview
+                else disk_preview_max_edge()
+            )
             if w <= pv_max and h <= pv_max:
                 preview_pil = pil_img
             else:
@@ -189,20 +449,19 @@ class UnifiedImageProcessor:
                 preview_pil = pil_img.resize((new_w1, new_h1), Image.Resampling.HAMMING)
             self.cache.put_preview(file_path, np.array(preview_pil))
 
-            # Level 2: Grid Mipmap (Max 512px)
-            if w <= 512 and h <= 512:
+            grid_max = disk_preview_max_edge()
+            if w <= grid_max and h <= grid_max:
                 grid_pil = pil_img
             else:
-                scale_2 = min(512 / w, 512 / h)
+                scale_2 = min(grid_max / w, grid_max / h)
                 new_w2 = max(1, int(w * scale_2))
                 new_h2 = max(1, int(h * scale_2))
                 grid_pil = pil_img.resize((new_w2, new_h2), Image.Resampling.HAMMING)
-                
+
             buffer_g = io.BytesIO()
             grid_pil.save(buffer_g, format='JPEG', quality=85)
             self.cache.put_grid(file_path, np.array(grid_pil), buffer_g.getvalue())
 
-            # Level 3: Filmstrip / Standard Thumbnail (Max 256px)
             if w <= 256 and h <= 256:
                 thumb_pil = pil_img
             else:
@@ -210,13 +469,15 @@ class UnifiedImageProcessor:
                 new_w3 = max(1, int(w * scale_3))
                 new_h3 = max(1, int(h * scale_3))
                 thumb_pil = pil_img.resize((new_w3, new_h3), Image.Resampling.HAMMING)
-                
+
             buffer_t = io.BytesIO()
             thumb_pil.save(buffer_t, format='JPEG', quality=85)
             thumb_np = np.array(thumb_pil)
             self.cache.put_thumbnail(file_path, thumb_np, buffer_t.getvalue())
-            
-            # Return Level 2 (Grid Mipmap - 512px) as the default layout image for high fidelity
+
+            # Single-view: return screen-preview tier; gallery/preload: return grid tier.
+            if single_view_preview:
+                return np.array(preview_pil)
             return np.array(grid_pil)
             
         except Exception as e:
@@ -329,6 +590,12 @@ class UnifiedImageProcessor:
                           executor: Optional[Any] = None) -> Optional[np.ndarray]:
         """處理 RAW 圖像"""
         libraw_first = use_libraw_consistent_preview_first()
+        skip_key = os.path.normcase(os.path.abspath(file_path))
+        if skip_key in _LIBRAW_UNSUPPORTED_PATHS and not use_full_resolution:
+            cached = self.cache.get_preview(file_path)
+            if cached is not None:
+                return cached
+            return None
         try:
             # 獲取 EXIF 數據（用於處理參數）
             exif_data = self.exif_extractor.extract_exif_data(file_path)
@@ -344,6 +611,8 @@ class UnifiedImageProcessor:
             # 處理 RAW 文件
             # Check if we should use Preview (embedded JPEG) instead of processing RAW
             if not use_full_resolution and not libraw_first:
+               if skip_key in _LIBRAW_UNSUPPORTED_PATHS:
+                   return self.cache.get_preview(file_path)
                # OPTIMIZATION: Try embedded / cached preview instead of full RAW demosaic.
                
                # Check Preview Cache
@@ -449,6 +718,7 @@ class UnifiedImageProcessor:
             
             is_unsupported = "unsupported" in str(e).lower() or "not recognized" in str(e).lower()
             if is_unsupported:
+                _LIBRAW_UNSUPPORTED_PATHS.add(skip_key)
                 logger.warning(
                     f"RAW file unsupported by LibRaw (e.g., composite DNG): {os.path.basename(file_path)}. Error: {e}"
                 )
@@ -515,18 +785,52 @@ class UnifiedImageProcessor:
         if cached_thumb is None and target_size is None:
             cached_thumb = self.cache.get_preview(file_path)
 
+        if cached_thumb is not None and target_size is None and allow_heavy_fallback:
+            try:
+                if hasattr(cached_thumb, "shape"):
+                    if max(int(cached_thumb.shape[0]), int(cached_thumb.shape[1])) < int(
+                        memory_preview_max_edge() * 0.85
+                    ):
+                        cached_thumb = None
+                elif hasattr(cached_thumb, "width"):
+                    if max(int(cached_thumb.height()), int(cached_thumb.width())) < int(
+                        memory_preview_max_edge() * 0.85
+                    ):
+                        cached_thumb = None
+            except Exception:
+                pass
+
+        if cached_thumb is not None and target_size is None:
+            try:
+                min_px = int(memory_preview_max_edge() * 0.85)
+                if hasattr(cached_thumb, "shape"):
+                    if max(int(cached_thumb.shape[0]), int(cached_thumb.shape[1])) < min_px:
+                        cached_thumb = None
+                elif hasattr(cached_thumb, "width"):
+                    if max(int(cached_thumb.height()), int(cached_thumb.width())) < min_px:
+                        cached_thumb = None
+            except Exception:
+                pass
+
         if cached_exif is not None and cached_thumb is not None:
-            return cached_exif, cached_thumb
+            if not cached_exif.get("minimal_preview_exif") and self._cached_preview_meets_display_tier(
+                cached_thumb
+            ):
+                return cached_exif, cached_thumb
+
+        if allow_heavy_fallback and target_size is None:
+            fast_pair = self._extract_raw_preview_before_full_exiftool(
+                file_path, cached_exif, cached_thumb
+            )
+            if fast_pair is not None:
+                return fast_pair
 
         exif = cached_exif or self.exif_extractor.extract_exif_data(file_path)
         thumb = cached_thumb
         if thumb is None:
-            if target_size is not None:
-                tw = int(target_size.width()) if target_size.width() > 0 else 512
-                th = int(target_size.height()) if target_size.height() > 0 else 512
-                max_dim = max(256, min(512, tw, th))
-            else:
-                max_dim = 512
+            max_dim = self._raw_thumbnail_extract_max_size(
+                target_size, allow_heavy_fallback=allow_heavy_fallback
+            )
             thumb = self.thumbnail_extractor.extract_thumbnail_from_raw(
                 file_path,
                 max_size=max_dim,
@@ -550,9 +854,9 @@ class UnifiedImageProcessor:
                 exif = self.exif_extractor.extract_exif_data(file_path, raw_object=raw)
                 
                 # 2. Extract Thumbnail
-                # Standard gallery thumbnails specify target_size;
-                # Folder/gallery pass: stay at grid size; single-image uses process_full_image.
-                max_size_val = disk_preview_max_edge() if target_size is None else 512
+                max_size_val = self._raw_thumbnail_extract_max_size(
+                    target_size, allow_heavy_fallback=allow_heavy_fallback
+                )
                 thumb = self.thumbnail_extractor.extract_thumbnail_from_raw(
                     file_path,
                     max_size=max_size_val,

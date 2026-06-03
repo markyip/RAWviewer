@@ -1542,6 +1542,10 @@ class ImageCache(QObject):
         if pixmap is not None and not pixmap.isNull():
             self.pixmap_cache.put(file_path, pixmap)
 
+    def get_exif_memory_only(self, file_path: str) -> Optional[Dict[str, Any]]:
+        """In-memory EXIF only (no SQLite) — for cache-hit emit during preview-first."""
+        return self.exif_memory_cache.get(file_path)
+
     def get_exif(self, file_path: str) -> Optional[Dict[str, Any]]:
         """Get cached EXIF data or return None if not cached."""
         self.stats['exif_requests'] += 1
@@ -1568,16 +1572,18 @@ class ImageCache(QObject):
         *,
         file_size: Optional[int] = None,
         file_mtime: Optional[float] = None,
+        persist_disk: bool = True,
     ) -> None:
-        """Cache EXIF data."""
+        """Cache EXIF data (memory always; disk optional for preview-first minimal stubs)."""
         if exif_data:
             self.exif_memory_cache.put(file_path, exif_data)
-            self.exif_cache.put(
-                file_path,
-                exif_data,
-                file_size=file_size,
-                file_mtime=file_mtime,
-            )
+            if persist_disk:
+                self.exif_cache.put(
+                    file_path,
+                    exif_data,
+                    file_size=file_size,
+                    file_mtime=file_mtime,
+                )
 
     def get_capture_times_for_sort(self, file_paths: list) -> Dict[str, str]:
         """capture_time only, for folder sort (ignores stale mtime on network folders)."""

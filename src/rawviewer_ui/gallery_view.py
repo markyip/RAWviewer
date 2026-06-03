@@ -8,7 +8,7 @@ from typing import List, Dict, Any, Optional
 
 from PyQt6.QtWidgets import QWidget, QScrollArea, QLabel
 from PyQt6.QtCore import Qt, QTimer, QRect, QEvent, QSize
-from PyQt6.QtGui import QPixmap, QImage, QPainter, QBrush, QColor, QFont, QTransform
+from PyQt6.QtGui import QPixmap, QImage, QPainter, QBrush, QColor, QFont, QTransform, QMouseEvent
 
 from rawviewer_ui.widgets import ThumbnailLabel, ImageLoaded
 from image_cache import LRUCache
@@ -214,6 +214,10 @@ class JustifiedGallery(QWidget):
 
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+
+        self._rubber_origin = None
+        self._rubber_active = False
+        self._rubber_toggled_paths = set()
 
         QTimer.singleShot(0, self._post_init)
 
@@ -1358,16 +1362,21 @@ class JustifiedGallery(QWidget):
                 display_rect = self._content_rect_to_viewport(rect)
                 w.setGeometry(display_rect)
                 w.setFixedSize(display_rect.size())
-                def _on_thumb_click(e, _w=w):
+                def _on_thumb_press(e, _w=w):
                     try:
                         if e.button() == Qt.MouseButton.LeftButton:
                             e.accept()
-                            # Read the widget's CURRENT file_path. Widgets are pooled and
-                            # reused by index, so a captured path can go stale when the
-                            # image list changes (e.g. after a search filter).
                             target_path = getattr(_w, "file_path", None)
-                            if target_path:
-                                self.parent_viewer._gallery_item_clicked(target_path)
+                            pv = self.parent_viewer
+                            if target_path and pv is not None:
+                                if hasattr(pv, "_gallery_has_extend_modifier") and pv._gallery_has_extend_modifier(
+                                    e.modifiers()
+                                ):
+                                    pt = _w.mapTo(self, e.position().toPoint())
+                                    self._begin_ctrl_drag_selection(pt)
+                                    self.grabMouse()
+                                    return
+                                pv._gallery_item_clicked(target_path)
                             return
                     except Exception:
                         pass
@@ -1375,7 +1384,7 @@ class JustifiedGallery(QWidget):
                         e.ignore()
                     except Exception:
                         pass
-                w.mousePressEvent = _on_thumb_click
+                w.mousePressEvent = _on_thumb_press
                 created_widgets += 1
                 self._visible_widgets[idx] = w
             else:
@@ -1442,6 +1451,10 @@ class JustifiedGallery(QWidget):
                     w.setText("")
 
             w.show()
+            pv = self.parent_viewer
+            if pv is not None and hasattr(pv, "_is_gallery_path_selected"):
+                if hasattr(w, "set_gallery_selected"):
+                    w.set_gallery_selected(pv._is_gallery_path_selected(path))
             thumb_missing = not cache_hit
             
             m = self._metadata_cache.get(path)
@@ -2005,6 +2018,101 @@ class JustifiedGallery(QWidget):
                     child.deleteLater()
             except Exception:
                 pass
+
+    @staticmethod
+    def _extend_selection_modifier(modifiers) -> bool:
+        return bool(
+            modifiers
+            & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.MetaModifier)
+        )
+
+    def refresh_gallery_selection_visuals(self) -> None:
+        """Sync selection border on visible pooled thumbnails."""
+        pv = self.parent_viewer
+        if pv is None or not hasattr(pv, "_is_gallery_path_selected"):
+            return
+        for w in self._visible_widgets.values():
+            path = getattr(w, "file_path", None)
+            if path and hasattr(w, "set_gallery_selected"):
+                w.set_gallery_selected(pv._is_gallery_path_selected(path))
+
+    def _paths_intersecting_rect(self, rect: QRect) -> List[str]:
+        if rect is None or rect.isNull():
+            return []
+        paths: List[str] = []
+        seen = set()
+        for item in self._gallery_layout_items:
+            item_rect = item.get("rect")
+            if item_rect is None or not rect.intersects(item_rect):
+                continue
+            fp = item.get("file_path")
+            if not fp or fp in seen:
+                continue
+            seen.add(fp)
+            paths.append(fp)
+        return paths
+
+    def _begin_ctrl_drag_selection(self, origin) -> None:
+        self._rubber_origin = origin
+        self._rubber_active = True
+        self._rubber_toggled_paths = set()
+
+    def _update_ctrl_drag_selection(self, current) -> None:
+        if not self._rubber_active or self._rubber_origin is None:
+            return
+        sel_rect = QRect(self._rubber_origin, current).normalized()
+        pv = self.parent_viewer
+        if pv is None or not hasattr(pv, "_gallery_toggle_path_selection"):
+            return
+        for fp in self._paths_intersecting_rect(sel_rect):
+            if fp in self._rubber_toggled_paths:
+                continue
+            self._rubber_toggled_paths.add(fp)
+            pv._gallery_toggle_path_selection(fp)
+
+    def _end_ctrl_drag_selection(self, current) -> None:
+        if not self._rubber_active:
+            return
+        if self._rubber_origin is not None and not self._rubber_toggled_paths:
+            pt_rect = QRect(self._rubber_origin, QSize(1, 1))
+            pv = self.parent_viewer
+            if pv is not None and hasattr(pv, "_gallery_toggle_path_selection"):
+                for fp in self._paths_intersecting_rect(pt_rect):
+                    pv._gallery_toggle_path_selection(fp)
+                    break
+        self._rubber_active = False
+        self._rubber_origin = None
+        self._rubber_toggled_paths = set()
+        if self.mouseGrabber() is self:
+            self.releaseMouse()
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:
+        if (
+            event.button() == Qt.MouseButton.LeftButton
+            and self._extend_selection_modifier(event.modifiers())
+        ):
+            self._begin_ctrl_drag_selection(event.position().toPoint())
+            self.grabMouse()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event: QMouseEvent) -> None:
+        if self._rubber_active and self._rubber_origin is not None:
+            self._update_ctrl_drag_selection(event.position().toPoint())
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event: QMouseEvent) -> None:
+        if (
+            self._rubber_active
+            and event.button() == Qt.MouseButton.LeftButton
+        ):
+            self._end_ctrl_drag_selection(event.position().toPoint())
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
 
     def _update_empty_label_geometry(self):
         """Lay out empty-state text across the justified gallery canvas (fills the frame when empty)."""

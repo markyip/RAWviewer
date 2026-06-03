@@ -18,7 +18,8 @@ echo Press Ctrl+C to stop the application.
 echo.
 
 set RAWVIEWER_USE_PROCESS_POOL=1
-set RAWVIEWER_VERBOSE_INFO_LOGS=0
+REM Full [LOAD]/[MANAGER]/[DISPLAY] timeline on console (focus filter still allows [TTFR]/[LOAD])
+set RAWVIEWER_VERBOSE_INFO_LOGS=1
 set RAWVIEWER_VERBOSE_CONSOLE=0
 set RAWVIEWER_FOCUS_GALLERY_SWITCH=1
 set RAWVIEWER_FILE_LOG=1
