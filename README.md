@@ -56,10 +56,12 @@ Beyond instant RAW previewing, 100% single-key zooming, and smooth panning, RAWv
 Official releases are published for **Windows** and **macOS** only.
 
 #### Windows
-1. Download the latest release from the [Releases Page](https://github.com/markyip/RAWviewer/releases/latest)
-2. Download `RAWviewer.exe` directly (no zip extraction needed)
-3. Double-click `RAWviewer.exe` to initiate the installation process. It will automatically download the necessary dependencies and AI models to a destination of your choice.
-4. Launch RAWviewer from the Desktop shortcut created during installation! (You can safely delete the original `RAWviewer.exe` installer afterwards).
+1. Download the appropriate version for your system from the [Releases Page](https://github.com/markyip/RAWviewer/releases/latest):
+   - **`RAWviewer-CUDA.exe`**: Recommended for **NVIDIA GPU** users who have CUDA installed. This provides the fastest indexing and search performance.
+   - **`RAWviewer-DirectML.exe`**: Recommended for **AMD, Intel, or NVIDIA** users who want an out-of-the-box hardware-accelerated experience without installing CUDA.
+2. Run the downloaded installer directly (no zip extraction needed).
+3. Double-click the installer to initiate the installation process. It will automatically set up the dependencies (via Pixi) and download the local AI models to a destination of your choice.
+4. Launch RAWviewer from the Desktop shortcut! (You can safely delete the installer afterwards).
 
 #### macOS
 > **Minimum supported macOS (official prebuilt release): macOS 13 Ventura or newer.**
@@ -122,11 +124,16 @@ Separate tokens with spaces. Filters use `key:value` or comparison forms.
 | Date prefix | `date:2024-05` |
 | GPS / faces | `has:gps` · `no:gps` · `has:face` · `people` · `person` · `no:face` |
 
-Optional: **stronger semantic models** (advanced). The app bundle uses **MobileCLIP2-S0** for speed and size. From the same MobileCLIP2 family, **S2** or **B** checkpoints usually score better on open-vocabulary retrieval at the cost of a larger Core ML package and slower indexing—export with `python scripts/export_mobileclip2_coreml.py --model MobileCLIP2-S2` (today’s `--for-app` flow names files `mobileclip2_s0_*`; you can replace those mlpackages after export or adjust filenames to match). You can also set environment variable **`RAWVIEWER_MOBILECLIP_VARIANT=s2`** to prefer Apple’s downloadable **MobileCLIP S2** Core ML models (a different architecture than MobileCLIP2, but often strong for general photo text queries).
+Optional: **stronger semantic models** (advanced). The app default is **MobileCLIP2-S0** (vision: ~43MB) for speed and size. You can choose a stronger model by setting the environment variable **`RAWVIEWER_MOBILECLIP_VARIANT`** to one of the following:
 
-Bundled macOS Core ML models are discovered automatically in common app/resource paths.  
-Both naming schemes are supported:
+- **`s0`** (Default): Vision model ~43MB, fastest indexing, lower memory usage.
+- **`s2`**: Vision model ~136MB, better accuracy on complex search terms.
+- **`b`**: ViT-B model ~330MB, significantly improved search understanding.
+- **`l14`**: ViT-L/14 model ~1.1GB, highest quality, recommended for heavy/large search applications.
 
+When a different variant is selected, the application will automatically download the correct model assets from Hugging Face (`plhery/mobileclip2-onnx` on Windows/Linux) to a separate cache folder.
+
+*Note for macOS users:* Bundled macOS Core ML models are discovered automatically in common app/resource paths:
 - Apple Hub naming: `mobileclip_s2_image.mlpackage` + `mobileclip_s2_text.mlpackage`
 - App export naming (`--for-app`): `mobileclip2_s0_image.mlpackage` + `mobileclip2_s0_text.mlpackage`
 

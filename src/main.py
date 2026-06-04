@@ -10183,8 +10183,8 @@ class RAWImageViewer(QMainWindow):
             index = self._get_semantic_index()
             if not index.semantic_backend_available():
                 return False
-            pending_emb = index.get_pending_embedding_paths(corpus)
-            if len(pending_emb) > 0:
+            pending = index.get_pending_paths(corpus)
+            if len(pending) > 0:
                 return False
             return index.get_face_pending_count(corpus) == 0
         except Exception:
@@ -11170,6 +11170,11 @@ class RAWImageViewer(QMainWindow):
 
         if getattr(self, "_semantic_index_prep_in_progress", False):
             logger.info("[INDEX][USER] Skip semantic start: prep worker already in progress")
+            self._sync_gallery_search_input_editable()
+            return
+
+        if getattr(self, "_semantic_asset_download_in_progress", False):
+            logger.info("[INDEX][USER] Skip semantic start: asset download in progress")
             self._sync_gallery_search_input_editable()
             return
 
@@ -16978,10 +16983,9 @@ class RAWImageViewer(QMainWindow):
             QTimer.singleShot(delay_ms, self._on_share_macos_deferred)
             return
         elif sys.platform == "win32":
-            QTimer.singleShot(0, lambda fp=path: self._share_windows_ui_chain(fp))
+            QTimer.singleShot(0, lambda fp=path: self._open_image_with_app(fp))
             return
         self._copy_current_file_path_to_clipboard()
-        self.status_bar.showMessage("Share unavailable — path copied to clipboard", 4000)
 
     def _copy_file_path_to_clipboard(self, path: str) -> None:
         try:
@@ -21636,8 +21640,7 @@ class RAWImageViewer(QMainWindow):
             )
         if hasattr(self, "share_bottom_button"):
             vis = bool(self.image_files) and self.view_mode == "single"
-            # v2.1: share only in single-image view on macOS.
-            self.share_bottom_button.setVisible(vis and sys.platform != "win32")
+            self.share_bottom_button.setVisible(vis)
             if hasattr(self, "slideshow_bottom_button"):
                 self.slideshow_bottom_button.setVisible(vis)
             cp = getattr(self, "current_file_path", None)
@@ -22719,6 +22722,7 @@ class RAWImageViewer(QMainWindow):
             self.current_file_index = idx
             self.current_file_path = start_path
             self._semantic_search_corpus_files = list(self.image_files)
+            self._folder_sort_refinement_applied_token = token
         else:
             self.image_files = [start_path]
             self._semantic_search_corpus_files = [start_path]
@@ -23663,8 +23667,16 @@ def main():
     import logging
     import traceback
 
-    # Packaged macOS app: enable semantic search by default (dev uses launch_dev.sh).
-    if getattr(sys, "frozen", False) and sys.platform == "darwin":
+    # Packaged or installed app: enable semantic search by default (dev uses launch_dev.sh / run_debug.bat).
+    # On Windows, the installed app runs inside a Pixi virtual environment (so sys.frozen is False),
+    # but we can detect it by checking if "_internal/pixi/pixi.exe" exists in the root directory.
+    is_installed = False
+    if sys.platform == "win32":
+        root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        if os.path.exists(os.path.join(root_dir, "_internal", "pixi", "pixi.exe")):
+            is_installed = True
+
+    if getattr(sys, "frozen", False) or is_installed:
         os.environ.setdefault("RAWVIEWER_ENABLE_SEMANTIC_SEARCH", "1")
 
     # Print to console immediately (before logging might be ready)

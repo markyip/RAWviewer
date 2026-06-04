@@ -197,13 +197,18 @@ def semantic_batch_candidates() -> List[int]:
 SEMANTIC_BATCH_TUNE_CACHE_VERSION = "v3"
 
 
-def _prep_mobileclip_image_chw(file_path: str) -> np.ndarray:
-    """Load, resize to 256, and return NCHW float tensor slice for one image."""
+def _prep_mobileclip_image_chw_resized(file_path: str, size: tuple[int, int] = (256, 256)) -> np.ndarray:
+    """Load, resize to size (width, height), and return NCHW float tensor slice for one image."""
     im = _load_index_source_image(file_path, max_size=1024).resize(
-        (256, 256), Image.Resampling.BICUBIC
+        size, Image.Resampling.BICUBIC
     )
     rgb = np.asarray(im.convert("RGB"), dtype=np.float32) / 255.0
     return np.transpose(rgb, (2, 0, 1))
+
+
+def _prep_mobileclip_image_chw(file_path: str) -> np.ndarray:
+    """Load, resize to 256, and return NCHW float tensor slice for one image."""
+    return _prep_mobileclip_image_chw_resized(file_path, (256, 256))
 
 
 def _semantic_batch_cache_path() -> str:
@@ -1050,7 +1055,7 @@ class MobileCLIPCoreMLBackend:
 
 
 class MobileCLIPONNXBackend:
-    """Windows ONNX backend for MobileCLIP2-S0 (official non-macOS release path).
+    """Windows ONNX backend for MobileCLIP2 (supports S0, S2, B, L14 variants).
     
     Requires 'onnxruntime' and 'numpy'.
     """
@@ -1063,8 +1068,13 @@ class MobileCLIPONNXBackend:
     SUPPORTS_HUB_DOWNLOAD = True
 
     def __init__(self, model_dir: Optional[str] = None):
+        self.variant = os.environ.get("RAWVIEWER_MOBILECLIP_VARIANT", "b").strip().lower()
+        if self.variant not in ("s0", "s2", "b", "l14"):
+            self.variant = "b"
+        self.MODEL_ID = f"mobileclip-onnx-2-{self.variant}"
+
         if model_dir is None:
-            model_dir = self._default_model_dir()
+            model_dir = self._default_model_dir(self.variant)
         self.model_dir = model_dir
         self.image_model_path = os.path.join(model_dir, self.IMAGE_MODEL_FILE)
         self.text_model_path = os.path.join(model_dir, self.TEXT_MODEL_FILE)
@@ -1074,37 +1084,38 @@ class MobileCLIPONNXBackend:
         self._tokenizer = None
 
     @staticmethod
-    def _candidate_model_dirs() -> List[str]:
+    def _candidate_model_dirs(variant: str = "b") -> List[str]:
         dirs: List[str] = []
         env_dir = os.environ.get("RAWVIEWER_MOBILECLIP_MODEL_DIR")
         if env_dir:
             dirs.append(env_dir)
             
+        suffix = f"_{variant}" if variant != "b" else ""
         if getattr(sys, "frozen", False):
             # Prioritize the actual executable directory for external (non-bundled) models
             exe_dir = os.path.dirname(sys.executable)
-            dirs.append(os.path.join(exe_dir, "models", "mobileclip_onnx"))
-            dirs.append(os.path.join(exe_dir, "mobileclip_onnx"))
+            dirs.append(os.path.join(exe_dir, "models", f"mobileclip_onnx{suffix}"))
+            dirs.append(os.path.join(exe_dir, f"mobileclip_onnx{suffix}"))
             
             # Fallback to PyInstaller temporary extract directory (_MEIPASS)
             if hasattr(sys, "_MEIPASS"):
-                dirs.append(os.path.join(sys._MEIPASS, "models", "mobileclip_onnx"))
+                dirs.append(os.path.join(sys._MEIPASS, "models", f"mobileclip_onnx{suffix}"))
             
-        dirs.append(os.path.expanduser("~/.rawviewer_cache/mobileclip_onnx"))
+        dirs.append(os.path.expanduser(f"~/.rawviewer_cache/mobileclip_onnx{suffix}"))
         
         module_dir = os.path.dirname(os.path.abspath(__file__))
-        dirs.append(os.path.join(module_dir, "..", "models", "mobileclip_onnx"))
+        dirs.append(os.path.join(module_dir, "..", "models", f"mobileclip_onnx{suffix}"))
         return dirs
 
     @classmethod
-    def _default_model_dir(cls) -> str:
-        for d in cls._candidate_model_dirs():
+    def _default_model_dir(cls, variant: str = "b") -> str:
+        for d in cls._candidate_model_dirs(variant):
             if (
                 os.path.exists(os.path.join(d, cls.IMAGE_MODEL_FILE))
                 and os.path.exists(os.path.join(d, cls.TEXT_MODEL_FILE))
             ):
                 return d
-        return cls._candidate_model_dirs()[0]
+        return cls._candidate_model_dirs(variant)[0]
 
     def availability_error(self) -> str:
         try:
@@ -1112,9 +1123,9 @@ class MobileCLIPONNXBackend:
         except ImportError:
             return "Missing 'onnxruntime' dependency"
         if not os.path.exists(self.image_model_path):
-            return f"Missing image model: {self.IMAGE_MODEL_FILE}"
+            return f"Missing MobileCLIP image model: {self.IMAGE_MODEL_FILE}"
         if not os.path.exists(self.text_model_path):
-            return f"Missing text model: {self.TEXT_MODEL_FILE}"
+            return f"Missing MobileCLIP text model: {self.TEXT_MODEL_FILE}"
         return ""
 
     def available(self) -> bool:
@@ -1126,7 +1137,7 @@ class MobileCLIPONNXBackend:
                 progress_callback(message)
 
         os.makedirs(self.model_dir, exist_ok=True)
-        _progress("Downloading MobileCLIP ONNX models...")
+        _progress(f"Downloading MobileCLIP ONNX models ({self.variant})...")
         try:
             from huggingface_hub import hf_hub_download
         except ImportError:
@@ -1134,8 +1145,8 @@ class MobileCLIPONNXBackend:
 
         # Mapping of remote path in HF repo to local filename expected by RAWviewer
         files_to_download = {
-            "onnx/s0/vision_model.onnx": self.IMAGE_MODEL_FILE,
-            "onnx/s0/text_model.onnx": self.TEXT_MODEL_FILE
+            f"onnx/{self.variant}/vision_model.onnx": self.IMAGE_MODEL_FILE,
+            f"onnx/{self.variant}/text_model.onnx": self.TEXT_MODEL_FILE
         }
         
         for remote_path, local_name in files_to_download.items():
@@ -1197,6 +1208,15 @@ class MobileCLIPONNXBackend:
             self._tokenizer = _ClipBPETokenizer(self.tokenizer_path)
         return self._tokenizer
 
+    def _get_input_size(self) -> tuple[int, int]:
+        try:
+            shape = self._image_session.get_inputs()[0].shape
+            h = shape[2] if isinstance(shape[2], int) else 256
+            w = shape[3] if isinstance(shape[3], int) else 256
+            return (w, h)
+        except Exception:
+            return (256, 256)
+
     def encode_text(self, text: str) -> np.ndarray:
         self._ensure_sessions()
         tokenizer = self._ensure_tokenizer()
@@ -1209,7 +1229,8 @@ class MobileCLIPONNXBackend:
 
     def encode_image(self, file_path: str) -> np.ndarray:
         self._ensure_sessions()
-        nchw = _prep_mobileclip_image_chw(file_path)[np.newaxis, ...]
+        size = self._get_input_size()
+        nchw = _prep_mobileclip_image_chw_resized(file_path, size)[np.newaxis, ...]
         inputs = {self._image_session.get_inputs()[0].name: nchw}
         outputs = self._image_session.run(None, inputs)
         return self._normalize(outputs[0])
@@ -1220,14 +1241,15 @@ class MobileCLIPONNXBackend:
         paths = [p for p in (file_paths or []) if p]
         if not paths:
             return []
+        size = self._get_input_size()
         workers = semantic_encode_prep_workers()
         if len(paths) == 1 or workers <= 1:
-            tensors = [_prep_mobileclip_image_chw(p) for p in paths]
+            tensors = [_prep_mobileclip_image_chw_resized(p, size) for p in paths]
         else:
             with concurrent.futures.ThreadPoolExecutor(
                 max_workers=min(workers, len(paths))
             ) as executor:
-                tensors = list(executor.map(_prep_mobileclip_image_chw, paths))
+                tensors = list(executor.map(lambda p: _prep_mobileclip_image_chw_resized(p, size), paths))
         nchw = np.stack(tensors, axis=0)
         inputs = {self._image_session.get_inputs()[0].name: nchw}
         outputs = self._image_session.run(None, inputs)

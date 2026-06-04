@@ -304,7 +304,7 @@ def _prepare_windows_pixi_manifest(accel: str) -> Path:
         raise ValueError(f"Unsupported Windows acceleration backend: {accel}")
     tmp_dir = REPO_ROOT / "build" / "_pixi_variants"
     tmp_dir.mkdir(parents=True, exist_ok=True)
-    out = tmp_dir / f"pixi.windows.{accel}.toml"
+    out = tmp_dir / "pixi.toml"
     out.write_text(raw, encoding="utf-8")
     return out
 
@@ -536,7 +536,7 @@ def main():
             if windows_pixi_manifest is not None
             else "pixi.toml"
         )
-        add_data_args.append(f'--add-data "{pixi_src};pixi.toml"')
+        add_data_args.append(f'--add-data "{pixi_src};."')
         add_data_args.append('--add-data "src;src"')
     
     if platform.system() == 'Darwin':
