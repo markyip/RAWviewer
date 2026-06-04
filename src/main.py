@@ -4966,6 +4966,12 @@ class CustomConfirmDialog(QDialog):
             self.reject()
             event.accept()
             return
+        if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            focused = self.focusWidget()
+            if focused in (self.delete_btn, self.cancel_btn):
+                focused.click()
+                event.accept()
+                return
         if key in (Qt.Key.Key_Left, Qt.Key.Key_Right):
             if self.cancel_btn.hasFocus() and key == Qt.Key.Key_Right:
                 self.delete_btn.setFocus(Qt.FocusReason.TabFocusReason)
