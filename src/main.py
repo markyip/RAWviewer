@@ -10705,8 +10705,13 @@ class RAWImageViewer(QMainWindow):
             pass
 
         index = self._get_semantic_index()
-        total_files = int(coverage.get("total", len(corpus_files)))
-        indexed_files = max(0, int(coverage.get("indexed", 0)))
+        try:
+            unique_corpus, _ = index._filter_duplicate_raw_companions(corpus_files)
+            fallback_total = len(unique_corpus)
+        except Exception:
+            fallback_total = len(corpus_files)
+        total_files = int(coverage.get("total", fallback_total))
+        indexed_files = max(0, total_files - len(pending_files))
         if not pending_files:
             self._clear_stale_gallery_search_index_progress()
             try:
@@ -10732,7 +10737,7 @@ class RAWImageViewer(QMainWindow):
         token = time.time_ns()
         self._semantic_index_active_token = token
         self._semantic_indexing_in_progress = True
-        self._semantic_index_progress_total = max(total_files, indexed_files + len(pending_files))
+        self._semantic_index_progress_total = total_files
         self._semantic_index_progress_base = 0
         self._semantic_index_run_semantic_embeddings = run_semantic_embeddings
         signals = SemanticIndexSignals()
@@ -10968,7 +10973,11 @@ class RAWImageViewer(QMainWindow):
         token = time.time_ns()
         self._face_index_active_token = token
         self._face_indexing_in_progress = True
-        total_files = len(corpus_files)
+        try:
+            unique_corpus, _ = index._filter_duplicate_raw_companions(corpus_files)
+            total_files = len(unique_corpus)
+        except Exception:
+            total_files = len(corpus_files)
         signals = SemanticIndexSignals()
         self._face_index_signals = signals
         signals.progress.connect(self._on_face_index_progress)
@@ -11249,24 +11258,14 @@ class RAWImageViewer(QMainWindow):
         defer = bool(getattr(self, "_defer_semantic_after_metadata", False))
         if not (wants or defer):
             expanded = bool(getattr(self, "_search_panel_expanded", False))
-            pending_emb_n = 0
-            if expanded and corpus_files:
-                try:
-                    pending_emb_n = len(
-                        self._get_semantic_index().get_pending_embedding_paths(
-                            corpus_files
-                        )
-                        or []
-                    )
-                except Exception:
-                    pending_emb_n = 0
-            if not (expanded and pending_emb_n > 0):
+            pending_n = len(pending or [])
+            if not (expanded and pending_n > 0):
                 logger.info(
-                    "[INDEX][USER] Prep done ignored: wants=%s defer=%s expanded=%s pending_emb=%d",
+                    "[INDEX][USER] Prep done ignored: wants=%s defer=%s expanded=%s pending=%d",
                     wants,
                     defer,
                     expanded,
-                    pending_emb_n,
+                    pending_n,
                 )
                 return
             wants = True
@@ -11293,17 +11292,11 @@ class RAWImageViewer(QMainWindow):
             self._sync_gallery_search_input_editable()
             return
 
-        try:
-            index = self._get_semantic_index()
-            pending_emb = list(index.get_pending_embedding_paths(corpus_files) or [])
-        except Exception:
-            pending_emb = []
-
-        if not pending_emb and not pending and int(face_pending or 0) <= 0:
+        if not pending and int(face_pending or 0) <= 0:
             self._finish_gallery_search_unlock(corpus_files)
             return
 
-        work = pending_emb if pending_emb else list(pending or [])
+        work = list(pending or [])
         if work:
             self._gallery_search_show_index_progress = True
             self._start_semantic_index_build_background(

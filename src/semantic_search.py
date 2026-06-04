@@ -2858,6 +2858,9 @@ class SemanticImageIndex:
         self,
         paths: List[str],
         progress_callback: ProgressCallback = None,
+        *,
+        progress_album_total: int = 0,
+        progress_indexed_base: int = 0,
     ) -> int:
         """
         Pre-extract thumbnails so MobileCLIP encode hits ImageCache instead of rawpy per file.
@@ -2915,16 +2918,24 @@ class SemanticImageIndex:
             workers,
         )
         total = len(pending)
+        warmed_base = progress_indexed_base + (len(paths) - len(pending)) * 0.1
         if workers <= 1 or total < 4:
             for i, path in enumerate(pending, start=1):
                 if _warm_one(path):
                     warmed += 1
                 if progress_callback and (i <= 2 or i >= total or i % 25 == 0):
-                    progress_callback(
-                        i,
-                        total,
-                        format_index_progress("Preparing thumbnails", i, total),
-                    )
+                    if progress_album_total > 0:
+                        progress_callback(
+                            int(warmed_base + i * 0.1),
+                            progress_album_total,
+                            format_index_progress("Semantic", int(warmed_base + i * 0.1), progress_album_total),
+                        )
+                    else:
+                        progress_callback(
+                            i,
+                            total,
+                            format_index_progress("Preparing thumbnails", i, total),
+                        )
         else:
             completed = 0
             with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
@@ -2936,13 +2947,20 @@ class SemanticImageIndex:
                     if progress_callback and (
                         completed <= 2 or completed >= total or completed % 25 == 0
                     ):
-                        progress_callback(
-                            completed,
-                            total,
-                            format_index_progress(
-                                "Preparing thumbnails", completed, total
-                            ),
-                        )
+                        if progress_album_total > 0:
+                            progress_callback(
+                                int(warmed_base + completed * 0.1),
+                                progress_album_total,
+                                format_index_progress("Semantic", int(warmed_base + completed * 0.1), progress_album_total),
+                            )
+                        else:
+                            progress_callback(
+                                completed,
+                                total,
+                                format_index_progress(
+                                    "Preparing thumbnails", completed, total
+                                ),
+                            )
         logger.info(
             "[INDEX] Semantic thumbnail warm-up done: %d/%d in %.2fs",
             warmed,
@@ -3440,7 +3458,7 @@ class SemanticImageIndex:
                     progress_callback(
                         progress_indexed_base,
                         progress_album_total,
-                        format_index_progress("Metadata", 0, total_extract),
+                        format_index_progress("Metadata", progress_indexed_base, progress_album_total),
                     )
                 t_meta_start = time.time()
                 from common_image_loader import index_metadata_worker_count
@@ -3499,7 +3517,7 @@ class SemanticImageIndex:
                                 progress_indexed_base,
                                 progress_album_total,
                                 format_index_progress(
-                                    "Metadata", i, total_extract
+                                    "Metadata", progress_indexed_base + i, progress_album_total
                                 ),
                             )
 
@@ -3530,7 +3548,7 @@ class SemanticImageIndex:
                         progress_callback(
                             progress_indexed_base,
                             progress_album_total,
-                            format_index_progress("Semantic", 0, total_sem),
+                            format_index_progress("Semantic", progress_indexed_base, progress_album_total),
                         )
                     sem_gpu_accel = False
                     sem_accel_detail = "unknown"
@@ -3588,7 +3606,10 @@ class SemanticImageIndex:
                         )
                     warm_paths = [cp for cp, _ in pending_for_semantic]
                     self._warm_thumbnail_cache_for_semantic_index(
-                        warm_paths, progress_callback
+                        warm_paths,
+                        progress_callback,
+                        progress_album_total=progress_album_total,
+                        progress_indexed_base=progress_indexed_base,
                     )
                     throttle_sec = semantic_gpu_throttle_seconds()
                     batch_size = self._auto_select_semantic_batch_size(
@@ -3644,13 +3665,13 @@ class SemanticImageIndex:
                                 sem_success += 1
                                 batch_writes += 1
                                 if progress_callback and (
-                                    i <= 2 or i >= total_sem or (i % 5 == 0)
-                                ):
-                                    progress_callback(
-                                        progress_indexed_base + i,
-                                        progress_album_total,
-                                        format_index_progress("Semantic", i, total_sem),
-                                    )
+                                     i <= 2 or i >= total_sem or (i % 5 == 0)
+                                 ):
+                                     progress_callback(
+                                         int(progress_indexed_base + total_sem * 0.1 + i * 0.9),
+                                         progress_album_total,
+                                         format_index_progress("Semantic", int(progress_indexed_base + total_sem * 0.1 + i * 0.9), progress_album_total),
+                                     )
                                 if batch_writes >= commit_every:
                                     conn.commit()
                                     batch_writes = 0
@@ -3721,9 +3742,9 @@ class SemanticImageIndex:
                                     i <= 2 or i >= total_sem or (i % 5 == 0)
                                 ):
                                     progress_callback(
-                                        progress_indexed_base + i,
+                                        int(progress_indexed_base + total_sem * 0.1 + i * 0.9),
                                         progress_album_total,
-                                        format_index_progress("Semantic", i, total_sem),
+                                        format_index_progress("Semantic", int(progress_indexed_base + total_sem * 0.1 + i * 0.9), progress_album_total),
                                     )
                                 if throttle_sec > 0:
                                     time.sleep(throttle_sec)
