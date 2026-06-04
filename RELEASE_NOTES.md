@@ -1,27 +1,15 @@
 # RAWviewer Release Notes
 
-## Unreleased (main)
-
-### Performance (folder & gallery)
-- **Butter-smooth gallery scroll**: Faster scroll-speed detection and throttled prefetch during fast scrolling.
-- **Fast-open / EXIF refinement**: Parallel capture-time probing, gated gallery EXIF sort, viewport scroll anchor on manual sort, instant gallery button when sort cache is warm.
-- **GPU navigation**: Smoother gallery→single transitions and priority full-resolution decodes; 27% zoom race fix.
-
-### Developer
-- **Folder sort**: Production uses EXIF / probe / birth / mtime only; Windows Shell `DateTaken` POC removed.
-- **Root `clear_cache.bat`**: Thin forwarder to `scripts/Launch/bat/clear_cache.bat`.
-
----
-
 ## 🚀 Version 2.2
 **Release Date: May 30, 2026**
 
-Unified 2.2 release — search, gallery, film strip, frameless window polish, RAW loading consistency, and indexing improvements.
+Unified 2.2 release — search, gallery, film strip, frameless window polish, RAW loading consistency, indexing improvements, and macOS share behavior aligned with Qt6.
 
 ### 🎯 What's New
 - **Search from single-image view**: Search button in single view; submitting a query switches to gallery with filtered results.
 - **Fast single-file open**: Opening one image no longer waits for full folder scan and EXIF sort on large libraries.
-- **Windows — Open with another app**: Bottom-bar button opens the native “Open with” picker (Lightroom, Photoshop, etc.) via `OpenAs_RunDLLW` / `SHOpenWithDialog` with `OAIF_EXEC`.
+- **Windows — Open with another app** (API): Native picker via `OpenAs_RunDLLW` / `SHOpenWithDialog` with `OAIF_EXEC` for Lightroom, Photoshop, etc. **Note:** v2.2 `main` currently hides the bottom-bar button on Windows; Open with is implemented but not exposed in the UI (see Known issues).
+- **macOS — Share (single image)**: Bottom-bar share in single view uses a **Qt menu** of `NSSharingService` targets (Mail, Messages, …). Native `NSSharingServicePicker` is opt-in (`RAWVIEWER_SHARE_TRY_NATIVE_PICKER=1`) because the popover often spins empty under the Qt6 shell. AirDrop is hidden from the menu by default; use Finder for reliable AirDrop (see `docs/macos-sharing-v21-v22.md`).
 - **Experimental GPU single-image view**: Opt in with `RAWVIEWER_GPU_VIEW=1` for smoother zoom/pan on supported hardware (classic scroll area remains the default).
 - **Consistent RAW color (fit ↔ zoom)**: Single-image RAW defaults to LibRaw half-res for fit view and full decode at 100% zoom (`RAWVIEWER_LIBRAW_CONSISTENT_PREVIEW=1`), avoiding embedded-JPEG color snap. Gallery thumbnails still use fast embedded previews.
 - **Unified EXIF dual-backend**: Metadata routes through `metadata_backend` — fast header reads for RAW, optional `pyexiv2` for JPEG/TIFF (`RAWVIEWER_EXIF_BACKEND=auto`).
@@ -44,6 +32,9 @@ Unified 2.2 release — search, gallery, film strip, frameless window polish, RA
 - **Rotation consistency**: Non-destructive rotation stays aligned across single view, film strip, and gallery after `R` or arrow navigation.
 
 **Performance & image pipeline**
+- **Butter-smooth gallery scroll**: Faster scroll-speed detection and throttled prefetch during fast scrolling.
+- **Fast-open / EXIF refinement**: Parallel capture-time probing, gated gallery EXIF sort, viewport scroll anchor on manual sort, instant gallery button when sort cache is warm.
+- **GPU navigation**: Smoother gallery→single transitions and priority full-resolution decodes; 27% zoom race fix.
 - **CPU downscaling**: Replaced LANCZOS with HAMMING for thumbnail downscales (faster, cleaner edges on CPU).
 - **GPU viewport scaling**: Experimental GPU view uses hardware-accelerated scaling where enabled.
 - **GPU single-view navigation**: Arrow keys and film strip keep the previous frame visible until the next buffer is ready; prefetched preview/full caches paint immediately; thumbnail-only stages are skipped during in-folder navigation to reduce flicker.
@@ -54,10 +45,16 @@ Unified 2.2 release — search, gallery, film strip, frameless window polish, RA
 - **Progressive RAW load**: Optional embedded-first path via `RAWVIEWER_PROGRESSIVE_RAW_LOAD=1` (off by default).
 
 **Platform & docs**
-- **`clear_cache.bat`**: Full dev/session reset — `%USERPROFILE%\.rawviewer_cache`, logs, and `HKCU\Software\RAWviewer` QSettings. Canonical script: `scripts\Launch\bat\clear_cache.bat`; repo-root `clear_cache.bat` forwards there.
-- **Windows share helper** (sources retained for future WinRT share work): In-process hidden Form HWND for reliable foreground share UI in dev builds.
-- **Launch scripts**: Documented env vars and platform scope (official Windows/macOS releases only).
+- **macOS share under Qt6**: Default dev/shipping path uses Qt menu + `performWithItems_`; picker fallback and AirDrop/Finder behavior documented in `docs/macos-sharing-v21-v22.md`.
+- **Folder sort**: Production uses EXIF / probe / birth / mtime only; Windows Shell `DateTaken` POC removed.
+- **`clear_cache.bat` / `clear_cache.sh`**: Full dev/session reset; repo-root `clear_cache.bat` forwards to `scripts/Launch/bat/clear_cache.bat`.
+- **Windows share helper** (sources retained): .NET `WindowsShareHelper.exe` for WinRT share in dev builds.
+- **Launch scripts**: macOS build/test workflow in `scripts/Launch/README.md`; version aligned to **2.2** across `build.py`, `pixi.toml`, and `QApplication`.
 - **Environment**: `activation.env` with `PYTHONNOUSERSITE=1` to prevent global package leaks and splash issues.
+
+### Known issues (v2.2)
+- **Windows:** Bottom-bar “Open with another app” is not visible in current `main` despite working APIs — restore UI from v2.2.1 wiring if needed.
+- **macOS:** In-app `NSSharingServicePicker` popover may still spin empty; use default share menu or Finder for AirDrop.
 
 ---
 
@@ -117,24 +114,3 @@ Includes fixes from **2.0.1** (Pixel DNG, gallery aspect ratio, DNG single-view 
 - **Down Arrow**: Move current image to "Discard" folder.
 - **Delete**: Remove the current image.
 - **H / F**: Toggle Histogram / Focus Subject outlines.
-
----
-
-## 🚀 Version 1.6.0
-**Release Date: April 28, 2026**
-
-🎯 What's New
-- **macOS Native Integration**: Set RAWviewer as your default viewer. Full support for `FileOpen` events from Finder.
-- **Seamless Pinch-to-Zoom**: Fluid trackpad gestures for Mac and Windows (or Ctrl+Scroll Wheel).
-- **Advanced Gallery Behavior**: Improved large-folder scrolling, cacheless-by-default mode, and polished UI controls.
-
-🛠️ Fixes & improvements
-- **Smart Cursor Anchoring**: Zooming naturally anchors to your cursor position, matching modern macOS application behavior.
-- **Smart Zoom Gesture**: Double-tap with two fingers to instantly toggle between "Fit to Window" and 100% zoom.
-- **Live Status Feedback**: Real-time zoom percentage and total image counts displayed in the status bar.
-- **EXIF-Aware Gallery**: Background extraction of capture-time and orientation with smart refresh logic for visible tiles.
-- **Histogram UX Guard**: Fixed visibility resets and ensured the histogram remains disabled when no image is loaded.
-
----
-
-**Thank you for using RAWviewer!** 📸

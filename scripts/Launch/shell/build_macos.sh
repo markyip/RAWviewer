@@ -7,8 +7,10 @@ set -e
 REPO_ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 cd "$REPO_ROOT"
 
-echo "RAWviewer macOS Build Script"
-echo "==========================="
+VERSION="$(grep -E '^VERSION = ' "$REPO_ROOT/build.py" | sed -E 's/.*"([^"]+)".*/\1/')"
+VERSION="${VERSION:-2.2}"
+echo "RAWviewer macOS Build Script (v${VERSION})"
+echo "======================================"
 echo ""
 
 if [[ "$OSTYPE" != "darwin"* ]]; then
@@ -83,11 +85,17 @@ if "$PYTHON_BIN" build.py; then
     echo ""
 
     if [ -d "dist/RAWviewer.app" ]; then
-        echo "macOS App Bundle created: dist/RAWviewer.app"
+        echo "macOS App Bundle created: dist/RAWviewer.app (v${VERSION})"
         echo ""
-        echo "To run the app, you can:"
-        echo "  1. Double-click RAWviewer.app in Finder"
-        echo "  2. Run: open dist/RAWviewer.app"
+        echo "Smoke test (release checklist):"
+        echo "  xattr -cr dist/RAWviewer.app"
+        echo "  open dist/RAWviewer.app"
+        echo "  # Single-image view: share icon -> Qt menu -> Mail (or Messages)"
+        echo "  # Optional: RAWVIEWER_FILE_LOG=1 when testing share from Terminal"
+        echo "  # See scripts/Launch/README.md and docs/macos-sharing-v21-v22.md"
+        echo ""
+        echo "To run the app:"
+        echo "  open dist/RAWviewer.app"
     elif [ -f "dist/RAWviewer" ]; then
         echo "Executable created: dist/RAWviewer"
         echo ""

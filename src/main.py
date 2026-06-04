@@ -23823,7 +23823,7 @@ def main():
 
             # Set application properties
             app.setApplicationName("RAWviewer")
-            app.setApplicationVersion("2.2.0")
+            app.setApplicationVersion("2.2")
 
             # Create and show main window
             safe_print("Creating RAWImageViewer...", flush=True)

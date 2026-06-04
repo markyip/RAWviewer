@@ -10,29 +10,25 @@
 [![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-Donate-orange?logo=buy-me-a-coffee)](https://www.buymeacoffee.com/markyip)
 
 ## ✈️ Why This Exists
-You're an aviation photographer who just returned from RIAT or spent a day at the Mach Loop. You took thousands of RAW shots of fast jets, helicopters, and flybys — and now you're facing the real challenge:
+You're a photographer who just returned from an aviation show, a wildlife safari, or a fast-paced sports event. You took thousands of RAW shots — and now you're facing the real challenge:
 
-- You want to **sort through all your photos** and identify the best shots.
-- Tools like **Lightroom** or **Capture One** are powerful, but importing and checking each image is **time-consuming**.
-- The default **Windows Photos** viewer lets you browse, but:
-  - It's clunky with RAW files.
-  - You have to zoom in manually to check sharpness.
-  - There's no easy way to filter out blurry images.
+- **Sifting through mountains of photos**: Importing everything into heavy catalog tools like **Lightroom** or **Capture One** just to see what's good is slow and frustrating.
+- **Checking technical details**: Zooming in to check sharpness or finding where the camera's autofocus locked (`F` key focus overlays) is usually a multi-step chore.
+- **Finding specific shots instantly**: Searching your catalog for specific descriptions (e.g., `"takeoff"`, `"sunset"`, `"crowd"`) typically requires manual tagging or cloud-based AI uploads that compromise privacy.
+- **Filtering out the noise**: The default system photo viewers are clunky with RAW formats and offer no easy ways to flag or move blurry images in bulk.
 
-I've been there myself — I still haven't finished editing my **500GB of RIAT 2024 photos** because of how tedious this process is. That frustration is exactly what inspired me to build **RAWviewer**.
+I've been there myself — struggling to sort through **500GB of RIAT aviation photos** because of how tedious this process is. That frustration is exactly what inspired me to build **RAWviewer**.
 
-RAWviewer is a lightweight, focused image viewer built specifically for photographers who shoot a lot — especially in aviation, wildlife, or sports.
-
-- Instant file previewing: No import steps — just drag & drop.
-- Zoom in with a single key to check sharpness immediately.
-- Stay in zoomed mode while browsing with arrow keys.
-- Quickly remove blurry photos from the queue with `↓` (moves them to a discard folder).
-- No complex controls to memorize — just the essential keys to move fast.
-
-This is a **pre-filtering tool**, letting you go through hundreds of RAW files efficiently **before** committing to editing them in Lightroom or Photoshop.
+RAWviewer is a lightweight, high-performance local organizer built specifically for photographers who shoot high volumes. It acts as an **AI-powered pre-filtering and discovery workspace**, letting you curate, search, and prepare your images entirely offline **before** you commit them to your editing workflow in Lightroom or Photoshop.
 
 ## 🔍 What is RAWviewer?
-**RAWviewer** is a fast, modern image viewer for **Windows and macOS** (official releases), built with PyQt6. It supports advanced zooming, panning, and direct file association, allowing RAW files to be opened with a double-click.
+**RAWviewer** is a fast, AI-powered image viewer and organizer for **Windows and macOS** (official releases), built with PyQt6. 
+
+Beyond instant RAW previewing, 100% single-key zooming, and smooth panning, RAWviewer integrates:
+- **Local Semantic AI Search**: Search your photo folder using natural language (e.g., `"airplane in clouds"`, `"portrait of a dog"`) running **100% offline and locally** via MobileCLIP (Core ML on macOS, ONNX on Windows).
+- **Structured Metadata Filtering**: Instantly narrow down results using advanced filters like `camera:`, `lens:`, `iso:`, `ext:`, `has:face`, `city:`, or date ranges.
+- **Focus Point & Subject Outlines**: Visualize camera autofocus points directly from MakerNote metadata to verify exact focal lock.
+- **Non-Destructive Tools & Sharing**: Quick visual rotations, automatic slideshows, and system sharing to jump straight into editing applications.
 
 > **Platform note:** Official prebuilt releases are **Windows** and **macOS** only. There is no official Linux package; running from source on Linux is unsupported and may require manual dependency setup.
 
@@ -206,6 +202,35 @@ Launch scripts live under [`scripts/Launch/`](scripts/Launch/README.md).
 | `RAWVIEWER_PROCESS_POOL_WORKERS` | LibRaw postprocess process pool size when `RAWVIEWER_USE_PROCESS_POOL=1` |
 | `RAWVIEWER_SLOW_STORAGE_PREFIXES` | Comma-separated path prefixes (e.g. `K:\Photos,N:\`) to cap sort-probe parallelism at 3 |
 
+**macOS share (v2.2, single-image view only):**
+
+| Variable | Default in `launch_dev.sh` | Effect |
+|----------|------------------------------|--------|
+| `RAWVIEWER_SHARE_MENU` | `1` | Qt menu listing `NSSharingService` targets (recommended under Qt6) |
+| `RAWVIEWER_SHARE_TRY_NATIVE_PICKER` | off | Try `NSSharingServicePicker` first, then menu fallback |
+| `RAWVIEWER_SHARE_SHOW_AIRDROP` | off | Include AirDrop in the menu (in-app AirDrop is unreliable in the Qt host) |
+| `RAWVIEWER_SHARE_DEBUG` | off | Share diagnostics in status bar and `[SHARE]` logs |
+
+Details: [`docs/macos-sharing-v21-v22.md`](docs/macos-sharing-v21-v22.md) and [`scripts/Launch/README.md`](scripts/Launch/README.md#macos--release-smoke-test-manual).
+
+### macOS — build and smoke test (v2.2)
+
+```bash
+chmod +x scripts/Launch/shell/*.sh
+./scripts/Launch/shell/build_macos.sh    # or: pixi install && pixi run python build.py
+xattr -cr dist/RAWviewer.app
+open dist/RAWviewer.app
+```
+
+**Dev run** (preflight checks for `pyexiv2` and semantic backend):
+
+```bash
+./scripts/Launch/shell/launch_dev.sh
+# Skip preflight: RAWVIEWER_TEST_PYEXIV2=0 RAWVIEWER_TEST_SEMANTIC=0 ./scripts/Launch/shell/launch_dev.sh
+```
+
+Before tagging a macOS release: confirm app version **2.2**, single-view **share** menu works (Mail attach), and bundled `models/mobileclip2_coreml` if semantic search is required in the `.app`.
+
 ## 🏗️ Building from Source
 
 ### Prerequisites
@@ -258,7 +283,7 @@ All project dependencies are managed via `pixi.toml` instead of `requirements.tx
 - **"Windows protected your PC"**: Click "More info" → "Run anyway"
 - **Antivirus warnings**: Add RAWviewer to your antivirus exclusions
 - **Performance issues**: Try running as administrator
-- **"Open with another app" does nothing**: Ensure a file is loaded in single-image view; restart the app after upgrading. The picker uses the native `OpenAs_RunDLLW` API (Unicode paths supported).
+- **"Open with another app" / bottom share button**: v2.2 implements the native Open with APIs (`OpenAs_RunDLLW`, `SHOpenWithDialog` + `OAIF_EXEC`), but the bottom-bar control is **hidden on Windows** in current `main`. Use Explorer **Open with** on the file until the in-app button is re-enabled (see `scripts/Launch/README.md`).
 - **AttributeError with stdout**: This is normal for windowed builds - the application runs without a console window
 - **Installer stuck on "Downloading MobileCLIP ONNX Models" / `No module named 'requests'`**:
   - Fixed in 2.1.0+ (`requests` in `pixi.toml`). Re-run the installer from a fresh build, or in the install folder run `_internal\pixi\pixi.exe install` then retry.
@@ -303,6 +328,8 @@ This will automatically create a perfectly compatible, warning-free `RAWviewer.a
 - **Homebrew delays on macOS 12 Monterey or older**: 
   - Homebrew has officially dropped "binary bottle" support for Monterey. However, **it still works**. When the build script attempts to `brew install inih gettext`, Homebrew will simply compile them from source on your machine. This is completely normal but may take 2-3 extra minutes.
 
+- **Share menu empty or native picker spins**: Use dev defaults (`RAWVIEWER_SHARE_MENU=1` via `launch_dev.sh`). Avoid opening the picker on mouse-up; see [`docs/macos-sharing-v21-v22.md`](docs/macos-sharing-v21-v22.md). For AirDrop, prefer Finder on the file.
+
 - **Permission Denied / Cannot Read Folder**: Modern macOS requires explicit permission for apps to access the Desktop or Documents. 
   1. Go to **System Settings** > **Privacy & Security** > **Full Disk Access**.
   2. Click the **+** button and add `RAWviewer.app`.
@@ -321,6 +348,10 @@ We're continuously working to improve RAWviewer. Here are some features planned 
 
 
 ## ⚠️ Known Issues
+
+### Platform (v2.2)
+- **Windows:** In-app **Open with** picker is implemented but the bottom-bar button is not shown on `win32` in current `main`.
+- **macOS:** `NSSharingServicePicker` popover often fails under the Qt6 host; default product path is the **Qt share menu**, not the popover.
 
 ### Camera Compatibility
 - **Newer camera models**: Support for the latest camera releases may be limited due to LibRaw library compatibility

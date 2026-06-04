@@ -12,7 +12,7 @@
 | v2.1 單張分享 | **可用**：約 15 行 `NSSharingServicePicker`，錨在分享按鈕 `winId()`。 |
 | v2.2 原生 picker（未改前） | **常轉圈、無選項**（狀況 B）；log 仍可能顯示 `show` 成功。 |
 | 根因 | **非**「抄錯 API」，而是 **Qt/AppKit 整合**（觸發時機、event filter、OpenGL 疊層、delegate 等）。 |
-| v2.2 目前 dev 預設 | **原生 picker**（`RAWVIEWER_SHARE_MENU=0`）；分享期間 **暫停 event filter**、**隱藏 gpu_view**、delegate **回傳預取服務**、**pump NSRunLoop**。失敗時 fallback Qt 選單（`RAWVIEWER_SHARE_MENU=1`）。 |
+| v2.2 目前 dev 預設 | **Qt 選單**（`RAWVIEWER_SHARE_MENU=1`）；原生 picker 為 opt-in（`RAWVIEWER_SHARE_TRY_NATIVE_PICKER=1`）。分享期間可暫停 event filter、隱藏 gpu_view；AirDrop 預設不在選單內。 |
 
 POC（極簡 `QMainWindow` + 延遲呼叫 picker）可正常顯示完整分享面板，證明 **AppKit 路徑在機器上沒壞**，差異在 **完整應用殼層**。
 
@@ -124,14 +124,16 @@ v2.2 `MainWindow.eventFilter` 裝在 scroll / image / GPU viewport、`centralWid
 
 ---
 
-## v2.2 目前 dev 行為（工作區，未 commit 前請以 `launch_dev.sh` 為準）
+## v2.2 目前 dev 行為（以 `launch_dev.sh` 與 `main` 為準）
 
 ### `scripts/Launch/shell/launch_dev.sh` 預設
 
 | 變數 | 預設 | 說明 |
 |------|------|------|
 | `RAWVIEWER_GPU_VIEW` | `1` | GPU 單張檢視 on |
-| `RAWVIEWER_SHARE_MENU` | `0` | `1` = Qt 選單；`0` = 原生 picker（預設） |
+| `RAWVIEWER_SHARE_MENU` | `1` | **Qt 選單**（v2.2 預設）；`0` = 僅原生 picker 路徑 |
+| `RAWVIEWER_SHARE_TRY_NATIVE_PICKER` | off | `1` = 先試 picker，約 900ms 後 fallback 選單 |
+| `RAWVIEWER_SHARE_SHOW_AIRDROP` | off | `1` = 選單顯示 AirDrop |
 | `RAWVIEWER_SHARE_KEEP_GPU_VISIBLE` | off | `1` = 分享時不隱藏 `gpu_view`（除錯 picker 與 OpenGL 衝突） |
 | `RAWVIEWER_MACOS_FORCE_FOREGROUND` | off | 僅 opt-in 時 `activateIgnoringOtherApps` |
 
@@ -148,8 +150,9 @@ RAWVIEWER_GPU_VIEW=0 RAWVIEWER_AIRDROP_PICKER=1 bash /Volumes/Development/Develo
 
 | 變數 | 用途 |
 |------|------|
-| `RAWVIEWER_SHARE_MENU=0` | **NSSharingServicePicker**（預設；已緩解 Qt/OpenGL 衝突） |
-| `RAWVIEWER_SHARE_MENU=1` | **Qt 選單**（Mail 等；跳過 popover 填表） |
+| `RAWVIEWER_SHARE_MENU=1` | **Qt 選單**（**v2.2 預設**；Mail 等可靠） |
+| `RAWVIEWER_SHARE_MENU=0` | 僅走 **NSSharingServicePicker**（常轉圈） |
+| `RAWVIEWER_SHARE_TRY_NATIVE_PICKER=1` | 先 picker，失敗/逾時 fallback 選單 |
 | `RAWVIEWER_SHARE_KEEP_GPU_VISIBLE=1` | 分享時不隱藏 OpenGL 層（A/B 測試） |
 | `RAWVIEWER_AIRDROP_PICKER=1` | AirDrop 改試 **僅 AirDrop 的 picker** |
 | `RAWVIEWER_AIRDROP_PERFORM=1` | AirDrop 改試 **`performWithItems`**（常 log OK、無 UI） |
@@ -173,7 +176,7 @@ RAWVIEWER_GPU_VIEW=0 RAWVIEWER_AIRDROP_PICKER=1 bash /Volumes/Development/Develo
 
 ## 建議後續（暫停實作前）
 
-1. **產品預設**：維持 **選單 + AirDrop Finder** 直至 in-app picker 在 `GPU_VIEW=0/1` 皆驗證穩定。  
+1. **產品預設（v2.2）**：**Qt 選單** + AirDrop 預設隱藏（Finder 路徑）；原生 picker 僅 opt-in。  
 2. **若要 v2.1 體驗**：`pressed` + 延遲 picker + `contentView` + `edge=3` + 分享期間暫停 filter + 預設 `GPU_VIEW=0` 或分享時暫時降 OpenGL。  
 3. **不要**僅複製 v2.1 的 `_share_macos` 15 行而忽略殼層差異。  
 4. **Bisect**：同一檔案、同一機器，v2.1 `launch_dev.sh` vs v2.2（`GPU_VIEW` / `SHARE_MENU` 矩陣）並行對照。

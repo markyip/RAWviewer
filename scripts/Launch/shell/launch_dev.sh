@@ -40,7 +40,7 @@ pause_if_interactive() {
 export RAWVIEWER_VERBOSE_ORIENTATION_LOGS=1
 export RAWVIEWER_DEBUG=1
 # macOS NSSharingServicePicker is AppKit; pointer on the sheet has no Qt window (harmless).
-# Native sharing uses the standard NSSharingServicePicker for all targets.
+# Default share UI is a Qt menu of NSSharingService targets (v2.2 Qt6). Native popover is opt-in.
 export QT_LOGGING_RULES="${QT_LOGGING_RULES:-qt.pointer.dispatch=false}"
 # File picker: macOS uses Finder via AppleScript/NSOpenPanel. Qt UI: RAWVIEWER_QT_FILE_DIALOG=1
 # Semantic search (CLIP embeddings). Off by default in app; enable for dev like run_debug.bat.

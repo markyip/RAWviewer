@@ -2,6 +2,8 @@
 
 Scripts for local development and packaging. All paths assume the **repository root** as the working directory (each script `cd`s there automatically).
 
+**Version:** release **v2.2** (`build.py` `VERSION`, `QApplication` version, `pixi.toml` workspace version).
+
 ## Windows (`.bat`)
 
 | Script | Purpose |
@@ -25,15 +27,31 @@ scripts\Launch\bat\build_windows_directml.bat
 clear_cache.bat
 ```
 
+### Windows — bottom bar (v2.2)
+
+| Platform behavior | Status in `main` (v2.2) |
+|-------------------|-------------------------|
+| **Open with another app** (Lightroom, Photoshop, …) | Implemented (`OpenAs_RunDLLW` / `SHOpenWithDialog` + `OAIF_EXEC`). **UI:** bottom share button is currently **hidden on Windows**; wiring exists via `_dispatch_share_bottom` but is not connected to a visible control — see [Known issues](#known-issues-platform). |
+| **System share** (Mail, Teams, …) | `_share_windows_ui_chain` (helper → WinRT → shell verb → clipboard). Dev-only unless the bottom button is re-enabled. |
+
+Optional WinRT helper (dev):
+
+```batch
+cd src\windows_share_helper
+dotnet build -c Release
+```
+
+Output: `src/windows_share_helper/bin/Release/net8.0-windows10.0.19041.0/WindowsShareHelper.exe` (git-ignored; rebuild locally).
+
 ## macOS (shell)
 
 Official macOS release only; there is no Linux build or installer.
 
 | Script | Purpose |
 |--------|---------|
-| [`shell/launch_dev.sh`](shell/launch_dev.sh) | Run `src/main.py` with verbose dev env vars (macOS dev) |
+| [`shell/launch_dev.sh`](shell/launch_dev.sh) | Run `src/main.py` with verbose dev env (GPU view, share menu, semantic preflight) |
 | [`shell/clear_cache.sh`](shell/clear_cache.sh) | Wipe image/EXIF/semantic caches, logs, and QSettings (full fresh start) |
-| [`shell/build_macos.sh`](shell/build_macos.sh) | macOS build via `rawviewer_env` + `build.py` |
+| [`shell/build_macos.sh`](shell/build_macos.sh) | macOS build via `rawviewer_env` + `build.py` → `dist/RAWviewer.app` |
 
 ```bash
 chmod +x scripts/Launch/shell/*.sh
@@ -43,6 +61,81 @@ chmod +x scripts/Launch/shell/*.sh
 ./clear_cache.sh
 ```
 
+**Recommended for day-to-day dev:** `pixi run start` or `./scripts/Launch/shell/launch_dev.sh` (macOS) / `scripts/Launch/bat/run_debug.bat` (Windows).
+
+### macOS — build process (`build_macos.sh`)
+
+1. **Requires macOS** (`darwin`), `python3` on PATH.
+2. Creates or reuses **`rawviewer_env/`** at repo root.
+3. Optional **Homebrew** deps for `pyexiv2`: `inih`, `gettext` (`brew install inih gettext` if the wheel build fails).
+4. Installs PyQt6, rawpy, PyInstaller, **pyobjc** (Cocoa / CoreML / Quartz / Vision), and other runtime deps; **pyexiv2** is best-effort (build continues with exifread fallback).
+5. Uninstalls heavy unused ML stacks (`torch`, `sentence-transformers`, …) to keep the app bundle smaller.
+6. Cleans `build/`, `dist/`, `*.spec`, then runs **`python build.py`** (version **2.2**, updates `Info.plist`, bundles `models/mobileclip2_coreml` when present).
+
+**Pixi alternative** (pinned Python, good when `rawviewer_env` pyexiv2 fails):
+
+```bash
+pixi install
+pixi run python build.py
+```
+
+**Output:** `dist/RAWviewer.app`. Install to Applications:
+
+```bash
+cp -R dist/RAWviewer.app /Applications/
+xattr -cr /Applications/RAWviewer.app   # if downloaded or copied from another machine
+open /Applications/RAWviewer.app
+```
+
+### macOS — dev run & preflight (`launch_dev.sh`)
+
+Before `src/main.py`, the script can run (skippable) checks:
+
+| Check | Env | Default |
+|-------|-----|---------|
+| `pyexiv2` import | `RAWVIEWER_TEST_PYEXIV2` | `1` |
+| MobileCLIP / semantic backend | `RAWVIEWER_TEST_SEMANTIC` | `1` (needs `RAWVIEWER_ENABLE_SEMANTIC_SEARCH=1`) |
+
+Skip checks when iterating on unrelated features:
+
+```bash
+RAWVIEWER_TEST_PYEXIV2=0 RAWVIEWER_TEST_SEMANTIC=0 ./scripts/Launch/shell/launch_dev.sh
+```
+
+**Default dev env (v2.2):**
+
+| Variable | Default | Notes |
+|----------|---------|--------|
+| `RAWVIEWER_GPU_VIEW` | `1` | OpenGL single-image viewport |
+| `RAWVIEWER_SHARE_MENU` | `1` | Qt menu of `NSSharingService` targets (reliable under Qt6) |
+| `RAWVIEWER_ENABLE_SEMANTIC_SEARCH` | `1` | Semantic search on |
+| `RAWVIEWER_DEBUG` | `1` | Verbose logging |
+
+Share opt-in (see [`docs/macos-sharing-v21-v22.md`](../../docs/macos-sharing-v21-v22.md)):
+
+| Variable | Purpose |
+|----------|---------|
+| `RAWVIEWER_SHARE_TRY_NATIVE_PICKER=1` | Try `NSSharingServicePicker` first (~900ms menu fallback) |
+| `RAWVIEWER_SHARE_SHOW_AIRDROP=1` | Show AirDrop in the share menu |
+| `RAWVIEWER_SHARE_DEBUG=1` | Share lines in status bar + `[SHARE]` logs |
+| `RAWVIEWER_FILE_LOG=1` | Persistent file logging (share diagnostics) |
+
+Pass env vars as arguments: `./scripts/Launch/shell/launch_dev.sh RAWVIEWER_GPU_VIEW=0`
+
+### macOS — release smoke test (manual)
+
+After `build_macos.sh` or `pixi run python build.py`:
+
+1. **Gatekeeper:** `xattr -cr dist/RAWviewer.app` then `open dist/RAWviewer.app`.
+2. **About / version:** Help or logs should report app version **2.2**.
+3. **Single-image view:** Open a JPEG/RAW folder → one file → bottom **share** icon visible.
+4. **Share:** Click share → Qt menu lists Mail / Messages / etc.; pick Mail and confirm attachment path (not an empty spinner).
+5. **Semantic (if models bundled):** Search field accepts a text query; index progress in status area.
+6. **GPU view:** Pan/zoom; toggle `RAWVIEWER_GPU_VIEW=0` if comparing share behavior.
+7. **Frozen vs dev:** Re-test share on the `.app` build; sandbox entitlements differ from `python src/main.py` (see sharing doc).
+
+Logs: dev console `[SHARE]`; packaged app under `~/Library/Logs/` or paths noted in app logging when `RAWVIEWER_FILE_LOG=1`.
+
 ## Virtual environments
 
 | Path | Used by |
@@ -51,17 +144,9 @@ chmod +x scripts/Launch/shell/*.sh
 | `.pixi/envs/default/` | `pixi install` / `pixi run start` (see root `pixi.toml`) |
 | `.venv/` | Not referenced by these scripts; optional IDE/local use |
 
-**Recommended for day-to-day dev:** `pixi run start` or `scripts/Launch/bat/run_debug.bat` (Windows) / `scripts/Launch/shell/launch_dev.sh` (macOS).
-
 **`clear_cache.bat`** / **`clear_cache.sh`** close RAWviewer (and dev `python … main.py` instances), then delete `~/.rawviewer_cache`, log folders, and session state (Windows: `HKCU\Software\RAWviewer`; macOS: `~/Library/Preferences/com.RAWviewer.RAWviewer.plist`). They do **not** remove the installed app (Windows: `%LOCALAPPDATA%\RAWviewer`; macOS: `/Applications/RAWviewer.app` or repo `models/`).
 
-## Windows share helper (optional, dev)
+## Known issues (platform)
 
-Sources live under `src/windows_share_helper/`. Build the Release helper when testing WinRT share fallbacks (macOS uses the native share sheet; the shipping Windows bottom-bar button opens **Open with another app** instead):
-
-```batch
-cd src\windows_share_helper
-dotnet build -c Release
-```
-
-Output: `src/windows_share_helper/bin/Release/net8.0-windows10.0.19041.0/WindowsShareHelper.exe` (ignored by git; rebuild locally as needed).
+- **Windows Open with:** Native picker code is in `main.py`, but the bottom-bar control is **not shown** on `win32` in v2.2 `main` (regression after macOS share work). Re-enable requires showing the button and `clicked` → `_on_share_bottom_button_clicked` (see git `8b3f54a`). Until then, use Explorer **Open with** on the file.
+- **macOS native share popover:** Often spins empty under the Qt6 host; **product default is the Qt share menu**, not the popover.
