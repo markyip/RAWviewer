@@ -8,7 +8,7 @@ Unified 2.2 release — search, gallery, film strip, frameless window polish, RA
 ### 🎯 What's New
 - **Search from single-image view**: Search button in single view; submitting a query switches to gallery with filtered results.
 - **Fast single-file open**: Opening one image no longer waits for full folder scan and EXIF sort on large libraries.
-- **Windows — Open with another app** (API): Native picker via `OpenAs_RunDLLW` / `SHOpenWithDialog` with `OAIF_EXEC` for Lightroom, Photoshop, etc. **Note:** v2.2 `main` currently hides the bottom-bar button on Windows; Open with is implemented but not exposed in the UI (see Known issues).
+- **Windows — Open with another app**: Native picker via `OpenAs_RunDLLW` / `SHOpenWithDialog` with `OAIF_EXEC` for Lightroom, Photoshop, etc., directly exposed in the bottom bar via the Share button (bypasses dropdown for instant editing selection).
 - **macOS — Share (single image)**: Bottom-bar share in single view uses a **Qt menu** of `NSSharingService` targets (Mail, Messages, …). Native `NSSharingServicePicker` is opt-in (`RAWVIEWER_SHARE_TRY_NATIVE_PICKER=1`) because the popover often spins empty under the Qt6 shell. AirDrop is hidden from the menu by default; use Finder for reliable AirDrop (see `docs/macos-sharing-v21-v22.md`).
 - **Experimental GPU single-image view**: Opt in with `RAWVIEWER_GPU_VIEW=1` for smoother zoom/pan on supported hardware (classic scroll area remains the default).
 - **Consistent RAW color (fit ↔ zoom)**: Single-image RAW defaults to LibRaw half-res for fit view and full decode at 100% zoom (`RAWVIEWER_LIBRAW_CONSISTENT_PREVIEW=1`), avoiding embedded-JPEG color snap. Gallery thumbnails still use fast embedded previews.
@@ -23,7 +23,7 @@ Unified 2.2 release — search, gallery, film strip, frameless window polish, RA
 - **Gallery thumbnails**: Click handler uses the widget’s current path so reordered/filtered grids navigate correctly.
 - **Search panel UI**: Collapsing the search field no longer shifts nearby status-bar icons; fixed width jump when clearing the query.
 - **Search indexing UX**: No flash of stale `Semantic/Face X/10` progress after search completes; session-aware index status.
-- **Semantic indexing**: Skip duplicate RAW companion files when writing to the index; improved progress formatting and accelerator logging.
+- **Semantic indexing**: Skip duplicate RAW companion files when writing to the index; resolved progress bar resets by scaling progress between thumbnail warming (10%) and MobileCLIP neural pass (90%); prevented brief double-count displays by filtering duplicate companion files in start fallbacks.
 
 **Film strip & rotation**
 - **Film strip animation**: Smooth fade-in/out when revealing or dismissing the single-image thumbnail strip; extended bottom hot zone.
@@ -53,7 +53,6 @@ Unified 2.2 release — search, gallery, film strip, frameless window polish, RA
 - **Environment**: `activation.env` with `PYTHONNOUSERSITE=1` to prevent global package leaks and splash issues.
 
 ### Known issues (v2.2)
-- **Windows:** Bottom-bar “Open with another app” is not visible in current `main` despite working APIs — restore UI from v2.2.1 wiring if needed.
 - **macOS:** In-app `NSSharingServicePicker` popover may still spin empty; use default share menu or Finder for AirDrop.
 
 ---
