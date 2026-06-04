@@ -8,7 +8,7 @@
 - **GPU navigation**: Smoother gallery→single transitions and priority full-resolution decodes; 27% zoom race fix.
 
 ### Developer
-- **Shell capture-time POC**: `src/windows_shell_meta.py` + `scripts/compare_shell_capture_times.py` — confirms EXIF path stays in production (Shell ~2.4× slower, no ≥1 s date differences on test folder).
+- **Folder sort**: Production uses EXIF / probe / birth / mtime only; Windows Shell `DateTaken` POC removed.
 - **Root `clear_cache.bat`**: Thin forwarder to `scripts/Launch/bat/clear_cache.bat`.
 
 ---

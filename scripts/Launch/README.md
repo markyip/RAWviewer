@@ -25,8 +25,6 @@ scripts\Launch\bat\build_windows_directml.bat
 clear_cache.bat
 ```
 
-**Windows capture-time benchmark (POC):** `python scripts\compare_shell_capture_times.py "<folder>"`.
-
 ## macOS (shell)
 
 Official macOS release only; there is no Linux build or installer.
@@ -54,8 +52,6 @@ chmod +x scripts/Launch/shell/*.sh
 | `.venv/` | Not referenced by these scripts; optional IDE/local use |
 
 **Recommended for day-to-day dev:** `pixi run start` or `scripts/Launch/bat/run_debug.bat` (Windows) / `scripts/Launch/shell/launch_dev.sh` (macOS).
-
-Root-level `run_debug.bat`, `build_windows.bat`, `clear_cache.bat`, `clear_cache.sh`, `launch_dev.sh`, and `build_macos.sh` are thin wrappers that forward here.
 
 **`clear_cache.bat`** / **`clear_cache.sh`** close RAWviewer (and dev `python … main.py` instances), then delete `~/.rawviewer_cache`, log folders, and session state (Windows: `HKCU\Software\RAWviewer`; macOS: `~/Library/Preferences/com.RAWviewer.RAWviewer.plist`). They do **not** remove the installed app (Windows: `%LOCALAPPDATA%\RAWviewer`; macOS: `/Applications/RAWviewer.app` or repo `models/`).
 

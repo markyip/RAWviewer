@@ -80,8 +80,9 @@ venv/
 # PyInstaller local cache
 .pyinstaller/
 
-# Accidental Windows-path-style folder name on macOS
+# Accidental Windows-path-style folder name on macOS (fatal_dump logs)
 C:/
+C:*/
 
 # Local agent / IDE scratch (not part of the app)
 .agent/
@@ -136,12 +137,8 @@ scratch/
 Untitled
 .rawviewer_cold_start
 
-# POC / benchmark script outputs (regenerate with compare_shell_capture_times.py)
+# Ad-hoc script outputs
 scripts/output/
-# load_workflow_poc.py ad-hoc runs (prefer --json-out scripts/output/…)
-scripts/load_workflow_poc_*.json
-scripts/load_workflow_poc_*_run.txt
-scripts/load_workflow_poc_last_run.txt
 
 # Local one-off profiling scripts (hardcoded paths)
 scripts/profile_*.py

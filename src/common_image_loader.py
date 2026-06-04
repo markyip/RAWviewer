@@ -118,7 +118,6 @@ def capture_timestamp_for_sort(
     file_birthtime: float = 0.0,
     probe_file: bool = True,
     semantic_capture_time: Optional[str] = None,
-    shell_capture_timestamp: float = 0.0,
 ) -> float:
     """Timestamp for folder/gallery sort (see resolve_folder_sort_timestamp)."""
     _has_capture, ts, _source = resolve_folder_sort_timestamp(
@@ -128,7 +127,6 @@ def capture_timestamp_for_sort(
         file_birthtime=file_birthtime,
         probe_file=probe_file,
         semantic_capture_time=semantic_capture_time,
-        shell_capture_timestamp=shell_capture_timestamp,
     )
     return ts
 
@@ -141,19 +139,18 @@ def resolve_folder_sort_timestamp(
     file_birthtime: float = 0.0,
     probe_file: bool = True,
     semantic_capture_time: Optional[str] = None,
-    shell_capture_timestamp: float = 0.0,
     probed_capture_timestamp: float = 0.0,
 ) -> Tuple[bool, float, str]:
     """
     Returns (has_capture_time, sort_timestamp, sort_source).
 
     Priority for sort_timestamp:
-      1. EXIF / semantic / probe / Shell capture time
+      1. EXIF / semantic / probe capture time
       2. Filesystem birth time (creation on Windows/macOS), when no capture time
       3. File modification time (mtime)
 
     All files share one timeline (camera + AI exports interleave by these rules).
-  """
+    """
     if metadata:
         ts = parse_capture_time_to_timestamp(metadata.get("capture_time"))
         if ts > 0:
@@ -168,8 +165,6 @@ def resolve_folder_sort_timestamp(
         ts = probe_capture_timestamp_from_file(file_path)
         if ts > 0:
             return True, ts, "probe"
-    if shell_capture_timestamp and shell_capture_timestamp > 0:
-        return True, float(shell_capture_timestamp), "shell"
 
     birth = float(file_birthtime or 0.0)
     mtime = float(file_mtime or 0.0)

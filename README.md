@@ -174,7 +174,7 @@ When focus/subject indicator is enabled (`F`):
 
 ## 🛠️ Development (run from source)
 
-Launch scripts live under [`scripts/Launch/`](scripts/Launch/README.md). Root-level `run_debug.bat` / `launch_dev.sh` forward there.
+Launch scripts live under [`scripts/Launch/`](scripts/Launch/README.md).
 
 | Platform | Debug run | Build |
 |----------|-----------|-------|
@@ -184,11 +184,7 @@ Launch scripts live under [`scripts/Launch/`](scripts/Launch/README.md). Root-le
 
 **Virtual environments:** `pixi install` → `pixi run start` uses `.pixi/`. Build/debug batch scripts use `rawviewer_env/` (created automatically). `.venv/` is optional for IDE use only.
 
-**Folder sort (capture time):** Gallery and folder load sort by **EXIF** (`metadata_backend` probe when cold; bulk cache when warm). Default order is **oldest first**; use the gallery **⇅ Oldest / Newest** control to toggle (saved in QSettings). Windows Explorer `DateTaken` via Shell was evaluated and rejected for production. To reproduce timings on Windows:
-
-```batch
-python scripts\compare_shell_capture_times.py "D:\Photos\YourFolder" --limit 1000
-```
+**Folder sort (capture time):** Gallery and folder load sort by **EXIF** (`metadata_backend` probe when cold; bulk cache when warm). Default order is **oldest first**; use the gallery **⇅ Oldest / Newest** control to toggle (saved in QSettings). Windows Explorer `DateTaken` via Shell was evaluated and rejected for production (slower than EXIF, no benefit on test folders).
 
 **Optional dev toggles:**
 
@@ -204,7 +200,6 @@ python scripts\compare_shell_capture_times.py "D:\Photos\YourFolder" --limit 100
 | `RAWVIEWER_DISABLE_CROSSFADE=1` | Disable viewport crossfade on resolution upgrades |
 | `RAWVIEWER_PERSISTENT_CACHE=1` | Enable disk/SQLite cache persistence (off by default) |
 | `RAWVIEWER_EXIF_BACKEND=auto` | EXIF via pyexiv2 (JPEG/TIFF) + exifread (RAW headers); `exifread` or `pyexiv2` to force one backend |
-| `RAWVIEWER_USE_SHELL_SORT_DATES` | **Dev/POC only.** When `1` on Windows, enables `windows_shell_meta` for scripts — **not** used for gallery folder sort |
 | `RAWVIEWER_SORT_PROBE_WORKERS` | Parallel EXIF header probes during folder sort (default scales with CPU, up to 12 on local disk; 3 on UNC / `RAWVIEWER_SLOW_STORAGE_PREFIXES`) |
 | `RAWVIEWER_INDEX_METADATA_WORKERS` | Semantic index metadata extraction pool (default 2–6; lower on folders &gt;2000 files) |
 | `RAWVIEWER_RAW_LOAD_LIMIT` | Max concurrent LibRaw decodes in the load manager (default `4`) |

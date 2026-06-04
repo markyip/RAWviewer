@@ -8,7 +8,7 @@ import traceback
 import threading
 import warnings
 from datetime import datetime
-from typing import List, Optional, Union
+from typing import List, Optional, Tuple, Union
 
 from PIL import Image
 Image.MAX_IMAGE_PIXELS = None
@@ -338,8 +338,209 @@ def _share_log(
     _share_logger().log(level, "[SHARE] " + msg, *args, exc_info=exc_info)
 
 
-def _activate_macos_foreground_app() -> None:
-    """Terminal-launched Python is often a background app; file panels need foreground."""
+def _macos_share_items_array(url) -> object:
+    """Build AppKit items array (NSURL). Empty/invalid arrays make picker spin forever."""
+    if url is None:
+        return None
+    try:
+        from Foundation import NSArray
+
+        arr = NSArray.arrayWithArray_([url])
+        if arr is None:
+            _share_log(logging.WARNING, "NSArray.arrayWithArray_ returned None")
+            return None
+        try:
+            count = int(arr.count())
+        except Exception:
+            count = len(arr) if hasattr(arr, "__len__") else 0
+        if count < 1:
+            _share_log(logging.WARNING, "share items array count=0")
+            return None
+        return arr
+    except Exception as exc:
+        _share_log(logging.WARNING, "NSArray build failed: %s", exc)
+        return None
+
+
+_macos_share_picker_delegate_cls = None
+_macos_sharing_service_delegate_cls = None
+
+
+def _macos_write_sharing_content_scope(scope, value: int = 0) -> None:
+    """Write NSSharingContentScopeItem (0) into AppKit out-parameter (^q). Module-level — not on NSObject."""
+    if scope is None:
+        return
+    try:
+        scope[0] = value
+        return
+    except Exception as exc:
+        _share_log(logging.DEBUG, "sharingContentScope scope[0]: %s", exc)
+    try:
+        import ctypes
+
+        ptr = int(scope) if hasattr(scope, "__index__") else scope
+        ctypes.cast(ptr, ctypes.POINTER(ctypes.c_long))[0] = value
+    except Exception as exc:
+        _share_log(logging.DEBUG, "sharingContentScope ctypes: %s", exc)
+
+
+def _macos_register_sharing_service_delegate_metadata(delegate_cls) -> None:
+    """Tell PyObjC that argument 4 is out-pointer (^q) so scope[0] works (no ObjCPointerWarning)."""
+    try:
+        import objc
+
+        scope_out_type = objc._C_OUT + objc._C_PTR + objc._C_LNG
+        meta = dict(arguments={4: dict(type=scope_out_type)})
+        sel = b"sharingService:sourceWindowForShareItems:sharingContentScope:"
+        for cls_name in (delegate_cls.__name__.encode(), b"NSObject"):
+            try:
+                objc.registerMetaDataForSelector(cls_name, sel, meta)
+            except Exception:
+                pass
+    except Exception as exc:
+        _share_log(logging.DEBUG, "sharing delegate metadata registration: %s", exc)
+
+
+def _get_macos_sharing_service_delegate_class():
+    """NSSharingServiceDelegate — AirDrop needs source NSWindow from Qt (Mail does not)."""
+    global _macos_sharing_service_delegate_cls
+    if _macos_sharing_service_delegate_cls is not None:
+        return _macos_sharing_service_delegate_cls
+    import objc
+    from AppKit import NSMakeRect, NSObject, NSScreen
+
+    class MacSharingServiceDelegate(NSObject):
+        def initWithViewer_(self, viewer):
+            self = objc.super(MacSharingServiceDelegate, self).init()
+            if self is None:
+                return None
+            self._viewer = viewer
+            return self
+
+        def sharingService_sourceWindowForShareItems_sharingContentScope_(
+            self, service, items, scope
+        ):
+            """Return NSWindow; set sharingContentScope or AirDrop gets ObjCPointerWarning (^q)."""
+            _macos_write_sharing_content_scope(scope, 0)
+            viewer = getattr(self, "_viewer", None)
+            if viewer is None:
+                return None
+            try:
+                win = viewer._macos_share_ns_window()
+                if win is None:
+                    _share_log(logging.WARNING, "AirDrop delegate: no source NSWindow")
+                return win
+            except Exception as exc:
+                _share_log(logging.DEBUG, "sourceWindow delegate: %s", exc)
+                return None
+
+        def sharingService_willShareItems_(self, service, items):
+            _share_log(logging.INFO, "sharing service will share items: %s", service)
+
+        def sharingService_sourceFrameOnScreenForShareItem_(self, service, item):
+            viewer = getattr(self, "_viewer", None)
+            btn = getattr(viewer, "share_bottom_button", None) if viewer else None
+            if btn is None:
+                return NSMakeRect(0, 0, 1, 1)
+            try:
+                screen = NSScreen.mainScreen()
+                if screen is None:
+                    return NSMakeRect(0, 0, max(1, btn.width()), max(1, btn.height()))
+                frame = screen.frame()
+                top_left = btn.mapToGlobal(QPoint(0, 0))
+                w = max(1, btn.width())
+                h = max(1, btn.height())
+                x = float(top_left.x())
+                y = float(frame.size.height) - float(top_left.y()) - h
+                return NSMakeRect(x, y, w, h)
+            except Exception:
+                return NSMakeRect(0, 0, max(1, btn.width()), max(1, btn.height()))
+
+        def sharingService_didShareItems_(self, service, items):
+            viewer = getattr(self, "_viewer", None)
+            if viewer is not None:
+                viewer._macos_share_airdrop_completed = True
+                _share_log(logging.INFO, "sharing service shared items successfully")
+                QTimer.singleShot(0, viewer._macos_cleanup_share_temp)
+                QTimer.singleShot(0, lambda: viewer._macos_share_end_picker_session("service_success"))
+
+        def sharingService_didFailToShareItems_error_(self, service, items, error):
+            viewer = getattr(self, "_viewer", None)
+            if viewer is not None:
+                viewer._macos_share_airdrop_completed = True
+                _share_log(logging.WARNING, "sharing service failed to share items: %s", error)
+                QTimer.singleShot(0, viewer._macos_cleanup_share_temp)
+                QTimer.singleShot(0, lambda: viewer._macos_share_end_picker_session("service_fail"))
+
+    _macos_register_sharing_service_delegate_metadata(MacSharingServiceDelegate)
+    _macos_sharing_service_delegate_cls = MacSharingServiceDelegate
+    return MacSharingServiceDelegate
+
+
+def _get_macos_share_picker_delegate_class():
+    """Lazy NSObject delegate so NSSharingServicePicker can populate and we resume Qt filters on dismiss."""
+    global _macos_share_picker_delegate_cls
+    if _macos_share_picker_delegate_cls is not None:
+        return _macos_share_picker_delegate_cls
+    import objc
+    from AppKit import NSObject
+
+    class MacSharePickerDelegate(NSObject):
+        def initWithViewer_(self, viewer):
+            self = objc.super(MacSharePickerDelegate, self).init()
+            if self is None:
+                return None
+            self._viewer = viewer
+            return self
+
+        def sharingServicePicker_sharingServicesForItems_proposedSharingServices_(
+            self, picker, items, proposed
+        ):
+            viewer = getattr(self, "_viewer", None)
+            cached = getattr(viewer, "_macos_share_cached_services", None) if viewer else None
+            if cached:
+                try:
+                    n = len(cached)
+                except Exception:
+                    n = -1
+                _share_log(logging.INFO, "picker delegate: returning %d cached service(s)", n)
+                return cached
+            try:
+                n = len(proposed or [])
+            except Exception:
+                n = -1
+            _share_log(logging.INFO, "picker delegate: returning %d proposed service(s)", n)
+            return proposed
+
+        def sharingServicePicker_delegateForSharingService_(self, picker, service):
+            viewer = getattr(self, "_viewer", None)
+            if viewer is None:
+                return None
+            try:
+                delegate_cls = _get_macos_sharing_service_delegate_class()
+                delegate = delegate_cls.alloc().initWithViewer_(viewer)
+                # Keep reference to prevent GC
+                viewer._macos_active_service_delegate = delegate
+                return delegate
+            except Exception as exc:
+                _share_log(logging.WARNING, "failed to create service delegate: %s", exc)
+                return None
+
+        def sharingServicePicker_didChooseSharingService_(self, picker, service):
+            viewer = getattr(self, "_viewer", None)
+            if viewer is not None:
+                _share_log(logging.INFO, "picker didChooseSharingService: %s", service)
+                QTimer.singleShot(0, viewer._macos_cleanup_share_temp)
+                reason = "picker_cancel" if service is None else "picker_chose"
+                QTimer.singleShot(0, lambda r=reason: viewer._macos_share_end_picker_session(r))
+            return None
+
+    _macos_share_picker_delegate_cls = MacSharePickerDelegate
+    return MacSharePickerDelegate
+
+
+def _activate_macos_foreground_for_share() -> None:
+    """Bring app forward for NSSharingService (AirDrop panel needs a key window)."""
     if sys.platform != "darwin":
         return
     try:
@@ -347,7 +548,25 @@ def _activate_macos_foreground_app() -> None:
 
         ns_app = objc.lookUpClass("NSApplication").sharedApplication()
         if ns_app is not None:
-            # 0 = NSApplicationActivationPolicyRegular
+            ns_app.setActivationPolicy_(0)
+            ns_app.activateIgnoringOtherApps_(True)
+    except Exception as exc:
+        _share_log(logging.DEBUG, "share foreground activate: %s", exc)
+
+
+def _activate_macos_foreground_app() -> None:
+    """Opt-in NSApplication foreground (RAWVIEWER_MACOS_FORCE_FOREGROUND=1).
+
+    Default off: v2.1 dev never needed this; brute-force activation can fight AppKit
+    sheets (e.g. NSSharingServicePicker). Use Qt raise/activateWindow in dialogs instead.
+    """
+    if sys.platform != "darwin" or not _env_true("RAWVIEWER_MACOS_FORCE_FOREGROUND"):
+        return
+    try:
+        import objc
+
+        ns_app = objc.lookUpClass("NSApplication").sharedApplication()
+        if ns_app is not None:
             ns_app.setActivationPolicy_(0)
             ns_app.activateIgnoringOtherApps_(True)
             _share_log(logging.DEBUG, "NSApplication activateIgnoringOtherApps OK")
@@ -508,8 +727,9 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QLabel, QFileDialog,
                              QMessageBox, QScrollArea, QSizePolicy, QPushButton, QFrame,
                              QGridLayout, QScrollBar, QDialog, QSplashScreen, QInputDialog,
-                             QLineEdit, QStackedLayout, QGraphicsOpacityEffect, QStyleOptionButton)
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QPoint, QEvent, QSettings, QSize, QRect, QObject, QRunnable, QThreadPool, QTimer, QPropertyAnimation, QEasingCurve, QAbstractAnimation
+                             QLineEdit, QStackedLayout, QGraphicsOpacityEffect, QStyleOptionButton,
+                             QMenu)
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, pyqtSlot, QPoint, QEvent, QSettings, QSize, QRect, QObject, QRunnable, QThreadPool, QTimer, QPropertyAnimation, QEasingCurve, QAbstractAnimation
 from PyQt6.QtGui import (QPixmap, QImage, QAction, QKeySequence, QShortcut, QGuiApplication,
                          QDragEnterEvent, QDropEvent, QCursor, QIcon,
                          QTransform, QRegion, QPainterPath, QPainter, QColor, QPen, QBrush, QPalette)
@@ -9414,34 +9634,14 @@ class RAWImageViewer(QMainWindow):
         self.share_bottom_button = QPushButton()
         self.share_bottom_button.setFlat(True)
         self.share_bottom_button.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        if sys.platform == "darwin":
-            self.share_bottom_button.setIcon(qta.icon("fa5s.share-alt", color="#B0B0B0"))
-            self.share_bottom_button.setToolTip("Share")
-        else:
-            self.share_bottom_button.setIcon(qta.icon("fa5s.external-link-alt", color="#B0B0B0"))
-            self.share_bottom_button.setToolTip("Open with another app")
+        self.share_bottom_button.setIcon(qta.icon("fa5s.share-alt", color="#B0B0B0"))
         self.share_bottom_button.setIconSize(QSize(20, 20))
         self.share_bottom_button.setStyleSheet(bottom_icon_btn_style)
-        self.share_bottom_button.clicked.connect(self._on_share_bottom_button_clicked)
+        # pressed (mouse-down), not clicked (mouse-up): NSSharingServicePicker must not
+        # open on mouseUp or the macOS share sheet spins empty (AppKit console warning).
+        self.share_bottom_button.pressed.connect(self._share_current_image_os)
         self.share_bottom_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.share_bottom_button.hide()
-        if sys.platform == "darwin":
-            try:
-                from AppKit import NSSharingServicePicker  # noqa: F401
-                import objc  # noqa: F401
-
-                # Do not reference the name `logging` here — init_ui() imports logging later,
-                # which would shadow the module and cause UnboundLocalError.
-                _share_logger().info(
-                    "[SHARE] macOS share ready (PyObjC=%s frozen=%s)",
-                    getattr(objc, "__version__", "?"),
-                    getattr(sys, "frozen", False),
-                )
-            except Exception as exc:
-                _share_logger().error(
-                    "[SHARE] macOS share unavailable at startup — install pyobjc-framework-Cocoa: %s",
-                    exc,
-                )
 
         self.slideshow_bottom_button = QPushButton()
         self.slideshow_bottom_button.setObjectName("slideshowBottomButton")
@@ -9607,7 +9807,7 @@ class RAWImageViewer(QMainWindow):
             }
         """)
 
-        # Image counter (right-aligned text); share, hint, and counter share one row with even spacing.
+        # Trailing status: [share][i] in right_status_actions, then counter (v2.1 two-level layout).
         _counter_label_style = """
             QLabel {
                 color: #B0B0B0;
@@ -9623,12 +9823,20 @@ class RAWImageViewer(QMainWindow):
         )
         self.status_counter_label.setStyleSheet(_counter_label_style)
 
+        self.right_status_actions = QWidget()
+        right_status_actions_layout = QHBoxLayout(self.right_status_actions)
+        right_status_actions_layout.setContentsMargins(0, 0, 0, 0)
+        right_status_actions_layout.setSpacing(8)
+        right_status_actions_layout.addWidget(
+            self.share_bottom_button, 0, alignment=Qt.AlignmentFlag.AlignVCenter)
+        right_status_actions_layout.addWidget(
+            self.shortcuts_hint_button, 0, alignment=Qt.AlignmentFlag.AlignVCenter)
+
         self.right_status_trailing = QWidget()
         _rtl = QHBoxLayout(self.right_status_trailing)
         _rtl.setContentsMargins(0, 0, 0, 0)
-        _rtl.setSpacing(8)
-        _rtl.addWidget(self.share_bottom_button, 0, alignment=Qt.AlignmentFlag.AlignVCenter)
-        _rtl.addWidget(self.shortcuts_hint_button, 0, alignment=Qt.AlignmentFlag.AlignVCenter)
+        _rtl.setSpacing(12)
+        _rtl.addWidget(self.right_status_actions, 0, alignment=Qt.AlignmentFlag.AlignVCenter)
         _rtl.addWidget(self.status_counter_label, 0, alignment=Qt.AlignmentFlag.AlignVCenter)
 
         # Add left buttons to main layout; EXIF/metadata lives in the top bar (center).
@@ -9642,12 +9850,6 @@ class RAWImageViewer(QMainWindow):
 
         # Add custom widget to status bar
         self.status_bar.addPermanentWidget(status_widget, 1)
-        # Install event filter recursively on status bar and all its children
-        def _install_status_bar_filters(w):
-            w.installEventFilter(self)
-            for child in w.findChildren(QWidget):
-                child.installEventFilter(self)
-        _install_status_bar_filters(self.status_bar)
 
         # Hover-only size grip for frameless edge resize (does not consume layout space).
         self._resize_grip = ResizeGripIndicator(self)
@@ -9658,19 +9860,16 @@ class RAWImageViewer(QMainWindow):
         cw = self.centralWidget()
         if cw is not None:
             cw.setMouseTracking(True)
-            cw.installEventFilter(self)
-        self.status_bar.setMouseTracking(True)
-        self.status_bar.installEventFilter(self)
+            # No event filter on centralWidget — POC/v2.1 parity; filter here breaks macOS share sheet.
         
         # Status bar created - no rounded corners to update
         
         self.setSizePolicy(QSizePolicy.Policy.Expanding,
                            QSizePolicy.Policy.Expanding)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-        # Install event filter to intercept arrow keys
+        # v2.1-style filters: image scroll + optional GPU view only (no status bar / container).
         self.scroll_area.installEventFilter(self)
         self.image_label.installEventFilter(self)
-        self.single_view_container.installEventFilter(self)
         if self.gpu_view is not None:
             self.gpu_view.setMouseTracking(True)
             self.gpu_view.viewport().setMouseTracking(True)
@@ -13626,28 +13825,14 @@ class RAWImageViewer(QMainWindow):
         return sys.platform == "darwin"
 
     def _sync_gallery_selection_chrome(self) -> None:
-        """Status text and share button when gallery multi-select is active."""
+        """Status text when gallery multi-select is active."""
         n = len(getattr(self, "_gallery_selected_paths", set()) or set())
-        in_gallery = getattr(self, "view_mode", "") == "gallery"
-        btn = getattr(self, "share_bottom_button", None)
-        if in_gallery and btn is not None:
-            show_share = n > 0 and self._share_button_platform_enabled()
-            btn.setVisible(show_share)
-            if show_share:
-                btn.setToolTip(
-                    f"Share {n} selected image{'s' if n != 1 else ''}"
-                )
         if n <= 0:
             return
         if hasattr(self, "status_bar") and self.status_bar:
-            share_hint = (
-                "Share button — "
-                if n > 0 and self._share_button_platform_enabled()
-                else ""
-            )
             self.status_bar.showMessage(
                 f"{n} image{'s' if n != 1 else ''} selected — "
-                f"{share_hint}Delete to remove, Down to Discard (Ctrl/Cmd+drag toggles)",
+                "Delete to remove, Down to Discard (Ctrl/Cmd+drag toggles)",
                 5000,
             )
 
@@ -14227,7 +14412,6 @@ class RAWImageViewer(QMainWindow):
         """Return an NSOpenPanel instance (can fail when Qt owns NSApplication)."""
         import objc
 
-        _activate_macos_foreground_app()
         ns_open_panel = objc.lookUpClass("NSOpenPanel")
         panel = ns_open_panel.alloc().init()
         if panel is None:
@@ -14238,7 +14422,6 @@ class RAWImageViewer(QMainWindow):
 
     def _open_file_dialog_macos_applescript(self, last_dir: str) -> str:
         """Native macOS Finder file picker via AppleScript (works with Qt + Terminal)."""
-        _activate_macos_foreground_app()
         types = [
             ext.lstrip(".").lower()
             for ext in self.get_supported_extensions()
@@ -14263,7 +14446,6 @@ class RAWImageViewer(QMainWindow):
         return _run_applescript(script)
 
     def _open_folder_dialog_macos_applescript(self, last_dir: str) -> str:
-        _activate_macos_foreground_app()
         start = self._sanitize_dialog_start_dir(last_dir)
         location_clause = ""
         if start:
@@ -14307,7 +14489,6 @@ class RAWImageViewer(QMainWindow):
         """macOS Finder open panel via AppKit (Qt native QFileDialog fails when run from Terminal)."""
         from AppKit import NSURL
 
-        _activate_macos_foreground_app()
         panel = self._create_macos_open_panel()
         panel.setTitle_("Open Image")
         panel.setPrompt_("Open")
@@ -14331,7 +14512,6 @@ class RAWImageViewer(QMainWindow):
     def _open_folder_dialog_macos_nsopenpanel(self, last_dir: str) -> str:
         from AppKit import NSURL
 
-        _activate_macos_foreground_app()
         panel = self._create_macos_open_panel()
         panel.setTitle_("Open Folder")
         panel.setPrompt_("Open")
@@ -16583,15 +16763,11 @@ class RAWImageViewer(QMainWindow):
             return
         n = len(paths)
         if sys.platform == "darwin":
-            ok, detail = self._share_macos(paths)
-            if ok:
-                _share_log(logging.INFO, "macOS share sheet OK (%s)", detail)
-                self.status_bar.showMessage(
-                    f"Share {n} image{'s' if n != 1 else ''}", 1500
-                )
+            if n == 1:
+                self._macos_share_pending_path = paths[0]
+                QTimer.singleShot(100, self._on_share_macos_deferred)
             else:
-                _share_log(logging.ERROR, "macOS share failed: %s", detail)
-                self._share_status_debug(detail)
+                self.status_bar.showMessage("Share unavailable for this selection", 3000)
             return
         elif sys.platform == "win32":
             if n == 1:
@@ -16622,9 +16798,190 @@ class RAWImageViewer(QMainWindow):
         _share_log(logging.WARNING, "fallback clipboard (%s)", hint)
         self.status_bar.showMessage(hint, 6000)
 
+    def _widgets_with_main_mouse_event_filter(self) -> List:
+        """Widgets where MainWindow.eventFilter handles mouse/gesture."""
+        out: List = []
+        sa = getattr(self, "scroll_area", None)
+        if sa is not None:
+            out.append(sa)
+            out.append(sa.viewport())
+        il = getattr(self, "image_label", None)
+        if il is not None:
+            out.append(il)
+        gv = getattr(self, "gpu_view", None)
+        if gv is not None:
+            out.append(gv)
+            out.append(gv.viewport())
+        tb = getattr(self, "title_bar", None)
+        if tb is not None:
+            out.append(tb)
+        svc = getattr(self, "single_view_container", None)
+        if svc is not None:
+            out.append(svc)
+        drop_targets = getattr(self, "_file_drop_targets", None)
+        if drop_targets:
+            out.extend(list(drop_targets))
+        seen = set()
+        deduped: List = []
+        for w in out:
+            key = int(w.winId()) if hasattr(w, "winId") else id(w)
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(w)
+        return deduped
+
+    def _macos_share_use_heavy_picker(self) -> bool:
+        """Full v2.2 integration (filter pause, delegate). Default off — caused empty spinner."""
+        return _env_true("RAWVIEWER_SHARE_HEAVY_PICKER")
+
+    def _macos_share_begin_picker_session(self) -> None:
+        """Pause Qt input hooks during native picker (do not hide GPU image — pixels live on gpu_view)."""
+        self._pause_main_event_filters_for_share()
+        self._macos_share_suspend_opengl_layers()
+
+    def _macos_share_end_picker_session(self, reason: str = "unknown") -> None:
+        """Restore Qt state after native picker dismisses."""
+        self._resume_main_event_filters_for_share(reason)
+        self._macos_share_restore_opengl_layers()
+        self._macos_share_cached_services = None
+
+    def _macos_share_suspend_opengl_layers(self) -> None:
+        """Optional GPU tweak. Default off: hiding gpu_view blanks the image in GPU single-view mode."""
+        if not _env_true("RAWVIEWER_SHARE_HIDE_GPU"):
+            return
+        gv = getattr(self, "gpu_view", None)
+        self._macos_share_saved_gpu_visible = False
+        if gv is not None and gv.isVisible():
+            self._macos_share_saved_gpu_visible = True
+            gv.hide()
+            _share_log(logging.INFO, "hid gpu_view (RAWVIEWER_SHARE_HIDE_GPU=1)")
+            app = QApplication.instance()
+            if app is not None:
+                app.processEvents()
+
+    def _macos_share_restore_opengl_layers(self) -> None:
+        if not getattr(self, "_macos_share_saved_gpu_visible", False):
+            return
+        gv = getattr(self, "gpu_view", None)
+        if gv is not None:
+            gv.show()
+        container = getattr(self, "single_view_container", None)
+        if container is not None and hasattr(container, "_raise_single_view_layers"):
+            try:
+                container._raise_single_view_layers()
+            except Exception as exc:
+                _share_log(logging.DEBUG, "raise single view layers: %s", exc)
+        self._macos_share_saved_gpu_visible = False
+        _share_log(logging.INFO, "restored gpu_view after share popover")
+
+    def _macos_share_log_thread(self, label: str) -> None:
+        import threading
+
+        on_main = self._macos_share_on_main_thread()
+        _share_log(
+            logging.INFO,
+            "%s: qt_gui_thread=%s python_thread=%s",
+            label,
+            on_main,
+            threading.current_thread().name,
+        )
+        if not on_main:
+            _share_log(
+                logging.WARNING,
+                "AppKit share must run on the Qt GUI thread or macOS may ignore the command",
+            )
+
+    def _macos_share_pump_events(self, passes: int = 1) -> None:
+        """Light Qt event drain on the GUI thread (avoid nested NSRunLoop — fights Qt Cocoa bridge)."""
+        if not self._macos_share_on_main_thread():
+            return
+        app = QApplication.instance()
+        for _ in range(max(1, passes)):
+            if app is not None:
+                app.processEvents()
+
+    def _pause_main_event_filters_for_share(self) -> None:
+        if getattr(self, "_share_paused_filter_widgets", None):
+            _share_log(logging.INFO, "event filters already paused")
+            return
+        paused = []
+        widgets = self._widgets_with_main_mouse_event_filter()
+        _share_log(logging.INFO, "pausing event filters on %d widgets", len(widgets))
+        for w in widgets:
+            try:
+                name = type(w).__name__
+                w.removeEventFilter(self)
+                paused.append(w)
+                _share_log(logging.INFO, "paused event filter on widget: %s", name)
+            except Exception as exc:
+                _share_log(logging.WARNING, "failed to remove event filter: %s", exc)
+        self._share_paused_filter_widgets = paused
+        overlay_paused = []
+        container = getattr(self, "single_view_container", None)
+        if container is not None:
+            ogl_gv = getattr(container, "_gpu_view", None)
+            ogl_vp = ogl_gv.viewport() if ogl_gv is not None else None
+            if ogl_vp is not None:
+                try:
+                    ogl_vp.removeEventFilter(container)
+                    overlay_paused.append((container, ogl_vp))
+                    _share_log(logging.INFO, "paused SingleImageViewOverlay filter on QOpenGLWidget viewport")
+                except Exception as exc:
+                    _share_log(logging.DEBUG, "overlay filter pause: %s", exc)
+        self._share_paused_overlay_filters = overlay_paused
+        _share_log(logging.INFO, "paused event filters on %d widget(s) total for share", len(paused))
+
+    def _resume_main_event_filters_for_share(self, reason: str = "unknown") -> None:
+        paused = getattr(self, "_share_paused_filter_widgets", None) or []
+        _share_log(logging.INFO, "resuming event filters on %d widget(s) for share (reason: %s)", len(paused), reason)
+        for w in paused:
+            try:
+                name = type(w).__name__
+                w.installEventFilter(self)
+                _share_log(logging.INFO, "resumed event filter on widget: %s", name)
+            except Exception as exc:
+                _share_log(logging.WARNING, "failed to install event filter: %s", exc)
+        self._share_paused_filter_widgets = []
+        for container, ogl_vp in getattr(self, "_share_paused_overlay_filters", None) or []:
+            try:
+                ogl_vp.installEventFilter(container)
+                _share_log(logging.INFO, "resumed SingleImageViewOverlay filter on QOpenGLWidget viewport")
+            except Exception as exc:
+                _share_log(logging.DEBUG, "overlay filter resume: %s", exc)
+        self._share_paused_overlay_filters = []
+        _share_log(logging.INFO, "resumed all event filters for share")
+
     def _share_current_image_os(self):
-        """Open the macOS share sheet for the current file path."""
-        self._share_paths_os(self._gallery_share_target_paths())
+        """Open the system share sheet (macOS / Windows) for the current file path."""
+        p = getattr(self, "current_file_path", None)
+        if not p or not os.path.isfile(p):
+            self.status_bar.showMessage("No file to share", 2000)
+            return
+        path = os.path.abspath(p)
+        now = time.monotonic()
+        last = float(getattr(self, "_macos_share_last_request_ts", 0.0) or 0.0)
+        if now - last < 0.45:
+            _share_log(logging.INFO, "share request ignored (debounce %.0f ms)", (now - last) * 1000)
+            return
+        self._macos_share_last_request_ts = now
+        self._macos_share_menu_fallback_used = False
+        _share_log(logging.INFO, "share requested: %s", path)
+        if sys.platform == "darwin":
+            # Defer past press/release so AppKit is not invoked on mouseUp (see NSSharingServicePicker).
+            self._macos_share_pending_path = path
+            delay_ms = 100
+            try:
+                delay_ms = max(50, int(os.environ.get("RAWVIEWER_SHARE_DELAY_MS", "100")))
+            except ValueError:
+                pass
+            QTimer.singleShot(delay_ms, self._on_share_macos_deferred)
+            return
+        elif sys.platform == "win32":
+            QTimer.singleShot(0, lambda fp=path: self._share_windows_ui_chain(fp))
+            return
+        self._copy_current_file_path_to_clipboard()
+        self.status_bar.showMessage("Share unavailable — path copied to clipboard", 4000)
 
     def _copy_file_path_to_clipboard(self, path: str) -> None:
         try:
@@ -16683,301 +17040,813 @@ class RAWImageViewer(QMainWindow):
         self._copy_current_file_path_to_clipboard()
         self.status_bar.showMessage("Share unavailable — path copied to clipboard", 4000)
 
-    def _macos_nsview_from_ptr(self, ptr: int, source: str = "?"):
-        """Bridge a Cocoa view pointer from Qt winId / windowHandle."""
-        if not ptr:
-            _share_log(logging.DEBUG, "%s: null pointer", source)
-            return None
-        import objc
-        from ctypes import c_void_p
+    def _macos_share_use_qt_menu(self) -> bool:
+        """Qt menu listing NSSharingService targets (works in v2.2 Qt6 shell)."""
+        if _env_true("RAWVIEWER_SHARE_TRY_NATIVE_PICKER"):
+            return False
+        if _env_true("RAWVIEWER_SHARE_NATIVE_PICKER"):
+            return False
+        return _env_true("RAWVIEWER_SHARE_MENU", default=True)
 
+    def _macos_share_try_native_picker(self) -> bool:
+        return _env_true("RAWVIEWER_SHARE_TRY_NATIVE_PICKER") or _env_true(
+            "RAWVIEWER_SHARE_NATIVE_PICKER"
+        )
+
+    def _macos_share_on_main_thread(self) -> bool:
+        app = QApplication.instance()
+        if app is None:
+            return True
         try:
-            view = objc.objc_object(c_void_p=ptr)
-            _share_log(
-                logging.DEBUG,
-                "%s: ptr=0x%x class=%s",
-                source,
-                ptr,
-                view.className() if view is not None else "nil",
-            )
-            return view
-        except Exception as exc:
-            _share_log(logging.WARNING, "%s: bridge failed ptr=0x%x: %s", source, ptr, exc)
-            return None
+            from PyQt6.QtCore import QThread
 
-    def _macos_share_resolve_anchor(self):
-        """
-        Resolve (content_view, ns_window, label) for NSSharingServicePicker.
+            return QThread.currentThread() is app.thread()
+        except Exception:
+            return True
 
-        Prefer the NSWindow owned by Qt (windowHandle); NSApp.keyWindow often
-        does not match PyQt windows and yields a silent no-op picker.
-        """
-        btn = getattr(self, "share_bottom_button", None)
-        if btn is not None:
-            try:
-                wid = btn.winId()
-                btn_view = self._macos_nsview_from_ptr(int(wid), "qt.share_bottom_button")
-                if btn_view is not None:
-                    try:
-                        ns_win = btn_view.window()
-                    except Exception:
-                        ns_win = None
-                    _share_log(logging.INFO, "anchor=qt.share_bottom_button (raw view)")
-                    return btn_view, ns_win, "qt.share_bottom_button"
-            except Exception as exc:
-                _share_log(logging.WARNING, "failed resolving qt.share_bottom_button: %s", exc)
+    def _macos_share_defer_to_main(self, callback) -> None:
+        if self._macos_share_on_main_thread():
+            callback()
+            return
+        _share_log(logging.WARNING, "share deferred to Qt main thread (was not on GUI thread)")
+        QTimer.singleShot(0, callback)
 
-        candidates = []
+    @pyqtSlot()
+    def _on_share_macos_deferred(self) -> None:
+        """Queued on the MainWindow thread — all AppKit share UI runs here."""
+        path = getattr(self, "_macos_share_pending_path", None)
+        if not path:
+            return
+        self._macos_share_log_thread("share deferred slot")
+        self._share_macos_ui_impl(path)
 
+    def _macos_share_log_runtime_context(self) -> None:
+        """Diagnostics for sandbox / activation (dev python is usually unsandboxed)."""
+        frozen = bool(getattr(sys, "frozen", False))
+        _share_log(
+            logging.INFO,
+            "runtime: frozen=%s main_thread=%s (Terminal dev builds are not App Sandbox by default)",
+            frozen,
+            self._macos_share_on_main_thread(),
+        )
+
+    def _macos_share_validate_file(self, path: str) -> Tuple[bool, str, str]:
+        """Return (ok, absolute_path, reason). Rejects missing/empty/unreadable items."""
+        if not path or not str(path).strip():
+            return False, "", "empty_path"
+        abs_path = os.path.abspath(path)
+        if not os.path.isfile(abs_path):
+            return False, abs_path, "not_a_file"
         try:
+            size = os.path.getsize(abs_path)
+        except OSError as exc:
+            return False, abs_path, f"stat_failed:{exc}"
+        if size <= 0:
+            return False, abs_path, "zero_byte_file"
+        if not os.access(abs_path, os.R_OK):
+            return False, abs_path, "not_readable"
+        return True, abs_path, ""
+
+    def _macos_share_ensure_appkit_context(self, *, require_window: bool = False) -> bool:
+        """Activate Qt + NSWindow before AppKit share UI (missing window → empty/spinning picker)."""
+        if not self._macos_share_on_main_thread():
+            _share_log(logging.WARNING, "AppKit share requires Qt main thread")
+            return False
+        try:
+            self.raise_()
+            self.activateWindow()
             wh = self.windowHandle()
             if wh is not None:
-                candidates.append(("qt.windowHandle", int(wh.winId())))
+                wh.raise_()
         except Exception as exc:
-            _share_log(logging.WARNING, "qt.windowHandle: %s", exc)
+            _share_log(logging.DEBUG, "Qt window activate: %s", exc)
 
-        for widget, label in (
-            (self, "qt.mainWindow"),
-            (self.centralWidget(), "qt.centralWidget"),
-        ):
-            if widget is None:
-                continue
+        ns_win = None
+        try:
+            import objc
+
+            ns_app = objc.lookUpClass("NSApplication").sharedApplication()
+            if ns_app is not None:
+                # Regular policy — Terminal-launched Python is often Accessory/Prohibited.
+                ns_app.setActivationPolicy_(0)
+                ns_win = self._macos_share_ns_window()
+                if ns_win is None:
+                    ns_win = ns_app.mainWindow() or ns_app.keyWindow()
+                if ns_win is not None:
+                    ns_win.makeKeyAndOrderFront_(None)
+        except Exception as exc:
+            _share_log(logging.DEBUG, "NSApplication/window activate: %s", exc)
+
+        app = QApplication.instance()
+        if app is not None:
+            app.processEvents()
+
+        content_view, _rect, anchor = self._macos_share_content_view_and_rect()
+        has_view = content_view is not None
+        _share_log(
+            logging.INFO,
+            "AppKit context: ns_window=%s content_view=%s anchor=%s",
+            ns_win is not None,
+            has_view,
+            anchor,
+        )
+        if require_window and ns_win is None and not has_view:
+            _share_log(logging.WARNING, "missing active NSWindow or contentView for share")
+            return False
+        return True
+
+    def _macos_share_prepare_url(self, path: str):
+        """Return (NSURL, share_path) for AppKit; copies /Volumes/ files to a local temp file."""
+        try:
+            from AppKit import NSURL
+        except Exception as exc:
+            _share_log(logging.WARNING, "AppKit unavailable: %s", exc)
+            return None, ""
+
+        ok, abs_path, reason = self._macos_share_validate_file(path)
+        if not ok:
+            _share_log(logging.WARNING, "share file rejected (%s): %s", reason, path)
+            return None, ""
+
+        share_path = abs_path
+        prev_temp = getattr(self, "_macos_share_temp_path", None)
+        if prev_temp:
             try:
-                wid = (
-                    widget.effectiveWinId()
-                    if hasattr(widget, "effectiveWinId")
-                    else widget.winId()
+                if os.path.exists(prev_temp):
+                    os.remove(prev_temp)
+            except OSError:
+                pass
+            self._macos_share_temp_path = None
+
+        if abs_path.startswith("/Volumes/"):
+            try:
+                import shutil
+                import tempfile
+                import time
+
+                suffix = os.path.splitext(abs_path)[1] or ".jpg"
+                fd, temp_path = tempfile.mkstemp(prefix="rawviewer_share_", suffix=suffix)
+                os.close(fd)
+                t0 = time.perf_counter()
+                shutil.copy2(abs_path, temp_path)
+                elapsed_ms = (time.perf_counter() - t0) * 1000.0
+                ok, share_path, reason = self._macos_share_validate_file(temp_path)
+                if not ok:
+                    _share_log(logging.WARNING, "temp share file invalid (%s): %s", reason, temp_path)
+                    return None, ""
+                self._macos_share_temp_path = temp_path
+                _share_log(
+                    logging.INFO,
+                    "copied /Volumes/ file to local temp (%.0f ms, %d bytes): %s",
+                    elapsed_ms,
+                    os.path.getsize(temp_path),
+                    temp_path,
                 )
-                candidates.append((label, int(wid)))
             except Exception as exc:
-                _share_log(logging.DEBUG, "%s winId: %s", label, exc)
+                _share_log(logging.WARNING, "failed to copy /Volumes/ file to temp path: %s", exc)
+                return None, ""
 
-        for label, ptr in candidates:
-            view = self._macos_nsview_from_ptr(ptr, label)
-            if view is None:
-                continue
-            try:
-                ns_win = view.window()
-            except Exception as exc:
-                _share_log(logging.WARNING, "%s: view.window() failed: %s", label, exc)
-                ns_win = None
-            if ns_win is not None:
-                try:
-                    content = ns_win.contentView()
-                    if content is not None:
-                        _share_log(logging.INFO, "anchor=%s (contentView via %s)", label, ns_win.title())
-                        return content, ns_win, label
-                except Exception as exc:
-                    _share_log(logging.WARNING, "%s: contentView failed: %s", label, exc)
-            _share_log(logging.INFO, "anchor=%s (raw view)", label)
-            return view, ns_win, label
-
+        url = NSURL.fileURLWithPath_(share_path)
+        if url is None:
+            _share_log(logging.WARNING, "NSURL.fileURLWithPath_ returned None for %s", share_path)
+            return None, ""
         try:
-            from AppKit import NSApplication
-
-            ns_app = NSApplication.sharedApplication()
-            for label, win in (
-                ("ns.keyWindow", ns_app.keyWindow()),
-                ("ns.mainWindow", ns_app.mainWindow()),
-            ):
-                if win is None:
-                    _share_log(logging.DEBUG, "%s: None", label)
-                    continue
-                try:
-                    cv = win.contentView()
-                    _share_log(
-                        logging.DEBUG,
-                        "%s: title=%r contentView=%s",
-                        label,
-                        win.title(),
-                        cv.className() if cv is not None else None,
-                    )
-                    if cv is not None:
-                        _share_log(logging.INFO, "anchor=%s (NSApp fallback)", label)
-                        return cv, win, label
-                except Exception as exc:
-                    _share_log(logging.WARNING, "%s inspect: %s", label, exc)
-        except Exception as exc:
-            _share_log(logging.WARNING, "NSApplication: %s", exc, exc_info=True)
-
-        _share_log(logging.ERROR, "no NSView anchor (tried %d Qt ptrs + NSApp windows)", len(candidates))
-        return None, None, ""
-
-    def _macos_share_list_services(self, urls) -> None:
-        try:
-            from AppKit import NSSharingService
-
-            services = NSSharingService.sharingServicesForItems_(urls) or []
-            titles = []
-            for svc in services[:12]:
-                try:
-                    titles.append(str(svc.title()))
-                except Exception:
-                    titles.append("<?>")
-            _share_log(
-                logging.INFO,
-                "NSSharingService count=%d sample=%s",
-                len(services),
-                titles,
-            )
-        except Exception as exc:
-            _share_log(logging.WARNING, "sharingServicesForItems_: %s", exc)
-
-    def _macos_share_via_picker(self, urls, view, ns_window, label: str) -> bool:
-        from AppKit import NSSharingServicePicker, NSMakeRect, NSMinYEdge
-
-        try:
-            if ns_window is not None:
-                ns_window.makeKeyAndOrderFront_(None)
-                _share_log(logging.DEBUG, "makeKeyAndOrderFront on %s", label)
-        except Exception as exc:
-            _share_log(logging.WARNING, "makeKeyAndOrderFront failed: %s", exc)
-
-        try:
-            bounds = view.bounds()
-            _share_log(
-                logging.INFO,
-                "picker anchor=%s view=%s bounds=(%.0f,%.0f,%.0f,%.0f)",
-                label,
-                view.className(),
-                bounds.origin.x,
-                bounds.origin.y,
-                bounds.size.width,
-                bounds.size.height,
-            )
-        except Exception as exc:
-            _share_log(logging.DEBUG, "view.bounds: %s", exc)
-
-        try:
-            if label == "qt.share_bottom_button":
-                w = self.share_bottom_button.width()
-                h = self.share_bottom_button.height()
-                rect = NSMakeRect(0, 0, w, h)
-            else:
-                btn_pos = self.share_bottom_button.mapTo(self, QPoint(0, 0))
-                ns_y = view.bounds().size.height - btn_pos.y() - self.share_bottom_button.height()
-                rect = NSMakeRect(btn_pos.x(), ns_y, self.share_bottom_button.width(), self.share_bottom_button.height())
+            if not bool(url.isFileURL()):
+                _share_log(logging.WARNING, "share URL is not a file URL: %s", share_path)
+                return None, ""
         except Exception:
-            bounds = view.bounds()
-            rect = NSMakeRect(bounds.origin.x + bounds.size.width / 2, bounds.origin.y + bounds.size.height / 2, 1, 1)
+            pass
+        items = _macos_share_items_array(url)
+        if items is None:
+            _share_log(logging.WARNING, "unsupported or empty share items for %s", share_path)
+            return None, ""
+        return url, share_path
 
-        picker = NSSharingServicePicker.alloc().initWithItems_(urls)
-        if picker is None:
-            _share_log(logging.ERROR, "NSSharingServicePicker.alloc/init returned None")
-            return False
-        self._macos_share_picker_ref = picker
+    def _macos_share_show_airdrop_in_menu(self) -> bool:
+        """AirDrop perform UI does not work under Qt host; hidden from menu unless opted in."""
+        return _env_true("RAWVIEWER_SHARE_SHOW_AIRDROP")
+
+    def _macos_share_include_service_in_menu(self, service) -> bool:
+        if self._macos_share_is_airdrop_service(service):
+            return self._macos_share_show_airdrop_in_menu()
+        return True
+
+    @staticmethod
+    def _macos_share_is_airdrop_service(service) -> bool:
         try:
-            picker.showRelativeToRect_ofView_preferredEdge_(rect, view, NSMinYEdge)
-            _share_log(logging.INFO, "picker.showRelativeToRect invoked on %s", label)
-            return True
-        except Exception as exc:
-            _share_log(logging.ERROR, "picker.show failed: %s", exc, exc_info=True)
-            return False
-
-    def _macos_share_via_service_fallback(self, urls) -> bool:
-        """If the picker is a no-op, try the first sharing service that accepts the items."""
-        try:
-            from AppKit import NSSharingService
-        except Exception as exc:
-            _share_log(logging.WARNING, "NSSharingService import: %s", exc)
-            return False
-
-        services = NSSharingService.sharingServicesForItems_(urls) or []
-        for svc in services:
-            try:
-                title = str(svc.title())
-                if not svc.canPerformWithItems_(urls):
-                    _share_log(logging.DEBUG, "skip service (cannot perform): %s", title)
-                    continue
-                _share_log(logging.INFO, "fallback performWithItems: %s", title)
-                svc.performWithItems_(urls)
+            title = str(service.title() or "").lower()
+            if "airdrop" in title:
                 return True
-            except Exception as exc:
-                _share_log(logging.WARNING, "service %s failed: %s", svc, exc)
-        _share_log(logging.WARNING, "no NSSharingService accepted %d item(s)", len(urls))
+        except Exception:
+            pass
+        try:
+            ident = str(service.valueForKey_("NSSharingServiceName") or "")
+            if "AirDrop" in ident or "airdrop" in ident.lower():
+                return True
+        except Exception:
+            pass
         return False
 
-    def _share_macos(self, paths: Union[str, List[str]]) -> tuple:
-        """Return (success, detail_message). Matches the proven v2.1 approach:
-        resolve the share button's native QNSView directly, present the picker
-        synchronously with local bounds and NSMaxYEdge."""
+    def _macos_share_airdrop_finder(self, share_path: str) -> None:
+        import subprocess
+
+        p = os.path.abspath(share_path)
+        _share_log(logging.INFO, "AirDrop via Finder: open -R %s", p)
         try:
-            from AppKit import NSURL, NSSharingServicePicker, NSMakeRect
-            import objc
-            from ctypes import c_void_p
-
-            _share_log(logging.INFO, "PyObjC/AppKit import OK")
+            subprocess.run(["open", "-R", p], check=False)
+            self.status_bar.showMessage(
+                "AirDrop — in Finder: right-click the file → Share → AirDrop",
+                7000,
+            )
         except Exception as exc:
-            msg = f"AppKit unavailable ({exc})"
-            _share_log(logging.ERROR, msg, exc_info=True)
-            return False, msg
+            _share_log(logging.WARNING, "Finder AirDrop failed: %s", exc)
+            self.status_bar.showMessage(f"AirDrop failed: {exc}", 4000)
+        QTimer.singleShot(600000, self._macos_cleanup_share_temp)
 
-        if isinstance(paths, str):
-            file_paths = [paths]
-        else:
-            file_paths = list(paths)
+    def _macos_share_airdrop_perform_watchdog(self, share_path: str) -> None:
+        """If performWithItems returns OK but no delegate callback, open Finder."""
+        if getattr(self, "_macos_share_airdrop_completed", False):
+            return
+        _share_log(
+            logging.INFO,
+            "AirDrop perform produced no panel (Qt host); opening Finder for Share → AirDrop",
+        )
+        self._macos_share_airdrop_finder(share_path)
 
-        urls = []
-        for p in file_paths:
-            if p and os.path.isfile(p):
-                abs_p = os.path.abspath(p)
-                urls.append(NSURL.fileURLWithPath_(abs_p))
-                _share_log(logging.DEBUG, "NSURL file:// %s", abs_p)
-        if not urls:
-            return False, "no file URLs built"
+    def _macos_share_resolve_airdrop_service(self, menu_service):
+        """Use the dedicated AirDrop send service (menu item object is often not perform-safe)."""
+        try:
+            from AppKit import NSSharingService
 
-        _activate_macos_foreground_app()
+            named = NSSharingService.sharingServiceNamed_("com.apple.share.AirDrop.send")
+            if named is not None:
+                return named
+        except Exception as exc:
+            _share_log(logging.DEBUG, "AirDrop named service: %s", exc)
+        return menu_service
+
+    def _macos_share_airdrop_via_appkit(self, url, share_path: str) -> None:
+        """AirDrop: Finder Share sheet is reliable under Qt; in-app perform is opt-in only."""
+        if not _env_true("RAWVIEWER_AIRDROP_PERFORM"):
+            _share_log(
+                logging.INFO,
+                "AirDrop: using Finder (NSSharingService.perform does not show UI in Qt host)",
+            )
+            self._macos_share_airdrop_finder(share_path)
+            return
+        self._macos_share_airdrop_completed = False
+        _activate_macos_foreground_for_share()
         try:
             self.raise_()
             self.activateWindow()
             app = QApplication.instance()
             if app is not None:
-                for _ in range(6):
-                    app.processEvents()
+                app.processEvents()
+        except Exception:
+            pass
+        service = self._macos_share_resolve_airdrop_service(None)
+        if service is None or self._macos_share_ns_window() is None:
+            self._macos_share_airdrop_finder(share_path)
+            return
+        _share_log(logging.INFO, "AirDrop experimental perform path=%s", share_path)
+        self._perform_macos_share_service(
+            service, url, is_airdrop=True, share_path=share_path
+        )
+        delay_ms = 1500
+        try:
+            delay_ms = max(800, int(os.environ.get("RAWVIEWER_AIRDROP_WATCHDOG_MS", "1500")))
+        except ValueError:
+            pass
+        QTimer.singleShot(
+            delay_ms, lambda sp=share_path: self._macos_share_airdrop_perform_watchdog(sp)
+        )
+
+    def _perform_macos_share_service(
+        self, service, url, *, is_airdrop: bool = False, share_path: str = ""
+    ) -> None:
+        def run() -> None:
+            fallback_path = share_path or ""
+            if not fallback_path:
+                try:
+                    fallback_path = str(url.path())
+                except Exception:
+                    pass
+
+            if not self._macos_share_ensure_appkit_context(require_window=is_airdrop):
+                if is_airdrop and fallback_path:
+                    self._macos_share_airdrop_finder(fallback_path)
+                else:
+                    self.status_bar.showMessage("Share unavailable — no active window", 4000)
+                return
+            perform_items = _macos_share_items_array(url)
+            if perform_items is None and url is not None:
+                perform_items = [url]
+            if perform_items is None:
+                _share_log(logging.WARNING, "performWithItems skipped: empty items array")
+                self.status_bar.showMessage("Share failed: no shareable file", 4000)
+                if is_airdrop and fallback_path:
+                    self._macos_share_airdrop_finder(fallback_path)
+                else:
+                    QTimer.singleShot(0, self._macos_cleanup_share_temp)
+                return
+            if is_airdrop:
+                _activate_macos_foreground_for_share()
+            src_win = self._macos_share_ns_window()
+            if src_win is None and (is_airdrop or self._macos_share_is_airdrop_service(service)):
+                _share_log(logging.WARNING, "perform without NSWindow")
+                if is_airdrop and fallback_path:
+                    self._macos_share_airdrop_finder(fallback_path)
+                return
+            try:
+                delegate_cls = _get_macos_sharing_service_delegate_class()
+                delegate = delegate_cls.alloc().initWithViewer_(self)
+                self._macos_active_service_delegate = delegate
+                if delegate is not None:
+                    service.setDelegate_(delegate)
+                try:
+                    can = service.canPerformWithItems_(perform_items)
+                except Exception:
+                    can = True
+                if not can:
+                    _share_log(logging.WARNING, "AirDrop canPerformWithItems=False")
+                    if is_airdrop and fallback_path:
+                        self._macos_share_airdrop_finder(fallback_path)
+                    return
+                service.performWithItems_(perform_items)
+                _share_log(logging.INFO, "performWithItems OK: %s", service)
+                if is_airdrop:
+                    self.status_bar.showMessage("AirDrop — choose a recipient", 4000)
+            except Exception as exc:
+                _share_log(logging.WARNING, "performWithItems failed: %s", exc, exc_info=True)
+                self.status_bar.showMessage(f"Share failed: {exc}", 4000)
+                if is_airdrop and fallback_path:
+                    self._macos_share_airdrop_finder(fallback_path)
+                else:
+                    QTimer.singleShot(0, self._macos_cleanup_share_temp)
+
+        self._macos_share_defer_to_main(run)
+
+    def _share_macos_menu_chose_service(self, service, url, share_path: str) -> None:
+        try:
+            title = str(service.title())
+        except Exception:
+            title = "?"
+        _share_log(logging.INFO, "share menu chose: %s", title)
+        if self._macos_share_is_airdrop_service(service):
+            if _env_true("RAWVIEWER_AIRDROP_PICKER"):
+                self._share_macos_picker_ui_for_url(url)
+                return
+            self._macos_share_airdrop_via_appkit(url, share_path)
+            return
+        self._perform_macos_share_service(service, url)
+
+    def _share_macos_services_menu(self, path: str) -> bool:
+        """List NSSharingService targets in a Qt menu (picker sheet often spins empty in v2.2)."""
+        try:
+            from AppKit import NSSharingService
         except Exception as exc:
-            _share_log(logging.WARNING, "Qt activate/processEvents: %s", exc)
+            _share_log(logging.WARNING, "share menu unavailable: %s", exc)
+            return False
+
+        self._macos_share_log_runtime_context()
+        if not self._macos_share_ensure_appkit_context(require_window=False):
+            return False
+
+        url, share_path = self._macos_share_prepare_url(path)
+        if url is None:
+            return False
+        items = _macos_share_items_array(url)
+        if items is None:
+            return False
+        services = NSSharingService.sharingServicesForItems_(items) or []
+        visible = [s for s in services if self._macos_share_include_service_in_menu(s)]
+        hidden = len(services) - len(visible)
+        if hidden:
+            _share_log(
+                logging.INFO,
+                "share menu: %d service(s) (%d hidden, e.g. AirDrop — RAWVIEWER_SHARE_SHOW_AIRDROP=1)",
+                len(visible),
+                hidden,
+            )
+        else:
+            _share_log(logging.INFO, "share menu: %d service(s)", len(visible))
+        if not visible:
+            return False
+
+        menu = QMenu(self)
+        for svc in visible:
+            try:
+                title = str(svc.title() or "Share").strip()
+            except Exception:
+                title = "Share"
+            action = QAction(title, self)
+            action.triggered.connect(
+                lambda _checked=False, s=svc, u=url, sp=share_path: self._share_macos_menu_chose_service(
+                    s, u, sp
+                )
+            )
+            menu.addAction(action)
+
+        btn = getattr(self, "share_bottom_button", None)
+        try:
+            self.raise_()
+            self.activateWindow()
+        except Exception:
+            pass
+        if btn is not None and btn.isVisible():
+            menu.popup(btn.mapToGlobal(QPoint(0, btn.height())))
+        else:
+            menu.exec(QCursor.pos())
+        return True
+
+    def _share_macos_picker_ui_for_url(self, url) -> None:
+        """Show NSSharingServicePicker for a prepared NSURL (AirDrop-only experiments)."""
+        items = _macos_share_items_array(url)
+        if items is None:
+            _share_log(logging.WARNING, "AirDrop picker skipped: empty items array")
+            return
+        self._macos_share_begin_picker_session()
+        try:
+            from AppKit import NSSharingService, NSSharingServicePicker
+
+            if not self._macos_share_ensure_appkit_context(require_window=True):
+                self._macos_share_end_picker_session("picker_fail")
+                return
+            self._macos_share_cached_services = (
+                NSSharingService.sharingServicesForItems_(items) or []
+            )
+            if not self._macos_share_on_main_thread():
+                _share_log(logging.ERROR, "refusing AirDrop picker: not on Qt GUI thread")
+                self._macos_share_end_picker_session("picker_fail")
+                return
+            view, rect, anchor_label = self._macos_share_picker_anchor_view_and_rect()
+            if view is None or rect is None:
+                _share_log(logging.WARNING, "no NSView anchor for AirDrop picker")
+                self._macos_share_end_picker_session("picker_fail")
+                return
+            delegate_cls = _get_macos_share_picker_delegate_class()
+            delegate = delegate_cls.alloc().initWithViewer_(self)
+            picker = NSSharingServicePicker.alloc().initWithItems_(items)
+            self._macos_share_picker_ref = picker
+            self._macos_share_url_ref = url
+            self._macos_share_picker_delegate_ref = delegate
+            if delegate is not None:
+                picker.setDelegate_(delegate)
+            preferred_edge = 3
+            _share_log(
+                logging.INFO,
+                "AirDrop picker show anchor=%s edge=%s",
+                anchor_label,
+                preferred_edge,
+            )
+            picker.showRelativeToRect_ofView_preferredEdge_(rect, view, preferred_edge)
+            self._macos_share_pump_events(1)
+            QTimer.singleShot(
+                120000,
+                lambda: (
+                    self._macos_share_end_picker_session("safety_timeout"),
+                    self._macos_cleanup_share_temp(),
+                ),
+            )
+        except Exception as exc:
+            _share_log(logging.WARNING, "AirDrop picker failed: %s", exc, exc_info=True)
+            self._macos_share_end_picker_session("picker_fail")
+            self._macos_cleanup_share_temp()
+
+    def _macos_share_content_view_and_rect(self):
+        """Anchor on NSWindow contentView (Qt status-bar button winId breaks picker populate)."""
+        import objc
+        from AppKit import NSMakeRect
+        from ctypes import c_void_p
+
+        btn = getattr(self, "share_bottom_button", None)
+        if btn is None:
+            return None, None, "no-button"
+
+        def _view_from_ptr(ptr: int, label: str):
+            if not ptr:
+                return None
+            try:
+                return objc.objc_object(c_void_p=ptr)
+            except Exception as exc:
+                _share_log(logging.DEBUG, "%s ptr bridge: %s", label, exc)
+                return None
+
+        ns_win = None
+        content = None
+        label = ""
+        for label, ptr in (
+            ("qt.windowHandle", int(self.windowHandle().winId()) if self.windowHandle() else 0),
+            ("qt.effectiveWinId", int(self.effectiveWinId())),
+        ):
+            if not ptr:
+                continue
+            view = _view_from_ptr(ptr, label)
+            if view is None:
+                continue
+            try:
+                ns_win = view.window()
+            except Exception:
+                ns_win = None
+            if ns_win is not None:
+                try:
+                    content = ns_win.contentView()
+                except Exception:
+                    content = None
+                if content is not None:
+                    break
+
+        if content is None:
+            view = _view_from_ptr(int(btn.winId()), "qt.share_button")
+            if view is None:
+                return None, None, "no-view"
+            rect = NSMakeRect(0, 0, max(1, btn.width()), max(1, btn.height()))
+            return view, rect, "qt.share_button"
 
         try:
-            btn = self.share_bottom_button
-            
-            from AppKit import NSArray, NSSharingServicePicker, NSMakeRect
-            
-            # Use QTimer to break out of the Qt event loop
-            def show_picker():
-                try:
-                    view = objc.objc_object(c_void_p=int(btn.winId()))
-                    ns_window = view.window()
-                    
-                    if ns_window:
-                        # Try to attach to the window's content view for better native integration
-                        present_view = ns_window.contentView()
-                        
-                        # Calculate rect relative to the content view
-                        btn_pos = btn.mapToGlobal(btn.rect().topLeft())
-                        # Note: Qt global Y is from top, macOS window Y is from bottom
-                        # We'll just use a small rect at the mouse cursor or top-left of window as fallback
-                        rect = NSMakeRect(50, 50, 1, 1) 
-                    else:
-                        present_view = view
-                        rect = NSMakeRect(0, 0, btn.width(), btn.height())
-                        
-                    items = NSArray.alloc().initWithArray_(urls)
-                    picker = NSSharingServicePicker.alloc().initWithItems_(items)
-                    
-                    self._macos_share_items_ref = items
-                    self._macos_share_picker_ref = picker
-                    
-                    picker.showRelativeToRect_ofView_preferredEdge_(rect, present_view, 3) # 3 = NSMaxYEdge
-                    _share_log(logging.INFO, "Native NSSharingServicePicker shown")
-                except Exception as exc:
-                    _share_log(logging.ERROR, "deferred picker show failed: %s", exc, exc_info=True)
-            
-            from PyQt6.QtCore import QTimer
-            QTimer.singleShot(50, show_picker)
-            return True, "qt.share_bottom_button (native_picker_deferred)"
-            
+            bounds = content.bounds()
+            ch = float(bounds.size.height)
+        except Exception:
+            ch = float(max(1, self.height()))
+
+        pt = btn.mapTo(self, QPoint(0, btn.height()))
+        bw = max(1, btn.width())
+        bh = max(1, btn.height())
+        x = float(pt.x())
+        y = ch - float(pt.y())
+        rect = NSMakeRect(x, y, bw, bh)
+        return content, rect, "ns.contentView"
+
+    def _macos_share_picker_anchor_view_and_rect(self):
+        """v2.1-style anchor on the share button NSView (stable for popover content)."""
+        import objc
+        from AppKit import NSMakeRect
+        from ctypes import c_void_p
+
+        if not _env_true("RAWVIEWER_SHARE_ANCHOR_CONTENT"):
+            btn = getattr(self, "share_bottom_button", None)
+            if btn is not None and btn.isVisible():
+                ptr = int(btn.winId())
+                if ptr:
+                    try:
+                        view = objc.objc_object(c_void_p=ptr)
+                        w = max(1, btn.width())
+                        h = max(1, btn.height())
+                        rect = NSMakeRect(0, 0, w, h)
+                        return view, rect, "qt.share_button"
+                    except Exception as exc:
+                        _share_log(logging.DEBUG, "share button anchor: %s", exc)
+        return self._macos_share_content_view_and_rect()
+
+    def _share_macos_ui(self, path: str) -> None:
+        """macOS share entry (prefer scheduling via _on_share_macos_deferred on GUI thread)."""
+        self._macos_share_pending_path = path
+
+        def run() -> None:
+            self._macos_share_log_thread("share macos ui")
+            self._share_macos_ui_impl(path)
+
+        self._macos_share_defer_to_main(run)
+
+    def _share_macos_ui_impl(self, path: str) -> None:
+        if self._macos_share_try_native_picker() and not self._macos_share_use_qt_menu():
+            _share_log(
+                logging.INFO,
+                "trying native NSSharingServicePicker (popover content often spins in v2.2 Qt6 host)",
+            )
+            if self._share_macos_picker_ui(path):
+                if _env_true("RAWVIEWER_SHARE_AUTO_MENU_FALLBACK", default=True):
+                    delay = 900
+                    try:
+                        delay = max(400, int(os.environ.get("RAWVIEWER_SHARE_MENU_FALLBACK_MS", "900")))
+                    except ValueError:
+                        pass
+                    QTimer.singleShot(delay, lambda fp=path: self._share_macos_auto_menu_fallback(fp))
+                return
+
+        if self._macos_share_use_qt_menu():
+            _share_log(logging.INFO, "using Qt share menu (same NSSharingService targets as system share)")
+            if self._share_macos_services_menu(path):
+                self.status_bar.showMessage("Share", 1500)
+                return
+            _share_log(logging.WARNING, "share menu failed; trying native picker")
+            if self._share_macos_picker_ui(path):
+                return
+
+        self._macos_cleanup_share_temp()
+        self._copy_current_file_path_to_clipboard()
+        self.status_bar.showMessage("Share unavailable — path copied to clipboard", 4000)
+
+    def _share_macos_auto_menu_fallback(self, path: str) -> None:
+        """If the native popover spinner never populates, offer the working Qt service menu."""
+        if getattr(self, "_macos_share_menu_fallback_used", False):
+            return
+        self._macos_share_menu_fallback_used = True
+        _share_log(
+            logging.INFO,
+            "auto Qt share menu (NSSharingService list — popover UI unavailable in this app)",
+        )
+        if self._share_macos_services_menu(path):
+            self.status_bar.showMessage("Share — choose a target below", 3500)
+
+    def _macos_share_picker_url(self, path: str):
+        """NSURL for picker — default original path (v2.1); temp copy only when forced."""
+        try:
+            from AppKit import NSURL
         except Exception as exc:
-            _share_log(logging.ERROR, "Native share panel setup failed: %s", exc, exc_info=True)
+            _share_log(logging.WARNING, "AppKit unavailable: %s", exc)
+            return None, ""
+        if _env_true("RAWVIEWER_SHARE_FORCE_TEMP"):
+            return self._macos_share_prepare_url(path)
+        ok, abs_path, reason = self._macos_share_validate_file(path)
+        if not ok:
+            _share_log(logging.WARNING, "share file rejected (%s): %s", reason, path)
+            return None, ""
+        url = NSURL.fileURLWithPath_(abs_path)
+        if url is None:
+            return None, ""
+        return url, abs_path
+
+    def _share_macos_minimal_v21(self, path: str) -> bool:
+        """v2.1 picker: button anchor, no event-filter pause, no picker delegate."""
+        try:
+            from AppKit import NSMakeRect, NSSharingServicePicker
+            import objc
+            from ctypes import c_void_p
+
+            self._macos_share_log_thread("NSSharingServicePicker minimal v2.1")
+            if not self._macos_share_on_main_thread():
+                _share_log(logging.ERROR, "refusing minimal picker: not on Qt GUI thread")
+                return False
+
+            url, share_path = self._macos_share_picker_url(path)
+            if url is None:
+                return False
+            if _env_true("RAWVIEWER_MACOS_FORCE_FOREGROUND") or _env_true(
+                "RAWVIEWER_SHARE_TRY_NATIVE_PICKER"
+            ):
+                _activate_macos_foreground_app()
+
+            btn = getattr(self, "share_bottom_button", None)
+            if btn is None:
+                return False
+            ptr = int(btn.winId())
+            if not ptr:
+                return False
+
+            try:
+                self.raise_()
+                self.activateWindow()
+            except Exception:
+                pass
+
+            view = objc.objc_object(c_void_p=ptr)
+            w = max(1, btn.width())
+            h = max(1, btn.height())
+            rect = NSMakeRect(0, 0, w, h)
+            # v2.1 passes a plain list of NSURL (not NSArray).
+            picker = NSSharingServicePicker.alloc().initWithItems_([url])
+            self._macos_share_picker_ref = picker
+            self._macos_share_url_ref = url
+            self._macos_share_picker_delegate_ref = None
+            picker.showRelativeToRect_ofView_preferredEdge_(rect, view, 3)
+            _share_log(
+                logging.INFO,
+                "minimal v2.1 picker shown anchor=qt.share_button path=%s",
+                share_path,
+            )
+            QTimer.singleShot(300000, self._macos_cleanup_share_temp)
+            return True
+        except Exception as exc:
+            self._macos_share_picker_ref = None
+            self._macos_share_url_ref = None
+            _share_log(logging.WARNING, "minimal v2.1 picker failed: %s", exc, exc_info=True)
+            return False
+
+    def _share_macos_picker_ui(self, path: str) -> bool:
+        """Native NSSharingServicePicker — minimal v2.1 path by default."""
+        if not self._macos_share_use_heavy_picker():
+            if self._share_macos_minimal_v21(path):
+                self.status_bar.showMessage("Share", 1500)
+                return True
+            _share_log(logging.WARNING, "minimal v2.1 picker failed; trying heavy integration")
+
+        self._macos_share_begin_picker_session()
+        ok = self._share_macos(path)
+        if ok:
+            _share_log(logging.INFO, "NSSharingServicePicker shown OK (heavy; session ends on dismiss)")
+            self.status_bar.showMessage("Share", 1500)
+            QTimer.singleShot(120000, lambda: (
+                self._macos_share_end_picker_session("safety_timeout"),
+                self._macos_cleanup_share_temp(),
+            ))
+            return True
+        self._macos_share_end_picker_session("picker_fail")
+        self._macos_cleanup_share_temp()
+        _share_log(logging.WARNING, "NSSharingServicePicker failed for %s", path)
+        return False
+
+    def _macos_share_ns_window(self):
+        """NSWindow for the Qt main window (for NSSharingServiceDelegate)."""
+        import objc
+        from ctypes import c_void_p
+
+        for label, ptr in (
+            ("qt.windowHandle", int(self.windowHandle().winId()) if self.windowHandle() else 0),
+            ("qt.effectiveWinId", int(self.effectiveWinId())),
+        ):
+            if not ptr:
+                continue
+            try:
+                view = objc.objc_object(c_void_p=ptr)
+                win = view.window()
+                if win is not None:
+                    return win
+            except Exception as exc:
+                _share_log(logging.DEBUG, "%s window: %s", label, exc)
+        try:
+            from AppKit import NSApplication
+
+            app = NSApplication.sharedApplication()
+            return app.mainWindow() or app.keyWindow()
+        except Exception:
+            return None
+
+    def _macos_cleanup_share_temp(self) -> None:
+        temp = getattr(self, "_macos_share_temp_path", None)
+        if not temp:
+            return
+        try:
+            if os.path.exists(temp):
+                os.remove(temp)
+                _share_log(logging.DEBUG, "cleaned up share temp file: %s", temp)
+        except OSError as exc:
+            _share_log(logging.WARNING, "failed to clean up share temp file %s: %s", temp, exc)
+        self._macos_share_temp_path = None
+
+    def _share_macos(self, path: str) -> bool:
+        """macOS NSSharingServicePicker — must run on Qt GUI thread."""
+        try:
+            from AppKit import NSSharingService, NSSharingServicePicker
+
+            self._macos_share_log_thread("NSSharingServicePicker show")
+            if not self._macos_share_on_main_thread():
+                _share_log(logging.ERROR, "refusing picker: not on Qt GUI thread")
+                return False
+
+            self._macos_share_log_runtime_context()
+            if not self._macos_share_ensure_appkit_context(require_window=True):
+                return False
+
+            url, share_path = self._macos_share_prepare_url(path)
+            if url is None:
+                return False
+            items = _macos_share_items_array(url)
+            if items is None:
+                return False
+            services = NSSharingService.sharingServicesForItems_(items) or []
+            self._macos_share_cached_services = services
+            _share_log(logging.INFO, "sharingServicesForItems count=%d path=%s", len(services), share_path)
+            if not services:
+                _share_log(logging.WARNING, "sharingServicesForItems returned no services (empty items?)")
+                return False
+
+            view, rect, anchor_label = self._macos_share_picker_anchor_view_and_rect()
+            if view is None or rect is None:
+                _share_log(logging.WARNING, "no NSView anchor for picker")
+                return False
+
+            delegate_cls = _get_macos_share_picker_delegate_class()
+            delegate = delegate_cls.alloc().initWithViewer_(self)
+            picker = NSSharingServicePicker.alloc().initWithItems_(items)
+            self._macos_share_picker_ref = picker
+            self._macos_share_url_ref = url
+            self._macos_share_picker_delegate_ref = delegate
+            if delegate is not None:
+                picker.setDelegate_(delegate)
+
+            # v2.1 / POC: edge 3 (NSMaxYEdge) — popover above anchor.
+            preferred_edge = 3
+            _share_log(
+                logging.INFO,
+                "picker show anchor=%s edge=%s rect=(%.0f,%.0f,%.0f,%.0f)",
+                anchor_label,
+                preferred_edge,
+                rect.origin.x,
+                rect.origin.y,
+                rect.size.width,
+                rect.size.height,
+            )
+            picker.showRelativeToRect_ofView_preferredEdge_(rect, view, preferred_edge)
+            self._macos_share_pump_events(1)
+            return True
+        except Exception as exc:
+            self._macos_share_picker_ref = None
+            self._macos_share_url_ref = None
+            self._macos_share_picker_delegate_ref = None
+            self._macos_share_cached_services = None
+            _share_log(logging.WARNING, "NSSharingServicePicker failed: %s", exc, exc_info=True)
+            return False
 
     def _share_windows_shell(self, path: str, owner_hwnd: int = 0) -> bool:
         """Legacy Explorer shell verb fallback when WinRT share is unavailable."""
@@ -20766,15 +21635,13 @@ class RAWImageViewer(QMainWindow):
                 bool(self.image_files) and self.view_mode == "single" and self._is_exif_sort_ready()
             )
         if hasattr(self, "share_bottom_button"):
-            single_chrome = bool(self.image_files) and self.view_mode == "single"
-            if self.view_mode == "gallery":
-                self._sync_gallery_selection_chrome()
-            else:
-                self.share_bottom_button.setVisible(single_chrome)
+            vis = bool(self.image_files) and self.view_mode == "single"
+            # v2.1: share only in single-image view on macOS.
+            self.share_bottom_button.setVisible(vis and sys.platform != "win32")
             if hasattr(self, "slideshow_bottom_button"):
-                self.slideshow_bottom_button.setVisible(single_chrome)
+                self.slideshow_bottom_button.setVisible(vis)
             cp = getattr(self, "current_file_path", None)
-            show_rotate = bool(single_chrome and cp and os.path.isfile(cp))
+            show_rotate = bool(vis and cp and os.path.isfile(cp))
             if hasattr(self, "rotate_bottom_button"):
                 self.rotate_bottom_button.setVisible(show_rotate)
         if hasattr(self, "search_bottom_button"):
@@ -22957,7 +23824,6 @@ def main():
             # Set application properties
             app.setApplicationName("RAWviewer")
             app.setApplicationVersion("2.2.0")
-            _activate_macos_foreground_app()
 
             # Create and show main window
             safe_print("Creating RAWImageViewer...", flush=True)
@@ -22979,6 +23845,16 @@ def main():
             
             # Show main window and close splash screen
             viewer.show()
+            if sys.platform == "darwin":
+                try:
+                    import objc
+
+                    ns_app = objc.lookUpClass("NSApplication").sharedApplication()
+                    if ns_app is not None:
+                        # Terminal-launched Python is often Prohibited/Accessory; sharing needs Regular.
+                        ns_app.setActivationPolicy_(0)
+                except Exception:
+                    pass
             # macOS native title bar tweaks disabled for stability.
             if splash:
                 splash.finish(viewer)  # Close splash screen when main window is ready
