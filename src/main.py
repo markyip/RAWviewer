@@ -9692,6 +9692,16 @@ class RAWImageViewer(QMainWindow):
         self.search_bottom_button.hide()
         left_buttons_layout.addWidget(self.search_bottom_button, 0, alignment=Qt.AlignmentFlag.AlignVCenter)
 
+        # RAW/JPEG Toggle button
+        self.raw_toggle_button = QPushButton()
+        self.raw_toggle_button.setFlat(True)
+        self.raw_toggle_button.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.raw_toggle_button.setStyleSheet(bottom_icon_btn_style)
+        self.raw_toggle_button.clicked.connect(self.toggle_raw_jpeg_workflow)
+        self.raw_toggle_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.raw_toggle_button.hide()
+        left_buttons_layout.addWidget(self.raw_toggle_button, 0, alignment=Qt.AlignmentFlag.AlignVCenter)
+
         # Search panel: in-row width animation (v2.1 layout — avoids overlay blocking Open)
         self.search_expand_container = QWidget()
         self.search_expand_container.setSizePolicy(
@@ -11931,6 +11941,95 @@ class RAWImageViewer(QMainWindow):
             # Currently sorting by oldest, switch to newest
             self.toggle_sort_by_newest()
     
+    def toggle_raw_jpeg_workflow(self):
+        """Toggle between embedded JPEG and raw image workflows."""
+        settings = self.get_settings()
+        current_value = settings.value("use_embedded_jpeg_workflow", True, type=bool)
+        new_value = not current_value
+        settings.setValue("use_embedded_jpeg_workflow", new_value)
+        
+        # Clear all image caches so everything is reloaded with the new pipeline
+        self.image_cache.full_image_cache.clear()
+        self.image_cache.preview_cache.clear()
+        self.image_cache.pixmap_cache.clear()
+        self.image_cache.grid_cache.clear()
+        
+        self.image_cache.disk_preview_cache.clear()
+        self.image_cache.disk_grid_cache.clear()
+        
+        # Also invalidate current file specifically to clear it from EXIF memory + disk caches
+        if self.current_file_path:
+            self.image_cache.invalidate_file(self.current_file_path)
+            self.image_cache.exif_cache.remove(self.current_file_path)
+        
+        # Update the button's icon/text/tooltip
+        self._update_raw_toggle_button_state()
+        
+        # Trigger reload of the current image
+        if self.current_file_path:
+            self.load_raw_image(self.current_file_path, force_reload=True)
+
+    def _update_raw_toggle_button_state(self):
+        """Update the text, tooltip and styling of the RAW/JPEG toggle button."""
+        if not hasattr(self, "raw_toggle_button"):
+            return
+        
+        from PyQt6.QtGui import QIcon
+        self.raw_toggle_button.setIcon(QIcon())
+        self.raw_toggle_button.setText("RAW")
+        
+        settings = self.get_settings()
+        use_embedded = settings.value("use_embedded_jpeg_workflow", True, type=bool)
+        
+        if use_embedded:
+            self.raw_toggle_button.setToolTip("Embedded JPEG workflow (Fast)\nClick to toggle to RAW image workflow (High Quality)")
+            self.raw_toggle_button.setStyleSheet("""
+                QPushButton {
+                    color: #757575;
+                    font-size: 13px;
+                    font-weight: 700;
+                    padding: 4px 8px;
+                    border: none;
+                    background: transparent;
+                    text-align: center;
+                    letter-spacing: 0.5px;
+                    min-height: 28px;
+                    max-height: 28px;
+                }
+                QPushButton:hover {
+                    color: #B0B0B0;
+                    background-color: rgba(255, 255, 255, 0.05);
+                    border-radius: 4px;
+                }
+                QPushButton:pressed {
+                    background-color: rgba(255, 255, 255, 0.1);
+                }
+            """)
+        else:
+            self.raw_toggle_button.setToolTip("RAW workflow (High Quality)\nClick to toggle to Embedded JPEG workflow (Fast)")
+            self.raw_toggle_button.setStyleSheet("""
+                QPushButton {
+                    color: #FFFFFF;
+                    font-size: 13px;
+                    font-weight: 800;
+                    padding: 4px 8px;
+                    border: none;
+                    background: transparent;
+                    text-align: center;
+                    letter-spacing: 0.5px;
+                    min-height: 28px;
+                    max-height: 28px;
+                }
+                QPushButton:hover {
+                    color: #E0E0E0;
+                    background-color: rgba(255, 255, 255, 0.05);
+                    border-radius: 4px;
+                }
+                QPushButton:pressed {
+                    background-color: rgba(255, 255, 255, 0.1);
+                }
+            """)
+
     # GALLERY FUNCTIONALITY COMMENTED OUT
     def toggle_view_mode(self):
         """Toggle between single image view and gallery view"""
@@ -15644,7 +15743,7 @@ class RAWImageViewer(QMainWindow):
                 self._cleanup_in_progress = False
                 logger.debug(f"[CLEANUP] Cleanup flag reset, cleanup_in_progress=False")
 
-    def load_raw_image(self, file_path):
+    def load_raw_image(self, file_path, force_reload=False):
         import time
         import logging
         import traceback
@@ -15703,7 +15802,8 @@ class RAWImageViewer(QMainWindow):
             safe_print(f"[PERF] Loading image: {os.path.basename(requested_file_path)}")
 
             if (
-                getattr(self, "view_mode", "single") == "single"
+                not force_reload
+                and getattr(self, "view_mode", "single") == "single"
                 and not getattr(self, "_navigation_in_progress", False)
                 and not getattr(self, "_loading_from_gallery", False)
                 and not getattr(self, "_loading_from_filmstrip", False)
@@ -15816,6 +15916,9 @@ class RAWImageViewer(QMainWindow):
             # the active task (e.g. duplicate load_raw_image after folder change).
             _prev_fp = getattr(self, "current_file_path", None)
             _same_path_reload = _prev_fp and _norm_path(_prev_fp) == _norm_path(requested_file_path)
+            if force_reload:
+                _same_path_reload = False
+                self._manager_displayed_max_dim = 0
             if _prev_fp and not _same_path_reload:
                 self._nav_idle_full_generation = int(
                     getattr(self, "_nav_idle_full_generation", 0)
@@ -21646,6 +21749,11 @@ class RAWImageViewer(QMainWindow):
             show_rotate = bool(vis and cp and os.path.isfile(cp))
             if hasattr(self, "rotate_bottom_button"):
                 self.rotate_bottom_button.setVisible(show_rotate)
+            if hasattr(self, "raw_toggle_button"):
+                is_raw = bool(vis and cp and os.path.isfile(cp) and is_raw_file(cp))
+                self.raw_toggle_button.setVisible(is_raw)
+                if is_raw:
+                    self._update_raw_toggle_button_state()
         if hasattr(self, "search_bottom_button"):
             self.search_bottom_button.setVisible(bool(self.image_files) and self._is_exif_sort_ready())
         if getattr(self, "_search_panel_expanded", False):

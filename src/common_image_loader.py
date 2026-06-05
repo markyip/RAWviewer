@@ -210,6 +210,13 @@ def use_libraw_consistent_preview_first() -> bool:
     Full-resolution embedded JPEGs (see use_full_embedded_raw_preview) bypass LibRaw even when
     this flag is on.
     """
+    from PyQt6.QtCore import QSettings
+    settings = QSettings("RAWviewer", "RAWviewer")
+    if settings.contains("use_embedded_jpeg_workflow"):
+        use_embedded = settings.value("use_embedded_jpeg_workflow", True, type=bool)
+        if not use_embedded:
+            return True
+
     v = os.environ.get("RAWVIEWER_LIBRAW_CONSISTENT_PREVIEW", "0").strip().lower()
     return v not in ("0", "false", "no", "off")
 
@@ -223,6 +230,11 @@ def use_full_embedded_raw_preview() -> bool:
     When True (default), use camera-embedded JPEG for fit/zoom when it covers sensor resolution,
     avoiding LibRaw demosaic. Set RAWVIEWER_USE_FULL_EMBEDDED_JPEG=0 to always prefer LibRaw.
     """
+    from PyQt6.QtCore import QSettings
+    settings = QSettings("RAWviewer", "RAWviewer")
+    if settings.contains("use_embedded_jpeg_workflow"):
+        return settings.value("use_embedded_jpeg_workflow", True, type=bool)
+
     v = os.environ.get("RAWVIEWER_USE_FULL_EMBEDDED_JPEG", "1").strip().lower()
     return v not in ("0", "false", "no", "off")
 
