@@ -10788,9 +10788,7 @@ class RAWImageViewer(QMainWindow):
                 self_inner.run_semantic_embeddings = run_semantic_embeddings
 
             def run(self_inner):
-                from PyQt6.QtCore import QThread
                 try:
-                    QThread.currentThread().setPriority(QThread.Priority.LowestPriority)
                     def _progress(done, total, message):
                         self_inner.signals.progress.emit(
                             self_inner.token, done, total, str(message)
@@ -11017,9 +11015,7 @@ class RAWImageViewer(QMainWindow):
                 self_inner.album_total = album_total
 
             def run(self_inner):
-                from PyQt6.QtCore import QThread
                 try:
-                    QThread.currentThread().setPriority(QThread.Priority.LowestPriority)
                     def _progress(done, total, message):
                         self_inner.signals.progress.emit(
                             self_inner.token, done, total, str(message)
@@ -22720,11 +22716,9 @@ class RAWImageViewer(QMainWindow):
 
         class _QuickFolderIndexWorker(QRunnable):
             def run(self_inner):
-                from PyQt6.QtCore import QThread
                 import time
 
                 try:
-                    QThread.currentThread().setPriority(QThread.Priority.LowestPriority)
                     t0 = time.time()
                     files, stats, start_idx = viewer._build_quick_folder_image_list(
                         folder_path, start_path
