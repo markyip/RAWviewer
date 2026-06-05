@@ -8778,7 +8778,8 @@ class RAWImageViewer(QMainWindow):
             current_max_dim = max(self.current_pixmap.width(), self.current_pixmap.height())
         
         if (
-            pixmap_is_for_this_file
+            not getattr(self, "_skip_resolution_downgrade_check", False)
+            and pixmap_is_for_this_file
             and max_dim < current_max_dim
             and self._single_view_pixels_on_screen(file_path)
             and _norm_path(file_path) == _norm_path(getattr(self, "current_file_path", None))
@@ -8797,6 +8798,7 @@ class RAWImageViewer(QMainWindow):
             self._mark_pending_resolution_crossfade()
         
         self.display_numpy_image(image)
+        self._skip_resolution_downgrade_check = False
         self._on_single_view_content_displayed()
         
         # logger.debug(f"[MANAGER] Resetting _orientation_already_applied = False after display_numpy_image")
@@ -11961,6 +11963,8 @@ class RAWImageViewer(QMainWindow):
         if self.current_file_path:
             self.image_cache.invalidate_file(self.current_file_path)
             self.image_cache.exif_cache.remove(self.current_file_path)
+        
+        self._skip_resolution_downgrade_check = True
         
         # Update the button's icon/text/tooltip
         self._update_raw_toggle_button_state()
