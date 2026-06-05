@@ -48,8 +48,11 @@ def decode_embedded_jpeg_bytes(
     max_size: int = 0,
 ) -> Optional[np.ndarray]:
     """Decode embedded JPEG to RGB; applies the JPEG segment's own EXIF orientation."""
+    import logging
+    logger = logging.getLogger(__name__)
     try:
-        from PIL import Image, ImageOps
+        from PIL import Image, ImageOps, ImageFile
+        ImageFile.LOAD_TRUNCATED_IMAGES = True
 
         im = Image.open(io.BytesIO(jpeg_bytes))
         im = ImageOps.exif_transpose(im)
@@ -59,7 +62,8 @@ def decode_embedded_jpeg_bytes(
         if max_size > 0 and (w > max_size or h > max_size):
             im.thumbnail((max_size, max_size), Image.Resampling.HAMMING)
         return np.array(im)
-    except Exception:
+    except Exception as e:
+        logger.error("[DECODE] Error decoding embedded JPEG bytes: %s", e)
         return None
 
 

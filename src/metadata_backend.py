@@ -23,6 +23,9 @@ from typing import Any, BinaryIO, Mapping
 _HAS_PYEXIV2 = None
 _pyexiv2 = None  # type: ignore
 
+import logging
+logging.getLogger("exifread").setLevel(logging.ERROR)
+
 def _ensure_pyexiv2():
     global _HAS_PYEXIV2, _pyexiv2
     if _HAS_PYEXIV2 is not None:

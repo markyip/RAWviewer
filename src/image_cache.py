@@ -45,13 +45,17 @@ def _jpeg_bytes_max_edge(jpeg_data: bytes, max_edge: int) -> bytes:
     if not jpeg_data or max_edge <= 0:
         return jpeg_data
     try:
-        from PIL import Image
+        from PIL import Image, ImageOps
         import io
 
         pil_image = Image.open(io.BytesIO(jpeg_data))
+        pil_image = ImageOps.exif_transpose(pil_image)
         w, h = pil_image.size
         if max(w, h) <= max_edge:
-            return jpeg_data
+            # We must re-save to strip EXIF orientation and ensure it stays rotated.
+            out = io.BytesIO()
+            pil_image.save(out, format="JPEG", quality=85)
+            return out.getvalue()
         scale = max_edge / float(max(w, h))
         new_w = max(1, int(w * scale))
         new_h = max(1, int(h * scale))
@@ -1250,9 +1254,10 @@ class ImageCache(QObject):
             grid_jpeg = self.disk_grid_cache.get(file_path)
             if grid_jpeg is not None:
                 try:
-                    from PIL import Image
+                    from PIL import Image, ImageOps
                     import io
                     pil_image = Image.open(io.BytesIO(grid_jpeg))
+                    pil_image = ImageOps.exif_transpose(pil_image)
                     if pil_image.mode != 'RGB':
                         pil_image = pil_image.convert('RGB')
                     grid = np.array(pil_image)
@@ -1288,9 +1293,10 @@ class ImageCache(QObject):
             preview_jpeg = self.disk_preview_cache.get(file_path)
             if preview_jpeg is not None:
                 try:
-                    from PIL import Image
+                    from PIL import Image, ImageOps
                     import io
                     pil_image = Image.open(io.BytesIO(preview_jpeg))
+                    pil_image = ImageOps.exif_transpose(pil_image)
                     if pil_image.mode != 'RGB':
                         pil_image = pil_image.convert('RGB')
                     preview = np.array(pil_image)
@@ -1354,9 +1360,10 @@ class ImageCache(QObject):
         jpeg_data = self.disk_grid_cache.get(file_path)
         if jpeg_data is not None:
             try:
-                from PIL import Image
+                from PIL import Image, ImageOps
                 import io
                 pil_image = Image.open(io.BytesIO(jpeg_data))
+                pil_image = ImageOps.exif_transpose(pil_image)
                 if pil_image.mode != 'RGB':
                     pil_image = pil_image.convert('RGB')
                 grid = np.array(pil_image)
@@ -1372,9 +1379,10 @@ class ImageCache(QObject):
             preview_jpeg = self.disk_preview_cache.get(file_path)
             if preview_jpeg is not None:
                 try:
-                    from PIL import Image
+                    from PIL import Image, ImageOps
                     import io
                     pil_image = Image.open(io.BytesIO(preview_jpeg))
+                    pil_image = ImageOps.exif_transpose(pil_image)
                     if pil_image.mode != 'RGB':
                         pil_image = pil_image.convert('RGB')
                     preview = np.array(pil_image)
@@ -1410,9 +1418,10 @@ class ImageCache(QObject):
             thumb_jpeg = self.disk_thumbnail_cache.get(file_path)
             if thumb_jpeg is not None:
                 try:
-                    from PIL import Image
+                    from PIL import Image, ImageOps
                     import io
                     pil_image = Image.open(io.BytesIO(thumb_jpeg))
+                    pil_image = ImageOps.exif_transpose(pil_image)
                     if pil_image.mode != 'RGB':
                         pil_image = pil_image.convert('RGB')
                     thumb = np.array(pil_image)
@@ -1482,9 +1491,10 @@ class ImageCache(QObject):
             jpeg_data = self.disk_grid_cache.get(file_path)
         if jpeg_data is not None:
              try:
-                from PIL import Image
+                from PIL import Image, ImageOps
                 import io
                 pil_image = Image.open(io.BytesIO(jpeg_data))
+                pil_image = ImageOps.exif_transpose(pil_image)
                 if pil_image.mode != 'RGB':
                     pil_image = pil_image.convert('RGB')
                 preview = np.array(pil_image)

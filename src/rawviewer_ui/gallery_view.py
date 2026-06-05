@@ -216,6 +216,7 @@ class JustifiedGallery(QWidget):
 
         # Metadata tracking for dynamic layout
         self._metadata_changed_paths = set()
+        self._last_metadata_change_time = 0.0
         self._failed_thumbnails = set()
         self._metadata_rebuild_timer = QTimer(self)
         self._metadata_rebuild_timer.setSingleShot(True)
@@ -382,6 +383,23 @@ class JustifiedGallery(QWidget):
             ):
                 if bulk_metadata:
                     self._metadata_cache.update(bulk_metadata)
+
+                # Fetch updated metadata from cache for paths that are missing it or have minimal metadata
+                if self.parent_viewer and hasattr(self.parent_viewer, "image_cache"):
+                    paths = [img for img in self.images if isinstance(img, str)]
+                    missing_paths = [p for p in paths if p not in self._metadata_cache or self._metadata_cache[p].get("minimal_preview_exif")]
+                    if missing_paths:
+                        bulk_fetched = self.parent_viewer.image_cache.get_multiple_exif(missing_paths)
+                        if bulk_fetched:
+                            self._metadata_cache.update(bulk_fetched)
+                            # If any aspect ratios/rotations changed, trigger a layout rebuild
+                            layout_changed = False
+                            for path, exif in bulk_fetched.items():
+                                if self.on_visual_rotation_changed(path, defer_rebuild=True):
+                                    layout_changed = True
+                            if layout_changed:
+                                self.build_gallery(force=True)
+
                 if self._pending_scroll_to_path:
                     QTimer.singleShot(0, self._apply_pending_scroll_to_file)
                 else:
@@ -765,13 +783,17 @@ class JustifiedGallery(QWidget):
         if changed and self._gallery_layout_items:
             if defer_rebuild:
                 return True
-            self._metadata_changed_paths.add(file_path)
+            self._add_metadata_changed_path(file_path)
             self.build_gallery(force=True)
         elif changed:
             return True
         else:
             self.refresh_visible_tile_for_path(file_path)
         return changed
+
+    def _add_metadata_changed_path(self, file_path: str) -> None:
+        self._metadata_changed_paths.add(file_path)
+        self._last_metadata_change_time = time.time()
 
     def sync_visual_rotations(self) -> None:
         """Refresh gallery tiles/layout for any paths with stored visual rotation."""
@@ -798,7 +820,7 @@ class JustifiedGallery(QWidget):
         layout_changed = self.on_visual_rotation_changed(file_path, defer_rebuild=True)
         self.refresh_visible_tile_for_path(file_path)
         if layout_changed and self._gallery_layout_items:
-            self._metadata_changed_paths.add(file_path)
+            self._add_metadata_changed_path(file_path)
             if not self._metadata_rebuild_timer.isActive():
                 self._metadata_rebuild_timer.start(400)
 
@@ -1185,7 +1207,7 @@ class JustifiedGallery(QWidget):
                 if missing_paths and self.parent_viewer and hasattr(
                     self.parent_viewer, "image_cache"
                 ):
-                    cap = 2048 if len(paths) > 500 else self.BUILD_EXIF_PREFETCH_MAX
+                    cap = 100000
                     bulk_fetched = self.parent_viewer.image_cache.get_multiple_exif(
                         missing_paths[:cap]
                     )
@@ -1813,7 +1835,7 @@ class JustifiedGallery(QWidget):
                         self._gallery_layout_items[idx]["aspect"] = aspect
 
             if needs_layout_rebuild:
-                self._metadata_changed_paths.add(file_path)
+                self._add_metadata_changed_path(file_path)
                 logger.debug(f"[GALLERY_DEBUG] Timer started by on_thumbnail_ready for {file_path}")
                 if not self._metadata_rebuild_timer.isActive():
                     self._metadata_rebuild_timer.start(500)
@@ -1849,6 +1871,30 @@ class JustifiedGallery(QWidget):
         
         if file_path in self._active_tasks:
             del self._active_tasks[file_path]
+            
+        # Dynamically exclude failed/unsupported images from gallery and parent lists
+        removed = False
+        if file_path in self.images:
+            self.images.remove(file_path)
+            removed = True
+            
+        pv = self.parent_viewer
+        if pv is not None:
+            if hasattr(pv, "image_files") and file_path in pv.image_files:
+                try:
+                    pv.image_files.remove(file_path)
+                    removed = True
+                except ValueError:
+                    pass
+            if removed and hasattr(pv, "_update_gallery_counter"):
+                try:
+                    pv._update_gallery_counter()
+                except Exception:
+                    pass
+
+        if removed:
+            logger.info(f"[GALLERY] Removed failed load image from list: {file_path}")
+            self.build_gallery(force=True)
             
         if self.parent_viewer is not None and getattr(
             self.parent_viewer, "view_mode", "gallery"
@@ -1901,7 +1947,7 @@ class JustifiedGallery(QWidget):
         
         if changed:
             self.refresh_visible_tile_for_path(file_path)
-            self._metadata_changed_paths.add(file_path)
+            self._add_metadata_changed_path(file_path)
             if self._gallery_warmup_active() or self._building:
                 return
 
@@ -1959,7 +2005,8 @@ class JustifiedGallery(QWidget):
             if self._is_scrolling_fast and not self._metadata_rebuild_timer.isActive():
                 self._metadata_rebuild_timer.start(1000)
             return
-        if large and len(self._metadata_changed_paths) < 8:
+        time_since_last_change = time.time() - getattr(self, "_last_metadata_change_time", 0.0)
+        if large and len(self._metadata_changed_paths) < 8 and time_since_last_change < 1.5:
             self._metadata_rebuild_timer.start(1200)
             return
         if (time.time() - self._last_force_build_ts) < 0.8:

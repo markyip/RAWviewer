@@ -11,7 +11,10 @@ from typing import Optional, Dict, Any, Union, Tuple
 from PyQt6.QtCore import QSize, QLoggingCategory
 from PyQt6.QtGui import QPixmap, QImage
 # Silence qt.imageformats warnings (e.g. missing TIFF tag warnings on RAW files)
-QLoggingCategory.setFilterRules("qt.imageformats.warning=false\nqt.imageformats.tiff.warning=false")
+QLoggingCategory.setFilterRules("qt.imageformats*=false")
+
+import logging
+logging.getLogger("exifread").setLevel(logging.ERROR)
 # PIL Image, rawpy, and exifread will be imported lazily to avoid import delays
 
 from image_cache import (
@@ -180,8 +183,10 @@ class UnifiedImageProcessor:
         """Upgrade sub-1400px worker thumbs to ~1920 embedded preview when possible."""
         if thumbnail is None or not self._is_raw_file(file_path):
             return thumbnail
+        from common_image_loader import dng_prefers_embedded_preview_first
+        is_pano_dng = dng_prefers_embedded_preview_first(file_path)
         try:
-            min_px = int(memory_preview_max_edge() * 0.85)
+            min_px = 1024 if is_pano_dng else int(memory_preview_max_edge() * 0.85)
             if hasattr(thumbnail, "shape"):
                 md = max(int(thumbnail.shape[0]), int(thumbnail.shape[1]))
             elif hasattr(thumbnail, "width"):
@@ -242,7 +247,14 @@ class UnifiedImageProcessor:
             os.path.basename(file_path),
             self._preview_buffer_max_dim(thumbnail),
         )
-        return None
+        return thumbnail
+
+    def is_libraw_unsupported(self, file_path: str) -> bool:
+        from common_image_loader import dng_prefers_embedded_preview_first
+        if dng_prefers_embedded_preview_first(file_path):
+            return True
+        skip_key = os.path.normcase(os.path.abspath(file_path))
+        return skip_key in _LIBRAW_UNSUPPORTED_PATHS
 
     @staticmethod
     def _preview_buffer_max_dim(buf) -> int:
@@ -345,6 +357,9 @@ class UnifiedImageProcessor:
         
         # Gallery grid: disk tier (~512px). Single-view CURRENT: memory preview tier (~1920px).
         is_raw = self._is_raw_file(file_path)
+        skip_key = os.path.normcase(os.path.abspath(file_path))
+        if is_raw and skip_key in _LIBRAW_UNSUPPORTED_PATHS:
+            return None
         if is_raw:
             max_size_val = self._raw_thumbnail_extract_max_size(
                 target_size, allow_heavy_fallback=allow_heavy_fallback
@@ -381,6 +396,7 @@ class UnifiedImageProcessor:
                 except Exception as e:
                     import logging
                     logger = logging.getLogger(__name__)
+                    _LIBRAW_UNSUPPORTED_PATHS.add(skip_key)
                     logger.warning(f"Heavy thumbnail fallback failed for {file_path}: {e}")
                     return None
             else:
@@ -593,17 +609,74 @@ class UnifiedImageProcessor:
         """處理 RAW 圖像"""
         libraw_first = use_libraw_consistent_preview_first()
         skip_key = os.path.normcase(os.path.abspath(file_path))
+        from common_image_loader import dng_prefers_embedded_preview_first
+        if dng_prefers_embedded_preview_first(file_path):
+            _LIBRAW_UNSUPPORTED_PATHS.add(skip_key)
         if skip_key in _LIBRAW_UNSUPPORTED_PATHS:
-            cached = self.cache.get_preview(file_path) or self.cache.get_full_image(
-                file_path
-            )
+            cached = self.cache.get_preview(file_path)
+            if cached is None:
+                cached = self.cache.get_full_image(file_path)
             if cached is not None:
-                return cached
+                cached_dim = max(cached.shape[0], cached.shape[1]) if hasattr(cached, "shape") else 0
+                if cached_dim >= 1024:
+                    return cached
             if use_full_resolution:
                 exif_data = self.exif_extractor.extract_exif_data(file_path)
+                
+                # First try decoding the full image via PIL TIFF reader (useful for linear/composite DNG panoramas)
+                try:
+                    from PIL import Image
+                    with Image.open(file_path) as im:
+                        best_w = best_h = 0
+                        best_idx = -1
+                        n_frames = getattr(im, "n_frames", 1)
+                        for idx in range(n_frames):
+                            im.seek(idx)
+                            w, h = im.size
+                            if w * h > best_w * best_h:
+                                best_w, best_h = w, h
+                                best_idx = idx
+                        if best_idx >= 0 and best_w >= 1024:
+                            im.seek(best_idx)
+                            rgb_im = im.convert("RGB")
+                            full_pixels = np.array(rgb_im)
+                            orientation = exif_data.get("orientation", 1) if exif_data else 1
+                            if orientation != 1:
+                                full_pixels = self._apply_orientation_correction(
+                                    full_pixels, orientation, exif_data
+                                )
+                            self.cache.put_full_image(file_path, full_pixels)
+                            self.cache.put_preview(file_path, full_pixels)
+                            import logging
+                            logging.getLogger(__name__).info(
+                                "[FULL_RES] Successfully loaded full resolution DNG panorama via PIL TIFF reader: %dx%d",
+                                best_w, best_h
+                            )
+                            return full_pixels
+                except Exception as pil_e:
+                    import logging
+                    logging.getLogger(__name__).warning(
+                        "[FULL_RES] PIL TIFF decode fallback failed/unsupported for %s: %s",
+                        os.path.basename(file_path), pil_e
+                    )
+
                 full_embedded = self._try_full_embedded_raw_preview(file_path, exif_data)
                 if full_embedded is not None:
                     return full_embedded
+                
+                # If that didn't work (due to resolution coverage reject or workflow toggle),
+                # extract the largest native preview since LibRaw can't demosaic this file anyway.
+                native_preview = self.thumbnail_extractor.extract_embedded_native_preview(file_path)
+                if native_preview is not None:
+                    orientation = exif_data.get("orientation", 1) if exif_data else 1
+                    if orientation != 1:
+                        native_preview = self._apply_orientation_correction(
+                            native_preview, orientation, exif_data
+                        )
+                    self.cache.put_preview(file_path, native_preview)
+                    self.cache.put_full_image(file_path, native_preview)
+                    return native_preview
+                
                 mem_max = memory_preview_max_edge()
                 preview = self.thumbnail_extractor.extract_preview_from_raw(
                     file_path, max_size=mem_max

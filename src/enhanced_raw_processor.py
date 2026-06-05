@@ -20,7 +20,10 @@ from PIL import Image
 import io
 
 # Silence qt.imageformats warnings (e.g. missing TIFF tag warnings on RAW files)
-QLoggingCategory.setFilterRules("qt.imageformats.warning=false\nqt.imageformats.tiff.warning=false")
+QLoggingCategory.setFilterRules("qt.imageformats*=false")
+
+import logging
+logging.getLogger("exifread").setLevel(logging.ERROR)
 
 # Suppress exifread warnings for unsupported file formats (e.g., video files)
 warnings.filterwarnings('ignore', category=UserWarning, module='exifread')
@@ -30,6 +33,7 @@ from common_image_loader import (
     decode_embedded_jpeg_bytes,
     normalize_capture_time_string,
     orientation_from_embedded_jpeg_bytes,
+    is_slow_storage_path,
 )
 import metadata_backend
 from raw_file_extensions import RAW_FILE_EXTENSIONS
@@ -212,10 +216,107 @@ def _thumbnail_via_qimage_reader(file_path: str, max_size: int, auto_transform: 
         return None
 
 
+def extract_previews_via_tiff_parse(file_path: str) -> list[bytes]:
+    """Parse TIFF structure to find all JPEG preview offsets and lengths accurately."""
+    import struct
+    previews = []
+    try:
+        with open(file_path, "rb") as f:
+            header = f.read(8)
+            if len(header) < 8:
+                return []
+            
+            # Determine endianness
+            if header[:2] == b"II":
+                endian = "<"
+            elif header[:2] == b"MM":
+                endian = ">"
+            else:
+                return []
+            
+            magic = struct.unpack(endian + "H", header[2:4])[0]
+            if magic != 42:
+                return []
+            
+            first_ifd_offset = struct.unpack(endian + "I", header[4:8])[0]
+            
+            ifds_to_visit = [first_ifd_offset]
+            visited_offsets = set()
+            
+            while ifds_to_visit:
+                offset = ifds_to_visit.pop(0)
+                if offset == 0 or offset in visited_offsets:
+                    continue
+                visited_offsets.add(offset)
+                
+                f.seek(offset)
+                num_entries_bytes = f.read(2)
+                if len(num_entries_bytes) < 2:
+                    continue
+                num_entries = struct.unpack(endian + "H", num_entries_bytes)[0]
+                
+                # Each entry is 12 bytes
+                entry_data = f.read(num_entries * 12)
+                if len(entry_data) < num_entries * 12:
+                    continue
+                
+                next_ifd_bytes = f.read(4)
+                if len(next_ifd_bytes) == 4:
+                    next_ifd = struct.unpack(endian + "I", next_ifd_bytes)[0]
+                    if next_ifd != 0:
+                        ifds_to_visit.append(next_ifd)
+                
+                jpeg_offset = None
+                jpeg_length = None
+                sub_ifd_offsets = []
+                
+                for i in range(num_entries):
+                    entry = entry_data[i*12 : (i+1)*12]
+                    tag = struct.unpack(endian + "H", entry[0:2])[0]
+                    type_val = struct.unpack(endian + "H", entry[2:4])[0]
+                    count = struct.unpack(endian + "I", entry[4:8])[0]
+                    value_offset = struct.unpack(endian + "I", entry[8:12])[0]
+                    
+                    if tag == 0x0201:  # JPEGInterchangeFormat
+                        jpeg_offset = value_offset
+                    elif tag == 0x0202:  # JPEGInterchangeFormatLength
+                        jpeg_length = value_offset
+                    elif tag == 0x014a:  # SubIFDs
+                        # SubIFDs can be a list of offsets
+                        if type_val == 4 or type_val == 13:  # LONG or IFD
+                            if count == 1:
+                                sub_ifd_offsets.append(value_offset)
+                            elif count > 1:
+                                # Read offsets from file
+                                current_pos = f.tell()
+                                f.seek(value_offset)
+                                offsets_bytes = f.read(count * 4)
+                                if len(offsets_bytes) == count * 4:
+                                    offsets = list(struct.unpack(endian + count * "I", offsets_bytes))
+                                    sub_ifd_offsets.extend(offsets)
+                                f.seek(current_pos)
+                
+                if jpeg_offset is not None and jpeg_length is not None:
+                    # Read the JPEG bytes
+                    f.seek(jpeg_offset)
+                    jpeg_bytes = f.read(jpeg_length)
+                    if len(jpeg_bytes) == jpeg_length:
+                        previews.append(jpeg_bytes)
+                
+                # Add sub-IFDs to visit list
+                for sub_offset in sub_ifd_offsets:
+                    if sub_offset != 0 and sub_offset not in visited_offsets:
+                        ifds_to_visit.append(sub_offset)
+                        
+    except Exception:
+        pass
+    return previews
+
+
 def extract_embedded_jpeg_by_scan(file_path: str, max_size: int) -> Optional[np.ndarray]:
     """
-    Scan for embedded JPEG (SOI … EOI) by reading head and tail chunks,
-    parsing headers to find the largest one, and decoding ONLY that one.
+    Scan for embedded JPEG (SOI … EOI) by first parsing TIFF directories,
+    and falling back to sequential head/tail scanning if needed.
     """
     try:
         stat = os.stat(file_path)
@@ -225,7 +326,29 @@ def extract_embedded_jpeg_by_scan(file_path: str, max_size: int) -> Optional[np.
             if miss_key in _embedded_scan_miss_cache:
                 return None
 
-        # We read the first 4MB and the last 4MB
+        # Try TIFF parsing first
+        tiff_previews = extract_previews_via_tiff_parse(file_path)
+        if tiff_previews:
+            candidates = []
+            for jpeg_bytes in tiff_previews:
+                dims = get_jpeg_dimensions(jpeg_bytes)
+                if dims is not None:
+                    w, h = dims
+                    candidates.append((w * h, jpeg_bytes, w, h))
+            if candidates:
+                candidates.sort(key=lambda x: x[0], reverse=True)
+                import logging
+                logger = logging.getLogger(__name__)
+                for area, segment, w, h in candidates:
+                    decoded = decode_embedded_jpeg_bytes(segment, max_size)
+                    if decoded is not None:
+                        logger.info(
+                            "[TIFF_PARSE] Found and successfully decoded preview: %dx%d for %s",
+                            w, h, os.path.basename(file_path)
+                        )
+                        return decoded
+
+        # Fallback to byte scan
         chunk_size = 4 * 1024 * 1024
         
         head = b""
@@ -242,8 +365,8 @@ def extract_embedded_jpeg_by_scan(file_path: str, max_size: int) -> Optional[np.
                 f.seek(size - chunk_size)
                 tail = f.read(chunk_size)
                 
-        # Scan head and tail
-        # We will collect candidate JPEGs: (area, segment_bytes, abs_offset)
+    # Scan head and tail
+        # We will collect candidate JPEGs: (area, segment_bytes, abs_offset, w, h)
         candidates = []
         
         def scan_chunk(chunk_bytes, base_offset):
@@ -264,17 +387,78 @@ def extract_embedded_jpeg_by_scan(file_path: str, max_size: int) -> Optional[np.
                         end_marker = chunk_bytes.find(b"\xff\xd9", idx + 3)
                         if end_marker >= 0:
                             segment = chunk_bytes[idx : end_marker + 2]
-                            candidates.append((area, segment, base_offset + idx))
+                            candidates.append((area, segment, base_offset + idx, w, h))
                         else:
                             # Not fully contained in the chunk (cut off).
                             # We will read the rest of the file from the start of the JPEG on-demand later.
-                            candidates.append((area, None, base_offset + idx))
+                            candidates.append((area, None, base_offset + idx, w, h))
                 start = idx + 3
 
         scan_chunk(head, 0)
         if tail:
             scan_chunk(tail, size - chunk_size)
             
+        # Select candidate with the largest area
+        import logging
+        logger = logging.getLogger(__name__)
+        
+        if candidates:
+            candidates.sort(key=lambda x: x[0], reverse=True)
+            best_w = candidates[0][3]
+        else:
+            best_w = 0
+
+        logger.info("[SCAN] Initial scan found %d candidates for %s. Best width: %d", len(candidates), os.path.basename(file_path), best_w)
+
+        is_dng = file_path.lower().endswith(".dng")
+        if (not candidates or best_w < 1500) and is_dng:
+            logger.info("[SCAN] Running whole-file scan for %s...", os.path.basename(file_path))
+            # Full file sequential scan in chunks
+            full_scan_candidates = []
+            scan_chunk_size = 8 * 1024 * 1024
+            overlap = 65536
+            offset = 0
+            try:
+                with open(file_path, "rb") as f:
+                    while True:
+                        f.seek(offset)
+                        chunk = f.read(scan_chunk_size + overlap)
+                        if not chunk:
+                            break
+                        
+                        start = 0
+                        chunk_len = len(chunk)
+                        while True:
+                            idx = chunk.find(b"\xff\xd8\xff", start)
+                            if idx < 0:
+                                break
+                            header_chunk = chunk[idx : min(chunk_len, idx + 65536)]
+                            dims = get_jpeg_dimensions(header_chunk)
+                            if dims is not None:
+                                w, h = dims
+                                area = w * h
+                                if w >= 32 and h >= 32:
+                                    end_marker = chunk.find(b"\xff\xd9", idx + 3)
+                                    if end_marker >= 0:
+                                        segment = chunk[idx : end_marker + 2]
+                                        full_scan_candidates.append((area, segment, offset + idx, w, h))
+                                    else:
+                                        full_scan_candidates.append((area, None, offset + idx, w, h))
+                            start = idx + 3
+                        
+                        if len(chunk) < scan_chunk_size + overlap:
+                            break
+                        offset += scan_chunk_size
+            except Exception as scan_e:
+                logger.error("[SCAN] Error scanning %s: %s", file_path, scan_e)
+            
+            if full_scan_candidates:
+                candidates = full_scan_candidates
+                candidates.sort(key=lambda x: x[0], reverse=True)
+                logger.info("[SCAN] Whole-file scan found %d candidates. New best width: %d", len(candidates), candidates[0][3])
+            else:
+                logger.info("[SCAN] Whole-file scan found 0 candidates.")
+
         if not candidates:
             # Mark as miss
             with _embedded_scan_miss_lock:
@@ -283,40 +467,38 @@ def extract_embedded_jpeg_by_scan(file_path: str, max_size: int) -> Optional[np.
                 _embedded_scan_miss_cache.add(miss_key)
             return None
             
-        # Select candidate with the largest area
-        candidates.sort(key=lambda x: x[0], reverse=True)
-        best_area, best_segment, best_abs_offset = candidates[0]
-        
-        # If the best segment was cut off, read it now from the file
-        if best_segment is None:
-            try:
-                with open(file_path, "rb") as f:
-                    f.seek(best_abs_offset)
-                    # Previews are usually not larger than 8MB, but we read up to 16MB or to the end
-                    remaining = f.read(16 * 1024 * 1024)
-                    end_marker = remaining.find(b"\xff\xd9")
-                    if end_marker >= 0:
-                        best_segment = remaining[:end_marker + 2]
-                    else:
-                        best_segment = remaining
-            except Exception:
-                return None
-                
-        if best_segment:
-            best_arr = decode_embedded_jpeg_bytes(best_segment, max_size)
-        else:
-            best_arr = None
-            
-    except Exception:
-        return None
+        # Try decoding candidates in order of area size
+        for best_area, best_segment, best_abs_offset, best_w, best_h in candidates:
+            # If the segment was cut off, read it now from the file
+            if best_segment is None:
+                try:
+                    with open(file_path, "rb") as f:
+                        f.seek(best_abs_offset)
+                        # Previews are usually not larger than 8MB, but we read up to 16MB or to the end
+                        remaining = f.read(16 * 1024 * 1024)
+                        end_marker = remaining.find(b"\xff\xd9")
+                        if end_marker >= 0:
+                            best_segment = remaining[:end_marker + 2]
+                        else:
+                            best_segment = remaining
+                except Exception:
+                    continue
+                    
+            if best_segment:
+                best_arr = decode_embedded_jpeg_bytes(best_segment, max_size)
+                if best_arr is not None:
+                    return best_arr
 
-    if best_arr is None:
+        # Mark as miss if all candidates failed to decode
         with _embedded_scan_miss_lock:
             if len(_embedded_scan_miss_cache) >= _embedded_scan_miss_cache_max:
                 _embedded_scan_miss_cache.clear()
             _embedded_scan_miss_cache.add(miss_key)
+            
+    except Exception:
+        return None
 
-    return best_arr
+    return None
 
 
 class ThumbnailExtractor(QObject):
@@ -362,6 +544,7 @@ class ThumbnailExtractor(QObject):
             return thumb
 
         # If rawpy fails entirely (e.g. unsupported DNG) or returns None, use non-LibRaw fallbacks.
+        is_slow = is_slow_storage_path(file_path)
         if thumb is None and allow_scan_fallback and not is_slow:
             thumb = extract_embedded_jpeg_by_scan(file_path, max_size)
         if thumb is None and allow_scan_fallback:

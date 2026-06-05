@@ -60,7 +60,7 @@ def _min_acceptable_preview_dim(file_path: str) -> int:
     from common_image_loader import dng_prefers_embedded_preview_first
 
     if dng_prefers_embedded_preview_first(file_path):
-        return 256
+        return 1024
     return _display_preview_min_dim()
 
 
@@ -193,7 +193,8 @@ class ImageLoadWorker(QRunnable):
                                 file_path, thumbnail
                             )
                         if processor._preview_buffer_max_dim(thumbnail) < min_preview_dim:
-                            thumbnail = None
+                            if not processor.is_libraw_unsupported(file_path):
+                                thumbnail = None
                     if thumbnail is not None:
                         self._maybe_cache_preview_first_warm(
                             processor, file_path, thumbnail, exif_data
@@ -287,7 +288,8 @@ class ImageLoadWorker(QRunnable):
                                 processor._preview_buffer_max_dim(thumbnail)
                                 < min_preview_dim
                             ):
-                                thumbnail = None
+                                if not processor.is_libraw_unsupported(file_path):
+                                    thumbnail = None
                             else:
                                 self._maybe_cache_preview_first_warm(
                                     processor, file_path, thumbnail, exif_data

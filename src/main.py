@@ -6826,7 +6826,7 @@ class RAWImageViewer(QMainWindow):
 
         for_navigation = str(context or "").strip().lower() == "navigation"
         if file_path and dng_prefers_embedded_preview_first(file_path):
-            min_dim = 256
+            min_dim = 1024
         else:
             min_dim = self._single_view_cache_min_dim(for_navigation=for_navigation)
         return self._cache_buffer_suitable_for_single_view(
@@ -9101,14 +9101,34 @@ class RAWImageViewer(QMainWindow):
         # Repeated QMessageBox.exec() blocks user input and can look like folder switching is broken.
         import time
         now = time.time()
-        last_key = getattr(self, "_last_manager_error_key", None)
+        last_error_path = getattr(self, "_last_manager_error_path", None)
         last_t = getattr(self, "_last_manager_error_ts", 0.0)
-        key = (_norm_path(file_path), str(error_message))
-        if key == last_key and (now - last_t) < 2.0:
+        norm_p = _norm_path(file_path)
+        if last_error_path == norm_p and (now - last_t) < 5.0:
             return
-        self._last_manager_error_key = key
+        self._last_manager_error_path = norm_p
         self._last_manager_error_ts = now
-        self.show_error("Load Error", f"Failed to load image: {error_message}")
+        
+        # Check if the error indicates an unsupported RAW format or decoding failure
+        lower_err = error_message.lower()
+        is_unsupported = any(term in lower_err for term in ("unsupported", "decode", "returned none", "failed"))
+        
+        if is_unsupported:
+            try:
+                from raw_file_extensions import get_supported_extensions
+                exts = get_supported_extensions()
+            except Exception:
+                exts = ['.arw', '.cr2', '.nef', '.dng', '.jpg', '.jpeg', '.png']
+            
+            dialog = CustomWarningDialog(
+                self,
+                title="Unsupported File Format",
+                message=f"The file '{os.path.basename(file_path)}' is not supported by SkySpotter or is corrupt.",
+                informative_text=f"Check if the file is corrupt. Supported formats list: {', '.join(exts)}"
+            )
+            dialog.exec()
+        else:
+            self.show_error("Load Error", f"Failed to load image: {error_message}")
         
         # Graceful handling for ejected volumes or missing files
         if not os.path.exists(file_path):
@@ -10903,6 +10923,13 @@ class RAWImageViewer(QMainWindow):
     def _on_semantic_index_progress(self, token, i, n, message):
         if token != self._semantic_index_active_token:
             return
+            
+        # Dynamically load newly warmed thumbnails into gallery view to speed up scrolling/display
+        if getattr(self, "view_mode", "") == "gallery":
+            gj = getattr(self, "gallery_justified", None)
+            if gj is not None and hasattr(gj, "_request_load_visible_images"):
+                gj._request_load_visible_images(0)
+
         if not getattr(self, "_gallery_search_show_index_progress", False):
             return
         msg = str(message or "").strip()
@@ -11095,6 +11122,13 @@ class RAWImageViewer(QMainWindow):
     def _on_face_index_progress(self, token, i, n, message):
         if token != getattr(self, "_face_index_active_token", None):
             return
+            
+        # Dynamically load newly warmed thumbnails into gallery view to speed up scrolling/display
+        if getattr(self, "view_mode", "") == "gallery":
+            gj = getattr(self, "gallery_justified", None)
+            if gj is not None and hasattr(gj, "_request_load_visible_images"):
+                gj._request_load_visible_images(0)
+
         msg = str(message or "").strip()
         if msg and self._should_show_search_index_progress(msg):
             self._set_gallery_search_status(msg)
@@ -21535,6 +21569,10 @@ class RAWImageViewer(QMainWindow):
                             file_ext = os.path.splitext(entry.name)[1].lower()
                             if file_ext not in supported_extensions:
                                 continue
+                            if file_ext == ".dng":
+                                from common_image_loader import dng_prefers_embedded_preview_first
+                                if dng_prefers_embedded_preview_first(entry.path):
+                                    continue
                             stat = entry.stat()
                             if stat.st_size <= 0:
                                 continue
@@ -22685,6 +22723,10 @@ class RAWImageViewer(QMainWindow):
                     ext = os.path.splitext(entry.name)[1].lower()
                     if ext not in extensions:
                         continue
+                    if ext == ".dng":
+                        from common_image_loader import dng_prefers_embedded_preview_first
+                        if dng_prefers_embedded_preview_first(entry.path):
+                            continue
                     try:
                         stat = entry.stat()
                         if stat.st_size > 0:
@@ -24012,13 +24054,13 @@ def main():
             # 4. Continue with initialization
             if is_windows:
                 safe_print("  [Windows] Setting AppUserModelID...", flush=True)
-                myappid = 'RAWviewer.2.2'
+                myappid = 'RAWviewer.2.2.5'
                 ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
                 safe_print("  [Windows] AppUserModelID set", flush=True)
 
             # Set application properties
             app.setApplicationName("RAWviewer")
-            app.setApplicationVersion("2.2")
+            app.setApplicationVersion("2.2.5")
 
             # Create and show main window
             safe_print("Creating RAWImageViewer...", flush=True)

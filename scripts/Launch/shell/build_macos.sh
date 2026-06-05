@@ -8,7 +8,7 @@ REPO_ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 cd "$REPO_ROOT"
 
 VERSION="$(grep -E '^VERSION = ' "$REPO_ROOT/build.py" | sed -E 's/.*"([^"]+)".*/\1/')"
-VERSION="${VERSION:-2.2}"
+VERSION="${VERSION:-2.2.5}"
 echo "RAWviewer macOS Build Script (v${VERSION})"
 echo "======================================"
 echo ""

@@ -1,5 +1,10 @@
 # RAWviewer Release Notes
 
+## 🚀 Version 2.2.5
+**Release Date: June 5, 2026**
+
+- **Filter out composite DNG panoramas**: Handled composite DNG panorama files (e.g., Lightroom/Photoshop HDR panoramas) similarly to unsupported images by hiding them from the gallery and navigation lists entirely to prevent loading errors and improve performance.
+
 ## 🚀 Version 2.2
 **Release Date: May 30, 2026**
 

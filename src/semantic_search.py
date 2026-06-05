@@ -148,7 +148,7 @@ def semantic_encode_prep_workers() -> int:
             return max(1, min(int(raw), 32))
         except Exception:
             pass
-    return max(1, min(8, os.cpu_count() or 4))
+    return max(1, min(16, os.cpu_count() or 4))
 
 
 def semantic_coreml_chunk_size() -> int:
@@ -2881,7 +2881,7 @@ class SemanticImageIndex:
             )
             return 0
 
-        workers = min(semantic_encode_prep_workers(), 8)
+        workers = min(semantic_encode_prep_workers(), 16)
         t0 = time.time()
         warmed = 0
 
@@ -3777,6 +3777,20 @@ class SemanticImageIndex:
                     )
                 else:
                     logger.info(f"[INDEX] Skipping AI features neural pass (MobileCLIP) for {total_sem} files (metadata-only index).")
+                    
+                    # Warm the thumbnail cache in the background even if not doing semantic embeddings now!
+                    # This populates the cache for future gallery display and future semantic searches.
+                    warm_paths = [cp for cp, _ in pending_for_semantic]
+                    try:
+                        self._warm_thumbnail_cache_for_semantic_index(
+                            warm_paths,
+                            progress_callback,
+                            progress_album_total=progress_album_total,
+                            progress_indexed_base=progress_indexed_base,
+                        )
+                    except Exception as e:
+                        logger.warning(f"[INDEX] Background thumbnail warming failed: {e}")
+
                     for canonical_fp, st in pending_for_semantic:
                         self._wait_if_paused()
                         self._mark_metadata_ready_without_embedding(canonical_fp, st, conn)
