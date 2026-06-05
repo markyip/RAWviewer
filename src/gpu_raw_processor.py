@@ -1,4 +1,5 @@
 import logging
+import os
 import time
 from typing import Any, Dict, Optional, Tuple
 import numpy as np
@@ -11,10 +12,18 @@ _GPU_BACKEND: Optional[str] = None
 def detect_gpu_backend() -> str:
     """
     Detect if the system has PyTorch (with CUDA or MPS) or CuPy installed.
+    Allows overriding via the RAWVIEWER_GPU_BACKEND environment variable.
     Returns: 'pytorch_cuda', 'pytorch_mps', 'cupy', or 'cpu_only'
     """
     global _GPU_BACKEND
     if _GPU_BACKEND is not None:
+        return _GPU_BACKEND
+
+    # Check for environment override
+    override = os.environ.get("RAWVIEWER_GPU_BACKEND", "").strip().lower()
+    if override in ("pytorch_cuda", "pytorch_mps", "cupy", "cpu_only"):
+        _GPU_BACKEND = override
+        logger.info(f"GPU Processor: Using backend override '{_GPU_BACKEND}' from RAWVIEWER_GPU_BACKEND.")
         return _GPU_BACKEND
 
     # 1. Check for PyTorch (CUDA / Apple Silicon MPS)
@@ -51,7 +60,9 @@ def gpu_demosaic_pytorch(
     bayer_pattern: str = "RGGB", 
     device_str: str = "cuda",
     wb_coeffs: Tuple[float, float, float, float] = (1.0, 1.0, 1.0, 1.0),
-    m_color: np.ndarray = np.eye(3, dtype=np.float32)
+    m_color: np.ndarray = np.eye(3, dtype=np.float32),
+    black_levels: Tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0),
+    white_level: float = 16383.0
 ) -> np.ndarray:
     """
     A GPU-accelerated Bilinear Demosaicing implementation using PyTorch.
@@ -62,58 +73,58 @@ def gpu_demosaic_pytorch(
 
     device = torch.device(device_str)
     
-    # 1. Upload raw array to GPU as float32 and normalize to [0, 1]
-    max_val = float(raw_array.max() or 1.0)
-    raw_tensor = torch.from_numpy(raw_array.astype(np.float32)).to(device) / max_val
+    # 1. Upload raw array to GPU as float32
+    raw_tensor = torch.from_numpy(raw_array.astype(np.float32)).to(device)
     h, w = raw_tensor.shape
     
-    # Create channel masks based on the Bayer pattern
-    # Assuming standard 2x2 repeating block:
-    # "RGGB":
-    #   Row 0: R G
-    #   Row 1: G B
-    r_mask = torch.zeros((h, w), dtype=torch.float32, device=device)
-    g_mask = torch.zeros((h, w), dtype=torch.float32, device=device)
-    b_mask = torch.zeros((h, w), dtype=torch.float32, device=device)
-    
+    # Define coordinate slices for R, G1, B, G2 based on bayer_pattern
     if bayer_pattern == "RGGB":
-        # R at (even, even)
-        r_mask[0::2, 0::2] = 1.0
-        # G at (even, odd) and (odd, even)
-        g_mask[0::2, 1::2] = 1.0
-        g_mask[1::2, 0::2] = 1.0
-        # B at (odd, odd)
-        b_mask[1::2, 1::2] = 1.0
+        r_slice = (slice(0, None, 2), slice(0, None, 2))
+        g_slice = (slice(0, None, 2), slice(1, None, 2))
+        g2_slice = (slice(1, None, 2), slice(0, None, 2))
+        b_slice = (slice(1, None, 2), slice(1, None, 2))
     elif bayer_pattern == "BGGR":
-        b_mask[0::2, 0::2] = 1.0
-        g_mask[0::2, 1::2] = 1.0
-        g_mask[1::2, 0::2] = 1.0
-        r_mask[1::2, 1::2] = 1.0
+        b_slice = (slice(0, None, 2), slice(0, None, 2))
+        g_slice = (slice(0, None, 2), slice(1, None, 2))
+        g2_slice = (slice(1, None, 2), slice(0, None, 2))
+        r_slice = (slice(1, None, 2), slice(1, None, 2))
     elif bayer_pattern == "GRBG":
-        g_mask[0::2, 0::2] = 1.0
-        r_mask[0::2, 1::2] = 1.0
-        b_mask[1::2, 0::2] = 1.0
-        g_mask[1::2, 1::2] = 1.0
+        g_slice = (slice(0, None, 2), slice(0, None, 2))
+        r_slice = (slice(0, None, 2), slice(1, None, 2))
+        b_slice = (slice(1, None, 2), slice(0, None, 2))
+        g2_slice = (slice(1, None, 2), slice(1, None, 2))
     elif bayer_pattern == "GBRG":
-        g_mask[0::2, 0::2] = 1.0
-        b_mask[0::2, 1::2] = 1.0
-        r_mask[1::2, 0::2] = 1.0
-        g_mask[1::2, 1::2] = 1.0
+        g_slice = (slice(0, None, 2), slice(0, None, 2))
+        b_slice = (slice(0, None, 2), slice(1, None, 2))
+        r_slice = (slice(1, None, 2), slice(0, None, 2))
+        g2_slice = (slice(1, None, 2), slice(1, None, 2))
+    else:
+        # Fallback to RGGB
+        r_slice = (slice(0, None, 2), slice(0, None, 2))
+        g_slice = (slice(0, None, 2), slice(1, None, 2))
+        g2_slice = (slice(1, None, 2), slice(0, None, 2))
+        b_slice = (slice(1, None, 2), slice(1, None, 2))
 
     wb_r, wb_g, wb_b, wb_g2 = wb_coeffs
+    black_r, black_g, black_b, black_g2 = black_levels
+
+    # Subtract black level channel-wise and normalize
+    raw_norm = torch.zeros_like(raw_tensor)
+    raw_norm[r_slice] = torch.clamp(raw_tensor[r_slice] - black_r, min=0.0) / max(1.0, white_level - black_r)
+    raw_norm[g_slice] = torch.clamp(raw_tensor[g_slice] - black_g, min=0.0) / max(1.0, white_level - black_g)
+    raw_norm[g2_slice] = torch.clamp(raw_tensor[g2_slice] - black_g2, min=0.0) / max(1.0, white_level - black_g2)
+    raw_norm[b_slice] = torch.clamp(raw_tensor[b_slice] - black_b, min=0.0) / max(1.0, white_level - black_b)
 
     # Extract raw channels and apply white balance multipliers
-    r_raw = raw_tensor * r_mask * wb_r
+    r_raw = torch.zeros_like(raw_norm)
+    r_raw[r_slice] = raw_norm[r_slice] * wb_r
     
-    g_raw = torch.zeros_like(raw_tensor)
-    if bayer_pattern in ("RGGB", "BGGR"):
-        g_raw[0::2, 1::2] = raw_tensor[0::2, 1::2] * wb_g
-        g_raw[1::2, 0::2] = raw_tensor[1::2, 0::2] * wb_g2
-    else:
-        g_raw[0::2, 0::2] = raw_tensor[0::2, 0::2] * wb_g
-        g_raw[1::2, 1::2] = raw_tensor[1::2, 1::2] * wb_g2
+    g_raw = torch.zeros_like(raw_norm)
+    g_raw[g_slice] = raw_norm[g_slice] * wb_g
+    g_raw[g2_slice] = raw_norm[g2_slice] * wb_g2
         
-    b_raw = raw_tensor * b_mask * wb_b
+    b_raw = torch.zeros_like(raw_norm)
+    b_raw[b_slice] = raw_norm[b_slice] * wb_b
     
     # 2. Setup interpolation filters for bilinear demosaicing
     # G-channel filter: cross shape for horizontal/vertical neighbors
@@ -139,7 +150,7 @@ def gpu_demosaic_pytorch(
     # Stack channels to RGB (1, 3, h, w) -> squeeze and permute to (h, w, 3)
     rgb_tensor = torch.cat([r_interp, g_interp, b_interp], dim=1).squeeze(0).permute(1, 2, 0)
     
-    # Apply Color Matrix Multiplication (maps sensor RGB to sRGB space)
+    # Apply Color Matrix Multiplication (maps sensor RGB directly to sRGB space)
     m_color_tensor = torch.from_numpy(m_color).to(device)
     rgb_srgb = torch.matmul(rgb_tensor, m_color_tensor.t())
     
@@ -160,7 +171,9 @@ def gpu_demosaic_cupy(
     raw_array: np.ndarray, 
     bayer_pattern: str = "RGGB",
     wb_coeffs: Tuple[float, float, float, float] = (1.0, 1.0, 1.0, 1.0),
-    m_color: np.ndarray = np.eye(3, dtype=np.float32)
+    m_color: np.ndarray = np.eye(3, dtype=np.float32),
+    black_levels: Tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0),
+    white_level: float = 16383.0
 ) -> np.ndarray:
     """
     A GPU-accelerated demosaicing implementation using CuPy.
@@ -168,17 +181,47 @@ def gpu_demosaic_cupy(
     """
     import cupy as cp
     
-    # Upload to GPU and normalize to [0, 1]
-    max_val = float(raw_array.max() or 1.0)
-    raw_gpu = cp.array(raw_array, dtype=cp.float32) / max_val
+    # Upload to GPU
+    raw_gpu = cp.array(raw_array, dtype=cp.float32)
     h, w = raw_gpu.shape
     
+    # Define coordinate slices for R, G1, B, G2 based on bayer_pattern
+    if bayer_pattern == "BGGR":
+        b_slice = (slice(0, None, 2), slice(0, None, 2))
+        g_slice = (slice(0, None, 2), slice(1, None, 2))
+        g2_slice = (slice(1, None, 2), slice(0, None, 2))
+        r_slice = (slice(1, None, 2), slice(1, None, 2))
+    elif bayer_pattern == "GRBG":
+        g_slice = (slice(0, None, 2), slice(0, None, 2))
+        r_slice = (slice(0, None, 2), slice(1, None, 2))
+        b_slice = (slice(1, None, 2), slice(0, None, 2))
+        g2_slice = (slice(1, None, 2), slice(1, None, 2))
+    elif bayer_pattern == "GBRG":
+        g_slice = (slice(0, None, 2), slice(0, None, 2))
+        b_slice = (slice(0, None, 2), slice(1, None, 2))
+        r_slice = (slice(1, None, 2), slice(0, None, 2))
+        g2_slice = (slice(1, None, 2), slice(1, None, 2))
+    else: # RGGB
+        r_slice = (slice(0, None, 2), slice(0, None, 2))
+        g_slice = (slice(0, None, 2), slice(1, None, 2))
+        g2_slice = (slice(1, None, 2), slice(0, None, 2))
+        b_slice = (slice(1, None, 2), slice(1, None, 2))
+
+    black_r, black_g, black_b, black_g2 = black_levels
+
+    # Subtract black level and normalize channel-wise
+    raw_norm = cp.zeros_like(raw_gpu)
+    raw_norm[r_slice] = cp.clip(raw_gpu[r_slice] - black_r, 0, None) / max(1.0, white_level - black_r)
+    raw_norm[g_slice] = cp.clip(raw_gpu[g_slice] - black_g, 0, None) / max(1.0, white_level - black_g)
+    raw_norm[g2_slice] = cp.clip(raw_gpu[g2_slice] - black_g2, 0, None) / max(1.0, white_level - black_g2)
+    raw_norm[b_slice] = cp.clip(raw_gpu[b_slice] - black_b, 0, None) / max(1.0, white_level - black_b)
+
     # Pre-allocate output RGB image on GPU (use float32 temporarily for matrix/gamma processing)
     rgb_gpu = cp.zeros((h, w, 3), dtype=cp.float32)
     
     wb_r, wb_g, wb_b, wb_g2 = wb_coeffs
     
-    # Simple CUDA kernel for bilinear demosaicing with white balance
+    # Simple CUDA kernel for bilinear demosaicing with white balance on pre-normalized array
     demosaic_kernel = cp.ElementwiseKernel(
         'raw float32 raw_data, int32 h, int32 w, float32 wb_r, float32 wb_g, float32 wb_b, float32 wb_g2',
         'raw float32 rgb_out',
@@ -223,9 +266,9 @@ def gpu_demosaic_cupy(
         'demosaic_kernel'
     )
     
-    demosaic_kernel(raw_gpu, h, w, rgb_gpu)
+    demosaic_kernel(raw_norm, h, w, rgb_gpu)
     
-    # Apply Color Matrix Multiplication (maps sensor RGB to sRGB space)
+    # Apply Color Matrix Multiplication (maps sensor RGB directly to sRGB space)
     m_color_gpu = cp.array(m_color, dtype=cp.float32)
     rgb_srgb = cp.dot(rgb_gpu, m_color_gpu.T)
     
@@ -266,23 +309,21 @@ def try_gpu_raw_decode(
             if pattern:
                 bayer_pattern = str(pattern)
 
-        # Retrieve White Balance Coefficients
+        # Retrieve White Balance Coefficients, Black Levels, and White Level
         wb_coeffs = (1.0, 1.0, 1.0, 1.0)
-        
-        # Standard conversion matrix from XYZ to sRGB (D65 white point)
-        XYZ_TO_SRGB = np.array([
-            [ 3.2406, -1.5372, -0.4986],
-            [-0.9689,  1.8758,  0.0415],
-            [ 0.0557, -0.2040,  1.0570]
-        ], dtype=np.float32)
-        
+        black_levels = (0.0, 0.0, 0.0, 0.0)
+        white_level = 16383.0
         cam_xyz = None
         
         if raw_obj is not None:
             if hasattr(raw_obj, "camera_whitebalance") and raw_obj.camera_whitebalance:
                 wb = list(raw_obj.camera_whitebalance)
-                if wb[1] != 0:
-                    wb_coeffs = (wb[0]/wb[1], 1.0, wb[2]/wb[1], wb[3]/wb[1] if len(wb) > 3 else 1.0)
+                max_wb = max(wb) or 1.0
+                wb_coeffs = (wb[0]/max_wb, wb[1]/max_wb, wb[2]/max_wb, wb[3]/max_wb if len(wb) > 3 else wb[1]/max_wb)
+            if hasattr(raw_obj, "black_level_per_channel") and raw_obj.black_level_per_channel is not None:
+                black_levels = tuple(float(x) for x in raw_obj.black_level_per_channel)
+            if hasattr(raw_obj, "white_level") and raw_obj.white_level is not None:
+                white_level = float(raw_obj.white_level)
             if hasattr(raw_obj, "rgb_xyz_matrix") and raw_obj.rgb_xyz_matrix is not None:
                 cam_xyz = raw_obj.rgb_xyz_matrix[:3, :3]
         else:
@@ -291,28 +332,47 @@ def try_gpu_raw_decode(
                 with rawpy.imread(file_path) as raw:
                     if hasattr(raw, "camera_whitebalance") and raw.camera_whitebalance:
                         wb = list(raw.camera_whitebalance)
-                        if wb[1] != 0:
-                            wb_coeffs = (wb[0]/wb[1], 1.0, wb[2]/wb[1], wb[3]/wb[1] if len(wb) > 3 else 1.0)
+                        max_wb = max(wb) or 1.0
+                        wb_coeffs = (wb[0]/max_wb, wb[1]/max_wb, wb[2]/max_wb, wb[3]/max_wb if len(wb) > 3 else wb[1]/max_wb)
+                    if hasattr(raw, "black_level_per_channel") and raw.black_level_per_channel is not None:
+                        black_levels = tuple(float(x) for x in raw.black_level_per_channel)
+                    if hasattr(raw, "white_level") and raw.white_level is not None:
+                        white_level = float(raw.white_level)
                     if hasattr(raw, "rgb_xyz_matrix") and raw.rgb_xyz_matrix is not None:
                         cam_xyz = raw.rgb_xyz_matrix[:3, :3]
             except Exception:
                 pass
 
+        # Calculate Color Matrix
+        # In LibRaw, rgb_xyz_matrix (returned by rawpy) is the rgb_cam matrix, mapping sRGB to camera RGB.
+        # Its inverse maps camera RGB directly to sRGB.
         if cam_xyz is None or np.allclose(cam_xyz, 0):
             m_color = np.eye(3, dtype=np.float32)
         else:
-            m_color = np.dot(XYZ_TO_SRGB, cam_xyz)
+            try:
+                m_color = np.linalg.inv(cam_xyz)
+            except np.linalg.LinAlgError:
+                m_color = np.eye(3, dtype=np.float32)
 
         if backend == "pytorch_cuda":
-            res = gpu_demosaic_pytorch(raw_array, bayer_pattern, device_str="cuda", wb_coeffs=wb_coeffs, m_color=m_color)
+            res = gpu_demosaic_pytorch(
+                raw_array, bayer_pattern, device_str="cuda", wb_coeffs=wb_coeffs, m_color=m_color,
+                black_levels=black_levels, white_level=white_level
+            )
             logger.info(f"GPU Processor: Decoded RAW via PyTorch CUDA in {(time.time() - t_start)*1000:.1f}ms")
             return res
         elif backend == "pytorch_mps":
-            res = gpu_demosaic_pytorch(raw_array, bayer_pattern, device_str="mps", wb_coeffs=wb_coeffs, m_color=m_color)
+            res = gpu_demosaic_pytorch(
+                raw_array, bayer_pattern, device_str="mps", wb_coeffs=wb_coeffs, m_color=m_color,
+                black_levels=black_levels, white_level=white_level
+            )
             logger.info(f"GPU Processor: Decoded RAW via PyTorch MPS in {(time.time() - t_start)*1000:.1f}ms")
             return res
         elif backend == "cupy":
-            res = gpu_demosaic_cupy(raw_array, bayer_pattern, wb_coeffs=wb_coeffs, m_color=m_color)
+            res = gpu_demosaic_cupy(
+                raw_array, bayer_pattern, wb_coeffs=wb_coeffs, m_color=m_color,
+                black_levels=black_levels, white_level=white_level
+            )
             logger.info(f"GPU Processor: Decoded RAW via CuPy in {(time.time() - t_start)*1000:.1f}ms")
             return res
             

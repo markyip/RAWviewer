@@ -785,9 +785,23 @@ class UnifiedImageProcessor:
             # CRITICAL: Force rawpy to ignore EXIF orientation
             params['user_flip'] = 0
             
-            # 處理 RAW - 使用 Process Pool 繞過 GIL
+            # Proof of Concept: Optional GPU-Accelerated demosaicing (try first if GPU backend is available)
             rgb_image = None
-            if executor:
+            try:
+                from gpu_raw_processor import try_gpu_raw_decode, detect_gpu_backend
+                if detect_gpu_backend() != "cpu_only":
+                    import rawpy
+                    with rawpy.imread(file_path) as raw:
+                        raw_array = raw.raw_image.copy()
+                        gpu_rgb = try_gpu_raw_decode(file_path, raw_array, exif_data, raw_obj=raw)
+                    if gpu_rgb is not None:
+                        rgb_image = gpu_rgb
+            except Exception as gpu_err:
+                import logging
+                logging.getLogger(__name__).warning(f"[GPU] PoC GPU decode failed: {gpu_err}")
+
+            # 處理 RAW - 使用 Process Pool 繞過 GIL (CPU fallback)
+            if rgb_image is None and executor:
                 try:
                     # logger = logging.getLogger(__name__)
                     # logger.info(f"[PIL/PROCESS_POOL] Offloading RAW postprocess to pool for {file_path}")
@@ -800,22 +814,8 @@ class UnifiedImageProcessor:
                         f"[PROCESS_POOL] Process pool decode failed for {os.path.basename(file_path)}: {pool_err}. "
                         "Falling back to in-process RAW decode."
                     )
-            
-            # Proof of Concept: Optional GPU-Accelerated demosaicing
-            if rgb_image is None:
-                try:
-                    from gpu_raw_processor import try_gpu_raw_decode, detect_gpu_backend
-                    if detect_gpu_backend() != "cpu_only":
-                        import rawpy
-                        with rawpy.imread(file_path) as raw:
-                            raw_array = raw.raw_image.copy()
-                            gpu_rgb = try_gpu_raw_decode(file_path, raw_array, exif_data, raw_obj=raw)
-                        if gpu_rgb is not None:
-                            rgb_image = gpu_rgb
-                except Exception as gpu_err:
-                    import logging
-                    logging.getLogger(__name__).warning(f"[GPU] PoC GPU decode failed: {gpu_err}")
 
+            # In-process CPU fallback
             if rgb_image is None:
                 import rawpy
                 with rawpy.imread(file_path) as raw:
