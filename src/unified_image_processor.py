@@ -342,7 +342,7 @@ class UnifiedImageProcessor:
                         import rawpy
                         with rawpy.imread(file_path) as raw:
                             raw_array = raw.raw_image.copy()
-                        gpu_rgb = try_gpu_raw_decode(file_path, raw_array, exif_data)
+                            gpu_rgb = try_gpu_raw_decode(file_path, raw_array, exif_data, raw_obj=raw)
                         if gpu_rgb is not None:
                             rgb_image = gpu_rgb
                 except Exception as gpu_err:
