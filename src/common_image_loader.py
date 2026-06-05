@@ -63,7 +63,7 @@ def decode_embedded_jpeg_bytes(
             im.thumbnail((max_size, max_size), Image.Resampling.HAMMING)
         return np.array(im)
     except Exception as e:
-        logger.error("[DECODE] Error decoding embedded JPEG bytes: %s", e)
+        logger.debug("[DECODE] Error decoding embedded JPEG bytes: %s", e)
         return None
 
 
