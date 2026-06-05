@@ -7,8 +7,10 @@ set -e
 REPO_ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 cd "$REPO_ROOT"
 
-echo "RAWviewer macOS Build Script"
-echo "==========================="
+VERSION="$(grep -E '^VERSION = ' "$REPO_ROOT/build.py" | sed -E 's/.*"([^"]+)".*/\1/')"
+VERSION="${VERSION:-2.2.5}"
+echo "RAWviewer macOS Build Script (v${VERSION})"
+echo "======================================"
 echo ""
 
 if [[ "$OSTYPE" != "darwin"* ]]; then
@@ -19,7 +21,7 @@ fi
 
 if ! command -v python3 &> /dev/null; then
     echo "[ERROR] python3 is not installed or not in PATH"
-    echo "Please install Python 3.8 or higher from https://www.python.org/"
+    echo "Please install Python 3.10 or higher from https://www.python.org/"
     exit 1
 fi
 
@@ -56,8 +58,16 @@ fi
 echo "Upgrading pip..."
 "$PYTHON_BIN" -m pip install --upgrade pip
 
-echo "Installing dependencies..."
-"$PYTHON_BIN" -m pip install --upgrade PyQt6 rawpy send2trash pyinstaller natsort exifread pyexiv2 Pillow psutil numpy qtawesome pyqtgraph reverse-geocoder pycountry huggingface-hub requests pyobjc-framework-Cocoa pyobjc-framework-CoreML pyobjc-framework-Quartz pyobjc-framework-Vision
+echo "Installing core dependencies..."
+"$PYTHON_BIN" -m pip install --upgrade PyQt6 rawpy send2trash pyinstaller natsort exifread Pillow psutil numpy qtawesome pyqtgraph reverse-geocoder pycountry huggingface-hub requests pyobjc-framework-Cocoa pyobjc-framework-CoreML pyobjc-framework-Quartz pyobjc-framework-Vision
+
+echo "Installing optional dependency: pyexiv2 (best-effort)..."
+if "$PYTHON_BIN" -m pip install --upgrade pyexiv2; then
+    echo "[INFO] pyexiv2 installed (full focus-point / Exiv2 path enabled)."
+else
+    echo "[WARNING] pyexiv2 install failed on this macOS/Python combo."
+    echo "[WARNING] Continuing build with exifread fallback (focus-point extraction may be less complete)."
+fi
 
 "$PYTHON_BIN" -m pip uninstall -y sentence-transformers torch torchvision transformers scikit-learn scipy tokenizers safetensors coremltools >/dev/null 2>&1 || true
 
@@ -75,11 +85,17 @@ if "$PYTHON_BIN" build.py; then
     echo ""
 
     if [ -d "dist/RAWviewer.app" ]; then
-        echo "macOS App Bundle created: dist/RAWviewer.app"
+        echo "macOS App Bundle created: dist/RAWviewer.app (v${VERSION})"
         echo ""
-        echo "To run the app, you can:"
-        echo "  1. Double-click RAWviewer.app in Finder"
-        echo "  2. Run: open dist/RAWviewer.app"
+        echo "Smoke test (release checklist):"
+        echo "  xattr -cr dist/RAWviewer.app"
+        echo "  open dist/RAWviewer.app"
+        echo "  # Single-image view: share icon -> Qt menu -> Mail (or Messages)"
+        echo "  # Optional: RAWVIEWER_FILE_LOG=1 when testing share from Terminal"
+        echo "  # See scripts/Launch/README.md and docs/macos-sharing-v21-v22.md"
+        echo ""
+        echo "To run the app:"
+        echo "  open dist/RAWviewer.app"
     elif [ -f "dist/RAWviewer" ]; then
         echo "Executable created: dist/RAWviewer"
         echo ""

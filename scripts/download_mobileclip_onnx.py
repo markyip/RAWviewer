@@ -22,14 +22,14 @@ def main():
         print("Run: pip install huggingface-hub requests")
         return 1
 
-    print(f"[INFO] Downloading MobileCLIP2-S0 ONNX models to {MODELS_DIR}...")
+    print(f"[INFO] Downloading MobileCLIP2-B ONNX models to {MODELS_DIR}...")
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
     os.environ['HF_HUB_DISABLE_PROGRESS_BARS'] = '1'
 
     # Mapping of remote path in HF repo to local filename expected by RAWviewer
     files_to_download = {
-        "onnx/s0/vision_model.onnx": "image_encoder.onnx",
-        "onnx/s0/text_model.onnx": "text_encoder.onnx"
+        "onnx/b/vision_model.onnx": "image_encoder.onnx",
+        "onnx/b/text_model.onnx": "text_encoder.onnx"
     }
     
     for remote_path, local_name in files_to_download.items():

@@ -2,8 +2,16 @@
 REM Run from repo root (scripts\Launch\bat -> ..\..\..)
 cd /d "%~dp0..\..\.."
 
+set "ACCEL=%~1"
+if "%ACCEL%"=="" set "ACCEL=cuda"
+if /I not "%ACCEL%"=="cuda" if /I not "%ACCEL%"=="directml" (
+    echo [ERROR] Invalid backend "%ACCEL%". Use: cuda or directml
+    exit /b 1
+)
+
 echo RAWviewer Windows Build Script
 echo ===============================
+echo Backend: %ACCEL%
 echo.
 
 if not exist "rawviewer_env" (
@@ -17,9 +25,6 @@ call rawviewer_env\Scripts\activate.bat
 
 echo Checking MobileCLIP2 ONNX models...
 python scripts/download_mobileclip_onnx.py
-
-echo Installing dependencies...
-pip install --upgrade PyQt6 rawpy send2trash pyinstaller natsort exifread pyexiv2 Pillow psutil numpy qtawesome pyqtgraph onnxruntime-directml reverse-geocoder pycountry pywin32 opencv-python-headless huggingface-hub requests
 
 echo Checking for running RAWviewer instances...
 taskkill /F /IM RAWviewer.exe /T >nul 2>&1
@@ -37,7 +42,7 @@ if exist dist (
 if exist *.spec del /q *.spec 2>nul
 
 echo Building RAWviewer...
-python build.py
+python build.py --windows-accel %ACCEL%
 if %errorlevel% neq 0 (
     echo.
     echo [ERROR] Build failed! Check the error messages above.

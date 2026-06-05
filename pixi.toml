@@ -1,14 +1,21 @@
 [workspace]
 name = "rawviewer"
-version = "1.0.0"
+version = "2.2.5"
 description = "RAWviewer - Professional RAW Image Viewer with Semantic Search"
 authors = ["Mark Yip"]
 channels = ["conda-forge"]
-platforms = ["win-64"]
+platforms = ["win-64", "osx-arm64", "osx-64"]
+
+# pyexiv2 arm64 wheels target macOS 14+ (macosx_14_0_arm64); Intel wheels use macosx_13_0_x86_64.
+[system-requirements]
+macos = "14.0"
 
 [tasks]
 start = "python src/main.py"
 start-windowless = "pythonw src/main.py"
+
+[activation.env]
+PYTHONNOUSERSITE = "1"
 
 [dependencies]
 python = ">=3.10,<3.13"
@@ -27,12 +34,25 @@ pyqtgraph = ">=0.13.0"
 qtawesome = ">=1.2.0"
 pycountry = "*"
 reverse-geocoder = "*"
-onnxruntime-directml = ">=1.18.0"
+opencv-python-headless = "*"
+huggingface_hub = "*"
+requests = "*"
+
+# Windows semantic search (MobileCLIP ONNX). Default for `pixi install` / `pixi run`.
+# - Local dev: onnxruntime-gpu (CUDA EP when a GPU is available).
+# - Installer variants: build scripts swap this to onnxruntime-directml for DirectML builds
+#   (see scripts/Launch/bat/build_windows_directml.bat and build.py --windows-accel).
+[target.win-64.pypi-dependencies]
+onnxruntime-gpu = ">=1.18.0"
 pyexiv2 = "*"
 pywin32 = "*"
 comtypes = "*"
 "winrt-Windows.ApplicationModel.DataTransfer" = "*"
 "winrt-Windows.Storage" = "*"
-opencv-python-headless = "*"
-huggingface_hub = "*"
-requests = "*"
+
+# macOS EXIF (Exiv2). After `pixi install`, ensure native libs: brew install inih gettext
+[target.osx-arm64.pypi-dependencies]
+pyexiv2 = ">=2.15.4"
+
+[target.osx-64.pypi-dependencies]
+pyexiv2 = ">=2.15.4"

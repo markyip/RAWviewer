@@ -4,6 +4,9 @@ A self-contained ``QGraphicsView`` that renders one image and performs fit / zoo
 pan as GPU matrix transforms instead of re-scaling the pixmap on the CPU every frame.
 This gives QuickLook-style smoothness for wheel/pinch zoom and drag pan.
 
+The optional ``QOpenGLWidget`` viewport is vendor-agnostic (NVIDIA / AMD / Intel on
+Windows; Qt typically uses a Metal-backed GL stack on macOS).
+
 Opt-in via the ``RAWVIEWER_GPU_VIEW=1`` environment variable; the legacy
 ``QScrollArea`` + ``QLabel`` path remains the default. The widget is intentionally
 decoupled from the main window: it exposes a small API plus a few signals so the
@@ -16,7 +19,7 @@ Environment toggles:
 
 import os
 
-from PyQt6.QtCore import Qt, QRectF, QPointF, pyqtSignal
+from PyQt6.QtCore import Qt, QRect, QRectF, QPointF, pyqtSignal, QEvent
 from PyQt6.QtGui import QPixmap, QPainter, QColor, QPen
 from PyQt6.QtWidgets import (
     QGraphicsView,
@@ -44,10 +47,14 @@ class GpuImageView(QGraphicsView):
     zoomChanged = pyqtSignal(float)
     # int: +1 request next image, -1 request previous image (plain wheel in fit mode)
     wheelNavigate = pyqtSignal(int)
-    doubleClicked = pyqtSignal()
+    # Image pixel coordinates (scene space) where the user double-clicked.
+    doubleClickedAt = pyqtSignal(QPointF)
 
+    # Absolute floor for set_scale; wheel zoom cannot go below fit_scale() (fit-to-window).
     MIN_SCALE = 0.01
-    MAX_SCALE = 60.0
+    # Pinch / wheel cap (400%). Space and double-click use zoom_to_actual() at 100%.
+    MAX_SCALE = 4.0
+    _FIT_SCALE_EPS = 1.002  # treat within ~0.2% of fit as fit-to-window
 
     def __init__(self, parent=None, background="#1E1E1E"):
         super().__init__(parent)
@@ -63,6 +70,7 @@ class GpuImageView(QGraphicsView):
         self._overlay_item = None
 
         self._fit_mode = True
+        self._zoom_intent_100 = False
         self._has_pixmap = False
         self._img_w = 0
         self._img_h = 0
@@ -118,8 +126,35 @@ class GpuImageView(QGraphicsView):
     def is_fit_mode(self) -> bool:
         return self._fit_mode
 
+    def is_at_fit_scale(self) -> bool:
+        """True when the view transform matches fit-to-window (within tolerance)."""
+        if not self._has_pixmap:
+            return True
+        return self.current_scale() <= self.fit_scale() * self._FIT_SCALE_EPS
+
+    def wants_zoom_in_toggle(self) -> bool:
+        """Whether Space / double-click should enter 100% zoom (not zoom out to fit)."""
+        return self._fit_mode or self.is_at_fit_scale()
+
+    def _sync_fit_mode_flag(self) -> None:
+        """Align ``_fit_mode`` with the live transform (fixes stale-flag toggle bugs)."""
+        if not self._has_pixmap:
+            return
+        if self.is_at_fit_scale() and not getattr(self, "_zoom_intent_100", False):
+            self._fit_mode = True
+        elif self.current_scale() >= 1.0 - 1e-4:
+            self._fit_mode = False
+
     def current_scale(self) -> float:
         return float(self.transform().m11())
+
+    def fit_scale(self) -> float:
+        """View pixels per image pixel when the image is scaled to fit the viewport."""
+        if not self._has_pixmap or self._img_w <= 0 or self._img_h <= 0:
+            return self.MIN_SCALE
+        vw = max(1, self.viewport().width())
+        vh = max(1, self.viewport().height())
+        return min(vw / self._img_w, vh / self._img_h)
 
     def image_size(self):
         return (self._img_w, self._img_h)
@@ -205,23 +240,71 @@ class GpuImageView(QGraphicsView):
         self._update_placeholder()
 
         if self._fit_mode or not capture:
-            if self._fit_mode:
+            if self._fit_mode and not getattr(self, "_zoom_intent_100", False):
                 self.fit_to_window()
+            elif not capture:
+                # Stale state: _fit_mode False but transform still at fit scale (e.g. zoom
+                # requested before the first pixmap arrived). Refit so Space/double-click
+                # toggles predictably instead of staying stuck at ~fit%.
+                if self.is_at_fit_scale() and not getattr(self, "_zoom_intent_100", False):
+                    self.fit_to_window()
+            self._sync_fit_mode_flag()
             return
 
-        # Preserve on-screen image scale: s_new * new_w == s_old * old_w
-        s_new = max(self.MIN_SCALE, min(self.MAX_SCALE, s_old * old_w / new_w))
+        # If user intended to zoom to 100% (actual pixels), do not scale down to preserve the thumbnail's screen size
+        if getattr(self, "_zoom_intent_100", False) or (s_old is not None and s_old >= 1.0 - 1e-4):
+            s_new = 1.0
+        else:
+            # Preserve on-screen image scale: s_new * new_w == s_old * old_w
+            s_new = max(self.MIN_SCALE, min(self.MAX_SCALE, s_old * old_w / new_w))
         self.resetTransform()
         self.scale(s_new, s_new)
         self.centerOn(QPointF(fx * new_w, fy * new_h))
+        self._sync_fit_mode_flag()
         self.zoomChanged.emit(self.current_scale())
 
     def clear(self) -> None:
         self.set_pixmap(QPixmap())
 
+    def capture_viewport_pixmap(self) -> QPixmap | None:
+        """Capture the visible view for resolution cross-fade (OpenGL-safe)."""
+        if not self._has_pixmap:
+            return None
+        vp = self.viewport()
+        w = max(1, vp.width())
+        h = max(1, vp.height())
+        try:
+            from PyQt6.QtOpenGLWidgets import QOpenGLWidget
+
+            if isinstance(vp, QOpenGLWidget):
+                fb = vp.grabFramebuffer()
+                if fb is not None and not fb.isNull():
+                    return fb
+        except Exception:
+            pass
+        try:
+            target = QRect(0, 0, w, h)
+            pix = QPixmap(w, h)
+            pix.fill(Qt.GlobalColor.transparent)
+            painter = QPainter(pix)
+            self.render(painter, target, target)
+            painter.end()
+            if not pix.isNull():
+                return pix
+        except Exception:
+            pass
+        try:
+            snap = vp.grab()
+            if snap is not None and not snap.isNull():
+                return snap
+        except Exception:
+            pass
+        return None
+
     # ------------------------------------------------------------------ zoom
     def fit_to_window(self) -> None:
         self._fit_mode = True
+        self._zoom_intent_100 = False
         if not self._has_pixmap:
             return
         self.resetTransform()
@@ -230,24 +313,104 @@ class GpuImageView(QGraphicsView):
         self.zoomChanged.emit(self.current_scale())
 
     def zoom_to_actual(self) -> None:
-        """100% — one image pixel per view pixel."""
-        self._fit_mode = False
+        """100% — one image pixel per view pixel, centered on the image middle."""
+        w, h = self._img_w, self._img_h
+        cx = w * 0.5 if w > 0 else 0.0
+        cy = h * 0.5 if h > 0 else 0.0
+        self.zoom_to_actual_at(cx, cy)
+
+    def zoom_to_actual_at(self, scene_x: float, scene_y: float) -> None:
+        """100% zoom with the given image pixel centered in the viewport."""
         if not self._has_pixmap:
             return
+        self._fit_mode = False
+        self._zoom_intent_100 = True
+        x = max(0.0, min(float(scene_x), max(0, self._img_w - 1)))
+        y = max(0.0, min(float(scene_y), max(0, self._img_h - 1)))
         self.resetTransform()
         self.scale(1.0, 1.0)
-        self.centerOn(self._item)
+        
+        # Ensure scrollbars are updated based on the new scale
+        from PyQt6.QtCore import QEventLoop
+        from PyQt6.QtWidgets import QApplication
+
+        QApplication.processEvents(
+            QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents
+        )
+        
+        self.centerOn(QPointF(x, y))
+            
         self.fitModeChanged.emit(False)
         self.zoomChanged.emit(1.0)
 
+    def set_pixmap_zoomed_at(
+        self,
+        pixmap: QPixmap,
+        scene_x: float,
+        scene_y: float,
+        *,
+        scale: float = 1.0,
+    ) -> None:
+        """Replace the image and apply zoom in one step (avoids a wrong-frame flash)."""
+        if pixmap is None or pixmap.isNull():
+            self.set_pixmap(QPixmap())
+            return
+        new_w, new_h = pixmap.width(), pixmap.height()
+        self._item.setPixmap(pixmap)
+        self._item.setOffset(0, 0)
+        self._scene.setSceneRect(QRectF(0, 0, new_w, new_h))
+        self._img_w, self._img_h = new_w, new_h
+        self._has_pixmap = True
+        self._fit_mode = False
+        self._zoom_intent_100 = False
+        self._update_placeholder()
+        fit = self.fit_scale()
+        s = float(scale)
+        if s <= fit * self._FIT_SCALE_EPS:
+            self.fit_to_window()
+            return
+        s = max(fit, min(self.MAX_SCALE, s))
+        x = max(0.0, min(float(scene_x), max(0, new_w - 1)))
+        y = max(0.0, min(float(scene_y), max(0, new_h - 1)))
+        self.resetTransform()
+        self.scale(s, s)
+        
+        # Ensure scrollbars are updated based on the new scale
+        from PyQt6.QtCore import QEventLoop
+        from PyQt6.QtWidgets import QApplication
+
+        QApplication.processEvents(
+            QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents
+        )
+        
+        self.centerOn(QPointF(x, y))
+            
+        self.fitModeChanged.emit(False)
+        self.zoomChanged.emit(self.current_scale())
+
+    def center_on_image_point(self, scene_x: float, scene_y: float) -> None:
+        """Pan so an image pixel is centered without changing zoom scale."""
+        if not self._has_pixmap:
+            return
+        x = max(0.0, min(float(scene_x), max(0, self._img_w - 1)))
+        y = max(0.0, min(float(scene_y), max(0, self._img_h - 1)))
+        self.centerOn(QPointF(x, y))
+
     def toggle_fit(self) -> None:
-        if self._fit_mode:
+        if not self._has_pixmap:
+            return
+        if self.wants_zoom_in_toggle():
             self.zoom_to_actual()
         else:
             self.fit_to_window()
 
     def set_scale(self, scale: float) -> None:
-        scale = max(self.MIN_SCALE, min(self.MAX_SCALE, float(scale)))
+        fit = self.fit_scale()
+        scale = float(scale)
+        if scale <= fit * self._FIT_SCALE_EPS:
+            self.fit_to_window()
+            return
+        scale = max(fit, min(self.MAX_SCALE, scale))
         self.resetTransform()
         self.scale(scale, scale)
         self._fit_mode = False
@@ -257,35 +420,72 @@ class GpuImageView(QGraphicsView):
     def zoom_by(self, factor: float) -> None:
         if not self._has_pixmap or factor <= 0:
             return
+        fit = self.fit_scale()
         cur = self.current_scale()
         new = cur * factor
-        if new < self.MIN_SCALE:
-            factor = self.MIN_SCALE / cur
-        elif new > self.MAX_SCALE:
-            factor = self.MAX_SCALE / cur
-        self.scale(factor, factor)
+        if factor < 1.0 and new <= fit * self._FIT_SCALE_EPS:
+            self.fit_to_window()
+            return
+        new = max(fit, min(self.MAX_SCALE, new))
+        if abs(new - cur) < 1e-9:
+            return
+        self.scale(new / cur, new / cur)
         self._fit_mode = False
         self.fitModeChanged.emit(False)
         self.zoomChanged.emit(self.current_scale())
 
     # ------------------------------------------------------------------ events
+    def mouseMoveEvent(self, event) -> None:
+        host = self.parentWidget()
+        if host is not None and hasattr(host, "handle_pointer_for_filmstrip"):
+            host.handle_pointer_for_filmstrip(event.globalPosition())
+        super().mouseMoveEvent(event)
+
+    def event(self, event) -> bool:
+        """Trackpad pinch (macOS) and smart-zoom gestures."""
+        if event.type() == QEvent.Type.NativeGesture and self._has_pixmap:
+            gtype = event.gestureType()
+            if gtype == Qt.NativeGestureType.ZoomNativeGesture:
+                self.zoom_by(1.0 + event.value() * 0.5)
+                event.accept()
+                return True
+            if gtype == Qt.NativeGestureType.SmartZoomNativeGesture:
+                self.toggle_fit()
+                event.accept()
+                return True
+        return super().event(event)
+
     def wheelEvent(self, event) -> None:
         delta = event.angleDelta().y()
         if delta == 0:
             super().wheelEvent(event)
             return
         ctrl = bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
-        # Match legacy UX: plain wheel while fit-to-window navigates images.
-        if self._fit_mode and not ctrl:
-            self.wheelNavigate.emit(1 if delta > 0 else -1)
+        if ctrl:
+            # Control + Scroll: Zoom smoothly
+            self.zoom_by(1.25 if delta > 0 else 0.8)
             event.accept()
             return
-        self.zoom_by(1.25 if delta > 0 else 0.8)
-        event.accept()
+
+        # Plain wheel (no Control Modifier)
+        if self._fit_mode:
+            # Fit-to-window: navigate images (Qt: delta > 0 = up, delta < 0 = down)
+            self.wheelNavigate.emit(-1 if delta > 0 else 1)
+            event.accept()
+            return
+
+        # Zoomed in: pan vertically by delegating to QGraphicsView scroll behavior
+        super().wheelEvent(event)
 
     def mouseDoubleClickEvent(self, event) -> None:
-        self.doubleClicked.emit()
-        self.toggle_fit()
+        if event.button() == Qt.MouseButton.LeftButton and self._has_pixmap:
+            scene_pt = self.mapToScene(event.position().toPoint())
+            self.doubleClickedAt.emit(
+                QPointF(
+                    max(0.0, min(scene_pt.x(), max(0, self._img_w - 1))),
+                    max(0.0, min(scene_pt.y(), max(0, self._img_h - 1))),
+                )
+            )
         event.accept()
 
     def resizeEvent(self, event) -> None:

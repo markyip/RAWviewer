@@ -14,6 +14,7 @@ import re
 import sqlite3
 import time
 import hashlib
+import json
 import sys
 import gzip
 import urllib.request
@@ -39,6 +40,479 @@ except Exception:
 
 
 ProgressCallback = Optional[Callable[[int, int, str], None]]
+
+
+def format_index_progress(stage: str, done: int, total: int) -> str:
+    """Concise progress for the search field, e.g. 'Semantic: 12/48'."""
+    try:
+        total_i = max(0, int(total))
+        done_i = max(0, int(done))
+    except (TypeError, ValueError):
+        return stage
+    if total_i <= 0:
+        return stage
+    done_i = min(done_i, total_i)
+    return f"{stage}: {done_i}/{total_i}"
+
+
+def semantic_embeddings_enabled() -> bool:
+    """Check if semantic search embeddings are enabled via environment."""
+    flag = os.environ.get("RAWVIEWER_ENABLE_SEMANTIC_SEARCH", "0").strip().lower()
+    return flag in ("1", "true", "yes", "on")
+
+
+def metadata_auto_index_enabled() -> bool:
+    """Check if auto metadata indexing is enabled via environment."""
+    flag = os.environ.get("RAWVIEWER_AUTO_METADATA_INDEX", "1").strip().lower()
+    return flag in ("1", "true", "yes", "on")
+
+
+def semantic_gpu_throttle_seconds() -> float:
+    """Optional per-image pacing for semantic pass.
+
+    Set RAWVIEWER_SEMANTIC_GPU_THROTTLE_MS to a positive value when you want
+    to reduce indexing pressure (e.g., keep UI extra responsive).
+    Default is 0ms so indexing is not artificially slowed down.
+    """
+    raw = os.environ.get("RAWVIEWER_SEMANTIC_GPU_THROTTLE_MS", "0").strip()
+    try:
+        ms = float(raw)
+    except Exception:
+        ms = 0.0
+    ms = max(0.0, min(ms, 2000.0))
+    return ms / 1000.0
+
+
+def semantic_batch_max() -> int:
+    """Upper cap for semantic ONNX batch size (auto-tune and forced)."""
+    raw = os.environ.get("RAWVIEWER_SEMANTIC_BATCH_MAX", "128").strip()
+    try:
+        v = int(raw)
+    except Exception:
+        v = 128
+    return max(1, min(v, 256))
+
+
+def semantic_batch_size() -> int:
+    """Semantic ONNX batch size. Default 1 keeps legacy behavior."""
+    raw = os.environ.get("RAWVIEWER_SEMANTIC_BATCH_SIZE", "1").strip()
+    try:
+        v = int(raw)
+    except Exception:
+        v = 1
+    return max(1, min(v, semantic_batch_max()))
+
+
+def semantic_batch_size_forced() -> Optional[int]:
+    """Return forced batch size when explicitly set by env, else None."""
+    raw = os.environ.get("RAWVIEWER_SEMANTIC_BATCH_SIZE", "").strip()
+    if not raw:
+        return None
+    try:
+        v = int(raw)
+    except Exception:
+        return 1
+    return max(1, min(v, semantic_batch_max()))
+
+
+def semantic_batch_auto_enabled() -> bool:
+    """Auto tune semantic batch size when no forced batch is provided."""
+    raw = os.environ.get("RAWVIEWER_SEMANTIC_BATCH_AUTO", "1").strip().lower()
+    return raw not in ("0", "false", "no", "off")
+
+
+def semantic_batch_tune_sample_count() -> int:
+    raw = os.environ.get("RAWVIEWER_SEMANTIC_BATCH_TUNE_SAMPLES", "32").strip()
+    try:
+        v = int(raw)
+    except Exception:
+        v = 32
+    return max(8, min(v, 128))
+
+
+def semantic_batch_tie_ratio() -> float:
+    """When throughput is within this ratio of the best, prefer a larger batch."""
+    raw = os.environ.get("RAWVIEWER_SEMANTIC_BATCH_TIE_RATIO", "0.92").strip()
+    try:
+        r = float(raw)
+    except Exception:
+        r = 0.92
+    return max(0.5, min(r, 1.0))
+
+
+def semantic_encode_prep_workers() -> int:
+    """Parallel CPU workers for resize/load before ONNX image batch."""
+    raw = os.environ.get("RAWVIEWER_SEMANTIC_PREP_WORKERS", "").strip()
+    if raw:
+        try:
+            return max(1, min(int(raw), 32))
+        except Exception:
+            pass
+    return max(1, min(16, os.cpu_count() or 4))
+
+
+def semantic_coreml_chunk_size() -> int:
+    """Paths per encode chunk on macOS Core ML (parallel prep, serial inference)."""
+    raw = os.environ.get("RAWVIEWER_SEMANTIC_COREML_CHUNK", "8").strip()
+    try:
+        v = int(raw)
+    except Exception:
+        v = 8
+    return max(1, min(v, semantic_batch_max()))
+
+
+def semantic_warm_thumbs_before_index() -> bool:
+    """Pre-extract embedded thumbnails before MobileCLIP (avoids per-file rawpy in encode)."""
+    raw = os.environ.get("RAWVIEWER_SEMANTIC_WARM_THUMBS", "1").strip().lower()
+    return raw not in ("0", "false", "no", "off")
+
+
+def semantic_batch_candidates() -> List[int]:
+    raw = os.environ.get(
+        "RAWVIEWER_SEMANTIC_BATCH_CANDIDATES", "8,16,32,64,128"
+    ).strip()
+    cap = semantic_batch_max()
+    out: List[int] = []
+    for item in raw.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        try:
+            out.append(max(1, min(cap, int(item))))
+        except Exception:
+            continue
+    if not out:
+        out = [8, 16, 32, 64, 128]
+    # stable dedupe
+    seen = set()
+    uniq: List[int] = []
+    for v in out:
+        if v not in seen:
+            seen.add(v)
+            uniq.append(v)
+    return uniq
+
+
+# Bump when auto-tune defaults/logic change so ~/.rawviewer_cache picks are refreshed.
+SEMANTIC_BATCH_TUNE_CACHE_VERSION = "v3"
+
+
+def _prep_mobileclip_image_chw_resized(file_path: str, size: tuple[int, int] = (256, 256)) -> np.ndarray:
+    """Load, resize to size (width, height), and return NCHW float tensor slice for one image."""
+    im = _load_index_source_image(file_path, max_size=1024).resize(
+        size, Image.Resampling.BICUBIC
+    )
+    rgb = np.asarray(im.convert("RGB"), dtype=np.float32) / 255.0
+    return np.transpose(rgb, (2, 0, 1))
+
+
+def _prep_mobileclip_image_chw(file_path: str) -> np.ndarray:
+    """Load, resize to 256, and return NCHW float tensor slice for one image."""
+    return _prep_mobileclip_image_chw_resized(file_path, (256, 256))
+
+
+def _semantic_batch_cache_path() -> str:
+    return os.path.join(
+        os.path.expanduser("~"), ".rawviewer_cache", "semantic_batch_tuning.json"
+    )
+
+
+def _load_semantic_batch_cache() -> Dict[str, int]:
+    try:
+        p = _semantic_batch_cache_path()
+        if not os.path.exists(p):
+            return {}
+        with open(p, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            return {str(k): int(v) for k, v in data.items()}
+    except Exception:
+        pass
+    return {}
+
+
+def _save_semantic_batch_cache(cache: Dict[str, int]) -> None:
+    try:
+        p = _semantic_batch_cache_path()
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, "w", encoding="utf-8") as f:
+            json.dump(cache, f, indent=2, sort_keys=True)
+    except Exception:
+        pass
+
+
+
+def resolve_onnx_execution_providers(
+    available: Optional[Sequence[str]] = None,
+) -> List[str]:
+    """Pick ONNX Runtime EPs for the current OS and GPU vendor.
+
+    Windows: CUDA / TensorRT first when installed (NVIDIA); DirectML next for
+    AMD / Intel or when CUDA is unavailable (default pixi build uses DirectML only).
+    macOS: Core ML EP when using ONNX fallback; otherwise app uses native Core ML.
+    Other Unix (no official Linux release): CUDA / ROCm / OpenVINO when present in a
+    custom onnxruntime build, else CPU — source-only, not tested as a product target.
+    Override with RAWVIEWER_ORT_PROVIDERS (comma-separated EP names).
+    """
+    try:
+        import onnxruntime as ort
+    except ImportError:
+        return ["CPUExecutionProvider"]
+
+    if available is None:
+        available = list(ort.get_available_providers())
+
+    override = os.environ.get("RAWVIEWER_ORT_PROVIDERS", "").strip()
+    if override:
+        names = [p.strip() for p in override.split(",") if p.strip()]
+        selected = [p for p in names if p in available]
+        return selected or ["CPUExecutionProvider"]
+
+    if sys.platform == "win32":
+        preferred = [
+            "CUDAExecutionProvider",
+            "TensorrtExecutionProvider",
+            "DmlExecutionProvider",
+            "OpenVINOExecutionProvider",
+            "CPUExecutionProvider",
+        ]
+    elif sys.platform == "darwin":
+        preferred = [
+            "CoreMLExecutionProvider",
+            "CPUExecutionProvider",
+        ]
+    else:
+        preferred = [
+            "CUDAExecutionProvider",
+            "ROCMExecutionProvider",
+            "OpenVINOExecutionProvider",
+            "CPUExecutionProvider",
+        ]
+
+    selected = [p for p in preferred if p in available]
+    return selected or ["CPUExecutionProvider"]
+
+
+def resolve_opencv_dnn_backend_target() -> tuple:
+    """OpenCV DNN backend/target for YuNet / SSD face models (Windows).
+
+    GPU-first policy: prefer CUDA, then CPU.
+    OpenCL is opt-in only via RAWVIEWER_FACE_DNN_TARGET=opencl because some
+    Windows OpenCV ocl4dnn stacks are unstable and can crash the process.
+    Override with RAWVIEWER_FACE_DNN_TARGET=cpu|opencl|cuda|openvino.
+    """
+    import cv2
+
+    override = os.environ.get("RAWVIEWER_FACE_DNN_TARGET", "").strip().lower()
+    backend_opencv = cv2.dnn.DNN_BACKEND_OPENCV
+    target_cpu = cv2.dnn.DNN_TARGET_CPU
+
+    if override == "cpu":
+        return backend_opencv, target_cpu
+    if override == "opencl":
+        _log_opencl_runtime_details_once(cv2)
+        return backend_opencv, cv2.dnn.DNN_TARGET_OPENCL
+    if override == "cuda":
+        return cv2.dnn.DNN_BACKEND_CUDA, cv2.dnn.DNN_TARGET_CUDA
+    if override == "openvino":
+        return cv2.dnn.DNN_BACKEND_INFERENCE_ENGINE, target_cpu
+
+    # Auto policy (GPU-first, stability): CUDA -> CPU.
+    # Keep OpenCL disabled unless explicitly requested.
+    try:
+        cv2.ocl.setUseOpenCL(False)
+    except Exception:
+        pass
+    try:
+        if cv2.cuda.getCudaEnabledDeviceCount() > 0:
+            return cv2.dnn.DNN_BACKEND_CUDA, cv2.dnn.DNN_TARGET_CUDA
+    except Exception:
+        pass
+    return backend_opencv, target_cpu
+
+
+def _apply_opencv_dnn_acceleration(net) -> None:
+    """Set preferable backend/target on an OpenCV dnn.Net (best-effort)."""
+    import cv2
+
+    backend_id, target_id = resolve_opencv_dnn_backend_target()
+    _log_face_backend_once(backend_id, target_id, cv2)
+    try:
+        net.setPreferableBackend(backend_id)
+        net.setPreferableTarget(target_id)
+    except Exception:
+        try:
+            net.setPreferableBackend(cv2.dnn.DNN_BACKEND_OPENCV)
+            net.setPreferableTarget(cv2.dnn.DNN_TARGET_CPU)
+        except Exception:
+            pass
+
+
+_OPENCL_RUNTIME_LOGGED = False
+_FACE_BACKEND_LOGGED = False
+
+
+def _log_opencl_runtime_details_once(cv2_module=None) -> None:
+    """Best-effort one-time OpenCL runtime/device details for diagnostics."""
+    global _OPENCL_RUNTIME_LOGGED
+    if _OPENCL_RUNTIME_LOGGED:
+        return
+    _OPENCL_RUNTIME_LOGGED = True
+
+    import logging
+
+    logger = logging.getLogger(__name__)
+    try:
+        cv2 = cv2_module
+        if cv2 is None:
+            import cv2 as _cv2
+            cv2 = _cv2
+
+        have = bool(cv2.ocl.haveOpenCL())
+        enabled = bool(cv2.ocl.useOpenCL())
+        if not have:
+            logger.info("[ACCEL] OpenCL runtime: unavailable")
+            return
+
+        try:
+            dev = cv2.ocl.Device_getDefault()
+        except Exception:
+            dev = None
+
+        if dev is None:
+            logger.info("[ACCEL] OpenCL runtime: available, enabled=%s (device details unavailable)", enabled)
+            return
+
+        def _safe(callable_or_attr, default="unknown"):
+            try:
+                v = callable_or_attr() if callable(callable_or_attr) else callable_or_attr
+                return str(v) if v not in (None, "") else default
+            except Exception:
+                return default
+
+        name = _safe(getattr(dev, "name", None))
+        vendor = _safe(getattr(dev, "vendorName", None))
+        version = _safe(getattr(dev, "version", None))
+        driver = _safe(getattr(dev, "driverVersion", None))
+        ocl_c = _safe(getattr(dev, "OpenCL_C_Version", None))
+        logger.info(
+            "[ACCEL] OpenCL runtime: enabled=%s; vendor=%s; device=%s; version=%s; OpenCL_C=%s; driver=%s",
+            enabled,
+            vendor,
+            name,
+            version,
+            ocl_c,
+            driver,
+        )
+    except Exception as e:
+        logger.info("[ACCEL] OpenCL runtime details unavailable: %s", e)
+
+
+def _log_face_backend_once(backend_id: int, target_id: int, cv2_module=None) -> None:
+    """One-time log of the actual selected OpenCV face backend/target."""
+    global _FACE_BACKEND_LOGGED
+    if _FACE_BACKEND_LOGGED:
+        return
+    _FACE_BACKEND_LOGGED = True
+
+    import logging
+
+    logger = logging.getLogger(__name__)
+    try:
+        cv2 = cv2_module
+        if cv2 is None:
+            import cv2 as _cv2
+            cv2 = _cv2
+
+        backend_name = str(backend_id)
+        try:
+            backend_name = cv2.dnn.getBackendName(backend_id)
+        except Exception:
+            pass
+
+        target_name = "CPU"
+        if target_id == cv2.dnn.DNN_TARGET_OPENCL:
+            target_name = "OpenCL"
+        elif target_id == cv2.dnn.DNN_TARGET_CUDA:
+            target_name = "CUDA"
+        elif target_id == getattr(cv2.dnn, "DNN_TARGET_OPENCL_FP16", -1):
+            target_name = "OpenCL FP16"
+
+        logger.info(
+            "[ACCEL] Face DNN backend selected: backend=%s target=%s (id=%s)",
+            backend_name,
+            target_name,
+            target_id,
+        )
+    except Exception as e:
+        logger.info("[ACCEL] Face DNN backend selected: backend_id=%s target_id=%s (%s)", backend_id, target_id, e)
+
+
+def _coreml_compute_units():
+    """Core ML compute-unit preference for MobileCLIP on macOS."""
+    import CoreML
+
+    raw = os.environ.get("RAWVIEWER_COREML_COMPUTE_UNITS", "all").strip().lower()
+    mapping = {
+        "cpu": CoreML.MLComputeUnitsCPUOnly,
+        "gpu": CoreML.MLComputeUnitsCPUAndGPU,
+        "ane": CoreML.MLComputeUnitsCPUAndNeuralEngine,
+        "all": CoreML.MLComputeUnitsAll,
+    }
+    return mapping.get(raw, CoreML.MLComputeUnitsAll)
+
+
+_ACCEL_PROFILE_LOGGED = False
+
+
+def log_inference_acceleration_profile(force: bool = False) -> None:
+    """Log once which inference accelerators are active (semantic + face)."""
+    global _ACCEL_PROFILE_LOGGED
+    if _ACCEL_PROFILE_LOGGED and not force:
+        return
+    _ACCEL_PROFILE_LOGGED = True
+
+    import logging
+
+    logger = logging.getLogger(__name__)
+    parts: List[str] = []
+
+    if sys.platform == "darwin":
+        parts.append("semantic=Core ML (Apple GPU/ANE when available)")
+    else:
+        try:
+            import onnxruntime as ort
+
+            available = list(ort.get_available_providers())
+            selected = resolve_onnx_execution_providers(available)
+            parts.append(f"semantic=ONNX [{', '.join(selected)}]")
+        except Exception:
+            parts.append("semantic=ONNX [CPUExecutionProvider]")
+
+    if sys.platform == "darwin":
+        parts.append("face=Apple Vision")
+    else:
+        try:
+            import cv2
+
+            b, t = resolve_opencv_dnn_backend_target()
+            try:
+                bname = cv2.dnn.getBackendName(b)
+            except Exception:
+                bname = str(b)
+            parts.append(f"face=OpenCV YuNet backend={bname} target={t}")
+        except Exception:
+            parts.append("face=OpenCV YuNet (CPU)")
+
+    gpu_view = os.environ.get("RAWVIEWER_GPU_VIEW", "").strip().lower()
+    if gpu_view in ("1", "true", "yes", "on"):
+        no_gl = os.environ.get("RAWVIEWER_GPU_VIEW_NO_GL", "").strip().lower()
+        if no_gl in ("1", "true", "yes", "on"):
+            parts.append("display=Qt raster viewport")
+        else:
+            parts.append("display=Qt OpenGL viewport (vendor-agnostic)")
+
+    logger.info("[ACCEL] Inference profile: %s", "; ".join(parts))
 
 
 def _load_index_source_image(file_path: str, max_size: int = 1024) -> Image.Image:
@@ -371,16 +845,25 @@ class MobileCLIPCoreMLBackend:
                 tmp_url, compile_error = CoreML.MLModel.compileModelAtURL_error_(url, None)
                 if compile_error is not None or tmp_url is None:
                     raise RuntimeError(f"Failed to compile Core ML model: {compile_error}")
-                
+
                 mgr = Foundation.NSFileManager.defaultManager()
                 if os.path.exists(compiled_path):
                     mgr.removeItemAtURL_error_(compiled_url, None)
-                
+
                 success, move_error = mgr.moveItemAtURL_toURL_error_(tmp_url, compiled_url, None)
                 if not success:
                     compiled_url = tmp_url
-            
-            model, load_error = CoreML.MLModel.modelWithContentsOfURL_error_(compiled_url, None)
+
+            config = CoreML.MLModelConfiguration.alloc().init()
+            try:
+                config.setComputeUnits_(_coreml_compute_units())
+            except Exception:
+                pass
+            model, load_error = CoreML.MLModel.modelWithContentsOfURL_configuration_error_(
+                compiled_url, config, None
+            )
+            if load_error is not None or model is None:
+                model, load_error = CoreML.MLModel.modelWithContentsOfURL_error_(compiled_url, None)
             if load_error is not None or model is None:
                 raise RuntimeError(f"Failed to load Core ML model: {load_error}")
             return model
@@ -448,12 +931,38 @@ class MobileCLIPCoreMLBackend:
 
     def encode_image(self, file_path: str) -> np.ndarray:
         self._load_models()
-        CoreML = self._CoreML
-        # Core ML encoder input is fixed (typically 256×256 NCHW in our exports). Loading a richer
-        # source (preview/thumbnail) before bicubic resize to 256 can help vs loading tiny 512-max inputs.
         im = _load_index_source_image(file_path, max_size=1024).resize(
             (256, 256), Image.Resampling.BICUBIC
         )
+        return self._encode_pil_image(im)
+
+    def encode_images(self, file_paths: Sequence[str]) -> List[np.ndarray]:
+        """Parallel load/resize, then serial Core ML inference (I/O bound on large albums)."""
+        self._load_models()
+        paths = [p for p in (file_paths or []) if p]
+        if not paths:
+            return []
+        if len(paths) == 1:
+            return [self.encode_image(paths[0])]
+
+        workers = semantic_encode_prep_workers()
+
+        def _prep(path: str) -> Image.Image:
+            return _load_index_source_image(path, max_size=1024).resize(
+                (256, 256), Image.Resampling.BICUBIC
+            )
+
+        if workers <= 1:
+            images = [_prep(p) for p in paths]
+        else:
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=min(workers, len(paths))
+            ) as executor:
+                images = list(executor.map(_prep, paths))
+        return [self._encode_pil_image(im) for im in images]
+
+    def _encode_pil_image(self, im: Image.Image) -> np.ndarray:
+        CoreML = self._CoreML
         desc = self._image_model.modelDescription()
         input_name = self._native_feature_name(self._image_model, "input")
         output_name = self._native_feature_name(self._image_model, "output")
@@ -546,7 +1055,7 @@ class MobileCLIPCoreMLBackend:
 
 
 class MobileCLIPONNXBackend:
-    """Windows/Linux ONNX backend for MobileCLIP2-S0.
+    """Windows ONNX backend for MobileCLIP2 (supports S0, S2, B, L14 variants).
     
     Requires 'onnxruntime' and 'numpy'.
     """
@@ -559,8 +1068,13 @@ class MobileCLIPONNXBackend:
     SUPPORTS_HUB_DOWNLOAD = True
 
     def __init__(self, model_dir: Optional[str] = None):
+        self.variant = os.environ.get("RAWVIEWER_MOBILECLIP_VARIANT", "b").strip().lower()
+        if self.variant not in ("s0", "s2", "b", "l14"):
+            self.variant = "b"
+        self.MODEL_ID = f"mobileclip-onnx-2-{self.variant}"
+
         if model_dir is None:
-            model_dir = self._default_model_dir()
+            model_dir = self._default_model_dir(self.variant)
         self.model_dir = model_dir
         self.image_model_path = os.path.join(model_dir, self.IMAGE_MODEL_FILE)
         self.text_model_path = os.path.join(model_dir, self.TEXT_MODEL_FILE)
@@ -570,37 +1084,38 @@ class MobileCLIPONNXBackend:
         self._tokenizer = None
 
     @staticmethod
-    def _candidate_model_dirs() -> List[str]:
+    def _candidate_model_dirs(variant: str = "b") -> List[str]:
         dirs: List[str] = []
         env_dir = os.environ.get("RAWVIEWER_MOBILECLIP_MODEL_DIR")
         if env_dir:
             dirs.append(env_dir)
             
+        suffix = f"_{variant}" if variant != "b" else ""
         if getattr(sys, "frozen", False):
             # Prioritize the actual executable directory for external (non-bundled) models
             exe_dir = os.path.dirname(sys.executable)
-            dirs.append(os.path.join(exe_dir, "models", "mobileclip_onnx"))
-            dirs.append(os.path.join(exe_dir, "mobileclip_onnx"))
+            dirs.append(os.path.join(exe_dir, "models", f"mobileclip_onnx{suffix}"))
+            dirs.append(os.path.join(exe_dir, f"mobileclip_onnx{suffix}"))
             
             # Fallback to PyInstaller temporary extract directory (_MEIPASS)
             if hasattr(sys, "_MEIPASS"):
-                dirs.append(os.path.join(sys._MEIPASS, "models", "mobileclip_onnx"))
+                dirs.append(os.path.join(sys._MEIPASS, "models", f"mobileclip_onnx{suffix}"))
             
-        dirs.append(os.path.expanduser("~/.rawviewer_cache/mobileclip_onnx"))
+        dirs.append(os.path.expanduser(f"~/.rawviewer_cache/mobileclip_onnx{suffix}"))
         
         module_dir = os.path.dirname(os.path.abspath(__file__))
-        dirs.append(os.path.join(module_dir, "..", "models", "mobileclip_onnx"))
+        dirs.append(os.path.join(module_dir, "..", "models", f"mobileclip_onnx{suffix}"))
         return dirs
 
     @classmethod
-    def _default_model_dir(cls) -> str:
-        for d in cls._candidate_model_dirs():
+    def _default_model_dir(cls, variant: str = "b") -> str:
+        for d in cls._candidate_model_dirs(variant):
             if (
                 os.path.exists(os.path.join(d, cls.IMAGE_MODEL_FILE))
                 and os.path.exists(os.path.join(d, cls.TEXT_MODEL_FILE))
             ):
                 return d
-        return cls._candidate_model_dirs()[0]
+        return cls._candidate_model_dirs(variant)[0]
 
     def availability_error(self) -> str:
         try:
@@ -608,9 +1123,9 @@ class MobileCLIPONNXBackend:
         except ImportError:
             return "Missing 'onnxruntime' dependency"
         if not os.path.exists(self.image_model_path):
-            return f"Missing image model: {self.IMAGE_MODEL_FILE}"
+            return f"Missing MobileCLIP image model: {self.IMAGE_MODEL_FILE}"
         if not os.path.exists(self.text_model_path):
-            return f"Missing text model: {self.TEXT_MODEL_FILE}"
+            return f"Missing MobileCLIP text model: {self.TEXT_MODEL_FILE}"
         return ""
 
     def available(self) -> bool:
@@ -622,7 +1137,7 @@ class MobileCLIPONNXBackend:
                 progress_callback(message)
 
         os.makedirs(self.model_dir, exist_ok=True)
-        _progress("Downloading MobileCLIP ONNX models...")
+        _progress(f"Downloading MobileCLIP ONNX models ({self.variant})...")
         try:
             from huggingface_hub import hf_hub_download
         except ImportError:
@@ -630,8 +1145,8 @@ class MobileCLIPONNXBackend:
 
         # Mapping of remote path in HF repo to local filename expected by RAWviewer
         files_to_download = {
-            "onnx/s0/vision_model.onnx": self.IMAGE_MODEL_FILE,
-            "onnx/s0/text_model.onnx": self.TEXT_MODEL_FILE
+            f"onnx/{self.variant}/vision_model.onnx": self.IMAGE_MODEL_FILE,
+            f"onnx/{self.variant}/text_model.onnx": self.TEXT_MODEL_FILE
         }
         
         for remote_path, local_name in files_to_download.items():
@@ -669,27 +1184,38 @@ class MobileCLIPONNXBackend:
         if self._image_session is not None:
             return
         import onnxruntime as ort
-        
-        # Priority-ordered list of high-performance execution providers
-        providers = [
-            'CUDAExecutionProvider',    # NVIDIA GPU
-            'TensorrtExecutionProvider', # NVIDIA TensorRT
-            'DmlExecutionProvider',     # Windows DirectML (AMD/Intel/NVIDIA)
-            'CPUExecutionProvider'       # Fallback
-        ]
-        
-        available_providers = ort.get_available_providers()
-        selected_providers = [p for p in providers if p in available_providers]
-        
-        print(f"[SemanticSearch] Initializing MobileCLIP ONNX session. Available providers: {available_providers}, using: {selected_providers}", flush=True)
-        
-        self._image_session = ort.InferenceSession(self.image_model_path, providers=selected_providers)
-        self._text_session = ort.InferenceSession(self.text_model_path, providers=selected_providers)
+
+        available = list(ort.get_available_providers())
+        selected_providers = resolve_onnx_execution_providers(available)
+
+        import logging
+
+        logging.getLogger(__name__).info(
+            "[SemanticSearch] MobileCLIP ONNX providers available=%s using=%s",
+            available,
+            selected_providers,
+        )
+
+        self._image_session = ort.InferenceSession(
+            self.image_model_path, providers=selected_providers
+        )
+        self._text_session = ort.InferenceSession(
+            self.text_model_path, providers=selected_providers
+        )
 
     def _ensure_tokenizer(self):
         if self._tokenizer is None:
             self._tokenizer = _ClipBPETokenizer(self.tokenizer_path)
         return self._tokenizer
+
+    def _get_input_size(self) -> tuple[int, int]:
+        try:
+            shape = self._image_session.get_inputs()[0].shape
+            h = shape[2] if isinstance(shape[2], int) else 256
+            w = shape[3] if isinstance(shape[3], int) else 256
+            return (w, h)
+        except Exception:
+            return (256, 256)
 
     def encode_text(self, text: str) -> np.ndarray:
         self._ensure_sessions()
@@ -703,14 +1229,32 @@ class MobileCLIPONNXBackend:
 
     def encode_image(self, file_path: str) -> np.ndarray:
         self._ensure_sessions()
-        # MobileCLIP2-S0 typically uses 256x256
-        im = _load_index_source_image(file_path, max_size=1024).resize((256, 256), Image.Resampling.BICUBIC)
-        rgb = np.asarray(im.convert("RGB"), dtype=np.float32) / 255.0
-        nchw = np.transpose(rgb, (2, 0, 1))[np.newaxis, ...]
-        
+        size = self._get_input_size()
+        nchw = _prep_mobileclip_image_chw_resized(file_path, size)[np.newaxis, ...]
         inputs = {self._image_session.get_inputs()[0].name: nchw}
         outputs = self._image_session.run(None, inputs)
         return self._normalize(outputs[0])
+
+    def encode_images(self, file_paths: Sequence[str]) -> List[np.ndarray]:
+        """Best-effort batched image encoding for ONNX backend."""
+        self._ensure_sessions()
+        paths = [p for p in (file_paths or []) if p]
+        if not paths:
+            return []
+        size = self._get_input_size()
+        workers = semantic_encode_prep_workers()
+        if len(paths) == 1 or workers <= 1:
+            tensors = [_prep_mobileclip_image_chw_resized(p, size) for p in paths]
+        else:
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=min(workers, len(paths))
+            ) as executor:
+                tensors = list(executor.map(lambda p: _prep_mobileclip_image_chw_resized(p, size), paths))
+        nchw = np.stack(tensors, axis=0)
+        inputs = {self._image_session.get_inputs()[0].name: nchw}
+        outputs = self._image_session.run(None, inputs)
+        out = np.asarray(outputs[0], dtype=np.float32)
+        return [self._normalize(out[i]) for i in range(out.shape[0])]
 
     @staticmethod
     def _normalize(vec: np.ndarray) -> np.ndarray:
@@ -735,7 +1279,7 @@ def resolve_mobileclip_backend() -> Any:
             return inst
         return MobileCLIPCoreMLBackend()
     else:
-        # Windows/Linux prefer ONNX
+        # Windows prefer ONNX (official release); macOS uses Core ML above.
         inst = MobileCLIPONNXBackend()
         if inst.available():
             return inst
@@ -836,6 +1380,130 @@ class _ClipBPETokenizer:
         return tokens + [0] * (context_length - len(tokens))
 
 
+_semantic_sort_read_local = threading.local()
+
+
+def _semantic_sort_read_conn(db_path: str) -> sqlite3.Connection:
+    """Per-thread read connection for capture_time lookups during background folder sort."""
+    conn = getattr(_semantic_sort_read_local, "conn", None)
+    if conn is None or getattr(_semantic_sort_read_local, "db_path", None) != db_path:
+        conn = sqlite3.connect(db_path, check_same_thread=False, timeout=30.0)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=60000")
+        try:
+            conn.execute("PRAGMA query_only=ON")
+        except sqlite3.OperationalError:
+            pass
+        _semantic_sort_read_local.conn = conn
+        _semantic_sort_read_local.db_path = db_path
+    return conn
+
+
+def get_semantic_capture_times_for_paths(
+    paths: Sequence[str],
+    db_path: Optional[str] = None,
+) -> Dict[str, str]:
+    """
+    Thread-safe bulk read of capture_time from semantic_index.db.
+
+    Used by folder-load / refinement workers (not only the UI thread) so navigation
+    order matches the semantic index instead of degrading to mtime when EXIF cache is cold.
+    """
+    if not paths:
+        return {}
+    if db_path is None:
+        cache_dir = os.path.expanduser("~/.rawviewer_cache")
+        db_path = os.path.join(cache_dir, "semantic_index.db")
+    if not os.path.isfile(db_path):
+        return {}
+
+    canonical_to_original: Dict[str, str] = {}
+    unique_canonical: List[str] = []
+    for p in paths:
+        if not p:
+            continue
+        cp = SemanticImageIndex._canonical_path(p)
+        if cp not in canonical_to_original:
+            canonical_to_original[cp] = p
+            unique_canonical.append(cp)
+    if not unique_canonical:
+        return {}
+
+    conn = _semantic_sort_read_conn(db_path)
+    result_map: Dict[str, str] = {}
+    chunk_size = 500
+    for i in range(0, len(unique_canonical), chunk_size):
+        chunk = unique_canonical[i : i + chunk_size]
+        placeholders = ",".join(["?"] * len(chunk))
+        rows = conn.execute(
+            f"""
+            SELECT file_path, capture_time
+            FROM semantic_index
+            WHERE lower(file_path) IN ({placeholders})
+              AND capture_time IS NOT NULL AND capture_time != ''
+            ORDER BY rowid DESC
+            """,
+            chunk,
+        ).fetchall()
+        for fp, ct in rows:
+            if fp in result_map:
+                continue
+            orig = canonical_to_original.get(fp)
+            if orig and ct:
+                result_map[orig] = str(ct)
+    return result_map
+
+
+def get_semantic_capture_times_for_folder(
+    folder_path: str,
+    db_path: Optional[str] = None,
+) -> Dict[str, str]:
+    """Bulk read capture_time for all indexed files under folder_path (any thread)."""
+    if not folder_path:
+        return {}
+    if db_path is None:
+        cache_dir = os.path.expanduser("~/.rawviewer_cache")
+        db_path = os.path.join(cache_dir, "semantic_index.db")
+    if not os.path.isfile(db_path):
+        return {}
+    try:
+        root = SemanticImageIndex._canonical_path(
+            os.path.abspath(folder_path)
+        )
+    except OSError:
+        return {}
+    if not root:
+        return {}
+    root_lower = root.rstrip("\\/").lower()
+    if os.sep == "\\":
+        prefix = root_lower + "\\%"
+    else:
+        prefix = root_lower.replace("\\", "/") + "/%"
+    path_expr = (
+        "lower(replace(file_path, '/', '\\\\'))"
+        if os.sep == "\\"
+        else "lower(replace(file_path, '\\\\', '/'))"
+    )
+    conn = _semantic_sort_read_conn(db_path)
+    result_map: Dict[str, str] = {}
+    rows = conn.execute(
+        f"""
+        SELECT file_path, capture_time
+        FROM semantic_index
+        WHERE {path_expr} LIKE ?
+          AND capture_time IS NOT NULL AND capture_time != ''
+        ORDER BY rowid DESC
+        """,
+        (prefix,),
+    ).fetchall()
+    for fp, ct in rows:
+        if fp in result_map:
+            continue
+        if ct:
+            result_map[fp] = str(ct)
+    return result_map
+
+
 class SemanticImageIndex:
     """SQLite-backed CLIP embedding index for local semantic search."""
 
@@ -901,7 +1569,49 @@ class SemanticImageIndex:
         self._model_name = model_name
         self._index_conn = None
         self._rg_lock = threading.Lock()
+        self._paused = False
+        self._pause_lock = threading.Lock()
         self._init_db_if_needed()
+
+    def pause_indexing(self, pause: bool) -> None:
+        """Pause or resume the background indexing loops."""
+        with self._pause_lock:
+            self._paused = pause
+
+    def _wait_if_paused(self) -> None:
+        """Helper to sleep/wait while the indexing process is paused."""
+        flag = os.environ.get("RAWVIEWER_INDEX_PAUSE_IN_GALLERY", "1").strip().lower()
+        if flag not in ("1", "true", "yes", "on"):
+            return
+        while True:
+            with self._pause_lock:
+                if not self._paused:
+                    break
+            time.sleep(0.5)
+
+    def _mark_metadata_ready_without_embedding(
+        self,
+        canonical_fp: str,
+        st: os.stat_result,
+        conn: sqlite3.Connection,
+    ) -> None:
+        """Mark file as metadata ready but without semantic embeddings (dim = 0)."""
+        conn.execute(
+            """
+            UPDATE semantic_index
+            SET semantic_ready = 1, dim = 0, embedding = ?, updated_at = ?
+            WHERE file_path = ? AND model_name = ? AND file_size = ? AND mtime_ns = ?
+            """,
+            (
+                b"",
+                float(time.time()),
+                canonical_fp,
+                self.model_name,
+                int(st.st_size),
+                self._mtime_ns_from_stat(st),
+            ),
+        )
+
 
     @property
     def backend(self):
@@ -1181,6 +1891,11 @@ class SemanticImageIndex:
 
     @staticmethod
     def _pil_dimensions(file_path: str) -> tuple[int, int]:
+        """Fallback dimensions when EXIF tags omit width/height.
+
+        For RAW, prefer rawpy header read only (PIL often fails on ARW). On network
+        drives this can still take seconds per file under parallel indexing.
+        """
         # Check thread-local cache first
         global _THREAD_LOCAL_DETECTORS
         if '_THREAD_LOCAL_DETECTORS' in globals() and hasattr(_THREAD_LOCAL_DETECTORS, 'last_original_sizes'):
@@ -1188,15 +1903,26 @@ class SemanticImageIndex:
             if w > 0 and h > 0:
                 return w, h
 
+        ext = os.path.splitext(file_path)[1].lower().lstrip(".")
+        if ext in RAW_FILE_EXTENSIONS:
+            try:
+                import rawpy  # type: ignore
+
+                with rawpy.imread(file_path) as raw:
+                    w = int(raw.sizes.width)
+                    h = int(raw.sizes.height)
+                    flip = int(getattr(raw.sizes, "flip", 0) or 0)
+                    if flip in (5, 6, 7, 8):
+                        w, h = h, w
+                    if w > 0 and h > 0:
+                        return w, h
+            except Exception:
+                pass
+            return 0, 0
+
         try:
             with Image.open(file_path) as im:
                 return int(im.width), int(im.height)
-        except Exception:
-            pass
-        try:
-            import rawpy  # type: ignore
-            with rawpy.imread(file_path) as raw:
-                return int(raw.sizes.width), int(raw.sizes.height)
         except Exception:
             pass
         return 0, 0
@@ -1437,7 +2163,12 @@ class SemanticImageIndex:
         except Exception:
             return None
 
-    def _extract_exif_brief(self, file_path: str, include_face: bool = False) -> Dict[str, object]:
+    def _extract_exif_brief(
+        self,
+        file_path: str,
+        include_face: bool = False,
+        file_stat: Optional[os.stat_result] = None,
+    ) -> Dict[str, object]:
         result = {
             "capture_time": "",
             "camera_model": "",
@@ -1463,9 +2194,17 @@ class SemanticImageIndex:
                 except Exception:
                     pass
 
+            t_exif = time.time()
+            # Stop after GPS block when possible; RAW uses exifread (header-only) in auto mode.
             tags = metadata_backend.process_file_from_path(
-                file_path, details=False
+                file_path,
+                details=False,
+                stop_tag="GPS GPSLongitudeRef",
             )
+            dur_exif = time.time() - t_exif
+            dur_dims = 0.0
+            dur_geo = 0.0
+            dur_cache = 0.0
             result["capture_time"] = self._tag_text(
                 tags,
                 "EXIF DateTimeOriginal",
@@ -1496,20 +2235,26 @@ class SemanticImageIndex:
             result["width"] = self._tag_int(
                 tags,
                 "EXIF ExifImageWidth",
+                "EXIF ImageWidth",
                 "Image ImageWidth",
                 "Image Width",
                 "EXIF PixelXDimension",
+                "MakerNote ImageWidth",
             )
             result["height"] = self._tag_int(
                 tags,
                 "EXIF ExifImageLength",
+                "EXIF ImageLength",
                 "Image ImageLength",
                 "Image Height",
                 "Image Length",
                 "EXIF PixelYDimension",
+                "MakerNote ImageHeight",
             )
             if not result["width"] or not result["height"]:
+                t_dims = time.time()
                 w, h = self._pil_dimensions(file_path)
+                dur_dims = time.time() - t_dims
                 result["width"] = int(result["width"] or w)
                 result["height"] = int(result["height"] or h)
                 
@@ -1538,11 +2283,14 @@ class SemanticImageIndex:
                     geo = self._ensure_reverse_geocoder()
                     if geo:
                         try:
-                            # Use a small timeout or limit to avoid blocking too long if multiple calls
-                            recs = geo.search(
-                                [(float(result["gps_lat"]), float(result["gps_lon"]))],
-                                mode=1,
-                            )
+                            t_geo = time.time()
+                            # reverse_geocoder is not thread-safe; serialize lookups.
+                            with self._rg_lock:
+                                recs = geo.search(
+                                    [(float(result["gps_lat"]), float(result["gps_lon"]))],
+                                    mode=1,
+                                )
+                            dur_geo = time.time() - t_geo
                             if recs:
                                 rec = recs[0] or {}
                                 result["city"] = str(rec.get("name", "") or "")
@@ -1572,6 +2320,8 @@ class SemanticImageIndex:
                             pass
 
                 from image_cache import get_image_cache
+
+                t_cache = time.time()
                 cache = get_image_cache()
                 cache_dict = {
                     "orientation": int(orientation),
@@ -1591,10 +2341,31 @@ class SemanticImageIndex:
                         "iso": int(result["iso"] or 0),
                     }
                 }
-                cache.put_exif(file_path, cache_dict)
+                if file_stat is not None:
+                    cache.put_exif(
+                        file_path,
+                        cache_dict,
+                        file_size=int(file_stat.st_size),
+                        file_mtime=float(file_stat.st_mtime),
+                    )
+                else:
+                    cache.put_exif(file_path, cache_dict)
+                dur_cache = time.time() - t_cache
             except Exception as e:
                 import logging
                 logging.getLogger(__name__).warning(f"[INDEX] Could not populate ImageCache for {file_path}: {e}")
+            total_dur = dur_exif + dur_dims + dur_geo + dur_cache
+            if total_dur > 2.0:
+                import logging
+                logging.getLogger(__name__).warning(
+                    "[INDEX] Slow metadata phases for %s: total=%.3fs exif=%.3fs dims=%.3fs geo=%.3fs cache_put=%.3fs",
+                    os.path.basename(file_path),
+                    total_dur,
+                    dur_exif,
+                    dur_dims,
+                    dur_geo,
+                    dur_cache,
+                )
         except Exception:
             pass
         return result
@@ -1661,17 +2432,34 @@ class SemanticImageIndex:
                     if not hasattr(_THREAD_LOCAL_DETECTORS, 'yunet'):
                         import logging
                         logging.getLogger(__name__).info("[VISION] Initializing OpenCV YuNet thread-local instance...")
-                        _THREAD_LOCAL_DETECTORS.yunet = cv2.FaceDetectorYN.create(
-                            model=model_path,
-                            config="",
-                            input_size=(w, h),
-                            score_threshold=0.75,
-                            nms_threshold=0.3,
-                            top_k=5000,
-                            backend_id=cv2.dnn.DNN_BACKEND_OPENCV,
-                            target_id=cv2.dnn.DNN_TARGET_CPU
+                        backend_id, target_id = resolve_opencv_dnn_backend_target()
+                        try:
+                            _THREAD_LOCAL_DETECTORS.yunet = cv2.FaceDetectorYN.create(
+                                model=model_path,
+                                config="",
+                                input_size=(w, h),
+                                score_threshold=0.85,
+                                nms_threshold=0.3,
+                                top_k=5000,
+                                backend_id=backend_id,
+                                target_id=target_id,
+                            )
+                        except Exception:
+                            _THREAD_LOCAL_DETECTORS.yunet = cv2.FaceDetectorYN.create(
+                                model=model_path,
+                                config="",
+                                input_size=(w, h),
+                                score_threshold=0.85,
+                                nms_threshold=0.3,
+                                top_k=5000,
+                                backend_id=cv2.dnn.DNN_BACKEND_OPENCV,
+                                target_id=cv2.dnn.DNN_TARGET_CPU,
+                            )
+                        logging.getLogger(__name__).info(
+                            "[VISION] OpenCV YuNet initialized (backend=%s target=%s).",
+                            backend_id,
+                            target_id,
                         )
-                        logging.getLogger(__name__).info("[VISION] OpenCV YuNet thread-local instance initialized successfully.")
                     
                     detector = _THREAD_LOCAL_DETECTORS.yunet
                     # Crucial: input size must match the actual image size for YuNet
@@ -1683,7 +2471,7 @@ class SemanticImageIndex:
                     import logging
                     logging.getLogger(__name__).debug(f"[VISION] OpenCV YuNet failed on {file_path}, trying OpenCV DNN: {yn_err}")
 
-                # 2. Windows / Linux fallback using OpenCV DNN Face Detector
+                # 2. Windows fallback using OpenCV DNN Face Detector
                 try:
                     import cv2
                     import numpy as np
@@ -1721,6 +2509,7 @@ class SemanticImageIndex:
                                         caffemodel_path
                                     )
                                 _FACE_DETECTOR_NET = cv2.dnn.readNetFromCaffe(prototxt_path, caffemodel_path)
+                                _apply_opencv_dnn_acceleration(_FACE_DETECTOR_NET)
                     
                     # Convert PIL image to BGR for OpenCV DNN
                     img_bgr = np.array(im.convert('RGB'))[:, :, ::-1].copy()
@@ -1735,7 +2524,7 @@ class SemanticImageIndex:
                     face_count = 0
                     for i in range(detections.shape[2]):
                         confidence = detections[0, 0, i, 2]
-                        if confidence > 0.75:  # 75% confidence threshold
+                        if confidence > 0.85:  # 85% confidence threshold
                             face_count += 1
                             
                     return face_count
@@ -1855,6 +2644,138 @@ class SemanticImageIndex:
                 f"Cannot decode image for semantic index: {os.path.basename(file_path)}"
             ) from exc
 
+    def _encode_images_best_effort(self, file_paths: Sequence[str]) -> List[np.ndarray]:
+        """
+        Encode multiple images. Falls back to per-image encoding when batch path
+        is unavailable or unsupported by the model graph.
+        """
+        paths = [p for p in (file_paths or []) if p]
+        if not paths:
+            return []
+        if self.model_name.startswith("mobileclip-"):
+            backend = self._mobileclip_backend or resolve_mobileclip_backend()
+            err = backend.availability_error()
+            if err:
+                raise RuntimeError(f"MobileCLIP backend unavailable: {err}")
+            if hasattr(backend, "encode_images"):
+                try:
+                    return list(backend.encode_images(paths))
+                except Exception:
+                    pass
+        return [self._encode_image(p) for p in paths]
+
+    def _semantic_batch_cache_key(self, accel_detail: str = "") -> str:
+        ep = ""
+        try:
+            if self.model_name.startswith("mobileclip-"):
+                backend = self._mobileclip_backend or resolve_mobileclip_backend()
+                self._mobileclip_backend = backend
+                if isinstance(backend, MobileCLIPONNXBackend):
+                    import onnxruntime as ort
+
+                    selected = resolve_onnx_execution_providers(
+                        list(ort.get_available_providers())
+                    )
+                    ep = ",".join(selected)
+                else:
+                    ep = backend.__class__.__name__
+        except Exception:
+            ep = accel_detail or "unknown"
+        return (
+            f"{sys.platform}|{self.model_name}|{ep}|{accel_detail or ''}"
+            f"|{SEMANTIC_BATCH_TUNE_CACHE_VERSION}"
+        )
+
+    def _auto_select_semantic_batch_size(
+        self, pending_for_semantic: Sequence[tuple[str, os.stat_result]], accel_detail: str = ""
+    ) -> int:
+        import logging
+
+        logger = logging.getLogger(__name__)
+        total = len(pending_for_semantic or [])
+        if total <= 1:
+            return 1
+        forced = semantic_batch_size_forced()
+        if forced is not None:
+            return forced
+        if not semantic_batch_auto_enabled():
+            return semantic_batch_size()
+
+        candidates = semantic_batch_candidates()
+        if self.model_name.startswith("mobileclip-"):
+            backend = self._mobileclip_backend or resolve_mobileclip_backend()
+            self._mobileclip_backend = backend
+            if isinstance(backend, MobileCLIPCoreMLBackend):
+                chunk = semantic_coreml_chunk_size()
+                logger.info(
+                    "[INDEX][SPEED] Core ML encode chunk size: %d (parallel prep)",
+                    chunk,
+                )
+                return min(total, chunk)
+            if not isinstance(backend, MobileCLIPONNXBackend):
+                return 1
+
+        cache_key = self._semantic_batch_cache_key(accel_detail)
+        cache = _load_semantic_batch_cache()
+        cached = cache.get(cache_key)
+        if cached in candidates:
+            logger.info("[INDEX][SPEED] Semantic batch auto cached: %d", int(cached))
+            return int(cached)
+
+        max_cand = max(candidates)
+        sample_n = min(
+            total,
+            max(semantic_batch_tune_sample_count(), max_cand),
+        )
+        sample_paths = [cp for cp, _ in list(pending_for_semantic)[:sample_n]]
+        best_batch = 1
+        best_tput = 0.0
+        tie_ratio = semantic_batch_tie_ratio()
+        logger.info(
+            "[INDEX][SPEED] Auto-tuning semantic batch size on %d samples; "
+            "candidates=%s (tie_ratio=%.2f)",
+            sample_n,
+            candidates,
+            tie_ratio,
+        )
+        for cand in candidates:
+            t0 = time.time()
+            ok = True
+            try:
+                for i in range(0, sample_n, cand):
+                    chunk = sample_paths[i : i + cand]
+                    self._encode_images_best_effort(chunk)
+            except Exception as e:
+                ok = False
+                logger.info(
+                    "[INDEX][SPEED] Batch candidate %d failed during auto-tune: %s",
+                    cand,
+                    e,
+                )
+            elapsed = max(1e-9, time.time() - t0)
+            tput = (sample_n / elapsed) if ok else 0.0
+            logger.info(
+                "[INDEX][SPEED] Batch candidate %d -> %.2f img/s (%s)",
+                cand,
+                tput,
+                "ok" if ok else "failed",
+            )
+            if ok:
+                if tput > best_tput:
+                    best_tput = tput
+                    best_batch = cand
+                elif tput >= best_tput * tie_ratio and cand > best_batch:
+                    best_batch = cand
+
+        cache[cache_key] = int(best_batch)
+        _save_semantic_batch_cache(cache)
+        logger.info(
+            "[INDEX][SPEED] Auto-selected semantic batch size: %d (%.2f img/s on samples)",
+            best_batch,
+            best_tput,
+        )
+        return int(best_batch)
+
     def _encode_text(self, text: str) -> np.ndarray:
         if self.model_name.startswith("mobileclip-"):
             backend = self._mobileclip_backend or resolve_mobileclip_backend()
@@ -1933,6 +2854,121 @@ class SemanticImageIndex:
                 pass
         return 1280
 
+    def _warm_thumbnail_cache_for_semantic_index(
+        self,
+        paths: List[str],
+        progress_callback: ProgressCallback = None,
+        *,
+        progress_album_total: int = 0,
+        progress_indexed_base: int = 0,
+    ) -> int:
+        """
+        Pre-extract thumbnails so MobileCLIP encode hits ImageCache instead of rawpy per file.
+        """
+        import logging
+        from image_cache import get_image_cache
+
+        logger = logging.getLogger(__name__)
+        if not paths or not semantic_warm_thumbs_before_index():
+            return 0
+
+        cache = get_image_cache()
+        pending = [p for p in paths if cache.get_thumbnail(p) is None]
+        if not pending:
+            logger.info(
+                "[INDEX] Semantic thumbnail warm-up: all %d paths already cached",
+                len(paths),
+            )
+            return 0
+
+        workers = min(semantic_encode_prep_workers(), 16)
+        t0 = time.time()
+        warmed = 0
+
+        def _warm_one(path: str) -> bool:
+            if cache.get_thumbnail(path) is not None:
+                return True
+            try:
+                from enhanced_raw_processor import (
+                    ThumbnailExtractor,
+                    _thumbnail_via_qimage_reader,
+                    extract_embedded_jpeg_by_scan,
+                )
+
+                arr = extract_embedded_jpeg_by_scan(path, 1024)
+                if arr is None:
+                    arr = _thumbnail_via_qimage_reader(path, 1024)
+                if arr is not None:
+                    cache.put_thumbnail(path, arr, None)
+                    return True
+                thumb = ThumbnailExtractor().extract_thumbnail_from_raw(
+                    path, max_size=1024, allow_scan_fallback=False
+                )
+                if thumb is not None:
+                    cache.put_thumbnail(path, thumb, None)
+                    return True
+            except Exception:
+                pass
+            return False
+
+        logger.info(
+            "[INDEX] Warming thumbnail cache for semantic index: %d/%d files (%d workers)",
+            len(pending),
+            len(paths),
+            workers,
+        )
+        total = len(pending)
+        warmed_base = progress_indexed_base + (len(paths) - len(pending)) * 0.1
+        if workers <= 1 or total < 4:
+            for i, path in enumerate(pending, start=1):
+                if _warm_one(path):
+                    warmed += 1
+                if progress_callback and (i <= 2 or i >= total or i % 25 == 0):
+                    if progress_album_total > 0:
+                        progress_callback(
+                            int(warmed_base + i * 0.1),
+                            progress_album_total,
+                            format_index_progress("Semantic", int(warmed_base + i * 0.1), progress_album_total),
+                        )
+                    else:
+                        progress_callback(
+                            i,
+                            total,
+                            format_index_progress("Preparing thumbnails", i, total),
+                        )
+        else:
+            completed = 0
+            with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+                futures = {executor.submit(_warm_one, p): p for p in pending}
+                for future in concurrent.futures.as_completed(futures):
+                    completed += 1
+                    if future.result():
+                        warmed += 1
+                    if progress_callback and (
+                        completed <= 2 or completed >= total or completed % 25 == 0
+                    ):
+                        if progress_album_total > 0:
+                            progress_callback(
+                                int(warmed_base + completed * 0.1),
+                                progress_album_total,
+                                format_index_progress("Semantic", int(warmed_base + completed * 0.1), progress_album_total),
+                            )
+                        else:
+                            progress_callback(
+                                completed,
+                                total,
+                                format_index_progress(
+                                    "Preparing thumbnails", completed, total
+                                ),
+                            )
+        logger.info(
+            "[INDEX] Semantic thumbnail warm-up done: %d/%d in %.2fs",
+            warmed,
+            len(pending),
+            time.time() - t0,
+        )
+        return warmed
+
     def _warm_thumbnail_cache_for_face_scan(
         self,
         paths: List[str],
@@ -2004,7 +3040,11 @@ class SemanticImageIndex:
                 if _warm_one(path):
                     warmed += 1
                 if progress_callback and (i <= 2 or i >= total or i % 20 == 0):
-                    progress_callback(i, total, "Warming thumbnails...")
+                    progress_callback(
+                        i,
+                        total,
+                        format_index_progress("Preparing thumbnails", i, total),
+                    )
         else:
             completed = 0
             with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
@@ -2042,7 +3082,13 @@ class SemanticImageIndex:
                         if progress_callback and (
                             completed <= 2 or completed >= total or completed % 20 == 0
                         ):
-                            progress_callback(completed, total, "Warming thumbnails...")
+                            progress_callback(
+                                completed,
+                                total,
+                                format_index_progress(
+                                    "Preparing thumbnails", completed, total
+                                ),
+                            )
                     futures = set(not_done)
                 for future in futures:
                     future.cancel()
@@ -2070,8 +3116,8 @@ class SemanticImageIndex:
             chunk = unique[i : i + chunk_size]
             qs = ",".join(["?"] * len(chunk))
             cursor = conn.execute(
-                f"SELECT file_path FROM semantic_index WHERE file_path IN ({qs}) AND face_count IS NULL",
-                chunk,
+                f"SELECT file_path FROM semantic_index WHERE file_path IN ({qs}) AND face_count IS NULL AND model_name = ?",
+                [*chunk, self.model_name],
             )
             pending.extend(row[0] for row in cursor.fetchall())
         return pending
@@ -2079,7 +3125,8 @@ class SemanticImageIndex:
     def get_face_pending_count(self, file_paths: Sequence[str]) -> int:
         if not file_paths:
             return 0
-        canonical = [self._canonical_path(p) for p in file_paths if p]
+        indexable_paths, _ = self._filter_duplicate_raw_companions(file_paths)
+        canonical = [self._canonical_path(p) for p in indexable_paths if p]
         if not canonical:
             return 0
         try:
@@ -2112,6 +3159,12 @@ class SemanticImageIndex:
         try:
             face_pending = self._face_pending_paths(conn, unique_canonical)
             if face_pending:
+                if progress_callback:
+                    progress_callback(
+                        album_indexed_base,
+                        album_total or len(file_paths),
+                        format_index_progress("Face", 0, len(face_pending)),
+                    )
                 self._run_parallel_face_scan(
                     face_pending,
                     conn,
@@ -2143,15 +3196,6 @@ class SemanticImageIndex:
             return
 
         warm_cb = None
-        if progress_callback:
-
-            def warm_cb(local_i, local_n, msg):
-                progress_callback(
-                    progress_indexed_base,
-                    progress_album_total or local_n,
-                    f"Warming thumbnails… {local_i}/{local_n}",
-                )
-
         self._warm_thumbnail_cache_for_face_scan(face_pending, warm_cb)
 
         workers = self._face_scan_worker_count()
@@ -2180,7 +3224,7 @@ class SemanticImageIndex:
                     progress_callback(
                         progress_indexed_base,
                         progress_album_total,
-                        f"Scanning faces… {idx}/{total_face}",
+                        format_index_progress("Face", idx, total_face),
                     )
                 cp, face_count = _scan_one(cp)
                 with lock:
@@ -2226,7 +3270,7 @@ class SemanticImageIndex:
                     progress_callback(
                         progress_indexed_base,
                         progress_album_total,
-                        f"Scanning faces… {completed}/{total_face}",
+                        format_index_progress("Face", completed, total_face),
                     )
 
         if batch_writes > 0:
@@ -2242,6 +3286,42 @@ class SemanticImageIndex:
             (dur / total_face) * 1000.0 if total_face else 0,
         )
 
+    @staticmethod
+    def _raw_companion_key(fp: str) -> str:
+        base = os.path.basename(fp)
+        parts = base.split(".")
+        if len(parts) > 1:
+            for idx, part in enumerate(parts):
+                if part.startswith("RAW-"):
+                    return ".".join(parts[:idx]).lower()
+            return ".".join(parts[:-1]).lower()
+        return base.lower()
+
+    @classmethod
+    def _filter_duplicate_raw_companions(
+        cls, file_paths: Sequence[str]
+    ) -> tuple[List[str], List[str]]:
+        """Return (indexable paths, skipped RAW paths with a non-raw companion)."""
+        filtered_paths: List[str] = []
+        skipped_raw: List[str] = []
+        non_raw_keys: set = set()
+        for fp in file_paths:
+            if not fp:
+                continue
+            ext = os.path.splitext(fp)[1].lower().lstrip(".")
+            if ext and ext not in RAW_FILE_EXTENSIONS:
+                non_raw_keys.add((os.path.dirname(fp), cls._raw_companion_key(fp)))
+        for fp in file_paths:
+            if not fp:
+                continue
+            ext = os.path.splitext(fp)[1].lower().lstrip(".")
+            if ext in RAW_FILE_EXTENSIONS:
+                if (os.path.dirname(fp), cls._raw_companion_key(fp)) in non_raw_keys:
+                    skipped_raw.append(fp)
+                    continue
+            filtered_paths.append(fp)
+        return filtered_paths, skipped_raw
+
     def build_index(
         self,
         file_paths: Sequence[str],
@@ -2250,53 +3330,32 @@ class SemanticImageIndex:
         album_total: int = 0,
         album_indexed_base: int = 0,
         run_face_scan: Optional[bool] = None,
+        run_semantic_embeddings: Optional[bool] = None,
     ) -> Dict[str, int]:
         import logging
         import sys
         import sqlite3
         logger = logging.getLogger(__name__)
         t_start = time.time()
+        log_inference_acceleration_profile()
+        if run_semantic_embeddings is None:
+            run_semantic_embeddings = semantic_embeddings_enabled()
         logger.info(f"[INDEX] Starting indexing of {len(file_paths)} file paths.")
         if sys.platform != "darwin":
-            logger.info("[VISION] Using OpenCV offline face scanner for Windows.")
-            
-        # Identify raw files that have a companion non-raw image to avoid duplicate indexing and slash indexing times
-        filtered_paths = []
-        skipped_companions = 0
-        
-        # Build a set of non-raw companion base keys in each directory
-        def get_companion_key(fp: str) -> str:
-            base = os.path.basename(fp)
-            parts = base.split('.')
-            if len(parts) > 1:
-                for idx, part in enumerate(parts):
-                    if part.startswith("RAW-"):
-                        return ".".join(parts[:idx]).lower()
-                return ".".join(parts[:-1]).lower()
-            return base.lower()
+            logger.info("[VISION] Using OpenCV offline face scanner on Windows.")
 
-        # Find all non-raw files in the list
-        non_raw_keys = set()
-        for fp in file_paths:
-            if not fp: continue
-            ext = os.path.splitext(fp)[1].lower().lstrip(".")
-            if ext and ext not in RAW_FILE_EXTENSIONS:
-                dirname = os.path.dirname(fp)
-                non_raw_keys.add((dirname, get_companion_key(fp)))
-
-        for fp in file_paths:
-            if not fp: continue
-            ext = os.path.splitext(fp)[1].lower().lstrip(".")
-            if ext in RAW_FILE_EXTENSIONS:
-                dirname = os.path.dirname(fp)
-                comp_key = get_companion_key(fp)
-                if (dirname, comp_key) in non_raw_keys:
-                    skipped_companions += 1
-                    logger.info(f"[INDEX] Skipping RAW companion file to avoid duplicate results: {os.path.basename(fp)}")
-                    continue
-            filtered_paths.append(fp)
-            
-        logger.info(f"[INDEX] Filtered out {skipped_companions} RAW companion files. Actual files to evaluate: {len(filtered_paths)}")
+        filtered_paths, skipped_raw_paths = self._filter_duplicate_raw_companions(file_paths)
+        skipped_companions = len(skipped_raw_paths)
+        for fp in skipped_raw_paths:
+            logger.info(
+                "[INDEX] Skipping RAW companion file to avoid duplicate results: %s",
+                os.path.basename(fp),
+            )
+        logger.info(
+            "[INDEX] Filtered out %d RAW companion files. Actual files to evaluate: %d",
+            skipped_companions,
+            len(filtered_paths),
+        )
             
         total = len(file_paths)
         indexed = 0
@@ -2311,7 +3370,17 @@ class SemanticImageIndex:
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
         conn.execute("PRAGMA busy_timeout=60000")
-        
+
+        if skipped_raw_paths:
+            for fp in skipped_raw_paths:
+                try:
+                    cp = self._canonical_path(fp)
+                    st = os.stat(cp)
+                    self._mark_semantic_skipped(cp, st, conn)
+                except OSError:
+                    pass
+            conn.commit()
+
         total_face = 0
         run_face_inline = False
         try:
@@ -2327,7 +3396,7 @@ class SemanticImageIndex:
                 chunk = unique_canonical[i:i+chunk_size]
                 qs = ",".join(["?"] * len(chunk))
                 cursor = conn.execute(
-                    f"SELECT file_path, file_mtime, file_size, semantic_ready, gps_lat, city FROM semantic_index WHERE file_path IN ({qs})",
+                    f"SELECT file_path, file_mtime, file_size, semantic_ready, dim, gps_lat, city FROM semantic_index WHERE file_path IN ({qs})",
                     chunk
                 )
                 for row in cursor.fetchall():
@@ -2335,8 +3404,9 @@ class SemanticImageIndex:
                         "mtime": row[1],
                         "size": row[2],
                         "semantic_ready": row[3],
-                        "gps_lat": row[4],
-                        "city": row[5]
+                        "dim": row[4],
+                        "gps_lat": row[5],
+                        "city": row[6]
                     }
             logger.info(f"[INDEX] Pre-fetch completed in {time.time() - t0:.4f}s. Found {len(existing_meta)} matches in database.")
 
@@ -2363,7 +3433,11 @@ class SemanticImageIndex:
                     else:
                         row = existing_meta[canonical_fp]
                         sr = int(row["semantic_ready"] or 0)
-                        if sr == 0:
+                        dim = int(self._row_value(row, "dim", 0) or 0)
+                        needs_semantic = (sr == 0) or (
+                            bool(run_semantic_embeddings) and sr == 1 and dim == 0
+                        )
+                        if needs_semantic:
                             pending_for_semantic.append((canonical_fp, st))
                         else:
                             skipped += 1
@@ -2380,17 +3454,38 @@ class SemanticImageIndex:
             
             if total_extract > 0:
                 logger.info(f"[INDEX] Starting parallel metadata extraction for {total_extract} files using ThreadPoolExecutor...")
+                if progress_callback:
+                    progress_callback(
+                        progress_indexed_base,
+                        progress_album_total,
+                        format_index_progress("Metadata", progress_indexed_base, progress_album_total),
+                    )
                 t_meta_start = time.time()
-                max_workers = min(3, os.cpu_count() or 2)
+                from common_image_loader import index_metadata_worker_count
+
+                max_workers = index_metadata_worker_count(total_extract)
+                logger.info(
+                    "[INDEX] Metadata workers=%d for %d files",
+                    max_workers,
+                    total_extract,
+                )
                 with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
                     def extract_task(item):
+                        self._wait_if_paused()
                         cp, st = item
                         try:
                             t_single_start = time.time()
-                            meta = self._extract_exif_brief(cp, include_face=False)
+                            meta = self._extract_exif_brief(
+                                cp, include_face=False, file_stat=st
+                            )
                             t_single_dur = time.time() - t_single_start
-                            if t_single_dur > 0.1:
-                                logger.warning(f"[INDEX] Slow metadata extraction (>100ms) for {os.path.basename(cp)}: {t_single_dur:.4f}s")
+                            if t_single_dur > 2.0:
+                                logger.warning(
+                                    "[INDEX] Slow metadata extraction for %s: %.3fs "
+                                    "(often EXIF cache lock vs folder sort refinement)",
+                                    os.path.basename(cp),
+                                    t_single_dur,
+                                )
                             return cp, st, meta
                         except Exception as e:
                             logger.error(f"[INDEX] Failed to extract EXIF for {os.path.basename(cp)}: {e}")
@@ -2421,7 +3516,9 @@ class SemanticImageIndex:
                             progress_callback(
                                 progress_indexed_base,
                                 progress_album_total,
-                                f"Scanning metadata… {i}/{total_extract}",
+                                format_index_progress(
+                                    "Metadata", progress_indexed_base + i, progress_album_total
+                                ),
                             )
 
                 if batch_writes > 0:
@@ -2444,69 +3541,261 @@ class SemanticImageIndex:
 
             # Phase 2: semantic embeddings (search-critical). Run before face scan.
             if total_sem > 0:
-                logger.info(f"[INDEX] Starting AI features neural pass (MobileCLIP) for {total_sem} files...")
-                t_sem_start = time.time()
-                for i, (canonical_fp, st) in enumerate(pending_for_semantic, start=1):
-                    time.sleep(0.15)  # breathing room for MobileCLIP on GPU
+                self._wait_if_paused()
+                if run_semantic_embeddings:
+                    logger.info(f"[INDEX] Starting AI features neural pass (MobileCLIP) for {total_sem} files...")
                     if progress_callback:
-                        if i <= 2 or i >= total_sem or (i % 12 == 0):
-                            progress_callback(
-                                progress_indexed_base + i,
-                                progress_album_total,
-                                "Processing AI features…",
-                            )
+                        progress_callback(
+                            progress_indexed_base,
+                            progress_album_total,
+                            format_index_progress("Semantic", progress_indexed_base, progress_album_total),
+                        )
+                    sem_gpu_accel = False
+                    sem_accel_detail = "unknown"
                     try:
-                        t_single_neural = time.time()
-                        vec = self._encode_image(canonical_fp)
-                        t_neural_dur = time.time() - t_single_neural
-                        if t_neural_dur > 0.5:
-                            logger.info(f"[INDEX] MobileCLIP encoding for {os.path.basename(canonical_fp)} took {t_neural_dur:.4f}s")
-                        conn.execute(
-                            """
-                            UPDATE semantic_index
-                            SET dim = ?, embedding = ?, semantic_ready = 1, updated_at = ?
-                            WHERE file_path = ? AND model_name = ? AND file_size = ? AND mtime_ns = ?
-                            """,
-                            (
-                                int(vec.size),
-                                self._to_blob(vec),
-                                float(time.time()),
-                                canonical_fp,
-                                self.model_name,
-                                int(st.st_size),
-                                self._mtime_ns_from_stat(st),
-                            ),
+                        if self.model_name.startswith("mobileclip-"):
+                            backend = self._mobileclip_backend or resolve_mobileclip_backend()
+                            self._mobileclip_backend = backend
+                            if isinstance(backend, MobileCLIPONNXBackend):
+                                try:
+                                    import onnxruntime as ort
+
+                                    selected = resolve_onnx_execution_providers(
+                                        list(ort.get_available_providers())
+                                    )
+                                except Exception:
+                                    selected = ["CPUExecutionProvider"]
+                                sem_gpu_accel = any(
+                                    str(p) != "CPUExecutionProvider" for p in selected
+                                )
+                                sem_accel_detail = f"ONNX providers=[{', '.join(selected)}]"
+                            elif isinstance(backend, MobileCLIPCoreMLBackend):
+                                cu = os.environ.get(
+                                    "RAWVIEWER_COREML_COMPUTE_UNITS", "all"
+                                ).strip().lower()
+                                sem_gpu_accel = cu not in ("cpu", "cpuonly")
+                                sem_accel_detail = f"CoreML compute_units={cu}"
+                            else:
+                                sem_accel_detail = backend.__class__.__name__
+                        else:
+                            sem_accel_detail = f"model={self.model_name}"
+                    except Exception as accel_exc:
+                        sem_accel_detail = f"unavailable ({accel_exc})"
+                    logger.info(
+                        "[INDEX][ACCEL] Semantic acceleration: gpu=%s (%s)",
+                        "ON" if sem_gpu_accel else "OFF",
+                        sem_accel_detail,
+                    )
+                    try:
+                        if self.model_name.startswith("mobileclip-"):
+                            backend = self._mobileclip_backend or resolve_mobileclip_backend()
+                            self._mobileclip_backend = backend
+                            if isinstance(backend, MobileCLIPONNXBackend):
+                                backend._ensure_sessions()
+                                img_providers = backend._image_session.get_providers()
+                                txt_providers = backend._text_session.get_providers()
+                                logger.info(
+                                    "[INDEX][ACCEL] ONNX active session providers: image=%s text=%s",
+                                    img_providers,
+                                    txt_providers,
+                                )
+                    except Exception as provider_exc:
+                        logger.debug(
+                            "[INDEX][ACCEL] Could not read active ONNX session providers: %s",
+                            provider_exc,
                         )
-                        indexed += 1
-                        batch_writes += 1
-                        if batch_writes >= commit_every:
-                            conn.commit()
-                            batch_writes = 0
-                    except Exception as e:
-                        logger.warning(
-                            "[INDEX] Skipping semantic embedding for %s: %s",
-                            os.path.basename(canonical_fp),
-                            e,
+                    warm_paths = [cp for cp, _ in pending_for_semantic]
+                    self._warm_thumbnail_cache_for_semantic_index(
+                        warm_paths,
+                        progress_callback,
+                        progress_album_total=progress_album_total,
+                        progress_indexed_base=progress_indexed_base,
+                    )
+                    throttle_sec = semantic_gpu_throttle_seconds()
+                    batch_size = self._auto_select_semantic_batch_size(
+                        pending_for_semantic,
+                        sem_accel_detail,
+                    )
+                    logger.info(
+                        "[INDEX][SPEED] Semantic batch size: %d",
+                        batch_size,
+                    )
+                    if throttle_sec > 0:
+                        logger.info(
+                            "[INDEX][SPEED] Semantic throttle enabled: %.0f ms/image",
+                            throttle_sec * 1000.0,
                         )
-                        failed += 1
+                    t_sem_start = time.time()
+                    sem_success = 0
+                    sem_fail = 0
+                    i = 0
+                    for batch_start in range(0, total_sem, batch_size):
+                        self._wait_if_paused()
+                        batch_items = pending_for_semantic[batch_start : batch_start + batch_size]
+                        batch_paths = [cp for cp, _ in batch_items]
                         try:
-                            self._mark_semantic_skipped(canonical_fp, st, conn)
-                            self._store_face_count(
-                                canonical_fp, 0, conn=conn, commit=False
+                            t_batch_neural = time.time()
+                            vecs = self._encode_images_best_effort(batch_paths)
+                            t_batch_dur = time.time() - t_batch_neural
+                            if t_batch_dur > 0.5:
+                                logger.info(
+                                    "[INDEX] MobileCLIP encoding batch=%d took %.4fs",
+                                    len(batch_items),
+                                    t_batch_dur,
+                                )
+                            for (canonical_fp, st), vec in zip(batch_items, vecs):
+                                i += 1
+                                conn.execute(
+                                    """
+                                    UPDATE semantic_index
+                                    SET dim = ?, embedding = ?, semantic_ready = 1, updated_at = ?
+                                    WHERE file_path = ? AND model_name = ? AND file_size = ? AND mtime_ns = ?
+                                    """,
+                                    (
+                                        int(vec.size),
+                                        self._to_blob(vec),
+                                        float(time.time()),
+                                        canonical_fp,
+                                        self.model_name,
+                                        int(st.st_size),
+                                        self._mtime_ns_from_stat(st),
+                                    ),
+                                )
+                                indexed += 1
+                                sem_success += 1
+                                batch_writes += 1
+                                if progress_callback and (
+                                     i <= 2 or i >= total_sem or (i % 5 == 0)
+                                 ):
+                                     progress_callback(
+                                         int(progress_indexed_base + total_sem * 0.1 + i * 0.9),
+                                         progress_album_total,
+                                         format_index_progress("Semantic", int(progress_indexed_base + total_sem * 0.1 + i * 0.9), progress_album_total),
+                                     )
+                                if batch_writes >= commit_every:
+                                    conn.commit()
+                                    batch_writes = 0
+                                if throttle_sec > 0:
+                                    time.sleep(throttle_sec)
+                        except Exception as batch_exc:
+                            logger.warning(
+                                "[INDEX] Batch semantic encode failed (size=%d): %s. Falling back to per-image.",
+                                len(batch_items),
+                                batch_exc,
                             )
-                            batch_writes += 1
-                            if batch_writes >= commit_every:
-                                conn.commit()
-                                batch_writes = 0
-                        except Exception as mark_exc:
-                            logger.debug(
-                                "[INDEX] Could not mark skipped for %s: %s",
-                                os.path.basename(canonical_fp),
-                                mark_exc,
+                            for canonical_fp, st in batch_items:
+                                i += 1
+                                try:
+                                    t_single_neural = time.time()
+                                    vec = self._encode_image(canonical_fp)
+                                    t_neural_dur = time.time() - t_single_neural
+                                    if t_neural_dur > 0.5:
+                                        logger.info(
+                                            f"[INDEX] MobileCLIP encoding for {os.path.basename(canonical_fp)} took {t_neural_dur:.4f}s"
+                                        )
+                                    conn.execute(
+                                        """
+                                        UPDATE semantic_index
+                                        SET dim = ?, embedding = ?, semantic_ready = 1, updated_at = ?
+                                        WHERE file_path = ? AND model_name = ? AND file_size = ? AND mtime_ns = ?
+                                        """,
+                                        (
+                                            int(vec.size),
+                                            self._to_blob(vec),
+                                            float(time.time()),
+                                            canonical_fp,
+                                            self.model_name,
+                                            int(st.st_size),
+                                            self._mtime_ns_from_stat(st),
+                                        ),
+                                    )
+                                    indexed += 1
+                                    sem_success += 1
+                                    batch_writes += 1
+                                    if batch_writes >= commit_every:
+                                        conn.commit()
+                                        batch_writes = 0
+                                except Exception as e:
+                                    logger.warning(
+                                        "[INDEX] Skipping semantic embedding for %s: %s",
+                                        os.path.basename(canonical_fp),
+                                        e,
+                                    )
+                                    failed += 1
+                                    sem_fail += 1
+                                    try:
+                                        self._mark_semantic_skipped(canonical_fp, st, conn)
+                                        self._store_face_count(
+                                            canonical_fp, 0, conn=conn, commit=False
+                                        )
+                                        batch_writes += 1
+                                        if batch_writes >= commit_every:
+                                            conn.commit()
+                                            batch_writes = 0
+                                    except Exception as mark_exc:
+                                        logger.debug(
+                                            "[INDEX] Could not mark skipped for %s: %s",
+                                            os.path.basename(canonical_fp),
+                                            mark_exc,
+                                        )
+                                if progress_callback and (
+                                    i <= 2 or i >= total_sem or (i % 5 == 0)
+                                ):
+                                    progress_callback(
+                                        int(progress_indexed_base + total_sem * 0.1 + i * 0.9),
+                                        progress_album_total,
+                                        format_index_progress("Semantic", int(progress_indexed_base + total_sem * 0.1 + i * 0.9), progress_album_total),
+                                    )
+                                if throttle_sec > 0:
+                                    time.sleep(throttle_sec)
+
+                        if i % 25 == 0 or i == total_sem:
+                            elapsed_so_far = max(1e-9, time.time() - t_sem_start)
+                            throughput_so_far = float(i) / elapsed_so_far
+                            logger.info(
+                                "[INDEX][SPEED] Semantic progress: %d/%d in %.3fs (%.2f img/s)",
+                                i,
+                                total_sem,
+                                elapsed_so_far,
+                                throughput_so_far,
                             )
-                if batch_writes:
+                    if batch_writes:
+                        conn.commit()
+                        batch_writes = 0
+                    sem_elapsed = max(1e-9, time.time() - t_sem_start)
+                    sem_avg = sem_elapsed / max(1, total_sem)
+                    sem_throughput = float(total_sem) / sem_elapsed
+                    logger.info(f"[INDEX] Completed AI neural pass in {sem_elapsed:.4f}s.")
+                    logger.info(
+                        "[INDEX][SPEED] Semantic pass stats: total=%d success=%d failed=%d elapsed=%.3fs avg=%.4fs/img throughput=%.2f img/s",
+                        total_sem,
+                        sem_success,
+                        sem_fail,
+                        sem_elapsed,
+                        sem_avg,
+                        sem_throughput,
+                    )
+                else:
+                    logger.info(f"[INDEX] Skipping AI features neural pass (MobileCLIP) for {total_sem} files (metadata-only index).")
+                    
+                    # Warm the thumbnail cache in the background even if not doing semantic embeddings now!
+                    # This populates the cache for future gallery display and future semantic searches.
+                    warm_paths = [cp for cp, _ in pending_for_semantic]
+                    try:
+                        self._warm_thumbnail_cache_for_semantic_index(
+                            warm_paths,
+                            progress_callback,
+                            progress_album_total=progress_album_total,
+                            progress_indexed_base=progress_indexed_base,
+                        )
+                    except Exception as e:
+                        logger.warning(f"[INDEX] Background thumbnail warming failed: {e}")
+
+                    for canonical_fp, st in pending_for_semantic:
+                        self._wait_if_paused()
+                        self._mark_metadata_ready_without_embedding(canonical_fp, st, conn)
+                        indexed += 1
                     conn.commit()
-                logger.info(f"[INDEX] Completed AI neural pass in {time.time() - t_sem_start:.4f}s.")
 
             # Phase 3: face scan (optional; skipped when deferred to a follow-up worker).
             if run_face_inline:
@@ -2515,6 +3804,12 @@ class SemanticImageIndex:
                     total_face,
                     total_sem,
                 )
+                if progress_callback:
+                    progress_callback(
+                        progress_indexed_base,
+                        progress_album_total,
+                        format_index_progress("Face", 0, total_face),
+                    )
                 self._run_parallel_face_scan(
                     face_pending,
                     conn,
@@ -2547,8 +3842,9 @@ class SemanticImageIndex:
         if not file_paths:
             return {"total": 0, "indexed": 0, "missing": 0, "ready": 1}
 
-        total = len(file_paths)
-        canonical_paths = [self._canonical_path(p) for p in file_paths if p]
+        indexable_paths, _ = self._filter_duplicate_raw_companions(file_paths)
+        total = len(indexable_paths)
+        canonical_paths = [self._canonical_path(p) for p in indexable_paths if p]
         
         # Bulk lookup in database
         placeholders = ",".join(["?"] * len(canonical_paths))
@@ -2585,17 +3881,95 @@ class SemanticImageIndex:
         if not file_paths:
             return []
 
-        canonical_map = {self._canonical_path(p): p for p in file_paths if p}
+        import time
+        t0 = time.time()
+
+        indexable_paths, _ = self._filter_duplicate_raw_companions(file_paths)
+        if not indexable_paths:
+            return []
+
+        # Bulk fetch rows in one (or a few) database queries!
+        rows = self._fetch_rows_for_paths(indexable_paths)
+        
+        # Build map of canonical path to row
+        row_map = {}
+        for r in rows:
+            fp = r['file_path']
+            row_map[self._canonical_path(fp)] = r
+
         pending: List[str] = []
+        
+        canonical_map = {self._canonical_path(p): p for p in indexable_paths if p}
         for cp, original in canonical_map.items():
             try:
                 st = os.stat(cp)
             except OSError:
                 pending.append(original)
                 continue
-            if self._needs_reindex(cp, st):
+
+            row = row_map.get(cp)
+            sr = int(self._row_value(row, 'semantic_ready', 0) or 0) if row else 0
+            dim = int(self._row_value(row, 'dim', 0) or 0) if row else 0
+            if (not row) or sr == 0 or (sr == 1 and dim == 0):
                 pending.append(original)
+                continue
+
+            # Check if file changed on disk (mtime or size mismatch)
+            row_size = self._row_value(row, 'file_size', None)
+            if row_size is None or int(row_size) != int(st.st_size):
+                pending.append(original)
+                continue
+
+            row_mtime_ns = self._row_value(row, 'mtime_ns', None)
+            if row_mtime_ns is not None:
+                try:
+                    if int(row_mtime_ns) != self._mtime_ns_from_stat(st):
+                        pending.append(original)
+                        continue
+                except Exception:
+                    pass
+            else:
+                row_mtime = self._row_value(row, 'file_mtime', None)
+                if row_mtime is None or not self._mtime_matches(float(row_mtime), st):
+                    pending.append(original)
+                    continue
+
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.debug(
+            "[INDEX] Pending scan: %d pending of %d paths in %.4fs (bulk)",
+            len(pending),
+            len(file_paths),
+            time.time() - t0
+        )
         return pending
+
+    def get_pending_embedding_paths(self, file_paths: Sequence[str]) -> List[str]:
+        """
+        Return paths that have metadata in database but are missing semantic embeddings (dim = 0).
+        """
+        if not file_paths:
+            return []
+        
+        indexable_paths, _ = self._filter_duplicate_raw_companions(file_paths)
+        if not indexable_paths:
+            return []
+
+        rows = self._fetch_rows_for_paths(indexable_paths)
+        row_map = {}
+        for r in rows:
+            fp = r['file_path']
+            row_map[self._canonical_path(fp)] = r
+
+        pending: List[str] = []
+        canonical_map = {self._canonical_path(p): p for p in indexable_paths if p}
+        for cp, original in canonical_map.items():
+            row = row_map.get(cp)
+            if row and int(self._row_value(row, 'semantic_ready', 0) or 0) == 1 and int(self._row_value(row, 'dim', 0) or 0) == 0:
+                pending.append(original)
+                
+        return pending
+
 
     def _fetch_rows_for_paths(self, paths: Sequence[str]) -> List[sqlite3.Row]:
         """Bulk fetch rows for a list of paths using optimized batch queries."""

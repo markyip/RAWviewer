@@ -14,10 +14,143 @@ import pickle
 import shutil
 import numpy as np
 from collections import OrderedDict
-from typing import Optional, Tuple, Dict, Any, Union
+from typing import Optional, Tuple, Dict, Any, Union, List
 import psutil
 from PyQt6.QtGui import QPixmap, QImage
 from PyQt6.QtCore import QObject, pyqtSignal
+
+
+def disk_preview_max_edge() -> int:
+    """Max long edge for JPEG files under ~/.rawviewer_cache/previews (grid tier is separate)."""
+    raw = os.environ.get("RAWVIEWER_DISK_PREVIEW_MAX", "512").strip()
+    try:
+        v = int(raw)
+    except Exception:
+        v = 512
+    return max(256, min(v, 1024))
+
+
+def memory_preview_max_edge() -> int:
+    """Max in-memory preview for progressive single-image RAW display (not disk size)."""
+    raw = os.environ.get("RAWVIEWER_MEMORY_PREVIEW_MAX", "1920").strip()
+    try:
+        v = int(raw)
+    except Exception:
+        v = 1920
+    return max(512, min(v, 4096))
+
+
+def _jpeg_bytes_max_edge(jpeg_data: bytes, max_edge: int) -> bytes:
+    """Downscale JPEG bytes so disk cache entries stay thumbnail-sized."""
+    if not jpeg_data or max_edge <= 0:
+        return jpeg_data
+    try:
+        from PIL import Image, ImageOps
+        import io
+
+        pil_image = Image.open(io.BytesIO(jpeg_data))
+        pil_image = ImageOps.exif_transpose(pil_image)
+        w, h = pil_image.size
+        if max(w, h) <= max_edge:
+            # We must re-save to strip EXIF orientation and ensure it stays rotated.
+            out = io.BytesIO()
+            pil_image.save(out, format="JPEG", quality=85)
+            return out.getvalue()
+        scale = max_edge / float(max(w, h))
+        new_w = max(1, int(w * scale))
+        new_h = max(1, int(h * scale))
+        resized = pil_image.resize((new_w, new_h), Image.Resampling.HAMMING)
+        if resized.mode != "RGB":
+            resized = resized.convert("RGB")
+        out = io.BytesIO()
+        resized.save(out, format="JPEG", quality=85)
+        return out.getvalue()
+    except Exception:
+        return jpeg_data
+
+
+def _exif_cache_path_key(file_path: str) -> str:
+    """Normalized path for exif_cache row keys and lookups (case- and slash-tolerant on Windows)."""
+    if not file_path:
+        return ""
+    try:
+        p = file_path if os.path.isabs(file_path) else os.path.abspath(file_path)
+        key = os.path.normcase(os.path.normpath(p))
+    except OSError:
+        key = os.path.normcase(os.path.normpath(file_path))
+    if os.sep == "\\":
+        key = key.replace("/", "\\")
+    return key
+
+
+def _exif_sql_path_expr(column: str = "file_path") -> str:
+    """SQL expression that normalizes slashes for path comparisons."""
+    if os.sep == "\\":
+        return f"lower(replace({column}, '/', '\\\\'))"
+    return f"lower(replace({column}, '\\\\', '/'))"
+
+
+def _exif_sql_folder_like_pattern(folder_path: str) -> str:
+    """LIKE prefix for all files under folder_path (must match _exif_sql_path_expr slashes)."""
+    root = _exif_cache_path_key(os.path.abspath(folder_path)).rstrip("\\/")
+    root_lower = root.lower()
+    if os.sep == "\\":
+        return root_lower + "\\%"
+    return root_lower.replace("\\", "/") + "/%"
+
+
+def _exif_sql_folder_like_patterns(folder_path: str) -> List[str]:
+    """Candidate LIKE prefixes (drive letter vs UNC realpath may differ in the DB)."""
+    patterns: List[str] = []
+    try:
+        primary = _exif_sql_folder_like_pattern(folder_path)
+        if primary:
+            patterns.append(primary)
+        try:
+            real_root = os.path.realpath(os.path.abspath(folder_path))
+        except OSError:
+            real_root = None
+        if real_root:
+            alt = _exif_sql_folder_like_pattern(real_root)
+            if alt and alt not in patterns:
+                patterns.append(alt)
+    except OSError:
+        pass
+    return patterns
+
+
+def _mtime_matches(cached_mtime: float, current_mtime: float) -> bool:
+    """Allow sub-second drift (network shares / FAT timestamp granularity)."""
+    try:
+        return abs(float(cached_mtime) - float(current_mtime)) < 1.0
+    except (TypeError, ValueError):
+        return cached_mtime == current_mtime
+
+
+def _capture_time_from_exif_row(row, exif_data: Optional[dict] = None) -> Optional[str]:
+    ct = row[7] if len(row) > 7 else None
+    if ct and str(ct).strip():
+        return str(ct)
+    if exif_data and exif_data.get("capture_time"):
+        return str(exif_data["capture_time"])
+    return None
+
+
+def _file_stats_row(
+    file_stats: Optional[Dict[str, Tuple[int, float]]], *paths: str
+) -> Optional[Tuple[int, float]]:
+    if not file_stats:
+        return None
+    for path in paths:
+        if not path:
+            continue
+        if path in file_stats:
+            return file_stats[path]
+        nk = _exif_cache_path_key(path)
+        for key, row in file_stats.items():
+            if _exif_cache_path_key(key) == nk:
+                return row
+    return None
 
 
 class LRUCache:
@@ -103,6 +236,12 @@ class MemoryOnlyPersistentCache:
 
     def get_multiple(self, file_paths: list, file_stats: Optional[Dict[str, Tuple[int, float]]] = None,
                      fast_mode: bool = True) -> Dict[str, Dict[str, Any]]:
+        return {}
+
+    def get_capture_times_bulk(self, file_paths: list) -> Dict[str, str]:
+        return {}
+
+    def get_capture_times_for_folder(self, folder_path: str) -> Dict[str, str]:
         return {}
 
     def put(self, file_path: str, value: Any) -> bool:
@@ -213,6 +352,7 @@ class PersistentEXIFCache:
         file_size, file_mtime = self._get_file_hash(file_path)
         if file_size == 0:
             return None
+        cache_key = _exif_cache_path_key(file_path)
 
         with self.lock:
             try:
@@ -220,8 +360,8 @@ class PersistentEXIFCache:
                 cursor = conn.execute(
                     "SELECT file_size, file_mtime, orientation, camera_make, camera_model, exif_data, "
                     "capture_time, original_width, original_height, sensor_meta_ver "
-                    "FROM exif_cache WHERE file_path = ?",
-                    (file_path,)
+                    "FROM exif_cache WHERE lower(file_path) = lower(?)",
+                    (cache_key,),
                 )
                 row = cursor.fetchone()
 
@@ -259,20 +399,34 @@ class PersistentEXIFCache:
 
     def remove(self, file_path: str) -> bool:
         """Remove cached EXIF data for a file."""
+        cache_key = _exif_cache_path_key(file_path)
         with self.lock:
             try:
                 conn = self._get_connection()
-                cursor = conn.execute("DELETE FROM exif_cache WHERE file_path = ?", (file_path,))
+                cursor = conn.execute(
+                    "DELETE FROM exif_cache WHERE lower(file_path) = lower(?)",
+                    (cache_key,),
+                )
                 conn.commit()
                 return cursor.rowcount > 0
             except Exception:
                 return False
 
-    def put(self, file_path: str, exif_info: Dict[str, Any]) -> None:
-        """Cache EXIF data."""
-        file_size, file_mtime = self._get_file_hash(file_path)
+    def put(
+        self,
+        file_path: str,
+        exif_info: Dict[str, Any],
+        *,
+        file_size: Optional[int] = None,
+        file_mtime: Optional[float] = None,
+    ) -> None:
+        """Cache EXIF data. Pass file_size/file_mtime when already known (avoids stat under lock)."""
+        if file_size is None or file_mtime is None:
+            file_size, file_mtime = self._get_file_hash(file_path)
         if file_size == 0:
             return
+
+        storage_path = _exif_cache_path_key(file_path)
 
         with self.lock:
             try:
@@ -306,7 +460,7 @@ class PersistentEXIFCache:
                     "cached_time, capture_time, original_width, original_height, sensor_meta_ver) "
                     "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
-                        file_path,
+                        storage_path,
                         file_size,
                         file_mtime,
                         exif_info.get('orientation', 1),
@@ -357,94 +511,232 @@ class PersistentEXIFCache:
             return {}
 
         results = {}
-        with self.lock:
-            try:
-                conn = self._get_connection()
-                # sqlite has a limit on the number of variables in a query
-                # Process in chunks of 500
-                for i in range(0, len(file_paths), 500):
-                    chunk = file_paths[i:i+500]
-                    placeholders = ','.join(['?'] * len(chunk))
-                    
-                    # Fetch all optimized columns
-                    query = f"SELECT file_path, file_size, file_mtime, orientation, camera_make, camera_model, " \
-                            f"exif_data, capture_time, original_width, original_height, sensor_meta_ver " \
-                            f"FROM exif_cache WHERE file_path IN ({placeholders})"
-                            
-                    cursor = conn.execute(query, chunk)
-                    
-                    for row in cursor.fetchall():
-                        path = row[0]
-                        # Use provided stats if available, otherwise fetch from disk
-                        if file_stats and path in file_stats:
-                            file_size, file_mtime = file_stats[path]
-                        else:
-                            file_size, file_mtime = self._get_file_hash(path)
-                        
-                        if row[1] == file_size and row[2] == file_mtime:
-                            # Cache is valid
-                            sensor_meta_ver = int(row[10] or 0) if len(row) > 10 else 0
-                            
-                            # Fast Mode Optimization: Skip unpickling if we have all needed data
-                            # We need capture_time, width, height, orientation
-                            has_fast_data = row[7] is not None and row[8] is not None and row[9] is not None
-                            
-                            if fast_mode and has_fast_data:
-                                # FAST PATH: Skip unpickling!
-                                exif_data = {} # Empty dict as placeholder
-                                result_capture_time = row[7]
-                                result_width = row[8]
-                                result_height = row[9]
-                            else:
-                                # SLOW PATH: Unpickle blob
-                                exif_data = pickle.loads(row[6]) if row[6] else {}
-                                result_capture_time = row[7] if row[7] else exif_data.get('capture_time')
-                                
-                                # Width fallback
-                                result_width = row[8]
-                                if result_width is None:
-                                    result_width = exif_data.get('original_width')
-                                    if result_width is None:
-                                        # Fallback to standard EXIF tags
-                                        for tag in ['Image ImageWidth', 'EXIF ExifImageWidth', 'Image Width']:
-                                            val = exif_data.get(tag)
-                                            if val:
-                                                try:
-                                                    result_width = int(str(val))
-                                                    break
-                                                except:
-                                                    pass
+        try:
+            conn = self._get_connection()
+            # sqlite has a limit on the number of variables in a query
+            # Process in chunks of 500; do not hold lock across entire folder (6889+ files).
+            for i in range(0, len(file_paths), 450):
+                chunk = file_paths[i : i + 450]
+                lookup: Dict[str, str] = {}
+                norm_keys: List[str] = []
+                for p in chunk:
+                    nk = _exif_cache_path_key(p)
+                    lookup[nk] = p
+                    norm_keys.append(nk)
+                placeholders = ",".join(["?"] * len(norm_keys))
 
-                                # Height fallback
-                                result_height = row[9]
-                                if result_height is None:
-                                    result_height = exif_data.get('original_height')
-                                    if result_height is None:
-                                         # Fallback to standard EXIF tags
-                                        for tag in ['Image ImageLength', 'EXIF ExifImageLength', 'Image Height', 'Image Length']:
-                                            val = exif_data.get(tag)
-                                            if val:
-                                                try:
-                                                    result_height = int(str(val))
-                                                    break
-                                                except:
-                                                    pass
-                            
-                            results[path] = {
-                                'orientation': row[3],
-                                'camera_make': row[4],
-                                'camera_model': row[5],
-                                'exif_data': exif_data,
-                                'capture_time': result_capture_time,
-                                'original_width': result_width,
-                                'original_height': result_height,
-                                'raw_exif_sensor_meta_ver': sensor_meta_ver,
-                            }
-                # No conn.close() here as it is thread-local
-                pass
-            except Exception:
-                pass
+                path_expr = _exif_sql_path_expr("file_path")
+                query = (
+                    f"SELECT file_path, file_size, file_mtime, orientation, camera_make, camera_model, "
+                    f"exif_data, capture_time, original_width, original_height, sensor_meta_ver "
+                    f"FROM exif_cache WHERE {path_expr} IN ({placeholders})"
+                )
+                with self.lock:
+                    cursor = conn.execute(query, norm_keys)
+                    rows = cursor.fetchall()
+
+                for row in rows:
+                    db_path = row[0]
+                    req_path = lookup.get(_exif_cache_path_key(db_path))
+                    if not req_path:
+                        continue
+                    st = _file_stats_row(file_stats, req_path, db_path)
+                    if st is not None:
+                        file_size = int(st[0])
+                        file_mtime = float(st[1]) if len(st) > 1 else 0.0
+                    elif fast_mode:
+                        file_size, file_mtime = int(row[1]), float(row[2])
+                    else:
+                        file_size, file_mtime = self._get_file_hash(req_path)
+
+                    mtime_ok = int(row[1]) == int(file_size) and _mtime_matches(
+                        row[2], file_mtime
+                    )
+
+                    exif_data: Dict[str, Any] = {}
+                    result_capture_time = _capture_time_from_exif_row(row)
+                    if not result_capture_time and row[6]:
+                        try:
+                            exif_data = pickle.loads(row[6]) or {}
+                            result_capture_time = _capture_time_from_exif_row(row, exif_data)
+                        except Exception:
+                            exif_data = {}
+
+                    # For folder sort: trust DB capture_time even when size/mtime drift (K: shares).
+                    if not mtime_ok and not result_capture_time:
+                        continue
+
+                    sensor_meta_ver = int(row[10] or 0) if len(row) > 10 else 0
+                    has_fast_data = (
+                        row[7] is not None and row[8] is not None and row[9] is not None
+                    )
+
+                    if mtime_ok and fast_mode and has_fast_data:
+                        exif_data = {}
+                        result_capture_time = row[7]
+                        result_width = row[8]
+                        result_height = row[9]
+                    elif mtime_ok:
+                        if not exif_data and row[6]:
+                            try:
+                                exif_data = pickle.loads(row[6]) or {}
+                            except Exception:
+                                exif_data = {}
+                        if not result_capture_time:
+                            result_capture_time = exif_data.get("capture_time")
+
+                        result_width = row[8]
+                        if result_width is None:
+                            result_width = exif_data.get("original_width")
+                            if result_width is None:
+                                for tag in [
+                                    "Image ImageWidth",
+                                    "EXIF ExifImageWidth",
+                                    "Image Width",
+                                ]:
+                                    val = exif_data.get(tag)
+                                    if val:
+                                        try:
+                                            result_width = int(str(val))
+                                            break
+                                        except Exception:
+                                            pass
+
+                        result_height = row[9]
+                        if result_height is None:
+                            result_height = exif_data.get("original_height")
+                            if result_height is None:
+                                for tag in [
+                                    "Image ImageLength",
+                                    "EXIF ExifImageLength",
+                                    "Image Height",
+                                    "Image Length",
+                                ]:
+                                    val = exif_data.get(tag)
+                                    if val:
+                                        try:
+                                            result_height = int(str(val))
+                                            break
+                                        except Exception:
+                                            pass
+                    else:
+                        # sort_only_stale: capture_time for ordering only
+                        result_width = row[8]
+                        result_height = row[9]
+
+                    results[req_path] = {
+                        "orientation": row[3] if row[3] is not None else 1,
+                        "camera_make": row[4] or "",
+                        "camera_model": row[5] or "",
+                        "exif_data": exif_data,
+                        "capture_time": result_capture_time,
+                        "original_width": result_width,
+                        "original_height": result_height,
+                        "raw_exif_sensor_meta_ver": sensor_meta_ver,
+                    }
+        except Exception:
+            pass
         return results
+
+    def get_capture_times_bulk(self, file_paths: list) -> Dict[str, str]:
+        """Read capture_time for sorting only — no size/mtime validation (fast, K:-safe)."""
+        if not file_paths:
+            return {}
+        out: Dict[str, str] = {}
+        try:
+            conn = self._get_connection()
+            path_expr = _exif_sql_path_expr("file_path")
+            # SQLite default max bind variables is 999; one key per path only.
+            for i in range(0, len(file_paths), 450):
+                chunk = file_paths[i : i + 450]
+                lookup: Dict[str, str] = {}
+                query_keys: List[str] = []
+                for p in chunk:
+                    nk = _exif_cache_path_key(p)
+                    lookup[nk] = p
+                    query_keys.append(nk)
+                placeholders = ",".join(["?"] * len(query_keys))
+                query = (
+                    f"SELECT file_path, capture_time, exif_data FROM exif_cache "
+                    f"WHERE {path_expr} IN ({placeholders})"
+                )
+                with self.lock:
+                    rows = conn.execute(query, query_keys).fetchall()
+                for db_path, ct_col, blob in rows:
+                    req = lookup.get(_exif_cache_path_key(db_path))
+                    if not req or req in out:
+                        continue
+                    ct = ct_col if ct_col and str(ct_col).strip() else None
+                    if not ct and blob:
+                        try:
+                            data = pickle.loads(blob) or {}
+                            if isinstance(data, dict):
+                                ct = data.get("capture_time")
+                        except Exception:
+                            pass
+                    if ct and str(ct).strip():
+                        out[req] = str(ct)
+        except Exception:
+            pass
+        return out
+
+    def get_capture_times_for_folder(self, folder_path: str) -> Dict[str, str]:
+        """All cached capture_time entries under folder_path (slash-agnostic LIKE)."""
+        if not folder_path:
+            return {}
+        patterns = _exif_sql_folder_like_patterns(folder_path)
+        if not patterns:
+            return {}
+        path_expr = _exif_sql_path_expr("file_path")
+        out: Dict[str, str] = {}
+        try:
+            conn = self._get_connection()
+            for pattern in patterns:
+                with self.lock:
+                    rows = conn.execute(
+                        f"SELECT file_path, capture_time FROM exif_cache "
+                        f"WHERE {path_expr} LIKE ? "
+                        f"AND capture_time IS NOT NULL AND capture_time != ''",
+                        (pattern,),
+                    ).fetchall()
+                for db_path, ct_col in rows:
+                    nk = _exif_cache_path_key(db_path)
+                    if nk in out:
+                        continue
+                    if ct_col and str(ct_col).strip():
+                        out[nk] = str(ct_col)
+            if not out:
+                # Rare: capture_time only inside pickled blob
+                for pattern in patterns:
+                    with self.lock:
+                        rows = conn.execute(
+                            f"SELECT file_path, exif_data FROM exif_cache "
+                            f"WHERE {path_expr} LIKE ? AND exif_data IS NOT NULL",
+                            (pattern,),
+                        ).fetchall()
+                    for db_path, blob in rows:
+                        nk = _exif_cache_path_key(db_path)
+                        if nk in out or not blob:
+                            continue
+                        try:
+                            data = pickle.loads(blob) or {}
+                            if isinstance(data, dict):
+                                ct = data.get("capture_time")
+                                if ct and str(ct).strip():
+                                    out[nk] = str(ct)
+                        except Exception:
+                            pass
+        except Exception as exc:
+            import logging
+
+            logging.getLogger(__name__).warning(
+                "[CACHE] get_capture_times_for_folder failed for %r (patterns=%s): %s",
+                folder_path,
+                patterns,
+                exc,
+                exc_info=True,
+            )
+        return out
     
     def close(self):
         """Close the database connection for the current thread."""
@@ -697,8 +989,52 @@ class PersistentThumbnailCache:
             pass
 
 
+class PersistentGridCache(PersistentThumbnailCache):
+    """Persistent disk cache for medium-res grid tiles (e.g., 512px)."""
+    
+    def __init__(self, cache_dir: str = None):
+        if cache_dir is None:
+            cache_dir = os.path.expanduser("~/.rawviewer_cache")
+        # Use 'grid' subdirectory
+        self.base_cache_dir = cache_dir 
+        super().__init__(cache_dir) # Init with base dir, will setup 'thumbnails'
+        
+        # Override cache_dir and db_path for grid
+        self.cache_dir = os.path.join(self.base_cache_dir, "grid")
+        os.makedirs(self.cache_dir, exist_ok=True)
+        self.db_path = os.path.join(self.base_cache_dir, "grid_cache.db")
+        self._init_db() # Re-init DB with new path
+        
+    def _init_db(self):
+        """Initialize grid cache database."""
+        with self.lock:
+            try:
+                # Reset thread-local connection for new DB path
+                if hasattr(self._local, 'conn'):
+                    del self._local.conn
+                    
+                conn = self._get_connection()
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS thumbnail_cache (
+                        file_path TEXT PRIMARY KEY,
+                        file_size INTEGER,
+                        file_mtime REAL,
+                        cache_file TEXT,
+                        cached_time REAL
+                    )
+                """)
+                # Create index for faster lookups
+                conn.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_file_path ON thumbnail_cache(file_path)
+                """)
+                conn.execute("PRAGMA journal_mode=WAL")
+                conn.commit()
+            except Exception:
+                pass
+
+
 class PersistentPreviewCache(PersistentThumbnailCache):
-    """Persistent disk cache for larger JPEG previews (e.g., 2048px)."""
+    """Persistent disk cache for medium JPEG previews (default max edge 512px)."""
     
     def __init__(self, cache_dir: str = None):
         if cache_dir is None:
@@ -813,17 +1149,20 @@ class ImageCache(QObject):
         # Initialize caches
         # Initialize caches
         self.thumbnail_cache = LRUCache(max_size=cache_sizes['thumbnails'])
+        self.grid_cache = LRUCache(max_size=cache_sizes['thumbnails'] // 2)
         self.preview_cache = LRUCache(max_size=10) # Keep a few high-res previews in memory
         self.full_image_cache = LRUCache(max_size=cache_sizes['full_images'])
         self.pixmap_cache = LRUCache(max_size=cache_sizes['full_images'])
         if self.persistent_cache_enabled:
             self.exif_cache = PersistentEXIFCache(cache_dir)
             self.disk_thumbnail_cache = PersistentThumbnailCache(cache_dir)
+            self.disk_grid_cache = PersistentGridCache(cache_dir)
             self.disk_preview_cache = PersistentPreviewCache(cache_dir)
         else:
             # Trial mode: keep all acceleration in RAM and never create/write local cache files.
             self.exif_cache = MemoryOnlyPersistentCache()
             self.disk_thumbnail_cache = MemoryOnlyPersistentCache()
+            self.disk_grid_cache = MemoryOnlyPersistentCache()
             self.disk_preview_cache = MemoryOnlyPersistentCache()
 
         # In-memory EXIF cache (used even if persistent cache is enabled for speed)
@@ -832,6 +1171,7 @@ class ImageCache(QObject):
         # Cache statistics
         self.stats = {
             'thumbnail_requests': 0,
+            'grid_requests': 0,
             'preview_requests': 0,
             'full_image_requests': 0,
             'pixmap_requests': 0,
@@ -894,13 +1234,11 @@ class ImageCache(QObject):
         jpeg_data = self.disk_thumbnail_cache.get(file_path)
         if jpeg_data is not None:
             try:
-                from PIL import Image
-                import io
-                # Load JPEG from bytes
-                pil_image = Image.open(io.BytesIO(jpeg_data))
-                if pil_image.mode != 'RGB':
-                    pil_image = pil_image.convert('RGB')
-                thumbnail = np.array(pil_image)
+                from common_image_loader import decode_embedded_jpeg_bytes
+
+                thumbnail = decode_embedded_jpeg_bytes(jpeg_data, max_size=0)
+                if thumbnail is None:
+                    raise ValueError("decode_embedded_jpeg_bytes failed")
                 # Also cache in memory for faster subsequent access
                 self.thumbnail_cache.put(file_path, thumbnail.copy())
                 self.cache_hit.emit(file_path, 'thumbnail')
@@ -909,6 +1247,85 @@ class ImageCache(QObject):
                 # If loading from disk cache fails, remove it
                 self.disk_thumbnail_cache.remove(file_path)
         
+        # --- Dynamic Mipmap Fallback ---
+        # 1. Downsample from Grid cache (512px) if available
+        grid = self.grid_cache.get(file_path)
+        if grid is None:
+            grid_jpeg = self.disk_grid_cache.get(file_path)
+            if grid_jpeg is not None:
+                try:
+                    from PIL import Image, ImageOps
+                    import io
+                    pil_image = Image.open(io.BytesIO(grid_jpeg))
+                    pil_image = ImageOps.exif_transpose(pil_image)
+                    if pil_image.mode != 'RGB':
+                        pil_image = pil_image.convert('RGB')
+                    grid = np.array(pil_image)
+                except Exception:
+                    pass
+        
+        if grid is not None:
+            try:
+                from PIL import Image
+                import io
+                if grid.dtype != np.uint8:
+                    grid = grid.astype(np.uint8)
+                pil_img = Image.fromarray(grid)
+                w, h = pil_img.size
+                scale = min(256 / w, 256 / h)
+                new_w = max(1, int(w * scale))
+                new_h = max(1, int(h * scale))
+                thumb_pil = pil_img.resize((new_w, new_h), Image.Resampling.HAMMING)
+                thumbnail = np.array(thumb_pil)
+                
+                # Compress and store in disk/memory caches
+                buffer = io.BytesIO()
+                thumb_pil.save(buffer, format='JPEG', quality=85)
+                t_jpeg = buffer.getvalue()
+                self.put_thumbnail(file_path, thumbnail, t_jpeg)
+                return thumbnail
+            except Exception:
+                pass
+                
+        # 2. Downsample from preview cache (memory or disk, up to ~512px) if available
+        preview = self.preview_cache.get(file_path)
+        if preview is None:
+            preview_jpeg = self.disk_preview_cache.get(file_path)
+            if preview_jpeg is not None:
+                try:
+                    from PIL import Image, ImageOps
+                    import io
+                    pil_image = Image.open(io.BytesIO(preview_jpeg))
+                    pil_image = ImageOps.exif_transpose(pil_image)
+                    if pil_image.mode != 'RGB':
+                        pil_image = pil_image.convert('RGB')
+                    preview = np.array(pil_image)
+                except Exception:
+                    pass
+                    
+        if preview is not None:
+            try:
+                from PIL import Image
+                import io
+                if preview.dtype != np.uint8:
+                    preview = preview.astype(np.uint8)
+                pil_img = Image.fromarray(preview)
+                w, h = pil_img.size
+                scale = min(256 / w, 256 / h)
+                new_w = max(1, int(w * scale))
+                new_h = max(1, int(h * scale))
+                thumb_pil = pil_img.resize((new_w, new_h), Image.Resampling.HAMMING)
+                thumbnail = np.array(thumb_pil)
+                
+                # Compress and store in disk/memory caches
+                buffer = io.BytesIO()
+                thumb_pil.save(buffer, format='JPEG', quality=85)
+                t_jpeg = buffer.getvalue()
+                self.put_thumbnail(file_path, thumbnail, t_jpeg)
+                return thumbnail
+            except Exception:
+                pass
+
         self.cache_miss.emit(file_path, 'thumbnail')
         return None
 
@@ -926,6 +1343,137 @@ class ImageCache(QObject):
             if jpeg_data is not None:
                 self.disk_thumbnail_cache.put(file_path, jpeg_data)
 
+    def get_grid(self, file_path: str) -> Optional[np.ndarray]:
+        """Get cached grid image (max 512px) or return None if not cached."""
+        if 'grid_requests' not in self.stats:
+            self.stats['grid_requests'] = 0
+        self.stats['grid_requests'] += 1
+        self._check_memory_pressure()
+
+        # 1. Check in-memory grid cache
+        grid = self.grid_cache.get(file_path)
+        if grid is not None:
+            self.cache_hit.emit(file_path, 'grid')
+            return grid
+
+        # 2. Check disk grid cache
+        jpeg_data = self.disk_grid_cache.get(file_path)
+        if jpeg_data is not None:
+            try:
+                from PIL import Image, ImageOps
+                import io
+                pil_image = Image.open(io.BytesIO(jpeg_data))
+                pil_image = ImageOps.exif_transpose(pil_image)
+                if pil_image.mode != 'RGB':
+                    pil_image = pil_image.convert('RGB')
+                grid = np.array(pil_image)
+                self.grid_cache.put(file_path, grid.copy())
+                self.cache_hit.emit(file_path, 'grid')
+                return grid
+            except Exception:
+                self.disk_grid_cache.remove(file_path)
+
+        # 3. Dynamic Mipmap Fallback 1: Downsample from preview tier
+        preview = self.preview_cache.get(file_path)
+        if preview is None:
+            preview_jpeg = self.disk_preview_cache.get(file_path)
+            if preview_jpeg is not None:
+                try:
+                    from PIL import Image, ImageOps
+                    import io
+                    pil_image = Image.open(io.BytesIO(preview_jpeg))
+                    pil_image = ImageOps.exif_transpose(pil_image)
+                    if pil_image.mode != 'RGB':
+                        pil_image = pil_image.convert('RGB')
+                    preview = np.array(pil_image)
+                except Exception:
+                    pass
+        
+        if preview is not None:
+            try:
+                from PIL import Image
+                import io
+                if preview.dtype != np.uint8:
+                    preview = preview.astype(np.uint8)
+                pil_img = Image.fromarray(preview)
+                w, h = pil_img.size
+                scale = min(512 / w, 512 / h)
+                new_w = max(1, int(w * scale))
+                new_h = max(1, int(h * scale))
+                grid_pil = pil_img.resize((new_w, new_h), Image.Resampling.HAMMING)
+                grid = np.array(grid_pil)
+                
+                # Compress and store in disk/memory caches
+                buffer = io.BytesIO()
+                grid_pil.save(buffer, format='JPEG', quality=85)
+                g_jpeg = buffer.getvalue()
+                self.put_grid(file_path, grid, g_jpeg)
+                return grid
+            except Exception:
+                pass
+
+        # 4. Dynamic Mipmap Fallback 2: Upsample from Thumbnail (256px)
+        thumb = self.thumbnail_cache.get(file_path)
+        if thumb is None:
+            thumb_jpeg = self.disk_thumbnail_cache.get(file_path)
+            if thumb_jpeg is not None:
+                try:
+                    from PIL import Image, ImageOps
+                    import io
+                    pil_image = Image.open(io.BytesIO(thumb_jpeg))
+                    pil_image = ImageOps.exif_transpose(pil_image)
+                    if pil_image.mode != 'RGB':
+                        pil_image = pil_image.convert('RGB')
+                    thumb = np.array(pil_image)
+                except Exception:
+                    pass
+        
+        if thumb is not None:
+            try:
+                from PIL import Image
+                if thumb.dtype != np.uint8:
+                    thumb = thumb.astype(np.uint8)
+                pil_img = Image.fromarray(thumb)
+                w, h = pil_img.size
+                scale = min(512 / w, 512 / h)
+                new_w = max(1, int(w * scale))
+                new_h = max(1, int(h * scale))
+                grid_pil = pil_img.resize((new_w, new_h), Image.Resampling.BICUBIC)
+                grid = np.array(grid_pil)
+                self.grid_cache.put(file_path, grid.copy())
+                return grid
+            except Exception:
+                pass
+
+        self.cache_miss.emit(file_path, 'grid')
+        return None
+
+    def put_grid(self, file_path: str, grid: np.ndarray, jpeg_data: bytes = None) -> None:
+        """Cache a grid image (max 512px)."""
+        if grid is not None:
+            # Ensure grid image is reasonable size (max 512x512)
+            if grid.shape[0] > 512 or grid.shape[1] > 512:
+                return
+            # Cache in memory
+            self.grid_cache.put(file_path, grid.copy())
+            
+            # Cache on disk
+            if self.persistent_cache_enabled:
+                if jpeg_data is not None:
+                    self.disk_grid_cache.put(file_path, jpeg_data)
+                else:
+                    try:
+                        from PIL import Image
+                        import io
+                        if grid.dtype != np.uint8:
+                            grid = grid.astype(np.uint8)
+                        pil_image = Image.fromarray(grid)
+                        buffer = io.BytesIO()
+                        pil_image.save(buffer, format='JPEG', quality=85)
+                        self.disk_grid_cache.put(file_path, buffer.getvalue())
+                    except Exception:
+                        pass
+
     def get_preview(self, file_path: str) -> Optional[np.ndarray]:
         """Get cached preview (screen size) or return None."""
         self.stats['preview_requests'] += 1
@@ -939,11 +1487,14 @@ class ImageCache(QObject):
 
         # Check disk cache for previews
         jpeg_data = self.disk_preview_cache.get(file_path)
+        if jpeg_data is None:
+            jpeg_data = self.disk_grid_cache.get(file_path)
         if jpeg_data is not None:
              try:
-                from PIL import Image
+                from PIL import Image, ImageOps
                 import io
                 pil_image = Image.open(io.BytesIO(jpeg_data))
+                pil_image = ImageOps.exif_transpose(pil_image)
                 if pil_image.mode != 'RGB':
                     pil_image = pil_image.convert('RGB')
                 preview = np.array(pil_image)
@@ -958,10 +1509,12 @@ class ImageCache(QObject):
         return None
 
     def put_preview(self, file_path: str, preview: np.ndarray, jpeg_data: bytes = None) -> None:
-        """Cache a preview image."""
+        """Cache a preview image (memory); optional disk JPEG clamped to disk_preview_max_edge()."""
         if preview is not None:
             self.preview_cache.put(file_path, preview.copy())
             if jpeg_data is not None:
+                cap = disk_preview_max_edge()
+                jpeg_data = _jpeg_bytes_max_edge(jpeg_data, cap)
                 self.disk_preview_cache.put(file_path, jpeg_data)
 
     def get_full_image(self, file_path: str) -> Optional[np.ndarray]:
@@ -999,32 +1552,56 @@ class ImageCache(QObject):
         if pixmap is not None and not pixmap.isNull():
             self.pixmap_cache.put(file_path, pixmap)
 
+    def get_exif_memory_only(self, file_path: str) -> Optional[Dict[str, Any]]:
+        """In-memory EXIF only (no SQLite) — for cache-hit emit during preview-first."""
+        return self.exif_memory_cache.get(file_path)
+
     def get_exif(self, file_path: str) -> Optional[Dict[str, Any]]:
         """Get cached EXIF data or return None if not cached."""
         self.stats['exif_requests'] += 1
 
         # 1. Check in-memory cache first
         exif_data = self.exif_memory_cache.get(file_path)
-        if exif_data is not None:
-            self.cache_hit.emit(file_path, 'exif')
-            return exif_data
+        if exif_data is None:
+            # 2. Check persistent cache
+            exif_data = self.exif_cache.get(file_path)
+            if exif_data is not None:
+                self.exif_memory_cache.put(file_path, exif_data)
 
-        # 2. Check persistent cache
-        exif_data = self.exif_cache.get(file_path)
         if exif_data is not None:
-            # Cache in memory for faster subsequent access
-            self.exif_memory_cache.put(file_path, exif_data)
             self.cache_hit.emit(file_path, 'exif')
             return exif_data
         else:
             self.cache_miss.emit(file_path, 'exif')
             return None
 
-    def put_exif(self, file_path: str, exif_data: Dict[str, Any]) -> None:
-        """Cache EXIF data."""
+    def put_exif(
+        self,
+        file_path: str,
+        exif_data: Dict[str, Any],
+        *,
+        file_size: Optional[int] = None,
+        file_mtime: Optional[float] = None,
+        persist_disk: bool = True,
+    ) -> None:
+        """Cache EXIF data (memory always; disk optional for preview-first minimal stubs)."""
         if exif_data:
             self.exif_memory_cache.put(file_path, exif_data)
-            self.exif_cache.put(file_path, exif_data)
+            if persist_disk:
+                self.exif_cache.put(
+                    file_path,
+                    exif_data,
+                    file_size=file_size,
+                    file_mtime=file_mtime,
+                )
+
+    def get_capture_times_for_sort(self, file_paths: list) -> Dict[str, str]:
+        """capture_time only, for folder sort (ignores stale mtime on network folders)."""
+        return self.exif_cache.get_capture_times_bulk(file_paths)
+
+    def get_capture_times_for_folder_sort(self, folder_path: str) -> Dict[str, str]:
+        """All capture_time rows under folder_path (normalized path keys)."""
+        return self.exif_cache.get_capture_times_for_folder(folder_path)
 
     def get_multiple_exif(self, file_paths: list, file_stats: Optional[Dict[str, Tuple[int, float]]] = None, fast_mode: bool = True) -> Dict[str, Dict[str, Any]]:
         """Get cached EXIF data for multiple files at once."""
@@ -1053,10 +1630,12 @@ class ImageCache(QObject):
     def invalidate_file(self, file_path: str) -> None:
         """Remove all cached data for a specific file."""
         self.thumbnail_cache.remove(file_path)
+        self.grid_cache.remove(file_path)
         self.preview_cache.remove(file_path)
         self.full_image_cache.remove(file_path)
         self.pixmap_cache.remove(file_path)
         self.disk_thumbnail_cache.remove(file_path)
+        self.disk_grid_cache.remove(file_path)
         self.disk_preview_cache.remove(file_path)
         self.exif_memory_cache.remove(file_path)
         # Note: EXIF persistent cache handles file modification time automatically
@@ -1064,12 +1643,14 @@ class ImageCache(QObject):
     def clear_all(self) -> None:
         """Clear all caches."""
         self.thumbnail_cache.clear()
+        self.grid_cache.clear()
         self.preview_cache.clear()
         self.full_image_cache.clear()
         self.pixmap_cache.clear()
         self.exif_cache.clear()
         self.exif_memory_cache.clear()
         self.disk_thumbnail_cache.clear()
+        self.disk_grid_cache.clear()
         self.disk_preview_cache.clear()
 
     def get_cache_stats(self) -> Dict[str, Any]:
@@ -1078,6 +1659,7 @@ class ImageCache(QObject):
 
         return {
             'thumbnail_cache': self.thumbnail_cache.get_stats(),
+            'grid_cache': self.grid_cache.get_stats(),
             'full_image_cache': self.full_image_cache.get_stats(),
             'pixmap_cache': self.pixmap_cache.get_stats(),
             'memory_info': memory_info,
@@ -1090,6 +1672,7 @@ class ImageCache(QObject):
         """Clean up old cache entries."""
         self.exif_cache.cleanup_old_entries()
         self.disk_thumbnail_cache.cleanup_old_entries()
+        self.disk_grid_cache.cleanup_old_entries()
         self.disk_preview_cache.cleanup_old_entries()
 
     def close(self):
@@ -1098,6 +1681,8 @@ class ImageCache(QObject):
             self.exif_cache.close()
         if hasattr(self, 'disk_thumbnail_cache'):
             self.disk_thumbnail_cache.close()
+        if hasattr(self, 'disk_grid_cache'):
+            self.disk_grid_cache.close()
         if hasattr(self, 'disk_preview_cache'):
             self.disk_preview_cache.close()
 
@@ -1128,10 +1713,14 @@ def _cleanup_legacy_disk_cache_once() -> None:
         "thumbnail_cache.db",
         "thumbnail_cache.db-shm",
         "thumbnail_cache.db-wal",
+        "grid_cache.db",
+        "grid_cache.db-shm",
+        "grid_cache.db-wal",
         "preview_cache.db",
         "preview_cache.db-shm",
         "preview_cache.db-wal",
         "thumbnails",
+        "grid",
         "previews",
         "images",
     )
@@ -1153,7 +1742,7 @@ def get_image_cache() -> ImageCache:
     """Get the global image cache instance."""
     global _global_cache
     if _global_cache is None:
-        persistent = os.environ.get("RAWVIEWER_PERSISTENT_CACHE", "").lower() in {"1", "true", "yes", "on"}
+        persistent = os.environ.get("RAWVIEWER_PERSISTENT_CACHE", "1").lower() in {"1", "true", "yes", "on"}
         if not persistent:
             _cleanup_legacy_disk_cache_once()
         _global_cache = ImageCache(persistent_cache_enabled=persistent)

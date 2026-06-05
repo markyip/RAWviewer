@@ -1,84 +1,73 @@
-# RAWviewer v2.2.2
+# RAWviewer v2.2.5
 
 <p align="center">
   <img src="icons/appicon.ico" alt="RAWviewer Icon" width="256">
 </p>
 
-![Version](https://img.shields.io/badge/version-2.2.2-blue)
+![Version](https://img.shields.io/badge/version-2.2.5-blue)
 ![Downloads](https://img.shields.io/github/downloads/markyip/RAWviewer/total) 
 ![License](https://img.shields.io/badge/license-MIT-green)
 [![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-Donate-orange?logo=buy-me-a-coffee)](https://www.buymeacoffee.com/markyip)
 
 ## ✈️ Why This Exists
-You're an aviation photographer who just returned from RIAT or spent a day at the Mach Loop. You took thousands of RAW shots of fast jets, helicopters, and flybys — and now you're facing the real challenge:
+You're a photographer who just returned from an aviation show, a wildlife safari, or a fast-paced sports event. You took thousands of RAW shots — and now you're facing the real challenge:
 
-- You want to **sort through all your photos** and identify the best shots.
-- Tools like **Lightroom** or **Capture One** are powerful, but importing and checking each image is **time-consuming**.
-- The default **Windows Photos** viewer lets you browse, but:
-  - It's clunky with RAW files.
-  - You have to zoom in manually to check sharpness.
-  - There's no easy way to filter out blurry images.
+- **Sifting through mountains of photos**: Importing everything into heavy catalog tools like **Lightroom** or **Capture One** just to see what's good is slow and frustrating.
+- **Checking technical details**: Zooming in to check sharpness or finding where the camera's autofocus locked (`F` key focus overlays) is usually a multi-step chore.
+- **Finding specific shots instantly**: Searching your catalog for specific descriptions (e.g., `"takeoff"`, `"sunset"`, `"crowd"`) typically requires manual tagging or cloud-based AI uploads that compromise privacy.
+- **Filtering out the noise**: The default system photo viewers are clunky with RAW formats and offer no easy ways to flag or move blurry images in bulk.
 
-I've been there myself — I still haven't finished editing my **500GB of RIAT 2024 photos** because of how tedious this process is. That frustration is exactly what inspired me to build **RAWviewer**.
+I've been there myself — struggling to sort through **500GB of RIAT aviation photos** because of how tedious this process is. That frustration is exactly what inspired me to build **RAWviewer**.
 
-RAWviewer is a lightweight, focused image viewer built specifically for photographers who shoot a lot — especially in aviation, wildlife, or sports.
-
-- Instant file previewing: No import steps — just drag & drop.
-- Zoom in with a single key to check sharpness immediately.
-- Stay in zoomed mode while browsing with arrow keys.
-- Quickly remove blurry photos from the queue with `↓` (moves them to a discard folder).
-- No complex controls to memorize — just the essential keys to move fast.
-
-This is a **pre-filtering tool**, letting you go through hundreds of RAW files efficiently **before** committing to editing them in Lightroom or Photoshop.
+RAWviewer is a lightweight, high-performance local organizer built specifically for photographers who shoot high volumes. It acts as an **AI-powered pre-filtering and discovery workspace**, letting you curate, search, and prepare your images entirely offline **before** you commit them to your editing workflow in Lightroom or Photoshop.
 
 ## 🔍 What is RAWviewer?
-**RAWviewer** is a fast, modern, cross-platform image viewer for Windows and macOS, built with PyQt6. It supports advanced zooming, panning, and direct file association, allowing RAW files to be opened with a double-click.
+**RAWviewer** is a fast, AI-powered image viewer and organizer for **Windows and macOS** (official releases), built with PyQt6. 
+
+Beyond instant RAW previewing, 100% single-key zooming, and smooth panning, RAWviewer integrates:
+- **Local Semantic AI Search**: Search your photo folder using natural language (e.g., `"airplane in clouds"`, `"portrait of a dog"`) running **100% offline and locally** via MobileCLIP (Core ML on macOS, ONNX on Windows).
+- **Structured Metadata Filtering**: Instantly narrow down results using advanced filters like `camera:`, `lens:`, `iso:`, `ext:`, `has:face`, `city:`, or date ranges.
+- **Focus Point & Subject Outlines**: Visualize camera autofocus points directly from MakerNote metadata to verify exact focal lock.
+- **Non-Destructive Tools & Sharing**: Quick visual rotations, automatic slideshows, and system sharing to jump straight into editing applications.
+
+> **Platform note:** Official prebuilt releases are **Windows** and **macOS** only. There is no official Linux package; running from source on Linux is unsupported and may require manual dependency setup.
 
 ## ✨ Features
 
-- **Cross-platform support**: Windows and macOS
-- **Ultra-Fast Performance**: Instant folder loading (scans thousands of images in milliseconds) using optimized algorithms
-- **High-Fidelity Thumbnails**: Uses high-quality **LANCZOS resampling** and **2x oversampling** for crystal-clear previews on Retina and 4K displays.
-- **Smart Prefetching**: Predictively loads relevant images in the background for zero-latency navigation
-- **Memory-First Cache (Default)**: Uses fast in-memory caching by default with no disk/SQLite writes
-- **Optional Persistent Cache**: Set `RAWVIEWER_PERSISTENT_CACHE=1` to re-enable disk/SQLite cache persistence
-- **Gallery View**: Justified grid layout with virtualized rendering, EXIF-aware ordering, and current-image positioning
-- **Gallery search (macOS + Core ML bundle)**: Free-text semantic ranking plus structured metadata filters (`camera:`, ISO, GPS, **`format:`** / **`ext:`**, and more — see README table below)
-- **Search from single-image view**: Submit a query from single view to jump into gallery with filtered results; arrow keys and the film strip stay within that result set until you clear the filter
-- **Film strip (single-image view)**: Bottom thumbnail strip fades in when the pointer nears the lower edge (extended hot zone above the strip); fades out when you leave. Click a thumbnail to jump; stays synced with search filters.
-- **Wide RAW format support**: Canon (CR2, CR3), Nikon (NEF), Sony (ARW), Adobe DNG, and many more
-- **Robust Orientation Handling**: Definitive fixes for Sony ARW and other RAW formats, ensuring images are always displayed upright
-- **Pillarbox-Free Gallery**: Accurately calculates aspect ratios to prevent black bars in the gallery view
-- **macOS File Association**: Fully integrated with macOS Finder; can be set as the default viewer and supports double-click to open
-- **Intuitive navigation**: Keyboard shortcuts, mouse controls, and scroll wheel support
-- **Zoom functionality**: Fit-to-window and 100% zoom modes with smooth panning, including native Mac trackpad pinch-to-zoom
-- **DNG zoom reliability**: Single-view DNG now prioritizes full-resolution decoding to keep Space / double-click 100% zoom behavior consistent
-- **File management**: Move images to discard folder or delete permanently
-- **EXIF data display**: View camera settings, focal length, ISO, aperture, and capture information with robust metadata extraction
-- **Session persistence**: Remembers your last opened folder, image, and view mode
-- **Single-image histogram**: Press `H` to show or hide the strip while viewing one image
-- **Modern Installer**: Lightweight executable that automatically provisions a self-contained Python environment and downloads AI models on first launch
-- **Professional Startup**: Synchronized native and Qt splash screens for a flicker-free, premium launch experience.
-- **Modern UI**: Material Design 3 aesthetics with Font Awesome icons (via qtawesome) and non-intrusive loading indicators
-- **Platform-specific chrome**: **Share** (macOS system share sheet) on macOS; **Open with another app** (native Windows picker) on Windows — send or edit the current file in Lightroom, Photoshop, etc.
-- **Non-destructive visual rotate**: Rotate in viewer by 90° steps without modifying original files (including RAW), with gallery-visible tiles refreshed immediately.
-- **Precision Focus Area Detection**: Overlays the camera's focus point(s) using manufacturer-specific MakerNote data (Canon, Nikon, Sony) plus EXIF SubjectArea/SubjectLocation with orientation-aware mapping and robust coordinate scaling.
+- **Built for speed**: Open large folders quickly and start culling right away.
+- **Easy sharpness check**: Press `Space` for instant 100% zoom, then browse with arrow keys.
+- **Smooth gallery browsing**: Scroll a large grid view without waiting for full imports.
+- **Search in gallery**: Filter by words and metadata like camera, ISO, date, GPS, and format.
+- **Single-view search jump**: Start search from one image and jump directly into filtered gallery results.
+- **Film strip navigation**: A bottom thumbnail strip appears when needed for fast jumping.
+- **Broad format support**: Works with common RAW types (CR2/CR3, NEF, ARW, DNG, RAF, ORF, RW2, and more) plus JPEG/TIFF/HEIF.
+- **Reliable orientation**: Photos display upright consistently across many camera brands.
+- **Clean fit and zoom colors**: RAW preview and 100% zoom stay visually consistent.
+- **Helpful photo info**: See key shooting details like focal length, aperture, ISO, and capture time.
+- **Safe file actions**: Move rejects to Discard or delete with confirmation.
+- **Session memory**: Reopen the app and continue from your last folder and image.
+- **Modern look and controls**: Keyboard, mouse, trackpad pinch, and polished UI.
+- **Windows and macOS releases**: Official prebuilt apps for both platforms.
 
 ## 🚀 Quick Start
 
 ### Download Executable
 
+Official releases are published for **Windows** and **macOS** only.
+
 #### Windows
-1. Download the latest release from the [Releases Page](https://github.com/markyip/RAWviewer/releases/latest)
-2. Download `RAWviewer.exe` directly (no zip extraction needed)
-3. Double-click `RAWviewer.exe` to initiate the installation process. It will automatically download the necessary dependencies and AI models to a destination of your choice.
-4. Launch RAWviewer from the Desktop shortcut created during installation! (You can safely delete the original `RAWviewer.exe` installer afterwards).
+1. Download the appropriate version for your system from the [Releases Page](https://github.com/markyip/RAWviewer/releases/latest):
+   - **`RAWviewer-CUDA.exe`**: Recommended for **NVIDIA GPU** users who have CUDA installed. This provides the fastest indexing and search performance.
+   - **`RAWviewer-DirectML.exe`**: Recommended for **AMD, Intel, or NVIDIA** users who want an out-of-the-box hardware-accelerated experience without installing CUDA.
+2. Run the downloaded installer directly (no zip extraction needed).
+3. Double-click the installer to initiate the installation process. It will automatically set up the dependencies (via Pixi) and download the local AI models to a destination of your choice.
+4. Launch RAWviewer from the Desktop shortcut! (You can safely delete the installer afterwards).
 
 #### macOS
 > **Minimum supported macOS (official prebuilt release): macOS 13 Ventura or newer.**
 
 1. Download the latest release from the [Releases Page](https://github.com/markyip/RAWviewer/releases/latest)
-2. Download and extract `RAWviewer-v2.2.2-macOS.zip`
+2. Download and extract `RAWviewer-v2.2-macOS.zip`
 3. Drag `RAWviewer.app` to your **Applications** folder.
 4. **CRITICAL FIRST STEP:** Because this is an open-source app not signed via the paid Apple Developer program, macOS Gatekeeper will incorrectly label it as "Damaged" or block it. **You must run this command in your Terminal once** to remove the download quarantine flag:
    ```bash
@@ -135,11 +124,16 @@ Separate tokens with spaces. Filters use `key:value` or comparison forms.
 | Date prefix | `date:2024-05` |
 | GPS / faces | `has:gps` · `no:gps` · `has:face` · `people` · `person` · `no:face` |
 
-Optional: **stronger semantic models** (advanced). The app bundle uses **MobileCLIP2-S0** for speed and size. From the same MobileCLIP2 family, **S2** or **B** checkpoints usually score better on open-vocabulary retrieval at the cost of a larger Core ML package and slower indexing—export with `python scripts/export_mobileclip2_coreml.py --model MobileCLIP2-S2` (today’s `--for-app` flow names files `mobileclip2_s0_*`; you can replace those mlpackages after export or adjust filenames to match). You can also set environment variable **`RAWVIEWER_MOBILECLIP_VARIANT=s2`** to prefer Apple’s downloadable **MobileCLIP S2** Core ML models (a different architecture than MobileCLIP2, but often strong for general photo text queries).
+Optional: **stronger semantic models** (advanced). The app default is **MobileCLIP2-S0** (vision: ~43MB) for speed and size. You can choose a stronger model by setting the environment variable **`RAWVIEWER_MOBILECLIP_VARIANT`** to one of the following:
 
-Bundled macOS Core ML models are discovered automatically in common app/resource paths.  
-Both naming schemes are supported:
+- **`s0`** (Default): Vision model ~43MB, fastest indexing, lower memory usage.
+- **`s2`**: Vision model ~136MB, better accuracy on complex search terms.
+- **`b`**: ViT-B model ~330MB, significantly improved search understanding.
+- **`l14`**: ViT-L/14 model ~1.1GB, highest quality, recommended for heavy/large search applications.
 
+When a different variant is selected, the application will automatically download the correct model assets from Hugging Face (`plhery/mobileclip2-onnx` on Windows/Linux) to a separate cache folder.
+
+*Note for macOS users:* Bundled macOS Core ML models are discovered automatically in common app/resource paths:
 - Apple Hub naming: `mobileclip_s2_image.mlpackage` + `mobileclip_s2_text.mlpackage`
 - App export naming (`--for-app`): `mobileclip2_s0_image.mlpackage` + `mobileclip2_s0_text.mlpackage`
 
@@ -183,22 +177,66 @@ When focus/subject indicator is enabled (`F`):
 
 ## 🛠️ Development (run from source)
 
-Launch scripts live under [`scripts/Launch/`](scripts/Launch/README.md). Root-level `run_debug.bat` / `launch_dev.sh` forward there.
+Launch scripts live under [`scripts/Launch/`](scripts/Launch/README.md).
 
 | Platform | Debug run | Build |
 |----------|-----------|-------|
 | Windows | `scripts\Launch\bat\run_debug.bat` | `scripts\Launch\bat\build_windows.bat` |
+| Windows (cache wipe) | `clear_cache.bat` or `scripts\Launch\bat\clear_cache.bat` | — |
 | macOS | `./scripts/Launch/shell/launch_dev.sh` | `./scripts/Launch/shell/build_macos.sh` |
 
 **Virtual environments:** `pixi install` → `pixi run start` uses `.pixi/`. Build/debug batch scripts use `rawviewer_env/` (created automatically). `.venv/` is optional for IDE use only.
+
+**Folder sort (capture time):** Gallery and folder load sort by **EXIF** (`metadata_backend` probe when cold; bulk cache when warm). Default order is **oldest first**; use the gallery **⇅ Oldest / Newest** control to toggle (saved in QSettings). Windows Explorer `DateTaken` via Shell was evaluated and rejected for production (slower than EXIF, no benefit on test folders).
 
 **Optional dev toggles:**
 
 | Variable | Effect |
 |----------|--------|
-| `RAWVIEWER_GPU_VIEW=1` | Use the experimental GPU-accelerated single-image viewport (smoother zoom/pan; default remains the classic scroll area) |
+| `RAWVIEWER_LIBRAW_CONSISTENT_PREVIEW=1` | **Default.** Single-image RAW uses LibRaw half-res for fit view and full decode at 100% zoom — same color pipeline, no embedded-JPEG color snap. Set `=0` for faster embedded-preview first paint. |
+| `RAWVIEWER_PROGRESSIVE_RAW_LOAD=1` | Show embedded preview first, then upgrade to LibRaw in background (may color-shift). Off by default. |
+| `RAWVIEWER_USE_PROCESS_POOL=1` | LibRaw postprocess in worker processes (multi-core). Default on when CPU count ≥ 4. |
+| `RAWVIEWER_GPU_VIEW=1` | Use the experimental GPU-accelerated single-image viewport (smoother zoom/pan; default remains the classic scroll area). Space / double-click toggle fit ↔ 100% pixel zoom; arrow keys browse in single view with prefetch. |
 | `RAWVIEWER_GPU_VIEW_NO_GL=1` | Force raster viewport when GPU view is enabled (debug / fallback) |
+| `RAWVIEWER_NAV_PRELOAD_DISPLAY=1` | Prefetch display-quality buffers for nearby files while navigating in single view (enabled in `run_debug.bat`) |
+| `RAWVIEWER_RESOLUTION_CROSSFADE_MS` | Duration (ms) of preview→full crossfade in single view when GPU/legacy crossfade is enabled (default `280`) |
+| `RAWVIEWER_DISABLE_CROSSFADE=1` | Disable viewport crossfade on resolution upgrades |
 | `RAWVIEWER_PERSISTENT_CACHE=1` | Enable disk/SQLite cache persistence (off by default) |
+| `RAWVIEWER_EXIF_BACKEND=auto` | EXIF via pyexiv2 (JPEG/TIFF) + exifread (RAW headers); `exifread` or `pyexiv2` to force one backend |
+| `RAWVIEWER_SORT_PROBE_WORKERS` | Parallel EXIF header probes during folder sort (default scales with CPU, up to 12 on local disk; 3 on UNC / `RAWVIEWER_SLOW_STORAGE_PREFIXES`) |
+| `RAWVIEWER_INDEX_METADATA_WORKERS` | Semantic index metadata extraction pool (default 2–6; lower on folders &gt;2000 files) |
+| `RAWVIEWER_RAW_LOAD_LIMIT` | Max concurrent LibRaw decodes in the load manager (default `4`) |
+| `RAWVIEWER_PROCESS_POOL_WORKERS` | LibRaw postprocess process pool size when `RAWVIEWER_USE_PROCESS_POOL=1` |
+| `RAWVIEWER_SLOW_STORAGE_PREFIXES` | Comma-separated path prefixes (e.g. `K:\Photos,N:\`) to cap sort-probe parallelism at 3 |
+
+**macOS share (v2.2, single-image view only):**
+
+| Variable | Default in `launch_dev.sh` | Effect |
+|----------|------------------------------|--------|
+| `RAWVIEWER_SHARE_MENU` | `1` | Qt menu listing `NSSharingService` targets (recommended under Qt6) |
+| `RAWVIEWER_SHARE_TRY_NATIVE_PICKER` | off | Try `NSSharingServicePicker` first, then menu fallback |
+| `RAWVIEWER_SHARE_SHOW_AIRDROP` | off | Include AirDrop in the menu (in-app AirDrop is unreliable in the Qt host) |
+| `RAWVIEWER_SHARE_DEBUG` | off | Share diagnostics in status bar and `[SHARE]` logs |
+
+Details: [`docs/macos-sharing-v21-v22.md`](docs/macos-sharing-v21-v22.md) and [`scripts/Launch/README.md`](scripts/Launch/README.md#macos--release-smoke-test-manual).
+
+### macOS — build and smoke test (v2.2)
+
+```bash
+chmod +x scripts/Launch/shell/*.sh
+./scripts/Launch/shell/build_macos.sh    # or: pixi install && pixi run python build.py
+xattr -cr dist/RAWviewer.app
+open dist/RAWviewer.app
+```
+
+**Dev run** (preflight checks for `pyexiv2` and semantic backend):
+
+```bash
+./scripts/Launch/shell/launch_dev.sh
+# Skip preflight: RAWVIEWER_TEST_PYEXIV2=0 RAWVIEWER_TEST_SEMANTIC=0 ./scripts/Launch/shell/launch_dev.sh
+```
+
+Before tagging a macOS release: confirm app version **2.2**, single-view **share** menu works (Mail attach), and bundled `models/mobileclip2_coreml` if semantic search is required in the `.app`.
 
 ## 🏗️ Building from Source
 
@@ -252,7 +290,7 @@ All project dependencies are managed via `pixi.toml` instead of `requirements.tx
 - **"Windows protected your PC"**: Click "More info" → "Run anyway"
 - **Antivirus warnings**: Add RAWviewer to your antivirus exclusions
 - **Performance issues**: Try running as administrator
-- **"Open with another app" does nothing**: Ensure a file is loaded in single-image view; restart the app after upgrading. The picker uses the native `OpenAs_RunDLLW` API (Unicode paths supported).
+- **"Open with another app" / bottom share button**: v2.2 implements the native Open with APIs (`OpenAs_RunDLLW`, `SHOpenWithDialog` + `OAIF_EXEC`), but the bottom-bar control is **hidden on Windows** in current `main`. Use Explorer **Open with** on the file until the in-app button is re-enabled (see `scripts/Launch/README.md`).
 - **AttributeError with stdout**: This is normal for windowed builds - the application runs without a console window
 - **Installer stuck on "Downloading MobileCLIP ONNX Models" / `No module named 'requests'`**:
   - Fixed in 2.1.0+ (`requests` in `pixi.toml`). Re-run the installer from a fresh build, or in the install folder run `_internal\pixi\pixi.exe install` then retry.
@@ -297,6 +335,8 @@ This will automatically create a perfectly compatible, warning-free `RAWviewer.a
 - **Homebrew delays on macOS 12 Monterey or older**: 
   - Homebrew has officially dropped "binary bottle" support for Monterey. However, **it still works**. When the build script attempts to `brew install inih gettext`, Homebrew will simply compile them from source on your machine. This is completely normal but may take 2-3 extra minutes.
 
+- **Share menu empty or native picker spins**: Use dev defaults (`RAWVIEWER_SHARE_MENU=1` via `launch_dev.sh`). Avoid opening the picker on mouse-up; see [`docs/macos-sharing-v21-v22.md`](docs/macos-sharing-v21-v22.md). For AirDrop, prefer Finder on the file.
+
 - **Permission Denied / Cannot Read Folder**: Modern macOS requires explicit permission for apps to access the Desktop or Documents. 
   1. Go to **System Settings** > **Privacy & Security** > **Full Disk Access**.
   2. Click the **+** button and add `RAWviewer.app`.
@@ -315,6 +355,10 @@ We're continuously working to improve RAWviewer. Here are some features planned 
 
 
 ## ⚠️ Known Issues
+
+### Platform (v2.2)
+- **Windows:** In-app **Open with** picker is implemented but the bottom-bar button is not shown on `win32` in current `main`.
+- **macOS:** `NSSharingServicePicker` popover often fails under the Qt6 host; default product path is the **Qt share menu**, not the popover.
 
 ### Camera Compatibility
 - **Newer camera models**: Support for the latest camera releases may be limited due to LibRaw library compatibility

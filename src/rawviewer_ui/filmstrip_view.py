@@ -8,7 +8,7 @@ from typing import Dict, List, Optional, Set
 
 import numpy as np
 from PyQt6.QtCore import Qt, pyqtSignal, QSize, QTimer
-from PyQt6.QtGui import QPixmap, QImage, QWheelEvent, QKeyEvent
+from PyQt6.QtGui import QPixmap, QImage, QWheelEvent, QKeyEvent, QTransform
 from PyQt6.QtWidgets import (
     QFrame,
     QLabel,
@@ -20,11 +20,28 @@ from PyQt6.QtWidgets import (
 ROW_H = 66
 MIN_GAP = 2
 SIDE_MARGIN = 4
-MIN_CELL_W = 34
+MIN_CELL_W = 14
 MAX_CELL_W = 140
 DEFAULT_ASPECT = 1.5
-BUFFER_PX = 120
-BUFFER_CELLS = 2
+def _filmstrip_env_int(name: str, default: int, *, minimum: int = 1) -> int:
+    try:
+        return max(minimum, int(os.environ.get(name, str(default)).strip()))
+    except (TypeError, ValueError):
+        return default
+
+
+BUFFER_PX = _filmstrip_env_int("RAWVIEWER_FILMSTRIP_BUFFER_PX", 180, minimum=80)
+BUFFER_CELLS = _filmstrip_env_int("RAWVIEWER_FILMSTRIP_BUFFER_CELLS", 4, minimum=1)
+_LAZY_WARM_THRESHOLD = _filmstrip_env_int(
+    "RAWVIEWER_FILMSTRIP_LAZY_WARM_THRESHOLD", 400, minimum=50
+)
+_WARM_BAND = _filmstrip_env_int("RAWVIEWER_FILMSTRIP_WARM_BAND", 56, minimum=8)
+# Uniform inset inside each cell so portrait/landscape share the same padding.
+CELL_BORDER = 2
+THUMB_PAD_V = 5
+THUMB_PAD_H = 2
+# Rebuild layout when stored aspect differs from measured thumb aspect.
+ASPECT_REBUILD_EPS = 0.02
 
 
 def _path_key(path: str) -> str:
@@ -77,16 +94,18 @@ class FilmStripBar(QFrame):
                 border-top: 1px solid #3A3A3A;
             }
             QLabel#filmstrip_cell {
-                background-color: #2A2A2A;
-                border: 3px solid transparent;
+                background-color: transparent;
+                border: 2px solid transparent;
                 border-radius: 3px;
                 color: #888;
                 font-size: 10px;
+                padding: 0px;
             }
             QLabel#filmstrip_cell_selected {
-                background-color: #333333;
-                border: 3px solid #5CB8FF;
+                background-color: rgba(51, 51, 51, 120);
+                border: 2px solid #5CB8FF;
                 border-radius: 3px;
+                padding: 0px;
             }
             """
         )
@@ -105,6 +124,8 @@ class FilmStripBar(QFrame):
         self._thumb_gen: Dict[str, int] = {}
         self._path_to_index: Dict[str, int] = {}
         self._generation = 0
+        # Measured slot widths from decoded/scaled thumbs (survives layout rebuilds).
+        self._measured_widths: Dict[str, int] = {}
 
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._scroll = QScrollArea(self)
@@ -122,7 +143,7 @@ class FilmStripBar(QFrame):
         self._scroll.setWidget(self._content)
 
         layout_outer = __import__("PyQt6.QtWidgets", fromlist=["QVBoxLayout"]).QVBoxLayout(self)
-        layout_outer.setContentsMargins(0, 2, 0, 2)
+        layout_outer.setContentsMargins(0, 4, 0, 4)
         layout_outer.addWidget(self._scroll)
 
         self._scroll.horizontalScrollBar().valueChanged.connect(self._on_scroll)
@@ -178,16 +199,24 @@ class FilmStripBar(QFrame):
         self._files = list(files) if files else []
         self._active_paths.clear()
         self._thumb_gen.clear()
+        self._measured_widths.clear()
         self._rebuild_path_index()
         if bulk_metadata:
             self._metadata_cache.update(bulk_metadata)
         self._fetch_missing_metadata()
-        self._rebuild_layout_slots()
         if self._files:
             if select_index is not None and select_index >= 0:
                 idx = max(0, min(select_index, len(self._files) - 1))
             else:
                 idx = 0
+        else:
+            idx = -1
+        if len(self._files) > _LAZY_WARM_THRESHOLD and idx >= 0:
+            self._warm_slot_widths_from_cache(center_index=idx)
+        else:
+            self._warm_slot_widths_from_cache()
+        self._rebuild_layout_slots()
+        if self._files:
             self._current_index = idx
             self._pending_index = idx
         else:
@@ -202,6 +231,8 @@ class FilmStripBar(QFrame):
         index = max(0, min(index, len(self._files) - 1))
         if index == self._current_index and index == self._pending_index:
             self._update_selection_style()
+            if center:
+                self._scroll_to_index_centered()
             return
         self._current_index = index
         self._pending_index = index
@@ -224,6 +255,14 @@ class FilmStripBar(QFrame):
             for cell in self._cell_pool:
                 self._clear_cell_thumbnail(cell)
         elif refresh_cache:
+            before = len(self._measured_widths)
+            center = self._current_index if self._current_index >= 0 else self._pending_index
+            if len(self._files) > _LAZY_WARM_THRESHOLD and center >= 0:
+                self._warm_slot_widths_from_cache(center_index=center)
+            else:
+                self._warm_slot_widths_from_cache()
+            if len(self._measured_widths) != before:
+                self._rebuild_layout_slots()
             for idx, cell in list(self._cells.items()):
                 if 0 <= idx < len(self._files):
                     path = self._files[idx]
@@ -247,6 +286,29 @@ class FilmStripBar(QFrame):
                 out.append(self._files[idx])
         return out
 
+    def note_cached_thumbnail(self, file_path: str, thumbnail) -> None:
+        """Record slot width when a thumbnail lands in cache before the cell is visible."""
+        if not file_path or file_path not in self._files:
+            return
+        key = _path_key(file_path)
+        if key in self._measured_widths:
+            return
+        pixmap = _thumbnail_to_pixmap(thumbnail)
+        if pixmap is None or pixmap.isNull():
+            return
+        rot = self._get_rotation_degrees_for_path(file_path)
+        if rot:
+            pixmap = self._rotate_pixmap(pixmap, rot)
+        scaled = self._scale_pixmap_to_content(pixmap)
+        if scaled is None or scaled.isNull():
+            return
+        width = self._cell_width_for_scaled(scaled)
+        self._measured_widths[key] = width
+        idx = self._index_for_path(file_path)
+        if idx >= 0 and idx < len(self._widths) and self._widths[idx] != width:
+            self._widths[idx] = width
+            self._recompute_slot_starts()
+
     def apply_thumbnail(self, file_path: str, thumbnail) -> None:
         if file_path not in self._active_paths:
             return
@@ -258,10 +320,52 @@ class FilmStripBar(QFrame):
             return
         cell = self._cells.get(idx)
         if cell is None:
+            pixmap = _thumbnail_to_pixmap(thumbnail)
+            if pixmap is None or pixmap.isNull():
+                return
+            rot = self._get_rotation_degrees_for_path(file_path)
+            if rot:
+                pixmap = self._rotate_pixmap(pixmap, rot)
+            scaled = self._scale_pixmap_to_content(pixmap)
+            if scaled is None or scaled.isNull():
+                return
+            width = self._cell_width_for_scaled(scaled)
+            self._measured_widths[_path_key(file_path)] = width
+            if idx < len(self._widths) and self._widths[idx] != width:
+                self._widths[idx] = width
+                self._recompute_slot_starts()
             return
         if _path_key(getattr(cell, "_filmstrip_path", "")) != _path_key(file_path):
             return
         self._apply_pixmap_to_cell(idx, file_path, thumbnail)
+
+    def refresh_cell_for_path(self, file_path: str) -> None:
+        """Redraw one cell after non-destructive visual rotation changes."""
+        idx = self._index_for_path(file_path)
+        if idx < 0 or idx >= len(self._files):
+            return
+        path = self._files[idx]
+        self._measured_widths.pop(_path_key(path), None)
+        cell = self._cells.get(idx)
+        if cell is not None:
+            self._clear_cell_thumbnail(cell)
+            cell._filmstrip_path = path
+            if self._try_apply_cache_for_cell(idx, path, cell):
+                self._recompute_slot_starts()
+                return
+            cell.setText("…")
+        else:
+            scaled = self._scaled_thumb_for_path(path)
+            if scaled is not None and not scaled.isNull():
+                self._record_cell_width(path, idx, self._cell_width_for_scaled(scaled))
+                self._recompute_slot_starts()
+        self._reload_visible()
+
+    def on_visual_rotation_changed(self, file_path: str) -> None:
+        """Update slot geometry and thumbnail after single-view rotation."""
+        if not file_path:
+            return
+        self.refresh_cell_for_path(file_path)
 
     def _index_for_path(self, file_path: str) -> int:
         return self._path_to_index.get(_path_key(file_path), -1)
@@ -274,6 +378,116 @@ class FilmStripBar(QFrame):
         cell.setText("")
         cell._filmstrip_path = None
 
+    def _content_height(self) -> int:
+        """Drawable thumb height inside a row cell (border + vertical padding)."""
+        return max(12, ROW_H - 2 * CELL_BORDER - 2 * THUMB_PAD_V)
+
+    def _max_content_width(self) -> int:
+        return max(12, MAX_CELL_W - 2 * CELL_BORDER - 2 * THUMB_PAD_H)
+
+    def _scale_pixmap_to_content(self, pixmap: QPixmap) -> QPixmap:
+        """Scale to row height first so width follows the image aspect ratio."""
+        if pixmap is None or pixmap.isNull():
+            return pixmap
+        content_h = self._content_height()
+        max_cw = self._max_content_width()
+        scaled = pixmap.scaledToHeight(
+            content_h, Qt.TransformationMode.SmoothTransformation
+        )
+        if scaled.width() > max_cw:
+            scaled = pixmap.scaled(
+                max_cw,
+                content_h,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+        return scaled
+
+    def _cell_width_for_scaled(self, scaled: QPixmap) -> int:
+        if scaled is None or scaled.isNull():
+            return MIN_CELL_W
+        # Horizontal room is only for the selection border; no extra fixed box padding.
+        return scaled.width() + 2 * CELL_BORDER
+
+    def _scaled_thumb_for_path(self, path: str) -> Optional[QPixmap]:
+        """Build the display-sized pixmap for a path when it is not on-screen yet."""
+        viewer = self._viewer
+        if viewer is None or not hasattr(viewer, "image_cache"):
+            return None
+        try:
+            # FAST IN-MEMORY CHECK ONLY to avoid blocking UI thread on thousands of files!
+            thumb = viewer.image_cache.thumbnail_cache.get(path)
+            if thumb is None:
+                return None
+        except Exception:
+            return None
+        pixmap = _thumbnail_to_pixmap(thumb)
+        if pixmap is None or pixmap.isNull():
+            return None
+        rot = self._get_rotation_degrees_for_path(path)
+        if rot:
+            pixmap = self._rotate_pixmap(pixmap, rot)
+        return self._scale_pixmap_to_content(pixmap)
+
+    def _record_cell_width(self, path: str, idx: int, width: int) -> None:
+        if not path or idx < 0 or idx >= len(self._widths):
+            return
+        width = max(MIN_CELL_W, min(MAX_CELL_W, int(width)))
+        self._measured_widths[_path_key(path)] = width
+        if self._widths[idx] == width:
+            return
+        self._widths[idx] = width
+        self._recompute_slot_starts()
+
+    def _slot_width_for_path(self, path: str, idx: int) -> int:
+        """Resolve layout slot width; never reserve a wide box from wrong EXIF."""
+        key = _path_key(path)
+        cached = self._measured_widths.get(key)
+        if cached is not None:
+            return cached
+
+        cell = self._cells.get(idx)
+        if cell is not None:
+            px = cell.pixmap()
+            if px is not None and not px.isNull():
+                return self._cell_width_for_scaled(px)
+
+        scaled = self._scaled_thumb_for_path(path)
+        if scaled is not None and not scaled.isNull():
+            width = self._cell_width_for_scaled(scaled)
+            self._measured_widths[key] = width
+            return width
+
+        # Unknown until decode: keep a narrow placeholder instead of a landscape EXIF guess.
+        return MIN_CELL_W
+
+    def _get_rotation_degrees_for_path(self, file_path: str) -> int:
+        viewer = self._viewer
+        if viewer is None:
+            return 0
+        getter = getattr(viewer, "_get_visual_rotation_degrees", None)
+        if getter is None:
+            return 0
+        try:
+            return int(getter(file_path)) % 360
+        except Exception:
+            return 0
+
+    def _display_aspect(self, file_path: str, base_aspect: float) -> float:
+        if base_aspect <= 0:
+            return base_aspect
+        if self._get_rotation_degrees_for_path(file_path) in (90, 270):
+            return 1.0 / base_aspect
+        return base_aspect
+
+    def _rotate_pixmap(self, pixmap: QPixmap, degrees: int) -> QPixmap:
+        degrees = int(degrees) % 360
+        if pixmap is None or pixmap.isNull() or degrees == 0:
+            return pixmap
+        transform = QTransform()
+        transform.rotate(degrees)
+        return pixmap.transformed(transform, Qt.TransformationMode.SmoothTransformation)
+
     def _apply_pixmap_to_cell(self, idx: int, file_path: str, thumbnail) -> None:
         pixmap = _thumbnail_to_pixmap(thumbnail)
         if pixmap is None or pixmap.isNull():
@@ -281,22 +495,25 @@ class FilmStripBar(QFrame):
         cell = self._cells.get(idx)
         if cell is None:
             return
-        if pixmap.height() > 0:
-            new_aspect = pixmap.width() / pixmap.height()
-            old = self._aspects[idx] if idx < len(self._aspects) else DEFAULT_ASPECT
-            if abs(new_aspect - old) > 0.06:
-                self._aspects[idx] = new_aspect
-                self._rebuild_layout_slots()
-        slot_w = self._widths[idx] if idx < len(self._widths) else MIN_CELL_W
-        scaled = pixmap.scaled(
-            slot_w,
-            ROW_H,
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation,
-        )
+        rot = self._get_rotation_degrees_for_path(file_path)
+        if rot:
+            pixmap = self._rotate_pixmap(pixmap, rot)
+        scaled = self._scale_pixmap_to_content(pixmap)
+        if scaled is None or scaled.isNull() or scaled.height() <= 0:
+            return
         cell.setPixmap(scaled)
+        cell.setAlignment(Qt.AlignmentFlag.AlignCenter)
         cell.setText("")
         cell._filmstrip_path = file_path
+
+        new_aspect = scaled.width() / scaled.height()
+        if idx < len(self._aspects):
+            old = self._aspects[idx]
+            if abs(new_aspect - old) > ASPECT_REBUILD_EPS:
+                self._aspects[idx] = new_aspect
+        width = self._cell_width_for_scaled(scaled)
+        cell.setFixedSize(width, ROW_H)
+        self._record_cell_width(file_path, idx, width)
 
     def _try_apply_cache_for_cell(self, idx: int, path: str, cell: QLabel) -> bool:
         viewer = self._viewer
@@ -322,6 +539,9 @@ class FilmStripBar(QFrame):
             cell.setText("…")
             return True
         if cell.pixmap() is not None and not cell.pixmap().isNull():
+            width = self._cell_width_for_scaled(cell.pixmap())
+            cell.setFixedSize(width, ROW_H)
+            self._record_cell_width(path, idx, width)
             return False
         if self._try_apply_cache_for_cell(idx, path, cell):
             return False
@@ -352,44 +572,58 @@ class FilmStripBar(QFrame):
         sb = self._scroll.horizontalScrollBar()
         sb.setValue(sb.value() - steps * max(80, ROW_H + MIN_GAP))
 
+    def _warm_slot_widths_from_cache(self, *, center_index: Optional[int] = None) -> None:
+        """Pre-measure slot widths for any thumbnails already in the global cache."""
+        files = self._files
+        if not files:
+            return
+        if center_index is not None and len(files) > _LAZY_WARM_THRESHOLD:
+            idx = max(0, min(center_index, len(files) - 1))
+            lo = max(0, idx - _WARM_BAND)
+            hi = min(len(files), idx + _WARM_BAND + 1)
+            paths = files[lo:hi]
+        else:
+            paths = files
+        for path in paths:
+            key = _path_key(path)
+            if key in self._measured_widths:
+                continue
+            scaled = self._scaled_thumb_for_path(path)
+            if scaled is not None and not scaled.isNull():
+                self._measured_widths[key] = self._cell_width_for_scaled(scaled)
+
     def _fetch_missing_metadata(self) -> None:
-        viewer = self._viewer
-        if viewer is None or not hasattr(viewer, "image_cache"):
+        """Disabled to prevent expensive synchronous SQLite queries on the UI thread."""
+        pass
+
+    def _recompute_slot_starts(self) -> None:
+        """Repack x positions after per-cell width tweaks (keep _widths/_aspects)."""
+        n = len(self._files)
+        if n == 0 or len(self._widths) != n:
+            self._rebuild_layout_slots()
             return
-        missing = [p for p in self._files if p not in self._metadata_cache]
-        if not missing:
-            return
-        try:
-            bulk = viewer.image_cache.get_multiple_exif(missing)
-            if bulk:
-                self._metadata_cache.update(bulk)
-        except Exception:
-            pass
+        inner = SIDE_MARGIN * 2 + sum(self._widths) + (n - 1) * MIN_GAP
+        vp_w = max(1, self._scroll.viewport().width())
+        content_w = max(vp_w, inner)
+        self._row_offset = max(0, (content_w - inner) // 2)
+        x = self._row_offset + SIDE_MARGIN
+        self._starts = []
+        for w in self._widths:
+            self._starts.append(x)
+            x += w + MIN_GAP
+        self._inner_width = inner
+        h = max(ROW_H + 2, self._scroll.viewport().height())
+        self._content.setFixedSize(max(content_w, 1), max(h, 1))
+        for idx, cell in list(self._cells.items()):
+            if idx < len(self._starts):
+                self._place_cell_geometry(cell, idx)
 
-    def _aspect_for_index(self, path: str, idx: int) -> float:
-        cell = self._cells.get(idx)
-        if cell is not None:
-            px = cell.pixmap()
-            if px is not None and not px.isNull() and px.height() > 0:
-                return px.width() / px.height()
-
-        meta = self._metadata_cache.get(path)
-        if meta and meta.get("original_width") and meta.get("original_height"):
-            w, h = meta["original_width"], meta["original_height"]
-            if meta.get("orientation", 1) in (5, 6, 7, 8):
-                w, h = h, w
-            if h > 0:
-                return w / h
-
-        try:
-            from common_image_loader import get_image_aspect_ratio
-            return get_image_aspect_ratio(path)
-        except Exception:
-            return DEFAULT_ASPECT
-
-    def _cell_width_for_aspect(self, aspect: float) -> int:
-        aspect = max(0.35, min(3.5, aspect))
-        return max(MIN_CELL_W, min(MAX_CELL_W, int(ROW_H * aspect)))
+    def _layout_width_for_index(self, path: str, idx: int) -> tuple[float, int]:
+        """Return (aspect, cell_width) for layout packing."""
+        width = self._slot_width_for_path(path, idx)
+        ch = self._content_height()
+        aspect = width / ch if ch > 0 else DEFAULT_ASPECT
+        return aspect, width
 
     def _rebuild_layout_slots(self) -> None:
         n = len(self._files)
@@ -404,8 +638,12 @@ class FilmStripBar(QFrame):
             self._content.setFixedSize(vp_w, max(ROW_H + 2, self._scroll.viewport().height()))
             return
 
-        aspects = [self._aspect_for_index(p, i) for i, p in enumerate(self._files)]
-        widths = [self._cell_width_for_aspect(a) for a in aspects]
+        aspects = []
+        widths = []
+        for i, p in enumerate(self._files):
+            aspect, width = self._layout_width_for_index(p, i)
+            aspects.append(aspect)
+            widths.append(width)
 
         inner = SIDE_MARGIN * 2 + sum(widths) + (n - 1) * MIN_GAP
         vp_w = max(1, self._scroll.viewport().width())
@@ -433,6 +671,7 @@ class FilmStripBar(QFrame):
         w = self._widths[idx]
         x = self._starts[idx]
         y = max(0, (self._content.height() - ROW_H) // 2)
+        cell.setFixedSize(w, ROW_H)
         cell.setGeometry(x, y, w, ROW_H)
 
     def _on_scroll(self, _value: int) -> None:
@@ -514,17 +753,26 @@ class FilmStripBar(QFrame):
                 self._recycle_cell(idx)
 
         needed_paths: List[str] = []
+        relayout = False
         for idx in range(first, last + 1):
             path = self._files[idx]
             cell = self._acquire_cell(idx)
-            self._place_cell_geometry(cell, idx)
-            cell.show()
-            cell.raise_()
             self._wire_cell(cell, idx)
             self._active_paths.add(path)
             self._thumb_gen[path] = self._generation
             if self._prepare_cell_for_path(cell, idx, path):
                 needed_paths.append(path)
+            # Width may have been measured from cache while preparing the cell.
+            slot_w = self._slot_width_for_path(path, idx)
+            if idx < len(self._widths) and self._widths[idx] != slot_w:
+                self._widths[idx] = slot_w
+                relayout = True
+            self._place_cell_geometry(cell, idx)
+            cell.show()
+            cell.raise_()
+
+        if relayout:
+            self._recompute_slot_starts()
 
         self._update_selection_style()
         if needed_paths:

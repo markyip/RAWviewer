@@ -12,8 +12,10 @@ from collections import defaultdict
 from enum import Enum
 from typing import Optional, Dict, Any, Tuple
 import numpy as np
-from PyQt6.QtCore import QObject, pyqtSignal, QRunnable, QThreadPool, QSize, Qt, QTimer
+from PyQt6.QtCore import QObject, pyqtSignal, QRunnable, QThreadPool, QSize, Qt, QTimer, QLoggingCategory
 from PyQt6.QtGui import QPixmap, QImage
+# Silence qt.imageformats warnings (e.g. missing TIFF tag warnings on RAW files)
+QLoggingCategory.setFilterRules("qt.imageformats.warning=false\nqt.imageformats.tiff.warning=false")
 
 import concurrent.futures
 from image_cache import get_image_cache
@@ -25,6 +27,56 @@ def _env_true(name: str, default: bool = False) -> bool:
     if raw is None:
         return default
     return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_int(name: str, default: int, *, minimum: int = 0) -> int:
+    raw = os.environ.get(name)
+    if raw is None:
+        return max(minimum, default)
+    try:
+        return max(minimum, int(str(raw).strip()))
+    except (TypeError, ValueError):
+        return max(minimum, default)
+
+
+def _buffer_max_dim(buf) -> int:
+    try:
+        if hasattr(buf, "shape"):
+            return max(int(buf.shape[0]), int(buf.shape[1]))
+        if hasattr(buf, "width") and hasattr(buf, "height"):
+            return max(int(buf.width()), int(buf.height()))
+    except Exception:
+        pass
+    return 0
+
+
+def _display_preview_min_dim() -> int:
+    from image_cache import memory_preview_max_edge
+
+    return int(memory_preview_max_edge() * 0.85)
+
+
+def _min_acceptable_preview_dim(file_path: str) -> int:
+    from common_image_loader import dng_prefers_embedded_preview_first
+
+    if dng_prefers_embedded_preview_first(file_path):
+        return 1024
+    return _display_preview_min_dim()
+
+
+def _skip_low_res_memory_thumb_for_display_tier(
+    thumb, wanted: set, use_full_resolution: bool
+) -> bool:
+    """Do not emit 512px grid-tier thumbs for preview-first single-view loads."""
+    if use_full_resolution or "full" in wanted:
+        return False
+    if wanted == {"thumbnail"}:
+        return False
+    if "thumbnail" not in wanted or "exif" not in wanted:
+        return False
+    min_dim = _env_int("RAWVIEWER_GALLERY_INSTANT_MIN_DIM", 1400, minimum=400)
+    px = _buffer_max_dim(thumb)
+    return 0 < px < min_dim
 
 
 class Priority(Enum):
@@ -83,6 +135,16 @@ class ImageLoadWorker(QRunnable):
         self.task = task
         self.manager = manager
         self._processor = None  # 延遲初始化，避免導入時創建
+
+    @staticmethod
+    def _uses_display_preview_tier(task: ImageLoadTask) -> bool:
+        """CURRENT single-view loads use ~1920px embedded preview, not 512px gallery grid."""
+        if task.priority != Priority.CURRENT:
+            return False
+        if task.thumbnail_target_size is not None:
+            return False
+        stages = task.stages or set()
+        return "full" in stages or "thumbnail" in stages
     
     def _get_processor(self):
         """獲取處理器實例（延遲初始化）"""
@@ -112,25 +174,60 @@ class ImageLoadWorker(QRunnable):
                 if self._safe_emit():
                     self.manager.progress_updated.emit(file_path, "Reading metadata & preview...")
                 
-                allow_heavy_fallback = (self.task.priority == Priority.CURRENT and "full" in stages)
+                allow_heavy_fallback = self._uses_display_preview_tier(self.task)
                 exif_data, thumbnail = processor.process_metadata_and_thumbnail(
                     file_path,
                     allow_heavy_fallback=allow_heavy_fallback,
                     target_size=self.task.thumbnail_target_size
                 )
-                
+
+                preview_tier = allow_heavy_fallback
+                min_preview_dim = _min_acceptable_preview_dim(file_path)
+                if preview_tier and thumbnail is not None and not self.task.is_cancelled():
+                    if processor._is_raw_file(file_path):
+                        if (
+                            processor._preview_buffer_max_dim(thumbnail)
+                            < min_preview_dim
+                        ):
+                            thumbnail = processor.ensure_display_tier_preview(
+                                file_path, thumbnail
+                            )
+                        if processor._preview_buffer_max_dim(thumbnail) < min_preview_dim:
+                            if not processor.is_libraw_unsupported(file_path):
+                                thumbnail = None
+                    if thumbnail is not None:
+                        self._maybe_cache_preview_first_warm(
+                            processor, file_path, thumbnail, exif_data
+                        )
+                if preview_tier and thumbnail is not None and not self.task.is_cancelled():
+                    self._handle_thumbnail_result(file_path, thumbnail)
+                elif preview_tier and thumbnail is None and not self.task.is_cancelled():
+                    if self._safe_emit():
+                        self.manager.error_occurred.emit(
+                            file_path,
+                            "Display-tier preview extraction failed",
+                        )
+                elif thumbnail is None and not self.task.is_cancelled():
+                    if self._safe_emit():
+                        self.manager.error_occurred.emit(
+                            file_path, "Thumbnail extraction returned None"
+                        )
+
                 if exif_data is not None and not self.task.is_cancelled():
                     if self._safe_emit():
                         self.manager.exif_data_ready.emit(file_path, exif_data)
                 elif exif_data is None and not self.task.is_cancelled():
                     if self._safe_emit():
                         self.manager.exif_data_ready.emit(file_path, {})
-                
-                if thumbnail is not None and not self.task.is_cancelled():
-                    self._handle_thumbnail_result(file_path, thumbnail)
-                elif thumbnail is None and not self.task.is_cancelled():
-                    if self._safe_emit():
-                        self.manager.error_occurred.emit(file_path, "Thumbnail extraction returned None")
+
+                if not preview_tier:
+                    if thumbnail is not None and not self.task.is_cancelled():
+                        self._handle_thumbnail_result(file_path, thumbnail)
+                    elif thumbnail is None and not self.task.is_cancelled():
+                        if self._safe_emit():
+                            self.manager.error_occurred.emit(
+                                file_path, "Thumbnail extraction returned None"
+                            )
             else:
                 # Sequential or partial stages
                 if 'exif' in stages and not self.task.is_cancelled():
@@ -147,17 +244,67 @@ class ImageLoadWorker(QRunnable):
                 if 'thumbnail' in stages and not self.task.is_cancelled():
                     if self._safe_emit():
                         self.manager.progress_updated.emit(file_path, "Extracting preview...")
-                    allow_heavy_fallback = (self.task.priority == Priority.CURRENT and "full" in stages)
-                    thumbnail = processor.process_thumbnail(
-                        file_path,
-                        allow_heavy_fallback=allow_heavy_fallback,
-                        target_size=self.task.thumbnail_target_size,
-                    )
-                    if thumbnail is not None and not self.task.is_cancelled():
-                        self._handle_thumbnail_result(file_path, thumbnail)
+                    allow_heavy_fallback = self._uses_display_preview_tier(self.task)
+                    thumbnail = None
+                    exif_data = None
+                    if allow_heavy_fallback and "exif" not in stages:
+                        cache = processor.cache
+                        cached_exif = cache.get_exif(file_path)
+                        cached_thumb = cache.get_preview(file_path)
+                        if cached_thumb is None:
+                            cached_thumb = cache.get_thumbnail(file_path)
+                        fast_pair = processor._extract_raw_preview_before_full_exiftool(
+                            file_path, cached_exif, cached_thumb
+                        )
+                        if fast_pair is not None:
+                            exif_data, thumbnail = fast_pair
+                    if thumbnail is None:
+                        thumbnail = processor.process_thumbnail(
+                            file_path,
+                            allow_heavy_fallback=allow_heavy_fallback,
+                            target_size=self.task.thumbnail_target_size,
+                        )
+                    if allow_heavy_fallback and "exif" not in stages and exif_data is None:
+                        deferred = processor.cache.get_exif(file_path)
+                        if deferred and deferred.get("minimal_preview_exif"):
+                            exif_data = deferred
+                    if (
+                        allow_heavy_fallback
+                        and exif_data is not None
+                        and not self.task.is_cancelled()
+                    ):
+                        if self._safe_emit():
+                            self.manager.exif_data_ready.emit(file_path, exif_data)
+                        if allow_heavy_fallback and processor._is_raw_file(file_path):
+                            min_preview_dim = _min_acceptable_preview_dim(file_path)
+                            if (
+                                processor._preview_buffer_max_dim(thumbnail)
+                                < min_preview_dim
+                            ):
+                                thumbnail = processor.ensure_display_tier_preview(
+                                    file_path, thumbnail
+                                )
+                            if (
+                                processor._preview_buffer_max_dim(thumbnail)
+                                < min_preview_dim
+                            ):
+                                if not processor.is_libraw_unsupported(file_path):
+                                    thumbnail = None
+                            else:
+                                self._maybe_cache_preview_first_warm(
+                                    processor, file_path, thumbnail, exif_data
+                                )
+                        elif allow_heavy_fallback:
+                            self._maybe_cache_preview_first_warm(
+                                processor, file_path, thumbnail, exif_data
+                            )
+                        if thumbnail is not None:
+                            self._handle_thumbnail_result(file_path, thumbnail)
                     elif thumbnail is None and not self.task.is_cancelled():
                         if self._safe_emit():
-                            self.manager.error_occurred.emit(file_path, "Thumbnail extraction returned None")
+                            self.manager.error_occurred.emit(
+                                file_path, "Thumbnail extraction returned None"
+                            )
             
             # 處理完整圖像（只在需要時）
             if 'full' in stages and not self.task.is_cancelled():
@@ -236,6 +383,17 @@ class ImageLoadWorker(QRunnable):
         if self._safe_emit():
             self.manager.thumbnail_ready.emit(file_path, thumbnail)
 
+    def _maybe_cache_preview_first_warm(
+        self, processor, file_path: str, thumbnail, exif_data
+    ) -> None:
+        """Warm-cache only for preview-first (thumbnail-only) CURRENT loads."""
+        if thumbnail is None or not self._uses_display_preview_tier(self.task):
+            return
+        stages = self.task.stages if self.task.stages is not None else set()
+        if stages != {"thumbnail"}:
+            return
+        processor._cache_display_tier_result(file_path, thumbnail, exif_data)
+
     def _safe_emit(self) -> bool:
         """Verify the manager still exists before emitting signals from background thread."""
         try:
@@ -299,24 +457,34 @@ class ImageLoadManager(QObject):
         self._work_queue = queue.PriorityQueue()
         self._thread_pool = QThreadPool()
         
-        # INCREASED CONCURRENCY: Scale with CPU cores
-        # For I/O bound tasks (thumbnails), we can have many threads
+        # INCREASED CONCURRENCY: Scale with CPU cores (embedded JPEG thumbnails are I/O-light).
         core_count = os.cpu_count() or 4
-        default_workers = max(12, core_count * 2) 
-        if max_workers == 4: # If default was used, upgrade it
+        default_workers = max(16, core_count * 2)
+        env_workers = os.environ.get("RAWVIEWER_LOAD_MAX_WORKERS", "").strip()
+        if env_workers:
+            try:
+                default_workers = max(4, int(env_workers))
+            except ValueError:
+                pass
+        if max_workers == 4:  # If default was used, upgrade it
             max_workers = default_workers
             
         self._thread_pool.setMaxThreadCount(max_workers)
 
         # PROCESS POOL (optional): on Windows debug/startup paths, process spawn can
         # re-import heavy modules and hurt first-load latency. Keep it opt-in.
-        use_process_pool = os.environ.get("RAWVIEWER_USE_PROCESS_POOL", "").strip().lower() in {
-            "1", "true", "yes", "on"
-        }
+        # PROCESS POOL: LibRaw postprocess in worker processes (multi-core on Windows).
+        from common_image_loader import (
+            process_pool_worker_count,
+            raw_concurrent_load_limit,
+            use_raw_process_pool,
+        )
+
+        use_process_pool = use_raw_process_pool()
         self._process_pool = None
         if use_process_pool:
             self._process_pool = concurrent.futures.ProcessPoolExecutor(
-                max_workers=max(2, core_count // 2)
+                max_workers=process_pool_worker_count()
             )
         
         self._active_tasks: Dict[Tuple, ImageLoadTask] = {}
@@ -325,11 +493,41 @@ class ImageLoadManager(QObject):
         self._queue_lock = threading.Lock()
         
         # RAW throttling: Limit concurrent heavy RAW decodes
-        self._raw_load_limit = 4
+        self._raw_load_limit = raw_concurrent_load_limit()
         self._active_raw_tasks = 0
         
         self._stopped = False  # Flag to stop scheduling new tasks
+        self._gallery_warmup_throttle_depth = 0
         self._initialized = True
+
+    def enter_gallery_warmup_throttle(self) -> None:
+        """Lower worker/RAW concurrency while gallery tiles are first painting."""
+        self._gallery_warmup_throttle_depth = (
+            int(getattr(self, "_gallery_warmup_throttle_depth", 0) or 0) + 1
+        )
+        if self._gallery_warmup_throttle_depth != 1:
+            return
+        self._warmup_saved_max_threads = self._thread_pool.maxThreadCount()
+        warmed_max = _env_int("RAWVIEWER_GALLERY_WARMUP_MAX_WORKERS", 8, minimum=2)
+        self._thread_pool.setMaxThreadCount(
+            min(warmed_max, self._warmup_saved_max_threads)
+        )
+        self._warmup_saved_raw_limit = self._raw_load_limit
+        self._raw_load_limit = min(2, int(self._raw_load_limit or 2))
+
+    def exit_gallery_warmup_throttle(self) -> None:
+        depth = int(getattr(self, "_gallery_warmup_throttle_depth", 0) or 0)
+        if depth <= 0:
+            return
+        self._gallery_warmup_throttle_depth = depth - 1
+        if self._gallery_warmup_throttle_depth > 0:
+            return
+        saved_threads = getattr(self, "_warmup_saved_max_threads", None)
+        if saved_threads is not None:
+            self._thread_pool.setMaxThreadCount(saved_threads)
+        saved_raw = getattr(self, "_warmup_saved_raw_limit", None)
+        if saved_raw is not None:
+            self._raw_load_limit = saved_raw
     
     def load_image(self, file_path: str, priority: Priority = Priority.CURRENT,
                    cancel_existing: bool = True, use_full_resolution: bool = False,
@@ -393,6 +591,13 @@ class ImageLoadManager(QObject):
         self._work_queue.put(task)
         self._schedule_next_task()
     
+    def has_active_work_for_path(self, file_path: str) -> bool:
+        """True when a load task for this path is queued or running."""
+        if not file_path:
+            return False
+        with self._queue_lock:
+            return bool(self._task_keys_by_path.get(file_path))
+
     def cancel_task(self, file_path: str):
         """取消任務（非阻塞）"""
         with self._queue_lock:
@@ -402,6 +607,22 @@ class ImageLoadManager(QObject):
                 if task is not None:
                     task.cancel()
             self._task_keys_by_path.pop(file_path, None)
+
+    def cancel_current_priority_tasks(self, file_path: str) -> None:
+        """Cancel only CURRENT-priority work; keep PRELOAD/BACKGROUND prefetch for that path."""
+        if not file_path:
+            return
+        with self._queue_lock:
+            keys = list(self._task_keys_by_path.get(file_path, ()))
+            for key in keys:
+                task = self._active_tasks.get(key)
+                if task is None or task.priority != Priority.CURRENT:
+                    continue
+                task.cancel()
+                self._active_tasks.pop(key, None)
+                self._task_keys_by_path[file_path].discard(key)
+            if not self._task_keys_by_path.get(file_path):
+                self._task_keys_by_path.pop(file_path, None)
     
     def cancel_all_tasks(self):
         """取消所有任務"""
@@ -470,36 +691,67 @@ class ImageLoadManager(QObject):
     def _emit_cached_result_later(signal, file_path: str, payload) -> None:
         """Defer cache-hit emissions to avoid re-entering PyQt slots synchronously."""
         QTimer.singleShot(0, lambda: signal.emit(file_path, payload))
+
+    @staticmethod
+    def _emit_cached_result_now(signal, file_path: str, payload) -> None:
+        """Emit cache hits immediately (load_image runs on UI thread)."""
+        signal.emit(file_path, payload)
     
     def _check_cache(self, file_path: str, use_full_resolution: bool, stages: Optional[set] = None) -> bool:
         """檢查快取，如果存在則直接發送信號（只檢查記憶體快取以避免阻塞 UI）"""
-        from common_image_loader import is_raw_file, use_libraw_consistent_preview_first
+        from common_image_loader import (
+            image_covers_sensor_resolution,
+            is_raw_file,
+            use_libraw_consistent_preview_first,
+        )
 
         is_raw = is_raw_file(file_path)
         libraw_first = use_libraw_consistent_preview_first()
         wanted = stages if stages is not None else {'thumbnail', 'exif', 'full'}
 
         cache = self._cache
-        any_terminal_hit = False
+        preview_only = wanted == {"thumbnail"}
 
-        # 1) Thumbnail stage: memory-only thumbnail cache (numpy)
-        if 'thumbnail' in wanted:
+        # 1) Thumbnail stage: memory preview/thumbnail (display tier for preview-first)
+        if "thumbnail" in wanted:
+
+            def _try_emit_display_thumb(buf) -> bool:
+                if buf is None:
+                    return False
+                if _skip_low_res_memory_thumb_for_display_tier(
+                    buf, wanted, use_full_resolution
+                ):
+                    return False
+                emit = (
+                    self._emit_cached_result_now
+                    if preview_only
+                    else self._emit_cached_result_later
+                )
+                emit(self.thumbnail_ready, file_path, buf)
+                if preview_only:
+                    exif_data = cache.get_exif(file_path)
+                    if exif_data is not None:
+                        emit(self.exif_data_ready, file_path, exif_data)
+                return True
+
+            preview_buf = cache.preview_cache.get(file_path)
+            if _try_emit_display_thumb(preview_buf):
+                if preview_only:
+                    return True
             thumb = cache.thumbnail_cache.get(file_path)
-            if thumb is not None:
-                self._emit_cached_result_later(self.thumbnail_ready, file_path, thumb)
-                if wanted == {'thumbnail'}:
+            if _try_emit_display_thumb(thumb):
+                if preview_only:
                     return True
                 # Not terminal if callers also requested EXIF/full image work.
 
-        # 2) EXIF stage: check memory cache and emit if found
+        # 2) EXIF stage: check memory + persistent cache and emit if found
         if 'exif' in wanted:
-            # Check memory cache (now always available via ImageCache.exif_memory_cache)
-            exif_data = cache.exif_memory_cache.get(file_path)
-            if exif_data is not None:
+            exif_data = cache.get_exif(file_path)
+            if exif_data is not None and not exif_data.get("minimal_preview_exif"):
                 self._emit_cached_result_later(self.exif_data_ready, file_path, exif_data)
                 # Note: EXIF hit alone doesn't terminate processing if pixels are also wanted
         
-        # 3) Full stage: treat RAW preview (1920) as "full" when use_full_resolution=False
+        # 3) Full stage: treat in-memory RAW preview as "full" when use_full_resolution=False
         if 'full' in wanted:
             if is_raw:
                 if use_full_resolution:
@@ -507,9 +759,25 @@ class ImageLoadManager(QObject):
                     if full_img is not None:
                         self._emit_cached_result_later(self.image_ready, file_path, full_img)
                         return True
+                    exif_data = cache.exif_cache.get(file_path)
+                    preview = cache.preview_cache.get(file_path)
+                    if preview is not None:
+                        h, w = preview.shape[:2]
+                        if image_covers_sensor_resolution(w, h, exif_data):
+                            self._emit_cached_result_later(self.image_ready, file_path, preview)
+                            return True
                 else:
                     # Prefer any LibRaw buffer already in memory (fit ↔ zoom consistency)
                     if libraw_first:
+                        exif_data = cache.exif_cache.get(file_path)
+                        preview = cache.preview_cache.get(file_path)
+                        if preview is not None:
+                            h, w = preview.shape[:2]
+                            if image_covers_sensor_resolution(w, h, exif_data):
+                                self._emit_cached_result_later(
+                                    self.image_ready, file_path, preview
+                                )
+                                return True
                         full_img = cache.get_full_image(file_path)
                         if full_img is not None:
                             self._emit_cached_result_later(self.image_ready, file_path, full_img)
@@ -527,7 +795,44 @@ class ImageLoadManager(QObject):
                     self._emit_cached_result_later(self.pixmap_ready, file_path, pixmap)
                     return True
 
-        return any_terminal_hit
+        def _memory_thumb_ok() -> bool:
+            if "thumbnail" not in wanted:
+                return True
+            preview_buf = cache.preview_cache.get(file_path)
+            if preview_buf is not None and not _skip_low_res_memory_thumb_for_display_tier(
+                preview_buf, wanted, use_full_resolution
+            ):
+                return True
+            thumb = cache.thumbnail_cache.get(file_path)
+            return thumb is not None and not _skip_low_res_memory_thumb_for_display_tier(
+                thumb, wanted, use_full_resolution
+            )
+
+        thumb_ok = _memory_thumb_ok()
+        exif_cached = cache.get_exif(file_path)
+        if "exif" not in wanted:
+            exif_ok = True
+        elif preview_only:
+            exif_ok = exif_cached is not None
+        else:
+            exif_ok = (
+                exif_cached is not None
+                and not exif_cached.get("minimal_preview_exif")
+            )
+        full_ok = "full" not in wanted
+        if "full" in wanted:
+            if is_raw:
+                if use_full_resolution:
+                    full_ok = cache.full_image_cache.get(file_path) is not None
+                elif libraw_first:
+                    full_ok = cache.get_full_image(file_path) is not None
+                else:
+                    full_ok = cache.preview_cache.get(file_path) is not None
+            else:
+                px = cache.pixmap_cache.get(file_path)
+                full_ok = px is not None and not px.isNull()
+
+        return thumb_ok and exif_ok and full_ok
     
     def _schedule_next_task(self):
         """調度下一個任務到線程池，實現 RAW 限制"""
