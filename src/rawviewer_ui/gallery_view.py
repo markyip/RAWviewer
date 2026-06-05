@@ -935,6 +935,17 @@ class JustifiedGallery(QWidget):
 
     def _on_scroll(self, value):
         now = time.time()
+        
+        # Pause background indexing during active scrolling to eliminate resource contention and keep UX smooth
+        if self.parent_viewer is not None:
+            if hasattr(self.parent_viewer, "_pause_semantic_indexing_deferred"):
+                try:
+                    self.parent_viewer._pause_semantic_indexing_deferred()
+                    if hasattr(self.parent_viewer, "_resume_indexing_timer") and self.parent_viewer._resume_indexing_timer:
+                        self.parent_viewer._resume_indexing_timer.stop()
+                except Exception:
+                    pass
+
         if self._last_scroll_y >= 0:
             last_time = getattr(self, "_last_scroll_time", 0)
             dt = now - last_time
@@ -984,6 +995,19 @@ class JustifiedGallery(QWidget):
         self._last_scroll_settle_t = time.time()
         self._thumb_first_after_settle_t = self._last_scroll_settle_t
         self.load_visible_images()
+        
+        # Defer resuming indexing for 5 seconds of idle gallery time
+        if self.parent_viewer is not None:
+            try:
+                if hasattr(self.parent_viewer, "_resume_indexing_timer") and self.parent_viewer._resume_indexing_timer:
+                    self.parent_viewer._resume_indexing_timer.stop()
+                from PyQt6.QtCore import QTimer
+                self.parent_viewer._resume_indexing_timer = QTimer(self.parent_viewer)
+                self.parent_viewer._resume_indexing_timer.setSingleShot(True)
+                self.parent_viewer._resume_indexing_timer.timeout.connect(self.parent_viewer._resume_indexing_if_gallery_idle)
+                self.parent_viewer._resume_indexing_timer.start(5000)
+            except Exception:
+                pass
 
     def _get_viewport_width(self):
         p = self.parent()
