@@ -169,7 +169,7 @@ def semantic_warm_thumbs_before_index() -> bool:
 
 def semantic_batch_candidates() -> List[int]:
     raw = os.environ.get(
-        "RAWVIEWER_SEMANTIC_BATCH_CANDIDATES", "1,2,4,8,16,32,64"
+        "RAWVIEWER_SEMANTIC_BATCH_CANDIDATES", "8,16,32,64"
     ).strip()
     cap = semantic_batch_max()
     out: List[int] = []
@@ -182,7 +182,7 @@ def semantic_batch_candidates() -> List[int]:
         except Exception:
             continue
     if not out:
-        out = [1, 2, 4, 8, 16, 32, 64]
+        out = [8, 16, 32, 64]
     # stable dedupe
     seen = set()
     uniq: List[int] = []
