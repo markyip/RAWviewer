@@ -8,8 +8,10 @@
 import os
 import numpy as np
 from typing import Optional, Dict, Any, Union, Tuple
-from PyQt6.QtCore import QSize
+from PyQt6.QtCore import QSize, QLoggingCategory
 from PyQt6.QtGui import QPixmap, QImage
+# Silence qt.imageformats warnings (e.g. missing TIFF tag warnings on RAW files)
+QLoggingCategory.setFilterRules("qt.imageformats.warning=false\nqt.imageformats.tiff.warning=false")
 # PIL Image, rawpy, and exifread will be imported lazily to avoid import delays
 
 from image_cache import (

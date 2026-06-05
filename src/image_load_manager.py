@@ -12,8 +12,10 @@ from collections import defaultdict
 from enum import Enum
 from typing import Optional, Dict, Any, Tuple
 import numpy as np
-from PyQt6.QtCore import QObject, pyqtSignal, QRunnable, QThreadPool, QSize, Qt, QTimer
+from PyQt6.QtCore import QObject, pyqtSignal, QRunnable, QThreadPool, QSize, Qt, QTimer, QLoggingCategory
 from PyQt6.QtGui import QPixmap, QImage
+# Silence qt.imageformats warnings (e.g. missing TIFF tag warnings on RAW files)
+QLoggingCategory.setFilterRules("qt.imageformats.warning=false\nqt.imageformats.tiff.warning=false")
 
 import concurrent.futures
 from image_cache import get_image_cache

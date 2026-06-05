@@ -12,6 +12,9 @@ from typing import Any, Dict, Optional, Tuple
 import numpy as np
 
 from PyQt6.QtGui import QPixmap, QImage
+from PyQt6.QtCore import QLoggingCategory
+# Silence qt.imageformats warnings (e.g. missing TIFF tag warnings on RAW files)
+QLoggingCategory.setFilterRules("qt.imageformats.warning=false\nqt.imageformats.tiff.warning=false")
 # PIL Image will be imported lazily to avoid import delays
 
 from image_cache import get_image_cache

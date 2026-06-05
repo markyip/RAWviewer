@@ -14,10 +14,13 @@ import rawpy
 import exifread
 import sys
 from typing import Optional, Dict, Any, Tuple, Union
-from PyQt6.QtCore import QThread, pyqtSignal, QObject, QSize
+from PyQt6.QtCore import QThread, pyqtSignal, QObject, QSize, QLoggingCategory
 from PyQt6.QtGui import QPixmap, QImage, QImageReader
 from PIL import Image
 import io
+
+# Silence qt.imageformats warnings (e.g. missing TIFF tag warnings on RAW files)
+QLoggingCategory.setFilterRules("qt.imageformats.warning=false\nqt.imageformats.tiff.warning=false")
 
 # Suppress exifread warnings for unsupported file formats (e.g., video files)
 warnings.filterwarnings('ignore', category=UserWarning, module='exifread')
