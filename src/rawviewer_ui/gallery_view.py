@@ -65,6 +65,17 @@ def _gallery_scheduling_budgets(fast: bool) -> tuple[int, int, int]:
     )
 
 
+def _gallery_warmup_scheduling_budgets(file_count: int) -> tuple[int, int, int]:
+    """Tight budgets during gallery entry to avoid native crashes on huge folders."""
+    if file_count >= 2500:
+        return (6, 4, 8)
+    if file_count >= 1200:
+        return (10, 6, 12)
+    if file_count >= 500:
+        return (14, 10, 18)
+    return (18, 14, 24)
+
+
 def _gallery_idle_preload_batch() -> int:
     return _env_int("RAWVIEWER_GALLERY_IDLE_PRELOAD_BATCH", 72, minimum=4)
 
@@ -153,6 +164,8 @@ class JustifiedGallery(QWidget):
         self._last_load_visible_request_ts = 0.0
         self._gallery_set_images_ts = 0.0
         self._first_thumb_ready_after_set = False
+        self._gallery_warmup_until = 0.0
+        self._thumb_ready_depth = 0
         self._pending_gallery_build = False
         self._pending_build_metadata = None
         self._pending_build_force = False
@@ -379,6 +392,10 @@ class JustifiedGallery(QWidget):
             self.images = new_images
             if not same_order or force_rebuild:
                 # Order changed: invalidate layout so build_gallery cannot skip via count-only checks.
+                self._building = False
+                self._pending_gallery_build = False
+                self._pending_build_metadata = None
+                self._pending_build_force = False
                 self.clear_thumbnail_widgets()
                 self._gallery_layout_items.clear()
                 self._path_to_indices.clear()
@@ -423,13 +440,28 @@ class JustifiedGallery(QWidget):
             # Rebuild on next event loop tick (avoid doing heavy UI work inside caller)
             build_gen = self._gallery_generation
             need_force = force_rebuild or not same_order
+            build_done = {"gen": -1}
 
             def _run_build():
                 if self._gallery_generation != build_gen:
                     return
+                if build_done["gen"] == build_gen:
+                    return
+                if (
+                    not need_force
+                    and self._gallery_layout_items
+                    and len(self._gallery_layout_items) == len(self.images)
+                    and tuple(self.images) == self._layout_image_sequence
+                ):
+                    build_done["gen"] = build_gen
+                    self._request_load_visible_images(20)
+                    return
                 self.build_gallery(bulk_metadata=bulk_metadata, force=need_force)
+                build_done["gen"] = build_gen
 
             QTimer.singleShot(0, _run_build)
+            # Backup: mode-switch bursts can delay the first tick on large folders.
+            QTimer.singleShot(200, _run_build)
         except Exception:
             logger.exception("[GALLERY] set_images() failed")
 
@@ -677,9 +709,35 @@ class JustifiedGallery(QWidget):
                     stages={"thumbnail"},
                 )
 
+    def begin_gallery_warmup(self, file_count: int = 0) -> None:
+        """Soften thumbnail/Qt work while switching into gallery on large folders."""
+        duration = min(
+            10.0,
+            2.0 + max(0, int(file_count or 0)) / 1000.0,
+        )
+        self._gallery_warmup_until = time.time() + duration
+        self._building = False
+        self._pending_gallery_build = False
+        self._pending_build_metadata = None
+        self._pending_build_force = False
+        self._idle_preload_timer.stop()
+        if _focus_gallery_switch_logs():
+            logger.debug(
+                "[MODESWITCH] gallery warmup started; files=%d duration=%.1fs",
+                int(file_count or 0),
+                duration,
+            )
+
+    def _gallery_warmup_active(self) -> bool:
+        return time.time() < float(getattr(self, "_gallery_warmup_until", 0.0) or 0.0)
+
     def _stop_layout_rebuild_timers(self) -> None:
         """Cancel pending gallery layout rebuilds (e.g. when leaving gallery mode)."""
-        for timer_name in ("_metadata_rebuild_timer", "_resize_timer"):
+        for timer_name in (
+            "_metadata_rebuild_timer",
+            "_resize_timer",
+            "_aspects_settle_timer",
+        ):
             timer = getattr(self, timer_name, None)
             if timer is not None and timer.isActive():
                 timer.stop()
@@ -941,8 +999,9 @@ class JustifiedGallery(QWidget):
             if hasattr(self.parent_viewer, "_pause_semantic_indexing_deferred"):
                 try:
                     self.parent_viewer._pause_semantic_indexing_deferred()
-                    if hasattr(self.parent_viewer, "_resume_indexing_timer") and self.parent_viewer._resume_indexing_timer:
-                        self.parent_viewer._resume_indexing_timer.stop()
+                    timer = getattr(self.parent_viewer, "_resume_indexing_timer", None)
+                    if timer is not None:
+                        timer.stop()
                 except Exception:
                     pass
 
@@ -999,13 +1058,9 @@ class JustifiedGallery(QWidget):
         # Defer resuming indexing for 5 seconds of idle gallery time
         if self.parent_viewer is not None:
             try:
-                if hasattr(self.parent_viewer, "_resume_indexing_timer") and self.parent_viewer._resume_indexing_timer:
-                    self.parent_viewer._resume_indexing_timer.stop()
-                from PyQt6.QtCore import QTimer
-                self.parent_viewer._resume_indexing_timer = QTimer(self.parent_viewer)
-                self.parent_viewer._resume_indexing_timer.setSingleShot(True)
-                self.parent_viewer._resume_indexing_timer.timeout.connect(self.parent_viewer._resume_indexing_if_gallery_idle)
-                self.parent_viewer._resume_indexing_timer.start(5000)
+                timer = getattr(self.parent_viewer, "_resume_indexing_timer", None)
+                if timer is not None:
+                    timer.start(5000)
             except Exception:
                 pass
 
@@ -1322,7 +1377,8 @@ class JustifiedGallery(QWidget):
         # First-paint mode: prioritize visible tiles only until first thumbnail arrives
         # (or a short timeout), then enable prefetch.
         warmup_elapsed = time.time() - float(getattr(self, "_gallery_set_images_ts", 0.0) or 0.0)
-        allow_prefetch = (not is_fast) and (
+        warmup_active = self._gallery_warmup_active()
+        allow_prefetch = (not is_fast) and (not warmup_active) and (
             self._first_thumb_ready_after_set or warmup_elapsed > 1.5
         )
 
@@ -1363,7 +1419,12 @@ class JustifiedGallery(QWidget):
 
         # Reduce per-tick work when fast scrolling (keep things responsive)
         # RESTORED: Using v1.6.0-style aggressive scheduling for snappier population
-        max_widgets, max_tasks, active_cap = _gallery_scheduling_budgets(is_fast)
+        if warmup_active:
+            max_widgets, max_tasks, active_cap = _gallery_warmup_scheduling_budgets(
+                len(self.images or [])
+            )
+        else:
+            max_widgets, max_tasks, active_cap = _gallery_scheduling_budgets(is_fast)
         active_cap = min(
             active_cap,
             _env_int("RAWVIEWER_GALLERY_ACTIVE_CAP_HARD", 48, minimum=8),
@@ -1681,6 +1742,30 @@ class JustifiedGallery(QWidget):
             return
         if file_path not in self._path_to_indices:
             return
+        if self._building or self._gallery_warmup_active() or self._thumb_ready_depth > 0:
+            QTimer.singleShot(
+                0,
+                lambda fp=file_path, td=thumbnail_data: self._apply_thumbnail_ready(fp, td),
+            )
+            return
+        self._apply_thumbnail_ready(file_path, thumbnail_data)
+
+    def _apply_thumbnail_ready(self, file_path, thumbnail_data):
+        if self._thumb_ready_depth > 0:
+            QTimer.singleShot(
+                0,
+                lambda fp=file_path, td=thumbnail_data: self._apply_thumbnail_ready(fp, td),
+            )
+            return
+        self._thumb_ready_depth += 1
+        try:
+            self._apply_thumbnail_ready_impl(file_path, thumbnail_data)
+        finally:
+            self._thumb_ready_depth = max(0, self._thumb_ready_depth - 1)
+
+    def _apply_thumbnail_ready_impl(self, file_path, thumbnail_data):
+        if file_path not in self._path_to_indices:
+            return
 
         pixmap = _thumbnail_data_to_base_pixmap(thumbnail_data)
 
@@ -1817,6 +1902,8 @@ class JustifiedGallery(QWidget):
         if changed:
             self.refresh_visible_tile_for_path(file_path)
             self._metadata_changed_paths.add(file_path)
+            if self._gallery_warmup_active() or self._building:
+                return
 
             large = len(self.images) > 800
             rebuild_threshold = 12 if large else (5 if len(self.images) < 100 else 15)

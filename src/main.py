@@ -10007,6 +10007,42 @@ class RAWImageViewer(QMainWindow):
         else:
             self._pending_pause_semantic_index = True
 
+    def _defer_background_indexing_for_gallery(self) -> None:
+        """Pause semantic/face background work while gallery thumbnails first paint."""
+        import logging
+        import time
+
+        logger = logging.getLogger(__name__)
+        file_count = len(getattr(self, "image_files", []) or [])
+        warmup_s = min(10.0, 2.0 + file_count / 1000.0)
+        self._gallery_indexing_deferred_until = time.time() + warmup_s
+        self._pause_semantic_indexing_deferred()
+        if getattr(self, "_face_indexing_in_progress", False):
+            self._face_index_active_token = None
+            logger.info(
+                "[VIEW_MODE] Face indexing deferred during gallery warmup (%d files)",
+                file_count,
+            )
+        gj = getattr(self, "gallery_justified", None)
+        if gj is not None and hasattr(gj, "begin_gallery_warmup"):
+            gj.begin_gallery_warmup(file_count)
+        try:
+            if hasattr(self, "image_manager") and self.image_manager is not None:
+                if hasattr(self.image_manager, "enter_gallery_warmup_throttle"):
+                    self.image_manager.enter_gallery_warmup_throttle()
+        except Exception:
+            pass
+
+    def _end_gallery_indexing_deferral(self) -> None:
+        """Restore background indexing / load concurrency after gallery warmup."""
+        self._gallery_indexing_deferred_until = 0.0
+        try:
+            if hasattr(self, "image_manager") and self.image_manager is not None:
+                if hasattr(self.image_manager, "exit_gallery_warmup_throttle"):
+                    self.image_manager.exit_gallery_warmup_throttle()
+        except Exception:
+            pass
+
     def _reset_semantic_search_for_new_folder(self):
         """Clear gallery search UI and stale query when the folder scope changes."""
         self._semantic_search_backup_files = None
@@ -10971,7 +11007,20 @@ class RAWImageViewer(QMainWindow):
 
     def _start_face_index_background(self, corpus_files) -> None:
         """Second pass: face_count backfill after semantic search is usable."""
+        import time
+
         logger = logging.getLogger(__name__)
+        if getattr(self, "view_mode", "") == "gallery":
+            defer_until = float(getattr(self, "_gallery_indexing_deferred_until", 0.0) or 0.0)
+            gj = getattr(self, "gallery_justified", None)
+            warmup = (
+                gj is not None
+                and hasattr(gj, "_gallery_warmup_active")
+                and gj._gallery_warmup_active()
+            )
+            if warmup or time.time() < defer_until:
+                logger.info("[INDEX][FACE] Skip start: gallery warmup in progress")
+                return
         if getattr(self, "_face_indexing_in_progress", False):
             logger.info("[INDEX][FACE] Skip start: already running")
             return
@@ -12094,15 +12143,30 @@ class RAWImageViewer(QMainWindow):
 
     def _resume_indexing_if_gallery_idle(self):
         """Resume background metadata indexing after gallery scrolling settles."""
-        if getattr(self, "view_mode", "") == "gallery":
-            try:
-                self._get_semantic_index().pause_indexing(False)
-                import logging
-                logging.getLogger(__name__).info(
-                    "[VIEW_MODE] Background indexing resumed after idle period in gallery"
-                )
-            except Exception:
-                pass
+        if getattr(self, "view_mode", "") != "gallery":
+            return
+        import logging
+        import time
+        from PyQt6.QtCore import QTimer
+
+        logger = logging.getLogger(__name__)
+        gj = getattr(self, "gallery_justified", None)
+        if gj is not None and hasattr(gj, "_gallery_warmup_active") and gj._gallery_warmup_active():
+            if hasattr(self, "_resume_indexing_timer") and self._resume_indexing_timer:
+                self._resume_indexing_timer.start(2000)
+            return
+        if time.time() < float(getattr(self, "_gallery_indexing_deferred_until", 0.0) or 0.0):
+            if hasattr(self, "_resume_indexing_timer") and self._resume_indexing_timer:
+                self._resume_indexing_timer.start(2000)
+            return
+        self._end_gallery_indexing_deferral()
+        try:
+            self._get_semantic_index().pause_indexing(False)
+            logger.info(
+                "[VIEW_MODE] Background indexing resumed after idle period in gallery"
+            )
+        except Exception:
+            pass
 
     def _show_single_view(self):
         """Show single image view"""
@@ -12126,6 +12190,7 @@ class RAWImageViewer(QMainWindow):
         except Exception:
             pass
         
+        self._end_gallery_indexing_deferral()
         # Stop all gallery background loading when switching to single view
         if hasattr(self, 'gallery_justified') and self.gallery_justified:
             self.gallery_justified._background_loading_active = False
@@ -12352,13 +12417,15 @@ class RAWImageViewer(QMainWindow):
         logger = logging.getLogger(__name__)
         self._suppress_single_manager_callbacks = True
         try:
-            self._pause_semantic_indexing_deferred()
+            self._defer_background_indexing_for_gallery()
             if hasattr(self, "_resume_indexing_timer") and self._resume_indexing_timer:
                 self._resume_indexing_timer.stop()
             self._resume_indexing_timer = QTimer(self)
             self._resume_indexing_timer.setSingleShot(True)
             self._resume_indexing_timer.timeout.connect(self._resume_indexing_if_gallery_idle)
-            self._resume_indexing_timer.start(5000)
+            file_count = len(getattr(self, "image_files", []) or [])
+            resume_ms = min(30000, max(8000, 8000 + (file_count // 500) * 2000))
+            self._resume_indexing_timer.start(resume_ms)
         except Exception:
             pass
         bar = self._filmstrip_bar()
@@ -12776,8 +12843,10 @@ class RAWImageViewer(QMainWindow):
                 self._warm_gallery_from_filmstrip_cache()
                 if hasattr(self.gallery_justified, "sync_visual_rotations"):
                     self.gallery_justified.sync_visual_rotations()
-                QTimer.singleShot(30, self.gallery_justified.load_visible_images)
-                QTimer.singleShot(120, self.gallery_justified.load_visible_images)
+                file_count = len(self.image_files or [])
+                first_load_ms = min(900, max(250, 200 + file_count // 40))
+                QTimer.singleShot(first_load_ms, self.gallery_justified.load_visible_images)
+                QTimer.singleShot(first_load_ms + 500, self.gallery_justified.load_visible_images)
             except Exception as e:
                 logger.exception(f"[GALLERY] set_images failed: {e}")
                 self.show_error(

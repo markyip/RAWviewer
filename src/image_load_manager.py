@@ -495,7 +495,37 @@ class ImageLoadManager(QObject):
         self._active_raw_tasks = 0
         
         self._stopped = False  # Flag to stop scheduling new tasks
+        self._gallery_warmup_throttle_depth = 0
         self._initialized = True
+
+    def enter_gallery_warmup_throttle(self) -> None:
+        """Lower worker/RAW concurrency while gallery tiles are first painting."""
+        self._gallery_warmup_throttle_depth = (
+            int(getattr(self, "_gallery_warmup_throttle_depth", 0) or 0) + 1
+        )
+        if self._gallery_warmup_throttle_depth != 1:
+            return
+        self._warmup_saved_max_threads = self._thread_pool.maxThreadCount()
+        warmed_max = _env_int("RAWVIEWER_GALLERY_WARMUP_MAX_WORKERS", 8, minimum=2)
+        self._thread_pool.setMaxThreadCount(
+            min(warmed_max, self._warmup_saved_max_threads)
+        )
+        self._warmup_saved_raw_limit = self._raw_load_limit
+        self._raw_load_limit = min(2, int(self._raw_load_limit or 2))
+
+    def exit_gallery_warmup_throttle(self) -> None:
+        depth = int(getattr(self, "_gallery_warmup_throttle_depth", 0) or 0)
+        if depth <= 0:
+            return
+        self._gallery_warmup_throttle_depth = depth - 1
+        if self._gallery_warmup_throttle_depth > 0:
+            return
+        saved_threads = getattr(self, "_warmup_saved_max_threads", None)
+        if saved_threads is not None:
+            self._thread_pool.setMaxThreadCount(saved_threads)
+        saved_raw = getattr(self, "_warmup_saved_raw_limit", None)
+        if saved_raw is not None:
+            self._raw_load_limit = saved_raw
     
     def load_image(self, file_path: str, priority: Priority = Priority.CURRENT,
                    cancel_existing: bool = True, use_full_resolution: bool = False,
