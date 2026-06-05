@@ -323,12 +323,33 @@ class UnifiedImageProcessor:
             params['user_flip'] = 0
             
             # 處理 RAW - 使用 Process Pool 繞過 GIL
+            rgb_image = None
             if executor:
                 # logger = logging.getLogger(__name__)
                 # logger.info(f"[PIL/PROCESS_POOL] Offloading RAW postprocess to pool for {file_path}")
-                future = executor.submit(decode_raw_file, file_path, params)
-                rgb_image = future.result()
-            else:
+                try:
+                    future = executor.submit(decode_raw_file, file_path, params)
+                    rgb_image = future.result()
+                except Exception as pool_err:
+                    import logging
+                    logging.getLogger(__name__).warning(f"[PROCESS_POOL] pool decode failed: {pool_err}")
+            
+            # Proof of Concept: Optional GPU-Accelerated demosaicing
+            if rgb_image is None:
+                try:
+                    from gpu_raw_processor import try_gpu_raw_decode, detect_gpu_backend
+                    if detect_gpu_backend() != "cpu_only":
+                        import rawpy
+                        with rawpy.imread(file_path) as raw:
+                            raw_array = raw.raw_image.copy()
+                        gpu_rgb = try_gpu_raw_decode(file_path, raw_array, exif_data)
+                        if gpu_rgb is not None:
+                            rgb_image = gpu_rgb
+                except Exception as gpu_err:
+                    import logging
+                    logging.getLogger(__name__).warning(f"[GPU] PoC GPU decode failed: {gpu_err}")
+
+            if rgb_image is None:
                 import rawpy
                 with rawpy.imread(file_path) as raw:
                     rgb_image = raw.postprocess(**params)
