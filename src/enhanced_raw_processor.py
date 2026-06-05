@@ -181,21 +181,23 @@ def _orientation_from_embedded_preview(
         return 1
 
 
-def _thumbnail_via_qimage_reader(file_path: str, max_size: int) -> Optional[np.ndarray]:
+def _thumbnail_via_qimage_reader(file_path: str, max_size: int, auto_transform: bool = True) -> Optional[np.ndarray]:
     """OS codec fallback for RAW when LibRaw cannot open the container (common on Windows)."""
     try:
         from PyQt6.QtCore import Qt
 
         reader = QImageReader(file_path)
-        reader.setAutoTransform(True)
+        if auto_transform:
+            reader.setAutoTransform(True)
         size = reader.size()
         if max_size > 0 and size.isValid():
-            # Adjust target dimensions if rotation swaps width and height
-            trans = reader.transformation()
-            from PyQt6.QtGui import QImageIOHandler
-            # Trans values 4, 5, 6, 7 in Qt involve 90 or 270 degree rotation
-            if trans.value >= 4:
-                size = QSize(size.height(), size.width())
+            if auto_transform:
+                # Adjust target dimensions if rotation swaps width and height
+                trans = reader.transformation()
+                from PyQt6.QtGui import QImageIOHandler
+                # Trans values 4, 5, 6, 7 in Qt involve 90 or 270 degree rotation
+                if trans.value >= 4:
+                    size = QSize(size.height(), size.width())
             reader.setScaledSize(
                 size.scaled(max_size, max_size, Qt.AspectRatioMode.KeepAspectRatio)
             )
@@ -360,7 +362,7 @@ class ThumbnailExtractor(QObject):
         if thumb is None and allow_scan_fallback and not is_slow:
             thumb = extract_embedded_jpeg_by_scan(file_path, max_size)
         if thumb is None and allow_scan_fallback:
-            thumb = _thumbnail_via_qimage_reader(file_path, max_size)
+            thumb = _thumbnail_via_qimage_reader(file_path, max_size, auto_transform=False)
         if thumb is None and allow_scan_fallback and sys.platform == "darwin":
                 try:
                     import subprocess
