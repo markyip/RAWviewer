@@ -187,8 +187,15 @@ def _thumbnail_via_qimage_reader(file_path: str, max_size: int) -> Optional[np.n
         from PyQt6.QtCore import Qt
 
         reader = QImageReader(file_path)
+        reader.setAutoTransform(True)
         size = reader.size()
         if max_size > 0 and size.isValid():
+            # Adjust target dimensions if rotation swaps width and height
+            trans = reader.transformation()
+            from PyQt6.QtGui import QImageIOHandler
+            # Trans values 4, 5, 6, 7 in Qt involve 90 or 270 degree rotation
+            if trans.value >= 4:
+                size = QSize(size.height(), size.width())
             reader.setScaledSize(
                 size.scaled(max_size, max_size, Qt.AspectRatioMode.KeepAspectRatio)
             )

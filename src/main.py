@@ -25,7 +25,10 @@ def close_native_splash():
 try:
     from PyQt6.QtWidgets import QApplication, QSplashScreen
     from PyQt6.QtGui import QPixmap, QColor, QPainter, QPen, QIcon
-    from PyQt6.QtCore import Qt, QEvent, QSize, QPoint
+    from PyQt6.QtCore import Qt, QEvent, QSize, QPoint, QLoggingCategory
+    
+    # Silence qt.imageformats warnings, particularly for RAW files structured as TIFFs
+    QLoggingCategory.setFilterRules("qt.imageformats.warning=false\nqt.imageformats.tiff.warning=false")
     
     def resource_path(relative_path):
         """ Get absolute path to resource, works for dev and for PyInstaller """

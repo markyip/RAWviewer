@@ -3922,7 +3922,7 @@ class SemanticImageIndex:
 
         import logging
         logger = logging.getLogger(__name__)
-        logger.info(
+        logger.debug(
             "[INDEX] Pending scan: %d pending of %d paths in %.4fs (bulk)",
             len(pending),
             len(file_paths),
