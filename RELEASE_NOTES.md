@@ -1,5 +1,16 @@
 # RAWviewer Release Notes
 
+## 🚀 Version 2.3.0
+**Release Date: June 6, 2026**
+
+### 🎯 Focus overlay
+- **Alignment fix (Canon EOS)**: Maker-note AF uses a center origin with **Y-up**; dashed boxes now line up with the image instead of appearing vertically flipped.
+- **Broader maker AF**: Nikon NEF (`AFInfo2`, image-height fallback), Olympus ORF (`AFPointSelected`, `AFFocusArea` / `AFSelectedArea`), Panasonic RW2 (`AFPointPosition`, including decimal `/1024` form).
+- **Status bar hint**: When the focus outline is on (`F`) but the file has no usable AF/subject metadata, the status bar reports *no AF/subject metadata found*.
+- **Docs**: README lists focus-overlay support by brand — **Fujifilm RAF**, **Hasselblad 3FR**, typical **Adobe DNG**, Pentax PEF, Samsung SRW, and Sigma X3F are documented as **not supported** in the current parser (JPEG/TIFF may still show CIPA `SubjectArea`).
+
+---
+
 ## 🚀 Version 2.2.5
 **Release Date: June 5, 2026**
 

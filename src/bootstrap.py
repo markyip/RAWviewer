@@ -211,7 +211,7 @@ oLink2.Save
                 with winreg.CreateKey(winreg.HKEY_CURRENT_USER, key_path) as key:
                     winreg.SetValueEx(key, "DisplayName", 0, winreg.REG_SZ, "RAWviewer")
                     winreg.SetValueEx(key, "DisplayIcon", 0, winreg.REG_SZ, icon_path)
-                    winreg.SetValueEx(key, "DisplayVersion", 0, winreg.REG_SZ, "2.2.5")
+                    winreg.SetValueEx(key, "DisplayVersion", 0, winreg.REG_SZ, "2.3.0")
                     winreg.SetValueEx(key, "UninstallString", 0, winreg.REG_SZ, silent_cmd)
                     winreg.SetValueEx(key, "QuietUninstallString", 0, winreg.REG_SZ, silent_cmd)
                     winreg.SetValueEx(key, "InstallLocation", 0, winreg.REG_SZ, target_dir)

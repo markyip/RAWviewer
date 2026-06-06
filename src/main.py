@@ -24060,13 +24060,13 @@ def main():
             # 4. Continue with initialization
             if is_windows:
                 safe_print("  [Windows] Setting AppUserModelID...", flush=True)
-                myappid = 'RAWviewer.2.2.5'
+                myappid = 'RAWviewer.2.3.0'
                 ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
                 safe_print("  [Windows] AppUserModelID set", flush=True)
 
             # Set application properties
             app.setApplicationName("RAWviewer")
-            app.setApplicationVersion("2.2.5")
+            app.setApplicationVersion("2.3.0")
 
             # Create and show main window
             safe_print("Creating RAWImageViewer...", flush=True)

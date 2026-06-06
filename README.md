@@ -1,10 +1,10 @@
-# RAWviewer v2.2.5
+# RAWviewer v2.3
 
 <p align="center">
   <img src="icons/appicon.ico" alt="RAWviewer Icon" width="256">
 </p>
 
-![Version](https://img.shields.io/badge/version-2.2.5-blue)
+![Version](https://img.shields.io/badge/version-2.3-blue)
 ![Downloads](https://img.shields.io/github/downloads/markyip/RAWviewer/total) 
 ![License](https://img.shields.io/badge/license-MIT-green)
 [![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-Donate-orange?logo=buy-me-a-coffee)](https://www.buymeacoffee.com/markyip)
@@ -153,6 +153,28 @@ When focus/subject indicator is enabled (`F`):
 
 - **Space** from fit-to-window zooms to the focus/subject box center.
 - **Double-click** still zooms to your clicked point (same as normal mode).
+- **Amber dashed box** — autofocus region from maker notes (Canon, Nikon, Sony, Olympus, Panasonic).
+- **Lime dashed box** — CIPA `SubjectArea` / `SubjectLocation` (common on JPEG; some RAW/DNG).
+- If the file has no usable metadata, the status bar shows *no AF/subject metadata found*.
+
+### Focus overlay support by brand
+
+Metadata is read via **pyexiv2 (Exiv2)**. Maker-note parsers exist for the brands below; other RAW types may still show a box when standard EXIF **SubjectArea** is present.
+
+| Brand / format | Focus overlay (`F`) |
+|----------------|---------------------|
+| **Canon** CR2, CR3 | Yes — maker AF |
+| **Nikon** NEF | Usually yes — AFInfo2 / contrast-detect AF (some shots have no AF tags, e.g. certain Z bodies) |
+| **Sony** ARW | Yes — FocusLocation / frame size |
+| **Olympus** ORF | Yes — AFPointSelected / focus area |
+| **Panasonic** RW2 | Yes — AFPointPosition |
+| **JPEG / TIFF / HEIF** | Sometimes — CIPA SubjectArea only |
+| **Adobe DNG** | Usually **no** — typical Leica/Adobe DNGs lack maker AF and SubjectArea in our test set |
+| **Fujifilm** RAF | **No** — no supported maker AF tags in current parser |
+| **Hasselblad** 3FR | **No** |
+| **Pentax** PEF, **Samsung** SRW, **Sigma** X3F | **No** — not implemented |
+
+Requires **pyexiv2** for maker-note AF on RAW; without it, only the slower **exifread** fallback (mainly SubjectArea / legacy Canon) may apply.
 
 ## 📁 Supported Formats
 
