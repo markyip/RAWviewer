@@ -746,6 +746,77 @@ from PyQt6.QtGui import (QPixmap, QImage, QAction, QKeySequence, QShortcut, QGui
 safe_print("PyQt6 imported successfully", flush=True)
 
 
+def _macos_disable_line_edit_system_completion(line_edit) -> None:
+    """
+    Disable macOS NSTextField automatic completion/spellcheck on a Qt QLineEdit.
+
+    Newer macOS builds host SPCompletionListServiceViewController inside Qt via
+    ViewBridge (NSRemoteView). When that XPC view fails to configure, the process
+    aborts (SIGABRT) — seen with gallery search on macOS 26 + Qt 6.11.
+    """
+    if sys.platform != "darwin" or line_edit is None:
+        return
+    if os.environ.get("RAWVIEWER_MACOS_LINEEDIT_COMPLETION", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    ):
+        return
+    try:
+        line_edit.setInputMethodHints(Qt.InputMethodHint.ImhNoPredictiveText)
+    except Exception:
+        pass
+    try:
+        import objc
+        from ctypes import c_void_p
+    except ImportError:
+        return
+    try:
+        view_ptr = int(line_edit.winId())
+        if not view_ptr:
+            return
+        view = objc.objc_object(c_void_p=view_ptr)
+        stack = [view]
+        seen: set[int] = set()
+        while stack:
+            node = stack.pop()
+            node_id = int(node) if node is not None else 0
+            if node_id and node_id in seen:
+                continue
+            if node_id:
+                seen.add(node_id)
+            for setter, value in (
+                ("setAutomaticTextCompletionEnabled:", False),
+                ("setAutomaticSpellingCorrectionEnabled:", False),
+                ("setContinuousSpellCheckingEnabled:", False),
+                ("setGrammarCheckingEnabled:", False),
+                ("setSmartInsertDeleteEnabled:", False),
+            ):
+                try:
+                    if node.respondsToSelector_(setter):
+                        getattr(node, setter.replace(":", "_"))(value)
+                except Exception:
+                    pass
+            try:
+                subs = node.subviews() or []
+            except Exception:
+                subs = []
+            stack.extend(subs)
+    except Exception:
+        pass
+
+
+def _macos_schedule_line_edit_system_completion_off(line_edit, delay_ms: int = 0) -> None:
+    """Apply _macos_disable_line_edit_system_completion after winId() is valid."""
+    if sys.platform != "darwin" or line_edit is None:
+        return
+
+    def _apply() -> None:
+        _macos_disable_line_edit_system_completion(line_edit)
+
+    QTimer.singleShot(max(0, int(delay_ms)), _apply)
+
+
 def _dismiss_startup_splash(app, main_window=None, splash=None) -> None:
     """Force-hide startup splash. macOS often keeps stay-on-top splash visible after finish()."""
     global _startup_splash
@@ -10037,6 +10108,8 @@ class RAWImageViewer(QMainWindow):
         self.gallery_search_input.setAttribute(
             Qt.WidgetAttribute.WA_MacShowFocusRect, False
         )
+        _macos_schedule_line_edit_system_completion_off(self.gallery_search_input, 0)
+        _macos_schedule_line_edit_system_completion_off(self.gallery_search_input, 250)
         self.gallery_search_input.returnPressed.connect(self._semantic_search_from_bar)
         self.gallery_search_input.textChanged.connect(self._on_gallery_search_text_changed)
 
@@ -10844,6 +10917,8 @@ class RAWImageViewer(QMainWindow):
             self._search_panel_target_width, animate=False
         )
         self._sync_gallery_search_input_editable()
+        if hasattr(self, "gallery_search_input") and self.gallery_search_input is not None:
+            _macos_schedule_line_edit_system_completion_off(self.gallery_search_input, 50)
 
     def _switch_to_gallery_for_search(self):
         """Enter gallery mode to show semantic search results or empty state."""

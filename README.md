@@ -64,16 +64,40 @@ Official releases are published for **Windows** and **macOS** only.
 4. Launch RAWviewer from the Desktop shortcut! (You can safely delete the installer afterwards).
 
 #### macOS
-> **Minimum supported macOS (official prebuilt release): macOS 13 Ventura or newer.**
 
-1. Download the latest release from the [Releases Page](https://github.com/markyip/RAWviewer/releases/latest)
-2. Download and extract `RAWviewer-v2.3-macOS.zip` (or the latest macOS asset from Releases)
-3. Drag `RAWviewer.app` to your **Applications** folder.
-4. **CRITICAL FIRST STEP:** Because this is an open-source app not signed via the paid Apple Developer program, macOS Gatekeeper will incorrectly label it as "Damaged" or block it. **You must run this command in your Terminal once** to remove the download quarantine flag:
-   ```bash
-   xattr -cr /Applications/RAWviewer.app
-   ```
-5. You can now double-click to launch it normally from Applications or Launchpad!
+##### Install (recommended)
+
+> **Requires macOS 13 Ventura or newer** for the official prebuilt app. See [macOS version support](#macos-version-support) below if you are on an older Mac or building from source.
+
+1. Download **`RAWviewer-v2.3-macOS.zip`** (or the latest macOS asset) from the [Releases Page](https://github.com/markyip/RAWviewer/releases/latest).
+2. **Double-click the zip** to extract a folder named `RAWviewer-v2.3-macOS` (version number may differ). Open **`Start Here.txt`** in that folder — it explains which file to double-click.
+
+**If macOS blocks a `.command` script the first time** (common for files downloaded outside the App Store): **right-click the script → Open → Open** once. After that, double-click works normally.
+
+**Already installed to Applications?** Run `Install RAWviewer.command` again and choose **Replace** to upgrade.
+
+**Manual install (optional):** Drag `RAWviewer.app` to Applications. If macOS reports the app as “damaged” or won’t open, run in Terminal:
+
+```bash
+xattr -cr /Applications/RAWviewer.app
+```
+
+*(Change the path if you installed somewhere other than Applications.)*
+
+##### macOS version support
+
+| Your Mac | Official prebuilt `.zip` | Dev / local build |
+|----------|--------------------------|-------------------|
+| **macOS 13 Ventura** (Intel) | Supported | Supported via `./scripts/Launch/shell/build_macos.sh` or `pixi run` (Intel wheels) |
+| **macOS 13 Ventura** (Apple Silicon) | Supported | Use **`build_macos.sh`** — `pyexiv2` arm64 wheels and Pixi’s workspace pin target **macOS 14+** |
+| **macOS 14 Sonoma** or newer | Supported | Supported via Pixi (`pixi install`) or `build_macos.sh` |
+| **macOS 12 Monterey** or older | **Not supported** | **Not supported** — prebuilt binaries and Core ML semantic search require macOS 13+ SDK/runtime symbols |
+
+**Why macOS 13 is the floor for releases:** bundled MobileCLIP Core ML models, `Info.plist` deployment target, and current PyQt6 / Python wheels are built for **Ventura (13.0)+**. Older systems may crash immediately (e.g. missing `_mkfifoat`) or fail dependency install.
+
+**Apple Silicon note:** Pixi declares `[system-requirements] macos = "14.0"` because `pyexiv2` arm64 wheels require **Sonoma (14)+**. On an M-series Mac still on Ventura, use the shell build script instead of Pixi, or upgrade macOS to 14+.
+
+**Building locally** (avoids Gatekeeper quarantine on your own machine): see [Building from Source → macOS](#macos-1). A local build still requires **macOS 13+**; it does not restore support for Monterey or older.
 
 ## ⌨️ Keyboard Shortcuts
 
@@ -245,9 +269,10 @@ Details: [`docs/macos-sharing-v21-v22.md`](docs/macos-sharing-v21-v22.md) and [`
 
 ```bash
 chmod +x scripts/Launch/shell/*.sh
-./scripts/Launch/shell/build_macos.sh    # or: pixi install && pixi run python build.py
-xattr -cr dist/RAWviewer.app
-open dist/RAWviewer.app
+./scripts/Launch/shell/build_macos.sh    # creates dist/RAWviewer.app + dist/RAWviewer-v2.3.0-macOS.zip
+# Test one-click install: unzip the zip, double-click Install RAWviewer.command
+# Or from repo after build:
+bash scripts/Launch/shell/install_macos_app.sh
 ```
 
 **Dev run** (preflight checks for `pyexiv2` and semantic backend):
@@ -284,6 +309,9 @@ pixi run python build.py
 ```
 
 ### macOS
+
+**Prerequisites:** **macOS 13 Ventura or newer** (see [macOS version support](#macos-version-support)). On **Apple Silicon**, Pixi-based workflows need **macOS 14 Sonoma+**; use `./scripts/Launch/shell/build_macos.sh` on Ventura.
+
 **Option 1: Using shell script (recommended)**
 ```bash
 # Run the automated build script (manages its own venv)
@@ -322,39 +350,53 @@ All project dependencies are managed via `pixi.toml` instead of `requirements.tx
   - Check `%LOCALAPPDATA%\RAWviewer\logs\` (persistent crash reports / fatal dumps). Dev runs via `scripts\Launch\bat\run_debug.bat` may also write under `src\logs\`.
 
 ### macOS
-- **Minimum supported macOS (official prebuilt app): 13.0 (Ventura)**
-  - macOS 12 and older may fail to launch the prebuilt binary; use a local Pixi build instead.
 
-- **"App is damaged and should be moved to the Trash" / "Apple could not verify RAWviewer is free of malware"**: 
+- **Version requirements:** See [macOS version support](#macos-version-support). Official prebuilt apps require **macOS 13+**. **macOS 12 Monterey and older are not supported.**
+
+- **"App is damaged and should be moved to the Trash" / "Apple could not verify RAWviewer is free of malware"**:
   - **Why it happens**: Apple heavily restricts apps downloaded outside the App Store that aren't signed with a paid developer certificate. On newer macOS versions (especially Apple Silicon M1/M2/M3), macOS breaks the app's ad-hoc signature and aggressively blocks opening it.
-  - **The Fix (Fastest)**: Open your **Terminal** app and run the following command to remove the quarantine flag:
+  - **The Fix (easiest)**: Use **`Install RAWviewer.command`** from the release zip (see [Install (recommended)](#install-recommended)). It clears quarantine and installs to Applications for you.
+  - **Manual fix**: Open **Terminal** and run:
     ```bash
     xattr -cr /Applications/RAWviewer.app
     ```
-    *(Note: If you placed the app somewhere other than the Applications folder, update the path accordingly).*
+    *(Update the path if you did not install to Applications.)*
 
-- **"Symbol not found: (_mkfifoat)" or App crashes instantly on macOS 12 (Monterey) or older**:
-  - **Why it happens**: The official prebuilt release targets macOS 13+ and newer system SDK/runtime symbols.
-  - **The Fix**: Build locally with Pixi (see below).
+- **"Symbol not found: (_mkfifoat)" or instant crash on launch**:
+  - **Why it happens**: The app was built for **macOS 13+**; Monterey (12) and older lack required system libraries.
+  - **The Fix**: Upgrade to **macOS 13 Ventura or newer**. Local builds on Monterey are not supported.
 
-#### 🛠️ The Ultimate Fix: Build Locally (Solves Both Issues Above)
-If you are on macOS 12 or older, OR if you simply want to permanently bypass all Gatekeeper/Quarantine warnings forever, you can build the app directly on your own machine. It takes about 2 minutes and is managed entirely by Pixi, which automatically downloads the correct Python version for you:
-1. **Install Pixi** (Open Terminal and run: `curl -fsSL https://pixi.sh/install.sh | bash`).
-2. **Open Terminal** and run these commands to download and build:
+#### Build locally (Gatekeeper / quarantine on your own Mac)
+
+If you prefer an app built on your machine (no download quarantine), or you need to test unreleased changes:
+
+1. **Requires macOS 13+** (14+ on Apple Silicon for Pixi; see [version support table](#macos-version-support)).
+2. **Install Pixi** (optional but recommended on Intel / macOS 14+): `curl -fsSL https://pixi.sh/install.sh | bash`
+3. Clone and build:
    ```bash
    git clone https://github.com/markyip/RAWviewer.git
    cd RAWviewer
-   pixi run python build.py
+   ./scripts/Launch/shell/build_macos.sh
+   # or: pixi install && pixi run python build.py   (macOS 14+ Apple Silicon / Intel)
    ```
-This will automatically create a perfectly compatible, warning-free `RAWviewer.app` inside the `dist/` folder!
+4. Install from `dist/`:
+   ```bash
+   bash dist/RAWviewer-v*/install_macos_app.sh
+   # or double-click Install RAWviewer.command inside the release folder after build_macos.sh
+   ```
 
-#### 🔧 Local Build Troubleshooting
+This produces a compatible `RAWviewer.app` under `dist/` without needing `xattr` on a downloaded release.
+
+#### Local build troubleshooting
 - **Error: "No matching distribution found for pyexiv2" or Massive C++ compilation failures**
-  - **Why it happens**: Usually caused by using an unsupported Python version (too old or too bleeding-edge).
-  - **The Fix**: Using `pixi` automatically resolves this by pinning a stable, supported Python version (e.g. 3.11) that has pre-compiled wheels for all libraries. Delete your old `rawviewer_env` and use the `pixi` build instructions above instead of the manual shell script.
+  - **Why it happens**: Usually caused by an unsupported macOS or Python version (e.g. Apple Silicon on Ventura with Pixi, or a bleeding-edge Python).
+  - **The Fix**: On **Apple Silicon + macOS 13**, use `./scripts/Launch/shell/build_macos.sh` instead of Pixi. On **macOS 14+**, `pixi install` pins a supported Python with pre-built wheels. Ensure Homebrew libs exist: `brew install inih gettext`.
 
-- **Homebrew delays on macOS 12 Monterey or older**: 
-  - Homebrew has officially dropped "binary bottle" support for Monterey. However, **it still works**. When the build script attempts to `brew install inih gettext`, Homebrew will simply compile them from source on your machine. This is completely normal but may take 2-3 extra minutes.
+- **Pixi refuses to install on macOS 13 (Apple Silicon)**:
+  - **Expected**: `pixi.toml` sets `macos = "14.0"` for arm64 `pyexiv2` wheels. Use **`build_macos.sh`**, or upgrade to **macOS 14 Sonoma+** for Pixi.
+
+- **Homebrew slow on older Macs**:
+  - If `brew install inih gettext` compiles from source, that is normal on systems without pre-built bottles; allow a few extra minutes.
 
 - **Share menu empty or native picker spins**: Use dev defaults (`RAWVIEWER_SHARE_MENU=1` via `launch_dev.sh`). Avoid opening the picker on mouse-up; see [`docs/macos-sharing-v21-v22.md`](docs/macos-sharing-v21-v22.md). For AirDrop, prefer Finder on the file.
 

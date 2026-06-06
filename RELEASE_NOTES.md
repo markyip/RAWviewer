@@ -20,6 +20,12 @@
 
 ### 🏗️ Build
 - **Removed unused `mediapipe`** from Windows `build.py` dependencies (face detection uses YuNet ONNX).
+- **macOS release zip**: `build_macos.sh` now produces `RAWviewer-v2.3.0-macOS.zip` with **`Start Here.txt`**, **`Install RAWviewer.command`** (Applications + quarantine fix), and **`Remove Quarantine.command`** (run from folder). Bundles **scipy** for GPS reverse geocoding; **`LSMinimumSystemVersion`** set to **13.0**; **pyexiv2** required in the build script.
+
+### 🍎 macOS
+- **Startup splash**: Dismisses automatically when the main window is ready (no extra click on macOS).
+- **Gallery search crash (macOS 26+)**: Disables NSTextField automatic completion on the search field to avoid ViewBridge / `SPCompletionListServiceViewController` aborts under Qt 6.11.
+- **Install docs**: README macOS version support table (13+ prebuilt; Pixi 14+ on Apple Silicon); simplified zip install flow via `Start Here.txt`.
 
 ---
 

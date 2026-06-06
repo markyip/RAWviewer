@@ -71,20 +71,30 @@ chmod +x scripts/Launch/shell/*.sh
 4. Installs PyQt6, rawpy, PyInstaller, **scipy**, **pyobjc** (Cocoa / CoreML / Quartz / Vision), and other runtime deps; **pyexiv2** is **required** (`brew install inih gettext` if the wheel build fails).
 5. Uninstalls heavy unused ML stacks (`torch`, `sentence-transformers`, …) to keep the app bundle smaller.
 6. Cleans `build/`, `dist/`, `*.spec`, then runs **`python build.py`** (version **2.3.0**, updates `Info.plist`, bundles `models/mobileclip2_coreml` when present).
+7. Packages **`dist/RAWviewer-v2.3.0-macOS.zip`** with `RAWviewer.app`, **`Start Here.txt`**, **`Remove Quarantine.command`**, **`Install RAWviewer.command`**, and helper `.sh` scripts.
 
 **Pixi alternative** (pinned Python, good when `rawviewer_env` pyexiv2 fails):
 
 ```bash
 pixi install
 pixi run python build.py
+# Then run install_macos_app.sh from a folder that contains RAWviewer.app, or use build_macos.sh for the full zip.
 ```
 
-**Output:** `dist/RAWviewer.app`. Install to Applications:
+**Output:** `dist/RAWviewer.app` and `dist/RAWviewer-v2.3.0-macOS.zip`.
+
+**End-user install (from release zip):**
+
+1. Extract the zip and read **`Start Here.txt`** in the folder.
+2. Double-click **`Install RAWviewer.command`** (recommended) or **`Remove Quarantine.command`** (run from this folder only).
+3. If a `.command` file is blocked once: right-click → Open.
+
+**Developer install to Applications:**
 
 ```bash
-cp -R dist/RAWviewer.app /Applications/
-xattr -cr /Applications/RAWviewer.app   # if downloaded or copied from another machine
-open /Applications/RAWviewer.app
+bash scripts/Launch/shell/install_macos_app.sh   # when cwd contains dist/RAWviewer.app
+# or after build:
+bash dist/RAWviewer-v*/install_macos_app.sh
 ```
 
 ### macOS — dev run & preflight (`launch_dev.sh`)
