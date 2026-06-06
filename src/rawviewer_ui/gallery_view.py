@@ -345,6 +345,189 @@ class JustifiedGallery(QWidget):
             return None
         return items[idx].get("file_path")
 
+    def _current_image_layout_index(self) -> Optional[int]:
+        """Layout index for the viewer's current single-view / navigation file."""
+        pv = getattr(self, "parent_viewer", None)
+        if pv is None:
+            return None
+        current = getattr(pv, "current_file_path", None)
+        if not current or not self._gallery_layout_items:
+            return None
+        resolved = self._resolve_gallery_path(current)
+        if not resolved:
+            return None
+        indices = self._path_to_indices.get(resolved)
+        if not indices:
+            return None
+        return indices[0]
+
+    def _layout_index_at_scroll_y(self, anchor_y: int) -> Optional[int]:
+        items = self._gallery_layout_items
+        if not items:
+            return None
+        low, high = 0, len(items) - 1
+        idx = 0
+        while low <= high:
+            mid = (low + high) // 2
+            if items[mid]["rect"].bottom() < anchor_y:
+                low = mid + 1
+            else:
+                idx = mid
+                high = mid - 1
+        if idx < 0 or idx >= len(items):
+            return None
+        return idx
+
+    def _gallery_prefetch_center_index(self, scroll_y: int, viewport_h: int) -> Optional[int]:
+        """Center for bidirectional JPEG prefetch: current image, else viewport center."""
+        current_idx = self._current_image_layout_index()
+        viewport_idx = self._layout_index_at_scroll_y(scroll_y + max(1, viewport_h) // 2)
+        if current_idx is None:
+            return viewport_idx
+        if getattr(self, "_pending_scroll_to_path", None):
+            return current_idx
+        pending = self._entry_anchor_path()
+        if pending and self._entry_prefetch_active(current_idx, scroll_y, viewport_h):
+            return current_idx
+        if viewport_idx is None:
+            return current_idx
+        if abs(current_idx - viewport_idx) <= self._gallery_center_prefetch_radius():
+            return current_idx
+        return viewport_idx
+
+    def _entry_anchor_path(self) -> Optional[str]:
+        """File path used to restore scroll when entering gallery."""
+        pending = getattr(self, "_pending_scroll_to_path", None)
+        if pending:
+            return pending
+        pv = getattr(self, "parent_viewer", None)
+        if pv is not None:
+            current = getattr(pv, "current_file_path", None)
+            if current:
+                return current
+            target = getattr(pv, "_gallery_scroll_target_path", None)
+            if target:
+                return target
+        return None
+
+    def _entry_anchor_layout_index(self) -> Optional[int]:
+        if not self._gallery_layout_items:
+            return None
+        path = self._entry_anchor_path()
+        if not path:
+            return None
+        resolved = self._resolve_gallery_path(path)
+        if not resolved:
+            return None
+        indices = self._path_to_indices.get(resolved)
+        if not indices:
+            return None
+        return indices[0]
+
+    def _layout_indices_near(self, center_idx: int, radius: int) -> List[int]:
+        n = len(self._gallery_layout_items)
+        if n <= 0:
+            return []
+        center_idx = max(0, min(int(center_idx), n - 1))
+        ordered: List[int] = []
+        seen: set[int] = set()
+        for offset in range(int(radius) + 1):
+            for idx in (center_idx + offset, center_idx - offset):
+                if 0 <= idx < n and idx not in seen:
+                    seen.add(idx)
+                    ordered.append(idx)
+        return ordered
+
+    def _gallery_center_prefetch_radius(self) -> int:
+        return _env_int("RAWVIEWER_GALLERY_ENTRY_PREFETCH_RADIUS", 48, minimum=4)
+
+    def _entry_prefetch_radius(self) -> int:
+        return self._gallery_center_prefetch_radius()
+
+    def _entry_prefetch_active(
+        self, anchor_idx: Optional[int], scroll_y: int, viewport_h: int
+    ) -> bool:
+        """True when scroll has not yet reached the entry thumbnail neighborhood."""
+        if anchor_idx is None:
+            return False
+        if getattr(self, "_pending_scroll_to_path", None):
+            return True
+        if anchor_idx < 0 or anchor_idx >= len(self._gallery_layout_items):
+            return False
+        rect = self._gallery_layout_items[anchor_idx]["rect"]
+        margin = max(viewport_h // 3, 80)
+        view_top = scroll_y - margin
+        view_bottom = scroll_y + viewport_h + margin
+        return rect.bottom() < view_top or rect.top() > view_bottom
+
+    def _prioritize_entry_paths(self, paths: List[str], cap: Optional[int] = None) -> List[str]:
+        """Order paths so EXIF/layout work near the entry file runs first."""
+        if not paths:
+            return []
+        anchor_path = self._entry_anchor_path()
+        if not anchor_path or not self.images:
+            return paths[:cap] if cap else list(paths)
+        resolved = self._resolve_gallery_path(anchor_path)
+        if not resolved:
+            return paths[:cap] if cap else list(paths)
+        try:
+            anchor_list_idx = self.images.index(resolved)
+        except ValueError:
+            return paths[:cap] if cap else list(paths)
+
+        path_set = set(paths)
+        seed_radius = min(max(self.BUILD_EXIF_PREFETCH_MAX // 2, 16), 96)
+        ordered: List[str] = []
+        seen: set[str] = set()
+        for offset in range(seed_radius + 1):
+            for idx in (anchor_list_idx + offset, anchor_list_idx - offset):
+                if 0 <= idx < len(self.images):
+                    p = self.images[idx]
+                    if p in path_set and p not in seen:
+                        seen.add(p)
+                        ordered.append(p)
+        for p in paths:
+            if p not in seen:
+                ordered.append(p)
+        if cap is not None:
+            return ordered[:cap]
+        return ordered
+
+    def _entry_prefetch_paths(self, anchor_idx: int) -> set[str]:
+        return self._bidirectional_jpeg_paths_from_center(anchor_idx)
+
+    def _bidirectional_jpeg_paths_from_center(self, center_idx: int) -> set[str]:
+        """Paths within ±radius layout indices of center (up/down in the gallery grid)."""
+        paths: set[str] = set()
+        for idx in self._layout_indices_near(center_idx, self._gallery_center_prefetch_radius()):
+            path = self._gallery_layout_items[idx].get("file_path")
+            if path:
+                paths.add(path)
+        return paths
+
+    def _missing_thumbnail_stage(self, path: str) -> bool:
+        return not self._thumbnail_cache.get((path, self._thumb_base_key))
+
+    def _missing_load_stages_for_path(
+        self, path: str, *, jpeg_only: bool = False
+    ) -> set[str]:
+        stages: set[str] = set()
+        if self._missing_thumbnail_stage(path):
+            stages.add("thumbnail")
+        if jpeg_only:
+            return stages
+        meta = self._metadata_cache.get(path)
+        if not meta or meta.get("original_width") is None or meta.get("original_height") is None:
+            stages.add("exif")
+        return stages
+
+    def _path_layout_distance(self, path: str, center_idx: Optional[int]) -> int:
+        if center_idx is None or not path:
+            return 1_000_000
+        indices = self._path_to_indices.get(path)
+        if not indices:
+            return 1_000_000
+        return min(abs(i - center_idx) for i in indices)
 
     def set_images(
         self,
@@ -389,7 +572,8 @@ class JustifiedGallery(QWidget):
                     paths = [img for img in self.images if isinstance(img, str)]
                     missing_paths = [p for p in paths if p not in self._metadata_cache or self._metadata_cache[p].get("minimal_preview_exif")]
                     if missing_paths:
-                        bulk_fetched = self.parent_viewer.image_cache.get_multiple_exif(missing_paths)
+                        fetch_paths = self._prioritize_entry_paths(missing_paths)
+                        bulk_fetched = self.parent_viewer.image_cache.get_multiple_exif(fetch_paths)
                         if bulk_fetched:
                             self._metadata_cache.update(bulk_fetched)
                             # If any aspect ratios/rotations changed, trigger a layout rebuild
@@ -1208,8 +1392,9 @@ class JustifiedGallery(QWidget):
                     self.parent_viewer, "image_cache"
                 ):
                     cap = 100000
+                    fetch_paths = self._prioritize_entry_paths(missing_paths, cap=cap)
                     bulk_fetched = self.parent_viewer.image_cache.get_multiple_exif(
-                        missing_paths[:cap]
+                        fetch_paths
                     )
                     if bulk_fetched:
                         self._metadata_cache.update(bulk_fetched)
@@ -1381,6 +1566,11 @@ class JustifiedGallery(QWidget):
         prefetch_indices_items = self._get_visible_range(prefetch_rect)
         prefetch_paths = {item["file_path"] for idx, item in prefetch_indices_items if item.get("file_path")}
 
+        center_idx = self._gallery_prefetch_center_index(scroll_y, v_h)
+        center_paths: set[str] = set()
+        if center_idx is not None:
+            center_paths = self._bidirectional_jpeg_paths_from_center(center_idx)
+
         is_fast = self._is_scrolling_fast
         for idx in list(self._visible_widgets.keys()):
             if idx not in visible_indices_set:
@@ -1421,6 +1611,8 @@ class JustifiedGallery(QWidget):
         wanted_paths = set(visible_paths)
         if allow_prefetch:
             wanted_paths |= {item["file_path"] for idx, item in prefetch_indices_items if item.get("file_path")}
+        if center_paths:
+            wanted_paths |= center_paths
 
         # Cancel thumbnail work that is no longer near the scrollbar thumb.
         # This prevents the queue from "finishing the whole folder" in the background.
@@ -1576,6 +1768,14 @@ class JustifiedGallery(QWidget):
             if stages and path not in self._active_tasks:
                 load_tasks.append((path, Priority.CURRENT, stages))
 
+        if center_paths:
+            for path in center_paths:
+                if not path or path in visible_paths:
+                    continue
+                stages = self._missing_load_stages_for_path(path, jpeg_only=True)
+                if stages and path not in self._active_tasks:
+                    load_tasks.append((path, Priority.PRELOAD_NEXT, stages))
+
         if allow_prefetch:
             for path in prefetch_paths:
                 if not path or path in visible_paths:
@@ -1596,9 +1796,13 @@ class JustifiedGallery(QWidget):
                 if stages and path not in self._active_tasks:
                     load_tasks.append((path, Priority.PRELOAD_NEXT, stages))
 
-        # In mixed RAW/non-RAW folders, render lightweight formats first so the gallery
-        # paints quickly while heavier RAW thumbnails continue in background.
-        load_tasks.sort(key=lambda item: 1 if is_raw_file(item[0]) else 0)
+        # Closest to prefetch center first (bidirectional up/down), then non-RAW.
+        load_tasks.sort(
+            key=lambda item: (
+                self._path_layout_distance(item[0], center_idx),
+                1 if is_raw_file(item[0]) else 0,
+            )
+        )
 
         # Schedule with budget and target-sized thumbnails for visible tiles.
         scheduled = 0
@@ -1653,22 +1857,31 @@ class JustifiedGallery(QWidget):
         if len(self._active_tasks) > 0:
             return
 
-        # Find current scroll position to start preloading in a proximity-aware outwards pattern
+        # Bidirectional embedded-JPEG prefetch from current image / viewport center.
         start_index = 0
+        center_idx = self._gallery_prefetch_center_index(scroll_y=0, viewport_h=400)
         try:
             p = self._scroll_area
             if p is None:
                 p = self.parent()
                 while p and not isinstance(p, QScrollArea):
                     p = p.parent()
+            scroll_y = 0
+            viewport_h = 400
             if isinstance(p, QScrollArea):
                 scroll_y = p.verticalScrollBar().value()
+                viewport_h = max(1, p.viewport().height())
+            center_idx = self._gallery_prefetch_center_index(scroll_y, viewport_h)
+            if center_idx is not None:
+                start_index = center_idx
+            elif isinstance(p, QScrollArea):
                 for idx, item in enumerate(self._gallery_layout_items):
                     if item["rect"].bottom() > scroll_y:
                         start_index = idx
                         break
         except Exception:
-            pass
+            if center_idx is not None:
+                start_index = center_idx
 
         # Search outwards from start_index: alternately checking next and previous indices
         n_items = len(self._gallery_layout_items)
@@ -1710,14 +1923,13 @@ class JustifiedGallery(QWidget):
                 break
 
         if preload_batch:
-            # Schedule in low priority background
+            # Embedded JPEG only — fast bidirectional scroll cushion above/below center.
             for path in preload_batch:
-                stages = {"thumbnail", "exif"}
                 self.load_manager.load_image(
                     path,
                     priority=Priority.BACKGROUND,
                     cancel_existing=False,
-                    stages=stages,
+                    stages={"thumbnail"},
                 )
                 self._active_tasks[path] = time.time()
             

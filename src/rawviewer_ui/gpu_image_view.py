@@ -362,7 +362,8 @@ class GpuImageView(QGraphicsView):
         self._img_w, self._img_h = new_w, new_h
         self._has_pixmap = True
         self._fit_mode = False
-        self._zoom_intent_100 = False
+        intent_100 = float(scale) >= 1.0 - 1e-4
+        self._zoom_intent_100 = intent_100
         self._update_placeholder()
         fit = self.fit_scale()
         s = float(scale)
@@ -399,6 +400,7 @@ class GpuImageView(QGraphicsView):
     def toggle_fit(self) -> None:
         if not self._has_pixmap:
             return
+        self._sync_fit_mode_flag()
         if self.wants_zoom_in_toggle():
             self.zoom_to_actual()
         else:

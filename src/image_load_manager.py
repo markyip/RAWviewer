@@ -533,7 +533,8 @@ class ImageLoadManager(QObject):
                    cancel_existing: bool = True, use_full_resolution: bool = False,
                    stages: Optional[set] = None,
                    thumbnail_target_size: Optional[QSize] = None,
-                   thumbnail_fit: str = "crop"):
+                   thumbnail_fit: str = "crop",
+                   bypass_cache: bool = False):
         """請求加載圖像"""
         # Don't accept new tasks if stopped
         if self._stopped:
@@ -544,7 +545,7 @@ class ImageLoadManager(QObject):
             self.cancel_task(file_path)
         
         # 檢查快取（memory-only, stage-aware）
-        if self._check_cache(file_path, use_full_resolution, stages=stages):
+        if not bypass_cache and self._check_cache(file_path, use_full_resolution, stages=stages):
             return
 
         task_key = self._make_task_key(
