@@ -7620,11 +7620,6 @@ class RAWImageViewer(QMainWindow):
                     "From fit: Space centers on the box; double-click zooms to the click. F = off.",
                     6500,
                 )
-            else:
-                self.status_bar.showMessage(
-                    "Focus outline ON — no AF/subject metadata found for this file.",
-                    5000,
-                )
             self._redraw_single_view_pixmap_without_relayout()
         else:
             self._focus_subject_rect_image = None

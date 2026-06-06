@@ -155,7 +155,6 @@ When focus/subject indicator is enabled (`F`):
 - **Double-click** still zooms to your clicked point (same as normal mode).
 - **Amber dashed box** — autofocus region from maker notes (Canon, Nikon, Sony, Olympus, Panasonic).
 - **Lime dashed box** — CIPA `SubjectArea` / `SubjectLocation` (common on JPEG; some RAW/DNG).
-- If the file has no usable metadata, the status bar shows *no AF/subject metadata found*.
 
 ### Focus overlay support by brand
 
