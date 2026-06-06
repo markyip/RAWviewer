@@ -68,7 +68,7 @@ chmod +x scripts/Launch/shell/*.sh
 1. **Requires macOS** (`darwin`), `python3` on PATH.
 2. Creates or reuses **`rawviewer_env/`** at repo root.
 3. Optional **Homebrew** deps for `pyexiv2`: `inih`, `gettext` (`brew install inih gettext` if the wheel build fails).
-4. Installs PyQt6, rawpy, PyInstaller, **pyobjc** (Cocoa / CoreML / Quartz / Vision), and other runtime deps; **pyexiv2** is best-effort (build continues with exifread fallback).
+4. Installs PyQt6, rawpy, PyInstaller, **scipy**, **pyobjc** (Cocoa / CoreML / Quartz / Vision), and other runtime deps; **pyexiv2** is **required** (`brew install inih gettext` if the wheel build fails).
 5. Uninstalls heavy unused ML stacks (`torch`, `sentence-transformers`, …) to keep the app bundle smaller.
 6. Cleans `build/`, `dist/`, `*.spec`, then runs **`python build.py`** (version **2.3.0**, updates `Info.plist`, bundles `models/mobileclip2_coreml` when present).
 

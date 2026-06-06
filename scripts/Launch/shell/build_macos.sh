@@ -59,17 +59,18 @@ echo "Upgrading pip..."
 "$PYTHON_BIN" -m pip install --upgrade pip
 
 echo "Installing core dependencies..."
-"$PYTHON_BIN" -m pip install --upgrade PyQt6 rawpy send2trash pyinstaller natsort exifread Pillow psutil numpy qtawesome pyqtgraph reverse-geocoder pycountry huggingface-hub requests pyobjc-framework-Cocoa pyobjc-framework-CoreML pyobjc-framework-Quartz pyobjc-framework-Vision
+"$PYTHON_BIN" -m pip install --upgrade PyQt6 rawpy send2trash pyinstaller natsort exifread Pillow psutil numpy scipy qtawesome pyqtgraph reverse-geocoder pycountry huggingface-hub requests pyobjc-framework-Cocoa pyobjc-framework-CoreML pyobjc-framework-Quartz pyobjc-framework-Vision
 
-echo "Installing optional dependency: pyexiv2 (best-effort)..."
-if "$PYTHON_BIN" -m pip install --upgrade pyexiv2; then
-    echo "[INFO] pyexiv2 installed (full focus-point / Exiv2 path enabled)."
-else
-    echo "[WARNING] pyexiv2 install failed on this macOS/Python combo."
-    echo "[WARNING] Continuing build with exifread fallback (focus-point extraction may be less complete)."
+echo "Installing required dependency: pyexiv2..."
+if ! "$PYTHON_BIN" -m pip install --upgrade pyexiv2; then
+    echo "[ERROR] pyexiv2 install failed (required for macOS release builds)."
+    echo "  Install native libraries, then re-run:"
+    echo "    brew install inih gettext"
+    exit 1
 fi
+echo "[INFO] pyexiv2 installed (Exiv2 / focus-point path enabled)."
 
-"$PYTHON_BIN" -m pip uninstall -y sentence-transformers torch torchvision transformers scikit-learn scipy tokenizers safetensors coremltools >/dev/null 2>&1 || true
+"$PYTHON_BIN" -m pip uninstall -y sentence-transformers torch torchvision transformers scikit-learn tokenizers safetensors coremltools >/dev/null 2>&1 || true
 
 echo "Cleaning previous builds..."
 chmod -R u+w build dist 2>/dev/null || true

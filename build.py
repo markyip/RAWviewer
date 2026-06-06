@@ -170,7 +170,7 @@ def update_macos_plist(app_path):
         plist['NSAppleEventsUsageDescription'] = 'RAWviewer needs to receive file open events from the system.'
         
         # macOS specific flags
-        plist['LSMinimumSystemVersion'] = '10.15.0'
+        plist['LSMinimumSystemVersion'] = '13.0'
         plist['NSHighResolutionCapable'] = True
         plist['LSSupportsOpeningDocumentsInPlace'] = True
         plist['LSApplicationCategoryType'] = 'public.app-category.photography'
@@ -218,6 +218,7 @@ def install_dependencies(windows_accel: str = "cuda"):
         dependencies.append('huggingface-hub')
         dependencies.append('requests')
     elif system_name == "Darwin":
+        dependencies.append('scipy')  # reverse_geocoder GPS lookup (scipy.spatial.cKDTree)
         dependencies.append('huggingface-hub')
         dependencies.append('pyobjc-framework-CoreML')
         dependencies.append('pyobjc-framework-Quartz')
@@ -494,13 +495,14 @@ def main():
             "--hidden-import", "CoreML",
             "--hidden-import", "Quartz",
             "--hidden-import", "Vision",
+            "--hidden-import", "reverse_geocoder",
+            "--hidden-import", "scipy.spatial.cKDTree",
             "--exclude-module", "coremltools",
             "--exclude-module", "torch",
             "--exclude-module", "torchvision",
             "--exclude-module", "sentence_transformers",
             "--exclude-module", "transformers",
             "--exclude-module", "sklearn",
-            "--exclude-module", "scipy",
             "--exclude-module", "tokenizers",
             "--exclude-module", "safetensors",
         ])
