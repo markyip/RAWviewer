@@ -2,7 +2,7 @@
 
 Scripts for local development and packaging. All paths assume the **repository root** as the working directory (each script `cd`s there automatically).
 
-**Version:** release **v2.2** (`build.py` `VERSION`, `QApplication` version, `pixi.toml` workspace version).
+**Version:** release **v2.3.0** (`build.py` `VERSION`, `QApplication` version, `pixi.toml` workspace version).
 
 ## Windows (`.bat`)
 

@@ -257,7 +257,7 @@ open dist/RAWviewer.app
 # Skip preflight: RAWVIEWER_TEST_PYEXIV2=0 RAWVIEWER_TEST_SEMANTIC=0 ./scripts/Launch/shell/launch_dev.sh
 ```
 
-Before tagging a macOS release: confirm app version **2.2**, single-view **share** menu works (Mail attach), and bundled `models/mobileclip2_coreml` if semantic search is required in the `.app`.
+Before tagging a macOS release: confirm app version **2.3.0**, single-view **share** menu works (Mail attach), and bundled `models/mobileclip2_coreml` if semantic search is required in the `.app`.
 
 ## 🏗️ Building from Source
 
