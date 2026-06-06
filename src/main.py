@@ -7614,11 +7614,17 @@ class RAWImageViewer(QMainWindow):
         )
         if self._focus_subject_outline_active:
             self._refresh_focus_subject_rect_from_exif()
-            self.status_bar.showMessage(
-                "Focus outline ON — amber dashed = maker AF; lime = Subject / CIPA. "
-                "From fit: Space centers on the box; double-click zooms to the click. F = off.",
-                6500,
-            )
+            if getattr(self, "_focus_subject_rect_image", None):
+                self.status_bar.showMessage(
+                    "Focus outline ON — amber dashed = maker AF; lime = Subject / CIPA. "
+                    "From fit: Space centers on the box; double-click zooms to the click. F = off.",
+                    6500,
+                )
+            else:
+                self.status_bar.showMessage(
+                    "Focus outline ON — no AF/subject metadata found for this file.",
+                    5000,
+                )
             self._redraw_single_view_pixmap_without_relayout()
         else:
             self._focus_subject_rect_image = None

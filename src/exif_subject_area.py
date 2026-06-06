@@ -23,8 +23,10 @@ Degenerate boxes (1–2 px in one dimension after downscale) are expanded symmet
 around the same center so the dashed overlay stays visible.
 
 Reference size uses ExifImageWidth/Height, then ImageWidth/Height, else the
-display pixmap size (assumes 1:1). Preview rotation from EXIF Orientation is
-not remapped here; the box may be offset on rotated JPEG previews.
+display pixmap size (assumes 1:1). EXIF Orientation is applied when mapping
+maker-note rectangles into the upright display pixmap (see
+:func:`pixmap_ltwh_focus_hint`). Canon EOS AF positions use a center origin
+with Y increasing upward; PowerShot-style Y-down is kept as a fallback.
 """
 
 from __future__ import annotations
@@ -86,13 +88,84 @@ def _numbers_from_tag_value(val: Any) -> list[int]:
     return nums
 
 
+def _rationals_from_tag_value(val: Any) -> list[tuple[int, int]]:
+    """Parse ``num/den`` pairs from Exiv2 tag strings (e.g. Olympus / Panasonic AF)."""
+    if val is None:
+        return []
+    s = str(val).strip()
+    if not s:
+        return []
+    out: list[tuple[int, int]] = []
+    for p in re.split(r"[\s,]+", s):
+        if "/" not in p:
+            continue
+        try:
+            a, b = p.split("/", 1)
+            num, den = int(a), int(b)
+        except ValueError:
+            continue
+        if den <= 0:
+            continue
+        out.append((num, den))
+    return out
+
+
+def _center_box_from_norm(
+    x_num: int,
+    x_den: int,
+    y_num: int,
+    y_den: int,
+    ref_w: int,
+    ref_h: int,
+) -> tuple[int, int, int, int] | None:
+    if x_den <= 0 or y_den <= 0 or ref_w <= 0 or ref_h <= 0:
+        return None
+    cx = float(x_num) / float(x_den) * float(ref_w)
+    cy = float(y_num) / float(y_den) * float(ref_h)
+    side = float(max(24, min(ref_w, ref_h) // 18))
+    return _clamp_rect(cx - side / 2.0, cy - side / 2.0, side, side, ref_w, ref_h)
+
+
+def _rect_ref_panasonic(row: dict[str, Any], ref_w: int, ref_h: int) -> tuple[int, int, int, int] | None:
+    """Panasonic RW2: ``AFPointPosition`` as normalized ``x/den y/den`` (often /1024)."""
+    pairs = _rationals_from_tag_value(_pick(row, "AFPointPosition"))
+    if len(pairs) < 2:
+        return None
+    x_num, x_den = pairs[0]
+    y_num, y_den = pairs[1]
+    if x_num == 0 and y_num == 0:
+        return None
+    return _center_box_from_norm(x_num, x_den, y_num, y_den, ref_w, ref_h)
+
+
+def _rect_ref_olympus(row: dict[str, Any], ref_w: int, ref_h: int) -> tuple[int, int, int, int] | None:
+    """
+    Olympus ORF: ``AFPointSelected`` — ``index/den x/den_x y/den_y [w/den_w h/den_h …]``.
+    Coordinates are normalized on an AF overlay grid (often 640×480), not absolute pixels.
+    """
+    pairs = _rationals_from_tag_value(_pick(row, "AFPointSelected"))
+    if len(pairs) < 3:
+        return None
+    start = 1 if pairs[0][0] == 0 and pairs[0][1] in (0, 1) else 0
+    if len(pairs) - start < 2:
+        return None
+    x_num, x_den = pairs[start]
+    y_num, y_den = pairs[start + 1]
+    if x_num == 0 and y_num == 0:
+        return None
+    return _center_box_from_norm(x_num, x_den, y_num, y_den, ref_w, ref_h)
+
+
 def _reference_dimensions(row: dict[str, Any]) -> tuple[int, int]:
     # EXIF standard dimensions.
     ew = _to_int(_pick(row, "ExifImageWidth", "PixelXDimension"))
     eh = _to_int(_pick(row, "ExifImageLength", "PixelYDimension"))
     # Maker-specific or RAW sensor dimensions often provide the true full-res canvas.
     sw = _to_int(_pick(row, "SensorWidth", "RawImageWidth", "AFImageWidth", "ImageWidth"))
-    sh = _to_int(_pick(row, "SensorHeight", "RawImageHeight", "AFImageHeight", "ImageHeight"))
+    # Nikon NEF and some bodies expose height as ImageLength only (no ImageHeight).
+    sh = _to_int(
+        _pick(row, "SensorHeight", "RawImageHeight", "AFImageHeight", "ImageHeight", "ImageLength")
+    )
     return max(ew or 0, sw or 0), max(eh or 0, sh or 0)
 
 
@@ -203,35 +276,17 @@ def _rect_ref_canon_style_af(row: dict[str, Any], ref_w: int, ref_h: int) -> tup
         return None
 
     x0, y0 = int(xs[0]), int(ys[0])
-    # Heuristic for absolute vs center-relative:
-    # 1. Negative values are always relative.
-    # 2. Small AFImageWidth (100, 1000) is almost always absolute normalized.
-    # 3. If SubjectArea is present, use it as a reference for the true center.
-    is_absolute = False
-    if all(x >= 0 for x in xs) and all(y >= 0 for y in ys):
-        if fw in (100, 1000, 128, 512):
-            is_absolute = True
+    # Canon AFInfo: (0,0) is the image center; EOS bodies use Y-up (ExifTool).
+    cx = fw * 0.5 + float(x0)
+    cy = fh * 0.5 - float(y0)
+    if not (0 <= cx <= fw and 0 <= cy <= fh):
+        # PowerShot / legacy: Y-down relative, then top-left absolute fallback.
+        cx_alt = fw * 0.5 + float(x0)
+        cy_alt = fh * 0.5 + float(y0)
+        if 0 <= cx_alt <= fw and 0 <= cy_alt <= fh:
+            cx, cy = cx_alt, cy_alt
         else:
-            sa = row.get("SubjectArea")
-            if sa:
-                sa_nums = _numbers_from_tag_value(sa)
-                if len(sa_nums) >= 2:
-                    sa_cx, sa_cy = sa_nums[0], sa_nums[1]
-                    # Compare distance from SubjectArea center
-                    dist_abs = (x0 - sa_cx)**2 + (y0 - sa_cy)**2
-                    dist_rel = (fw*0.5 + x0 - sa_cx)**2 + (fh*0.5 + y0 - sa_cy)**2
-                    if dist_abs < dist_rel:
-                        is_absolute = True
-            elif x0 > fw * 0.25 and y0 > fh * 0.25:
-                # If no SubjectArea, only assume absolute if far from center
-                is_absolute = True
-    
-    if is_absolute:
-        cx, cy = float(x0), float(y0)
-    else:
-        cx = fw * 0.5 + x0
-        cy = fh * 0.5 + y0
-
+            cx, cy = float(x0), float(y0)
     if not (0 <= cx <= fw and 0 <= cy <= fh):
         cx = max(0.0, min(float(cx), float(fw)))
         cy = max(0.0, min(float(cy), float(fh)))
@@ -545,6 +600,12 @@ def _get_focus_hint_sensor_space(path: str) -> tuple[tuple[int, int, int, int], 
         return None
 
     ref_w, ref_h = _reference_dimensions(row)
+
+    # Nikon AFInfo2 can supply its own reference canvas when EXIF height is missing.
+    hint_af2 = _rect_ref_from_nikon_afinfo2_row_sensor_space(row, ref_w, ref_h)
+    if hint_af2:
+        return hint_af2
+
     if ref_w <= 0 or ref_h <= 0:
         return None
 
@@ -554,14 +615,12 @@ def _get_focus_hint_sensor_space(path: str) -> tuple[tuple[int, int, int, int], 
         _rect_ref_nikon_cdaf,
         _rect_ref_nikon_initial,
         _rect_ref_sony,
+        _rect_ref_panasonic,
+        _rect_ref_olympus,
     ):
         rect_ref = fn(row, ref_w, ref_h)
         if rect_ref is not None:
             return rect_ref, "maker_af", ref_w, ref_h
-
-    hint_af2 = _rect_ref_from_nikon_afinfo2_row_sensor_space(row, ref_w, ref_h)
-    if hint_af2:
-        return hint_af2
 
     # Priority 2: CIPA SubjectArea / SubjectLocation
     sa = row.get("SubjectArea")

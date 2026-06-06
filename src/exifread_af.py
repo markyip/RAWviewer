@@ -153,10 +153,15 @@ def _canon_af_ltwh_in_ref(
 
     x0, y0 = int(xs[0]), int(ys[0])
 
-    cx = fw * 0.5 + x0
-    cy = fh * 0.5 + y0
+    cx = fw * 0.5 + float(x0)
+    cy = fh * 0.5 - float(y0)
     if not (0 <= cx <= fw and 0 <= cy <= fh):
-        cx, cy = float(x0), float(y0)
+        cx_alt = fw * 0.5 + float(x0)
+        cy_alt = fh * 0.5 + float(y0)
+        if 0 <= cx_alt <= fw and 0 <= cy_alt <= fh:
+            cx, cy = cx_alt, cy_alt
+        else:
+            cx, cy = float(x0), float(y0)
     if not (0 <= cx <= fw and 0 <= cy <= fh):
         cx = max(0.0, min(float(cx), float(fw)))
         cy = max(0.0, min(float(cy), float(fh)))
@@ -193,10 +198,15 @@ def _canon_tag_0x0012_fallback(
     ah = max(2, nums[7])
     x0 = nums[8]
     y0 = nums[9]
-    cx = fw * 0.5 + x0
-    cy = fh * 0.5 + y0
+    cx = fw * 0.5 + float(x0)
+    cy = fh * 0.5 - float(y0)
     if not (0 <= cx <= fw and 0 <= cy <= fh):
-        cx, cy = float(x0), float(y0)
+        cx_alt = fw * 0.5 + float(x0)
+        cy_alt = fh * 0.5 + float(y0)
+        if 0 <= cx_alt <= fw and 0 <= cy_alt <= fh:
+            cx, cy = cx_alt, cy_alt
+        else:
+            cx, cy = float(x0), float(y0)
     left = cx - aw / 2.0
     top = cy - ah / 2.0
     sx = ref_w / float(fw)
