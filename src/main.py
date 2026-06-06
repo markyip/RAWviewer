@@ -12236,6 +12236,8 @@ class RAWImageViewer(QMainWindow):
 
     def toggle_raw_jpeg_workflow(self):
         """Toggle between embedded JPEG and raw image workflows."""
+        if getattr(self, "view_mode", "single") != "single":
+            return
         settings = self.get_settings()
         current_value = settings.value("use_embedded_jpeg_workflow", True, type=bool)
         new_value = not current_value
@@ -12291,45 +12293,28 @@ class RAWImageViewer(QMainWindow):
         """Update the text, tooltip and styling of the RAW/JPEG toggle button."""
         if not hasattr(self, "raw_toggle_button"):
             return
-        
-        from PyQt6.QtGui import QIcon
+
+        from PyQt6.QtGui import QFont, QIcon
+
         self.raw_toggle_button.setIcon(QIcon())
         self.raw_toggle_button.setText("RAW")
-        
+
         settings = self.get_settings()
         use_embedded = settings.value("use_embedded_jpeg_workflow", True, type=bool)
-        
+
+        btn_font = self.raw_toggle_button.font()
+        btn_font.setBold(not use_embedded)
+        self.raw_toggle_button.setFont(btn_font)
+
         if use_embedded:
-            self.raw_toggle_button.setToolTip("Embedded JPEG workflow (Fast)\nClick to toggle to RAW image workflow (High Quality)")
+            self.raw_toggle_button.setToolTip(
+                "Embedded JPEG workflow (Fast)\nClick to toggle to RAW image workflow (High Quality)"
+            )
             self.raw_toggle_button.setStyleSheet("""
                 QPushButton {
-                    color: #757575;
-                    font-size: 13px;
-                    font-weight: 700;
-                    padding: 4px 8px;
-                    border: none;
-                    background: transparent;
-                    text-align: center;
-                    letter-spacing: 0.5px;
-                    min-height: 28px;
-                    max-height: 28px;
-                }
-                QPushButton:hover {
                     color: #B0B0B0;
-                    background-color: rgba(255, 255, 255, 0.05);
-                    border-radius: 4px;
-                }
-                QPushButton:pressed {
-                    background-color: rgba(255, 255, 255, 0.1);
-                }
-            """)
-        else:
-            self.raw_toggle_button.setToolTip("RAW workflow (High Quality)\nClick to toggle to Embedded JPEG workflow (Fast)")
-            self.raw_toggle_button.setStyleSheet("""
-                QPushButton {
-                    color: #FFFFFF;
                     font-size: 13px;
-                    font-weight: 800;
+                    font-weight: 500;
                     padding: 4px 8px;
                     border: none;
                     background: transparent;
@@ -12345,6 +12330,33 @@ class RAWImageViewer(QMainWindow):
                 }
                 QPushButton:pressed {
                     background-color: rgba(255, 255, 255, 0.1);
+                }
+            """)
+        else:
+            self.raw_toggle_button.setToolTip(
+                "RAW workflow (High Quality)\nClick to toggle to Embedded JPEG workflow (Fast)"
+            )
+            self.raw_toggle_button.setStyleSheet("""
+                QPushButton {
+                    color: #FFFFFF;
+                    font-size: 13px;
+                    font-weight: 700;
+                    padding: 4px 8px;
+                    border: none;
+                    background: transparent;
+                    text-align: center;
+                    letter-spacing: 0.5px;
+                    min-height: 28px;
+                    max-height: 28px;
+                }
+                QPushButton:hover {
+                    color: #FFFFFF;
+                    background-color: rgba(255, 255, 255, 0.08);
+                    border-radius: 4px;
+                }
+                QPushButton:pressed {
+                    color: #FFFFFF;
+                    background-color: rgba(255, 255, 255, 0.12);
                 }
             """)
 
@@ -12793,6 +12805,8 @@ class RAWImageViewer(QMainWindow):
             self.slideshow_bottom_button.hide()
         if hasattr(self, "rotate_bottom_button"):
             self.rotate_bottom_button.hide()
+        if hasattr(self, "raw_toggle_button"):
+            self.raw_toggle_button.hide()
         self._schedule_search_expand_overlay_sync()
         
         if hasattr(self, "gallery_scroll") and self.gallery_scroll is not None:
