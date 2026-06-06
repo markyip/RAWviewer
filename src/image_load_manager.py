@@ -192,23 +192,28 @@ class ImageLoadWorker(QRunnable):
                             thumbnail = processor.ensure_display_tier_preview(
                                 file_path, thumbnail
                             )
-                        if processor._preview_buffer_max_dim(thumbnail) < min_preview_dim:
-                            if not processor.is_libraw_unsupported(file_path):
-                                thumbnail = None
-                    if thumbnail is not None:
-                        self._maybe_cache_preview_first_warm(
-                            processor, file_path, thumbnail, exif_data
-                        )
-                if preview_tier and thumbnail is not None and not self.task.is_cancelled():
-                    self._handle_thumbnail_result(file_path, thumbnail)
-                elif preview_tier and thumbnail is None and not self.task.is_cancelled():
-                    if self._safe_emit():
+                        if (
+                            processor._preview_buffer_max_dim(thumbnail)
+                            < min_preview_dim
+                            and not processor.is_libraw_unsupported(file_path)
+                        ):
+                            thumbnail = None
+                if thumbnail is not None and not self.task.is_cancelled():
+                    self._cache_gallery_thumbnail_for_indexing(
+                        processor, file_path, thumbnail, exif_data
+                    )
+                if preview_tier:
+                    if thumbnail is not None and not self.task.is_cancelled():
+                        self._handle_thumbnail_result(file_path, thumbnail)
+                    elif not self.task.is_cancelled() and self._safe_emit():
                         self.manager.error_occurred.emit(
                             file_path,
                             "Display-tier preview extraction failed",
                         )
-                elif thumbnail is None and not self.task.is_cancelled():
-                    if self._safe_emit():
+                elif not self.task.is_cancelled():
+                    if thumbnail is not None:
+                        self._handle_thumbnail_result(file_path, thumbnail)
+                    elif self._safe_emit():
                         self.manager.error_occurred.emit(
                             file_path, "Thumbnail extraction returned None"
                         )
@@ -219,15 +224,6 @@ class ImageLoadWorker(QRunnable):
                 elif exif_data is None and not self.task.is_cancelled():
                     if self._safe_emit():
                         self.manager.exif_data_ready.emit(file_path, {})
-
-                if not preview_tier:
-                    if thumbnail is not None and not self.task.is_cancelled():
-                        self._handle_thumbnail_result(file_path, thumbnail)
-                    elif thumbnail is None and not self.task.is_cancelled():
-                        if self._safe_emit():
-                            self.manager.error_occurred.emit(
-                                file_path, "Thumbnail extraction returned None"
-                            )
             else:
                 # Sequential or partial stages
                 if 'exif' in stages and not self.task.is_cancelled():
@@ -291,11 +287,11 @@ class ImageLoadWorker(QRunnable):
                                 if not processor.is_libraw_unsupported(file_path):
                                     thumbnail = None
                             else:
-                                self._maybe_cache_preview_first_warm(
+                                self._cache_gallery_thumbnail_for_indexing(
                                     processor, file_path, thumbnail, exif_data
                                 )
                         elif allow_heavy_fallback:
-                            self._maybe_cache_preview_first_warm(
+                            self._cache_gallery_thumbnail_for_indexing(
                                 processor, file_path, thumbnail, exif_data
                             )
                         if thumbnail is not None:
@@ -383,16 +379,26 @@ class ImageLoadWorker(QRunnable):
         if self._safe_emit():
             self.manager.thumbnail_ready.emit(file_path, thumbnail)
 
+    def _cache_gallery_thumbnail_for_indexing(
+        self, processor, file_path: str, thumbnail, exif_data
+    ) -> None:
+        """Publish gallery extractions to ImageCache for semantic/face indexing reuse."""
+        if thumbnail is None:
+            return
+        stages = self.task.stages if self.task.stages is not None else set()
+        if "thumbnail" not in stages:
+            return
+        processor.cache_index_source_mipmap_tiers(
+            file_path, thumbnail, exif_data=exif_data
+        )
+
     def _maybe_cache_preview_first_warm(
         self, processor, file_path: str, thumbnail, exif_data
     ) -> None:
-        """Warm-cache only for preview-first (thumbnail-only) CURRENT loads."""
-        if thumbnail is None or not self._uses_display_preview_tier(self.task):
-            return
-        stages = self.task.stages if self.task.stages is not None else set()
-        if stages != {"thumbnail"}:
-            return
-        processor._cache_display_tier_result(file_path, thumbnail, exif_data)
+        """Backward-compatible alias for gallery → global cache publish."""
+        self._cache_gallery_thumbnail_for_indexing(
+            processor, file_path, thumbnail, exif_data
+        )
 
     def _safe_emit(self) -> bool:
         """Verify the manager still exists before emitting signals from background thread."""

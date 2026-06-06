@@ -131,7 +131,7 @@ def semantic_batch_tune_sample_count() -> int:
 
 
 def semantic_batch_tie_ratio() -> float:
-    """When throughput is within this ratio of the best, prefer a larger batch."""
+    """On equal throughput (within this ratio of the best), prefer a larger batch."""
     raw = os.environ.get("RAWVIEWER_SEMANTIC_BATCH_TIE_RATIO", "0.92").strip()
     try:
         r = float(raw)
@@ -194,7 +194,7 @@ def semantic_batch_candidates() -> List[int]:
 
 
 # Bump when auto-tune defaults/logic change so ~/.rawviewer_cache picks are refreshed.
-SEMANTIC_BATCH_TUNE_CACHE_VERSION = "v3"
+SEMANTIC_BATCH_TUNE_CACHE_VERSION = "v4"
 
 
 def _prep_mobileclip_image_chw_resized(file_path: str, size: tuple[int, int] = (256, 256)) -> np.ndarray:
@@ -560,6 +560,22 @@ def _cached_index_source_array(cache, file_path: str) -> Optional[np.ndarray]:
     return None
 
 
+def _index_source_cache_tier(cache, file_path: str) -> str:
+    """Which ImageCache tier satisfied the lookup, or empty string if miss."""
+    for tier, getter_name in (
+        ("preview", "get_preview"),
+        ("grid", "get_grid"),
+        ("thumbnail", "get_thumbnail"),
+    ):
+        try:
+            arr = getattr(cache, getter_name)(file_path)
+            if arr is not None:
+                return tier
+        except Exception:
+            continue
+    return ""
+
+
 def _index_source_image_cached(cache, file_path: str) -> bool:
     return _cached_index_source_array(cache, file_path) is not None
 
@@ -580,6 +596,13 @@ def _load_index_source_image(file_path: str, max_size: int = 1024) -> Image.Imag
             im = Image.fromarray(arr).convert("RGB")
             _THREAD_LOCAL_DETECTORS.last_original_sizes = (im.width, im.height)
             im.thumbnail((max_size, max_size), Image.Resampling.BICUBIC)
+            tier = _index_source_cache_tier(cache, file_path)
+            if tier:
+                hits = getattr(_THREAD_LOCAL_DETECTORS, "index_source_cache_hits", None)
+                if hits is None:
+                    hits = {"preview": 0, "grid": 0, "thumbnail": 0}
+                    _THREAD_LOCAL_DETECTORS.index_source_cache_hits = hits
+                hits[tier] = int(hits.get(tier, 0)) + 1
             return im
     except Exception:
         pass
@@ -2809,7 +2832,13 @@ class SemanticImageIndex:
                 if tput > best_tput:
                     best_tput = tput
                     best_batch = cand
-                elif tput >= best_tput * tie_ratio and cand > best_batch:
+                elif (
+                    best_tput > 0
+                    and tput >= best_tput
+                    and tput >= best_tput * tie_ratio
+                    and cand > best_batch
+                ):
+                    # True tie only: never prefer a larger batch when it is slower.
                     best_batch = cand
 
         cache[cache_key] = int(best_batch)
@@ -2920,17 +2949,32 @@ class SemanticImageIndex:
         cache = get_image_cache()
         pending = [p for p in paths if not _index_source_image_cached(cache, p)]
         already_cached = len(paths) - len(pending)
+        tier_counts = {"preview": 0, "grid": 0, "thumbnail": 0}
+        for p in paths:
+            if p in pending:
+                continue
+            tier = _index_source_cache_tier(cache, p) or "thumbnail"
+            tier_counts[tier] = tier_counts.get(tier, 0) + 1
         if not pending:
             logger.info(
-                "[INDEX] Semantic thumbnail warm-up: all %d paths already cached",
+                "[INDEX] Semantic thumbnail warm-up: all %d paths already in ImageCache "
+                "(preview=%d grid=%d thumb=%d)",
                 len(paths),
+                tier_counts.get("preview", 0),
+                tier_counts.get("grid", 0),
+                tier_counts.get("thumbnail", 0),
             )
             return 0
         if already_cached:
             logger.info(
-                "[INDEX] Semantic thumbnail warm-up: %d/%d already in ImageCache (gallery preview/grid)",
+                "[INDEX] Semantic thumbnail warm-up: %d/%d already in ImageCache "
+                "(preview=%d grid=%d thumb=%d); %d still need extract",
                 already_cached,
                 len(paths),
+                tier_counts.get("preview", 0),
+                tier_counts.get("grid", 0),
+                tier_counts.get("thumbnail", 0),
+                len(pending),
             )
 
         workers = min(semantic_encode_prep_workers(), 16)
