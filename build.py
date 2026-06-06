@@ -214,7 +214,6 @@ def install_dependencies(windows_accel: str = "cuda"):
         else:
             print(f"[ERROR] Unsupported Windows acceleration backend: {windows_accel}")
             return False
-        dependencies.append('mediapipe')
         dependencies.append('opencv-python-headless')
         dependencies.append('huggingface-hub')
         dependencies.append('requests')

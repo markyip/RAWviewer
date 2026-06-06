@@ -67,7 +67,7 @@ Official releases are published for **Windows** and **macOS** only.
 > **Minimum supported macOS (official prebuilt release): macOS 13 Ventura or newer.**
 
 1. Download the latest release from the [Releases Page](https://github.com/markyip/RAWviewer/releases/latest)
-2. Download and extract `RAWviewer-v2.2-macOS.zip`
+2. Download and extract `RAWviewer-v2.3-macOS.zip` (or the latest macOS asset from Releases)
 3. Drag `RAWviewer.app` to your **Applications** folder.
 4. **CRITICAL FIRST STEP:** Because this is an open-source app not signed via the paid Apple Developer program, macOS Gatekeeper will incorrectly label it as "Damaged" or block it. **You must run this command in your Terminal once** to remove the download quarantine flag:
    ```bash
@@ -230,7 +230,7 @@ Launch scripts live under [`scripts/Launch/`](scripts/Launch/README.md).
 | `RAWVIEWER_PROCESS_POOL_WORKERS` | LibRaw postprocess process pool size when `RAWVIEWER_USE_PROCESS_POOL=1` |
 | `RAWVIEWER_SLOW_STORAGE_PREFIXES` | Comma-separated path prefixes (e.g. `K:\Photos,N:\`) to cap sort-probe parallelism at 3 |
 
-**macOS share (v2.2, single-image view only):**
+**macOS share (v2.3, single-image view only):**
 
 | Variable | Default in `launch_dev.sh` | Effect |
 |----------|------------------------------|--------|
@@ -241,7 +241,7 @@ Launch scripts live under [`scripts/Launch/`](scripts/Launch/README.md).
 
 Details: [`docs/macos-sharing-v21-v22.md`](docs/macos-sharing-v21-v22.md) and [`scripts/Launch/README.md`](scripts/Launch/README.md#macos--release-smoke-test-manual).
 
-### macOS — build and smoke test (v2.2)
+### macOS — build and smoke test (v2.3)
 
 ```bash
 chmod +x scripts/Launch/shell/*.sh
@@ -311,7 +311,7 @@ All project dependencies are managed via `pixi.toml` instead of `requirements.tx
 - **"Windows protected your PC"**: Click "More info" → "Run anyway"
 - **Antivirus warnings**: Add RAWviewer to your antivirus exclusions
 - **Performance issues**: Try running as administrator
-- **"Open with another app" / bottom share button**: v2.2 implements the native Open with APIs (`OpenAs_RunDLLW`, `SHOpenWithDialog` + `OAIF_EXEC`), but the bottom-bar control is **hidden on Windows** in current `main`. Use Explorer **Open with** on the file until the in-app button is re-enabled (see `scripts/Launch/README.md`).
+- **"Open with another app" / bottom share button**: The app implements native Open with APIs (`OpenAs_RunDLLW`, `SHOpenWithDialog` + `OAIF_EXEC`), but the bottom-bar control is **hidden on Windows** in current `main`. Use Explorer **Open with** on the file until the in-app button is re-enabled (see `scripts/Launch/README.md`).
 - **AttributeError with stdout**: This is normal for windowed builds - the application runs without a console window
 - **Installer stuck on "Downloading MobileCLIP ONNX Models" / `No module named 'requests'`**:
   - Fixed in 2.1.0+ (`requests` in `pixi.toml`). Re-run the installer from a fresh build, or in the install folder run `_internal\pixi\pixi.exe install` then retry.
@@ -377,7 +377,7 @@ We're continuously working to improve RAWviewer. Here are some features planned 
 
 ## ⚠️ Known Issues
 
-### Platform (v2.2)
+### Platform (v2.3)
 - **Windows:** In-app **Open with** picker is implemented but the bottom-bar button is not shown on `win32` in current `main`.
 - **macOS:** `NSSharingServicePicker` popover often fails under the Qt6 host; default product path is the **Qt share menu**, not the popover.
 

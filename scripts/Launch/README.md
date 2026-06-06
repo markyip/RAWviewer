@@ -27,9 +27,9 @@ scripts\Launch\bat\build_windows_directml.bat
 clear_cache.bat
 ```
 
-### Windows — bottom bar (v2.2)
+### Windows — bottom bar (v2.3)
 
-| Platform behavior | Status in `main` (v2.2) |
+| Platform behavior | Status in `main` (v2.3) |
 |-------------------|-------------------------|
 | **Open with another app** (Lightroom, Photoshop, …) | Implemented (`OpenAs_RunDLLW` / `SHOpenWithDialog` + `OAIF_EXEC`). **UI:** bottom share button is currently **hidden on Windows**; wiring exists via `_dispatch_share_bottom` but is not connected to a visible control — see [Known issues](#known-issues-platform). |
 | **System share** (Mail, Teams, …) | `_share_windows_ui_chain` (helper → WinRT → shell verb → clipboard). Dev-only unless the bottom button is re-enabled. |
@@ -70,7 +70,7 @@ chmod +x scripts/Launch/shell/*.sh
 3. Optional **Homebrew** deps for `pyexiv2`: `inih`, `gettext` (`brew install inih gettext` if the wheel build fails).
 4. Installs PyQt6, rawpy, PyInstaller, **pyobjc** (Cocoa / CoreML / Quartz / Vision), and other runtime deps; **pyexiv2** is best-effort (build continues with exifread fallback).
 5. Uninstalls heavy unused ML stacks (`torch`, `sentence-transformers`, …) to keep the app bundle smaller.
-6. Cleans `build/`, `dist/`, `*.spec`, then runs **`python build.py`** (version **2.2**, updates `Info.plist`, bundles `models/mobileclip2_coreml` when present).
+6. Cleans `build/`, `dist/`, `*.spec`, then runs **`python build.py`** (version **2.3.0**, updates `Info.plist`, bundles `models/mobileclip2_coreml` when present).
 
 **Pixi alternative** (pinned Python, good when `rawviewer_env` pyexiv2 fails):
 
@@ -102,7 +102,7 @@ Skip checks when iterating on unrelated features:
 RAWVIEWER_TEST_PYEXIV2=0 RAWVIEWER_TEST_SEMANTIC=0 ./scripts/Launch/shell/launch_dev.sh
 ```
 
-**Default dev env (v2.2):**
+**Default dev env (v2.3):**
 
 | Variable | Default | Notes |
 |----------|---------|--------|
@@ -127,7 +127,7 @@ Pass env vars as arguments: `./scripts/Launch/shell/launch_dev.sh RAWVIEWER_GPU_
 After `build_macos.sh` or `pixi run python build.py`:
 
 1. **Gatekeeper:** `xattr -cr dist/RAWviewer.app` then `open dist/RAWviewer.app`.
-2. **About / version:** Help or logs should report app version **2.2**.
+2. **About / version:** Help or logs should report app version **2.3.0**.
 3. **Single-image view:** Open a JPEG/RAW folder → one file → bottom **share** icon visible.
 4. **Share:** Click share → Qt menu lists Mail / Messages / etc.; pick Mail and confirm attachment path (not an empty spinner).
 5. **Semantic (if models bundled):** Search field accepts a text query; index progress in status area.
@@ -148,5 +148,5 @@ Logs: dev console `[SHARE]`; packaged app under `~/Library/Logs/` or paths noted
 
 ## Known issues (platform)
 
-- **Windows Open with:** Native picker code is in `main.py`, but the bottom-bar control is **not shown** on `win32` in v2.2 `main` (regression after macOS share work). Re-enable requires showing the button and `clicked` → `_on_share_bottom_button_clicked` (see git `8b3f54a`). Until then, use Explorer **Open with** on the file.
+- **Windows Open with:** Native picker code is in `main.py`, but the bottom-bar control is **not shown** on `win32` in current `main` (regression after macOS share work). Re-enable requires showing the button and `clicked` → `_on_share_bottom_button_clicked` (see git `8b3f54a`). Until then, use Explorer **Open with** on the file.
 - **macOS native share popover:** Often spins empty under the Qt6 host; **product default is the Qt share menu**, not the popover.

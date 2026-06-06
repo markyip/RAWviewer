@@ -242,6 +242,46 @@ def _save_semantic_batch_cache(cache: Dict[str, int]) -> None:
 
 
 
+def _import_onnxruntime():
+    """Return onnxruntime module, or None if missing or broken (e.g. partial install)."""
+    try:
+        import onnxruntime as ort
+    except ImportError:
+        return None
+    if not callable(getattr(ort, "InferenceSession", None)):
+        return None
+    return ort
+
+
+def _onnxruntime_availability_error() -> str:
+    ort = _import_onnxruntime()
+    if ort is None:
+        return (
+            "Broken or missing 'onnxruntime' dependency "
+            "(run: pixi run pip install --force-reinstall onnxruntime-gpu)"
+        )
+    if not callable(getattr(ort, "get_available_providers", None)):
+        return (
+            "Broken 'onnxruntime' install (missing get_available_providers; "
+            "run: pixi run pip install --force-reinstall onnxruntime-gpu)"
+        )
+    return ""
+
+
+def _ort_get_available_providers(ort=None) -> List[str]:
+    if ort is None:
+        ort = _import_onnxruntime()
+    if ort is None:
+        return ["CPUExecutionProvider"]
+    getter = getattr(ort, "get_available_providers", None)
+    if callable(getter):
+        try:
+            return list(getter())
+        except Exception:
+            pass
+    return ["CPUExecutionProvider"]
+
+
 def resolve_onnx_execution_providers(
     available: Optional[Sequence[str]] = None,
 ) -> List[str]:
@@ -254,13 +294,8 @@ def resolve_onnx_execution_providers(
     custom onnxruntime build, else CPU — source-only, not tested as a product target.
     Override with RAWVIEWER_ORT_PROVIDERS (comma-separated EP names).
     """
-    try:
-        import onnxruntime as ort
-    except ImportError:
-        return ["CPUExecutionProvider"]
-
     if available is None:
-        available = list(ort.get_available_providers())
+        available = _ort_get_available_providers()
 
     override = os.environ.get("RAWVIEWER_ORT_PROVIDERS", "").strip()
     if override:
@@ -481,9 +516,7 @@ def log_inference_acceleration_profile(force: bool = False) -> None:
         parts.append("semantic=Core ML (Apple GPU/ANE when available)")
     else:
         try:
-            import onnxruntime as ort
-
-            available = list(ort.get_available_providers())
+            available = _ort_get_available_providers()
             selected = resolve_onnx_execution_providers(available)
             parts.append(f"semantic=ONNX [{', '.join(selected)}]")
         except Exception:
@@ -515,6 +548,22 @@ def log_inference_acceleration_profile(force: bool = False) -> None:
     logger.info("[ACCEL] Inference profile: %s", "; ".join(parts))
 
 
+def _cached_index_source_array(cache, file_path: str) -> Optional[np.ndarray]:
+    """RGB array from ImageCache tiers usable for semantic/face indexing (gallery may warm preview/grid)."""
+    for getter_name in ("get_preview", "get_grid", "get_thumbnail"):
+        try:
+            arr = getattr(cache, getter_name)(file_path)
+            if arr is not None:
+                return np.asarray(arr, dtype=np.uint8)
+        except Exception:
+            continue
+    return None
+
+
+def _index_source_image_cached(cache, file_path: str) -> bool:
+    return _cached_index_source_array(cache, file_path) is not None
+
+
 def _load_index_source_image(file_path: str, max_size: int = 1024) -> Image.Image:
     """Load a small RGB image suitable for indexing/detection, preferring app caches."""
     import threading
@@ -526,16 +575,12 @@ def _load_index_source_image(file_path: str, max_size: int = 1024) -> Image.Imag
     try:
         from image_cache import get_image_cache
         cache = get_image_cache()
-        for getter_name in ("get_thumbnail", "get_preview"):
-            try:
-                arr = getattr(cache, getter_name)(file_path)
-                if arr is not None:
-                    im = Image.fromarray(np.asarray(arr, dtype=np.uint8)).convert("RGB")
-                    _THREAD_LOCAL_DETECTORS.last_original_sizes = (im.width, im.height)
-                    im.thumbnail((max_size, max_size), Image.Resampling.BICUBIC)
-                    return im
-            except Exception:
-                continue
+        arr = _cached_index_source_array(cache, file_path)
+        if arr is not None:
+            im = Image.fromarray(arr).convert("RGB")
+            _THREAD_LOCAL_DETECTORS.last_original_sizes = (im.width, im.height)
+            im.thumbnail((max_size, max_size), Image.Resampling.BICUBIC)
+            return im
     except Exception:
         pass
 
@@ -1118,10 +1163,9 @@ class MobileCLIPONNXBackend:
         return cls._candidate_model_dirs(variant)[0]
 
     def availability_error(self) -> str:
-        try:
-            import onnxruntime  # noqa: F401
-        except ImportError:
-            return "Missing 'onnxruntime' dependency"
+        err = _onnxruntime_availability_error()
+        if err:
+            return err
         if not os.path.exists(self.image_model_path):
             return f"Missing MobileCLIP image model: {self.IMAGE_MODEL_FILE}"
         if not os.path.exists(self.text_model_path):
@@ -1183,9 +1227,12 @@ class MobileCLIPONNXBackend:
     def _ensure_sessions(self):
         if self._image_session is not None:
             return
+        err = _onnxruntime_availability_error()
+        if err:
+            raise RuntimeError(err)
         import onnxruntime as ort
 
-        available = list(ort.get_available_providers())
+        available = _ort_get_available_providers(ort)
         selected_providers = resolve_onnx_execution_providers(available)
 
         import logging
@@ -2671,10 +2718,8 @@ class SemanticImageIndex:
                 backend = self._mobileclip_backend or resolve_mobileclip_backend()
                 self._mobileclip_backend = backend
                 if isinstance(backend, MobileCLIPONNXBackend):
-                    import onnxruntime as ort
-
                     selected = resolve_onnx_execution_providers(
-                        list(ort.get_available_providers())
+                        _ort_get_available_providers()
                     )
                     ep = ",".join(selected)
                 else:
@@ -2873,20 +2918,27 @@ class SemanticImageIndex:
             return 0
 
         cache = get_image_cache()
-        pending = [p for p in paths if cache.get_thumbnail(p) is None]
+        pending = [p for p in paths if not _index_source_image_cached(cache, p)]
+        already_cached = len(paths) - len(pending)
         if not pending:
             logger.info(
                 "[INDEX] Semantic thumbnail warm-up: all %d paths already cached",
                 len(paths),
             )
             return 0
+        if already_cached:
+            logger.info(
+                "[INDEX] Semantic thumbnail warm-up: %d/%d already in ImageCache (gallery preview/grid)",
+                already_cached,
+                len(paths),
+            )
 
         workers = min(semantic_encode_prep_workers(), 16)
         t0 = time.time()
         warmed = 0
 
         def _warm_one(path: str) -> bool:
-            if cache.get_thumbnail(path) is not None:
+            if _index_source_image_cached(cache, path):
                 return True
             try:
                 from enhanced_raw_processor import (
@@ -2987,7 +3039,7 @@ class SemanticImageIndex:
             return 0
 
         cache = get_image_cache()
-        pending = [p for p in paths if cache.get_thumbnail(p) is None]
+        pending = [p for p in paths if not _index_source_image_cached(cache, p)]
         if not pending:
             logger.info("[INDEX] Thumbnail warm-up: all %d face-scan paths already cached", len(paths))
             return 0
@@ -3005,7 +3057,7 @@ class SemanticImageIndex:
         warmed = 0
 
         def _warm_one(path: str) -> bool:
-            if cache.get_thumbnail(path) is not None:
+            if _index_source_image_cached(cache, path):
                 return True
             try:
                 from enhanced_raw_processor import (
@@ -3558,10 +3610,8 @@ class SemanticImageIndex:
                             self._mobileclip_backend = backend
                             if isinstance(backend, MobileCLIPONNXBackend):
                                 try:
-                                    import onnxruntime as ort
-
                                     selected = resolve_onnx_execution_providers(
-                                        list(ort.get_available_providers())
+                                        _ort_get_available_providers()
                                     )
                                 except Exception:
                                     selected = ["CPUExecutionProvider"]

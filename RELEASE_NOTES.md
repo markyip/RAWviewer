@@ -10,6 +10,16 @@
 
 ### 🛠️ Gallery & navigation
 - **Filter out composite DNG panoramas**: Handled composite DNG panorama files (e.g., Lightroom/Photoshop HDR panoramas) similarly to unsupported images by hiding them from the gallery and navigation lists entirely to prevent loading errors and improve performance.
+- **Navigation prefetch & zoom**: Bidirectional embedded-JPEG prefetch (default radius 6), focus-anchor zoom on resolution upgrades, and more reliable Space / double-click zoom on RAW.
+- **RAW ↔ JPEG workflow**: Selective cache invalidation and forced reload when toggling workflow so the current image updates immediately.
+
+### 🔍 Semantic search & indexing
+- **Gallery thumbnail reuse**: Semantic warm-up skips paths already in `ImageCache` preview/grid tiers (gallery-loaded thumbnails), avoiding duplicate RAW decode.
+- **ONNX Runtime hardening**: Detect broken `onnxruntime` installs early with a clear reinstall message instead of failing every embedding silently.
+- **Pixi lock**: Upgraded `pixi.lock` to v7 for reproducible `pixi install`.
+
+### 🏗️ Build
+- **Removed unused `mediapipe`** from Windows `build.py` dependencies (face detection uses YuNet ONNX).
 
 ---
 
@@ -62,7 +72,7 @@ Unified 2.2 release — search, gallery, film strip, frameless window polish, RA
 - **Folder sort**: Production uses EXIF / probe / birth / mtime only; Windows Shell `DateTaken` POC removed.
 - **`clear_cache.bat` / `clear_cache.sh`**: Full dev/session reset; repo-root `clear_cache.bat` forwards to `scripts/Launch/bat/clear_cache.bat`.
 - **Windows share helper** (sources retained): .NET `WindowsShareHelper.exe` for WinRT share in dev builds.
-- **Launch scripts**: macOS build/test workflow in `scripts/Launch/README.md`; version aligned to **2.2** across `build.py`, `pixi.toml`, and `QApplication`.
+- **Launch scripts**: macOS build/test workflow in `scripts/Launch/README.md`; version aligned across `build.py`, `pixi.toml`, and `QApplication`.
 - **Environment**: `activation.env` with `PYTHONNOUSERSITE=1` to prevent global package leaks and splash issues.
 
 ---
