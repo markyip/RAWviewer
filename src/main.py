@@ -21,6 +21,9 @@ def close_native_splash():
     except ImportError:
         pass
 
+
+_startup_splash = None  # set in ultra-fast splash block when frozen
+
 # Ultra Fast Splash: Initialize Qt and show splash BEFORE parsing the rest of the file
 try:
     from PyQt6.QtWidgets import QApplication, QSplashScreen
@@ -100,7 +103,11 @@ try:
         _painter.end()
     
     if getattr(sys, 'frozen', False):
-        _startup_splash = QSplashScreen(_splash_pixmap, Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.FramelessWindowHint)
+        # WindowStaysOnTopHint makes finish()/close() unreliable on macOS (splash lingers until click).
+        _splash_flags = Qt.WindowType.FramelessWindowHint
+        if sys.platform != "darwin":
+            _splash_flags |= Qt.WindowType.WindowStaysOnTopHint
+        _startup_splash = QSplashScreen(_splash_pixmap, _splash_flags)
         _startup_splash.showMessage("Starting RAWviewer...", Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignCenter, Qt.GlobalColor.white)
         _startup_splash.show()
         _temp_app.processEvents()
@@ -737,6 +744,80 @@ from PyQt6.QtGui import (QPixmap, QImage, QAction, QKeySequence, QShortcut, QGui
                          QDragEnterEvent, QDropEvent, QCursor, QIcon,
                          QTransform, QRegion, QPainterPath, QPainter, QColor, QPen, QBrush, QPalette)
 safe_print("PyQt6 imported successfully", flush=True)
+
+
+def _dismiss_startup_splash(app, main_window=None, splash=None) -> None:
+    """Force-hide startup splash. macOS often keeps stay-on-top splash visible after finish()."""
+    global _startup_splash
+    close_native_splash()
+    splash_widgets: list = []
+    for candidate in (splash, _startup_splash):
+        if candidate is not None and candidate not in splash_widgets:
+            splash_widgets.append(candidate)
+    try:
+        for top_level in QApplication.topLevelWidgets():
+            if isinstance(top_level, QSplashScreen) and top_level not in splash_widgets:
+                splash_widgets.append(top_level)
+    except Exception:
+        pass
+    for sp in splash_widgets:
+        try:
+            flags = sp.windowFlags()
+            flags &= ~Qt.WindowType.WindowStaysOnTopHint
+            sp.setWindowFlags(flags)
+            sp.hide()
+            if main_window is not None:
+                try:
+                    sp.finish(main_window)
+                except Exception:
+                    pass
+            sp.close()
+            sp.deleteLater()
+        except Exception:
+            pass
+    _startup_splash = None
+    if app is not None:
+        try:
+            app.processEvents()
+        except Exception:
+            pass
+    if main_window is not None:
+        try:
+            main_window.show()
+            main_window.raise_()
+            main_window.activateWindow()
+            if app is not None:
+                app.processEvents()
+        except Exception:
+            pass
+    if sys.platform == "darwin" and main_window is not None:
+        try:
+            import objc
+            from ctypes import c_void_p
+
+            ns_app = objc.lookUpClass("NSApplication").sharedApplication()
+            if ns_app is not None:
+                ns_app.setActivationPolicy_(0)
+                ns_app.activateIgnoringOtherApps_(True)
+            wh = main_window.windowHandle()
+            if wh is not None:
+                view = objc.objc_object(c_void_p=int(wh.winId()))
+                win = view.window()
+                if win is not None:
+                    win.makeKeyAndOrderFront_(None)
+        except Exception:
+            pass
+
+
+def _schedule_startup_splash_dismiss(app, main_window, splash) -> None:
+    """Dismiss splash now and again after event-loop ticks (macOS can lag finish())."""
+    _dismiss_startup_splash(app, main_window, splash)
+    for delay_ms in (0, 50, 150, 400):
+        QTimer.singleShot(
+            delay_ms,
+            lambda mw=main_window, a=app: _dismiss_startup_splash(a, mw, None),
+        )
+
 
 # Heavy third-party imports moved to lazy-loading to speed up splash display
 # (Globals are initialized at the top of the file)
@@ -24413,7 +24494,12 @@ def main():
                     painter.drawText(splash_pixmap.rect(), Qt.AlignmentFlag.AlignCenter, "RAW")
                     painter.end()
                 
-                splash = QSplashScreen(splash_pixmap, Qt.WindowType.WindowStaysOnTopHint)
+                splash = QSplashScreen(
+                    splash_pixmap,
+                    Qt.WindowType.FramelessWindowHint
+                    if sys.platform == "darwin"
+                    else (Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.FramelessWindowHint),
+                )
                 splash.show()
                 app.processEvents()
                 safe_print("Fallback splash screen displayed", flush=True)
@@ -24455,30 +24541,7 @@ def main():
             
             # Show main window and close splash screen
             viewer.show()
-            if sys.platform == "darwin":
-                try:
-                    import objc
-
-                    ns_app = objc.lookUpClass("NSApplication").sharedApplication()
-                    if ns_app is not None:
-                        # Terminal-launched Python is often Prohibited/Accessory; sharing needs Regular.
-                        ns_app.setActivationPolicy_(0)
-                except Exception:
-                    pass
-            # macOS native title bar tweaks disabled for stability.
-            if splash:
-                splash.finish(viewer)  # Close splash screen when main window is ready
-                splash.close()         # Force close the splash screen
-            
-            # Broad check to close any remaining or orphaned QSplashScreen in the app
-            try:
-                for top_level in QApplication.topLevelWidgets():
-                    if isinstance(top_level, QSplashScreen):
-                        top_level.close()
-                app.processEvents()
-            except Exception as e:
-                logger.warning(f"[MAIN] Error closing orphaned splash screens: {e}")
-                
+            _schedule_startup_splash_dismiss(app, viewer, splash)
             safe_print("Splash screen closed, main window displayed", flush=True)
 
         # Run application
@@ -24538,13 +24601,9 @@ def main():
         
         # Try to show error dialog if possible
         try:
-            # IMPORTANT: Close the splash screen so the error dialog is visible!
-            # We use a broad check for any QSplashScreen in the app
-            for top_level in QApplication.topLevelWidgets():
-                if isinstance(top_level, QSplashScreen):
-                    top_level.close()
-
             app = QApplication.instance()
+            _dismiss_startup_splash(app, None, None)
+
             if app is not None:
                 from PyQt6.QtWidgets import QMessageBox
                 msg = QMessageBox()
@@ -24594,13 +24653,9 @@ if __name__ == '__main__':
         
         # Try to show error dialog if possible
         try:
-            # IMPORTANT: Close the splash screen so the error dialog is visible!
-            # We use a broad check for any QSplashScreen in the app
-            for top_level in QApplication.topLevelWidgets():
-                if isinstance(top_level, QSplashScreen):
-                    top_level.close()
-
             app = QApplication.instance()
+            _dismiss_startup_splash(app, None, None)
+
             if app is not None:
                 from PyQt6.QtWidgets import QMessageBox
                 msg = QMessageBox()
