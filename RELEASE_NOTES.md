@@ -3,7 +3,7 @@
 ## 🚀 Version 2.3.1
 **Release Date: June 8, 2026**
 
-Windows-focused stability and installer hotfix. **macOS** builds are unchanged from 2.3.0 unless you rebuild from source with this tag.
+Windows installer stability and launch fixes, plus **macOS** release packaging (Terminal install, in-app MobileCLIP download, SSL fix for HTTPS downloads).
 
 ### 🪟 Windows installer & launch
 - **Clearer release filenames**: **`RAWviewer_Setup_DirectML.exe`** (recommended) and **`RAWviewer_Setup_CUDA.exe`** replace the old single-file names.
@@ -18,8 +18,15 @@ Windows-focused stability and installer hotfix. **macOS** builds are unchanged f
 ### 🖼️ Viewing
 - **RAW zoom**: Fixed **Space** and **double-click** not zooming on RAW files when fit-to-window state was out of sync (Ctrl+scroll still worked).
 
+### 🍎 macOS
+- **Release zip**: `RAWviewer-v2.3.1-macOS.zip` (~82 MB) does **not** bundle MobileCLIP models; install via **Terminal** (`bash install_macos_app.sh` in the extracted folder). Models download when the user opens **gallery search** (~150 MB, one-time, needs internet).
+- **No launch-time download prompt**: Semantic model download is offered only from gallery search (not on app startup).
+- **HTTPS / SSL fix**: Packaged app bundles **certifi** CA certificates and configures SSL before Hugging Face / tokenizer downloads, fixing `[SSL: CERTIFICATE_VERIFY_FAILED]` on fresh installs.
+- **Dock — single app icon**: LibRaw process pool off by default (PyInstaller runtime hook); opt in with `RAWVIEWER_USE_PROCESS_POOL=1`.
+- **Gallery search crash (macOS 26+)**: NSTextField autocomplete disabled on the search field to avoid ViewBridge aborts under Qt 6.11.
+
 ### 📄 Docs
-- README updated for Setup vs launcher exe, DirectML recommendation, uninstall, and troubleshooting.
+- README updated for Setup vs launcher exe, DirectML recommendation, uninstall, macOS Terminal install, gallery-search model download, and troubleshooting.
 
 ---
 
@@ -57,7 +64,7 @@ Version 2.3.0 expands **focus overlays**, adds a **RAW ↔ embedded-JPEG workflo
 - **Removed unused `mediapipe`** from Windows `build.py` dependencies (face detection uses YuNet ONNX).
 
 ### 🍎 macOS
-- **Release packaging**: `RAWviewer-v2.3.0-macOS.zip` bundles MobileCLIP Core ML models when built with `build_macos.sh`; also bundles **scipy** for GPS reverse geocoding; minimum macOS **13.0**; **pyexiv2** in release builds. If models are missing, the app prompts to download them on first launch or gallery search (needs internet once).
+- **Release packaging**: `RAWviewer-v2.3.1-macOS.zip` bundles **scipy** for GPS reverse geocoding; minimum macOS **13.0**; **pyexiv2** in release builds. MobileCLIP models are not in the zip; the app prompts to download when the user opens gallery search (needs internet once).
 - **Dock — single app icon**: Fixed extra RAWviewer icons in the Dock while browsing large folders. LibRaw’s process pool is **off by default on macOS** (PyInstaller runtime hook + spawn-safe startup); opt in with `RAWVIEWER_USE_PROCESS_POOL=1` (may bring back extra Dock entries).
 - **Startup splash**: Dismisses automatically when the main window is ready (no extra click on macOS).
 - **Gallery search crash (macOS 26+)**: Disables NSTextField automatic completion on the search field (including after focus and wake-from-sleep) to avoid ViewBridge / `SPCompletionListServiceViewController` aborts under Qt 6.11.

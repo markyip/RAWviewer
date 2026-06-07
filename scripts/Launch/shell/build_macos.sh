@@ -59,7 +59,7 @@ echo "Upgrading pip..."
 "$PYTHON_BIN" -m pip install --upgrade pip
 
 echo "Installing core dependencies..."
-"$PYTHON_BIN" -m pip install --upgrade PyQt6 rawpy send2trash pyinstaller natsort exifread Pillow psutil numpy scipy qtawesome pyqtgraph reverse-geocoder pycountry huggingface-hub requests pyobjc-framework-Cocoa pyobjc-framework-CoreML pyobjc-framework-Quartz pyobjc-framework-Vision
+"$PYTHON_BIN" -m pip install --upgrade PyQt6 rawpy send2trash pyinstaller natsort exifread Pillow psutil numpy scipy qtawesome pyqtgraph reverse-geocoder pycountry huggingface-hub requests certifi pyobjc-framework-Cocoa pyobjc-framework-CoreML pyobjc-framework-Quartz pyobjc-framework-Vision
 
 echo "Installing required dependency: pyexiv2..."
 if ! "$PYTHON_BIN" -m pip install --upgrade pyexiv2; then

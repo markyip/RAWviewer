@@ -603,6 +603,9 @@ def main():
             "--hidden-import", "Vision",
             "--hidden-import", "huggingface_hub",
             "--hidden-import", "requests",
+            "--hidden-import", "certifi",
+            "--hidden-import", "ssl_certs",
+            "--collect-data", "certifi",
             "--hidden-import", "reverse_geocoder",
             "--hidden-import", "scipy.spatial.cKDTree",
             "--exclude-module", "coremltools",
@@ -653,6 +656,9 @@ def main():
         cmd_base.extend(["--osx-bundle-identifier", "com.markyip.rawviewer"])
         macos_pool_hook = os.path.join(src_path, "pyi_rth_macos_process_pool.py")
         release_defaults_hook = os.path.join(src_path, "pyi_rth_release_defaults.py")
+        ssl_certs_hook = os.path.join(src_path, "pyi_rth_ssl_certs.py")
+        if os.path.isfile(ssl_certs_hook):
+            cmd_base.extend(["--runtime-hook", ssl_certs_hook])
         if os.path.isfile(macos_pool_hook):
             cmd_base.extend(["--runtime-hook", macos_pool_hook])
         if os.path.isfile(release_defaults_hook):

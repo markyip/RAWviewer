@@ -6697,7 +6697,6 @@ class RAWImageViewer(QMainWindow):
         self._semantic_asset_download_signals = None
         self._mobileclip_download_dismissed_this_session = False
         self._mobileclip_download_dialog = None
-        self._mobileclip_download_skipped_at_launch = False
         self._last_semantic_query = ""
         self._semantic_index_progress_base = 0
         self._semantic_index_progress_total = 0
@@ -6807,7 +6806,6 @@ class RAWImageViewer(QMainWindow):
         else:
             update_delay_ms = 12000
         QTimer.singleShot(update_delay_ms, self._check_for_updates_on_launch)
-        QTimer.singleShot(2500, self._maybe_prompt_mobileclip_download_on_launch)
         safe_print("  [RAWImageViewer] Initialization complete!", flush=True)
 
     def _set_single_view_pixmap(self, base: QPixmap) -> None:
@@ -11628,13 +11626,11 @@ class RAWImageViewer(QMainWindow):
         except Exception:
             return False
 
-    def _prompt_mobileclip_download(self, corpus_files, *, at_launch: bool = False) -> bool:
+    def _prompt_mobileclip_download(self, corpus_files) -> bool:
         """Return True if download started or models already present; False if user declined."""
         if not self._mobileclip_models_missing():
             return True
-        if at_launch and getattr(self, "_mobileclip_download_skipped_at_launch", False):
-            return True
-        if not at_launch and getattr(self, "_mobileclip_download_dismissed_this_session", False):
+        if getattr(self, "_mobileclip_download_dismissed_this_session", False):
             return False
 
         from rawviewer_ui.mobileclip_download_dialog import MobileCLIPDownloadDialog
@@ -11648,14 +11644,8 @@ class RAWImageViewer(QMainWindow):
         self._mobileclip_download_dialog = None
         if dialog.download_started:
             return True
-        if at_launch:
-            self._mobileclip_download_skipped_at_launch = True
-        else:
-            self._mobileclip_download_dismissed_this_session = True
+        self._mobileclip_download_dismissed_this_session = True
         return False
-
-    def _maybe_prompt_mobileclip_download_on_launch(self) -> None:
-        self._prompt_mobileclip_download([], at_launch=True)
 
     def _start_semantic_asset_download_background(self, corpus_files):
         if self._semantic_asset_download_in_progress:
@@ -11712,11 +11702,6 @@ class RAWImageViewer(QMainWindow):
         self._mobileclip_download_dialog = None
         if corpus_files:
             self._start_user_semantic_indexing(corpus_files)
-        else:
-            self.status_bar.showMessage(
-                "Semantic search models downloaded. Open gallery search to start indexing.",
-                8000,
-            )
 
     def _on_semantic_asset_download_error(self, token, error):
         if not self._semantic_asset_download_in_progress:

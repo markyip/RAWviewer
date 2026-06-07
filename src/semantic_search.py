@@ -855,6 +855,12 @@ class MobileCLIPCoreMLBackend:
         os.makedirs(self.model_dir, exist_ok=True)
         _progress("Downloading MobileCLIP Core ML models...")
         try:
+            from ssl_certs import configure_ssl_certificates
+
+            configure_ssl_certificates()
+        except Exception:
+            pass
+        try:
             from huggingface_hub import snapshot_download
         except Exception as exc:
             raise RuntimeError(
@@ -873,7 +879,9 @@ class MobileCLIPCoreMLBackend:
 
         if not os.path.exists(self.tokenizer_path):
             _progress("Downloading MobileCLIP tokenizer...")
-            urllib.request.urlretrieve(self.TOKENIZER_URL, self.tokenizer_path)
+            from ssl_certs import urlretrieve
+
+            urlretrieve(self.TOKENIZER_URL, self.tokenizer_path)
 
         err = self.availability_error()
         if err:
@@ -1242,8 +1250,9 @@ class MobileCLIPONNXBackend:
             
         if not os.path.exists(self.tokenizer_path):
             _progress("Downloading CLIP tokenizer...")
-            import urllib.request
-            urllib.request.urlretrieve(self.TOKENIZER_URL, self.tokenizer_path)
+            from ssl_certs import urlretrieve
+
+            urlretrieve(self.TOKENIZER_URL, self.tokenizer_path)
             
         return self.model_dir
 
@@ -2491,7 +2500,9 @@ class SemanticImageIndex:
                         import logging
                         logging.getLogger(__name__).info("[VISION] Downloading YuNet ONNX face detection model (353 KB)...")
                         url = "https://github.com/opencv/opencv_zoo/raw/main/models/face_detection_yunet/face_detection_yunet_2023mar.onnx"
-                        urllib.request.urlretrieve(url, model_path)
+                        from ssl_certs import urlretrieve
+
+                        urlretrieve(url, model_path)
                         logging.getLogger(__name__).info("[VISION] YuNet ONNX model downloaded successfully.")
                     
                     # YuNet requires BGR input
@@ -2566,16 +2577,20 @@ class SemanticImageIndex:
                                 if not os.path.exists(prototxt_path):
                                     import logging
                                     logging.getLogger(__name__).info("[VISION] Downloading DNN face detector prototxt...")
-                                    urllib.request.urlretrieve(
+                                    from ssl_certs import urlretrieve
+
+                                    urlretrieve(
                                         "https://raw.githubusercontent.com/opencv/opencv/master/samples/dnn/face_detector/deploy.prototxt",
-                                        prototxt_path
+                                        prototxt_path,
                                     )
                                 if not os.path.exists(caffemodel_path):
                                     import logging
                                     logging.getLogger(__name__).info("[VISION] Downloading DNN face detector weights...")
-                                    urllib.request.urlretrieve(
+                                    from ssl_certs import urlretrieve
+
+                                    urlretrieve(
                                         "https://raw.githubusercontent.com/opencv/opencv_3rdparty/dnn_samples_face_detector_20170830/res10_300x300_ssd_iter_140000.caffemodel",
-                                        caffemodel_path
+                                        caffemodel_path,
                                     )
                                 _FACE_DETECTOR_NET = cv2.dnn.readNetFromCaffe(prototxt_path, caffemodel_path)
                                 _apply_opencv_dnn_acceleration(_FACE_DETECTOR_NET)

@@ -134,6 +134,7 @@ Full search syntax, focus-overlay brands, and power-user options are in **[Advan
 | `bash: command not found` | Type `cd `, drag the extracted folder onto Terminal, press Return, then run the command again |
 | Can’t read Desktop/Documents | System Settings → Privacy → **Full Disk Access** → add RAWviewer |
 | Search says models missing | Open gallery search and click **Download** when prompted (needs internet once). Or re-run `bash install_macos_app.sh` after downloading a fresh release zip |
+| Download failed (SSL / certificate error) | Update to **v2.3.1** or newer (bundles certifi). If you are on a corporate VPN or proxy with SSL inspection, add your organization’s root certificate to **Keychain Access** and set it to **Always Trust** |
 
 More detail: [`scripts/Launch/README.md`](scripts/Launch/README.md)
 
@@ -167,7 +168,7 @@ Separate words with spaces. Use `key:value` filters:
 | Platform | Default | Change it |
 |----------|---------|-----------|
 | **Windows** | MobileCLIP2-**B** (installer downloads on first install) | Set `RAWVIEWER_MOBILECLIP_VARIANT` to `s0`, `s2`, `b`, or `l14` |
-| **macOS** | Core ML bundled in the release app when built with `build_macos.sh`; otherwise downloaded on first gallery search | Dev: `python scripts/download_mobileclip_coreml.py --out-dir models/mobileclip2_coreml` before building |
+| **macOS** | Downloaded when you open gallery search (~150 MB, one-time) | Dev helper: `python scripts/download_mobileclip_coreml.py --out-dir models/mobileclip2_coreml` |
 
 Windows variants download from Hugging Face (`plhery/mobileclip2-onnx`) into separate cache folders (e.g. `~/.rawviewer_cache/mobileclip_onnx_s0`).
 
@@ -221,7 +222,7 @@ Scripts: [`scripts/Launch/`](scripts/Launch/README.md)
 | macOS | `./scripts/Launch/shell/launch_dev.sh` | `./scripts/Launch/shell/build_macos.sh` |
 
 **Pixi (optional):** `pixi install` → `pixi run start`  
-**macOS release zip:** `./scripts/Launch/shell/build_macos.sh` → `dist/RAWviewer-v2.3.1-macOS.zip` (prebuilt macOS downloads may still be **2.3.0** until a new macOS release is published)
+**macOS release zip:** `./scripts/Launch/shell/build_macos.sh` → `dist/RAWviewer-v2.3.1-macOS.zip`
 
 Dependencies are in `pixi.toml`. Build scripts use a local `rawviewer_env/` venv when packaging.
 
