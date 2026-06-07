@@ -489,9 +489,17 @@ class ImageLoadManager(QObject):
         use_process_pool = use_raw_process_pool()
         self._process_pool = None
         if use_process_pool:
+            import logging
+            logging.getLogger(__name__).info(
+                "[LOAD] LibRaw process pool enabled (%d workers)",
+                process_pool_worker_count(),
+            )
             self._process_pool = concurrent.futures.ProcessPoolExecutor(
                 max_workers=process_pool_worker_count()
             )
+        else:
+            import logging
+            logging.getLogger(__name__).info("[LOAD] LibRaw process pool disabled")
         
         self._active_tasks: Dict[Tuple, ImageLoadTask] = {}
         self._task_keys_by_path = defaultdict(set)

@@ -13,6 +13,51 @@ from typing import List, Optional, Tuple, Union
 from PIL import Image
 Image.MAX_IMAGE_PIXELS = None
 
+
+def _is_multiprocessing_worker_process() -> bool:
+    """Detect ProcessPool / spawn children before Qt runs (frozen .app re-exec)."""
+    if any(
+        arg == "--multiprocessing-fork" or arg.startswith("--multiprocessing-fork")
+        for arg in sys.argv[1:]
+    ):
+        return True
+    if len(sys.argv) >= 3 and sys.argv[1] == "-c" and "spawn_main" in sys.argv[2]:
+        return True
+    try:
+        import multiprocessing as _mp
+        if _mp.parent_process() is not None:
+            return True
+        # Spawn children can still report MainProcess until spawn_main renames them.
+        if _mp.current_process().name != "MainProcess":
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _bootstrap_multiprocessing_gui_main() -> bool:
+    """True only for the real GUI process (not ProcessPoolExecutor workers)."""
+    try:
+        import multiprocessing as _mp
+        _mp.freeze_support()
+    except Exception:
+        pass
+    return not _is_multiprocessing_worker_process()
+
+
+_IS_GUI_MAIN_PROCESS = _bootstrap_multiprocessing_gui_main()
+
+
+def resource_path(relative_path):
+    """Absolute path to a bundled resource (dev tree or PyInstaller _MEIPASS)."""
+    try:
+        base_path = sys._MEIPASS
+    except Exception:
+        base_path = os.path.abspath(os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), ".."))
+    return os.path.join(base_path, relative_path)
+
+
 # PyInstaller Splash Screen: Helper to close the boot-time splash
 def close_native_splash():
     try:
@@ -22,102 +67,107 @@ def close_native_splash():
         pass
 
 
-_startup_splash = None  # set in ultra-fast splash block when frozen
-
-# Ultra Fast Splash: Initialize Qt and show splash BEFORE parsing the rest of the file
-try:
-    from PyQt6.QtWidgets import QApplication, QSplashScreen
-    from PyQt6.QtGui import QPixmap, QColor, QPainter, QPen, QIcon
-    from PyQt6.QtCore import Qt, QEvent, QSize, QPoint, QLoggingCategory
-    
-    # Silence qt.imageformats warnings, particularly for RAW files structured as TIFFs
-    QLoggingCategory.setFilterRules("qt.imageformats.warning=false\nqt.imageformats.tiff.warning=false")
-    
-    def resource_path(relative_path):
-        """ Get absolute path to resource, works for dev and for PyInstaller """
-        try:
-            # PyInstaller creates a temp folder and stores path in _MEIPASS
-            base_path = sys._MEIPASS
-        except Exception:
-            # The script is in src/, so we go one level up to the project root
-            base_path = os.path.abspath(os.path.join(
-                os.path.dirname(os.path.abspath(__file__)), ".."))
-        return os.path.join(base_path, relative_path)
-
-    class RAWApplication(QApplication):
-        """Custom QApplication to handle macOS FileOpen events"""
-        def __init__(self, argv):
-            super().__init__(argv)
-            self.viewer = None
-            self.pending_files = []
-
-        def set_viewer(self, viewer):
-            """Set the main viewer window and load any pending files"""
-            self.viewer = viewer
-            for file_path in self.pending_files:
-                self._load_file(file_path)
-            self.pending_files.clear()
-
-        def event(self, event):
-            """Intercept application-level events"""
-            if event.type() == QEvent.Type.FileOpen:
-                file_path = event.file()
-                if file_path:
-                    if self.viewer:
-                        self._load_file(file_path)
-                    else:
-                        self.pending_files.append(file_path)
-                return True
-            return super().event(event)
-
-        def _load_file(self, path):
-            """Load a file into the viewer"""
-            if os.path.isfile(path):
-                self.viewer.load_folder_images(os.path.dirname(path), start_file=os.path.basename(path))
-            elif os.path.isdir(path):
-                self.viewer.load_folder_images(path)
-
-    # We need a temporary app just to show the splash
-    _temp_app = QApplication.instance()
-    if not _temp_app:
-        _temp_app = RAWApplication(sys.argv)
-    
-    # Try to load appicon.png as splash
-    _icon_path = resource_path(os.path.join('icons', 'appicon.png'))
-    if os.path.exists(_icon_path):
-        _splash_pixmap = QPixmap(_icon_path)
-        # Scale to reasonable splash size if needed (e.g. 512x512)
-        if _splash_pixmap.width() > 512:
-            _splash_pixmap = _splash_pixmap.scaled(512, 512, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
-    else:
-        # Fallback to generated if icon missing
-        _splash_pixmap = QPixmap(400, 400)
-        _splash_pixmap.fill(QColor(30, 30, 30))
-        _painter = QPainter(_splash_pixmap)
-        _painter.setPen(QPen(QColor(70, 130, 180), 4))
-        _font = _painter.font()
-        _font.setPointSize(48)
-        _font.setBold(True)
-        _painter.setFont(_font)
-        _painter.drawText(_splash_pixmap.rect(), Qt.AlignmentFlag.AlignCenter, "RAW")
-        _painter.end()
-    
-    if getattr(sys, 'frozen', False):
-        # WindowStaysOnTopHint makes finish()/close() unreliable on macOS (splash lingers until click).
-        _splash_flags = Qt.WindowType.FramelessWindowHint
-        if sys.platform != "darwin":
-            _splash_flags |= Qt.WindowType.WindowStaysOnTopHint
-        _startup_splash = QSplashScreen(_splash_pixmap, _splash_flags)
-        _startup_splash.showMessage("Starting RAWviewer...", Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignCenter, Qt.GlobalColor.white)
-        _startup_splash.show()
-        _temp_app.processEvents()
-    else:
-        _startup_splash = None
-    
-    # Now that the Qt splash is visible, close the native one to handover
+if not _IS_GUI_MAIN_PROCESS:
+    # Pool workers re-run the frozen binary; dismiss boot splash immediately, skip Qt.
     close_native_splash()
-except Exception:
-    _startup_splash = None
+
+_startup_splash = None  # set in ultra-fast splash block when frozen
+RAWApplication = None  # type: ignore[misc, assignment]
+
+# Ultra Fast Splash: Qt only in the GUI main process (pool workers must not touch Cocoa).
+if _IS_GUI_MAIN_PROCESS:
+    try:
+        from PyQt6.QtWidgets import QApplication, QSplashScreen
+        from PyQt6.QtGui import QPixmap, QColor, QPainter, QPen, QIcon
+        from PyQt6.QtCore import Qt, QEvent, QSize, QPoint, QLoggingCategory
+
+        # Silence qt.imageformats warnings, particularly for RAW files structured as TIFFs
+        QLoggingCategory.setFilterRules(
+            "qt.imageformats.warning=false\nqt.imageformats.tiff.warning=false"
+        )
+
+        class RAWApplication(QApplication):
+            """Custom QApplication to handle macOS FileOpen events"""
+            def __init__(self, argv):
+                super().__init__(argv)
+                self.viewer = None
+                self.pending_files = []
+
+            def set_viewer(self, viewer):
+                """Set the main viewer window and load any pending files"""
+                self.viewer = viewer
+                for file_path in self.pending_files:
+                    self._load_file(file_path)
+                self.pending_files.clear()
+
+            def event(self, event):
+                """Intercept application-level events"""
+                if event.type() == QEvent.Type.FileOpen:
+                    file_path = event.file()
+                    if file_path:
+                        if self.viewer:
+                            self._load_file(file_path)
+                        else:
+                            self.pending_files.append(file_path)
+                    return True
+                return super().event(event)
+
+            def _load_file(self, path):
+                """Load a file into the viewer"""
+                if os.path.isfile(path):
+                    self.viewer.load_folder_images(
+                        os.path.dirname(path), start_file=os.path.basename(path)
+                    )
+                elif os.path.isdir(path):
+                    self.viewer.load_folder_images(path)
+
+        # We need a temporary app just to show the splash
+        _temp_app = QApplication.instance()
+        if not _temp_app:
+            _temp_app = RAWApplication(sys.argv)
+
+        # Try to load appicon.png as splash
+        _icon_path = resource_path(os.path.join('icons', 'appicon.png'))
+        if os.path.exists(_icon_path):
+            _splash_pixmap = QPixmap(_icon_path)
+            if _splash_pixmap.width() > 512:
+                _splash_pixmap = _splash_pixmap.scaled(
+                    512, 512,
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+        else:
+            _splash_pixmap = QPixmap(400, 400)
+            _splash_pixmap.fill(QColor(30, 30, 30))
+            _painter = QPainter(_splash_pixmap)
+            _painter.setPen(QPen(QColor(70, 130, 180), 4))
+            _font = _painter.font()
+            _font.setPointSize(48)
+            _font.setBold(True)
+            _painter.setFont(_font)
+            _painter.drawText(
+                _splash_pixmap.rect(), Qt.AlignmentFlag.AlignCenter, "RAW"
+            )
+            _painter.end()
+
+        if getattr(sys, 'frozen', False):
+            _splash_flags = Qt.WindowType.FramelessWindowHint
+            if sys.platform != "darwin":
+                _splash_flags |= Qt.WindowType.WindowStaysOnTopHint
+            _startup_splash = QSplashScreen(_splash_pixmap, _splash_flags)
+            _startup_splash.showMessage(
+                "Starting RAWviewer...",
+                Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignCenter,
+                Qt.GlobalColor.white,
+            )
+            _startup_splash.show()
+            _temp_app.processEvents()
+        else:
+            _startup_splash = None
+
+        close_native_splash()
+    except Exception:
+        _startup_splash = None
 
 # Force verbose orientation logs for debugging rotation issues
 os.environ["RAWVIEWER_VERBOSE_ORIENTATION_LOGS"] = "1"
@@ -149,17 +199,6 @@ exif_backend_mode = None
 exif_orientation_after_cw90 = None
 has_pyexiv2 = None
 process_file_from_path = None
-
-# PyInstaller + multiprocessing/process pools:
-# When using ProcessPoolExecutor in a frozen onefile app on Windows, child processes
-# are spawned by re-launching the same executable. Without freeze_support(), the
-# child process can incorrectly run the GUI entrypoint and open another window.
-try:
-    import multiprocessing
-    if getattr(sys, "frozen", False):
-        multiprocessing.freeze_support()
-except Exception:
-    pass
 
 # In PyInstaller --windowed builds there is no console, so stdout/stderr can be None.
 # Redirect them to a file early so all existing safe_print() debug output is preserved.
@@ -267,11 +306,7 @@ def _env_int(name: str, default: int, *, minimum: int = 0) -> int:
 
 
 def _is_primary_process() -> bool:
-    try:
-        import multiprocessing
-        return multiprocessing.current_process().name == "MainProcess"
-    except Exception:
-        return True
+    return _IS_GUI_MAIN_PROCESS
 
 
 _VERBOSE_CONSOLE = _env_true("RAWVIEWER_VERBOSE_CONSOLE", default=False)
@@ -7151,7 +7186,7 @@ class RAWImageViewer(QMainWindow):
             self._on_single_view_content_displayed()
         finally:
             self._orientation_already_applied = False
-        self.setFocus()
+        self._restore_single_view_keyboard_focus()
         self.save_session_state()
         try:
             if self.image_files and file_path in self.image_files:
@@ -8259,6 +8294,15 @@ class RAWImageViewer(QMainWindow):
         if container is None or not hasattr(container, "filmstrip_widget"):
             return None
         return container.filmstrip_widget()
+
+    def _navigate_single_view_step(self, delta: int) -> None:
+        """Prev/next in single view (filmstrip hotzone or main image list)."""
+        if self._filmstrip_handles_input():
+            bar = self._filmstrip_bar()
+            if bar:
+                bar.move_selection(delta)
+                return
+        self._debounced_navigate("prev" if delta < 0 else "next")
 
     def _filmstrip_handles_input(self) -> bool:
         if getattr(self, "view_mode", "single") != "single":
@@ -9828,6 +9872,7 @@ class RAWImageViewer(QMainWindow):
                 self.gpu_view.fitModeChanged.connect(self._on_gpu_fit_mode_changed)
                 self.gpu_view.zoomChanged.connect(self._on_gpu_zoom_changed)
                 self.gpu_view.doubleClickedAt.connect(self._on_gpu_double_clicked)
+                self.gpu_view._shortcut_handler = self._handle_app_shortcut
             except Exception as _gpu_exc:
                 import logging
                 logging.getLogger(__name__).warning(
@@ -10229,6 +10274,7 @@ class RAWImageViewer(QMainWindow):
         # v2.1-style filters: image scroll + optional GPU view only (no status bar / container).
         self.scroll_area.installEventFilter(self)
         self.image_label.installEventFilter(self)
+        self.single_view_container.installEventFilter(self)
         if self.gpu_view is not None:
             self.gpu_view.setMouseTracking(True)
             self.gpu_view.viewport().setMouseTracking(True)
@@ -10247,6 +10293,15 @@ class RAWImageViewer(QMainWindow):
         self._shortcut_toggle_focus_subject_outline.activated.connect(
             self._toggle_focus_subject_outline
         )
+
+        # Arrow keys must work when the GPU OpenGL viewport (or other NoFocus
+        # children) holds focus; WindowShortcut matches the F-key pattern.
+        self._shortcut_nav_prev = QShortcut(QKeySequence(Qt.Key.Key_Left), self)
+        self._shortcut_nav_prev.setContext(Qt.ShortcutContext.WindowShortcut)
+        self._shortcut_nav_prev.activated.connect(self._shortcut_activate_nav_prev)
+        self._shortcut_nav_next = QShortcut(QKeySequence(Qt.Key.Key_Right), self)
+        self._shortcut_nav_next.setContext(Qt.ShortcutContext.WindowShortcut)
+        self._shortcut_nav_next.activated.connect(self._shortcut_activate_nav_next)
 
         self._sync_single_image_histogram()
 
@@ -20530,6 +20585,38 @@ class RAWImageViewer(QMainWindow):
         if hasattr(self, "single_view_container") and self.single_view_container is not None:
             self.single_view_container.set_rating(rating)
 
+    def _restore_single_view_keyboard_focus(self) -> None:
+        """Return keyboard focus to the image surface (GPU view or main window)."""
+        if getattr(self, "view_mode", "single") != "single":
+            self.setFocus(Qt.FocusReason.OtherFocusReason)
+            return
+        gv = getattr(self, "gpu_view", None)
+        if gv is not None and gv.isVisible():
+            gv.setFocus(Qt.FocusReason.OtherFocusReason)
+            return
+        self.setFocus(Qt.FocusReason.OtherFocusReason)
+
+    def _shortcut_blocked_by_text_input(self) -> bool:
+        focused = self.focusWidget()
+        from PyQt6.QtWidgets import QLineEdit, QTextEdit, QPlainTextEdit
+        return bool(
+            focused and isinstance(focused, (QLineEdit, QTextEdit, QPlainTextEdit))
+        )
+
+    def _shortcut_activate_nav_prev(self) -> None:
+        if getattr(self, "view_mode", "single") != "single":
+            return
+        if self._shortcut_blocked_by_text_input():
+            return
+        self._navigate_single_view_step(-1)
+
+    def _shortcut_activate_nav_next(self) -> None:
+        if getattr(self, "view_mode", "single") != "single":
+            return
+        if self._shortcut_blocked_by_text_input():
+            return
+        self._navigate_single_view_step(1)
+
     def _handle_app_shortcut(self, event):
         """Handle application-wide shortcuts for better consistency and focus-resilience."""
         focused = self.focusWidget()
@@ -20565,24 +20652,6 @@ class RAWImageViewer(QMainWindow):
                         self.toggle_zoom()
                     return True
                 self.toggle_zoom()
-                return True
-        elif key == Qt.Key.Key_Left:
-            if vm == "single":
-                if self._filmstrip_handles_input():
-                    bar = self._filmstrip_bar()
-                    if bar:
-                        bar.move_selection(-1)
-                        return True
-                self._debounced_navigate("prev")
-                return True
-        elif key == Qt.Key.Key_Right:
-            if vm == "single":
-                if self._filmstrip_handles_input():
-                    bar = self._filmstrip_bar()
-                    if bar:
-                        bar.move_selection(1)
-                        return True
-                self._debounced_navigate("next")
                 return True
         elif key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
             if vm == "single" and self._filmstrip_handles_input():
@@ -24616,6 +24685,7 @@ def main():
             
             # Show main window and close splash screen
             viewer.show()
+            QTimer.singleShot(0, viewer._restore_single_view_keyboard_focus)
             _schedule_startup_splash_dismiss(app, viewer, splash)
             safe_print("Splash screen closed, main window displayed", flush=True)
 
@@ -24693,59 +24763,7 @@ def main():
         sys.exit(1)
 
 
-if __name__ == '__main__':
-    # Print startup message to console immediately
-    safe_print("=" * 80, flush=True)
-    safe_print("RAWviewer Starting...", flush=True)
-    safe_print("=" * 80, flush=True)
-    
-    # Setup logging before anything else
-    try:
-        safe_print("Setting up logging...", flush=True)
-        setup_logging()
-        safe_print("Logging setup complete.", flush=True)
-    except Exception as e:
-        safe_print_err(f"ERROR: Failed to setup logging: {e}", flush=True)
-        import traceback
-        safe_print_err(f"Traceback: {traceback.format_exc()}", flush=True)
-    
-    try:
-        safe_print("Calling main()...", flush=True)
-        main()
-    except Exception as e:
-        safe_print_err(f"\n{'='*80}", flush=True)
-        safe_print_err(f"FATAL ERROR in main(): {type(e).__name__}: {e}", flush=True)
-        import traceback
-        safe_print_err(f"Traceback:\n{traceback.format_exc()}", flush=True)
-        safe_print_err(f"{'='*80}\n", flush=True)
-        raise
-        safe_print_err(f"FATAL ERROR")
-        safe_print_err(f"{'='*80}")
-        safe_print_err(f"{error_msg}")
-        safe_print_err(f"\nFull traceback:")
-        safe_print_err(f"{error_traceback}")
-        safe_print_err(f"{'='*80}\n")
-        
-        # Try to show error dialog if possible
-        try:
-            app = QApplication.instance()
-            _dismiss_startup_splash(app, None, None)
-
-            if app is not None:
-                from PyQt6.QtWidgets import QMessageBox
-                msg = QMessageBox()
-                msg.setIcon(QMessageBox.Icon.Critical)
-                msg.setWindowTitle("Fatal Error")
-                msg.setText("The application encountered a fatal error and will now exit.")
-                msg.setDetailedText(f"{error_msg}\n\n{error_traceback}")
-                msg.exec()
-        except:
-            pass  # If we can't show dialog, at least we logged it
-        
-        sys.exit(1)
-
-
-if __name__ == '__main__':
+if __name__ == '__main__' and _IS_GUI_MAIN_PROCESS:
     # Print startup message to console immediately
     safe_print("=" * 80, flush=True)
     safe_print("RAWviewer Starting...", flush=True)

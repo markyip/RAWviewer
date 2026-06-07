@@ -20,7 +20,7 @@ Environment toggles:
 import os
 
 from PyQt6.QtCore import Qt, QRect, QRectF, QPointF, pyqtSignal, QEvent
-from PyQt6.QtGui import QPixmap, QPainter, QColor, QPen
+from PyQt6.QtGui import QKeyEvent, QPixmap, QPainter, QColor, QPen
 from PyQt6.QtWidgets import (
     QGraphicsView,
     QGraphicsScene,
@@ -90,6 +90,9 @@ class GpuImageView(QGraphicsView):
             QGraphicsView.OptimizationFlag.DontAdjustForAntialiasing, True
         )
         self.viewport().setMouseTracking(True)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        # Set by RAWImageViewer: callable(QKeyEvent) -> bool
+        self._shortcut_handler = None
 
         self._maybe_enable_opengl()
 
@@ -112,9 +115,11 @@ class GpuImageView(QGraphicsView):
             from PyQt6.QtOpenGLWidgets import QOpenGLWidget
 
             gl = QOpenGLWidget()
+            gl.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
             self.setViewport(gl)
             # Re-enable tracking on the new viewport.
             self.viewport().setMouseTracking(True)
+            self.viewport().setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         except Exception:
             # Raster fallback keeps the feature working without a GL context.
             pass
@@ -456,6 +461,13 @@ class GpuImageView(QGraphicsView):
                 event.accept()
                 return True
         return super().event(event)
+
+    def keyPressEvent(self, event: QKeyEvent) -> None:
+        handler = getattr(self, "_shortcut_handler", None)
+        if callable(handler) and handler(event):
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
     def wheelEvent(self, event) -> None:
         delta = event.angleDelta().y()

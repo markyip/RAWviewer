@@ -1,7 +1,7 @@
 # RAWviewer Release Notes
 
 ## 🚀 Version 2.3.0
-**Release Date: June 6, 2026**
+**Release Date: June 7, 2026**
 
 ### 🎯 Focus overlay
 - **Alignment fix (Canon EOS)**: Maker-note AF uses a center origin with **Y-up**; dashed boxes now line up with the image instead of appearing vertically flipped.
@@ -23,6 +23,7 @@
 - **macOS release zip**: `build_macos.sh` now produces `RAWviewer-v2.3.0-macOS.zip` with **`Start Here.txt`**, **`Install RAWviewer.command`** (Applications + quarantine fix), and **`Remove Quarantine.command`** (run from folder). Bundles **scipy** for GPS reverse geocoding; **`LSMinimumSystemVersion`** set to **13.0**; **pyexiv2** required in the build script.
 
 ### 🍎 macOS
+- **Dock — single app icon**: Fixed extra RAWviewer icons appearing in the Dock while browsing large folders. LibRaw’s process pool is **off by default on macOS** (PyInstaller runtime hook + spawn-safe startup): `ProcessPoolExecutor` workers no longer re-launch the `.app` as separate GUI processes. RAW decode falls back to the existing in-process path; thread-pool loading is unchanged. Opt in with `RAWVIEWER_USE_PROCESS_POOL=1` if you want multi-process LibRaw postprocess (may bring back extra Dock entries).
 - **Startup splash**: Dismisses automatically when the main window is ready (no extra click on macOS).
 - **Gallery search crash (macOS 26+)**: Disables NSTextField automatic completion on the search field to avoid ViewBridge / `SPCompletionListServiceViewController` aborts under Qt 6.11.
 - **Install docs**: README macOS version support table (13+ prebuilt; Pixi 14+ on Apple Silicon); simplified zip install flow via `Start Here.txt`.

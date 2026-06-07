@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Download MobileCLIP2-S0 ONNX models for bundling into RAWviewer.
+Download MobileCLIP2-B ONNX models for bundling into RAWviewer.
 """
 
 import os

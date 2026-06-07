@@ -9,455 +9,247 @@
 ![License](https://img.shields.io/badge/license-MIT-green)
 [![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-Donate-orange?logo=buy-me-a-coffee)](https://www.buymeacoffee.com/markyip)
 
-## ✈️ Why This Exists
-You're a photographer who just returned from an aviation show, a wildlife safari, or a fast-paced sports event. You took thousands of RAW shots — and now you're facing the real challenge:
+**RAWviewer** is a fast photo viewer for **Windows and macOS**. Open a folder of RAW or JPEG files, check sharpness, search your shots, and cull rejects — **100% on your computer, no cloud upload.**
 
-- **Sifting through mountains of photos**: Importing everything into heavy catalog tools like **Lightroom** or **Capture One** just to see what's good is slow and frustrating.
-- **Checking technical details**: Zooming in to check sharpness or finding where the camera's autofocus locked (`F` key focus overlays) is usually a multi-step chore.
-- **Finding specific shots instantly**: Searching your catalog for specific descriptions (e.g., `"takeoff"`, `"sunset"`, `"crowd"`) typically requires manual tagging or cloud-based AI uploads that compromise privacy.
-- **Filtering out the noise**: The default system photo viewers are clunky with RAW formats and offer no easy ways to flag or move blurry images in bulk.
+Official releases: [GitHub Releases](https://github.com/markyip/RAWviewer/releases/latest)
 
-I've been there myself — struggling to sort through **500GB of RIAT aviation photos** because of how tedious this process is. That frustration is exactly what inspired me to build **RAWviewer**.
+---
 
-RAWviewer is a lightweight, high-performance local organizer built specifically for photographers who shoot high volumes. It acts as an **AI-powered pre-filtering and discovery workspace**, letting you curate, search, and prepare your images entirely offline **before** you commit them to your editing workflow in Lightroom or Photoshop.
+## Download & install
 
-## 🔍 What is RAWviewer?
-**RAWviewer** is a fast, AI-powered image viewer and organizer for **Windows and macOS** (official releases), built with PyQt6. 
+### Windows
 
-Beyond instant RAW previewing, 100% single-key zooming, and smooth panning, RAWviewer integrates:
-- **Local Semantic AI Search**: Search your photo folder using natural language (e.g., `"airplane in clouds"`, `"portrait of a dog"`) running **100% offline and locally** via MobileCLIP (Core ML on macOS, ONNX on Windows).
-- **Structured Metadata Filtering**: Instantly narrow down results using advanced filters like `camera:`, `lens:`, `iso:`, `ext:`, `has:face`, `city:`, or date ranges.
-- **Focus Point & Subject Outlines**: Visualize camera autofocus points directly from MakerNote metadata to verify exact focal lock.
-- **Non-Destructive Tools & Sharing**: Quick visual rotations, automatic slideshows, and system sharing to jump straight into editing applications.
+1. Go to **[Releases](https://github.com/markyip/RAWviewer/releases/latest)** and download:
+   - **`RAWviewer-CUDA.exe`** — best if you have an **NVIDIA** GPU with CUDA
+   - **`RAWviewer-DirectML.exe`** — works on most PCs without extra setup (AMD / Intel / NVIDIA)
+2. Run the installer and pick an install folder.
+3. Open **RAWviewer** from the Desktop shortcut. The first run downloads the offline AI search models (no account needed).
 
-> **Platform note:** Official prebuilt releases are **Windows** and **macOS** only. There is no official Linux package; running from source on Linux is unsupported and may require manual dependency setup.
+If Windows shows **“Protected your PC”**: click **More info** → **Run anyway**.
 
-## ✨ Features
+### macOS (13 Ventura or newer)
 
-- **Built for speed**: Open large folders quickly and start culling right away.
-- **Easy sharpness check**: Press `Space` for instant 100% zoom, then browse with arrow keys.
-- **Smooth gallery browsing**: Scroll a large grid view without waiting for full imports.
-- **Search in gallery**: Filter by words and metadata like camera, ISO, date, GPS, and format.
-- **Single-view search jump**: Start search from one image and jump directly into filtered gallery results.
-- **Film strip navigation**: A bottom thumbnail strip appears when needed for fast jumping.
-- **Broad format support**: Works with common RAW types (CR2/CR3, NEF, ARW, DNG, RAF, ORF, RW2, and more) plus JPEG/TIFF/HEIF.
-- **Reliable orientation**: Photos display upright consistently across many camera brands.
-- **Clean fit and zoom colors**: RAW preview and 100% zoom stay visually consistent.
-- **Helpful photo info**: See key shooting details like focal length, aperture, ISO, and capture time.
-- **Safe file actions**: Move rejects to Discard or delete with confirmation.
-- **Session memory**: Reopen the app and continue from your last folder and image.
-- **Modern look and controls**: Keyboard, mouse, trackpad pinch, and polished UI.
-- **Windows and macOS releases**: Official prebuilt apps for both platforms.
+1. Download **`RAWviewer-v2.3.0-macOS.zip`** from **[Releases](https://github.com/markyip/RAWviewer/releases/latest)**.
+2. Double-click the zip to extract the folder. Open **`Start Here.txt`** — it tells you which file to click.
+3. **Recommended:** double-click **`Install RAWviewer.command`** → **Install** → **Open**.  
+   **Or:** double-click **`Remove Quarantine.command`**, then open **`RAWviewer.app`** in the same folder.
 
-## 🚀 Quick Start
+If macOS blocks a script the first time: **right-click it → Open → Open** (once only).
 
-### Download Executable
+> **Mac too old?** Prebuilt apps need **macOS 13+**. Monterey (12) and older are not supported. Details are in [Advanced → macOS version support](#macos-version-support).
 
-Official releases are published for **Windows** and **macOS** only.
+---
 
-#### Windows
-1. Download the appropriate version for your system from the [Releases Page](https://github.com/markyip/RAWviewer/releases/latest):
-   - **`RAWviewer-CUDA.exe`**: Recommended for **NVIDIA GPU** users who have CUDA installed. This provides the fastest indexing and search performance.
-   - **`RAWviewer-DirectML.exe`**: Recommended for **AMD, Intel, or NVIDIA** users who want an out-of-the-box hardware-accelerated experience without installing CUDA.
-2. Run the downloaded installer directly (no zip extraction needed).
-3. Double-click the installer to initiate the installation process. It will automatically set up the dependencies (via Pixi) and download the local AI models to a destination of your choice.
-4. Launch RAWviewer from the Desktop shortcut! (You can safely delete the installer afterwards).
+## Using RAWviewer
 
-#### macOS
+1. **Open a folder** (File menu, drag-and-drop, or double-click a photo with RAWviewer set as default).
+2. **Gallery view** — scroll the grid; click a photo for full-screen view.
+3. **Check sharpness** — press **`Space`** for 100% zoom; **`←` / `→`** for prev/next.
+4. **Search** — click the search icon in gallery view; type plain words (e.g. `sunset`, `airplane`) or filters like `camera:sony` `iso<800`.
+5. **Reject a shot** — **`↓`** moves it to a **Discard** subfolder; **Delete** removes it (with confirmation).
+6. **`Esc`** returns from single view to the gallery.
 
-##### Install (recommended)
+### Keyboard shortcuts
 
-> **Requires macOS 13 Ventura or newer** for the official prebuilt app. See [macOS version support](#macos-version-support) below if you are on an older Mac or building from source.
+| Key | Action |
+|-----|--------|
+| **Space** | Fit ↔ 100% zoom |
+| **← / →** | Previous / next image |
+| **↓** | Move to Discard folder |
+| **Delete** | Delete (with confirm) |
+| **Esc** | Back to gallery |
+| **H** | Show / hide histogram |
+| **F** | Show focus / subject box (when supported) |
 
-1. Download **`RAWviewer-v2.3-macOS.zip`** (or the latest macOS asset) from the [Releases Page](https://github.com/markyip/RAWviewer/releases/latest).
-2. **Double-click the zip** to extract a folder named `RAWviewer-v2.3-macOS` (version number may differ). Open **`Start Here.txt`** in that folder — it explains which file to double-click.
+### Mouse & trackpad
 
-**If macOS blocks a `.command` script the first time** (common for files downloaded outside the App Store): **right-click the script → Open → Open** once. After that, double-click works normally.
+- **Double-click** — zoom in on a point, or back to fit
+- **Drag** — pan when zoomed in
+- **Pinch / Ctrl+scroll** — zoom
+- **Scroll wheel** — next/previous (single view) or scroll gallery grid
+- **Film strip** — move the pointer to the bottom in single view for thumbnails
 
-**Already installed to Applications?** Run `Install RAWviewer.command` again and choose **Replace** to upgrade.
+### Search tips
 
-**Manual install (optional):** Drag `RAWviewer.app` to Applications. If macOS reports the app as “damaged” or won’t open, run in Terminal:
+- Type everyday words: `dog on beach`, `crowd`, `portrait`.
+- Add filters on the same line: `jet takeoff camera:canon iso<800`.
+- Words like **`people`** or **`face`** filter by detected faces, not AI meaning — if nothing matches, try `crowd` or `spectators` instead.
+- Clear the search box to show the whole folder again.
 
-```bash
-xattr -cr /Applications/RAWviewer.app
-```
+Full search syntax, focus-overlay brands, and power-user options are in **[Advanced reference](#advanced-reference)** below.
 
-*(Change the path if you installed somewhere other than Applications.)*
+---
 
-##### macOS version support
+## What you get
 
-| Your Mac | Official prebuilt `.zip` | Dev / local build |
-|----------|--------------------------|-------------------|
-| **macOS 13 Ventura** (Intel) | Supported | Supported via `./scripts/Launch/shell/build_macos.sh` or `pixi run` (Intel wheels) |
-| **macOS 13 Ventura** (Apple Silicon) | Supported | Use **`build_macos.sh`** — `pyexiv2` arm64 wheels and Pixi’s workspace pin target **macOS 14+** |
-| **macOS 14 Sonoma** or newer | Supported | Supported via Pixi (`pixi install`) or `build_macos.sh` |
-| **macOS 12 Monterey** or older | **Not supported** | **Not supported** — prebuilt binaries and Core ML semantic search require macOS 13+ SDK/runtime symbols |
+- Fast **RAW + JPEG** viewing (Canon, Nikon, Sony, DNG, and many more)
+- **Offline AI search** — describe photos in plain language; nothing leaves your PC
+- **Metadata filters** — camera, lens, ISO, date, GPS, file type
+- **Focus overlay** (`F`) on many Canon / Nikon / Sony / Olympus / Panasonic files
+- **Share** (macOS single view) — Mail, Messages, etc.
+- Remembers your last folder and position
 
-**Why macOS 13 is the floor for releases:** bundled MobileCLIP Core ML models, `Info.plist` deployment target, and current PyQt6 / Python wheels are built for **Ventura (13.0)+**. Older systems may crash immediately (e.g. missing `_mkfifoat`) or fail dependency install.
+---
 
-**Apple Silicon note:** Pixi declares `[system-requirements] macos = "14.0"` because `pyexiv2` arm64 wheels require **Sonoma (14)+**. On an M-series Mac still on Ventura, use the shell build script instead of Pixi, or upgrade macOS to 14+.
+## Supported formats
 
-**Building locally** (avoids Gatekeeper quarantine on your own machine): see [Building from Source → macOS](#macos-1). A local build still requires **macOS 13+**; it does not restore support for Monterey or older.
+**RAW:** CR2, CR3, NEF, ARW, DNG, ORF, RW2, RAF, and other LibRaw types  
+**Standard:** JPEG, TIFF, HEIF
 
-## ⌨️ Keyboard Shortcuts
+---
 
-- **Space**: Toggle between fit-to-window and 100% zoom
-- **`Esc`**: Return to Gallery View (from Single View)
-- **`←`/`→` arrows**: Navigate between images
-- **`↓`**: Move current image to Discard folder
-- **Delete**: Delete current image (with confirmation)
-- **`H`**: Show or hide the single-image histogram strip
-- **`F`**: Focus / subject outline
+## Something not working?
 
-## 🔎 Gallery search (Gallery view)
+### Windows
 
-Open the bottom search panel. The search field placeholder is **Search gallery**.
+| Problem | What to do |
+|---------|------------|
+| SmartScreen warning | More info → Run anyway |
+| Slow search | Use the **CUDA** build if you have an NVIDIA GPU |
+| Installer stuck on “Downloading models” | Re-run the latest installer; needs internet once |
+| Crash | Check `%LOCALAPPDATA%\RAWviewer\logs\` |
 
-- On **macOS** with bundled Core ML models, free-text queries run **semantic ranking** over the images that pass any filters below.
-- **Important:** Words like **`face`**, **`faces`**, **`people`**, **`person`**, and **`human`** are **not** sent to the neural search: they filter by the **Vision face-detection count** stored at index time (same as `has:face`). If no faces were detected (distant subjects, backs to camera, silhouettes), those photos are excluded—try free-text phrases instead, e.g. `crowd`, `pedestrians`, `spectators`.
-- **Formats:** Prefer **`format:jpeg`** · **`format:raw`** (`type jpeg` / `ext raw` with a space also normalize). Loose phrases **`file jpeg`** / **`file raw`** map to **`format:`** so **`.jpg`** matches **JPEG** synonyms and **`raw`** covers typical camera RAW extensions (not only filenames containing the substring `raw`).
-- You can combine a description with structured filters on one line (see examples).
-- **Clear** the field or use the **×** control to restore the full folder.
+### macOS
 
-### Semantic + face indexing behavior (current default)
+| Problem | What to do |
+|---------|------------|
+| “App is damaged” / won’t open | Run **`Install RAWviewer.command`** or **`Remove Quarantine.command`** from the zip |
+| Still blocked | Terminal: `xattr -cr /Applications/RAWviewer.app` |
+| Can’t read Desktop/Documents | System Settings → Privacy → **Full Disk Access** → add RAWviewer |
+| Search says models missing | Re-download the release zip; rebuild instructions for developers are below |
 
-- Semantic indexing and face detection are both enabled by default.
-- To keep the app responsive on very large RAW folders, indexing runs in two passes:
-  1. metadata + semantic embeddings (search-ready first)
-  2. face-count backfill in background
-- Background face pass starts automatically after semantic indexing is ready and resumes from persisted DB state.
-- Thumbnail warm-up before face scan is conservative by default to avoid long "warming" stalls on multi-thousand-image folders.
-- Advanced environment switches:
-  - `RAWVIEWER_INDEX_DEFER_FACE_SCAN=1` (default): run face scan after semantic pass
-  - `RAWVIEWER_FACE_SCAN_WARM_THUMBS=0` (default): disable full warm-up prepass
-  - `RAWVIEWER_FACE_SCAN_WARM_MAX_FILES=256` (default): cap warm-up batch size
-  - `RAWVIEWER_FACE_SCAN_WARM_MAX_SECONDS=25` (default): cap warm-up wall time
+More detail: [`scripts/Launch/README.md`](scripts/Launch/README.md)
 
-### Gallery search syntax examples
+---
 
-Separate tokens with spaces. Filters use `key:value` or comparison forms.
+## Advanced reference
+
+*Everything below is optional — for search power users, developers, and troubleshooting.*
+
+### Gallery search syntax
+
+Separate words with spaces. Use `key:value` filters:
 
 | Kind | Example |
 |------|---------|
 | Free text + filter | `jet takeoff camera:sony iso<800` |
 | Camera / lens | `camera:canon` · `lens:70-200` |
 | ISO / year | `iso<=800` · `year>=2024` |
-| Place | `city:tokyo` · `country:jp` · `admin:california` |
-| File name | `filename:_dsc` or `name:img_` |
-| File format | `format:cr3` · `type:jpeg` · `ext:jpg,png` · `format:raw` (same set as [`src/raw_file_extensions.py`](src/raw_file_extensions.py)) |
-| Date prefix | `date:2024-05` |
-| GPS / faces | `has:gps` · `no:gps` · `has:face` · `people` · `person` · `no:face` |
+| Place | `city:tokyo` · `country:jp` |
+| File name | `filename:_dsc` |
+| Format | `format:raw` · `format:jpeg` · `format:cr3` |
+| Date | `date:2024-05` |
+| GPS / faces | `has:gps` · `has:face` · `no:face` |
 
-Optional: **stronger semantic models** (advanced). The app default is **MobileCLIP2-S0** (vision: ~43MB) for speed and size. You can choose a stronger model by setting the environment variable **`RAWVIEWER_MOBILECLIP_VARIANT`** to one of the following:
+**Face vs semantic search:** `face`, `people`, `person`, etc. use stored face counts (`has:face`), not the neural search.
 
-- **`s0`** (Default): Vision model ~43MB, fastest indexing, lower memory usage.
-- **`s2`**: Vision model ~136MB, better accuracy on complex search terms.
-- **`b`**: ViT-B model ~330MB, significantly improved search understanding.
-- **`l14`**: ViT-L/14 model ~1.1GB, highest quality, recommended for heavy/large search applications.
+**Indexing:** Semantic search and face counts run in the background on large folders (metadata + AI first, faces after). The gallery becomes searchable before face tagging finishes.
 
-When a different variant is selected, the application will automatically download the correct model assets from Hugging Face (`plhery/mobileclip2-onnx` on Windows/Linux) to a separate cache folder.
+### MobileCLIP models (AI search)
 
-*Note for macOS users:* Bundled macOS Core ML models are discovered automatically in common app/resource paths:
-- Apple Hub naming: `mobileclip_s2_image.mlpackage` + `mobileclip_s2_text.mlpackage`
-- App export naming (`--for-app`): `mobileclip2_s0_image.mlpackage` + `mobileclip2_s0_text.mlpackage`
+| Platform | Default | Change it |
+|----------|---------|-----------|
+| **Windows** | MobileCLIP2-**B** | Set `RAWVIEWER_MOBILECLIP_VARIANT` to `s0`, `s2`, `b`, or `l14` |
+| **macOS** | Bundled Core ML (**S0** or **S2** in the app) | Replace models before building; see `models/mobileclip2_coreml/` |
 
-## 🖱️ Mouse Controls
+Windows variants download from Hugging Face (`plhery/mobileclip2-onnx`) into separate cache folders (e.g. `~/.rawviewer_cache/mobileclip_onnx_s0`).
 
-- **Double-click**: Zoom in to the clicked point (from fit), or zoom out to fit
-- **Pinch (Mac/Windows Trackpad) or Ctrl+Scroll**: Smoothly zoom in/out with smart cursor anchoring
-- **Click and drag**: Pan image when zoomed in
-- **Drag and drop**: Open images or folders
-- **Scroll Wheel (fit-to-window)**: Navigate images - Scroll down = previous, Scroll up = next
-- **Scroll Wheel (zoom mode)**: Pan image vertically
-- **Horizontal Wheel (zoom mode)**: Pan image horizontally (left/right)
-- **Scroll Wheel (Gallery View)**: Scroll through the image grid
-- **Film strip (Single View)**: Move the pointer toward the bottom of the image area to reveal a fading thumbnail strip; move away to dismiss. The strip includes thumbnails from the current folder or active search filter.
+### Focus overlay (`F`) by brand
 
-When focus/subject indicator is enabled (`F`):
+| Brand | Support |
+|-------|---------|
+| Canon CR2/CR3, Nikon NEF, Sony ARW, Olympus ORF, Panasonic RW2 | Yes (maker AF) |
+| JPEG / TIFF / HEIF | Sometimes (EXIF SubjectArea) |
+| Fujifilm RAF, Hasselblad 3FR, Pentax PEF, Samsung SRW, Sigma X3F | No |
+| Typical Adobe DNG | Usually no |
 
-- **Space** from fit-to-window zooms to the focus/subject box center.
-- **Double-click** still zooms to your clicked point (same as normal mode).
-- **Amber dashed box** — autofocus region from maker notes (Canon, Nikon, Sony, Olympus, Panasonic).
-- **Lime dashed box** — CIPA `SubjectArea` / `SubjectLocation` (common on JPEG; some RAW/DNG).
+Requires **pyexiv2** for maker-note AF on RAW.
 
-### Focus overlay support by brand
+### Environment variables
 
-Metadata is read via **pyexiv2 (Exiv2)**. Maker-note parsers exist for the brands below; other RAW types may still show a box when standard EXIF **SubjectArea** is present.
-
-| Brand / format | Focus overlay (`F`) |
-|----------------|---------------------|
-| **Canon** CR2, CR3 | Yes — maker AF |
-| **Nikon** NEF | Usually yes — AFInfo2 / contrast-detect AF (some shots have no AF tags, e.g. certain Z bodies) |
-| **Sony** ARW | Yes — FocusLocation / frame size |
-| **Olympus** ORF | Yes — AFPointSelected / focus area |
-| **Panasonic** RW2 | Yes — AFPointPosition |
-| **JPEG / TIFF / HEIF** | Sometimes — CIPA SubjectArea only |
-| **Adobe DNG** | Usually **no** — typical Leica/Adobe DNGs lack maker AF and SubjectArea in our test set |
-| **Fujifilm** RAF | **No** — no supported maker AF tags in current parser |
-| **Hasselblad** 3FR | **No** |
-| **Pentax** PEF, **Samsung** SRW, **Sigma** X3F | **No** — not implemented |
-
-Requires **pyexiv2** for maker-note AF on RAW; without it, only the slower **exifread** fallback (mainly SubjectArea / legacy Canon) may apply.
-
-## 📁 Supported Formats
-
-### RAW Formats
-- **Canon**: CR2, CR3
-- **Nikon**: NEF
-- **Sony**: ARW
-- **Adobe**: DNG
-- **Olympus**: ORF
-- **Panasonic**: RW2
-- **Fujifilm**: RAF
-- **Hasselblad**: 3FR
-- **Pentax**: PEF
-- **Samsung**: SRW
-- **Sigma**: X3F
-- **And many more supported by LibRaw**
-
-### Standard Formats
-- **JPEG**: JPG, JPEG
-- **TIFF**: TIF, TIFF
-- **HEIF**: HEIF
-
-## 🛠️ Development (run from source)
-
-Launch scripts live under [`scripts/Launch/`](scripts/Launch/README.md).
-
-| Platform | Debug run | Build |
-|----------|-----------|-------|
-| Windows | `scripts\Launch\bat\run_debug.bat` | `scripts\Launch\bat\build_windows.bat` |
-| Windows (cache wipe) | `clear_cache.bat` or `scripts\Launch\bat\clear_cache.bat` | — |
-| macOS | `./scripts/Launch/shell/launch_dev.sh` | `./scripts/Launch/shell/build_macos.sh` |
-
-**Virtual environments:** `pixi install` → `pixi run start` uses `.pixi/`. Build/debug batch scripts use `rawviewer_env/` (created automatically). `.venv/` is optional for IDE use only.
-
-**Folder sort (capture time):** Gallery and folder load sort by **EXIF** (`metadata_backend` probe when cold; bulk cache when warm). Default order is **oldest first**; use the gallery **⇅ Oldest / Newest** control to toggle (saved in QSettings). Windows Explorer `DateTaken` via Shell was evaluated and rejected for production (slower than EXIF, no benefit on test folders).
-
-**Optional dev toggles:**
+<details>
+<summary><strong>Click to expand — dev / tuning flags</strong></summary>
 
 | Variable | Effect |
 |----------|--------|
-| `RAWVIEWER_LIBRAW_CONSISTENT_PREVIEW=1` | **Default.** Single-image RAW uses LibRaw half-res for fit view and full decode at 100% zoom — same color pipeline, no embedded-JPEG color snap. Set `=0` for faster embedded-preview first paint. |
-| `RAWVIEWER_PROGRESSIVE_RAW_LOAD=1` | Show embedded preview first, then upgrade to LibRaw in background (may color-shift). Off by default. |
-| `RAWVIEWER_USE_PROCESS_POOL=1` | LibRaw postprocess in worker processes (multi-core). Default on when CPU count ≥ 4. |
-| `RAWVIEWER_GPU_VIEW=1` | Use the experimental GPU-accelerated single-image viewport (smoother zoom/pan; default remains the classic scroll area). Space / double-click toggle fit ↔ 100% pixel zoom; arrow keys browse in single view with prefetch. |
-| `RAWVIEWER_GPU_VIEW_NO_GL=1` | Force raster viewport when GPU view is enabled (debug / fallback) |
-| `RAWVIEWER_NAV_PRELOAD_DISPLAY=1` | Prefetch display-quality buffers for nearby files while navigating in single view (enabled in `run_debug.bat`) |
-| `RAWVIEWER_RESOLUTION_CROSSFADE_MS` | Duration (ms) of preview→full crossfade in single view when GPU/legacy crossfade is enabled (default `280`) |
-| `RAWVIEWER_DISABLE_CROSSFADE=1` | Disable viewport crossfade on resolution upgrades |
-| `RAWVIEWER_PERSISTENT_CACHE=1` | Enable disk/SQLite cache persistence (off by default) |
-| `RAWVIEWER_EXIF_BACKEND=auto` | EXIF via pyexiv2 (JPEG/TIFF) + exifread (RAW headers); `exifread` or `pyexiv2` to force one backend |
-| `RAWVIEWER_SORT_PROBE_WORKERS` | Parallel EXIF header probes during folder sort (default scales with CPU, up to 12 on local disk; 3 on UNC / `RAWVIEWER_SLOW_STORAGE_PREFIXES`) |
-| `RAWVIEWER_INDEX_METADATA_WORKERS` | Semantic index metadata extraction pool (default 2–6; lower on folders &gt;2000 files) |
-| `RAWVIEWER_RAW_LOAD_LIMIT` | Max concurrent LibRaw decodes in the load manager (default `4`) |
-| `RAWVIEWER_PROCESS_POOL_WORKERS` | LibRaw postprocess process pool size when `RAWVIEWER_USE_PROCESS_POOL=1` |
-| `RAWVIEWER_SLOW_STORAGE_PREFIXES` | Comma-separated path prefixes (e.g. `K:\Photos,N:\`) to cap sort-probe parallelism at 3 |
+| `RAWVIEWER_MOBILECLIP_VARIANT` | Windows ONNX model: `b` (default), `s0`, `s2`, `l14` |
+| `RAWVIEWER_GPU_VIEW=1` | GPU-accelerated single-image viewport |
+| `RAWVIEWER_LIBRAW_CONSISTENT_PREVIEW=1` | Same color pipeline for fit vs 100% zoom on RAW (default on) |
+| `RAWVIEWER_EXIF_BACKEND=auto` | `auto`, `pyexiv2`, or `exifread` |
+| `RAWVIEWER_SHARE_MENU=1` | macOS: Qt share menu (recommended) |
+| `RAWVIEWER_SHARE_TRY_NATIVE_PICKER=1` | macOS: try native share sheet first |
+| `RAWVIEWER_INDEX_DEFER_FACE_SCAN=1` | Defer face scan until after semantic index (default) |
 
-**macOS share (v2.3, single-image view only):**
+Full list and dev defaults: [`scripts/Launch/README.md`](scripts/Launch/README.md), [`docs/macos-sharing-v21-v22.md`](docs/macos-sharing-v21-v22.md).
 
-| Variable | Default in `launch_dev.sh` | Effect |
-|----------|------------------------------|--------|
-| `RAWVIEWER_SHARE_MENU` | `1` | Qt menu listing `NSSharingService` targets (recommended under Qt6) |
-| `RAWVIEWER_SHARE_TRY_NATIVE_PICKER` | off | Try `NSSharingServicePicker` first, then menu fallback |
-| `RAWVIEWER_SHARE_SHOW_AIRDROP` | off | Include AirDrop in the menu (in-app AirDrop is unreliable in the Qt host) |
-| `RAWVIEWER_SHARE_DEBUG` | off | Share diagnostics in status bar and `[SHARE]` logs |
+</details>
 
-Details: [`docs/macos-sharing-v21-v22.md`](docs/macos-sharing-v21-v22.md) and [`scripts/Launch/README.md`](scripts/Launch/README.md#macos--release-smoke-test-manual).
+### macOS version support
 
-### macOS — build and smoke test (v2.3)
+| Your Mac | Official `.zip` | Build from source |
+|----------|-----------------|-------------------|
+| macOS 13 Ventura (Intel) | ✅ | `build_macos.sh` or Pixi |
+| macOS 13 Ventura (Apple Silicon) | ✅ | Use **`build_macos.sh`** (Pixi needs 14+) |
+| macOS 14 Sonoma+ | ✅ | Pixi or `build_macos.sh` |
+| macOS 12 Monterey or older | ❌ | ❌ |
 
-```bash
-chmod +x scripts/Launch/shell/*.sh
-./scripts/Launch/shell/build_macos.sh    # creates dist/RAWviewer.app + dist/RAWviewer-v2.3.0-macOS.zip
-# Test one-click install: unzip the zip, double-click Install RAWviewer.command
-# Or from repo after build:
-bash scripts/Launch/shell/install_macos_app.sh
-```
+### Development & building from source
 
-**Dev run** (preflight checks for `pyexiv2` and semantic backend):
+Scripts: [`scripts/Launch/`](scripts/Launch/README.md)
 
-```bash
-./scripts/Launch/shell/launch_dev.sh
-# Skip preflight: RAWVIEWER_TEST_PYEXIV2=0 RAWVIEWER_TEST_SEMANTIC=0 ./scripts/Launch/shell/launch_dev.sh
-```
+| Platform | Run | Build |
+|----------|-----|-------|
+| Windows | `scripts\Launch\bat\run_debug.bat` | `scripts\Launch\bat\build_windows.bat` |
+| macOS | `./scripts/Launch/shell/launch_dev.sh` | `./scripts/Launch/shell/build_macos.sh` |
 
-Before tagging a macOS release: confirm app version **2.3.0**, single-view **share** menu works (Mail attach), and bundled `models/mobileclip2_coreml` if semantic search is required in the `.app`.
+**Pixi (optional):** `pixi install` → `pixi run start`  
+**macOS release zip:** `./scripts/Launch/shell/build_macos.sh` → `dist/RAWviewer-v2.3.0-macOS.zip`
 
-## 🏗️ Building from Source
+Dependencies are in `pixi.toml`. Build scripts use a local `rawviewer_env/` venv when packaging.
 
-### Prerequisites
-- [Pixi](https://pixi.sh/latest/) (Package manager for development and dependencies)
+<details>
+<summary><strong>Building from source (commands)</strong></summary>
 
-### Windows
-**Option 1: Using batch script (recommended)**
+**Windows**
 ```batch
-# Run the automated build script (manages its own venv)
 scripts\Launch\bat\build_windows.bat
 ```
 
-**Option 2: Manual build with Pixi**
+**macOS**
 ```bash
-# Install dependencies
-pixi install
-
-# Run application
-pixi run start
-
-# Build executable
-pixi run python build.py
-```
-
-### macOS
-
-**Prerequisites:** **macOS 13 Ventura or newer** (see [macOS version support](#macos-version-support)). On **Apple Silicon**, Pixi-based workflows need **macOS 14 Sonoma+**; use `./scripts/Launch/shell/build_macos.sh` on Ventura.
-
-**Option 1: Using shell script (recommended)**
-```bash
-# Run the automated build script (manages its own venv)
 ./scripts/Launch/shell/build_macos.sh
+# or: pixi install && pixi run python build.py
 ```
 
-**Option 2: Manual build with Pixi**
-```bash
-# Install dependencies
-pixi install
+</details>
 
-# Run application
-pixi run start
+### Architecture (brief)
 
-# Build executable
-pixi run python build.py
-```
-
-### Dependencies
-All project dependencies are managed via `pixi.toml` instead of `requirements.txt`. Launch and build scripts live under [`scripts/Launch/`](scripts/Launch/README.md) (`bat/` on Windows, `shell/` on macOS). They install required pip packages into a local `rawviewer_env` virtual environment when building.
-
-## 🐛 Troubleshooting
-
-### Windows
-- **"Windows protected your PC"**: Click "More info" → "Run anyway"
-- **Antivirus warnings**: Add RAWviewer to your antivirus exclusions
-- **Performance issues**: Try running as administrator
-- **"Open with another app" / bottom share button**: The app implements native Open with APIs (`OpenAs_RunDLLW`, `SHOpenWithDialog` + `OAIF_EXEC`), but the bottom-bar control is **hidden on Windows** in current `main`. Use Explorer **Open with** on the file until the in-app button is re-enabled (see `scripts/Launch/README.md`).
-- **AttributeError with stdout**: This is normal for windowed builds - the application runs without a console window
-- **Installer stuck on "Downloading MobileCLIP ONNX Models" / `No module named 'requests'`**:
-  - Fixed in 2.1.0+ (`requests` in `pixi.toml`). Re-run the installer from a fresh build, or in the install folder run `_internal\pixi\pixi.exe install` then retry.
-  - Public Hugging Face models download **without** an account or token.
-
-- **Crash code `-1073741819` / `0xC0000005` (access violation)**:
-  - This is a native crash (Qt/LibRaw/ONNX/driver layer), not always a Python exception.
-  - Check `%LOCALAPPDATA%\RAWviewer\logs\` (persistent crash reports / fatal dumps). Dev runs via `scripts\Launch\bat\run_debug.bat` may also write under `src\logs\`.
-
-### macOS
-
-- **Version requirements:** See [macOS version support](#macos-version-support). Official prebuilt apps require **macOS 13+**. **macOS 12 Monterey and older are not supported.**
-
-- **"App is damaged and should be moved to the Trash" / "Apple could not verify RAWviewer is free of malware"**:
-  - **Why it happens**: Apple heavily restricts apps downloaded outside the App Store that aren't signed with a paid developer certificate. On newer macOS versions (especially Apple Silicon M1/M2/M3), macOS breaks the app's ad-hoc signature and aggressively blocks opening it.
-  - **The Fix (easiest)**: Use **`Install RAWviewer.command`** from the release zip (see [Install (recommended)](#install-recommended)). It clears quarantine and installs to Applications for you.
-  - **Manual fix**: Open **Terminal** and run:
-    ```bash
-    xattr -cr /Applications/RAWviewer.app
-    ```
-    *(Update the path if you did not install to Applications.)*
-
-- **"Symbol not found: (_mkfifoat)" or instant crash on launch**:
-  - **Why it happens**: The app was built for **macOS 13+**; Monterey (12) and older lack required system libraries.
-  - **The Fix**: Upgrade to **macOS 13 Ventura or newer**. Local builds on Monterey are not supported.
-
-#### Build locally (Gatekeeper / quarantine on your own Mac)
-
-If you prefer an app built on your machine (no download quarantine), or you need to test unreleased changes:
-
-1. **Requires macOS 13+** (14+ on Apple Silicon for Pixi; see [version support table](#macos-version-support)).
-2. **Install Pixi** (optional but recommended on Intel / macOS 14+): `curl -fsSL https://pixi.sh/install.sh | bash`
-3. Clone and build:
-   ```bash
-   git clone https://github.com/markyip/RAWviewer.git
-   cd RAWviewer
-   ./scripts/Launch/shell/build_macos.sh
-   # or: pixi install && pixi run python build.py   (macOS 14+ Apple Silicon / Intel)
-   ```
-4. Install from `dist/`:
-   ```bash
-   bash dist/RAWviewer-v*/install_macos_app.sh
-   # or double-click Install RAWviewer.command inside the release folder after build_macos.sh
-   ```
-
-This produces a compatible `RAWviewer.app` under `dist/` without needing `xattr` on a downloaded release.
-
-#### Local build troubleshooting
-- **Error: "No matching distribution found for pyexiv2" or Massive C++ compilation failures**
-  - **Why it happens**: Usually caused by an unsupported macOS or Python version (e.g. Apple Silicon on Ventura with Pixi, or a bleeding-edge Python).
-  - **The Fix**: On **Apple Silicon + macOS 13**, use `./scripts/Launch/shell/build_macos.sh` instead of Pixi. On **macOS 14+**, `pixi install` pins a supported Python with pre-built wheels. Ensure Homebrew libs exist: `brew install inih gettext`.
-
-- **Pixi refuses to install on macOS 13 (Apple Silicon)**:
-  - **Expected**: `pixi.toml` sets `macos = "14.0"` for arm64 `pyexiv2` wheels. Use **`build_macos.sh`**, or upgrade to **macOS 14 Sonoma+** for Pixi.
-
-- **Homebrew slow on older Macs**:
-  - If `brew install inih gettext` compiles from source, that is normal on systems without pre-built bottles; allow a few extra minutes.
-
-- **Share menu empty or native picker spins**: Use dev defaults (`RAWVIEWER_SHARE_MENU=1` via `launch_dev.sh`). Avoid opening the picker on mouse-up; see [`docs/macos-sharing-v21-v22.md`](docs/macos-sharing-v21-v22.md). For AirDrop, prefer Finder on the file.
-
-- **Permission Denied / Cannot Read Folder**: Modern macOS requires explicit permission for apps to access the Desktop or Documents. 
-  1. Go to **System Settings** > **Privacy & Security** > **Full Disk Access**.
-  2. Click the **+** button and add `RAWviewer.app`.
-  3. Toggle it to **ON**.
-
-- **"Semantic search unavailable" / asks to download models even in packaged app**:
-  1. Open `RAWviewer.app/Contents/Resources/models/mobileclip2_coreml/`.
-  2. Confirm either **S2** pair (`mobileclip_s2_*`) or **S0 app-export** pair (`mobileclip2_s0_*`) exists, plus `bpe_simple_vocab_16e6.txt.gz`.
-  3. If missing, rebuild with `models/mobileclip2_coreml/` present before running `python build.py`.
-
-## 🚧 Upcoming Features
-
-We're continuously working to improve RAWviewer. Here are some features planned for future releases:
-
-- **Batch Operations**: Select and process multiple images at once
-
-
-## ⚠️ Known Issues
-
-### Platform (v2.3)
-- **Windows:** In-app **Open with** picker is implemented but the bottom-bar button is not shown on `win32` in current `main`.
-- **macOS:** `NSSharingServicePicker` popover often fails under the Qt6 host; default product path is the **Qt share menu**, not the popover.
-
-### Camera Compatibility
-- **Newer camera models**: Support for the latest camera releases may be limited due to LibRaw library compatibility
-- **Proprietary RAW formats**: Some manufacturers' newest RAW formats may not be fully supported immediately after camera release
-- **Firmware updates**: Camera firmware updates may introduce RAW format changes that require LibRaw updates
-
-## 🏛️ Architecture
-
-RAWviewer uses a modern, optimized architecture:
-
-- **ImageLoadManager**: Manages all image loading tasks using a thread pool and priority queue
-- **UnifiedImageProcessor**: Handles all image types (RAW, JPEG, TIFF, etc.) with a unified interface
-- **Cache System**: Memory-first cache by default, with optional persistent disk cache via env flag
-- **Smart Caching**: Efficient image and video caching for faster navigation
-- **Thread Pool**: Reuses threads to avoid creation/destruction overhead
-- **Event-Driven**: Permanent signal connections for better performance
-
-## 📄 License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
-## 🤝 Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request.
-
-## 📞 Support
-
-If you encounter any issues:
-1. Check the troubleshooting section above
-2. Search existing GitHub issues
-3. Create a new issue with detailed information about your problem
-
-## ☕ Thank You / Buy Me a Coffee
-
-If you find RAWviewer useful and it's become part of your workflow, feel free to **buy me a coffee** ☕ or chip in to help fund my **RIAT tickets for next year**
+- **ImageLoadManager** — threaded load queue  
+- **UnifiedImageProcessor** — RAW/JPEG/TIFF via one path  
+- **Cache** — memory-first; optional disk cache via env  
+- **Semantic index** — SQLite + local embeddings (Core ML on macOS, ONNX on Windows)
 
 ---
 
-**Enjoy viewing your RAW photos with RAWviewer!** 📸
+## License
+
+MIT — see [LICENSE](LICENSE).
+
+## Contributing
+
+Pull requests welcome on [GitHub](https://github.com/markyip/RAWviewer).
+
+## Support
+
+1. Check [Troubleshooting](#something-not-working) above  
+2. Search [existing issues](https://github.com/markyip/RAWviewer/issues)  
+3. Open a new issue with OS version, steps, and logs if possible  
+
+## ☕ Buy Me a Coffee
+
+If RAWviewer helps your workflow, you can [buy me a coffee](https://www.buymeacoffee.com/markyip) ☕
+
+---
+
+**Enjoy your photos.** 📸
