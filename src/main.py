@@ -775,10 +775,11 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QGridLayout, QScrollBar, QDialog, QSplashScreen, QInputDialog,
                              QLineEdit, QStackedLayout, QGraphicsOpacityEffect, QStyleOptionButton,
                              QMenu)
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, pyqtSlot, QPoint, QEvent, QSettings, QSize, QRect, QObject, QRunnable, QThreadPool, QTimer, QPropertyAnimation, QEasingCurve, QAbstractAnimation
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, pyqtSlot, QPoint, QEvent, QSettings, QSize, QRect, QObject, QRunnable, QThreadPool, QTimer, QPropertyAnimation, QEasingCurve, QAbstractAnimation, QUrl
 from PyQt6.QtGui import (QPixmap, QImage, QAction, QKeySequence, QShortcut, QGuiApplication,
                          QDragEnterEvent, QDropEvent, QCursor, QIcon,
-                         QTransform, QRegion, QPainterPath, QPainter, QColor, QPen, QBrush, QPalette)
+                         QTransform, QRegion, QPainterPath, QPainter, QColor, QPen, QBrush, QPalette,
+                         QDesktopServices)
 safe_print("PyQt6 imported successfully", flush=True)
 
 
@@ -2660,6 +2661,38 @@ class SemanticIndexPrepSignals(QObject):
     """Signal carrier for background semantic index prep (coverage + pending checks)."""
     done = pyqtSignal(object, object, int)        # coverage dict, pending list, face_pending count
     error = pyqtSignal(str)                       # error message
+
+class ReleaseUpdateCheckSignals(QObject):
+    """Signal carrier for background GitHub release version check."""
+    finished = pyqtSignal(dict)
+
+
+class _ReleaseUpdateCheckWorker(QRunnable):
+    """Fetch latest GitHub release tag and compare to the running app version."""
+
+    def __init__(self, signals: ReleaseUpdateCheckSignals, *, timeout: float = 5.0):
+        super().__init__()
+        self.signals = signals
+        self.timeout = float(timeout)
+
+    def run(self) -> None:
+        from release_update import check_for_update
+
+        try:
+            result = check_for_update(timeout=self.timeout)
+        except Exception:
+            result = {
+                "current": "",
+                "latest": "",
+                "is_latest": True,
+                "update_available": False,
+                "release_url": "",
+                "release_name": "",
+                "published_at": "",
+                "offline": True,
+                "error": "",
+            }
+        self.signals.finished.emit(result)
 
 class _SemanticIndexPrepWorker(QRunnable):
     """Background task to prepare semantic index build (coverage & pending scans)."""
@@ -6921,6 +6954,13 @@ class RAWImageViewer(QMainWindow):
                     self._show_gallery_view()
         else:
             safe_print("  [RAWImageViewer] Session restore skipped (RAWVIEWER_DISABLE_SESSION_RESTORE)", flush=True)
+        if os.environ.get("RAWVIEWER_UPDATE_CHECK_DELAY_MS"):
+            update_delay_ms = _env_int("RAWVIEWER_UPDATE_CHECK_DELAY_MS", 12000, minimum=0)
+        elif os.environ.get("RAWVIEWER_MOCK_UPDATE_VERSION", "").strip():
+            update_delay_ms = 1500
+        else:
+            update_delay_ms = 12000
+        QTimer.singleShot(update_delay_ms, self._check_for_updates_on_launch)
         safe_print("  [RAWImageViewer] Initialization complete!", flush=True)
 
     def _set_single_view_pixmap(self, base: QPixmap) -> None:
@@ -10455,6 +10495,75 @@ class RAWImageViewer(QMainWindow):
         self.addAction(self.reveal_action)
         self.addAction(exit_action)
         self.addAction(shortcuts_action)
+
+    def _check_for_updates_on_launch(self) -> None:
+        """Silent background release check once per app launch (opt-out: RAWVIEWER_SKIP_UPDATE_CHECK=1)."""
+        if _env_true("RAWVIEWER_SKIP_UPDATE_CHECK"):
+            return
+        if getattr(self, "_release_update_launch_check_done", False):
+            return
+        self._release_update_launch_check_done = True
+        self._run_release_update_check()
+
+    def _run_release_update_check(self) -> None:
+        if getattr(self, "_release_update_check_in_progress", False):
+            return
+        self._release_update_check_in_progress = True
+        signals = ReleaseUpdateCheckSignals()
+        self._release_update_check_signals = signals
+        signals.finished.connect(self._on_release_update_check_finished)
+        QThreadPool.globalInstance().start(_ReleaseUpdateCheckWorker(signals))
+
+    def _show_release_update_available_dialog(
+        self, current: str, latest: str, release_url: str
+    ) -> bool:
+        """Return True when the user chose Not Now (or dismissed), False after Open Download Page."""
+        from release_update import RELEASE_PAGE_URL
+        from rawviewer_ui.release_update_dialog import ReleaseUpdateDialog
+
+        url = (release_url or RELEASE_PAGE_URL).strip() or RELEASE_PAGE_URL
+        dialog = ReleaseUpdateDialog(
+            self,
+            current=current,
+            latest=latest,
+            release_url=url,
+        )
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            QDesktopServices.openUrl(QUrl(dialog.release_url))
+            return False
+        return True
+
+    def _on_release_update_check_finished(self, result: dict) -> None:
+        self._release_update_check_in_progress = False
+        result = result or {}
+        if result.get("offline") or str(result.get("error") or "").strip():
+            return
+
+        if not result.get("update_available"):
+            return
+
+        current = str(result.get("current") or "").strip()
+        latest = str(result.get("latest") or "").strip()
+        if not latest:
+            return
+
+        settings = self.get_settings()
+        snoozed_version = str(settings.value("update_check/snoozed_version", "") or "").strip()
+        snooze_until = float(settings.value("update_check/snooze_until_epoch", 0) or 0)
+        if snoozed_version and time.time() < snooze_until:
+            from release_update import compare_version_labels
+
+            if compare_version_labels(latest, snoozed_version) <= 0:
+                return
+
+        release_url = str(result.get("release_url") or "").strip()
+        dismissed = self._show_release_update_available_dialog(current, latest, release_url)
+        if dismissed:
+            settings.setValue("update_check/snoozed_version", latest)
+            settings.setValue(
+                "update_check/snooze_until_epoch",
+                int(time.time() + 14 * 86400),
+            )
 
     def _get_semantic_index(self):
         if SemanticImageIndex is None:
@@ -24733,13 +24842,17 @@ def main():
             # 4. Continue with initialization
             if is_windows:
                 safe_print("  [Windows] Setting AppUserModelID...", flush=True)
-                myappid = 'RAWviewer.2.3.0'
+                from release_update import APP_VERSION
+
+                myappid = f"RAWviewer.{APP_VERSION}"
                 ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
                 safe_print("  [Windows] AppUserModelID set", flush=True)
 
             # Set application properties
+            from release_update import APP_VERSION
+
             app.setApplicationName("RAWviewer")
-            app.setApplicationVersion("2.3.0")
+            app.setApplicationVersion(APP_VERSION)
 
             # Create and show main window
             safe_print("Creating RAWImageViewer...", flush=True)
