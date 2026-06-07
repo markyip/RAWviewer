@@ -149,8 +149,9 @@ class MobileCLIPDownloadDialog(QDialog):
         layout.addWidget(title)
 
         message = QLabel(
-            "RAWviewer can download the MobileCLIP models now. "
-            "This is a one-time download used for local, offline semantic indexing."
+            "Semantic search needs a one-time download of MobileCLIP models "
+            "(~150 MB, internet required). Files are saved under your home folder "
+            "and used offline after that."
         )
         message.setWordWrap(True)
         message.setStyleSheet(self._body_style())

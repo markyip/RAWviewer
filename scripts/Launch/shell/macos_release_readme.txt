@@ -3,34 +3,33 @@ RAWviewer for macOS — START HERE
 
 Requires macOS 13 Ventura or newer.
 
-WHAT TO DOUBLE-CLICK
---------------------
+INSTALL
+-------
 
-Most users (recommended):
-  → Install RAWviewer.command
-    Installs RAWviewer to your Applications folder and removes the
-    macOS "downloaded from the internet" block. Then you can open it
-    from Applications or Launchpad like any other app.
+1. Extract this zip.
 
-Run from this folder only (USB, Desktop, etc.):
-  → Remove Quarantine.command
-    Removes the download block so you can double-click RAWviewer.app
-    here without moving it to Applications.
+2. Open **Terminal** (Applications → Utilities → Terminal).
 
-You do NOT need to run both .command files. Pick one path above.
+3. Go to this folder — type `cd ` (with a space), drag this folder
+   onto Terminal, press Return.
 
-THE .SH FILES (ignore unless you use Terminal)
-----------------------------------------------
-  install_macos_app.sh      — same as Install RAWviewer.command
-  remove_macos_quarantine.sh — same as Remove Quarantine.command
+4. Run:
 
-IF macOS BLOCKS A .command FILE THE FIRST TIME
-----------------------------------------------
-Right-click the file → Open → Open (once). After that, double-click works.
+   bash install_macos_app.sh
 
-IF THE APP STILL SAYS "DAMAGED" OR WON'T OPEN
----------------------------------------------
-Run Remove Quarantine.command again, or in Terminal:
-  xattr -cr /path/to/RAWviewer.app
+5. Click **Install**, then **Open** in the dialogs.
+
+SEMANTIC SEARCH (first use)
+---------------------------
+
+When you open gallery search for the first time, RAWviewer may ask to
+download the offline AI models (~150 MB, one-time, needs internet).
+Click Download. Official release zips built with build_macos.sh already
+include these models; older or custom builds may need this step.
+
+RUN FROM THIS FOLDER (no Applications copy)
+-------------------------------------------
+
+  bash remove_macos_quarantine.sh
 
 More help: https://github.com/markyip/RAWviewer

@@ -38,12 +38,18 @@ If Windows shows **“Protected your PC”**: click **More info** → **Run anyw
 
 ### macOS (13 Ventura or newer)
 
-1. Download **`RAWviewer-v2.3.0-macOS.zip`** from **[Releases](https://github.com/markyip/RAWviewer/releases/latest)**.
-2. Double-click the zip to extract the folder. Open **`Start Here.txt`** — it tells you which file to click.
-3. **Recommended:** double-click **`Install RAWviewer.command`** → **Install** → **Open**.  
-   **Or:** double-click **`Remove Quarantine.command`**, then open **`RAWviewer.app`** in the same folder.
+1. Download **`RAWviewer-v2.3.1-macOS.zip`** from **[Releases](https://github.com/markyip/RAWviewer/releases/latest)** and extract it.
+2. Open **Terminal**, go to the extracted folder (`cd ` then drag the folder onto Terminal), and run:
 
-If macOS blocks a script the first time: **right-click it → Open → Open** (once only).
+```bash
+bash install_macos_app.sh
+```
+
+3. Click **Install**, then **Open** in the dialogs.
+
+4. **First time you use gallery search**, RAWviewer may prompt to download the offline AI models (~150 MB, one-time, needs internet). Click **Download** — same models as the Windows installer fetches automatically.
+
+To run from the folder without installing to Applications: `bash remove_macos_quarantine.sh`
 
 > **Mac too old?** Prebuilt apps need **macOS 13+**. Monterey (12) and older are not supported. Details are in [Advanced → macOS version support](#macos-version-support).
 
@@ -124,10 +130,10 @@ Full search syntax, focus-overlay brands, and power-user options are in **[Advan
 
 | Problem | What to do |
 |---------|------------|
-| “App is damaged” / won’t open | Run **`Install RAWviewer.command`** or **`Remove Quarantine.command`** from the zip |
-| Still blocked | Terminal: `xattr -cr /Applications/RAWviewer.app` |
+| macOS blocks the app (“damaged” / won’t open) | In the extracted folder, run `bash install_macos_app.sh` (see install steps above) |
+| `bash: command not found` | Type `cd `, drag the extracted folder onto Terminal, press Return, then run the command again |
 | Can’t read Desktop/Documents | System Settings → Privacy → **Full Disk Access** → add RAWviewer |
-| Search says models missing | Re-download the release zip; rebuild instructions for developers are below |
+| Search says models missing | Open gallery search and click **Download** when prompted (needs internet once). Or re-run `bash install_macos_app.sh` after downloading a fresh release zip |
 
 More detail: [`scripts/Launch/README.md`](scripts/Launch/README.md)
 
@@ -160,8 +166,8 @@ Separate words with spaces. Use `key:value` filters:
 
 | Platform | Default | Change it |
 |----------|---------|-----------|
-| **Windows** | MobileCLIP2-**B** | Set `RAWVIEWER_MOBILECLIP_VARIANT` to `s0`, `s2`, `b`, or `l14` |
-| **macOS** | Bundled Core ML (**S0** or **S2** in the app) | Replace models before building; see `models/mobileclip2_coreml/` |
+| **Windows** | MobileCLIP2-**B** (installer downloads on first install) | Set `RAWVIEWER_MOBILECLIP_VARIANT` to `s0`, `s2`, `b`, or `l14` |
+| **macOS** | Core ML bundled in the release app when built with `build_macos.sh`; otherwise downloaded on first gallery search | Dev: `python scripts/download_mobileclip_coreml.py --out-dir models/mobileclip2_coreml` before building |
 
 Windows variants download from Hugging Face (`plhery/mobileclip2-onnx`) into separate cache folders (e.g. `~/.rawviewer_cache/mobileclip_onnx_s0`).
 

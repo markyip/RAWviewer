@@ -553,12 +553,7 @@ def main():
     app_bundle_name = "RAWviewer"
     windows_pixi_manifest = None
     if platform.system() == "Darwin":
-        m2 = Path("models/mobileclip2_coreml")
-        if m2.is_dir() and list(m2.glob("*_image.mlpackage")):
-            add_data_args.append(
-                f'--add-data "{m2.resolve()}{add_data_sep}models/mobileclip2_coreml"'
-            )
-            print("[INFO] Bundling MobileCLIP2 Core ML from models/mobileclip2_coreml/")
+        print("[INFO] macOS release: MobileCLIP Core ML models are NOT bundled; users download in-app on first use.")
     elif platform.system() == "Windows":
         add_data_args.append('--add-data "uninstall.bat;."')
         add_data_args.append('--add-data "scripts;scripts"')
@@ -606,6 +601,8 @@ def main():
             "--hidden-import", "CoreML",
             "--hidden-import", "Quartz",
             "--hidden-import", "Vision",
+            "--hidden-import", "huggingface_hub",
+            "--hidden-import", "requests",
             "--hidden-import", "reverse_geocoder",
             "--hidden-import", "scipy.spatial.cKDTree",
             "--exclude-module", "coremltools",

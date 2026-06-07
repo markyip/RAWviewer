@@ -6697,6 +6697,7 @@ class RAWImageViewer(QMainWindow):
         self._semantic_asset_download_signals = None
         self._mobileclip_download_dismissed_this_session = False
         self._mobileclip_download_dialog = None
+        self._mobileclip_download_skipped_at_launch = False
         self._last_semantic_query = ""
         self._semantic_index_progress_base = 0
         self._semantic_index_progress_total = 0
@@ -6806,6 +6807,7 @@ class RAWImageViewer(QMainWindow):
         else:
             update_delay_ms = 12000
         QTimer.singleShot(update_delay_ms, self._check_for_updates_on_launch)
+        QTimer.singleShot(2500, self._maybe_prompt_mobileclip_download_on_launch)
         safe_print("  [RAWImageViewer] Initialization complete!", flush=True)
 
     def _set_single_view_pixmap(self, base: QPixmap) -> None:
@@ -11610,6 +11612,51 @@ class RAWImageViewer(QMainWindow):
         self._sync_gallery_search_input_editable()
         self.status_bar.showMessage(f"Semantic indexing failed: {error}", 5000)
 
+    def _mobileclip_models_missing(self) -> bool:
+        from semantic_search import semantic_embeddings_enabled
+
+        if not semantic_embeddings_enabled():
+            return False
+        if getattr(self, "_semantic_asset_download_in_progress", False):
+            return False
+        try:
+            index = self._get_semantic_index()
+            if index.semantic_backend_available():
+                return False
+            backend_error = index.semantic_backend_error()
+            return "Missing MobileCLIP" in backend_error and index.mobileclip_supports_hub_download()
+        except Exception:
+            return False
+
+    def _prompt_mobileclip_download(self, corpus_files, *, at_launch: bool = False) -> bool:
+        """Return True if download started or models already present; False if user declined."""
+        if not self._mobileclip_models_missing():
+            return True
+        if at_launch and getattr(self, "_mobileclip_download_skipped_at_launch", False):
+            return True
+        if not at_launch and getattr(self, "_mobileclip_download_dismissed_this_session", False):
+            return False
+
+        from rawviewer_ui.mobileclip_download_dialog import MobileCLIPDownloadDialog
+
+        dialog = MobileCLIPDownloadDialog(self)
+        self._mobileclip_download_dialog = dialog
+        dialog.download_requested.connect(
+            lambda: self._start_semantic_asset_download_background(corpus_files)
+        )
+        dialog.exec()
+        self._mobileclip_download_dialog = None
+        if dialog.download_started:
+            return True
+        if at_launch:
+            self._mobileclip_download_skipped_at_launch = True
+        else:
+            self._mobileclip_download_dismissed_this_session = True
+        return False
+
+    def _maybe_prompt_mobileclip_download_on_launch(self) -> None:
+        self._prompt_mobileclip_download([], at_launch=True)
+
     def _start_semantic_asset_download_background(self, corpus_files):
         if self._semantic_asset_download_in_progress:
             return
@@ -11663,7 +11710,13 @@ class RAWImageViewer(QMainWindow):
         if dialog is not None:
             dialog.show_download_complete()
         self._mobileclip_download_dialog = None
-        self._start_user_semantic_indexing(corpus_files)
+        if corpus_files:
+            self._start_user_semantic_indexing(corpus_files)
+        else:
+            self.status_bar.showMessage(
+                "Semantic search models downloaded. Open gallery search to start indexing.",
+                8000,
+            )
 
     def _on_semantic_asset_download_error(self, token, error):
         if not self._semantic_asset_download_in_progress:
@@ -11751,18 +11804,8 @@ class RAWImageViewer(QMainWindow):
             if not index.semantic_backend_available():
                 backend_error = index.semantic_backend_error()
                 if "Missing MobileCLIP" in backend_error and index.mobileclip_supports_hub_download():
-                    if not getattr(self, "_mobileclip_download_dismissed_this_session", False):
-                        from rawviewer_ui.mobileclip_download_dialog import MobileCLIPDownloadDialog
-
-                        dialog = MobileCLIPDownloadDialog(self)
-                        self._mobileclip_download_dialog = dialog
-                        dialog.download_requested.connect(
-                            lambda: self._start_semantic_asset_download_background(corpus_files)
-                        )
-                        dialog.exec()
-                        self._mobileclip_download_dialog = None
-                        if not dialog.download_started:
-                            self._mobileclip_download_dismissed_this_session = True
+                    if not self._prompt_mobileclip_download(corpus_files):
+                        self._set_gallery_search_status("EXIF search only (semantic models not downloaded)")
                 else:
                     self._set_gallery_search_status(f"EXIF search only. Backend: {backend_error}")
                 return

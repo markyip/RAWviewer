@@ -57,11 +57,11 @@ Version 2.3.0 expands **focus overlays**, adds a **RAW ↔ embedded-JPEG workflo
 - **Removed unused `mediapipe`** from Windows `build.py` dependencies (face detection uses YuNet ONNX).
 
 ### 🍎 macOS
-- **Release zip**: `RAWviewer-v2.3.0-macOS.zip` with **`Start Here.txt`**, **`Install RAWviewer.command`** (copy to Applications + quarantine), and **`Remove Quarantine.command`**. Bundles **scipy** for GPS reverse geocoding; minimum macOS **13.0**; **pyexiv2** included in release builds.
+- **Release packaging**: `RAWviewer-v2.3.0-macOS.zip` bundles MobileCLIP Core ML models when built with `build_macos.sh`; also bundles **scipy** for GPS reverse geocoding; minimum macOS **13.0**; **pyexiv2** in release builds. If models are missing, the app prompts to download them on first launch or gallery search (needs internet once).
 - **Dock — single app icon**: Fixed extra RAWviewer icons in the Dock while browsing large folders. LibRaw’s process pool is **off by default on macOS** (PyInstaller runtime hook + spawn-safe startup); opt in with `RAWVIEWER_USE_PROCESS_POOL=1` (may bring back extra Dock entries).
 - **Startup splash**: Dismisses automatically when the main window is ready (no extra click on macOS).
 - **Gallery search crash (macOS 26+)**: Disables NSTextField automatic completion on the search field (including after focus and wake-from-sleep) to avoid ViewBridge / `SPCompletionListServiceViewController` aborts under Qt 6.11.
-- **Install docs**: README macOS version support table (13+ prebuilt; Pixi 14+ on Apple Silicon); simplified zip install flow via `Start Here.txt`.
+- **Docs**: README macOS version support table (13+ prebuilt; Pixi 14+ on Apple Silicon).
 
 ---
 

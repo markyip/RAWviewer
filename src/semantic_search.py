@@ -1831,11 +1831,10 @@ class SemanticImageIndex:
             return str(exc)
 
     def mobileclip_supports_hub_download(self) -> bool:
-        return bool(
-            self.model_name.startswith("mobileclip-")
-            and self._mobileclip_backend is not None
-            and getattr(self._mobileclip_backend, "SUPPORTS_HUB_DOWNLOAD", False)
-        )
+        if not self.model_name.startswith("mobileclip-"):
+            return False
+        backend = self.backend
+        return bool(getattr(backend, "SUPPORTS_HUB_DOWNLOAD", False))
 
     def download_semantic_backend_assets(
         self, progress_callback: Optional[Callable[[str], None]] = None
