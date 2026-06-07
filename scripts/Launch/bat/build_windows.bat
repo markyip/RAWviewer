@@ -41,7 +41,7 @@ if exist dist (
 )
 if exist *.spec del /q *.spec 2>nul
 
-echo Building RAWviewer...
+echo Building RAWviewer (GPU single-image viewport enabled by default)...
 python build.py --windows-accel %ACCEL%
 if %errorlevel% neq 0 (
     echo.

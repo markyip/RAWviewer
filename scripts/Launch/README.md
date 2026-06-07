@@ -116,7 +116,7 @@ RAWVIEWER_TEST_PYEXIV2=0 RAWVIEWER_TEST_SEMANTIC=0 ./scripts/Launch/shell/launch
 
 | Variable | Default | Notes |
 |----------|---------|--------|
-| `RAWVIEWER_GPU_VIEW` | `1` | OpenGL single-image viewport |
+| `RAWVIEWER_GPU_VIEW` | `1` (release default) | OpenGL single-image viewport; set `0` for legacy scroll view |
 | `RAWVIEWER_SHARE_MENU` | `1` | Qt menu of `NSSharingService` targets (reliable under Qt6) |
 | `RAWVIEWER_ENABLE_SEMANTIC_SEARCH` | `1` | Semantic search on |
 | `RAWVIEWER_DEBUG` | `1` | Verbose logging |

@@ -9858,11 +9858,10 @@ class RAWImageViewer(QMainWindow):
         self.single_image_histogram = ImageHistogramWidget()
         self._histogram_overlay_visible = True
 
-        # Route B: optional GPU-accelerated single-image view (QGraphicsView + OpenGL).
-        # Opt-in via RAWVIEWER_GPU_VIEW=1. The legacy QScrollArea/QLabel path is kept
-        # intact as the default and as a fallback.
+        # Route B: GPU-accelerated single-image view (QGraphicsView + OpenGL).
+        # On by default; set RAWVIEWER_GPU_VIEW=0 for the legacy QScrollArea/QLabel path.
         self.gpu_view = None
-        if _env_true("RAWVIEWER_GPU_VIEW", default=False):
+        if _env_true("RAWVIEWER_GPU_VIEW", default=True):
             try:
                 from rawviewer_ui.gpu_image_view import GpuImageView
                 self.gpu_view = GpuImageView()
@@ -24501,6 +24500,7 @@ def main():
 
     if getattr(sys, "frozen", False) or is_installed:
         os.environ.setdefault("RAWVIEWER_ENABLE_SEMANTIC_SEARCH", "1")
+        os.environ.setdefault("RAWVIEWER_GPU_VIEW", "1")
 
     # Print to console immediately (before logging might be ready)
     safe_print("main() function called", flush=True)

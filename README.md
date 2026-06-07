@@ -173,7 +173,7 @@ Requires **pyexiv2** for maker-note AF on RAW.
 | Variable | Effect |
 |----------|--------|
 | `RAWVIEWER_MOBILECLIP_VARIANT` | Windows ONNX model: `b` (default), `s0`, `s2`, `l14` |
-| `RAWVIEWER_GPU_VIEW=1` | GPU-accelerated single-image viewport |
+| `RAWVIEWER_GPU_VIEW=0` | Disable GPU single-image viewport (OpenGL zoom/pan; **on by default** in release builds) |
 | `RAWVIEWER_LIBRAW_CONSISTENT_PREVIEW=1` | Same color pipeline for fit vs 100% zoom on RAW (default on) |
 | `RAWVIEWER_EXIF_BACKEND=auto` | `auto`, `pyexiv2`, or `exifread` |
 | `RAWVIEWER_SHARE_MENU=1` | macOS: Qt share menu (recommended) |
@@ -229,6 +229,14 @@ scripts\Launch\bat\build_windows.bat
 - **UnifiedImageProcessor** — RAW/JPEG/TIFF via one path  
 - **Cache** — memory-first; optional disk cache via env  
 - **Semantic index** — SQLite + local embeddings (Core ML on macOS, ONNX on Windows)
+
+### Upcoming (development branch)
+
+Not in a release yet — tracked on a separate development branch while we assess whether the integration effort is worth it.
+
+**GPU-accelerated RAW decoding** — Early GPU decode works, but **correct color rendering** (matching the current LibRaw / embedded-JPEG pipeline) is still unresolved. We will only ship it if color accuracy and maintenance cost are acceptable.
+
+This is separate from the GPU **viewport** (OpenGL zoom/pan on decoded pixels, on by default in release builds; set `RAWVIEWER_GPU_VIEW=0` to disable); the upcoming work targets **RAW decode** itself.
 
 ---
 

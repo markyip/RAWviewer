@@ -7,13 +7,13 @@ This gives QuickLook-style smoothness for wheel/pinch zoom and drag pan.
 The optional ``QOpenGLWidget`` viewport is vendor-agnostic (NVIDIA / AMD / Intel on
 Windows; Qt typically uses a Metal-backed GL stack on macOS).
 
-Opt-in via the ``RAWVIEWER_GPU_VIEW=1`` environment variable; the legacy
-``QScrollArea`` + ``QLabel`` path remains the default. The widget is intentionally
+Enabled by default in release builds; set ``RAWVIEWER_GPU_VIEW=0`` for the legacy
+``QScrollArea`` + ``QLabel`` path. The widget is intentionally
 decoupled from the main window: it exposes a small API plus a few signals so the
 host can keep navigation / status / histogram behaviour identical.
 
 Environment toggles:
-- ``RAWVIEWER_GPU_VIEW=1``       Enable this view in the main window.
+- ``RAWVIEWER_GPU_VIEW=0``       Disable; use legacy scroll-area single-image view.
 - ``RAWVIEWER_GPU_VIEW_NO_GL=1`` Use the raster viewport (debug / fallback).
 """
 

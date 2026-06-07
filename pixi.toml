@@ -16,6 +16,7 @@ start-windowless = "pythonw src/main.py"
 
 [activation.env]
 PYTHONNOUSERSITE = "1"
+RAWVIEWER_GPU_VIEW = "1"
 
 [dependencies]
 python = ">=3.10,<3.13"

@@ -537,8 +537,8 @@ def log_inference_acceleration_profile(force: bool = False) -> None:
         except Exception:
             parts.append("face=OpenCV YuNet (CPU)")
 
-    gpu_view = os.environ.get("RAWVIEWER_GPU_VIEW", "").strip().lower()
-    if gpu_view in ("1", "true", "yes", "on"):
+    gpu_view = os.environ.get("RAWVIEWER_GPU_VIEW", "1").strip().lower()
+    if gpu_view not in ("0", "false", "no", "off"):
         no_gl = os.environ.get("RAWVIEWER_GPU_VIEW_NO_GL", "").strip().lower()
         if no_gl in ("1", "true", "yes", "on"):
             parts.append("display=Qt raster viewport")

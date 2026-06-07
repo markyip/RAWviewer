@@ -3,30 +3,29 @@
 ## 🚀 Version 2.3.0
 **Release Date: June 7, 2026**
 
-### 🎯 Focus overlay
-- **Alignment fix (Canon EOS)**: Maker-note AF uses a center origin with **Y-up**; dashed boxes now line up with the image instead of appearing vertically flipped.
-- **Broader maker AF**: Nikon NEF (`AFInfo2`, image-height fallback), Olympus ORF (`AFPointSelected`, `AFFocusArea` / `AFSelectedArea`), Panasonic RW2 (`AFPointPosition`, including decimal `/1024` form).
-- **Docs**: README lists focus-overlay support by brand — **Fujifilm RAF**, **Hasselblad 3FR**, typical **Adobe DNG**, Pentax PEF, Samsung SRW, and Sigma X3F are documented as **not supported** in the current parser (JPEG/TIFF may still show CIPA `SubjectArea`).
+Version 2.3.0 expands **focus overlays**, adds a **RAW ↔ embedded-JPEG workflow** switch for single-image viewing, and improves **gallery navigation** and **semantic indexing** speed on large folders.
+
+### 🎯 Focus overlay (`F`)
+- **Broader maker AF**: Nikon NEF (`AFInfo2`, image-height fallback), Olympus ORF (`AFPointSelected`, `AFFocusArea` / `AFSelectedArea`), Panasonic RW2 (`AFPointPosition`, including decimal `/1024` form), and refined Canon EOS point placement (center origin, Y-up).
+- **Brand guide**: README documents which formats support maker-note AF vs CIPA `SubjectArea` only (e.g. Fujifilm RAF, Hasselblad 3FR, typical Adobe DNG, Pentax PEF, Samsung SRW, Sigma X3F).
+
+### 🖼️ RAW ↔ JPEG workflow (single view)
+- **One-click toggle** on the bottom bar: **embedded JPEG** (fast) vs **full RAW decode** (high quality) for the current file.
+- **Instant reload**: Switching workflows clears display caches and reloads the open image so resolution and color match the selected path.
+- **Single view only**: The toggle is shown while viewing one image, not in gallery grid mode.
 
 ### 🛠️ Gallery & navigation
-- **Filter out composite DNG panoramas**: Handled composite DNG panorama files (e.g., Lightroom/Photoshop HDR panoramas) similarly to unsupported images by hiding them from the gallery and navigation lists entirely to prevent loading errors and improve performance.
-- **Navigation prefetch & zoom**: Bidirectional embedded-JPEG prefetch (default radius 6), focus-anchor zoom on resolution upgrades, and more reliable Space / double-click zoom on RAW.
-- **RAW ↔ JPEG workflow**: Selective cache invalidation and forced reload when toggling workflow so the current image updates immediately.
+- **Cleaner libraries**: Composite DNG panoramas (e.g. Lightroom/Photoshop HDR stitches) are hidden from the gallery and navigation lists.
+- **Snappier browsing**: Bidirectional **embedded-JPEG prefetch** (default radius **6**), **focus-anchored zoom** when upgrading resolution, and more reliable **Space** / double-click zoom on RAW.
+- **Scroll-friendly indexing**: Background metadata and semantic indexing **pause while you scroll** the gallery and resume after idle, keeping large folders responsive.
 
 ### 🔍 Semantic search & indexing
-- **Gallery thumbnail reuse**: Semantic warm-up skips paths already in `ImageCache` preview/grid tiers (gallery-loaded thumbnails), avoiding duplicate RAW decode.
-- **ONNX Runtime hardening**: Detect broken `onnxruntime` installs early with a clear reinstall message instead of failing every embedding silently.
-- **Pixi lock**: Upgraded `pixi.lock` to v7 for reproducible `pixi install`.
+- **Gallery thumbnail reuse**: Semantic warm-up reuses paths already in `ImageCache` (preview/grid tiers from loaded tiles), cutting duplicate RAW decodes during indexing.
+- **Faster neural pass**: Auto-tuned MobileCLIP **batch size** on your GPU/CPU for higher indexing throughput.
+- **Safer setup**: Incomplete ONNX installs report a clear reinstall hint instead of failing silently.
 
-### 🏗️ Build
-- **Removed unused `mediapipe`** from Windows `build.py` dependencies (face detection uses YuNet ONNX).
-- **macOS release zip**: `build_macos.sh` now produces `RAWviewer-v2.3.0-macOS.zip` with **`Start Here.txt`**, **`Install RAWviewer.command`** (Applications + quarantine fix), and **`Remove Quarantine.command`** (run from folder). Bundles **scipy** for GPS reverse geocoding; **`LSMinimumSystemVersion`** set to **13.0**; **pyexiv2** required in the build script.
-
-### 🍎 macOS
-- **Dock — single app icon**: Fixed extra RAWviewer icons appearing in the Dock while browsing large folders. LibRaw’s process pool is **off by default on macOS** (PyInstaller runtime hook + spawn-safe startup): `ProcessPoolExecutor` workers no longer re-launch the `.app` as separate GUI processes. RAW decode falls back to the existing in-process path; thread-pool loading is unchanged. Opt in with `RAWVIEWER_USE_PROCESS_POOL=1` if you want multi-process LibRaw postprocess (may bring back extra Dock entries).
-- **Startup splash**: Dismisses automatically when the main window is ready (no extra click on macOS).
-- **Gallery search crash (macOS 26+)**: Disables NSTextField automatic completion on the search field to avoid ViewBridge / `SPCompletionListServiceViewController` aborts under Qt 6.11.
-- **Install docs**: README macOS version support table (13+ prebuilt; Pixi 14+ on Apple Silicon); simplified zip install flow via `Start Here.txt`.
+### 🍎 macOS packaging & install
+- **Release zip**: `RAWviewer-v2.3.0-macOS.zip` with **`Start Here.txt`**, **`Install RAWviewer.command`** (copy to Applications + quarantine), and **`Remove Quarantine.command`**. Bundles **scipy** for GPS reverse geocoding; minimum macOS **13.0**; **pyexiv2** included in release builds.
 
 ---
 

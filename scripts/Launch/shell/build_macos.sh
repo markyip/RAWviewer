@@ -79,7 +79,7 @@ chmod -R u+w dist 2>/dev/null || true
 rm -rf dist || true
 rm -f *.spec
 
-echo "Building RAWviewer..."
+echo "Building RAWviewer (GPU single-image viewport enabled by default)..."
 if "$PYTHON_BIN" build.py; then
     echo ""
     echo "[SUCCESS] Build completed!"

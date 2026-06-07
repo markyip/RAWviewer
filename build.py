@@ -544,10 +544,16 @@ def main():
         cmd_base.append("--onedir")
         cmd_base.extend(["--osx-bundle-identifier", "com.markyip.rawviewer"])
         macos_pool_hook = os.path.join(src_path, "pyi_rth_macos_process_pool.py")
+        release_defaults_hook = os.path.join(src_path, "pyi_rth_release_defaults.py")
         if os.path.isfile(macos_pool_hook):
             cmd_base.extend(["--runtime-hook", macos_pool_hook])
+        if os.path.isfile(release_defaults_hook):
+            cmd_base.extend(["--runtime-hook", release_defaults_hook])
     else:
         cmd_base.append("--onefile")
+        release_defaults_hook = os.path.join(src_path, "pyi_rth_release_defaults.py")
+        if os.path.isfile(release_defaults_hook):
+            cmd_base.extend(["--runtime-hook", release_defaults_hook])
         
     if icon_arg:
         if platform.system() == 'Windows':
