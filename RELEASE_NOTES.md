@@ -1,39 +1,9 @@
 # RAWviewer Release Notes
 
 ## 🚀 Version 2.3.1
-**Release Date: June 8, 2026**
-
-Windows installer stability and launch fixes, plus **macOS** release packaging (Terminal install, in-app MobileCLIP download, SSL fix for HTTPS downloads).
-
-### 🪟 Windows installer & launch
-- **Clearer release filenames**: **`RAWviewer_Setup_DirectML.exe`** (recommended) and **`RAWviewer_Setup_CUDA.exe`** replace the old single-file names.
-- **Dedicated app launcher**: Install folder **`RAWviewer.exe`** is a small stub that starts the app; **`RAWviewer_Setup.exe`** in the same folder is for repair/reinstall only.
-- **More reliable setup**: Pixi and MobileCLIP downloads retry on failure with clearer network/disk/proxy errors; canceling setup removes incomplete install folders; welcome page text simplified (no Ctrl+Shift+O / disk-space hints).
-- **MobileCLIP optional at install**: If AI models fail during setup, browsing still works; download them later from gallery **Search** (MD3 prompt + in-dialog progress, same style as macOS).
-- **Uninstall fixes**: Settings → Apps and `uninstall.bat` work on Win11; a confirmation message appears when removal finishes.
-
-### ⚡ Onboarding (Windows)
-- **Shortcuts button**: Status-bar **i** opens the keyboard-shortcuts dialog (not just a tooltip).
-
-### 🖼️ Viewing
-- **RAW zoom**: Fixed **Space** and **double-click** not zooming on RAW files when fit-to-window state was out of sync (Ctrl+scroll still worked).
-
-### 🍎 macOS
-- **Release zip**: `RAWviewer-v2.3.1-macOS.zip` (~82 MB) does **not** bundle MobileCLIP models; install via **Terminal** (`bash install_macos_app.sh` in the extracted folder). Models download when the user opens **gallery search** (~150 MB, one-time, needs internet).
-- **No launch-time download prompt**: Semantic model download is offered only from gallery search (not on app startup).
-- **HTTPS / SSL fix**: Packaged app bundles **certifi** CA certificates and configures SSL before Hugging Face / tokenizer downloads, fixing `[SSL: CERTIFICATE_VERIFY_FAILED]` on fresh installs.
-- **Dock — single app icon**: LibRaw process pool off by default (PyInstaller runtime hook); opt in with `RAWVIEWER_USE_PROCESS_POOL=1`.
-- **Gallery search crash (macOS 26+)**: NSTextField autocomplete disabled on the search field to avoid ViewBridge aborts under Qt 6.11.
-
-### 📄 Docs
-- README updated for Setup vs launcher exe, DirectML recommendation, uninstall, macOS Terminal install, gallery-search model download, and troubleshooting.
-
----
-
-## 🚀 Version 2.3.0
 **Release Date: June 7, 2026**
 
-Version 2.3.0 expands **focus overlays**, adds a **RAW ↔ embedded-JPEG workflow** switch for single-image viewing, improves **gallery navigation** and **semantic indexing** speed on large folders, and adds a **background update check** on launch.
+Focus overlays, RAW ↔ embedded-JPEG workflow, faster gallery indexing, background update checks, Windows installer stability, and macOS release packaging (Terminal install, in-app MobileCLIP download, SSL fix).
 
 ### 🔔 Release updates
 - **Background check on launch**: Once per app start, RAWviewer quietly compares your version to the latest [GitHub release](https://github.com/markyip/RAWviewer/releases/latest) (offline or unreachable → no UI).
@@ -45,14 +15,13 @@ Version 2.3.0 expands **focus overlays**, adds a **RAW ↔ embedded-JPEG workflo
 - **Broader maker AF**: Nikon NEF (`AFInfo2`, image-height fallback), Olympus ORF (`AFPointSelected`, `AFFocusArea` / `AFSelectedArea`), Panasonic RW2 (`AFPointPosition`, including decimal `/1024` form), and refined Canon EOS point placement (center origin, Y-up).
 - **Brand guide**: README documents which formats support maker-note AF vs CIPA `SubjectArea` only (e.g. Fujifilm RAF, Hasselblad 3FR, typical Adobe DNG, Pentax PEF, Samsung SRW, Sigma X3F).
 
-### 🖼️ RAW ↔ JPEG workflow (single view)
-- **One-click toggle** on the bottom bar: **embedded JPEG** (fast) vs **full RAW decode** (high quality) for the current file.
-- **Instant reload**: Switching workflows clears display caches and reloads the open image so resolution and color match the selected path.
-- **Single view only**: The toggle is shown while viewing one image, not in gallery grid mode.
+### 🖼️ Viewing
+- **RAW ↔ JPEG workflow (single view)**: One-click toggle on the bottom bar — **embedded JPEG** (fast) vs **full RAW decode** (high quality); switching clears display caches and reloads the current file. Shown in single view only, not in gallery grid.
+- **Snappier RAW navigation**: Bidirectional **embedded-JPEG prefetch** (default radius **6**), **focus-anchored zoom** when upgrading resolution.
+- **RAW zoom fix**: **Space** and **double-click** reach 100% zoom reliably on RAW when fit-to-window state was out of sync (Ctrl+scroll already worked).
 
 ### 🛠️ Gallery & navigation
 - **Cleaner libraries**: Composite DNG panoramas (e.g. Lightroom/Photoshop HDR stitches) are hidden from the gallery and navigation lists.
-- **Snappier browsing**: Bidirectional **embedded-JPEG prefetch** (default radius **6**), **focus-anchored zoom** when upgrading resolution, and more reliable **Space** / double-click zoom on RAW.
 - **Scroll-friendly indexing**: Background metadata and semantic indexing **pause while you scroll** the gallery and resume after idle, keeping large folders responsive.
 
 ### 🔍 Semantic search & indexing
@@ -60,15 +29,29 @@ Version 2.3.0 expands **focus overlays**, adds a **RAW ↔ embedded-JPEG workflo
 - **Faster neural pass**: Auto-tuned MobileCLIP **batch size** on your GPU/CPU for higher indexing throughput.
 - **Safer setup**: Incomplete ONNX installs report a clear reinstall hint instead of failing silently.
 
-### 🏗️ Build
-- **Removed unused `mediapipe`** from Windows `build.py` dependencies (face detection uses YuNet ONNX).
+### 🪟 Windows installer & launch
+- **Clearer release filenames**: **`RAWviewer_Setup_DirectML.exe`** (recommended) and **`RAWviewer_Setup_CUDA.exe`** replace the old single-file names.
+- **Dedicated app launcher**: Install folder **`RAWviewer.exe`** is a small stub that starts the app; **`RAWviewer_Setup.exe`** in the same folder is for repair/reinstall only.
+- **More reliable setup**: Pixi and MobileCLIP downloads retry on failure with clearer network/disk/proxy errors; canceling setup removes incomplete install folders; welcome page text simplified (no Ctrl+Shift+O / disk-space hints).
+- **MobileCLIP optional at install**: If AI models fail during setup, browsing still works; download them later from gallery **Search** (MD3 prompt + in-dialog progress, same style as macOS).
+- **Uninstall fixes**: Settings → Apps and `uninstall.bat` work on Win11; a confirmation message appears when removal finishes.
+- **Shortcuts button**: Status-bar **i** opens the keyboard-shortcuts dialog (not just a tooltip).
 
 ### 🍎 macOS
-- **Release packaging**: `RAWviewer-v2.3.1-macOS.zip` bundles **scipy** for GPS reverse geocoding; minimum macOS **13.0**; **pyexiv2** in release builds. MobileCLIP models are not in the zip; the app prompts to download when the user opens gallery search (needs internet once).
-- **Dock — single app icon**: Fixed extra RAWviewer icons in the Dock while browsing large folders. LibRaw’s process pool is **off by default on macOS** (PyInstaller runtime hook + spawn-safe startup); opt in with `RAWVIEWER_USE_PROCESS_POOL=1` (may bring back extra Dock entries).
-- **Startup splash**: Dismisses automatically when the main window is ready (no extra click on macOS).
-- **Gallery search crash (macOS 26+)**: Disables NSTextField automatic completion on the search field (including after focus and wake-from-sleep) to avoid ViewBridge / `SPCompletionListServiceViewController` aborts under Qt 6.11.
-- **Docs**: README macOS version support table (13+ prebuilt; Pixi 14+ on Apple Silicon).
+- **Release zip**: `RAWviewer-v2.3.1-macOS.zip` (~82 MB); minimum macOS **13.0**; bundles **scipy** (GPS reverse geocoding) and **pyexiv2**. MobileCLIP models are **not** in the zip.
+- **Terminal install**: Extract the zip, then `bash install_macos_app.sh` in the extracted folder (see README).
+- **In-app model download**: When the user opens **gallery search**, the app prompts to download MobileCLIP (~150 MB, one-time, needs internet). No download prompt on app startup.
+- **HTTPS / SSL fix**: Packaged app bundles **certifi** CA certificates and configures SSL before Hugging Face / tokenizer downloads, fixing `[SSL: CERTIFICATE_VERIFY_FAILED]` on fresh installs.
+- **Dock — single app icon**: LibRaw process pool **off by default** (PyInstaller runtime hook + spawn-safe startup); opt in with `RAWVIEWER_USE_PROCESS_POOL=1` (may bring back extra Dock entries).
+- **Startup splash**: Dismisses automatically when the main window is ready (no extra click).
+- **Gallery search crash (macOS 26+)**: NSTextField autocomplete disabled on the search field (including after focus and wake-from-sleep) to avoid ViewBridge / `SPCompletionListServiceViewController` aborts under Qt 6.11.
+
+### 🏗️ Build
+- **Removed unused `mediapipe`** from Windows `build.py` dependencies (face detection uses YuNet ONNX).
+- **macOS SSL bundling**: PyInstaller collects **certifi** and runs an SSL runtime hook for HTTPS downloads in the packaged app.
+
+### 📄 Docs
+- README: focus-overlay brand guide, macOS version support table, Setup vs launcher exe, DirectML recommendation, Terminal install, gallery-search model download, uninstall, and troubleshooting.
 
 ---
 
