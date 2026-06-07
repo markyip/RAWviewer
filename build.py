@@ -4,7 +4,7 @@ Build script for RAW Image Viewer Windows/macOS executable
 Handles dependency installation and executable creation.
 """
 
-VERSION = "2.3.0"
+VERSION = "2.3.1"
 
 import os
 import subprocess
@@ -309,6 +309,67 @@ def _prepare_windows_pixi_manifest(accel: str) -> Path:
     return out
 
 
+def _windows_setup_exe_name(accel: str) -> str:
+    suffix = "CUDA" if accel == "cuda" else "DirectML"
+    return f"RAWviewer_Setup_{suffix}"
+
+
+def build_windows_launcher_stub(icon_path: str | None) -> Path:
+    """Build a tiny RAWviewer.exe that launches pixi in the install directory."""
+    stub_root = REPO_ROOT / "build" / "launcher_stub"
+    dist_dir = stub_root / "dist"
+    work_dir = stub_root / "build"
+    spec_dir = stub_root
+    stub_root.mkdir(parents=True, exist_ok=True)
+
+    for path in (dist_dir, work_dir):
+        if path.exists():
+            shutil.rmtree(path, ignore_errors=True)
+
+    launcher_src = REPO_ROOT / "src" / "win_launcher.py"
+    cmd = [
+        sys.executable,
+        "-m",
+        "PyInstaller",
+        "--onefile",
+        "--windowed",
+        "--noconfirm",
+        "--name",
+        "RAWviewer",
+        "--distpath",
+        str(dist_dir),
+        "--workpath",
+        str(work_dir),
+        "--specpath",
+        str(spec_dir),
+        "--exclude-module",
+        "PyQt6",
+        "--exclude-module",
+        "numpy",
+        "--exclude-module",
+        "PIL",
+        "--exclude-module",
+        "rawpy",
+        "--exclude-module",
+        "onnxruntime",
+        str(launcher_src),
+    ]
+    if icon_path and os.path.isfile(icon_path):
+        cmd.extend(["--icon", icon_path])
+
+    print("[INFO] Building Windows launcher stub (RAWviewer.exe)...")
+    if not run_command(cmd):
+        print("[ERROR] Launcher stub build failed.")
+        sys.exit(1)
+
+    out = dist_dir / "RAWviewer.exe"
+    if not out.is_file():
+        print(f"[ERROR] Launcher stub was not created: {out}")
+        sys.exit(1)
+    print(f"[INFO] Launcher stub ready: {out} ({out.stat().st_size:,} bytes)")
+    return out
+
+
 def main():
     parser = argparse.ArgumentParser(description="Build RAWviewer executable")
     parser.add_argument(
@@ -316,6 +377,11 @@ def main():
         choices=["cuda", "directml"],
         default=os.environ.get("RAWVIEWER_WINDOWS_ACCEL", "cuda").strip().lower() or "cuda",
         help="Windows ONNX acceleration backend (default: cuda).",
+    )
+    parser.add_argument(
+        "--keep-dist",
+        action="store_true",
+        help="Windows: keep other dist/*.exe outputs (build both CUDA and DirectML in one session).",
     )
     args = parser.parse_args()
 
@@ -353,20 +419,26 @@ def main():
 
     # Clean previous builds
     print("Cleaning previous builds...")
+    windows_target_setup = (
+        _windows_setup_exe_name(args.windows_accel)
+        if platform.system() == "Windows"
+        else None
+    )
     
     # Try to kill any running RAWviewer.exe processes on Windows
     if platform.system() == 'Windows':
-        try:
-            result = subprocess.run(
-                ['taskkill', '/F', '/IM', 'RAWviewer.exe', '/T'],
-                capture_output=True,
-                text=True
-            )
-            if result.returncode == 0:
-                print("Closed running RAWviewer.exe instances")
-                time.sleep(1)  # Wait a moment for file handles to release
-        except Exception as e:
-            print(f"[WARNING] Could not close running instances: {e}")
+        for image in ("RAWviewer.exe", "RAWviewer_Setup_CUDA.exe", "RAWviewer_Setup_DirectML.exe"):
+            try:
+                result = subprocess.run(
+                    ['taskkill', '/F', '/IM', image, '/T'],
+                    capture_output=True,
+                    text=True,
+                )
+                if result.returncode == 0:
+                    print(f"Closed running {image} instances")
+            except Exception as e:
+                print(f"[WARNING] Could not close running {image} instances: {e}")
+        time.sleep(1)
     
     # Clean build directory
     if os.path.exists('build'):
@@ -382,28 +454,59 @@ def main():
     # Clean dist directory (try to delete specific files first)
     if os.path.exists('dist'):
         try:
-            print("Cleaning dist directory...")
-            # Try to delete the exe file specifically first
-            exe_name = 'RAWviewer.exe' if platform.system() == 'Windows' else 'RAWviewer'
-            exe_path = os.path.join('dist', exe_name)
-            if os.path.exists(exe_path):
+            if args.keep_dist and platform.system() == "Windows" and windows_target_setup:
+                target_file = os.path.join("dist", f"{windows_target_setup}.exe")
+                if os.path.exists(target_file):
+                    print(f"Cleaning dist directory (keeping other installers)...")
+                    try:
+                        os.remove(target_file)
+                        print(f"  Removed {windows_target_setup}.exe")
+                    except PermissionError:
+                        print(f"[ERROR] Cannot delete {windows_target_setup}.exe - it may be running.")
+                        print("  Please close RAWviewer and try again.")
+                        sys.exit(1)
+                    except Exception as e:
+                        print(f"[WARNING] Could not delete {windows_target_setup}.exe: {e}")
+            else:
+                print("Cleaning dist directory...")
+                if platform.system() == "Windows":
+                    for name in (
+                        "RAWviewer.exe",
+                        "RAWviewer_Setup_CUDA.exe",
+                        "RAWviewer_Setup_DirectML.exe",
+                    ):
+                        candidate = os.path.join("dist", name)
+                        if os.path.exists(candidate):
+                            try:
+                                os.remove(candidate)
+                                print(f"  Removed {name}")
+                            except PermissionError:
+                                print(f"[ERROR] Cannot delete {name} - it may be running.")
+                                print("  Please close RAWviewer and try again.")
+                                sys.exit(1)
+                            except Exception as e:
+                                print(f"[WARNING] Could not delete {name}: {e}")
+                else:
+                    exe_name = "RAWviewer"
+                    exe_path = os.path.join("dist", exe_name)
+                    if os.path.exists(exe_path):
+                        try:
+                            os.remove(exe_path)
+                            print(f"  Removed {exe_name}")
+                        except PermissionError:
+                            print(f"[ERROR] Cannot delete {exe_name} - it may be running.")
+                            print("  Please close RAWviewer and try again.")
+                            sys.exit(1)
+                        except Exception as e:
+                            print(f"[WARNING] Could not delete {exe_name}: {e}")
+
+                # Try to remove the entire dist directory
                 try:
-                    os.remove(exe_path)
-                    print(f"  Removed {exe_name}")
+                    shutil.rmtree('dist')
                 except PermissionError:
-                    print("[ERROR] Cannot delete {exe_name} - it may be running.")
-                    print("  Please close RAWviewer and try again.")
-                    sys.exit(1)
+                    print("[WARNING] Some files in dist directory are locked, but continuing...")
                 except Exception as e:
-                    print(f"[WARNING] Could not delete {exe_name}: {e}")
-            
-            # Try to remove the entire dist directory
-            try:
-                shutil.rmtree('dist')
-            except PermissionError:
-                print("[WARNING] Some files in dist directory are locked, but continuing...")
-            except Exception as e:
-                print(f"[WARNING] Could not fully clean dist directory: {e}")
+                    print(f"[WARNING] Could not fully clean dist directory: {e}")
         except Exception as e:
             print(f"[WARNING] Error cleaning dist directory: {e}")
 
@@ -447,6 +550,7 @@ def main():
         f'--add-data "{imageformats_src}{add_data_sep}imageformats"',
         f'--add-data "icons{add_data_sep}icons"'
     ]
+    app_bundle_name = "RAWviewer"
     windows_pixi_manifest = None
     if platform.system() == "Darwin":
         m2 = Path("models/mobileclip2_coreml")
@@ -459,6 +563,12 @@ def main():
         add_data_args.append('--add-data "uninstall.bat;."')
         add_data_args.append('--add-data "scripts;scripts"')
         windows_pixi_manifest = _prepare_windows_pixi_manifest(args.windows_accel)
+        app_bundle_name = _windows_setup_exe_name(args.windows_accel)
+        launcher_stub = build_windows_launcher_stub(
+            icon_path if os.path.exists(icon_path) else None
+        )
+        add_data_args.append(f'--add-data "{launcher_stub.resolve()};."')
+        print(f"[INFO] Windows installer output: dist\\{app_bundle_name}.exe")
         print(f"[INFO] Bundling Windows pixi manifest for backend: {args.windows_accel}")
     add_data_arg_str = " ".join(add_data_args)
 
@@ -470,10 +580,11 @@ def main():
         "--paths", src_path,
         "--hidden-import", "rawviewer_ui.gallery_view",
         "--hidden-import", "rawviewer_ui.widgets",
+        "--hidden-import", "rawviewer_ui.mobileclip_download_dialog",
         "--hidden-import", "natsort",
         "--hidden-import", "send2trash",
         "--hidden-import", "metadata_backend",
-        "--name", "RAWviewer"
+        "--name", app_bundle_name
     ]
     try:
         import pyexiv2  # noqa: F401
@@ -575,7 +686,7 @@ def main():
         print("[ERROR] Build failed.")
         sys.exit(1)
     if platform.system() == 'Windows':
-        exe_path = Path('dist/RAWviewer.exe')
+        exe_path = Path("dist") / f"{app_bundle_name}.exe"
     else:
         exe_path = Path('dist/RAWviewer.app')
     if exe_path.exists():
@@ -592,6 +703,8 @@ def main():
         
     if platform.system() == 'Windows' and exe_path.exists():
         print("Build completed successfully.")
+        print(f"  Installer: {exe_path}")
+        print("  (Installs a separate RAWviewer.exe launcher stub into the chosen folder.)")
 
 
 if __name__ == '__main__':

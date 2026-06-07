@@ -1,10 +1,166 @@
+import errno
 import os
 import sys
 import shutil
 import subprocess
 import zipfile
 import urllib.request
+import urllib.error
+import ssl
+import time
 import winreg
+PIXI_DOWNLOAD_URL = (
+    "https://github.com/prefix-dev/pixi/releases/latest/download/"
+    "pixi-x86_64-pc-windows-msvc.zip"
+)
+DOWNLOAD_RETRIES = 3
+RETRY_DELAY_SEC = 3
+MIN_FREE_BYTES = 3 * 1024 * 1024 * 1024  # ~3 GiB for pixi env + models
+
+
+def _human_bytes(num_bytes: int) -> str:
+    value = float(num_bytes)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if value < 1024.0 or unit == "TB":
+            return f"{value:.1f} {unit}"
+        value /= 1024.0
+    return f"{num_bytes} B"
+
+
+def _check_disk_space(path: str, min_bytes: int = MIN_FREE_BYTES) -> str | None:
+    """Return a user-facing error when the target drive is too full."""
+    try:
+        abs_path = os.path.abspath(path)
+        drive, _ = os.path.splitdrive(abs_path)
+        check_path = f"{drive}\\" if drive else abs_path
+        free = shutil.disk_usage(check_path).free
+        if free < min_bytes:
+            return (
+                f"Not enough free disk space on {check_path}: "
+                f"{_human_bytes(free)} available, about {_human_bytes(min_bytes)} recommended."
+            )
+    except OSError as exc:
+        return f"Could not check disk space: {exc}"
+    return None
+
+
+def _describe_download_error(exc: BaseException) -> str:
+    if isinstance(exc, urllib.error.HTTPError):
+        return f"HTTP {exc.code} from server"
+    if isinstance(exc, urllib.error.URLError):
+        reason = getattr(exc, "reason", exc)
+        if isinstance(reason, ssl.SSLError):
+            return "SSL/TLS error — check HTTPS proxy or antivirus scanning"
+        text = str(reason).lower()
+        if "timed out" in text or "timeout" in text:
+            return "Connection timed out — check network or VPN"
+        if "proxy" in text:
+            return "Proxy error — verify HTTP/HTTPS proxy settings"
+        if "getaddrinfo" in text or "name or service not known" in text:
+            return "DNS lookup failed — check internet connection"
+        return f"Network error: {reason}"
+    if isinstance(exc, OSError):
+        if exc.errno in (errno.ENOSPC, 28):  # type: ignore[name-defined]
+            return "Disk full while writing the download"
+        if exc.errno in (errno.EACCES, errno.EPERM, 13, 5):
+            return "Permission denied while writing files"
+    return str(exc)
+
+
+def _download_file_with_retry(url: str, dest_path: str, log) -> bool:
+    os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+    req = urllib.request.Request(url, headers={"User-Agent": "RAWviewer-Setup/1.0"})
+    for attempt in range(1, DOWNLOAD_RETRIES + 1):
+        disk_err = _check_disk_space(dest_path)
+        if disk_err:
+            log(disk_err)
+            return False
+        try:
+            log(f"Downloading (attempt {attempt}/{DOWNLOAD_RETRIES})…")
+            with urllib.request.urlopen(req, timeout=120) as resp:
+                with open(dest_path, "wb") as out:
+                    shutil.copyfileobj(resp, out)
+            return True
+        except Exception as exc:
+            log(f"Download failed: {_describe_download_error(exc)}")
+            if attempt < DOWNLOAD_RETRIES:
+                log(f"Retrying in {RETRY_DELAY_SEC}s…")
+                time.sleep(RETRY_DELAY_SEC)
+            else:
+                log(
+                    "Tip: check firewall, VPN, or corporate proxy settings "
+                    "and ensure GitHub is reachable."
+                )
+    return False
+
+
+def _run_logged_subprocess(cmd, cwd, log, cancelled) -> int | None:
+    """Run a subprocess, streaming stdout. Returns None if cancelled."""
+    process = subprocess.Popen(
+        cmd,
+        cwd=cwd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        creationflags=subprocess.CREATE_NO_WINDOW,
+    )
+    try:
+        for line in process.stdout:
+            if cancelled():
+                process.terminate()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                return None
+            msg = line.strip()
+            if msg:
+                log(msg)
+        process.wait()
+        return process.returncode
+    finally:
+        if process.stdout:
+            process.stdout.close()
+
+
+def _run_subprocess_with_retry(cmd, cwd, log, label, cancelled) -> int | None:
+    last_code = 1
+    for attempt in range(1, DOWNLOAD_RETRIES + 1):
+        if cancelled():
+            return None
+        log(f"{label} (attempt {attempt}/{DOWNLOAD_RETRIES})…")
+        code = _run_logged_subprocess(cmd, cwd, log, cancelled)
+        if code is None:
+            return None
+        if code == 0:
+            return 0
+        last_code = code
+        log(f"{label} exited with code {code}.")
+        if attempt < DOWNLOAD_RETRIES:
+            log(f"Retrying in {RETRY_DELAY_SEC}s…")
+            time.sleep(RETRY_DELAY_SEC)
+    log(
+        f"{label} failed after {DOWNLOAD_RETRIES} attempts. "
+        "Check internet, proxy/VPN, and antivirus; conda-forge and PyPI must be reachable."
+    )
+    return last_code
+
+
+def _cleanup_partial_install(target_dir: str, log=None) -> None:
+    if not target_dir:
+        return
+    if not os.path.isdir(target_dir):
+        return
+    try:
+        shutil.rmtree(target_dir)
+        if log:
+            log("Removed incomplete installation folder.")
+    except Exception as exc:
+        if log:
+            log(f"Could not fully remove incomplete installation: {exc}")
+
 
 # IMPORTANT: Keep PyInstaller bundle dir
 if getattr(sys, 'frozen', False):
@@ -13,19 +169,6 @@ if getattr(sys, 'frozen', False):
 else:
     BUNDLE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     EXE_DIR = BUNDLE_DIR
-
-# Check if we should just run the app
-if "--run" in sys.argv:
-    # We are in the install directory. Find the pixi environment.
-    cwd = EXE_DIR
-    pixi_exe = os.path.join(cwd, "_internal", "pixi", "pixi.exe")
-    if os.path.exists(pixi_exe):
-        # Run using pixi
-        subprocess.Popen([pixi_exe, "run", "start-windowless"], cwd=cwd, creationflags=subprocess.CREATE_NO_WINDOW)
-    else:
-        # Fallback if pixi is somehow missing
-        pass
-    sys.exit(0)
 
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -36,7 +179,7 @@ from PyQt6.QtGui import QIcon, QFont, QColor, QPalette
 from PyQt6.QtCore import Qt, pyqtSignal, QObject, QThread
 
 class InstallWorker(QObject):
-    finished = pyqtSignal(bool)
+    finished = pyqtSignal(bool, str)
     log_signal = pyqtSignal(str)
     progress_signal = pyqtSignal(int)
 
@@ -48,47 +191,78 @@ class InstallWorker(QObject):
     def stop(self):
         self.cancelled = True
 
+    def _is_cancelled(self) -> bool:
+        return self.cancelled
+
+    def _abort_cancelled(self) -> None:
+        self.log_signal.emit("Installation cancelled.")
+        _cleanup_partial_install(self.target_dir, self.log_signal.emit)
+        self.finished.emit(False, "")
+
     def run(self):
+        target_dir = self.target_dir
         try:
-            target_dir = self.target_dir
+            disk_err = _check_disk_space(target_dir)
+            if disk_err:
+                self.log_signal.emit(disk_err)
+                self.finished.emit(False, "")
+                return
+
             os.makedirs(target_dir, exist_ok=True)
             self.progress_signal.emit(10)
             self.log_signal.emit(f"Installing to {target_dir}...")
 
-            # Copy application files
+            if self._is_cancelled():
+                self._abort_cancelled()
+                return
+
             self.log_signal.emit("Copying core files...")
             shutil.copy2(os.path.join(BUNDLE_DIR, "pixi.toml"), target_dir)
-            
+
             src_dir = os.path.join(target_dir, "src")
-            if os.path.exists(src_dir): shutil.rmtree(src_dir)
+            if os.path.exists(src_dir):
+                shutil.rmtree(src_dir)
             shutil.copytree(
                 os.path.join(BUNDLE_DIR, "src"),
                 src_dir,
                 dirs_exist_ok=True,
                 ignore=shutil.ignore_patterns("logs", "*.log"),
             )
-            
+
             assets_dir = os.path.join(target_dir, "icons")
-            if os.path.exists(assets_dir): shutil.rmtree(assets_dir)
+            if os.path.exists(assets_dir):
+                shutil.rmtree(assets_dir)
             shutil.copytree(os.path.join(BUNDLE_DIR, "icons"), assets_dir, dirs_exist_ok=True)
-            
+
             scripts_dir = os.path.join(target_dir, "scripts")
-            if os.path.exists(scripts_dir): shutil.rmtree(scripts_dir)
+            if os.path.exists(scripts_dir):
+                shutil.rmtree(scripts_dir)
             if os.path.exists(os.path.join(BUNDLE_DIR, "scripts")):
-                shutil.copytree(os.path.join(BUNDLE_DIR, "scripts"), scripts_dir, dirs_exist_ok=True)
-            
+                shutil.copytree(
+                    os.path.join(BUNDLE_DIR, "scripts"),
+                    scripts_dir,
+                    dirs_exist_ok=True,
+                )
+
             uninst_src = os.path.join(BUNDLE_DIR, "uninstall.bat")
             if os.path.exists(uninst_src):
                 shutil.copy2(uninst_src, target_dir)
 
-            # Copy the executable itself
             target_exe = os.path.join(target_dir, "RAWviewer.exe")
-            if getattr(sys, 'frozen', False):
-                shutil.copy2(sys.executable, target_exe)
+            launcher_stub_src = os.path.join(BUNDLE_DIR, "RAWviewer.exe")
+            if os.path.isfile(launcher_stub_src):
+                shutil.copy2(launcher_stub_src, target_exe)
+            else:
+                self.log_signal.emit(
+                    "Warning: launcher stub missing from installer; creating launcher.vbs fallback."
+                )
+
+            setup_exe = os.path.join(target_dir, "RAWviewer_Setup.exe")
+            if getattr(sys, "frozen", False):
+                shutil.copy2(sys.executable, setup_exe)
 
             self.progress_signal.emit(30)
 
-            # Download Pixi
             internal_dir = os.path.join(target_dir, "_internal")
             pixi_dir = os.path.join(internal_dir, "pixi")
             os.makedirs(pixi_dir, exist_ok=True)
@@ -96,122 +270,142 @@ class InstallWorker(QObject):
 
             if not os.path.exists(pixi_exe):
                 self.log_signal.emit("Downloading Pixi environment manager...")
-                url = "https://github.com/prefix-dev/pixi/releases/latest/download/pixi-x86_64-pc-windows-msvc.zip"
                 zip_path = os.path.join(pixi_dir, "pixi.zip")
-                urllib.request.urlretrieve(url, zip_path)
-                with zipfile.ZipFile(zip_path, 'r') as zf:
-                    zf.extractall(pixi_dir)
-                os.remove(zip_path)
+                if not _download_file_with_retry(PIXI_DOWNLOAD_URL, zip_path, self.log_signal.emit):
+                    _cleanup_partial_install(target_dir, self.log_signal.emit)
+                    self.finished.emit(False, "")
+                    return
+                if self._is_cancelled():
+                    self._abort_cancelled()
+                    return
+                try:
+                    with zipfile.ZipFile(zip_path, "r") as zf:
+                        zf.extractall(pixi_dir)
+                    os.remove(zip_path)
+                except (OSError, zipfile.BadZipFile) as exc:
+                    self.log_signal.emit(f"Could not unpack Pixi: {_describe_download_error(exc)}")
+                    _cleanup_partial_install(target_dir, self.log_signal.emit)
+                    self.finished.emit(False, "")
+                    return
 
             self.progress_signal.emit(50)
 
-            # Install environment using Pixi
-            self.log_signal.emit("Downloading AI Models & Python Dependencies. This may take a few minutes...")
-            process = subprocess.Popen(
-                [pixi_exe, "install", "-v"], cwd=target_dir,
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                text=True, encoding='utf-8', errors='replace',
-                creationflags=subprocess.CREATE_NO_WINDOW
+            self.log_signal.emit(
+                "Downloading Python dependencies. This may take several minutes..."
             )
-            for line in process.stdout:
-                if self.cancelled:
-                    process.terminate()
-                    self.log_signal.emit("Installation cancelled.")
-                    return
-                msg = line.strip()
-                if msg:
-                    self.log_signal.emit(msg)
-            process.wait()
-            
-            if process.returncode != 0:
-                self.log_signal.emit("Failed to install dependencies.")
-                self.finished.emit(False)
+            pixi_code = _run_subprocess_with_retry(
+                [pixi_exe, "install", "-v"],
+                target_dir,
+                self.log_signal.emit,
+                "Dependency install",
+                self._is_cancelled,
+            )
+            if pixi_code is None:
+                self._abort_cancelled()
+                return
+            if pixi_code != 0:
+                _cleanup_partial_install(target_dir, self.log_signal.emit)
+                self.finished.emit(False, "")
                 return
 
             self.progress_signal.emit(75)
 
-            # Download AI Models
-            self.log_signal.emit("Downloading MobileCLIP ONNX Models...")
-            process_models = subprocess.Popen(
-                [pixi_exe, "run", "python", "scripts/download_mobileclip_onnx.py"], cwd=target_dir,
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                text=True, encoding='utf-8', errors='replace',
-                creationflags=subprocess.CREATE_NO_WINDOW
+            self.log_signal.emit("Downloading MobileCLIP ONNX models (optional for AI search)...")
+            models_code = _run_subprocess_with_retry(
+                [pixi_exe, "run", "python", "scripts/download_mobileclip_onnx.py"],
+                target_dir,
+                self.log_signal.emit,
+                "AI model download",
+                self._is_cancelled,
             )
-            for line in process_models.stdout:
-                if self.cancelled:
-                    process_models.terminate()
-                    self.log_signal.emit("Installation cancelled.")
-                    return
-                msg = line.strip()
-                if msg:
-                    self.log_signal.emit(msg)
-            process_models.wait()
-            
-            if process_models.returncode != 0:
-                self.log_signal.emit("Failed to download AI models.")
-                self.finished.emit(False)
+            if models_code is None:
+                self._abort_cancelled()
+                return
+
+            success_note = ""
+            if models_code != 0:
+                self.log_signal.emit(
+                    "Warning: AI search models were not downloaded. "
+                    "Photo browsing will work; open Search in the gallery to download them later."
+                )
+                success_note = (
+                    "AI search models were not downloaded (network, proxy, or disk issue). "
+                    "Browsing works normally — open Search in the gallery to download them later."
+                )
+
+            if self._is_cancelled():
+                self._abort_cancelled()
                 return
 
             self.progress_signal.emit(90)
 
-            # Create fast launcher
-            self.log_signal.emit("Creating launcher...")
-            launcher_script = f'''Set oWS = WScript.CreateObject("WScript.Shell")
+            launcher_vbs_path = os.path.join(target_dir, "launcher.vbs")
+            if not os.path.isfile(target_exe):
+                self.log_signal.emit("Creating launcher fallback...")
+                launcher_script = f'''Set oWS = WScript.CreateObject("WScript.Shell")
 oWS.CurrentDirectory = "{target_dir}"
 oWS.Run "{pixi_exe} run start-windowless", 0, False
 '''
-            launcher_vbs_path = os.path.join(target_dir, "launcher.vbs")
-            with open(launcher_vbs_path, "w", encoding="utf-8") as f:
-                f.write(launcher_script)
+                with open(launcher_vbs_path, "w", encoding="utf-8") as f:
+                    f.write(launcher_script)
+                launch_target = launcher_vbs_path
+            else:
+                launch_target = target_exe
 
-            # Create Shortcuts
             self.log_signal.emit("Creating shortcuts...")
             try:
-                desktop = os.path.join(os.environ['USERPROFILE'], 'Desktop')
-                programs = os.path.join(os.environ['APPDATA'], 'Microsoft', 'Windows', 'Start Menu', 'Programs')
-                
+                desktop = os.path.join(os.environ["USERPROFILE"], "Desktop")
+                programs = os.path.join(
+                    os.environ["APPDATA"],
+                    "Microsoft",
+                    "Windows",
+                    "Start Menu",
+                    "Programs",
+                )
+
                 vbs_script = f"""
 Set oWS = WScript.CreateObject("WScript.Shell")
 sLinkFile = "{os.path.join(desktop, 'RAWviewer.lnk')}"
 Set oLink = oWS.CreateShortcut(sLinkFile)
-oLink.TargetPath = "{launcher_vbs_path}"
+oLink.TargetPath = "{launch_target}"
 oLink.WorkingDirectory = "{target_dir}"
-oLink.IconLocation = "{target_exe}"
+oLink.IconLocation = "{target_exe if os.path.isfile(target_exe) else setup_exe}"
 oLink.Save
 
 sLinkFile2 = "{os.path.join(programs, 'RAWviewer.lnk')}"
 Set oLink2 = oWS.CreateShortcut(sLinkFile2)
-oLink2.TargetPath = "{launcher_vbs_path}"
+oLink2.TargetPath = "{launch_target}"
 oLink2.WorkingDirectory = "{target_dir}"
-oLink2.IconLocation = "{target_exe}"
+oLink2.IconLocation = "{target_exe if os.path.isfile(target_exe) else setup_exe}"
 oLink2.Save
 """
                 vbs_path = os.path.join(target_dir, "create_shortcuts.vbs")
                 with open(vbs_path, "w", encoding="utf-8") as f:
                     f.write(vbs_script)
-                
-                subprocess.run(["cscript.exe", "//Nologo", vbs_path], creationflags=subprocess.CREATE_NO_WINDOW)
+
+                subprocess.run(
+                    ["cscript.exe", "//Nologo", vbs_path],
+                    creationflags=subprocess.CREATE_NO_WINDOW,
+                )
                 os.remove(vbs_path)
             except Exception as e:
                 self.log_signal.emit(f"Could not create shortcut: {e}")
-                
+
             self.progress_signal.emit(95)
-            
-            # Register Uninstaller
+
             self.log_signal.emit("Registering uninstaller...")
             try:
                 import ctypes
-                import time
+
                 key_path = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\RAWviewer"
-                icon_path = target_exe
+                icon_path = target_exe if os.path.isfile(target_exe) else setup_exe
                 install_date = time.strftime("%Y%m%d")
                 uninst_path = os.path.join(target_dir, "uninstall.bat")
-                silent_cmd = f'powershell.exe -WindowStyle Hidden -Command "& \'{uninst_path}\' __CLEANUP__ \'{target_dir}\'"'
+                silent_cmd = f'"{uninst_path}"'
                 with winreg.CreateKey(winreg.HKEY_CURRENT_USER, key_path) as key:
                     winreg.SetValueEx(key, "DisplayName", 0, winreg.REG_SZ, "RAWviewer")
                     winreg.SetValueEx(key, "DisplayIcon", 0, winreg.REG_SZ, icon_path)
-                    winreg.SetValueEx(key, "DisplayVersion", 0, winreg.REG_SZ, "2.3.0")
+                    winreg.SetValueEx(key, "DisplayVersion", 0, winreg.REG_SZ, "2.3.1")
                     winreg.SetValueEx(key, "UninstallString", 0, winreg.REG_SZ, silent_cmd)
                     winreg.SetValueEx(key, "QuietUninstallString", 0, winreg.REG_SZ, silent_cmd)
                     winreg.SetValueEx(key, "InstallLocation", 0, winreg.REG_SZ, target_dir)
@@ -220,27 +414,42 @@ oLink2.Save
                     winreg.SetValueEx(key, "NoModify", 0, winreg.REG_DWORD, 1)
                     winreg.SetValueEx(key, "NoRepair", 0, winreg.REG_DWORD, 1)
                     winreg.SetValueEx(key, "WindowsInstaller", 0, winreg.REG_DWORD, 0)
-                # Broadcast environment change
                 result = ctypes.wintypes.DWORD()
-                ctypes.windll.user32.SendMessageTimeoutW(0xFFFF, 0x001A, 0, "Environment", 0x0002, 1000, ctypes.byref(result))
+                ctypes.windll.user32.SendMessageTimeoutW(
+                    0xFFFF, 0x001A, 0, "Environment", 0x0002, 1000, ctypes.byref(result)
+                )
             except Exception as e:
                 self.log_signal.emit(f"Failed to register uninstaller: {e}")
 
             self.progress_signal.emit(100)
-            self.finished.emit(True)
+            self.finished.emit(True, success_note)
 
         except Exception as e:
             self.log_signal.emit(f"Error: {e}")
-            self.finished.emit(False)
+            _cleanup_partial_install(target_dir, self.log_signal.emit)
+            self.finished.emit(False, "")
 
 class InstallerGUI(QMainWindow):
+    _SUCCESS_DESC_BASE = (
+        "Installation complete.\n\n"
+        "• Click Launch, or open RAWviewer from the Desktop shortcut\n"
+        "• Re-run RAWviewer_Setup.exe in the install folder to repair\n"
+        "• Uninstall anytime from Windows Settings → Apps → RAWviewer"
+    )
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle("RAWviewer Setup")
         self.setFixedSize(650, 500)
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        
+
+        self._install_in_progress = False
+        self._awaiting_cancel = False
+        self.worker = None
+        self.thread = None
+        self._close_after_failed_install = False
+
         self.init_ui()
         self.load_styles()
 
@@ -265,7 +474,7 @@ class InstallerGUI(QMainWindow):
         btn_close = QPushButton("✕")
         btn_close.setFixedSize(30, 30)
         btn_close.setObjectName("btn_close")
-        btn_close.clicked.connect(self.close)
+        btn_close.clicked.connect(self.request_close)
         title_layout.addWidget(btn_close)
         layout.addWidget(title_bar)
         
@@ -298,7 +507,7 @@ class InstallerGUI(QMainWindow):
         self.btn_cancel = QPushButton("CANCEL")
         self.btn_cancel.setObjectName("btn_cancel")
         self.btn_cancel.setFixedSize(120, 40)
-        self.btn_cancel.clicked.connect(self.close)
+        self.btn_cancel.clicked.connect(self.request_close)
         
         self.btn_next = QPushButton("INSTALL")
         self.btn_next.setObjectName("btn_next")
@@ -385,8 +594,13 @@ class InstallerGUI(QMainWindow):
         title.setObjectName("title")
         layout.addWidget(title)
         
-        desc = QLabel("RAWviewer is a professional photo culling tool powered by AI.\nThis setup will download the required AI models and optimized environments.")
+        desc = QLabel(
+            "RAWviewer helps you review and cull RAW and JPEG photos quickly.\n\n"
+            "Setup downloads the runtime, Python dependencies, and AI search models "
+            "(several minutes on a slow connection)."
+        )
         desc.setObjectName("desc")
+        desc.setWordWrap(True)
         layout.addWidget(desc)
         
         path_label = QLabel("Installation Directory:")
@@ -437,16 +651,24 @@ class InstallerGUI(QMainWindow):
         title.setStyleSheet("font-size: 40px; color: #4ade80;")
         layout.addWidget(title, alignment=Qt.AlignmentFlag.AlignCenter)
         
-        desc = QLabel("RAWviewer is now installed and ready to launch.")
+        desc = QLabel(self._SUCCESS_DESC_BASE)
         desc.setObjectName("desc")
+        desc.setWordWrap(True)
+        self.success_desc = desc
         layout.addWidget(desc, alignment=Qt.AlignmentFlag.AlignCenter)
 
     def start_install(self):
-        target_dir = self.path_edit.text()
+        target_dir = self.path_edit.text().strip()
+        if not target_dir:
+            return
+        self._install_in_progress = True
+        self._awaiting_cancel = False
         self.stack.setCurrentIndex(1)
         self.btn_next.setEnabled(False)
         self.btn_next.setText("INSTALLING...")
-        
+        self.btn_cancel.setText("CANCEL")
+        self.log_box.clear()
+
         self.thread = QThread()
         self.worker = InstallWorker(target_dir)
         self.worker.moveToThread(self.thread)
@@ -456,20 +678,84 @@ class InstallerGUI(QMainWindow):
         self.worker.progress_signal.connect(self.progress_bar.setValue)
         self.thread.start()
 
-    def on_finished(self, success):
+    def request_close(self):
+        if self._install_in_progress:
+            if self._awaiting_cancel:
+                return
+            self._awaiting_cancel = True
+            self._close_after_failed_install = True
+            self.btn_cancel.setEnabled(False)
+            self.log_box.appendPlainText("Cancelling installation…")
+            if self.worker is not None:
+                self.worker.stop()
+            return
+        self.close()
+
+    def on_finished(self, success, note=""):
+        close_after_failure = self._close_after_failed_install
+        self._install_in_progress = False
+        self._awaiting_cancel = False
+        self._close_after_failed_install = False
+        self.btn_cancel.setEnabled(True)
+        if self.thread is not None:
+            self.thread.quit()
+            self.thread.wait()
+        self.thread = None
+        self.worker = None
+
         if success:
+            text = self._SUCCESS_DESC_BASE
+            if note:
+                text += f"\n\nNote: {note}"
+            self.success_desc.setText(text)
             self.stack.setCurrentIndex(2)
             self.btn_next.setText("LAUNCH")
             self.btn_next.setEnabled(True)
-            self.btn_next.clicked.disconnect()
+            try:
+                self.btn_next.clicked.disconnect()
+            except TypeError:
+                pass
             self.btn_next.clicked.connect(self.launch_app)
             self.btn_cancel.hide()
         else:
-            self.btn_next.setText("FAILED")
+            self.btn_next.setText("RETRY")
+            self.btn_next.setEnabled(True)
+            try:
+                self.btn_next.clicked.disconnect()
+            except TypeError:
+                pass
+            self.btn_next.clicked.connect(self.retry_install)
+
+        if not success and close_after_failure:
+            self.close()
+
+    def retry_install(self):
+        self.stack.setCurrentIndex(0)
+        self.btn_next.setText("INSTALL")
+        self.btn_cancel.setText("CANCEL")
+        self.btn_cancel.show()
+        try:
+            self.btn_next.clicked.disconnect()
+        except TypeError:
+            pass
+        self.btn_next.clicked.connect(self.start_install)
+        self.progress_bar.setValue(0)
+
+    def closeEvent(self, event):
+        if self._install_in_progress:
+            self.request_close()
+            event.ignore()
+            return
+        super().closeEvent(event)
 
     def launch_app(self):
-        launcher_vbs = os.path.join(self.path_edit.text(), "launcher.vbs")
-        subprocess.Popen(["wscript.exe", launcher_vbs], creationflags=subprocess.CREATE_NO_WINDOW)
+        install_dir = self.path_edit.text()
+        app_exe = os.path.join(install_dir, "RAWviewer.exe")
+        if os.path.isfile(app_exe):
+            subprocess.Popen([app_exe], cwd=install_dir, creationflags=subprocess.CREATE_NO_WINDOW)
+        else:
+            launcher_vbs = os.path.join(install_dir, "launcher.vbs")
+            subprocess.Popen(["wscript.exe", launcher_vbs], creationflags=subprocess.CREATE_NO_WINDOW)
         self.close()
 
     def mousePressEvent(self, event):

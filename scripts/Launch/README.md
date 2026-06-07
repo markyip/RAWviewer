@@ -2,7 +2,7 @@
 
 Scripts for local development and packaging. All paths assume the **repository root** as the working directory (each script `cd`s there automatically).
 
-**Version:** release **v2.3.0** (`build.py` `VERSION`, `QApplication` version, `pixi.toml` workspace version).
+**Version:** release **v2.3.1** (`build.py` `VERSION`, `QApplication` version, `pixi.toml` workspace version).
 
 ## Windows (`.bat`)
 
@@ -13,6 +13,7 @@ Scripts for local development and packaging. All paths assume the **repository r
 | [`bat/build_windows.bat`](bat/build_windows.bat) | Build Windows app with selectable backend (`cuda` default, or `directml`) |
 | [`bat/build_windows_cuda.bat`](bat/build_windows_cuda.bat) | Build Windows app with CUDA backend (`onnxruntime-gpu`) |
 | [`bat/build_windows_directml.bat`](bat/build_windows_directml.bat) | Build Windows app with DirectML backend (`onnxruntime-directml`) |
+| [`bat/build_windows_all.bat`](bat/build_windows_all.bat) | Build **both** DirectML and CUDA installers into `dist/` |
 
 From repo root:
 
@@ -24,6 +25,7 @@ scripts\Launch\bat\build_windows.bat cuda
 scripts\Launch\bat\build_windows.bat directml
 scripts\Launch\bat\build_windows_cuda.bat
 scripts\Launch\bat\build_windows_directml.bat
+scripts\Launch\bat\build_windows_all.bat
 clear_cache.bat
 ```
 
@@ -70,8 +72,8 @@ chmod +x scripts/Launch/shell/*.sh
 3. Optional **Homebrew** deps for `pyexiv2`: `inih`, `gettext` (`brew install inih gettext` if the wheel build fails).
 4. Installs PyQt6, rawpy, PyInstaller, **scipy**, **pyobjc** (Cocoa / CoreML / Quartz / Vision), and other runtime deps; **pyexiv2** is **required** (`brew install inih gettext` if the wheel build fails).
 5. Uninstalls heavy unused ML stacks (`torch`, `sentence-transformers`, …) to keep the app bundle smaller.
-6. Cleans `build/`, `dist/`, `*.spec`, then runs **`python build.py`** (version **2.3.0**, updates `Info.plist`, bundles `models/mobileclip2_coreml` when present).
-7. Packages **`dist/RAWviewer-v2.3.0-macOS.zip`** with `RAWviewer.app`, **`Start Here.txt`**, **`Remove Quarantine.command`**, **`Install RAWviewer.command`**, and helper `.sh` scripts.
+6. Cleans `build/`, `dist/`, `*.spec`, then runs **`python build.py`** (version **2.3.1**, updates `Info.plist`, bundles `models/mobileclip2_coreml` when present).
+7. Packages **`dist/RAWviewer-v2.3.1-macOS.zip`** with `RAWviewer.app`, **`Start Here.txt`**, **`Remove Quarantine.command`**, **`Install RAWviewer.command`**, and helper `.sh` scripts.
 
 **Pixi alternative** (pinned Python, good when `rawviewer_env` pyexiv2 fails):
 
@@ -81,7 +83,7 @@ pixi run python build.py
 # Then run install_macos_app.sh from a folder that contains RAWviewer.app, or use build_macos.sh for the full zip.
 ```
 
-**Output:** `dist/RAWviewer.app` and `dist/RAWviewer-v2.3.0-macOS.zip`.
+**Output:** `dist/RAWviewer.app` and `dist/RAWviewer-v2.3.1-macOS.zip`.
 
 **End-user install (from release zip):**
 
@@ -137,7 +139,7 @@ Pass env vars as arguments: `./scripts/Launch/shell/launch_dev.sh RAWVIEWER_GPU_
 After `build_macos.sh` or `pixi run python build.py`:
 
 1. **Gatekeeper:** `xattr -cr dist/RAWviewer.app` then `open dist/RAWviewer.app`.
-2. **About / version:** Help or logs should report app version **2.3.0**.
+2. **About / version:** Help or logs should report app version **2.3.1**.
 3. **Single-image view:** Open a JPEG/RAW folder → one file → bottom **share** icon visible.
 4. **Share:** Click share → Qt menu lists Mail / Messages / etc.; pick Mail and confirm attachment path (not an empty spinner).
 5. **Semantic (if models bundled):** Search field accepts a text query; index progress in status area.

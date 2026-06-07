@@ -8,6 +8,42 @@ from pathlib import Path
 
 REPO_ID = "plhery/mobileclip2-onnx"
 MODELS_DIR = Path(__file__).resolve().parent.parent / "models" / "mobileclip_onnx"
+DOWNLOAD_RETRIES = 3
+RETRY_DELAY_SEC = 3
+
+
+def _describe_error(exc: BaseException) -> str:
+    text = str(exc).lower()
+    if "timeout" in text or "timed out" in text:
+        return "Connection timed out — check network or VPN"
+    if "proxy" in text:
+        return "Proxy error — verify HTTP/HTTPS proxy settings"
+    if "ssl" in text or "certificate" in text:
+        return "SSL/TLS error — check HTTPS proxy or antivirus scanning"
+    if "no space" in text or "disk" in text:
+        return "Disk full or not enough space to save models"
+    return str(exc)
+
+
+def _download_with_retry(label, download_fn):
+    for attempt in range(1, DOWNLOAD_RETRIES + 1):
+        try:
+            print(f"  - {label} (attempt {attempt}/{DOWNLOAD_RETRIES})...")
+            download_fn()
+            return 0
+        except Exception as exc:
+            print(f"[ERROR] {label} failed: {_describe_error(exc)}")
+            if attempt < DOWNLOAD_RETRIES:
+                print(f"[INFO] Retrying in {RETRY_DELAY_SEC}s...")
+                import time
+                time.sleep(RETRY_DELAY_SEC)
+            else:
+                print(
+                    "[ERROR] Tip: check firewall, VPN, or corporate proxy; "
+                    "Hugging Face and Azure CDN must be reachable."
+                )
+                return 1
+    return 1
 
 def main():
     try:
@@ -33,22 +69,22 @@ def main():
     }
     
     for remote_path, local_name in files_to_download.items():
-        print(f"  - Fetching {remote_path} -> {local_name}...")
-        hf_hub_download(
-            repo_id=REPO_ID,
-            filename=remote_path,
-            local_dir=str(MODELS_DIR)
-        )
-        
-        # hf_hub_download with local_dir often creates subdirectories
-        # We need to move the file to the root of MODELS_DIR and rename it
-        downloaded_path = MODELS_DIR / remote_path
-        target_path = MODELS_DIR / local_name
-        
-        if downloaded_path.exists():
-            if target_path.exists():
-                target_path.unlink()
-            downloaded_path.rename(target_path)
+        def _fetch(remote_path=remote_path, local_name=local_name):
+            hf_hub_download(
+                repo_id=REPO_ID,
+                filename=remote_path,
+                local_dir=str(MODELS_DIR),
+            )
+            downloaded_path = MODELS_DIR / remote_path
+            target_path = MODELS_DIR / local_name
+            if downloaded_path.exists():
+                if target_path.exists():
+                    target_path.unlink()
+                downloaded_path.rename(target_path)
+
+        rc = _download_with_retry(f"Fetching {remote_path} -> {local_name}", _fetch)
+        if rc != 0:
+            return rc
             
     # Clean up empty subdirectories created by hf_hub_download
     if (MODELS_DIR / "onnx").exists():
@@ -59,9 +95,13 @@ def main():
     tokenizer_url = "https://openaipublic.azureedge.net/clip/bpe_simple_vocab_16e6.txt.gz"
     tokenizer_path = MODELS_DIR / "bpe_simple_vocab_16e6.txt.gz"
     if not tokenizer_path.exists():
-        print(f"  - Fetching tokenizer -> {tokenizer_path.name}...")
-        import urllib.request
-        urllib.request.urlretrieve(tokenizer_url, tokenizer_path)
+        def _fetch_tokenizer():
+            import urllib.request
+            urllib.request.urlretrieve(tokenizer_url, tokenizer_path)
+
+        rc = _download_with_retry(f"Fetching tokenizer -> {tokenizer_path.name}", _fetch_tokenizer)
+        if rc != 0:
+            return rc
 
     print("[SUCCESS] MobileCLIP2 models and tokenizer ready for bundling.")
     return 0

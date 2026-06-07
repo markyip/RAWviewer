@@ -9,9 +9,16 @@ if /I not "%ACCEL%"=="cuda" if /I not "%ACCEL%"=="directml" (
     exit /b 1
 )
 
+if /I "%ACCEL%"=="cuda" (
+    set "SETUP_EXE=RAWviewer_Setup_CUDA.exe"
+) else (
+    set "SETUP_EXE=RAWviewer_Setup_DirectML.exe"
+)
+
 echo RAWviewer Windows Build Script
 echo ===============================
 echo Backend: %ACCEL%
+echo Output:  dist\%SETUP_EXE%
 echo.
 
 if not exist "rawviewer_env" (
@@ -28,20 +35,16 @@ python scripts/download_mobileclip_onnx.py
 
 echo Checking for running RAWviewer instances...
 taskkill /F /IM RAWviewer.exe /T >nul 2>&1
-if %errorlevel% == 0 (
-    echo Closed running RAWviewer.exe instances
-    timeout /t 1 /nobreak >nul
-)
+taskkill /F /IM RAWviewer_Setup_CUDA.exe /T >nul 2>&1
+taskkill /F /IM RAWviewer_Setup_DirectML.exe /T >nul 2>&1
+timeout /t 1 /nobreak >nul
 
 echo Cleaning previous builds...
 if exist build rmdir /s /q build 2>nul
-if exist dist (
-    if exist dist\RAWviewer.exe del /f /q dist\RAWviewer.exe 2>nul
-    rmdir /s /q dist 2>nul
-)
+if exist dist rmdir /s /q dist 2>nul
 if exist *.spec del /q *.spec 2>nul
 
-echo Building RAWviewer (GPU single-image viewport enabled by default)...
+echo Building Windows installer and launcher stub...
 python build.py --windows-accel %ACCEL%
 if %errorlevel% neq 0 (
     echo.
@@ -53,12 +56,11 @@ if %errorlevel% neq 0 (
 echo.
 echo Build completed successfully!
 echo.
-echo You can find the executable at:
-echo   - dist\RAWviewer.exe
+echo Upload to GitHub Releases:
+echo   dist\%SETUP_EXE%
 echo.
-echo To run the app:
-echo   1. Double-click RAWviewer.exe in File Explorer
-echo   2. Run: dist\RAWviewer.exe
-echo   3. Run: .\dist\RAWviewer.exe
+echo End users run the Setup exe once, then launch RAWviewer.exe from:
+echo   - Desktop shortcut
+echo   - %%LOCALAPPDATA%%\RAWviewer\RAWviewer.exe
 
 pause

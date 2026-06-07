@@ -1,10 +1,10 @@
-# RAWviewer v2.3
+# RAWviewer v2.3.1
 
 <p align="center">
   <img src="icons/appicon.ico" alt="RAWviewer Icon" width="256">
 </p>
 
-![Version](https://img.shields.io/badge/version-2.3-blue)
+![Version](https://img.shields.io/badge/version-2.3.1-blue)
 ![Downloads](https://img.shields.io/github/downloads/markyip/RAWviewer/total) 
 ![License](https://img.shields.io/badge/license-MIT-green)
 [![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-Donate-orange?logo=buy-me-a-coffee)](https://www.buymeacoffee.com/markyip)
@@ -20,10 +20,19 @@ Official releases: [GitHub Releases](https://github.com/markyip/RAWviewer/releas
 ### Windows
 
 1. Go to **[Releases](https://github.com/markyip/RAWviewer/releases/latest)** and download:
-   - **`RAWviewer-CUDA.exe`** — best if you have an **NVIDIA** GPU with CUDA
-   - **`RAWviewer-DirectML.exe`** — works on most PCs without extra setup (AMD / Intel / NVIDIA)
-2. Run the installer and pick an install folder.
-3. Open **RAWviewer** from the Desktop shortcut. The first run downloads the offline AI search models (no account needed).
+   - **`RAWviewer_Setup_DirectML.exe`** — **recommended for most PCs** (AMD / Intel / NVIDIA; no CUDA setup)
+   - **`RAWviewer_Setup_CUDA.exe`** — optional if you have an **NVIDIA** GPU with CUDA and want maximum AI search speed
+2. Run the **Setup** installer and pick an install folder (default: `%LOCALAPPDATA%\RAWviewer`).
+3. Stay online while setup runs. The installer downloads:
+   - the **Pixi** runtime manager
+   - **Python and all app dependencies** (`pixi install`)
+   - **MobileCLIP ONNX models** for offline AI search (no Hugging Face account needed)
+   
+   Setup usually takes several minutes. If AI models fail to download, installation still completes and you can browse photos; open **Search** in the gallery later to download the models.
+4. Open **RAWviewer** from the **Desktop shortcut**, **Start Menu**, or **`RAWviewer.exe`** in the install folder (default: `%LOCALAPPDATA%\RAWviewer\RAWviewer.exe`).  
+   **`RAWviewer_Setup_*.exe`** is only for install/repair — it does not open the photo viewer.
+
+**Uninstall:** Windows **Settings → Apps → Installed apps → RAWviewer → Uninstall**, or run `uninstall.bat` in the install folder. Your photo cache and app preferences in `%USERPROFILE%\.rawviewer_cache` and Windows settings are kept unless you delete them manually.
 
 If Windows shows **“Protected your PC”**: click **More info** → **Run anyway**.
 
@@ -105,9 +114,11 @@ Full search syntax, focus-overlay brands, and power-user options are in **[Advan
 | Problem | What to do |
 |---------|------------|
 | SmartScreen warning | More info → Run anyway |
-| Slow search | Use the **CUDA** build if you have an NVIDIA GPU |
-| Installer stuck on “Downloading models” | Re-run the latest installer; needs internet once |
-| Crash | Check `%LOCALAPPDATA%\RAWviewer\logs\` |
+| Slow search | Prefer **DirectML** on most PCs; use **CUDA** only with NVIDIA + CUDA |
+| Installer stuck on “Downloading models” | Needs internet once; check firewall, VPN, or proxy; click **Retry** if setup failed |
+| Opened Setup again instead of the app | Launch **`RAWviewer.exe`** or the Desktop shortcut — not **`RAWviewer_Setup_*.exe`** |
+| AI search missing after install | Open gallery **Search** → accept the download prompt (browsing still works) |
+| Crash | Enable file logging with `RAWVIEWER_FILE_LOG=1`, then check the install folder |
 
 ### macOS
 
@@ -173,7 +184,8 @@ Requires **pyexiv2** for maker-note AF on RAW.
 | Variable | Effect |
 |----------|--------|
 | `RAWVIEWER_MOBILECLIP_VARIANT` | Windows ONNX model: `b` (default), `s0`, `s2`, `l14` |
-| `RAWVIEWER_GPU_VIEW=0` | Disable GPU single-image viewport (OpenGL zoom/pan; **on by default** in release builds) |
+| `RAWVIEWER_GPU_VIEW=1` | GPU single-image viewport (OpenGL zoom/pan; on by default in release builds) |
+| `RAWVIEWER_GPU_VIEW=0` | Force legacy scroll-area single-image view |
 | `RAWVIEWER_LIBRAW_CONSISTENT_PREVIEW=1` | Same color pipeline for fit vs 100% zoom on RAW (default on) |
 | `RAWVIEWER_EXIF_BACKEND=auto` | `auto`, `pyexiv2`, or `exifread` |
 | `RAWVIEWER_SHARE_MENU=1` | macOS: Qt share menu (recommended) |
@@ -199,11 +211,11 @@ Scripts: [`scripts/Launch/`](scripts/Launch/README.md)
 
 | Platform | Run | Build |
 |----------|-----|-------|
-| Windows | `scripts\Launch\bat\run_debug.bat` | `scripts\Launch\bat\build_windows.bat` |
+| Windows | `scripts\Launch\bat\run_debug.bat` | `scripts\Launch\bat\build_windows_all.bat` (both), or `build_windows_directml.bat` / `build_windows_cuda.bat` |
 | macOS | `./scripts/Launch/shell/launch_dev.sh` | `./scripts/Launch/shell/build_macos.sh` |
 
 **Pixi (optional):** `pixi install` → `pixi run start`  
-**macOS release zip:** `./scripts/Launch/shell/build_macos.sh` → `dist/RAWviewer-v2.3.0-macOS.zip`
+**macOS release zip:** `./scripts/Launch/shell/build_macos.sh` → `dist/RAWviewer-v2.3.1-macOS.zip` (prebuilt macOS downloads may still be **2.3.0** until a new macOS release is published)
 
 Dependencies are in `pixi.toml`. Build scripts use a local `rawviewer_env/` venv when packaging.
 

@@ -12,7 +12,7 @@ from typing import Any, Dict, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
-APP_VERSION = "2.3.0"
+APP_VERSION = "2.3.1"
 GITHUB_REPO = "markyip/RAWviewer"
 GITHUB_LATEST_RELEASE_API = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 RELEASE_PAGE_URL = f"https://github.com/{GITHUB_REPO}/releases/latest"

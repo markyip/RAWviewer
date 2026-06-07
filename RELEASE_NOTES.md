@@ -1,5 +1,28 @@
 # RAWviewer Release Notes
 
+## 🚀 Version 2.3.1
+**Release Date: June 8, 2026**
+
+Windows-focused stability and installer hotfix. **macOS** builds are unchanged from 2.3.0 unless you rebuild from source with this tag.
+
+### 🪟 Windows installer & launch
+- **Clearer release filenames**: **`RAWviewer_Setup_DirectML.exe`** (recommended) and **`RAWviewer_Setup_CUDA.exe`** replace the old single-file names.
+- **Dedicated app launcher**: Install folder **`RAWviewer.exe`** is a small stub that starts the app; **`RAWviewer_Setup.exe`** in the same folder is for repair/reinstall only.
+- **More reliable setup**: Pixi and MobileCLIP downloads retry on failure with clearer network/disk/proxy errors; canceling setup removes incomplete install folders; welcome page text simplified (no Ctrl+Shift+O / disk-space hints).
+- **MobileCLIP optional at install**: If AI models fail during setup, browsing still works; download them later from gallery **Search** (MD3 prompt + in-dialog progress, same style as macOS).
+- **Uninstall fixes**: Settings → Apps and `uninstall.bat` work on Win11; a confirmation message appears when removal finishes.
+
+### ⚡ Onboarding (Windows)
+- **Shortcuts button**: Status-bar **i** opens the keyboard-shortcuts dialog (not just a tooltip).
+
+### 🖼️ Viewing
+- **RAW zoom**: Fixed **Space** and **double-click** not zooming on RAW files when fit-to-window state was out of sync (Ctrl+scroll still worked).
+
+### 📄 Docs
+- README updated for Setup vs launcher exe, DirectML recommendation, uninstall, and troubleshooting.
+
+---
+
 ## 🚀 Version 2.3.0
 **Release Date: June 7, 2026**
 

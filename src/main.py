@@ -5533,162 +5533,6 @@ class CustomWarningDialog(QDialog):
         super().mouseReleaseEvent(event)
 
 
-class MobileCLIPDownloadDialog(QDialog):
-    """RAWviewer-styled prompt for downloading optional MobileCLIP assets."""
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        self.setModal(True)
-
-        self.container = QWidget(self)
-        self.container.setObjectName("mobileclip_download_container")
-        self.container.setStyleSheet("""
-            #mobileclip_download_container {
-                background-color: #1E1E1E;
-                border: 1px solid #2E2E2E;
-                border-radius: 12px;
-            }
-        """)
-
-        main_layout = QVBoxLayout(self.container)
-        main_layout.setContentsMargins(24, 22, 24, 22)
-        main_layout.setSpacing(12)
-
-        title_label = QLabel("Enable Semantic Search")
-        title_label.setStyleSheet("""
-            QLabel {
-                color: #E0E0E0;
-                font-size: 17px;
-                font-weight: 600;
-                font-family: 'Roboto', 'Segoe UI', sans-serif;
-            }
-        """)
-        main_layout.addWidget(title_label)
-
-        message_label = QLabel(
-            "RAWviewer can download the MobileCLIP Core ML assets now. "
-            "This is a one-time download used for local, offline semantic indexing."
-        )
-        message_label.setWordWrap(True)
-        message_label.setStyleSheet("""
-            QLabel {
-                color: #B0B0B0;
-                font-size: 13px;
-                line-height: 1.45;
-                font-family: 'Roboto', 'Segoe UI', sans-serif;
-            }
-        """)
-        main_layout.addWidget(message_label)
-
-        note_label = QLabel("You can still use EXIF-only search without downloading.")
-        note_label.setWordWrap(True)
-        note_label.setStyleSheet("""
-            QLabel {
-                color: #888888;
-                font-size: 12px;
-                font-family: 'Roboto', 'Segoe UI', sans-serif;
-            }
-        """)
-        main_layout.addWidget(note_label)
-
-        button_layout = QHBoxLayout()
-        button_layout.setContentsMargins(0, 10, 0, 0)
-        button_layout.setSpacing(12)
-        button_layout.addStretch()
-
-        exif_only_btn = QPushButton("EXIF Only")
-        exif_only_btn.setFixedHeight(36)
-        exif_only_btn.setMinimumWidth(110)
-        exif_only_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        exif_only_btn.setStyleSheet("""
-            QPushButton {
-                background-color: transparent;
-                color: #B0B0B0;
-                border: 1px solid #4A4A4A;
-                border-radius: 18px;
-                font-size: 13px;
-                font-weight: 500;
-                font-family: 'Roboto', 'Segoe UI', sans-serif;
-                padding: 0px 20px;
-            }
-            QPushButton:hover {
-                color: #E0E0E0;
-                background-color: rgba(255, 255, 255, 0.05);
-                border-color: #5A5A5A;
-            }
-            QPushButton:pressed {
-                background-color: rgba(255, 255, 255, 0.1);
-            }
-        """)
-        exif_only_btn.clicked.connect(self.reject)
-        button_layout.addWidget(exif_only_btn)
-
-        download_btn = QPushButton("Download")
-        download_btn.setFixedHeight(36)
-        download_btn.setMinimumWidth(110)
-        download_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        download_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #3A3A3A;
-                color: #E0E0E0;
-                border: 1px solid #4A4A4A;
-                border-radius: 18px;
-                font-size: 13px;
-                font-weight: 600;
-                font-family: 'Roboto', 'Segoe UI', sans-serif;
-                padding: 0px 20px;
-            }
-            QPushButton:hover {
-                background-color: #4A4A4A;
-                border-color: #5A5A5A;
-            }
-            QPushButton:pressed {
-                background-color: #2F2F2F;
-            }
-        """)
-        download_btn.clicked.connect(self.accept)
-        download_btn.setDefault(True)
-        download_btn.setFocus()
-        button_layout.addWidget(download_btn)
-        main_layout.addLayout(button_layout)
-
-        container_layout = QVBoxLayout(self)
-        container_layout.setContentsMargins(0, 0, 0, 0)
-        container_layout.addWidget(self.container)
-        self.setFixedSize(460, 220)
-        self.container.setFixedSize(460, 220)
-
-        if parent:
-            parent_geometry = parent.geometry()
-            dialog_x = parent_geometry.x() + (parent_geometry.width() - self.width()) // 2
-            dialog_y = parent_geometry.y() + (parent_geometry.height() - self.height()) // 2
-            self.move(dialog_x, dialog_y)
-
-    def mousePressEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton:
-            self._dragging = True
-            self._drag_pos = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
-            event.accept()
-            return
-        super().mousePressEvent(event)
-
-    def mouseMoveEvent(self, event):
-        if hasattr(self, '_dragging') and self._dragging:
-            self.move(event.globalPosition().toPoint() - self._drag_pos)
-            event.accept()
-            return
-        super().mouseMoveEvent(event)
-
-    def mouseReleaseEvent(self, event):
-        if hasattr(self, '_dragging'):
-            self._dragging = False
-            event.accept()
-            return
-        super().mouseReleaseEvent(event)
-
-
 # -----------------------------
 # Single-image area: full-bleed scroll + draggable histogram overlay
 # -----------------------------
@@ -6852,6 +6696,7 @@ class RAWImageViewer(QMainWindow):
         self.setFocus()
         self._semantic_asset_download_signals = None
         self._mobileclip_download_dismissed_this_session = False
+        self._mobileclip_download_dialog = None
         self._last_semantic_query = ""
         self._semantic_index_progress_base = 0
         self._semantic_index_progress_total = 0
@@ -7704,18 +7549,21 @@ class RAWImageViewer(QMainWindow):
         import logging
 
         logger = logging.getLogger(__name__)
-        if not self.current_pixmap or not getattr(self, "current_file_path", None):
+        fp = getattr(self, "current_file_path", None)
+        if not fp:
             return
-
-        should_upgrade = self._needs_full_resolution_upgrade()
-
-        if getattr(self, "gpu_view", None) is not None:
+        gv = getattr(self, "gpu_view", None)
+        pm = getattr(self, "current_pixmap", None)
+        if gv is not None and gv.has_pixmap():
+            should_upgrade = self._needs_full_resolution_upgrade(fp)
             self._gpu_zoom_in_to_point_finish()
             if should_upgrade:
-                self._queue_sensor_full_decode(
-                    self.current_file_path, priority_current=True
-                )
+                self._queue_sensor_full_decode(fp, priority_current=True)
             return
+        if pm is None or pm.isNull():
+            return
+
+        should_upgrade = self._needs_full_resolution_upgrade(fp)
 
         if should_upgrade:
             if getattr(self, "_full_resolution_loading", False):
@@ -7808,8 +7656,16 @@ class RAWImageViewer(QMainWindow):
     def _single_view_is_fit_mode(self) -> bool:
         gv = getattr(self, "gpu_view", None)
         if gv is not None:
-            return gv.is_fit_mode()
-        return bool(getattr(self, "fit_to_window", True))
+            gv._sync_fit_mode_flag()
+            return gv.wants_zoom_in_toggle()
+        if bool(getattr(self, "fit_to_window", True)):
+            return True
+        pm = getattr(self, "current_pixmap", None)
+        if pm is None or pm.isNull():
+            return True
+        fit_scale = self._fit_zoom_level()
+        zoom = float(getattr(self, "current_zoom_level", 1.0))
+        return zoom <= fit_scale * 1.05
 
     def _single_view_is_zoomed_in(self) -> bool:
         return not self._single_view_is_fit_mode()
@@ -7873,7 +7729,7 @@ class RAWImageViewer(QMainWindow):
         gv = getattr(self, "gpu_view", None)
         if gv is None:
             return
-        if not self.current_pixmap or self.current_pixmap.isNull():
+        if not gv.has_pixmap():
             if getattr(self, "current_file_path", None):
                 self._pending_zoom_toggle = True
                 self._pending_zoom_target_path = self.current_file_path
@@ -7882,6 +7738,7 @@ class RAWImageViewer(QMainWindow):
                     "GPU double-click recorded while image is loading; will zoom once ready."
                 )
             return
+        gv._sync_fit_mode_flag()
         self._stop_slideshow()
         logger.info(
             "[TRACK] User double-clicked to zoom (GPU) - file: %s",
@@ -10303,6 +10160,7 @@ class RAWImageViewer(QMainWindow):
         self.shortcuts_hint_button.setFixedSize(22, 22)
         self.shortcuts_hint_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.shortcuts_hint_button.setToolTip(self._keyboard_shortcuts_tooltip())
+        self.shortcuts_hint_button.clicked.connect(self.show_keyboard_shortcuts)
         self.shortcuts_hint_button.setStyleSheet("""
             QPushButton {
                 color: #888888;
@@ -11791,6 +11649,9 @@ class RAWImageViewer(QMainWindow):
     def _on_semantic_asset_download_progress(self, token, message):
         if not self._semantic_asset_download_in_progress:
             return
+        dialog = getattr(self, "_mobileclip_download_dialog", None)
+        if dialog is not None:
+            dialog.set_progress_message(message)
         self._set_gallery_search_status(message or "Downloading assets…")
 
     def _on_semantic_asset_download_done(self, token, asset_path, corpus_files):
@@ -11798,6 +11659,10 @@ class RAWImageViewer(QMainWindow):
             return
         self._semantic_asset_download_in_progress = False
         self._semantic_asset_download_signals = None
+        dialog = getattr(self, "_mobileclip_download_dialog", None)
+        if dialog is not None:
+            dialog.show_download_complete()
+        self._mobileclip_download_dialog = None
         self._start_user_semantic_indexing(corpus_files)
 
     def _on_semantic_asset_download_error(self, token, error):
@@ -11805,9 +11670,13 @@ class RAWImageViewer(QMainWindow):
             return
         self._semantic_asset_download_in_progress = False
         self._semantic_asset_download_signals = None
-        self._set_gallery_search_status("Asset download failed")
+        dialog = getattr(self, "_mobileclip_download_dialog", None)
+        if dialog is not None:
+            dialog.show_download_error(error)
+        else:
+            self._set_gallery_search_status("Asset download failed")
+            self.status_bar.showMessage(f"Asset download failed: {error}", 7000)
         self._gallery_search_user_collapsed_while_busy = False
-        self.status_bar.showMessage(f"Asset download failed: {error}", 7000)
 
     def _start_user_semantic_indexing(self, corpus_files) -> None:
         """Run or resume semantic embeddings after the user opens search (metadata may already be silent)."""
@@ -11883,10 +11752,16 @@ class RAWImageViewer(QMainWindow):
                 backend_error = index.semantic_backend_error()
                 if "Missing MobileCLIP" in backend_error and index.mobileclip_supports_hub_download():
                     if not getattr(self, "_mobileclip_download_dismissed_this_session", False):
+                        from rawviewer_ui.mobileclip_download_dialog import MobileCLIPDownloadDialog
+
                         dialog = MobileCLIPDownloadDialog(self)
-                        if dialog.exec() == QDialog.DialogCode.Accepted:
-                            self._start_semantic_asset_download_background(corpus_files)
-                        else:
+                        self._mobileclip_download_dialog = dialog
+                        dialog.download_requested.connect(
+                            lambda: self._start_semantic_asset_download_background(corpus_files)
+                        )
+                        dialog.exec()
+                        self._mobileclip_download_dialog = None
+                        if not dialog.download_started:
                             self._mobileclip_download_dismissed_this_session = True
                 else:
                     self._set_gallery_search_status(f"EXIF search only. Backend: {backend_error}")
@@ -15468,6 +15343,7 @@ class RAWImageViewer(QMainWindow):
     def _keyboard_shortcuts_help_text(self):
         """Plain-text shortcuts list for tooltips and the shortcuts dialog."""
         return (
+            "Ctrl+Shift+O — Open folder\n"
             "Space / Double-click — Toggle fit-to-window / 100% zoom\n"
             "Trackpad Pinch / Ctrl+Scroll — Smooth zoom in/out\n"
             "Left / Right Arrow — Previous / next image\n"
@@ -19173,9 +19049,7 @@ class RAWImageViewer(QMainWindow):
                         self._pending_zoom_thumbnail_size = pixmap.size()
                         gv.set_pixmap(pixmap, preserve_view=False)
                         gv.fit_to_window()
-                        # Restore intent so we stay zoomed in logic
-                        self.fit_to_window = False
-                        gv._fit_mode = False
+                        self.fit_to_window = True
                         return False
 
                     if self._apply_gpu_navigation_zoom_restore(pixmap, gv):
@@ -19367,16 +19241,14 @@ class RAWImageViewer(QMainWindow):
                 if is_pixmap_half_size:
                     logger.info(f"[DISPLAY_PIXMAP] Half-size image ({pixmap.width()}x{pixmap.height()}), "
                                "showing Fit preview until a full-resolution buffer arrives (avoid fake zoom upscale).")
-                    hold_z = self.current_zoom_level
-                    hold_pt = self.zoom_center_point
-                    hold_fit = self.fit_to_window
+                    if not getattr(self, "_pending_zoom", False):
+                        self._pending_zoom = True
+                        self._pending_zoom_center = self.zoom_center_point
+                        self._pending_zoom_thumbnail_size = pixmap.size()
                     self.fit_to_window = True
                     self.current_zoom_level = 1.0
                     self.zoom_center_point = None
                     self.scale_image_to_fit()
-                    self.fit_to_window = hold_fit
-                    self.current_zoom_level = hold_z
-                    self.zoom_center_point = hold_pt
                 else:
                     # Full resolution image - apply zoom now
                     logger.info(f"[DISPLAY_PIXMAP] Full resolution image, applying zoom immediately")
@@ -21589,7 +21461,7 @@ class RAWImageViewer(QMainWindow):
                 return
             return
         self._stop_slideshow()
-        if self.fit_to_window:
+        if self._single_view_is_fit_mode():
             # Switch to 100% zoom mode - center on image center
             self.fit_to_window = False
             
