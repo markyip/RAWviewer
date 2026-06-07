@@ -470,7 +470,7 @@ class UnifiedImageProcessor:
             )
         
         if thumbnail is None:
-            if allow_heavy_fallback:
+            if allow_heavy_fallback and is_raw:
                 # Fallback: If no embedded thumbnail found, or it was rejected as too small,
                 # do a fast half-size RAW decode to get a high-quality thumbnail.
                 try:

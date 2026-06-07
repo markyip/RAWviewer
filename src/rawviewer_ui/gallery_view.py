@@ -142,6 +142,7 @@ class JustifiedGallery(QWidget):
         self._building = False
         self._gallery_generation = 0
         self._active_tasks = {}
+        self._thumb_fail_counts: Dict[str, int] = {}
         self._metadata_cache = {}
         # Thumbnail cache: base + per-bucket scaled
         self._thumbnail_cache = LRUCache(10000)
@@ -2018,6 +2019,7 @@ class JustifiedGallery(QWidget):
                     if abs(ex_ar - meta_ar) < abs(px_ar - meta_ar):
                         pixmap = existing
         self._thumbnail_cache.put((file_path, self._thumb_base_key), pixmap)
+        self._thumb_fail_counts.pop(file_path, None)
         if not self._first_thumb_ready_after_set:
             self._first_thumb_ready_after_set = True
 
@@ -2075,21 +2077,82 @@ class JustifiedGallery(QWidget):
             del self._active_tasks[file_path]
 
     def on_thumbnail_error(self, file_path, error_msg):
-        # Prevent infinite retry loops by putting a dummy grey thumbnail in cache
-        null_pixmap = QPixmap(100, 100)
-        null_pixmap.fill(Qt.GlobalColor.darkGray)
-        # Use target size if known, else default to some key
-        self._thumbnail_cache.put((file_path, self._thumb_base_key), null_pixmap)
-        
         if file_path in self._active_tasks:
             del self._active_tasks[file_path]
-            
-        # Dynamically exclude failed/unsupported images from gallery and parent lists
+
+        if file_path not in self.images:
+            return
+
+        lower_err = (error_msg or "").lower()
+        clearly_unsupported = any(
+            term in lower_err
+            for term in (
+                "unsupported file format",
+                "not recognized",
+                "unsupported or corrupt",
+            )
+        )
+        attempt = self._thumb_fail_counts.get(file_path, 0) + 1
+        self._thumb_fail_counts[file_path] = attempt
+        max_retries = 3
+
+        # JPEG/PNG/WebP: keep in gallery on thumbnail-only failures; retry transient decode errors.
+        if not is_raw_file(file_path):
+            if attempt <= max_retries:
+                logger.debug(
+                    "[GALLERY] Thumbnail failed for %s (attempt %d/%d): %s",
+                    os.path.basename(file_path),
+                    attempt,
+                    max_retries,
+                    error_msg,
+                )
+                QTimer.singleShot(
+                    min(500 * attempt, 2000),
+                    lambda: self._request_load_visible_images(40),
+                )
+                return
+
+            null_pixmap = QPixmap(100, 100)
+            null_pixmap.fill(Qt.GlobalColor.darkGray)
+            self._thumbnail_cache.put((file_path, self._thumb_base_key), null_pixmap)
+            logger.warning(
+                "[GALLERY] Keeping %s after repeated thumbnail failures: %s",
+                os.path.basename(file_path),
+                error_msg,
+            )
+            return
+
+        if attempt < max_retries and not clearly_unsupported:
+            logger.debug(
+                "[GALLERY] RAW thumbnail failed for %s (attempt %d/%d): %s",
+                os.path.basename(file_path),
+                attempt,
+                max_retries,
+                error_msg,
+            )
+            QTimer.singleShot(
+                min(500 * attempt, 2000),
+                lambda: self._request_load_visible_images(40),
+            )
+            return
+
+        if not clearly_unsupported and attempt < max_retries + 1:
+            null_pixmap = QPixmap(100, 100)
+            null_pixmap.fill(Qt.GlobalColor.darkGray)
+            self._thumbnail_cache.put((file_path, self._thumb_base_key), null_pixmap)
+            logger.warning(
+                "[GALLERY] Keeping RAW %s after thumbnail failures: %s",
+                os.path.basename(file_path),
+                error_msg,
+            )
+            return
+
+        # Only drop RAW files that are clearly unsupported after retries are exhausted.
         removed = False
         if file_path in self.images:
             self.images.remove(file_path)
             removed = True
-            
+
         pv = self.parent_viewer
         if pv is not None:
             if hasattr(pv, "image_files") and file_path in pv.image_files:
@@ -2105,13 +2168,16 @@ class JustifiedGallery(QWidget):
                     pass
 
         if removed:
-            logger.info(f"[GALLERY] Removed failed load image from list: {file_path}")
+            logger.info(
+                "[GALLERY] Removed unsupported RAW from list: %s (%s)",
+                file_path,
+                error_msg,
+            )
             self.build_gallery(force=True)
-            
+
         if self.parent_viewer is not None and getattr(
             self.parent_viewer, "view_mode", "gallery"
         ) == "gallery":
-            # Delay slightly to prevent spin loops
             QTimer.singleShot(100, lambda: self._request_load_visible_images(40))
 
     def on_exif_ready(self, file_path, exif_data):

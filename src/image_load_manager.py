@@ -144,7 +144,13 @@ class ImageLoadWorker(QRunnable):
         if task.thumbnail_target_size is not None:
             return False
         stages = task.stages or set()
-        return "full" in stages or "thumbnail" in stages
+        if "full" in stages:
+            return True
+        if "thumbnail" not in stages:
+            return False
+        from common_image_loader import is_raw_file
+
+        return is_raw_file(task.file_path)
     
     def _get_processor(self):
         """獲取處理器實例（延遲初始化）"""
@@ -271,36 +277,33 @@ class ImageLoadWorker(QRunnable):
                     ):
                         if self._safe_emit():
                             self.manager.exif_data_ready.emit(file_path, exif_data)
-                        if allow_heavy_fallback and processor._is_raw_file(file_path):
-                            min_preview_dim = _min_acceptable_preview_dim(file_path)
-                            if (
-                                processor._preview_buffer_max_dim(thumbnail)
-                                < min_preview_dim
-                            ):
-                                thumbnail = processor.ensure_display_tier_preview(
-                                    file_path, thumbnail
-                                )
-                            if (
-                                processor._preview_buffer_max_dim(thumbnail)
-                                < min_preview_dim
-                            ):
-                                if not processor.is_libraw_unsupported(file_path):
-                                    thumbnail = None
-                            else:
-                                self._cache_gallery_thumbnail_for_indexing(
-                                    processor, file_path, thumbnail, exif_data
-                                )
-                        elif allow_heavy_fallback:
-                            self._cache_gallery_thumbnail_for_indexing(
-                                processor, file_path, thumbnail, exif_data
+                    if allow_heavy_fallback and processor._is_raw_file(file_path):
+                        min_preview_dim = _min_acceptable_preview_dim(file_path)
+                        if (
+                            thumbnail is not None
+                            and processor._preview_buffer_max_dim(thumbnail)
+                            < min_preview_dim
+                        ):
+                            thumbnail = processor.ensure_display_tier_preview(
+                                file_path, thumbnail
                             )
-                        if thumbnail is not None:
-                            self._handle_thumbnail_result(file_path, thumbnail)
-                    elif thumbnail is None and not self.task.is_cancelled():
-                        if self._safe_emit():
-                            self.manager.error_occurred.emit(
-                                file_path, "Thumbnail extraction returned None"
-                            )
+                        if (
+                            thumbnail is not None
+                            and processor._preview_buffer_max_dim(thumbnail)
+                            < min_preview_dim
+                            and not processor.is_libraw_unsupported(file_path)
+                        ):
+                            thumbnail = None
+                    if thumbnail is not None and not self.task.is_cancelled():
+                        cache_exif = exif_data or processor.cache.get_exif(file_path)
+                        self._cache_gallery_thumbnail_for_indexing(
+                            processor, file_path, thumbnail, cache_exif
+                        )
+                        self._handle_thumbnail_result(file_path, thumbnail)
+                    elif not self.task.is_cancelled() and self._safe_emit():
+                        self.manager.error_occurred.emit(
+                            file_path, "Thumbnail extraction returned None"
+                        )
             
             # 處理完整圖像（只在需要時）
             if 'full' in stages and not self.task.is_cancelled():
