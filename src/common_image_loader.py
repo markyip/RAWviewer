@@ -403,7 +403,60 @@ def is_tiff_file(file_path: str) -> bool:
     return is_tiff
 
 
-def load_pixmap_safe(file_path: str) -> QPixmap:
+def _regular_image_max_edge() -> int:
+    """Safety cap when full-resolution Qt/PIL decode fails (e.g. huge panorama JPEG)."""
+    raw = os.environ.get("RAWVIEWER_REGULAR_IMAGE_MAX_EDGE", "16384").strip()
+    try:
+        v = int(raw)
+    except Exception:
+        v = 16384
+    return max(2048, min(v, 65536))
+
+
+def _pil_file_to_qpixmap(file_path: str, max_edge: int = 0) -> QPixmap:
+    """Load JPEG/PNG/WebP via PIL with EXIF orientation; optional downscale."""
+    import logging
+
+    logger = logging.getLogger(__name__)
+    try:
+        from PIL import Image, ImageOps, ImageFile
+
+        ImageFile.LOAD_TRUNCATED_IMAGES = True
+        Image.MAX_IMAGE_PIXELS = None
+        with Image.open(file_path) as pil_image:
+            pil_image = ImageOps.exif_transpose(pil_image)
+            if max_edge > 0:
+                w, h = pil_image.size
+                if max(w, h) > max_edge:
+                    pil_image.thumbnail((max_edge, max_edge), Image.Resampling.LANCZOS)
+            if pil_image.mode not in ("RGB", "L"):
+                pil_image = pil_image.convert("RGB")
+            width, height = pil_image.size
+            if pil_image.mode == "RGB":
+                qimage = QImage(
+                    pil_image.tobytes("raw", "RGB"),
+                    width,
+                    height,
+                    QImage.Format.Format_RGB888,
+                )
+            else:
+                qimage = QImage(
+                    pil_image.tobytes("raw", "L"),
+                    width,
+                    height,
+                    QImage.Format.Format_Grayscale8,
+                )
+            if qimage.isNull():
+                return QPixmap()
+            return QPixmap.fromImage(qimage)
+    except Exception as e:
+        logger.debug(
+            "PIL load failed for %s: %s", os.path.basename(file_path), e
+        )
+        return QPixmap()
+
+
+def load_pixmap_safe(file_path: str, max_edge: int = 0) -> QPixmap:
     """安全載入 QPixmap，對 TIFF 文件使用 PIL 以避免 Qt 警告"""
     cache = get_image_cache()
     
@@ -451,9 +504,23 @@ def load_pixmap_safe(file_path: str) -> QPixmap:
     
     # 對於其他格式（JPEG, PNG, etc.），使用 QImageReader 並啟用自動方向轉換
     try:
+        from PyQt6.QtCore import QSize
         from PyQt6.QtGui import QImageReader
+
         reader = QImageReader(file_path)
         reader.setAutoTransform(True)  # 自動應用 EXIF 方向
+        if max_edge > 0:
+            original_size = reader.size()
+            if original_size.isValid():
+                w, h = original_size.width(), original_size.height()
+                if max(w, h) > max_edge:
+                    if w >= h:
+                        sw = max_edge
+                        sh = max(1, int(h * max_edge / max(w, 1)))
+                    else:
+                        sh = max_edge
+                        sw = max(1, int(w * max_edge / max(h, 1)))
+                    reader.setScaledSize(QSize(sw, sh))
         pixmap = QPixmap.fromImageReader(reader)
         if not pixmap.isNull():
             cache.put_pixmap(file_path, pixmap)
@@ -462,11 +529,23 @@ def load_pixmap_safe(file_path: str) -> QPixmap:
         import logging
         logger = logging.getLogger(__name__)
         logger.debug(f"QImageReader failed for {os.path.basename(file_path)}: {e}")
-    
+
+    pixmap = _pil_file_to_qpixmap(file_path, max_edge=max_edge)
+    if not pixmap.isNull():
+        cache.put_pixmap(file_path, pixmap)
+        return pixmap
+
     # 回退到直接使用 QPixmap（不會應用方向，但比沒有好）
     pixmap = QPixmap(file_path)
     if not pixmap.isNull():
         cache.put_pixmap(file_path, pixmap)
+        return pixmap
+
+    if max_edge <= 0:
+        safety_edge = _regular_image_max_edge()
+        pixmap = _pil_file_to_qpixmap(file_path, max_edge=safety_edge)
+        if not pixmap.isNull():
+            cache.put_pixmap(file_path, pixmap)
     return pixmap
 
 

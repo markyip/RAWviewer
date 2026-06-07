@@ -9452,22 +9452,48 @@ class RAWImageViewer(QMainWindow):
         self._last_manager_error_path = norm_p
         self._last_manager_error_ts = now
         
-        # Check if the error indicates an unsupported RAW format or decoding failure
         lower_err = error_message.lower()
-        is_unsupported = any(term in lower_err for term in ("unsupported", "decode", "returned none", "failed"))
-        
-        if is_unsupported:
+        from common_image_loader import is_raw_file, load_pixmap_safe
+
+        clearly_unsupported = any(
+            term in lower_err
+            for term in (
+                "unsupported file format",
+                "not recognized",
+                "libraw unsupported",
+                "unsupported or corrupt raw",
+                "no usable embedded jpeg",
+            )
+        )
+        if not clearly_unsupported and not is_raw_file(file_path):
+            try:
+                recovered = load_pixmap_safe(file_path)
+                if not recovered.isNull():
+                    self.on_manager_pixmap_ready(file_path, recovered)
+                    return
+            except Exception:
+                pass
+
+        if clearly_unsupported or (
+            is_raw_file(file_path)
+            and "thumbnail extraction returned none" in lower_err
+        ):
             try:
                 from raw_file_extensions import get_supported_extensions
                 exts = get_supported_extensions()
             except Exception:
                 exts = ['.arw', '.cr2', '.nef', '.dng', '.jpg', '.jpeg', '.png']
-            
+
             dialog = CustomWarningDialog(
                 self,
                 title="Unsupported File Format",
-                message=f"The file '{os.path.basename(file_path)}' is not supported by SkySpotter or is corrupt.",
-                informative_text=f"Check if the file is corrupt. Supported formats list: {', '.join(exts)}"
+                message=(
+                    f"The file '{os.path.basename(file_path)}' is not supported by "
+                    f"RAWviewer or is corrupt."
+                ),
+                informative_text=(
+                    f"Check if the file is corrupt. Supported formats list: {', '.join(exts)}"
+                ),
             )
             dialog.exec()
         else:

@@ -344,11 +344,19 @@ class ImageLoadWorker(QRunnable):
                     and self.task.priority == Priority.CURRENT
                 ):
                     if self._safe_emit():
-                        self.manager.error_occurred.emit(
-                            file_path,
-                            "Could not decode image data (unsupported or corrupt RAW, "
-                            "or no usable embedded JPEG).",
-                        )
+                        from common_image_loader import is_raw_file
+
+                        if is_raw_file(file_path):
+                            msg = (
+                                "Could not decode image data (unsupported or corrupt RAW, "
+                                "or no usable embedded JPEG)."
+                            )
+                        else:
+                            msg = (
+                                "Could not decode image file "
+                                "(file may be corrupt or too large to load at full resolution)."
+                            )
+                        self.manager.error_occurred.emit(file_path, msg)
 
             # 發送完成信號
             if self._safe_emit() and not self.task.is_cancelled():
