@@ -1,6 +1,6 @@
 [workspace]
 name = "rawviewer"
-version = "2.2.5"
+version = "2.3.0"
 description = "RAWviewer - Professional RAW Image Viewer with Semantic Search"
 authors = ["Mark Yip"]
 channels = ["conda-forge"]
@@ -16,6 +16,7 @@ start-windowless = "pythonw src/main.py"
 
 [activation.env]
 PYTHONNOUSERSITE = "1"
+RAWVIEWER_GPU_VIEW = "1"
 
 [dependencies]
 python = ">=3.10,<3.13"

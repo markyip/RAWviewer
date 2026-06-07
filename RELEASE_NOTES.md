@@ -1,9 +1,46 @@
 # RAWviewer Release Notes
 
-## 🚀 Version 2.2.5
-**Release Date: June 5, 2026**
+## 🚀 Version 2.3.0
+**Release Date: June 7, 2026**
 
-- **Filter out composite DNG panoramas**: Handled composite DNG panorama files (e.g., Lightroom/Photoshop HDR panoramas) similarly to unsupported images by hiding them from the gallery and navigation lists entirely to prevent loading errors and improve performance.
+Version 2.3.0 expands **focus overlays**, adds a **RAW ↔ embedded-JPEG workflow** switch for single-image viewing, improves **gallery navigation** and **semantic indexing** speed on large folders, and adds a **background update check** on launch.
+
+### 🔔 Release updates
+- **Background check on launch**: Once per app start, RAWviewer quietly compares your version to the latest [GitHub release](https://github.com/markyip/RAWviewer/releases/latest) (offline or unreachable → no UI).
+- **MD3 update prompt**: When a newer release is available, a styled dialog shows your version vs the latest tag and offers **Open Download Page** or **Not Now**.
+- **Respectful snooze**: **Not Now** hides the prompt for **14 days** for that release; a **newer** release tag will notify you again sooner.
+- **Opt out**: Set `RAWVIEWER_SKIP_UPDATE_CHECK=1` to disable the check entirely.
+
+### 🎯 Focus overlay (`F`)
+- **Broader maker AF**: Nikon NEF (`AFInfo2`, image-height fallback), Olympus ORF (`AFPointSelected`, `AFFocusArea` / `AFSelectedArea`), Panasonic RW2 (`AFPointPosition`, including decimal `/1024` form), and refined Canon EOS point placement (center origin, Y-up).
+- **Brand guide**: README documents which formats support maker-note AF vs CIPA `SubjectArea` only (e.g. Fujifilm RAF, Hasselblad 3FR, typical Adobe DNG, Pentax PEF, Samsung SRW, Sigma X3F).
+
+### 🖼️ RAW ↔ JPEG workflow (single view)
+- **One-click toggle** on the bottom bar: **embedded JPEG** (fast) vs **full RAW decode** (high quality) for the current file.
+- **Instant reload**: Switching workflows clears display caches and reloads the open image so resolution and color match the selected path.
+- **Single view only**: The toggle is shown while viewing one image, not in gallery grid mode.
+
+### 🛠️ Gallery & navigation
+- **Cleaner libraries**: Composite DNG panoramas (e.g. Lightroom/Photoshop HDR stitches) are hidden from the gallery and navigation lists.
+- **Snappier browsing**: Bidirectional **embedded-JPEG prefetch** (default radius **6**), **focus-anchored zoom** when upgrading resolution, and more reliable **Space** / double-click zoom on RAW.
+- **Scroll-friendly indexing**: Background metadata and semantic indexing **pause while you scroll** the gallery and resume after idle, keeping large folders responsive.
+
+### 🔍 Semantic search & indexing
+- **Gallery thumbnail reuse**: Semantic warm-up reuses paths already in `ImageCache` (preview/grid tiers from loaded tiles), cutting duplicate RAW decodes during indexing.
+- **Faster neural pass**: Auto-tuned MobileCLIP **batch size** on your GPU/CPU for higher indexing throughput.
+- **Safer setup**: Incomplete ONNX installs report a clear reinstall hint instead of failing silently.
+
+### 🏗️ Build
+- **Removed unused `mediapipe`** from Windows `build.py` dependencies (face detection uses YuNet ONNX).
+
+### 🍎 macOS
+- **Release zip**: `RAWviewer-v2.3.0-macOS.zip` with **`Start Here.txt`**, **`Install RAWviewer.command`** (copy to Applications + quarantine), and **`Remove Quarantine.command`**. Bundles **scipy** for GPS reverse geocoding; minimum macOS **13.0**; **pyexiv2** included in release builds.
+- **Dock — single app icon**: Fixed extra RAWviewer icons in the Dock while browsing large folders. LibRaw’s process pool is **off by default on macOS** (PyInstaller runtime hook + spawn-safe startup); opt in with `RAWVIEWER_USE_PROCESS_POOL=1` (may bring back extra Dock entries).
+- **Startup splash**: Dismisses automatically when the main window is ready (no extra click on macOS).
+- **Gallery search crash (macOS 26+)**: Disables NSTextField automatic completion on the search field (including after focus and wake-from-sleep) to avoid ViewBridge / `SPCompletionListServiceViewController` aborts under Qt 6.11.
+- **Install docs**: README macOS version support table (13+ prebuilt; Pixi 14+ on Apple Silicon); simplified zip install flow via `Start Here.txt`.
+
+---
 
 ## 🚀 Version 2.2
 **Release Date: May 30, 2026**
@@ -54,7 +91,7 @@ Unified 2.2 release — search, gallery, film strip, frameless window polish, RA
 - **Folder sort**: Production uses EXIF / probe / birth / mtime only; Windows Shell `DateTaken` POC removed.
 - **`clear_cache.bat` / `clear_cache.sh`**: Full dev/session reset; repo-root `clear_cache.bat` forwards to `scripts/Launch/bat/clear_cache.bat`.
 - **Windows share helper** (sources retained): .NET `WindowsShareHelper.exe` for WinRT share in dev builds.
-- **Launch scripts**: macOS build/test workflow in `scripts/Launch/README.md`; version aligned to **2.2** across `build.py`, `pixi.toml`, and `QApplication`.
+- **Launch scripts**: macOS build/test workflow in `scripts/Launch/README.md`; version aligned across `build.py`, `pixi.toml`, and `QApplication`.
 - **Environment**: `activation.env` with `PYTHONNOUSERSITE=1` to prevent global package leaks and splash issues.
 
 ---

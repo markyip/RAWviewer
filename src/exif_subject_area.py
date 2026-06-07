@@ -1,9 +1,8 @@
 """
 Focus / subject hints for dashed overlay via **pyexiv2 (Exiv2)**.
 
-No ExifTool subprocess: uses :func:`metadata_backend.read_exif_raw_string_dict` when
-pyexiv2 is installed (same stack as general EXIF). Falls back to :mod:`exifread_af` in
-the viewer when Exiv2 yields nothing.
+Uses :func:`metadata_backend.read_exif_raw_string_dict` when pyexiv2 is
+installed. Falls back to :mod:`exifread_af` when Exiv2 yields nothing.
 
 Includes:
 - CIPA SubjectArea / SubjectLocation
@@ -23,8 +22,10 @@ Degenerate boxes (1–2 px in one dimension after downscale) are expanded symmet
 around the same center so the dashed overlay stays visible.
 
 Reference size uses ExifImageWidth/Height, then ImageWidth/Height, else the
-display pixmap size (assumes 1:1). Preview rotation from EXIF Orientation is
-not remapped here; the box may be offset on rotated JPEG previews.
+display pixmap size (assumes 1:1). EXIF Orientation is applied when mapping
+maker-note rectangles into the upright display pixmap (see
+:func:`pixmap_ltwh_focus_hint`). Canon EOS AF positions use a center origin
+with Y increasing upward; PowerShot-style Y-down is kept as a fallback.
 """
 
 from __future__ import annotations
@@ -86,13 +87,155 @@ def _numbers_from_tag_value(val: Any) -> list[int]:
     return nums
 
 
+def _rationals_from_tag_value(val: Any) -> list[tuple[int, int]]:
+    """Parse ``num/den`` pairs from Exiv2 tag strings (e.g. Olympus / Panasonic AF)."""
+    if val is None:
+        return []
+    s = str(val).strip()
+    if not s:
+        return []
+    out: list[tuple[int, int]] = []
+    for p in re.split(r"[\s,]+", s):
+        if "/" not in p:
+            continue
+        try:
+            a, b = p.split("/", 1)
+            num, den = int(a), int(b)
+        except ValueError:
+            continue
+        if den <= 0:
+            continue
+        out.append((num, den))
+    return out
+
+
+def _center_box_from_norm(
+    x_num: int,
+    x_den: int,
+    y_num: int,
+    y_den: int,
+    ref_w: int,
+    ref_h: int,
+) -> tuple[int, int, int, int] | None:
+    if x_den <= 0 or y_den <= 0 or ref_w <= 0 or ref_h <= 0:
+        return None
+    cx = float(x_num) / float(x_den) * float(ref_w)
+    cy = float(y_num) / float(y_den) * float(ref_h)
+    side = float(max(24, min(ref_w, ref_h) // 18))
+    return _clamp_rect(cx - side / 2.0, cy - side / 2.0, side, side, ref_w, ref_h)
+
+
+def _float_pairs_from_tag_value(val: Any) -> tuple[float, float] | None:
+    """Parse two floating-point coordinates (e.g. unit-interval AF positions)."""
+    if val is None:
+        return None
+    s = str(val).strip()
+    if not s:
+        return None
+    parts = [p for p in re.split(r"[\s,]+", s) if p]
+    if len(parts) < 2:
+        return None
+    try:
+        return float(parts[0]), float(parts[1])
+    except ValueError:
+        return None
+
+
+def _rect_ref_panasonic(row: dict[str, Any], ref_w: int, ref_h: int) -> tuple[int, int, int, int] | None:
+    """Panasonic RW2: ``AFPointPosition`` as normalized ``x/den y/den`` (often /1024)."""
+    val = _pick(row, "AFPointPosition")
+    pairs = _rationals_from_tag_value(val)
+    if len(pairs) >= 2:
+        x_num, x_den = pairs[0]
+        y_num, y_den = pairs[1]
+        if x_num == 0 and y_num == 0:
+            return None
+        return _center_box_from_norm(x_num, x_den, y_num, y_den, ref_w, ref_h)
+    floats = _float_pairs_from_tag_value(val)
+    if floats is not None:
+        x, y = floats
+        if x == 0.0 and y == 0.0:
+            return None
+        if -0.01 <= x <= 1.01 and -0.01 <= y <= 1.01:
+            return _center_box_from_norm(
+                int(round(x * 1024)),
+                1024,
+                int(round(y * 1024)),
+                1024,
+                ref_w,
+                ref_h,
+            )
+    return None
+
+
+def _rect_ref_olympus_focus_area(row: dict[str, Any], ref_w: int, ref_h: int) -> tuple[int, int, int, int] | None:
+    """Olympus ORF: ``AFFocusArea`` / ``AFSelectedArea`` as ``left top right bottom`` pixels."""
+    frame_w = 0
+    frame_h = 0
+    fs = _numbers_from_tag_value(_pick(row, "AFFrameSize", "SubjectDetectFrameSize"))
+    if len(fs) >= 2:
+        frame_w, frame_h = fs[0], fs[1]
+    for key in ("AFFocusArea", "AFSelectedArea"):
+        nums = _numbers_from_tag_value(_pick(row, key))
+        if len(nums) < 4:
+            continue
+        a, b, c, d = nums[0], nums[1], nums[2], nums[3]
+        if c <= a or d <= b:
+            continue
+        # Small coordinates are on the Olympus AF overlay grid (often 640×480).
+        if frame_w and frame_h and max(a, b, c, d) <= max(frame_w, frame_h) + 4:
+            sx = ref_w / float(frame_w)
+            sy = ref_h / float(frame_h)
+            return _clamp_rect(a * sx, b * sy, (c - a) * sx, (d - b) * sy, ref_w, ref_h)
+        wi = float(c - a)
+        hi = float(d - b)
+        if wi < 2 or hi < 2 or wi > float(ref_w) * 0.75 or hi > float(ref_h) * 0.75:
+            continue
+        return _clamp_rect(float(a), float(b), wi, hi, ref_w, ref_h)
+    return None
+
+
+def _rect_ref_olympus(row: dict[str, Any], ref_w: int, ref_h: int) -> tuple[int, int, int, int] | None:
+    """
+    Olympus ORF: ``AFPointSelected`` — ``index/den x/den_x y/den_y [w/den_w h/den_h …]``.
+    Coordinates are normalized on an AF overlay grid (often 640×480), not absolute pixels.
+    """
+    pairs = _rationals_from_tag_value(_pick(row, "AFPointSelected"))
+    if len(pairs) < 3:
+        floats = _float_pairs_from_tag_value(_pick(row, "AFPointSelected"))
+        if floats is not None:
+            x, y = floats
+            if x == 0.0 and y == 0.0:
+                return None
+            return _center_box_from_norm(
+                int(round(x * 10000)),
+                10000,
+                int(round(y * 10000)),
+                10000,
+                ref_w,
+                ref_h,
+            )
+        return None
+    start = 1 if pairs[0][0] == 0 and pairs[0][1] in (0, 1) else 0
+    if len(pairs) - start < 2:
+        return None
+    x_num, x_den = pairs[start]
+    y_num, y_den = pairs[start + 1]
+    if x_num == 0 and y_num == 0:
+        return None
+    return _center_box_from_norm(x_num, x_den, y_num, y_den, ref_w, ref_h)
+
+
 def _reference_dimensions(row: dict[str, Any]) -> tuple[int, int]:
     # EXIF standard dimensions.
     ew = _to_int(_pick(row, "ExifImageWidth", "PixelXDimension"))
     eh = _to_int(_pick(row, "ExifImageLength", "PixelYDimension"))
     # Maker-specific or RAW sensor dimensions often provide the true full-res canvas.
     sw = _to_int(_pick(row, "SensorWidth", "RawImageWidth", "AFImageWidth", "ImageWidth"))
-    sh = _to_int(_pick(row, "SensorHeight", "RawImageHeight", "AFImageHeight", "ImageHeight"))
+    # Nikon NEF and some bodies expose height as ImageLength only (no ImageHeight).
+    sh = _to_int(
+        _pick(row, "SensorHeight", "RawImageHeight", "AFImageHeight", "ImageHeight", "ImageLength")
+    )
     return max(ew or 0, sw or 0), max(eh or 0, sh or 0)
 
 
@@ -203,35 +346,17 @@ def _rect_ref_canon_style_af(row: dict[str, Any], ref_w: int, ref_h: int) -> tup
         return None
 
     x0, y0 = int(xs[0]), int(ys[0])
-    # Heuristic for absolute vs center-relative:
-    # 1. Negative values are always relative.
-    # 2. Small AFImageWidth (100, 1000) is almost always absolute normalized.
-    # 3. If SubjectArea is present, use it as a reference for the true center.
-    is_absolute = False
-    if all(x >= 0 for x in xs) and all(y >= 0 for y in ys):
-        if fw in (100, 1000, 128, 512):
-            is_absolute = True
+    # Canon AFInfo: (0,0) is the image center; EOS bodies use Y-up (CIPA / ExifTool spec).
+    cx = fw * 0.5 + float(x0)
+    cy = fh * 0.5 - float(y0)
+    if not (0 <= cx <= fw and 0 <= cy <= fh):
+        # PowerShot / legacy: Y-down relative, then top-left absolute fallback.
+        cx_alt = fw * 0.5 + float(x0)
+        cy_alt = fh * 0.5 + float(y0)
+        if 0 <= cx_alt <= fw and 0 <= cy_alt <= fh:
+            cx, cy = cx_alt, cy_alt
         else:
-            sa = row.get("SubjectArea")
-            if sa:
-                sa_nums = _numbers_from_tag_value(sa)
-                if len(sa_nums) >= 2:
-                    sa_cx, sa_cy = sa_nums[0], sa_nums[1]
-                    # Compare distance from SubjectArea center
-                    dist_abs = (x0 - sa_cx)**2 + (y0 - sa_cy)**2
-                    dist_rel = (fw*0.5 + x0 - sa_cx)**2 + (fh*0.5 + y0 - sa_cy)**2
-                    if dist_abs < dist_rel:
-                        is_absolute = True
-            elif x0 > fw * 0.25 and y0 > fh * 0.25:
-                # If no SubjectArea, only assume absolute if far from center
-                is_absolute = True
-    
-    if is_absolute:
-        cx, cy = float(x0), float(y0)
-    else:
-        cx = fw * 0.5 + x0
-        cy = fh * 0.5 + y0
-
+            cx, cy = float(x0), float(y0)
     if not (0 <= cx <= fw and 0 <= cy <= fh):
         cx = max(0.0, min(float(cx), float(fw)))
         cy = max(0.0, min(float(cy), float(fh)))
@@ -485,15 +610,8 @@ def _ensure_min_display_ltwh(
     return _clamp_rect(nl, nt, nw, nh, pw, ph)
 
 
-def _row_from_pyexiv2(path: str) -> dict[str, Any] | None:
-    """Flatten ``read_exif_raw_string_dict`` keys to Exiv2 leaf names (last segment)."""
-    try:
-        from metadata_backend import read_exif_raw_string_dict
-    except ImportError:
-        return None
-    raw = read_exif_raw_string_dict(path)
-    if not raw:
-        return None
+def _row_from_exiv2_raw_dict(raw: dict[str, str]) -> dict[str, Any]:
+    """Flatten Exiv2 dotted keys to leaf names (last segment)."""
     by_leaf: dict[str, list[tuple[str, str]]] = {}
     for k, v in raw.items():
         v2 = (v or "").strip()
@@ -504,17 +622,29 @@ def _row_from_pyexiv2(path: str) -> dict[str, Any] | None:
     row: dict[str, Any] = {}
     for leaf, pairs in by_leaf.items():
         if len(pairs) > 1:
-            # For SubjectArea / Location, prefer the CIPA standard EXIF tags (Photo)
-            # over MakerNote duplicates which may use different coordinate spaces.
             if leaf in ("SubjectArea", "SubjectLocation"):
-                standard = [kv for kv in pairs if "Exif.Photo." in kv[0] or "Exif.Image." in kv[0]]
+                standard = [
+                    kv for kv in pairs if "Exif.Photo." in kv[0] or "Exif.Image." in kv[0]
+                ]
                 if standard:
                     row[leaf] = standard[0][1]
                     continue
-        # Otherwise pick the longest key path (deepest leaf).
         pairs.sort(key=lambda kv: len(kv[0]), reverse=True)
         row[leaf] = pairs[0][1]
     return row
+
+
+def _row_from_pyexiv2(path: str) -> dict[str, Any] | None:
+    """Flatten ``read_exif_raw_string_dict`` keys to Exiv2 leaf names (last segment)."""
+    try:
+        from metadata_backend import read_exif_raw_string_dict
+    except ImportError:
+        return None
+    raw = read_exif_raw_string_dict(path)
+    if not raw:
+        return None
+    row = _row_from_exiv2_raw_dict(raw)
+    return row if row else None
 
 
 @functools.lru_cache(maxsize=1024)
@@ -545,6 +675,12 @@ def _get_focus_hint_sensor_space(path: str) -> tuple[tuple[int, int, int, int], 
         return None
 
     ref_w, ref_h = _reference_dimensions(row)
+
+    # Nikon AFInfo2 can supply its own reference canvas when EXIF height is missing.
+    hint_af2 = _rect_ref_from_nikon_afinfo2_row_sensor_space(row, ref_w, ref_h)
+    if hint_af2:
+        return hint_af2
+
     if ref_w <= 0 or ref_h <= 0:
         return None
 
@@ -554,14 +690,13 @@ def _get_focus_hint_sensor_space(path: str) -> tuple[tuple[int, int, int, int], 
         _rect_ref_nikon_cdaf,
         _rect_ref_nikon_initial,
         _rect_ref_sony,
+        _rect_ref_panasonic,
+        _rect_ref_olympus,
+        _rect_ref_olympus_focus_area,
     ):
         rect_ref = fn(row, ref_w, ref_h)
         if rect_ref is not None:
             return rect_ref, "maker_af", ref_w, ref_h
-
-    hint_af2 = _rect_ref_from_nikon_afinfo2_row_sensor_space(row, ref_w, ref_h)
-    if hint_af2:
-        return hint_af2
 
     # Priority 2: CIPA SubjectArea / SubjectLocation
     sa = row.get("SubjectArea")

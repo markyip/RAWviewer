@@ -7,11 +7,57 @@ import logging
 import traceback
 import threading
 import warnings
+import weakref
 from datetime import datetime
 from typing import List, Optional, Tuple, Union
 
 from PIL import Image
 Image.MAX_IMAGE_PIXELS = None
+
+
+def _is_multiprocessing_worker_process() -> bool:
+    """Detect ProcessPool / spawn children before Qt runs (frozen .app re-exec)."""
+    if any(
+        arg == "--multiprocessing-fork" or arg.startswith("--multiprocessing-fork")
+        for arg in sys.argv[1:]
+    ):
+        return True
+    if len(sys.argv) >= 3 and sys.argv[1] == "-c" and "spawn_main" in sys.argv[2]:
+        return True
+    try:
+        import multiprocessing as _mp
+        if _mp.parent_process() is not None:
+            return True
+        # Spawn children can still report MainProcess until spawn_main renames them.
+        if _mp.current_process().name != "MainProcess":
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _bootstrap_multiprocessing_gui_main() -> bool:
+    """True only for the real GUI process (not ProcessPoolExecutor workers)."""
+    try:
+        import multiprocessing as _mp
+        _mp.freeze_support()
+    except Exception:
+        pass
+    return not _is_multiprocessing_worker_process()
+
+
+_IS_GUI_MAIN_PROCESS = _bootstrap_multiprocessing_gui_main()
+
+
+def resource_path(relative_path):
+    """Absolute path to a bundled resource (dev tree or PyInstaller _MEIPASS)."""
+    try:
+        base_path = sys._MEIPASS
+    except Exception:
+        base_path = os.path.abspath(os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), ".."))
+    return os.path.join(base_path, relative_path)
+
 
 # PyInstaller Splash Screen: Helper to close the boot-time splash
 def close_native_splash():
@@ -21,96 +67,108 @@ def close_native_splash():
     except ImportError:
         pass
 
-# Ultra Fast Splash: Initialize Qt and show splash BEFORE parsing the rest of the file
-try:
-    from PyQt6.QtWidgets import QApplication, QSplashScreen
-    from PyQt6.QtGui import QPixmap, QColor, QPainter, QPen, QIcon
-    from PyQt6.QtCore import Qt, QEvent, QSize, QPoint, QLoggingCategory
-    
-    # Silence qt.imageformats warnings, particularly for RAW files structured as TIFFs
-    QLoggingCategory.setFilterRules("qt.imageformats.warning=false\nqt.imageformats.tiff.warning=false")
-    
-    def resource_path(relative_path):
-        """ Get absolute path to resource, works for dev and for PyInstaller """
-        try:
-            # PyInstaller creates a temp folder and stores path in _MEIPASS
-            base_path = sys._MEIPASS
-        except Exception:
-            # The script is in src/, so we go one level up to the project root
-            base_path = os.path.abspath(os.path.join(
-                os.path.dirname(os.path.abspath(__file__)), ".."))
-        return os.path.join(base_path, relative_path)
 
-    class RAWApplication(QApplication):
-        """Custom QApplication to handle macOS FileOpen events"""
-        def __init__(self, argv):
-            super().__init__(argv)
-            self.viewer = None
-            self.pending_files = []
-
-        def set_viewer(self, viewer):
-            """Set the main viewer window and load any pending files"""
-            self.viewer = viewer
-            for file_path in self.pending_files:
-                self._load_file(file_path)
-            self.pending_files.clear()
-
-        def event(self, event):
-            """Intercept application-level events"""
-            if event.type() == QEvent.Type.FileOpen:
-                file_path = event.file()
-                if file_path:
-                    if self.viewer:
-                        self._load_file(file_path)
-                    else:
-                        self.pending_files.append(file_path)
-                return True
-            return super().event(event)
-
-        def _load_file(self, path):
-            """Load a file into the viewer"""
-            if os.path.isfile(path):
-                self.viewer.load_folder_images(os.path.dirname(path), start_file=os.path.basename(path))
-            elif os.path.isdir(path):
-                self.viewer.load_folder_images(path)
-
-    # We need a temporary app just to show the splash
-    _temp_app = QApplication.instance()
-    if not _temp_app:
-        _temp_app = RAWApplication(sys.argv)
-    
-    # Try to load appicon.png as splash
-    _icon_path = resource_path(os.path.join('icons', 'appicon.png'))
-    if os.path.exists(_icon_path):
-        _splash_pixmap = QPixmap(_icon_path)
-        # Scale to reasonable splash size if needed (e.g. 512x512)
-        if _splash_pixmap.width() > 512:
-            _splash_pixmap = _splash_pixmap.scaled(512, 512, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
-    else:
-        # Fallback to generated if icon missing
-        _splash_pixmap = QPixmap(400, 400)
-        _splash_pixmap.fill(QColor(30, 30, 30))
-        _painter = QPainter(_splash_pixmap)
-        _painter.setPen(QPen(QColor(70, 130, 180), 4))
-        _font = _painter.font()
-        _font.setPointSize(48)
-        _font.setBold(True)
-        _painter.setFont(_font)
-        _painter.drawText(_splash_pixmap.rect(), Qt.AlignmentFlag.AlignCenter, "RAW")
-        _painter.end()
-    
-    if getattr(sys, 'frozen', False):
-        _startup_splash = QSplashScreen(_splash_pixmap, Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.FramelessWindowHint)
-        _startup_splash.showMessage("Starting RAWviewer...", Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignCenter, Qt.GlobalColor.white)
-        _startup_splash.show()
-        _temp_app.processEvents()
-    else:
-        _startup_splash = None
-    
-    # Now that the Qt splash is visible, close the native one to handover
+if not _IS_GUI_MAIN_PROCESS:
+    # Pool workers re-run the frozen binary; dismiss boot splash immediately, skip Qt.
     close_native_splash()
-except Exception:
-    _startup_splash = None
+
+_startup_splash = None  # set in ultra-fast splash block when frozen
+RAWApplication = None  # type: ignore[misc, assignment]
+
+# Ultra Fast Splash: Qt only in the GUI main process (pool workers must not touch Cocoa).
+if _IS_GUI_MAIN_PROCESS:
+    try:
+        from PyQt6.QtWidgets import QApplication, QSplashScreen
+        from PyQt6.QtGui import QPixmap, QColor, QPainter, QPen, QIcon
+        from PyQt6.QtCore import Qt, QEvent, QSize, QPoint, QLoggingCategory
+
+        # Silence qt.imageformats warnings, particularly for RAW files structured as TIFFs
+        QLoggingCategory.setFilterRules(
+            "qt.imageformats.warning=false\nqt.imageformats.tiff.warning=false"
+        )
+
+        class RAWApplication(QApplication):
+            """Custom QApplication to handle macOS FileOpen events"""
+            def __init__(self, argv):
+                super().__init__(argv)
+                self.viewer = None
+                self.pending_files = []
+
+            def set_viewer(self, viewer):
+                """Set the main viewer window and load any pending files"""
+                self.viewer = viewer
+                for file_path in self.pending_files:
+                    self._load_file(file_path)
+                self.pending_files.clear()
+
+            def event(self, event):
+                """Intercept application-level events"""
+                if event.type() == QEvent.Type.FileOpen:
+                    file_path = event.file()
+                    if file_path:
+                        if self.viewer:
+                            self._load_file(file_path)
+                        else:
+                            self.pending_files.append(file_path)
+                    return True
+                return super().event(event)
+
+            def _load_file(self, path):
+                """Load a file into the viewer"""
+                if os.path.isfile(path):
+                    self.viewer.load_folder_images(
+                        os.path.dirname(path), start_file=os.path.basename(path)
+                    )
+                elif os.path.isdir(path):
+                    self.viewer.load_folder_images(path)
+
+        # We need a temporary app just to show the splash
+        _temp_app = QApplication.instance()
+        if not _temp_app:
+            _temp_app = RAWApplication(sys.argv)
+
+        # Try to load appicon.png as splash
+        _icon_path = resource_path(os.path.join('icons', 'appicon.png'))
+        if os.path.exists(_icon_path):
+            _splash_pixmap = QPixmap(_icon_path)
+            if _splash_pixmap.width() > 512:
+                _splash_pixmap = _splash_pixmap.scaled(
+                    512, 512,
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+        else:
+            _splash_pixmap = QPixmap(400, 400)
+            _splash_pixmap.fill(QColor(30, 30, 30))
+            _painter = QPainter(_splash_pixmap)
+            _painter.setPen(QPen(QColor(70, 130, 180), 4))
+            _font = _painter.font()
+            _font.setPointSize(48)
+            _font.setBold(True)
+            _painter.setFont(_font)
+            _painter.drawText(
+                _splash_pixmap.rect(), Qt.AlignmentFlag.AlignCenter, "RAW"
+            )
+            _painter.end()
+
+        if getattr(sys, 'frozen', False):
+            _splash_flags = Qt.WindowType.FramelessWindowHint
+            if sys.platform != "darwin":
+                _splash_flags |= Qt.WindowType.WindowStaysOnTopHint
+            _startup_splash = QSplashScreen(_splash_pixmap, _splash_flags)
+            _startup_splash.showMessage(
+                "Starting RAWviewer...",
+                Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignCenter,
+                Qt.GlobalColor.white,
+            )
+            _startup_splash.show()
+            _temp_app.processEvents()
+        else:
+            _startup_splash = None
+
+        close_native_splash()
+    except Exception:
+        _startup_splash = None
 
 # Force verbose orientation logs for debugging rotation issues
 os.environ["RAWVIEWER_VERBOSE_ORIENTATION_LOGS"] = "1"
@@ -142,17 +200,6 @@ exif_backend_mode = None
 exif_orientation_after_cw90 = None
 has_pyexiv2 = None
 process_file_from_path = None
-
-# PyInstaller + multiprocessing/process pools:
-# When using ProcessPoolExecutor in a frozen onefile app on Windows, child processes
-# are spawned by re-launching the same executable. Without freeze_support(), the
-# child process can incorrectly run the GUI entrypoint and open another window.
-try:
-    import multiprocessing
-    if getattr(sys, "frozen", False):
-        multiprocessing.freeze_support()
-except Exception:
-    pass
 
 # In PyInstaller --windowed builds there is no console, so stdout/stderr can be None.
 # Redirect them to a file early so all existing safe_print() debug output is preserved.
@@ -260,11 +307,7 @@ def _env_int(name: str, default: int, *, minimum: int = 0) -> int:
 
 
 def _is_primary_process() -> bool:
-    try:
-        import multiprocessing
-        return multiprocessing.current_process().name == "MainProcess"
-    except Exception:
-        return True
+    return _IS_GUI_MAIN_PROCESS
 
 
 _VERBOSE_CONSOLE = _env_true("RAWVIEWER_VERBOSE_CONSOLE", default=False)
@@ -732,11 +775,233 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QGridLayout, QScrollBar, QDialog, QSplashScreen, QInputDialog,
                              QLineEdit, QStackedLayout, QGraphicsOpacityEffect, QStyleOptionButton,
                              QMenu)
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, pyqtSlot, QPoint, QEvent, QSettings, QSize, QRect, QObject, QRunnable, QThreadPool, QTimer, QPropertyAnimation, QEasingCurve, QAbstractAnimation
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, pyqtSlot, QPoint, QEvent, QSettings, QSize, QRect, QObject, QRunnable, QThreadPool, QTimer, QPropertyAnimation, QEasingCurve, QAbstractAnimation, QUrl
 from PyQt6.QtGui import (QPixmap, QImage, QAction, QKeySequence, QShortcut, QGuiApplication,
                          QDragEnterEvent, QDropEvent, QCursor, QIcon,
-                         QTransform, QRegion, QPainterPath, QPainter, QColor, QPen, QBrush, QPalette)
+                         QTransform, QRegion, QPainterPath, QPainter, QColor, QPen, QBrush, QPalette,
+                         QDesktopServices)
 safe_print("PyQt6 imported successfully", flush=True)
+
+
+_macos_completion_guarded_edits: "weakref.WeakSet" = weakref.WeakSet()
+
+
+def _macos_apply_ns_text_completion_off(node) -> None:
+    """Turn off AppKit completion/spellcheck hooks on one NSView/NSTextField."""
+    for setter, value in (
+        ("setAutomaticTextCompletionEnabled:", False),
+        ("setAutomaticSpellingCorrectionEnabled:", False),
+        ("setContinuousSpellCheckingEnabled:", False),
+        ("setGrammarCheckingEnabled:", False),
+        ("setSmartInsertDeleteEnabled:", False),
+        ("setAutomaticDashSubstitutionEnabled:", False),
+        ("setAutomaticQuoteSubstitutionEnabled:", False),
+        ("setAutomaticLinkDetectionEnabled:", False),
+    ):
+        try:
+            if node.respondsToSelector_(setter):
+                getattr(node, setter.replace(":", "_"))(value)
+        except Exception:
+            pass
+
+
+def _macos_disable_line_edit_system_completion(line_edit) -> None:
+    """
+    Disable macOS NSTextField automatic completion/spellcheck on a Qt QLineEdit.
+
+    Newer macOS builds host SPCompletionListServiceViewController inside Qt via
+    ViewBridge (NSRemoteView). When that XPC view fails to configure, the process
+    aborts (SIGABRT) — seen with gallery search on macOS 26 + Qt 6.11.
+    """
+    if sys.platform != "darwin" or line_edit is None:
+        return
+    if os.environ.get("RAWVIEWER_MACOS_LINEEDIT_COMPLETION", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    ):
+        return
+    try:
+        line_edit.setInputMethodHints(Qt.InputMethodHint.ImhNoPredictiveText)
+    except Exception:
+        pass
+    try:
+        import objc
+        from ctypes import c_void_p
+    except ImportError:
+        return
+    try:
+        view_ptr = int(line_edit.winId())
+        if not view_ptr:
+            return
+        view = objc.objc_object(c_void_p=view_ptr)
+        stack = [view]
+        seen: set[int] = set()
+        while stack:
+            node = stack.pop()
+            node_id = int(node) if node is not None else 0
+            if node_id and node_id in seen:
+                continue
+            if node_id:
+                seen.add(node_id)
+            _macos_apply_ns_text_completion_off(node)
+            try:
+                subs = list(node.subviews() or [])
+            except Exception:
+                subs = []
+            stack.extend(subs)
+            try:
+                parent = node.superview()
+                if parent is not None:
+                    stack.append(parent)
+            except Exception:
+                pass
+        try:
+            if view.respondsToSelector_("window"):
+                win = view.window()
+                if win is not None and win.respondsToSelector_("fieldEditor:forObject:"):
+                    editor = win.fieldEditor_forObject_(True, view)
+                    if editor is not None:
+                        _macos_apply_ns_text_completion_off(editor)
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+
+def _macos_schedule_line_edit_system_completion_off(line_edit, delay_ms: int = 0) -> None:
+    """Apply _macos_disable_line_edit_system_completion after winId() is valid."""
+    if sys.platform != "darwin" or line_edit is None:
+        return
+
+    def _apply() -> None:
+        _macos_disable_line_edit_system_completion(line_edit)
+
+    QTimer.singleShot(max(0, int(delay_ms)), _apply)
+
+
+class _MacLineEditCompletionGuard(QObject):
+    """Re-disable AppKit text completion when the Qt line edit is shown or focused."""
+
+    def eventFilter(self, watched, event):
+        try:
+            if event.type() in (
+                QEvent.Type.FocusIn,
+                QEvent.Type.Show,
+                QEvent.Type.Polish,
+                QEvent.Type.WindowActivate,
+            ):
+                _macos_disable_line_edit_system_completion(watched)
+        except Exception:
+            pass
+        return False
+
+
+def _macos_install_line_edit_completion_guard(line_edit) -> None:
+    """Install focus/show hooks plus wake-from-sleep re-apply for a QLineEdit."""
+    if sys.platform != "darwin" or line_edit is None:
+        return
+    if os.environ.get("RAWVIEWER_MACOS_LINEEDIT_COMPLETION", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    ):
+        return
+    _macos_completion_guarded_edits.add(line_edit)
+    guard = getattr(line_edit, "_macos_completion_guard", None)
+    if guard is None:
+        guard = _MacLineEditCompletionGuard(line_edit)
+        line_edit._macos_completion_guard = guard
+        line_edit.installEventFilter(guard)
+    for delay in (0, 50, 250, 500):
+        _macos_schedule_line_edit_system_completion_off(line_edit, delay)
+    app = QApplication.instance()
+    if app is not None and not getattr(app, "_macos_completion_reapply_hook", False):
+        app._macos_completion_reapply_hook = True
+
+        def _reapply_on_app_active(state) -> None:
+            if state != Qt.ApplicationState.ApplicationActive:
+                return
+            for edit in list(_macos_completion_guarded_edits):
+                _macos_disable_line_edit_system_completion(edit)
+
+        app.applicationStateChanged.connect(_reapply_on_app_active)
+
+
+def _dismiss_startup_splash(app, main_window=None, splash=None) -> None:
+    """Force-hide startup splash. macOS often keeps stay-on-top splash visible after finish()."""
+    global _startup_splash
+    close_native_splash()
+    splash_widgets: list = []
+    for candidate in (splash, _startup_splash):
+        if candidate is not None and candidate not in splash_widgets:
+            splash_widgets.append(candidate)
+    try:
+        for top_level in QApplication.topLevelWidgets():
+            if isinstance(top_level, QSplashScreen) and top_level not in splash_widgets:
+                splash_widgets.append(top_level)
+    except Exception:
+        pass
+    for sp in splash_widgets:
+        try:
+            flags = sp.windowFlags()
+            flags &= ~Qt.WindowType.WindowStaysOnTopHint
+            sp.setWindowFlags(flags)
+            sp.hide()
+            if main_window is not None:
+                try:
+                    sp.finish(main_window)
+                except Exception:
+                    pass
+            sp.close()
+            sp.deleteLater()
+        except Exception:
+            pass
+    _startup_splash = None
+    if app is not None:
+        try:
+            app.processEvents()
+        except Exception:
+            pass
+    if main_window is not None:
+        try:
+            main_window.show()
+            main_window.raise_()
+            main_window.activateWindow()
+            if app is not None:
+                app.processEvents()
+        except Exception:
+            pass
+    if sys.platform == "darwin" and main_window is not None:
+        try:
+            import objc
+            from ctypes import c_void_p
+
+            ns_app = objc.lookUpClass("NSApplication").sharedApplication()
+            if ns_app is not None:
+                ns_app.setActivationPolicy_(0)
+                ns_app.activateIgnoringOtherApps_(True)
+            wh = main_window.windowHandle()
+            if wh is not None:
+                view = objc.objc_object(c_void_p=int(wh.winId()))
+                win = view.window()
+                if win is not None:
+                    win.makeKeyAndOrderFront_(None)
+        except Exception:
+            pass
+
+
+def _schedule_startup_splash_dismiss(app, main_window, splash) -> None:
+    """Dismiss splash now and again after event-loop ticks (macOS can lag finish())."""
+    _dismiss_startup_splash(app, main_window, splash)
+    for delay_ms in (0, 50, 150, 400):
+        QTimer.singleShot(
+            delay_ms,
+            lambda mw=main_window, a=app: _dismiss_startup_splash(a, mw, None),
+        )
+
 
 # Heavy third-party imports moved to lazy-loading to speed up splash display
 # (Globals are initialized at the top of the file)
@@ -2396,6 +2661,38 @@ class SemanticIndexPrepSignals(QObject):
     """Signal carrier for background semantic index prep (coverage + pending checks)."""
     done = pyqtSignal(object, object, int)        # coverage dict, pending list, face_pending count
     error = pyqtSignal(str)                       # error message
+
+class ReleaseUpdateCheckSignals(QObject):
+    """Signal carrier for background GitHub release version check."""
+    finished = pyqtSignal(dict)
+
+
+class _ReleaseUpdateCheckWorker(QRunnable):
+    """Fetch latest GitHub release tag and compare to the running app version."""
+
+    def __init__(self, signals: ReleaseUpdateCheckSignals, *, timeout: float = 5.0):
+        super().__init__()
+        self.signals = signals
+        self.timeout = float(timeout)
+
+    def run(self) -> None:
+        from release_update import check_for_update
+
+        try:
+            result = check_for_update(timeout=self.timeout)
+        except Exception:
+            result = {
+                "current": "",
+                "latest": "",
+                "is_latest": True,
+                "update_available": False,
+                "release_url": "",
+                "release_name": "",
+                "published_at": "",
+                "offline": True,
+                "error": "",
+            }
+        self.signals.finished.emit(result)
 
 class _SemanticIndexPrepWorker(QRunnable):
     """Background task to prepare semantic index build (coverage & pending scans)."""
@@ -6460,6 +6757,9 @@ class RAWImageViewer(QMainWindow):
         self.fit_to_window = True  # Whether we're in fit-to-window mode
         self.zoom_center_point = None  # Store center point for zooming
         self._pending_zoom_focus_subject = False  # Space+focus box zoom waiting for full-res
+        self._focus_zoom_anchor_active = False  # Keep focus anchor across buffer upgrades
+        self._workflow_toggle_fit_until_display = False
+        self._workflow_toggle_refit_timer_scheduled = False
 
         self._is_half_size_displayed = False  # Track if currently displaying half_size image
         self._full_resolution_loading = False  # Track if full resolution is being loaded
@@ -6654,6 +6954,13 @@ class RAWImageViewer(QMainWindow):
                     self._show_gallery_view()
         else:
             safe_print("  [RAWImageViewer] Session restore skipped (RAWVIEWER_DISABLE_SESSION_RESTORE)", flush=True)
+        if os.environ.get("RAWVIEWER_UPDATE_CHECK_DELAY_MS"):
+            update_delay_ms = _env_int("RAWVIEWER_UPDATE_CHECK_DELAY_MS", 12000, minimum=0)
+        elif os.environ.get("RAWVIEWER_MOCK_UPDATE_VERSION", "").strip():
+            update_delay_ms = 1500
+        else:
+            update_delay_ms = 12000
+        QTimer.singleShot(update_delay_ms, self._check_for_updates_on_launch)
         safe_print("  [RAWImageViewer] Initialization complete!", flush=True)
 
     def _set_single_view_pixmap(self, base: QPixmap) -> None:
@@ -6829,17 +7136,28 @@ class RAWImageViewer(QMainWindow):
             min_dim = 1024
         else:
             min_dim = self._single_view_cache_min_dim(for_navigation=for_navigation)
+        allow_sensor = bool(
+            for_navigation
+            and file_path
+            and use_libraw_consistent_preview_first()
+            and is_raw_file(file_path)
+        )
         return self._cache_buffer_suitable_for_single_view(
-            image, min_dim=min_dim, file_path=file_path
+            image,
+            min_dim=min_dim,
+            file_path=file_path,
+            allow_sensor_resolution=allow_sensor,
         )
 
     def _cache_buffer_suitable_for_single_view(
-        self, image, *, min_dim: int | None = None, file_path: str | None = None
+        self, image, *, min_dim: int | None = None, file_path: str | None = None,
+        allow_sensor_resolution: bool = False,
     ) -> bool:
         """Reject gallery grid-tier disk previews (~512px); wait for embedded thumbnail/full.
 
         Sensor-resolution buffers in the preview cache are also rejected so EXIF-ready
         does not replace a fast 1920px first frame with a full LibRaw decode.
+        Navigation may allow LibRaw half-res buffers when RAW workflow is active.
         """
         if image is None:
             return False
@@ -6847,7 +7165,11 @@ class RAWImageViewer(QMainWindow):
             min_dim = self._single_view_cache_min_dim(for_navigation=False)
         if self._cache_buffer_max_dim(image) < int(min_dim):
             return False
-        if file_path and image_covers_sensor_resolution is not None:
+        if (
+            not allow_sensor_resolution
+            and file_path
+            and image_covers_sensor_resolution is not None
+        ):
             try:
                 w = h = 0
                 if hasattr(image, "shape"):
@@ -6951,7 +7273,10 @@ class RAWImageViewer(QMainWindow):
         logger = logging.getLogger(__name__)
         if image is None:
             return False
-        if self._already_displaying_buffer_for_path(file_path, image):
+        if (
+            not getattr(self, "_skip_resolution_downgrade_check", False)
+            and self._already_displaying_buffer_for_path(file_path, image)
+        ):
             logger.info(
                 f"[LOAD] Skipping redundant cache redraw for {os.path.basename(file_path)} "
                 f"(already on screen)"
@@ -6974,10 +7299,11 @@ class RAWImageViewer(QMainWindow):
             self._gallery_preview_pending_full = False
         try:
             self.display_numpy_image(image)
+            self._skip_resolution_downgrade_check = False
             self._on_single_view_content_displayed()
         finally:
             self._orientation_already_applied = False
-        self.setFocus()
+        self._restore_single_view_keyboard_focus()
         self.save_session_state()
         try:
             if self.image_files and file_path in self.image_files:
@@ -7384,9 +7710,11 @@ class RAWImageViewer(QMainWindow):
         should_upgrade = self._needs_full_resolution_upgrade()
 
         if getattr(self, "gpu_view", None) is not None:
-            if should_upgrade and self._defer_zoom_until_full_or_apply():
-                return
             self._gpu_zoom_in_to_point_finish()
+            if should_upgrade:
+                self._queue_sensor_full_decode(
+                    self.current_file_path, priority_current=True
+                )
             return
 
         if should_upgrade:
@@ -7528,7 +7856,12 @@ class RAWImageViewer(QMainWindow):
         gv.zoom_to_actual_at(float(pt.x()), float(pt.y()))
         self.fit_to_window = False
         self.current_zoom_level = float(gv.current_scale())
-        self._pending_zoom_focus_subject = False
+        if getattr(self, "_pending_zoom_focus_subject", False) or getattr(
+            self, "_focus_zoom_anchor_active", False
+        ):
+            self._focus_zoom_anchor_active = True
+        else:
+            self._pending_zoom_focus_subject = False
         self._gpu_request_full_resolution_if_needed()
         self.update_status_bar()
 
@@ -7564,9 +7897,11 @@ class RAWImageViewer(QMainWindow):
         elif gv.wants_zoom_in_toggle():
             self._recenter_on_focus_after_nav = False
             self.zoom_center_point = QPoint(int(scene_pt.x()), int(scene_pt.y()))
-            if self._defer_zoom_until_full_or_apply():
-                return
-            self._zoom_in_to_image_point_finish()
+            self._gpu_zoom_in_to_point_finish()
+            if self._needs_full_resolution_upgrade():
+                self._queue_sensor_full_decode(
+                    self.current_file_path, priority_current=True
+                )
         else:
             gv.fit_to_window()
             self.fit_to_window = True
@@ -7587,6 +7922,7 @@ class RAWImageViewer(QMainWindow):
         self._recenter_on_focus_after_nav = False
         self.zoom_center_point = QPoint(cx, cy)
         self._pending_zoom_focus_subject = True
+        self._focus_zoom_anchor_active = True
         gv = getattr(self, "gpu_view", None)
         if gv is not None and gv.has_pixmap():
             if gv.is_fit_mode():
@@ -7614,11 +7950,12 @@ class RAWImageViewer(QMainWindow):
         )
         if self._focus_subject_outline_active:
             self._refresh_focus_subject_rect_from_exif()
-            self.status_bar.showMessage(
-                "Focus outline ON — amber dashed = maker AF; lime = Subject / CIPA. "
-                "From fit: Space centers on the box; double-click zooms to the click. F = off.",
-                6500,
-            )
+            if getattr(self, "_focus_subject_rect_image", None):
+                self.status_bar.showMessage(
+                    "Focus outline ON — amber dashed = maker AF; lime = Subject / CIPA. "
+                    "From fit: Space centers on the box; double-click zooms to the click. F = off.",
+                    6500,
+                )
             self._redraw_single_view_pixmap_without_relayout()
         else:
             self._focus_subject_rect_image = None
@@ -7716,20 +8053,132 @@ class RAWImageViewer(QMainWindow):
             return QPoint(pending.x(), pending.y())
         return QPoint(pixmap.width() // 2, pixmap.height() // 2)
 
+    def _pixmap_size_changed(self, old_pm, new_pm) -> bool:
+        if old_pm is None or new_pm is None or old_pm.isNull() or new_pm.isNull():
+            return False
+        return old_pm.size() != new_pm.size()
+
+    def _should_reanchor_focus_on_pixmap_upgrade(self, pixmap) -> bool:
+        if getattr(self, "_workflow_toggle_fit_until_display", False):
+            return False
+        if self._single_view_is_fit_mode():
+            return False
+        if getattr(self, "_focus_zoom_anchor_active", False):
+            return True
+        if getattr(self, "_pending_zoom_focus_subject", False):
+            return True
+        if getattr(self, "_pending_zoom", False) and getattr(
+            self, "zoom_center_point", None
+        ) is not None:
+            return True
+        return False
+
+    def _focus_zoom_target_for_pixmap(self, pixmap) -> QPoint | None:
+        """Image-pixel zoom anchor for *pixmap* (focus box preferred when active)."""
+        if pixmap is None or pixmap.isNull():
+            return None
+        if getattr(self, "_focus_subject_outline_active", False) or getattr(
+            self, "_focus_zoom_anchor_active", False
+        ):
+            self._refresh_focus_subject_rect_from_exif()
+            rect = getattr(self, "_focus_subject_rect_image", None)
+            if (
+                rect is not None
+                and not rect.isNull()
+                and rect.width() >= 1
+                and rect.height() >= 1
+            ):
+                return QPoint(
+                    rect.left() + rect.width() // 2,
+                    rect.top() + rect.height() // 2,
+                )
+        zcp = getattr(self, "zoom_center_point", None)
+        old_pm = getattr(self, "current_pixmap", None)
+        if zcp is not None and old_pm is not None and not old_pm.isNull():
+            ow, oh = old_pm.width(), old_pm.height()
+            nw, nh = pixmap.width(), pixmap.height()
+            if ow > 0 and oh > 0 and (ow != nw or oh != nh):
+                return QPoint(
+                    int(zcp.x() * nw / ow),
+                    int(zcp.y() * nh / oh),
+                )
+        if zcp is not None:
+            return QPoint(zcp)
+        return QPoint(max(0, pixmap.width() // 2), max(0, pixmap.height() // 2))
+
+    def _clear_focus_zoom_anchor(self) -> None:
+        self._focus_zoom_anchor_active = False
+        self._pending_zoom_focus_subject = False
+
+    def _finish_focus_zoom_anchor_if_sensor_res(self) -> None:
+        if not self._needs_full_resolution_upgrade():
+            self._clear_focus_zoom_anchor()
+
+    def _apply_gpu_pixmap_with_focus_anchor(
+        self, gv, pixmap: QPixmap, *, preserve: bool
+    ) -> None:
+        """Swap the GPU pixmap without losing a focus-box or pending zoom anchor."""
+        reanchor = self._should_reanchor_focus_on_pixmap_upgrade(pixmap)
+        old_pm = getattr(self, "current_pixmap", None)
+        size_changed = self._pixmap_size_changed(old_pm, pixmap)
+
+        if reanchor and size_changed:
+            target = self._focus_zoom_target_for_pixmap(pixmap)
+            if target is not None:
+                scale = float(gv.current_scale()) if gv.has_pixmap() else 1.0
+                if getattr(gv, "_zoom_intent_100", False) or scale >= 1.0 - 1e-4:
+                    scale = max(scale, 1.0)
+                gv.set_pixmap_zoomed_at(
+                    pixmap,
+                    float(target.x()),
+                    float(target.y()),
+                    scale=scale,
+                )
+                self.zoom_center_point = target
+                self.fit_to_window = False
+                self.current_zoom_level = float(gv.current_scale())
+                self._finish_focus_zoom_anchor_if_sensor_res()
+                return
+
+        gv.set_pixmap(pixmap, preserve_view=True if preserve else None)
+        if reanchor:
+            target = self._focus_zoom_target_for_pixmap(pixmap)
+            if target is not None:
+                gv.center_on_image_point(float(target.x()), float(target.y()))
+                self.zoom_center_point = target
+                self._finish_focus_zoom_anchor_if_sensor_res()
+
     def _clear_pending_point_zoom_state(self) -> None:
         self._pending_zoom = False
         self._pending_zoom_center = None
         self._pending_zoom_thumbnail_size = None
-        self._pending_zoom_focus_subject = False
+        if not getattr(self, "_focus_zoom_anchor_active", False):
+            self._pending_zoom_focus_subject = False
         gv = getattr(self, "gpu_view", None)
         if gv is not None:
             gv._zoom_intent_100 = False
 
-    def _apply_pending_gpu_point_zoom_in_place(self, pixmap, gv) -> bool:
-        """Swap to full pixmap and zoom to the pending target in one step (no corner flash)."""
+    def _pending_zoom_ready_for_pixmap(self, pixmap, file_path) -> bool:
+        """True when a pending Space/double-click zoom may commit on this buffer."""
         if not getattr(self, "_pending_zoom", False):
             return False
-        if getattr(self, "_full_resolution_loading", False):
+        if not getattr(self, "_full_resolution_loading", False):
+            return True
+        if pixmap is None or pixmap.isNull() or not file_path:
+            return False
+        try:
+            exif = self.image_cache.get_exif(file_path)
+            return image_covers_sensor_resolution(
+                pixmap.width(), pixmap.height(), exif
+            )
+        except Exception:
+            return max(pixmap.width(), pixmap.height()) >= 3000
+
+    def _apply_pending_gpu_point_zoom_in_place(self, pixmap, gv) -> bool:
+        """Swap to full pixmap and zoom to the pending target in one step (no corner flash)."""
+        if not self._pending_zoom_ready_for_pixmap(
+            pixmap, getattr(self, "current_file_path", None)
+        ):
             return False
         target = self._resolve_pending_zoom_center_for_pixmap(pixmap)
         if target is None:
@@ -7744,7 +8193,11 @@ class RAWImageViewer(QMainWindow):
         self.zoom_center_point = target
         self.fit_to_window = False
         self.current_zoom_level = float(gv.current_scale())
+        focus_zoom = getattr(self, "_pending_zoom_focus_subject", False)
         self._clear_pending_point_zoom_state()
+        if focus_zoom or getattr(self, "_focus_zoom_anchor_active", False):
+            self._focus_zoom_anchor_active = True
+        self._finish_focus_zoom_anchor_if_sensor_res()
         return True
 
     def _gpu_zoom_anchor_for_navigation_restore(self) -> QPoint:
@@ -7959,6 +8412,15 @@ class RAWImageViewer(QMainWindow):
             return None
         return container.filmstrip_widget()
 
+    def _navigate_single_view_step(self, delta: int) -> None:
+        """Prev/next in single view (filmstrip hotzone or main image list)."""
+        if self._filmstrip_handles_input():
+            bar = self._filmstrip_bar()
+            if bar:
+                bar.move_selection(delta)
+                return
+        self._debounced_navigate("prev" if delta < 0 else "next")
+
     def _filmstrip_handles_input(self) -> bool:
         if getattr(self, "view_mode", "single") != "single":
             return False
@@ -8086,7 +8548,7 @@ class RAWImageViewer(QMainWindow):
                 preview.shape[1], preview.shape[0], exif
             ):
                 return
-            if self.image_cache.get_full_image(file_path) is not None:
+            if self._cached_full_covers_sensor(file_path):
                 return
             from image_load_manager import Priority as _Priority
 
@@ -8096,6 +8558,7 @@ class RAWImageViewer(QMainWindow):
                 cancel_existing=False,
                 use_full_resolution=True,
                 stages={"full"},
+                bypass_cache=not self._cached_full_covers_sensor(file_path),
             )
         except Exception:
             pass
@@ -8523,7 +8986,11 @@ class RAWImageViewer(QMainWindow):
         # Late thumbnail_ready after preview/full was already shown causes deep re-entrant
         # display + status updates and can trigger RecursionError inside logging.
         shown_max = getattr(self, "_manager_displayed_max_dim", 0)
-        if max_dim > 0 and shown_max >= max_dim:
+        if (
+            not getattr(self, "_skip_resolution_downgrade_check", False)
+            and max_dim > 0
+            and shown_max >= max_dim
+        ):
             logger.debug(
                 f"[MANAGER] Skipping stale thumbnail ({max_dim}px max); "
                 f"already displayed {shown_max}px for this file"
@@ -8667,6 +9134,7 @@ class RAWImageViewer(QMainWindow):
                     self.display_numpy_image(thumbnail)
 
                 self._on_single_view_content_displayed()
+                self._skip_resolution_downgrade_check = False
 
                 self._manager_displayed_max_dim = max(
                     getattr(self, "_manager_displayed_max_dim", 0), max_dim
@@ -8709,11 +9177,16 @@ class RAWImageViewer(QMainWindow):
             )
             return
 
-        if self._already_displaying_buffer_for_path(file_path, image):
-            logger.debug(
-                f"[MANAGER] Skipping redundant image_ready for "
-                f"{os.path.basename(file_path)} (already on screen)"
+        if (
+            not getattr(self, "_skip_resolution_downgrade_check", False)
+            and self._already_displaying_buffer_for_path(file_path, image)
+        ):
+            logger.info(
+                "[MANAGER] Skipping redundant image_ready for %s (already on screen)",
+                os.path.basename(file_path),
             )
+            self._full_resolution_loading = False
+            self._finish_pending_zoom_after_full_load(file_path)
             return
             
         # Check resolution to see if this is "Full" or "Preview"
@@ -8752,7 +9225,7 @@ class RAWImageViewer(QMainWindow):
             )
             self._orientation_already_applied = False
             return
-        
+
         if is_full_resolution:
             logger.info(f"[MANAGER] Full-resolution pixels loaded ({width}x{height}).")
             self._full_resolution_loading = False
@@ -8790,6 +9263,8 @@ class RAWImageViewer(QMainWindow):
             logger.info(f"[MANAGER] Ignoring lower-resolution preview ({width}x{height}) as higher-resolution image ({current_max_dim}px) is already displayed.")
             # Still update status bar and focus if needed, but don't redisplay
             self._orientation_already_applied = False
+            self._full_resolution_loading = False
+            self._finish_pending_zoom_after_full_load(file_path)
             return
 
         if (
@@ -8884,7 +9359,8 @@ class RAWImageViewer(QMainWindow):
         # full-size pixmap through display_numpy_image() cache fast-path just moments earlier.
         displayed_for = getattr(self, "_displayed_content_path", None)
         if (
-            displayed_for is not None
+            not getattr(self, "_skip_resolution_downgrade_check", False)
+            and displayed_for is not None
             and _norm_path(displayed_for) == _norm_path(file_path)
             and self.current_pixmap is not None
             and not self.current_pixmap.isNull()
@@ -8902,6 +9378,7 @@ class RAWImageViewer(QMainWindow):
             return
         
         self.display_pixmap(pixmap)
+        self._skip_resolution_downgrade_check = False
         self._on_single_view_content_displayed()
         pm_max = max(pixmap.width(), pixmap.height())
         self._manager_displayed_max_dim = max(
@@ -9498,11 +9975,10 @@ class RAWImageViewer(QMainWindow):
         self.single_image_histogram = ImageHistogramWidget()
         self._histogram_overlay_visible = True
 
-        # Route B: optional GPU-accelerated single-image view (QGraphicsView + OpenGL).
-        # Opt-in via RAWVIEWER_GPU_VIEW=1. The legacy QScrollArea/QLabel path is kept
-        # intact as the default and as a fallback.
+        # Route B: GPU-accelerated single-image view (QGraphicsView + OpenGL).
+        # On by default; set RAWVIEWER_GPU_VIEW=0 for the legacy QScrollArea/QLabel path.
         self.gpu_view = None
-        if _env_true("RAWVIEWER_GPU_VIEW", default=False):
+        if _env_true("RAWVIEWER_GPU_VIEW", default=True):
             try:
                 from rawviewer_ui.gpu_image_view import GpuImageView
                 self.gpu_view = GpuImageView()
@@ -9512,6 +9988,7 @@ class RAWImageViewer(QMainWindow):
                 self.gpu_view.fitModeChanged.connect(self._on_gpu_fit_mode_changed)
                 self.gpu_view.zoomChanged.connect(self._on_gpu_zoom_changed)
                 self.gpu_view.doubleClickedAt.connect(self._on_gpu_double_clicked)
+                self.gpu_view._shortcut_handler = self._handle_app_shortcut
             except Exception as _gpu_exc:
                 import logging
                 logging.getLogger(__name__).warning(
@@ -9792,6 +10269,7 @@ class RAWImageViewer(QMainWindow):
         self.gallery_search_input.setAttribute(
             Qt.WidgetAttribute.WA_MacShowFocusRect, False
         )
+        _macos_install_line_edit_completion_guard(self.gallery_search_input)
         self.gallery_search_input.returnPressed.connect(self._semantic_search_from_bar)
         self.gallery_search_input.textChanged.connect(self._on_gallery_search_text_changed)
 
@@ -9911,6 +10389,7 @@ class RAWImageViewer(QMainWindow):
         # v2.1-style filters: image scroll + optional GPU view only (no status bar / container).
         self.scroll_area.installEventFilter(self)
         self.image_label.installEventFilter(self)
+        self.single_view_container.installEventFilter(self)
         if self.gpu_view is not None:
             self.gpu_view.setMouseTracking(True)
             self.gpu_view.viewport().setMouseTracking(True)
@@ -9929,6 +10408,15 @@ class RAWImageViewer(QMainWindow):
         self._shortcut_toggle_focus_subject_outline.activated.connect(
             self._toggle_focus_subject_outline
         )
+
+        # Arrow keys must work when the GPU OpenGL viewport (or other NoFocus
+        # children) holds focus; WindowShortcut matches the F-key pattern.
+        self._shortcut_nav_prev = QShortcut(QKeySequence(Qt.Key.Key_Left), self)
+        self._shortcut_nav_prev.setContext(Qt.ShortcutContext.WindowShortcut)
+        self._shortcut_nav_prev.activated.connect(self._shortcut_activate_nav_prev)
+        self._shortcut_nav_next = QShortcut(QKeySequence(Qt.Key.Key_Right), self)
+        self._shortcut_nav_next.setContext(Qt.ShortcutContext.WindowShortcut)
+        self._shortcut_nav_next.activated.connect(self._shortcut_activate_nav_next)
 
         self._sync_single_image_histogram()
 
@@ -10007,6 +10495,75 @@ class RAWImageViewer(QMainWindow):
         self.addAction(self.reveal_action)
         self.addAction(exit_action)
         self.addAction(shortcuts_action)
+
+    def _check_for_updates_on_launch(self) -> None:
+        """Silent background release check once per app launch (opt-out: RAWVIEWER_SKIP_UPDATE_CHECK=1)."""
+        if _env_true("RAWVIEWER_SKIP_UPDATE_CHECK"):
+            return
+        if getattr(self, "_release_update_launch_check_done", False):
+            return
+        self._release_update_launch_check_done = True
+        self._run_release_update_check()
+
+    def _run_release_update_check(self) -> None:
+        if getattr(self, "_release_update_check_in_progress", False):
+            return
+        self._release_update_check_in_progress = True
+        signals = ReleaseUpdateCheckSignals()
+        self._release_update_check_signals = signals
+        signals.finished.connect(self._on_release_update_check_finished)
+        QThreadPool.globalInstance().start(_ReleaseUpdateCheckWorker(signals))
+
+    def _show_release_update_available_dialog(
+        self, current: str, latest: str, release_url: str
+    ) -> bool:
+        """Return True when the user chose Not Now (or dismissed), False after Open Download Page."""
+        from release_update import RELEASE_PAGE_URL
+        from rawviewer_ui.release_update_dialog import ReleaseUpdateDialog
+
+        url = (release_url or RELEASE_PAGE_URL).strip() or RELEASE_PAGE_URL
+        dialog = ReleaseUpdateDialog(
+            self,
+            current=current,
+            latest=latest,
+            release_url=url,
+        )
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            QDesktopServices.openUrl(QUrl(dialog.release_url))
+            return False
+        return True
+
+    def _on_release_update_check_finished(self, result: dict) -> None:
+        self._release_update_check_in_progress = False
+        result = result or {}
+        if result.get("offline") or str(result.get("error") or "").strip():
+            return
+
+        if not result.get("update_available"):
+            return
+
+        current = str(result.get("current") or "").strip()
+        latest = str(result.get("latest") or "").strip()
+        if not latest:
+            return
+
+        settings = self.get_settings()
+        snoozed_version = str(settings.value("update_check/snoozed_version", "") or "").strip()
+        snooze_until = float(settings.value("update_check/snooze_until_epoch", 0) or 0)
+        if snoozed_version and time.time() < snooze_until:
+            from release_update import compare_version_labels
+
+            if compare_version_labels(latest, snoozed_version) <= 0:
+                return
+
+        release_url = str(result.get("release_url") or "").strip()
+        dismissed = self._show_release_update_available_dialog(current, latest, release_url)
+        if dismissed:
+            settings.setValue("update_check/snoozed_version", latest)
+            settings.setValue(
+                "update_check/snooze_until_epoch",
+                int(time.time() + 14 * 86400),
+            )
 
     def _get_semantic_index(self):
         if SemanticImageIndex is None:
@@ -10599,6 +11156,8 @@ class RAWImageViewer(QMainWindow):
             self._search_panel_target_width, animate=False
         )
         self._sync_gallery_search_input_editable()
+        if hasattr(self, "gallery_search_input") and self.gallery_search_input is not None:
+            _macos_install_line_edit_completion_guard(self.gallery_search_input)
 
     def _switch_to_gallery_for_search(self):
         """Enter gallery mode to show semantic search results or empty state."""
@@ -12029,79 +12588,128 @@ class RAWImageViewer(QMainWindow):
             # Currently sorting by oldest, switch to newest
             self.toggle_sort_by_newest()
     
+    def _reset_view_for_workflow_toggle(self) -> None:
+        """Drop stale zoom anchors and fit before RAW↔JPEG reload."""
+        self._clear_focus_zoom_anchor()
+        self._pending_zoom = False
+        self._pending_zoom_center = None
+        self._pending_zoom_thumbnail_size = None
+        self._pending_zoom_toggle = False
+        if hasattr(self, "_pending_zoom_target_path"):
+            try:
+                delattr(self, "_pending_zoom_target_path")
+            except AttributeError:
+                pass
+        self.zoom_center_point = None
+        self.fit_to_window = True
+        if hasattr(self, "_maintain_zoom_on_navigation"):
+            try:
+                delattr(self, "_maintain_zoom_on_navigation")
+            except AttributeError:
+                pass
+        gv = getattr(self, "gpu_view", None)
+        if gv is not None:
+            gv._zoom_intent_100 = False
+            if gv.has_pixmap():
+                gv.fit_to_window()
+        self._workflow_toggle_fit_until_display = True
+        self._workflow_toggle_refit_timer_scheduled = False
+
+    def _schedule_workflow_toggle_fit_complete(self) -> None:
+        """Keep fit-to-window across all async paints from a RAW↔JPEG toggle."""
+        if getattr(self, "_workflow_toggle_refit_timer_scheduled", False):
+            return
+        self._workflow_toggle_refit_timer_scheduled = True
+        from PyQt6.QtCore import QTimer
+
+        def _done() -> None:
+            self._workflow_toggle_refit_timer_scheduled = False
+            self._workflow_toggle_fit_until_display = False
+            self._skip_resolution_downgrade_check = False
+
+        QTimer.singleShot(300, _done)
+
     def toggle_raw_jpeg_workflow(self):
         """Toggle between embedded JPEG and raw image workflows."""
+        if getattr(self, "view_mode", "single") != "single":
+            return
         settings = self.get_settings()
         current_value = settings.value("use_embedded_jpeg_workflow", True, type=bool)
         new_value = not current_value
         settings.setValue("use_embedded_jpeg_workflow", new_value)
-        
-        # Clear all image caches so everything is reloaded with the new pipeline
-        self.image_cache.full_image_cache.clear()
-        self.image_cache.preview_cache.clear()
-        self.image_cache.pixmap_cache.clear()
-        self.image_cache.grid_cache.clear()
-        
-        self.image_cache.disk_preview_cache.clear()
-        self.image_cache.disk_grid_cache.clear()
-        
-        # Also invalidate current file specifically to clear it from EXIF memory + disk caches
-        if self.current_file_path:
-            self.image_cache.invalidate_file(self.current_file_path)
-            self.image_cache.exif_cache.remove(self.current_file_path)
-        
+        self._invalidate_workflow_pixel_caches()
         self._skip_resolution_downgrade_check = True
-        
-        # Update the button's icon/text/tooltip
         self._update_raw_toggle_button_state()
-        
-        # Trigger reload of the current image
         if self.current_file_path:
-            self.load_raw_image(self.current_file_path, force_reload=True)
+            self._reset_view_for_workflow_toggle()
+            try:
+                self.image_manager.cancel_task(self.current_file_path)
+            except Exception:
+                pass
+            self._manager_displayed_max_dim = 0
+            self._displayed_content_path = None
+            self._gpu_last_path = None
+            norm_cur = _norm_path(self.current_file_path)
+            if hasattr(self, "_file_max_dim_map") and norm_cur in self._file_max_dim_map:
+                del self._file_max_dim_map[norm_cur]
+            self._preview_upgrade_attempted_paths.discard(norm_cur)
+            self._single_view_display_generation = int(
+                getattr(self, "_single_view_display_generation", 0)
+            ) + 1
+            self._workflow_toggle_reload = True
+            try:
+                self.load_raw_image(self.current_file_path, force_reload=True)
+            finally:
+                self._workflow_toggle_reload = False
+
+    def _invalidate_workflow_pixel_caches(self, paths=None) -> None:
+        """Drop display-tier pixel caches that depend on RAW vs embedded workflow."""
+        targets = list(paths or getattr(self, "image_files", []) or [])
+        cur = getattr(self, "current_file_path", None)
+        if cur and cur not in targets:
+            targets.append(cur)
+        cache = self.image_cache
+        for fp in targets:
+            if not fp:
+                continue
+            try:
+                if not is_raw_file(fp):
+                    continue
+            except Exception:
+                continue
+            cache.thumbnail_cache.remove(fp)
+            cache.preview_cache.remove(fp)
+            cache.full_image_cache.remove(fp)
+            cache.pixmap_cache.remove(fp)
+            cache.disk_preview_cache.remove(fp)
+            cache.disk_thumbnail_cache.remove(fp)
 
     def _update_raw_toggle_button_state(self):
         """Update the text, tooltip and styling of the RAW/JPEG toggle button."""
         if not hasattr(self, "raw_toggle_button"):
             return
-        
-        from PyQt6.QtGui import QIcon
+
+        from PyQt6.QtGui import QFont, QIcon
+
         self.raw_toggle_button.setIcon(QIcon())
         self.raw_toggle_button.setText("RAW")
-        
+
         settings = self.get_settings()
         use_embedded = settings.value("use_embedded_jpeg_workflow", True, type=bool)
-        
+
+        btn_font = self.raw_toggle_button.font()
+        btn_font.setBold(not use_embedded)
+        self.raw_toggle_button.setFont(btn_font)
+
         if use_embedded:
-            self.raw_toggle_button.setToolTip("Embedded JPEG workflow (Fast)\nClick to toggle to RAW image workflow (High Quality)")
+            self.raw_toggle_button.setToolTip(
+                "Embedded JPEG workflow (Fast)\nClick to toggle to RAW image workflow (High Quality)"
+            )
             self.raw_toggle_button.setStyleSheet("""
                 QPushButton {
-                    color: #757575;
-                    font-size: 13px;
-                    font-weight: 700;
-                    padding: 4px 8px;
-                    border: none;
-                    background: transparent;
-                    text-align: center;
-                    letter-spacing: 0.5px;
-                    min-height: 28px;
-                    max-height: 28px;
-                }
-                QPushButton:hover {
                     color: #B0B0B0;
-                    background-color: rgba(255, 255, 255, 0.05);
-                    border-radius: 4px;
-                }
-                QPushButton:pressed {
-                    background-color: rgba(255, 255, 255, 0.1);
-                }
-            """)
-        else:
-            self.raw_toggle_button.setToolTip("RAW workflow (High Quality)\nClick to toggle to Embedded JPEG workflow (Fast)")
-            self.raw_toggle_button.setStyleSheet("""
-                QPushButton {
-                    color: #FFFFFF;
                     font-size: 13px;
-                    font-weight: 800;
+                    font-weight: 500;
                     padding: 4px 8px;
                     border: none;
                     background: transparent;
@@ -12117,6 +12725,33 @@ class RAWImageViewer(QMainWindow):
                 }
                 QPushButton:pressed {
                     background-color: rgba(255, 255, 255, 0.1);
+                }
+            """)
+        else:
+            self.raw_toggle_button.setToolTip(
+                "RAW workflow (High Quality)\nClick to toggle to Embedded JPEG workflow (Fast)"
+            )
+            self.raw_toggle_button.setStyleSheet("""
+                QPushButton {
+                    color: #FFFFFF;
+                    font-size: 13px;
+                    font-weight: 700;
+                    padding: 4px 8px;
+                    border: none;
+                    background: transparent;
+                    text-align: center;
+                    letter-spacing: 0.5px;
+                    min-height: 28px;
+                    max-height: 28px;
+                }
+                QPushButton:hover {
+                    color: #FFFFFF;
+                    background-color: rgba(255, 255, 255, 0.08);
+                    border-radius: 4px;
+                }
+                QPushButton:pressed {
+                    color: #FFFFFF;
+                    background-color: rgba(255, 255, 255, 0.12);
                 }
             """)
 
@@ -12565,6 +13200,8 @@ class RAWImageViewer(QMainWindow):
             self.slideshow_bottom_button.hide()
         if hasattr(self, "rotate_bottom_button"):
             self.rotate_bottom_button.hide()
+        if hasattr(self, "raw_toggle_button"):
+            self.raw_toggle_button.hide()
         self._schedule_search_expand_overlay_sync()
         
         if hasattr(self, "gallery_scroll") and self.gallery_scroll is not None:
@@ -15359,6 +15996,53 @@ class RAWImageViewer(QMainWindow):
             exif = None
         return not image_covers_sensor_resolution(pm.width(), pm.height(), exif)
 
+    def _cached_full_covers_sensor(self, file_path: str, cached_full=None) -> bool:
+        """True when a cached full-image buffer reaches sensor resolution."""
+        if not file_path:
+            return False
+        try:
+            buf = cached_full if cached_full is not None else self.image_cache.get_full_image(file_path)
+            if buf is None:
+                return False
+            if hasattr(buf, "shape"):
+                h, w = int(buf.shape[0]), int(buf.shape[1])
+            elif hasattr(buf, "width") and hasattr(buf, "height"):
+                w, h = int(buf.width()), int(buf.height())
+            else:
+                return False
+            exif = self.image_cache.get_exif(file_path)
+            return image_covers_sensor_resolution(w, h, exif)
+        except Exception:
+            return False
+
+    def _finish_pending_zoom_after_full_load(self, file_path: str) -> None:
+        """Apply a deferred Space/double-click zoom once full-res work completes or stalls."""
+        if getattr(self, "_workflow_toggle_fit_until_display", False):
+            return
+        if _norm_path(file_path or "") != _norm_path(
+            getattr(self, "current_file_path", "") or ""
+        ):
+            return
+        gv = getattr(self, "gpu_view", None)
+        pm = getattr(self, "current_pixmap", None)
+        if gv is not None and pm is not None and not pm.isNull():
+            if self._pending_zoom_ready_for_pixmap(pm, file_path):
+                if self._apply_pending_gpu_point_zoom_in_place(pm, gv):
+                    return
+            if getattr(self, "_focus_zoom_anchor_active", False) or getattr(
+                self, "_pending_zoom_focus_subject", False
+            ):
+                target = self._focus_zoom_target_for_pixmap(pm)
+                if target is not None:
+                    gv.center_on_image_point(float(target.x()), float(target.y()))
+                    self.zoom_center_point = target
+                self._finish_focus_zoom_anchor_if_sensor_res()
+                return
+        if getattr(self, "_pending_zoom", False) or (
+            gv is not None and getattr(gv, "_zoom_intent_100", False)
+        ):
+            self._gpu_zoom_in_to_point_finish()
+
     def _sync_displayed_half_size_flag(self, file_path: str | None = None) -> None:
         """Keep ``_is_half_size_displayed`` aligned with buffer vs sensor size, not file type."""
         fp = file_path or getattr(self, "current_file_path", None)
@@ -15488,7 +16172,7 @@ class RAWImageViewer(QMainWindow):
                 preview.shape[1], preview.shape[0], exif
             ):
                 return
-            if self.image_cache.get_full_image(file_path) is not None:
+            if self._cached_full_covers_sensor(file_path):
                 return
         except Exception:
             pass
@@ -15501,6 +16185,7 @@ class RAWImageViewer(QMainWindow):
             cancel_existing=False,
             use_full_resolution=True,
             stages={"full"},
+            bypass_cache=not self._cached_full_covers_sensor(file_path),
         )
 
     def _try_sync_full_before_zoom(self) -> bool:
@@ -16109,7 +16794,11 @@ class RAWImageViewer(QMainWindow):
                     self.image_manager.request_load(
                         requested_file_path, priority=False, stages={"exif"}
                     )
-                self._queue_single_view_embedded_preview_load(requested_file_path)
+                if not (
+                    use_libraw_consistent_preview_first()
+                    and is_raw_file(requested_file_path)
+                ):
+                    self._queue_single_view_embedded_preview_load(requested_file_path)
                 self._start_preloading()
                 return
 
@@ -16125,10 +16814,14 @@ class RAWImageViewer(QMainWindow):
             cache_check_time = 0.0
 
             preview_cached = self.image_cache.get_preview(requested_file_path)
-            if preview_cached is not None and not self._preview_acceptable_for_single_view(
+            if (
+                not force_reload
+                and preview_cached is not None
+                and not self._preview_acceptable_for_single_view(
                 preview_cached,
                 file_path=requested_file_path,
                 context="navigation" if _is_single_view_step else "display",
+            )
             ):
                 px = self._cache_buffer_max_dim(preview_cached)
                 logger.info(
@@ -16137,7 +16830,11 @@ class RAWImageViewer(QMainWindow):
                 )
                 preview_cached = None
             preserve_zoom_navigation = self._preserve_zoom_navigation_active()
-            if preview_cached is not None and not preserve_zoom_navigation:
+            if (
+                not force_reload
+                and preview_cached is not None
+                and not preserve_zoom_navigation
+            ):
                 cache_check_time = time.time() - cache_check_start
                 logger.info(
                     f"[LOAD] Cache hit: display preview for {filename}, "
@@ -16178,7 +16875,7 @@ class RAWImageViewer(QMainWindow):
 
             cache_check_time = time.time() - cache_check_start
             cached_image = self.image_cache.get_full_image(requested_file_path)
-            if cached_image is not None:
+            if not force_reload and cached_image is not None:
                 logger.info(
                     f"[LOAD] Cache hit: full image found for {filename}, "
                     f"shape: {cached_image.shape}"
@@ -16298,6 +16995,7 @@ class RAWImageViewer(QMainWindow):
                 # DNG single-view path is also forced to full-resolution-first to keep
                 # zoom logic deterministic (no preview/full handoff race on first zoom).
                 preserve_zoom_navigation = self._preserve_zoom_navigation_active()
+                workflow_toggle = getattr(self, "_workflow_toggle_reload", False)
                 nav_single_step = (
                     getattr(self, "view_mode", "single") == "single"
                     and (
@@ -16305,6 +17003,7 @@ class RAWImageViewer(QMainWindow):
                         or getattr(self, "_loading_from_filmstrip", False)
                     )
                 )
+                nav_fit_browse = nav_single_step and not preserve_zoom_navigation
                 is_dng_file = os.path.splitext(requested_file_path)[1].lower() == ".dng"
                 from common_image_loader import dng_prefers_embedded_preview_first
 
@@ -16329,6 +17028,14 @@ class RAWImageViewer(QMainWindow):
                     and not force_full_res_for_dng
                     and getattr(self, "_folder_fast_open_token", None) is None
                     and not use_progressive_raw_loading()
+                    and (not nav_fit_browse or workflow_toggle)
+                )
+                libraw_nav_fit = (
+                    use_libraw_consistent_preview_first()
+                    and is_raw
+                    and nav_fit_browse
+                    and not preserve_zoom_navigation
+                    and not force_full_res_for_dng
                 )
                 quality_cached = self._display_quality_buffer_cached(requested_file_path)
                 quality_on_screen = (
@@ -16340,6 +17047,7 @@ class RAWImageViewer(QMainWindow):
                     if (
                         preserve_zoom_navigation
                         or libraw_fit
+                        or libraw_nav_fit
                         or force_full_res_for_dng
                         or (nav_single_step and preserve_zoom_navigation)
                         or from_gallery
@@ -16355,10 +17063,15 @@ class RAWImageViewer(QMainWindow):
                     and not request_full_res
                     and not preserve_zoom_navigation
                     and not libraw_fit
+                    and not libraw_nav_fit
                     and not force_full_res_for_dng
                     and not from_gallery
                     and not (nav_single_step and preserve_zoom_navigation)
+                    and not workflow_toggle
                 )
+                if libraw_nav_fit and cached_exif:
+                    load_stages = {"full"}
+                    request_full_res = False
                 if preview_first_stages:
                     # Fast-open / cold single-view: paint embedded preview first;
                     # full exiftool metadata runs in the BACKGROUND exif task below.
@@ -16385,6 +17098,9 @@ class RAWImageViewer(QMainWindow):
                     cancel_existing=True,
                     use_full_resolution=request_full_res,
                     stages=load_stages,
+                    bypass_cache=bool(
+                        force_reload or getattr(self, "_workflow_toggle_reload", False)
+                    ),
                 )
                 if preview_first_stages:
                     self._schedule_deferred_sensor_full_after_first_paint(
@@ -16621,18 +17337,24 @@ class RAWImageViewer(QMainWindow):
             # Check for resolution downgrade for the CURRENT file
             if hasattr(self, 'current_file_path') and self.current_file_path:
                 norm_current = _norm_path(self.current_file_path)
-                if hasattr(self, "_file_max_dim_map") and norm_current in self._file_max_dim_map:
-                    if (
-                        max_dim < self._file_max_dim_map[norm_current] * 0.9
-                        and self._single_view_pixels_on_screen(self.current_file_path)
-                    ):
-                        logger.info(f"[DISPLAY] Ignoring resolution downgrade for {os.path.basename(self.current_file_path)}: {width}x{height} < cached max")
-                        return
+                if (
+                    not getattr(self, "_skip_resolution_downgrade_check", False)
+                    and hasattr(self, "_file_max_dim_map")
+                    and norm_current in self._file_max_dim_map
+                    and max_dim < self._file_max_dim_map[norm_current] * 0.9
+                    and self._single_view_pixels_on_screen(self.current_file_path)
+                ):
+                    logger.info(
+                        f"[DISPLAY] Ignoring resolution downgrade for "
+                        f"{os.path.basename(self.current_file_path)}: {width}x{height} < cached max"
+                    )
+                    return
 
-                # Update map
                 if not hasattr(self, "_file_max_dim_map"):
                     self._file_max_dim_map = {}
-                self._file_max_dim_map[norm_current] = max(self._file_max_dim_map.get(norm_current, 0), max_dim)
+                self._file_max_dim_map[norm_current] = max(
+                    self._file_max_dim_map.get(norm_current, 0), max_dim
+                )
 
             logger.info(f"[DISPLAY] ========== display_numpy_image() STARTED at {display_start:.3f} ==========")
             logger.info(f"[DISPLAY] Image dimensions: {width}x{height}, channels: {channels}")
@@ -18361,6 +19083,7 @@ class RAWImageViewer(QMainWindow):
         if new_file:
             self._cancel_content_crossfade()
             self._clear_pending_resolution_crossfade()
+            self._clear_focus_zoom_anchor()
         pending_point_zoom = bool(
             getattr(self, "_pending_zoom", False)
             and not getattr(self, "_full_resolution_loading", False)
@@ -18407,18 +19130,28 @@ class RAWImageViewer(QMainWindow):
                 if apply_gen != int(getattr(self, "_single_view_display_generation", 0)):
                     return False
 
+                if getattr(self, "_workflow_toggle_fit_until_display", False):
+                    gv._zoom_intent_100 = False
+                    gv.set_pixmap(pixmap, preserve_view=False)
+                    gv.fit_to_window()
+                    self.fit_to_window = True
+                    self.zoom_center_point = None
+                    self._clear_focus_zoom_anchor()
+                    self._schedule_workflow_toggle_fit_complete()
+                    return False
+
                 # Deferred zoom: single atomic paint only (never set_pixmap + fit first).
-                if (
-                    getattr(self, "_pending_zoom", False)
-                    and not getattr(self, "_full_resolution_loading", False)
-                ):
+                if self._pending_zoom_ready_for_pixmap(pixmap, cur_path):
                     return self._apply_pending_gpu_point_zoom_in_place(pixmap, gv)
 
                 pending_user_zoom = bool(
                     getattr(self, "_pending_zoom_toggle", False)
                     or getattr(self, "_pending_zoom", False)
                     or getattr(self, "_pending_gpu_zoom_point", None) is not None
-                    or getattr(gv, "_zoom_intent_100", False)
+                    or (
+                        getattr(gv, "_zoom_intent_100", False)
+                        and not getattr(self, "_workflow_toggle_fit_until_display", False)
+                    )
                 )
                 nav_preserve = bool(
                     getattr(self, "_preserve_nav_zoom_active", False)
@@ -18459,7 +19192,9 @@ class RAWImageViewer(QMainWindow):
                 # Same-file buffer upgrade (preview → sensor, etc.)
                 if zoomed_in or nav_preserve or pending_user_zoom:
                     preserve = zoomed_in or nav_preserve or needs_resolution_crossfade
-                    gv.set_pixmap(pixmap, preserve_view=True if preserve else None)
+                    self._apply_gpu_pixmap_with_focus_anchor(
+                        gv, pixmap, preserve=preserve
+                    )
                     return False
 
                 if self._single_view_is_fit_mode() and not pending_user_zoom:
@@ -18494,7 +19229,7 @@ class RAWImageViewer(QMainWindow):
                 self._gpu_last_path = cur_path
             if (
                 not pending_zoom_applied
-                and getattr(self, "fit_to_window", True)
+                and self._single_view_is_fit_mode()
                 and not getattr(self, "_preserve_nav_zoom_active", False)
             ):
                 self._schedule_gpu_viewport_refit()
@@ -18880,8 +19615,6 @@ class RAWImageViewer(QMainWindow):
             ch, cw = cached_full.shape[0], cached_full.shape[1]
             if image_covers_sensor_resolution(cw, ch, exif_for_res):
                 logger.info("Full resolution image already cached, loading...")
-                self._full_resolution_loading = True
-                # Display the full resolution image
                 # CRITICAL: UnifiedImageProcessor caches already-oriented images.
                 # Mark as oriented to prevent double rotation in display_numpy_image.
                 self._orientation_already_applied = True
@@ -18889,6 +19622,10 @@ class RAWImageViewer(QMainWindow):
                 self._is_half_size_displayed = False
                 self._full_resolution_loading = False
                 return
+            try:
+                self.image_cache.full_image_cache.remove(self.current_file_path)
+            except Exception:
+                pass
         
         # Check if we're already loading full resolution
         if hasattr(self, '_full_resolution_loading') and self._full_resolution_loading:
@@ -18913,7 +19650,8 @@ class RAWImageViewer(QMainWindow):
             file_path=self.current_file_path,
             priority=Priority.CURRENT,
             cancel_existing=False, # Don't cancel existing (though theoretically this replaces previous)
-            use_full_resolution=True
+            use_full_resolution=True,
+            bypass_cache=True,
         )
     
     # Dangling block removed
@@ -18938,7 +19676,7 @@ class RAWImageViewer(QMainWindow):
         )
 
     def _nav_preload_display_radius(self) -> int:
-        return _env_int("RAWVIEWER_NAV_PRELOAD_RADIUS", 4, minimum=1)
+        return _env_int("RAWVIEWER_NAV_PRELOAD_RADIUS", 6, minimum=1)
 
     def _nav_preload_display_near_count(self) -> int:
         return _env_int("RAWVIEWER_NAV_PRELOAD_NEAR", 2, minimum=1)
@@ -18952,6 +19690,20 @@ class RAWImageViewer(QMainWindow):
         )
         return cached_item is None
 
+    def _nav_prefetch_stages_for_path(self, file_path: str, *, zoomed: bool) -> tuple[set[str], bool]:
+        """Stages for warming the next/prev image before navigation."""
+        if zoomed:
+            return {"exif", "full"}, True
+        try:
+            if use_libraw_consistent_preview_first() and is_raw_file(file_path):
+                stages = {"full"}
+                if not self.image_cache.get_exif(file_path):
+                    stages = {"exif", "full"}
+                return stages, False
+        except Exception:
+            pass
+        return {"thumbnail"}, False
+
     def _request_display_buffer_prefetch(
         self,
         file_path: str,
@@ -18961,13 +19713,7 @@ class RAWImageViewer(QMainWindow):
     ) -> None:
         if not self._needs_display_buffer_prefetch(file_path, zoomed=zoomed):
             return
-        if zoomed:
-            stages = {"exif", "full"}
-            use_full = True
-        else:
-            # Fit-mode navigation: warm ~1920px embedded preview, not sensor full decode.
-            stages = {"thumbnail"}
-            use_full = False
+        stages, use_full = self._nav_prefetch_stages_for_path(file_path, zoomed=zoomed)
         self.image_manager.load_image(
             file_path=file_path,
             priority=priority,
@@ -19014,12 +19760,13 @@ class RAWImageViewer(QMainWindow):
                 continue
             if self.image_manager.has_active_work_for_path(path):
                 continue
+            stages, use_full = self._nav_prefetch_stages_for_path(path, zoomed=False)
             self.image_manager.load_image(
                 path,
                 priority=Priority.BACKGROUND,
                 cancel_existing=False,
-                use_full_resolution=False,
-                stages={"thumbnail"},
+                use_full_resolution=use_full,
+                stages=stages,
             )
 
     def _preload_adjacent_display_buffers(self):
@@ -19697,7 +20444,7 @@ class RAWImageViewer(QMainWindow):
                                     cached_max_dim = max(cached_full.shape[1], cached_full.shape[0])
                                     if cached_max_dim >= 3000:
                                         logger.debug("Full resolution image already cached, loading immediately for zoom restoration...")
-                                        self._full_resolution_loading = True
+                                        self._orientation_already_applied = True
                                         self.display_numpy_image(cached_full)
                                         self._is_half_size_displayed = False
                                         self._full_resolution_loading = False
@@ -19808,7 +20555,7 @@ class RAWImageViewer(QMainWindow):
                                     cached_max_dim = max(cached_full.shape[1], cached_full.shape[0])
                                     if cached_max_dim >= 3000:
                                         logger.debug("Full resolution image already cached, loading immediately for zoom restoration...")
-                                        self._full_resolution_loading = True
+                                        self._orientation_already_applied = True
                                         self.display_numpy_image(cached_full)
                                         self._is_half_size_displayed = False
                                         self._full_resolution_loading = False
@@ -20022,6 +20769,38 @@ class RAWImageViewer(QMainWindow):
         if hasattr(self, "single_view_container") and self.single_view_container is not None:
             self.single_view_container.set_rating(rating)
 
+    def _restore_single_view_keyboard_focus(self) -> None:
+        """Return keyboard focus to the image surface (GPU view or main window)."""
+        if getattr(self, "view_mode", "single") != "single":
+            self.setFocus(Qt.FocusReason.OtherFocusReason)
+            return
+        gv = getattr(self, "gpu_view", None)
+        if gv is not None and gv.isVisible():
+            gv.setFocus(Qt.FocusReason.OtherFocusReason)
+            return
+        self.setFocus(Qt.FocusReason.OtherFocusReason)
+
+    def _shortcut_blocked_by_text_input(self) -> bool:
+        focused = self.focusWidget()
+        from PyQt6.QtWidgets import QLineEdit, QTextEdit, QPlainTextEdit
+        return bool(
+            focused and isinstance(focused, (QLineEdit, QTextEdit, QPlainTextEdit))
+        )
+
+    def _shortcut_activate_nav_prev(self) -> None:
+        if getattr(self, "view_mode", "single") != "single":
+            return
+        if self._shortcut_blocked_by_text_input():
+            return
+        self._navigate_single_view_step(-1)
+
+    def _shortcut_activate_nav_next(self) -> None:
+        if getattr(self, "view_mode", "single") != "single":
+            return
+        if self._shortcut_blocked_by_text_input():
+            return
+        self._navigate_single_view_step(1)
+
     def _handle_app_shortcut(self, event):
         """Handle application-wide shortcuts for better consistency and focus-resilience."""
         focused = self.focusWidget()
@@ -20057,24 +20836,6 @@ class RAWImageViewer(QMainWindow):
                         self.toggle_zoom()
                     return True
                 self.toggle_zoom()
-                return True
-        elif key == Qt.Key.Key_Left:
-            if vm == "single":
-                if self._filmstrip_handles_input():
-                    bar = self._filmstrip_bar()
-                    if bar:
-                        bar.move_selection(-1)
-                        return True
-                self._debounced_navigate("prev")
-                return True
-        elif key == Qt.Key.Key_Right:
-            if vm == "single":
-                if self._filmstrip_handles_input():
-                    bar = self._filmstrip_bar()
-                    if bar:
-                        bar.move_selection(1)
-                        return True
-                self._debounced_navigate("next")
                 return True
         elif key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
             if vm == "single" and self._filmstrip_handles_input():
@@ -20746,6 +21507,7 @@ class RAWImageViewer(QMainWindow):
         # Keep legacy state roughly in sync for any code that still reads it.
         self.fit_to_window = bool(fit_mode)
         if fit_mode:
+            self._clear_focus_zoom_anchor()
             self._upgrade_display_quality_on_fit_if_needed()
         else:
             self._gpu_request_full_resolution_if_needed()
@@ -20779,16 +21541,36 @@ class RAWImageViewer(QMainWindow):
         if getattr(self, "gpu_view", None) is not None:
             self._stop_slideshow()
             gv = self.gpu_view
-            if gv.wants_zoom_in_toggle() and self._needs_full_resolution_upgrade():
-                # Plain Space fit→100%: image center (not stale scroll/viewport coords).
-                if not getattr(self, "_focus_subject_outline_active", False):
+            gv._sync_fit_mode_flag()
+            if gv.wants_zoom_in_toggle():
+                if (
+                    not getattr(self, "_focus_subject_outline_active", False)
+                    and getattr(self, "zoom_center_point", None) is None
+                ):
                     pm = self.current_pixmap
                     if pm is not None and not pm.isNull():
                         self.zoom_center_point = QPoint(
                             pm.width() // 2, pm.height() // 2
                         )
-                if self._defer_zoom_until_full_or_apply():
-                    return
+                    elif gv.has_pixmap():
+                        w, h = gv.image_size()
+                        self.zoom_center_point = QPoint(
+                            max(0, w // 2), max(0, h // 2)
+                        )
+                self._gpu_zoom_in_to_point_finish()
+                if self._needs_full_resolution_upgrade():
+                    self._queue_sensor_full_decode(
+                        self.current_file_path, priority_current=True
+                    )
+                self.fit_to_window = gv.is_fit_mode()
+                self.current_zoom_level = float(gv.current_scale())
+                self.update_status_bar()
+                return
+            if not gv.has_pixmap():
+                if getattr(self, "current_file_path", None):
+                    self._pending_zoom_toggle = True
+                    self._pending_zoom_target_path = self.current_file_path
+                return
             gv.toggle_fit()
             self.fit_to_window = gv.is_fit_mode()
             if not gv.is_fit_mode():
@@ -23903,6 +24685,7 @@ def main():
 
     if getattr(sys, "frozen", False) or is_installed:
         os.environ.setdefault("RAWVIEWER_ENABLE_SEMANTIC_SEARCH", "1")
+        os.environ.setdefault("RAWVIEWER_GPU_VIEW", "1")
 
     # Print to console immediately (before logging might be ready)
     safe_print("main() function called", flush=True)
@@ -24040,7 +24823,12 @@ def main():
                     painter.drawText(splash_pixmap.rect(), Qt.AlignmentFlag.AlignCenter, "RAW")
                     painter.end()
                 
-                splash = QSplashScreen(splash_pixmap, Qt.WindowType.WindowStaysOnTopHint)
+                splash = QSplashScreen(
+                    splash_pixmap,
+                    Qt.WindowType.FramelessWindowHint
+                    if sys.platform == "darwin"
+                    else (Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.FramelessWindowHint),
+                )
                 splash.show()
                 app.processEvents()
                 safe_print("Fallback splash screen displayed", flush=True)
@@ -24054,13 +24842,17 @@ def main():
             # 4. Continue with initialization
             if is_windows:
                 safe_print("  [Windows] Setting AppUserModelID...", flush=True)
-                myappid = 'RAWviewer.2.2.5'
+                from release_update import APP_VERSION
+
+                myappid = f"RAWviewer.{APP_VERSION}"
                 ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
                 safe_print("  [Windows] AppUserModelID set", flush=True)
 
             # Set application properties
+            from release_update import APP_VERSION
+
             app.setApplicationName("RAWviewer")
-            app.setApplicationVersion("2.2.5")
+            app.setApplicationVersion(APP_VERSION)
 
             # Create and show main window
             safe_print("Creating RAWImageViewer...", flush=True)
@@ -24082,30 +24874,8 @@ def main():
             
             # Show main window and close splash screen
             viewer.show()
-            if sys.platform == "darwin":
-                try:
-                    import objc
-
-                    ns_app = objc.lookUpClass("NSApplication").sharedApplication()
-                    if ns_app is not None:
-                        # Terminal-launched Python is often Prohibited/Accessory; sharing needs Regular.
-                        ns_app.setActivationPolicy_(0)
-                except Exception:
-                    pass
-            # macOS native title bar tweaks disabled for stability.
-            if splash:
-                splash.finish(viewer)  # Close splash screen when main window is ready
-                splash.close()         # Force close the splash screen
-            
-            # Broad check to close any remaining or orphaned QSplashScreen in the app
-            try:
-                for top_level in QApplication.topLevelWidgets():
-                    if isinstance(top_level, QSplashScreen):
-                        top_level.close()
-                app.processEvents()
-            except Exception as e:
-                logger.warning(f"[MAIN] Error closing orphaned splash screens: {e}")
-                
+            QTimer.singleShot(0, viewer._restore_single_view_keyboard_focus)
+            _schedule_startup_splash_dismiss(app, viewer, splash)
             safe_print("Splash screen closed, main window displayed", flush=True)
 
         # Run application
@@ -24165,13 +24935,9 @@ def main():
         
         # Try to show error dialog if possible
         try:
-            # IMPORTANT: Close the splash screen so the error dialog is visible!
-            # We use a broad check for any QSplashScreen in the app
-            for top_level in QApplication.topLevelWidgets():
-                if isinstance(top_level, QSplashScreen):
-                    top_level.close()
-
             app = QApplication.instance()
+            _dismiss_startup_splash(app, None, None)
+
             if app is not None:
                 from PyQt6.QtWidgets import QMessageBox
                 msg = QMessageBox()
@@ -24186,63 +24952,7 @@ def main():
         sys.exit(1)
 
 
-if __name__ == '__main__':
-    # Print startup message to console immediately
-    safe_print("=" * 80, flush=True)
-    safe_print("RAWviewer Starting...", flush=True)
-    safe_print("=" * 80, flush=True)
-    
-    # Setup logging before anything else
-    try:
-        safe_print("Setting up logging...", flush=True)
-        setup_logging()
-        safe_print("Logging setup complete.", flush=True)
-    except Exception as e:
-        safe_print_err(f"ERROR: Failed to setup logging: {e}", flush=True)
-        import traceback
-        safe_print_err(f"Traceback: {traceback.format_exc()}", flush=True)
-    
-    try:
-        safe_print("Calling main()...", flush=True)
-        main()
-    except Exception as e:
-        safe_print_err(f"\n{'='*80}", flush=True)
-        safe_print_err(f"FATAL ERROR in main(): {type(e).__name__}: {e}", flush=True)
-        import traceback
-        safe_print_err(f"Traceback:\n{traceback.format_exc()}", flush=True)
-        safe_print_err(f"{'='*80}\n", flush=True)
-        raise
-        safe_print_err(f"FATAL ERROR")
-        safe_print_err(f"{'='*80}")
-        safe_print_err(f"{error_msg}")
-        safe_print_err(f"\nFull traceback:")
-        safe_print_err(f"{error_traceback}")
-        safe_print_err(f"{'='*80}\n")
-        
-        # Try to show error dialog if possible
-        try:
-            # IMPORTANT: Close the splash screen so the error dialog is visible!
-            # We use a broad check for any QSplashScreen in the app
-            for top_level in QApplication.topLevelWidgets():
-                if isinstance(top_level, QSplashScreen):
-                    top_level.close()
-
-            app = QApplication.instance()
-            if app is not None:
-                from PyQt6.QtWidgets import QMessageBox
-                msg = QMessageBox()
-                msg.setIcon(QMessageBox.Icon.Critical)
-                msg.setWindowTitle("Fatal Error")
-                msg.setText("The application encountered a fatal error and will now exit.")
-                msg.setDetailedText(f"{error_msg}\n\n{error_traceback}")
-                msg.exec()
-        except:
-            pass  # If we can't show dialog, at least we logged it
-        
-        sys.exit(1)
-
-
-if __name__ == '__main__':
+if __name__ == '__main__' and _IS_GUI_MAIN_PROCESS:
     # Print startup message to console immediately
     safe_print("=" * 80, flush=True)
     safe_print("RAWviewer Starting...", flush=True)

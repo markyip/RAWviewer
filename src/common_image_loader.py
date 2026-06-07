@@ -746,16 +746,29 @@ def metadata_index_idle_delay_ms() -> int:
 def use_raw_process_pool() -> bool:
     """
     Offload LibRaw postprocess to a process pool (multi-core). Opt-out with
-    SkySpotter_USE_PROCESS_POOL=0. Default: on when CPU count >= 4.
+    SkySpotter_USE_PROCESS_POOL=0. Default: on when CPU count >= 4 (Windows/Linux).
+    macOS default off: spawn re-executes the .app (extra PIDs / splash). Opt in only via
+    RAWVIEWER_USE_PROCESS_POOL=1 (SkySpotter_* is ignored on macOS).
     """
-    raw = os.environ.get("RAWVIEWER_USE_PROCESS_POOL") or os.environ.get("SkySpotter_USE_PROCESS_POOL", "")
+    import os as _os
+    import sys as _sys
+
+    if _sys.platform == "darwin":
+        raw = os.environ.get("RAWVIEWER_USE_PROCESS_POOL", "").strip().lower()
+        if raw in ("0", "false", "no", "off"):
+            return False
+        if raw in ("1", "true", "yes", "on"):
+            return True
+        return False
+
+    raw = os.environ.get("RAWVIEWER_USE_PROCESS_POOL") or os.environ.get(
+        "SkySpotter_USE_PROCESS_POOL", ""
+    )
     raw = raw.strip().lower()
     if raw in ("0", "false", "no", "off"):
         return False
     if raw in ("1", "true", "yes", "on"):
         return True
-    import os as _os
-
     return (_os.cpu_count() or 0) >= 4
 
 

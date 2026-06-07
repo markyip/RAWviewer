@@ -7,20 +7,20 @@ This gives QuickLook-style smoothness for wheel/pinch zoom and drag pan.
 The optional ``QOpenGLWidget`` viewport is vendor-agnostic (NVIDIA / AMD / Intel on
 Windows; Qt typically uses a Metal-backed GL stack on macOS).
 
-Opt-in via the ``RAWVIEWER_GPU_VIEW=1`` environment variable; the legacy
-``QScrollArea`` + ``QLabel`` path remains the default. The widget is intentionally
+Enabled by default in release builds; set ``RAWVIEWER_GPU_VIEW=0`` for the legacy
+``QScrollArea`` + ``QLabel`` path. The widget is intentionally
 decoupled from the main window: it exposes a small API plus a few signals so the
 host can keep navigation / status / histogram behaviour identical.
 
 Environment toggles:
-- ``RAWVIEWER_GPU_VIEW=1``       Enable this view in the main window.
+- ``RAWVIEWER_GPU_VIEW=0``       Disable; use legacy scroll-area single-image view.
 - ``RAWVIEWER_GPU_VIEW_NO_GL=1`` Use the raster viewport (debug / fallback).
 """
 
 import os
 
 from PyQt6.QtCore import Qt, QRect, QRectF, QPointF, pyqtSignal, QEvent
-from PyQt6.QtGui import QPixmap, QPainter, QColor, QPen
+from PyQt6.QtGui import QKeyEvent, QPixmap, QPainter, QColor, QPen
 from PyQt6.QtWidgets import (
     QGraphicsView,
     QGraphicsScene,
@@ -90,6 +90,9 @@ class GpuImageView(QGraphicsView):
             QGraphicsView.OptimizationFlag.DontAdjustForAntialiasing, True
         )
         self.viewport().setMouseTracking(True)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        # Set by RAWImageViewer: callable(QKeyEvent) -> bool
+        self._shortcut_handler = None
 
         self._maybe_enable_opengl()
 
@@ -112,9 +115,11 @@ class GpuImageView(QGraphicsView):
             from PyQt6.QtOpenGLWidgets import QOpenGLWidget
 
             gl = QOpenGLWidget()
+            gl.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
             self.setViewport(gl)
             # Re-enable tracking on the new viewport.
             self.viewport().setMouseTracking(True)
+            self.viewport().setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         except Exception:
             # Raster fallback keeps the feature working without a GL context.
             pass
@@ -362,7 +367,8 @@ class GpuImageView(QGraphicsView):
         self._img_w, self._img_h = new_w, new_h
         self._has_pixmap = True
         self._fit_mode = False
-        self._zoom_intent_100 = False
+        intent_100 = float(scale) >= 1.0 - 1e-4
+        self._zoom_intent_100 = intent_100
         self._update_placeholder()
         fit = self.fit_scale()
         s = float(scale)
@@ -399,6 +405,7 @@ class GpuImageView(QGraphicsView):
     def toggle_fit(self) -> None:
         if not self._has_pixmap:
             return
+        self._sync_fit_mode_flag()
         if self.wants_zoom_in_toggle():
             self.zoom_to_actual()
         else:
@@ -454,6 +461,13 @@ class GpuImageView(QGraphicsView):
                 event.accept()
                 return True
         return super().event(event)
+
+    def keyPressEvent(self, event: QKeyEvent) -> None:
+        handler = getattr(self, "_shortcut_handler", None)
+        if callable(handler) and handler(event):
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
     def wheelEvent(self, event) -> None:
         delta = event.angleDelta().y()

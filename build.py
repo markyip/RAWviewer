@@ -4,7 +4,7 @@ Build script for RAW Image Viewer Windows/macOS executable
 Handles dependency installation and executable creation.
 """
 
-VERSION = "2.2.5"
+VERSION = "2.3.0"
 
 import os
 import subprocess
@@ -170,7 +170,7 @@ def update_macos_plist(app_path):
         plist['NSAppleEventsUsageDescription'] = 'RAWviewer needs to receive file open events from the system.'
         
         # macOS specific flags
-        plist['LSMinimumSystemVersion'] = '10.15.0'
+        plist['LSMinimumSystemVersion'] = '13.0'
         plist['NSHighResolutionCapable'] = True
         plist['LSSupportsOpeningDocumentsInPlace'] = True
         plist['LSApplicationCategoryType'] = 'public.app-category.photography'
@@ -214,11 +214,11 @@ def install_dependencies(windows_accel: str = "cuda"):
         else:
             print(f"[ERROR] Unsupported Windows acceleration backend: {windows_accel}")
             return False
-        dependencies.append('mediapipe')
         dependencies.append('opencv-python-headless')
         dependencies.append('huggingface-hub')
         dependencies.append('requests')
     elif system_name == "Darwin":
+        dependencies.append('scipy')  # reverse_geocoder GPS lookup (scipy.spatial.cKDTree)
         dependencies.append('huggingface-hub')
         dependencies.append('pyobjc-framework-CoreML')
         dependencies.append('pyobjc-framework-Quartz')
@@ -495,13 +495,14 @@ def main():
             "--hidden-import", "CoreML",
             "--hidden-import", "Quartz",
             "--hidden-import", "Vision",
+            "--hidden-import", "reverse_geocoder",
+            "--hidden-import", "scipy.spatial.cKDTree",
             "--exclude-module", "coremltools",
             "--exclude-module", "torch",
             "--exclude-module", "torchvision",
             "--exclude-module", "sentence_transformers",
             "--exclude-module", "transformers",
             "--exclude-module", "sklearn",
-            "--exclude-module", "scipy",
             "--exclude-module", "tokenizers",
             "--exclude-module", "safetensors",
         ])
@@ -542,8 +543,17 @@ def main():
     if platform.system() == 'Darwin':
         cmd_base.append("--onedir")
         cmd_base.extend(["--osx-bundle-identifier", "com.markyip.rawviewer"])
+        macos_pool_hook = os.path.join(src_path, "pyi_rth_macos_process_pool.py")
+        release_defaults_hook = os.path.join(src_path, "pyi_rth_release_defaults.py")
+        if os.path.isfile(macos_pool_hook):
+            cmd_base.extend(["--runtime-hook", macos_pool_hook])
+        if os.path.isfile(release_defaults_hook):
+            cmd_base.extend(["--runtime-hook", release_defaults_hook])
     else:
         cmd_base.append("--onefile")
+        release_defaults_hook = os.path.join(src_path, "pyi_rth_release_defaults.py")
+        if os.path.isfile(release_defaults_hook):
+            cmd_base.extend(["--runtime-hook", release_defaults_hook])
         
     if icon_arg:
         if platform.system() == 'Windows':
