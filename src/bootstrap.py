@@ -218,6 +218,9 @@ class InstallWorker(QObject):
 
             self.log_signal.emit("Copying core files...")
             shutil.copy2(os.path.join(BUNDLE_DIR, "pixi.toml"), target_dir)
+            pixi_lock_src = os.path.join(BUNDLE_DIR, "pixi.lock")
+            if os.path.isfile(pixi_lock_src):
+                shutil.copy2(pixi_lock_src, os.path.join(target_dir, "pixi.lock"))
 
             src_dir = os.path.join(target_dir, "src")
             if os.path.exists(src_dir):

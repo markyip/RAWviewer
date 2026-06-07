@@ -292,7 +292,7 @@ def _darwin_preflight_pyexiv2_import() -> None:
 def _prepare_windows_pixi_manifest(accel: str) -> Path:
     """
     Create a backend-specific pixi.toml copy for Windows installer payload.
-    The bundled bootstrap always copies this file as `pixi.toml`.
+    The bundled bootstrap copies this file as `pixi.toml` plus matching `pixi.lock`.
     """
     src = REPO_ROOT / "pixi.toml"
     raw = src.read_text(encoding="utf-8")
@@ -302,10 +302,41 @@ def _prepare_windows_pixi_manifest(accel: str) -> Path:
         raw = raw.replace("onnxruntime-gpu", "onnxruntime-directml")
     else:
         raise ValueError(f"Unsupported Windows acceleration backend: {accel}")
-    tmp_dir = REPO_ROOT / "build" / "_pixi_variants"
+    tmp_dir = REPO_ROOT / "build" / "_pixi_variants" / accel
     tmp_dir.mkdir(parents=True, exist_ok=True)
     out = tmp_dir / "pixi.toml"
     out.write_text(raw, encoding="utf-8")
+
+    lock_src = REPO_ROOT / "pixi.lock"
+    lock_out = tmp_dir / "pixi.lock"
+    if lock_src.is_file():
+        shutil.copy2(lock_src, lock_out)
+
+    pixi_bin = shutil.which("pixi")
+    bundled_pixi = REPO_ROOT / "_internal" / "pixi" / "pixi.exe"
+    if pixi_bin is None and bundled_pixi.is_file():
+        pixi_bin = str(bundled_pixi)
+    if pixi_bin:
+        print(f"[INFO] Updating pixi.lock for win-64 ({accel})…")
+        result = subprocess.run(
+            [pixi_bin, "lock"],
+            cwd=tmp_dir,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            print(
+                "[WARN] pixi lock failed; install may re-resolve dependencies:\n"
+                + (result.stderr or result.stdout or "")[:800]
+            )
+        elif not lock_out.is_file():
+            print("[WARN] pixi lock did not produce pixi.lock")
+    else:
+        print(
+            "[WARN] pixi not on PATH; bundling pixi.lock as-is "
+            "(install may log lock-file refresh for DirectML/CUDA variants)"
+        )
+
     return out
 
 
@@ -649,6 +680,12 @@ def main():
             else "pixi.toml"
         )
         add_data_args.append(f'--add-data "{pixi_src};."')
+        if windows_pixi_manifest is not None:
+            lock_path = windows_pixi_manifest.parent / "pixi.lock"
+            if lock_path.is_file():
+                add_data_args.append(
+                    f'--add-data "{str(lock_path).replace(chr(92), "/")};."'
+                )
         add_data_args.append('--add-data "src;src"')
     
     if platform.system() == 'Darwin':
