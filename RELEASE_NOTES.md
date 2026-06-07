@@ -1,5 +1,30 @@
 # RAWviewer Release Notes
 
+## 🚀 Version 2.3.2
+**Release Date: June 8, 2026**
+
+Installer and in-app MobileCLIP download UX, gallery bottom-bar layout, and clearer Hugging Face messaging.
+
+### 🪟 Windows installer
+- **Live model download progress**: The ~600 MB Hugging Face download maps to **5–100%** on the installer progress bar (no longer stuck at 75%).
+- **Installer log + label**: Progress appears as **`Downloading... N%`** in the step label and install log (every 5%); ASCII-only text avoids console encoding glitches on Windows.
+- **Cleaner subprocess output**: Silent Hugging Face tqdm bars; only `@RAWVIEWER_PROGRESS` lines drive the UI (`python -u`, `PYTHONUNBUFFERED`).
+- **Byte-level reporting**: `download_mobileclip_onnx.py` streams progress parsed by the bootstrap installer.
+- **Optional faster downloads**: Set a **`HF_TOKEN`** environment variable before setup if you use a [Hugging Face](https://huggingface.co/) account (inherits into the download subprocess).
+
+### 🔍 Semantic search (all platforms)
+- **In-app download progress in search field**: After you click **Download**, the gallery search bar shows **`Downloading... N%`** (same place as Metadata/Semantic/Face indexing). The prompt dialog closes immediately so the search field stays visible.
+- **macOS Core ML downloads**: Per-file `hf_hub_download` with byte progress instead of opaque `snapshot_download`.
+- **Shared progress helpers**: New `mobileclip_download_progress.py` used by installer scripts, bootstrap, and the main app.
+
+### 🛠️ Gallery UI
+- **Bottom bar button order**: **RAW/JPEG workflow** toggle now sits **before** the search icon so the search field expands right next to the search button (not with RAW sandwiched in between).
+
+### 📖 Documentation
+- README and release notes clarify models come from Hugging Face (~600 MB on Windows), installer progress behavior, and that first download may take longer without a Hugging Face account.
+
+---
+
 ## 🚀 Version 2.3.1
 **Release Date: June 7, 2026**
 
@@ -33,14 +58,15 @@ Focus overlays, RAW ↔ embedded-JPEG workflow, faster gallery indexing, backgro
 - **Clearer release filenames**: **`RAWviewer_Setup_DirectML.exe`** (recommended) and **`RAWviewer_Setup_CUDA.exe`** replace the old single-file names.
 - **Dedicated app launcher**: Install folder **`RAWviewer.exe`** is a small stub that starts the app; **`RAWviewer_Setup.exe`** in the same folder is for repair/reinstall only.
 - **More reliable setup**: Pixi and MobileCLIP downloads retry on failure with clearer network/disk/proxy errors; canceling setup removes incomplete install folders; welcome page text simplified (no Ctrl+Shift+O / disk-space hints).
-- **MobileCLIP optional at install**: If AI models fail during setup, browsing still works; download them later from gallery **Search** (MD3 prompt + in-dialog progress, same style as macOS).
+- **AI model install progress**: During the ~600 MB Hugging Face download, the installer progress bar and log show real transfer progress (no longer stuck at 75%).
+- **MobileCLIP optional at install**: If AI models fail during setup, browsing still works; download them later from gallery **Search** (MD3 prompt + in-dialog progress, same style as macOS). Models are hosted on Hugging Face; without a Hugging Face account, the first download may take longer.
 - **Uninstall fixes**: Settings → Apps and `uninstall.bat` work on Win11; a confirmation message appears when removal finishes.
 - **Shortcuts button**: Status-bar **i** opens the keyboard-shortcuts dialog (not just a tooltip).
 
 ### 🍎 macOS
 - **Release zip**: `RAWviewer-v2.3.1-macOS.zip` (~82 MB); minimum macOS **13.0**; bundles **scipy** (GPS reverse geocoding) and **pyexiv2**. MobileCLIP models are **not** in the zip.
 - **Terminal install**: Extract the zip, then `bash install_macos_app.sh` in the extracted folder (see README).
-- **In-app model download**: When the user opens **gallery search**, the app prompts to download MobileCLIP (~150 MB, one-time, needs internet). No download prompt on app startup.
+- **In-app model download**: When the user opens **gallery search**, the app prompts to download MobileCLIP from Hugging Face (~150 MB on macOS, one-time, needs internet). Without a Hugging Face account, that download may take longer. No download prompt on app startup.
 - **HTTPS / SSL fix**: Packaged app bundles **certifi** CA certificates and configures SSL before Hugging Face / tokenizer downloads, fixing `[SSL: CERTIFICATE_VERIFY_FAILED]` on fresh installs.
 - **Dock — single app icon**: LibRaw process pool **off by default** (PyInstaller runtime hook + spawn-safe startup); opt in with `RAWVIEWER_USE_PROCESS_POOL=1` (may bring back extra Dock entries).
 - **Startup splash**: Dismisses automatically when the main window is ready (no extra click).
@@ -118,7 +144,7 @@ Unified 2.2 release — search, gallery, film strip, frameless window polish, RA
 - **Semantic + face indexing (Windows)**: Phased indexing (metadata → MobileCLIP embeddings → background face backfill), resume from `semantic_index.db`, DirectML-accelerated ONNX on Windows when available.
 
 🛠️ Fixes & improvements
-- **Installer model download**: Added `requests` to Pixi dependencies so `huggingface_hub` can download MobileCLIP ONNX models on first install (no HF account required for public models).
+- **Installer model download**: Added `requests` to Pixi dependencies so `huggingface_hub` can download MobileCLIP ONNX models on first install (public models on Hugging Face).
 - **Indexing stability**: Stronger RAW thumbnail fallbacks, skip permanently unindexable files, conservative face-scan warm-up defaults, clearer progress phases.
 - **Delete confirmation dialog**: Centered on the main window using global coordinates.
 - **Face detection threshold**: YuNet / SSD confidence raised to **0.75** (fewer false positives).

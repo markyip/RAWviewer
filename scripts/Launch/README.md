@@ -2,7 +2,7 @@
 
 Scripts for local development and packaging. All paths assume the **repository root** as the working directory (each script `cd`s there automatically).
 
-**Version:** release **v2.3.1** (`build.py` `VERSION`, `QApplication` version, `pixi.toml` workspace version).
+**Version:** release **v2.3.2** (`build.py` `VERSION`, `QApplication` version, `pixi.toml` workspace version).
 
 ## Windows (`.bat`)
 
@@ -72,13 +72,13 @@ chmod +x scripts/Launch/shell/*.sh
 3. Optional **Homebrew** deps for `pyexiv2`: `inih`, `gettext` (`brew install inih gettext` if the wheel build fails).
 4. Installs PyQt6, rawpy, PyInstaller, **scipy**, **pyobjc** (Cocoa / CoreML / Quartz / Vision), and other runtime deps; **pyexiv2** is **required** (`brew install inih gettext` if the wheel build fails).
 5. Uninstalls heavy unused ML stacks (`torch`, `sentence-transformers`, …) to keep the app bundle smaller.
-6. Cleans `build/`, `dist/`, `*.spec`, then runs **`python build.py`** (version **2.3.1**, updates `Info.plist`; MobileCLIP models are **not** bundled — users download in-app).
-7. Packages **`dist/RAWviewer-v2.3.1-macOS.zip`** with `RAWviewer.app`, **`install_macos_app.sh`**, **`remove_macos_quarantine.sh`**, and **`Start Here.txt`**.
+6. Cleans `build/`, `dist/`, `*.spec`, then runs **`python build.py`** (version **2.3.2**, updates `Info.plist`; MobileCLIP models are **not** bundled — users download in-app).
+7. Packages **`dist/RAWviewer-v2.3.2-macOS.zip`** with `RAWviewer.app`, **`install_macos_app.sh`**, **`remove_macos_quarantine.sh`**, and **`Start Here.txt`**.
 
 **End-user install:** extract the zip, then in Terminal:
 
 ```bash
-cd /path/to/RAWviewer-v2.3.1-macOS
+cd /path/to/RAWviewer-v2.3.2-macOS
 bash install_macos_app.sh
 ```
 
@@ -86,7 +86,7 @@ bash install_macos_app.sh
 
 The script clears macOS download quarantine, copies RAWviewer to Applications, and opens it. Double-clicking the unsigned app from a download is often blocked before quarantine is cleared — **Terminal + `bash install_macos_app.sh`** is the supported path.
 
-**Output:** `dist/RAWviewer.app` and `dist/RAWviewer-v2.3.1-macOS.zip`.
+**Output:** `dist/RAWviewer.app` and `dist/RAWviewer-v2.3.2-macOS.zip`.
 
 **Pixi alternative:** `pixi install && pixi run python build.py` (then test with `bash install_macos_app.sh` from a folder containing the app).
 
@@ -130,7 +130,7 @@ Pass env vars as arguments: `./scripts/Launch/shell/launch_dev.sh RAWVIEWER_GPU_
 After `build_macos.sh` or `pixi run python build.py`:
 
 1. **Gatekeeper:** `xattr -cr dist/RAWviewer.app` then `open dist/RAWviewer.app`.
-2. **About / version:** Help or logs should report app version **2.3.1**.
+2. **About / version:** Help or logs should report app version **2.3.2**.
 3. **Single-image view:** Open a JPEG/RAW folder → one file → bottom **share** icon visible.
 4. **Share:** Click share → Qt menu lists Mail / Messages / etc.; pick Mail and confirm attachment path (not an empty spinner).
 5. **Semantic (if models bundled):** Search field accepts a text query; index progress in status area.

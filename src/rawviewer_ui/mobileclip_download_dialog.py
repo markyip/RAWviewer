@@ -197,15 +197,17 @@ class MobileCLIPDownloadDialog(QDialog):
         title.setStyleSheet(self._title_style())
         layout.addWidget(title)
 
-        self._progress_message = QLabel("Preparing download…")
-        self._progress_message.setWordWrap(True)
+        self._progress_message = QLabel("Downloading AI models…")
+        self._progress_message.setWordWrap(False)
         self._progress_message.setStyleSheet(self._body_style())
         layout.addWidget(self._progress_message)
 
         self._progress_bar = QProgressBar()
         self._progress_bar.setFixedHeight(8)
-        self._progress_bar.setTextVisible(False)
-        self._progress_bar.setRange(0, 0)
+        self._progress_bar.setTextVisible(True)
+        self._progress_bar.setRange(0, 100)
+        self._progress_bar.setValue(0)
+        self._progress_bar.setFormat("%p%")
         self._progress_bar.setStyleSheet("""
             QProgressBar {
                 background-color: #2A2A2A;
@@ -278,14 +280,22 @@ class MobileCLIPDownloadDialog(QDialog):
 
     def _on_download_clicked(self) -> None:
         self._download_started = True
-        self._stack.setCurrentIndex(1)
-        self._apply_size_for_page(1)
-        self._center_on_parent()
         self.download_requested.emit()
+        # Progress lives in the gallery search field (same as indexing), not this dialog.
+        self.accept()
+
+    def set_download_progress(self, pct: int, message: str = "") -> None:
+        pct = max(0, min(100, int(pct)))
+        self._progress_bar.setRange(0, 100)
+        self._progress_bar.setValue(pct)
+        self._progress_bar.setFormat("%p%")
+        self._progress_message.setText("Downloading AI models…")
 
     def set_progress_message(self, message: str) -> None:
-        text = (message or "").strip() or "Downloading…"
-        self._progress_message.setText(text)
+        """Legacy hook — maps to determinate progress when possible."""
+        text = (message or "").strip()
+        if text:
+            self._progress_message.setText("Downloading AI models…")
 
     def show_download_complete(self) -> None:
         self.accept()

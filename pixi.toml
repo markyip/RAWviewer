@@ -1,6 +1,6 @@
 [workspace]
 name = "rawviewer"
-version = "2.3.1"
+version = "2.3.2"
 description = "RAWviewer - Professional RAW Image Viewer with Semantic Search"
 authors = ["Mark Yip"]
 channels = ["conda-forge"]

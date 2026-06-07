@@ -2715,7 +2715,7 @@ class _SemanticIndexPrepWorker(QRunnable):
 
 class SemanticAssetDownloadSignals(QObject):
     """Signal carrier for background semantic backend asset download."""
-    progress = pyqtSignal(object, str)            # token, status message
+    progress = pyqtSignal(object, int, str)         # token, pct, short status
     done = pyqtSignal(object, str, object)        # token, asset path, corpus files
     error = pyqtSignal(object, str)               # token, error
 
@@ -10034,6 +10034,16 @@ class RAWImageViewer(QMainWindow):
         self.rotate_bottom_button.hide()
         left_buttons_layout.addWidget(self.rotate_bottom_button, 0, alignment=Qt.AlignmentFlag.AlignVCenter)
 
+        # RAW/JPEG Toggle button (before search so expand field stays adjacent to search icon)
+        self.raw_toggle_button = QPushButton()
+        self.raw_toggle_button.setFlat(True)
+        self.raw_toggle_button.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.raw_toggle_button.setStyleSheet(bottom_icon_btn_style)
+        self.raw_toggle_button.clicked.connect(self.toggle_raw_jpeg_workflow)
+        self.raw_toggle_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.raw_toggle_button.hide()
+        left_buttons_layout.addWidget(self.raw_toggle_button, 0, alignment=Qt.AlignmentFlag.AlignVCenter)
+
         self.search_bottom_button = QPushButton()
         self.search_bottom_button.setFlat(True)
         self.search_bottom_button.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
@@ -10050,16 +10060,6 @@ class RAWImageViewer(QMainWindow):
         self.search_bottom_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.search_bottom_button.hide()
         left_buttons_layout.addWidget(self.search_bottom_button, 0, alignment=Qt.AlignmentFlag.AlignVCenter)
-
-        # RAW/JPEG Toggle button
-        self.raw_toggle_button = QPushButton()
-        self.raw_toggle_button.setFlat(True)
-        self.raw_toggle_button.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        self.raw_toggle_button.setStyleSheet(bottom_icon_btn_style)
-        self.raw_toggle_button.clicked.connect(self.toggle_raw_jpeg_workflow)
-        self.raw_toggle_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.raw_toggle_button.hide()
-        left_buttons_layout.addWidget(self.raw_toggle_button, 0, alignment=Qt.AlignmentFlag.AlignVCenter)
 
         # Search panel: in-row width animation (v2.1 layout — avoids overlay blocking Open)
         self.search_expand_container = QWidget()
@@ -11332,6 +11332,8 @@ class RAWImageViewer(QMainWindow):
         lowered = msg.lower()
         if lowered.startswith("preparing thumbnail"):
             return False
+        if lowered.startswith("downloading"):
+            return True
         # Only the three search-index phases belong in the search field.
         return lowered.startswith(
             ("metadata:", "semantic:", "face:")
@@ -11653,6 +11655,7 @@ class RAWImageViewer(QMainWindow):
         index = self._get_semantic_index()
         token = time.time_ns()
         self._semantic_asset_download_in_progress = True
+        self._gallery_search_show_index_progress = True
         signals = SemanticAssetDownloadSignals()
         self._semantic_asset_download_signals = signals
         signals.progress.connect(self._on_semantic_asset_download_progress)
@@ -11669,8 +11672,12 @@ class RAWImageViewer(QMainWindow):
 
             def run(self_inner):
                 try:
-                    def _progress(message):
-                        self_inner.signals.progress.emit(self_inner.token, str(message))
+                    def _progress(pct, message=None):
+                        from mobileclip_download_progress import download_status_text
+
+                        pct_val = max(0, min(100, int(pct)))
+                        text = (message or download_status_text(pct_val)).strip()
+                        self_inner.signals.progress.emit(self_inner.token, pct_val, text)
 
                     path = self_inner.index.download_semantic_backend_assets(
                         progress_callback=_progress
@@ -11679,17 +11686,15 @@ class RAWImageViewer(QMainWindow):
                 except Exception as e:
                     self_inner.signals.error.emit(self_inner.token, str(e))
 
-        self._set_gallery_search_status("Downloading assets…")
+        self._set_gallery_search_status("Downloading... 0%")
         worker = _SemanticAssetDownloadWorker(token, index, list(corpus_files), signals)
         QThreadPool.globalInstance().start(worker)
 
-    def _on_semantic_asset_download_progress(self, token, message):
+    def _on_semantic_asset_download_progress(self, token, pct, message):
         if not self._semantic_asset_download_in_progress:
             return
-        dialog = getattr(self, "_mobileclip_download_dialog", None)
-        if dialog is not None:
-            dialog.set_progress_message(message)
-        self._set_gallery_search_status(message or "Downloading assets…")
+        short = (message or "").strip() or f"Downloading... {int(pct)}%"
+        self._set_gallery_search_status(short)
 
     def _on_semantic_asset_download_done(self, token, asset_path, corpus_files):
         if not self._semantic_asset_download_in_progress:

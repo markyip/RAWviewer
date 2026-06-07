@@ -1,5 +1,6 @@
 import errno
 import os
+import re
 import sys
 import shutil
 import subprocess
@@ -16,6 +17,26 @@ PIXI_DOWNLOAD_URL = (
 DOWNLOAD_RETRIES = 3
 RETRY_DELAY_SEC = 3
 MIN_FREE_BYTES = 3 * 1024 * 1024 * 1024  # ~3 GiB for pixi env + models
+INSTALLER_PROGRESS_PREFIX = "@RAWVIEWER_PROGRESS"
+MODEL_DOWNLOAD_PROGRESS_START = 5
+MODEL_DOWNLOAD_PROGRESS_END = 100
+
+
+def _parse_installer_progress_line(line: str) -> tuple[int, str] | None:
+    """Parse @RAWVIEWER_PROGRESS pct=N message=... from child download scripts."""
+    idx = line.find(INSTALLER_PROGRESS_PREFIX)
+    if idx < 0:
+        return None
+    payload = line[idx:]
+    match = re.search(r"pct=(\d+)\s+message=(.*)", payload)
+    if not match:
+        return None
+    return int(match.group(1)), match.group(2).strip()
+
+
+def _map_model_download_progress(pct: int) -> int:
+    span = MODEL_DOWNLOAD_PROGRESS_END - MODEL_DOWNLOAD_PROGRESS_START
+    return MODEL_DOWNLOAD_PROGRESS_START + int(max(0, min(100, pct)) * span / 100)
 
 
 def _human_bytes(num_bytes: int) -> str:
@@ -76,7 +97,7 @@ def _download_file_with_retry(url: str, dest_path: str, log) -> bool:
             log(disk_err)
             return False
         try:
-            log(f"Downloading (attempt {attempt}/{DOWNLOAD_RETRIES})…")
+            log(f"Downloading (attempt {attempt}/{DOWNLOAD_RETRIES})...")
             with urllib.request.urlopen(req, timeout=120) as resp:
                 with open(dest_path, "wb") as out:
                     shutil.copyfileobj(resp, out)
@@ -84,7 +105,7 @@ def _download_file_with_retry(url: str, dest_path: str, log) -> bool:
         except Exception as exc:
             log(f"Download failed: {_describe_download_error(exc)}")
             if attempt < DOWNLOAD_RETRIES:
-                log(f"Retrying in {RETRY_DELAY_SEC}s…")
+                log(f"Retrying in {RETRY_DELAY_SEC}s...")
                 time.sleep(RETRY_DELAY_SEC)
             else:
                 log(
@@ -94,8 +115,10 @@ def _download_file_with_retry(url: str, dest_path: str, log) -> bool:
     return False
 
 
-def _run_logged_subprocess(cmd, cwd, log, cancelled) -> int | None:
+def _run_logged_subprocess(cmd, cwd, log, cancelled, progress_hook=None) -> int | None:
     """Run a subprocess, streaming stdout. Returns None if cancelled."""
+    env = os.environ.copy()
+    env["PYTHONUNBUFFERED"] = "1"
     process = subprocess.Popen(
         cmd,
         cwd=cwd,
@@ -105,6 +128,7 @@ def _run_logged_subprocess(cmd, cwd, log, cancelled) -> int | None:
         encoding="utf-8",
         errors="replace",
         creationflags=subprocess.CREATE_NO_WINDOW,
+        env=env,
     )
     try:
         for line in process.stdout:
@@ -116,8 +140,18 @@ def _run_logged_subprocess(cmd, cwd, log, cancelled) -> int | None:
                     process.kill()
                 return None
             msg = line.strip()
-            if msg:
-                log(msg)
+            if not msg:
+                continue
+            parsed = _parse_installer_progress_line(msg)
+            if parsed is not None:
+                pct, progress_msg = parsed
+                if progress_hook is not None:
+                    progress_hook(pct, progress_msg)
+                continue
+            # Skip leaked tqdm bar lines (progress uses @RAWVIEWER_PROGRESS only).
+            if re.search(r"\d+%\|", msg) or re.search(r"\|\s*\d+%", msg):
+                continue
+            log(msg)
         process.wait()
         return process.returncode
     finally:
@@ -125,13 +159,13 @@ def _run_logged_subprocess(cmd, cwd, log, cancelled) -> int | None:
             process.stdout.close()
 
 
-def _run_subprocess_with_retry(cmd, cwd, log, label, cancelled) -> int | None:
+def _run_subprocess_with_retry(cmd, cwd, log, label, cancelled, progress_hook=None) -> int | None:
     last_code = 1
     for attempt in range(1, DOWNLOAD_RETRIES + 1):
         if cancelled():
             return None
-        log(f"{label} (attempt {attempt}/{DOWNLOAD_RETRIES})…")
-        code = _run_logged_subprocess(cmd, cwd, log, cancelled)
+        log(f"{label} (attempt {attempt}/{DOWNLOAD_RETRIES})...")
+        code = _run_logged_subprocess(cmd, cwd, log, cancelled, progress_hook)
         if code is None:
             return None
         if code == 0:
@@ -139,7 +173,7 @@ def _run_subprocess_with_retry(cmd, cwd, log, label, cancelled) -> int | None:
         last_code = code
         log(f"{label} exited with code {code}.")
         if attempt < DOWNLOAD_RETRIES:
-            log(f"Retrying in {RETRY_DELAY_SEC}s…")
+            log(f"Retrying in {RETRY_DELAY_SEC}s...")
             time.sleep(RETRY_DELAY_SEC)
     log(
         f"{label} failed after {DOWNLOAD_RETRIES} attempts. "
@@ -182,6 +216,7 @@ class InstallWorker(QObject):
     finished = pyqtSignal(bool, str)
     log_signal = pyqtSignal(str)
     progress_signal = pyqtSignal(int)
+    progress_label_signal = pyqtSignal(str)
 
     def __init__(self, target_dir):
         super().__init__()
@@ -209,7 +244,7 @@ class InstallWorker(QObject):
                 return
 
             os.makedirs(target_dir, exist_ok=True)
-            self.progress_signal.emit(10)
+            self.progress_signal.emit(2)
             self.log_signal.emit(f"Installing to {target_dir}...")
 
             if self._is_cancelled():
@@ -261,7 +296,7 @@ class InstallWorker(QObject):
             if getattr(sys, "frozen", False):
                 shutil.copy2(sys.executable, setup_exe)
 
-            self.progress_signal.emit(30)
+            self.progress_signal.emit(4)
 
             internal_dir = os.path.join(target_dir, "_internal")
             pixi_dir = os.path.join(internal_dir, "pixi")
@@ -288,7 +323,7 @@ class InstallWorker(QObject):
                     self.finished.emit(False, "")
                     return
 
-            self.progress_signal.emit(50)
+            self.progress_signal.emit(5)
 
             self.log_signal.emit(
                 "Downloading Python dependencies. This may take several minutes..."
@@ -308,15 +343,30 @@ class InstallWorker(QObject):
                 self.finished.emit(False, "")
                 return
 
-            self.progress_signal.emit(75)
+            self.progress_signal.emit(MODEL_DOWNLOAD_PROGRESS_START)
 
-            self.log_signal.emit("Downloading MobileCLIP ONNX models (optional for AI search)...")
+            self.log_signal.emit(
+                "Downloading AI models (~600 MB). This may take several minutes..."
+            )
+            self.progress_label_signal.emit("Downloading... 0%")
+            self._model_download_log_pct = -1
+
+            def _on_model_download_progress(pct: int, message: str) -> None:
+                self.progress_signal.emit(_map_model_download_progress(pct))
+                label = (message or "").strip() or f"Downloading... {pct}%"
+                self.progress_label_signal.emit(label)
+                last_logged = getattr(self, "_model_download_log_pct", -1)
+                if pct >= 100 or pct <= 0 or pct >= last_logged + 5:
+                    self._model_download_log_pct = pct
+                    self.log_signal.emit(label)
+
             models_code = _run_subprocess_with_retry(
-                [pixi_exe, "run", "python", "scripts/download_mobileclip_onnx.py"],
+                [pixi_exe, "run", "python", "-u", "scripts/download_mobileclip_onnx.py"],
                 target_dir,
                 self.log_signal.emit,
                 "AI model download",
                 self._is_cancelled,
+                progress_hook=_on_model_download_progress,
             )
             if models_code is None:
                 self._abort_cancelled()
@@ -336,8 +386,6 @@ class InstallWorker(QObject):
             if self._is_cancelled():
                 self._abort_cancelled()
                 return
-
-            self.progress_signal.emit(90)
 
             launcher_vbs_path = os.path.join(target_dir, "launcher.vbs")
             if not os.path.isfile(target_exe):
@@ -391,8 +439,6 @@ oLink2.Save
             except Exception as e:
                 self.log_signal.emit(f"Could not create shortcut: {e}")
 
-            self.progress_signal.emit(95)
-
             self.log_signal.emit("Registering uninstaller...")
             try:
                 import ctypes
@@ -405,7 +451,7 @@ oLink2.Save
                 with winreg.CreateKey(winreg.HKEY_CURRENT_USER, key_path) as key:
                     winreg.SetValueEx(key, "DisplayName", 0, winreg.REG_SZ, "RAWviewer")
                     winreg.SetValueEx(key, "DisplayIcon", 0, winreg.REG_SZ, icon_path)
-                    winreg.SetValueEx(key, "DisplayVersion", 0, winreg.REG_SZ, "2.3.1")
+                    winreg.SetValueEx(key, "DisplayVersion", 0, winreg.REG_SZ, "2.3.2")
                     winreg.SetValueEx(key, "UninstallString", 0, winreg.REG_SZ, silent_cmd)
                     winreg.SetValueEx(key, "QuietUninstallString", 0, winreg.REG_SZ, silent_cmd)
                     winreg.SetValueEx(key, "InstallLocation", 0, winreg.REG_SZ, target_dir)
@@ -633,9 +679,14 @@ class InstallerGUI(QMainWindow):
         title = QLabel("Installing...")
         title.setObjectName("title")
         layout.addWidget(title)
-        
+
+        self.install_step_label = QLabel("")
+        self.install_step_label.setStyleSheet("color: #A0A0A0; font-size: 13px;")
+        layout.addWidget(self.install_step_label)
+
         self.progress_bar = QProgressBar()
         self.progress_bar.setFixedHeight(12)
+        self.progress_bar.setFormat("%p%")
         layout.addWidget(self.progress_bar)
         
         self.log_box = QPlainTextEdit()
@@ -668,6 +719,7 @@ class InstallerGUI(QMainWindow):
         self.btn_next.setText("INSTALLING...")
         self.btn_cancel.setText("CANCEL")
         self.log_box.clear()
+        self.install_step_label.setText("")
 
         self.thread = QThread()
         self.worker = InstallWorker(target_dir)
@@ -676,6 +728,7 @@ class InstallerGUI(QMainWindow):
         self.worker.finished.connect(self.on_finished)
         self.worker.log_signal.connect(self.log_box.appendPlainText)
         self.worker.progress_signal.connect(self.progress_bar.setValue)
+        self.worker.progress_label_signal.connect(self.install_step_label.setText)
         self.thread.start()
 
     def request_close(self):
@@ -685,7 +738,7 @@ class InstallerGUI(QMainWindow):
             self._awaiting_cancel = True
             self._close_after_failed_install = True
             self.btn_cancel.setEnabled(False)
-            self.log_box.appendPlainText("Cancelling installation…")
+            self.log_box.appendPlainText("Cancelling installation...")
             if self.worker is not None:
                 self.worker.stop()
             return
