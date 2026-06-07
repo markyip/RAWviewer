@@ -1,12 +1,17 @@
 #!/usr/bin/env python3
 """
-POC: use embedded JPEG as color reference to correct GPU-decoded RAW color.
+POC: correct GPU-decoded RAW color using a reference from the same RAW file.
 
-Default input: D:\\Development\\RAW Image Data
-Default output: <input>\\_color_match_poc
+Reference modes:
+  rawpy     LibRaw/rawpy postprocess (default; raw-to-raw, same geometry)
+  embedded  Camera embedded JPEG preview
+
+Default input : D:\\Development\\RAW Image Data
+Default output: <input>\\_rawpy_color_match_poc  (rawpy mode)
+                <input>\\_color_match_poc       (embedded mode)
 
 Writes per file:
-  {stem}_embedded_ref.png
+  {stem}_reference.png
   {stem}_gpu_decode.png
   {stem}_gpu_matched.png
   {stem}_compare.png
@@ -15,7 +20,6 @@ Writes per file:
 from __future__ import annotations
 
 import argparse
-import os
 import sys
 import traceback
 from pathlib import Path
@@ -38,14 +42,32 @@ def _save_png(path: Path, rgb: np.ndarray) -> None:
     Image.fromarray(rgb[:, :, :3]).save(path, format="PNG", optimize=True)
 
 
-def _bayer_pattern_from_raw(raw) -> str:
-    try:
-        desc = bytes(raw.color_desc).decode("ascii", errors="ignore").upper()
-        if len(desc) >= 4 and all(c in "RGB" for c in desc[:4]):
-            return desc[:4]
-    except Exception:
-        pass
-    return "RGGB"
+def _gpu_decode_rgb(file_path: str, *, half_size: bool) -> np.ndarray | None:
+    import rawpy
+    from gpu_raw_processor import bayer_pattern_from_raw, detect_gpu_backend, try_gpu_raw_decode
+
+    backend = detect_gpu_backend()
+    if backend == "cpu_only":
+        print("  [skip GPU] no GPU backend (set RAWVIEWER_GPU_BACKEND or install torch/cupy)")
+        return None
+
+    with rawpy.imread(file_path) as raw:
+        raw_array = raw.raw_image.copy()
+        if half_size:
+            raw_array = raw_array[::2, ::2]
+        pattern = bayer_pattern_from_raw(raw)
+        rgb = try_gpu_raw_decode(file_path, raw_array, None, raw_obj=raw)
+        if rgb is not None:
+            means = rgb[:, :, 0].mean(), rgb[:, :, 1].mean(), rgb[:, :, 2].mean()
+            print(
+                f"  GPU decode OK ({backend}, bayer={pattern}, {rgb.shape[1]}x{rgb.shape[0]}, "
+                f"RGB means={means[0]:.1f}/{means[1]:.1f}/{means[2]:.1f})"
+            )
+        return rgb
+
+
+def _channel_means(rgb: np.ndarray) -> tuple[float, float, float]:
+    return float(rgb[:, :, 0].mean()), float(rgb[:, :, 1].mean()), float(rgb[:, :, 2].mean())
 
 
 def _extract_embedded_jpeg(file_path: str, *, max_edge: int) -> np.ndarray | None:
@@ -64,27 +86,8 @@ def _extract_embedded_jpeg(file_path: str, *, max_edge: int) -> np.ndarray | Non
     return thumb[:, :, :3].astype(np.uint8)
 
 
-def _gpu_decode_rgb(file_path: str, exif_data: dict | None, *, half_size: bool) -> np.ndarray | None:
-    import rawpy
-    from gpu_raw_processor import detect_gpu_backend, try_gpu_raw_decode
-
-    backend = detect_gpu_backend()
-    if backend == "cpu_only":
-        print(f"  [skip GPU] no GPU backend (set RAWVIEWER_GPU_BACKEND or install torch/cupy)")
-        return None
-
-    with rawpy.imread(file_path) as raw:
-        raw_array = raw.raw_image.copy()
-        if half_size:
-            raw_array = raw_array[::2, ::2]
-        pattern = _bayer_pattern_from_raw(raw)
-        rgb = try_gpu_raw_decode(file_path, raw_array, exif_data, raw_obj=raw)
-        if rgb is not None:
-            print(f"  GPU decode OK ({backend}, bayer={pattern}, {rgb.shape[1]}x{rgb.shape[0]})")
-        return rgb
-
-
-def _libraw_reference_rgb(file_path: str, *, half_size: bool) -> np.ndarray:
+def _rawpy_reference_rgb(file_path: str, *, half_size: bool) -> np.ndarray:
+    """LibRaw/rawpy decode used as the color reference (raw-to-raw POC)."""
     import rawpy
 
     with rawpy.imread(file_path) as raw:
@@ -102,70 +105,83 @@ def process_file(
     file_path: Path,
     output_dir: Path,
     *,
+    reference_mode: str,
     max_edge: int,
     method: str,
     half_size: bool,
+    chroma_strength: float,
 ) -> bool:
     from embedded_color_match import (
         align_reference_to_source,
+        apply_color_transfer,
+        diagonal_gain_match,
         make_comparison_strip,
-        reinhard_color_transfer,
-        reinhard_lab_color_transfer,
     )
+
     stem = file_path.stem
-    print(f"\n[{file_path.name}]")
+    print(f"\n[{file_path.name}] ref={reference_mode} method={method}")
 
-    embedded = _extract_embedded_jpeg(str(file_path), max_edge=max_edge)
-    if embedded is None:
-        print("  [skip] no embedded JPEG / preview")
-        return False
-
-    gpu_rgb = _gpu_decode_rgb(str(file_path), None, half_size=half_size)
+    gpu_rgb = _gpu_decode_rgb(str(file_path), half_size=half_size)
     if gpu_rgb is None:
         print("  [skip] GPU decode failed")
         return False
 
-    ref_aligned = align_reference_to_source(embedded, gpu_rgb)
-    if method == "lab":
-        matched = reinhard_lab_color_transfer(gpu_rgb, ref_aligned)
+    if reference_mode == "rawpy":
+        reference = _rawpy_reference_rgb(str(file_path), half_size=half_size)
+        ref_label = "rawpy"
+    elif reference_mode == "embedded":
+        reference = _extract_embedded_jpeg(str(file_path), max_edge=max_edge)
+        if reference is None:
+            print("  [skip] no embedded JPEG / preview")
+            return False
+        ref_label = "embedded"
     else:
-        matched = reinhard_color_transfer(gpu_rgb, ref_aligned)
+        raise ValueError(f"Unknown reference mode: {reference_mode}")
 
-    _save_png(output_dir / f"{stem}_embedded_ref.png", ref_aligned)
+    ref_aligned = align_reference_to_source(reference, gpu_rgb)
+    ref_means = _channel_means(ref_aligned)
+    print(f"  reference RGB means={ref_means[0]:.1f}/{ref_means[1]:.1f}/{ref_means[2]:.1f}")
+
+    gpu_balanced = diagonal_gain_match(gpu_rgb, ref_aligned)
+    balanced_means = _channel_means(gpu_balanced)
+    print(f"  diagonal gain RGB means={balanced_means[0]:.1f}/{balanced_means[1]:.1f}/{balanced_means[2]:.1f}")
+
+    matched = apply_color_transfer(
+        gpu_rgb,
+        ref_aligned,
+        method,
+        chroma_strength=chroma_strength,
+    )
+    matched_means = _channel_means(matched)
+    print(f"  matched RGB means={matched_means[0]:.1f}/{matched_means[1]:.1f}/{matched_means[2]:.1f}")
+
+    _save_png(output_dir / f"{stem}_reference.png", ref_aligned)
     _save_png(output_dir / f"{stem}_gpu_decode.png", gpu_rgb)
+    _save_png(output_dir / f"{stem}_gpu_balanced.png", gpu_balanced)
     _save_png(output_dir / f"{stem}_gpu_matched.png", matched)
 
-    try:
-        libraw_rgb = _libraw_reference_rgb(str(file_path), half_size=half_size)
-        libraw_aligned = align_reference_to_source(libraw_rgb, gpu_rgb)
-        compare = make_comparison_strip(
-            (
-                ("embedded", ref_aligned),
-                ("gpu", gpu_rgb),
-                ("matched", matched),
-                ("libraw", libraw_aligned),
-            )
+    compare = make_comparison_strip(
+        (
+            (ref_label, ref_aligned),
+            ("gpu", gpu_rgb),
+            ("gain", gpu_balanced),
+            ("matched", matched),
         )
-        _save_png(output_dir / f"{stem}_compare.png", compare)
-    except Exception as exc:
-        print(f"  [warn] compare strip without libraw: {exc}")
-        compare = make_comparison_strip(
-            (
-                ("embedded", ref_aligned),
-                ("gpu", gpu_rgb),
-                ("matched", matched),
-            )
-        )
-        _save_png(output_dir / f"{stem}_compare.png", compare)
+    )
+    _save_png(output_dir / f"{stem}_compare.png", compare)
 
     print(f"  wrote {output_dir / (stem + '_gpu_matched.png')}")
     return True
 
 
 def iter_raw_files(root: Path) -> list[Path]:
+    skip_dirs = {"_color_match_poc", "_rawpy_color_match_poc", "_rawpy_color_match_poc_v2"}
     files = [
         p for p in root.rglob("*")
-        if p.is_file() and p.suffix.lower() in RAW_EXTENSIONS and not p.name.startswith(".")
+        if p.is_file()
+        and p.suffix.lower() in RAW_EXTENSIONS
+        and not p.name.startswith(".")
+        and not any(part in skip_dirs for part in p.parts)
     ]
     return sorted(files, key=lambda p: p.name.lower())
 
@@ -180,7 +196,13 @@ def main() -> int:
     parser.add_argument(
         "--output",
         default="",
-        help="Output folder (default: <input>/_color_match_poc)",
+        help="Output folder (default depends on --reference mode)",
+    )
+    parser.add_argument(
+        "--reference",
+        choices=("rawpy", "embedded"),
+        default="rawpy",
+        help="Color reference source (default: rawpy LibRaw decode)",
     )
     parser.add_argument("--limit", type=int, default=0, help="Process at most N files (0 = all)")
     parser.add_argument(
@@ -196,9 +218,15 @@ def main() -> int:
     )
     parser.add_argument(
         "--method",
-        choices=("rgb", "lab"),
-        default="rgb",
-        help="Color transfer method (lab needs scikit-image)",
+        choices=("affine-diagonal", "affine", "diagonal", "lab-l", "lab", "rgb"),
+        default="affine-diagonal",
+        help="Transfer method (default: diagonal gain then affine)",
+    )
+    parser.add_argument(
+        "--chroma-strength",
+        type=float,
+        default=0.35,
+        help="For lab-l: how much to match a/b chroma vs keep GPU chroma (0-1)",
     )
     args = parser.parse_args()
     half_size = not args.full_size
@@ -208,7 +236,12 @@ def main() -> int:
         print(f"Input folder not found: {input_dir}", file=sys.stderr)
         return 1
 
-    output_dir = Path(args.output) if args.output else input_dir / "_color_match_poc"
+    if args.output:
+        output_dir = Path(args.output)
+    elif args.reference == "rawpy":
+        output_dir = input_dir / "_rawpy_color_match_poc_v2"
+    else:
+        output_dir = input_dir / "_color_match_poc"
     output_dir.mkdir(parents=True, exist_ok=True)
 
     files = iter_raw_files(input_dir)
@@ -217,20 +250,23 @@ def main() -> int:
 
     print(f"Input : {input_dir}")
     print(f"Output: {output_dir}")
-    print(f"Files : {len(files)} (half_size={half_size}, method={args.method})")
+    print(
+        f"Files : {len(files)} "
+        f"(reference={args.reference}, half_size={half_size}, method={args.method})"
+    )
 
     ok = 0
     fail = 0
     for path in files:
-        if "_color_match_poc" in path.parts:
-            continue
         try:
             if process_file(
                 path,
                 output_dir,
+                reference_mode=args.reference,
                 max_edge=args.max_edge,
                 method=args.method,
                 half_size=half_size,
+                chroma_strength=args.chroma_strength,
             ):
                 ok += 1
             else:

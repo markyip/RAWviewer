@@ -6,6 +6,19 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
+# Standard XYZ (D65) -> linear sRGB (IEC 61966-2-1)
+_XYZ_D65_TO_SRGB = np.array(
+    [
+        [3.2404542, -1.5371385, -0.4985314],
+        [-0.9692660, 1.8760108, 0.0415560],
+        [0.0556434, -0.2040259, 1.0572252],
+    ],
+    dtype=np.float32,
+)
+
+_VALID_BAYER_PATTERNS = frozenset({"RGGB", "BGGR", "GRBG", "GBRG"})
+_RAW_COLOR_INDEX = {0: "R", 1: "G", 2: "B", 3: "G"}
+
 # Cache detection results to avoid repeated import attempts
 _GPU_BACKEND: Optional[str] = None
 
@@ -53,6 +66,38 @@ def detect_gpu_backend() -> str:
 
     _GPU_BACKEND = "cpu_only"
     return _GPU_BACKEND
+
+
+def bayer_pattern_from_raw(raw_obj: Any) -> str:
+    """Derive RGGB/BGGR/GRBG/GBRG from rawpy ``raw_pattern`` (not ``color_desc`` labels)."""
+    if raw_obj is None:
+        return "RGGB"
+    try:
+        pattern = np.asarray(raw_obj.raw_pattern)
+        if pattern.shape == (2, 2):
+            chars = "".join(_RAW_COLOR_INDEX[int(pattern[row, col])] for row in (0, 1) for col in (0, 1))
+            if chars in _VALID_BAYER_PATTERNS:
+                return chars
+    except Exception:
+        pass
+    return "RGGB"
+
+
+def camera_rgb_to_srgb_matrix(cam_rgb_to_xyz: np.ndarray) -> np.ndarray:
+    """
+    Build a 3x3 matrix for ``linear_srgb = camera_rgb @ matrix.T``.
+
+    LibRaw stores ``rgb_xyz_matrix`` with a layout that does not match a naive
+    ``cam @ XYZ->sRGB`` product on our GPU path yet. Transpose matches rawpy
+    channel balance more closely than ``inv(cam)`` on tested Canon CR3 files.
+    """
+    cam = np.asarray(cam_rgb_to_xyz, dtype=np.float64)[:3, :3]
+    if cam.shape != (3, 3) or np.allclose(cam, 0.0):
+        return np.eye(3, dtype=np.float32)
+    try:
+        return cam.T.astype(np.float32)
+    except Exception:
+        return np.eye(3, dtype=np.float32)
 
 
 def gpu_demosaic_pytorch(
@@ -301,13 +346,13 @@ def try_gpu_raw_decode(
         
     t_start = time.time()
     try:
-        # Determine bayer pattern (default to RGGB)
         bayer_pattern = "RGGB"
-        if exif_data and exif_data.get("exif_data"):
-            # Some raw formats store sensor layout/bayer filter pattern in EXIF
+        if raw_obj is not None:
+            bayer_pattern = bayer_pattern_from_raw(raw_obj)
+        elif exif_data and exif_data.get("exif_data"):
             pattern = exif_data["exif_data"].get("CFAPattern")
-            if pattern:
-                bayer_pattern = str(pattern)
+            if pattern and str(pattern).upper() in _VALID_BAYER_PATTERNS:
+                bayer_pattern = str(pattern).upper()
 
         # Retrieve White Balance Coefficients, Black Levels, and White Level
         wb_coeffs = (1.0, 1.0, 1.0, 1.0)
@@ -343,37 +388,60 @@ def try_gpu_raw_decode(
             except Exception:
                 pass
 
-        # Calculate Color Matrix
-        # In LibRaw, rgb_xyz_matrix (returned by rawpy) is the rgb_cam matrix, mapping sRGB to camera RGB.
-        # Its inverse maps camera RGB directly to sRGB.
         if cam_xyz is None or np.allclose(cam_xyz, 0):
             m_color = np.eye(3, dtype=np.float32)
         else:
+            m_color = camera_rgb_to_srgb_matrix(cam_xyz)
+
+        if backend == "cupy" and bayer_pattern != "RGGB":
+            logger.warning(
+                "GPU Processor: CuPy demosaic only supports RGGB; trying PyTorch for %s.",
+                bayer_pattern,
+            )
             try:
-                m_color = np.linalg.inv(cam_xyz)
-            except np.linalg.LinAlgError:
-                m_color = np.eye(3, dtype=np.float32)
+                import torch
+
+                if torch.cuda.is_available():
+                    backend = "pytorch_cuda"
+                elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+                    backend = "pytorch_mps"
+                else:
+                    return None
+            except ImportError:
+                return None
 
         if backend == "pytorch_cuda":
             res = gpu_demosaic_pytorch(
                 raw_array, bayer_pattern, device_str="cuda", wb_coeffs=wb_coeffs, m_color=m_color,
                 black_levels=black_levels, white_level=white_level
             )
-            logger.info(f"GPU Processor: Decoded RAW via PyTorch CUDA in {(time.time() - t_start)*1000:.1f}ms")
+            logger.info(
+                "GPU Processor: Decoded RAW via PyTorch CUDA in %.1fms (bayer=%s)",
+                (time.time() - t_start) * 1000.0,
+                bayer_pattern,
+            )
             return res
         elif backend == "pytorch_mps":
             res = gpu_demosaic_pytorch(
                 raw_array, bayer_pattern, device_str="mps", wb_coeffs=wb_coeffs, m_color=m_color,
                 black_levels=black_levels, white_level=white_level
             )
-            logger.info(f"GPU Processor: Decoded RAW via PyTorch MPS in {(time.time() - t_start)*1000:.1f}ms")
+            logger.info(
+                "GPU Processor: Decoded RAW via PyTorch MPS in %.1fms (bayer=%s)",
+                (time.time() - t_start) * 1000.0,
+                bayer_pattern,
+            )
             return res
         elif backend == "cupy":
             res = gpu_demosaic_cupy(
                 raw_array, bayer_pattern, wb_coeffs=wb_coeffs, m_color=m_color,
                 black_levels=black_levels, white_level=white_level
             )
-            logger.info(f"GPU Processor: Decoded RAW via CuPy in {(time.time() - t_start)*1000:.1f}ms")
+            logger.info(
+                "GPU Processor: Decoded RAW via CuPy in %.1fms (bayer=%s)",
+                (time.time() - t_start) * 1000.0,
+                bayer_pattern,
+            )
             return res
             
     except Exception as e:
