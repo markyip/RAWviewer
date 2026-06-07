@@ -24,8 +24,15 @@ Version 2.3.0 expands **focus overlays**, adds a **RAW ↔ embedded-JPEG workflo
 - **Faster neural pass**: Auto-tuned MobileCLIP **batch size** on your GPU/CPU for higher indexing throughput.
 - **Safer setup**: Incomplete ONNX installs report a clear reinstall hint instead of failing silently.
 
-### 🍎 macOS packaging & install
+### 🏗️ Build
+- **Removed unused `mediapipe`** from Windows `build.py` dependencies (face detection uses YuNet ONNX).
+
+### 🍎 macOS
 - **Release zip**: `RAWviewer-v2.3.0-macOS.zip` with **`Start Here.txt`**, **`Install RAWviewer.command`** (copy to Applications + quarantine), and **`Remove Quarantine.command`**. Bundles **scipy** for GPS reverse geocoding; minimum macOS **13.0**; **pyexiv2** included in release builds.
+- **Dock — single app icon**: Fixed extra RAWviewer icons in the Dock while browsing large folders. LibRaw’s process pool is **off by default on macOS** (PyInstaller runtime hook + spawn-safe startup); opt in with `RAWVIEWER_USE_PROCESS_POOL=1` (may bring back extra Dock entries).
+- **Startup splash**: Dismisses automatically when the main window is ready (no extra click on macOS).
+- **Gallery search crash (macOS 26+)**: Disables NSTextField automatic completion on the search field (including after focus and wake-from-sleep) to avoid ViewBridge / `SPCompletionListServiceViewController` aborts under Qt 6.11.
+- **Install docs**: README macOS version support table (13+ prebuilt; Pixi 14+ on Apple Silicon); simplified zip install flow via `Start Here.txt`.
 
 ---
 

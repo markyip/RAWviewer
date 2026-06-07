@@ -7,6 +7,7 @@ import logging
 import traceback
 import threading
 import warnings
+import weakref
 from datetime import datetime
 from typing import List, Optional, Tuple, Union
 
@@ -781,6 +782,28 @@ from PyQt6.QtGui import (QPixmap, QImage, QAction, QKeySequence, QShortcut, QGui
 safe_print("PyQt6 imported successfully", flush=True)
 
 
+_macos_completion_guarded_edits: "weakref.WeakSet" = weakref.WeakSet()
+
+
+def _macos_apply_ns_text_completion_off(node) -> None:
+    """Turn off AppKit completion/spellcheck hooks on one NSView/NSTextField."""
+    for setter, value in (
+        ("setAutomaticTextCompletionEnabled:", False),
+        ("setAutomaticSpellingCorrectionEnabled:", False),
+        ("setContinuousSpellCheckingEnabled:", False),
+        ("setGrammarCheckingEnabled:", False),
+        ("setSmartInsertDeleteEnabled:", False),
+        ("setAutomaticDashSubstitutionEnabled:", False),
+        ("setAutomaticQuoteSubstitutionEnabled:", False),
+        ("setAutomaticLinkDetectionEnabled:", False),
+    ):
+        try:
+            if node.respondsToSelector_(setter):
+                getattr(node, setter.replace(":", "_"))(value)
+        except Exception:
+            pass
+
+
 def _macos_disable_line_edit_system_completion(line_edit) -> None:
     """
     Disable macOS NSTextField automatic completion/spellcheck on a Qt QLineEdit.
@@ -795,6 +818,7 @@ def _macos_disable_line_edit_system_completion(line_edit) -> None:
         "1",
         "true",
         "yes",
+        "on",
     ):
         return
     try:
@@ -820,23 +844,27 @@ def _macos_disable_line_edit_system_completion(line_edit) -> None:
                 continue
             if node_id:
                 seen.add(node_id)
-            for setter, value in (
-                ("setAutomaticTextCompletionEnabled:", False),
-                ("setAutomaticSpellingCorrectionEnabled:", False),
-                ("setContinuousSpellCheckingEnabled:", False),
-                ("setGrammarCheckingEnabled:", False),
-                ("setSmartInsertDeleteEnabled:", False),
-            ):
-                try:
-                    if node.respondsToSelector_(setter):
-                        getattr(node, setter.replace(":", "_"))(value)
-                except Exception:
-                    pass
+            _macos_apply_ns_text_completion_off(node)
             try:
-                subs = node.subviews() or []
+                subs = list(node.subviews() or [])
             except Exception:
                 subs = []
             stack.extend(subs)
+            try:
+                parent = node.superview()
+                if parent is not None:
+                    stack.append(parent)
+            except Exception:
+                pass
+        try:
+            if view.respondsToSelector_("window"):
+                win = view.window()
+                if win is not None and win.respondsToSelector_("fieldEditor:forObject:"):
+                    editor = win.fieldEditor_forObject_(True, view)
+                    if editor is not None:
+                        _macos_apply_ns_text_completion_off(editor)
+        except Exception:
+            pass
     except Exception:
         pass
 
@@ -850,6 +878,55 @@ def _macos_schedule_line_edit_system_completion_off(line_edit, delay_ms: int = 0
         _macos_disable_line_edit_system_completion(line_edit)
 
     QTimer.singleShot(max(0, int(delay_ms)), _apply)
+
+
+class _MacLineEditCompletionGuard(QObject):
+    """Re-disable AppKit text completion when the Qt line edit is shown or focused."""
+
+    def eventFilter(self, watched, event):
+        try:
+            if event.type() in (
+                QEvent.Type.FocusIn,
+                QEvent.Type.Show,
+                QEvent.Type.Polish,
+                QEvent.Type.WindowActivate,
+            ):
+                _macos_disable_line_edit_system_completion(watched)
+        except Exception:
+            pass
+        return False
+
+
+def _macos_install_line_edit_completion_guard(line_edit) -> None:
+    """Install focus/show hooks plus wake-from-sleep re-apply for a QLineEdit."""
+    if sys.platform != "darwin" or line_edit is None:
+        return
+    if os.environ.get("RAWVIEWER_MACOS_LINEEDIT_COMPLETION", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    ):
+        return
+    _macos_completion_guarded_edits.add(line_edit)
+    guard = getattr(line_edit, "_macos_completion_guard", None)
+    if guard is None:
+        guard = _MacLineEditCompletionGuard(line_edit)
+        line_edit._macos_completion_guard = guard
+        line_edit.installEventFilter(guard)
+    for delay in (0, 50, 250, 500):
+        _macos_schedule_line_edit_system_completion_off(line_edit, delay)
+    app = QApplication.instance()
+    if app is not None and not getattr(app, "_macos_completion_reapply_hook", False):
+        app._macos_completion_reapply_hook = True
+
+        def _reapply_on_app_active(state) -> None:
+            if state != Qt.ApplicationState.ApplicationActive:
+                return
+            for edit in list(_macos_completion_guarded_edits):
+                _macos_disable_line_edit_system_completion(edit)
+
+        app.applicationStateChanged.connect(_reapply_on_app_active)
 
 
 def _dismiss_startup_splash(app, main_window=None, splash=None) -> None:
@@ -10152,8 +10229,7 @@ class RAWImageViewer(QMainWindow):
         self.gallery_search_input.setAttribute(
             Qt.WidgetAttribute.WA_MacShowFocusRect, False
         )
-        _macos_schedule_line_edit_system_completion_off(self.gallery_search_input, 0)
-        _macos_schedule_line_edit_system_completion_off(self.gallery_search_input, 250)
+        _macos_install_line_edit_completion_guard(self.gallery_search_input)
         self.gallery_search_input.returnPressed.connect(self._semantic_search_from_bar)
         self.gallery_search_input.textChanged.connect(self._on_gallery_search_text_changed)
 
@@ -10972,7 +11048,7 @@ class RAWImageViewer(QMainWindow):
         )
         self._sync_gallery_search_input_editable()
         if hasattr(self, "gallery_search_input") and self.gallery_search_input is not None:
-            _macos_schedule_line_edit_system_completion_off(self.gallery_search_input, 50)
+            _macos_install_line_edit_completion_guard(self.gallery_search_input)
 
     def _switch_to_gallery_for_search(self):
         """Enter gallery mode to show semantic search results or empty state."""
