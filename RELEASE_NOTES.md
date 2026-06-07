@@ -3,7 +3,13 @@
 ## 🚀 Version 2.3.0
 **Release Date: June 7, 2026**
 
-Version 2.3.0 expands **focus overlays**, adds a **RAW ↔ embedded-JPEG workflow** switch for single-image viewing, and improves **gallery navigation** and **semantic indexing** speed on large folders.
+Version 2.3.0 expands **focus overlays**, adds a **RAW ↔ embedded-JPEG workflow** switch for single-image viewing, improves **gallery navigation** and **semantic indexing** speed on large folders, and adds a **background update check** on launch.
+
+### 🔔 Release updates
+- **Background check on launch**: Once per app start, RAWviewer quietly compares your version to the latest [GitHub release](https://github.com/markyip/RAWviewer/releases/latest) (offline or unreachable → no UI).
+- **MD3 update prompt**: When a newer release is available, a styled dialog shows your version vs the latest tag and offers **Open Download Page** or **Not Now**.
+- **Respectful snooze**: **Not Now** hides the prompt for **14 days** for that release; a **newer** release tag will notify you again sooner.
+- **Opt out**: Set `RAWVIEWER_SKIP_UPDATE_CHECK=1` to disable the check entirely.
 
 ### 🎯 Focus overlay (`F`)
 - **Broader maker AF**: Nikon NEF (`AFInfo2`, image-height fallback), Olympus ORF (`AFPointSelected`, `AFFocusArea` / `AFSelectedArea`), Panasonic RW2 (`AFPointPosition`, including decimal `/1024` form), and refined Canon EOS point placement (center origin, Y-up).
