@@ -10869,6 +10869,9 @@ class RAWImageViewer(QMainWindow):
     def _set_gallery_search_status(
         self, message: str, animate: bool = False, *, relayout: bool = True
     ):
+        if getattr(self, "_semantic_asset_download_in_progress", False):
+            if not self._is_model_download_status(message):
+                return
         has_msg = bool(message and str(message).strip())
         show_in_search = bool(getattr(self, "_gallery_search_show_index_progress", False))
         if has_msg and self._should_show_search_index_progress(message) and not show_in_search:
@@ -11339,8 +11342,13 @@ class RAWImageViewer(QMainWindow):
             ("metadata:", "semantic:", "face:")
         )
 
+    def _is_model_download_status(self, message: str) -> bool:
+        return (message or "").strip().lower().startswith("downloading")
+
     def _on_semantic_index_progress(self, token, i, n, message):
         if token != self._semantic_index_active_token:
+            return
+        if getattr(self, "_semantic_asset_download_in_progress", False):
             return
             
         # Dynamically load newly warmed thumbnails into gallery view to speed up scrolling/display
@@ -11540,6 +11548,8 @@ class RAWImageViewer(QMainWindow):
 
     def _on_face_index_progress(self, token, i, n, message):
         if token != getattr(self, "_face_index_active_token", None):
+            return
+        if getattr(self, "_semantic_asset_download_in_progress", False):
             return
             
         # Dynamically load newly warmed thumbnails into gallery view to speed up scrolling/display
