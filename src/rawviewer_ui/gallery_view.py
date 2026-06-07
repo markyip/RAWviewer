@@ -77,11 +77,15 @@ def _gallery_warmup_scheduling_budgets(file_count: int) -> tuple[int, int, int]:
 
 
 def _gallery_idle_preload_batch() -> int:
-    return _env_int("RAWVIEWER_GALLERY_IDLE_PRELOAD_BATCH", 72, minimum=4)
+    from rawviewer_profile import gallery_idle_preload_batch
+
+    return gallery_idle_preload_batch()
 
 
 def _gallery_idle_preload_ms() -> int:
-    return _env_int("RAWVIEWER_GALLERY_IDLE_PRELOAD_MS", 250, minimum=50)
+    from rawviewer_profile import gallery_idle_preload_ms
+
+    return gallery_idle_preload_ms()
 
 
 def _thumbnail_data_to_base_pixmap(thumbnail_data) -> Optional[QPixmap]:
@@ -1923,11 +1927,14 @@ class JustifiedGallery(QWidget):
                 break
 
         if preload_batch:
+            from rawviewer_profile import gallery_idle_load_priority
+
+            idle_priority = gallery_idle_load_priority()
             # Embedded JPEG only — fast bidirectional scroll cushion above/below center.
             for path in preload_batch:
                 self.load_manager.load_image(
                     path,
-                    priority=Priority.BACKGROUND,
+                    priority=idle_priority,
                     cancel_existing=False,
                     stages={"thumbnail"},
                 )

@@ -54,12 +54,16 @@ Official macOS release only; there is no Linux build or installer.
 | [`shell/launch_dev.sh`](shell/launch_dev.sh) | Run `src/main.py` with verbose dev env (GPU view, share menu, semantic preflight) |
 | [`shell/clear_cache.sh`](shell/clear_cache.sh) | Wipe image/EXIF/semantic caches, logs, and QSettings (full fresh start) |
 | [`shell/build_macos.sh`](shell/build_macos.sh) | macOS build via `rawviewer_env` + `build.py` → `dist/RAWviewer.app` |
+| [`shell/build_macos_lite.sh`](shell/build_macos_lite.sh) | **Lite** macOS build: no semantic/face AI; EXIF+GPS search; higher prefetch → `dist/RAWviewer-v*-macOS-lite.zip` |
+| [`shell/launch_dev_lite.sh`](shell/launch_dev_lite.sh) | Run from source in **lite** profile (metadata/GPS search only; skips MobileCLIP preflight) |
 
 ```bash
 chmod +x scripts/Launch/shell/*.sh
 ./scripts/Launch/shell/launch_dev.sh
+./scripts/Launch/shell/launch_dev_lite.sh
 ./scripts/Launch/shell/clear_cache.sh
 ./scripts/Launch/shell/build_macos.sh
+./scripts/Launch/shell/build_macos_lite.sh
 ./clear_cache.sh
 ```
 
@@ -74,6 +78,20 @@ chmod +x scripts/Launch/shell/*.sh
 5. Uninstalls heavy unused ML stacks (`torch`, `sentence-transformers`, …) to keep the app bundle smaller.
 6. Cleans `build/`, `dist/`, `*.spec`, then runs **`python build.py`** (version **2.3.2**, updates `Info.plist`; MobileCLIP models are **not** bundled — users download in-app).
 7. Packages **`dist/RAWviewer-v2.3.2-macOS.zip`** with `RAWviewer.app`, **`install_macos_app.sh`**, **`remove_macos_quarantine.sh`**, and **`Start Here.txt`**.
+
+### macOS — lite profile (`build_macos_lite.sh` / `launch_dev_lite.sh`)
+
+Build-time profile (`build.py --profile lite`) disables **MobileCLIP semantic search** and **face detection**, keeps **GPS city/country** (`reverse-geocoder` + **scipy**), and raises prefetch defaults (nav radius, idle display prefetch, filmstrip radius, preload threads). Same codebase as full; behavior is controlled by baked `src/build_profile.py` + runtime hook.
+
+```bash
+./scripts/Launch/shell/launch_dev_lite.sh          # debug from source
+./scripts/Launch/shell/build_macos_lite.sh         # dist/RAWviewer-v2.3.2-macOS-lite.zip (~73 MB vs ~82 MB full)
+python build.py --profile lite                     # equivalent PyInstaller step
+```
+
+Override any lite prefetch default via env (see `src/rawviewer_profile.py`).
+
+**RAM-adaptive navigation prefetch (lite and full):** when `RAWVIEWER_NAV_PRELOAD_ADAPTIVE=1` (default) and `RAWVIEWER_NAV_PRELOAD_RADIUS` is unset, single-view neighbor prefetch radius scales with **available RAM** (~5–16 lite, ~4–10 full). Caps: `RAWVIEWER_NAV_PRELOAD_RADIUS_MIN` / `_MAX`. Gallery idle thumbnails use a larger batch in lite and `PRELOAD_NEXT` priority when semantic/face indexing is off.
 
 **End-user install:** extract the zip, then in Terminal:
 

@@ -19,6 +19,19 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent
 
 
+def write_build_profile(profile: str) -> None:
+    profile = profile.strip().lower()
+    if profile not in ("full", "lite"):
+        raise ValueError(f"Unknown build profile: {profile}")
+    path = REPO_ROOT / "src" / "build_profile.py"
+    path.write_text(
+        '"""Baked at build time by build.py (--profile full|lite). Dev default: full."""\n\n'
+        f'PROFILE = "{profile}"\n',
+        encoding="utf-8",
+    )
+    print(f"[INFO] Build profile: {profile} -> {path}")
+
+
 def _project_venv_python() -> Path:
     if platform.system() == "Windows":
         return REPO_ROOT / "rawviewer_env" / "Scripts" / "python.exe"
@@ -184,8 +197,9 @@ def update_macos_plist(app_path):
         return False
 
 
-def install_dependencies(windows_accel: str = "cuda"):
+def install_dependencies(windows_accel: str = "cuda", *, profile: str = "full"):
     """Install required dependencies"""
+    lite = profile.strip().lower() == "lite"
     print("Installing/upgrading dependencies...")
     system_name = platform.system()
     dependencies = [
@@ -219,10 +233,13 @@ def install_dependencies(windows_accel: str = "cuda"):
         dependencies.append('requests')
     elif system_name == "Darwin":
         dependencies.append('scipy')  # reverse_geocoder GPS lookup (scipy.spatial.cKDTree)
-        dependencies.append('huggingface-hub')
-        dependencies.append('pyobjc-framework-CoreML')
+        dependencies.append('requests')
+        dependencies.append('certifi')
+        if not lite:
+            dependencies.append('huggingface-hub')
+            dependencies.append('pyobjc-framework-CoreML')
+            dependencies.append('pyobjc-framework-Vision')
         dependencies.append('pyobjc-framework-Quartz')
-        dependencies.append('pyobjc-framework-Vision')
     if system_name in ("Darwin", "Windows"):
         dependencies.append("pyexiv2")
 
@@ -379,15 +396,30 @@ def main():
         help="Windows ONNX acceleration backend (default: cuda).",
     )
     parser.add_argument(
+        "--profile",
+        choices=["full", "lite"],
+        default=os.environ.get("RAWVIEWER_BUILD_PROFILE", "full").strip().lower() or "full",
+        help="Build profile: full (AI search + face) or lite (viewing + EXIF/GPS search only).",
+    )
+    parser.add_argument(
         "--keep-dist",
         action="store_true",
         help="Windows: keep other dist/*.exe outputs (build both CUDA and DirectML in one session).",
     )
     args = parser.parse_args()
+    if args.profile not in ("full", "lite"):
+        args.profile = "full"
 
     ensure_project_venv_and_reexec()
 
+    write_build_profile(args.profile)
+    is_lite = args.profile == "lite"
+
     system_name = platform.system()
+    if is_lite and system_name == "Windows":
+        print("[WARNING] Windows lite profile is not fully supported yet; building bootstrap with lite env only.")
+    if is_lite and system_name == "Darwin":
+        print("[INFO] macOS lite: semantic/face AI off; GPS metadata search kept; higher prefetch defaults.")
     if system_name == 'Windows':
         print("RAWviewer Windows Build Script")
         print(f"[INFO] Windows acceleration backend: {args.windows_accel}")
@@ -399,7 +431,7 @@ def main():
     print("")
 
     # Install dependencies first
-    if not install_dependencies(windows_accel=args.windows_accel):
+    if not install_dependencies(windows_accel=args.windows_accel, profile=args.profile):
         print("[ERROR] Dependency installation failed.")
         sys.exit(1)
 
@@ -553,7 +585,10 @@ def main():
     app_bundle_name = "RAWviewer"
     windows_pixi_manifest = None
     if platform.system() == "Darwin":
-        print("[INFO] macOS release: MobileCLIP Core ML models are NOT bundled; users download in-app on first use.")
+        if is_lite:
+            print("[INFO] macOS lite release: no MobileCLIP / face AI; EXIF+GPS gallery search only.")
+        else:
+            print("[INFO] macOS release: MobileCLIP Core ML models are NOT bundled; users download in-app on first use.")
     elif platform.system() == "Windows":
         add_data_args.append('--add-data "uninstall.bat;."')
         add_data_args.append('--add-data "scripts;scripts"')
@@ -579,6 +614,8 @@ def main():
         "--hidden-import", "natsort",
         "--hidden-import", "send2trash",
         "--hidden-import", "metadata_backend",
+        "--hidden-import", "rawviewer_profile",
+        "--hidden-import", "build_profile",
         "--name", app_bundle_name
     ]
     try:
@@ -598,16 +635,13 @@ def main():
             "--hidden-import", "objc",
             "--hidden-import", "AppKit",
             "--hidden-import", "Foundation",
-            "--hidden-import", "CoreML",
             "--hidden-import", "Quartz",
-            "--hidden-import", "Vision",
-            "--hidden-import", "huggingface_hub",
-            "--hidden-import", "requests",
             "--hidden-import", "certifi",
             "--hidden-import", "ssl_certs",
             "--collect-data", "certifi",
             "--hidden-import", "reverse_geocoder",
             "--hidden-import", "scipy.spatial.cKDTree",
+            "--hidden-import", "requests",
             "--exclude-module", "coremltools",
             "--exclude-module", "torch",
             "--exclude-module", "torchvision",
@@ -617,6 +651,19 @@ def main():
             "--exclude-module", "tokenizers",
             "--exclude-module", "safetensors",
         ])
+        if is_lite:
+            cmd_base.extend([
+                "--exclude-module", "huggingface_hub",
+                "--exclude-module", "httpx",
+                "--exclude-module", "CoreML",
+                "--exclude-module", "Vision",
+            ])
+        else:
+            cmd_base.extend([
+                "--hidden-import", "CoreML",
+                "--hidden-import", "Vision",
+                "--hidden-import", "huggingface_hub",
+            ])
     elif platform.system() == "Windows":
         cmd_base.extend([
             "--hidden-import", "win32com.client",
@@ -653,22 +700,29 @@ def main():
     
     if platform.system() == 'Darwin':
         cmd_base.append("--onedir")
-        cmd_base.extend(["--osx-bundle-identifier", "com.markyip.rawviewer"])
         macos_pool_hook = os.path.join(src_path, "pyi_rth_macos_process_pool.py")
         release_defaults_hook = os.path.join(src_path, "pyi_rth_release_defaults.py")
         ssl_certs_hook = os.path.join(src_path, "pyi_rth_ssl_certs.py")
+        profile_hook = os.path.join(src_path, "pyi_rth_profile_defaults.py")
         if os.path.isfile(ssl_certs_hook):
             cmd_base.extend(["--runtime-hook", ssl_certs_hook])
+        if os.path.isfile(profile_hook):
+            cmd_base.extend(["--runtime-hook", profile_hook])
         if os.path.isfile(macos_pool_hook):
             cmd_base.extend(["--runtime-hook", macos_pool_hook])
         if os.path.isfile(release_defaults_hook):
             cmd_base.extend(["--runtime-hook", release_defaults_hook])
+        bundle_id = "com.markyip.rawviewer.lite" if is_lite else "com.markyip.rawviewer"
+        cmd_base.extend(["--osx-bundle-identifier", bundle_id])
     else:
         cmd_base.append("--onefile")
         release_defaults_hook = os.path.join(src_path, "pyi_rth_release_defaults.py")
+        profile_hook = os.path.join(src_path, "pyi_rth_profile_defaults.py")
+        if os.path.isfile(profile_hook):
+            cmd_base.extend(["--runtime-hook", profile_hook])
         if os.path.isfile(release_defaults_hook):
             cmd_base.extend(["--runtime-hook", release_defaults_hook])
-        
+
     if icon_arg:
         if platform.system() == 'Windows':
             cmd_base.extend(["--icon", icon_path])

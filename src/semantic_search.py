@@ -61,6 +61,12 @@ def semantic_embeddings_enabled() -> bool:
     return flag in ("1", "true", "yes", "on")
 
 
+def face_detection_enabled() -> bool:
+    """Check if background face detection / has:face indexing is enabled."""
+    flag = os.environ.get("RAWVIEWER_ENABLE_FACE_SCAN", "1").strip().lower()
+    return flag in ("1", "true", "yes", "on")
+
+
 def metadata_auto_index_enabled() -> bool:
     """Check if auto metadata indexing is enabled via environment."""
     flag = os.environ.get("RAWVIEWER_AUTO_METADATA_INDEX", "1").strip().lower()
@@ -1868,6 +1874,8 @@ class SemanticImageIndex:
 
     @staticmethod
     def semantic_backend_available() -> bool:
+        if not semantic_embeddings_enabled():
+            return False
         if resolve_mobileclip_backend().available():
             return True
         try:
@@ -3280,6 +3288,8 @@ class SemanticImageIndex:
         return pending
 
     def get_face_pending_count(self, file_paths: Sequence[str]) -> int:
+        if not face_detection_enabled():
+            return 0
         if not file_paths:
             return 0
         indexable_paths, _ = self._filter_duplicate_raw_companions(file_paths)
@@ -3306,6 +3316,8 @@ class SemanticImageIndex:
         """Deferred face-only pass (after semantic index is ready for search)."""
         import sqlite3
 
+        if not face_detection_enabled():
+            return 0
         if not file_paths:
             return 0
         canonical_map = {self._canonical_path(p): p for p in file_paths if p}
@@ -3687,7 +3699,7 @@ class SemanticImageIndex:
             total_face = len(face_pending)
             total_sem = len(pending_for_semantic)
             if run_face_scan is None:
-                run_face_scan = not self._defer_face_scan_during_build()
+                run_face_scan = face_detection_enabled() and not self._defer_face_scan_during_build()
             run_face_inline = total_face > 0 and run_face_scan
 
             if total_face > 0 and not run_face_inline:

@@ -121,10 +121,24 @@ class ImageLoadTask:
             return self._cancelled
     
     def __lt__(self, other):
-        """用於優先級隊列排序"""
+        """Priority queue ordering: enum priority, then lighter thumbnail work first."""
         if not isinstance(other, ImageLoadTask):
             return NotImplemented
-        return self.priority.value < other.priority.value
+        if self.priority.value != other.priority.value:
+            return self.priority.value < other.priority.value
+        return _task_queue_weight(self) < _task_queue_weight(other)
+
+
+def _task_queue_weight(task: ImageLoadTask) -> int:
+    """Lower weight = scheduled sooner within the same Priority band."""
+    stages = task.stages or set()
+    if stages == {"thumbnail"}:
+        return 0
+    if stages <= {"thumbnail", "exif"}:
+        return 1
+    if "full" in stages:
+        return 3
+    return 2
 
 
 class ImageLoadWorker(QRunnable):

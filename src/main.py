@@ -1058,8 +1058,13 @@ def _lazy_import_heavy_modules(splash=None):
     except Exception:
         pass
     
-    _update_splash("Loading AI search engine...")
     try:
+        from rawviewer_profile import is_lite_build
+
+        if is_lite_build():
+            _update_splash("Loading metadata search index...")
+        else:
+            _update_splash("Loading AI search engine...")
         from semantic_search import SemanticImageIndex as _SemanticImageIndex
         SemanticImageIndex = _SemanticImageIndex
     except Exception as e:
@@ -6729,7 +6734,11 @@ class RAWImageViewer(QMainWindow):
         safe_print("  [RAWImageViewer] Image cache initialized", flush=True)
         # Pass RAWProcessor class to PreloadManager for consistent processing (legacy support)
         safe_print("  [RAWImageViewer] Initializing PreloadManager...", flush=True)
-        self.preload_manager = PreloadManager(max_preload_threads=8, processor_class=RAWProcessor)
+        from rawviewer_profile import preload_thread_count
+
+        self.preload_manager = PreloadManager(
+            max_preload_threads=preload_thread_count(), processor_class=RAWProcessor
+        )
         safe_print("  [RAWImageViewer] PreloadManager initialized", flush=True)
         self.current_processor = None  # Legacy support - will be phased out
         self._pending_thumbnail = None  # Store thumbnail when not immediately displayed
@@ -10560,13 +10569,18 @@ class RAWImageViewer(QMainWindow):
 
     def _gallery_search_needs_index_work(self, corpus_files) -> tuple[bool, bool]:
         """Return (needs_semantic, needs_face) for the given corpus."""
+        from semantic_search import face_detection_enabled, semantic_embeddings_enabled
+
         try:
             index = self._get_semantic_index()
-            if not index.semantic_backend_available():
-                return False, False
-            if index.get_pending_paths(corpus_files):
-                return True, False
-            return False, index.get_face_pending_count(corpus_files) > 0
+            needs_semantic = False
+            if semantic_embeddings_enabled() and index.semantic_backend_available():
+                if index.get_pending_paths(corpus_files):
+                    needs_semantic = True
+            needs_face = False
+            if face_detection_enabled():
+                needs_face = index.get_face_pending_count(corpus_files) > 0
+            return needs_semantic, needs_face
         except Exception:
             return False, False
 
@@ -11461,6 +11475,10 @@ class RAWImageViewer(QMainWindow):
 
     def _start_face_index_background(self, corpus_files) -> None:
         """Second pass: face_count backfill after semantic search is usable."""
+        from semantic_search import face_detection_enabled
+
+        if not face_detection_enabled():
+            return
         import time
 
         logger = logging.getLogger(__name__)
@@ -19591,7 +19609,9 @@ class RAWImageViewer(QMainWindow):
         )
 
     def _nav_preload_display_radius(self) -> int:
-        return _env_int("RAWVIEWER_NAV_PRELOAD_RADIUS", 6, minimum=1)
+        from rawviewer_profile import adaptive_nav_preload_radius
+
+        return adaptive_nav_preload_radius()
 
     def _nav_preload_display_near_count(self) -> int:
         return _env_int("RAWVIEWER_NAV_PRELOAD_NEAR", 2, minimum=1)
@@ -19676,9 +19696,16 @@ class RAWImageViewer(QMainWindow):
             if self.image_manager.has_active_work_for_path(path):
                 continue
             stages, use_full = self._nav_prefetch_stages_for_path(path, zoomed=False)
+            from rawviewer_profile import indexing_loads_compete
+
+            prio = (
+                Priority.PRELOAD_NEXT
+                if not indexing_loads_compete()
+                else Priority.BACKGROUND
+            )
             self.image_manager.load_image(
                 path,
-                priority=Priority.BACKGROUND,
+                priority=prio,
                 cancel_existing=False,
                 use_full_resolution=use_full,
                 stages=stages,
@@ -19979,7 +20006,11 @@ class RAWImageViewer(QMainWindow):
             pass
 
         zoomed = not getattr(self, "fit_to_window", True)
-        radius = _env_int("RAWVIEWER_IDLE_DISPLAY_PREFETCH_RADIUS", 6, minimum=2)
+        radius = _env_int("RAWVIEWER_IDLE_DISPLAY_PREFETCH_RADIUS", 0, minimum=0)
+        if radius <= 0:
+            from rawviewer_profile import adaptive_idle_display_prefetch_radius
+
+            radius = adaptive_idle_display_prefetch_radius()
         batch = _env_int("RAWVIEWER_IDLE_DISPLAY_PREFETCH_BATCH", 2, minimum=1)
         n = len(self.image_files)
         base = self.current_file_index
@@ -20038,7 +20069,9 @@ class RAWImageViewer(QMainWindow):
         current_path = self.current_file_path
         zoomed = not getattr(self, "fit_to_window", True)
         near = self._nav_preload_display_near_count()
-        next_count = min(self._PRELOAD_NEXT_COUNT, len(self.image_files) - 1)
+        from rawviewer_profile import adjacent_preload_next, adjacent_preload_prev
+
+        next_count = min(adjacent_preload_next(), len(self.image_files) - 1)
         for i in range(1, next_count + 1):
             next_index = (self.current_file_index + i) % len(self.image_files)
             next_file = self.image_files[next_index]
@@ -20063,7 +20096,7 @@ class RAWImageViewer(QMainWindow):
                     stages={"thumbnail", "exif"},
                 )
 
-        prev_count = min(self._PRELOAD_PREV_COUNT, len(self.image_files) - 1)
+        prev_count = min(adjacent_preload_prev(), len(self.image_files) - 1)
         for i in range(1, prev_count + 1):
             prev_index = (self.current_file_index - i) % len(self.image_files)
             prev_file = self.image_files[prev_index]
@@ -24590,6 +24623,11 @@ def main():
     import traceback
 
     # Packaged or installed app: enable semantic search by default (dev uses launch_dev.sh / run_debug.bat).
+    # Lite builds bake PROFILE=lite and skip AI/face via rawviewer_profile defaults.
+    from rawviewer_profile import apply_profile_runtime_defaults, is_lite_build
+
+    apply_profile_runtime_defaults()
+
     # On Windows, the installed app runs inside a Pixi virtual environment (so sys.frozen is False),
     # but we can detect it by checking if "_internal/pixi/pixi.exe" exists in the root directory.
     is_installed = False
@@ -24599,7 +24637,8 @@ def main():
             is_installed = True
 
     if getattr(sys, "frozen", False) or is_installed:
-        os.environ.setdefault("RAWVIEWER_ENABLE_SEMANTIC_SEARCH", "1")
+        if not is_lite_build():
+            os.environ.setdefault("RAWVIEWER_ENABLE_SEMANTIC_SEARCH", "1")
         os.environ.setdefault("RAWVIEWER_GPU_VIEW", "1")
 
     # Print to console immediately (before logging might be ready)
