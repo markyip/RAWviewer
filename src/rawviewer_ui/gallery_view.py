@@ -84,6 +84,37 @@ def _gallery_idle_preload_ms() -> int:
     return _env_int("RAWVIEWER_GALLERY_IDLE_PRELOAD_MS", 250, minimum=50)
 
 
+def _indexing_loads_compete() -> bool:
+    """True when semantic/face indexing may flood the load queue at BACKGROUND priority."""
+    sem = os.environ.get("RAWVIEWER_ENABLE_SEMANTIC_SEARCH", "0").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+    face = os.environ.get("RAWVIEWER_ENABLE_FACE_SCAN", "1").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+    return sem or face
+
+
+def _gallery_idle_load_priority() -> Priority:
+    """Queue priority for off-screen gallery thumbnail idle preload."""
+    raw = os.environ.get("RAWVIEWER_GALLERY_IDLE_PRELOAD_PRIORITY", "").strip().lower()
+    if raw in ("background", "low"):
+        return Priority.BACKGROUND
+    if raw in ("preload_prev", "prev"):
+        return Priority.PRELOAD_PREV
+    if raw in ("preload_next", "preload", "high", "next"):
+        return Priority.PRELOAD_NEXT
+    if not _indexing_loads_compete():
+        return Priority.PRELOAD_NEXT
+    return Priority.BACKGROUND
+
+
 def _thumbnail_data_to_base_pixmap(thumbnail_data) -> Optional[QPixmap]:
     """Convert manager/cache thumbnail payload to a gallery base QPixmap."""
     if thumbnail_data is None:
@@ -1924,11 +1955,12 @@ class JustifiedGallery(QWidget):
                 break
 
         if preload_batch:
+            idle_priority = _gallery_idle_load_priority()
             # Embedded JPEG only — fast bidirectional scroll cushion above/below center.
             for path in preload_batch:
                 self.load_manager.load_image(
                     path,
-                    priority=Priority.BACKGROUND,
+                    priority=idle_priority,
                     cancel_existing=False,
                     stages={"thumbnail"},
                 )
