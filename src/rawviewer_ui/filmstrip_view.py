@@ -107,6 +107,14 @@ class FilmStripBar(QFrame):
                 border-radius: 3px;
                 padding: 0px;
             }
+            QLabel#filmstrip_batch_badge {
+                color: #FFD700;
+                font-size: 11px;
+                font-weight: 700;
+                background: transparent;
+                border: none;
+                padding: 0px;
+            }
             """
         )
         self._files: List[str] = []
@@ -124,6 +132,7 @@ class FilmStripBar(QFrame):
         self._thumb_gen: Dict[str, int] = {}
         self._path_to_index: Dict[str, int] = {}
         self._generation = 0
+        self._batch_selected_norm: Set[str] = set()
         # Measured slot widths from decoded/scaled thumbs (survives layout rebuilds).
         self._measured_widths: Dict[str, int] = {}
 
@@ -673,6 +682,7 @@ class FilmStripBar(QFrame):
         y = max(0, (self._content.height() - ROW_H) // 2)
         cell.setFixedSize(w, ROW_H)
         cell.setGeometry(x, y, w, ROW_H)
+        self._position_batch_badge(cell)
 
     def _on_scroll(self, _value: int) -> None:
         self._reload_timer.start(16)
@@ -713,6 +723,9 @@ class FilmStripBar(QFrame):
             if path:
                 self._active_paths.discard(path)
             self._clear_cell_thumbnail(cell)
+            badge = getattr(cell, "_batch_badge", None)
+            if badge is not None:
+                badge.hide()
             cell.setObjectName("filmstrip_cell")
             cell.setStyleSheet("")
             cell.hide()
@@ -788,9 +801,50 @@ class FilmStripBar(QFrame):
 
         cell.mousePressEvent = _on_click
 
+    def _position_batch_badge(self, cell: QLabel) -> None:
+        badge = getattr(cell, "_batch_badge", None)
+        if badge is None or not badge.isVisible():
+            return
+        size = 14
+        margin = 2
+        badge.setFixedSize(size, size)
+        badge.move(
+            max(0, cell.width() - size - margin),
+            max(0, cell.height() - size - margin),
+        )
+        badge.raise_()
+
+    def _set_cell_batch_marked(self, cell: QLabel, marked: bool) -> None:
+        badge = getattr(cell, "_batch_badge", None)
+        if marked:
+            if badge is None:
+                badge = QLabel("★", cell)
+                badge.setObjectName("filmstrip_batch_badge")
+                badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                cell._batch_badge = badge
+            badge.show()
+            self._position_batch_badge(cell)
+        elif badge is not None:
+            badge.hide()
+
+    def set_batch_selected_norm_paths(self, norm_paths: Set[str]) -> None:
+        """Highlight filmstrip cells included in a multi-select set (norm paths)."""
+        self._batch_selected_norm = set(norm_paths or set())
+        self._update_selection_style()
+
+    @staticmethod
+    def _norm_path(path: str) -> str:
+        return os.path.normcase(os.path.normpath(path or ""))
+
     def _update_selection_style(self) -> None:
         sel = self._pending_index
         for idx, cell in self._cells.items():
+            path = self._files[idx] if 0 <= idx < len(self._files) else ""
+            in_batch = bool(
+                path
+                and self._batch_selected_norm
+                and self._norm_path(path) in self._batch_selected_norm
+            )
             if idx == sel:
                 cell.setObjectName("filmstrip_cell_selected")
             else:
@@ -798,6 +852,7 @@ class FilmStripBar(QFrame):
             cell.setStyleSheet("")
             cell.style().unpolish(cell)
             cell.style().polish(cell)
+            self._set_cell_batch_marked(cell, in_batch)
 
     def _scroll_to_index_centered(self) -> None:
         if not self._files or self._pending_index < 0 or not self._starts:

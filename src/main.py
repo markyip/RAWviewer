@@ -9840,11 +9840,12 @@ class RAWImageViewer(QMainWindow):
             "Press Space or Double-click to toggle fit-to-window / 100% zoom\n"
             "Click and drag to pan when zoomed\n"
             "Use Left/Right arrow keys to navigate between images (preserves zoom if zoomed in)\n"
-            "Bottom bar: Share and other controls when images are loaded\n"
+            "Bottom bar: Share (open in editor) and other controls when images are loaded\n"
             "Gallery: Ctrl/Cmd+drag over thumbnails to toggle selection\n"
             "Gallery: Delete / Down Arrow on selection to remove or move to Discard\n"
-            "Single view: Down Arrow to move the current image to Discard folder\n"
-            "Single view: Delete to remove the current image\n"
+            "Single view: ↑ to toggle batch selection (Share — open in Lightroom, Photoshop, etc.)\n"
+            "Single view: Delete / Down on selection — bulk remove or move to Discard\n"
+            "Single view: Esc — clear selection or return to gallery\n"
             "H — Show/hide histogram\n"
             "F — Show/hide focus point\n"
             "Scroll wheel (fit-to-window): Scroll down = next image, Scroll up = previous image\n"
@@ -10032,16 +10033,27 @@ class RAWImageViewer(QMainWindow):
         self.view_mode_button.hide()  # Hidden by default until images are loaded
 
         self.share_bottom_button = QPushButton()
+        self.share_bottom_button.setObjectName("shareBottomButton")
         self.share_bottom_button.setFlat(True)
+        self.share_bottom_button.setAutoDefault(False)
+        self.share_bottom_button.setDefault(False)
         self.share_bottom_button.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         self.share_bottom_button.setIcon(qta.icon("fa5s.share-alt", color="#B0B0B0"))
         self.share_bottom_button.setIconSize(QSize(20, 20))
         self.share_bottom_button.setStyleSheet(bottom_icon_btn_style)
-        # pressed (mouse-down), not clicked (mouse-up): NSSharingServicePicker must not
-        # open on mouseUp or the macOS share sheet spins empty (AppKit console warning).
-        self.share_bottom_button.pressed.connect(self._share_current_image_os)
+        self.share_bottom_button.clicked.connect(self._share_current_image_os)
         self.share_bottom_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.share_bottom_button.hide()
+
+        self.batch_mark_indicator = QLabel()
+        self.batch_mark_indicator.setObjectName("batchMarkIndicator")
+        self.batch_mark_indicator.setFixedSize(20, 20)
+        self.batch_mark_indicator.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.batch_mark_indicator.setPixmap(
+            qta.icon("fa5s.star", color="#FFD700").pixmap(QSize(16, 16))
+        )
+        self.batch_mark_indicator.setToolTip("Marked for batch share (↑ to toggle)")
+        self.batch_mark_indicator.hide()
 
         self.slideshow_bottom_button = QPushButton()
         self.slideshow_bottom_button.setObjectName("slideshowBottomButton")
@@ -10239,6 +10251,8 @@ class RAWImageViewer(QMainWindow):
         right_status_actions_layout = QHBoxLayout(self.right_status_actions)
         right_status_actions_layout.setContentsMargins(0, 0, 0, 0)
         right_status_actions_layout.setSpacing(8)
+        right_status_actions_layout.addWidget(
+            self.batch_mark_indicator, 0, alignment=Qt.AlignmentFlag.AlignVCenter)
         right_status_actions_layout.addWidget(
             self.share_bottom_button, 0, alignment=Qt.AlignmentFlag.AlignVCenter)
         right_status_actions_layout.addWidget(
@@ -14629,28 +14643,91 @@ class RAWImageViewer(QMainWindow):
         gj = getattr(self, "gallery_justified", None)
         if gj is not None and hasattr(gj, "refresh_gallery_selection_visuals"):
             gj.refresh_gallery_selection_visuals()
+        self._refresh_filmstrip_batch_selection_visuals()
         self._sync_gallery_selection_chrome()
+
+    def _confirm_clear_gallery_marks(self, count: int, paths: List[str]) -> bool:
+        """Ask before clearing batch marks when more than one image is marked."""
+        max_list = 8
+        names = [os.path.basename(p) for p in paths[:max_list] if p]
+        listing = "\n".join(f"• {name}" for name in names)
+        extra = count - len(names)
+        if extra > 0:
+            listing = (listing + "\n" if listing else "") + f"… and {extra} more"
+        noun = "image" if count == 1 else "images"
+        dialog = CustomConfirmDialog(
+            parent=self,
+            title="Clear marked images?",
+            message=f"Remove marks from {count} {noun}?",
+            informative_text=listing or "Marked images will no longer be included in Share.",
+            confirm_action="Unmark",
+        )
+        self._is_delete_dialog_open = True
+        try:
+            dialog.exec()
+            return bool(dialog.result_value)
+        finally:
+            self._is_delete_dialog_open = False
+
+    def _request_clear_gallery_selection(self) -> None:
+        """Clear batch marks in single view; confirm when more than one image is marked."""
+        if not self._gallery_has_selection():
+            return
+        paths = self._gallery_selected_canonical_paths()
+        count = len(paths)
+        if count > 1 and not self._confirm_clear_gallery_marks(count, paths):
+            return
+        self._clear_gallery_selection()
 
     @staticmethod
     def _share_button_platform_enabled() -> bool:
-        """Share bottom button is macOS-only (system share sheet)."""
-        return sys.platform == "darwin"
+        """Share / open-in-app is supported on macOS and Windows."""
+        return sys.platform in ("darwin", "win32")
 
     def _sync_gallery_selection_chrome(self) -> None:
-        """Status text when gallery multi-select is active."""
+        """Status text when multi-select is active."""
         n = len(getattr(self, "_gallery_selected_paths", set()) or set())
         if n <= 0:
             return
         if hasattr(self, "status_bar") and self.status_bar:
+            vm = getattr(self, "view_mode", "single")
+            if vm == "gallery":
+                hint = "Delete to remove, Down to Discard (Ctrl/Cmd+drag toggles)"
+            else:
+                hint = "Share — open in editor, Delete/Down bulk actions (↑ toggles, ★ in bar)"
             self.status_bar.showMessage(
-                f"{n} image{'s' if n != 1 else ''} selected — "
-                "Delete to remove, Down to Discard (Ctrl/Cmd+drag toggles)",
+                f"{n} image{'s' if n != 1 else ''} selected — {hint}",
                 5000,
             )
 
-    def _gallery_share_target_paths(self) -> List[str]:
-        """Paths to share: gallery selection when active, else current single file."""
-        if getattr(self, "view_mode", "") == "gallery" and self._gallery_has_selection():
+    def _current_image_batch_marked(self) -> bool:
+        path = getattr(self, "current_file_path", None)
+        if not path:
+            return False
+        canonical = self._gallery_canonical_path(path) or path
+        selected = getattr(self, "_gallery_selected_paths", set()) or set()
+        return _norm_path(canonical) in selected
+
+    def _sync_batch_mark_indicator(self) -> None:
+        indicator = getattr(self, "batch_mark_indicator", None)
+        if indicator is None:
+            return
+        show = (
+            getattr(self, "view_mode", "single") == "single"
+            and bool(getattr(self, "image_files", None))
+            and self._current_image_batch_marked()
+        )
+        indicator.setVisible(show)
+
+    def _refresh_filmstrip_batch_selection_visuals(self) -> None:
+        bar = self._filmstrip_bar()
+        if bar is not None and hasattr(bar, "set_batch_selected_norm_paths"):
+            bar.set_batch_selected_norm_paths(getattr(self, "_gallery_selected_paths", set()) or set())
+        self._sync_batch_mark_indicator()
+
+    def _share_target_paths(self) -> List[str]:
+        """Paths for share / batch-open: multi-select in any view, else current file."""
+        if self._gallery_has_selection():
             return [
                 os.path.abspath(p)
                 for p in self._gallery_selected_canonical_paths()
@@ -14660,6 +14737,10 @@ class RAWImageViewer(QMainWindow):
         if p and os.path.isfile(p):
             return [os.path.abspath(p)]
         return []
+
+    def _gallery_share_target_paths(self) -> List[str]:
+        """Paths to share: gallery selection when active, else current single file."""
+        return self._share_target_paths()
 
     def _gallery_toggle_path_selection(self, file_path: str) -> None:
         canonical = self._gallery_canonical_path(file_path)
@@ -14675,6 +14756,7 @@ class RAWImageViewer(QMainWindow):
         gj = getattr(self, "gallery_justified", None)
         if gj is not None and hasattr(gj, "refresh_gallery_selection_visuals"):
             gj.refresh_gallery_selection_visuals()
+        self._refresh_filmstrip_batch_selection_visuals()
         self._sync_gallery_selection_chrome()
 
     def _gallery_selected_canonical_paths(self) -> List[str]:
@@ -15436,8 +15518,9 @@ class RAWImageViewer(QMainWindow):
             "Left / Right Arrow — Previous / next image\n"
             "Gallery: Ctrl/Cmd+drag over thumbnails — Toggle selection\n"
             "Gallery: Delete / Down — Remove selection or move to Discard\n"
-            "Single view: Down Arrow — Move image to Discard folder\n"
-            "Single view: Delete — Delete current image\n"
+            "Single view: ↑ — Toggle batch selection (Share — open in editor)\n"
+            "Single view: Delete / Down — Remove selection or move to Discard\n"
+            "Single view: Esc — Clear selection or return to gallery\n"
             "H — Show/hide histogram\n"
             "F — Show/hide focus point"
         )
@@ -17617,18 +17700,13 @@ class RAWImageViewer(QMainWindow):
 
     def _dispatch_share_bottom(self, paths: List[str]) -> None:
         _share_log(logging.INFO, "dispatch paths=%d platform=%s", len(paths), sys.platform)
-        if sys.platform == "darwin":
-            self._share_paths_os(paths)
-        elif sys.platform == "win32":
-            if len(paths) == 1:
-                self._open_image_with_app(paths[0])
-            else:
-                self._share_paths_os(paths)
+        if sys.platform in ("darwin", "win32"):
+            self._show_open_in_app_menu(paths)
+            return
+        if len(paths) == 1:
+            self._open_image_with_app(paths[0])
         else:
-            if len(paths) == 1:
-                self._open_image_with_app(paths[0])
-            else:
-                self._share_paths_os(paths)
+            self._share_paths_os(paths)
 
     def _open_image_with_app(self, path: str) -> None:
         """Windows: show the native Open With dialog for one file."""
@@ -17672,17 +17750,27 @@ class RAWImageViewer(QMainWindow):
                 self.status_bar.showMessage("Share unavailable for this selection", 3000)
             return
         elif sys.platform == "win32":
-            if n == 1:
-                self._share_windows_ui_chain(paths[0])
+            share_paths, cleanup = self._prepare_share_export_paths(paths, allow_raw=False)
+            if not share_paths:
+                self.status_bar.showMessage("Could not prepare images for sharing", 3500)
                 return
-            if _share_windows_clipboard_cf_hdrop_paths(paths):
+            if n == 1:
+                if self._share_windows_ui_chain(share_paths[0]):
+                    self._schedule_share_export_cleanup(cleanup)
+                else:
+                    cleanup()
+                return
+            if _share_windows_clipboard_cf_hdrop_paths(share_paths):
                 self.status_bar.showMessage(
                     f"{n} files copied to clipboard — paste into Mail, Teams, or other apps",
                     4500,
                 )
+                self._schedule_share_export_cleanup(cleanup)
                 return
-            if self._share_windows_ui_chain(paths[0]):
+            if self._share_windows_ui_chain(share_paths[0]):
+                self._schedule_share_export_cleanup(cleanup)
                 return
+            cleanup()
         if n == 1:
             self._copy_file_path_to_clipboard(paths[0])
         else:
@@ -17854,13 +17942,176 @@ class RAWImageViewer(QMainWindow):
         self._share_paused_overlay_filters = []
         _share_log(logging.INFO, "resumed all event filters for share")
 
+    def _schedule_share_export_cleanup(self, cleanup, delay_ms: int = 180000) -> None:
+        if cleanup is None:
+            return
+        QTimer.singleShot(delay_ms, cleanup)
+
+    def _prepare_share_export_paths(self, paths, *, allow_raw: bool = False):
+        from share_path_export import prepare_paths_for_external_share
+
+        return prepare_paths_for_external_share(list(paths), allow_raw=allow_raw)
+
+    def _on_batch_open_chosen(self, app_id: str, paths: tuple) -> None:
+        from batch_open_apps import launch_batch_open_app
+        from share_path_export import prepare_paths_for_batch_open
+
+        share_paths, cleanup = prepare_paths_for_batch_open(paths, app_id)
+        if not share_paths:
+            self.status_bar.showMessage("Could not prepare images for that app", 3500)
+            return
+        _share_log(
+            logging.INFO,
+            "batch open app=%s paths=%d first=%s",
+            app_id,
+            len(share_paths),
+            share_paths[0],
+        )
+        try:
+            if launch_batch_open_app(app_id, share_paths):
+                _share_log(logging.INFO, "batch open ok app=%s", app_id)
+                n = len(share_paths)
+                self.status_bar.showMessage(
+                    f"Opening {n} image{'s' if n != 1 else ''}…",
+                    2500,
+                )
+                self._schedule_share_export_cleanup(cleanup)
+            else:
+                cleanup()
+                _share_log(logging.WARNING, "batch open failed app=%s", app_id)
+                self.status_bar.showMessage("Could not open files in that app", 3500)
+        except Exception:
+            cleanup()
+            raise
+
+    def _defer_macos_share_single(self, path: str) -> None:
+        if not path or not os.path.isfile(path):
+            return
+        self._macos_share_pending_path = os.path.abspath(path)
+        delay_ms = 100
+        try:
+            delay_ms = max(50, int(os.environ.get("RAWVIEWER_SHARE_DELAY_MS", "100")))
+        except ValueError:
+            pass
+        QTimer.singleShot(delay_ms, self._on_share_macos_deferred)
+
+    def _reset_share_bottom_button_state(self) -> None:
+        """Clear stuck pressed/hover chrome after the share menu opens."""
+        btn = getattr(self, "share_bottom_button", None)
+        if btn is None:
+            return
+        btn.setDown(False)
+        btn.setChecked(False)
+        btn.clearFocus()
+
+    def _popup_share_menu(self, menu: QMenu) -> None:
+        self._reset_share_bottom_button_state()
+        btn = getattr(self, "share_bottom_button", None)
+        if btn is not None and btn.isVisible():
+            menu.popup(btn.mapToGlobal(QPoint(0, btn.height())))
+        else:
+            menu.exec(QCursor.pos())
+        QTimer.singleShot(0, self._reset_share_bottom_button_state)
+
+    def _share_menu_action(
+        self,
+        menu: QMenu,
+        label: str,
+        callback,
+        *,
+        app_path: Optional[str] = None,
+        macos_service: Optional[object] = None,
+    ):
+        from app_local_icon import icon_for_local_app, icon_for_macos_sharing_service
+
+        action = menu.addAction(label)
+        icon = QIcon()
+        if macos_service is not None:
+            icon = icon_for_macos_sharing_service(macos_service)
+        elif app_path:
+            icon = icon_for_local_app(app_path)
+        if not icon.isNull():
+            action.setIcon(icon)
+        action.triggered.connect(callback)
+        return action
+
+    def _show_open_in_app_menu(self, paths: List[str]) -> None:
+        """Installed batch editors; hides apps not on this machine."""
+        from batch_open_apps import list_installed_batch_open_apps
+
+        valid = [os.path.abspath(p) for p in paths if p and os.path.isfile(p)]
+        if not valid:
+            self.status_bar.showMessage("No file to open", 2000)
+            return
+
+        editors = list_installed_batch_open_apps()
+        n = len(valid)
+
+        if not editors:
+            if n == 1 and sys.platform == "win32":
+                self._open_image_with_app(valid[0])
+                return
+            if n == 1 and sys.platform == "darwin":
+                self._defer_macos_share_single(valid[0])
+                return
+            self.status_bar.showMessage("No supported editor installed", 3500)
+            return
+
+        menu = QMenu(self)
+        edit_header = menu.addAction("Open in editor")
+        edit_header.setEnabled(False)
+        for app in editors:
+            label = app.display_name if n == 1 else f"{app.display_name} ({n} images)"
+            self._share_menu_action(
+                menu,
+                label,
+                lambda _checked=False, aid=app.app_id, ps=tuple(valid): self._on_batch_open_chosen(
+                    aid, ps
+                ),
+                app_path=app.executable,
+            )
+
+        if n == 1 and sys.platform == "win32":
+            menu.addSeparator()
+            menu.addAction("Choose another app…").triggered.connect(
+                lambda: self._open_image_with_app(valid[0])
+            )
+
+        if n > 1:
+            menu.addSeparator()
+            menu.addAction(f"Copy {n} files to clipboard").triggered.connect(
+                lambda: self._copy_paths_hdrop_to_clipboard(valid)
+            )
+
+        self._popup_share_menu(menu)
+
+    def _copy_paths_hdrop_to_clipboard(self, paths: List[str]) -> None:
+        share_paths, cleanup = self._prepare_share_export_paths(paths, allow_raw=False)
+        if not share_paths:
+            self.status_bar.showMessage("Could not prepare images for sharing", 3500)
+            return
+        if _share_windows_clipboard_cf_hdrop_paths(share_paths):
+            n = len(share_paths)
+            self.status_bar.showMessage(
+                f"{n} files copied — paste into Mail, Teams, or other apps",
+                4500,
+            )
+            self._schedule_share_export_cleanup(cleanup)
+        else:
+            cleanup()
+            joined = "\n".join(paths)
+            try:
+                QApplication.clipboard().setText(joined)
+                self.status_bar.showMessage("Paths copied to clipboard", 2500)
+            except Exception:
+                self.status_bar.showMessage("Could not copy files", 2500)
+
     def _share_current_image_os(self):
-        """Open the system share sheet (macOS / Windows) for the current file path."""
-        p = getattr(self, "current_file_path", None)
-        if not p or not os.path.isfile(p):
+        """Open in app menu (batch editors) or system share for the current selection."""
+        paths = self._share_target_paths()
+        if not paths:
             self.status_bar.showMessage("No file to share", 2000)
             return
-        path = os.path.abspath(p)
         now = time.monotonic()
         last = float(getattr(self, "_macos_share_last_request_ts", 0.0) or 0.0)
         if now - last < 0.45:
@@ -17868,19 +18119,9 @@ class RAWImageViewer(QMainWindow):
             return
         self._macos_share_last_request_ts = now
         self._macos_share_menu_fallback_used = False
-        _share_log(logging.INFO, "share requested: %s", path)
-        if sys.platform == "darwin":
-            # Defer past press/release so AppKit is not invoked on mouseUp (see NSSharingServicePicker).
-            self._macos_share_pending_path = path
-            delay_ms = 100
-            try:
-                delay_ms = max(50, int(os.environ.get("RAWVIEWER_SHARE_DELAY_MS", "100")))
-            except ValueError:
-                pass
-            QTimer.singleShot(delay_ms, self._on_share_macos_deferred)
-            return
-        elif sys.platform == "win32":
-            QTimer.singleShot(0, lambda fp=path: self._open_image_with_app(fp))
+        _share_log(logging.INFO, "open in editor requested: %d path(s)", len(paths))
+        if sys.platform in ("darwin", "win32"):
+            self._show_open_in_app_menu(paths)
             return
         self._copy_current_file_path_to_clipboard()
 
@@ -17913,33 +18154,40 @@ class RAWImageViewer(QMainWindow):
         except Exception:
             return 0
 
-    def _share_windows_ui_chain(self, path: str):
+    def _share_windows_ui_chain(self, path: str) -> bool:
         """Open the Windows share sheet for a file path."""
+        if not path or not os.path.isfile(path):
+            _share_log(logging.WARNING, "share chain: invalid path %r", path)
+            return False
         owner = self._share_windows_owner_hwnd()
-        # Prefer the bundled .NET helper: it uses CsWinRT's MarshalInterface.FromAbi to
-        # project the DataTransferManager, which the in-process Python WinRT path cannot do
-        # on pywinrt 3.x (raw ABI pointers are not projectable from Python).
         if _share_windows_via_helper(path, owner):
+            _share_log(logging.INFO, "share chain: helper ok path=%s", path)
             self.status_bar.showMessage("Share", 1500)
-            return
+            return True
         if _share_windows_via_winrt(path, owner):
+            _share_log(logging.INFO, "share chain: winrt ok path=%s", path)
             self.status_bar.showMessage("Share", 1500)
-            return
+            return True
         if self._share_windows_shell(path, owner):
+            _share_log(logging.INFO, "share chain: shell ok path=%s", path)
             self.status_bar.showMessage("Share", 1500)
-            return
+            return True
         if _share_windows_clipboard_cf_hdrop(path):
+            _share_log(logging.INFO, "share chain: CF_HDROP ok path=%s", path)
             self.status_bar.showMessage(
                 "File copied to clipboard — paste into Mail, Teams, or other apps", 4500
             )
-            return
+            return True
         if _share_windows_clipboard_file_via_powershell(path):
+            _share_log(logging.INFO, "share chain: PowerShell clipboard ok path=%s", path)
             self.status_bar.showMessage(
                 "File copied to clipboard — paste into Mail, Teams, or other apps", 4500
             )
-            return
+            return True
+        _share_log(logging.WARNING, "share chain: all methods failed path=%s", path)
         self._copy_current_file_path_to_clipboard()
         self.status_bar.showMessage("Share unavailable — path copied to clipboard", 4000)
+        return False
 
     def _macos_share_use_qt_menu(self) -> bool:
         """Qt menu listing NSSharingService targets (works in v2.2 Qt6 shell)."""
@@ -18340,13 +18588,14 @@ class RAWImageViewer(QMainWindow):
                 title = str(svc.title() or "Share").strip()
             except Exception:
                 title = "Share"
-            action = QAction(title, self)
-            action.triggered.connect(
+            self._share_menu_action(
+                menu,
+                title,
                 lambda _checked=False, s=svc, u=url, sp=share_path: self._share_macos_menu_chose_service(
                     s, u, sp
-                )
+                ),
+                macos_service=svc,
             )
-            menu.addAction(action)
 
         btn = getattr(self, "share_bottom_button", None)
         try:
@@ -18354,10 +18603,7 @@ class RAWImageViewer(QMainWindow):
             self.activateWindow()
         except Exception:
             pass
-        if btn is not None and btn.isVisible():
-            menu.popup(btn.mapToGlobal(QPoint(0, btn.height())))
-        else:
-            menu.exec(QCursor.pos())
+        self._popup_share_menu(menu)
         return True
 
     def _share_macos_picker_ui_for_url(self, url) -> None:
@@ -20821,12 +21067,17 @@ class RAWImageViewer(QMainWindow):
             if vm == "gallery" and self._gallery_has_selection():
                 self.discard_gallery_selection()
                 return True
+            if vm == "single" and self._gallery_has_selection():
+                self.discard_gallery_selection()
+                return True
             if vm == "single":
                 self.move_current_image_to_discard()
                 return True
         elif key == Qt.Key.Key_Up:
             if vm == "single":
-                # Consume Up arrow in single view to prevent scrolling/panning glitches
+                p = getattr(self, "current_file_path", None)
+                if p and os.path.isfile(p):
+                    self._gallery_toggle_path_selection(p)
                 return True
         elif key == Qt.Key.Key_Delete or (
             sys.platform == "darwin" and key == Qt.Key.Key_Backspace
@@ -20835,14 +21086,22 @@ class RAWImageViewer(QMainWindow):
             if vm == "gallery" and self._gallery_has_selection():
                 self.delete_gallery_selection()
                 return True
+            if vm == "single" and self._gallery_has_selection():
+                self.delete_gallery_selection()
+                return True
             if vm == "single":
                 self.delete_current_image()
                 return True
         elif key == Qt.Key.Key_Escape:
-            if vm == "gallery" and self._gallery_has_selection():
-                self._clear_gallery_selection()
+            if self._gallery_has_selection():
+                if vm == "gallery":
+                    self._clear_gallery_selection()
+                else:
+                    self._request_clear_gallery_selection()
                 return True
-            if vm == "single":
+            if vm == "gallery":
+                pass
+            elif vm == "single":
                 if self._is_exif_sort_ready():
                     self.toggle_view_mode()
                 return True
@@ -22413,11 +22672,12 @@ class RAWImageViewer(QMainWindow):
             "Press Space or Double-click to toggle fit-to-window / 100% zoom\n"
             "Click and drag to pan when zoomed\n"
             "Use Left/Right arrow keys to navigate between images (preserves zoom if zoomed in)\n"
-            "Bottom bar: Share and other controls when images are loaded\n"
+            "Bottom bar: Share (open in editor) and other controls when images are loaded\n"
             "Gallery: Ctrl/Cmd+drag over thumbnails to toggle selection\n"
             "Gallery: Delete / Down Arrow on selection to remove or move to Discard\n"
-            "Single view: Down Arrow to move the current image to Discard folder\n"
-            "Single view: Delete to remove the current image\n"
+            "Single view: ↑ to toggle batch selection (Share — open in Lightroom, Photoshop, etc.)\n"
+            "Single view: Delete / Down on selection — bulk remove or move to Discard\n"
+            "Single view: Esc — clear selection or return to gallery\n"
             "H — Show/hide histogram\n"
             "F — Show/hide focus point\n"
             "Scroll wheel (fit-to-window): Scroll down = next image, Scroll up = previous image\n"
@@ -22613,6 +22873,7 @@ class RAWImageViewer(QMainWindow):
         if hasattr(self, "share_bottom_button"):
             vis = bool(self.image_files) and self.view_mode == "single"
             self.share_bottom_button.setVisible(vis)
+            self._sync_batch_mark_indicator()
             if hasattr(self, "slideshow_bottom_button"):
                 self.slideshow_bottom_button.setVisible(vis)
             cp = getattr(self, "current_file_path", None)
