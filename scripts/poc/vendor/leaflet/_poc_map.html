@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <link rel="stylesheet" href="leaflet.css" />
+  <script src="leaflet.js"></script>
+  <script src="qrc:///qtwebchannel/qwebchannel.js"></script>
+  <style>
+    html, body, #map { margin: 0; padding: 0; width: 100%; height: 100%; background: #1a1a1a; }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+  <script>
+    function clusterIcon(color, badge) {
+      const bg = color === "green" ? "#28dc5a" : "#dc3c3c";
+      const size = color === "green" ? 16 : 10;
+      const label = badge || "";
+      const fontPx = (color === "green" ? 9 : 8) - (label.length > 1 ? 1 : 0);
+      return L.divIcon({
+        className: "",
+        html: `<div style="width:${size}px;height:${size}px;border-radius:50%;background:${bg};border:2px solid #fff;box-shadow:0 0 4px rgba(0,0,0,.4);display:flex;align-items:center;justify-content:center;color:#fff;font:bold ${fontPx}px sans-serif;line-height:1;text-shadow:0 0 2px rgba(0,0,0,.6);">${label}</div>`,
+        iconSize: [size, size],
+        iconAnchor: [size / 2, size / 2],
+      });
+    }
+
+    const MAP_MAX_ZOOM = 20;
+    const MAX_ZOOM_IN_ABOVE_FIT = 2;
+    const MIN_DETAIL_ZOOM = 18;
+    const TILE_NATIVE_MAX = 19;
+    const FIT_BOUNDS_PAD = 0.04;
+    const FIT_BOUNDS_PIXEL_PAD = 4;
+
+    const map = L.map("map", {
+      zoomControl: true,
+      attributionControl: true,
+      scrollWheelZoom: true,
+      maxZoom: MAP_MAX_ZOOM,
+    });
+
+    L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+      maxNativeZoom: TILE_NATIVE_MAX,
+      maxZoom: MAP_MAX_ZOOM,
+      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
+    }).addTo(map);
+
+    let markerLayers = [];
+    let minZoomLimit = null;
+    let maxZoomLimit = MAP_MAX_ZOOM;
+
+    function rebuildMarkers(data) {
+      markerLayers.forEach((m) => map.removeLayer(m));
+      markerLayers = [];
+
+      const latlngs = [];
+      const cur = data.current_cluster;
+      const greenLatLng = L.latLng(cur.lat, cur.lon);
+      const green = L.marker(greenLatLng, {
+        icon: clusterIcon("green", String(cur.count)),
+        zIndexOffset: 1000,
+      }).addTo(map).bindPopup(cur.title);
+      markerLayers.push(green);
+      latlngs.push(greenLatLng);
+
+      data.neighbor_clusters.forEach((cluster) => {
+        const ll = L.latLng(cluster.lat, cluster.lon);
+        const red = L.marker(ll, {
+          icon: clusterIcon("red", String(cluster.count)),
+        }).addTo(map).bindPopup(cluster.title);
+        red.on("click", () => {
+          if (window.bridge) window.bridge.selectCluster(cluster.id);
+        });
+        markerLayers.push(red);
+        latlngs.push(ll);
+      });
+
+      return L.latLngBounds(latlngs).pad(FIT_BOUNDS_PAD);
+    }
+
+    function fitAllPins(bounds, maxFitZoom, updateMinZoom) {
+      map.invalidateSize();
+      map.setMaxBounds(null);
+      window.__rawviewerLastBounds = bounds;
+      if (updateMinZoom) {
+        map.setMinZoom(0);
+      }
+      map.fitBounds(bounds, {
+        animate: false,
+        padding: [FIT_BOUNDS_PIXEL_PAD, FIT_BOUNDS_PIXEL_PAD],
+        maxZoom: maxFitZoom,
+      });
+      if (updateMinZoom) {
+        minZoomLimit = map.getZoom();
+        maxZoomLimit = Math.min(
+          MAP_MAX_ZOOM,
+          Math.max(minZoomLimit + MAX_ZOOM_IN_ABOVE_FIT, MIN_DETAIL_ZOOM)
+        );
+        map.setMinZoom(minZoomLimit);
+        map.setMaxZoom(maxZoomLimit);
+      }
+    }
+
+    function applyMapData(data, opts) {
+      opts = opts || {};
+      const preserveZoom = opts.preserveZoom === true;
+      const maxFitZoom = preserveZoom ? map.getZoom() : MAP_MAX_ZOOM;
+      const bounds = rebuildMarkers(data);
+      fitAllPins(bounds, maxFitZoom, !preserveZoom);
+    }
+
+    map.on("zoomend", () => {
+      if (minZoomLimit !== null && map.getZoom() < minZoomLimit) {
+        map.setZoom(minZoomLimit);
+      }
+      if (map.getZoom() > maxZoomLimit) {
+        map.setZoom(maxZoomLimit);
+      }
+    });
+
+    window.rawviewerUpdateMap = applyMapData;
+    const INITIAL_DATA = {"current_cluster": {"id": 1, "lat": 52.9711424826728, "lon": -3.087619871520996, "count": 4, "title": "GPS cluster \u00b7 -3.08762, 52.97114 \u00b7 4 images", "members": [{"name": "PXL_20250816_150629009.RAW-01.MP.COVER.jpg", "capture_time": "2025:08:16 16:06:29"}, {"name": "PXL_20250816_150629009.RAW-02.ORIGINAL.dng", "capture_time": "2025:08:16 16:06:29"}, {"name": "PXL_20250816_150632752.RAW-01.MP.COVER.jpg", "capture_time": "2025:08:16 16:06:32"}, {"name": "PXL_20250816_150632752.RAW-02.ORIGINAL.dng", "capture_time": "2025:08:16 16:06:32"}]}, "neighbor_clusters": [{"id": 6, "lat": 52.97123640526665, "lon": -3.087422561475966, "count": 4, "title": "GPS cluster \u00b7 -3.08742, 52.97124 \u00b7 4 images", "members": [{"name": "PXL_20250816_160745828.RAW-01.MP.COVER.jpg", "capture_time": "2025:08:16 17:07:45"}, {"name": "PXL_20250816_160745828.RAW-02.ORIGINAL.dng", "capture_time": "2025:08:16 17:07:45"}, {"name": "PXL_20250816_160748476.RAW-01.MP.COVER.jpg", "capture_time": "2025:08:16 17:07:48"}, {"name": "PXL_20250816_160748476.RAW-02.ORIGINAL.dng", "capture_time": "2025:08:16 17:07:48"}]}, {"id": 5, "lat": 52.971439693196615, "lon": -3.0874622534857856, "count": 2, "title": "GPS cluster \u00b7 -3.08746, 52.97144 \u00b7 2 images", "members": [{"name": "PXL_20250816_160647500.RAW-01.MP.COVER.jpg", "capture_time": "2025:08:16 17:06:47"}, {"name": "PXL_20250816_160647500.RAW-02.ORIGINAL.dng", "capture_time": "2025:08:16 17:06:47"}]}, {"id": 3, "lat": 52.9708168323093, "lon": -3.0878168340047205, "count": 2, "title": "GPS cluster \u00b7 -3.08782, 52.97082 \u00b7 2 images", "members": [{"name": "PXL_20250816_160328164.RAW-01.MP.COVER.jpg", "capture_time": "2025:08:16 17:03:28"}, {"name": "PXL_20250816_160328164.RAW-02.ORIGINAL.dng", "capture_time": "2025:08:16 17:03:28"}]}, {"id": 8, "lat": 52.97145130140517, "lon": -3.0873199242485896, "count": 2, "title": "GPS cluster \u00b7 -3.08732, 52.97145 \u00b7 2 images", "members": [{"name": "PXL_20250816_162801830.RAW-01.MP.COVER.jpg", "capture_time": "2025:08:16 17:28:01"}, {"name": "PXL_20250816_162801830.RAW-02.ORIGINAL.dng", "capture_time": "2025:08:16 17:28:01"}]}, {"id": 4, "lat": 52.97151150563558, "lon": -3.0873865556504994, "count": 4, "title": "GPS cluster \u00b7 -3.08739, 52.97151 \u00b7 4 images", "members": [{"name": "PXL_20250816_160330108.RAW-01.MP.COVER.jpg", "capture_time": "2025:08:16 17:03:30"}, {"name": "PXL_20250816_160330108.RAW-02.ORIGINAL.dng", "capture_time": "2025:08:16 17:03:30"}, {"name": "PXL_20250816_160333040.RAW-01.MP.COVER.jpg", "capture_time": "2025:08:16 17:03:33"}, {"name": "PXL_20250816_160333040.RAW-02.ORIGINAL.dng", "capture_time": "2025:08:16 17:03:33"}]}]};
+
+    window.__rawviewerMapReady = false;
+    window.__rawviewerMapError = null;
+    window.bootMap = function bootMap() {
+      try {
+        map.invalidateSize();
+        applyMapData(INITIAL_DATA, { preserveZoom: false });
+        if (typeof window.initWebChannel === "function") {
+          window.initWebChannel();
+        }
+        window.__rawviewerMapReady = true;
+        setTimeout(() => {
+          map.invalidateSize();
+          if (window.__rawviewerLastBounds) {
+            fitAllPins(window.__rawviewerLastBounds, map.getZoom(), false);
+          }
+        }, 150);
+      } catch (err) {
+        window.__rawviewerMapError = String(err);
+        console.error("bootMap failed:", err);
+      }
+    };
+
+    map.whenReady(() => {
+      /* bootMap() is invoked from Qt after the widget has a real size */
+    });
+
+    window.initWebChannel = function() {
+      if (window.__rawviewerBridgeReady) return;
+      new QWebChannel(qt.webChannelTransport, function(channel) {
+        window.bridge = channel.objects.bridge;
+        window.__rawviewerBridgeReady = true;
+      });
+    };
+
+  </script>
+</body>
+</html>
