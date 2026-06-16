@@ -9215,19 +9215,10 @@ class RAWImageViewer(QMainWindow):
             )
             return
 
-        if (
-            not getattr(self, "_skip_resolution_downgrade_check", False)
-            and self._already_displaying_buffer_for_path(file_path, image)
-        ):
-            logger.info(
-                "[MANAGER] Skipping redundant image_ready for %s (already on screen)",
-                os.path.basename(file_path),
-            )
-            self._full_resolution_loading = False
-            self._finish_pending_zoom_after_full_load(file_path)
-            return
-            
-        # Check resolution to see if this is "Full" or "Preview"
+        # Check resolution to see if this is "Full" or "Preview" — we need this BEFORE
+        # the redundancy check so full-res images are never skipped even when the on-screen
+        # buffer has the same pixel dimensions (e.g. gallery-to-single transition can leave a
+        # high-pixel-count but blurry embedded-JPEG preview on screen).
         if hasattr(image, 'shape'):
             shape = image.shape
             height, width = shape[0], shape[1]
@@ -9239,7 +9230,7 @@ class RAWImageViewer(QMainWindow):
         else:
             logger.error(f"[MANAGER] Invalid image object type: {type(image)}")
             return
-            
+
         max_dim = max(height, width)
         exif_for_res = None
         try:
@@ -9247,6 +9238,23 @@ class RAWImageViewer(QMainWindow):
         except Exception:
             pass
         is_full_resolution = image_covers_sensor_resolution(width, height, exif_for_res)
+
+        # Skip redundant redraws only for non-full-resolution images (previews/thumbnails).
+        # A full-resolution decode must always be shown — the on-screen buffer may be a
+        # blurry preview with identical pixel dimensions (gallery → single view transition).
+        if (
+            not is_full_resolution
+            and not getattr(self, "_skip_resolution_downgrade_check", False)
+            and self._already_displaying_buffer_for_path(file_path, image)
+        ):
+            logger.info(
+                "[MANAGER] Skipping redundant image_ready for %s (already on screen)",
+                os.path.basename(file_path),
+            )
+            self._full_resolution_loading = False
+            self._finish_pending_zoom_after_full_load(file_path)
+            return
+
 
         # Space/double-click deferred zoom: skip intermediate buffers (avoids a
         # one-frame fit transform on a large pixmap = upper-left flash).
