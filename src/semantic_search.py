@@ -285,47 +285,8 @@ def _ort_get_available_providers(ort=None) -> List[str]:
 def resolve_onnx_execution_providers(
     available: Optional[Sequence[str]] = None,
 ) -> List[str]:
-    """Pick ONNX Runtime EPs for the current OS and GPU vendor.
-
-    Windows: CUDA / TensorRT first when installed (NVIDIA); DirectML next for
-    AMD / Intel or when CUDA is unavailable (default pixi build uses DirectML only).
-    macOS: Core ML EP when using ONNX fallback; otherwise app uses native Core ML.
-    Other Unix (no official Linux release): CUDA / ROCm / OpenVINO when present in a
-    custom onnxruntime build, else CPU — source-only, not tested as a product target.
-    Override with RAWVIEWER_ORT_PROVIDERS (comma-separated EP names).
-    """
-    if available is None:
-        available = _ort_get_available_providers()
-
-    override = os.environ.get("RAWVIEWER_ORT_PROVIDERS", "").strip()
-    if override:
-        names = [p.strip() for p in override.split(",") if p.strip()]
-        selected = [p for p in names if p in available]
-        return selected or ["CPUExecutionProvider"]
-
-    if sys.platform == "win32":
-        preferred = [
-            "CUDAExecutionProvider",
-            "TensorrtExecutionProvider",
-            "DmlExecutionProvider",
-            "OpenVINOExecutionProvider",
-            "CPUExecutionProvider",
-        ]
-    elif sys.platform == "darwin":
-        preferred = [
-            "CoreMLExecutionProvider",
-            "CPUExecutionProvider",
-        ]
-    else:
-        preferred = [
-            "CUDAExecutionProvider",
-            "ROCMExecutionProvider",
-            "OpenVINOExecutionProvider",
-            "CPUExecutionProvider",
-        ]
-
-    selected = [p for p in preferred if p in available]
-    return selected or ["CPUExecutionProvider"]
+    """Force CPUExecutionProvider to completely decouple semantic search from GPU and prevent lock starvation/deadlocks."""
+    return ["CPUExecutionProvider"]
 
 
 def resolve_opencv_dnn_backend_target() -> tuple:
@@ -1150,6 +1111,7 @@ class MobileCLIPONNXBackend:
         self._image_session = None
         self._text_session = None
         self._tokenizer = None
+        self._lock = threading.Lock()
 
     @staticmethod
     def _candidate_model_dirs(variant: str = "b") -> List[str]:
@@ -1250,28 +1212,31 @@ class MobileCLIPONNXBackend:
     def _ensure_sessions(self):
         if self._image_session is not None:
             return
-        err = _onnxruntime_availability_error()
-        if err:
-            raise RuntimeError(err)
-        import onnxruntime as ort
+        with self._lock:
+            if self._image_session is not None:
+                return
+            err = _onnxruntime_availability_error()
+            if err:
+                raise RuntimeError(err)
+            import onnxruntime as ort
 
-        available = _ort_get_available_providers(ort)
-        selected_providers = resolve_onnx_execution_providers(available)
+            available = _ort_get_available_providers(ort)
+            selected_providers = resolve_onnx_execution_providers(available)
 
-        import logging
+            import logging
 
-        logging.getLogger(__name__).info(
-            "[SemanticSearch] MobileCLIP ONNX providers available=%s using=%s",
-            available,
-            selected_providers,
-        )
+            logging.getLogger(__name__).info(
+                "[SemanticSearch] MobileCLIP ONNX providers available=%s using=%s",
+                available,
+                selected_providers,
+            )
 
-        self._image_session = ort.InferenceSession(
-            self.image_model_path, providers=selected_providers
-        )
-        self._text_session = ort.InferenceSession(
-            self.text_model_path, providers=selected_providers
-        )
+            self._image_session = ort.InferenceSession(
+                self.image_model_path, providers=selected_providers
+            )
+            self._text_session = ort.InferenceSession(
+                self.text_model_path, providers=selected_providers
+            )
 
     def _ensure_tokenizer(self):
         if self._tokenizer is None:

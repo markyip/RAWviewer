@@ -88,11 +88,7 @@ def bayer_pattern_from_raw(raw_obj: Any) -> str:
     return "RGGB"
 
 
-def camera_rgb_to_srgb_matrix(
-    cam_xyz: np.ndarray,
-    wb_coeffs: Tuple[float, float, float, float],
-    daylight_wb: Optional[Tuple[float, float, float, float]] = None
-) -> np.ndarray:
+def camera_rgb_to_srgb_matrix(cam_xyz: np.ndarray) -> np.ndarray:
     """
     Build a 3x3 matrix for converting white-balanced camera RGB to linear sRGB.
     srgb = W @ camera_rgb_balanced
@@ -113,21 +109,9 @@ def camera_rgb_to_srgb_matrix(
         
         cam_to_srgb = XYZ_TO_SRGB @ cam_to_xyz
         
-        # Normalize rows so that D65 camera response (1.0 / daylight_wb) maps to (1,1,1) in sRGB
-        if daylight_wb is not None and len(daylight_wb) >= 3 and not np.allclose(daylight_wb[:3], 0.0):
-            dwb_coeffs = np.array([daylight_wb[0], daylight_wb[1], daylight_wb[2]], dtype=np.float64)
-            d65_cam = 1.0 / dwb_coeffs
-            d65_srgb = cam_to_srgb @ d65_cam
-            m_norm = cam_to_srgb / d65_srgb[:, None]
-        else:
-            m_norm = cam_to_srgb
-            
-        # Correct for pre-applied white balance coefficients
-        wb_arr = np.array([wb_coeffs[0], wb_coeffs[1], wb_coeffs[2]], dtype=np.float64)
-        wb_arr = np.where(wb_arr == 0.0, 1.0, wb_arr)
-        
-        W_final = m_norm / wb_arr[None, :]
-        return W_final.astype(np.float32)
+        # Row sum normalization to map white point
+        m_norm = cam_to_srgb / cam_to_srgb.sum(axis=1)[:, None]
+        return m_norm.astype(np.float32)
     except Exception as e:
         logger.warning(f"Error computing camera to sRGB matrix: {e}")
         return cam.T.astype(np.float32)
@@ -161,32 +145,32 @@ def gpu_demosaic_pytorch(
         g_slice = (slice(0, None, 2), slice(1, None, 2))
         g2_slice = (slice(1, None, 2), slice(0, None, 2))
         b_slice = (slice(1, None, 2), slice(1, None, 2))
-        cfa = kornia.color.CFA.RG
+        cfa = kornia.color.CFA.BG
     elif bayer_pattern == "BGGR":
         b_slice = (slice(0, None, 2), slice(0, None, 2))
         g_slice = (slice(0, None, 2), slice(1, None, 2))
         g2_slice = (slice(1, None, 2), slice(0, None, 2))
         r_slice = (slice(1, None, 2), slice(1, None, 2))
-        cfa = kornia.color.CFA.BG
+        cfa = kornia.color.CFA.RG
     elif bayer_pattern == "GRBG":
         g_slice = (slice(0, None, 2), slice(0, None, 2))
         r_slice = (slice(0, None, 2), slice(1, None, 2))
         b_slice = (slice(1, None, 2), slice(0, None, 2))
         g2_slice = (slice(1, None, 2), slice(1, None, 2))
-        cfa = kornia.color.CFA.GR
+        cfa = kornia.color.CFA.GB
     elif bayer_pattern == "GBRG":
         g_slice = (slice(0, None, 2), slice(0, None, 2))
         b_slice = (slice(0, None, 2), slice(1, None, 2))
         r_slice = (slice(1, None, 2), slice(0, None, 2))
         g2_slice = (slice(1, None, 2), slice(1, None, 2))
-        cfa = kornia.color.CFA.GB
+        cfa = kornia.color.CFA.GR
     else:
         # Fallback to RGGB
         r_slice = (slice(0, None, 2), slice(0, None, 2))
         g_slice = (slice(0, None, 2), slice(1, None, 2))
         g2_slice = (slice(1, None, 2), slice(0, None, 2))
         b_slice = (slice(1, None, 2), slice(1, None, 2))
-        cfa = kornia.color.CFA.RG
+        cfa = kornia.color.CFA.BG
 
     wb_r, wb_g, wb_b, wb_g2 = wb_coeffs
     black_r, black_g, black_b, black_g2 = black_levels
@@ -368,6 +352,14 @@ def try_gpu_raw_decode(
         try:
             bayer_pattern = "RGGB"
             if raw_obj is not None:
+                if hasattr(raw_obj, "raw_pattern") and raw_obj.raw_pattern is not None:
+                    pattern = np.asarray(raw_obj.raw_pattern)
+                    if pattern.shape != (2, 2):
+                        logger.info("GPU Processor: Unsupported sensor pattern shape %s (X-Trans/other); falling back to CPU.", pattern.shape)
+                        return None
+                if hasattr(raw_obj, "num_colors") and raw_obj.num_colors != 3:
+                    logger.info("GPU Processor: Unsupported number of colors %s; falling back to CPU.", raw_obj.num_colors)
+                    return None
                 bayer_pattern = bayer_pattern_from_raw(raw_obj)
             elif exif_data and exif_data.get("exif_data"):
                 pattern = exif_data["exif_data"].get("CFAPattern")
@@ -384,8 +376,9 @@ def try_gpu_raw_decode(
             if raw_obj is not None:
                 if hasattr(raw_obj, "camera_whitebalance") and raw_obj.camera_whitebalance:
                     wb = list(raw_obj.camera_whitebalance)
-                    wb_g = wb[1] if wb[1] != 0.0 else 1.0
-                    wb_coeffs = (wb[0]/wb_g, 1.0, wb[2]/wb_g, wb[3]/wb_g if len(wb) > 3 else 1.0)
+                    max_wb = max(wb) or 1.0
+                    wb_g2 = wb[3] if (len(wb) > 3 and wb[3] > 0.0) else wb[1]
+                    wb_coeffs = (wb[0]/max_wb, wb[1]/max_wb, wb[2]/max_wb, wb_g2/max_wb)
                 if hasattr(raw_obj, "black_level_per_channel") and raw_obj.black_level_per_channel is not None:
                     black_levels = tuple(float(x) for x in raw_obj.black_level_per_channel)
                 if hasattr(raw_obj, "white_level") and raw_obj.white_level is not None:
@@ -398,10 +391,17 @@ def try_gpu_raw_decode(
                 import rawpy
                 try:
                     with rawpy.imread(file_path) as raw:
+                        if hasattr(raw, "raw_pattern") and raw.raw_pattern is not None:
+                            pattern = np.asarray(raw.raw_pattern)
+                            if pattern.shape != (2, 2):
+                                return None
+                        if hasattr(raw, "num_colors") and raw.num_colors != 3:
+                            return None
                         if hasattr(raw, "camera_whitebalance") and raw.camera_whitebalance:
                             wb = list(raw.camera_whitebalance)
-                            wb_g = wb[1] if wb[1] != 0.0 else 1.0
-                            wb_coeffs = (wb[0]/wb_g, 1.0, wb[2]/wb_g, wb[3]/wb_g if len(wb) > 3 else 1.0)
+                            max_wb = max(wb) or 1.0
+                            wb_g2 = wb[3] if (len(wb) > 3 and wb[3] > 0.0) else wb[1]
+                            wb_coeffs = (wb[0]/max_wb, wb[1]/max_wb, wb[2]/max_wb, wb_g2/max_wb)
                         if hasattr(raw, "black_level_per_channel") and raw.black_level_per_channel is not None:
                             black_levels = tuple(float(x) for x in raw.black_level_per_channel)
                         if hasattr(raw, "white_level") and raw.white_level is not None:
@@ -416,7 +416,7 @@ def try_gpu_raw_decode(
             if cam_xyz is None or np.allclose(cam_xyz, 0):
                 m_color = np.eye(3, dtype=np.float32)
             else:
-                m_color = camera_rgb_to_srgb_matrix(cam_xyz, wb_coeffs, daylight_wb)
+                m_color = camera_rgb_to_srgb_matrix(cam_xyz)
 
             if backend == "cupy" and bayer_pattern != "RGGB":
                 logger.warning(
