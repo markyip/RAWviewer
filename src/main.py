@@ -388,14 +388,18 @@ def _share_log(
     _share_logger().log(level, "[SHARE] " + msg, *args, exc_info=exc_info)
 
 
-def _macos_share_items_array(url) -> object:
+def _macos_share_items_array(urls) -> object:
     """Build AppKit items array (NSURL). Empty/invalid arrays make picker spin forever."""
-    if url is None:
+    if urls is None:
         return None
     try:
         from Foundation import NSArray
+        if isinstance(urls, (list, tuple)):
+            items_list = list(urls)
+        else:
+            items_list = [urls]
 
-        arr = NSArray.arrayWithArray_([url])
+        arr = NSArray.arrayWithArray_(items_list)
         if arr is None:
             _share_log(logging.WARNING, "NSArray.arrayWithArray_ returned None")
             return None
@@ -511,7 +515,7 @@ def _get_macos_sharing_service_delegate_class():
             if viewer is not None:
                 viewer._macos_share_airdrop_completed = True
                 _share_log(logging.INFO, "sharing service shared items successfully")
-                QTimer.singleShot(0, viewer._macos_cleanup_share_temp)
+                QTimer.singleShot(30000, viewer._macos_cleanup_share_temp)
                 QTimer.singleShot(0, lambda: viewer._macos_share_end_picker_session("service_success"))
 
         def sharingService_didFailToShareItems_error_(self, service, items, error):
@@ -519,7 +523,7 @@ def _get_macos_sharing_service_delegate_class():
             if viewer is not None:
                 viewer._macos_share_airdrop_completed = True
                 _share_log(logging.WARNING, "sharing service failed to share items: %s", error)
-                QTimer.singleShot(0, viewer._macos_cleanup_share_temp)
+                QTimer.singleShot(30000, viewer._macos_cleanup_share_temp)
                 QTimer.singleShot(0, lambda: viewer._macos_share_end_picker_session("service_fail"))
 
     _macos_register_sharing_service_delegate_metadata(MacSharingServiceDelegate)
@@ -580,7 +584,10 @@ def _get_macos_share_picker_delegate_class():
             viewer = getattr(self, "_viewer", None)
             if viewer is not None:
                 _share_log(logging.INFO, "picker didChooseSharingService: %s", service)
-                QTimer.singleShot(0, viewer._macos_cleanup_share_temp)
+                if service is None:
+                    QTimer.singleShot(0, viewer._macos_cleanup_share_temp)
+                else:
+                    QTimer.singleShot(30000, viewer._macos_cleanup_share_temp)
                 reason = "picker_cancel" if service is None else "picker_chose"
                 QTimer.singleShot(0, lambda r=reason: viewer._macos_share_end_picker_session(r))
             return None
@@ -6820,7 +6827,10 @@ class RAWImageViewer(QMainWindow):
         # Focus-area dashed outline from EXIF / maker AF (toggle with F)
         self._focus_subject_outline_active = False
         # Composition guide overlay (toggle with G): off → 3×3 → diagonal → both → golden
-        self._composition_grid_mode = "off"
+        try:
+            self._composition_grid_mode = str(self.get_settings().value("composition_grid_mode", "off"))
+        except Exception:
+            self._composition_grid_mode = "off"
         # EXIF SubjectArea / maker AF (pyexiv2/Exiv2) in current_pixmap coordinates
         self._focus_subject_rect_image: QRect | None = None
         # "makernote_af" (exifread Canon AF) vs "exif_subject" (SubjectArea/Location via Exiv2)
@@ -7884,17 +7894,22 @@ class RAWImageViewer(QMainWindow):
             and not gv.is_fit_mode()
         ):
             gv.fit_to_window()
+            self.zoom_center_point = None
         elif gv.wants_zoom_in_toggle():
             self._recenter_on_focus_after_nav = False
             self.zoom_center_point = QPoint(int(scene_pt.x()), int(scene_pt.y()))
             self._gpu_zoom_in_to_point_finish()
             if self._needs_full_resolution_upgrade():
+                self._pending_zoom = True
+                self._pending_zoom_center = self.zoom_center_point
+                self._pending_zoom_thumbnail_size = self.current_pixmap.size() if self.current_pixmap else None
                 self._queue_sensor_full_decode(
                     self.current_file_path, priority_current=True
                 )
         else:
             gv.fit_to_window()
             self.fit_to_window = True
+            self.zoom_center_point = None
         self.update_status_bar()
         self.setFocus()
 
@@ -7962,6 +7977,10 @@ class RAWImageViewer(QMainWindow):
         from rawviewer_ui.composition_grid import grid_mode_label, next_grid_mode
 
         self._composition_grid_mode = next_grid_mode(self._composition_grid_mode)
+        try:
+            self.get_settings().setValue("composition_grid_mode", self._composition_grid_mode)
+        except Exception:
+            pass
         self._sync_composition_grid_display()
         self.status_bar.showMessage(
             f"Composition guide: {grid_mode_label(self._composition_grid_mode)}",
@@ -10076,6 +10095,7 @@ class RAWImageViewer(QMainWindow):
                 self.gpu_view.zoomChanged.connect(self._on_gpu_zoom_changed)
                 self.gpu_view.doubleClickedAt.connect(self._on_gpu_double_clicked)
                 self.gpu_view._shortcut_handler = self._handle_app_shortcut
+                self._sync_composition_grid_display()
             except Exception as _gpu_exc:
                 logging.getLogger(__name__).warning(
                     "GPU view requested but failed to initialize: %s", _gpu_exc
@@ -10229,11 +10249,13 @@ class RAWImageViewer(QMainWindow):
         self.share_bottom_button = QPushButton()
         self.share_bottom_button.setFlat(True)
         self.share_bottom_button.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        self.share_bottom_button.setIcon(qta.icon("fa5s.external-link-alt", color="#B0B0B0"))
+        self.share_bottom_button.setIcon(qta.icon("fa5s.share-alt", color="#B0B0B0"))
         self.share_bottom_button.setIconSize(QSize(20, 20))
         self.share_bottom_button.setStyleSheet(bottom_icon_btn_style)
-        self.share_bottom_button.setToolTip("Open selected image(s) in another app")
-        self.share_bottom_button.clicked.connect(self._on_share_bottom_button_clicked)
+        self.share_bottom_button.setToolTip("Share")
+        # pressed (mouse-down), not clicked (mouse-up): NSSharingServicePicker must not
+        # open on mouseUp or the macOS share sheet spins empty (AppKit console warning).
+        self.share_bottom_button.pressed.connect(self._on_share_bottom_button_clicked)
         self.share_bottom_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.share_bottom_button.hide()
 
@@ -10583,8 +10605,9 @@ class RAWImageViewer(QMainWindow):
 
         file_menu.addSeparator()
 
-        self.copy_path_action = QAction("Copy Image Path", self)
-        self.copy_path_action.setStatusTip("Copy the current file path to the clipboard")
+        self.copy_path_action = QAction("Copy Image File", self)
+        self.copy_path_action.setShortcut(QKeySequence.StandardKey.Copy)
+        self.copy_path_action.setStatusTip("Copy the current image file to the clipboard to paste/send in messaging apps")
         self.copy_path_action.triggered.connect(self._copy_current_file_path_to_clipboard)
         file_menu.addAction(self.copy_path_action)
 
@@ -15904,6 +15927,7 @@ class RAWImageViewer(QMainWindow):
             "Up Arrow — Bookmark / unbookmark image(s)\n"
             "Down Arrow — Move image(s) to Discard folder\n"
             "Delete — Delete image(s)\n"
+            "Ctrl+C / Cmd+C — Copy image file to clipboard (paste into messaging apps)\n"
             "Gallery: Ctrl/Cmd+drag over thumbnails — Toggle selection\n"
             "H — Show/hide histogram\n"
             "G — Cycle composition guide (off / 3×3 / diagonal / both / golden)\n"
@@ -18225,12 +18249,12 @@ class RAWImageViewer(QMainWindow):
             pass
 
     def _on_share_bottom_button_clicked(self):
-        """Open selected gallery images, bookmarked images, or the current file in another app."""
+        """Open/share selected gallery images, bookmarked images, or the current file."""
         try:
             paths = self._gallery_share_target_paths()
             _share_log(
                 logging.INFO,
-                "open-in-app clicked view_mode=%s paths=%d visible=%s frozen=%s",
+                "share button clicked view_mode=%s paths=%d visible=%s frozen=%s",
                 getattr(self, "view_mode", "?"),
                 len(paths),
                 getattr(getattr(self, "share_bottom_button", None), "isVisible", lambda: None)(),
@@ -18239,16 +18263,27 @@ class RAWImageViewer(QMainWindow):
             if paths:
                 _share_log(logging.INFO, "targets: %s", paths[:3] if len(paths) > 3 else paths)
             if not paths:
-                _share_log(logging.WARNING, "no open-in-app targets (gallery selection or current file)")
-                self.status_bar.showMessage("No images selected to open", 2500)
+                _share_log(logging.WARNING, "no share targets (gallery selection or current file)")
+                self.status_bar.showMessage("No images selected to share", 2500)
                 return
             self._dispatch_share_bottom(list(paths))
         finally:
             self._release_share_bottom_button()
 
     def _dispatch_share_bottom(self, paths: List[str]) -> None:
-        _share_log(logging.INFO, "open-in-app dispatch paths=%d platform=%s", len(paths), sys.platform)
-        self._open_paths_in_editing_app(paths)
+        _share_log(logging.INFO, "share dispatch paths=%d platform=%s", len(paths), sys.platform)
+        if sys.platform == "darwin":
+            self._share_paths_os(paths)
+        elif sys.platform == "win32":
+            if len(paths) == 1:
+                self._open_image_with_app(paths[0])
+            else:
+                self._share_paths_os(paths)
+        else:
+            if len(paths) == 1:
+                self._open_image_with_app(paths[0])
+            else:
+                self._share_paths_os(paths)
 
     def _valid_open_target_paths(self, paths: List[str]) -> List[str]:
         raw_in = list(paths)
@@ -18299,9 +18334,29 @@ class RAWImageViewer(QMainWindow):
 
     def _copy_paths_to_clipboard(self, paths: List[str]) -> None:
         try:
-            QApplication.clipboard().setText("\n".join(os.path.abspath(p) for p in paths))
+            from PyQt6.QtCore import QUrl, QMimeData
+            mime = QMimeData()
+            text_val = "\n".join(os.path.abspath(p) for p in paths)
+            mime.setText(text_val)
+            urls = [QUrl.fromLocalFile(os.path.abspath(p)) for p in paths]
+            mime.setUrls(urls)
+
+            if sys.platform == "darwin":
+                try:
+                    from AppKit import NSPasteboard, NSURL
+                    pb = NSPasteboard.generalPasteboard()
+                    pb.clearContents()
+                    ns_urls = [NSURL.fileURLWithPath_(os.path.abspath(p)) for p in paths]
+                    pb.writeObjects_(ns_urls)
+                except Exception:
+                    pass
+
+            QApplication.clipboard().setMimeData(mime)
         except Exception:
-            pass
+            try:
+                QApplication.clipboard().setText("\n".join(os.path.abspath(p) for p in paths))
+            except Exception:
+                pass
 
     def _open_image_with_default_app(self, path: str) -> bool:
         import subprocess
@@ -18450,11 +18505,8 @@ class RAWImageViewer(QMainWindow):
             return
         n = len(paths)
         if sys.platform == "darwin":
-            if n == 1:
-                self._macos_share_pending_path = paths[0]
-                QTimer.singleShot(100, self._on_share_macos_deferred)
-            else:
-                self.status_bar.showMessage("Share unavailable for this selection", 3000)
+            self._macos_share_pending_paths = list(paths)
+            QTimer.singleShot(100, self._on_share_macos_deferred)
             return
         elif sys.platform == "win32":
             if n == 1:
@@ -18760,11 +18812,16 @@ class RAWImageViewer(QMainWindow):
     @pyqtSlot()
     def _on_share_macos_deferred(self) -> None:
         """Queued on the MainWindow thread — all AppKit share UI runs here."""
-        path = getattr(self, "_macos_share_pending_path", None)
-        if not path:
+        paths = getattr(self, "_macos_share_pending_paths", None)
+        if not paths:
+            path = getattr(self, "_macos_share_pending_path", None)
+            paths = [path] if path else []
+        self._macos_share_pending_paths = None
+        self._macos_share_pending_path = None
+        if not paths:
             return
         self._macos_share_log_thread("share deferred slot")
-        self._share_macos_ui_impl(path)
+        self._share_macos_ui_impl(paths)
 
     def _macos_share_log_runtime_context(self) -> None:
         """Diagnostics for sandbox / activation (dev python is usually unsandboxed)."""
@@ -18933,15 +18990,19 @@ class RAWImageViewer(QMainWindow):
             pass
         return False
 
-    def _macos_share_airdrop_finder(self, share_path: str) -> None:
+    def _macos_share_airdrop_finder(self, share_paths) -> None:
         import subprocess
 
-        p = os.path.abspath(share_path)
-        _share_log(logging.INFO, "AirDrop via Finder: open -R %s", p)
+        if isinstance(share_paths, str):
+            paths = [share_paths]
+        else:
+            paths = list(share_paths)
+
         try:
-            subprocess.run(["open", "-R", p], check=False)
+            for p in paths:
+                subprocess.run(["open", "-R", os.path.abspath(p)], check=False)
             self.status_bar.showMessage(
-                "AirDrop — in Finder: right-click the file → Share → AirDrop",
+                "AirDrop — in Finder: right-click the file(s) → Share → AirDrop",
                 7000,
             )
         except Exception as exc:
@@ -18949,7 +19010,7 @@ class RAWImageViewer(QMainWindow):
             self.status_bar.showMessage(f"AirDrop failed: {exc}", 4000)
         QTimer.singleShot(600000, self._macos_cleanup_share_temp)
 
-    def _macos_share_airdrop_perform_watchdog(self, share_path: str) -> None:
+    def _macos_share_airdrop_perform_watchdog(self, share_paths) -> None:
         """If performWithItems returns OK but no delegate callback, open Finder."""
         if getattr(self, "_macos_share_airdrop_completed", False):
             return
@@ -18957,7 +19018,7 @@ class RAWImageViewer(QMainWindow):
             logging.INFO,
             "AirDrop perform produced no panel (Qt host); opening Finder for Share → AirDrop",
         )
-        self._macos_share_airdrop_finder(share_path)
+        self._macos_share_airdrop_finder(share_paths)
 
     def _macos_share_resolve_airdrop_service(self, menu_service):
         """Use the dedicated AirDrop send service (menu item object is often not perform-safe)."""
@@ -18971,14 +19032,19 @@ class RAWImageViewer(QMainWindow):
             _share_log(logging.DEBUG, "AirDrop named service: %s", exc)
         return menu_service
 
-    def _macos_share_airdrop_via_appkit(self, url, share_path: str) -> None:
+    def _macos_share_airdrop_via_appkit(self, urls, share_paths) -> None:
         """AirDrop: Finder Share sheet is reliable under Qt; in-app perform is opt-in only."""
+        if isinstance(share_paths, str):
+            paths = [share_paths]
+        else:
+            paths = list(share_paths)
+
         if not _env_true("RAWVIEWER_AIRDROP_PERFORM"):
             _share_log(
                 logging.INFO,
                 "AirDrop: using Finder (NSSharingService.perform does not show UI in Qt host)",
             )
-            self._macos_share_airdrop_finder(share_path)
+            self._macos_share_airdrop_finder(paths)
             return
         self._macos_share_airdrop_completed = False
         _activate_macos_foreground_for_share()
@@ -18992,11 +19058,11 @@ class RAWImageViewer(QMainWindow):
             pass
         service = self._macos_share_resolve_airdrop_service(None)
         if service is None or self._macos_share_ns_window() is None:
-            self._macos_share_airdrop_finder(share_path)
+            self._macos_share_airdrop_finder(paths)
             return
-        _share_log(logging.INFO, "AirDrop experimental perform path=%s", share_path)
+        _share_log(logging.INFO, "AirDrop experimental perform paths=%s", paths)
         self._perform_macos_share_service(
-            service, url, is_airdrop=True, share_path=share_path
+            service, urls, is_airdrop=True, share_paths=paths
         )
         delay_ms = 1500
         try:
@@ -19004,34 +19070,39 @@ class RAWImageViewer(QMainWindow):
         except ValueError:
             pass
         QTimer.singleShot(
-            delay_ms, lambda sp=share_path: self._macos_share_airdrop_perform_watchdog(sp)
+            delay_ms, lambda sps=paths: self._macos_share_airdrop_perform_watchdog(sps)
         )
 
     def _perform_macos_share_service(
-        self, service, url, *, is_airdrop: bool = False, share_path: str = ""
+        self, service, urls, *, is_airdrop: bool = False, share_paths = None
     ) -> None:
         def run() -> None:
-            fallback_path = share_path or ""
-            if not fallback_path:
+            if isinstance(share_paths, str):
+                fallback_paths = [share_paths]
+            else:
+                fallback_paths = list(share_paths or [])
+
+            if not fallback_paths and urls:
                 try:
-                    fallback_path = str(url.path())
+                    if isinstance(urls, (list, tuple)):
+                        fallback_paths = [str(u.path()) for u in urls]
+                    else:
+                        fallback_paths = [str(urls.path())]
                 except Exception:
                     pass
 
             if not self._macos_share_ensure_appkit_context(require_window=is_airdrop):
-                if is_airdrop and fallback_path:
-                    self._macos_share_airdrop_finder(fallback_path)
+                if is_airdrop and fallback_paths:
+                    self._macos_share_airdrop_finder(fallback_paths)
                 else:
                     self.status_bar.showMessage("Share unavailable — no active window", 4000)
                 return
-            perform_items = _macos_share_items_array(url)
-            if perform_items is None and url is not None:
-                perform_items = [url]
+            perform_items = _macos_share_items_array(urls)
             if perform_items is None:
                 _share_log(logging.WARNING, "performWithItems skipped: empty items array")
                 self.status_bar.showMessage("Share failed: no shareable file", 4000)
-                if is_airdrop and fallback_path:
-                    self._macos_share_airdrop_finder(fallback_path)
+                if is_airdrop and fallback_paths:
+                    self._macos_share_airdrop_finder(fallback_paths)
                 else:
                     QTimer.singleShot(0, self._macos_cleanup_share_temp)
                 return
@@ -19040,8 +19111,8 @@ class RAWImageViewer(QMainWindow):
             src_win = self._macos_share_ns_window()
             if src_win is None and (is_airdrop or self._macos_share_is_airdrop_service(service)):
                 _share_log(logging.WARNING, "perform without NSWindow")
-                if is_airdrop and fallback_path:
-                    self._macos_share_airdrop_finder(fallback_path)
+                if is_airdrop and fallback_paths:
+                    self._macos_share_airdrop_finder(fallback_paths)
                 return
             try:
                 delegate_cls = _get_macos_sharing_service_delegate_class()
@@ -19055,8 +19126,8 @@ class RAWImageViewer(QMainWindow):
                     can = True
                 if not can:
                     _share_log(logging.WARNING, "AirDrop canPerformWithItems=False")
-                    if is_airdrop and fallback_path:
-                        self._macos_share_airdrop_finder(fallback_path)
+                    if is_airdrop and fallback_paths:
+                        self._macos_share_airdrop_finder(fallback_paths)
                     return
                 service.performWithItems_(perform_items)
                 _share_log(logging.INFO, "performWithItems OK: %s", service)
@@ -19065,14 +19136,14 @@ class RAWImageViewer(QMainWindow):
             except Exception as exc:
                 _share_log(logging.WARNING, "performWithItems failed: %s", exc, exc_info=True)
                 self.status_bar.showMessage(f"Share failed: {exc}", 4000)
-                if is_airdrop and fallback_path:
-                    self._macos_share_airdrop_finder(fallback_path)
+                if is_airdrop and fallback_paths:
+                    self._macos_share_airdrop_finder(fallback_paths)
                 else:
                     QTimer.singleShot(0, self._macos_cleanup_share_temp)
 
         self._macos_share_defer_to_main(run)
 
-    def _share_macos_menu_chose_service(self, service, url, share_path: str) -> None:
+    def _share_macos_menu_chose_service(self, service, urls, share_paths) -> None:
         try:
             title = str(service.title())
         except Exception:
@@ -19080,13 +19151,13 @@ class RAWImageViewer(QMainWindow):
         _share_log(logging.INFO, "share menu chose: %s", title)
         if self._macos_share_is_airdrop_service(service):
             if _env_true("RAWVIEWER_AIRDROP_PICKER"):
-                self._share_macos_picker_ui_for_url(url)
+                self._share_macos_picker_ui_for_url(urls)
                 return
-            self._macos_share_airdrop_via_appkit(url, share_path)
+            self._macos_share_airdrop_via_appkit(urls, share_paths)
             return
-        self._perform_macos_share_service(service, url)
+        self._perform_macos_share_service(service, urls, share_paths=share_paths)
 
-    def _share_macos_services_menu(self, path: str) -> bool:
+    def _share_macos_services_menu(self, paths: List[str]) -> bool:
         """List NSSharingService targets in a Qt menu (picker sheet often spins empty in v2.2)."""
         try:
             from AppKit import NSSharingService
@@ -19098,10 +19169,10 @@ class RAWImageViewer(QMainWindow):
         if not self._macos_share_ensure_appkit_context(require_window=False):
             return False
 
-        url, share_path = self._macos_share_prepare_url(path)
-        if url is None:
+        urls, share_paths = self._macos_share_prepare_urls(paths)
+        if not urls:
             return False
-        items = _macos_share_items_array(url)
+        items = _macos_share_items_array(urls)
         if items is None:
             return False
         services = NSSharingService.sharingServicesForItems_(items) or []
@@ -19127,8 +19198,8 @@ class RAWImageViewer(QMainWindow):
                 title = "Share"
             action = QAction(title, self)
             action.triggered.connect(
-                lambda _checked=False, s=svc, u=url, sp=share_path: self._share_macos_menu_chose_service(
-                    s, u, sp
+                lambda _checked=False, s=svc, us=urls, sps=share_paths: self._share_macos_menu_chose_service(
+                    s, us, sps
                 )
             )
             menu.addAction(action)
@@ -19145,9 +19216,9 @@ class RAWImageViewer(QMainWindow):
             menu.exec(QCursor.pos())
         return True
 
-    def _share_macos_picker_ui_for_url(self, url) -> None:
-        """Show NSSharingServicePicker for a prepared NSURL (AirDrop-only experiments)."""
-        items = _macos_share_items_array(url)
+    def _share_macos_picker_ui_for_url(self, urls) -> None:
+        """Show NSSharingServicePicker for prepared NSURL(s) (AirDrop-only experiments)."""
+        items = _macos_share_items_array(urls)
         if items is None:
             _share_log(logging.WARNING, "AirDrop picker skipped: empty items array")
             return
@@ -19174,7 +19245,7 @@ class RAWImageViewer(QMainWindow):
             delegate = delegate_cls.alloc().initWithViewer_(self)
             picker = NSSharingServicePicker.alloc().initWithItems_(items)
             self._macos_share_picker_ref = picker
-            self._macos_share_url_ref = url
+            self._macos_share_url_ref = urls
             self._macos_share_picker_delegate_ref = delegate
             if delegate is not None:
                 picker.setDelegate_(delegate)
@@ -19264,12 +19335,12 @@ class RAWImageViewer(QMainWindow):
         return content, rect, "ns.contentView"
 
     def _macos_share_picker_anchor_view_and_rect(self):
-        """v2.1-style anchor on the share button NSView (stable for popover content)."""
+        """v2.1-style anchor on the window contentView or button (stable for popover content)."""
         import objc
         from AppKit import NSMakeRect
         from ctypes import c_void_p
 
-        if not _env_true("RAWVIEWER_SHARE_ANCHOR_CONTENT"):
+        if _env_true("RAWVIEWER_SHARE_ANCHOR_BUTTON"):
             btn = getattr(self, "share_bottom_button", None)
             if btn is not None and btn.isVisible():
                 ptr = int(btn.winId())
@@ -19286,44 +19357,45 @@ class RAWImageViewer(QMainWindow):
 
     def _share_macos_ui(self, path: str) -> None:
         """macOS share entry (prefer scheduling via _on_share_macos_deferred on GUI thread)."""
-        self._macos_share_pending_path = path
+        self._macos_share_pending_paths = [path]
 
         def run() -> None:
             self._macos_share_log_thread("share macos ui")
-            self._share_macos_ui_impl(path)
+            self._share_macos_ui_impl([path])
 
         self._macos_share_defer_to_main(run)
 
-    def _share_macos_ui_impl(self, path: str) -> None:
+    def _share_macos_ui_impl(self, paths: List[str]) -> None:
         if self._macos_share_try_native_picker() and not self._macos_share_use_qt_menu():
             _share_log(
                 logging.INFO,
                 "trying native NSSharingServicePicker (popover content often spins in v2.2 Qt6 host)",
             )
-            if self._share_macos_picker_ui(path):
+            if self._share_macos_picker_ui(paths):
                 if _env_true("RAWVIEWER_SHARE_AUTO_MENU_FALLBACK", default=True):
                     delay = 900
                     try:
                         delay = max(400, int(os.environ.get("RAWVIEWER_SHARE_MENU_FALLBACK_MS", "900")))
                     except ValueError:
                         pass
-                    QTimer.singleShot(delay, lambda fp=path: self._share_macos_auto_menu_fallback(fp))
+                    QTimer.singleShot(delay, lambda fps=paths: self._share_macos_auto_menu_fallback(fps))
                 return
 
         if self._macos_share_use_qt_menu():
             _share_log(logging.INFO, "using Qt share menu (same NSSharingService targets as system share)")
-            if self._share_macos_services_menu(path):
+            if self._share_macos_services_menu(paths):
                 self.status_bar.showMessage("Share", 1500)
                 return
             _share_log(logging.WARNING, "share menu failed; trying native picker")
-            if self._share_macos_picker_ui(path):
+            if self._share_macos_picker_ui(paths):
                 return
 
         self._macos_cleanup_share_temp()
-        self._copy_current_file_path_to_clipboard()
+        if paths:
+            self._copy_current_file_path_to_clipboard()
         self.status_bar.showMessage("Share unavailable — path copied to clipboard", 4000)
 
-    def _share_macos_auto_menu_fallback(self, path: str) -> None:
+    def _share_macos_auto_menu_fallback(self, paths: List[str]) -> None:
         """If the native popover spinner never populates, offer the working Qt service menu."""
         if getattr(self, "_macos_share_menu_fallback_used", False):
             return
@@ -19332,41 +19404,103 @@ class RAWImageViewer(QMainWindow):
             logging.INFO,
             "auto Qt share menu (NSSharingService list — popover UI unavailable in this app)",
         )
-        if self._share_macos_services_menu(path):
+        if self._share_macos_services_menu(paths):
             self.status_bar.showMessage("Share — choose a target below", 3500)
 
-    def _macos_share_picker_url(self, path: str):
-        """NSURL for picker — default original path (v2.1); temp copy only when forced."""
+    def _macos_share_prepare_urls(self, paths: List[str]):
+        """Return (list of NSURL, list of share_paths) for AppKit; copies /Volumes/ files to local temp files."""
         try:
             from AppKit import NSURL
         except Exception as exc:
             _share_log(logging.WARNING, "AppKit unavailable: %s", exc)
-            return None, ""
-        if _env_true("RAWVIEWER_SHARE_FORCE_TEMP"):
-            return self._macos_share_prepare_url(path)
-        ok, abs_path, reason = self._macos_share_validate_file(path)
-        if not ok:
-            _share_log(logging.WARNING, "share file rejected (%s): %s", reason, path)
-            return None, ""
-        url = NSURL.fileURLWithPath_(abs_path)
-        if url is None:
-            return None, ""
-        return url, abs_path
+            return [], []
 
-    def _share_macos_minimal_v21(self, path: str) -> bool:
-        """v2.1 picker: button anchor, no event-filter pause, no picker delegate."""
+        # Cleanup old temp files
+        prev_temps = getattr(self, "_macos_share_temp_paths", None)
+        if prev_temps:
+            for temp in prev_temps:
+                try:
+                    if os.path.exists(temp):
+                        os.remove(temp)
+                except OSError:
+                    pass
+            self._macos_share_temp_paths = []
+        else:
+            self._macos_share_temp_paths = []
+
+        # Keep original single path cleanup for compatibility
+        prev_temp = getattr(self, "_macos_share_temp_path", None)
+        if prev_temp:
+            try:
+                if os.path.exists(prev_temp):
+                    os.remove(prev_temp)
+            except OSError:
+                pass
+            self._macos_share_temp_path = None
+
+        urls = []
+        share_paths = []
+
+        import shutil
+        import tempfile
+        import time
+
+        for path in paths:
+            ok, abs_path, reason = self._macos_share_validate_file(path)
+            if not ok:
+                _share_log(logging.WARNING, "share file rejected (%s): %s", reason, path)
+                continue
+
+            share_path = abs_path
+            if abs_path.startswith("/Volumes/"):
+                try:
+                    suffix = os.path.splitext(abs_path)[1] or ".jpg"
+                    fd, temp_path = tempfile.mkstemp(prefix="rawviewer_share_", suffix=suffix)
+                    os.close(fd)
+                    t0 = time.perf_counter()
+                    shutil.copy2(abs_path, temp_path)
+                    elapsed_ms = (time.perf_counter() - t0) * 1000.0
+                    ok, temp_share_path, reason = self._macos_share_validate_file(temp_path)
+                    if not ok:
+                        _share_log(logging.WARNING, "temp share file invalid (%s): %s", reason, temp_path)
+                        try:
+                            os.remove(temp_path)
+                        except OSError:
+                            pass
+                        continue
+                    self._macos_share_temp_paths.append(temp_path)
+                    share_path = temp_path
+                    _share_log(
+                        logging.INFO,
+                        "copied /Volumes/ file to local temp (%.0f ms, %d bytes): %s",
+                        elapsed_ms,
+                        os.path.getsize(temp_path),
+                        temp_path,
+                    )
+                except Exception as exc:
+                    _share_log(logging.WARNING, "failed to copy /Volumes/ file to temp path: %s", exc)
+                    continue
+
+            url = NSURL.fileURLWithPath_(share_path)
+            if url is not None:
+                urls.append(url)
+                share_paths.append(share_path)
+
+        return urls, share_paths
+
+    def _share_macos_minimal_v21(self, paths: List[str]) -> bool:
+        """v2.1 picker: window contentView anchor, no event-filter pause, no picker delegate."""
         try:
             from AppKit import NSMakeRect, NSSharingServicePicker
             import objc
-            from ctypes import c_void_p
 
             self._macos_share_log_thread("NSSharingServicePicker minimal v2.1")
             if not self._macos_share_on_main_thread():
                 _share_log(logging.ERROR, "refusing minimal picker: not on Qt GUI thread")
                 return False
 
-            url, share_path = self._macos_share_picker_url(path)
-            if url is None:
+            urls, share_paths = self._macos_share_prepare_urls(paths)
+            if not urls:
                 return False
             if _env_true("RAWVIEWER_MACOS_FORCE_FOREGROUND") or _env_true(
                 "RAWVIEWER_SHARE_TRY_NATIVE_PICKER"
@@ -19376,9 +19510,6 @@ class RAWImageViewer(QMainWindow):
             btn = getattr(self, "share_bottom_button", None)
             if btn is None:
                 return False
-            ptr = int(btn.winId())
-            if not ptr:
-                return False
 
             try:
                 self.raise_()
@@ -19386,39 +19517,43 @@ class RAWImageViewer(QMainWindow):
             except Exception:
                 pass
 
-            view = objc.objc_object(c_void_p=ptr)
-            w = max(1, btn.width())
-            h = max(1, btn.height())
-            rect = NSMakeRect(0, 0, w, h)
-            # v2.1 passes a plain list of NSURL (not NSArray).
-            picker = NSSharingServicePicker.alloc().initWithItems_([url])
+            view, rect, anchor_label = self._macos_share_picker_anchor_view_and_rect()
+            if view is None or rect is None:
+                return False
+
+            items = _macos_share_items_array(urls)
+            if items is None:
+                return False
+
+            picker = NSSharingServicePicker.alloc().initWithItems_(items)
             self._macos_share_picker_ref = picker
-            self._macos_share_url_ref = url
+            self._macos_share_urls_ref = urls
             self._macos_share_picker_delegate_ref = None
             picker.showRelativeToRect_ofView_preferredEdge_(rect, view, 3)
             _share_log(
                 logging.INFO,
-                "minimal v2.1 picker shown anchor=qt.share_button path=%s",
-                share_path,
+                "minimal v2.1 picker shown anchor=%s paths=%s",
+                anchor_label,
+                share_paths,
             )
             QTimer.singleShot(300000, self._macos_cleanup_share_temp)
             return True
         except Exception as exc:
             self._macos_share_picker_ref = None
-            self._macos_share_url_ref = None
+            self._macos_share_urls_ref = None
             _share_log(logging.WARNING, "minimal v2.1 picker failed: %s", exc, exc_info=True)
             return False
 
-    def _share_macos_picker_ui(self, path: str) -> bool:
+    def _share_macos_picker_ui(self, paths: List[str]) -> bool:
         """Native NSSharingServicePicker — minimal v2.1 path by default."""
         if not self._macos_share_use_heavy_picker():
-            if self._share_macos_minimal_v21(path):
+            if self._share_macos_minimal_v21(paths):
                 self.status_bar.showMessage("Share", 1500)
                 return True
             _share_log(logging.WARNING, "minimal v2.1 picker failed; trying heavy integration")
 
         self._macos_share_begin_picker_session()
-        ok = self._share_macos(path)
+        ok = self._share_macos(paths)
         if ok:
             _share_log(logging.INFO, "NSSharingServicePicker shown OK (heavy; session ends on dismiss)")
             self.status_bar.showMessage("Share", 1500)
@@ -19429,7 +19564,7 @@ class RAWImageViewer(QMainWindow):
             return True
         self._macos_share_end_picker_session("picker_fail")
         self._macos_cleanup_share_temp()
-        _share_log(logging.WARNING, "NSSharingServicePicker failed for %s", path)
+        _share_log(logging.WARNING, "NSSharingServicePicker failed for %s", paths)
         return False
 
     def _macos_share_ns_window(self):
@@ -19459,18 +19594,28 @@ class RAWImageViewer(QMainWindow):
             return None
 
     def _macos_cleanup_share_temp(self) -> None:
-        temp = getattr(self, "_macos_share_temp_path", None)
-        if not temp:
-            return
-        try:
-            if os.path.exists(temp):
-                os.remove(temp)
-                _share_log(logging.DEBUG, "cleaned up share temp file: %s", temp)
-        except OSError as exc:
-            _share_log(logging.WARNING, "failed to clean up share temp file %s: %s", temp, exc)
-        self._macos_share_temp_path = None
+        temps = getattr(self, "_macos_share_temp_paths", None)
+        if temps:
+            for temp in temps:
+                try:
+                    if os.path.exists(temp):
+                        os.remove(temp)
+                        _share_log(logging.DEBUG, "cleaned up share temp file: %s", temp)
+                except OSError as exc:
+                    _share_log(logging.WARNING, "failed to clean up share temp file %s: %s", temp, exc)
+            self._macos_share_temp_paths = []
 
-    def _share_macos(self, path: str) -> bool:
+        temp = getattr(self, "_macos_share_temp_path", None)
+        if temp:
+            try:
+                if os.path.exists(temp):
+                    os.remove(temp)
+                    _share_log(logging.DEBUG, "cleaned up share temp file: %s", temp)
+            except OSError as exc:
+                _share_log(logging.WARNING, "failed to clean up share temp file %s: %s", temp, exc)
+            self._macos_share_temp_path = None
+
+    def _share_macos(self, paths: List[str]) -> bool:
         """macOS NSSharingServicePicker — must run on Qt GUI thread."""
         try:
             from AppKit import NSSharingService, NSSharingServicePicker
@@ -19484,15 +19629,15 @@ class RAWImageViewer(QMainWindow):
             if not self._macos_share_ensure_appkit_context(require_window=True):
                 return False
 
-            url, share_path = self._macos_share_prepare_url(path)
-            if url is None:
+            urls, share_paths = self._macos_share_prepare_urls(paths)
+            if not urls:
                 return False
-            items = _macos_share_items_array(url)
+            items = _macos_share_items_array(urls)
             if items is None:
                 return False
             services = NSSharingService.sharingServicesForItems_(items) or []
             self._macos_share_cached_services = services
-            _share_log(logging.INFO, "sharingServicesForItems count=%d path=%s", len(services), share_path)
+            _share_log(logging.INFO, "sharingServicesForItems count=%d paths=%s", len(services), share_paths)
             if not services:
                 _share_log(logging.WARNING, "sharingServicesForItems returned no services (empty items?)")
                 return False
@@ -19506,7 +19651,7 @@ class RAWImageViewer(QMainWindow):
             delegate = delegate_cls.alloc().initWithViewer_(self)
             picker = NSSharingServicePicker.alloc().initWithItems_(items)
             self._macos_share_picker_ref = picker
-            self._macos_share_url_ref = url
+            self._macos_share_urls_ref = urls
             self._macos_share_picker_delegate_ref = delegate
             if delegate is not None:
                 picker.setDelegate_(delegate)
@@ -19528,12 +19673,10 @@ class RAWImageViewer(QMainWindow):
             return True
         except Exception as exc:
             self._macos_share_picker_ref = None
-            self._macos_share_url_ref = None
+            self._macos_share_urls_ref = None
             self._macos_share_picker_delegate_ref = None
             self._macos_share_cached_services = None
             _share_log(logging.WARNING, "NSSharingServicePicker failed: %s", exc, exc_info=True)
-            return False
-
     def _share_windows_shell(self, path: str, owner_hwnd: int = 0) -> bool:
         """Legacy Explorer shell verb fallback when WinRT share is unavailable."""
         abs_path = _norm_path(os.path.abspath(path))
@@ -19707,8 +19850,8 @@ class RAWImageViewer(QMainWindow):
         if not p:
             self.status_bar.showMessage("No file open", 2000)
             return
-        QGuiApplication.clipboard().setText(p)
-        self.status_bar.showMessage("Path copied to clipboard", 2000)
+        self._copy_paths_to_clipboard([p])
+        self.status_bar.showMessage("Image copied to clipboard — paste into messaging apps to send", 3500)
 
     def _reveal_current_file_in_os_file_manager(self):
         import subprocess
@@ -22281,12 +22424,20 @@ class RAWImageViewer(QMainWindow):
 
     def _on_gpu_wheel_navigate(self, direction: int):
         """Plain wheel while fit-to-window navigates images (legacy parity)."""
+        import time
+        now = time.monotonic()
+        last = float(getattr(self, "_last_wheel_nav_ts", 0.0))
+        # 250ms cooldown prevents trackpad flick inertia from skipping multiple images
+        if now - last < 0.25:
+            return
+        self._last_wheel_nav_ts = now
         self._schedule_coalesced_navigation(1 if direction > 0 else -1)
 
     def _on_gpu_fit_mode_changed(self, fit_mode: bool):
         # Keep legacy state roughly in sync for any code that still reads it.
         self.fit_to_window = bool(fit_mode)
         if fit_mode:
+            self.zoom_center_point = None
             self._clear_focus_zoom_anchor()
             self._upgrade_display_quality_on_fit_if_needed()
         else:
@@ -22339,6 +22490,9 @@ class RAWImageViewer(QMainWindow):
                         )
                 self._gpu_zoom_in_to_point_finish()
                 if self._needs_full_resolution_upgrade():
+                    self._pending_zoom = True
+                    self._pending_zoom_center = self.zoom_center_point
+                    self._pending_zoom_thumbnail_size = self.current_pixmap.size() if self.current_pixmap else None
                     self._queue_sensor_full_decode(
                         self.current_file_path, priority_current=True
                     )
@@ -22356,6 +22510,8 @@ class RAWImageViewer(QMainWindow):
             if not gv.is_fit_mode():
                 self.current_zoom_level = float(gv.current_scale())
                 self._gpu_request_full_resolution_if_needed()
+            else:
+                self.zoom_center_point = None
             self.update_status_bar()
             return
         # Allow toggle even if pixmap is not ready yet - check if image is loading

@@ -27,7 +27,7 @@ Official releases: [GitHub Releases](https://github.com/markyip/RAWviewer/releas
 | **GPS location map** (`M` in single view) | Yes | Yes |
 | **Install size / time** | Smaller; no AI model download | Larger; downloads AI models on first setup (Full only) |
 
-**Windows installers:** `RAWviewer_Setup_Lite.exe` · `RAWviewer_Setup_DirectML.exe` · `RAWviewer_Setup_CUDA.exe`  
+**Windows installer:** `RAWviewer_Setup.exe` (Unified Installer)  
 **macOS zips:** `RAWviewer-v2.3.2-macOS.zip` · `RAWviewer-v2.3.2-macOS-Lite.zip`
 
 Not sure? Start with **Lite** if you mainly browse and cull by eye. Choose **Full** if you want to search with words like `sunset on beach` or filter by detected faces.
@@ -38,10 +38,10 @@ Not sure? Start with **Lite** if you mainly browse and cull by eye. Choose **Ful
 
 ### Windows
 
-1. Download an installer from **[Releases](https://github.com/markyip/RAWviewer/releases/latest)** and run it.
-   - **Lite** — `RAWviewer_Setup_Lite.exe` (one installer; recommended if you don't need AI search)
-   - **Full — DirectML** — `RAWviewer_Setup_DirectML.exe` (recommended for most PCs: AMD, Intel, or NVIDIA)
-   - **Full — CUDA** — `RAWviewer_Setup_CUDA.exe` (optional; NVIDIA GPU with CUDA for fastest AI search)
+    - Runs `RAWviewer_Setup.exe` and select your profile/acceleration in the setup wizard:
+      - **Full — CUDA** (NVIDIA GPU with CUDA for fastest AI search)
+      - **Full — DirectML** (AMD, Intel, or NVIDIA GPU; recommended for most PCs)
+      - **Lite** (Browsing and culling only; saves disk space, no AI models download)
 2. Follow the setup wizard. Stay online — setup downloads the app runtime and dependencies. **Full** builds also download AI search models (~600 MB); this can take several minutes.
 3. Open **RAWviewer** from the Desktop shortcut, Start Menu, or `RAWviewer.exe` in your install folder (default: `%LOCALAPPDATA%\RAWviewer`).
 
@@ -51,7 +51,7 @@ Setup also registers RAWviewer in Windows **Open with** for common photo formats
 
 If Windows shows **“Protected your PC”**: click **More info** → **Run anyway**.
 
-> **`RAWviewer_Setup_*.exe` is the installer only** — it does not open the photo viewer. Use **RAWviewer.exe** or the Desktop shortcut.
+> **`RAWviewer_Setup.exe` is the installer only** — it does not open the photo viewer. Use **RAWviewer.exe** or the Desktop shortcut.
 
 ### macOS (13 Ventura or newer)
 
@@ -156,7 +156,7 @@ Full search syntax, focus-overlay brands, and power-user options are in **[Advan
 | SmartScreen warning | More info → Run anyway |
 | Slow AI search (**Full**) | Prefer **DirectML** on most PCs; use **CUDA** only with NVIDIA + CUDA |
 | Installer stuck on “Downloading models” (**Full**) | AI models (~600 MB) can take several minutes. Check firewall, VPN, or proxy if it fails — browsing still works; open gallery **Search** later to retry |
-| Opened Setup again instead of the app | Launch **`RAWviewer.exe`** or the Desktop shortcut — not **`RAWviewer_Setup_*.exe`** |
+| Opened Setup again instead of the app | Launch **`RAWviewer.exe`** or the Desktop shortcut — not **`RAWviewer_Setup.exe`** |
 | AI search missing after install (**Full**) | Open gallery **Search** → accept the download prompt |
 | RAWviewer not in Open with | Re-run the installer (repair), or reinstall |
 | Crash | Enable file logging with `RAWVIEWER_FILE_LOG=1`, then check the install folder |
@@ -291,8 +291,8 @@ Build outputs:
 
 | Profile | Windows | macOS |
 |---------|---------|-------|
-| **Full** | `dist/RAWviewer_Setup_DirectML.exe`, `dist/RAWviewer_Setup_CUDA.exe` | `dist/RAWviewer-v2.3.2-macOS.zip` |
-| **Lite** | `dist/RAWviewer_Setup_Lite.exe` | `dist/RAWviewer-v2.3.2-macOS-Lite.zip` |
+| **Full / Unified** | `dist/RAWviewer_Setup.exe` (includes Full & Lite options) | `dist/RAWviewer-v2.3.2-macOS.zip` |
+| **Lite** | (Select Lite option in `RAWviewer_Setup.exe`) | `dist/RAWviewer-v2.3.2-macOS-Lite.zip` |
 
 Dependencies are in `pixi.toml`. Packaging scripts use a local `rawviewer_env/` venv when building release artifacts.
 

@@ -10,12 +10,12 @@ Scripts for local development and packaging. All paths assume the **repository r
 |--------|---------|
 | [`bat/run_debug.bat`](bat/run_debug.bat) | Run `src/main.py` with debug logging and `rawviewer_env` if present (full profile) |
 | [`bat/clear_cache.bat`](bat/clear_cache.bat) | Wipe memory/disk image caches, semantic index DB, logs, and QSettings (full fresh start) |
-| [`bat/build_windows_full.bat`](bat/build_windows_full.bat) | Build **full** Windows installer (`RAWviewer_Setup_CUDA.exe` or `_DirectML.exe`) |
-| [`bat/build_windows_lite.bat`](bat/build_windows_lite.bat) | Build **lite** installer (`RAWviewer_Setup_Lite.exe`) — no semantic/face AI; single path (no CUDA/DirectML split) |
-| [`bat/build_windows.bat`](bat/build_windows.bat) | Same as full build with selectable backend (`cuda` default, or `directml`) |
-| [`bat/build_windows_cuda.bat`](bat/build_windows_cuda.bat) | Full build with CUDA backend (`onnxruntime-gpu`) |
-| [`bat/build_windows_directml.bat`](bat/build_windows_directml.bat) | Full build with DirectML backend (`onnxruntime-directml`) |
-| [`bat/build_windows_all.bat`](bat/build_windows_all.bat) | Build **both** DirectML and CUDA full installers into `dist/` |
+| [`bat/build_windows.bat`](bat/build_windows.bat) | Build unified Windows installer (`RAWviewer_Setup.exe` containing Full-CUDA, Full-DirectML, and Lite profiles) |
+| [`bat/build_windows_all.bat`](bat/build_windows_all.bat) | Legacy/wrapper: Redirects to `build_windows.bat` |
+| [`bat/build_windows_full.bat`](bat/build_windows_full.bat) | Legacy/wrapper: Redirects to `build_windows.bat` |
+| [`bat/build_windows_lite.bat`](bat/build_windows_lite.bat) | Legacy/wrapper: Redirects to `build_windows.bat` |
+| [`bat/build_windows_cuda.bat`](bat/build_windows_cuda.bat) | Legacy/wrapper: Redirects to `build_windows.bat` |
+| [`bat/build_windows_directml.bat`](bat/build_windows_directml.bat) | Legacy/wrapper: Redirects to `build_windows.bat` |
 | [`bat/launch_dev_full.bat`](bat/launch_dev_full.bat) | Run from source with `RAWVIEWER_BUILD_PROFILE=full` |
 | [`bat/launch_dev_lite.bat`](bat/launch_dev_lite.bat) | Run from source with `RAWVIEWER_BUILD_PROFILE=lite` (semantic/face off) |
 | [`bat/test_builds.bat`](bat/test_builds.bat) | Smoke test profile resolution + optional `dist/` artifact check |
@@ -24,19 +24,14 @@ Scripts for local development and packaging. All paths assume the **repository r
 
 | Profile | Installer artifact |
 |---------|-------------------|
-| Full (CUDA) | `dist/RAWviewer_Setup_CUDA.exe` |
-| Full (DirectML) | `dist/RAWviewer_Setup_DirectML.exe` |
-| Lite | `dist/RAWviewer_Setup_Lite.exe` |
+| Unified (CUDA / DirectML / Lite) | `dist/RAWviewer_Setup.exe` |
 
 From repo root:
 
 ```batch
 scripts\Launch\bat\run_debug.bat
 scripts\Launch\bat\clear_cache.bat
-scripts\Launch\bat\build_windows_full.bat
-scripts\Launch\bat\build_windows_full.bat directml
-scripts\Launch\bat\build_windows_lite.bat
-scripts\Launch\bat\build_windows_all.bat
+scripts\Launch\bat\build_windows.bat
 scripts\Launch\bat\launch_dev_full.bat
 scripts\Launch\bat\launch_dev_lite.bat
 scripts\Launch\bat\test_builds.bat

@@ -487,7 +487,7 @@ def main():
     # Clean previous builds
     print("Cleaning previous builds...")
     windows_target_setup = (
-        _windows_setup_exe_name(args.windows_accel, profile=args.profile)
+        "RAWviewer_Setup"
         if platform.system() == "Windows"
         else None
     )
@@ -496,6 +496,7 @@ def main():
     if platform.system() == 'Windows':
         for image in (
             "RAWviewer.exe",
+            "RAWviewer_Setup.exe",
             "RAWviewer_Setup_CUDA.exe",
             "RAWviewer_Setup_DirectML.exe",
             "RAWviewer_Setup_Lite.exe",
@@ -544,6 +545,7 @@ def main():
                 if platform.system() == "Windows":
                     for name in (
                         "RAWviewer.exe",
+                        "RAWviewer_Setup.exe",
                         "RAWviewer_Setup_CUDA.exe",
                         "RAWviewer_Setup_DirectML.exe",
                         "RAWviewer_Setup_Lite.exe",
@@ -647,19 +649,27 @@ def main():
     elif platform.system() == "Windows":
         add_data_args.append('--add-data "uninstall.bat;."')
         add_data_args.append('--add-data "scripts;scripts"')
-        windows_pixi_manifest = _prepare_windows_pixi_manifest(
-            args.windows_accel, profile=args.profile
-        )
-        app_bundle_name = _windows_setup_exe_name(args.windows_accel, profile=args.profile)
+        
+        # Prepare all three variants of pixi.toml for the unified installer
+        cuda_manifest = _prepare_windows_pixi_manifest("cuda", profile="full")
+        dml_manifest = _prepare_windows_pixi_manifest("directml", profile="full")
+        lite_manifest = _prepare_windows_pixi_manifest("directml", profile="lite")
+        
+        cuda_str = str(cuda_manifest).replace("\\", "/")
+        dml_str = str(dml_manifest).replace("\\", "/")
+        lite_str = str(lite_manifest).replace("\\", "/")
+        
+        add_data_args.append(f'--add-data "{cuda_str};."')
+        add_data_args.append(f'--add-data "{dml_str};."')
+        add_data_args.append(f'--add-data "{lite_str};."')
+        
+        app_bundle_name = "RAWviewer_Setup"
         launcher_stub = build_windows_launcher_stub(
             icon_path if os.path.exists(icon_path) else None
         )
         add_data_args.append(f'--add-data "{launcher_stub.resolve()};."')
         print(f"[INFO] Windows installer output: dist\\{app_bundle_name}.exe")
-        if is_lite:
-            print("[INFO] Bundling Windows lite pixi manifest (no ONNX / huggingface / opencv).")
-        else:
-            print(f"[INFO] Bundling Windows pixi manifest for backend: {args.windows_accel}")
+        print("[INFO] Bundling all Windows environment manifests (CUDA, DirectML, and Lite).")
     add_data_arg_str = " ".join(add_data_args)
 
     src_path = os.path.abspath('src')
@@ -753,12 +763,6 @@ def main():
             "--exclude-module", "exifread",
         ])
         
-        pixi_src = (
-            str(windows_pixi_manifest).replace("\\", "/")
-            if windows_pixi_manifest is not None
-            else "pixi.toml"
-        )
-        add_data_args.append(f'--add-data "{pixi_src};."')
         add_data_args.append('--add-data "src;src"')
     
     if platform.system() == 'Darwin':

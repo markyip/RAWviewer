@@ -325,7 +325,7 @@ else:
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QLineEdit, QProgressBar, QPlainTextEdit,
-    QStackedWidget, QFileDialog, QFrame, QDialog
+    QStackedWidget, QFileDialog, QFrame, QDialog, QRadioButton
 )
 from PyQt6.QtGui import QIcon, QFont, QColor, QPalette
 from PyQt6.QtCore import Qt, pyqtSignal, QObject, QThread
@@ -336,9 +336,10 @@ class InstallWorker(QObject):
     progress_signal = pyqtSignal(int)
     progress_label_signal = pyqtSignal(str)
 
-    def __init__(self, target_dir):
+    def __init__(self, target_dir, install_mode):
         super().__init__()
         self.target_dir = os.path.normpath(target_dir)
+        self.install_mode = install_mode
         self.cancelled = False
 
     def stop(self):
@@ -355,7 +356,8 @@ class InstallWorker(QObject):
     def run(self):
         target_dir = self.target_dir
         try:
-            disk_err = _check_disk_space(target_dir, _min_free_bytes_for_install())
+            min_bytes = MIN_FREE_BYTES_LITE if self.install_mode == "lite" else MIN_FREE_BYTES
+            disk_err = _check_disk_space(target_dir, min_bytes)
             if disk_err:
                 self.log_signal.emit(disk_err)
                 self.finished.emit(False, "")
@@ -370,7 +372,11 @@ class InstallWorker(QObject):
                 return
 
             self.log_signal.emit("Copying core files...")
-            shutil.copy2(os.path.join(BUNDLE_DIR, "pixi.toml"), target_dir)
+            # Copy the selected variant of pixi.toml to the target folder
+            manifest_source = os.path.join(BUNDLE_DIR, f"pixi-{self.install_mode}.toml")
+            if not os.path.isfile(manifest_source):
+                manifest_source = os.path.join(BUNDLE_DIR, "pixi.toml")
+            shutil.copy2(manifest_source, os.path.join(target_dir, "pixi.toml"))
 
             src_dir = os.path.join(target_dir, "src")
             if os.path.exists(src_dir):
@@ -381,6 +387,16 @@ class InstallWorker(QObject):
                 dirs_exist_ok=True,
                 ignore=shutil.ignore_patterns("logs", "*.log"),
             )
+
+            # Dynamically configure build_profile.py based on install mode
+            profile_val = "lite" if self.install_mode == "lite" else "full"
+            build_profile_path = os.path.join(src_dir, "build_profile.py")
+            try:
+                with open(build_profile_path, "w", encoding="utf-8") as f:
+                    f.write(f'PROFILE = "{profile_val}"\n')
+                self.log_signal.emit(f"Configured build profile: {profile_val}")
+            except Exception as exc:
+                self.log_signal.emit(f"Warning: could not write build_profile.py: {exc}")
 
             assets_dir = os.path.join(target_dir, "icons")
             if os.path.exists(assets_dir):
@@ -464,7 +480,7 @@ class InstallWorker(QObject):
             self.progress_signal.emit(MODEL_DOWNLOAD_PROGRESS_START)
 
             success_note = ""
-            if _is_lite_installer():
+            if self.install_mode == "lite":
                 self.log_signal.emit(
                     "Lite install: skipping AI models (no semantic search or face detection)."
                 )
@@ -758,6 +774,15 @@ class InstallerGUI(QMainWindow):
                 font-family: Consolas, monospace;
                 padding: 10px;
             }
+            QRadioButton {
+                color: #ffffff;
+                font-family: 'Segoe UI', Arial;
+                font-size: 13px;
+            }
+            QRadioButton::indicator {
+                width: 16px;
+                height: 16px;
+            }
         """)
 
     def init_welcome_page(self):
@@ -768,25 +793,36 @@ class InstallerGUI(QMainWindow):
         title.setObjectName("title")
         layout.addWidget(title)
         
-        if _is_lite_installer():
-            desc_text = (
-                "RAWviewer Lite helps you review and cull RAW and JPEG photos quickly.\n\n"
-                "Setup downloads the runtime and Python dependencies only — no AI models. "
-                "Gallery search uses EXIF and GPS metadata; the location map is included."
-            )
-        else:
-            desc_text = (
-                "RAWviewer helps you review and cull RAW and JPEG photos quickly.\n\n"
-                "Setup downloads the runtime, Python dependencies, and AI search models "
-                "(several minutes on a slow connection)."
-            )
+        desc_text = (
+            "RAWviewer helps you review and cull RAW and JPEG photos quickly.\n\n"
+            "Choose your installation profile and acceleration backend below. "
+            "Full versions require internet access to download dependencies and models."
+        )
         desc = QLabel(desc_text)
         desc.setObjectName("desc")
         desc.setWordWrap(True)
         layout.addWidget(desc)
+
+        options_label = QLabel("Installation Options:")
+        options_label.setStyleSheet("color: #888; font-weight: bold; margin-top: 15px;")
+        layout.addWidget(options_label)
+
+        self.radio_cuda = QRadioButton("Full — NVIDIA GPU (CUDA Acceleration, downloads ~600MB models)")
+        self.radio_directml = QRadioButton("Full — Default GPU (DirectML Acceleration, downloads ~600MB models)")
+        self.radio_lite = QRadioButton("Lite — High Performance (No AI search, no downloading models, saves ~3GB disk space)")
+
+        # Set default to DirectML (most compatible across all devices)
+        self.radio_directml.setChecked(True)
+
+        options_layout = QVBoxLayout()
+        options_layout.setSpacing(6)
+        options_layout.addWidget(self.radio_cuda)
+        options_layout.addWidget(self.radio_directml)
+        options_layout.addWidget(self.radio_lite)
+        layout.addLayout(options_layout)
         
         path_label = QLabel("Installation Directory:")
-        path_label.setStyleSheet("color: #888; font-weight: bold; margin-top: 20px;")
+        path_label.setStyleSheet("color: #888; font-weight: bold; margin-top: 15px;")
         layout.addWidget(path_label)
         
         row = QHBoxLayout()
@@ -849,6 +885,14 @@ class InstallerGUI(QMainWindow):
         target_dir = self.path_edit.text().strip()
         if not target_dir:
             return
+            
+        if self.radio_cuda.isChecked():
+            mode = "cuda"
+        elif self.radio_lite.isChecked():
+            mode = "lite"
+        else:
+            mode = "directml"
+            
         self._install_in_progress = True
         self._awaiting_cancel = False
         self.stack.setCurrentIndex(1)
@@ -857,9 +901,9 @@ class InstallerGUI(QMainWindow):
         self.btn_cancel.setText("CANCEL")
         self.log_box.clear()
         self.install_step_label.setText("")
-
+ 
         self.thread = QThread()
-        self.worker = InstallWorker(target_dir)
+        self.worker = InstallWorker(target_dir, mode)
         self.worker.moveToThread(self.thread)
         self.thread.started.connect(self.worker.run)
         self.worker.finished.connect(self.on_finished)
