@@ -6,8 +6,44 @@
 
 import io
 import os
+import time
 from datetime import datetime
 from typing import Any, Dict, Optional, Tuple
+
+_io_pressure_until = 0.0
+
+
+def raise_process_fd_limit(soft_target: int = 4096) -> None:
+    """Raise the soft RLIMIT_NOFILE cap (macOS default 256 is too low for gallery prefetch)."""
+    try:
+        import resource
+
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        if hard == resource.RLIM_INFINITY:
+            target = soft_target
+        else:
+            target = min(int(hard), soft_target)
+        if soft < target:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (target, hard))
+    except Exception:
+        pass
+
+
+def is_emfile_error(exc: BaseException) -> bool:
+    errno = getattr(exc, "errno", None)
+    if errno == 24:
+        return True
+    return "too many open files" in str(exc).lower()
+
+
+def note_emfile_pressure(duration_s: float = 45.0) -> None:
+    """Back off concurrent I/O after EMFILE so the process can recover."""
+    global _io_pressure_until
+    _io_pressure_until = max(_io_pressure_until, time.time() + max(5.0, duration_s))
+
+
+def io_pressure_active() -> bool:
+    return time.time() < _io_pressure_until
 
 import numpy as np
 
@@ -431,21 +467,15 @@ def _pil_file_to_qpixmap(file_path: str, max_edge: int = 0) -> QPixmap:
                     pil_image.thumbnail((max_edge, max_edge), Image.Resampling.LANCZOS)
             if pil_image.mode not in ("RGB", "L"):
                 pil_image = pil_image.convert("RGB")
+            if pil_image.mode == "L":
+                pil_image = pil_image.convert("RGB")
             width, height = pil_image.size
-            if pil_image.mode == "RGB":
-                qimage = QImage(
-                    pil_image.tobytes("raw", "RGB"),
-                    width,
-                    height,
-                    QImage.Format.Format_RGB888,
-                )
-            else:
-                qimage = QImage(
-                    pil_image.tobytes("raw", "L"),
-                    width,
-                    height,
-                    QImage.Format.Format_Grayscale8,
-                )
+            qimage = QImage(
+                pil_image.tobytes("raw", "RGB"),
+                width,
+                height,
+                QImage.Format.Format_RGB888,
+            )
             if qimage.isNull():
                 return QPixmap()
             return QPixmap.fromImage(qimage)
@@ -475,21 +505,13 @@ def load_pixmap_safe(file_path: str, max_edge: int = 0) -> QPixmap:
                 
                 if pil_image.mode not in ('RGB', 'L'):
                     pil_image = pil_image.convert('RGB')
+                if pil_image.mode == 'L':
+                    pil_image = pil_image.convert('RGB')
                 
                 width, height = pil_image.size
-                if pil_image.mode == 'RGB':
-                    qimage = QImage(pil_image.tobytes('raw', 'RGB'), 
-                                   width, height, 
-                                   QImage.Format.Format_RGB888)
-                elif pil_image.mode == 'L':
-                    qimage = QImage(pil_image.tobytes('raw', 'L'), 
-                                   width, height, 
-                                   QImage.Format.Format_Grayscale8)
-                else:
-                    rgb_pil = pil_image.convert('RGB')
-                    qimage = QImage(rgb_pil.tobytes('raw', 'RGB'), 
-                                   width, height, 
-                                   QImage.Format.Format_RGB888)
+                qimage = QImage(pil_image.tobytes('raw', 'RGB'), 
+                               width, height, 
+                               QImage.Format.Format_RGB888)
                 
                 if not qimage.isNull():
                     pixmap = QPixmap.fromImage(qimage)
@@ -905,6 +927,9 @@ def sort_probe_worker_count(
     override = os.environ.get("RAWVIEWER_SORT_PROBE_WORKERS", "").strip()
     if override:
         return _env_int_bounded("RAWVIEWER_SORT_PROBE_WORKERS", 4, minimum=1, maximum=32)
+
+    if io_pressure_active():
+        return 2
 
     cpu = os.cpu_count() or 4
     if conservative:

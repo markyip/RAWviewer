@@ -65,9 +65,15 @@ def _min_acceptable_preview_dim(file_path: str) -> int:
 
 
 def _skip_low_res_memory_thumb_for_display_tier(
-    thumb, wanted: set, use_full_resolution: bool
+    thumb,
+    wanted: set,
+    use_full_resolution: bool,
+    *,
+    gallery_thumbnail: bool = False,
 ) -> bool:
     """Do not emit 512px grid-tier thumbs for preview-first single-view loads."""
+    if gallery_thumbnail:
+        return False
     if use_full_resolution or "full" in wanted:
         return False
     if wanted == {"thumbnail"}:
@@ -94,10 +100,12 @@ class ImageLoadTask:
                  use_full_resolution: bool = False,
                  stages: Optional[set] = None,
                  thumbnail_target_size: Optional[QSize] = None,
-                 thumbnail_fit: str = "crop"):
+                 thumbnail_fit: str = "crop",
+                 gallery_thumbnail: bool = False):
         self.file_path = file_path
         self.priority = priority
         self.use_full_resolution = use_full_resolution
+        self.gallery_thumbnail = gallery_thumbnail
         # Stages: {'thumbnail', 'exif', 'full'}.
         # Gallery should typically request only {'thumbnail'} (and optionally 'exif').
         self.stages = stages if stages is not None else {'thumbnail', 'exif', 'full'}
@@ -153,6 +161,8 @@ class ImageLoadWorker(QRunnable):
     @staticmethod
     def _uses_display_preview_tier(task: ImageLoadTask) -> bool:
         """CURRENT single-view loads use ~1920px embedded preview, not 512px gallery grid."""
+        if getattr(task, "gallery_thumbnail", False):
+            return False
         if task.priority != Priority.CURRENT:
             return False
         if task.thumbnail_target_size is not None:
@@ -174,6 +184,13 @@ class ImageLoadWorker(QRunnable):
             self._processor = UnifiedImageProcessor()
         return self._processor
     
+    def _emit_preview_failure(self, file_path: str, message: str) -> None:
+        """Skip preview-only errors when a full decode stage will run in the same task."""
+        if "full" in (self.task.stages or set()):
+            return
+        if self._safe_emit():
+            self.manager.error_occurred.emit(file_path, message)
+
     def run(self):
         """執行任務"""
         if self.task.is_cancelled():
@@ -225,8 +242,8 @@ class ImageLoadWorker(QRunnable):
                 if preview_tier:
                     if thumbnail is not None and not self.task.is_cancelled():
                         self._handle_thumbnail_result(file_path, thumbnail)
-                    elif not self.task.is_cancelled() and self._safe_emit():
-                        self.manager.error_occurred.emit(
+                    elif not self.task.is_cancelled():
+                        self._emit_preview_failure(
                             file_path,
                             "Display-tier preview extraction failed",
                         )
@@ -234,7 +251,7 @@ class ImageLoadWorker(QRunnable):
                     if thumbnail is not None:
                         self._handle_thumbnail_result(file_path, thumbnail)
                     elif self._safe_emit():
-                        self.manager.error_occurred.emit(
+                        self._emit_preview_failure(
                             file_path, "Thumbnail extraction returned None"
                         )
 
@@ -314,8 +331,8 @@ class ImageLoadWorker(QRunnable):
                             processor, file_path, thumbnail, cache_exif
                         )
                         self._handle_thumbnail_result(file_path, thumbnail)
-                    elif not self.task.is_cancelled() and self._safe_emit():
-                        self.manager.error_occurred.emit(
+                    elif not self.task.is_cancelled():
+                        self._emit_preview_failure(
                             file_path, "Thumbnail extraction returned None"
                         )
             
@@ -537,7 +554,37 @@ class ImageLoadManager(QObject):
         
         self._stopped = False  # Flag to stop scheduling new tasks
         self._gallery_warmup_throttle_depth = 0
+        self._io_pressure_throttle_depth = 0
         self._initialized = True
+
+    def enter_io_pressure_throttle(self) -> None:
+        """Cut worker/RAW concurrency after EMFILE so open fds can drain."""
+        self._io_pressure_throttle_depth = (
+            int(getattr(self, "_io_pressure_throttle_depth", 0) or 0) + 1
+        )
+        if self._io_pressure_throttle_depth != 1:
+            return
+        self._pressure_saved_max_threads = self._thread_pool.maxThreadCount()
+        pressure_max = _env_int("RAWVIEWER_IO_PRESSURE_MAX_WORKERS", 6, minimum=2)
+        self._thread_pool.setMaxThreadCount(
+            min(pressure_max, self._pressure_saved_max_threads)
+        )
+        self._pressure_saved_raw_limit = self._raw_load_limit
+        self._raw_load_limit = min(2, int(self._raw_load_limit or 2))
+
+    def exit_io_pressure_throttle(self) -> None:
+        depth = int(getattr(self, "_io_pressure_throttle_depth", 0) or 0)
+        if depth <= 0:
+            return
+        self._io_pressure_throttle_depth = depth - 1
+        if self._io_pressure_throttle_depth > 0:
+            return
+        saved_threads = getattr(self, "_pressure_saved_max_threads", None)
+        if saved_threads is not None:
+            self._thread_pool.setMaxThreadCount(saved_threads)
+        saved_raw = getattr(self, "_pressure_saved_raw_limit", None)
+        if saved_raw is not None:
+            self._raw_load_limit = saved_raw
 
     def enter_gallery_warmup_throttle(self) -> None:
         """Lower worker/RAW concurrency while gallery tiles are first painting."""
@@ -573,7 +620,8 @@ class ImageLoadManager(QObject):
                    stages: Optional[set] = None,
                    thumbnail_target_size: Optional[QSize] = None,
                    thumbnail_fit: str = "crop",
-                   bypass_cache: bool = False):
+                   bypass_cache: bool = False,
+                   gallery_thumbnail: bool = False):
         """請求加載圖像"""
         # Don't accept new tasks if stopped
         if self._stopped:
@@ -584,7 +632,12 @@ class ImageLoadManager(QObject):
             self.cancel_task(file_path)
         
         # 檢查快取（memory-only, stage-aware）
-        if not bypass_cache and self._check_cache(file_path, use_full_resolution, stages=stages):
+        if not bypass_cache and self._check_cache(
+            file_path,
+            use_full_resolution,
+            stages=stages,
+            gallery_thumbnail=gallery_thumbnail,
+        ):
             return
 
         task_key = self._make_task_key(
@@ -617,7 +670,8 @@ class ImageLoadManager(QObject):
             use_full_resolution,
             stages=stages,
             thumbnail_target_size=thumbnail_target_size,
-            thumbnail_fit=thumbnail_fit
+            thumbnail_fit=thumbnail_fit,
+            gallery_thumbnail=gallery_thumbnail,
         )
         task.task_key = task_key
         with self._queue_lock:
@@ -637,6 +691,21 @@ class ImageLoadManager(QObject):
             return False
         with self._queue_lock:
             return bool(self._task_keys_by_path.get(file_path))
+
+    def has_current_priority_work(self, file_path: str) -> bool:
+        """True when a CURRENT-priority task for this path is queued or running."""
+        if not file_path:
+            return False
+        with self._queue_lock:
+            for key in self._task_keys_by_path.get(file_path, ()):
+                task = self._active_tasks.get(key)
+                if (
+                    task is not None
+                    and task.priority == Priority.CURRENT
+                    and not task.is_cancelled()
+                ):
+                    return True
+        return False
 
     def cancel_task(self, file_path: str):
         """取消任務（非阻塞）"""
@@ -737,7 +806,14 @@ class ImageLoadManager(QObject):
         """Emit cache hits immediately (load_image runs on UI thread)."""
         signal.emit(file_path, payload)
     
-    def _check_cache(self, file_path: str, use_full_resolution: bool, stages: Optional[set] = None) -> bool:
+    def _check_cache(
+        self,
+        file_path: str,
+        use_full_resolution: bool,
+        stages: Optional[set] = None,
+        *,
+        gallery_thumbnail: bool = False,
+    ) -> bool:
         """檢查快取，如果存在則直接發送信號（只檢查記憶體快取以避免阻塞 UI）"""
         from common_image_loader import (
             image_covers_sensor_resolution,
@@ -759,7 +835,10 @@ class ImageLoadManager(QObject):
                 if buf is None:
                     return False
                 if _skip_low_res_memory_thumb_for_display_tier(
-                    buf, wanted, use_full_resolution
+                    buf,
+                    wanted,
+                    use_full_resolution,
+                    gallery_thumbnail=gallery_thumbnail,
                 ):
                     return False
                 emit = (
@@ -840,12 +919,18 @@ class ImageLoadManager(QObject):
                 return True
             preview_buf = cache.preview_cache.get(file_path)
             if preview_buf is not None and not _skip_low_res_memory_thumb_for_display_tier(
-                preview_buf, wanted, use_full_resolution
+                preview_buf,
+                wanted,
+                use_full_resolution,
+                gallery_thumbnail=gallery_thumbnail,
             ):
                 return True
             thumb = cache.thumbnail_cache.get(file_path)
             return thumb is not None and not _skip_low_res_memory_thumb_for_display_tier(
-                thumb, wanted, use_full_resolution
+                thumb,
+                wanted,
+                use_full_resolution,
+                gallery_thumbnail=gallery_thumbnail,
             )
 
         thumb_ok = _memory_thumb_ok()
@@ -879,7 +964,8 @@ class ImageLoadManager(QObject):
         if self._stopped:
             return
             
-        from common_image_loader import is_raw_file
+        from common_image_loader import io_pressure_active, is_raw_file
+        pressure = io_pressure_active()
         with self._queue_lock:
             if self._work_queue.empty():
                 return
@@ -888,6 +974,7 @@ class ImageLoadManager(QObject):
                 # We want to fill the thread pool, but limit heavy RAW tasks
                 # JPEGs can always proceed if threads are free.
                 deferred_raw_tasks = []
+                deferred_prefetch_tasks = []
                 while (
                     not self._work_queue.empty()
                     and self._thread_pool.activeThreadCount() < self._thread_pool.maxThreadCount()
@@ -901,6 +988,10 @@ class ImageLoadManager(QObject):
                             self._task_keys_by_path[task.file_path].discard(key)
                             if not self._task_keys_by_path[task.file_path]:
                                 self._task_keys_by_path.pop(task.file_path, None)
+                        continue
+
+                    if pressure and task.priority != Priority.CURRENT:
+                        deferred_prefetch_tasks.append(task)
                         continue
 
                     is_raw = is_raw_file(task.file_path)
@@ -920,6 +1011,8 @@ class ImageLoadManager(QObject):
 
                     worker = ImageLoadWorker(task, self)
                     self._thread_pool.start(worker)
+                for deferred in deferred_prefetch_tasks:
+                    self._work_queue.put(deferred)
                 for deferred in deferred_raw_tasks:
                     self._work_queue.put(deferred)
             except queue.Empty:

@@ -50,6 +50,13 @@ def _gallery_viewport_buffer_screens() -> float:
         return 1.25
 
 
+def _gallery_current_active_reserve(active_cap: int) -> int:
+    """Slots reserved for visible (CURRENT) gallery tiles; prefetch cannot use them."""
+    default = max(8, (active_cap * 2) // 5)
+    reserve = _env_int("RAWVIEWER_GALLERY_CURRENT_ACTIVE_RESERVE", default, minimum=4)
+    return min(reserve, max(4, active_cap - 4))
+
+
 def _gallery_scheduling_budgets(fast: bool) -> tuple[int, int, int]:
     """Return (max_widgets, max_tasks, active_cap) for the current scroll mode."""
     if fast:
@@ -123,16 +130,39 @@ def _thumbnail_data_to_base_pixmap(thumbnail_data) -> Optional[QPixmap]:
         return thumbnail_data if not thumbnail_data.isNull() else None
     if isinstance(thumbnail_data, np.ndarray):
         arr = np.ascontiguousarray(thumbnail_data)
-        h, w = arr.shape[:2]
-        if h <= 0 or w <= 0:
+        if arr.ndim == 2:
+            arr = np.stack([arr, arr, arr], axis=-1)
+        elif arr.ndim == 3 and arr.shape[2] == 1:
+            arr = np.repeat(arr, 3, axis=2)
+        if arr.ndim == 3:
+            h, w, c = arr.shape[:3]
+            if h <= 0 or w <= 0:
+                return None
+            if arr.dtype != np.uint8:
+                arr = np.clip(arr, 0, 255).astype(np.uint8)
+                arr = np.ascontiguousarray(arr)
+            if c == 3:
+                bytes_per_line = arr.strides[0]
+                qimg = QImage(
+                    arr.data, w, h, bytes_per_line, QImage.Format.Format_RGB888
+                ).copy()
+            elif c == 4:
+                bytes_per_line = arr.strides[0]
+                qimg = QImage(
+                    arr.data, w, h, bytes_per_line, QImage.Format.Format_RGBA8888
+                ).copy()
+            else:
+                return None
+        else:
             return None
-        bytes_per_line = arr.strides[0]
-        qimg = QImage(arr.data, w, h, bytes_per_line, QImage.Format.Format_RGB888).copy()
         if qimg.isNull():
             return None
         return QPixmap.fromImage(qimg)
     if isinstance(thumbnail_data, QImage):
-        return QPixmap.fromImage(thumbnail_data) if not thumbnail_data.isNull() else None
+        if thumbnail_data.isNull():
+            return None
+        rgb = thumbnail_data.convertToFormat(QImage.Format.Format_RGB888)
+        return QPixmap.fromImage(rgb) if not rgb.isNull() else None
     return None
 
 
@@ -172,7 +202,7 @@ class JustifiedGallery(QWidget):
         # State Management
         self._building = False
         self._gallery_generation = 0
-        self._active_tasks = {}
+        self._active_tasks = {}  # path -> (started_ts, Priority)
         self._thumb_fail_counts: Dict[str, int] = {}
         self._metadata_cache = {}
         # Thumbnail cache: base + per-bucket scaled
@@ -941,7 +971,45 @@ class JustifiedGallery(QWidget):
                     priority=Priority.CURRENT,
                     cancel_existing=False,
                     stages={"thumbnail"},
+                    gallery_thumbnail=True,
                 )
+
+    def _active_task_started_ts(self, path: str) -> Optional[float]:
+        meta = self._active_tasks.get(path)
+        if meta is None:
+            return None
+        if isinstance(meta, tuple):
+            return float(meta[0])
+        return float(meta)
+
+    def _active_task_priority(self, path: str) -> Priority:
+        meta = self._active_tasks.get(path)
+        if meta is None:
+            return Priority.PRELOAD_NEXT
+        if isinstance(meta, tuple) and len(meta) >= 2:
+            return meta[1]
+        return Priority.CURRENT
+
+    def _prefetch_active_count(self) -> int:
+        return sum(
+            1
+            for path in self._active_tasks
+            if self._active_task_priority(path) != Priority.CURRENT
+        )
+
+    def _should_protect_active_raw_thumbnail(
+        self, file_path: str, visible_paths: set[str]
+    ) -> bool:
+        """Keep in-flight visible RAW/DNG decodes when prefetch window moves away."""
+        if file_path not in visible_paths or not is_raw_file(file_path):
+            return False
+        if file_path in self._active_tasks:
+            return True
+        lm = self.load_manager
+        return lm is not None and lm.has_current_priority_work(file_path)
+
+    def _mark_active_task(self, path: str, priority: Priority) -> None:
+        self._active_tasks[path] = (time.time(), priority)
 
     def begin_gallery_warmup(self, file_count: int = 0) -> None:
         """Soften thumbnail/Qt work while switching into gallery on large folders."""
@@ -1563,7 +1631,11 @@ class JustifiedGallery(QWidget):
 
         # Drop stale in-flight markers so failed/missed thumbnails can be retried.
         now_ts = time.time()
-        stale_paths = [p for p, ts in self._active_tasks.items() if (now_ts - ts) > 8.0]
+        stale_paths = [
+            p
+            for p in self._active_tasks
+            if (now_ts - (self._active_task_started_ts(p) or now_ts)) > 8.0
+        ]
         for sp in stale_paths:
             self._active_tasks.pop(sp, None)
 
@@ -1647,17 +1719,19 @@ class JustifiedGallery(QWidget):
             wanted_paths |= center_paths
 
         # Cancel thumbnail work that is no longer near the scrollbar thumb.
-        # This prevents the queue from "finishing the whole folder" in the background.
-        # We only cancel tasks we previously requested from this gallery instance.
+        # Skip cancel for visible RAW/DNG tiles still decoding at CURRENT priority.
         to_cancel = self._requested_thumbnail_paths - wanted_paths
+        protected_paths: set[str] = set()
         for fp in list(to_cancel):
+            if self._should_protect_active_raw_thumbnail(fp, visible_paths):
+                protected_paths.add(fp)
+                continue
             try:
                 self.load_manager.cancel_task(fp)
             except Exception:
                 pass
-            if fp in self._active_tasks:
-                del self._active_tasks[fp]
-        self._requested_thumbnail_paths = wanted_paths
+            self._active_tasks.pop(fp, None)
+        self._requested_thumbnail_paths = wanted_paths | protected_paths
 
         load_tasks = []
         created_widgets = 0
@@ -1839,9 +1913,13 @@ class JustifiedGallery(QWidget):
             )
         )
 
+        current_reserve = _gallery_current_active_reserve(active_cap)
+        prefetch_active_cap = max(0, active_cap - current_reserve)
+        has_pending_current = any(pri == Priority.CURRENT for _, pri, _ in load_tasks)
+
         # Schedule with budget and target-sized thumbnails for visible tiles.
         scheduled = 0
-        if len(self._active_tasks) >= active_cap:
+        if len(self._active_tasks) >= active_cap and not has_pending_current:
             if _focus_gallery_switch_logs():
                 logger.debug(
                     "[MODESWITCH] gallery.load_visible_images skipped scheduling; active cap reached (%d)",
@@ -1853,15 +1931,21 @@ class JustifiedGallery(QWidget):
                 if not self._load_timer.isActive():
                     self._load_timer.start(16)
                 break
+            if priority != Priority.CURRENT:
+                if self._prefetch_active_count() >= prefetch_active_cap:
+                    continue
             if len(self._active_tasks) >= active_cap:
+                if priority != Priority.CURRENT:
+                    continue
                 break
             self.load_manager.load_image(
                 path,
                 priority=priority,
                 cancel_existing=False,
                 stages=stages,
+                gallery_thumbnail=True,
             )
-            self._active_tasks[path] = time.time()
+            self._mark_active_task(path, priority)
             scheduled += 1
         scheduled_tasks = scheduled
 
@@ -1884,6 +1968,14 @@ class JustifiedGallery(QWidget):
         """Silently preload thumbnails for out-of-viewport images during idle stages to smooth out future scrolling."""
         if self._building or not self.images or self.load_manager is None:
             return
+
+        try:
+            from common_image_loader import io_pressure_active
+
+            if io_pressure_active():
+                return
+        except Exception:
+            pass
         
         # Guard: do not run if not in gallery view or if there are already active tasks in flight
         pv = getattr(self, "parent_viewer", None)
@@ -1934,6 +2026,8 @@ class JustifiedGallery(QWidget):
 
         preload_batch = []
         max_preload_batch = _gallery_idle_preload_batch()
+        if len(self.images or []) > 500:
+            max_preload_batch = min(max_preload_batch, 24)
 
         for idx in outwards_indices:
             item = self._gallery_layout_items[idx]
@@ -1966,8 +2060,9 @@ class JustifiedGallery(QWidget):
                     priority=idle_priority,
                     cancel_existing=False,
                     stages={"thumbnail"},
+                    gallery_thumbnail=True,
                 )
-                self._active_tasks[path] = time.time()
+                self._mark_active_task(path, idle_priority)
             
             # Schedule next batch after a short delay (progressive background loading)
             self._idle_preload_timer.start(_gallery_idle_preload_ms())

@@ -78,6 +78,12 @@ RAWApplication = None  # type: ignore[misc, assignment]
 # Ultra Fast Splash: Qt only in the GUI main process (pool workers must not touch Cocoa).
 if _IS_GUI_MAIN_PROCESS:
     try:
+        from common_image_loader import raise_process_fd_limit
+
+        raise_process_fd_limit()
+    except Exception:
+        pass
+    try:
         from PyQt6.QtWidgets import QApplication, QSplashScreen
         from PyQt6.QtGui import QPixmap, QColor, QPainter, QPen, QIcon
         from PyQt6.QtCore import Qt, QEvent, QSize, QPoint, QLoggingCategory
@@ -5839,6 +5845,7 @@ class SingleImageViewOverlay(QWidget):
             remaining = self._show_filmstrip_timer.remainingTime()
             if remaining >= 0 and remaining <= delay:
                 return
+        self._prepare_filmstrip_reveal()
         self._show_filmstrip_timer.start(delay)
 
     def _show_filmstrip_if_still_in_hotzone(self) -> None:
@@ -5892,8 +5899,15 @@ class SingleImageViewOverlay(QWidget):
         local_top_left = self.mapFromGlobal(global_top_left)
         return QRect(local_top_left, layer.size())
 
+    def _ensure_filmstrip_enabled(self) -> None:
+        """Enable/sync filmstrip before hover handling (GPU path may skip main eventFilter)."""
+        viewer = self._viewer
+        if viewer is not None and hasattr(viewer, "_ensure_filmstrip_synced"):
+            viewer._ensure_filmstrip_synced()
+
     def handle_pointer_for_filmstrip(self, global_pos) -> None:
         """Reveal/hide film strip when pointer moves over scroll area (child widgets)."""
+        self._ensure_filmstrip_enabled()
         if not self._filmstrip.isEnabled():
             return
         pos = self._local_pos_from_global(global_pos)
@@ -5937,8 +5951,13 @@ class SingleImageViewOverlay(QWidget):
     def eventFilter(self, watched, event):
         from PyQt6.QtCore import QEvent
 
-        if self._gpu_view is not None and watched is self._gpu_view.viewport():
-            if event.type() == QEvent.Type.MouseMove:
+        gpu = self._gpu_view
+        if gpu is not None and watched in (gpu, gpu.viewport()):
+            if event.type() in (
+                QEvent.Type.MouseMove,
+                QEvent.Type.HoverMove,
+                QEvent.Type.Enter,
+            ):
                 self.handle_pointer_for_filmstrip(event.globalPosition())
         return False
 
@@ -8956,7 +8975,8 @@ class RAWImageViewer(QMainWindow):
         try:
             self._orientation_already_applied = True
             if isinstance(thumbnail, QImage):
-                self.display_pixmap(QPixmap.fromImage(thumbnail))
+                thumb_rgb = thumbnail.convertToFormat(QImage.Format.Format_RGB888)
+                self.display_pixmap(QPixmap.fromImage(thumb_rgb))
             else:
                 self.display_numpy_image(thumbnail)
             self._on_single_view_content_displayed()
@@ -9607,11 +9627,13 @@ class RAWImageViewer(QMainWindow):
             return
         
         logger.error(f"[MANAGER] Error loading {os.path.basename(file_path)}: {error_message}")
+        if "too many open files" in (error_message or "").lower():
+            self._enter_io_pressure_mode("manager_error_emfile")
         if getattr(self, "_defer_sensor_full_decode_path", None):
             self._flush_deferred_sensor_full_decode(file_path)
         if self._retry_composite_dng_embedded_preview(file_path, error_message):
             return
-        if self._retry_display_tier_with_full_decode(file_path, error_message):
+        if self._retry_raw_preview_with_full_decode(file_path, error_message):
             return
         if (
             getattr(self, "view_mode", "single") == "single"
@@ -9656,10 +9678,7 @@ class RAWImageViewer(QMainWindow):
             except Exception:
                 pass
 
-        if clearly_unsupported or (
-            is_raw_file(file_path)
-            and "thumbnail extraction returned none" in lower_err
-        ):
+        if clearly_unsupported:
             try:
                 from raw_file_extensions import get_supported_extensions
                 exts = get_supported_extensions()
@@ -9678,6 +9697,18 @@ class RAWImageViewer(QMainWindow):
                 ),
             )
             dialog.exec()
+        elif (
+            is_raw_file(file_path)
+            and any(
+                marker in lower_err
+                for marker in (
+                    "thumbnail extraction returned none",
+                    "display-tier preview extraction failed",
+                )
+            )
+        ):
+            # Preview-only failure in gallery (or after retry): status bar only, no modal.
+            pass
         else:
             self.show_error("Load Error", f"Failed to load image: {error_message}")
         
@@ -9687,19 +9718,36 @@ class RAWImageViewer(QMainWindow):
             if not os.path.exists(parent_dir):
                 self.reset_to_initial_state()
 
-    def _retry_display_tier_with_full_decode(
+    def _raw_preview_failure_markers(self) -> tuple[str, ...]:
+        return (
+            "display-tier preview extraction failed",
+            "thumbnail extraction returned none",
+        )
+
+    def _retry_raw_preview_with_full_decode(
         self, file_path: str, error_message: str
     ) -> bool:
-        """Auto-fallback: display-tier preview failed -> queue sensor full decode once."""
+        """Auto-fallback: embedded/thumbnail preview failed -> queue sensor full decode once."""
         from common_image_loader import is_raw_file
 
         lower_err = str(error_message or "").lower()
-        if "display-tier preview extraction failed" not in lower_err:
+        if not any(m in lower_err for m in self._raw_preview_failure_markers()):
             return False
         if not is_raw_file(file_path):
             return False
+        if getattr(self, "view_mode", "single") != "single":
+            return False
 
         norm_p = _norm_path(file_path)
+        if self.image_manager.has_active_work_for_path(file_path):
+            if hasattr(self, "loading_overlay"):
+                self.loading_overlay.show_loading("Decoding RAW…")
+            self.status_bar.showMessage(
+                f"{os.path.basename(file_path)}: preview unavailable, decoding full RAW…",
+                4000,
+            )
+            return True
+
         retry_token = (
             norm_p,
             int(getattr(self, "_single_view_display_generation", 0)),
@@ -9709,14 +9757,22 @@ class RAWImageViewer(QMainWindow):
         self._display_tier_full_retry_token = retry_token
 
         try:
+            if hasattr(self, "loading_overlay"):
+                self.loading_overlay.show_loading("Decoding RAW…")
             self._queue_sensor_full_decode(file_path, priority_current=True)
             self.status_bar.showMessage(
-                f"{os.path.basename(file_path)}: preview unavailable, retrying full decode...",
+                f"{os.path.basename(file_path)}: preview unavailable, decoding full RAW…",
                 4000,
             )
             return True
         except Exception:
             return False
+
+    def _retry_display_tier_with_full_decode(
+        self, file_path: str, error_message: str
+    ) -> bool:
+        """Backward-compatible alias for preview-tier auto full decode."""
+        return self._retry_raw_preview_with_full_decode(file_path, error_message)
 
     def on_manager_progress(self, file_path: str, status_message: str):
         """處理 ImageLoadManager 的進度更新信號"""
@@ -10520,7 +10576,9 @@ class RAWImageViewer(QMainWindow):
         self.single_view_container.installEventFilter(self)
         if self.gpu_view is not None:
             self.gpu_view.setMouseTracking(True)
+            self.gpu_view.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
             self.gpu_view.viewport().setMouseTracking(True)
+            self.gpu_view.viewport().setAttribute(Qt.WidgetAttribute.WA_Hover, True)
             self.gpu_view.installEventFilter(self)
             self.gpu_view.viewport().installEventFilter(self)
         self.single_image_histogram.installEventFilter(self)
@@ -14107,8 +14165,13 @@ class RAWImageViewer(QMainWindow):
             
             height, width = shape[0], shape[1]
             channels = shape[2] if len(shape) > 2 else 1
-            
-            if channels not in [1, 3, 4]:
+
+            if channels == 1:
+                plane = numpy_array.reshape(height, width)
+                numpy_array = np.stack([plane, plane, plane], axis=-1)
+                channels = 3
+
+            if channels not in [3, 4]:
                 logger.warning(f"[GALLERY] Unsupported channel count: {channels}, expected 1, 3, or 4")
                 return None
             
@@ -15523,11 +15586,16 @@ class RAWImageViewer(QMainWindow):
             return probed_timestamps
 
         from concurrent.futures import ThreadPoolExecutor
-        from common_image_loader import probe_capture_timestamp_from_file, sort_probe_worker_count
+        from common_image_loader import (
+            io_pressure_active,
+            probe_capture_timestamp_from_file,
+            sort_probe_worker_count,
+        )
         import logging
 
         logger = logging.getLogger(__name__)
         hint = sample_path or missing_paths[0]
+        conservative = conservative or io_pressure_active() or len(missing_paths) > 400
         workers = sort_probe_worker_count(hint, conservative=conservative)
         chunksize = max(1, len(missing_paths) // max(workers * 8, 1))
         logger.info(
@@ -20853,6 +20921,14 @@ class RAWImageViewer(QMainWindow):
             return
         if self._semantic_indexing_in_progress or getattr(self, "_semantic_index_prep_in_progress", False):
             return
+        try:
+            from common_image_loader import io_pressure_active
+
+            if io_pressure_active():
+                self._metadata_index_defer_timer.start(15000)
+                return
+        except Exception:
+            pass
 
         folder = getattr(self, "current_folder", None)
         corpus = getattr(self, "_semantic_search_corpus_files", None) or getattr(
@@ -24204,8 +24280,12 @@ class RAWImageViewer(QMainWindow):
             if self._handle_app_shortcut(event):
                 return True
 
-        # Film strip hot zone: pointer events hit the scroll viewport / image label, not the overlay.
-        if event.type() == QEvent.Type.MouseMove and getattr(self, "view_mode", "single") == "single":
+        # Film strip hot zone: pointer events hit child widgets, not the overlay itself.
+        if event.type() in (
+            QEvent.Type.MouseMove,
+            QEvent.Type.HoverMove,
+            QEvent.Type.Enter,
+        ) and getattr(self, "view_mode", "single") == "single":
             container = getattr(self, "single_view_container", None)
             gpu_view = getattr(self, "gpu_view", None)
             filmstrip_targets = (
@@ -24213,12 +24293,13 @@ class RAWImageViewer(QMainWindow):
                 self.image_label,
                 self.scroll_area,
             )
+            if container is not None:
+                filmstrip_targets = (*filmstrip_targets, container)
             if gpu_view is not None:
                 filmstrip_targets = (*filmstrip_targets, gpu_view, gpu_view.viewport())
             if container is not None and obj in filmstrip_targets:
                 self._ensure_filmstrip_synced()
-                gp = event.globalPosition()
-                container.handle_pointer_for_filmstrip(gp)
+                container.handle_pointer_for_filmstrip(event.globalPosition())
         
         # Handle trackpad pinch-to-zoom on Mac
         if event.type() == QEvent.Type.NativeGesture:
@@ -24641,6 +24722,8 @@ class RAWImageViewer(QMainWindow):
             scan_s,
         )
         if len(image_files) > 1:
+            if not self._is_exif_sort_ready():
+                self._folder_sort_refinement_applied_token = token
             self._schedule_folder_sort_refinement(token, file_stats)
         try:
             from PyQt6.QtCore import QTimer
@@ -24744,6 +24827,28 @@ class RAWImageViewer(QMainWindow):
         if not preserve_folder_index:
             self._start_quick_folder_index(folder_path, start_path, token)
 
+    def _enter_io_pressure_mode(self, reason: str = "") -> None:
+        """Reduce background I/O when the process hits EMFILE or similar pressure."""
+        import logging
+        from common_image_loader import note_emfile_pressure
+
+        note_emfile_pressure()
+        logger = logging.getLogger(__name__)
+        if reason:
+            logger.warning("[IO] Entering I/O pressure mode (%s)", reason)
+        try:
+            lm = getattr(self, "image_manager", None)
+            if lm is not None and hasattr(lm, "enter_io_pressure_throttle"):
+                lm.enter_io_pressure_throttle()
+        except Exception:
+            pass
+        try:
+            gj = getattr(self, "gallery_justified", None)
+            if gj is not None and hasattr(gj, "_idle_preload_timer"):
+                gj._idle_preload_timer.stop()
+        except Exception:
+            pass
+
     def _schedule_folder_sort_refinement(self, token: int, file_stats: dict) -> None:
         """Refine mtime-based folder order to EXIF capture-time order in the background."""
         if token != getattr(self, "_folder_load_generation", None):
@@ -24779,9 +24884,20 @@ class RAWImageViewer(QMainWindow):
                 except Exception as e:
                     import logging
                     import traceback
+                    from common_image_loader import is_emfile_error, note_emfile_pressure
+
                     logging.getLogger(__name__).error(
                         f"[SORT_REFINE] Exception in background refinement sort: {e}\n{traceback.format_exc()}"
                     )
+                    if is_emfile_error(e):
+                        note_emfile_pressure()
+                        try:
+                            viewer._enter_io_pressure_mode("sort_refine_emfile")
+                        except Exception:
+                            pass
+                    fallback = list(getattr(viewer, "image_files", []) or paths)
+                    if fallback:
+                        self_inner.signals.ready.emit(token, fallback, {})
                     return
 
                 self_inner.signals.ready.emit(token, sorted_files, bulk_metadata)
@@ -25059,6 +25175,8 @@ class RAWImageViewer(QMainWindow):
                     len(self.image_files),
                 )
                 if len(self.image_files) > 1:
+                    if not self._is_exif_sort_ready():
+                        self._folder_sort_refinement_applied_token = token
                     self._schedule_folder_sort_refinement(token, file_stats)
             else:
                 self._show_single_view()

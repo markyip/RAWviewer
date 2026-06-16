@@ -59,18 +59,27 @@ def _thumbnail_to_pixmap(thumbnail) -> Optional[QPixmap]:
     if isinstance(thumbnail, QPixmap):
         return thumbnail if not thumbnail.isNull() else None
     if isinstance(thumbnail, QImage):
-        return QPixmap.fromImage(thumbnail) if not thumbnail.isNull() else None
+        if thumbnail.isNull():
+            return None
+        rgb = thumbnail.convertToFormat(QImage.Format.Format_RGB888)
+        return QPixmap.fromImage(rgb) if not rgb.isNull() else None
     try:
         arr = np.ascontiguousarray(thumbnail)
-        h, w = arr.shape[:2]
+        if arr.ndim == 2:
+            arr = np.stack([arr, arr, arr], axis=-1)
+        elif arr.ndim == 3 and arr.shape[2] == 1:
+            arr = np.repeat(arr, 3, axis=2)
+        h, w, c = arr.shape[:3]
         if h <= 0 or w <= 0:
             return None
-        channels = arr.shape[2] if len(arr.shape) > 2 else 1
-        if channels == 1:
-            qimg = QImage(arr.data, w, h, w, QImage.Format.Format_Grayscale8).copy()
+        if c == 3:
+            bpl = arr.strides[0]
+            qimg = QImage(arr.data, w, h, bpl, QImage.Format.Format_RGB888).copy()
+        elif c == 4:
+            bpl = arr.strides[0]
+            qimg = QImage(arr.data, w, h, bpl, QImage.Format.Format_RGBA8888).copy()
         else:
-            bpl = 3 * w
-            qimg = QImage(arr.data.tobytes(), w, h, bpl, QImage.Format.Format_RGB888)
+            return None
         return QPixmap.fromImage(qimg)
     except Exception:
         return None

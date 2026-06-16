@@ -75,6 +75,10 @@ def _qimage_to_rgb_array(image: QImage) -> Optional[np.ndarray]:
 _embedded_scan_miss_cache = set()
 _embedded_scan_miss_lock = threading.Lock()
 _embedded_scan_miss_cache_max = 4096
+_embedded_scan_inflight: dict[tuple, threading.Event] = {}
+_embedded_scan_results: dict[tuple, Optional[np.ndarray]] = {}
+_embedded_scan_coalesce_lock = threading.Lock()
+_embedded_scan_results_max = 512
 
 
 def get_jpeg_dimensions(data: bytes) -> Optional[Tuple[int, int]]:
@@ -318,6 +322,42 @@ def extract_embedded_jpeg_by_scan(file_path: str, max_size: int) -> Optional[np.
     Scan for embedded JPEG (SOI … EOI) by first parsing TIFF directories,
     and falling back to sequential head/tail scanning if needed.
     """
+    try:
+        stat = os.stat(file_path)
+        cache_key = (file_path, stat.st_size, stat.st_mtime, max_size)
+    except Exception:
+        return _extract_embedded_jpeg_by_scan_impl(file_path, max_size)
+
+    with _embedded_scan_coalesce_lock:
+        if cache_key in _embedded_scan_results:
+            return _embedded_scan_results[cache_key]
+        if cache_key in _embedded_scan_inflight:
+            event = _embedded_scan_inflight[cache_key]
+            leader = False
+        else:
+            event = threading.Event()
+            _embedded_scan_inflight[cache_key] = event
+            leader = True
+
+    if not leader:
+        event.wait(timeout=120)
+        with _embedded_scan_coalesce_lock:
+            return _embedded_scan_results.get(cache_key)
+
+    try:
+        result = _extract_embedded_jpeg_by_scan_impl(file_path, max_size)
+        with _embedded_scan_coalesce_lock:
+            if len(_embedded_scan_results) >= _embedded_scan_results_max:
+                _embedded_scan_results.clear()
+            _embedded_scan_results[cache_key] = result
+        return result
+    finally:
+        with _embedded_scan_coalesce_lock:
+            _embedded_scan_inflight.pop(cache_key, None)
+        event.set()
+
+
+def _extract_embedded_jpeg_by_scan_impl(file_path: str, max_size: int) -> Optional[np.ndarray]:
     try:
         stat = os.stat(file_path)
         size = stat.st_size
@@ -682,6 +722,8 @@ class ThumbnailExtractor(QObject):
             
             image = reader.read()
             if not image.isNull():
+                if image.format() != QImage.Format.Format_RGB888:
+                    image = image.convertToFormat(QImage.Format.Format_RGB888)
                 # Perform high-quality final scaling if the loaded image is still larger than needed
                 if target_size is not None and isinstance(target_size, QSize) and target_size.isValid():
                     if image.size().width() > target_size.width() or image.size().height() > target_size.height():
@@ -784,7 +826,11 @@ class EXIFExtractor(QObject):
             tags = metadata_backend.process_file_from_path(file_path, details=False)
         except Exception as e:
             import logging
+            from common_image_loader import is_emfile_error, note_emfile_pressure
+
             logging.getLogger(__name__).warning(f"metadata_backend failed on {file_path}: {e}")
+            if is_emfile_error(e):
+                note_emfile_pressure()
             tags = {}
 
         try:

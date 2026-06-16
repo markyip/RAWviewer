@@ -497,10 +497,12 @@ class UnifiedImageProcessor:
 
         # Non-RAW reader path can return QImage directly.
         if isinstance(thumbnail, QImage):
-            # If we decoded to target_size, it's already perfect.
-            # Don't cache custom-sized QImages in the global persistent cache
-            # (which expects 512px JPEGs), but return it for immediate UI display.
-            return thumbnail
+            from enhanced_raw_processor import _qimage_to_rgb_array
+
+            rgb = _qimage_to_rgb_array(thumbnail)
+            if rgb is None:
+                return None
+            thumbnail = rgb
 
         # For RAW or fallback paths that return np.ndarray:
         # 獲取 EXIF 數據以獲取 orientation
@@ -537,7 +539,7 @@ class UnifiedImageProcessor:
                 thumbnail = thumbnail.astype(np.uint8)
             
             if len(thumbnail.shape) == 2:
-                pil_img = Image.fromarray(thumbnail, 'L')
+                pil_img = Image.fromarray(thumbnail, 'L').convert('RGB')
             elif len(thumbnail.shape) == 3:
                 pil_img = Image.fromarray(thumbnail, 'RGB')
             else:

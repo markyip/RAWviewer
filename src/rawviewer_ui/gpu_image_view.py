@@ -95,6 +95,7 @@ class GpuImageView(QGraphicsView):
             QGraphicsView.OptimizationFlag.DontAdjustForAntialiasing, True
         )
         self.viewport().setMouseTracking(True)
+        self.viewport().setAttribute(Qt.WidgetAttribute.WA_Hover, True)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         # Set by RAWImageViewer: callable(QKeyEvent) -> bool
         self._shortcut_handler = None
@@ -122,8 +123,9 @@ class GpuImageView(QGraphicsView):
             gl = QOpenGLWidget()
             gl.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
             self.setViewport(gl)
-            # Re-enable tracking on the new viewport.
+            # Re-enable tracking on the new viewport (HoverMove works before first click).
             self.viewport().setMouseTracking(True)
+            self.viewport().setAttribute(Qt.WidgetAttribute.WA_Hover, True)
             self.viewport().setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         except Exception:
             # Raster fallback keeps the feature working without a GL context.
@@ -457,8 +459,11 @@ class GpuImageView(QGraphicsView):
     # ------------------------------------------------------------------ events
     def mouseMoveEvent(self, event) -> None:
         host = self.parentWidget()
-        if host is not None and hasattr(host, "handle_pointer_for_filmstrip"):
-            host.handle_pointer_for_filmstrip(event.globalPosition())
+        if host is not None:
+            if hasattr(host, "_ensure_filmstrip_enabled"):
+                host._ensure_filmstrip_enabled()
+            if hasattr(host, "handle_pointer_for_filmstrip"):
+                host.handle_pointer_for_filmstrip(event.globalPosition())
         super().mouseMoveEvent(event)
 
     def event(self, event) -> bool:
