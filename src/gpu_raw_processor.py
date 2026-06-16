@@ -1,10 +1,15 @@
 import logging
 import os
 import time
+import threading
 from typing import Any, Dict, Optional, Tuple
 import numpy as np
 
 logger = logging.getLogger(__name__)
+
+# Global lock to serialize GPU decoding and prevent concurrent CUDA context/VRAM allocation conflicts
+_GPU_LOCK = threading.Lock()
+
 
 # Standard XYZ (D65) -> linear sRGB (IEC 61966-2-1)
 _XYZ_D65_TO_SRGB = np.array(
@@ -357,112 +362,114 @@ def try_gpu_raw_decode(
     if backend == "cpu_only":
         return None
         
-    t_start = time.time()
-    try:
-        bayer_pattern = "RGGB"
-        if raw_obj is not None:
-            bayer_pattern = bayer_pattern_from_raw(raw_obj)
-        elif exif_data and exif_data.get("exif_data"):
-            pattern = exif_data["exif_data"].get("CFAPattern")
-            if pattern and str(pattern).upper() in _VALID_BAYER_PATTERNS:
-                bayer_pattern = str(pattern).upper()
+    global _GPU_LOCK
+    with _GPU_LOCK:
+        t_start = time.time()
+        try:
+            bayer_pattern = "RGGB"
+            if raw_obj is not None:
+                bayer_pattern = bayer_pattern_from_raw(raw_obj)
+            elif exif_data and exif_data.get("exif_data"):
+                pattern = exif_data["exif_data"].get("CFAPattern")
+                if pattern and str(pattern).upper() in _VALID_BAYER_PATTERNS:
+                    bayer_pattern = str(pattern).upper()
 
-        # Retrieve White Balance Coefficients, Black Levels, and White Level
-        wb_coeffs = (1.0, 1.0, 1.0, 1.0)
-        black_levels = (0.0, 0.0, 0.0, 0.0)
-        white_level = 16383.0
-        cam_xyz = None
-        daylight_wb = None
-        
-        if raw_obj is not None:
-            if hasattr(raw_obj, "camera_whitebalance") and raw_obj.camera_whitebalance:
-                wb = list(raw_obj.camera_whitebalance)
-                wb_g = wb[1] if wb[1] != 0.0 else 1.0
-                wb_coeffs = (wb[0]/wb_g, 1.0, wb[2]/wb_g, wb[3]/wb_g if len(wb) > 3 else 1.0)
-            if hasattr(raw_obj, "black_level_per_channel") and raw_obj.black_level_per_channel is not None:
-                black_levels = tuple(float(x) for x in raw_obj.black_level_per_channel)
-            if hasattr(raw_obj, "white_level") and raw_obj.white_level is not None:
-                white_level = float(raw_obj.white_level)
-            if hasattr(raw_obj, "rgb_xyz_matrix") and raw_obj.rgb_xyz_matrix is not None:
-                cam_xyz = raw_obj.rgb_xyz_matrix[:3, :3]
-            if hasattr(raw_obj, "daylight_whitebalance") and raw_obj.daylight_whitebalance is not None:
-                daylight_wb = tuple(raw_obj.daylight_whitebalance)
-        else:
-            import rawpy
-            try:
-                with rawpy.imread(file_path) as raw:
-                    if hasattr(raw, "camera_whitebalance") and raw.camera_whitebalance:
-                        wb = list(raw.camera_whitebalance)
-                        wb_g = wb[1] if wb[1] != 0.0 else 1.0
-                        wb_coeffs = (wb[0]/wb_g, 1.0, wb[2]/wb_g, wb[3]/wb_g if len(wb) > 3 else 1.0)
-                    if hasattr(raw, "black_level_per_channel") and raw.black_level_per_channel is not None:
-                        black_levels = tuple(float(x) for x in raw.black_level_per_channel)
-                    if hasattr(raw, "white_level") and raw.white_level is not None:
-                        white_level = float(raw.white_level)
-                    if hasattr(raw, "rgb_xyz_matrix") and raw.rgb_xyz_matrix is not None:
-                        cam_xyz = raw.rgb_xyz_matrix[:3, :3]
-                    if hasattr(raw, "daylight_whitebalance") and raw.daylight_whitebalance is not None:
-                        daylight_wb = tuple(raw.daylight_whitebalance)
-            except Exception:
-                pass
-
-        if cam_xyz is None or np.allclose(cam_xyz, 0):
-            m_color = np.eye(3, dtype=np.float32)
-        else:
-            m_color = camera_rgb_to_srgb_matrix(cam_xyz, wb_coeffs, daylight_wb)
-
-        if backend == "cupy" and bayer_pattern != "RGGB":
-            logger.warning(
-                "GPU Processor: CuPy demosaic only supports RGGB; trying PyTorch for %s.",
-                bayer_pattern,
-            )
-            try:
-                import torch
-
-                if torch.cuda.is_available():
-                    backend = "pytorch_cuda"
-                elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-                    backend = "pytorch_mps"
-                else:
-                    return None
-            except ImportError:
-                return None
-
-        if backend == "pytorch_cuda":
-            res = gpu_demosaic_pytorch(
-                raw_array, bayer_pattern, device_str="cuda", wb_coeffs=wb_coeffs, m_color=m_color,
-                black_levels=black_levels, white_level=white_level
-            )
-            logger.info(
-                "GPU Processor: Decoded RAW via PyTorch CUDA in %.1fms (bayer=%s)",
-                (time.time() - t_start) * 1000.0,
-                bayer_pattern,
-            )
-            return res
-        elif backend == "pytorch_mps":
-            res = gpu_demosaic_pytorch(
-                raw_array, bayer_pattern, device_str="mps", wb_coeffs=wb_coeffs, m_color=m_color,
-                black_levels=black_levels, white_level=white_level
-            )
-            logger.info(
-                "GPU Processor: Decoded RAW via PyTorch MPS in %.1fms (bayer=%s)",
-                (time.time() - t_start) * 1000.0,
-                bayer_pattern,
-            )
-            return res
-        elif backend == "cupy":
-            res = gpu_demosaic_cupy(
-                raw_array, bayer_pattern, wb_coeffs=wb_coeffs, m_color=m_color,
-                black_levels=black_levels, white_level=white_level
-            )
-            logger.info(
-                "GPU Processor: Decoded RAW via CuPy in %.1fms (bayer=%s)",
-                (time.time() - t_start) * 1000.0,
-                bayer_pattern,
-            )
-            return res
+            # Retrieve White Balance Coefficients, Black Levels, and White Level
+            wb_coeffs = (1.0, 1.0, 1.0, 1.0)
+            black_levels = (0.0, 0.0, 0.0, 0.0)
+            white_level = 16383.0
+            cam_xyz = None
+            daylight_wb = None
             
-    except Exception as e:
-        logger.warning(f"GPU Processor: Failed to decode RAW on GPU ({backend}): {e}", exc_info=True)
-        
-    return None
+            if raw_obj is not None:
+                if hasattr(raw_obj, "camera_whitebalance") and raw_obj.camera_whitebalance:
+                    wb = list(raw_obj.camera_whitebalance)
+                    wb_g = wb[1] if wb[1] != 0.0 else 1.0
+                    wb_coeffs = (wb[0]/wb_g, 1.0, wb[2]/wb_g, wb[3]/wb_g if len(wb) > 3 else 1.0)
+                if hasattr(raw_obj, "black_level_per_channel") and raw_obj.black_level_per_channel is not None:
+                    black_levels = tuple(float(x) for x in raw_obj.black_level_per_channel)
+                if hasattr(raw_obj, "white_level") and raw_obj.white_level is not None:
+                    white_level = float(raw_obj.white_level)
+                if hasattr(raw_obj, "rgb_xyz_matrix") and raw_obj.rgb_xyz_matrix is not None:
+                    cam_xyz = raw_obj.rgb_xyz_matrix[:3, :3]
+                if hasattr(raw_obj, "daylight_whitebalance") and raw_obj.daylight_whitebalance is not None:
+                    daylight_wb = tuple(raw_obj.daylight_whitebalance)
+            else:
+                import rawpy
+                try:
+                    with rawpy.imread(file_path) as raw:
+                        if hasattr(raw, "camera_whitebalance") and raw.camera_whitebalance:
+                            wb = list(raw.camera_whitebalance)
+                            wb_g = wb[1] if wb[1] != 0.0 else 1.0
+                            wb_coeffs = (wb[0]/wb_g, 1.0, wb[2]/wb_g, wb[3]/wb_g if len(wb) > 3 else 1.0)
+                        if hasattr(raw, "black_level_per_channel") and raw.black_level_per_channel is not None:
+                            black_levels = tuple(float(x) for x in raw.black_level_per_channel)
+                        if hasattr(raw, "white_level") and raw.white_level is not None:
+                            white_level = float(raw.white_level)
+                        if hasattr(raw, "rgb_xyz_matrix") and raw.rgb_xyz_matrix is not None:
+                            cam_xyz = raw.rgb_xyz_matrix[:3, :3]
+                        if hasattr(raw, "daylight_whitebalance") and raw.daylight_whitebalance is not None:
+                            daylight_wb = tuple(raw.daylight_whitebalance)
+                except Exception:
+                    pass
+
+            if cam_xyz is None or np.allclose(cam_xyz, 0):
+                m_color = np.eye(3, dtype=np.float32)
+            else:
+                m_color = camera_rgb_to_srgb_matrix(cam_xyz, wb_coeffs, daylight_wb)
+
+            if backend == "cupy" and bayer_pattern != "RGGB":
+                logger.warning(
+                    "GPU Processor: CuPy demosaic only supports RGGB; trying PyTorch for %s.",
+                    bayer_pattern,
+                )
+                try:
+                    import torch
+
+                    if torch.cuda.is_available():
+                        backend = "pytorch_cuda"
+                    elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+                        backend = "pytorch_mps"
+                    else:
+                        return None
+                except ImportError:
+                    return None
+
+            if backend == "pytorch_cuda":
+                res = gpu_demosaic_pytorch(
+                    raw_array, bayer_pattern, device_str="cuda", wb_coeffs=wb_coeffs, m_color=m_color,
+                    black_levels=black_levels, white_level=white_level
+                )
+                logger.info(
+                    "GPU Processor: Decoded RAW via PyTorch CUDA in %.1fms (bayer=%s)",
+                    (time.time() - t_start) * 1000.0,
+                    bayer_pattern,
+                )
+                return res
+            elif backend == "pytorch_mps":
+                res = gpu_demosaic_pytorch(
+                    raw_array, bayer_pattern, device_str="mps", wb_coeffs=wb_coeffs, m_color=m_color,
+                    black_levels=black_levels, white_level=white_level
+                )
+                logger.info(
+                    "GPU Processor: Decoded RAW via PyTorch MPS in %.1fms (bayer=%s)",
+                    (time.time() - t_start) * 1000.0,
+                    bayer_pattern,
+                )
+                return res
+            elif backend == "cupy":
+                res = gpu_demosaic_cupy(
+                    raw_array, bayer_pattern, wb_coeffs=wb_coeffs, m_color=m_color,
+                    black_levels=black_levels, white_level=white_level
+                )
+                logger.info(
+                    "GPU Processor: Decoded RAW via CuPy in %.1fms (bayer=%s)",
+                    (time.time() - t_start) * 1000.0,
+                    bayer_pattern,
+                )
+                return res
+                
+        except Exception as e:
+            logger.warning(f"GPU Processor: Failed to decode RAW on GPU ({backend}): {e}", exc_info=True)
+            
+        return None
