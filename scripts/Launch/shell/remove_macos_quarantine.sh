@@ -1,6 +1,6 @@
 #!/bin/bash
-# Clear macOS download quarantine on RAWviewer.app in this folder (no copy to Applications).
-# Shipped in release zips; double-click "Remove Quarantine.command".
+# Clear download quarantine on RAWviewer.app in this folder (no copy to Applications).
+# End users: bash remove_macos_quarantine.sh
 
 set -euo pipefail
 
@@ -73,7 +73,7 @@ xattr -cr "${APP_SRC}" 2>/dev/null || true
 
 dialog_ok "Download quarantine removed for RAWviewer${VERSION_LABEL}.
 
-You can double-click RAWviewer.app in this folder, or install to Applications with Install RAWviewer.command."
+You can open RAWviewer.app here, or run: bash install_macos_app.sh"
 
 if dialog_open "Open RAWviewer${VERSION_LABEL} from this folder now?"; then
     open "${APP_SRC}"

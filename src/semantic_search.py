@@ -61,6 +61,12 @@ def semantic_embeddings_enabled() -> bool:
     return flag in ("1", "true", "yes", "on")
 
 
+def face_detection_enabled() -> bool:
+    """Check if background face detection / has:face indexing is enabled."""
+    flag = os.environ.get("RAWVIEWER_ENABLE_FACE_SCAN", "1").strip().lower()
+    return flag in ("1", "true", "yes", "on")
+
+
 def metadata_auto_index_enabled() -> bool:
     """Check if auto metadata indexing is enabled via environment."""
     flag = os.environ.get("RAWVIEWER_AUTO_METADATA_INDEX", "1").strip().lower()
@@ -804,42 +810,93 @@ class MobileCLIPCoreMLBackend:
             and os.path.isfile(os.path.join(path, "Data", "com.apple.CoreML", "weights", "weight.bin"))
         )
 
-    def download_assets(self, progress_callback: Optional[Callable[[str], None]] = None) -> str:
+    @staticmethod
+    def _mlpackage_hub_files(bundle_name: str) -> list[str]:
+        return [
+            f"{bundle_name}/Manifest.json",
+            f"{bundle_name}/Data/com.apple.CoreML/model.mlmodel",
+            f"{bundle_name}/Data/com.apple.CoreML/weights/weight.bin",
+        ]
+
+    def download_assets(
+        self, progress_callback: Optional[Callable[..., None]] = None
+    ) -> str:
         """Download MobileCLIP S2 Core ML assets into the backend model directory."""
         if sys.platform != "darwin":
             raise RuntimeError("MobileCLIP Core ML download is only supported on macOS")
 
-        def _progress(message: str) -> None:
-            if progress_callback:
-                progress_callback(message)
+        def _report(pct: int) -> None:
+            from mobileclip_download_progress import report_progress
+
+            report_progress(progress_callback, pct, installer=False)
 
         os.makedirs(self.model_dir, exist_ok=True)
-        _progress("Downloading MobileCLIP Core ML models...")
+        _report(0)
         try:
-            from huggingface_hub import snapshot_download
+            from ssl_certs import configure_ssl_certificates
+
+            configure_ssl_certificates()
+        except Exception:
+            pass
+        try:
+            from huggingface_hub import hf_hub_download
         except Exception as exc:
             raise RuntimeError(
                 "MobileCLIP auto-download requires 'huggingface_hub'. "
                 "Install dependencies with: pip install -r requirements.txt"
             ) from exc
 
-        snapshot_download(
-            repo_id=self.HUB_REPO_ID,
-            allow_patterns=[
-                f"{self.IMAGE_MODEL_FILE}/**",
-                f"{self.TEXT_MODEL_FILE}/**",
-            ],
-            local_dir=self.model_dir,
-        )
+        from mobileclip_download_progress import make_byte_progress_tqdm
+
+        weight_files = [
+            (
+                f"{self.IMAGE_MODEL_FILE}/Data/com.apple.CoreML/weights/weight.bin",
+                0,
+                45,
+            ),
+            (
+                f"{self.TEXT_MODEL_FILE}/Data/com.apple.CoreML/weights/weight.bin",
+                45,
+                85,
+            ),
+        ]
+        small_files = [
+            path
+            for bundle in (self.IMAGE_MODEL_FILE, self.TEXT_MODEL_FILE)
+            for path in self._mlpackage_hub_files(bundle)
+            if not path.endswith("weight.bin")
+        ]
+
+        for remote_path, stage_start, stage_end in weight_files:
+            tqdm_class = make_byte_progress_tqdm(stage_start, stage_end, _report)
+            hf_hub_download(
+                repo_id=self.HUB_REPO_ID,
+                filename=remote_path,
+                local_dir=self.model_dir,
+                local_dir_use_symlinks=False,
+                tqdm_class=tqdm_class,
+            )
+            _report(stage_end)
+
+        for idx, remote_path in enumerate(small_files):
+            hf_hub_download(
+                repo_id=self.HUB_REPO_ID,
+                filename=remote_path,
+                local_dir=self.model_dir,
+                local_dir_use_symlinks=False,
+            )
+            pct = 85 + int((idx + 1) * 8 / max(1, len(small_files)))
+            _report(min(93, pct))
 
         if not os.path.exists(self.tokenizer_path):
-            _progress("Downloading MobileCLIP tokenizer...")
-            urllib.request.urlretrieve(self.TOKENIZER_URL, self.tokenizer_path)
+            from ssl_certs import urlretrieve
+
+            urlretrieve(self.TOKENIZER_URL, self.tokenizer_path)
+        _report(100)
 
         err = self.availability_error()
         if err:
             raise RuntimeError(err)
-        _progress("MobileCLIP assets ready")
         return self.model_dir
 
     def _load_models(self):
@@ -1160,53 +1217,58 @@ class MobileCLIPONNXBackend:
     def available(self) -> bool:
         return self.availability_error() == ""
 
-    def download_assets(self, progress_callback: Optional[Callable[[str], None]] = None) -> str:
-        def _progress(message: str) -> None:
-            if progress_callback:
-                progress_callback(message)
+    def download_assets(
+        self, progress_callback: Optional[Callable[..., None]] = None
+    ) -> str:
+        from mobileclip_download_progress import make_byte_progress_tqdm, report_progress
+
+        def _report(pct: int) -> None:
+            report_progress(progress_callback, pct, installer=False)
 
         os.makedirs(self.model_dir, exist_ok=True)
-        _progress(f"Downloading MobileCLIP ONNX models ({self.variant})...")
+        _report(0)
+
         try:
             from huggingface_hub import hf_hub_download
         except ImportError:
             raise RuntimeError("MobileCLIP download requires 'huggingface_hub' (pip install huggingface_hub)")
 
-        # Mapping of remote path in HF repo to local filename expected by RAWviewer
-        files_to_download = {
-            f"onnx/{self.variant}/vision_model.onnx": self.IMAGE_MODEL_FILE,
-            f"onnx/{self.variant}/text_model.onnx": self.TEXT_MODEL_FILE
-        }
-        
-        for remote_path, local_name in files_to_download.items():
-            _progress(f"Fetching {local_name}...")
+        files_to_download = [
+            (f"onnx/{self.variant}/vision_model.onnx", self.IMAGE_MODEL_FILE, 0, 58),
+            (f"onnx/{self.variant}/text_model.onnx", self.TEXT_MODEL_FILE, 58, 98),
+        ]
+
+        for remote_path, local_name, stage_start, stage_end in files_to_download:
+            tqdm_class = make_byte_progress_tqdm(stage_start, stage_end, _report)
             hf_hub_download(
                 repo_id=self.HUB_REPO_ID,
                 filename=remote_path,
                 local_dir=self.model_dir,
-                local_dir_use_symlinks=False
+                local_dir_use_symlinks=False,
+                tqdm_class=tqdm_class,
             )
-            
-            # Handle nesting created by local_dir
+
             downloaded_path = os.path.join(self.model_dir, remote_path)
             target_path = os.path.join(self.model_dir, local_name)
-            
+
             if os.path.exists(downloaded_path):
                 if os.path.exists(target_path):
                     os.remove(target_path)
                 os.rename(downloaded_path, target_path)
+            _report(stage_end)
 
-        # Clean up empty subdirectories
         onnx_dir = os.path.join(self.model_dir, "onnx")
         if os.path.exists(onnx_dir):
             import shutil
+
             shutil.rmtree(onnx_dir)
-            
+
         if not os.path.exists(self.tokenizer_path):
-            _progress("Downloading CLIP tokenizer...")
-            import urllib.request
-            urllib.request.urlretrieve(self.TOKENIZER_URL, self.tokenizer_path)
-            
+            from ssl_certs import urlretrieve
+
+            urlretrieve(self.TOKENIZER_URL, self.tokenizer_path)
+        _report(100)
+
         return self.model_dir
 
     def _ensure_sessions(self):
@@ -1777,6 +1839,8 @@ class SemanticImageIndex:
 
     @staticmethod
     def semantic_backend_available() -> bool:
+        if not semantic_embeddings_enabled():
+            return False
         if resolve_mobileclip_backend().available():
             return True
         try:
@@ -1796,11 +1860,10 @@ class SemanticImageIndex:
             return str(exc)
 
     def mobileclip_supports_hub_download(self) -> bool:
-        return bool(
-            self.model_name.startswith("mobileclip-")
-            and self._mobileclip_backend is not None
-            and getattr(self._mobileclip_backend, "SUPPORTS_HUB_DOWNLOAD", False)
-        )
+        if not self.model_name.startswith("mobileclip-"):
+            return False
+        backend = self.backend
+        return bool(getattr(backend, "SUPPORTS_HUB_DOWNLOAD", False))
 
     def download_semantic_backend_assets(
         self, progress_callback: Optional[Callable[[str], None]] = None
@@ -2457,7 +2520,9 @@ class SemanticImageIndex:
                         import logging
                         logging.getLogger(__name__).info("[VISION] Downloading YuNet ONNX face detection model (353 KB)...")
                         url = "https://github.com/opencv/opencv_zoo/raw/main/models/face_detection_yunet/face_detection_yunet_2023mar.onnx"
-                        urllib.request.urlretrieve(url, model_path)
+                        from ssl_certs import urlretrieve
+
+                        urlretrieve(url, model_path)
                         logging.getLogger(__name__).info("[VISION] YuNet ONNX model downloaded successfully.")
                     
                     # YuNet requires BGR input
@@ -2532,16 +2597,20 @@ class SemanticImageIndex:
                                 if not os.path.exists(prototxt_path):
                                     import logging
                                     logging.getLogger(__name__).info("[VISION] Downloading DNN face detector prototxt...")
-                                    urllib.request.urlretrieve(
+                                    from ssl_certs import urlretrieve
+
+                                    urlretrieve(
                                         "https://raw.githubusercontent.com/opencv/opencv/master/samples/dnn/face_detector/deploy.prototxt",
-                                        prototxt_path
+                                        prototxt_path,
                                     )
                                 if not os.path.exists(caffemodel_path):
                                     import logging
                                     logging.getLogger(__name__).info("[VISION] Downloading DNN face detector weights...")
-                                    urllib.request.urlretrieve(
+                                    from ssl_certs import urlretrieve
+
+                                    urlretrieve(
                                         "https://raw.githubusercontent.com/opencv/opencv_3rdparty/dnn_samples_face_detector_20170830/res10_300x300_ssd_iter_140000.caffemodel",
-                                        caffemodel_path
+                                        caffemodel_path,
                                     )
                                 _FACE_DETECTOR_NET = cv2.dnn.readNetFromCaffe(prototxt_path, caffemodel_path)
                                 _apply_opencv_dnn_acceleration(_FACE_DETECTOR_NET)
@@ -3184,6 +3253,8 @@ class SemanticImageIndex:
         return pending
 
     def get_face_pending_count(self, file_paths: Sequence[str]) -> int:
+        if not face_detection_enabled():
+            return 0
         if not file_paths:
             return 0
         indexable_paths, _ = self._filter_duplicate_raw_companions(file_paths)
@@ -3210,6 +3281,8 @@ class SemanticImageIndex:
         """Deferred face-only pass (after semantic index is ready for search)."""
         import sqlite3
 
+        if not face_detection_enabled():
+            return 0
         if not file_paths:
             return 0
         canonical_map = {self._canonical_path(p): p for p in file_paths if p}
@@ -3591,7 +3664,7 @@ class SemanticImageIndex:
             total_face = len(face_pending)
             total_sem = len(pending_for_semantic)
             if run_face_scan is None:
-                run_face_scan = not self._defer_face_scan_during_build()
+                run_face_scan = face_detection_enabled() and not self._defer_face_scan_during_build()
             run_face_inline = total_face > 0 and run_face_scan
 
             if total_face > 0 and not run_face_inline:

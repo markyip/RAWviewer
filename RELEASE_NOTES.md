@@ -1,9 +1,34 @@
 # RAWviewer Release Notes
 
-## 🚀 Version 2.3.0
+## 🚀 Version 2.3.2
+**Release Date: June 8, 2026**
+
+Installer and in-app MobileCLIP download UX, gallery bottom-bar layout, and clearer Hugging Face messaging.
+
+### 🪟 Windows installer
+- **Live model download progress**: The ~600 MB Hugging Face download maps to **5–100%** on the installer progress bar (no longer stuck at 75%).
+- **Installer log + label**: Progress appears as **`Downloading... N%`** in the step label and install log (every 5%); ASCII-only text avoids console encoding glitches on Windows.
+- **Cleaner subprocess output**: Silent Hugging Face tqdm bars; only `@RAWVIEWER_PROGRESS` lines drive the UI (`python -u`, `PYTHONUNBUFFERED`).
+- **Byte-level reporting**: `download_mobileclip_onnx.py` streams progress parsed by the bootstrap installer.
+- **Optional faster downloads**: Set a **`HF_TOKEN`** environment variable before setup if you use a [Hugging Face](https://huggingface.co/) account (inherits into the download subprocess).
+
+### 🔍 Semantic search (all platforms)
+- **In-app download progress in search field**: After you click **Download**, the gallery search bar shows **`Downloading... N%`** (same place as Metadata/Semantic/Face indexing). The prompt dialog closes immediately so the search field stays visible.
+- **macOS Core ML downloads**: Per-file `hf_hub_download` with byte progress instead of opaque `snapshot_download`.
+- **Shared progress helpers**: New `mobileclip_download_progress.py` used by installer scripts, bootstrap, and the main app.
+
+### 🛠️ Gallery UI
+- **Bottom bar button order**: **RAW/JPEG workflow** toggle now sits **before** the search icon so the search field expands right next to the search button (not with RAW sandwiched in between).
+
+### 📖 Documentation
+- README and release notes clarify models come from Hugging Face (~600 MB on Windows), installer progress behavior, and that first download may take longer without a Hugging Face account.
+
+---
+
+## 🚀 Version 2.3.1
 **Release Date: June 7, 2026**
 
-Version 2.3.0 expands **focus overlays**, adds a **RAW ↔ embedded-JPEG workflow** switch for single-image viewing, improves **gallery navigation** and **semantic indexing** speed on large folders, and adds a **background update check** on launch.
+Focus overlays, RAW ↔ embedded-JPEG workflow, faster gallery indexing, background update checks, Windows installer stability, and macOS release packaging (Terminal install, in-app MobileCLIP download, SSL fix).
 
 ### 🔔 Release updates
 - **Background check on launch**: Once per app start, RAWviewer quietly compares your version to the latest [GitHub release](https://github.com/markyip/RAWviewer/releases/latest) (offline or unreachable → no UI).
@@ -15,14 +40,13 @@ Version 2.3.0 expands **focus overlays**, adds a **RAW ↔ embedded-JPEG workflo
 - **Broader maker AF**: Nikon NEF (`AFInfo2`, image-height fallback), Olympus ORF (`AFPointSelected`, `AFFocusArea` / `AFSelectedArea`), Panasonic RW2 (`AFPointPosition`, including decimal `/1024` form), and refined Canon EOS point placement (center origin, Y-up).
 - **Brand guide**: README documents which formats support maker-note AF vs CIPA `SubjectArea` only (e.g. Fujifilm RAF, Hasselblad 3FR, typical Adobe DNG, Pentax PEF, Samsung SRW, Sigma X3F).
 
-### 🖼️ RAW ↔ JPEG workflow (single view)
-- **One-click toggle** on the bottom bar: **embedded JPEG** (fast) vs **full RAW decode** (high quality) for the current file.
-- **Instant reload**: Switching workflows clears display caches and reloads the open image so resolution and color match the selected path.
-- **Single view only**: The toggle is shown while viewing one image, not in gallery grid mode.
+### 🖼️ Viewing
+- **RAW ↔ JPEG workflow (single view)**: One-click toggle on the bottom bar — **embedded JPEG** (fast) vs **full RAW decode** (high quality); switching clears display caches and reloads the current file. Shown in single view only, not in gallery grid.
+- **Snappier RAW navigation**: Bidirectional **embedded-JPEG prefetch** (default radius **6**), **focus-anchored zoom** when upgrading resolution.
+- **RAW zoom fix**: **Space** and **double-click** reach 100% zoom reliably on RAW when fit-to-window state was out of sync (Ctrl+scroll already worked).
 
 ### 🛠️ Gallery & navigation
 - **Cleaner libraries**: Composite DNG panoramas (e.g. Lightroom/Photoshop HDR stitches) are hidden from the gallery and navigation lists.
-- **Snappier browsing**: Bidirectional **embedded-JPEG prefetch** (default radius **6**), **focus-anchored zoom** when upgrading resolution, and more reliable **Space** / double-click zoom on RAW.
 - **Scroll-friendly indexing**: Background metadata and semantic indexing **pause while you scroll** the gallery and resume after idle, keeping large folders responsive.
 
 ### 🔍 Semantic search & indexing
@@ -30,15 +54,30 @@ Version 2.3.0 expands **focus overlays**, adds a **RAW ↔ embedded-JPEG workflo
 - **Faster neural pass**: Auto-tuned MobileCLIP **batch size** on your GPU/CPU for higher indexing throughput.
 - **Safer setup**: Incomplete ONNX installs report a clear reinstall hint instead of failing silently.
 
-### 🏗️ Build
-- **Removed unused `mediapipe`** from Windows `build.py` dependencies (face detection uses YuNet ONNX).
+### 🪟 Windows installer & launch
+- **Clearer release filenames**: **`RAWviewer_Setup_DirectML.exe`** (recommended) and **`RAWviewer_Setup_CUDA.exe`** replace the old single-file names.
+- **Dedicated app launcher**: Install folder **`RAWviewer.exe`** is a small stub that starts the app; **`RAWviewer_Setup.exe`** in the same folder is for repair/reinstall only.
+- **More reliable setup**: Pixi and MobileCLIP downloads retry on failure with clearer network/disk/proxy errors; canceling setup removes incomplete install folders; welcome page text simplified (no Ctrl+Shift+O / disk-space hints).
+- **AI model install progress**: During the ~600 MB Hugging Face download, the installer progress bar and log show real transfer progress (no longer stuck at 75%).
+- **MobileCLIP optional at install**: If AI models fail during setup, browsing still works; download them later from gallery **Search** (MD3 prompt + in-dialog progress, same style as macOS). Models are hosted on Hugging Face; without a Hugging Face account, the first download may take longer.
+- **Uninstall fixes**: Settings → Apps and `uninstall.bat` work on Win11; a confirmation message appears when removal finishes.
+- **Shortcuts button**: Status-bar **i** opens the keyboard-shortcuts dialog (not just a tooltip).
 
 ### 🍎 macOS
-- **Release zip**: `RAWviewer-v2.3.0-macOS.zip` with **`Start Here.txt`**, **`Install RAWviewer.command`** (copy to Applications + quarantine), and **`Remove Quarantine.command`**. Bundles **scipy** for GPS reverse geocoding; minimum macOS **13.0**; **pyexiv2** included in release builds.
-- **Dock — single app icon**: Fixed extra RAWviewer icons in the Dock while browsing large folders. LibRaw’s process pool is **off by default on macOS** (PyInstaller runtime hook + spawn-safe startup); opt in with `RAWVIEWER_USE_PROCESS_POOL=1` (may bring back extra Dock entries).
-- **Startup splash**: Dismisses automatically when the main window is ready (no extra click on macOS).
-- **Gallery search crash (macOS 26+)**: Disables NSTextField automatic completion on the search field (including after focus and wake-from-sleep) to avoid ViewBridge / `SPCompletionListServiceViewController` aborts under Qt 6.11.
-- **Install docs**: README macOS version support table (13+ prebuilt; Pixi 14+ on Apple Silicon); simplified zip install flow via `Start Here.txt`.
+- **Release zip**: `RAWviewer-v2.3.1-macOS.zip` (~82 MB); minimum macOS **13.0**; bundles **scipy** (GPS reverse geocoding) and **pyexiv2**. MobileCLIP models are **not** in the zip.
+- **Terminal install**: Extract the zip, then `bash install_macos_app.sh` in the extracted folder (see README).
+- **In-app model download**: When the user opens **gallery search**, the app prompts to download MobileCLIP from Hugging Face (~150 MB on macOS, one-time, needs internet). Without a Hugging Face account, that download may take longer. No download prompt on app startup.
+- **HTTPS / SSL fix**: Packaged app bundles **certifi** CA certificates and configures SSL before Hugging Face / tokenizer downloads, fixing `[SSL: CERTIFICATE_VERIFY_FAILED]` on fresh installs.
+- **Dock — single app icon**: LibRaw process pool **off by default** (PyInstaller runtime hook + spawn-safe startup); opt in with `RAWVIEWER_USE_PROCESS_POOL=1` (may bring back extra Dock entries).
+- **Startup splash**: Dismisses automatically when the main window is ready (no extra click).
+- **Gallery search crash (macOS 26+)**: NSTextField autocomplete disabled on the search field (including after focus and wake-from-sleep) to avoid ViewBridge / `SPCompletionListServiceViewController` aborts under Qt 6.11.
+
+### 🏗️ Build
+- **Removed unused `mediapipe`** from Windows `build.py` dependencies (face detection uses YuNet ONNX).
+- **macOS SSL bundling**: PyInstaller collects **certifi** and runs an SSL runtime hook for HTTPS downloads in the packaged app.
+
+### 📄 Docs
+- README: focus-overlay brand guide, macOS version support table, Setup vs launcher exe, DirectML recommendation, Terminal install, gallery-search model download, uninstall, and troubleshooting.
 
 ---
 
@@ -105,7 +144,7 @@ Unified 2.2 release — search, gallery, film strip, frameless window polish, RA
 - **Semantic + face indexing (Windows)**: Phased indexing (metadata → MobileCLIP embeddings → background face backfill), resume from `semantic_index.db`, DirectML-accelerated ONNX on Windows when available.
 
 🛠️ Fixes & improvements
-- **Installer model download**: Added `requests` to Pixi dependencies so `huggingface_hub` can download MobileCLIP ONNX models on first install (no HF account required for public models).
+- **Installer model download**: Added `requests` to Pixi dependencies so `huggingface_hub` can download MobileCLIP ONNX models on first install (public models on Hugging Face).
 - **Indexing stability**: Stronger RAW thumbnail fallbacks, skip permanently unindexable files, conservative face-scan warm-up defaults, clearer progress phases.
 - **Delete confirmation dialog**: Centered on the main window using global coordinates.
 - **Face detection threshold**: YuNet / SSD confidence raised to **0.75** (fewer false positives).

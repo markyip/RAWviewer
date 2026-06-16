@@ -1,6 +1,6 @@
 #!/bin/bash
-# Install RAWviewer.app to /Applications and clear Gatekeeper quarantine.
-# Shipped next to RAWviewer.app in release zips; also runnable from Terminal.
+# Install RAWviewer.app to /Applications and clear macOS download quarantine.
+# End users: open Terminal in the extracted zip folder and run: bash install_macos_app.sh
 
 set -euo pipefail
 
@@ -37,9 +37,14 @@ confirm_install() {
     if command -v osascript >/dev/null 2>&1; then
         osascript <<EOF
 set v to "${version_label}"
-display dialog "Install RAWviewer" & v & " to Applications?
+display dialog "RAWviewer" & v & " was downloaded outside the App Store, so macOS blocks it until the download quarantine is cleared.
 
-This removes the macOS download quarantine so the app opens normally (no Terminal commands needed)." with title "RAWviewer Installer" buttons {"Cancel", "Install"} default button "Install" with icon note
+This installer will:
+• Clear that block on RAWviewer
+• Copy it to your Applications folder
+• Offer to open it for you
+
+Click Install to continue (no Terminal needed)." with title "RAWviewer Installer" buttons {"Cancel", "Install"} default button "Install" with icon note
 EOF
         return $?
     fi

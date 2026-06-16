@@ -470,7 +470,7 @@ class UnifiedImageProcessor:
             )
         
         if thumbnail is None:
-            if allow_heavy_fallback:
+            if allow_heavy_fallback and is_raw:
                 # Fallback: If no embedded thumbnail found, or it was rejected as too small,
                 # do a fast half-size RAW decode to get a high-quality thumbnail.
                 try:
@@ -652,7 +652,9 @@ class UnifiedImageProcessor:
         if is_raw:
             return self._process_raw_image(file_path, use_full_resolution, executor=executor)
         else:
-            return self._process_regular_image(file_path)
+            return self._process_regular_image(
+                file_path, use_full_resolution=use_full_resolution
+            )
     
     def _try_full_embedded_raw_preview(
         self, file_path: str, exif_data: Optional[Dict[str, Any]]
@@ -908,7 +910,6 @@ class UnifiedImageProcessor:
                         "Falling back to in-process RAW decode."
                     )
 
-            # In-process CPU fallback
             if rgb_image is None:
                 import rawpy
                 with rawpy.imread(file_path) as raw:
@@ -967,11 +968,15 @@ class UnifiedImageProcessor:
                 pass
             return None
     
-    def _process_regular_image(self, file_path: str) -> Optional[QPixmap]:
+    def _process_regular_image(
+        self, file_path: str, use_full_resolution: bool = False
+    ) -> Optional[QPixmap]:
         """處理常規圖像（JPEG/PNG/WebP）"""
         try:
-            # 使用共用載入函數
-            pixmap = load_pixmap_safe(file_path)
+            from image_cache import memory_preview_max_edge
+
+            max_edge = 0 if use_full_resolution else memory_preview_max_edge()
+            pixmap = load_pixmap_safe(file_path, max_edge=max_edge)
             if not pixmap.isNull():
                 self.cache.put_pixmap(file_path, pixmap)
                 return pixmap

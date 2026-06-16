@@ -1,10 +1,10 @@
-# RAWviewer v2.3
+# RAWviewer v2.3.2
 
 <p align="center">
   <img src="icons/appicon.ico" alt="RAWviewer Icon" width="256">
 </p>
 
-![Version](https://img.shields.io/badge/version-2.3-blue)
+![Version](https://img.shields.io/badge/version-2.3.2-blue)
 ![Downloads](https://img.shields.io/github/downloads/markyip/RAWviewer/total) 
 ![License](https://img.shields.io/badge/license-MIT-green)
 [![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-Donate-orange?logo=buy-me-a-coffee)](https://www.buymeacoffee.com/markyip)
@@ -20,21 +20,36 @@ Official releases: [GitHub Releases](https://github.com/markyip/RAWviewer/releas
 ### Windows
 
 1. Go to **[Releases](https://github.com/markyip/RAWviewer/releases/latest)** and download:
-   - **`RAWviewer-CUDA.exe`** — best if you have an **NVIDIA** GPU with CUDA
-   - **`RAWviewer-DirectML.exe`** — works on most PCs without extra setup (AMD / Intel / NVIDIA)
-2. Run the installer and pick an install folder.
-3. Open **RAWviewer** from the Desktop shortcut. The first run downloads the offline AI search models (no account needed).
+   - **`RAWviewer_Setup_DirectML.exe`** — **recommended for most PCs** (AMD / Intel / NVIDIA; no CUDA setup)
+   - **`RAWviewer_Setup_CUDA.exe`** — optional if you have an **NVIDIA** GPU with CUDA and want maximum AI search speed
+2. Run the **Setup** installer and pick an install folder (default: `%LOCALAPPDATA%\RAWviewer`).
+3. Stay online while setup runs. The installer downloads:
+   - the **Pixi** runtime manager
+   - **Python and all app dependencies** (`pixi install`)
+   - **MobileCLIP ONNX models** (~600 MB) for offline AI search, from [Hugging Face](https://huggingface.co/plhery/mobileclip2-onnx)
+
+   Setup usually takes several minutes. Because the AI models come from Hugging Face, the first download can take a while if you do not have a Hugging Face account on this PC; the installer progress bar and log show **`Downloading... N%`** during that step. If the model download fails, installation still completes and you can browse photos; open **Search** in the gallery later to download the models.
+4. Open **RAWviewer** from the **Desktop shortcut**, **Start Menu**, or **`RAWviewer.exe`** in the install folder (default: `%LOCALAPPDATA%\RAWviewer\RAWviewer.exe`).  
+   **`RAWviewer_Setup_*.exe`** is only for install/repair — it does not open the photo viewer.
+
+**Uninstall:** Windows **Settings → Apps → Installed apps → RAWviewer → Uninstall**, or run `uninstall.bat` in the install folder. Your photo cache and app preferences in `%USERPROFILE%\.rawviewer_cache` and Windows settings are kept unless you delete them manually.
 
 If Windows shows **“Protected your PC”**: click **More info** → **Run anyway**.
 
 ### macOS (13 Ventura or newer)
 
-1. Download **`RAWviewer-v2.3.0-macOS.zip`** from **[Releases](https://github.com/markyip/RAWviewer/releases/latest)**.
-2. Double-click the zip to extract the folder. Open **`Start Here.txt`** — it tells you which file to click.
-3. **Recommended:** double-click **`Install RAWviewer.command`** → **Install** → **Open**.  
-   **Or:** double-click **`Remove Quarantine.command`**, then open **`RAWviewer.app`** in the same folder.
+1. Download **`RAWviewer-v2.3.2-macOS.zip`** from **[Releases](https://github.com/markyip/RAWviewer/releases/latest)** and extract it.
+2. Open **Terminal**, go to the extracted folder (`cd ` then drag the folder onto Terminal), and run:
 
-If macOS blocks a script the first time: **right-click it → Open → Open** (once only).
+```bash
+bash install_macos_app.sh
+```
+
+3. Click **Install**, then **Open** in the dialogs.
+
+4. **First time you use gallery search**, RAWviewer may prompt to download the offline AI models from Hugging Face (~150 MB on macOS, one-time, needs internet). Without a Hugging Face account, that download may take longer. Click **Download** when prompted — progress appears in the **search bar** as `Downloading... N%`. Windows setup fetches the same models automatically during install.
+
+To run from the folder without installing to Applications: `bash remove_macos_quarantine.sh`
 
 > **Mac too old?** Prebuilt apps need **macOS 13+**. Monterey (12) and older are not supported. Details are in [Advanced → macOS version support](#macos-version-support).
 
@@ -105,18 +120,21 @@ Full search syntax, focus-overlay brands, and power-user options are in **[Advan
 | Problem | What to do |
 |---------|------------|
 | SmartScreen warning | More info → Run anyway |
-| Slow search | Use the **CUDA** build if you have an NVIDIA GPU |
-| Installer stuck on “Downloading models” | Re-run the latest installer; needs internet once |
-| Crash | Check `%LOCALAPPDATA%\RAWviewer\logs\` |
+| Slow search | Prefer **DirectML** on most PCs; use **CUDA** only with NVIDIA + CUDA |
+| Installer stuck on “Downloading models” | The AI models (~600 MB) come from Hugging Face; the first download can take several minutes, especially without a Hugging Face account. Watch the progress bar and install log for **`Downloading... N%`**. Check firewall, VPN, or proxy if it fails |
+| Opened Setup again instead of the app | Launch **`RAWviewer.exe`** or the Desktop shortcut — not **`RAWviewer_Setup_*.exe`** |
+| AI search missing after install | Open gallery **Search** → accept the download prompt (browsing still works) |
+| Crash | Enable file logging with `RAWVIEWER_FILE_LOG=1`, then check the install folder |
 
 ### macOS
 
 | Problem | What to do |
 |---------|------------|
-| “App is damaged” / won’t open | Run **`Install RAWviewer.command`** or **`Remove Quarantine.command`** from the zip |
-| Still blocked | Terminal: `xattr -cr /Applications/RAWviewer.app` |
+| macOS blocks the app (“damaged” / won’t open) | In the extracted folder, run `bash install_macos_app.sh` (see install steps above) |
+| `bash: command not found` | Type `cd `, drag the extracted folder onto Terminal, press Return, then run the command again |
 | Can’t read Desktop/Documents | System Settings → Privacy → **Full Disk Access** → add RAWviewer |
-| Search says models missing | Re-download the release zip; rebuild instructions for developers are below |
+| Search says models missing | Open gallery search and click **Download** when prompted (needs internet once). Or re-run `bash install_macos_app.sh` after downloading a fresh release zip |
+| Download failed (SSL / certificate error) | Update to **v2.3.2** or newer (bundles certifi). If you are on a corporate VPN or proxy with SSL inspection, add your organization’s root certificate to **Keychain Access** and set it to **Always Trust** |
 
 More detail: [`scripts/Launch/README.md`](scripts/Launch/README.md)
 
@@ -149,10 +167,10 @@ Separate words with spaces. Use `key:value` filters:
 
 | Platform | Default | Change it |
 |----------|---------|-----------|
-| **Windows** | MobileCLIP2-**B** | Set `RAWVIEWER_MOBILECLIP_VARIANT` to `s0`, `s2`, `b`, or `l14` |
-| **macOS** | Bundled Core ML (**S0** or **S2** in the app) | Replace models before building; see `models/mobileclip2_coreml/` |
+| **Windows** | MobileCLIP2-**B** (~600 MB; installer downloads on first install from Hugging Face) | Set `RAWVIEWER_MOBILECLIP_VARIANT` to `s0`, `s2`, `b`, or `l14` |
+| **macOS** | Downloaded from Hugging Face when you open gallery search (~150 MB, one-time) | Dev helper: `python scripts/download_mobileclip_coreml.py --out-dir models/mobileclip2_coreml` |
 
-Windows variants download from Hugging Face (`plhery/mobileclip2-onnx`) into separate cache folders (e.g. `~/.rawviewer_cache/mobileclip_onnx_s0`).
+Windows variants are fetched from Hugging Face (`plhery/mobileclip2-onnx`) into separate cache folders (e.g. `~/.rawviewer_cache/mobileclip_onnx_s0`). The first download may take longer without a Hugging Face account.
 
 ### Focus overlay (`F`) by brand
 
@@ -173,7 +191,8 @@ Requires **pyexiv2** for maker-note AF on RAW.
 | Variable | Effect |
 |----------|--------|
 | `RAWVIEWER_MOBILECLIP_VARIANT` | Windows ONNX model: `b` (default), `s0`, `s2`, `l14` |
-| `RAWVIEWER_GPU_VIEW=0` | Disable GPU single-image viewport (OpenGL zoom/pan; **on by default** in release builds) |
+| `RAWVIEWER_GPU_VIEW=1` | GPU single-image viewport (OpenGL zoom/pan; on by default in release builds) |
+| `RAWVIEWER_GPU_VIEW=0` | Force legacy scroll-area single-image view |
 | `RAWVIEWER_LIBRAW_CONSISTENT_PREVIEW=1` | Same color pipeline for fit vs 100% zoom on RAW (default on) |
 | `RAWVIEWER_EXIF_BACKEND=auto` | `auto`, `pyexiv2`, or `exifread` |
 | `RAWVIEWER_SHARE_MENU=1` | macOS: Qt share menu (recommended) |
@@ -199,11 +218,11 @@ Scripts: [`scripts/Launch/`](scripts/Launch/README.md)
 
 | Platform | Run | Build |
 |----------|-----|-------|
-| Windows | `scripts\Launch\bat\run_debug.bat` | `scripts\Launch\bat\build_windows.bat` |
+| Windows | `scripts\Launch\bat\run_debug.bat` | `scripts\Launch\bat\build_windows_all.bat` (both), or `build_windows_directml.bat` / `build_windows_cuda.bat` |
 | macOS | `./scripts/Launch/shell/launch_dev.sh` | `./scripts/Launch/shell/build_macos.sh` |
 
 **Pixi (optional):** `pixi install` → `pixi run start`  
-**macOS release zip:** `./scripts/Launch/shell/build_macos.sh` → `dist/RAWviewer-v2.3.0-macOS.zip`
+**macOS release zip:** `./scripts/Launch/shell/build_macos.sh` → `dist/RAWviewer-v2.3.2-macOS.zip`
 
 Dependencies are in `pixi.toml`. Build scripts use a local `rawviewer_env/` venv when packaging.
 

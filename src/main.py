@@ -1058,8 +1058,13 @@ def _lazy_import_heavy_modules(splash=None):
     except Exception:
         pass
     
-    _update_splash("Loading AI search engine...")
     try:
+        from rawviewer_profile import is_lite_build
+
+        if is_lite_build():
+            _update_splash("Loading metadata search index...")
+        else:
+            _update_splash("Loading AI search engine...")
         from semantic_search import SemanticImageIndex as _SemanticImageIndex
         SemanticImageIndex = _SemanticImageIndex
     except Exception as e:
@@ -2715,7 +2720,7 @@ class _SemanticIndexPrepWorker(QRunnable):
 
 class SemanticAssetDownloadSignals(QObject):
     """Signal carrier for background semantic backend asset download."""
-    progress = pyqtSignal(object, str)            # token, status message
+    progress = pyqtSignal(object, int, str)         # token, pct, short status
     done = pyqtSignal(object, str, object)        # token, asset path, corpus files
     error = pyqtSignal(object, str)               # token, error
 
@@ -5533,162 +5538,6 @@ class CustomWarningDialog(QDialog):
         super().mouseReleaseEvent(event)
 
 
-class MobileCLIPDownloadDialog(QDialog):
-    """RAWviewer-styled prompt for downloading optional MobileCLIP assets."""
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        self.setModal(True)
-
-        self.container = QWidget(self)
-        self.container.setObjectName("mobileclip_download_container")
-        self.container.setStyleSheet("""
-            #mobileclip_download_container {
-                background-color: #1E1E1E;
-                border: 1px solid #2E2E2E;
-                border-radius: 12px;
-            }
-        """)
-
-        main_layout = QVBoxLayout(self.container)
-        main_layout.setContentsMargins(24, 22, 24, 22)
-        main_layout.setSpacing(12)
-
-        title_label = QLabel("Enable Semantic Search")
-        title_label.setStyleSheet("""
-            QLabel {
-                color: #E0E0E0;
-                font-size: 17px;
-                font-weight: 600;
-                font-family: 'Roboto', 'Segoe UI', sans-serif;
-            }
-        """)
-        main_layout.addWidget(title_label)
-
-        message_label = QLabel(
-            "RAWviewer can download the MobileCLIP Core ML assets now. "
-            "This is a one-time download used for local, offline semantic indexing."
-        )
-        message_label.setWordWrap(True)
-        message_label.setStyleSheet("""
-            QLabel {
-                color: #B0B0B0;
-                font-size: 13px;
-                line-height: 1.45;
-                font-family: 'Roboto', 'Segoe UI', sans-serif;
-            }
-        """)
-        main_layout.addWidget(message_label)
-
-        note_label = QLabel("You can still use EXIF-only search without downloading.")
-        note_label.setWordWrap(True)
-        note_label.setStyleSheet("""
-            QLabel {
-                color: #888888;
-                font-size: 12px;
-                font-family: 'Roboto', 'Segoe UI', sans-serif;
-            }
-        """)
-        main_layout.addWidget(note_label)
-
-        button_layout = QHBoxLayout()
-        button_layout.setContentsMargins(0, 10, 0, 0)
-        button_layout.setSpacing(12)
-        button_layout.addStretch()
-
-        exif_only_btn = QPushButton("EXIF Only")
-        exif_only_btn.setFixedHeight(36)
-        exif_only_btn.setMinimumWidth(110)
-        exif_only_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        exif_only_btn.setStyleSheet("""
-            QPushButton {
-                background-color: transparent;
-                color: #B0B0B0;
-                border: 1px solid #4A4A4A;
-                border-radius: 18px;
-                font-size: 13px;
-                font-weight: 500;
-                font-family: 'Roboto', 'Segoe UI', sans-serif;
-                padding: 0px 20px;
-            }
-            QPushButton:hover {
-                color: #E0E0E0;
-                background-color: rgba(255, 255, 255, 0.05);
-                border-color: #5A5A5A;
-            }
-            QPushButton:pressed {
-                background-color: rgba(255, 255, 255, 0.1);
-            }
-        """)
-        exif_only_btn.clicked.connect(self.reject)
-        button_layout.addWidget(exif_only_btn)
-
-        download_btn = QPushButton("Download")
-        download_btn.setFixedHeight(36)
-        download_btn.setMinimumWidth(110)
-        download_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        download_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #3A3A3A;
-                color: #E0E0E0;
-                border: 1px solid #4A4A4A;
-                border-radius: 18px;
-                font-size: 13px;
-                font-weight: 600;
-                font-family: 'Roboto', 'Segoe UI', sans-serif;
-                padding: 0px 20px;
-            }
-            QPushButton:hover {
-                background-color: #4A4A4A;
-                border-color: #5A5A5A;
-            }
-            QPushButton:pressed {
-                background-color: #2F2F2F;
-            }
-        """)
-        download_btn.clicked.connect(self.accept)
-        download_btn.setDefault(True)
-        download_btn.setFocus()
-        button_layout.addWidget(download_btn)
-        main_layout.addLayout(button_layout)
-
-        container_layout = QVBoxLayout(self)
-        container_layout.setContentsMargins(0, 0, 0, 0)
-        container_layout.addWidget(self.container)
-        self.setFixedSize(460, 220)
-        self.container.setFixedSize(460, 220)
-
-        if parent:
-            parent_geometry = parent.geometry()
-            dialog_x = parent_geometry.x() + (parent_geometry.width() - self.width()) // 2
-            dialog_y = parent_geometry.y() + (parent_geometry.height() - self.height()) // 2
-            self.move(dialog_x, dialog_y)
-
-    def mousePressEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton:
-            self._dragging = True
-            self._drag_pos = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
-            event.accept()
-            return
-        super().mousePressEvent(event)
-
-    def mouseMoveEvent(self, event):
-        if hasattr(self, '_dragging') and self._dragging:
-            self.move(event.globalPosition().toPoint() - self._drag_pos)
-            event.accept()
-            return
-        super().mouseMoveEvent(event)
-
-    def mouseReleaseEvent(self, event):
-        if hasattr(self, '_dragging'):
-            self._dragging = False
-            event.accept()
-            return
-        super().mouseReleaseEvent(event)
-
-
 # -----------------------------
 # Single-image area: full-bleed scroll + draggable histogram overlay
 # -----------------------------
@@ -6852,6 +6701,7 @@ class RAWImageViewer(QMainWindow):
         self.setFocus()
         self._semantic_asset_download_signals = None
         self._mobileclip_download_dismissed_this_session = False
+        self._mobileclip_download_dialog = None
         self._last_semantic_query = ""
         self._semantic_index_progress_base = 0
         self._semantic_index_progress_total = 0
@@ -6884,7 +6734,11 @@ class RAWImageViewer(QMainWindow):
         safe_print("  [RAWImageViewer] Image cache initialized", flush=True)
         # Pass RAWProcessor class to PreloadManager for consistent processing (legacy support)
         safe_print("  [RAWImageViewer] Initializing PreloadManager...", flush=True)
-        self.preload_manager = PreloadManager(max_preload_threads=8, processor_class=RAWProcessor)
+        from rawviewer_profile import preload_thread_count
+
+        self.preload_manager = PreloadManager(
+            max_preload_threads=preload_thread_count(), processor_class=RAWProcessor
+        )
         safe_print("  [RAWImageViewer] PreloadManager initialized", flush=True)
         self.current_processor = None  # Legacy support - will be phased out
         self._pending_thumbnail = None  # Store thumbnail when not immediately displayed
@@ -7704,18 +7558,21 @@ class RAWImageViewer(QMainWindow):
         import logging
 
         logger = logging.getLogger(__name__)
-        if not self.current_pixmap or not getattr(self, "current_file_path", None):
+        fp = getattr(self, "current_file_path", None)
+        if not fp:
             return
-
-        should_upgrade = self._needs_full_resolution_upgrade()
-
-        if getattr(self, "gpu_view", None) is not None:
+        gv = getattr(self, "gpu_view", None)
+        pm = getattr(self, "current_pixmap", None)
+        if gv is not None and gv.has_pixmap():
+            should_upgrade = self._needs_full_resolution_upgrade(fp)
             self._gpu_zoom_in_to_point_finish()
             if should_upgrade:
-                self._queue_sensor_full_decode(
-                    self.current_file_path, priority_current=True
-                )
+                self._queue_sensor_full_decode(fp, priority_current=True)
             return
+        if pm is None or pm.isNull():
+            return
+
+        should_upgrade = self._needs_full_resolution_upgrade(fp)
 
         if should_upgrade:
             if getattr(self, "_full_resolution_loading", False):
@@ -7808,8 +7665,16 @@ class RAWImageViewer(QMainWindow):
     def _single_view_is_fit_mode(self) -> bool:
         gv = getattr(self, "gpu_view", None)
         if gv is not None:
-            return gv.is_fit_mode()
-        return bool(getattr(self, "fit_to_window", True))
+            gv._sync_fit_mode_flag()
+            return gv.wants_zoom_in_toggle()
+        if bool(getattr(self, "fit_to_window", True)):
+            return True
+        pm = getattr(self, "current_pixmap", None)
+        if pm is None or pm.isNull():
+            return True
+        fit_scale = self._fit_zoom_level()
+        zoom = float(getattr(self, "current_zoom_level", 1.0))
+        return zoom <= fit_scale * 1.05
 
     def _single_view_is_zoomed_in(self) -> bool:
         return not self._single_view_is_fit_mode()
@@ -7873,7 +7738,7 @@ class RAWImageViewer(QMainWindow):
         gv = getattr(self, "gpu_view", None)
         if gv is None:
             return
-        if not self.current_pixmap or self.current_pixmap.isNull():
+        if not gv.has_pixmap():
             if getattr(self, "current_file_path", None):
                 self._pending_zoom_toggle = True
                 self._pending_zoom_target_path = self.current_file_path
@@ -7882,6 +7747,7 @@ class RAWImageViewer(QMainWindow):
                     "GPU double-click recorded while image is loading; will zoom once ready."
                 )
             return
+        gv._sync_fit_mode_flag()
         self._stop_slideshow()
         logger.info(
             "[TRACK] User double-clicked to zoom (GPU) - file: %s",
@@ -9586,22 +9452,48 @@ class RAWImageViewer(QMainWindow):
         self._last_manager_error_path = norm_p
         self._last_manager_error_ts = now
         
-        # Check if the error indicates an unsupported RAW format or decoding failure
         lower_err = error_message.lower()
-        is_unsupported = any(term in lower_err for term in ("unsupported", "decode", "returned none", "failed"))
-        
-        if is_unsupported:
+        from common_image_loader import is_raw_file, load_pixmap_safe
+
+        clearly_unsupported = any(
+            term in lower_err
+            for term in (
+                "unsupported file format",
+                "not recognized",
+                "libraw unsupported",
+                "unsupported or corrupt raw",
+                "no usable embedded jpeg",
+            )
+        )
+        if not clearly_unsupported and not is_raw_file(file_path):
+            try:
+                recovered = load_pixmap_safe(file_path)
+                if not recovered.isNull():
+                    self.on_manager_pixmap_ready(file_path, recovered)
+                    return
+            except Exception:
+                pass
+
+        if clearly_unsupported or (
+            is_raw_file(file_path)
+            and "thumbnail extraction returned none" in lower_err
+        ):
             try:
                 from raw_file_extensions import get_supported_extensions
                 exts = get_supported_extensions()
             except Exception:
                 exts = ['.arw', '.cr2', '.nef', '.dng', '.jpg', '.jpeg', '.png']
-            
+
             dialog = CustomWarningDialog(
                 self,
                 title="Unsupported File Format",
-                message=f"The file '{os.path.basename(file_path)}' is not supported by SkySpotter or is corrupt.",
-                informative_text=f"Check if the file is corrupt. Supported formats list: {', '.join(exts)}"
+                message=(
+                    f"The file '{os.path.basename(file_path)}' is not supported by "
+                    f"RAWviewer or is corrupt."
+                ),
+                informative_text=(
+                    f"Check if the file is corrupt. Supported formats list: {', '.join(exts)}"
+                ),
             )
             dialog.exec()
         else:
@@ -9948,11 +9840,12 @@ class RAWImageViewer(QMainWindow):
             "Press Space or Double-click to toggle fit-to-window / 100% zoom\n"
             "Click and drag to pan when zoomed\n"
             "Use Left/Right arrow keys to navigate between images (preserves zoom if zoomed in)\n"
-            "Bottom bar: Share and other controls when images are loaded\n"
+            "Bottom bar: Share (open in editor) and other controls when images are loaded\n"
             "Gallery: Ctrl/Cmd+drag over thumbnails to toggle selection\n"
             "Gallery: Delete / Down Arrow on selection to remove or move to Discard\n"
-            "Single view: Down Arrow to move the current image to Discard folder\n"
-            "Single view: Delete to remove the current image\n"
+            "Single view: ↑ to toggle batch selection (Share — open in Lightroom, Photoshop, etc.)\n"
+            "Single view: Delete / Down on selection — bulk remove or move to Discard\n"
+            "Single view: Esc — clear selection or return to gallery\n"
             "H — Show/hide histogram\n"
             "F — Show/hide focus point\n"
             "Scroll wheel (fit-to-window): Scroll down = next image, Scroll up = previous image\n"
@@ -10140,16 +10033,27 @@ class RAWImageViewer(QMainWindow):
         self.view_mode_button.hide()  # Hidden by default until images are loaded
 
         self.share_bottom_button = QPushButton()
+        self.share_bottom_button.setObjectName("shareBottomButton")
         self.share_bottom_button.setFlat(True)
+        self.share_bottom_button.setAutoDefault(False)
+        self.share_bottom_button.setDefault(False)
         self.share_bottom_button.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         self.share_bottom_button.setIcon(qta.icon("fa5s.share-alt", color="#B0B0B0"))
         self.share_bottom_button.setIconSize(QSize(20, 20))
         self.share_bottom_button.setStyleSheet(bottom_icon_btn_style)
-        # pressed (mouse-down), not clicked (mouse-up): NSSharingServicePicker must not
-        # open on mouseUp or the macOS share sheet spins empty (AppKit console warning).
-        self.share_bottom_button.pressed.connect(self._share_current_image_os)
+        self.share_bottom_button.clicked.connect(self._share_current_image_os)
         self.share_bottom_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.share_bottom_button.hide()
+
+        self.batch_mark_indicator = QLabel()
+        self.batch_mark_indicator.setObjectName("batchMarkIndicator")
+        self.batch_mark_indicator.setFixedSize(20, 20)
+        self.batch_mark_indicator.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.batch_mark_indicator.setPixmap(
+            qta.icon("fa5s.star", color="#FFD700").pixmap(QSize(16, 16))
+        )
+        self.batch_mark_indicator.setToolTip("Marked for batch share (↑ to toggle)")
+        self.batch_mark_indicator.hide()
 
         self.slideshow_bottom_button = QPushButton()
         self.slideshow_bottom_button.setObjectName("slideshowBottomButton")
@@ -10177,6 +10081,16 @@ class RAWImageViewer(QMainWindow):
         self.rotate_bottom_button.hide()
         left_buttons_layout.addWidget(self.rotate_bottom_button, 0, alignment=Qt.AlignmentFlag.AlignVCenter)
 
+        # RAW/JPEG Toggle button (before search so expand field stays adjacent to search icon)
+        self.raw_toggle_button = QPushButton()
+        self.raw_toggle_button.setFlat(True)
+        self.raw_toggle_button.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.raw_toggle_button.setStyleSheet(bottom_icon_btn_style)
+        self.raw_toggle_button.clicked.connect(self.toggle_raw_jpeg_workflow)
+        self.raw_toggle_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.raw_toggle_button.hide()
+        left_buttons_layout.addWidget(self.raw_toggle_button, 0, alignment=Qt.AlignmentFlag.AlignVCenter)
+
         self.search_bottom_button = QPushButton()
         self.search_bottom_button.setFlat(True)
         self.search_bottom_button.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
@@ -10193,16 +10107,6 @@ class RAWImageViewer(QMainWindow):
         self.search_bottom_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.search_bottom_button.hide()
         left_buttons_layout.addWidget(self.search_bottom_button, 0, alignment=Qt.AlignmentFlag.AlignVCenter)
-
-        # RAW/JPEG Toggle button
-        self.raw_toggle_button = QPushButton()
-        self.raw_toggle_button.setFlat(True)
-        self.raw_toggle_button.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        self.raw_toggle_button.setStyleSheet(bottom_icon_btn_style)
-        self.raw_toggle_button.clicked.connect(self.toggle_raw_jpeg_workflow)
-        self.raw_toggle_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.raw_toggle_button.hide()
-        left_buttons_layout.addWidget(self.raw_toggle_button, 0, alignment=Qt.AlignmentFlag.AlignVCenter)
 
         # Search panel: in-row width animation (v2.1 layout — avoids overlay blocking Open)
         self.search_expand_container = QWidget()
@@ -10303,6 +10207,7 @@ class RAWImageViewer(QMainWindow):
         self.shortcuts_hint_button.setFixedSize(22, 22)
         self.shortcuts_hint_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.shortcuts_hint_button.setToolTip(self._keyboard_shortcuts_tooltip())
+        self.shortcuts_hint_button.clicked.connect(self.show_keyboard_shortcuts)
         self.shortcuts_hint_button.setStyleSheet("""
             QPushButton {
                 color: #888888;
@@ -10346,6 +10251,8 @@ class RAWImageViewer(QMainWindow):
         right_status_actions_layout = QHBoxLayout(self.right_status_actions)
         right_status_actions_layout.setContentsMargins(0, 0, 0, 0)
         right_status_actions_layout.setSpacing(8)
+        right_status_actions_layout.addWidget(
+            self.batch_mark_indicator, 0, alignment=Qt.AlignmentFlag.AlignVCenter)
         right_status_actions_layout.addWidget(
             self.share_bottom_button, 0, alignment=Qt.AlignmentFlag.AlignVCenter)
         right_status_actions_layout.addWidget(
@@ -10702,13 +10609,18 @@ class RAWImageViewer(QMainWindow):
 
     def _gallery_search_needs_index_work(self, corpus_files) -> tuple[bool, bool]:
         """Return (needs_semantic, needs_face) for the given corpus."""
+        from semantic_search import face_detection_enabled, semantic_embeddings_enabled
+
         try:
             index = self._get_semantic_index()
-            if not index.semantic_backend_available():
-                return False, False
-            if index.get_pending_paths(corpus_files):
-                return True, False
-            return False, index.get_face_pending_count(corpus_files) > 0
+            needs_semantic = False
+            if semantic_embeddings_enabled() and index.semantic_backend_available():
+                if index.get_pending_paths(corpus_files):
+                    needs_semantic = True
+            needs_face = False
+            if face_detection_enabled():
+                needs_face = index.get_face_pending_count(corpus_files) > 0
+            return needs_semantic, needs_face
         except Exception:
             return False, False
 
@@ -11011,6 +10923,9 @@ class RAWImageViewer(QMainWindow):
     def _set_gallery_search_status(
         self, message: str, animate: bool = False, *, relayout: bool = True
     ):
+        if getattr(self, "_semantic_asset_download_in_progress", False):
+            if not self._is_model_download_status(message):
+                return
         has_msg = bool(message and str(message).strip())
         show_in_search = bool(getattr(self, "_gallery_search_show_index_progress", False))
         if has_msg and self._should_show_search_index_progress(message) and not show_in_search:
@@ -11474,13 +11389,20 @@ class RAWImageViewer(QMainWindow):
         lowered = msg.lower()
         if lowered.startswith("preparing thumbnail"):
             return False
+        if lowered.startswith("downloading"):
+            return True
         # Only the three search-index phases belong in the search field.
         return lowered.startswith(
             ("metadata:", "semantic:", "face:")
         )
 
+    def _is_model_download_status(self, message: str) -> bool:
+        return (message or "").strip().lower().startswith("downloading")
+
     def _on_semantic_index_progress(self, token, i, n, message):
         if token != self._semantic_index_active_token:
+            return
+        if getattr(self, "_semantic_asset_download_in_progress", False):
             return
             
         # Dynamically load newly warmed thumbnails into gallery view to speed up scrolling/display
@@ -11593,6 +11515,10 @@ class RAWImageViewer(QMainWindow):
 
     def _start_face_index_background(self, corpus_files) -> None:
         """Second pass: face_count backfill after semantic search is usable."""
+        from semantic_search import face_detection_enabled
+
+        if not face_detection_enabled():
+            return
         import time
 
         logger = logging.getLogger(__name__)
@@ -11681,6 +11607,8 @@ class RAWImageViewer(QMainWindow):
     def _on_face_index_progress(self, token, i, n, message):
         if token != getattr(self, "_face_index_active_token", None):
             return
+        if getattr(self, "_semantic_asset_download_in_progress", False):
+            return
             
         # Dynamically load newly warmed thumbnails into gallery view to speed up scrolling/display
         if getattr(self, "view_mode", "") == "gallery":
@@ -11752,12 +11680,50 @@ class RAWImageViewer(QMainWindow):
         self._sync_gallery_search_input_editable()
         self.status_bar.showMessage(f"Semantic indexing failed: {error}", 5000)
 
+    def _mobileclip_models_missing(self) -> bool:
+        from semantic_search import semantic_embeddings_enabled
+
+        if not semantic_embeddings_enabled():
+            return False
+        if getattr(self, "_semantic_asset_download_in_progress", False):
+            return False
+        try:
+            index = self._get_semantic_index()
+            if index.semantic_backend_available():
+                return False
+            backend_error = index.semantic_backend_error()
+            return "Missing MobileCLIP" in backend_error and index.mobileclip_supports_hub_download()
+        except Exception:
+            return False
+
+    def _prompt_mobileclip_download(self, corpus_files) -> bool:
+        """Return True if download started or models already present; False if user declined."""
+        if not self._mobileclip_models_missing():
+            return True
+        if getattr(self, "_mobileclip_download_dismissed_this_session", False):
+            return False
+
+        from rawviewer_ui.mobileclip_download_dialog import MobileCLIPDownloadDialog
+
+        dialog = MobileCLIPDownloadDialog(self)
+        self._mobileclip_download_dialog = dialog
+        dialog.download_requested.connect(
+            lambda: self._start_semantic_asset_download_background(corpus_files)
+        )
+        dialog.exec()
+        self._mobileclip_download_dialog = None
+        if dialog.download_started:
+            return True
+        self._mobileclip_download_dismissed_this_session = True
+        return False
+
     def _start_semantic_asset_download_background(self, corpus_files):
         if self._semantic_asset_download_in_progress:
             return
         index = self._get_semantic_index()
         token = time.time_ns()
         self._semantic_asset_download_in_progress = True
+        self._gallery_search_show_index_progress = True
         signals = SemanticAssetDownloadSignals()
         self._semantic_asset_download_signals = signals
         signals.progress.connect(self._on_semantic_asset_download_progress)
@@ -11774,8 +11740,12 @@ class RAWImageViewer(QMainWindow):
 
             def run(self_inner):
                 try:
-                    def _progress(message):
-                        self_inner.signals.progress.emit(self_inner.token, str(message))
+                    def _progress(pct, message=None):
+                        from mobileclip_download_progress import download_status_text
+
+                        pct_val = max(0, min(100, int(pct)))
+                        text = (message or download_status_text(pct_val)).strip()
+                        self_inner.signals.progress.emit(self_inner.token, pct_val, text)
 
                     path = self_inner.index.download_semantic_backend_assets(
                         progress_callback=_progress
@@ -11784,30 +11754,40 @@ class RAWImageViewer(QMainWindow):
                 except Exception as e:
                     self_inner.signals.error.emit(self_inner.token, str(e))
 
-        self._set_gallery_search_status("Downloading assets…")
+        self._set_gallery_search_status("Downloading... 0%")
         worker = _SemanticAssetDownloadWorker(token, index, list(corpus_files), signals)
         QThreadPool.globalInstance().start(worker)
 
-    def _on_semantic_asset_download_progress(self, token, message):
+    def _on_semantic_asset_download_progress(self, token, pct, message):
         if not self._semantic_asset_download_in_progress:
             return
-        self._set_gallery_search_status(message or "Downloading assets…")
+        short = (message or "").strip() or f"Downloading... {int(pct)}%"
+        self._set_gallery_search_status(short)
 
     def _on_semantic_asset_download_done(self, token, asset_path, corpus_files):
         if not self._semantic_asset_download_in_progress:
             return
         self._semantic_asset_download_in_progress = False
         self._semantic_asset_download_signals = None
-        self._start_user_semantic_indexing(corpus_files)
+        dialog = getattr(self, "_mobileclip_download_dialog", None)
+        if dialog is not None:
+            dialog.show_download_complete()
+        self._mobileclip_download_dialog = None
+        if corpus_files:
+            self._start_user_semantic_indexing(corpus_files)
 
     def _on_semantic_asset_download_error(self, token, error):
         if not self._semantic_asset_download_in_progress:
             return
         self._semantic_asset_download_in_progress = False
         self._semantic_asset_download_signals = None
-        self._set_gallery_search_status("Asset download failed")
+        dialog = getattr(self, "_mobileclip_download_dialog", None)
+        if dialog is not None:
+            dialog.show_download_error(error)
+        else:
+            self._set_gallery_search_status("Asset download failed")
+            self.status_bar.showMessage(f"Asset download failed: {error}", 7000)
         self._gallery_search_user_collapsed_while_busy = False
-        self.status_bar.showMessage(f"Asset download failed: {error}", 7000)
 
     def _start_user_semantic_indexing(self, corpus_files) -> None:
         """Run or resume semantic embeddings after the user opens search (metadata may already be silent)."""
@@ -11882,12 +11862,8 @@ class RAWImageViewer(QMainWindow):
             if not index.semantic_backend_available():
                 backend_error = index.semantic_backend_error()
                 if "Missing MobileCLIP" in backend_error and index.mobileclip_supports_hub_download():
-                    if not getattr(self, "_mobileclip_download_dismissed_this_session", False):
-                        dialog = MobileCLIPDownloadDialog(self)
-                        if dialog.exec() == QDialog.DialogCode.Accepted:
-                            self._start_semantic_asset_download_background(corpus_files)
-                        else:
-                            self._mobileclip_download_dismissed_this_session = True
+                    if not self._prompt_mobileclip_download(corpus_files):
+                        self._set_gallery_search_status("EXIF search only (semantic models not downloaded)")
                 else:
                     self._set_gallery_search_status(f"EXIF search only. Backend: {backend_error}")
                 return
@@ -14667,28 +14643,91 @@ class RAWImageViewer(QMainWindow):
         gj = getattr(self, "gallery_justified", None)
         if gj is not None and hasattr(gj, "refresh_gallery_selection_visuals"):
             gj.refresh_gallery_selection_visuals()
+        self._refresh_filmstrip_batch_selection_visuals()
         self._sync_gallery_selection_chrome()
+
+    def _confirm_clear_gallery_marks(self, count: int, paths: List[str]) -> bool:
+        """Ask before clearing batch marks when more than one image is marked."""
+        max_list = 8
+        names = [os.path.basename(p) for p in paths[:max_list] if p]
+        listing = "\n".join(f"• {name}" for name in names)
+        extra = count - len(names)
+        if extra > 0:
+            listing = (listing + "\n" if listing else "") + f"… and {extra} more"
+        noun = "image" if count == 1 else "images"
+        dialog = CustomConfirmDialog(
+            parent=self,
+            title="Clear marked images?",
+            message=f"Remove marks from {count} {noun}?",
+            informative_text=listing or "Marked images will no longer be included in Share.",
+            confirm_action="Unmark",
+        )
+        self._is_delete_dialog_open = True
+        try:
+            dialog.exec()
+            return bool(dialog.result_value)
+        finally:
+            self._is_delete_dialog_open = False
+
+    def _request_clear_gallery_selection(self) -> None:
+        """Clear batch marks in single view; confirm when more than one image is marked."""
+        if not self._gallery_has_selection():
+            return
+        paths = self._gallery_selected_canonical_paths()
+        count = len(paths)
+        if count > 1 and not self._confirm_clear_gallery_marks(count, paths):
+            return
+        self._clear_gallery_selection()
 
     @staticmethod
     def _share_button_platform_enabled() -> bool:
-        """Share bottom button is macOS-only (system share sheet)."""
-        return sys.platform == "darwin"
+        """Share / open-in-app is supported on macOS and Windows."""
+        return sys.platform in ("darwin", "win32")
 
     def _sync_gallery_selection_chrome(self) -> None:
-        """Status text when gallery multi-select is active."""
+        """Status text when multi-select is active."""
         n = len(getattr(self, "_gallery_selected_paths", set()) or set())
         if n <= 0:
             return
         if hasattr(self, "status_bar") and self.status_bar:
+            vm = getattr(self, "view_mode", "single")
+            if vm == "gallery":
+                hint = "Delete to remove, Down to Discard (Ctrl/Cmd+drag toggles)"
+            else:
+                hint = "Share — open in editor, Delete/Down bulk actions (↑ toggles, ★ in bar)"
             self.status_bar.showMessage(
-                f"{n} image{'s' if n != 1 else ''} selected — "
-                "Delete to remove, Down to Discard (Ctrl/Cmd+drag toggles)",
+                f"{n} image{'s' if n != 1 else ''} selected — {hint}",
                 5000,
             )
 
-    def _gallery_share_target_paths(self) -> List[str]:
-        """Paths to share: gallery selection when active, else current single file."""
-        if getattr(self, "view_mode", "") == "gallery" and self._gallery_has_selection():
+    def _current_image_batch_marked(self) -> bool:
+        path = getattr(self, "current_file_path", None)
+        if not path:
+            return False
+        canonical = self._gallery_canonical_path(path) or path
+        selected = getattr(self, "_gallery_selected_paths", set()) or set()
+        return _norm_path(canonical) in selected
+
+    def _sync_batch_mark_indicator(self) -> None:
+        indicator = getattr(self, "batch_mark_indicator", None)
+        if indicator is None:
+            return
+        show = (
+            getattr(self, "view_mode", "single") == "single"
+            and bool(getattr(self, "image_files", None))
+            and self._current_image_batch_marked()
+        )
+        indicator.setVisible(show)
+
+    def _refresh_filmstrip_batch_selection_visuals(self) -> None:
+        bar = self._filmstrip_bar()
+        if bar is not None and hasattr(bar, "set_batch_selected_norm_paths"):
+            bar.set_batch_selected_norm_paths(getattr(self, "_gallery_selected_paths", set()) or set())
+        self._sync_batch_mark_indicator()
+
+    def _share_target_paths(self) -> List[str]:
+        """Paths for share / batch-open: multi-select in any view, else current file."""
+        if self._gallery_has_selection():
             return [
                 os.path.abspath(p)
                 for p in self._gallery_selected_canonical_paths()
@@ -14698,6 +14737,10 @@ class RAWImageViewer(QMainWindow):
         if p and os.path.isfile(p):
             return [os.path.abspath(p)]
         return []
+
+    def _gallery_share_target_paths(self) -> List[str]:
+        """Paths to share: gallery selection when active, else current single file."""
+        return self._share_target_paths()
 
     def _gallery_toggle_path_selection(self, file_path: str) -> None:
         canonical = self._gallery_canonical_path(file_path)
@@ -14713,6 +14756,7 @@ class RAWImageViewer(QMainWindow):
         gj = getattr(self, "gallery_justified", None)
         if gj is not None and hasattr(gj, "refresh_gallery_selection_visuals"):
             gj.refresh_gallery_selection_visuals()
+        self._refresh_filmstrip_batch_selection_visuals()
         self._sync_gallery_selection_chrome()
 
     def _gallery_selected_canonical_paths(self) -> List[str]:
@@ -15468,13 +15512,15 @@ class RAWImageViewer(QMainWindow):
     def _keyboard_shortcuts_help_text(self):
         """Plain-text shortcuts list for tooltips and the shortcuts dialog."""
         return (
+            "Ctrl+Shift+O — Open folder\n"
             "Space / Double-click — Toggle fit-to-window / 100% zoom\n"
             "Trackpad Pinch / Ctrl+Scroll — Smooth zoom in/out\n"
             "Left / Right Arrow — Previous / next image\n"
             "Gallery: Ctrl/Cmd+drag over thumbnails — Toggle selection\n"
             "Gallery: Delete / Down — Remove selection or move to Discard\n"
-            "Single view: Down Arrow — Move image to Discard folder\n"
-            "Single view: Delete — Delete current image\n"
+            "Single view: ↑ — Toggle batch selection (Share — open in editor)\n"
+            "Single view: Delete / Down — Remove selection or move to Discard\n"
+            "Single view: Esc — Clear selection or return to gallery\n"
             "H — Show/hide histogram\n"
             "F — Show/hide focus point"
         )
@@ -17654,18 +17700,13 @@ class RAWImageViewer(QMainWindow):
 
     def _dispatch_share_bottom(self, paths: List[str]) -> None:
         _share_log(logging.INFO, "dispatch paths=%d platform=%s", len(paths), sys.platform)
-        if sys.platform == "darwin":
-            self._share_paths_os(paths)
-        elif sys.platform == "win32":
-            if len(paths) == 1:
-                self._open_image_with_app(paths[0])
-            else:
-                self._share_paths_os(paths)
+        if sys.platform in ("darwin", "win32"):
+            self._show_open_in_app_menu(paths)
+            return
+        if len(paths) == 1:
+            self._open_image_with_app(paths[0])
         else:
-            if len(paths) == 1:
-                self._open_image_with_app(paths[0])
-            else:
-                self._share_paths_os(paths)
+            self._share_paths_os(paths)
 
     def _open_image_with_app(self, path: str) -> None:
         """Windows: show the native Open With dialog for one file."""
@@ -17709,17 +17750,27 @@ class RAWImageViewer(QMainWindow):
                 self.status_bar.showMessage("Share unavailable for this selection", 3000)
             return
         elif sys.platform == "win32":
-            if n == 1:
-                self._share_windows_ui_chain(paths[0])
+            share_paths, cleanup = self._prepare_share_export_paths(paths, allow_raw=False)
+            if not share_paths:
+                self.status_bar.showMessage("Could not prepare images for sharing", 3500)
                 return
-            if _share_windows_clipboard_cf_hdrop_paths(paths):
+            if n == 1:
+                if self._share_windows_ui_chain(share_paths[0]):
+                    self._schedule_share_export_cleanup(cleanup)
+                else:
+                    cleanup()
+                return
+            if _share_windows_clipboard_cf_hdrop_paths(share_paths):
                 self.status_bar.showMessage(
                     f"{n} files copied to clipboard — paste into Mail, Teams, or other apps",
                     4500,
                 )
+                self._schedule_share_export_cleanup(cleanup)
                 return
-            if self._share_windows_ui_chain(paths[0]):
+            if self._share_windows_ui_chain(share_paths[0]):
+                self._schedule_share_export_cleanup(cleanup)
                 return
+            cleanup()
         if n == 1:
             self._copy_file_path_to_clipboard(paths[0])
         else:
@@ -17891,13 +17942,176 @@ class RAWImageViewer(QMainWindow):
         self._share_paused_overlay_filters = []
         _share_log(logging.INFO, "resumed all event filters for share")
 
+    def _schedule_share_export_cleanup(self, cleanup, delay_ms: int = 180000) -> None:
+        if cleanup is None:
+            return
+        QTimer.singleShot(delay_ms, cleanup)
+
+    def _prepare_share_export_paths(self, paths, *, allow_raw: bool = False):
+        from share_path_export import prepare_paths_for_external_share
+
+        return prepare_paths_for_external_share(list(paths), allow_raw=allow_raw)
+
+    def _on_batch_open_chosen(self, app_id: str, paths: tuple) -> None:
+        from batch_open_apps import launch_batch_open_app
+        from share_path_export import prepare_paths_for_batch_open
+
+        share_paths, cleanup = prepare_paths_for_batch_open(paths, app_id)
+        if not share_paths:
+            self.status_bar.showMessage("Could not prepare images for that app", 3500)
+            return
+        _share_log(
+            logging.INFO,
+            "batch open app=%s paths=%d first=%s",
+            app_id,
+            len(share_paths),
+            share_paths[0],
+        )
+        try:
+            if launch_batch_open_app(app_id, share_paths):
+                _share_log(logging.INFO, "batch open ok app=%s", app_id)
+                n = len(share_paths)
+                self.status_bar.showMessage(
+                    f"Opening {n} image{'s' if n != 1 else ''}…",
+                    2500,
+                )
+                self._schedule_share_export_cleanup(cleanup)
+            else:
+                cleanup()
+                _share_log(logging.WARNING, "batch open failed app=%s", app_id)
+                self.status_bar.showMessage("Could not open files in that app", 3500)
+        except Exception:
+            cleanup()
+            raise
+
+    def _defer_macos_share_single(self, path: str) -> None:
+        if not path or not os.path.isfile(path):
+            return
+        self._macos_share_pending_path = os.path.abspath(path)
+        delay_ms = 100
+        try:
+            delay_ms = max(50, int(os.environ.get("RAWVIEWER_SHARE_DELAY_MS", "100")))
+        except ValueError:
+            pass
+        QTimer.singleShot(delay_ms, self._on_share_macos_deferred)
+
+    def _reset_share_bottom_button_state(self) -> None:
+        """Clear stuck pressed/hover chrome after the share menu opens."""
+        btn = getattr(self, "share_bottom_button", None)
+        if btn is None:
+            return
+        btn.setDown(False)
+        btn.setChecked(False)
+        btn.clearFocus()
+
+    def _popup_share_menu(self, menu: QMenu) -> None:
+        self._reset_share_bottom_button_state()
+        btn = getattr(self, "share_bottom_button", None)
+        if btn is not None and btn.isVisible():
+            menu.popup(btn.mapToGlobal(QPoint(0, btn.height())))
+        else:
+            menu.exec(QCursor.pos())
+        QTimer.singleShot(0, self._reset_share_bottom_button_state)
+
+    def _share_menu_action(
+        self,
+        menu: QMenu,
+        label: str,
+        callback,
+        *,
+        app_path: Optional[str] = None,
+        macos_service: Optional[object] = None,
+    ):
+        from app_local_icon import icon_for_local_app, icon_for_macos_sharing_service
+
+        action = menu.addAction(label)
+        icon = QIcon()
+        if macos_service is not None:
+            icon = icon_for_macos_sharing_service(macos_service)
+        elif app_path:
+            icon = icon_for_local_app(app_path)
+        if not icon.isNull():
+            action.setIcon(icon)
+        action.triggered.connect(callback)
+        return action
+
+    def _show_open_in_app_menu(self, paths: List[str]) -> None:
+        """Installed batch editors; hides apps not on this machine."""
+        from batch_open_apps import list_installed_batch_open_apps
+
+        valid = [os.path.abspath(p) for p in paths if p and os.path.isfile(p)]
+        if not valid:
+            self.status_bar.showMessage("No file to open", 2000)
+            return
+
+        editors = list_installed_batch_open_apps()
+        n = len(valid)
+
+        if not editors:
+            if n == 1 and sys.platform == "win32":
+                self._open_image_with_app(valid[0])
+                return
+            if n == 1 and sys.platform == "darwin":
+                self._defer_macos_share_single(valid[0])
+                return
+            self.status_bar.showMessage("No supported editor installed", 3500)
+            return
+
+        menu = QMenu(self)
+        edit_header = menu.addAction("Open in editor")
+        edit_header.setEnabled(False)
+        for app in editors:
+            label = app.display_name if n == 1 else f"{app.display_name} ({n} images)"
+            self._share_menu_action(
+                menu,
+                label,
+                lambda _checked=False, aid=app.app_id, ps=tuple(valid): self._on_batch_open_chosen(
+                    aid, ps
+                ),
+                app_path=app.executable,
+            )
+
+        if n == 1 and sys.platform == "win32":
+            menu.addSeparator()
+            menu.addAction("Choose another app…").triggered.connect(
+                lambda: self._open_image_with_app(valid[0])
+            )
+
+        if n > 1:
+            menu.addSeparator()
+            menu.addAction(f"Copy {n} files to clipboard").triggered.connect(
+                lambda: self._copy_paths_hdrop_to_clipboard(valid)
+            )
+
+        self._popup_share_menu(menu)
+
+    def _copy_paths_hdrop_to_clipboard(self, paths: List[str]) -> None:
+        share_paths, cleanup = self._prepare_share_export_paths(paths, allow_raw=False)
+        if not share_paths:
+            self.status_bar.showMessage("Could not prepare images for sharing", 3500)
+            return
+        if _share_windows_clipboard_cf_hdrop_paths(share_paths):
+            n = len(share_paths)
+            self.status_bar.showMessage(
+                f"{n} files copied — paste into Mail, Teams, or other apps",
+                4500,
+            )
+            self._schedule_share_export_cleanup(cleanup)
+        else:
+            cleanup()
+            joined = "\n".join(paths)
+            try:
+                QApplication.clipboard().setText(joined)
+                self.status_bar.showMessage("Paths copied to clipboard", 2500)
+            except Exception:
+                self.status_bar.showMessage("Could not copy files", 2500)
+
     def _share_current_image_os(self):
-        """Open the system share sheet (macOS / Windows) for the current file path."""
-        p = getattr(self, "current_file_path", None)
-        if not p or not os.path.isfile(p):
+        """Open in app menu (batch editors) or system share for the current selection."""
+        paths = self._share_target_paths()
+        if not paths:
             self.status_bar.showMessage("No file to share", 2000)
             return
-        path = os.path.abspath(p)
         now = time.monotonic()
         last = float(getattr(self, "_macos_share_last_request_ts", 0.0) or 0.0)
         if now - last < 0.45:
@@ -17905,19 +18119,9 @@ class RAWImageViewer(QMainWindow):
             return
         self._macos_share_last_request_ts = now
         self._macos_share_menu_fallback_used = False
-        _share_log(logging.INFO, "share requested: %s", path)
-        if sys.platform == "darwin":
-            # Defer past press/release so AppKit is not invoked on mouseUp (see NSSharingServicePicker).
-            self._macos_share_pending_path = path
-            delay_ms = 100
-            try:
-                delay_ms = max(50, int(os.environ.get("RAWVIEWER_SHARE_DELAY_MS", "100")))
-            except ValueError:
-                pass
-            QTimer.singleShot(delay_ms, self._on_share_macos_deferred)
-            return
-        elif sys.platform == "win32":
-            QTimer.singleShot(0, lambda fp=path: self._open_image_with_app(fp))
+        _share_log(logging.INFO, "open in editor requested: %d path(s)", len(paths))
+        if sys.platform in ("darwin", "win32"):
+            self._show_open_in_app_menu(paths)
             return
         self._copy_current_file_path_to_clipboard()
 
@@ -17950,33 +18154,40 @@ class RAWImageViewer(QMainWindow):
         except Exception:
             return 0
 
-    def _share_windows_ui_chain(self, path: str):
+    def _share_windows_ui_chain(self, path: str) -> bool:
         """Open the Windows share sheet for a file path."""
+        if not path or not os.path.isfile(path):
+            _share_log(logging.WARNING, "share chain: invalid path %r", path)
+            return False
         owner = self._share_windows_owner_hwnd()
-        # Prefer the bundled .NET helper: it uses CsWinRT's MarshalInterface.FromAbi to
-        # project the DataTransferManager, which the in-process Python WinRT path cannot do
-        # on pywinrt 3.x (raw ABI pointers are not projectable from Python).
         if _share_windows_via_helper(path, owner):
+            _share_log(logging.INFO, "share chain: helper ok path=%s", path)
             self.status_bar.showMessage("Share", 1500)
-            return
+            return True
         if _share_windows_via_winrt(path, owner):
+            _share_log(logging.INFO, "share chain: winrt ok path=%s", path)
             self.status_bar.showMessage("Share", 1500)
-            return
+            return True
         if self._share_windows_shell(path, owner):
+            _share_log(logging.INFO, "share chain: shell ok path=%s", path)
             self.status_bar.showMessage("Share", 1500)
-            return
+            return True
         if _share_windows_clipboard_cf_hdrop(path):
+            _share_log(logging.INFO, "share chain: CF_HDROP ok path=%s", path)
             self.status_bar.showMessage(
                 "File copied to clipboard — paste into Mail, Teams, or other apps", 4500
             )
-            return
+            return True
         if _share_windows_clipboard_file_via_powershell(path):
+            _share_log(logging.INFO, "share chain: PowerShell clipboard ok path=%s", path)
             self.status_bar.showMessage(
                 "File copied to clipboard — paste into Mail, Teams, or other apps", 4500
             )
-            return
+            return True
+        _share_log(logging.WARNING, "share chain: all methods failed path=%s", path)
         self._copy_current_file_path_to_clipboard()
         self.status_bar.showMessage("Share unavailable — path copied to clipboard", 4000)
+        return False
 
     def _macos_share_use_qt_menu(self) -> bool:
         """Qt menu listing NSSharingService targets (works in v2.2 Qt6 shell)."""
@@ -18377,13 +18588,14 @@ class RAWImageViewer(QMainWindow):
                 title = str(svc.title() or "Share").strip()
             except Exception:
                 title = "Share"
-            action = QAction(title, self)
-            action.triggered.connect(
+            self._share_menu_action(
+                menu,
+                title,
                 lambda _checked=False, s=svc, u=url, sp=share_path: self._share_macos_menu_chose_service(
                     s, u, sp
-                )
+                ),
+                macos_service=svc,
             )
-            menu.addAction(action)
 
         btn = getattr(self, "share_bottom_button", None)
         try:
@@ -18391,10 +18603,7 @@ class RAWImageViewer(QMainWindow):
             self.activateWindow()
         except Exception:
             pass
-        if btn is not None and btn.isVisible():
-            menu.popup(btn.mapToGlobal(QPoint(0, btn.height())))
-        else:
-            menu.exec(QCursor.pos())
+        self._popup_share_menu(menu)
         return True
 
     def _share_macos_picker_ui_for_url(self, url) -> None:
@@ -19173,9 +19382,7 @@ class RAWImageViewer(QMainWindow):
                         self._pending_zoom_thumbnail_size = pixmap.size()
                         gv.set_pixmap(pixmap, preserve_view=False)
                         gv.fit_to_window()
-                        # Restore intent so we stay zoomed in logic
-                        self.fit_to_window = False
-                        gv._fit_mode = False
+                        self.fit_to_window = True
                         return False
 
                     if self._apply_gpu_navigation_zoom_restore(pixmap, gv):
@@ -19367,16 +19574,14 @@ class RAWImageViewer(QMainWindow):
                 if is_pixmap_half_size:
                     logger.info(f"[DISPLAY_PIXMAP] Half-size image ({pixmap.width()}x{pixmap.height()}), "
                                "showing Fit preview until a full-resolution buffer arrives (avoid fake zoom upscale).")
-                    hold_z = self.current_zoom_level
-                    hold_pt = self.zoom_center_point
-                    hold_fit = self.fit_to_window
+                    if not getattr(self, "_pending_zoom", False):
+                        self._pending_zoom = True
+                        self._pending_zoom_center = self.zoom_center_point
+                        self._pending_zoom_thumbnail_size = pixmap.size()
                     self.fit_to_window = True
                     self.current_zoom_level = 1.0
                     self.zoom_center_point = None
                     self.scale_image_to_fit()
-                    self.fit_to_window = hold_fit
-                    self.current_zoom_level = hold_z
-                    self.zoom_center_point = hold_pt
                 else:
                     # Full resolution image - apply zoom now
                     logger.info(f"[DISPLAY_PIXMAP] Full resolution image, applying zoom immediately")
@@ -19676,7 +19881,9 @@ class RAWImageViewer(QMainWindow):
         )
 
     def _nav_preload_display_radius(self) -> int:
-        return _env_int("RAWVIEWER_NAV_PRELOAD_RADIUS", 6, minimum=1)
+        from rawviewer_profile import adaptive_nav_preload_radius
+
+        return adaptive_nav_preload_radius()
 
     def _nav_preload_display_near_count(self) -> int:
         return _env_int("RAWVIEWER_NAV_PRELOAD_NEAR", 2, minimum=1)
@@ -19761,9 +19968,16 @@ class RAWImageViewer(QMainWindow):
             if self.image_manager.has_active_work_for_path(path):
                 continue
             stages, use_full = self._nav_prefetch_stages_for_path(path, zoomed=False)
+            from rawviewer_profile import indexing_loads_compete
+
+            prio = (
+                Priority.PRELOAD_NEXT
+                if not indexing_loads_compete()
+                else Priority.BACKGROUND
+            )
             self.image_manager.load_image(
                 path,
-                priority=Priority.BACKGROUND,
+                priority=prio,
                 cancel_existing=False,
                 use_full_resolution=use_full,
                 stages=stages,
@@ -20064,7 +20278,11 @@ class RAWImageViewer(QMainWindow):
             pass
 
         zoomed = not getattr(self, "fit_to_window", True)
-        radius = _env_int("RAWVIEWER_IDLE_DISPLAY_PREFETCH_RADIUS", 6, minimum=2)
+        radius = _env_int("RAWVIEWER_IDLE_DISPLAY_PREFETCH_RADIUS", 0, minimum=0)
+        if radius <= 0:
+            from rawviewer_profile import adaptive_idle_display_prefetch_radius
+
+            radius = adaptive_idle_display_prefetch_radius()
         batch = _env_int("RAWVIEWER_IDLE_DISPLAY_PREFETCH_BATCH", 2, minimum=1)
         n = len(self.image_files)
         base = self.current_file_index
@@ -20123,7 +20341,9 @@ class RAWImageViewer(QMainWindow):
         current_path = self.current_file_path
         zoomed = not getattr(self, "fit_to_window", True)
         near = self._nav_preload_display_near_count()
-        next_count = min(self._PRELOAD_NEXT_COUNT, len(self.image_files) - 1)
+        from rawviewer_profile import adjacent_preload_next, adjacent_preload_prev
+
+        next_count = min(adjacent_preload_next(), len(self.image_files) - 1)
         for i in range(1, next_count + 1):
             next_index = (self.current_file_index + i) % len(self.image_files)
             next_file = self.image_files[next_index]
@@ -20148,7 +20368,7 @@ class RAWImageViewer(QMainWindow):
                     stages={"thumbnail", "exif"},
                 )
 
-        prev_count = min(self._PRELOAD_PREV_COUNT, len(self.image_files) - 1)
+        prev_count = min(adjacent_preload_prev(), len(self.image_files) - 1)
         for i in range(1, prev_count + 1):
             prev_index = (self.current_file_index - i) % len(self.image_files)
             prev_file = self.image_files[prev_index]
@@ -20847,12 +21067,17 @@ class RAWImageViewer(QMainWindow):
             if vm == "gallery" and self._gallery_has_selection():
                 self.discard_gallery_selection()
                 return True
+            if vm == "single" and self._gallery_has_selection():
+                self.discard_gallery_selection()
+                return True
             if vm == "single":
                 self.move_current_image_to_discard()
                 return True
         elif key == Qt.Key.Key_Up:
             if vm == "single":
-                # Consume Up arrow in single view to prevent scrolling/panning glitches
+                p = getattr(self, "current_file_path", None)
+                if p and os.path.isfile(p):
+                    self._gallery_toggle_path_selection(p)
                 return True
         elif key == Qt.Key.Key_Delete or (
             sys.platform == "darwin" and key == Qt.Key.Key_Backspace
@@ -20861,14 +21086,22 @@ class RAWImageViewer(QMainWindow):
             if vm == "gallery" and self._gallery_has_selection():
                 self.delete_gallery_selection()
                 return True
+            if vm == "single" and self._gallery_has_selection():
+                self.delete_gallery_selection()
+                return True
             if vm == "single":
                 self.delete_current_image()
                 return True
         elif key == Qt.Key.Key_Escape:
-            if vm == "gallery" and self._gallery_has_selection():
-                self._clear_gallery_selection()
+            if self._gallery_has_selection():
+                if vm == "gallery":
+                    self._clear_gallery_selection()
+                else:
+                    self._request_clear_gallery_selection()
                 return True
-            if vm == "single":
+            if vm == "gallery":
+                pass
+            elif vm == "single":
                 if self._is_exif_sort_ready():
                     self.toggle_view_mode()
                 return True
@@ -21589,7 +21822,7 @@ class RAWImageViewer(QMainWindow):
                 return
             return
         self._stop_slideshow()
-        if self.fit_to_window:
+        if self._single_view_is_fit_mode():
             # Switch to 100% zoom mode - center on image center
             self.fit_to_window = False
             
@@ -22439,11 +22672,12 @@ class RAWImageViewer(QMainWindow):
             "Press Space or Double-click to toggle fit-to-window / 100% zoom\n"
             "Click and drag to pan when zoomed\n"
             "Use Left/Right arrow keys to navigate between images (preserves zoom if zoomed in)\n"
-            "Bottom bar: Share and other controls when images are loaded\n"
+            "Bottom bar: Share (open in editor) and other controls when images are loaded\n"
             "Gallery: Ctrl/Cmd+drag over thumbnails to toggle selection\n"
             "Gallery: Delete / Down Arrow on selection to remove or move to Discard\n"
-            "Single view: Down Arrow to move the current image to Discard folder\n"
-            "Single view: Delete to remove the current image\n"
+            "Single view: ↑ to toggle batch selection (Share — open in Lightroom, Photoshop, etc.)\n"
+            "Single view: Delete / Down on selection — bulk remove or move to Discard\n"
+            "Single view: Esc — clear selection or return to gallery\n"
             "H — Show/hide histogram\n"
             "F — Show/hide focus point\n"
             "Scroll wheel (fit-to-window): Scroll down = next image, Scroll up = previous image\n"
@@ -22639,6 +22873,7 @@ class RAWImageViewer(QMainWindow):
         if hasattr(self, "share_bottom_button"):
             vis = bool(self.image_files) and self.view_mode == "single"
             self.share_bottom_button.setVisible(vis)
+            self._sync_batch_mark_indicator()
             if hasattr(self, "slideshow_bottom_button"):
                 self.slideshow_bottom_button.setVisible(vis)
             cp = getattr(self, "current_file_path", None)
@@ -24675,6 +24910,11 @@ def main():
     import traceback
 
     # Packaged or installed app: enable semantic search by default (dev uses launch_dev.sh / run_debug.bat).
+    # Lite builds bake PROFILE=lite and skip AI/face via rawviewer_profile defaults.
+    from rawviewer_profile import apply_profile_runtime_defaults, is_lite_build
+
+    apply_profile_runtime_defaults()
+
     # On Windows, the installed app runs inside a Pixi virtual environment (so sys.frozen is False),
     # but we can detect it by checking if "_internal/pixi/pixi.exe" exists in the root directory.
     is_installed = False
@@ -24684,7 +24924,8 @@ def main():
             is_installed = True
 
     if getattr(sys, "frozen", False) or is_installed:
-        os.environ.setdefault("RAWVIEWER_ENABLE_SEMANTIC_SEARCH", "1")
+        if not is_lite_build():
+            os.environ.setdefault("RAWVIEWER_ENABLE_SEMANTIC_SEARCH", "1")
         os.environ.setdefault("RAWVIEWER_GPU_VIEW", "1")
 
     # Print to console immediately (before logging might be ready)
