@@ -1,10 +1,10 @@
-# RAWviewer v2.3.2
+# RAWviewer v2.4
 
 <p align="center">
   <img src="icons/appicon.ico" alt="RAWviewer Icon" width="256">
 </p>
 
-![Version](https://img.shields.io/badge/version-2.3.2-blue)
+![Version](https://img.shields.io/badge/version-2.4-blue)
 ![Downloads](https://img.shields.io/github/downloads/markyip/RAWviewer/total) 
 ![License](https://img.shields.io/badge/license-MIT-green)
 [![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-Donate-orange?logo=buy-me-a-coffee)](https://www.buymeacoffee.com/markyip)
@@ -28,7 +28,7 @@ Official releases: [GitHub Releases](https://github.com/markyip/RAWviewer/releas
 | **Install size / time** | Smaller; no AI model download | Larger; downloads AI models on first setup (Full only) |
 
 **Windows installer:** `RAWviewer_Setup.exe` (Unified Installer)  
-**macOS zips:** `RAWviewer-v2.3.2-macOS.zip` · `RAWviewer-v2.3.2-macOS-Lite.zip`
+**macOS zips:** `RAWviewer-v2.4-macOS.zip` · `RAWviewer-v2.4-macOS-Lite.zip`
 
 Not sure? Start with **Lite** if you mainly browse and cull by eye. Choose **Full** if you want to search with words like `sunset on beach` or filter by detected faces.
 
@@ -55,7 +55,7 @@ If Windows shows **“Protected your PC”**: click **More info** → **Run anyw
 
 ### macOS (13 Ventura or newer)
 
-1. Download **`RAWviewer-v2.3.2-macOS.zip`** (Full) or **`RAWviewer-v2.3.2-macOS-Lite.zip`** (Lite) from **[Releases](https://github.com/markyip/RAWviewer/releases/latest)** and extract the zip.
+1. Download **`RAWviewer-v2.4-macOS.zip`** (Full) or **`RAWviewer-v2.4-macOS-Lite.zip`** (Lite) from **[Releases](https://github.com/markyip/RAWviewer/releases/latest)** and extract the zip.
 2. Open **Terminal**, go to the extracted folder (`cd ` then drag the folder onto Terminal), and run:
 
 ```bash
@@ -169,7 +169,7 @@ Full search syntax, focus-overlay brands, and power-user options are in **[Advan
 | `bash: command not found` | Type `cd `, drag the extracted folder onto Terminal, press Return, then run the command again |
 | Can’t read Desktop/Documents | System Settings → Privacy → **Full Disk Access** → add RAWviewer |
 | Search says models missing (**Full**) | Open gallery search and click **Download** when prompted (needs internet once) |
-| Download failed (SSL / certificate error) | Update to **v2.3.2** or newer (bundles certifi). On a corporate VPN or proxy, add your organization’s root certificate to **Keychain Access** and set it to **Always Trust** |
+| Download failed (SSL / certificate error) | Update to **v2.4** or newer (bundles certifi). On a corporate VPN or proxy, add your organization’s root certificate to **Keychain Access** and set it to **Always Trust** |
 
 More detail: [`scripts/Launch/README.md`](scripts/Launch/README.md)
 
@@ -291,8 +291,8 @@ Build outputs:
 
 | Profile | Windows | macOS |
 |---------|---------|-------|
-| **Full / Unified** | `dist/RAWviewer_Setup.exe` (includes Full & Lite options) | `dist/RAWviewer-v2.3.2-macOS.zip` |
-| **Lite** | (Select Lite option in `RAWviewer_Setup.exe`) | `dist/RAWviewer-v2.3.2-macOS-Lite.zip` |
+| **Full / Unified** | `dist/RAWviewer_Setup.exe` (includes Full & Lite options) | `dist/RAWviewer-v2.4-macOS.zip` |
+| **Lite** | (Select Lite option in `RAWviewer_Setup.exe`) | `dist/RAWviewer-v2.4-macOS-Lite.zip` |
 
 Dependencies are in `pixi.toml`. Packaging scripts use a local `rawviewer_env/` venv when building release artifacts.
 

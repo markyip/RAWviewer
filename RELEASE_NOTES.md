@@ -1,5 +1,17 @@
 # RAWviewer Release Notes
 
+## 🚀 Version 2.4
+**Release Date: June 16, 2026**
+
+Version **2.4** uses **`build.py`** as the single source of truth: `VERSION` syncs to `src/app_version.py`, `pixi.toml`, macOS `Info.plist`, and runtime update checks.
+
+### Highlights
+- **Lite profile**: Adaptive prefetch/cache, map disabled by default, smaller installers (map stack omitted).
+- **Composition grid**: **G** cycles Off → rule of thirds → diagonals → both → golden ratio.
+- **Reliability**: Display-tier preview failures automatically retry full decode; keyboard shortcut help is hover-only on **i**.
+
+---
+
 ## 🚀 Version 2.3.2
 **Release Date: June 8, 2026**
 

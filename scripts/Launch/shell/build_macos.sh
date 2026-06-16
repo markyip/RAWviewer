@@ -25,7 +25,7 @@ else
 fi
 
 VERSION="$(grep -E '^VERSION = ' "$REPO_ROOT/build.py" | sed -E 's/.*"([^"]+)".*/\1/')"
-VERSION="${VERSION:-2.3.2}"
+VERSION="${VERSION:-unknown}"
 echo "RAWviewer macOS Build Script (v${VERSION}, profile: ${PROFILE})"
 echo "======================================"
 echo ""

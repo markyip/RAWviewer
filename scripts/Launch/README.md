@@ -2,7 +2,7 @@
 
 Scripts for local development and packaging. All paths assume the **repository root** as the working directory (each script `cd`s there automatically).
 
-**Version:** release **v2.3.2** (`build.py` `VERSION`, `QApplication` version, `pixi.toml` workspace version).
+**Version:** release **v2.4** (`build.py` `VERSION` is the single source; syncs `app_version.py`, `pixi.toml`, and `Info.plist`).
 
 ## Windows (`.bat`)
 
@@ -96,13 +96,13 @@ chmod +x scripts/Launch/shell/*.sh
 3. Optional **Homebrew** deps for `pyexiv2`: `inih`, `gettext` (`brew install inih gettext` if the wheel build fails).
 4. Installs PyQt6, rawpy, PyInstaller, **scipy**, **pyobjc** (Cocoa / CoreML / Quartz / Vision), and other runtime deps; **pyexiv2** is **required** (`brew install inih gettext` if the wheel build fails).
 5. Uninstalls heavy unused ML stacks (`torch`, `sentence-transformers`, …) to keep the app bundle smaller.
-6. Cleans `build/`, `dist/`, `*.spec`, then runs **`python build.py --profile full|lite`** (version **2.3.2**, updates `Info.plist`; MobileCLIP models are **not** bundled — users download in-app on full builds).
+6. Cleans `build/`, `dist/`, `*.spec`, then runs **`python build.py --profile full|lite`** (version from `build.py` `VERSION`, updates `Info.plist`; MobileCLIP models are **not** bundled — users download in-app on full builds).
 7. Packages release zip with the app bundle, **`install_macos_app.sh`**, **`remove_macos_quarantine.sh`**, and **`Start Here.txt`**.
 
 **End-user install:** extract the zip, then in Terminal:
 
 ```bash
-cd /path/to/RAWviewer-v2.3.2-macOS
+cd /path/to/RAWviewer-v2.4-macOS
 bash install_macos_app.sh
 ```
 
@@ -156,7 +156,7 @@ Pass env vars as arguments: `./scripts/Launch/shell/launch_dev.sh RAWVIEWER_GPU_
 After `build_macos.sh` or `pixi run python build.py`:
 
 1. **Gatekeeper:** `xattr -cr dist/RAWviewer.app` then `open dist/RAWviewer.app`.
-2. **About / version:** Help or logs should report app version **2.3.2**.
+2. **About / version:** Help or logs should report app version **2.4** (from `app_version.py`, synced from `build.py`).
 3. **Single-image view:** Open a JPEG/RAW folder → one file → bottom **share** icon visible.
 4. **Share:** Click share → Qt menu lists Mail / Messages / etc.; pick Mail and confirm attachment path (not an empty spinner).
 5. **Semantic (if models bundled):** Search field accepts a text query; index progress in status area.

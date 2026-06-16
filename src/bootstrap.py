@@ -10,6 +10,9 @@ import urllib.error
 import ssl
 import time
 import winreg
+
+from app_version import APP_VERSION
+
 PIXI_DOWNLOAD_URL = (
     "https://github.com/prefix-dev/pixi/releases/latest/download/"
     "pixi-x86_64-pc-windows-msvc.zip"
@@ -592,7 +595,7 @@ oLink2.Save
                 with winreg.CreateKey(winreg.HKEY_CURRENT_USER, key_path) as key:
                     winreg.SetValueEx(key, "DisplayName", 0, winreg.REG_SZ, "RAWviewer")
                     winreg.SetValueEx(key, "DisplayIcon", 0, winreg.REG_SZ, icon_path)
-                    winreg.SetValueEx(key, "DisplayVersion", 0, winreg.REG_SZ, "2.3.2")
+                    winreg.SetValueEx(key, "DisplayVersion", 0, winreg.REG_SZ, APP_VERSION)
                     winreg.SetValueEx(key, "UninstallString", 0, winreg.REG_SZ, silent_cmd)
                     winreg.SetValueEx(key, "QuietUninstallString", 0, winreg.REG_SZ, silent_cmd)
                     winreg.SetValueEx(key, "InstallLocation", 0, winreg.REG_SZ, target_dir)
