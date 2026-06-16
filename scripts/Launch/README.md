@@ -8,24 +8,38 @@ Scripts for local development and packaging. All paths assume the **repository r
 
 | Script | Purpose |
 |--------|---------|
-| [`bat/run_debug.bat`](bat/run_debug.bat) | Run `src/main.py` with debug logging and `rawviewer_env` if present |
+| [`bat/run_debug.bat`](bat/run_debug.bat) | Run `src/main.py` with debug logging and `rawviewer_env` if present (full profile) |
 | [`bat/clear_cache.bat`](bat/clear_cache.bat) | Wipe memory/disk image caches, semantic index DB, logs, and QSettings (full fresh start) |
-| [`bat/build_windows.bat`](bat/build_windows.bat) | Build Windows app with selectable backend (`cuda` default, or `directml`) |
-| [`bat/build_windows_cuda.bat`](bat/build_windows_cuda.bat) | Build Windows app with CUDA backend (`onnxruntime-gpu`) |
-| [`bat/build_windows_directml.bat`](bat/build_windows_directml.bat) | Build Windows app with DirectML backend (`onnxruntime-directml`) |
-| [`bat/build_windows_all.bat`](bat/build_windows_all.bat) | Build **both** DirectML and CUDA installers into `dist/` |
+| [`bat/build_windows_full.bat`](bat/build_windows_full.bat) | Build **full** Windows installer (`RAWviewer_Setup_CUDA.exe` or `_DirectML.exe`) |
+| [`bat/build_windows_lite.bat`](bat/build_windows_lite.bat) | Build **lite** installer (`RAWviewer_Setup_Lite.exe`) — no semantic/face AI; single path (no CUDA/DirectML split) |
+| [`bat/build_windows.bat`](bat/build_windows.bat) | Same as full build with selectable backend (`cuda` default, or `directml`) |
+| [`bat/build_windows_cuda.bat`](bat/build_windows_cuda.bat) | Full build with CUDA backend (`onnxruntime-gpu`) |
+| [`bat/build_windows_directml.bat`](bat/build_windows_directml.bat) | Full build with DirectML backend (`onnxruntime-directml`) |
+| [`bat/build_windows_all.bat`](bat/build_windows_all.bat) | Build **both** DirectML and CUDA full installers into `dist/` |
+| [`bat/launch_dev_full.bat`](bat/launch_dev_full.bat) | Run from source with `RAWVIEWER_BUILD_PROFILE=full` |
+| [`bat/launch_dev_lite.bat`](bat/launch_dev_lite.bat) | Run from source with `RAWVIEWER_BUILD_PROFILE=lite` (semantic/face off) |
+| [`bat/test_builds.bat`](bat/test_builds.bat) | Smoke test profile resolution + optional `dist/` artifact check |
+
+**Build outputs (Windows):**
+
+| Profile | Installer artifact |
+|---------|-------------------|
+| Full (CUDA) | `dist/RAWviewer_Setup_CUDA.exe` |
+| Full (DirectML) | `dist/RAWviewer_Setup_DirectML.exe` |
+| Lite | `dist/RAWviewer_Setup_Lite.exe` |
 
 From repo root:
 
 ```batch
 scripts\Launch\bat\run_debug.bat
 scripts\Launch\bat\clear_cache.bat
-scripts\Launch\bat\build_windows.bat
-scripts\Launch\bat\build_windows.bat cuda
-scripts\Launch\bat\build_windows.bat directml
-scripts\Launch\bat\build_windows_cuda.bat
-scripts\Launch\bat\build_windows_directml.bat
+scripts\Launch\bat\build_windows_full.bat
+scripts\Launch\bat\build_windows_full.bat directml
+scripts\Launch\bat\build_windows_lite.bat
 scripts\Launch\bat\build_windows_all.bat
+scripts\Launch\bat\launch_dev_full.bat
+scripts\Launch\bat\launch_dev_lite.bat
+scripts\Launch\bat\test_builds.bat
 clear_cache.bat
 ```
 
@@ -33,8 +47,8 @@ clear_cache.bat
 
 | Platform behavior | Status in `main` (v2.3) |
 |-------------------|-------------------------|
-| **Open with another app** (Lightroom, Photoshop, …) | Implemented (`OpenAs_RunDLLW` / `SHOpenWithDialog` + `OAIF_EXEC`). **UI:** bottom share button is currently **hidden on Windows**; wiring exists via `_dispatch_share_bottom` but is not connected to a visible control — see [Known issues](#known-issues-platform). |
-| **System share** (Mail, Teams, …) | `_share_windows_ui_chain` (helper → WinRT → shell verb → clipboard). Dev-only unless the bottom button is re-enabled. |
+| **Open with another app** (Lightroom, Photoshop, …) | Implemented and visible from the bottom external-app button. Single file uses native Open With (`OpenAs_RunDLLW` / `SHOpenWithDialog` + `OAIF_EXEC`); multi-file selection can launch a chosen editor executable. |
+| **System share** (Mail, Teams, …) | Legacy helper code remains (`_share_windows_ui_chain`) but the product path now focuses on opening originals in editing apps. |
 
 Optional WinRT helper (dev):
 
@@ -51,29 +65,44 @@ Official macOS release only; there is no Linux build or installer.
 
 | Script | Purpose |
 |--------|---------|
-| [`shell/launch_dev.sh`](shell/launch_dev.sh) | Run `src/main.py` with verbose dev env (GPU view, share menu, semantic preflight) |
+| [`shell/launch_dev.sh`](shell/launch_dev.sh) | Run `src/main.py` with verbose dev env (full profile defaults) |
+| [`shell/launch_dev_full.sh`](shell/launch_dev_full.sh) | Same as full dev launch (`RAWVIEWER_BUILD_PROFILE=full`) |
+| [`shell/launch_dev_lite.sh`](shell/launch_dev_lite.sh) | Run from source with lite profile (semantic/face off) |
 | [`shell/clear_cache.sh`](shell/clear_cache.sh) | Wipe image/EXIF/semantic caches, logs, and QSettings (full fresh start) |
-| [`shell/build_macos.sh`](shell/build_macos.sh) | macOS build via `rawviewer_env` + `build.py` → `dist/RAWviewer.app` |
+| [`shell/build_macos_full.sh`](shell/build_macos_full.sh) | macOS **full** build → `dist/RAWviewer.app` + release zip |
+| [`shell/build_macos_lite.sh`](shell/build_macos_lite.sh) | macOS **lite** build → `dist/RAWviewer_Lite.app` + release zip |
+| [`shell/build_macos.sh`](shell/build_macos.sh) | Underlying build script; accepts `full` or `lite` as first argument |
+| [`shell/test_builds.sh`](shell/test_builds.sh) | Smoke test profile resolution + optional `dist/` artifact check |
+
+**Build outputs (macOS):**
+
+| Profile | App bundle | Release zip |
+|---------|------------|-------------|
+| Full | `dist/RAWviewer.app` | `dist/RAWviewer-v{VERSION}-macOS.zip` |
+| Lite | `dist/RAWviewer_Lite.app` | `dist/RAWviewer-v{VERSION}-macOS-Lite.zip` |
 
 ```bash
 chmod +x scripts/Launch/shell/*.sh
-./scripts/Launch/shell/launch_dev.sh
+./scripts/Launch/shell/launch_dev_full.sh
+./scripts/Launch/shell/launch_dev_lite.sh
 ./scripts/Launch/shell/clear_cache.sh
-./scripts/Launch/shell/build_macos.sh
+./scripts/Launch/shell/build_macos_full.sh
+./scripts/Launch/shell/build_macos_lite.sh
+./scripts/Launch/shell/test_builds.sh
 ./clear_cache.sh
 ```
 
-**Recommended for day-to-day dev:** `pixi run start` or `./scripts/Launch/shell/launch_dev.sh` (macOS) / `scripts/Launch/bat/run_debug.bat` (Windows).
+**Recommended for day-to-day dev:** `pixi run start` or `./scripts/Launch/shell/launch_dev_full.sh` (macOS) / `scripts/Launch/bat/launch_dev_full.bat` (Windows).
 
-### macOS — build process (`build_macos.sh`)
+### macOS — build process (`build_macos.sh [full|lite]`)
 
 1. **Requires macOS** (`darwin`), `python3` on PATH.
 2. Creates or reuses **`rawviewer_env/`** at repo root.
 3. Optional **Homebrew** deps for `pyexiv2`: `inih`, `gettext` (`brew install inih gettext` if the wheel build fails).
 4. Installs PyQt6, rawpy, PyInstaller, **scipy**, **pyobjc** (Cocoa / CoreML / Quartz / Vision), and other runtime deps; **pyexiv2** is **required** (`brew install inih gettext` if the wheel build fails).
 5. Uninstalls heavy unused ML stacks (`torch`, `sentence-transformers`, …) to keep the app bundle smaller.
-6. Cleans `build/`, `dist/`, `*.spec`, then runs **`python build.py`** (version **2.3.2**, updates `Info.plist`; MobileCLIP models are **not** bundled — users download in-app).
-7. Packages **`dist/RAWviewer-v2.3.2-macOS.zip`** with `RAWviewer.app`, **`install_macos_app.sh`**, **`remove_macos_quarantine.sh`**, and **`Start Here.txt`**.
+6. Cleans `build/`, `dist/`, `*.spec`, then runs **`python build.py --profile full|lite`** (version **2.3.2**, updates `Info.plist`; MobileCLIP models are **not** bundled — users download in-app on full builds).
+7. Packages release zip with the app bundle, **`install_macos_app.sh`**, **`remove_macos_quarantine.sh`**, and **`Start Here.txt`**.
 
 **End-user install:** extract the zip, then in Terminal:
 
@@ -86,11 +115,13 @@ bash install_macos_app.sh
 
 The script clears macOS download quarantine, copies RAWviewer to Applications, and opens it. Double-clicking the unsigned app from a download is often blocked before quarantine is cleared — **Terminal + `bash install_macos_app.sh`** is the supported path.
 
-**Output:** `dist/RAWviewer.app` and `dist/RAWviewer-v2.3.2-macOS.zip`.
+**Output:** `dist/RAWviewer.app` or `dist/RAWviewer_Lite.app`, plus matching release zip under `dist/`.
 
-**Pixi alternative:** `pixi install && pixi run python build.py` (then test with `bash install_macos_app.sh` from a folder containing the app).
+**Pixi alternative:** `pixi install && pixi run python build.py --profile full` (or `--profile lite`).
 
 ### macOS — dev run & preflight (`launch_dev.sh`)
+
+`launch_dev.sh` / `launch_dev_*.sh` prefer `.pixi/envs/default` when `pixi` and `pixi.toml` are present (CoreML for full semantic preflight); otherwise they activate `rawviewer_env/`.
 
 Before `src/main.py`, the script can run (skippable) checks:
 
@@ -151,5 +182,5 @@ Logs: dev console `[SHARE]`; packaged app under `~/Library/Logs/` or paths noted
 
 ## Known issues (platform)
 
-- **Windows Open with:** Native picker code is in `main.py`, but the bottom-bar control is **not shown** on `win32` in current `main` (regression after macOS share work). Re-enable requires showing the button and `clicked` → `_on_share_bottom_button_clicked` (see git `8b3f54a`). Until then, use Explorer **Open with** on the file.
+- **Windows Open with:** The bottom external-app button is shown on `win32`. Single-file Open With uses the native picker; multi-file Open With uses a chosen editor executable because the Windows native picker is file-oriented.
 - **macOS native share popover:** Often spins empty under the Qt6 host; **product default is the Qt share menu**, not the popover.

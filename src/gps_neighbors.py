@@ -153,7 +153,71 @@ def gps_to_decimal(gps_vals: Any, ref: str) -> Optional[float]:
         return None
 
 
-def extract_gps_point(file_path: str) -> Optional[GpsPoint]:
+def _photo_set_id(filename: str) -> str:
+    """Stable id for Pixel/Google COVER + ORIGINAL pairs (same capture)."""
+    upper = filename.upper()
+    if ".RAW-" in upper:
+        return filename.split(".RAW-", 1)[0].upper()
+    stem = Path(filename).stem.upper()
+    for suffix in (
+        ".MP.COVER",
+        ".COVER",
+        ".ORIGINAL",
+        ".MP",
+        ".NIGHT.RAW-01",
+        ".NIGHT",
+    ):
+        if stem.endswith(suffix):
+            stem = stem[: -len(suffix)]
+            break
+    return stem
+
+
+_companion_dir_cache: dict[str, list[str]] = {}
+_corpus_cache: dict[str, tuple[float, list[GpsPoint]]] = {}
+
+
+def clear_gps_corpus_cache(folder: str | None = None) -> None:
+    """Drop cached folder GPS lists (call after folder reload)."""
+    if folder:
+        key = os.path.normpath(os.path.abspath(folder))
+        _corpus_cache.pop(key, None)
+        _companion_dir_cache.pop(key, None)
+    else:
+        _corpus_cache.clear()
+        _companion_dir_cache.clear()
+
+
+def _companion_gps_paths(file_path: str) -> list[str]:
+    """Sibling RAW/ORIGINAL files that often hold GPS when a COVER/preview JPEG does not."""
+    directory = os.path.dirname(file_path)
+    name = os.path.basename(file_path)
+    upper = name.upper()
+    if ".RAW-" not in upper:
+        return []
+    base = name.split(".RAW-", 1)[0]
+    try:
+        entries = _companion_dir_cache.get(directory)
+        if entries is None:
+            entries = os.listdir(directory)
+            _companion_dir_cache[directory] = entries
+    except OSError:
+        return []
+    companions: list[str] = []
+    base_prefix = base.upper() + ".RAW-"
+    for entry in entries:
+        if entry == name:
+            continue
+        entry_upper = entry.upper()
+        if not entry_upper.startswith(base_prefix):
+            continue
+        if "ORIGINAL" in entry_upper or entry_upper.endswith(".DNG"):
+            companions.append(os.path.join(directory, entry))
+    companions.sort(key=lambda p: ("ORIGINAL" not in os.path.basename(p).upper(), p))
+    return companions
+
+
+def _extract_gps_point_from_file(file_path: str) -> Optional[GpsPoint]:
     try:
         tags = metadata_backend.process_file_from_path(
             file_path,
@@ -181,6 +245,23 @@ def extract_gps_point(file_path: str) -> Optional[GpsPoint]:
         "EXIF DateTime",
     )
     return GpsPoint(path=file_path, lat=lat_dec, lon=lon_dec, capture_time=capture_time)
+
+
+def extract_gps_point(file_path: str) -> Optional[GpsPoint]:
+    pt = _extract_gps_point_from_file(file_path)
+    if pt is not None:
+        return pt
+    for companion in _companion_gps_paths(file_path):
+        alt = _extract_gps_point_from_file(companion)
+        if alt is None:
+            continue
+        return GpsPoint(
+            path=file_path,
+            lat=alt.lat,
+            lon=alt.lon,
+            capture_time=alt.capture_time,
+        )
+    return None
 
 
 def scan_folder_gps(folder: Path) -> list[GpsPoint]:
@@ -323,11 +404,24 @@ def map_pins_for_view(view: GpsMapView) -> list[MapPin]:
 
 def corpus_gps_points(file_paths: Iterable[str]) -> list[GpsPoint]:
     """GPS points for the viewer corpus (e.g. current folder file list)."""
+    paths = [p for p in file_paths if p]
+    if not paths:
+        return []
+    folder = os.path.normpath(os.path.dirname(os.path.abspath(paths[0])))
+    try:
+        folder_mtime = os.path.getmtime(folder)
+    except OSError:
+        folder_mtime = 0.0
+    cached = _corpus_cache.get(folder)
+    if cached is not None and cached[0] == folder_mtime:
+        return list(cached[1])
+
     points: list[GpsPoint] = []
-    for file_path in file_paths:
+    for file_path in paths:
         pt = extract_gps_point(file_path)
         if pt:
             points.append(pt)
+    _corpus_cache[folder] = (folder_mtime, list(points))
     return points
 
 
@@ -335,7 +429,7 @@ def current_point_for_path(
     points: list[GpsPoint],
     current_path: Optional[str],
 ) -> Optional[GpsPoint]:
-    if not current_path or not points:
+    if not current_path:
         return None
     target = os.path.normpath(current_path)
     for pt in points:
@@ -345,7 +439,17 @@ def current_point_for_path(
     for pt in points:
         if Path(pt.path).name.lower() == name:
             return pt
-    return None
+    cur_id = _photo_set_id(Path(current_path).name)
+    if cur_id:
+        for pt in points:
+            if _photo_set_id(Path(pt.path).name) == cur_id:
+                return GpsPoint(
+                    path=current_path,
+                    lat=pt.lat,
+                    lon=pt.lon,
+                    capture_time=pt.capture_time,
+                )
+    return extract_gps_point(current_path)
 
 
 def resolve_current_point(

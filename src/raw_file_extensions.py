@@ -66,3 +66,54 @@ RAW_FILE_EXTENSIONS: frozenset[str] = frozenset(
         "sti",
     }
 )
+
+# Standard (non-RAW) image extensions opened by the viewer (without leading dot).
+STANDARD_IMAGE_EXTENSIONS: frozenset[str] = frozenset(
+    {
+        "jpeg",
+        "jpg",
+        "png",
+        "webp",
+        "heif",
+        "heic",
+        "tif",
+        "tiff",
+    }
+)
+
+
+def get_supported_extensions() -> list[str]:
+    """Supported file extensions with leading dot (RAW + standard images)."""
+    return [
+        # RAW formats (aligned with main.py / README)
+        ".cr2",
+        ".cr3",
+        ".nef",
+        ".arw",
+        ".dng",
+        ".orf",
+        ".rw2",
+        ".pef",
+        ".srw",
+        ".x3f",
+        ".raf",
+        ".3fr",
+        ".fff",
+        ".iiq",
+        ".cap",
+        ".erf",
+        ".mef",
+        ".mos",
+        ".nrw",
+        ".rwl",
+        ".srf",
+        # Standard image formats
+        ".jpeg",
+        ".jpg",
+        ".png",
+        ".webp",
+        ".heif",
+        ".heic",
+        ".tif",
+        ".tiff",
+    ]

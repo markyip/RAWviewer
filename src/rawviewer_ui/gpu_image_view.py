@@ -29,6 +29,8 @@ from PyQt6.QtWidgets import (
     QLabel,
 )
 
+from rawviewer_ui.composition_grid import CompositionGridGraphicsItem
+
 
 def _env_true(name: str) -> bool:
     return str(os.environ.get(name, "")).strip().lower() in {"1", "true", "yes", "on"}
@@ -68,6 +70,9 @@ class GpuImageView(QGraphicsView):
         # Dashed focus / subject overlay rectangle (scene coords == image pixels). Uses a
         # cosmetic pen so the on-screen line width stays constant at any zoom level.
         self._overlay_item = None
+        self._grid_item = CompositionGridGraphicsItem()
+        self._scene.addItem(self._grid_item)
+        self._grid_mode = "off"
 
         self._fit_mode = True
         self._zoom_intent_100 = False
@@ -207,6 +212,11 @@ class GpuImageView(QGraphicsView):
         if self._overlay_item is not None:
             self._overlay_item.hide()
 
+    def set_composition_grid_mode(self, mode: str) -> None:
+        """Show composition guide lines in image (scene) coordinates."""
+        self._grid_mode = mode if mode else "off"
+        self._grid_item.set_grid(self._img_w, self._img_h, self._grid_mode)
+
     # ------------------------------------------------------------------ image
     def set_pixmap(self, pixmap: QPixmap, preserve_view=None) -> None:
         """Set the displayed image.
@@ -219,6 +229,7 @@ class GpuImageView(QGraphicsView):
             self._has_pixmap = False
             self._img_w = self._img_h = 0
             self.clear_overlay()
+            self._grid_item.set_grid(0, 0, self._grid_mode)
             self._update_placeholder()
             return
 
@@ -242,6 +253,7 @@ class GpuImageView(QGraphicsView):
         self._scene.setSceneRect(QRectF(0, 0, new_w, new_h))
         self._img_w, self._img_h = new_w, new_h
         self._has_pixmap = True
+        self._grid_item.set_grid(new_w, new_h, self._grid_mode)
         self._update_placeholder()
 
         if self._fit_mode or not capture:
@@ -369,6 +381,7 @@ class GpuImageView(QGraphicsView):
         self._fit_mode = False
         intent_100 = float(scale) >= 1.0 - 1e-4
         self._zoom_intent_100 = intent_100
+        self._grid_item.set_grid(new_w, new_h, self._grid_mode)
         self._update_placeholder()
         fit = self.fit_scale()
         s = float(scale)

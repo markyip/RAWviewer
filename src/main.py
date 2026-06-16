@@ -209,7 +209,10 @@ def _runtime_log_dir() -> str:
     Central runtime log directory.
     Use LocalAppData for both installed and dev runs to avoid packaging stale src/logs.
     """
-    app_data = os.environ.get("LOCALAPPDATA", "C:\\")
+    if os.name == "nt":
+        app_data = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+    else:
+        app_data = os.path.expanduser("~")
     return os.path.join(app_data, "RAWviewer", "logs")
 
 
@@ -1016,7 +1019,7 @@ def _lazy_import_heavy_modules(splash=None):
            EnhancedRAWProcessor, PreloadManager, ThumbnailExtractor, get_image_load_manager, \
            Priority, is_raw_file, load_pixmap_safe, check_memory_cache_for_image, \
            use_libraw_consistent_preview_first, image_covers_sensor_resolution, \
-           use_progressive_raw_loading, metadata_index_idle_delay_ms, ImageHistogramWidget, ThumbnailLabel, ExternalJustifiedGallery, \
+           use_progressive_raw_loading, metadata_index_idle_delay_ms, ImageHistogramWidget, ImageLocationMapWidget, ThumbnailLabel, ExternalJustifiedGallery, \
            exif_backend_mode, exif_orientation_after_cw90, has_pyexiv2, process_file_from_path
     
     def _update_splash(msg):
@@ -1104,8 +1107,17 @@ def _lazy_import_heavy_modules(splash=None):
     from image_histogram import ImageHistogramWidget as _ImageHistogramWidget
     ImageHistogramWidget = _ImageHistogramWidget
 
-    from rawviewer_ui.location_map_overlay import ImageLocationMapWidget as _ImageLocationMapWidget
-    ImageLocationMapWidget = _ImageLocationMapWidget
+    try:
+        from rawviewer_profile import location_map_enabled
+
+        if location_map_enabled():
+            from rawviewer_ui.location_map_overlay import (
+                ImageLocationMapWidget as _ImageLocationMapWidget,
+            )
+
+            ImageLocationMapWidget = _ImageLocationMapWidget
+    except Exception:
+        ImageLocationMapWidget = None
 
     _update_splash("Loading UI components...")
     from rawviewer_ui.widgets import ThumbnailLabel as _ThumbnailLabel
@@ -5934,6 +5946,9 @@ class SingleImageViewOverlay(QWidget):
         self._scroll.lower()
         if self._gpu_view is not None:
             self._gpu_view.setGeometry(0, 0, self.width(), self.height())
+        viewer = getattr(self, "_viewer", None)
+        if viewer is not None and hasattr(viewer, "_try_apply_pending_overlay_positions"):
+            viewer._try_apply_pending_overlay_positions()
         self._layout_filmstrip()
         self._layout_histogram()
         self._layout_map()
@@ -5974,6 +5989,51 @@ class SingleImageViewOverlay(QWidget):
 
     def mark_map_user_moved(self):
         self._map_user_placed = True
+        viewer = getattr(self, "_viewer", None)
+        if viewer is not None and hasattr(viewer, "schedule_save_session_state"):
+            viewer.schedule_save_session_state()
+
+    def overlay_session_snapshot(self) -> dict:
+        """Normalized overlay positions (0–1) for cross-session restore."""
+        pw, ph = max(1, self.width()), max(1, self.height())
+        out: dict = {}
+        if self._hist_user_placed:
+            out["histogram"] = {"x": self._hist.x() / pw, "y": self._hist.y() / ph}
+        if self._map is not None and self._map_user_placed:
+            out["map"] = {"x": self._map.x() / pw, "y": self._map.y() / ph}
+        return out
+
+    def apply_overlay_session_positions(self, data: dict) -> None:
+        if not isinstance(data, dict):
+            return
+        pw, ph = max(1, self.width()), max(1, self.height())
+        hist = data.get("histogram")
+        if isinstance(hist, dict):
+            try:
+                x = int(float(hist["x"]) * pw)
+                y = int(float(hist["y"]) * ph)
+                hw, hh = self._hist.width(), self._hist.height()
+                self._hist.move(
+                    min(max(0, x), max(0, pw - hw)),
+                    min(max(0, y), max(0, ph - hh)),
+                )
+                self._hist_user_placed = True
+            except (KeyError, TypeError, ValueError):
+                pass
+        if self._map is not None:
+            map_data = data.get("map")
+            if isinstance(map_data, dict):
+                try:
+                    x = int(float(map_data["x"]) * pw)
+                    y = int(float(map_data["y"]) * ph)
+                    mw, mh = self._map.width(), self._map.height()
+                    self._map.move(
+                        min(max(0, x), max(0, pw - mw)),
+                        min(max(0, y), max(0, ph - mh)),
+                    )
+                    self._map_user_placed = True
+                except (KeyError, TypeError, ValueError):
+                    pass
 
     def relayout_map(self):
         self._layout_map()
@@ -6035,6 +6095,9 @@ class SingleImageViewOverlay(QWidget):
 
     def mark_histogram_user_moved(self):
         self._hist_user_placed = True
+        viewer = getattr(self, "_viewer", None)
+        if viewer is not None and hasattr(viewer, "schedule_save_session_state"):
+            viewer.schedule_save_session_state()
 
     def relayout_histogram(self):
         self._layout_histogram()
@@ -6678,6 +6741,10 @@ class RAWImageViewer(QMainWindow):
         self._map_user_hidden = False
         self._map_online = None
         self._map_gallery_title = None
+        self._map_gallery_return_path = None
+        self._map_sync_timer = QTimer(self)
+        self._map_sync_timer.setSingleShot(True)
+        self._map_sync_timer.timeout.connect(self._sync_location_map_now)
         self.thumbnail_threads = []  # Track running thumbnail threads
         
         # View mode: 'single' for single image view, 'gallery' for gallery view
@@ -6698,6 +6765,7 @@ class RAWImageViewer(QMainWindow):
         self._loading_from_gallery = False  # Flag for gallery loading
         self._loading_from_filmstrip = False  # Flag for filmstrip loading
         self._gallery_selected_paths = set()  # normpath keys for multi-select in gallery
+        self._gallery_bookmarked_paths = set()  # normpath keys for bookmarked share targets
         self._gallery_preview_pending_full = False  # Gallery thumb on screen; full-res pending
         self._gallery_instant_display_quality = False  # True when gallery→single already shows preview/full
         self._skip_resolution_crossfade_once = False
@@ -6751,6 +6819,8 @@ class RAWImageViewer(QMainWindow):
 
         # Focus-area dashed outline from EXIF / maker AF (toggle with F)
         self._focus_subject_outline_active = False
+        # Composition guide overlay (toggle with G): off → 3×3 → diagonal → both → golden
+        self._composition_grid_mode = "off"
         # EXIF SubjectArea / maker AF (pyexiv2/Exiv2) in current_pixmap coordinates
         self._focus_subject_rect_image: QRect | None = None
         # "makernote_af" (exifread Canon AF) vs "exif_subject" (SubjectArea/Location via Exiv2)
@@ -6816,21 +6886,28 @@ class RAWImageViewer(QMainWindow):
         safe_print("  [RAWImageViewer] Initializing UI...", flush=True)
         self.init_ui()
         safe_print("  [RAWImageViewer] UI initialized", flush=True)
+        self._load_persisted_overlay_positions()
 
         # macOS native title bar tweaks disabled for stability.
 
         # Display cache initialization message
         safe_print("  [RAWImageViewer] Getting cache stats...", flush=True)
-        cache_stats = self.image_cache.get_cache_stats()
-        memory_info = cache_stats['memory_info']
-        safe_print(f"✓ Enhanced image cache initialized", flush=True)
-        safe_print(f"  Cache budget: {cache_stats['cache_budget_mb']}MB", flush=True)
-        safe_print(
-            f"  Max full images: {cache_stats['full_image_cache']['max_size']}", flush=True)
-        safe_print(
-            f"  Max thumbnails: {cache_stats['thumbnail_cache']['max_size']}", flush=True)
-        safe_print(
-            f"  Available memory: {memory_info['system_available_gb']:.1f}GB", flush=True)
+        try:
+            cache_stats = self.image_cache.get_cache_stats()
+            memory_info = cache_stats["memory_info"]
+            safe_print(f"✓ Enhanced image cache initialized", flush=True)
+            safe_print(f"  Cache budget: {cache_stats['cache_budget_mb']}MB", flush=True)
+            safe_print(
+                f"  Max full images: {cache_stats['full_image_cache']['max_size']}", flush=True)
+            safe_print(
+                f"  Max thumbnails: {cache_stats['thumbnail_cache']['max_size']}", flush=True)
+            safe_print(
+                f"  Available memory: {memory_info['system_available_gb']:.1f}GB", flush=True)
+        except Exception as exc:
+            safe_print(
+                f"  [RAWImageViewer] Cache stats unavailable ({exc}); continuing startup",
+                flush=True,
+            )
         QTimer.singleShot(1000, self._cleanup_old_image_cache)
 
         # Restore last folder / file / view mode (opt-out: RAWVIEWER_DISABLE_SESSION_RESTORE=1)
@@ -6890,10 +6967,24 @@ class RAWImageViewer(QMainWindow):
             and oh > 0
             and not base.isNull()
         )
-        if draw_exif_subj:
+        grid_mode = getattr(self, "_composition_grid_mode", "off")
+        draw_grid = (
+            grid_mode != "off"
+            and self.current_pixmap is not None
+            and not self.current_pixmap.isNull()
+            and ow > 0
+            and oh > 0
+            and not base.isNull()
+        )
+        if draw_exif_subj or draw_grid:
             blended = base.copy()
             p = QPainter(blended)
-            self._draw_focus_subject_outline_on_base_painter(p, base, subj)
+            if draw_exif_subj:
+                self._draw_focus_subject_outline_on_base_painter(p, base, subj)
+            if draw_grid:
+                from rawviewer_ui.composition_grid import draw_composition_grid
+
+                draw_composition_grid(p, ow, oh, grid_mode)
             p.end()
         pending_size = blended.size()
 
@@ -7190,7 +7281,7 @@ class RAWImageViewer(QMainWindow):
             self._on_single_view_content_displayed()
         finally:
             self._orientation_already_applied = False
-        self._restore_single_view_keyboard_focus()
+        self._restore_keyboard_focus()
         self.save_session_state()
         try:
             if self.image_files and file_path in self.image_files:
@@ -7864,6 +7955,26 @@ class RAWImageViewer(QMainWindow):
         self.update_status_bar()
         return True
 
+    def _toggle_composition_grid(self) -> bool:
+        """Cycle composition guides: off → 3×3 → diagonal → 3×3+diagonal → golden."""
+        if getattr(self, "view_mode", "single") != "single":
+            return False
+        from rawviewer_ui.composition_grid import grid_mode_label, next_grid_mode
+
+        self._composition_grid_mode = next_grid_mode(self._composition_grid_mode)
+        self._sync_composition_grid_display()
+        self.status_bar.showMessage(
+            f"Composition guide: {grid_mode_label(self._composition_grid_mode)}",
+            2500,
+        )
+        return True
+
+    def _sync_composition_grid_display(self) -> None:
+        gv = getattr(self, "gpu_view", None)
+        if gv is not None:
+            gv.set_composition_grid_mode(getattr(self, "_composition_grid_mode", "off"))
+        self._redraw_single_view_pixmap_without_relayout()
+
     def _refresh_focus_subject_rect_from_exif(self) -> None:
         """Populate _focus_subject_rect_image from pyexiv2, then exifread Subject*, then Canon AF.
 
@@ -8220,9 +8331,10 @@ class RAWImageViewer(QMainWindow):
 
     def _redraw_single_view_pixmap_without_relayout(self) -> None:
         if getattr(self, "gpu_view", None) is not None:
-            # GPU path: the dashed focus/subject outline is a scene overlay, not painted
-            # onto the pixmap, so just refresh that overlay without touching the transform.
+            # GPU path: focus and composition guides are scene overlays, not painted
+            # onto the pixmap, so just refresh those without touching the transform.
             self._gpu_update_focus_overlay()
+            self._gpu_update_composition_grid()
             return
         if not self.current_pixmap:
             return
@@ -8244,6 +8356,13 @@ class RAWImageViewer(QMainWindow):
             gv.set_overlay_rect(rect, color)
         else:
             gv.clear_overlay()
+
+    def _gpu_update_composition_grid(self) -> None:
+        """Reflect the current composition guide onto the GPU scene overlay."""
+        gv = getattr(self, "gpu_view", None)
+        if gv is None:
+            return
+        gv.set_composition_grid_mode(getattr(self, "_composition_grid_mode", "off"))
 
     def _maybe_refresh_focus_subject_outline_after_display(self) -> None:
         if (
@@ -8652,6 +8771,7 @@ class RAWImageViewer(QMainWindow):
             idx = getattr(self, "current_file_index", -1)
             bar.set_files(files, bulk_metadata=bulk, select_index=idx)
             self._sync_filmstrip_index(center=True)
+            self._refresh_filmstrip_bookmark_visuals()
             QTimer.singleShot(0, self._prefetch_filmstrip_thumbnails)
         finally:
             self._sync_filmstrip_in_progress = False
@@ -9464,6 +9584,8 @@ class RAWImageViewer(QMainWindow):
             self._flush_deferred_sensor_full_decode(file_path)
         if self._retry_composite_dng_embedded_preview(file_path, error_message):
             return
+        if self._retry_display_tier_with_full_decode(file_path, error_message):
+            return
         if (
             getattr(self, "view_mode", "single") == "single"
             and not self._single_view_pixels_on_screen(file_path)
@@ -9537,6 +9659,37 @@ class RAWImageViewer(QMainWindow):
             parent_dir = os.path.dirname(file_path)
             if not os.path.exists(parent_dir):
                 self.reset_to_initial_state()
+
+    def _retry_display_tier_with_full_decode(
+        self, file_path: str, error_message: str
+    ) -> bool:
+        """Auto-fallback: display-tier preview failed -> queue sensor full decode once."""
+        from common_image_loader import is_raw_file
+
+        lower_err = str(error_message or "").lower()
+        if "display-tier preview extraction failed" not in lower_err:
+            return False
+        if not is_raw_file(file_path):
+            return False
+
+        norm_p = _norm_path(file_path)
+        retry_token = (
+            norm_p,
+            int(getattr(self, "_single_view_display_generation", 0)),
+        )
+        if retry_token == getattr(self, "_display_tier_full_retry_token", None):
+            return False
+        self._display_tier_full_retry_token = retry_token
+
+        try:
+            self._queue_sensor_full_decode(file_path, priority_current=True)
+            self.status_bar.showMessage(
+                f"{os.path.basename(file_path)}: preview unavailable, retrying full decode...",
+                4000,
+            )
+            return True
+        except Exception:
+            return False
 
     def on_manager_progress(self, file_path: str, status_message: str):
         """處理 ImageLoadManager 的進度更新信號"""
@@ -9874,12 +10027,12 @@ class RAWImageViewer(QMainWindow):
             "Click and drag to pan when zoomed\n"
             "Use Left/Right arrow keys to navigate between images (preserves zoom if zoomed in)\n"
             "Bottom bar: Share and other controls when images are loaded\n"
-            "Gallery: Ctrl/Cmd+drag over thumbnails to toggle selection\n"
-            "Gallery: Delete / Down Arrow on selection to remove or move to Discard\n"
-            "Single view: Down Arrow to move the current image to Discard folder\n"
-            "Single view: Delete to remove the current image\n"
+            "Up Arrow — Bookmark / unbookmark image(s)\n"
+            "Down Arrow — Move image(s) to Discard folder\n"
+            "Delete — Delete image(s)\n"
+            "Gallery: Ctrl/Cmd+drag over thumbnails — Toggle selection\n"
             "H — Show/hide histogram\n"
-            "M — Show/hide GPS map\n"
+            "G — Cycle composition guide (off / 3×3 / diagonal / both / golden)\n"
             "F — Show/hide focus point\n"
             "Scroll wheel (fit-to-window): Scroll down = next image, Scroll up = previous image\n"
             "Horizontal wheel (zoom mode): Scroll left/right to pan the image"
@@ -9899,11 +10052,13 @@ class RAWImageViewer(QMainWindow):
         self.scroll_area.viewport().installEventFilter(self)
 
         self.single_image_histogram = ImageHistogramWidget()
+        self.single_image_histogram.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._histogram_overlay_visible = True
 
         self.single_image_location_map = None
         if ImageLocationMapWidget is not None:
             self.single_image_location_map = ImageLocationMapWidget()
+            self.single_image_location_map.setFocusPolicy(Qt.FocusPolicy.NoFocus)
             self.single_image_location_map.set_cluster_click_handler(self._on_map_cluster_clicked)
             self.single_image_location_map.hide()
 
@@ -9922,7 +10077,6 @@ class RAWImageViewer(QMainWindow):
                 self.gpu_view.doubleClickedAt.connect(self._on_gpu_double_clicked)
                 self.gpu_view._shortcut_handler = self._handle_app_shortcut
             except Exception as _gpu_exc:
-                import logging
                 logging.getLogger(__name__).warning(
                     "GPU view requested but failed to initialize: %s", _gpu_exc
                 )
@@ -10075,14 +10229,23 @@ class RAWImageViewer(QMainWindow):
         self.share_bottom_button = QPushButton()
         self.share_bottom_button.setFlat(True)
         self.share_bottom_button.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        self.share_bottom_button.setIcon(qta.icon("fa5s.share-alt", color="#B0B0B0"))
+        self.share_bottom_button.setIcon(qta.icon("fa5s.external-link-alt", color="#B0B0B0"))
         self.share_bottom_button.setIconSize(QSize(20, 20))
         self.share_bottom_button.setStyleSheet(bottom_icon_btn_style)
-        # pressed (mouse-down), not clicked (mouse-up): NSSharingServicePicker must not
-        # open on mouseUp or the macOS share sheet spins empty (AppKit console warning).
-        self.share_bottom_button.pressed.connect(self._share_current_image_os)
+        self.share_bottom_button.setToolTip("Open selected image(s) in another app")
+        self.share_bottom_button.clicked.connect(self._on_share_bottom_button_clicked)
         self.share_bottom_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.share_bottom_button.hide()
+
+        self.batch_mark_indicator = QLabel()
+        self.batch_mark_indicator.setObjectName("batchMarkIndicator")
+        self.batch_mark_indicator.setFixedSize(20, 20)
+        self.batch_mark_indicator.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.batch_mark_indicator.setPixmap(
+            qta.icon("fa5s.star", color="#FFD700").pixmap(QSize(16, 16))
+        )
+        self.batch_mark_indicator.setToolTip("Bookmarked for opening in another app (↑ to toggle)")
+        self.batch_mark_indicator.hide()
 
         self.slideshow_bottom_button = QPushButton()
         self.slideshow_bottom_button.setObjectName("slideshowBottomButton")
@@ -10236,7 +10399,6 @@ class RAWImageViewer(QMainWindow):
         self.shortcuts_hint_button.setFixedSize(22, 22)
         self.shortcuts_hint_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.shortcuts_hint_button.setToolTip(self._keyboard_shortcuts_tooltip())
-        self.shortcuts_hint_button.clicked.connect(self.show_keyboard_shortcuts)
         self.shortcuts_hint_button.setStyleSheet("""
             QPushButton {
                 color: #888888;
@@ -10280,6 +10442,8 @@ class RAWImageViewer(QMainWindow):
         right_status_actions_layout = QHBoxLayout(self.right_status_actions)
         right_status_actions_layout.setContentsMargins(0, 0, 0, 0)
         right_status_actions_layout.setSpacing(8)
+        right_status_actions_layout.addWidget(
+            self.batch_mark_indicator, 0, alignment=Qt.AlignmentFlag.AlignVCenter)
         right_status_actions_layout.addWidget(
             self.share_bottom_button, 0, alignment=Qt.AlignmentFlag.AlignVCenter)
         right_status_actions_layout.addWidget(
@@ -10329,6 +10493,9 @@ class RAWImageViewer(QMainWindow):
             self.gpu_view.viewport().setMouseTracking(True)
             self.gpu_view.installEventFilter(self)
             self.gpu_view.viewport().installEventFilter(self)
+        self.single_image_histogram.installEventFilter(self)
+        if self.single_image_location_map is not None:
+            self.single_image_location_map.installEventFilter(self)
 
         # F must work even when no child widget accepts keyboard focus (QLabel default
         # is NoFocus). WindowShortcut fires while this window is active.
@@ -10342,6 +10509,16 @@ class RAWImageViewer(QMainWindow):
         self._shortcut_toggle_focus_subject_outline.activated.connect(
             self._toggle_focus_subject_outline
         )
+        self._shortcut_toggle_composition_grid = QShortcut(
+            QKeySequence(Qt.Key.Key_G), self
+        )
+        self._shortcut_toggle_composition_grid.setContext(
+            Qt.ShortcutContext.WindowShortcut
+        )
+        self._shortcut_toggle_composition_grid.setAutoRepeat(False)
+        self._shortcut_toggle_composition_grid.activated.connect(
+            self._toggle_composition_grid
+        )
 
         # Arrow keys must work when the GPU OpenGL viewport (or other NoFocus
         # children) holds focus; WindowShortcut matches the F-key pattern.
@@ -10351,6 +10528,19 @@ class RAWImageViewer(QMainWindow):
         self._shortcut_nav_next = QShortcut(QKeySequence(Qt.Key.Key_Right), self)
         self._shortcut_nav_next.setContext(Qt.ShortcutContext.WindowShortcut)
         self._shortcut_nav_next.activated.connect(self._shortcut_activate_nav_next)
+
+        self._shortcut_escape = QShortcut(QKeySequence(Qt.Key.Key_Escape), self)
+        self._shortcut_escape.setContext(Qt.ShortcutContext.WindowShortcut)
+        self._shortcut_escape.setAutoRepeat(False)
+        self._shortcut_escape.activated.connect(self._shortcut_activate_escape)
+
+        self._shortcut_gallery_up = QShortcut(QKeySequence(Qt.Key.Key_Up), self)
+        self._shortcut_gallery_up.setContext(Qt.ShortcutContext.WindowShortcut)
+        self._shortcut_gallery_up.activated.connect(self._shortcut_activate_gallery_up)
+
+        self._shortcut_gallery_down = QShortcut(QKeySequence(Qt.Key.Key_Down), self)
+        self._shortcut_gallery_down.setContext(Qt.ShortcutContext.WindowShortcut)
+        self._shortcut_gallery_down.activated.connect(self._shortcut_activate_gallery_down)
 
         self._sync_single_image_histogram()
 
@@ -10368,6 +10558,7 @@ class RAWImageViewer(QMainWindow):
         super().showEvent(event)
         if platform.system() == "Darwin":
             self._apply_macos_titlebar_appearance()
+        QTimer.singleShot(0, self._restore_keyboard_focus)
 
     def create_menu_bar(self):
         """Create the menu bar with File and Keyboard Shortcuts action"""
@@ -12369,6 +12560,59 @@ class RAWImageViewer(QMainWindow):
         digest = hashlib.sha256(norm.encode("utf-8")).hexdigest()[:24]
         return f"semantic_index_incomplete/{digest}"
 
+    def _gallery_bookmarks_settings_key(self, folder: str) -> str:
+        import hashlib
+
+        norm = os.path.normcase(os.path.normpath(folder or ""))
+        digest = hashlib.sha256(norm.encode("utf-8")).hexdigest()[:24]
+        return f"gallery_bookmarks/{digest}"
+
+    def _load_persisted_gallery_bookmarks(self, folder: str) -> set:
+        """Restore bookmarked image norm paths for a folder from QSettings."""
+        import json
+
+        if not folder:
+            return set()
+        try:
+            raw = self.get_settings().value(self._gallery_bookmarks_settings_key(folder), "")
+            if not raw:
+                return set()
+            if isinstance(raw, (bytes, bytearray)):
+                raw = raw.decode("utf-8", errors="ignore")
+            data = json.loads(raw)
+            if not isinstance(data, list):
+                return set()
+            return {_norm_path(str(p)) for p in data if p}
+        except Exception:
+            return set()
+
+    def _save_persisted_gallery_bookmarks(self) -> None:
+        """Persist bookmarked image norm paths for the current folder."""
+        import json
+
+        folder = getattr(self, "current_folder", None)
+        if not folder:
+            return
+        try:
+            paths = sorted(getattr(self, "_gallery_bookmarked_paths", set()) or set())
+            key = self._gallery_bookmarks_settings_key(folder)
+            if paths:
+                self.get_settings().setValue(
+                    key,
+                    json.dumps(paths, separators=(",", ":")),
+                )
+            else:
+                self.get_settings().remove(key)
+        except Exception:
+            pass
+
+    def _reconcile_gallery_bookmarks_with_folder(self) -> None:
+        """Drop stale bookmark keys that are no longer in the current folder."""
+        valid = {_norm_path(p) for p in (getattr(self, "image_files", None) or [])}
+        bookmarked = getattr(self, "_gallery_bookmarked_paths", set()) or set()
+        self._gallery_bookmarked_paths = bookmarked & valid
+        self._apply_gallery_bookmark_visual_updates()
+
     def _set_semantic_index_incomplete(self, folder: str, incomplete: bool) -> None:
         if not folder:
             return
@@ -12717,8 +12961,8 @@ class RAWImageViewer(QMainWindow):
             )
             self.raw_toggle_button.setStyleSheet("""
                 QPushButton {
-                    color: #FFFFFF;
-                    font-size: 13px;
+                    color: #D2D2D2;
+                    font-size: 16px;
                     font-weight: 700;
                     padding: 4px 8px;
                     border: none;
@@ -12729,7 +12973,7 @@ class RAWImageViewer(QMainWindow):
                     max-height: 28px;
                 }
                 QPushButton:hover {
-                    color: #FFFFFF;
+                    color: #E4E4E4;
                     background-color: rgba(255, 255, 255, 0.08);
                     border-radius: 4px;
                 }
@@ -13058,6 +13302,7 @@ class RAWImageViewer(QMainWindow):
         if self.current_file_path:
             logger.info(f"[VIEW_MODE] Image reload: {load_time:.3f}s")
         self.setFocus()
+        QTimer.singleShot(0, self._restore_keyboard_focus)
         logger.info(f"[VIEW_MODE] ========== SINGLE VIEW RENDERING COMPLETED in {total_time:.3f}s ==========")
     
     # GALLERY FUNCTIONALITY COMMENTED OUT
@@ -13179,7 +13424,9 @@ class RAWImageViewer(QMainWindow):
         # Single-image actions stay in update_status_bar for single mode only; hide here
         # because we do not call update_status_bar() when entering gallery (counter text differs).
         if hasattr(self, "share_bottom_button"):
-            self._sync_gallery_selection_chrome()
+            self._sync_share_button_visibility()
+        if hasattr(self, "batch_mark_indicator"):
+            self.batch_mark_indicator.hide()
         if hasattr(self, "slideshow_bottom_button"):
             self.slideshow_bottom_button.hide()
         if hasattr(self, "rotate_bottom_button"):
@@ -13198,6 +13445,8 @@ class RAWImageViewer(QMainWindow):
         
         # Update gallery content
         QTimer.singleShot(50, self._update_gallery_view)
+        QTimer.singleShot(120, self._refresh_gallery_bookmark_visuals)
+        QTimer.singleShot(0, self._restore_keyboard_focus)
         logger.debug("[MODESWITCH] _show_gallery_view scheduled gallery update")
 
     def _remove_orphan_gallery_containers(self) -> None:
@@ -13299,6 +13548,7 @@ class RAWImageViewer(QMainWindow):
 
         # Create optimized justified gallery widget from rawviewer_ui module.
         justified_gallery = ExternalJustifiedGallery([], self)  # Empty list initially, will be populated
+        justified_gallery.installEventFilter(self)
         gallery_scroll.setWidget(justified_gallery)
         gallery_layout.addWidget(gallery_scroll)
 
@@ -14652,11 +14902,12 @@ class RAWImageViewer(QMainWindow):
         if gj is not None and hasattr(gj, "refresh_gallery_selection_visuals"):
             gj.refresh_gallery_selection_visuals()
         self._sync_gallery_selection_chrome()
+        self._sync_share_button_visibility()
 
     @staticmethod
     def _share_button_platform_enabled() -> bool:
-        """Share bottom button is macOS-only (system share sheet)."""
-        return sys.platform == "darwin"
+        """Bottom action opens selected image(s) in another app on desktop platforms."""
+        return sys.platform in ("darwin", "win32")
 
     def _sync_gallery_selection_chrome(self) -> None:
         """Status text when gallery multi-select is active."""
@@ -14670,18 +14921,140 @@ class RAWImageViewer(QMainWindow):
                 5000,
             )
 
+    def _gallery_has_bookmarks(self) -> bool:
+        return bool(getattr(self, "_gallery_bookmarked_paths", None))
+
+    def _is_gallery_path_bookmarked(self, file_path: str) -> bool:
+        return _norm_path(file_path) in getattr(self, "_gallery_bookmarked_paths", set())
+
+    def _gallery_toggle_path_bookmark(self, file_path: str) -> None:
+        canonical = self._gallery_canonical_path(file_path)
+        if not canonical:
+            return
+        key = _norm_path(canonical)
+        bookmarked = getattr(self, "_gallery_bookmarked_paths", set())
+        if key in bookmarked:
+            bookmarked.discard(key)
+            msg = "Bookmark removed"
+        else:
+            bookmarked.add(key)
+            msg = "Bookmarked for opening in another app"
+        self._gallery_bookmarked_paths = bookmarked
+        self._apply_gallery_bookmark_visual_updates()
+        if hasattr(self, "status_bar") and self.status_bar:
+            self.status_bar.showMessage(msg, 2000)
+
+    def _apply_gallery_bookmark_visual_updates(self) -> None:
+        self._refresh_filmstrip_bookmark_visuals()
+        self._refresh_gallery_bookmark_visuals()
+        self._sync_bookmark_indicator()
+        self._sync_share_button_visibility()
+        self._save_persisted_gallery_bookmarks()
+
+    def _gallery_toggle_selected_bookmarks(self) -> None:
+        """Toggle bookmark state for each selected gallery image."""
+        paths = self._gallery_selected_canonical_paths()
+        if not paths:
+            return
+        bookmarked = getattr(self, "_gallery_bookmarked_paths", set())
+        added = 0
+        removed = 0
+        for p in paths:
+            canonical = self._gallery_canonical_path(p)
+            if not canonical:
+                continue
+            key = _norm_path(canonical)
+            if key in bookmarked:
+                bookmarked.discard(key)
+                removed += 1
+            else:
+                bookmarked.add(key)
+                added += 1
+        self._gallery_bookmarked_paths = bookmarked
+        self._apply_gallery_bookmark_visual_updates()
+        if hasattr(self, "status_bar") and self.status_bar:
+            if added and not removed:
+                msg = f"Bookmarked {added} image{'s' if added != 1 else ''}"
+            elif removed and not added:
+                msg = f"Removed bookmark from {removed} image{'s' if removed != 1 else ''}"
+            else:
+                msg = (
+                    f"Updated bookmarks ({added} added, {removed} removed)"
+                    if added or removed
+                    else "No bookmarks changed"
+                )
+            self.status_bar.showMessage(msg, 2500)
+
+    def _gallery_bookmarked_canonical_paths(self) -> List[str]:
+        bookmarked = getattr(self, "_gallery_bookmarked_paths", set()) or set()
+        if not bookmarked:
+            return []
+        out: List[str] = []
+        for p in self.image_files or []:
+            if _norm_path(p) in bookmarked:
+                out.append(p)
+        return out
+
+    def _current_image_bookmarked(self) -> bool:
+        path = getattr(self, "current_file_path", None)
+        if not path:
+            return False
+        return _norm_path(path) in getattr(self, "_gallery_bookmarked_paths", set())
+
+    def _sync_bookmark_indicator(self) -> None:
+        indicator = getattr(self, "batch_mark_indicator", None)
+        if indicator is None:
+            return
+        show = (
+            getattr(self, "view_mode", "single") == "single"
+            and bool(getattr(self, "image_files", None))
+            and self._current_image_bookmarked()
+        )
+        indicator.setVisible(show)
+
+    def _refresh_filmstrip_bookmark_visuals(self) -> None:
+        bar = self._filmstrip_bar()
+        if bar is not None and hasattr(bar, "set_bookmarked_norm_paths"):
+            bar.set_bookmarked_norm_paths(
+                getattr(self, "_gallery_bookmarked_paths", set()) or set()
+            )
+        self._sync_bookmark_indicator()
+
+    def _refresh_gallery_bookmark_visuals(self) -> None:
+        gj = getattr(self, "gallery_justified", None)
+        if gj is not None and hasattr(gj, "refresh_gallery_bookmark_visuals"):
+            gj.refresh_gallery_bookmark_visuals()
+
+    def _sync_share_button_visibility(self) -> None:
+        btn = getattr(self, "share_bottom_button", None)
+        if btn is None:
+            return
+        if not self._share_button_platform_enabled():
+            btn.hide()
+            return
+        vm = getattr(self, "view_mode", "single")
+        if vm == "single":
+            vis = bool(self.image_files)
+        else:
+            vis = self._gallery_has_selection() or self._gallery_has_bookmarks()
+        btn.setVisible(vis)
+
     def _gallery_share_target_paths(self) -> List[str]:
-        """Paths to share: gallery selection when active, else current single file."""
-        if getattr(self, "view_mode", "") == "gallery" and self._gallery_has_selection():
-            return [
-                os.path.abspath(p)
-                for p in self._gallery_selected_canonical_paths()
-                if p and os.path.isfile(p)
-            ]
-        p = getattr(self, "current_file_path", None)
-        if p and os.path.isfile(p):
-            return [os.path.abspath(p)]
-        return []
+        """Paths to open/share: gallery selection, else bookmarks; single view uses current file."""
+        vm = getattr(self, "view_mode", "")
+        if vm == "gallery":
+            if self._gallery_has_selection():
+                paths = self._gallery_selected_canonical_paths()
+            else:
+                paths = self._gallery_bookmarked_canonical_paths()
+        else:
+            p = getattr(self, "current_file_path", None)
+            paths = [p] if p else []
+        return [
+            os.path.abspath(p)
+            for p in paths
+            if p and os.path.isfile(p)
+        ]
 
     def _gallery_toggle_path_selection(self, file_path: str) -> None:
         canonical = self._gallery_canonical_path(file_path)
@@ -14698,6 +15071,7 @@ class RAWImageViewer(QMainWindow):
         if gj is not None and hasattr(gj, "refresh_gallery_selection_visuals"):
             gj.refresh_gallery_selection_visuals()
         self._sync_gallery_selection_chrome()
+        self._sync_share_button_visibility()
 
     def _gallery_selected_canonical_paths(self) -> List[str]:
         selected = getattr(self, "_gallery_selected_paths", set()) or set()
@@ -14744,6 +15118,13 @@ class RAWImageViewer(QMainWindow):
         self.image_files = [
             p for p in self.image_files if _norm_path(p) not in remove_keys
         ]
+        bookmarked = getattr(self, "_gallery_bookmarked_paths", None)
+        if bookmarked:
+            bookmarked -= remove_keys
+            self._gallery_bookmarked_paths = bookmarked
+        selected = getattr(self, "_gallery_selected_paths", None)
+        if selected:
+            selected -= remove_keys
         if self.current_file_path and _norm_path(self.current_file_path) in remove_keys:
             if self.image_files:
                 self.current_file_index = min(
@@ -14758,6 +15139,10 @@ class RAWImageViewer(QMainWindow):
 
     def _after_gallery_bulk_file_removal(self, anchor_path: Optional[str] = None) -> None:
         self._clear_gallery_selection()
+        self._refresh_filmstrip_bookmark_visuals()
+        self._refresh_gallery_bookmark_visuals()
+        self._sync_share_button_visibility()
+        self._save_persisted_gallery_bookmarks()
         if not self.image_files:
             had_semantic_scope = bool(
                 self._semantic_search_backup_files or self._semantic_search_corpus_files
@@ -15362,6 +15747,67 @@ class RAWImageViewer(QMainWindow):
         url = panel.URL()
         return url.path() if url is not None else ""
 
+    def _choose_macos_editing_app_applescript(self, start_dir: str) -> str:
+        """Native app picker via AppleScript (works when Qt owns NSApplication)."""
+        start = self._sanitize_dialog_start_dir(start_dir) or "/Applications"
+        location_clause = (
+            f' default location (POSIX file "{_applescript_escape(start)}")'
+        )
+        script = (
+            'choose file of type {"com.apple.application-bundle", "app"} '
+            f'with prompt "Choose Editing App"{location_clause}\n'
+            "return POSIX path of result"
+        )
+        return _run_applescript(script)
+
+    def _choose_macos_editing_app_nsopenpanel(self, start_dir: str) -> str:
+        """macOS app bundle picker via AppKit."""
+        from AppKit import NSURL
+
+        panel = self._create_macos_open_panel()
+        panel.setTitle_("Choose Editing App")
+        panel.setPrompt_("Choose")
+        panel.setCanChooseFiles_(True)
+        panel.setCanChooseDirectories_(True)
+        panel.setAllowsMultipleSelection_(False)
+        panel.setTreatsFilePackagesAsDirectories_(True)
+        try:
+            panel.setAllowedFileTypes_(["app"])
+        except Exception:
+            pass
+
+        start = self._sanitize_dialog_start_dir(start_dir) or "/Applications"
+        panel.setDirectoryURL_(NSURL.fileURLWithPath_(start))
+
+        if panel.runModal() != 1:
+            return ""
+        url = panel.URL()
+        return url.path() if url is not None else ""
+
+    def _choose_macos_editing_app_dialog(self, start_dir: str = "/Applications") -> str:
+        """Pick a .app bundle; Qt QFileDialog fails on macOS when launched from Terminal."""
+        import logging
+
+        logger = logging.getLogger(__name__)
+        if self._use_qt_file_dialog():
+            self._prepare_for_modal_dialog()
+            app_path, _ = QFileDialog.getOpenFileName(
+                self,
+                "Choose Editing App",
+                start_dir,
+                "Applications (*.app);;All Files (*)",
+                options=QFileDialog.Option.DontUseNativeDialog,
+            )
+            return app_path or ""
+        try:
+            return self._choose_macos_editing_app_nsopenpanel(start_dir)
+        except Exception as exc:
+            logger.warning(
+                "NSOpenPanel app chooser unavailable (%s), using AppleScript",
+                exc,
+            )
+        return self._choose_macos_editing_app_applescript(start_dir)
+
     def open_file(self):
         """Open an image file (and its containing folder).
 
@@ -15452,15 +15898,15 @@ class RAWImageViewer(QMainWindow):
     def _keyboard_shortcuts_help_text(self):
         """Plain-text shortcuts list for tooltips and the shortcuts dialog."""
         return (
-            "Ctrl+Shift+O — Open folder\n"
             "Space / Double-click — Toggle fit-to-window / 100% zoom\n"
             "Trackpad Pinch / Ctrl+Scroll — Smooth zoom in/out\n"
             "Left / Right Arrow — Previous / next image\n"
+            "Up Arrow — Bookmark / unbookmark image(s)\n"
+            "Down Arrow — Move image(s) to Discard folder\n"
+            "Delete — Delete image(s)\n"
             "Gallery: Ctrl/Cmd+drag over thumbnails — Toggle selection\n"
-            "Gallery: Delete / Down — Remove selection or move to Discard\n"
-            "Single view: Down Arrow — Move image to Discard folder\n"
-            "Single view: Delete — Delete current image\n"
             "H — Show/hide histogram\n"
+            "G — Cycle composition guide (off / 3×3 / diagonal / both / golden)\n"
             "F — Show/hide focus point"
         )
 
@@ -17522,8 +17968,31 @@ class RAWImageViewer(QMainWindow):
                 c.relayout_histogram()
         self._sync_location_map()
 
-    def _sync_location_map(self):
+    def _location_map_feature_enabled(self) -> bool:
+        """GPS map loading is opt-in (disabled by default for performance)."""
+        try:
+            from rawviewer_profile import location_map_enabled
+
+            return location_map_enabled()
+        except Exception:
+            return _env_true("RAWVIEWER_ENABLE_LOCATION_MAP", default=False)
+
+    def _sync_location_map(self) -> None:
+        """Debounced refresh — avoids canceling map load on every histogram tick."""
+        if not self._location_map_feature_enabled():
+            self._clear_location_map()
+            return
+        timer = getattr(self, "_map_sync_timer", None)
+        if timer is not None:
+            timer.start(250)
+            return
+        self._sync_location_map_now()
+
+    def _sync_location_map_now(self):
         """Refresh GPS cluster map when in single-image mode (requires network + GPS)."""
+        if not self._location_map_feature_enabled():
+            self._clear_location_map()
+            return
         w = getattr(self, "single_image_location_map", None)
         if w is None:
             return
@@ -17572,6 +18041,47 @@ class RAWImageViewer(QMainWindow):
             if c is not None and hasattr(c, "relayout_map"):
                 c.relayout_map()
 
+    def _is_map_cluster_gallery_active(self) -> bool:
+        return bool(
+            getattr(self, "_map_gallery_return_path", None)
+            and getattr(self, "_semantic_search_backup_files", None)
+        )
+
+    def _exit_map_cluster_gallery(self) -> bool:
+        """Leave GPS cluster gallery and return to the prior single-image view."""
+        return_path = getattr(self, "_map_gallery_return_path", None)
+        backup = getattr(self, "_semantic_search_backup_files", None)
+        if not return_path or not backup:
+            return False
+        restored = [p for p in backup if os.path.isfile(p)]
+        if not restored:
+            self._map_gallery_return_path = None
+            self._map_gallery_title = None
+            self._semantic_search_backup_files = None
+            return False
+
+        target = _norm_path(return_path)
+        idx = 0
+        for i, p in enumerate(restored):
+            if _norm_path(p) == target:
+                idx = i
+                break
+
+        self._semantic_search_backup_files = None
+        self._map_gallery_return_path = None
+        self._map_gallery_title = None
+        self.image_files = restored
+        self.current_file_index = idx
+        self.current_file_path = restored[idx]
+        self.view_mode = "single"
+        self._stop_slideshow()
+        self._show_single_view()
+        self.load_raw_image(self.current_file_path)
+        self._sync_filmstrip_to_folder()
+        self.status_bar.showMessage("Returned to previous image", 2500)
+        QTimer.singleShot(0, self._restore_keyboard_focus)
+        return True
+
     def _on_map_cluster_clicked(self, cluster):
         from gps_neighbors import format_cluster_gallery_title
 
@@ -17590,6 +18100,7 @@ class RAWImageViewer(QMainWindow):
             return
         if getattr(self, "_semantic_search_backup_files", None) is None:
             self._semantic_search_backup_files = list(getattr(self, "image_files", []) or [])
+        self._map_gallery_return_path = getattr(self, "current_file_path", None)
         self._map_gallery_title = format_cluster_gallery_title(
             cluster.centroid_lat, cluster.centroid_lon, cluster.count
         )
@@ -17602,6 +18113,7 @@ class RAWImageViewer(QMainWindow):
         self._sync_gallery_scrollbar_policy()
         self._update_gallery_view()
         self.status_bar.showMessage(self._map_gallery_title, 5000)
+        QTimer.singleShot(0, self._restore_keyboard_focus)
 
     def _clear_single_image_histogram(self):
         w = getattr(self, "single_image_histogram", None)
@@ -17700,56 +18212,224 @@ class RAWImageViewer(QMainWindow):
         except Exception:
             pass
 
-    def _on_share_bottom_button_clicked(self):
-        """Share or open selected gallery images, or the current file in single view."""
-        paths = self._gallery_share_target_paths()
-        _share_log(
-            logging.INFO,
-            "button clicked view_mode=%s paths=%d visible=%s frozen=%s",
-            getattr(self, "view_mode", "?"),
-            len(paths),
-            getattr(getattr(self, "share_bottom_button", None), "isVisible", lambda: None)(),
-            getattr(sys, "frozen", False),
-        )
-        if paths:
-            _share_log(logging.INFO, "targets: %s", paths[:3] if len(paths) > 3 else paths)
-        if not paths:
-            _share_log(logging.WARNING, "no share targets (gallery selection or current file)")
-            self.status_bar.showMessage("No images selected to share", 2500)
+    def _release_share_bottom_button(self) -> None:
+        """Clear stuck pressed/highlight state after modal dialogs."""
+        btn = getattr(self, "share_bottom_button", None)
+        if btn is None:
             return
-        paths_copy = list(paths)
-        self._dispatch_share_bottom(paths_copy)
+        try:
+            btn.setDown(False)
+            btn.clearFocus()
+            btn.repaint()
+        except Exception:
+            pass
+
+    def _on_share_bottom_button_clicked(self):
+        """Open selected gallery images, bookmarked images, or the current file in another app."""
+        try:
+            paths = self._gallery_share_target_paths()
+            _share_log(
+                logging.INFO,
+                "open-in-app clicked view_mode=%s paths=%d visible=%s frozen=%s",
+                getattr(self, "view_mode", "?"),
+                len(paths),
+                getattr(getattr(self, "share_bottom_button", None), "isVisible", lambda: None)(),
+                getattr(sys, "frozen", False),
+            )
+            if paths:
+                _share_log(logging.INFO, "targets: %s", paths[:3] if len(paths) > 3 else paths)
+            if not paths:
+                _share_log(logging.WARNING, "no open-in-app targets (gallery selection or current file)")
+                self.status_bar.showMessage("No images selected to open", 2500)
+                return
+            self._dispatch_share_bottom(list(paths))
+        finally:
+            self._release_share_bottom_button()
 
     def _dispatch_share_bottom(self, paths: List[str]) -> None:
-        _share_log(logging.INFO, "dispatch paths=%d platform=%s", len(paths), sys.platform)
+        _share_log(logging.INFO, "open-in-app dispatch paths=%d platform=%s", len(paths), sys.platform)
+        self._open_paths_in_editing_app(paths)
+
+    def _valid_open_target_paths(self, paths: List[str]) -> List[str]:
+        raw_in = list(paths)
+        valid = [os.path.abspath(p) for p in raw_in if p and os.path.isfile(p)]
+        if len(raw_in) != len(valid):
+            for p in raw_in:
+                if p and not os.path.isfile(os.path.abspath(p)):
+                    _share_log(logging.WARNING, "skipped missing open-in-app file: %s", p)
+        return valid
+
+    def _open_paths_in_editing_app(self, paths: List[str]) -> None:
+        """Open one or more RAW/JPEG originals in an external editing app."""
+        valid = self._valid_open_target_paths(paths)
+        if not valid:
+            self.status_bar.showMessage("No file to open", 2000)
+            return
         if sys.platform == "darwin":
-            self._share_paths_os(paths)
+            self._open_paths_in_macos_editing_app(valid)
         elif sys.platform == "win32":
-            if len(paths) == 1:
-                self._open_image_with_app(paths[0])
-            else:
-                self._share_paths_os(paths)
+            self._open_paths_in_windows_editing_app(valid)
+        elif len(valid) == 1:
+            self._open_image_with_default_app(valid[0])
         else:
-            if len(paths) == 1:
-                self._open_image_with_app(paths[0])
-            else:
-                self._share_paths_os(paths)
+            self._copy_paths_to_clipboard(valid)
+            self.status_bar.showMessage("Paths copied to clipboard", 2500)
 
     def _open_image_with_app(self, path: str) -> None:
-        """Windows: show the native Open With dialog for one file."""
+        """Show the platform Open With/default-app flow for one file."""
         if not path or not os.path.isfile(path):
             self.status_bar.showMessage("No file to open", 2000)
             return
         abs_path = os.path.abspath(path)
 
         def _show_open_with_dialog():
-            owner = self._share_windows_owner_hwnd() if sys.platform == "win32" else 0
-            if _open_windows_open_with_dialog(abs_path, owner_hwnd=owner):
+            if sys.platform == "win32":
+                owner = self._share_windows_owner_hwnd()
+                ok = _open_windows_open_with_dialog(abs_path, owner_hwnd=owner)
+            elif sys.platform == "darwin":
+                ok = self._open_macos_choose_editing_app([abs_path])
+            else:
+                ok = self._open_image_with_default_app(abs_path)
+            if ok:
                 self.status_bar.showMessage("Choose an app to open this file", 2500)
             else:
                 self.status_bar.showMessage("Open With unavailable for this file", 3500)
 
         QTimer.singleShot(0, _show_open_with_dialog)
+
+    def _copy_paths_to_clipboard(self, paths: List[str]) -> None:
+        try:
+            QApplication.clipboard().setText("\n".join(os.path.abspath(p) for p in paths))
+        except Exception:
+            pass
+
+    def _open_image_with_default_app(self, path: str) -> bool:
+        import subprocess
+
+        try:
+            if sys.platform == "darwin":
+                subprocess.Popen(["/usr/bin/open", path])
+            elif sys.platform == "win32":
+                os.startfile(path)  # type: ignore[attr-defined]
+            else:
+                subprocess.Popen(["xdg-open", path])
+            return True
+        except Exception:
+            return False
+
+    def _macos_editing_app_settings_key(self) -> str:
+        return "externalEditor/macosAppPath"
+
+    def _windows_editing_app_settings_key(self) -> str:
+        return "externalEditor/windowsExePath"
+
+    def _format_app_name(self, app_path: str) -> str:
+        name = os.path.basename(app_path.rstrip(os.sep))
+        if name.lower().endswith(".app"):
+            name = name[:-4]
+        if name.lower().endswith(".exe"):
+            name = name[:-4]
+        return name or "selected app"
+
+    def _open_with_macos_app_path(self, paths: List[str], app_path: str) -> bool:
+        import subprocess
+
+        app_path = os.path.abspath(app_path)
+        if not os.path.isdir(app_path) or not app_path.lower().endswith(".app"):
+            return False
+        try:
+            subprocess.Popen(["/usr/bin/open", "-a", app_path, "--", *paths])
+            self.get_settings().setValue(self._macos_editing_app_settings_key(), app_path)
+            self.status_bar.showMessage(
+                f"Opening {len(paths)} file{'s' if len(paths) != 1 else ''} in {self._format_app_name(app_path)}",
+                2500,
+            )
+            return True
+        except Exception as exc:
+            _share_log(logging.WARNING, "macOS open in app failed: %s", exc)
+            return False
+
+    def _open_with_windows_exe_path(self, paths: List[str], exe_path: str) -> bool:
+        import subprocess
+
+        exe_path = os.path.abspath(exe_path)
+        if not os.path.isfile(exe_path):
+            return False
+        try:
+            subprocess.Popen([exe_path, *paths], cwd=os.path.dirname(exe_path) or None)
+            self.get_settings().setValue(self._windows_editing_app_settings_key(), exe_path)
+            self.status_bar.showMessage(
+                f"Opening {len(paths)} file{'s' if len(paths) != 1 else ''} in {self._format_app_name(exe_path)}",
+                2500,
+            )
+            return True
+        except Exception as exc:
+            _share_log(logging.WARNING, "Windows open in app failed: %s", exc)
+            return False
+
+    def _open_macos_choose_editing_app(self, paths: List[str]) -> bool:
+        app_path = self._choose_macos_editing_app_dialog("/Applications")
+        if not app_path:
+            return False
+        return self._open_with_macos_app_path(paths, app_path)
+
+    def _open_windows_choose_editing_app(self, paths: List[str]) -> bool:
+        start_dir = os.environ.get("ProgramFiles", "C:\\Program Files")
+        exe_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Choose Editing App",
+            start_dir,
+            "Applications (*.exe);;All Files (*)",
+        )
+        if not exe_path:
+            return False
+        return self._open_with_windows_exe_path(paths, exe_path)
+
+    def _open_paths_in_macos_editing_app(self, paths: List[str]) -> None:
+        """macOS: open in the last chosen editor, or pick one (no intermediate menu)."""
+        last_app = str(self.get_settings().value(self._macos_editing_app_settings_key(), "") or "")
+        if last_app and os.path.isdir(last_app):
+            self._open_with_macos_app_path(paths, last_app)
+            return
+        ok = self._open_macos_choose_editing_app(paths)
+        if not ok:
+            self.status_bar.showMessage("No editing app selected", 2500)
+
+    def _open_paths_in_windows_editing_app(self, paths: List[str]) -> None:
+        """Windows: single file uses native Open With; multi-file can launch a chosen editor."""
+        if len(paths) == 1:
+            self._open_image_with_app(paths[0])
+            return
+
+        menu = QMenu(self)
+        last_exe = str(self.get_settings().value(self._windows_editing_app_settings_key(), "") or "")
+        if last_exe and os.path.isfile(last_exe):
+            last_action = QAction(f"Open with {self._format_app_name(last_exe)}", self)
+            last_action.triggered.connect(
+                lambda _checked=False, ps=list(paths), exe=last_exe: self._open_with_windows_exe_path(ps, exe)
+            )
+            menu.addAction(last_action)
+
+        choose_action = QAction("Choose Editing App...", self)
+        choose_action.triggered.connect(
+            lambda _checked=False, ps=list(paths): self._open_windows_choose_editing_app(ps)
+        )
+        menu.addAction(choose_action)
+
+        copy_action = QAction("Copy File Paths", self)
+        copy_action.triggered.connect(
+            lambda _checked=False, ps=list(paths): (
+                self._copy_paths_to_clipboard(ps),
+                self.status_bar.showMessage("Paths copied to clipboard", 2500),
+            )
+        )
+        menu.addAction(copy_action)
+
+        btn = getattr(self, "share_bottom_button", None)
+        pos = QCursor.pos()
+        if btn is not None and btn.isVisible():
+            pos = btn.mapToGlobal(QPoint(0, btn.height()))
+        menu.exec(pos)
 
     def _share_paths_os(self, paths: List[str]) -> None:
         """macOS share sheet or Windows share/clipboard for one or more files."""
@@ -20833,9 +21513,15 @@ class RAWImageViewer(QMainWindow):
         if hasattr(self, "single_view_container") and self.single_view_container is not None:
             self.single_view_container.set_rating(rating)
 
-    def _restore_single_view_keyboard_focus(self) -> None:
-        """Return keyboard focus to the image surface (GPU view or main window)."""
-        if getattr(self, "view_mode", "single") != "single":
+    def _restore_keyboard_focus(self) -> None:
+        """Return keyboard focus to the active view surface (gallery or single image)."""
+        self.activateWindow()
+        if getattr(self, "view_mode", "single") == "gallery":
+            gs = getattr(self, "gallery_scroll", None)
+            if gs is not None and gs.isVisible():
+                gs.setFocus(Qt.FocusReason.OtherFocusReason)
+                gs.viewport().setFocus(Qt.FocusReason.OtherFocusReason)
+                return
             self.setFocus(Qt.FocusReason.OtherFocusReason)
             return
         gv = getattr(self, "gpu_view", None)
@@ -20843,6 +21529,11 @@ class RAWImageViewer(QMainWindow):
             gv.setFocus(Qt.FocusReason.OtherFocusReason)
             return
         self.setFocus(Qt.FocusReason.OtherFocusReason)
+
+    def _restore_single_view_keyboard_focus(self) -> None:
+        """Backward-compatible alias."""
+        if getattr(self, "view_mode", "single") == "single":
+            self._restore_keyboard_focus()
 
     def _shortcut_blocked_by_text_input(self) -> bool:
         focused = self.focusWidget()
@@ -20864,6 +21555,48 @@ class RAWImageViewer(QMainWindow):
         if self._shortcut_blocked_by_text_input():
             return
         self._navigate_single_view_step(1)
+
+    def _shortcut_activate_escape(self) -> None:
+        if self._shortcut_blocked_by_text_input():
+            return
+        vm = getattr(self, "view_mode", "single")
+        if vm == "gallery":
+            if self._gallery_has_selection():
+                self._clear_gallery_selection()
+                return
+            if self._exit_map_cluster_gallery():
+                return
+        elif vm == "single" and self._is_exif_sort_ready():
+            self.toggle_view_mode()
+
+    def _shortcut_activate_gallery_up(self) -> None:
+        if self._shortcut_blocked_by_text_input():
+            return
+        vm = getattr(self, "view_mode", "single")
+        if vm == "single":
+            p = getattr(self, "current_file_path", None)
+            if p:
+                self._gallery_toggle_path_bookmark(p)
+            return
+        if vm != "gallery":
+            return
+        if self._gallery_has_selection():
+            self._gallery_toggle_selected_bookmarks()
+            return
+        self._scroll_gallery_vertical(-1)
+
+    def _shortcut_activate_gallery_down(self) -> None:
+        if self._shortcut_blocked_by_text_input():
+            return
+        vm = getattr(self, "view_mode", "single")
+        if vm == "gallery":
+            if self._gallery_has_selection():
+                self.discard_gallery_selection()
+                return
+            self._scroll_gallery_vertical(1)
+            return
+        if vm == "single":
+            self.move_current_image_to_discard()
 
     def _handle_app_shortcut(self, event):
         """Handle application-wide shortcuts for better consistency and focus-resilience."""
@@ -20907,17 +21640,6 @@ class RAWImageViewer(QMainWindow):
                 if bar:
                     bar.commit_selection()
                     return True
-        elif key == Qt.Key.Key_Down:
-            if vm == "gallery" and self._gallery_has_selection():
-                self.discard_gallery_selection()
-                return True
-            if vm == "single":
-                self.move_current_image_to_discard()
-                return True
-        elif key == Qt.Key.Key_Up:
-            if vm == "single":
-                # Consume Up arrow in single view to prevent scrolling/panning glitches
-                return True
         elif key == Qt.Key.Key_Delete or (
             sys.platform == "darwin" and key == Qt.Key.Key_Backspace
         ):
@@ -20927,14 +21649,6 @@ class RAWImageViewer(QMainWindow):
                 return True
             if vm == "single":
                 self.delete_current_image()
-                return True
-        elif key == Qt.Key.Key_Escape:
-            if vm == "gallery" and self._gallery_has_selection():
-                self._clear_gallery_selection()
-                return True
-            if vm == "single":
-                if self._is_exif_sort_ready():
-                    self.toggle_view_mode()
                 return True
         # Handle H (Histogram) separately to ensure it works even when no image is loaded
         # but only in single view mode.
@@ -20957,8 +21671,16 @@ class RAWImageViewer(QMainWindow):
                 return True
         if key == Qt.Key.Key_M:
             if vm == "single":
+                if not self._location_map_feature_enabled():
+                    self.status_bar.showMessage(
+                        "GPS map is disabled. Set RAWVIEWER_ENABLE_LOCATION_MAP=1 to enable.",
+                        3500,
+                    )
+                    return True
                 self._map_overlay_visible = not getattr(self, "_map_overlay_visible", True)
                 self._map_user_hidden = not self._map_overlay_visible
+                if self._map_overlay_visible and self._map_online is False:
+                    self._map_online = None
                 self._sync_location_map()
                 return True
 
@@ -20976,18 +21698,7 @@ class RAWImageViewer(QMainWindow):
             event.accept()
             return
 
-        # Handle mode-specific keys that aren't app-wide shortcuts
-        if key == Qt.Key.Key_Down:
-            if vm == "gallery" and not self._gallery_has_selection():
-                if self._scroll_gallery_vertical(1):
-                    event.accept()
-                    return
-        elif key == Qt.Key.Key_Up:
-            if vm == "gallery":
-                if self._scroll_gallery_vertical(-1):
-                    event.accept()
-                    return
-
+        # Mode-specific keys handled via WindowShortcut (arrows, escape, up/down).
         super().keyPressEvent(event)
 
     def can_navigate(self):
@@ -22509,12 +23220,12 @@ class RAWImageViewer(QMainWindow):
             "Click and drag to pan when zoomed\n"
             "Use Left/Right arrow keys to navigate between images (preserves zoom if zoomed in)\n"
             "Bottom bar: Share and other controls when images are loaded\n"
-            "Gallery: Ctrl/Cmd+drag over thumbnails to toggle selection\n"
-            "Gallery: Delete / Down Arrow on selection to remove or move to Discard\n"
-            "Single view: Down Arrow to move the current image to Discard folder\n"
-            "Single view: Delete to remove the current image\n"
+            "Up Arrow — Bookmark / unbookmark image(s)\n"
+            "Down Arrow — Move image(s) to Discard folder\n"
+            "Delete — Delete image(s)\n"
+            "Gallery: Ctrl/Cmd+drag over thumbnails — Toggle selection\n"
             "H — Show/hide histogram\n"
-            "M — Show/hide GPS map\n"
+            "G — Cycle composition guide (off / 3×3 / diagonal / both / golden)\n"
             "F — Show/hide focus point\n"
             "Scroll wheel (fit-to-window): Scroll down = next image, Scroll up = previous image\n"
             "Horizontal wheel (zoom mode): Scroll left/right to pan the image"
@@ -22707,19 +23418,26 @@ class RAWImageViewer(QMainWindow):
                 bool(self.image_files) and self.view_mode == "single" and self._is_exif_sort_ready()
             )
         if hasattr(self, "share_bottom_button"):
-            vis = bool(self.image_files) and self.view_mode == "single"
-            self.share_bottom_button.setVisible(vis)
+            self._sync_share_button_visibility()
             if hasattr(self, "slideshow_bottom_button"):
-                self.slideshow_bottom_button.setVisible(vis)
+                self.slideshow_bottom_button.setVisible(
+                    bool(self.image_files) and self.view_mode == "single"
+                )
             cp = getattr(self, "current_file_path", None)
-            show_rotate = bool(vis and cp and os.path.isfile(cp))
+            show_rotate = bool(
+                self.image_files
+                and self.view_mode == "single"
+                and cp
+                and os.path.isfile(cp)
+            )
             if hasattr(self, "rotate_bottom_button"):
                 self.rotate_bottom_button.setVisible(show_rotate)
             if hasattr(self, "raw_toggle_button"):
-                is_raw = bool(vis and cp and os.path.isfile(cp) and is_raw_file(cp))
+                is_raw = bool(show_rotate and is_raw_file(cp))
                 self.raw_toggle_button.setVisible(is_raw)
                 if is_raw:
                     self._update_raw_toggle_button_state()
+        self._sync_bookmark_indicator()
         if hasattr(self, "search_bottom_button"):
             self.search_bottom_button.setVisible(bool(self.image_files) and self._is_exif_sort_ready())
         if getattr(self, "_search_panel_expanded", False):
@@ -24059,6 +24777,7 @@ class RAWImageViewer(QMainWindow):
 
             self.current_folder = folder_path
             self.image_files = image_files
+            self._reconcile_gallery_bookmarks_with_folder()
             self._semantic_search_corpus_files = list(image_files)
             self._gallery_search_index_session_key = None
             self._filmstrip_warmed_paths = set()
@@ -24220,6 +24939,15 @@ class RAWImageViewer(QMainWindow):
             and start_file
             and len(getattr(self, "image_files", []) or []) > 1
         )
+        if not same_folder:
+            self._gallery_bookmarked_paths = self._load_persisted_gallery_bookmarks(folder_path)
+            if self._location_map_feature_enabled():
+                try:
+                    from gps_neighbors import clear_gps_corpus_cache
+
+                    clear_gps_corpus_cache(folder_path)
+                except Exception:
+                    pass
         # Folder scope changed: clear search bar, indexing UI, and filter snapshot.
         if not preserve_folder_index:
             self._reset_semantic_search_for_new_folder()
@@ -24485,6 +25213,51 @@ class RAWImageViewer(QMainWindow):
             settings.remove("last_session_file")
             settings.remove("last_session_view_mode")
         self._save_persisted_visual_rotations()
+        self._save_persisted_gallery_bookmarks()
+        self._save_persisted_overlay_positions()
+
+    def _load_persisted_overlay_positions(self) -> None:
+        """Load histogram/map overlay positions saved from a prior session."""
+        import json
+
+        self._pending_overlay_positions = None
+        try:
+            raw = self.get_settings().value("overlay_positions", "")
+            if not raw:
+                return
+            if isinstance(raw, (bytes, bytearray)):
+                raw = raw.decode("utf-8", errors="ignore")
+            data = json.loads(raw)
+            if isinstance(data, dict) and data:
+                self._pending_overlay_positions = data
+        except Exception:
+            pass
+
+    def _try_apply_pending_overlay_positions(self) -> None:
+        data = getattr(self, "_pending_overlay_positions", None)
+        if not data:
+            return
+        container = getattr(self, "single_view_container", None)
+        if container is None or container.width() < 80 or container.height() < 80:
+            return
+        if hasattr(container, "apply_overlay_session_positions"):
+            container.apply_overlay_session_positions(data)
+        self._pending_overlay_positions = None
+
+    def _save_persisted_overlay_positions(self) -> None:
+        import json
+
+        container = getattr(self, "single_view_container", None)
+        if container is None or not hasattr(container, "overlay_session_snapshot"):
+            return
+        snap = container.overlay_session_snapshot()
+        try:
+            if snap:
+                self.get_settings().setValue("overlay_positions", json.dumps(snap))
+            else:
+                self.get_settings().remove("overlay_positions")
+        except Exception:
+            pass
 
     def restore_session_state(self):
         """Restore the last session's folder and file, with error handling for unavailable drives"""
@@ -24745,6 +25518,11 @@ def main():
     import traceback
 
     # Packaged or installed app: enable semantic search by default (dev uses launch_dev.sh / run_debug.bat).
+    # Lite builds bake PROFILE=lite and skip AI/face via rawviewer_profile defaults.
+    from rawviewer_profile import apply_profile_runtime_defaults, is_lite_build
+
+    apply_profile_runtime_defaults()
+
     # On Windows, the installed app runs inside a Pixi virtual environment (so sys.frozen is False),
     # but we can detect it by checking if "_internal/pixi/pixi.exe" exists in the root directory.
     is_installed = False
@@ -24753,8 +25531,10 @@ def main():
         if os.path.exists(os.path.join(root_dir, "_internal", "pixi", "pixi.exe")):
             is_installed = True
 
-    if getattr(sys, "frozen", False) or is_installed:
+    if (getattr(sys, "frozen", False) or is_installed) and not is_lite_build():
         os.environ.setdefault("RAWVIEWER_ENABLE_SEMANTIC_SEARCH", "1")
+        os.environ.setdefault("RAWVIEWER_GPU_VIEW", "1")
+    elif getattr(sys, "frozen", False) or is_installed:
         os.environ.setdefault("RAWVIEWER_GPU_VIEW", "1")
 
     # Print to console immediately (before logging might be ready)
@@ -24944,7 +25724,7 @@ def main():
             
             # Show main window and close splash screen
             viewer.show()
-            QTimer.singleShot(0, viewer._restore_single_view_keyboard_focus)
+            QTimer.singleShot(0, viewer._restore_keyboard_focus)
             _schedule_startup_splash_dismiss(app, viewer, splash)
             safe_print("Splash screen closed, main window displayed", flush=True)
 

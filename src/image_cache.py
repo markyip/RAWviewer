@@ -6,6 +6,9 @@ to dramatically improve browsing performance.
 """
 
 import os
+import logging
+import platform
+import subprocess
 import time
 import threading
 import sqlite3
@@ -18,6 +21,39 @@ from typing import Optional, Tuple, Dict, Any, Union, List
 import psutil
 from PyQt6.QtGui import QPixmap, QImage
 from PyQt6.QtCore import QObject, pyqtSignal
+
+logger = logging.getLogger(__name__)
+
+
+def _sysctl_hw_memsize_bytes() -> Optional[int]:
+    """Physical RAM via sysctl (macOS fallback when psutil virtual_memory fails)."""
+    if platform.system() != "Darwin":
+        return None
+    try:
+        out = subprocess.check_output(
+            ["sysctl", "-n", "hw.memsize"],
+            text=True,
+            timeout=2,
+        ).strip()
+        return int(out)
+    except Exception:
+        return None
+
+
+def _safe_virtual_memory():
+    """psutil.virtual_memory() with sysctl fallback for newer macOS kernels."""
+    try:
+        return psutil.virtual_memory()
+    except Exception as exc:
+        logger.warning(
+            "psutil.virtual_memory() failed (%s); using fallback memory stats",
+            exc,
+        )
+        total = _sysctl_hw_memsize_bytes() or (8 * 1024**3)
+        available = total // 2
+        from types import SimpleNamespace
+
+        return SimpleNamespace(total=total, available=available, percent=50.0)
 
 
 def disk_preview_max_edge() -> int:
@@ -1085,6 +1121,74 @@ class PersistentPreviewCache(PersistentThumbnailCache):
 
 
 
+def _env_int(name: str, default: int, *, minimum: int, maximum: int) -> int:
+    raw = os.environ.get(name, "").strip()
+    if raw:
+        try:
+            return max(minimum, min(int(raw), maximum))
+        except ValueError:
+            pass
+    return max(minimum, min(default, maximum))
+
+
+def _preview_cache_adaptive_enabled() -> bool:
+    raw = os.environ.get("RAWVIEWER_PREVIEW_CACHE_ADAPTIVE", "1").strip().lower()
+    return raw in ("1", "true", "yes", "on")
+
+
+def recommended_preview_cache_items(available_gb: float | None = None) -> int:
+    """Preview LRU capacity from free RAM, preview resolution, and build profile."""
+    explicit = os.environ.get("RAWVIEWER_PREVIEW_CACHE_ITEMS", "").strip()
+    if explicit:
+        return _env_int("RAWVIEWER_PREVIEW_CACHE_ITEMS", 10, minimum=6, maximum=64)
+
+    if not _preview_cache_adaptive_enabled():
+        return 10
+
+    if available_gb is None:
+        try:
+            available_gb = float(_safe_virtual_memory().available) / (1024**3)
+        except Exception:
+            return 10
+
+    edge = memory_preview_max_edge()
+    preview_mb = max(6.0, (edge / 1920.0) ** 2 * 12.0)
+
+    budget_fraction = 0.08
+    budget_cap_mb = 1200.0
+    try:
+        from rawviewer_profile import indexing_loads_compete, is_lite_build
+
+        if not indexing_loads_compete():
+            budget_fraction = 0.12
+            budget_cap_mb = 1600.0
+        if is_lite_build():
+            budget_fraction = max(budget_fraction, 0.14)
+            budget_cap_mb = 1800.0
+    except Exception:
+        pass
+
+    budget_mb = min(float(available_gb) * 1024.0 * budget_fraction, budget_cap_mb)
+    items = int(budget_mb / preview_mb)
+
+    if available_gb >= 24:
+        floor = 20
+    elif available_gb >= 16:
+        floor = 16
+    elif available_gb >= 10:
+        floor = 14
+    elif available_gb >= 6:
+        floor = 12
+    elif available_gb >= 3:
+        floor = 8
+    else:
+        floor = 6
+
+    min_items = _env_int("RAWVIEWER_PREVIEW_CACHE_ITEMS_MIN", 6, minimum=4, maximum=32)
+    max_items = _env_int("RAWVIEWER_PREVIEW_CACHE_ITEMS_MAX", 64, minimum=8, maximum=128)
+    return max(min_items, min(max(floor, items), max_items))
+
+
 class MemoryMonitor:
     """Monitor system memory usage and provide cache sizing recommendations."""
 
@@ -1093,8 +1197,14 @@ class MemoryMonitor:
 
     def get_memory_info(self) -> Dict[str, float]:
         """Get current memory usage information."""
-        system_memory = psutil.virtual_memory()
-        process_memory = self.process.memory_info()
+        system_memory = _safe_virtual_memory()
+        try:
+            process_memory = self.process.memory_info()
+        except Exception as exc:
+            logger.warning("process.memory_info() failed (%s)", exc)
+            from types import SimpleNamespace
+
+            process_memory = SimpleNamespace(rss=0, vms=0)
 
         return {
             'system_total_gb': system_memory.total / (1024**3),
@@ -1122,9 +1232,12 @@ class MemoryMonitor:
         max_thumbnails = max(
             50, int((cache_budget_gb * 1024 * 0.2) / thumbnail_mb))
 
+        preview_items = recommended_preview_cache_items(available_gb)
+
         return {
             'full_images': min(max_full_images, 100),
             'thumbnails': min(max_thumbnails, 2000),
+            'preview_images': preview_items,
             'cache_budget_mb': int(cache_budget_gb * 1024)
         }
 
@@ -1158,7 +1271,9 @@ class ImageCache(QObject):
         # Initialize caches
         self.thumbnail_cache = LRUCache(max_size=cache_sizes['thumbnails'])
         self.grid_cache = LRUCache(max_size=cache_sizes['thumbnails'] // 2)
-        self.preview_cache = LRUCache(max_size=10) # Keep a few high-res previews in memory
+        self.preview_cache = LRUCache(
+            max_size=cache_sizes['preview_images']
+        )  # High-res preview working set (RAM-adaptive)
         self.full_image_cache = LRUCache(max_size=cache_sizes['full_images'])
         self.pixmap_cache = LRUCache(max_size=cache_sizes['full_images'])
         if self.persistent_cache_enabled:
@@ -1219,6 +1334,12 @@ class ImageCache(QObject):
         # Reduce by 25%
         new_full_size = max(5, int(self.full_image_cache.max_size * 0.75))
         new_thumbnail_size = max(20, int(self.thumbnail_cache.max_size * 0.75))
+        min_preview = _env_int(
+            "RAWVIEWER_PREVIEW_CACHE_ITEMS_MIN", 6, minimum=4, maximum=32
+        )
+        new_preview_size = max(
+            min_preview, int(self.preview_cache.max_size * 0.75)
+        )
 
         # Clear excess items
         while len(self.full_image_cache.cache) > new_full_size:
@@ -1227,9 +1348,13 @@ class ImageCache(QObject):
         while len(self.thumbnail_cache.cache) > new_thumbnail_size:
             self.thumbnail_cache.cache.popitem(last=False)
 
+        while len(self.preview_cache.cache) > new_preview_size:
+            self.preview_cache.cache.popitem(last=False)
+
         # Update max sizes
         self.full_image_cache.max_size = new_full_size
         self.thumbnail_cache.max_size = new_thumbnail_size
+        self.preview_cache.max_size = new_preview_size
 
     def get_thumbnail(self, file_path: str) -> Optional[np.ndarray]:
         """Get cached thumbnail or return None if not cached."""

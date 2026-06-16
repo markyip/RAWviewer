@@ -18,6 +18,27 @@ from pathlib import Path
 # Repository root (directory containing this script)
 REPO_ROOT = Path(__file__).resolve().parent
 
+_WINDOWS_LITE_PIXI_SKIP = (
+    "huggingface_hub",
+    "onnxruntime-gpu",
+    "onnxruntime-directml",
+    "opencv-python-headless",
+    "requests",
+)
+
+
+def write_build_profile(profile: str) -> None:
+    profile = profile.strip().lower()
+    if profile not in ("full", "lite"):
+        raise ValueError(f"Unknown build profile: {profile}")
+    path = REPO_ROOT / "src" / "build_profile.py"
+    path.write_text(
+        '"""Baked at build time by build.py (--profile full|lite). Dev default: full."""\n\n'
+        f'PROFILE = "{profile}"\n',
+        encoding="utf-8",
+    )
+    print(f"[INFO] Build profile: {profile} -> {path}")
+
 
 def _project_venv_python() -> Path:
     if platform.system() == "Windows":
@@ -112,7 +133,13 @@ def run_command(cmd):
     return result.returncode == 0
 
 
-def update_macos_plist(app_path):
+def _macos_app_bundle_name(profile: str = "full") -> str:
+    if profile.strip().lower() == "lite":
+        return "RAWviewer_Lite"
+    return "RAWviewer"
+
+
+def update_macos_plist(app_path, profile: str = "full"):
     """Update Info.plist in macOS app bundle to add file associations"""
     plist_path = os.path.join(app_path, 'Contents', 'Info.plist')
     if not os.path.exists(plist_path):
@@ -152,11 +179,15 @@ def update_macos_plist(app_path):
             }
             plist['CFBundleDocumentTypes'].append(doc_type)
             
+        bundle_name = _macos_app_bundle_name(profile)
+        is_lite = profile.strip().lower() == "lite"
         # Set a unique Bundle Identifier
-        plist['CFBundleIdentifier'] = 'com.markyip.rawviewer'
-        plist['CFBundleName'] = 'RAWviewer'
-        plist['CFBundleDisplayName'] = 'RAW Image Viewer'
-        plist['CFBundleExecutable'] = 'RAWviewer'
+        plist['CFBundleIdentifier'] = (
+            'com.markyip.rawviewer.lite' if is_lite else 'com.markyip.rawviewer'
+        )
+        plist['CFBundleName'] = bundle_name
+        plist['CFBundleDisplayName'] = 'RAWviewer Lite' if is_lite else 'RAW Image Viewer'
+        plist['CFBundleExecutable'] = bundle_name
         plist['CFBundlePackageType'] = 'APPL'
         plist['CFBundleShortVersionString'] = VERSION
         plist['CFBundleVersion'] = VERSION
@@ -184,8 +215,9 @@ def update_macos_plist(app_path):
         return False
 
 
-def install_dependencies(windows_accel: str = "cuda"):
+def install_dependencies(windows_accel: str = "cuda", *, profile: str = "full"):
     """Install required dependencies"""
+    lite = profile.strip().lower() == "lite"
     print("Installing/upgrading dependencies...")
     system_name = platform.system()
     dependencies = [
@@ -204,25 +236,30 @@ def install_dependencies(windows_accel: str = "cuda"):
         'pycountry',  # ISO country code -> full country name
     ]
 
+    if system_name in ("Darwin", "Windows"):
+        dependencies.append("certifi")
+        if not lite:
+            dependencies.append("requests")
     if system_name == "Windows":
-        # Windows semantic backend uses ONNX with selectable acceleration backend.
-        accel = (windows_accel or "cuda").strip().lower()
-        if accel == "cuda":
-            dependencies.append('onnxruntime-gpu')
-        elif accel == "directml":
-            dependencies.append('onnxruntime-directml')
-        else:
-            print(f"[ERROR] Unsupported Windows acceleration backend: {windows_accel}")
-            return False
-        dependencies.append('opencv-python-headless')
-        dependencies.append('huggingface-hub')
-        dependencies.append('requests')
+        if not lite:
+            # Windows semantic backend uses ONNX with selectable acceleration backend.
+            accel = (windows_accel or "cuda").strip().lower()
+            if accel == "cuda":
+                dependencies.append('onnxruntime-gpu')
+            elif accel == "directml":
+                dependencies.append('onnxruntime-directml')
+            else:
+                print(f"[ERROR] Unsupported Windows acceleration backend: {windows_accel}")
+                return False
+            dependencies.append('opencv-python-headless')
+            dependencies.append('huggingface-hub')
     elif system_name == "Darwin":
         dependencies.append('scipy')  # reverse_geocoder GPS lookup (scipy.spatial.cKDTree)
-        dependencies.append('huggingface-hub')
-        dependencies.append('pyobjc-framework-CoreML')
+        if not lite:
+            dependencies.append('huggingface-hub')
+            dependencies.append('pyobjc-framework-CoreML')
+            dependencies.append('pyobjc-framework-Vision')
         dependencies.append('pyobjc-framework-Quartz')
-        dependencies.append('pyobjc-framework-Vision')
     if system_name in ("Darwin", "Windows"):
         dependencies.append("pyexiv2")
 
@@ -289,14 +326,26 @@ def _darwin_preflight_pyexiv2_import() -> None:
         sys.exit(1)
 
 
-def _prepare_windows_pixi_manifest(accel: str) -> Path:
+def _prepare_windows_pixi_manifest(accel: str, *, profile: str = "full") -> Path:
     """
     Create a backend-specific pixi.toml copy for Windows installer payload.
     The bundled bootstrap always copies this file as `pixi.toml`.
     """
     src = REPO_ROOT / "pixi.toml"
     raw = src.read_text(encoding="utf-8")
-    if accel == "cuda":
+    lite = profile.strip().lower() == "lite"
+    if lite:
+        kept_lines = []
+        for line in raw.splitlines():
+            if any(token in line for token in _WINDOWS_LITE_PIXI_SKIP):
+                continue
+            kept_lines.append(line)
+        raw = "\n".join(kept_lines) + "\n"
+        raw = raw.replace(
+            "Professional RAW Image Viewer with Semantic Search",
+            "Professional RAW Image Viewer (Lite — viewing, EXIF/GPS search)",
+        )
+    elif accel == "cuda":
         raw = raw.replace("onnxruntime-directml", "onnxruntime-gpu")
     elif accel == "directml":
         raw = raw.replace("onnxruntime-gpu", "onnxruntime-directml")
@@ -304,12 +353,15 @@ def _prepare_windows_pixi_manifest(accel: str) -> Path:
         raise ValueError(f"Unsupported Windows acceleration backend: {accel}")
     tmp_dir = REPO_ROOT / "build" / "_pixi_variants"
     tmp_dir.mkdir(parents=True, exist_ok=True)
-    out = tmp_dir / "pixi.toml"
+    suffix = "lite" if lite else accel
+    out = tmp_dir / f"pixi-{suffix}.toml"
     out.write_text(raw, encoding="utf-8")
     return out
 
 
-def _windows_setup_exe_name(accel: str) -> str:
+def _windows_setup_exe_name(accel: str, *, profile: str = "full") -> str:
+    if profile.strip().lower() == "lite":
+        return "RAWviewer_Setup_Lite"
     suffix = "CUDA" if accel == "cuda" else "DirectML"
     return f"RAWviewer_Setup_{suffix}"
 
@@ -376,7 +428,13 @@ def main():
         "--windows-accel",
         choices=["cuda", "directml"],
         default=os.environ.get("RAWVIEWER_WINDOWS_ACCEL", "cuda").strip().lower() or "cuda",
-        help="Windows ONNX acceleration backend (default: cuda).",
+        help="Windows ONNX acceleration backend (default: cuda). Ignored for --profile lite.",
+    )
+    parser.add_argument(
+        "--profile",
+        choices=["full", "lite"],
+        default=os.environ.get("RAWVIEWER_BUILD_PROFILE", "full").strip().lower() or "full",
+        help="Build profile: full (AI search + face) or lite (viewing + EXIF/GPS search only).",
     )
     parser.add_argument(
         "--keep-dist",
@@ -384,10 +442,19 @@ def main():
         help="Windows: keep other dist/*.exe outputs (build both CUDA and DirectML in one session).",
     )
     args = parser.parse_args()
+    if args.profile not in ("full", "lite"):
+        args.profile = "full"
 
     ensure_project_venv_and_reexec()
 
+    write_build_profile(args.profile)
+    is_lite = args.profile == "lite"
+
     system_name = platform.system()
+    if is_lite and system_name == "Windows":
+        print("[INFO] Windows lite: no semantic/face AI / map overlay; EXIF+GPS gallery search only.")
+    elif is_lite and system_name == "Darwin":
+        print("[INFO] macOS lite: semantic/face AI / map overlay off; EXIF+GPS metadata search only.")
     if system_name == 'Windows':
         print("RAWviewer Windows Build Script")
         print(f"[INFO] Windows acceleration backend: {args.windows_accel}")
@@ -399,7 +466,7 @@ def main():
     print("")
 
     # Install dependencies first
-    if not install_dependencies(windows_accel=args.windows_accel):
+    if not install_dependencies(windows_accel=args.windows_accel, profile=args.profile):
         print("[ERROR] Dependency installation failed.")
         sys.exit(1)
 
@@ -420,14 +487,19 @@ def main():
     # Clean previous builds
     print("Cleaning previous builds...")
     windows_target_setup = (
-        _windows_setup_exe_name(args.windows_accel)
+        _windows_setup_exe_name(args.windows_accel, profile=args.profile)
         if platform.system() == "Windows"
         else None
     )
     
     # Try to kill any running RAWviewer.exe processes on Windows
     if platform.system() == 'Windows':
-        for image in ("RAWviewer.exe", "RAWviewer_Setup_CUDA.exe", "RAWviewer_Setup_DirectML.exe"):
+        for image in (
+            "RAWviewer.exe",
+            "RAWviewer_Setup_CUDA.exe",
+            "RAWviewer_Setup_DirectML.exe",
+            "RAWviewer_Setup_Lite.exe",
+        ):
             try:
                 result = subprocess.run(
                     ['taskkill', '/F', '/IM', image, '/T'],
@@ -474,6 +546,7 @@ def main():
                         "RAWviewer.exe",
                         "RAWviewer_Setup_CUDA.exe",
                         "RAWviewer_Setup_DirectML.exe",
+                        "RAWviewer_Setup_Lite.exe",
                     ):
                         candidate = os.path.join("dist", name)
                         if os.path.exists(candidate):
@@ -486,6 +559,19 @@ def main():
                                 sys.exit(1)
                             except Exception as e:
                                 print(f"[WARNING] Could not delete {name}: {e}")
+                elif platform.system() == "Darwin":
+                    for bundle in ("RAWviewer.app", "RAWviewer_Lite.app"):
+                        candidate = os.path.join("dist", bundle)
+                        if os.path.exists(candidate):
+                            try:
+                                shutil.rmtree(candidate)
+                                print(f"  Removed {bundle}")
+                            except PermissionError:
+                                print(f"[ERROR] Cannot delete {bundle} - it may be running.")
+                                print("  Please close RAWviewer and try again.")
+                                sys.exit(1)
+                            except Exception as e:
+                                print(f"[WARNING] Could not delete {bundle}: {e}")
                 else:
                     exe_name = "RAWviewer"
                     exe_path = os.path.join("dist", exe_name)
@@ -550,21 +636,30 @@ def main():
         f'--add-data "{imageformats_src}{add_data_sep}imageformats"',
         f'--add-data "icons{add_data_sep}icons"'
     ]
-    app_bundle_name = "RAWviewer"
+    app_bundle_name = _macos_app_bundle_name(args.profile)
     windows_pixi_manifest = None
     if platform.system() == "Darwin":
-        print("[INFO] macOS release: MobileCLIP Core ML models are NOT bundled; users download in-app on first use.")
+        print(f"[INFO] macOS app bundle: dist/{app_bundle_name}.app")
+        if is_lite:
+            print("[INFO] macOS lite release: no MobileCLIP / face AI / map overlay; EXIF+GPS gallery search only.")
+        else:
+            print("[INFO] macOS release: MobileCLIP Core ML models are NOT bundled; users download in-app on first use.")
     elif platform.system() == "Windows":
         add_data_args.append('--add-data "uninstall.bat;."')
         add_data_args.append('--add-data "scripts;scripts"')
-        windows_pixi_manifest = _prepare_windows_pixi_manifest(args.windows_accel)
-        app_bundle_name = _windows_setup_exe_name(args.windows_accel)
+        windows_pixi_manifest = _prepare_windows_pixi_manifest(
+            args.windows_accel, profile=args.profile
+        )
+        app_bundle_name = _windows_setup_exe_name(args.windows_accel, profile=args.profile)
         launcher_stub = build_windows_launcher_stub(
             icon_path if os.path.exists(icon_path) else None
         )
         add_data_args.append(f'--add-data "{launcher_stub.resolve()};."')
         print(f"[INFO] Windows installer output: dist\\{app_bundle_name}.exe")
-        print(f"[INFO] Bundling Windows pixi manifest for backend: {args.windows_accel}")
+        if is_lite:
+            print("[INFO] Bundling Windows lite pixi manifest (no ONNX / huggingface / opencv).")
+        else:
+            print(f"[INFO] Bundling Windows pixi manifest for backend: {args.windows_accel}")
     add_data_arg_str = " ".join(add_data_args)
 
     src_path = os.path.abspath('src')
@@ -579,6 +674,8 @@ def main():
         "--hidden-import", "natsort",
         "--hidden-import", "send2trash",
         "--hidden-import", "metadata_backend",
+        "--hidden-import", "rawviewer_profile",
+        "--hidden-import", "build_profile",
         "--name", app_bundle_name
     ]
     try:
@@ -598,11 +695,7 @@ def main():
             "--hidden-import", "objc",
             "--hidden-import", "AppKit",
             "--hidden-import", "Foundation",
-            "--hidden-import", "CoreML",
             "--hidden-import", "Quartz",
-            "--hidden-import", "Vision",
-            "--hidden-import", "huggingface_hub",
-            "--hidden-import", "requests",
             "--hidden-import", "certifi",
             "--hidden-import", "ssl_certs",
             "--collect-data", "certifi",
@@ -617,6 +710,23 @@ def main():
             "--exclude-module", "tokenizers",
             "--exclude-module", "safetensors",
         ])
+        if is_lite:
+            cmd_base.extend([
+                "--exclude-module", "huggingface_hub",
+                "--exclude-module", "httpx",
+                "--exclude-module", "CoreML",
+                "--exclude-module", "Vision",
+                "--exclude-module", "location_map_engine",
+                "--exclude-module", "rawviewer_ui.location_map_overlay",
+                "--exclude-module", "gps_neighbors",
+            ])
+        else:
+            cmd_base.extend([
+                "--hidden-import", "requests",
+                "--hidden-import", "CoreML",
+                "--hidden-import", "Vision",
+                "--hidden-import", "huggingface_hub",
+            ])
     elif platform.system() == "Windows":
         cmd_base.extend([
             "--hidden-import", "win32com.client",
@@ -653,19 +763,26 @@ def main():
     
     if platform.system() == 'Darwin':
         cmd_base.append("--onedir")
-        cmd_base.extend(["--osx-bundle-identifier", "com.markyip.rawviewer"])
         macos_pool_hook = os.path.join(src_path, "pyi_rth_macos_process_pool.py")
         release_defaults_hook = os.path.join(src_path, "pyi_rth_release_defaults.py")
         ssl_certs_hook = os.path.join(src_path, "pyi_rth_ssl_certs.py")
+        profile_hook = os.path.join(src_path, "pyi_rth_profile_defaults.py")
         if os.path.isfile(ssl_certs_hook):
             cmd_base.extend(["--runtime-hook", ssl_certs_hook])
+        if os.path.isfile(profile_hook):
+            cmd_base.extend(["--runtime-hook", profile_hook])
         if os.path.isfile(macos_pool_hook):
             cmd_base.extend(["--runtime-hook", macos_pool_hook])
         if os.path.isfile(release_defaults_hook):
             cmd_base.extend(["--runtime-hook", release_defaults_hook])
+        bundle_id = "com.markyip.rawviewer.lite" if is_lite else "com.markyip.rawviewer"
+        cmd_base.extend(["--osx-bundle-identifier", bundle_id])
     else:
         cmd_base.append("--onefile")
         release_defaults_hook = os.path.join(src_path, "pyi_rth_release_defaults.py")
+        profile_hook = os.path.join(src_path, "pyi_rth_profile_defaults.py")
+        if os.path.isfile(profile_hook):
+            cmd_base.extend(["--runtime-hook", profile_hook])
         if os.path.isfile(release_defaults_hook):
             cmd_base.extend(["--runtime-hook", release_defaults_hook])
         
@@ -690,13 +807,15 @@ def main():
         sys.exit(1)
     if platform.system() == 'Windows':
         exe_path = Path("dist") / f"{app_bundle_name}.exe"
+    elif platform.system() == 'Darwin':
+        exe_path = Path("dist") / f"{app_bundle_name}.app"
     else:
-        exe_path = Path('dist/RAWviewer.app')
+        exe_path = Path("dist") / app_bundle_name
     if exe_path.exists():
         print(f"[SUCCESS] Executable created: {exe_path}")
         if platform.system() == 'Darwin':
             print("Patching macOS Info.plist...")
-            update_macos_plist(str(exe_path))
+            update_macos_plist(str(exe_path), profile=args.profile)
             print("Re-signing macOS app bundle (ad-hoc)...")
             run_command(['codesign', '--force', '--deep', '-s', '-', str(exe_path)])
             print("Clearing macOS quarantine attribute...")

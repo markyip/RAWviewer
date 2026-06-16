@@ -12,7 +12,6 @@ __pycache__/
 # IDE files
 .vscode/
 .idea/
-.agent/
 .gemini/
 *.swp
 *.swo
@@ -87,6 +86,9 @@ C:*/
 # Local agent / IDE scratch (not part of the app)
 .agent/
 
+# Local planning / agent docs (not for release)
+docs/local/
+
 # Local MobileCLIP2 / OpenCLIP Core ML export trees (not part of the app bundle)
 .build/
 .hf_cache_mobileclip/
@@ -140,13 +142,16 @@ Untitled
 # Ad-hoc script outputs
 scripts/output/
 
-# Local one-off profiling scripts (hardcoded paths)
+# Local one-off profiling / cache-debug scripts (hardcoded paths)
 scripts/profile_*.py
+scripts/check_folder_cache.py
 
 # .NET build output (Windows share helper)
 src/windows_share_helper/bin/
 src/windows_share_helper/obj/
 
-# Aviation Specialist AI
-aviation_model_v2/
-old_semantic.py
+# Python packaging / test caches
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/

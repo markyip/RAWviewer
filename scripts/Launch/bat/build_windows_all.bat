@@ -39,7 +39,7 @@ if exist *.spec del /q *.spec 2>nul
 
 echo.
 echo [1/2] Building DirectML installer...
-python build.py --windows-accel directml
+python build.py --profile full --windows-accel directml
 if %errorlevel% neq 0 (
     echo.
     echo [ERROR] DirectML build failed!
@@ -49,7 +49,7 @@ if %errorlevel% neq 0 (
 
 echo.
 echo [2/2] Building CUDA installer (keeping DirectML output)...
-python build.py --windows-accel cuda --keep-dist
+python build.py --profile full --windows-accel cuda --keep-dist
 if %errorlevel% neq 0 (
     echo.
     echo [ERROR] CUDA build failed!

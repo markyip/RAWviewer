@@ -18,6 +18,7 @@ from gps_neighbors import (
     GpsMapView,
     GpsPoint,
     MapPin,
+    haversine_m,
     map_pins_for_view,
 )
 
@@ -30,7 +31,13 @@ ESRI_SATELLITE_URL = (
 OPENTOPOMAP_URL = "https://tile.opentopomap.org/{z}/{x}/{y}.png"
 MAX_MAP_ZOOM = 20  # absolute ceiling; clusters stay one pin (no per-file fan-out)
 MAX_ZOOM_IN_ABOVE_FIT = 2  # headroom when Z_fit is already high (tight cluster spread)
+MAX_ZOOM_OUT_BELOW_FIT = 2  # allow modest zoom-out below fitBounds for surrounding context
 MIN_DETAIL_ZOOM = 18  # floor when Z_fit is low (wide spread — +2 alone is not enough)
+PAN_FRACTION_ZOOM_OUT = 0.45  # max pan (fraction of view) when fully zoomed out below fit
+PAN_FRACTION_ZOOM_IN = 0.40  # max pan (fraction of view) when zoomed in above fit
+PAN_FRACTION_AT_FIT = 0.22  # allow modest pan even at the initial fit zoom
+MAP_FRAME_EDGE_PX = 10  # click within this band to reset view
+MAX_VIEWPORT_CLUSTER_PINS = 48  # cap dynamic pins when zoomed/panned out
 TILE_NATIVE_MAX_ZOOM = 19
 MIN_GEO_HALF_DEG = 0.00012  # ~13 m; keeps a sensible minimum view
 PIN_MARGIN_PX = 14
@@ -55,9 +62,9 @@ TILE_STYLES: dict[str, TileStyleConfig] = {
     "satellite": TileStyleConfig(ESRI_SATELLITE_URL, "© Esri · © OpenStreetMap", 19),
 }
 DEFAULT_TILE_STYLE = "map"
-OSM_USER_AGENT = "RAWviewer/POC location_map_poc (contact: dev@rawviewer.local)"
+OSM_USER_AGENT = "RAWviewer/2.3 (contact: dev@rawviewer.local)"
 TILE_SIZE = 256
-DEFAULT_CACHE_DIR = Path("/tmp/rawviewer_map_poc_tiles")
+DEFAULT_CACHE_DIR = Path("/tmp/rawviewer_map_tiles")
 WIDGET_W = 352
 WIDGET_H = WIDGET_W * 3 // 4  # 4:3 (352×264)
 WIDGET_ASPECT = WIDGET_W / WIDGET_H
@@ -69,6 +76,26 @@ def lat_lon_to_tile_xy(lat: float, lon: float, zoom: int) -> tuple[float, float]
     lat_rad = math.radians(lat)
     y = (1.0 - math.asinh(math.tan(lat_rad)) / math.pi) / 2.0 * n
     return x, y
+
+
+def world_pixel_to_lat_lon(px: float, py: float, zoom: int) -> tuple[float, float]:
+    """Inverse of lat_lon_to_world_pixel (Web Mercator)."""
+    n = 2**zoom
+    tx = px / TILE_SIZE
+    ty = py / TILE_SIZE
+    lon = tx / n * 360.0 - 180.0
+    lat_rad = math.atan(math.sinh(math.pi * (1.0 - 2.0 * ty / n)))
+    return math.degrees(lat_rad), lon
+
+
+def is_map_frame_edge(widget_x: float, widget_y: float) -> bool:
+    """True when click is on the map widget border (used to reset pan/zoom)."""
+    return (
+        widget_x <= MAP_FRAME_EDGE_PX
+        or widget_y <= MAP_FRAME_EDGE_PX
+        or widget_x >= WIDGET_W - MAP_FRAME_EDGE_PX
+        or widget_y >= WIDGET_H - MAP_FRAME_EDGE_PX
+    )
 
 
 def nearest_file_neighbors(
@@ -530,7 +557,8 @@ def _draw_pin(
         painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, badge)
 
 
-RED_HIT_RADIUS = 8.0
+RED_HIT_RADIUS = 12.0
+GREEN_HIT_RADIUS = 14.0
 
 
 def viewport_pin_to_widget(
@@ -565,14 +593,13 @@ def hit_test_pin_at(
     widget_x: float,
     widget_y: float,
 ) -> Optional[MapPin]:
-    """Return clicked red cluster pin; green / miss → None."""
+    """Return the nearest cluster pin under the cursor (green or red)."""
     best: Optional[MapPin] = None
     best_dist = float("inf")
     for pin, x, y, color in layout:
-        if color == "green":
-            continue
+        hit_r = GREEN_HIT_RADIUS if color == "green" else RED_HIT_RADIUS
         dist = math.hypot(widget_x - x, widget_y - y)
-        if dist <= RED_HIT_RADIUS and dist < best_dist:
+        if dist <= hit_r and dist < best_dist:
             best = pin
             best_dist = dist
     return best
@@ -616,6 +643,7 @@ class LocationMapModel:
         map_view: GpsMapView,
         cache_dir: Path,
         tile_style: str = DEFAULT_TILE_STYLE,
+        all_clusters: Optional[list[GpsCluster]] = None,
     ):
         if tile_style not in TILE_STYLES:
             raise ValueError(f"Unknown tile style: {tile_style}")
@@ -624,18 +652,28 @@ class LocationMapModel:
         self.attribution = style.attribution
         self.max_zoom = style.max_zoom
         self.map_view = map_view
+        self.all_clusters = all_clusters or [
+            map_view.current_cluster,
+            *map_view.neighbor_clusters,
+        ]
+        self.bounds = padded_bounds(map_pins_for_view(map_view))
         self.pins = map_pins_for_view(map_view)
         self.cache_dir = cache_dir
         self.tile_style = tile_style
-        self.bounds = padded_bounds(self.pins)
         # Initial zoom = fitBounds from cluster pin spread (not a fixed level).
         self.base_zoom = fit_base_zoom(
             *self.bounds, WIDGET_W, WIDGET_H, self.max_zoom
         )
         self.max_zoom_limit = max_display_zoom(self.base_zoom, self.max_zoom)
+        self.min_zoom_limit = max(1, self.base_zoom - MAX_ZOOM_OUT_BELOW_FIT)
         self.zoom = self.base_zoom
+        self.pan_x = 0.0
+        self.pan_y = 0.0
+        self._default_world_left = 0.0
+        self._default_world_top = 0.0
         self.cache = TileCache(cache_dir / tile_style)
         self.cropped: "QPixmap"
+        self._stitched: Optional["QPixmap"] = None
         self.pin_pixels: list[tuple[MapPin, float, float, str]]
         self.view_w = 0.0
         self.view_h = 0.0
@@ -645,12 +683,174 @@ class LocationMapModel:
         return self.zoom < self.max_zoom_limit
 
     def can_zoom_out(self) -> bool:
-        return self.zoom > self.base_zoom
+        return self.zoom > self.min_zoom_limit
+
+    def _max_pan_world(self) -> tuple[float, float]:
+        """Pan range in world pixels at the current zoom."""
+        if self.zoom > self.base_zoom:
+            depth = self.zoom - self.base_zoom
+            factor = min(1.0, depth / max(1, MAX_ZOOM_IN_ABOVE_FIT)) * PAN_FRACTION_ZOOM_IN
+        elif self.zoom < self.base_zoom:
+            depth = self.base_zoom - self.zoom
+            factor = min(1.0, depth / max(1, MAX_ZOOM_OUT_BELOW_FIT)) * PAN_FRACTION_ZOOM_OUT
+        else:
+            factor = PAN_FRACTION_AT_FIT
+        return self.view_w * factor, self.view_h * factor
+
+    def _visible_geo_bounds(self) -> tuple[float, float, float, float]:
+        """Return min_lat, max_lat, min_lon, max_lon for the current viewport."""
+        nw_lat, nw_lon = world_pixel_to_lat_lon(
+            self.world_left, self.world_top, self.zoom
+        )
+        se_lat, se_lon = world_pixel_to_lat_lon(
+            self.world_left + self.view_w,
+            self.world_top + self.view_h,
+            self.zoom,
+        )
+        return (
+            min(nw_lat, se_lat),
+            max(nw_lat, se_lat),
+            min(nw_lon, se_lon),
+            max(nw_lon, se_lon),
+        )
+
+    def _cluster_in_bounds(
+        self,
+        cluster: GpsCluster,
+        min_lat: float,
+        max_lat: float,
+        min_lon: float,
+        max_lon: float,
+    ) -> bool:
+        lat = cluster.centroid_lat
+        lon = cluster.centroid_lon
+        return min_lat <= lat <= max_lat and min_lon <= lon <= max_lon
+
+    def _pins_for_current_viewport(self) -> list[MapPin]:
+        """Pins visible in the current viewport (dynamic when zoomed/panned out)."""
+        view = self.map_view
+        min_lat, max_lat, min_lon, max_lon = self._visible_geo_bounds()
+        pins: list[MapPin] = []
+        seen: set[int] = set()
+
+        def add_cluster(cluster: GpsCluster, color: str) -> None:
+            if cluster.cluster_id in seen:
+                return
+            if not self._cluster_in_bounds(cluster, min_lat, max_lat, min_lon, max_lon):
+                return
+            seen.add(cluster.cluster_id)
+            pins.append(
+                MapPin(
+                    lat=cluster.centroid_lat,
+                    lon=cluster.centroid_lon,
+                    color=color,
+                    cluster=cluster,
+                    badge=str(cluster.count),
+                )
+            )
+
+        add_cluster(view.current_cluster, "green")
+        others = sorted(
+            (c for c in self.all_clusters if c.cluster_id != view.current_cluster.cluster_id),
+            key=lambda c: (
+                haversine_m(
+                    view.current_cluster.centroid_lat,
+                    view.current_cluster.centroid_lon,
+                    c.centroid_lat,
+                    c.centroid_lon,
+                ),
+                c.cluster_id,
+            ),
+        )
+        for cluster in others:
+            if len(pins) >= MAX_VIEWPORT_CLUSTER_PINS:
+                break
+            add_cluster(cluster, "red")
+        return pins
+
+    def reset_view(self) -> bool:
+        """Reset zoom/pan to the initial fit view."""
+        if (
+            self.zoom == self.base_zoom
+            and abs(self.pan_x) < 1e-6
+            and abs(self.pan_y) < 1e-6
+        ):
+            return False
+        self.zoom = self.base_zoom
+        self.pan_x = 0.0
+        self.pan_y = 0.0
+        self._rebuild_at_zoom(self.base_zoom, log=False)
+        return True
+
+    def _clamp_pan(self) -> None:
+        max_x, max_y = self._max_pan_world()
+        self.pan_x = max(-max_x, min(max_x, self.pan_x))
+        self.pan_y = max(-max_y, min(max_y, self.pan_y))
+
+    def _stitched_covers_viewport(self) -> bool:
+        stitched = self._stitched
+        if stitched is None or stitched.isNull():
+            return False
+        crop_x = self.world_left - self.x0 * TILE_SIZE
+        crop_y = self.world_top - self.y0 * TILE_SIZE
+        margin = 1.0
+        return (
+            crop_x >= -margin
+            and crop_y >= -margin
+            and crop_x + self.view_w <= stitched.width() + margin
+            and crop_y + self.view_h <= stitched.height() + margin
+        )
+
+    def _repaint_viewport_only(self) -> None:
+        """Fast pan path: re-crop cached tiles and refresh pin positions."""
+        self.world_left = self._default_world_left + self.pan_x
+        self.world_top = self._default_world_top + self.pan_y
+        self.pins = self._pins_for_current_viewport()
+        if self._stitched is not None and not self._stitched.isNull():
+            self.cropped = render_world_viewport(
+                self._stitched,
+                self.world_left,
+                self.world_top,
+                self.view_w,
+                self.view_h,
+                self.x0,
+                self.y0,
+                WIDGET_W,
+                WIDGET_H,
+            )
+        self.pin_pixels = pin_positions_in_viewport(
+            self.pins,
+            self.zoom,
+            self.world_left,
+            self.world_top,
+        )
+
+    def pan_by_widget_delta(self, dx: float, dy: float) -> bool:
+        """Drag-pan the map; dx/dy are widget pixels since the last pan step."""
+        if dx == 0.0 and dy == 0.0:
+            return False
+        max_x, max_y = self._max_pan_world()
+        if max_x <= 0.0 and max_y <= 0.0:
+            return False
+        scale_x = self.view_w / max(WIDGET_W, 1)
+        scale_y = self.view_h / max(WIDGET_H, 1)
+        self.pan_x -= dx * scale_x
+        self.pan_y -= dy * scale_y
+        self._clamp_pan()
+        self.world_left = self._default_world_left + self.pan_x
+        self.world_top = self._default_world_top + self.pan_y
+        if self._stitched_covers_viewport():
+            self._repaint_viewport_only()
+        else:
+            self._rebuild_at_zoom(self.zoom, log=False)
+        return True
 
     def zoom_in(self) -> bool:
         if not self.can_zoom_in():
             return False
         prev = self.zoom
+        self.pan_x *= 2.0
+        self.pan_y *= 2.0
         self._rebuild_at_zoom(self.zoom + 1)
         return self.zoom > prev
 
@@ -658,18 +858,26 @@ class LocationMapModel:
         if not self.can_zoom_out():
             return False
         prev = self.zoom
+        self.pan_x *= 0.5
+        self.pan_y *= 0.5
         self._rebuild_at_zoom(self.zoom - 1)
         return self.zoom < prev
 
     def _rebuild_at_zoom(self, zoom: int, log: bool = False) -> None:
-        self.zoom = min(zoom, self.max_zoom_limit)
-        self.view_w, self.view_h, self.world_left, self.world_top = viewport_for_widget(
-            *self.bounds,
-            self.zoom,
-            WIDGET_W,
-            WIDGET_H,
-            self.base_zoom,
+        self.zoom = max(self.min_zoom_limit, min(zoom, self.max_zoom_limit))
+        self.view_w, self.view_h, self._default_world_left, self._default_world_top = (
+            viewport_for_widget(
+                *self.bounds,
+                self.zoom,
+                WIDGET_W,
+                WIDGET_H,
+                self.base_zoom,
+            )
         )
+        self._clamp_pan()
+        self.world_left = self._default_world_left + self.pan_x
+        self.world_top = self._default_world_top + self.pan_y
+        self.pins = self._pins_for_current_viewport()
 
         tile_zoom = self.zoom
         tile_paths: dict[tuple[int, int], Path] = {}
@@ -736,6 +944,7 @@ class LocationMapModel:
 
         self.x0, self.y0, self.x1, self.y1 = x0, y0, x1, y1
         stitched = stitch_tiles(tile_zoom, x0, y0, x1, y1, tile_paths)
+        self._stitched = stitched
         self.cropped = render_world_viewport(
             stitched,
             tw_left,
@@ -794,6 +1003,9 @@ class LocationMapModel:
                 inner_self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
                 inner_self.setFocusPolicy(Qt.FocusPolicy.WheelFocus)
                 inner_self.setMouseTracking(False)
+                inner_self._press_pos = None
+                inner_self._panning = False
+                inner_self._pending_cluster = None
 
             def paintEvent(inner_self, event):
                 del event
@@ -826,12 +1038,44 @@ class LocationMapModel:
                 if event.button() != Qt.MouseButton.LeftButton:
                     return
                 pos = event.position()
-                picked = model.hit_test_pin(pos.x(), pos.y())
-                if picked is None:
+                if is_map_frame_edge(pos.x(), pos.y()):
+                    if model.reset_view():
+                        inner_self.update()
+                    event.accept()
                     return
-                model.handle_cluster_click(picked.cluster)
-                if on_cluster_clicked:
-                    on_cluster_clicked(picked.cluster)
+                inner_self._press_pos = pos
+                inner_self._panning = False
+                picked = model.hit_test_pin(event.position().x(), event.position().y())
+                inner_self._pending_cluster = picked.cluster if picked is not None else None
+                event.accept()
+
+            def mouseMoveEvent(inner_self, event: QMouseEvent):
+                if inner_self._press_pos is None or not (
+                    event.buttons() & Qt.MouseButton.LeftButton
+                ):
+                    return
+                delta = event.position() - inner_self._press_pos
+                if not inner_self._panning and delta.manhattanLength() > 4:
+                    inner_self._panning = True
+                    inner_self._pending_cluster = None
+                if inner_self._panning:
+                    if model.pan_by_widget_delta(delta.x(), delta.y()):
+                        inner_self._press_pos = event.position()
+                        inner_self.update()
+                    event.accept()
+                    return
+                super().mouseMoveEvent(event)
+
+            def mouseReleaseEvent(inner_self, event: QMouseEvent):
+                if event.button() != Qt.MouseButton.LeftButton:
+                    return
+                if inner_self._panning:
+                    inner_self._panning = False
+                elif inner_self._pending_cluster is not None:
+                    if on_cluster_clicked:
+                        on_cluster_clicked(inner_self._pending_cluster)
+                inner_self._press_pos = None
+                inner_self._pending_cluster = None
                 event.accept()
 
         return _MapWidget()

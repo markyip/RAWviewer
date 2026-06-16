@@ -89,7 +89,7 @@ Unified 2.2 release — search, gallery, film strip, frameless window polish, RA
 ### 🎯 What's New
 - **Search from single-image view**: Search button in single view; submitting a query switches to gallery with filtered results.
 - **Fast single-file open**: Opening one image no longer waits for full folder scan and EXIF sort on large libraries.
-- **Windows — Open with another app**: Native picker via `OpenAs_RunDLLW` / `SHOpenWithDialog` with `OAIF_EXEC` for Lightroom, Photoshop, etc., directly exposed in the bottom bar via the Share button (bypasses dropdown for instant editing selection).
+- **Windows — Open with another app**: Native picker via `OpenAs_RunDLLW` / `SHOpenWithDialog` with `OAIF_EXEC` for Lightroom, Photoshop, etc., exposed through the bottom external-app button.
 - **macOS — Share (single image)**: Bottom-bar share in single view uses a **Qt menu** of `NSSharingService` targets (Mail, Messages, …). AirDrop is hidden from the menu by default; use Finder for reliable AirDrop (see `docs/macos-sharing-v21-v22.md`).
 - **Experimental GPU single-image view**: Opt in with `RAWVIEWER_GPU_VIEW=1` for smoother zoom/pan on supported hardware (classic scroll area remains the default).
 - **Consistent RAW color (fit ↔ zoom)**: Single-image RAW defaults to LibRaw half-res for fit view and full decode at 100% zoom (`RAWVIEWER_LIBRAW_CONSISTENT_PREVIEW=1`), avoiding embedded-JPEG color snap. Gallery thumbnails still use fast embedded previews.

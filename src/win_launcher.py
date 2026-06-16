@@ -37,10 +37,16 @@ def main() -> int:
         )
         return 1
 
+    cmd = [pixi_exe, "run", "start-windowless"]
+    file_args = [arg for arg in sys.argv[1:] if arg]
+    if file_args:
+        cmd.append("--")
+        cmd.extend(file_args)
+
     creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     try:
         subprocess.Popen(
-            [pixi_exe, "run", "start-windowless"],
+            cmd,
             cwd=install_dir,
             creationflags=creationflags,
         )

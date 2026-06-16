@@ -5,30 +5,49 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
-APP_NAME="RAWviewer.app"
-APP_SRC="${SCRIPT_DIR}/${APP_NAME}"
-APP_DEST="/Applications/${APP_NAME}"
+APP_NAME="${RAWVIEWER_APP_NAME:-}"
+APP_SRC=""
+APP_DEST=""
 
 # Allow double-click via .command from a quarantined download folder.
 xattr -cr "${SCRIPT_DIR}" 2>/dev/null || true
 
 find_app_bundle() {
-    if [[ -d "${APP_SRC}" ]]; then
-        return 0
+    local candidates=()
+    if [[ -n "${APP_NAME}" ]]; then
+        candidates+=("${APP_NAME}")
+    else
+        candidates+=("RAWviewer.app" "RAWviewer_Lite.app")
     fi
+    for name in "${candidates[@]}"; do
+        if [[ -d "${SCRIPT_DIR}/${name}" ]]; then
+            APP_NAME="${name}"
+            APP_SRC="${SCRIPT_DIR}/${name}"
+            APP_DEST="/Applications/${name}"
+            return 0
+        fi
+    done
     local found
-    found="$(find "${SCRIPT_DIR}" -maxdepth 2 -name "${APP_NAME}" -type d 2>/dev/null | head -1)"
-    if [[ -n "${found}" ]]; then
-        APP_SRC="${found}"
-        return 0
-    fi
-    # Developer: script run from repo (dist/RAWviewer.app after build.py).
-    local repo_dist
-    repo_dist="$(cd "${SCRIPT_DIR}/../../.." 2>/dev/null && pwd)/dist/${APP_NAME}"
-    if [[ -d "${repo_dist}" ]]; then
-        APP_SRC="${repo_dist}"
-        return 0
-    fi
+    for name in "${candidates[@]}"; do
+        found="$(find "${SCRIPT_DIR}" -maxdepth 2 -name "${name}" -type d 2>/dev/null | head -1)"
+        if [[ -n "${found}" ]]; then
+            APP_NAME="${name}"
+            APP_SRC="${found}"
+            APP_DEST="/Applications/${name}"
+            return 0
+        fi
+    done
+    # Developer: script run from repo (dist/*.app after build.py).
+    local repo_root
+    repo_root="$(cd "${SCRIPT_DIR}/../../.." 2>/dev/null && pwd || true)"
+    for name in "${candidates[@]}"; do
+        if [[ -n "${repo_root}" && -d "${repo_root}/dist/${name}" ]]; then
+            APP_NAME="${name}"
+            APP_SRC="${repo_root}/dist/${name}"
+            APP_DEST="/Applications/${name}"
+            return 0
+        fi
+    done
     return 1
 }
 
@@ -91,7 +110,7 @@ fail() {
 }
 
 if ! find_app_bundle; then
-    fail "Could not find RAWviewer.app next to this installer. Extract the full release zip first."
+    fail "Could not find RAWviewer.app or RAWviewer_Lite.app next to this installer. Extract the full release zip first."
 fi
 
 VERSION=""

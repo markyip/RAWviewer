@@ -1,15 +1,32 @@
 #!/bin/bash
-# Build RAWviewer on macOS.
+# Build RAWviewer on macOS (full or lite profile).
 # Repo root: scripts/Launch/shell -> ../../..
+# Usage: build_macos.sh [full|lite]
 
 set -e
 
 REPO_ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 cd "$REPO_ROOT"
 
+PROFILE="${1:-${RAWVIEWER_BUILD_PROFILE:-full}}"
+PROFILE="$(echo "$PROFILE" | tr '[:upper:]' '[:lower:]')"
+if [[ "$PROFILE" != "full" && "$PROFILE" != "lite" ]]; then
+    echo "[ERROR] Unknown profile: $PROFILE (use full or lite)"
+    exit 1
+fi
+export RAWVIEWER_BUILD_PROFILE="$PROFILE"
+
+if [[ "$PROFILE" == "lite" ]]; then
+    APP_BUNDLE="RAWviewer_Lite.app"
+    RELEASE_SUFFIX="macOS-Lite"
+else
+    APP_BUNDLE="RAWviewer.app"
+    RELEASE_SUFFIX="macOS"
+fi
+
 VERSION="$(grep -E '^VERSION = ' "$REPO_ROOT/build.py" | sed -E 's/.*"([^"]+)".*/\1/')"
 VERSION="${VERSION:-2.3.2}"
-echo "RAWviewer macOS Build Script (v${VERSION})"
+echo "RAWviewer macOS Build Script (v${VERSION}, profile: ${PROFILE})"
 echo "======================================"
 echo ""
 
@@ -59,7 +76,11 @@ echo "Upgrading pip..."
 "$PYTHON_BIN" -m pip install --upgrade pip
 
 echo "Installing core dependencies..."
-"$PYTHON_BIN" -m pip install --upgrade PyQt6 rawpy send2trash pyinstaller natsort exifread Pillow psutil numpy scipy qtawesome pyqtgraph reverse-geocoder pycountry huggingface-hub requests certifi pyobjc-framework-Cocoa pyobjc-framework-CoreML pyobjc-framework-Quartz pyobjc-framework-Vision
+CORE_DEPS="PyQt6 rawpy send2trash pyinstaller natsort exifread Pillow psutil numpy scipy qtawesome pyqtgraph reverse-geocoder pycountry certifi pyobjc-framework-Cocoa pyobjc-framework-Quartz"
+if [[ "$PROFILE" == "full" ]]; then
+    CORE_DEPS="$CORE_DEPS requests huggingface-hub pyobjc-framework-CoreML pyobjc-framework-Vision"
+fi
+"$PYTHON_BIN" -m pip install --upgrade $CORE_DEPS
 
 echo "Installing required dependency: pyexiv2..."
 if ! "$PYTHON_BIN" -m pip install --upgrade pyexiv2; then
@@ -79,21 +100,21 @@ chmod -R u+w dist 2>/dev/null || true
 rm -rf dist || true
 rm -f *.spec
 
-echo "Building RAWviewer (GPU single-image viewport enabled by default)..."
-if "$PYTHON_BIN" build.py; then
+echo "Building RAWviewer (${PROFILE})..."
+if "$PYTHON_BIN" build.py --profile "$PROFILE"; then
     echo ""
     echo "[SUCCESS] Build completed!"
     echo ""
 
-    if [ -d "dist/RAWviewer.app" ]; then
-        echo "macOS App Bundle created: dist/RAWviewer.app (v${VERSION})"
+    if [ -d "dist/${APP_BUNDLE}" ]; then
+        echo "macOS App Bundle created: dist/${APP_BUNDLE} (v${VERSION}, ${PROFILE})"
         echo ""
         echo "Packaging release zip (app + installer)..."
-        RELEASE_NAME="RAWviewer-v${VERSION}-macOS"
+        RELEASE_NAME="RAWviewer-v${VERSION}-${RELEASE_SUFFIX}"
         RELEASE_DIR="dist/${RELEASE_NAME}"
         rm -rf "${RELEASE_DIR}"
         mkdir -p "${RELEASE_DIR}"
-        ditto "dist/RAWviewer.app" "${RELEASE_DIR}/RAWviewer.app"
+        ditto "dist/${APP_BUNDLE}" "${RELEASE_DIR}/${APP_BUNDLE}"
         cp "${REPO_ROOT}/scripts/Launch/shell/install_macos_app.sh" "${RELEASE_DIR}/"
         cp "${REPO_ROOT}/scripts/Launch/shell/remove_macos_quarantine.sh" "${RELEASE_DIR}/"
         cp "${REPO_ROOT}/scripts/Launch/shell/macos_release_readme.txt" "${RELEASE_DIR}/Start Here.txt"
@@ -108,7 +129,7 @@ if "$PYTHON_BIN" build.py; then
         echo "  # Terminal: cd /tmp/${RELEASE_NAME} && bash install_macos_app.sh"
         echo ""
         echo "Local dev run (no download quarantine):"
-        echo "  open dist/RAWviewer.app"
+        echo "  open dist/${APP_BUNDLE}"
     elif [ -f "dist/RAWviewer" ]; then
         echo "Executable created: dist/RAWviewer"
         echo ""

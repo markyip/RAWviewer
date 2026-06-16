@@ -1786,6 +1786,9 @@ class JustifiedGallery(QWidget):
             if pv is not None and hasattr(pv, "_is_gallery_path_selected"):
                 if hasattr(w, "set_gallery_selected"):
                     w.set_gallery_selected(pv._is_gallery_path_selected(path))
+            if pv is not None and hasattr(pv, "_is_gallery_path_bookmarked"):
+                if hasattr(w, "set_gallery_bookmarked"):
+                    w.set_gallery_bookmarked(pv._is_gallery_path_bookmarked(path))
             thumb_missing = not cache_hit
             
             m = self._metadata_cache.get(path)
@@ -2463,6 +2466,10 @@ class JustifiedGallery(QWidget):
                 label.setText("")
                 label.file_path = None
                 label.original_pixmap = None
+                if hasattr(label, "set_gallery_selected"):
+                    label.set_gallery_selected(False)
+                if hasattr(label, "set_gallery_bookmarked"):
+                    label.set_gallery_bookmarked(False)
                 if destroy:
                     label.deleteLater()
                 else:
@@ -2503,6 +2510,16 @@ class JustifiedGallery(QWidget):
             path = getattr(w, "file_path", None)
             if path and hasattr(w, "set_gallery_selected"):
                 w.set_gallery_selected(pv._is_gallery_path_selected(path))
+
+    def refresh_gallery_bookmark_visuals(self) -> None:
+        """Sync bookmark star on visible pooled thumbnails."""
+        pv = self.parent_viewer
+        if pv is None or not hasattr(pv, "_is_gallery_path_bookmarked"):
+            return
+        for w in self._visible_widgets.values():
+            path = getattr(w, "file_path", None)
+            if path and hasattr(w, "set_gallery_bookmarked"):
+                w.set_gallery_bookmarked(pv._is_gallery_path_bookmarked(path))
 
     def _paths_intersecting_rect(self, rect: QRect) -> List[str]:
         if rect is None or rect.isNull():

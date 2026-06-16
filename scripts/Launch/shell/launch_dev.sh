@@ -67,9 +67,16 @@ export RAWVIEWER_TEST_PYEXIV2="${RAWVIEWER_TEST_PYEXIV2:-1}"
 export RAWVIEWER_TEST_SEMANTIC="${RAWVIEWER_TEST_SEMANTIC:-1}"
 export PYTHONPATH="${REPO_ROOT}/src:${PYTHONPATH:-}"
 
-if [ -f "${REPO_ROOT}/rawviewer_env/bin/activate" ]; then
+# Prefer pixi (.pixi/envs/default): includes PyObjC CoreML needed for full-profile semantic search on macOS.
+# rawviewer_env from build_macos.sh may lack CoreML; only fall back when pixi is unavailable.
+PIXI_PYTHON="${REPO_ROOT}/.pixi/envs/default/bin/python"
+if command -v pixi >/dev/null 2>&1 && [ -f "${REPO_ROOT}/pixi.toml" ] && [ -x "$PIXI_PYTHON" ]; then
+    export PATH="${REPO_ROOT}/.pixi/envs/default/bin:${PATH}"
+    echo "[launch_dev] Using pixi env (.pixi/envs/default)"
+elif [ -f "${REPO_ROOT}/rawviewer_env/bin/activate" ]; then
     # shellcheck source=/dev/null
     source "${REPO_ROOT}/rawviewer_env/bin/activate"
+    echo "[launch_dev] Using rawviewer_env (pixi unavailable)"
 fi
 
 if [ "${RAWVIEWER_TEST_PYEXIV2}" = "1" ]; then

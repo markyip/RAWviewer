@@ -16,10 +16,24 @@ PIXI_DOWNLOAD_URL = (
 )
 DOWNLOAD_RETRIES = 3
 RETRY_DELAY_SEC = 3
-MIN_FREE_BYTES = 3 * 1024 * 1024 * 1024  # ~3 GiB for pixi env + models
+MIN_FREE_BYTES = 3 * 1024 * 1024 * 1024  # ~3 GiB for pixi env + models (full)
+MIN_FREE_BYTES_LITE = 1024 * 1024 * 1024  # ~1 GiB for lite (no AI models)
 INSTALLER_PROGRESS_PREFIX = "@RAWVIEWER_PROGRESS"
 MODEL_DOWNLOAD_PROGRESS_START = 5
 MODEL_DOWNLOAD_PROGRESS_END = 100
+
+
+def _is_lite_installer() -> bool:
+    try:
+        from build_profile import PROFILE
+
+        return str(PROFILE).strip().lower() == "lite"
+    except Exception:
+        return False
+
+
+def _min_free_bytes_for_install() -> int:
+    return MIN_FREE_BYTES_LITE if _is_lite_installer() else MIN_FREE_BYTES
 
 
 def _parse_installer_progress_line(line: str) -> tuple[int, str] | None:
@@ -92,7 +106,7 @@ def _download_file_with_retry(url: str, dest_path: str, log) -> bool:
     os.makedirs(os.path.dirname(dest_path), exist_ok=True)
     req = urllib.request.Request(url, headers={"User-Agent": "RAWviewer-Setup/1.0"})
     for attempt in range(1, DOWNLOAD_RETRIES + 1):
-        disk_err = _check_disk_space(dest_path)
+        disk_err = _check_disk_space(dest_path, _min_free_bytes_for_install())
         if disk_err:
             log(disk_err)
             return False
@@ -182,6 +196,110 @@ def _run_subprocess_with_retry(cmd, cwd, log, label, cancelled, progress_hook=No
     return last_code
 
 
+FILE_ASSOC_PROGID = "RAWviewer.Image"
+
+
+def _file_association_extensions() -> list[str]:
+    try:
+        src_dir = os.path.join(BUNDLE_DIR, "src")
+        if src_dir not in sys.path:
+            sys.path.insert(0, src_dir)
+        from raw_file_extensions import get_supported_extensions
+
+        return get_supported_extensions()
+    except Exception:
+        return [
+            ".cr2",
+            ".cr3",
+            ".nef",
+            ".arw",
+            ".dng",
+            ".orf",
+            ".rw2",
+            ".pef",
+            ".srw",
+            ".x3f",
+            ".raf",
+            ".3fr",
+            ".fff",
+            ".iiq",
+            ".cap",
+            ".erf",
+            ".mef",
+            ".mos",
+            ".nrw",
+            ".rwl",
+            ".srf",
+            ".jpeg",
+            ".jpg",
+            ".png",
+            ".webp",
+            ".heif",
+            ".heic",
+            ".tif",
+            ".tiff",
+        ]
+
+
+def _register_file_associations(target_exe: str, log) -> None:
+    """Register HKCU Open With entries (does not set default handler / UserChoice)."""
+    if not os.path.isfile(target_exe):
+        log("Skipping file associations: RAWviewer.exe not found.")
+        return
+
+    exe_path = os.path.normpath(target_exe)
+    open_cmd = f'"{exe_path}" "%1"'
+    extensions = _file_association_extensions()
+
+    try:
+        app_key = r"Software\Classes\Applications\RAWviewer.exe"
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, f"{app_key}\\shell\\open\\command") as key:
+            winreg.SetValueEx(key, "", 0, winreg.REG_SZ, open_cmd)
+
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, f"{app_key}\\SupportedTypes") as key:
+            for ext in extensions:
+                winreg.SetValueEx(key, ext.lower(), 0, winreg.REG_SZ, "")
+
+        progid_key = f"Software\\Classes\\{FILE_ASSOC_PROGID}"
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, progid_key) as key:
+            winreg.SetValueEx(key, "", 0, winreg.REG_SZ, "RAWviewer Image")
+        with winreg.CreateKey(
+            winreg.HKEY_CURRENT_USER, f"{progid_key}\\shell\\open\\command"
+        ) as key:
+            winreg.SetValueEx(key, "", 0, winreg.REG_SZ, open_cmd)
+
+        for ext in extensions:
+            ext_key = ext.lower()
+            if not ext_key.startswith("."):
+                ext_key = f".{ext_key}"
+            owp_key = f"Software\\Classes\\{ext_key}\\OpenWithProgids"
+            with winreg.CreateKey(winreg.HKEY_CURRENT_USER, owp_key) as key:
+                winreg.SetValueEx(key, FILE_ASSOC_PROGID, 0, winreg.REG_SZ, "")
+
+        caps_key = r"Software\RAWviewer\Capabilities"
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, caps_key) as key:
+            winreg.SetValueEx(key, "ApplicationName", 0, winreg.REG_SZ, "RAWviewer")
+            winreg.SetValueEx(
+                key, "ApplicationDescription", 0, winreg.REG_SZ, "RAW and photo viewer"
+            )
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, f"{caps_key}\\FileAssociations") as key:
+            for ext in extensions:
+                ext_key = ext.lower()
+                if not ext_key.startswith("."):
+                    ext_key = f".{ext_key}"
+                winreg.SetValueEx(key, ext_key, 0, winreg.REG_SZ, "RAWviewer Image")
+
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, r"Software\RegisteredApplications") as key:
+            winreg.SetValueEx(key, "RAWviewer", 0, winreg.REG_SZ, r"Software\RAWviewer\Capabilities")
+
+        import ctypes
+
+        ctypes.windll.shell32.SHChangeNotify(0x08000000, 0x0000, None, None)
+        log("Registered file associations (Open With).")
+    except Exception as exc:
+        log(f"Failed to register file associations: {exc}")
+
+
 def _cleanup_partial_install(target_dir: str, log=None) -> None:
     if not target_dir:
         return
@@ -237,7 +355,7 @@ class InstallWorker(QObject):
     def run(self):
         target_dir = self.target_dir
         try:
-            disk_err = _check_disk_space(target_dir)
+            disk_err = _check_disk_space(target_dir, _min_free_bytes_for_install())
             if disk_err:
                 self.log_signal.emit(disk_err)
                 self.finished.emit(False, "")
@@ -345,43 +463,50 @@ class InstallWorker(QObject):
 
             self.progress_signal.emit(MODEL_DOWNLOAD_PROGRESS_START)
 
-            self.log_signal.emit(
-                "Downloading AI models (~600 MB). This may take several minutes..."
-            )
-            self.progress_label_signal.emit("Downloading... 0%")
-            self._model_download_log_pct = -1
-
-            def _on_model_download_progress(pct: int, message: str) -> None:
-                self.progress_signal.emit(_map_model_download_progress(pct))
-                label = (message or "").strip() or f"Downloading... {pct}%"
-                self.progress_label_signal.emit(label)
-                last_logged = getattr(self, "_model_download_log_pct", -1)
-                if pct >= 100 or pct <= 0 or pct >= last_logged + 5:
-                    self._model_download_log_pct = pct
-                    self.log_signal.emit(label)
-
-            models_code = _run_subprocess_with_retry(
-                [pixi_exe, "run", "python", "-u", "scripts/download_mobileclip_onnx.py"],
-                target_dir,
-                self.log_signal.emit,
-                "AI model download",
-                self._is_cancelled,
-                progress_hook=_on_model_download_progress,
-            )
-            if models_code is None:
-                self._abort_cancelled()
-                return
-
             success_note = ""
-            if models_code != 0:
+            if _is_lite_installer():
                 self.log_signal.emit(
-                    "Warning: AI search models were not downloaded. "
-                    "Photo browsing will work; open Search in the gallery to download them later."
+                    "Lite install: skipping AI models (no semantic search or face detection)."
                 )
-                success_note = (
-                    "AI search models were not downloaded (network, proxy, or disk issue). "
-                    "Browsing works normally — open Search in the gallery to download them later."
+                self.progress_label_signal.emit("Finishing setup...")
+                self.progress_signal.emit(100)
+            else:
+                self.log_signal.emit(
+                    "Downloading AI models (~600 MB). This may take several minutes..."
                 )
+                self.progress_label_signal.emit("Downloading... 0%")
+                self._model_download_log_pct = -1
+
+                def _on_model_download_progress(pct: int, message: str) -> None:
+                    self.progress_signal.emit(_map_model_download_progress(pct))
+                    label = (message or "").strip() or f"Downloading... {pct}%"
+                    self.progress_label_signal.emit(label)
+                    last_logged = getattr(self, "_model_download_log_pct", -1)
+                    if pct >= 100 or pct <= 0 or pct >= last_logged + 5:
+                        self._model_download_log_pct = pct
+                        self.log_signal.emit(label)
+
+                models_code = _run_subprocess_with_retry(
+                    [pixi_exe, "run", "python", "-u", "scripts/download_mobileclip_onnx.py"],
+                    target_dir,
+                    self.log_signal.emit,
+                    "AI model download",
+                    self._is_cancelled,
+                    progress_hook=_on_model_download_progress,
+                )
+                if models_code is None:
+                    self._abort_cancelled()
+                    return
+
+                if models_code != 0:
+                    self.log_signal.emit(
+                        "Warning: AI search models were not downloaded. "
+                        "Photo browsing will work; open Search in the gallery to download them later."
+                    )
+                    success_note = (
+                        "AI search models were not downloaded (network, proxy, or disk issue). "
+                        "Browsing works normally — open Search in the gallery to download them later."
+                    )
 
             if self._is_cancelled():
                 self._abort_cancelled()
@@ -466,6 +591,9 @@ oLink2.Save
                 )
             except Exception as e:
                 self.log_signal.emit(f"Failed to register uninstaller: {e}")
+
+            self.log_signal.emit("Registering file associations...")
+            _register_file_associations(target_exe, self.log_signal.emit)
 
             self.progress_signal.emit(100)
             self.finished.emit(True, success_note)
@@ -640,11 +768,19 @@ class InstallerGUI(QMainWindow):
         title.setObjectName("title")
         layout.addWidget(title)
         
-        desc = QLabel(
-            "RAWviewer helps you review and cull RAW and JPEG photos quickly.\n\n"
-            "Setup downloads the runtime, Python dependencies, and AI search models "
-            "(several minutes on a slow connection)."
-        )
+        if _is_lite_installer():
+            desc_text = (
+                "RAWviewer Lite helps you review and cull RAW and JPEG photos quickly.\n\n"
+                "Setup downloads the runtime and Python dependencies only — no AI models. "
+                "Gallery search uses EXIF and GPS metadata; the location map is included."
+            )
+        else:
+            desc_text = (
+                "RAWviewer helps you review and cull RAW and JPEG photos quickly.\n\n"
+                "Setup downloads the runtime, Python dependencies, and AI search models "
+                "(several minutes on a slow connection)."
+            )
+        desc = QLabel(desc_text)
         desc.setObjectName("desc")
         desc.setWordWrap(True)
         layout.addWidget(desc)
@@ -655,7 +791,8 @@ class InstallerGUI(QMainWindow):
         
         row = QHBoxLayout()
         self.path_edit = QLineEdit()
-        default_path = os.path.join(os.environ.get('LOCALAPPDATA', 'C:'), "RAWviewer")
+        app_data = os.environ.get('LOCALAPPDATA') or os.path.expanduser('~')
+        default_path = os.path.join(app_data, "RAWviewer")
         self.path_edit.setText(default_path)
         
         btn_browse = QPushButton("Browse...")
