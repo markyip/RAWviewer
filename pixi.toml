@@ -9,6 +9,7 @@ platforms = ["win-64", "osx-arm64", "osx-64"]
 # pyexiv2 arm64 wheels target macOS 14+ (macosx_14_0_arm64); Intel wheels use macosx_13_0_x86_64.
 [system-requirements]
 macos = "14.0"
+cuda = "12.1"
 
 [tasks]
 start = "python src/main.py"
@@ -38,6 +39,7 @@ reverse-geocoder = "*"
 opencv-python-headless = "*"
 huggingface_hub = "*"
 requests = "*"
+kornia = ">=0.8.3, <0.9"
 
 # Windows semantic search (MobileCLIP ONNX). Default for `pixi install` / `pixi run`.
 # - Local dev: onnxruntime-gpu (CUDA EP when a GPU is available).
@@ -50,6 +52,8 @@ pywin32 = "*"
 comtypes = "*"
 "winrt-Windows.ApplicationModel.DataTransfer" = "*"
 "winrt-Windows.Storage" = "*"
+torch = { version = "==2.5.1", index = "https://download.pytorch.org/whl/cu121" }
+torchvision = { version = "==0.20.1", index = "https://download.pytorch.org/whl/cu121" }
 
 # macOS EXIF (Exiv2). After `pixi install`, ensure native libs: brew install inih gettext
 [target.osx-arm64.pypi-dependencies]

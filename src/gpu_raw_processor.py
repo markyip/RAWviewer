@@ -83,21 +83,49 @@ def bayer_pattern_from_raw(raw_obj: Any) -> str:
     return "RGGB"
 
 
-def camera_rgb_to_srgb_matrix(cam_rgb_to_xyz: np.ndarray) -> np.ndarray:
+def camera_rgb_to_srgb_matrix(
+    cam_xyz: np.ndarray,
+    wb_coeffs: Tuple[float, float, float, float],
+    daylight_wb: Optional[Tuple[float, float, float, float]] = None
+) -> np.ndarray:
     """
-    Build a 3x3 matrix for ``linear_srgb = camera_rgb @ matrix.T``.
-
-    LibRaw stores ``rgb_xyz_matrix`` with a layout that does not match a naive
-    ``cam @ XYZ->sRGB`` product on our GPU path yet. Transpose matches rawpy
-    channel balance more closely than ``inv(cam)`` on tested Canon CR3 files.
+    Build a 3x3 matrix for converting white-balanced camera RGB to linear sRGB.
+    srgb = W @ camera_rgb_balanced
     """
-    cam = np.asarray(cam_rgb_to_xyz, dtype=np.float64)[:3, :3]
+    cam = np.asarray(cam_xyz, dtype=np.float64)[:3, :3]
     if cam.shape != (3, 3) or np.allclose(cam, 0.0):
         return np.eye(3, dtype=np.float32)
     try:
+        # Camera to XYZ is the inverse of XYZ -> Camera (cam_xyz)
+        cam_to_xyz = np.linalg.inv(cam)
+        
+        # Standard XYZ to linear sRGB matrix (D65)
+        XYZ_TO_SRGB = np.array([
+            [3.2404542, -1.5371385, -0.4985314],
+            [-0.9692660, 1.8760108, 0.0415560],
+            [0.0556434, -0.2040259, 1.0572252]
+        ], dtype=np.float64)
+        
+        cam_to_srgb = XYZ_TO_SRGB @ cam_to_xyz
+        
+        # Normalize rows so that D65 camera response (1.0 / daylight_wb) maps to (1,1,1) in sRGB
+        if daylight_wb is not None and len(daylight_wb) >= 3 and not np.allclose(daylight_wb[:3], 0.0):
+            dwb_coeffs = np.array([daylight_wb[0], daylight_wb[1], daylight_wb[2]], dtype=np.float64)
+            d65_cam = 1.0 / dwb_coeffs
+            d65_srgb = cam_to_srgb @ d65_cam
+            m_norm = cam_to_srgb / d65_srgb[:, None]
+        else:
+            m_norm = cam_to_srgb
+            
+        # Correct for pre-applied white balance coefficients
+        wb_arr = np.array([wb_coeffs[0], wb_coeffs[1], wb_coeffs[2]], dtype=np.float64)
+        wb_arr = np.where(wb_arr == 0.0, 1.0, wb_arr)
+        
+        W_final = m_norm / wb_arr[None, :]
+        return W_final.astype(np.float32)
+    except Exception as e:
+        logger.warning(f"Error computing camera to sRGB matrix: {e}")
         return cam.T.astype(np.float32)
-    except Exception:
-        return np.eye(3, dtype=np.float32)
 
 
 def gpu_demosaic_pytorch(
@@ -110,11 +138,11 @@ def gpu_demosaic_pytorch(
     white_level: float = 16383.0
 ) -> np.ndarray:
     """
-    A GPU-accelerated Bilinear Demosaicing implementation using PyTorch.
-    Uses torch.nn.functional.conv2d with fixed convolution filters to interpolate Bayer channels.
+    A GPU-accelerated Demosaicing implementation using PyTorch and Kornia.
+    Uses kornia.color.raw_to_rgb to interpolate Bayer channels.
     """
     import torch
-    import torch.nn.functional as F
+    import kornia
 
     device = torch.device(device_str)
     
@@ -122,80 +150,65 @@ def gpu_demosaic_pytorch(
     raw_tensor = torch.from_numpy(raw_array.astype(np.float32)).to(device)
     h, w = raw_tensor.shape
     
-    # Define coordinate slices for R, G1, B, G2 based on bayer_pattern
+    # Define coordinate slices and select Kornia CFA enum based on bayer_pattern
     if bayer_pattern == "RGGB":
         r_slice = (slice(0, None, 2), slice(0, None, 2))
         g_slice = (slice(0, None, 2), slice(1, None, 2))
         g2_slice = (slice(1, None, 2), slice(0, None, 2))
         b_slice = (slice(1, None, 2), slice(1, None, 2))
+        cfa = kornia.color.CFA.RG
     elif bayer_pattern == "BGGR":
         b_slice = (slice(0, None, 2), slice(0, None, 2))
         g_slice = (slice(0, None, 2), slice(1, None, 2))
         g2_slice = (slice(1, None, 2), slice(0, None, 2))
         r_slice = (slice(1, None, 2), slice(1, None, 2))
+        cfa = kornia.color.CFA.BG
     elif bayer_pattern == "GRBG":
         g_slice = (slice(0, None, 2), slice(0, None, 2))
         r_slice = (slice(0, None, 2), slice(1, None, 2))
         b_slice = (slice(1, None, 2), slice(0, None, 2))
         g2_slice = (slice(1, None, 2), slice(1, None, 2))
+        cfa = kornia.color.CFA.GR
     elif bayer_pattern == "GBRG":
         g_slice = (slice(0, None, 2), slice(0, None, 2))
         b_slice = (slice(0, None, 2), slice(1, None, 2))
         r_slice = (slice(1, None, 2), slice(0, None, 2))
         g2_slice = (slice(1, None, 2), slice(1, None, 2))
+        cfa = kornia.color.CFA.GB
     else:
         # Fallback to RGGB
         r_slice = (slice(0, None, 2), slice(0, None, 2))
         g_slice = (slice(0, None, 2), slice(1, None, 2))
         g2_slice = (slice(1, None, 2), slice(0, None, 2))
         b_slice = (slice(1, None, 2), slice(1, None, 2))
+        cfa = kornia.color.CFA.RG
 
     wb_r, wb_g, wb_b, wb_g2 = wb_coeffs
     black_r, black_g, black_b, black_g2 = black_levels
 
-    # Subtract black level channel-wise and normalize
+    # Subtract black level and normalize channel-wise
     raw_norm = torch.zeros_like(raw_tensor)
     raw_norm[r_slice] = torch.clamp(raw_tensor[r_slice] - black_r, min=0.0) / max(1.0, white_level - black_r)
     raw_norm[g_slice] = torch.clamp(raw_tensor[g_slice] - black_g, min=0.0) / max(1.0, white_level - black_g)
     raw_norm[g2_slice] = torch.clamp(raw_tensor[g2_slice] - black_g2, min=0.0) / max(1.0, white_level - black_g2)
     raw_norm[b_slice] = torch.clamp(raw_tensor[b_slice] - black_b, min=0.0) / max(1.0, white_level - black_b)
 
-    # Extract raw channels and apply white balance multipliers
-    r_raw = torch.zeros_like(raw_norm)
-    r_raw[r_slice] = raw_norm[r_slice] * wb_r
-    
-    g_raw = torch.zeros_like(raw_norm)
-    g_raw[g_slice] = raw_norm[g_slice] * wb_g
-    g_raw[g2_slice] = raw_norm[g2_slice] * wb_g2
-        
-    b_raw = torch.zeros_like(raw_norm)
-    b_raw[b_slice] = raw_norm[b_slice] * wb_b
-    
-    # 2. Setup interpolation filters for bilinear demosaicing
-    # G-channel filter: cross shape for horizontal/vertical neighbors
-    g_filter = torch.tensor([[0.0, 0.25, 0.0],
-                             [0.25, 1.0, 0.25],
-                             [0.0, 0.25, 0.0]], dtype=torch.float32, device=device).view(1, 1, 3, 3)
-                             
-    # R/B-channel filter: box shape for diagonal/cardinal neighbors
-    rb_filter = torch.tensor([[0.25, 0.5, 0.25],
-                              [0.5,  1.0, 0.5],
-                              [0.25, 0.5, 0.25]], dtype=torch.float32, device=device).view(1, 1, 3, 3)
+    # Apply White Balance directly on the single-channel Bayer grid
+    raw_norm[r_slice] *= wb_r
+    raw_norm[g_slice] *= wb_g
+    raw_norm[g2_slice] *= wb_g2
+    raw_norm[b_slice] *= wb_b
 
-    # 3. Reshape for conv2d: (batch_size, channels, height, width)
-    r_raw = r_raw.view(1, 1, h, w)
-    g_raw = g_raw.view(1, 1, h, w)
-    b_raw = b_raw.view(1, 1, h, w)
+    # 2. Reshape for Kornia: (batch_size=1, channels=1, height, width)
+    raw_input = raw_norm.view(1, 1, h, w)
     
-    # 4. Perform GPU Convolutions
-    r_interp = F.conv2d(r_raw, rb_filter, padding=1)
-    g_interp = F.conv2d(g_raw, g_filter, padding=1)
-    b_interp = F.conv2d(b_raw, rb_filter, padding=1)
+    # 3. Kornia Demosaicing
+    rgb_tensor = kornia.color.raw_to_rgb(raw_input, cfa)
     
-    # Stack channels to RGB (1, 3, h, w) -> squeeze and permute to (h, w, 3)
-    rgb_tensor = torch.cat([r_interp, g_interp, b_interp], dim=1).squeeze(0).permute(1, 2, 0)
+    # Squeeze and permute to (H, W, 3)
+    rgb_tensor = rgb_tensor.squeeze(0).permute(1, 2, 0)
     
-    # Apply Color Matrix Multiplication (maps sensor RGB directly to sRGB space)
+    # 4. Apply Color Matrix Multiplication (maps sensor RGB directly to sRGB space)
     m_color_tensor = torch.from_numpy(m_color).to(device)
     rgb_srgb = torch.matmul(rgb_tensor, m_color_tensor.t())
     
@@ -359,39 +372,44 @@ def try_gpu_raw_decode(
         black_levels = (0.0, 0.0, 0.0, 0.0)
         white_level = 16383.0
         cam_xyz = None
+        daylight_wb = None
         
         if raw_obj is not None:
             if hasattr(raw_obj, "camera_whitebalance") and raw_obj.camera_whitebalance:
                 wb = list(raw_obj.camera_whitebalance)
-                max_wb = max(wb) or 1.0
-                wb_coeffs = (wb[0]/max_wb, wb[1]/max_wb, wb[2]/max_wb, wb[3]/max_wb if len(wb) > 3 else wb[1]/max_wb)
+                wb_g = wb[1] if wb[1] != 0.0 else 1.0
+                wb_coeffs = (wb[0]/wb_g, 1.0, wb[2]/wb_g, wb[3]/wb_g if len(wb) > 3 else 1.0)
             if hasattr(raw_obj, "black_level_per_channel") and raw_obj.black_level_per_channel is not None:
                 black_levels = tuple(float(x) for x in raw_obj.black_level_per_channel)
             if hasattr(raw_obj, "white_level") and raw_obj.white_level is not None:
                 white_level = float(raw_obj.white_level)
             if hasattr(raw_obj, "rgb_xyz_matrix") and raw_obj.rgb_xyz_matrix is not None:
                 cam_xyz = raw_obj.rgb_xyz_matrix[:3, :3]
+            if hasattr(raw_obj, "daylight_whitebalance") and raw_obj.daylight_whitebalance is not None:
+                daylight_wb = tuple(raw_obj.daylight_whitebalance)
         else:
             import rawpy
             try:
                 with rawpy.imread(file_path) as raw:
                     if hasattr(raw, "camera_whitebalance") and raw.camera_whitebalance:
                         wb = list(raw.camera_whitebalance)
-                        max_wb = max(wb) or 1.0
-                        wb_coeffs = (wb[0]/max_wb, wb[1]/max_wb, wb[2]/max_wb, wb[3]/max_wb if len(wb) > 3 else wb[1]/max_wb)
+                        wb_g = wb[1] if wb[1] != 0.0 else 1.0
+                        wb_coeffs = (wb[0]/wb_g, 1.0, wb[2]/wb_g, wb[3]/wb_g if len(wb) > 3 else 1.0)
                     if hasattr(raw, "black_level_per_channel") and raw.black_level_per_channel is not None:
                         black_levels = tuple(float(x) for x in raw.black_level_per_channel)
                     if hasattr(raw, "white_level") and raw.white_level is not None:
                         white_level = float(raw.white_level)
                     if hasattr(raw, "rgb_xyz_matrix") and raw.rgb_xyz_matrix is not None:
                         cam_xyz = raw.rgb_xyz_matrix[:3, :3]
+                    if hasattr(raw, "daylight_whitebalance") and raw.daylight_whitebalance is not None:
+                        daylight_wb = tuple(raw.daylight_whitebalance)
             except Exception:
                 pass
 
         if cam_xyz is None or np.allclose(cam_xyz, 0):
             m_color = np.eye(3, dtype=np.float32)
         else:
-            m_color = camera_rgb_to_srgb_matrix(cam_xyz)
+            m_color = camera_rgb_to_srgb_matrix(cam_xyz, wb_coeffs, daylight_wb)
 
         if backend == "cupy" and bayer_pattern != "RGGB":
             logger.warning(
