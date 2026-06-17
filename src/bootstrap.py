@@ -812,7 +812,7 @@ class InstallerGUI(QMainWindow):
 
         self.radio_cuda = QRadioButton("Full — NVIDIA GPU (CUDA Acceleration, downloads ~600MB models)")
         self.radio_directml = QRadioButton("Full — Default GPU (DirectML Acceleration, downloads ~600MB models)")
-        self.radio_lite = QRadioButton("Lite — High Performance (No AI search, no downloading models, saves ~3GB disk space)")
+        self.radio_lite = QRadioButton("Lite — High Performance (No AI search, no downloading models)")
 
         # Set default to DirectML (most compatible across all devices)
         self.radio_directml.setChecked(True)
