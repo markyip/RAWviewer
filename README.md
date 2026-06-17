@@ -38,20 +38,21 @@ Not sure? Start with **Lite** if you mainly browse and cull by eye. Choose **Ful
 
 ### Windows
 
-    - Runs `RAWviewer_Setup.exe` and select your profile/acceleration in the setup wizard:
-      - **Full — CUDA** (NVIDIA GPU with CUDA for fastest AI search)
-      - **Full — DirectML** (AMD, Intel, or NVIDIA GPU; recommended for most PCs)
-      - **Lite** (Browsing and culling only; saves disk space, no AI models download)
-2. Follow the setup wizard. Stay online — setup downloads the app runtime and dependencies. **Full** builds also download AI search models (~600 MB); this can take several minutes.
-3. Open **RAWviewer** from the Desktop shortcut, Start Menu, or `RAWviewer.exe` in your install folder (default: `%LOCALAPPDATA%\RAWviewer`).
+1. Download **`RAWviewer_Setup.exe`** from **[Releases](https://github.com/markyip/RAWviewer/releases/latest)** and run it.
+2. In the setup wizard, choose your profile:
+   - **Full — CUDA** (NVIDIA GPU with CUDA for fastest AI search)
+   - **Full — DirectML** (AMD, Intel, or NVIDIA GPU; recommended for most PCs)
+   - **Lite** (browsing and culling only; smaller download, no AI models)
+3. Stay online — setup downloads the app runtime and dependencies. **Full** builds also download AI search models (~600 MB); this can take several minutes.
+4. Open **RAWviewer** from the Desktop shortcut, Start Menu, or **`RAWviewer.exe`** in your install folder (default: `%LOCALAPPDATA%\RAWviewer`).
 
 Setup also registers RAWviewer in Windows **Open with** for common photo formats, so you can right-click a file in Explorer and choose RAWviewer.
 
-**Uninstall:** Windows **Settings → Apps → RAWviewer → Uninstall**, or run `uninstall.bat` in the install folder. Your photo cache (`%USERPROFILE%\.rawviewer_cache`) and preferences are kept unless you delete them. Set `RAWVIEWER_UNINSTALL_FULL=1` before running `uninstall.bat` to remove cache and preferences too.
+**Uninstall:** **Settings → Apps → RAWviewer → Uninstall**, or run **`uninstall.bat`** in the install folder (`%LOCALAPPDATA%\RAWviewer`). This removes the app, your photo cache (`%USERPROFILE%\.rawviewer_cache`), logs, and map tiles under `%LOCALAPPDATA%\RAWviewer`. Window layout and sort preferences are kept unless you set **`RAWVIEWER_UNINSTALL_FULL=1`** before running **`uninstall.bat`** (that also clears `HKCU\Software\RAWviewer`).
 
 If Windows shows **“Protected your PC”**: click **More info** → **Run anyway**.
 
-> **`RAWviewer_Setup.exe` is the installer only** — it does not open the photo viewer. Use **RAWviewer.exe** or the Desktop shortcut.
+> **`RAWviewer_Setup.exe` is the installer only** — it does not open the photo viewer. Use **`RAWviewer.exe`** or the Desktop shortcut.
 
 ### macOS (13 Ventura or newer)
 
@@ -68,6 +69,8 @@ bash install_macos_app.sh
 
 To run from the extracted folder without installing: `bash remove_macos_quarantine.sh`
 
+**Uninstall:** In the extracted release folder (keep the zip or re-download from Releases), run **`bash uninstall_macos_app.sh`** or double-click **`Uninstall RAWviewer.command`** (right-click → **Open** if macOS blocks it). This removes RAWviewer from **Applications** and deletes your photo cache (`~/.rawviewer_cache`), logs, and preferences. Dragging the app to Trash alone does not clear cache.
+
 > **Mac too old?** Prebuilt apps need **macOS 13+**. See [macOS version support](#macos-version-support) below.
 
 ### System requirements
@@ -79,6 +82,16 @@ To run from the extracted folder without installing: `bash remove_macos_quaranti
 | **Disk (Lite)** | ~500 MB install + cache as you browse |
 | **Disk (Full)** | ~1.5 GB+ (includes AI models after first setup) |
 | **GPS map** | Internet on first use per area (map tiles are cached locally) |
+
+### Uninstall vs clear cache
+
+| Action | Windows | macOS |
+|--------|---------|-------|
+| **Uninstall app** | Settings → Apps, or **`uninstall.bat`** in `%LOCALAPPDATA%\RAWviewer` | **`uninstall_macos_app.sh`** or **`Uninstall RAWviewer.command`** in the release zip folder |
+| **Removes app** | Install folder | **`RAWviewer.app`** / **`RAWviewer_Lite.app`** in Applications |
+| **Removes photo cache** | `%USERPROFILE%\.rawviewer_cache` | `~/.rawviewer_cache` |
+| **Removes preferences** | Only if **`RAWVIEWER_UNINSTALL_FULL=1`** | Always (with uninstall script) |
+| **Clear cache only (keep app)** | **`scripts\Launch\bat\clear_cache.bat`** | **`scripts/Launch/shell/clear_cache.sh`** |
 
 ---
 
@@ -159,6 +172,7 @@ Full search syntax, focus-overlay brands, and power-user options are in **[Advan
 | Opened Setup again instead of the app | Launch **`RAWviewer.exe`** or the Desktop shortcut — not **`RAWviewer_Setup.exe`** |
 | AI search missing after install (**Full**) | Open gallery **Search** → accept the download prompt |
 | RAWviewer not in Open with | Re-run the installer (repair), or reinstall |
+| Leftover cache after uninstall | Run **`uninstall.bat`** again, or delete `%USERPROFILE%\.rawviewer_cache` manually |
 | Crash | Enable file logging with `RAWVIEWER_FILE_LOG=1`, then check the install folder |
 
 ### macOS
@@ -170,6 +184,8 @@ Full search syntax, focus-overlay brands, and power-user options are in **[Advan
 | Can’t read Desktop/Documents | System Settings → Privacy → **Full Disk Access** → add RAWviewer |
 | Search says models missing (**Full**) | Open gallery search and click **Download** when prompted (needs internet once) |
 | Download failed (SSL / certificate error) | Update to **v2.4** or newer (bundles certifi). On a corporate VPN or proxy, add your organization’s root certificate to **Keychain Access** and set it to **Always Trust** |
+| Need to uninstall completely | Use **`uninstall_macos_app.sh`** or **`Uninstall RAWviewer.command`** from the release zip — not Trash alone |
+| Uninstall scripts missing | Re-download the release zip from [Releases](https://github.com/markyip/RAWviewer/releases/latest); scripts are inside the extracted folder |
 
 More detail: [`scripts/Launch/README.md`](scripts/Launch/README.md)
 

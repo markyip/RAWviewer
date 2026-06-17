@@ -26,6 +26,20 @@ Scripts for local development and packaging. All paths assume the **repository r
 |---------|-------------------|
 | Unified (CUDA / DirectML / Lite) | `dist/RAWviewer_Setup.exe` |
 
+**End-user install (Windows):**
+
+1. Run **`RAWviewer_Setup.exe`** from [Releases](https://github.com/markyip/RAWviewer/releases/latest).
+2. Choose **Full — CUDA**, **Full — DirectML**, or **Lite** in the wizard; stay online for runtime and (Full) AI model downloads.
+3. Launch **`RAWviewer.exe`** or the Desktop shortcut — not **`RAWviewer_Setup.exe`** (installer/repair only).
+
+Default install folder: `%LOCALAPPDATA%\RAWviewer`. Setup registers **Open with** for common photo formats.
+
+**End-user uninstall (Windows):**
+
+- **Settings → Apps → RAWviewer → Uninstall**, or run **`uninstall.bat`** in the install folder.
+- Removes the install folder, `%USERPROFILE%\.rawviewer_cache`, and `%LOCALAPPDATA%\RAWviewer` (logs, map tiles).
+- Set **`RAWVIEWER_UNINSTALL_FULL=1`** before **`uninstall.bat`** to also delete QSettings (`HKCU\Software\RAWviewer` — window layout, sort, last folder).
+
 From repo root:
 
 ```batch
@@ -64,6 +78,7 @@ Official macOS release only; there is no Linux build or installer.
 | [`shell/launch_dev_full.sh`](shell/launch_dev_full.sh) | Same as full dev launch (`RAWVIEWER_BUILD_PROFILE=full`) |
 | [`shell/launch_dev_lite.sh`](shell/launch_dev_lite.sh) | Run from source with lite profile (semantic/face off) |
 | [`shell/clear_cache.sh`](shell/clear_cache.sh) | Wipe image/EXIF/semantic caches, logs, and QSettings (full fresh start) |
+| [`shell/uninstall_macos_app.sh`](shell/uninstall_macos_app.sh) | Remove `.app` from Applications + user cache, logs, and preferences |
 | [`shell/build_macos_full.sh`](shell/build_macos_full.sh) | macOS **full** build → `dist/RAWviewer.app` + release zip |
 | [`shell/build_macos_lite.sh`](shell/build_macos_lite.sh) | macOS **lite** build → `dist/RAWviewer_Lite.app` + release zip |
 | [`shell/build_macos.sh`](shell/build_macos.sh) | Underlying build script; accepts `full` or `lite` as first argument |
@@ -97,7 +112,7 @@ chmod +x scripts/Launch/shell/*.sh
 4. Installs PyQt6, rawpy, PyInstaller, **scipy**, **pyobjc** (Cocoa / CoreML / Quartz / Vision), and other runtime deps; **pyexiv2** is **required** (`brew install inih gettext` if the wheel build fails).
 5. Uninstalls heavy unused ML stacks (`torch`, `sentence-transformers`, …) to keep the app bundle smaller.
 6. Cleans `build/`, `dist/`, `*.spec`, then runs **`python build.py --profile full|lite`** (version from `build.py` `VERSION`, updates `Info.plist`; MobileCLIP models are **not** bundled — users download in-app on full builds).
-7. Packages release zip with the app bundle, **`install_macos_app.sh`**, **`remove_macos_quarantine.sh`**, and **`Start Here.txt`**.
+7. Packages release zip with the app bundle, **`install_macos_app.sh`**, **`remove_macos_quarantine.sh`**, **`uninstall_macos_app.sh`**, **`Uninstall RAWviewer.command`**, and **`Start Here.txt`**.
 
 **End-user install:** extract the zip, then in Terminal:
 
@@ -109,6 +124,19 @@ bash install_macos_app.sh
 (Tip: type `cd ` and drag the folder onto Terminal.)
 
 The script clears macOS download quarantine, copies RAWviewer to Applications, and opens it. Double-clicking the unsigned app from a download is often blocked before quarantine is cleared — **Terminal + `bash install_macos_app.sh`** is the supported path.
+
+**End-user uninstall (macOS):**
+
+Keep the extracted release folder (or re-download the zip from Releases). Then:
+
+```bash
+cd /path/to/RAWviewer-v2.4-macOS
+bash uninstall_macos_app.sh
+```
+
+Or double-click **`Uninstall RAWviewer.command`** (right-click → **Open** if Gatekeeper blocks it).
+
+Removes **`RAWviewer.app`** / **`RAWviewer_Lite.app`** from Applications, **`~/.rawviewer_cache`**, **`~/Library/Application Support/RAWviewer`**, logs, and preference plists. Dragging the app to Trash does **not** clear cache or preferences.
 
 **Output:** `dist/RAWviewer.app` or `dist/RAWviewer_Lite.app`, plus matching release zip under `dist/`.
 
@@ -173,7 +201,9 @@ Logs: dev console `[SHARE]`; packaged app under `~/Library/Logs/` or paths noted
 | `.pixi/envs/default/` | `pixi install` / `pixi run start` (see root `pixi.toml`) |
 | `.venv/` | Not referenced by these scripts; optional IDE/local use |
 
-**`clear_cache.bat`** / **`clear_cache.sh`** close RAWviewer (and dev `python … main.py` instances), then delete `~/.rawviewer_cache`, log folders, and session state (Windows: `HKCU\Software\RAWviewer`; macOS: `~/Library/Preferences/com.RAWviewer.RAWviewer.plist`). They do **not** remove the installed app (Windows: `%LOCALAPPDATA%\RAWviewer`; macOS: `/Applications/RAWviewer.app` or repo `models/`).
+**`clear_cache.bat`** / **`clear_cache.sh`** close RAWviewer (and dev `python … main.py` instances), then delete `~/.rawviewer_cache`, log folders, and session state (Windows: `HKCU\Software\RAWviewer`; macOS: `~/Library/Preferences/com.RAWviewer.RAWviewer.plist`). They do **not** remove the installed app.
+
+**`uninstall.bat`** (Windows, in install folder) and **`uninstall_macos_app.sh`** (macOS, in release zip) remove the app **and** user caches; see the end-user uninstall sections above. On Windows, QSettings are removed only when **`RAWVIEWER_UNINSTALL_FULL=1`**; macOS uninstall always clears preferences.
 
 ## Known issues (platform)
 

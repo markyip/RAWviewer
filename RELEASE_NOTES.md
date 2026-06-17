@@ -12,6 +12,13 @@ Version **2.4** uses **`build.py`** as the single source of truth: `VERSION` syn
 - **Large-Folder Stability**: Optimized prefetch slot reservation under low capacity caps, debounced thumbnail error retries to prevent event loop storms, and quick recovery from EMFILE (too-many-open-files) pressure with a shorter 12-second cooldown and a minor background prefetch trickle.
 - **Cache Eviction**: Replaced the abrupt full clear of the embedded scan cache with a FIFO (first-in-first-out) eviction strategy to avoid duplicate file I/O in large folders.
 
+### 📦 Install & uninstall
+- **Windows install**: Unified **`RAWviewer_Setup.exe`** — choose **Full (CUDA / DirectML)** or **Lite** in the wizard; launch **`RAWviewer.exe`** (not Setup) after install. Default folder: `%LOCALAPPDATA%\RAWviewer`.
+- **Windows uninstall**: **Settings → Apps → RAWviewer → Uninstall**, or **`uninstall.bat`** in the install folder. Removes the app, **`%USERPROFILE%\.rawviewer_cache`**, and **`%LOCALAPPDATA%\RAWviewer`** logs/tiles. Set **`RAWVIEWER_UNINSTALL_FULL=1`** before **`uninstall.bat`** to also clear QSettings preferences.
+- **macOS install**: Extract release zip → **`bash install_macos_app.sh`** (see **`Start Here.txt`** in the zip). Copies the app to **Applications** and clears download quarantine.
+- **macOS uninstall**: Release zips now include **`uninstall_macos_app.sh`** and **`Uninstall RAWviewer.command`** — removes **Applications** copies, **`~/.rawviewer_cache`**, logs, and preferences. Keep the zip (or re-download) to run uninstall later; Trash alone does not clear cache.
+- **Documentation**: README, **`Start Here.txt`**, and **`scripts/Launch/README.md`** updated with install/uninstall steps and an uninstall-vs-**`clear_cache`** table for both platforms.
+
 ---
 
 ## 🚀 Version 2.3.2
