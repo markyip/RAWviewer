@@ -95,9 +95,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command ^
   "  }" ^
   "}" >nul 2>&1
 
+if exist "%USERPROFILE%\.rawviewer_cache" rd /s /q "%USERPROFILE%\.rawviewer_cache" >nul 2>&1
+
 if /I "%RAWVIEWER_UNINSTALL_FULL%"=="1" (
     reg delete "HKCU\Software\RAWviewer" /f >nul 2>&1
-    if exist "%USERPROFILE%\.rawviewer_cache" rd /s /q "%USERPROFILE%\.rawviewer_cache" >nul 2>&1
 )
 
 
