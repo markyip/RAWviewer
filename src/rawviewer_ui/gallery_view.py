@@ -2736,6 +2736,11 @@ class JustifiedGallery(QWidget):
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
         if self._rubber_active and self._rubber_origin is not None:
+            # If the user releases Ctrl/Cmd midway through dragging, stop the selection.
+            if not self._extend_selection_modifier(event.modifiers()):
+                self._end_ctrl_drag_selection(event.position().toPoint())
+                event.accept()
+                return
             self._update_ctrl_drag_selection(event.position().toPoint())
             event.accept()
             return
