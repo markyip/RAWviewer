@@ -2783,11 +2783,9 @@ class JustifiedGallery(QWidget):
                 if hasattr(pv, "_gallery_has_extend_modifier") and pv._gallery_has_extend_modifier(
                     e.modifiers()
                 ):
-                    _w = self.sender()
-                    if _w:
-                        pt = _w.mapTo(self, e.position().toPoint())
-                        self._begin_ctrl_drag_selection(pt)
-                        self.grabMouse()
+                    # Ctrl + Click toggles the single item instead of starting a sticky mouse grab drag
+                    if hasattr(pv, "_gallery_toggle_path_selection"):
+                        pv._gallery_toggle_path_selection(target_path)
                     return
                 pv._gallery_item_clicked(target_path)
         except Exception:
