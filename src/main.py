@@ -20167,6 +20167,7 @@ class RAWImageViewer(QMainWindow):
         # the QGraphicsView handle the transform. New file -> fit; same-file resolution
         # upgrade -> preserve framing while zoomed.
         if gv is not None:
+            gv.set_file_path(cur_path)
             self._crossfade_next_paint = False
             maintain_zoom = (
                 getattr(self, "_preserve_nav_zoom_active", False)

@@ -6,9 +6,9 @@ import logging
 import numpy as np
 from typing import List, Dict, Any, Optional
 
-from PyQt6.QtWidgets import QWidget, QScrollArea, QLabel
-from PyQt6.QtCore import Qt, QTimer, QRect, QEvent, QSize
-from PyQt6.QtGui import QPixmap, QImage, QPainter, QBrush, QColor, QFont, QTransform, QMouseEvent
+from PyQt6.QtWidgets import QWidget, QScrollArea, QLabel, QApplication
+from PyQt6.QtCore import Qt, QTimer, QRect, QEvent, QSize, QUrl, QMimeData, QPoint
+from PyQt6.QtGui import QPixmap, QImage, QPainter, QBrush, QColor, QFont, QTransform, QMouseEvent, QDrag
 
 from rawviewer_ui.widgets import ThumbnailLabel, ImageLoaded
 from image_cache import LRUCache
@@ -1797,29 +1797,11 @@ class JustifiedGallery(QWidget):
                 display_rect = self._content_rect_to_viewport(rect)
                 w.setGeometry(display_rect)
                 w.setFixedSize(display_rect.size())
-                def _on_thumb_press(e, _w=w):
-                    try:
-                        if e.button() == Qt.MouseButton.LeftButton:
-                            e.accept()
-                            target_path = getattr(_w, "file_path", None)
-                            pv = self.parent_viewer
-                            if target_path and pv is not None:
-                                if hasattr(pv, "_gallery_has_extend_modifier") and pv._gallery_has_extend_modifier(
-                                    e.modifiers()
-                                ):
-                                    pt = _w.mapTo(self, e.position().toPoint())
-                                    self._begin_ctrl_drag_selection(pt)
-                                    self.grabMouse()
-                                    return
-                                pv._gallery_item_clicked(target_path)
-                            return
-                    except Exception:
-                        pass
-                    try:
-                        e.ignore()
-                    except Exception:
-                        pass
-                w.mousePressEvent = _on_thumb_press
+                try:
+                    w.clicked.disconnect()
+                except Exception:
+                    pass
+                w.clicked.connect(self._on_thumbnail_clicked)
                 created_widgets += 1
                 self._visible_widgets[idx] = w
             else:
@@ -2788,3 +2770,20 @@ class JustifiedGallery(QWidget):
         y = max(8, (avail_h - label_h) // 2)
         x = margin_x
         label.setGeometry(int(x), int(y), avail_w, label_h)
+
+    def _on_thumbnail_clicked(self, target_path, e):
+        try:
+            pv = self.parent_viewer
+            if target_path and pv is not None:
+                if hasattr(pv, "_gallery_has_extend_modifier") and pv._gallery_has_extend_modifier(
+                    e.modifiers()
+                ):
+                    _w = self.sender()
+                    if _w:
+                        pt = _w.mapTo(self, e.position().toPoint())
+                        self._begin_ctrl_drag_selection(pt)
+                        self.grabMouse()
+                    return
+                pv._gallery_item_clicked(target_path)
+        except Exception:
+            pass

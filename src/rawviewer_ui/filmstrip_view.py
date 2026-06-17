@@ -7,13 +7,14 @@ import os
 from typing import Dict, List, Optional, Set
 
 import numpy as np
-from PyQt6.QtCore import Qt, pyqtSignal, QSize, QTimer
-from PyQt6.QtGui import QPixmap, QImage, QWheelEvent, QKeyEvent, QTransform
+from PyQt6.QtCore import Qt, pyqtSignal, QSize, QTimer, QUrl, QMimeData, QPoint
+from PyQt6.QtGui import QPixmap, QImage, QWheelEvent, QKeyEvent, QTransform, QDrag
 from PyQt6.QtWidgets import (
     QFrame,
     QLabel,
     QScrollArea,
     QWidget,
+    QApplication,
 )
 
 # Single justified row (same idea as gallery row: width = row_height * aspect)
@@ -83,6 +84,65 @@ def _thumbnail_to_pixmap(thumbnail) -> Optional[QPixmap]:
         return QPixmap.fromImage(qimg)
     except Exception:
         return None
+
+
+class FilmstripCell(QLabel):
+    clicked = pyqtSignal(int, object)  # index, QMouseEvent
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.index = -1
+        self.file_path = ""
+        self._drag_start_pos = None
+        self._drag_started = False
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton and self.file_path:
+            self._drag_start_pos = event.position().toPoint()
+            self._drag_started = False
+            event.accept()
+        else:
+            super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if not (event.buttons() & Qt.MouseButton.LeftButton) or not self.file_path:
+            super().mouseMoveEvent(event)
+            return
+
+        if self._drag_start_pos is not None and not self._drag_started:
+            dist = (event.position().toPoint() - self._drag_start_pos).manhattanLength()
+            if dist >= QApplication.startDragDistance():
+                self._drag_started = True
+                self._start_drag()
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            drag_started = self._drag_started
+            self._drag_start_pos = None
+            self._drag_started = False
+            if not drag_started and self.index >= 0:
+                self.clicked.emit(self.index, event)
+            event.accept()
+        else:
+            super().mouseReleaseEvent(event)
+
+    def _start_drag(self):
+        if not self.file_path or not os.path.exists(self.file_path):
+            return
+        
+        drag = QDrag(self)
+        mime_data = QMimeData()
+        mime_data.setUrls([QUrl.fromLocalFile(self.file_path)])
+        drag.setMimeData(mime_data)
+        
+        px = self.pixmap()
+        if px and not px.isNull():
+            drag_px = px.scaled(100, 100, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+            drag.setPixmap(drag_px)
+            drag.setHotSpot(QPoint(drag_px.width() // 2, drag_px.height() // 2))
+            
+        drag.exec(Qt.DropAction.CopyAction)
 
 
 class FilmStripBar(QFrame):
@@ -750,7 +810,7 @@ class FilmStripBar(QFrame):
             cell.setObjectName("filmstrip_cell")
             cell.setStyleSheet("")
         else:
-            cell = QLabel(self._content)
+            cell = FilmstripCell(self._content)
             cell.setObjectName("filmstrip_cell")
             cell.setAlignment(Qt.AlignmentFlag.AlignCenter)
             cell.setScaledContents(False)
@@ -779,7 +839,13 @@ class FilmStripBar(QFrame):
         for idx in range(first, last + 1):
             path = self._files[idx]
             cell = self._acquire_cell(idx)
-            self._wire_cell(cell, idx)
+            cell.index = idx
+            cell.file_path = path
+            try:
+                cell.clicked.disconnect()
+            except Exception:
+                pass
+            cell.clicked.connect(self._on_cell_clicked)
             self._active_paths.add(path)
             self._thumb_gen[path] = self._generation
             if self._prepare_cell_for_path(cell, idx, path):
@@ -800,15 +866,10 @@ class FilmStripBar(QFrame):
         if needed_paths:
             self.thumbnails_needed.emit(needed_paths)
 
-    def _wire_cell(self, cell: QLabel, index: int) -> None:
-        def _on_click(event, i=index):
-            if event.button() == Qt.MouseButton.LeftButton:
-                self._pending_index = i
-                self._update_selection_style()
-                self.committed.emit(i)
-            event.accept()
-
-        cell.mousePressEvent = _on_click
+    def _on_cell_clicked(self, idx: int, event) -> None:
+        self._pending_index = idx
+        self._update_selection_style()
+        self.committed.emit(idx)
 
     def _position_bookmark_badge(self, cell: QLabel) -> None:
         badge = getattr(cell, "_bookmark_badge", None)

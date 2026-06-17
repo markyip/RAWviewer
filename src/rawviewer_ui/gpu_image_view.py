@@ -101,6 +101,9 @@ class GpuImageView(QGraphicsView):
         self._shortcut_handler = None
 
         self._maybe_enable_opengl()
+        self.file_path = None
+        self._drag_start_pos = None
+        self._drag_started = False
 
         # Centered placeholder text shown when no image is loaded (parity with the
         # legacy QLabel instruction screen, which the GPU view would otherwise cover).
@@ -112,6 +115,9 @@ class GpuImageView(QGraphicsView):
         )
         self._placeholder.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         self._placeholder.hide()
+
+    def set_file_path(self, file_path: str) -> None:
+        self.file_path = file_path
 
     # ------------------------------------------------------------------ setup
     def _maybe_enable_opengl(self) -> None:
@@ -457,6 +463,14 @@ class GpuImageView(QGraphicsView):
         self.zoomChanged.emit(self.current_scale())
 
     # ------------------------------------------------------------------ events
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton and self._fit_mode and self.file_path:
+            self._drag_start_pos = event.position().toPoint()
+            self._drag_started = False
+            event.accept()
+        else:
+            super().mousePressEvent(event)
+
     def mouseMoveEvent(self, event) -> None:
         host = self.parentWidget()
         if host is not None:
@@ -464,7 +478,44 @@ class GpuImageView(QGraphicsView):
                 host._ensure_filmstrip_enabled()
             if hasattr(host, "handle_pointer_for_filmstrip"):
                 host.handle_pointer_for_filmstrip(event.globalPosition())
-        super().mouseMoveEvent(event)
+
+        if (event.buttons() & Qt.MouseButton.LeftButton) and self._fit_mode and self.file_path and self._drag_start_pos is not None:
+            if not self._drag_started:
+                dist = (event.position().toPoint() - self._drag_start_pos).manhattanLength()
+                if dist >= QApplication.startDragDistance():
+                    self._drag_started = True
+                    self._start_drag()
+            event.accept()
+        else:
+            super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton and self._fit_mode:
+            self._drag_start_pos = None
+            self._drag_started = False
+            event.accept()
+        else:
+            super().mouseReleaseEvent(event)
+
+    def _start_drag(self) -> None:
+        if not self.file_path or not os.path.exists(self.file_path):
+            return
+        drag = QDrag(self)
+        mime_data = QMimeData()
+        mime_data.setUrls([QUrl.fromLocalFile(self.file_path)])
+        drag.setMimeData(mime_data)
+
+        # Try to capture the current viewport pixmap to use as the drag thumbnail
+        try:
+            drag_px = self.capture_viewport_pixmap()
+            if drag_px and not drag_px.isNull():
+                drag_px = drag_px.scaled(140, 140, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+                drag.setPixmap(drag_px)
+                drag.setHotSpot(QPoint(drag_px.width() // 2, drag_px.height() // 2))
+        except Exception:
+            pass
+
+        drag.exec(Qt.DropAction.CopyAction)
 
     def event(self, event) -> bool:
         """Trackpad pinch (macOS) and smart-zoom gestures."""
