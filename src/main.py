@@ -20227,8 +20227,11 @@ class RAWImageViewer(QMainWindow):
                         self._pending_zoom_center = self.zoom_center_point
                         self._pending_zoom_thumbnail_size = pixmap.size()
                         gv.set_pixmap(pixmap, preserve_view=False)
-                        gv.fit_to_window()
-                        self.fit_to_window = True
+                        if not pending_user_zoom:
+                            gv.fit_to_window()
+                            self.fit_to_window = True
+                        else:
+                            self.fit_to_window = False
                         return False
 
                     if self._apply_gpu_navigation_zoom_restore(pixmap, gv):
