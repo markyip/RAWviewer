@@ -10876,6 +10876,7 @@ class RAWImageViewer(QMainWindow):
     def _is_gallery_search_indexing_active(self) -> bool:
         return bool(
             getattr(self, "_semantic_indexing_in_progress", False)
+            or getattr(self, "_semantic_index_prep_in_progress", False)
             or getattr(self, "_semantic_asset_download_in_progress", False)
             or getattr(self, "_face_indexing_in_progress", False)
         )
@@ -11013,7 +11014,7 @@ class RAWImageViewer(QMainWindow):
             self._face_indexing_in_progress = False
         if getattr(self, "_semantic_index_prep_in_progress", False):
             return False
-        from semantic_search import semantic_embeddings_enabled
+        from semantic_search import semantic_embeddings_enabled, face_scan_enabled
 
         if getattr(self, "_semantic_indexing_in_progress", False):
             return False
@@ -11021,6 +11022,8 @@ class RAWImageViewer(QMainWindow):
         if not semantic_embeddings_enabled():
             if not bool(getattr(self, "_metadata_index_run_done", False)):
                 return False
+            if not face_scan_enabled():
+                return True
             try:
                 index = self._get_semantic_index()
                 return index.get_face_pending_count(corpus) == 0
@@ -11031,9 +11034,10 @@ class RAWImageViewer(QMainWindow):
             index = self._get_semantic_index()
             if not index.semantic_backend_available():
                 return False
-            pending = index.get_pending_paths(corpus)
-            if len(pending) > 0:
+            if len(index.get_pending_embedding_paths(corpus)) > 0:
                 return False
+            if not face_scan_enabled():
+                return True
             return index.get_face_pending_count(corpus) == 0
         except Exception:
             return False
@@ -11068,7 +11072,10 @@ class RAWImageViewer(QMainWindow):
             return
         wants = bool(getattr(self, "_gallery_search_user_wants_semantic", False))
         expanded = bool(getattr(self, "_search_panel_expanded", False))
-        ready = self._is_gallery_semantic_search_ready()
+        if self._is_gallery_search_indexing_active():
+            ready = False
+        else:
+            ready = self._is_gallery_semantic_search_ready()
         # Requirement: while search panel is open, disable input unless indexing is fully ready.
         locked = expanded and not ready
         inp.setReadOnly(locked)
@@ -11687,7 +11694,7 @@ class RAWImageViewer(QMainWindow):
             return False
         lowered = msg.lower()
         if lowered.startswith("preparing thumbnail"):
-            return False
+            return True
         if lowered.startswith("downloading"):
             return True
         # Only the three search-index phases belong in the search field.
@@ -11703,17 +11710,26 @@ class RAWImageViewer(QMainWindow):
         if getattr(self, "view_mode", "") == "gallery":
             gj = getattr(self, "gallery_justified", None)
             if gj is not None and hasattr(gj, "_request_load_visible_images"):
-                gj._request_load_visible_images(0)
+                import time
+                now = time.time()
+                last_time = getattr(self, "_last_semantic_progress_reload_time", 0.0)
+                if now - last_time >= 2.0:
+                    self._last_semantic_progress_reload_time = now
+                    gj._request_load_visible_images(100)
 
         if not getattr(self, "_gallery_search_show_index_progress", False):
             return
         msg = str(message or "").strip()
         pass_kind = getattr(self, "_semantic_index_pass_kind", None)
+        if pass_kind == "silent_metadata":
+            return
         if pass_kind == "user_semantic" and msg.lower().startswith("metadata:"):
             return
         if msg and self._should_show_search_index_progress(msg):
             if pass_kind == "user_semantic" and not msg.lower().startswith("semantic:"):
-                if not msg.lower().startswith("face:"):
+                if not msg.lower().startswith("face:") and not msg.lower().startswith(
+                    "preparing thumbnail"
+                ):
                     return
             self._set_gallery_search_status(msg)
             return
@@ -11764,18 +11780,22 @@ class RAWImageViewer(QMainWindow):
         if pass_kind == "user_semantic":
             if folder:
                 self._set_semantic_index_incomplete(folder, False)
-            if self._is_gallery_semantic_search_ready(corpus):
-                self._finish_gallery_search_unlock(corpus)
-            else:
-                QTimer.singleShot(0, lambda: self._start_user_semantic_indexing(corpus))
+            pending_emb = 0
             face_pending = 0
             try:
                 if corpus:
-                    face_pending = self._get_semantic_index().get_face_pending_count(corpus)
+                    index = self._get_semantic_index()
+                    pending_emb = len(index.get_pending_embedding_paths(corpus) or [])
+                    face_pending = int(index.get_face_pending_count(corpus) or 0)
             except Exception:
                 pass
-            if face_pending > 0:
+            if pending_emb > 0:
+                QTimer.singleShot(0, lambda: self._start_user_semantic_indexing(corpus))
+            elif face_pending > 0:
+                self._gallery_search_show_index_progress = True
                 self._start_face_index_background(corpus)
+            elif self._is_gallery_semantic_search_ready(corpus):
+                self._finish_gallery_search_unlock(corpus)
             self._gallery_search_user_collapsed_while_busy = False
             return
 
@@ -11812,6 +11832,19 @@ class RAWImageViewer(QMainWindow):
         import time
 
         logger = logging.getLogger(__name__)
+        from semantic_search import face_scan_enabled
+        if not face_scan_enabled():
+            logger.info("[INDEX][FACE] Skip start: face scan is disabled")
+            self._face_indexing_in_progress = False
+            self._face_index_active_token = None
+            self._face_index_signals = None
+            corpus = self._gallery_search_index_corpus()
+            if self._is_gallery_semantic_search_ready(corpus):
+                self._finish_gallery_search_unlock(corpus)
+            else:
+                self._reset_gallery_search_to_idle()
+            return
+
         if getattr(self, "view_mode", "") == "gallery":
             defer_until = float(getattr(self, "_gallery_indexing_deferred_until", 0.0) or 0.0)
             gj = getattr(self, "gallery_justified", None)
@@ -11897,12 +11930,6 @@ class RAWImageViewer(QMainWindow):
     def _on_face_index_progress(self, token, i, n, message):
         if token != getattr(self, "_face_index_active_token", None):
             return
-            
-        # Dynamically load newly warmed thumbnails into gallery view to speed up scrolling/display
-        if getattr(self, "view_mode", "") == "gallery":
-            gj = getattr(self, "gallery_justified", None)
-            if gj is not None and hasattr(gj, "_request_load_visible_images"):
-                gj._request_load_visible_images(0)
 
         msg = str(message or "").strip()
         if msg and self._should_show_search_index_progress(msg):
@@ -11915,24 +11942,40 @@ class RAWImageViewer(QMainWindow):
         )
 
     def _on_face_index_done(self, token, result):
+        logger = logging.getLogger(__name__)
         if token != getattr(self, "_face_index_active_token", None):
             return
         self._face_indexing_in_progress = False
         self._face_index_active_token = None
         self._face_index_signals = None
         corpus = self._gallery_search_index_corpus()
-        if self._is_gallery_semantic_search_ready(corpus):
-            self._finish_gallery_search_unlock(corpus)
-        else:
-            # Face pass completed, but semantic may still be pending (or was never started).
-            # Keep search in indexing flow and resume semantic if the user requested it.
-            self._gallery_search_show_index_progress = True
-            if bool(getattr(self, "_gallery_search_user_wants_semantic", False)) or bool(
-                getattr(self, "_defer_semantic_after_metadata", False)
-            ):
-                self._start_user_semantic_indexing(corpus)
-            self._sync_gallery_search_input_editable()
         self._invalidate_semantic_coverage_cache()
+
+        pending_emb = 0
+        face_pending = 0
+        try:
+            index = self._get_semantic_index()
+            pending_emb = len(index.get_pending_embedding_paths(corpus) or [])
+            face_pending = int(index.get_face_pending_count(corpus) or 0)
+        except Exception as exc:
+            logger.warning("[INDEX][FACE] Done handler pending check failed: %s", exc)
+
+        logger.info(
+            "[INDEX][FACE] Done: pending_emb=%d pending_face=%d corpus=%d",
+            pending_emb,
+            face_pending,
+            len(corpus or []),
+        )
+
+        if pending_emb > 0:
+            self._gallery_search_show_index_progress = True
+            self._start_user_semantic_indexing(corpus)
+        elif face_pending > 0:
+            self._gallery_search_show_index_progress = True
+            self._sync_gallery_search_input_editable()
+        else:
+            QTimer.singleShot(0, lambda c=list(corpus or []): self._finish_gallery_search_unlock(c))
+        self._gallery_search_user_collapsed_while_busy = False
 
     def _on_face_index_error(self, token, error):
         if token != getattr(self, "_face_index_active_token", None):
@@ -12118,6 +12161,11 @@ class RAWImageViewer(QMainWindow):
             self._sync_gallery_search_input_editable()
             return
 
+        if getattr(self, "_face_indexing_in_progress", False):
+            logger.info("[INDEX][USER] Skip semantic start: face indexing in progress")
+            self._sync_gallery_search_input_editable()
+            return
+
         if not semantic_embeddings_enabled():
             if self._is_gallery_semantic_search_ready(corpus_files):
                 self._finish_gallery_search_unlock(corpus_files)
@@ -12158,6 +12206,21 @@ class RAWImageViewer(QMainWindow):
         except Exception as e:
             self._set_gallery_search_status(f"Search error: {e}")
             return
+
+        try:
+            pending_emb = len(index.get_pending_embedding_paths(corpus_files) or [])
+            face_pending = int(index.get_face_pending_count(corpus_files) or 0)
+            if pending_emb == 0 and face_pending > 0:
+                logger.info(
+                    "[INDEX][USER] Embeddings complete; starting face scan (pending=%d)",
+                    face_pending,
+                )
+                self._gallery_search_show_index_progress = True
+                self._start_face_index_background(corpus_files)
+                self._sync_gallery_search_input_editable()
+                return
+        except Exception:
+            pass
 
         self._run_semantic_index_prep_for_search(corpus_files)
 
@@ -12353,7 +12416,11 @@ class RAWImageViewer(QMainWindow):
         if (text or "").strip():
             return
         # Triggered by clear button "x" or manual delete-to-empty.
-        if self._semantic_search_backup_files:
+        if (
+            self._semantic_search_backup_files
+            or self._semantic_search_result_paths
+            or (getattr(self, "_last_semantic_query", "") or "").strip()
+        ):
             self._clear_semantic_search_results(silent=True)
 
     def _should_show_image_counter(self) -> bool:
@@ -12568,7 +12635,16 @@ class RAWImageViewer(QMainWindow):
         self.image_files = restored
         self._update_gallery_counter()
         if hasattr(self, "gallery_justified") and self.gallery_justified:
-            self.gallery_justified.hide_empty_message()
+            gj = self.gallery_justified
+            try:
+                if getattr(gj, "load_manager", None) is not None:
+                    if hasattr(gj.load_manager, "flush_queue"):
+                        gj.load_manager.flush_queue()
+                    else:
+                        gj.load_manager.cancel_all_tasks()
+            except Exception:
+                pass
+            gj.hide_empty_message()
         if self.current_file_path in self.image_files:
             self.current_file_index = self.image_files.index(self.current_file_path)
         else:
@@ -13818,11 +13894,15 @@ class RAWImageViewer(QMainWindow):
                                     bulk_metadata[fp] = {}
                                 # Don't overwrite if EXIF already arrived
                                 if "original_width" not in bulk_metadata[fp] and meta.get("width"):
-                                    bulk_metadata[fp]["original_width"] = meta.get("width")
-                                if "original_height" not in bulk_metadata[fp] and meta.get("height"):
-                                    bulk_metadata[fp]["original_height"] = meta.get("height")
-                                if "orientation" not in bulk_metadata[fp] and meta.get("orientation"):
-                                    bulk_metadata[fp]["orientation"] = meta.get("orientation")
+                                    from common_image_loader import exif_display_dimensions
+
+                                    w = int(meta.get("width") or 0)
+                                    h = int(meta.get("height") or 0)
+                                    o = int(meta.get("orientation") or 1)
+                                    dw, dh = exif_display_dimensions(w, h, o)
+                                    bulk_metadata[fp]["original_width"] = dw
+                                    bulk_metadata[fp]["original_height"] = dh
+                                    bulk_metadata[fp]["orientation"] = 1
                 except Exception as ex:
                     logger.warning(f"[GALLERY] Could not pre-seed semantic metadata: {ex}")
 
@@ -24722,8 +24802,6 @@ class RAWImageViewer(QMainWindow):
             scan_s,
         )
         if len(image_files) > 1:
-            if not self._is_exif_sort_ready():
-                self._folder_sort_refinement_applied_token = token
             self._schedule_folder_sort_refinement(token, file_stats)
         try:
             from PyQt6.QtCore import QTimer
@@ -25175,8 +25253,6 @@ class RAWImageViewer(QMainWindow):
                     len(self.image_files),
                 )
                 if len(self.image_files) > 1:
-                    if not self._is_exif_sort_ready():
-                        self._folder_sort_refinement_applied_token = token
                     self._schedule_folder_sort_refinement(token, file_stats)
             else:
                 self._show_single_view()

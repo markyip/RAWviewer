@@ -52,9 +52,9 @@ def _gallery_viewport_buffer_screens() -> float:
 
 def _gallery_current_active_reserve(active_cap: int) -> int:
     """Slots reserved for visible (CURRENT) gallery tiles; prefetch cannot use them."""
-    default = max(8, (active_cap * 2) // 5)
-    reserve = _env_int("RAWVIEWER_GALLERY_CURRENT_ACTIVE_RESERVE", default, minimum=4)
-    return min(reserve, max(4, active_cap - 4))
+    default = max(4, active_cap // 3)
+    reserve = _env_int("RAWVIEWER_GALLERY_CURRENT_ACTIVE_RESERVE", default, minimum=2)
+    return min(reserve, max(2, active_cap - 4))
 
 
 def _gallery_scheduling_budgets(fast: bool) -> tuple[int, int, int]:
@@ -192,6 +192,7 @@ class JustifiedGallery(QWidget):
         super().__init__(parent)
         self.parent_viewer = parent
         self.images = images
+        self._rebuild_normalized_map()
 
         # Virtualization Data
         self._gallery_layout_items = []  # List of {rect, file_path, aspect}
@@ -248,6 +249,12 @@ class JustifiedGallery(QWidget):
         self._idle_preload_timer = QTimer(self)
         self._idle_preload_timer.setSingleShot(True)
         self._idle_preload_timer.timeout.connect(self._preload_remaining_thumbnails_background)
+
+        # Debounced retry timer for thumbnail errors to prevent retry storms
+        self._retry_timer = QTimer(self)
+        self._retry_timer.setSingleShot(True)
+        self._retry_timer.timeout.connect(self._on_retry_timer_timeout)
+        self._max_retry_attempt = 1
 
         # Work budget per tick for smooth scrolling (embedded-JPEG thumbnails are cheap).
         self._max_widgets_per_tick = _env_int("RAWVIEWER_GALLERY_MAX_WIDGETS", 20, minimum=1)
@@ -654,6 +661,7 @@ class JustifiedGallery(QWidget):
 
             self._gallery_generation += 1
             self.images = new_images
+            self._rebuild_normalized_map()
             if not same_order or force_rebuild:
                 # Order changed: invalidate layout so build_gallery cannot skip via count-only checks.
                 self._building = False
@@ -729,6 +737,17 @@ class JustifiedGallery(QWidget):
         except Exception:
             logger.exception("[GALLERY] set_images() failed")
 
+    def _rebuild_normalized_map(self):
+        """Rebuild the O(1) normalized to canonical path mapping."""
+        self._normalized_to_canonical = {}
+        for img in self.images:
+            if isinstance(img, str):
+                try:
+                    norm = os.path.normcase(os.path.abspath(img))
+                except OSError:
+                    norm = os.path.normcase(img)
+                self._normalized_to_canonical[norm] = img
+
     def _resolve_gallery_path(self, file_path: Optional[str]) -> Optional[str]:
         """Match file_path to the canonical path string used in ``self.images``."""
         if not file_path or not self.images:
@@ -737,6 +756,10 @@ class JustifiedGallery(QWidget):
             target = os.path.normcase(os.path.abspath(file_path))
         except OSError:
             target = os.path.normcase(file_path)
+            
+        if hasattr(self, "_normalized_to_canonical") and target in self._normalized_to_canonical:
+            return self._normalized_to_canonical[target]
+            
         target_base = os.path.normcase(os.path.basename(file_path))
         for img in self.images:
             if not isinstance(img, str):
@@ -865,23 +888,23 @@ class JustifiedGallery(QWidget):
         return base_aspect
 
     def _metadata_display_aspect(self, file_path: str) -> Optional[float]:
-        """Layout aspect from EXIF sensor dimensions (orientation applied at RAW extract time)."""
+        """Layout aspect from EXIF display dimensions (matches index thumbnail pixels)."""
         m = self._metadata_cache.get(file_path)
         if not m or not m.get("original_width") or not m.get("original_height"):
             return None
+        from common_image_loader import exif_display_dimensions
+
         w, h = int(m["original_width"]), int(m["original_height"])
         o = int(m.get("orientation", 1) or 1)
-        # Sensor dims are often landscape while orient 6/8 means display portrait.
-        if o in (5, 6, 7, 8) and w > h:
-            w, h = h, w
-        elif o <= 1 and w > h:
+        dw, dh = exif_display_dimensions(w, h, o)
+        if o <= 1 and dw > dh:
             # Container EXIF often has orientation=1 but embedded JPEG is portrait.
             base = self._thumbnail_cache.get((file_path, self._thumb_base_key))
             if base and not base.isNull() and base.height() > base.width():
-                w, h = h, w
-        if h <= 0:
+                dw, dh = dh, dw
+        if dh <= 0:
             return None
-        return self._display_aspect(file_path, w / h)
+        return self._display_aspect(file_path, dw / dh)
 
     def _layout_aspect_for_path(
         self, file_path: str, pixmap: Optional[QPixmap] = None
@@ -918,6 +941,9 @@ class JustifiedGallery(QWidget):
 
     def invalidate_thumbnails_for_path(self, file_path: str) -> None:
         """Drop cached gallery pixmaps for a path (e.g. after on-disk rotation)."""
+        resolved = self._resolve_gallery_path(file_path)
+        if resolved:
+            file_path = resolved
         try:
             self._thumbnail_cache.remove_keys_for_file_path(file_path)
         except Exception:
@@ -1053,6 +1079,10 @@ class JustifiedGallery(QWidget):
         """
         if not file_path:
             return False
+        resolved = self._resolve_gallery_path(file_path)
+        if not resolved:
+            return False
+        file_path = resolved
         self._invalidate_scaled_thumbnails_for_path(file_path)
         if file_path not in self._path_to_indices:
             return False
@@ -2097,6 +2127,9 @@ class JustifiedGallery(QWidget):
 
     def on_thumbnail_ready(self, file_path, thumbnail_data):
         # Mark path as no longer in-flight regardless of whether we can render it now.
+        resolved = self._resolve_gallery_path(file_path)
+        if resolved:
+            file_path = resolved
         if file_path in self._active_tasks:
             del self._active_tasks[file_path]
         # Single-image view uses RAWImageViewer.on_manager_thumbnail_ready; skip gallery
@@ -2129,8 +2162,10 @@ class JustifiedGallery(QWidget):
             self._thumb_ready_depth = max(0, self._thumb_ready_depth - 1)
 
     def _apply_thumbnail_ready_impl(self, file_path, thumbnail_data):
-        if file_path not in self._path_to_indices:
+        resolved = self._resolve_gallery_path(file_path)
+        if not resolved or resolved not in self._path_to_indices:
             return
+        file_path = resolved
 
         pixmap = _thumbnail_data_to_base_pixmap(thumbnail_data)
 
@@ -2203,10 +2238,20 @@ class JustifiedGallery(QWidget):
 
     def on_task_completed(self, file_path):
         """Always clear active tasks when the background worker finishes."""
+        resolved = self._resolve_gallery_path(file_path)
+        if resolved:
+            file_path = resolved
         if file_path in self._active_tasks:
             del self._active_tasks[file_path]
 
+    def _on_retry_timer_timeout(self):
+        self._max_retry_attempt = 1
+        self._request_load_visible_images(40)
+
     def on_thumbnail_error(self, file_path, error_msg):
+        resolved = self._resolve_gallery_path(file_path)
+        if resolved:
+            file_path = resolved
         if file_path in self._active_tasks:
             del self._active_tasks[file_path]
 
@@ -2226,6 +2271,15 @@ class JustifiedGallery(QWidget):
         self._thumb_fail_counts[file_path] = attempt
         max_retries = 3
 
+        is_emfile = "too many open files" in lower_err or "emfile" in lower_err
+        if is_emfile:
+            pv = self.parent_viewer
+            if pv is not None and hasattr(pv, "_enter_io_pressure_mode"):
+                pv._enter_io_pressure_mode("gallery_thumb_emfile")
+            self._max_retry_attempt = max(getattr(self, "_max_retry_attempt", 1), 6)
+        else:
+            self._max_retry_attempt = max(getattr(self, "_max_retry_attempt", 1), attempt)
+
         # JPEG/PNG/WebP: keep in gallery on thumbnail-only failures; retry transient decode errors.
         if not is_raw_file(file_path):
             if attempt <= max_retries:
@@ -2236,10 +2290,8 @@ class JustifiedGallery(QWidget):
                     max_retries,
                     error_msg,
                 )
-                QTimer.singleShot(
-                    min(500 * attempt, 2000),
-                    lambda: self._request_load_visible_images(40),
-                )
+                if not self._retry_timer.isActive():
+                    self._retry_timer.start(min(500 * self._max_retry_attempt, 3000))
                 return
 
             null_pixmap = QPixmap(100, 100)
@@ -2260,10 +2312,8 @@ class JustifiedGallery(QWidget):
                 max_retries,
                 error_msg,
             )
-            QTimer.singleShot(
-                min(500 * attempt, 2000),
-                lambda: self._request_load_visible_images(40),
-            )
+            if not self._retry_timer.isActive():
+                self._retry_timer.start(min(500 * self._max_retry_attempt, 3000))
             return
 
         if not clearly_unsupported and attempt < max_retries + 1:
@@ -2308,20 +2358,22 @@ class JustifiedGallery(QWidget):
         if self.parent_viewer is not None and getattr(
             self.parent_viewer, "view_mode", "gallery"
         ) == "gallery":
-            QTimer.singleShot(100, lambda: self._request_load_visible_images(40))
+            if not self._retry_timer.isActive():
+                self._retry_timer.start(100)
 
     def on_exif_ready(self, file_path, exif_data):
         """Update aspect ratio in layout when metadata arrives."""
-        if not exif_data:
-            # Save dummy data so we don't infinitely request it
-            self._metadata_cache[file_path] = {"original_width": 0, "original_height": 0}
+        resolved = self._resolve_gallery_path(file_path)
+        if not resolved:
             return
             
-        if file_path not in self.images:
+        if not exif_data:
+            # Save dummy data so we don't infinitely request it
+            self._metadata_cache[resolved] = {"original_width": 0, "original_height": 0}
             return
             
         # Store in local metadata cache
-        self._metadata_cache[file_path] = exif_data
+        self._metadata_cache[resolved] = exif_data
         try:
             from image_cache import get_image_cache
 

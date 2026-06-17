@@ -9,6 +9,8 @@ Version **2.4** uses **`build.py`** as the single source of truth: `VERSION` syn
 - **Lite profile**: Adaptive prefetch/cache, map disabled by default, smaller installers (map stack omitted).
 - **Composition grid**: **G** cycles Off → rule of thirds → diagonals → both → golden ratio.
 - **Reliability**: Display-tier preview failures automatically retry full decode; keyboard shortcut help is hover-only on **i**.
+- **Large-Folder Stability**: Optimized prefetch slot reservation under low capacity caps, debounced thumbnail error retries to prevent event loop storms, and quick recovery from EMFILE (too-many-open-files) pressure with a shorter 12-second cooldown and a minor background prefetch trickle.
+- **Cache Eviction**: Replaced the abrupt full clear of the embedded scan cache with a FIFO (first-in-first-out) eviction strategy to avoid duplicate file I/O in large folders.
 
 ---
 

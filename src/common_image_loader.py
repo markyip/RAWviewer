@@ -36,7 +36,7 @@ def is_emfile_error(exc: BaseException) -> bool:
     return "too many open files" in str(exc).lower()
 
 
-def note_emfile_pressure(duration_s: float = 45.0) -> None:
+def note_emfile_pressure(duration_s: float = 12.0) -> None:
     """Back off concurrent I/O after EMFILE so the process can recover."""
     global _io_pressure_until
     _io_pressure_until = max(_io_pressure_until, time.time() + max(5.0, duration_s))

@@ -288,6 +288,9 @@ class MemoryOnlyPersistentCache:
     def put(self, file_path: str, value: Any) -> bool:
         return False
 
+    def has_valid(self, file_path: str) -> bool:
+        return False
+
     def remove(self, file_path: str) -> bool:
         return False
 
@@ -882,6 +885,26 @@ class PersistentThumbnailCache:
         path_hash = hashlib.md5(_cache_path_key(file_path).encode('utf-8')).hexdigest()
         return os.path.join(self.cache_dir, f"{path_hash}.jpg")
     
+    def has_valid(self, file_path: str) -> bool:
+        """True if a valid on-disk entry exists (metadata + file path only, no JPEG read)."""
+        key = _cache_path_key(file_path)
+        file_size, file_mtime = self._get_file_hash(file_path)
+        if file_size == 0:
+            return False
+        try:
+            conn = self._get_connection()
+            cursor = conn.execute(
+                "SELECT file_size, file_mtime, cache_file FROM thumbnail_cache WHERE file_path = ?",
+                (key,),
+            )
+            row = cursor.fetchone()
+            if row and row[0] == file_size and row[1] == file_mtime:
+                cache_file = row[2]
+                return bool(cache_file) and os.path.exists(cache_file)
+        except Exception:
+            pass
+        return False
+
     def get(self, file_path: str) -> Optional[bytes]:
         """Get cached JPEG thumbnail if still valid."""
         key = _cache_path_key(file_path)

@@ -41,6 +41,11 @@ except Exception:
 
 ProgressCallback = Optional[Callable[[int, int, str], None]]
 
+_YUNET_INFER_LOCK = threading.Lock()
+_INDEX_THREAD_LOCAL = threading.local()
+_YUNET_SINGLETON = None
+_YUNET_SINGLETON_MODEL_PATH = ""
+
 
 def format_index_progress(stage: str, done: int, total: int) -> str:
     """Concise progress for the search field, e.g. 'Semantic: 12/48'."""
@@ -58,6 +63,12 @@ def format_index_progress(stage: str, done: int, total: int) -> str:
 def semantic_embeddings_enabled() -> bool:
     """Check if semantic search embeddings are enabled via environment."""
     flag = os.environ.get("RAWVIEWER_ENABLE_SEMANTIC_SEARCH", "0").strip().lower()
+    return flag in ("1", "true", "yes", "on")
+
+
+def face_scan_enabled() -> bool:
+    """Check if face scan/indexing is enabled via environment."""
+    flag = os.environ.get("RAWVIEWER_ENABLE_FACE_SCAN", "1").strip().lower()
     return flag in ("1", "true", "yes", "on")
 
 
@@ -145,10 +156,11 @@ def semantic_encode_prep_workers() -> int:
     raw = os.environ.get("RAWVIEWER_SEMANTIC_PREP_WORKERS", "").strip()
     if raw:
         try:
-            return max(1, min(int(raw), 32))
+            return max(1, min(int(raw), 48))
         except Exception:
             pass
-    return max(1, min(16, os.cpu_count() or 4))
+    cpu = os.cpu_count() or 4
+    return max(4, min(24, cpu - 1))
 
 
 def semantic_coreml_chunk_size() -> int:
@@ -197,11 +209,37 @@ def semantic_batch_candidates() -> List[int]:
 SEMANTIC_BATCH_TUNE_CACHE_VERSION = "v4"
 
 
+def _thumbnail_jpeg_bytes(arr: np.ndarray, quality: int = 85) -> bytes:
+    from io import BytesIO
+
+    pil = Image.fromarray(np.asarray(arr, dtype=np.uint8)).convert("RGB")
+    buf = BytesIO()
+    pil.save(buf, format="JPEG", quality=quality)
+    return buf.getvalue()
+
+
+def _maybe_persist_index_thumbnail(file_path: str, im: Image.Image) -> None:
+    """Disk-back index thumbnails so deferred face scan can reuse semantic loads."""
+    try:
+        from image_cache import get_image_cache
+
+        cache = get_image_cache()
+        if _index_source_image_cached(cache, file_path):
+            return
+        rgb = im.convert("RGB")
+        if max(rgb.width, rgb.height) > 1024:
+            rgb.thumbnail((1024, 1024), Image.Resampling.BICUBIC)
+        arr = np.asarray(rgb, dtype=np.uint8)
+        cache.put_thumbnail(file_path, arr, _thumbnail_jpeg_bytes(arr))
+    except Exception:
+        pass
+
+
 def _prep_mobileclip_image_chw_resized(file_path: str, size: tuple[int, int] = (256, 256)) -> np.ndarray:
     """Load, resize to size (width, height), and return NCHW float tensor slice for one image."""
-    im = _load_index_source_image(file_path, max_size=1024).resize(
-        size, Image.Resampling.BICUBIC
-    )
+    im = _load_index_source_image(file_path, max_size=1024)
+    _maybe_persist_index_thumbnail(file_path, im)
+    im = im.resize(size, Image.Resampling.BICUBIC)
     rgb = np.asarray(im.convert("RGB"), dtype=np.float32) / 255.0
     return np.transpose(rgb, (2, 0, 1))
 
@@ -331,9 +369,9 @@ def resolve_onnx_execution_providers(
 def resolve_opencv_dnn_backend_target() -> tuple:
     """OpenCV DNN backend/target for YuNet / SSD face models (Windows).
 
-    GPU-first policy: prefer CUDA, then CPU.
-    OpenCL is opt-in only via RAWVIEWER_FACE_DNN_TARGET=opencl because some
-    Windows OpenCV ocl4dnn stacks are unstable and can crash the process.
+    GPU-first when CUDA is available. Face scan runs after semantic indexing
+    (never in parallel with MobileCLIP ONNX), so both can use the GPU sequentially.
+    OpenCL is opt-in via RAWVIEWER_FACE_DNN_TARGET=opencl (some Windows stacks crash).
     Override with RAWVIEWER_FACE_DNN_TARGET=cpu|opencl|cuda|openvino.
     """
     import cv2
@@ -352,8 +390,7 @@ def resolve_opencv_dnn_backend_target() -> tuple:
     if override == "openvino":
         return cv2.dnn.DNN_BACKEND_INFERENCE_ENGINE, target_cpu
 
-    # Auto policy (GPU-first, stability): CUDA -> CPU.
-    # Keep OpenCL disabled unless explicitly requested.
+    # Auto: CUDA when available, else CPU. OpenCL stays disabled unless requested.
     try:
         cv2.ocl.setUseOpenCL(False)
     except Exception:
@@ -381,6 +418,90 @@ def _apply_opencv_dnn_acceleration(net) -> None:
             net.setPreferableTarget(cv2.dnn.DNN_TARGET_CPU)
         except Exception:
             pass
+
+
+def _yunet_model_path() -> str:
+    cache_dir = os.path.expanduser("~/.rawviewer_cache/models")
+    os.makedirs(cache_dir, exist_ok=True)
+    model_path = os.path.join(cache_dir, "face_detection_yunet_2023mar.onnx")
+    if not os.path.exists(model_path):
+        import logging
+
+        logging.getLogger(__name__).info(
+            "[VISION] Downloading YuNet ONNX face detection model (353 KB)..."
+        )
+        url = (
+            "https://github.com/opencv/opencv_zoo/raw/main/models/"
+            "face_detection_yunet/face_detection_yunet_2023mar.onnx"
+        )
+        from ssl_certs import urlretrieve
+
+        urlretrieve(url, model_path)
+        logging.getLogger(__name__).info("[VISION] YuNet ONNX model downloaded successfully.")
+    return model_path
+
+
+def _yunet_warmup() -> None:
+    """Initialize YuNet once on the calling thread before any worker pool starts."""
+    import logging
+
+    import cv2
+    import numpy as np
+
+    try:
+        dummy = np.zeros((320, 320, 3), dtype=np.uint8)
+        count = _yunet_detect_faces_bgr(dummy)
+        logging.getLogger(__name__).info("[VISION] YuNet warmup ok (faces=%d)", count)
+    except Exception as exc:
+        logging.getLogger(__name__).warning("[VISION] YuNet warmup failed: %s", exc)
+
+
+def _yunet_detect_faces_bgr(img_bgr) -> int:
+    """Run YuNet on a BGR image using one shared detector (thread-safe, GPU-friendly)."""
+    global _YUNET_SINGLETON, _YUNET_SINGLETON_MODEL_PATH
+    import cv2
+    import logging
+
+    model_path = _yunet_model_path()
+    h, w = img_bgr.shape[:2]
+    with _YUNET_INFER_LOCK:
+        if _YUNET_SINGLETON is None or _YUNET_SINGLETON_MODEL_PATH != model_path:
+            backend_id, target_id = resolve_opencv_dnn_backend_target()
+            logger = logging.getLogger(__name__)
+            logger.info("[VISION] Initializing OpenCV YuNet (singleton)...")
+            try:
+                _YUNET_SINGLETON = cv2.FaceDetectorYN.create(
+                    model=model_path,
+                    config="",
+                    input_size=(w, h),
+                    score_threshold=0.85,
+                    nms_threshold=0.3,
+                    top_k=5000,
+                    backend_id=backend_id,
+                    target_id=target_id,
+                )
+            except Exception:
+                _YUNET_SINGLETON = cv2.FaceDetectorYN.create(
+                    model=model_path,
+                    config="",
+                    input_size=(w, h),
+                    score_threshold=0.85,
+                    nms_threshold=0.3,
+                    top_k=5000,
+                    backend_id=cv2.dnn.DNN_BACKEND_OPENCV,
+                    target_id=cv2.dnn.DNN_TARGET_CPU,
+                )
+                backend_id = cv2.dnn.DNN_BACKEND_OPENCV
+                target_id = cv2.dnn.DNN_TARGET_CPU
+            _YUNET_SINGLETON_MODEL_PATH = model_path
+            logger.info(
+                "[VISION] OpenCV YuNet ready (backend=%s target=%s).",
+                backend_id,
+                target_id,
+            )
+        _YUNET_SINGLETON.setInputSize((w, h))
+        _retval, faces = _YUNET_SINGLETON.detect(img_bgr)
+    return len(faces) if faces is not None else 0
 
 
 _OPENCL_RUNTIME_LOGGED = False
@@ -580,13 +701,57 @@ def _index_source_image_cached(cache, file_path: str) -> bool:
     return _cached_index_source_array(cache, file_path) is not None
 
 
-def _load_index_source_image(file_path: str, max_size: int = 1024) -> Image.Image:
-    """Load a small RGB image suitable for indexing/detection, preferring app caches."""
-    import threading
-    global _THREAD_LOCAL_DETECTORS
-    if '_THREAD_LOCAL_DETECTORS' not in globals():
-        _THREAD_LOCAL_DETECTORS = threading.local()
-    _THREAD_LOCAL_DETECTORS.last_original_sizes = (0, 0)
+def _index_source_thumbnail_present(cache, file_path: str) -> bool:
+    """Fast presence check for index/face thumbnails (no JPEG decode)."""
+    key = cache._path_key(file_path)
+    if cache.thumbnail_cache.get(key) is not None:
+        return True
+    if cache.grid_cache.get(key) is not None:
+        return True
+    if cache.preview_cache.get(key) is not None:
+        return True
+    for disk_cache in (
+        cache.disk_thumbnail_cache,
+        cache.disk_grid_cache,
+        cache.disk_preview_cache,
+    ):
+        try:
+            if hasattr(disk_cache, "has_valid") and disk_cache.has_valid(file_path):
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _load_face_scan_image(file_path: str, max_size: int) -> Optional[Image.Image]:
+    """Face detection input from ImageCache only (semantic / gallery warm-up).
+
+    YuNet only needs a downscaled RGB image; reusing warmed thumbnails avoids
+    per-file RAW decode and keeps Qt off background worker threads.
+    """
+    from image_cache import get_image_cache
+
+    _INDEX_THREAD_LOCAL.last_original_sizes = (0, 0)
+    cache = get_image_cache()
+    arr = _cached_index_source_array(cache, file_path)
+    if arr is None:
+        return None
+    im = Image.fromarray(arr).convert("RGB")
+    _INDEX_THREAD_LOCAL.last_original_sizes = (im.width, im.height)
+    if max(im.width, im.height) > max_size:
+        im.thumbnail((max_size, max_size), Image.Resampling.BICUBIC)
+    return im
+
+
+def _load_index_source_image(
+    file_path: str, max_size: int = 1024, *, qt_decode: bool = True
+) -> Image.Image:
+    """Load a small RGB image suitable for indexing/detection, preferring app caches.
+
+    When ``qt_decode`` is False, skip QImageReader / Qt-based decoders so face scan
+  workers never touch Qt from a background thread pool (can crash the process).
+    """
+    _INDEX_THREAD_LOCAL.last_original_sizes = (0, 0)
 
     try:
         from image_cache import get_image_cache
@@ -594,14 +759,14 @@ def _load_index_source_image(file_path: str, max_size: int = 1024) -> Image.Imag
         arr = _cached_index_source_array(cache, file_path)
         if arr is not None:
             im = Image.fromarray(arr).convert("RGB")
-            _THREAD_LOCAL_DETECTORS.last_original_sizes = (im.width, im.height)
+            _INDEX_THREAD_LOCAL.last_original_sizes = (im.width, im.height)
             im.thumbnail((max_size, max_size), Image.Resampling.BICUBIC)
             tier = _index_source_cache_tier(cache, file_path)
             if tier:
-                hits = getattr(_THREAD_LOCAL_DETECTORS, "index_source_cache_hits", None)
+                hits = getattr(_INDEX_THREAD_LOCAL, "index_source_cache_hits", None)
                 if hits is None:
                     hits = {"preview": 0, "grid": 0, "thumbnail": 0}
-                    _THREAD_LOCAL_DETECTORS.index_source_cache_hits = hits
+                    _INDEX_THREAD_LOCAL.index_source_cache_hits = hits
                 hits[tier] = int(hits.get(tier, 0)) + 1
             return im
     except Exception:
@@ -609,7 +774,7 @@ def _load_index_source_image(file_path: str, max_size: int = 1024) -> Image.Imag
 
     try:
         with Image.open(file_path) as im:
-            _THREAD_LOCAL_DETECTORS.last_original_sizes = (im.width, im.height)
+            _INDEX_THREAD_LOCAL.last_original_sizes = (im.width, im.height)
             im = ImageOps.exif_transpose(im).convert("RGB")
             im.thumbnail((max_size, max_size), Image.Resampling.BICUBIC)
             return im.copy()
@@ -618,6 +783,29 @@ def _load_index_source_image(file_path: str, max_size: int = 1024) -> Image.Imag
 
     ext = os.path.splitext(file_path)[1].lower().lstrip(".")
     if ext in RAW_FILE_EXTENSIONS:
+        if not qt_decode:
+            try:
+                from enhanced_raw_processor import (
+                    ThumbnailExtractor,
+                    extract_embedded_jpeg_by_scan,
+                )
+
+                arr = extract_embedded_jpeg_by_scan(file_path, max_size)
+                if arr is None:
+                    thumb = ThumbnailExtractor().extract_thumbnail_from_raw(
+                        file_path,
+                        max_size=max_size,
+                        allow_scan_fallback=False,
+                    )
+                    if thumb is not None:
+                        arr = np.asarray(thumb, dtype=np.uint8)
+                if arr is not None:
+                    im = Image.fromarray(arr).convert("RGB")
+                    _INDEX_THREAD_LOCAL.last_original_sizes = (im.width, im.height)
+                    im.thumbnail((max_size, max_size), Image.Resampling.BICUBIC)
+                    return im
+            except Exception:
+                pass
         try:
             from enhanced_raw_processor import ThumbnailExtractor, _thumbnail_via_qimage_reader
             from PyQt6.QtGui import QImage
@@ -625,12 +813,14 @@ def _load_index_source_image(file_path: str, max_size: int = 1024) -> Image.Imag
             thumb = ThumbnailExtractor().extract_thumbnail_from_raw(
                 file_path, max_size=max_size, allow_scan_fallback=True
             )
-            if thumb is None:
+            if thumb is None and qt_decode:
                 arr = _thumbnail_via_qimage_reader(file_path, max_size)
                 if arr is not None:
                     thumb = arr
             if thumb is not None:
                 if isinstance(thumb, QImage):
+                    if not qt_decode:
+                        raise RuntimeError("Qt image in face-scan path")
                     from enhanced_raw_processor import _qimage_to_rgb_array
 
                     arr = _qimage_to_rgb_array(thumb)
@@ -639,35 +829,36 @@ def _load_index_source_image(file_path: str, max_size: int = 1024) -> Image.Imag
                     im = Image.fromarray(arr).convert("RGB")
                 else:
                     im = Image.fromarray(np.asarray(thumb, dtype=np.uint8)).convert("RGB")
-                _THREAD_LOCAL_DETECTORS.last_original_sizes = (im.width, im.height)
+                _INDEX_THREAD_LOCAL.last_original_sizes = (im.width, im.height)
                 im.thumbnail((max_size, max_size), Image.Resampling.BICUBIC)
                 return im
         except Exception:
             pass
-        try:
-            from unified_image_processor import UnifiedImageProcessor
+        if qt_decode:
+            try:
+                from unified_image_processor import UnifiedImageProcessor
 
-            thumb = UnifiedImageProcessor().process_thumbnail(
-                file_path, allow_heavy_fallback=True
-            )
-            if thumb is not None:
-                if isinstance(thumb, np.ndarray):
-                    im = Image.fromarray(np.asarray(thumb, dtype=np.uint8)).convert("RGB")
-                else:
-                    from PyQt6.QtGui import QImage
-                    from enhanced_raw_processor import _qimage_to_rgb_array
-
-                    if isinstance(thumb, QImage):
-                        arr = _qimage_to_rgb_array(thumb)
-                        im = Image.fromarray(arr).convert("RGB") if arr is not None else None
+                thumb = UnifiedImageProcessor().process_thumbnail(
+                    file_path, allow_heavy_fallback=True
+                )
+                if thumb is not None:
+                    if isinstance(thumb, np.ndarray):
+                        im = Image.fromarray(np.asarray(thumb, dtype=np.uint8)).convert("RGB")
                     else:
-                        im = None
-                if im is not None:
-                    _THREAD_LOCAL_DETECTORS.last_original_sizes = (im.width, im.height)
-                    im.thumbnail((max_size, max_size), Image.Resampling.BICUBIC)
-                    return im
-        except Exception:
-            pass
+                        from PyQt6.QtGui import QImage
+                        from enhanced_raw_processor import _qimage_to_rgb_array
+
+                        if isinstance(thumb, QImage):
+                            arr = _qimage_to_rgb_array(thumb)
+                            im = Image.fromarray(arr).convert("RGB") if arr is not None else None
+                        else:
+                            im = None
+                    if im is not None:
+                        _INDEX_THREAD_LOCAL.last_original_sizes = (im.width, im.height)
+                        im.thumbnail((max_size, max_size), Image.Resampling.BICUBIC)
+                        return im
+            except Exception:
+                pass
 
     raise RuntimeError(
         f"Cannot decode image for semantic index: {os.path.basename(file_path)}"
@@ -1391,6 +1582,15 @@ class MobileCLIPONNXBackend:
         return arr
 
 
+    def release_gpu_sessions(self) -> None:
+        """Drop ONNX sessions so a follow-up GPU pass (e.g. YuNet) can use VRAM."""
+        self._image_session = None
+        self._text_session = None
+        import gc
+
+        gc.collect()
+
+
 def resolve_mobileclip_backend() -> Any:
     """Prefer platform-native; then ONNX; then Core ML fallback."""
     if sys.platform == "darwin":
@@ -1745,6 +1945,24 @@ class SemanticImageIndex:
             self._mobileclip_backend = resolve_mobileclip_backend()
         return self._mobileclip_backend
 
+    def release_mobileclip_gpu_memory(self) -> None:
+        """Free ONNX GPU memory after semantic indexing, before GPU face detection."""
+        import logging
+
+        backend = self._mobileclip_backend
+        if backend is None:
+            return
+        if hasattr(backend, "release_gpu_sessions"):
+            try:
+                backend.release_gpu_sessions()
+                logging.getLogger(__name__).info(
+                    "[INDEX][FACE] Released MobileCLIP ONNX sessions before face scan"
+                )
+            except Exception as exc:
+                logging.getLogger(__name__).debug(
+                    "[INDEX][FACE] MobileCLIP GPU release skipped: %s", exc
+                )
+
     @property
     def model_name(self):
         if self._model_name is None:
@@ -2022,9 +2240,8 @@ class SemanticImageIndex:
         drives this can still take seconds per file under parallel indexing.
         """
         # Check thread-local cache first
-        global _THREAD_LOCAL_DETECTORS
-        if '_THREAD_LOCAL_DETECTORS' in globals() and hasattr(_THREAD_LOCAL_DETECTORS, 'last_original_sizes'):
-            w, h = _THREAD_LOCAL_DETECTORS.last_original_sizes
+        if hasattr(_INDEX_THREAD_LOCAL, "last_original_sizes"):
+            w, h = _INDEX_THREAD_LOCAL.last_original_sizes
             if w > 0 and h > 0:
                 return w, h
 
@@ -2530,70 +2747,9 @@ class SemanticImageIndex:
                 try:
                     import cv2
                     import numpy as np
-                    import os
-                    import urllib.request
-                    import threading
-                    
-                    global _THREAD_LOCAL_DETECTORS
-                    if '_THREAD_LOCAL_DETECTORS' not in globals():
-                        _THREAD_LOCAL_DETECTORS = threading.local()
-                    
-                    # Ensure the model file is present
-                    cache_dir = os.path.expanduser("~/.rawviewer_cache/models")
-                    os.makedirs(cache_dir, exist_ok=True)
-                    model_path = os.path.join(cache_dir, "face_detection_yunet_2023mar.onnx")
-                    
-                    if not os.path.exists(model_path):
-                        import logging
-                        logging.getLogger(__name__).info("[VISION] Downloading YuNet ONNX face detection model (353 KB)...")
-                        url = "https://github.com/opencv/opencv_zoo/raw/main/models/face_detection_yunet/face_detection_yunet_2023mar.onnx"
-                        from ssl_certs import urlretrieve
 
-                        urlretrieve(url, model_path)
-                        logging.getLogger(__name__).info("[VISION] YuNet ONNX model downloaded successfully.")
-                    
-                    # YuNet requires BGR input
                     img_bgr = cv2.cvtColor(np.array(im), cv2.COLOR_RGB2BGR)
-                    h, w = img_bgr.shape[:2]
-                    
-                    if not hasattr(_THREAD_LOCAL_DETECTORS, 'yunet'):
-                        import logging
-                        logging.getLogger(__name__).info("[VISION] Initializing OpenCV YuNet thread-local instance...")
-                        backend_id, target_id = resolve_opencv_dnn_backend_target()
-                        try:
-                            _THREAD_LOCAL_DETECTORS.yunet = cv2.FaceDetectorYN.create(
-                                model=model_path,
-                                config="",
-                                input_size=(w, h),
-                                score_threshold=0.85,
-                                nms_threshold=0.3,
-                                top_k=5000,
-                                backend_id=backend_id,
-                                target_id=target_id,
-                            )
-                        except Exception:
-                            _THREAD_LOCAL_DETECTORS.yunet = cv2.FaceDetectorYN.create(
-                                model=model_path,
-                                config="",
-                                input_size=(w, h),
-                                score_threshold=0.85,
-                                nms_threshold=0.3,
-                                top_k=5000,
-                                backend_id=cv2.dnn.DNN_BACKEND_OPENCV,
-                                target_id=cv2.dnn.DNN_TARGET_CPU,
-                            )
-                        logging.getLogger(__name__).info(
-                            "[VISION] OpenCV YuNet initialized (backend=%s target=%s).",
-                            backend_id,
-                            target_id,
-                        )
-                    
-                    detector = _THREAD_LOCAL_DETECTORS.yunet
-                    # Crucial: input size must match the actual image size for YuNet
-                    detector.setInputSize((w, h))
-                    retval, faces = detector.detect(img_bgr)
-                    
-                    return len(faces) if faces is not None else 0
+                    return _yunet_detect_faces_bgr(img_bgr)
                 except Exception as yn_err:
                     import logging
                     logging.getLogger(__name__).debug(f"[VISION] OpenCV YuNet failed on {file_path}, trying OpenCV DNN: {yn_err}")
@@ -2923,7 +3079,7 @@ class SemanticImageIndex:
 
     @staticmethod
     def _face_scan_worker_count() -> int:
-        """Parallel face-detection workers (CPU). Override with RAWVIEWER_FACE_SCAN_WORKERS."""
+        """Parallel image-load workers for face scan. YuNet inference is serialized."""
         raw = os.environ.get("RAWVIEWER_FACE_SCAN_WORKERS", "").strip()
         if raw:
             try:
@@ -2934,8 +3090,19 @@ class SemanticImageIndex:
         return min(6, max(2, cpu - 1))
 
     @staticmethod
+    def _face_scan_inflight_chunk() -> int:
+        raw = os.environ.get("RAWVIEWER_FACE_SCAN_CHUNK", "64").strip()
+        try:
+            return max(4, min(512, int(raw)))
+        except ValueError:
+            return 64
+
+    @staticmethod
     def _face_scan_parallel_enabled() -> bool:
-        v = os.environ.get("RAWVIEWER_FACE_SCAN_PARALLEL", "1").strip().lower()
+        v = os.environ.get("RAWVIEWER_FACE_SCAN_PARALLEL", "").strip().lower()
+        if not v:
+            # Nested thread pools + Qt/raw decode from worker threads crash on Windows.
+            return sys.platform != "win32"
         return v not in ("0", "false", "no", "off")
 
     @staticmethod
@@ -2996,80 +3163,104 @@ class SemanticImageIndex:
         *,
         progress_album_total: int = 0,
         progress_indexed_base: int = 0,
+        stage_label: str = "Semantic",
+    ) -> int:
+        """Pre-extract thumbnails so MobileCLIP encode hits ImageCache instead of rawpy per file."""
+        if not paths or not semantic_warm_thumbs_before_index():
+            return 0
+        return self._ensure_index_thumbnails_cached(
+            paths,
+            progress_callback,
+            progress_album_total=progress_album_total,
+            progress_indexed_base=progress_indexed_base,
+            purpose="semantic",
+        )
+
+    def _ensure_index_thumbnails_cached(
+        self,
+        paths: List[str],
+        progress_callback: ProgressCallback = None,
+        *,
+        progress_album_total: int = 0,
+        progress_indexed_base: int = 0,
+        purpose: str = "index",
+        max_workers: Optional[int] = None,
     ) -> int:
         """
-        Pre-extract thumbnails so MobileCLIP encode hits ImageCache instead of rawpy per file.
+        Fill ImageCache for paths missing preview/grid/thumbnail tiers.
+        Shared by semantic encoding and deferred face scan (same warmed pixels).
         """
         import logging
         from image_cache import get_image_cache
 
         logger = logging.getLogger(__name__)
-        if not paths or not semantic_warm_thumbs_before_index():
+        if not paths:
             return 0
 
         cache = get_image_cache()
-        pending = [p for p in paths if not _index_source_image_cached(cache, p)]
+        pending = [p for p in paths if not _index_source_thumbnail_present(cache, p)]
         already_cached = len(paths) - len(pending)
-        tier_counts = {"preview": 0, "grid": 0, "thumbnail": 0}
-        for p in paths:
-            if p in pending:
-                continue
-            tier = _index_source_cache_tier(cache, p) or "thumbnail"
-            tier_counts[tier] = tier_counts.get(tier, 0) + 1
         if not pending:
             logger.info(
-                "[INDEX] Semantic thumbnail warm-up: all %d paths already in ImageCache "
-                "(preview=%d grid=%d thumb=%d)",
+                "[INDEX] %s thumbnail cache: all %d paths already in ImageCache",
+                purpose,
                 len(paths),
-                tier_counts.get("preview", 0),
-                tier_counts.get("grid", 0),
-                tier_counts.get("thumbnail", 0),
             )
             return 0
         if already_cached:
             logger.info(
-                "[INDEX] Semantic thumbnail warm-up: %d/%d already in ImageCache "
-                "(preview=%d grid=%d thumb=%d); %d still need extract",
+                "[INDEX] %s thumbnail cache: %d/%d already in ImageCache; %d still need extract",
+                purpose,
                 already_cached,
                 len(paths),
-                tier_counts.get("preview", 0),
-                tier_counts.get("grid", 0),
-                tier_counts.get("thumbnail", 0),
                 len(pending),
             )
 
-        workers = min(semantic_encode_prep_workers(), 16)
+        if max_workers is None:
+            max_workers = semantic_encode_prep_workers()
+        workers = max(1, int(max_workers))
         t0 = time.time()
         warmed = 0
 
         def _warm_one(path: str) -> bool:
-            if _index_source_image_cached(cache, path):
+            if _index_source_thumbnail_present(cache, path):
                 return True
             try:
                 from enhanced_raw_processor import (
                     ThumbnailExtractor,
-                    _thumbnail_via_qimage_reader,
                     extract_embedded_jpeg_by_scan,
                 )
+                from common_image_loader import is_raw_file
 
-                arr = extract_embedded_jpeg_by_scan(path, 1024)
-                if arr is None:
-                    arr = _thumbnail_via_qimage_reader(path, 1024)
+                if is_raw_file(path):
+                    arr = extract_embedded_jpeg_by_scan(path, 1024)
+                    if arr is None:
+                        arr = ThumbnailExtractor().extract_thumbnail_from_raw(
+                            path, max_size=1024, allow_scan_fallback=False
+                        )
+                        if arr is not None:
+                            arr = np.asarray(arr, dtype=np.uint8)
+                else:
+                    with Image.open(path) as im:
+                        im = ImageOps.exif_transpose(im).convert("RGB")
+                        im.thumbnail((1024, 1024), Image.Resampling.BICUBIC)
+                        arr = np.asarray(im)
+
                 if arr is not None:
-                    cache.put_thumbnail(path, arr, None)
-                    return True
-                thumb = ThumbnailExtractor().extract_thumbnail_from_raw(
-                    path, max_size=1024, allow_scan_fallback=False
-                )
-                if thumb is not None:
-                    cache.put_thumbnail(path, thumb, None)
+                    jpeg = None
+                    try:
+                        jpeg = _thumbnail_jpeg_bytes(arr)
+                    except Exception:
+                        pass
+                    cache.put_thumbnail(path, arr, jpeg)
                     return True
             except Exception:
                 pass
             return False
 
         logger.info(
-            "[INDEX] Warming thumbnail cache for semantic index: %d/%d files (%d workers)",
+            "[INDEX] Warming thumbnail cache for %s: %d/%d files (%d workers)",
+            purpose,
             len(pending),
             len(paths),
             workers,
@@ -3085,7 +3276,11 @@ class SemanticImageIndex:
                         progress_callback(
                             int(warmed_base + i * 0.1),
                             progress_album_total,
-                            format_index_progress("Semantic", int(warmed_base + i * 0.1), progress_album_total),
+                            format_index_progress(
+                                "Preparing thumbnails",
+                                int(warmed_base + i * 0.1),
+                                progress_album_total,
+                            ),
                         )
                     else:
                         progress_callback(
@@ -3108,7 +3303,11 @@ class SemanticImageIndex:
                             progress_callback(
                                 int(warmed_base + completed * 0.1),
                                 progress_album_total,
-                                format_index_progress("Semantic", int(warmed_base + completed * 0.1), progress_album_total),
+                                format_index_progress(
+                                    "Preparing thumbnails",
+                                    int(warmed_base + completed * 0.1),
+                                    progress_album_total,
+                                ),
                             )
                         else:
                             progress_callback(
@@ -3119,144 +3318,11 @@ class SemanticImageIndex:
                                 ),
                             )
         logger.info(
-            "[INDEX] Semantic thumbnail warm-up done: %d/%d in %.2fs",
+            "[INDEX] %s thumbnail warm-up done: %d/%d in %.2fs",
+            purpose,
             warmed,
             len(pending),
             time.time() - t0,
-        )
-        return warmed
-
-    def _warm_thumbnail_cache_for_face_scan(
-        self,
-        paths: List[str],
-        progress_callback: ProgressCallback = None,
-    ) -> int:
-        """
-        Pre-extract embedded thumbnails into ImageCache so face scan avoids per-file RAW decode.
-        Face detection only needs a downscaled RGB image (~1280px); cached thumbs are enough.
-        """
-        import logging
-        from image_cache import get_image_cache
-        from unified_image_processor import UnifiedImageProcessor
-
-        logger = logging.getLogger(__name__)
-        if not paths or not self._thumbnail_warm_before_face_scan():
-            return 0
-
-        cache = get_image_cache()
-        pending = [p for p in paths if not _index_source_image_cached(cache, p)]
-        if not pending:
-            logger.info("[INDEX] Thumbnail warm-up: all %d face-scan paths already cached", len(paths))
-            return 0
-        max_files = self._face_scan_warm_max_files()
-        if max_files == 0:
-            logger.info("[INDEX] Thumbnail warm-up disabled by RAWVIEWER_FACE_SCAN_WARM_MAX_FILES=0")
-            return 0
-        if max_files > 0 and len(pending) > max_files:
-            pending = pending[:max_files]
-        max_seconds = self._face_scan_warm_max_seconds()
-
-        workers = min(4, self._face_scan_worker_count())
-        processor = UnifiedImageProcessor()
-        t0 = time.time()
-        warmed = 0
-
-        def _warm_one(path: str) -> bool:
-            if _index_source_image_cached(cache, path):
-                return True
-            try:
-                from enhanced_raw_processor import (
-                    _thumbnail_via_qimage_reader,
-                    extract_embedded_jpeg_by_scan,
-                )
-
-                arr = extract_embedded_jpeg_by_scan(path, 1024)
-                if arr is None:
-                    arr = _thumbnail_via_qimage_reader(path, 1024)
-                if arr is not None:
-                    cache.put_thumbnail(path, arr, None)
-                    return True
-                thumb = processor.process_thumbnail(path, allow_heavy_fallback=False)
-                return thumb is not None
-            except Exception:
-                return False
-
-        logger.info(
-            "[INDEX] Warming thumbnail cache for face scan: %d/%d files (%d workers, %.1fs budget)",
-            len(pending),
-            len(paths),
-            workers,
-            max_seconds,
-        )
-        total = len(pending)
-        if workers <= 1 or total < 8:
-            for i, path in enumerate(pending, start=1):
-                if max_seconds > 0 and (time.time() - t0) >= max_seconds:
-                    logger.info("[INDEX] Thumbnail warm-up budget reached after %d/%d files", i - 1, total)
-                    break
-                if _warm_one(path):
-                    warmed += 1
-                if progress_callback and (i <= 2 or i >= total or i % 20 == 0):
-                    progress_callback(
-                        i,
-                        total,
-                        format_index_progress("Preparing thumbnails", i, total),
-                    )
-        else:
-            completed = 0
-            with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
-                futures = {executor.submit(_warm_one, p) for p in pending}
-                while futures:
-                    remaining_budget = None
-                    if max_seconds > 0:
-                        remaining_budget = max(0.0, max_seconds - (time.time() - t0))
-                        if remaining_budget <= 0:
-                            logger.info(
-                                "[INDEX] Thumbnail warm-up budget reached after %d/%d files",
-                                completed,
-                                total,
-                            )
-                            break
-                    done, not_done = concurrent.futures.wait(
-                        futures,
-                        timeout=remaining_budget if remaining_budget is not None else None,
-                        return_when=concurrent.futures.FIRST_COMPLETED,
-                    )
-                    if not done:
-                        logger.info(
-                            "[INDEX] Thumbnail warm-up timeout after %d/%d files",
-                            completed,
-                            total,
-                        )
-                        break
-                    for future in done:
-                        try:
-                            if future.result():
-                                warmed += 1
-                        except Exception:
-                            pass
-                        completed += 1
-                        if progress_callback and (
-                            completed <= 2 or completed >= total or completed % 20 == 0
-                        ):
-                            progress_callback(
-                                completed,
-                                total,
-                                format_index_progress(
-                                    "Preparing thumbnails", completed, total
-                                ),
-                            )
-                    futures = set(not_done)
-                for future in futures:
-                    future.cancel()
-
-        dur = time.time() - t0
-        logger.info(
-            "[INDEX] Thumbnail warm-up done in %.2fs: %d/%d newly cached (%.0f ms/file)",
-            dur,
-            warmed,
-            len(pending),
-            (dur / len(pending)) * 1000.0 if pending else 0,
         )
         return warmed
 
@@ -3280,6 +3346,8 @@ class SemanticImageIndex:
         return pending
 
     def get_face_pending_count(self, file_paths: Sequence[str]) -> int:
+        if not face_scan_enabled():
+            return 0
         if not file_paths:
             return 0
         indexable_paths, _ = self._filter_duplicate_raw_companions(file_paths)
@@ -3306,8 +3374,11 @@ class SemanticImageIndex:
         """Deferred face-only pass (after semantic index is ready for search)."""
         import sqlite3
 
+        if not face_scan_enabled():
+            return 0
         if not file_paths:
             return 0
+        self.release_mobileclip_gpu_memory()
         canonical_map = {self._canonical_path(p): p for p in file_paths if p}
         unique_canonical = list(canonical_map.keys())
         conn = sqlite3.connect(self.db_path, timeout=60.0)
@@ -3352,18 +3423,86 @@ class SemanticImageIndex:
         if total_face <= 0:
             return
 
-        warm_cb = None
-        self._warm_thumbnail_cache_for_face_scan(face_pending, warm_cb)
+        max_edge = self.face_detection_max_edge()
+        cache_misses: List[str] = []
+        try:
+            from image_cache import get_image_cache
+
+            cache = get_image_cache()
+            cached_n = 0
+            for p in face_pending:
+                if _index_source_thumbnail_present(cache, p):
+                    cached_n += 1
+                else:
+                    cache_misses.append(p)
+            logger.info(
+                "[INDEX] Face scan ImageCache ready: %d/%d (preview/grid/thumbnail or disk)",
+                cached_n,
+                total_face,
+            )
+        except Exception:
+            cache_misses = list(face_pending)
+
+        if cache_misses:
+            logger.info(
+                "[INDEX] Face scan filling %d missing thumbnails (semantic pass should have cached most)",
+                len(cache_misses),
+            )
+            face_warm_workers = (
+                1
+                if sys.platform == "win32"
+                else min(semantic_encode_prep_workers(), 4)
+            )
+            self._ensure_index_thumbnails_cached(
+                cache_misses,
+                progress_callback,
+                progress_album_total=progress_album_total,
+                progress_indexed_base=progress_indexed_base,
+                purpose="face",
+                max_workers=face_warm_workers,
+            )
+        else:
+            logger.info(
+                "[INDEX] Face scan reusing semantic thumbnails for all %d files",
+                total_face,
+            )
+
+        _yunet_warmup()
 
         workers = self._face_scan_worker_count()
-        max_edge = self.face_detection_max_edge()
+        chunk_size = self._face_scan_inflight_chunk()
         t_face_start = time.time()
         batch_writes = 0
         lock = conn_lock or threading.Lock()
+        parallel = self._face_scan_parallel_enabled() and total_face >= 4
+        try:
+            import cv2
+
+            backend_id, target_id = resolve_opencv_dnn_backend_target()
+            try:
+                backend_name = cv2.dnn.getBackendName(backend_id)
+            except Exception:
+                backend_name = str(backend_id)
+            logger.info(
+                "[INDEX] Face scan config: backend=%s target=%s workers=%d chunk=%d parallel=%s",
+                backend_name,
+                target_id,
+                workers,
+                chunk_size,
+                parallel,
+            )
+        except Exception:
+            pass
 
         def _scan_one(cp: str) -> tuple:
             try:
-                im = _load_index_source_image(cp, max_size=max_edge)
+                im = _load_face_scan_image(cp, max_size=max_edge)
+                if im is None:
+                    logger.warning(
+                        "[INDEX] Face scan cache miss (no warmed thumbnail): %s",
+                        os.path.basename(cp),
+                    )
+                    return cp, 0
                 return cp, int(self._detect_face_count(cp, preloaded_im=im) or 0)
             except Exception as e:
                 logger.error(
@@ -3373,7 +3512,7 @@ class SemanticImageIndex:
                 )
                 return cp, 0
 
-        if not self._face_scan_parallel_enabled() or total_face < 4:
+        if not parallel:
             for idx, cp in enumerate(face_pending, start=1):
                 if progress_callback and (
                     idx <= 2 or idx >= total_face or idx % 10 == 0
@@ -3409,26 +3548,28 @@ class SemanticImageIndex:
         )
         completed = 0
         with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
-            futures = [executor.submit(_scan_one, cp) for cp in face_pending]
-            for future in concurrent.futures.as_completed(futures):
-                cp, face_count = future.result()
-                with lock:
-                    self._store_face_count(cp, face_count, conn=conn, commit=False)
-                    batch_writes += 1
-                    if batch_writes >= commit_every:
-                        conn.commit()
-                        batch_writes = 0
-                completed += 1
-                if progress_callback and (
-                    completed <= 2
-                    or completed >= total_face
-                    or completed % 10 == 0
-                ):
-                    progress_callback(
-                        progress_indexed_base,
-                        progress_album_total,
-                        format_index_progress("Face", completed, total_face),
-                    )
+            for chunk_start in range(0, total_face, chunk_size):
+                chunk = face_pending[chunk_start : chunk_start + chunk_size]
+                futures = [executor.submit(_scan_one, cp) for cp in chunk]
+                for future in concurrent.futures.as_completed(futures):
+                    cp, face_count = future.result()
+                    with lock:
+                        self._store_face_count(cp, face_count, conn=conn, commit=False)
+                        batch_writes += 1
+                        if batch_writes >= commit_every:
+                            conn.commit()
+                            batch_writes = 0
+                    completed += 1
+                    if progress_callback and (
+                        completed <= 2
+                        or completed >= total_face
+                        or completed % 10 == 0
+                    ):
+                        progress_callback(
+                            progress_indexed_base,
+                            progress_album_total,
+                            format_index_progress("Face", completed, total_face),
+                        )
 
         if batch_writes > 0:
             with lock:
@@ -3683,11 +3824,11 @@ class SemanticImageIndex:
                     batch_writes = 0
                 logger.info(f"[INDEX] Completed metadata extraction for {total_extract} files in {time.time() - t_meta_start:.4f}s.")
 
-            face_pending = self._face_pending_paths(conn, unique_canonical)
+            face_pending = self._face_pending_paths(conn, unique_canonical) if face_scan_enabled() else []
             total_face = len(face_pending)
             total_sem = len(pending_for_semantic)
             if run_face_scan is None:
-                run_face_scan = not self._defer_face_scan_during_build()
+                run_face_scan = face_scan_enabled() and not self._defer_face_scan_during_build()
             run_face_inline = total_face > 0 and run_face_scan
 
             if total_face > 0 and not run_face_inline:
@@ -3819,19 +3960,18 @@ class SemanticImageIndex:
                                 indexed += 1
                                 sem_success += 1
                                 batch_writes += 1
-                                if progress_callback and (
-                                     i <= 2 or i >= total_sem or (i % 5 == 0)
-                                 ):
-                                     progress_callback(
-                                         int(progress_indexed_base + total_sem * 0.1 + i * 0.9),
-                                         progress_album_total,
-                                         format_index_progress("Semantic", int(progress_indexed_base + total_sem * 0.1 + i * 0.9), progress_album_total),
-                                     )
                                 if batch_writes >= commit_every:
                                     conn.commit()
                                     batch_writes = 0
                                 if throttle_sec > 0:
                                     time.sleep(throttle_sec)
+
+                            if progress_callback:
+                                progress_callback(
+                                    int(progress_indexed_base + total_sem * 0.1 + i * 0.9),
+                                    progress_album_total,
+                                    format_index_progress("Semantic", int(progress_indexed_base + total_sem * 0.1 + i * 0.9), progress_album_total),
+                                )
                         except Exception as batch_exc:
                             logger.warning(
                                 "[INDEX] Batch semantic encode failed (size=%d): %s. Falling back to per-image.",
@@ -3933,18 +4073,22 @@ class SemanticImageIndex:
                 else:
                     logger.info(f"[INDEX] Skipping AI features neural pass (MobileCLIP) for {total_sem} files (metadata-only index).")
                     
-                    # Warm the thumbnail cache in the background even if not doing semantic embeddings now!
-                    # This populates the cache for future gallery display and future semantic searches.
-                    warm_paths = [cp for cp, _ in pending_for_semantic]
-                    try:
-                        self._warm_thumbnail_cache_for_semantic_index(
-                            warm_paths,
-                            progress_callback,
-                            progress_album_total=progress_album_total,
-                            progress_indexed_base=progress_indexed_base,
-                        )
-                    except Exception as e:
-                        logger.warning(f"[INDEX] Background thumbnail warming failed: {e}")
+                    # Thumbnail warm-up runs once in the user semantic pass (before MobileCLIP).
+                    # Skip here when semantic search is enabled to avoid duplicate work and a
+                    # second misleading "Semantic" progress phase in the search field.
+                    if semantic_embeddings_enabled():
+                        pass
+                    else:
+                        warm_paths = [cp for cp, _ in pending_for_semantic]
+                        try:
+                            self._warm_thumbnail_cache_for_semantic_index(
+                                warm_paths,
+                                progress_callback,
+                                progress_album_total=progress_album_total,
+                                progress_indexed_base=progress_indexed_base,
+                            )
+                        except Exception as e:
+                            logger.warning(f"[INDEX] Background thumbnail warming failed: {e}")
 
                     for canonical_fp, st in pending_for_semantic:
                         self._wait_if_paused()
@@ -3954,6 +4098,7 @@ class SemanticImageIndex:
 
             # Phase 3: face scan (optional; skipped when deferred to a follow-up worker).
             if run_face_inline:
+                self.release_mobileclip_gpu_memory()
                 logger.info(
                     "[INDEX] Face scanning %d files (semantic pending was %d)",
                     total_face,
@@ -4264,11 +4409,17 @@ class SemanticImageIndex:
             for r in rows:
                 fp = r['file_path']
                 if fp not in result_map:
+                    from common_image_loader import exif_display_dimensions
+
                     orig_path = canonical_to_original[fp]
+                    w = int(r["width"] or 0)
+                    h = int(r["height"] or 0)
+                    o = int(r["orientation"] or 1)
+                    dw, dh = exif_display_dimensions(w, h, o)
                     result_map[orig_path] = {
-                        "width": r["width"] or 0,
-                        "height": r["height"] or 0,
-                        "orientation": r["orientation"] or 1,
+                        "width": dw,
+                        "height": dh,
+                        "orientation": 1,
                         "capture_time": r["capture_time"] or "",
                     }
                     
@@ -4568,6 +4719,12 @@ class SemanticImageIndex:
                 val = int(val_str)
 
                 def _ok(x: int) -> bool:
+                    if x <= 0:
+                        if op == "=":
+                            return val == 0
+                        if op == "<=":
+                            return val == 0
+                        return False
                     if op == "<":
                         return x < val
                     if op == "<=":
@@ -5063,12 +5220,10 @@ class SemanticImageIndex:
             found_paths.add(self._canonical_path(original))
             
             face_count = row["face_count"] if "face_count" in row.keys() else None
-            # Only detect faces during search if explicitly needed and missing, 
-            # but ideally this should be done during background indexing.
-            if needs_face and face_count is None:
-                if os.path.isfile(original):
-                    face_count = self._detect_face_count(original)
-                    self._store_face_count(original, int(face_count or 0))
+            # Never run YuNet/OpenCV on the UI thread during gallery search — use
+            # indexed face_count only (NULL → 0). Live detection belongs in indexing.
+            if face_count is None:
+                face_count = 0
             
             # Lazy metadata repair: If we have GPS but no location names (city/country),
             # it might have been indexed when the geocoder was unavailable. 
@@ -5126,11 +5281,11 @@ class SemanticImageIndex:
             canonical = self._canonical_path(p)
             if canonical in found_paths:
                 continue
-            meta = self._extract_exif_brief(canonical, include_face=needs_face)
+            meta = self._extract_exif_brief(p, include_face=False)
             rows.append(
                 {
-                    "file_path": canonical,
-                    "file_name": os.path.basename(canonical),
+                    "file_path": p,
+                    "file_name": os.path.basename(p),
                     "capture_time": str(meta.get("capture_time") or ""),
                     "camera_model": str(meta.get("camera_model") or ""),
                     "lens_model": str(meta.get("lens_model") or ""),

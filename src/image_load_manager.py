@@ -991,8 +991,13 @@ class ImageLoadManager(QObject):
                         continue
 
                     if pressure and task.priority != Priority.CURRENT:
-                        deferred_prefetch_tasks.append(task)
-                        continue
+                        active_prefetch = sum(
+                            1 for t in self._active_tasks.values()
+                            if getattr(t, "priority", None) != Priority.CURRENT and not t.is_cancelled()
+                        )
+                        if active_prefetch >= 1:
+                            deferred_prefetch_tasks.append(task)
+                            continue
 
                     is_raw = is_raw_file(task.file_path)
                     # HEAVY TASK CHECK: Only throttle RAW tasks that perform full-resolution processing.

@@ -42,6 +42,8 @@ from raw_file_extensions import RAW_FILE_EXTENSIONS
 # Cached EXIF rows without this version used buggy orientation logic (e.g. LibRaw 5 mis-mapped, Sony MakerNote missing, or Silent Failures).
 RAW_EXIF_SENSOR_META_VER = 7
 
+_rawpy_global_lock = threading.Lock()
+
 
 def _qimage_to_rgb_array(image: QImage) -> Optional[np.ndarray]:
     """Convert a QImage into a contiguous RGB numpy array without creating a QPixmap."""
@@ -183,8 +185,9 @@ def _orientation_from_embedded_preview(
         if raw_object is not None:
             thumb = raw_object.extract_thumb()
         else:
-            with rawpy.imread(file_path) as raw:
-                thumb = raw.extract_thumb()
+            with _rawpy_global_lock:
+                with rawpy.imread(file_path) as raw:
+                    thumb = raw.extract_thumb()
         if thumb is None or thumb.format != rawpy.ThumbFormat.JPEG:
             return 1
         return orientation_from_embedded_jpeg_bytes(thumb.data)
@@ -348,7 +351,8 @@ def extract_embedded_jpeg_by_scan(file_path: str, max_size: int) -> Optional[np.
         result = _extract_embedded_jpeg_by_scan_impl(file_path, max_size)
         with _embedded_scan_coalesce_lock:
             if len(_embedded_scan_results) >= _embedded_scan_results_max:
-                _embedded_scan_results.clear()
+                oldest_key = next(iter(_embedded_scan_results))
+                _embedded_scan_results.pop(oldest_key, None)
             _embedded_scan_results[cache_key] = result
         return result
     finally:
@@ -564,8 +568,9 @@ class ThumbnailExtractor(QObject):
             if raw_object is not None:
                 thumb = self._extract_from_raw_obj(raw_object, file_path, max_size)
             else:
-                with rawpy.imread(file_path) as raw:
-                    thumb = self._extract_from_raw_obj(raw, file_path, max_size)
+                with _rawpy_global_lock:
+                    with rawpy.imread(file_path) as raw:
+                        thumb = self._extract_from_raw_obj(raw, file_path, max_size)
         except Exception as e:
             import logging
             # Expected for some ARW/RAW; fallbacks (embedded JPEG scan, etc.) follow.
@@ -656,6 +661,14 @@ class ThumbnailExtractor(QObject):
                 thumb_array = thumb.data.copy()
                 if thumb_array is None or not hasattr(thumb_array, 'shape'):
                     return None
+
+                flip = int(getattr(raw.sizes, "flip", 0) or 0)
+                if flip != 0:
+                    flip_map = {0: 1, 3: 3, 5: 8, 6: 6}
+                    orientation = int(flip_map.get(flip, flip))
+                    thumb_array = self._apply_orientation_correction(
+                        thumb_array, orientation
+                    )
                 
                 h, w = thumb_array.shape[:2]
                 if max_size > 0 and (w > max_size or h > max_size):
@@ -945,13 +958,14 @@ class EXIFExtractor(QObject):
                                 # print(f"[ORIENTATION] EXIFExtractor: Falling back to LibRaw flip={sizes.flip} -> Orientation {orientation} for {os.path.basename(file_path)}")
                                 pass
                     else:
-                        with rawpy.imread(file_path) as raw:
-                            sizes = raw.sizes
-                            original_width = sizes.width
-                            original_height = sizes.height
-                            if orientation == 1 and sizes.flip != 0:
-                                flip_map = {0: 1, 3: 3, 5: 8, 6: 6}
-                                orientation = flip_map.get(sizes.flip, sizes.flip)
+                        with _rawpy_global_lock:
+                            with rawpy.imread(file_path) as raw:
+                                sizes = raw.sizes
+                                original_width = sizes.width
+                                original_height = sizes.height
+                                if orientation == 1 and sizes.flip != 0:
+                                    flip_map = {0: 1, 3: 3, 5: 8, 6: 6}
+                                    orientation = flip_map.get(sizes.flip, sizes.flip)
                 except Exception:
                     pass
 
@@ -1189,14 +1203,15 @@ class OptimizedRAWProcessor(QObject):
     def process_raw_fast(self, file_path: str, exif_data: Dict[str, Any] = None) -> Optional[np.ndarray]:
         """Process RAW file with optimized parameters for speed."""
         try:
-            with rawpy.imread(file_path) as raw:
-                params = self.get_optimized_processing_params(
-                    file_path, exif_data)
+            with _rawpy_global_lock:
+                with rawpy.imread(file_path) as raw:
+                    params = self.get_optimized_processing_params(
+                        file_path, exif_data)
 
-                # Process with optimized parameters
-                rgb_image = raw.postprocess(**params)
+                    # Process with optimized parameters
+                    rgb_image = raw.postprocess(**params)
 
-                return rgb_image
+                    return rgb_image
 
         except Exception as e:
             # Log the actual error for debugging
@@ -1207,15 +1222,16 @@ class OptimizedRAWProcessor(QObject):
     def process_raw_quality(self, file_path: str, exif_data: Dict[str, Any] = None) -> Optional[np.ndarray]:
         """Process RAW file with quality parameters (slower)."""
         try:
-            with rawpy.imread(file_path) as raw:
-                # Quality processing parameters
-                params = {
-                    'use_camera_wb': True,
-                    'output_bps': 16,  # 16-bit for quality
-                    'gamma': (1, 1),   # Linear gamma for better quality
-                    'no_auto_bright': True,
-                    'bright': 1.0
-                }
+            with _rawpy_global_lock:
+                with rawpy.imread(file_path) as raw:
+                    # Quality processing parameters
+                    params = {
+                        'use_camera_wb': True,
+                        'output_bps': 16,  # 16-bit for quality
+                        'gamma': (1, 1),   # Linear gamma for better quality
+                        'no_auto_bright': True,
+                        'bright': 1.0
+                    }
 
                 # Camera-specific quality adjustments
                 if self.is_canon_camera(file_path, exif_data):
