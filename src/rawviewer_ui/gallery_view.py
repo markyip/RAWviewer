@@ -2372,6 +2372,29 @@ class JustifiedGallery(QWidget):
             self._metadata_cache[resolved] = {"original_width": 0, "original_height": 0}
             return
             
+        # Merge: if we already have display-corrected metadata from the semantic
+        # index (orientation=1, dimensions already swapped), keep those dimensions
+        # when the incoming EXIF has a non-trivial orientation that would cause
+        # the gallery to re-interpret them.
+        existing = self._metadata_cache.get(resolved)
+        if (
+            existing
+            and existing.get("orientation") == 1
+            and existing.get("original_width")
+            and existing.get("original_height")
+        ):
+            try:
+                incoming_o = int(exif_data.get("orientation", 1) or 1)
+            except (ValueError, TypeError):
+                incoming_o = 1
+            if incoming_o in (5, 6, 7, 8):
+                # The existing metadata was pre-corrected; keep its display
+                # dimensions and normalise orientation to 1 in the merged result.
+                exif_data = dict(exif_data)
+                exif_data["original_width"] = existing["original_width"]
+                exif_data["original_height"] = existing["original_height"]
+                exif_data["orientation"] = 1
+
         # Store in local metadata cache
         self._metadata_cache[resolved] = exif_data
         try:
