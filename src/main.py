@@ -97,6 +97,13 @@ if _IS_GUI_MAIN_PROCESS:
             """Custom QApplication to handle macOS FileOpen events"""
             def __init__(self, argv):
                 super().__init__(argv)
+                # Set explicit AppUserModelID on Windows so the taskbar groups and shows the app icon correctly
+                if sys.platform == "win32":
+                    try:
+                        import ctypes
+                        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("markyip.rawviewer.app.1")
+                    except Exception:
+                        pass
                 self.viewer = None
                 self.pending_files = []
 
