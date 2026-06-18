@@ -27,7 +27,6 @@ LITE_PREFETCH_DEFAULTS: dict[str, str] = {
     "RAWVIEWER_GALLERY_IDLE_PRELOAD_PRIORITY": "preload_next",
     "RAWVIEWER_PREVIEW_CACHE_ADAPTIVE": "1",
     "RAWVIEWER_MEMORY_PREVIEW_MAX": "2304",
-    "RAWVIEWER_ENABLE_LOCATION_MAP": "0",
 }
 
 
@@ -116,14 +115,6 @@ def resolved_profile() -> str:
 
 def is_lite_build() -> bool:
     return resolved_profile() == "lite"
-
-
-def location_map_enabled() -> bool:
-    """Tile map overlay (OSM). Off by default; opt in via RAWVIEWER_ENABLE_LOCATION_MAP=1."""
-    raw = os.environ.get("RAWVIEWER_ENABLE_LOCATION_MAP")
-    if raw is None:
-        return False
-    return str(raw).strip().lower() in ("1", "true", "yes", "on")
 
 
 def apply_profile_runtime_defaults() -> None:

@@ -1,7 +1,8 @@
-"""Composition guide overlays (rule of thirds, golden ratio) for single-image view."""
+"""Composition guide overlays (rule of thirds, phi / golden-ratio grid) for single-image view."""
 
 from __future__ import annotations
 
+import math
 from typing import Tuple
 
 from PyQt6.QtCore import Qt, QRectF
@@ -18,11 +19,22 @@ GRID_MODES: Tuple[str, ...] = (
 _GRID_LINE = QColor(200, 200, 200, 175)
 _GRID_LINE_WIDTH_COSMETIC = 2  # screen pixels (GPU overlay)
 _GRID_LINE_WIDTH_IMAGE = 2  # image pixels (legacy QLabel path)
-_INV_PHI = 0.618033988749895
-_PHI_COMPLEMENT = 1.0 - _INV_PHI
+
+# Phi grid (golden-ratio grid): divide each axis so the long : short segment ratio is φ.
+# φ = (1 + √5) / 2  →  lines at 1/φ ≈ 0.618 and (1 − 1/φ) = 1/φ² ≈ 0.382 of width/height.
+_PHI = (1.0 + math.sqrt(5.0)) / 2.0
+_INV_PHI = 1.0 / _PHI
+_PHI_MINOR = 1.0 - _INV_PHI
+
+
+def phi_grid_positions() -> Tuple[float, float]:
+    """Normalized positions (minor, major) for vertical and horizontal phi-grid lines."""
+    return _PHI_MINOR, _INV_PHI
 
 
 def next_grid_mode(mode: str) -> str:
+    if mode == "golden_spiral":
+        mode = "golden"
     try:
         idx = GRID_MODES.index(mode)
     except ValueError:
@@ -31,12 +43,14 @@ def next_grid_mode(mode: str) -> str:
 
 
 def grid_mode_label(mode: str) -> str:
+    if mode == "golden_spiral":
+        mode = "golden"
     return {
         "off": "Off",
         "thirds": "3×3 grid",
         "diagonal": "Diagonal",
         "thirds_diagonal": "3×3 + diagonal",
-        "golden": "Golden ratio",
+        "golden": "Phi grid (golden ratio)",
     }.get(mode, "Off")
 
 
@@ -58,6 +72,8 @@ def draw_composition_grid(
     cosmetic: bool = False,
 ) -> None:
     """Draw guide lines in image pixel coordinates (0,0)–(width,height)."""
+    if mode == "golden_spiral":
+        mode = "golden"
     if mode == "off" or width <= 0 or height <= 0:
         return
     w, h = float(width), float(height)
@@ -74,7 +90,7 @@ def draw_composition_grid(
         painter.drawLine(0, 0, width, height)
         painter.drawLine(width, 0, 0, height)
     if mode == "golden":
-        for t in (_PHI_COMPLEMENT, _INV_PHI):
+        for t in phi_grid_positions():
             x = w * t
             y = h * t
             painter.drawLine(int(round(x)), 0, int(round(x)), height)
@@ -105,7 +121,10 @@ class CompositionGridGraphicsItem(QGraphicsItem):
 
     def set_grid(self, width: int, height: int, mode: str) -> None:
         if mode not in GRID_MODES:
-            mode = "off"
+            if mode == "golden_spiral":
+                mode = "golden"
+            else:
+                mode = "off"
         self.prepareGeometryChange()
         self._w = max(0, int(width))
         self._h = max(0, int(height))

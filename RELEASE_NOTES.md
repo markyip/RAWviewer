@@ -3,41 +3,77 @@
 ## 🚀 Version 2.4
 **Release Date: June 16, 2026**
 
-Version **2.4** uses **`build.py`** as the single source of truth: `VERSION` syncs to `src/app_version.py`, `pixi.toml`, macOS `Info.plist`, and runtime update checks.
+### Highlights — new in 2.4
 
-### Highlights
-- **macOS large libraries**: Raised file-descriptor limits (macOS defaults are too low for gallery prefetch), automatic memory-tier tuning, and faster recovery from “too many open files” pressure — large folders on Mac stay responsive instead of stalling or crashing.
-- **Thumbnail orientation**: Portrait RAW and cached gallery thumbnails now respect EXIF display orientation consistently across the grid, film strip, and semantic index warm-up (fixes double-rotation and sideways portrait shots).
-- **Lite profile**: Adaptive prefetch/cache, map disabled by default, smaller installers (map stack omitted).
-- **Composition grid**: **G** cycles Off → rule of thirds → diagonals → both → golden ratio.
-- **Drag out photos**: Drag the current image or gallery selection to the desktop, another folder, or another app (Explorer, Finder, Mail, Lightroom, etc.) — originals are copied as file URLs with a thumbnail preview while dragging.
-- **Reliability**: Display-tier preview failures automatically retry full decode; keyboard shortcut help is hover-only on **i**.
-- **Large-Folder Stability**: Optimized prefetch slot reservation under low capacity caps, debounced thumbnail error retries to prevent event loop storms, and quick recovery from EMFILE (too-many-open-files) pressure with a shorter 12-second cooldown and a minor background prefetch trickle.
-- **Cache Eviction**: Replaced the abrupt full clear of the embedded scan cache with a FIFO (first-in-first-out) eviction strategy to avoid duplicate file I/O in large folders.
+- **RAWviewer Lite** — A lighter edition for fast browsing and culling: smaller download, no AI model install, and gallery search by camera, ISO, date, GPS, and filename. On **Windows**, pick **Lite** in the installer; on **Mac**, use **`RAWviewer-v2.4-macOS-Lite.zip`**.
+- **One Windows installer** — **`RAWviewer_Setup.exe`** is all you need. In the wizard, choose **Full (CUDA)**, **Full (DirectML)**, or **Lite** — no more hunting for separate setup files.
+- **Drag photos out** — Drag the image on screen, a gallery thumbnail, or a film-strip thumb to Explorer, Finder, Mail, WhatsApp (where supported), Lightroom, or any app that accepts files. Select several gallery photos first and drag once to export them all.
+- **Composition guides** — Press **G** in single-image view to cycle overlays: rule of thirds, diagonals, or phi grid — handy for checking framing while you cull.
+- **Release highlights image** — The GitHub release includes a new visual summary of v2.4 so you can see what’s new at a glance before you download.
 
-### 🍎 macOS & large libraries
-- **File-descriptor headroom**: On startup, RAWviewer raises the soft `RLIMIT_NOFILE` cap (macOS often ships with 256) so gallery prefetch and background indexing can open many RAW/JPEG handles without hitting EMFILE.
-- **I/O pressure recovery**: After “too many open files” errors, concurrent loads back off for a short cooldown and resume with a lighter prefetch trickle instead of wedging the UI.
-- **Memory-tier auto-tuning**: Installed RAM selects worker counts, cache sizes, and whether face scan runs during indexing — 8 GB Macs get conservative defaults; 16 GB+ machines scale up automatically.
-- **Scroll-friendly indexing**: Background metadata and semantic indexing pause while you scroll the gallery and resume after idle.
+### Introducing RAWviewer Lite
 
-### 🖼️ Thumbnail orientation
-- **Gallery & film strip**: Indexer-cached thumbnails validate cache metadata version so stale sideways thumbnails are not reused after orientation fixes.
-- **No double-rotation**: Pre-warmed index thumbnails and semantic warm-up paths apply container EXIF correction once — portrait RAW shots no longer appear rotated twice.
-- **Semantic warm-up**: Index thumbnail warm-up re-orients mis-cached portrait RAW entries so AI indexing previews match what you see when scrolling the gallery.
-- **Core ML batching (macOS Full)**: Semantic indexing uses batched Core ML predictions where supported for faster passes on large folders.
+**Lite is RAWviewer without the AI search engine** — built for photographers who want the same fast viewer, gallery, and culling workflow, but prefer a smaller install and snappier loading over plain-language search.
 
-### 🖼️ Drag & drop
-- **Single-image view**: Click and drag the photo from the main viewer (fit-to-window) to drop the original file elsewhere.
-- **Gallery**: Drag a thumbnail to export one file; if that thumbnail is part of a multi-selection, **all selected photos** are dragged together.
+**What you keep (same as Full):**
+- Open folders of RAW and JPEG, gallery grid, film strip, fit / 100% zoom, histogram, focus overlay, composition guides (**G**)
+- Drag photos out to Explorer, Finder, Mail, or your editor
+- Bookmarks, Discard folder, keyboard shortcuts
+- Gallery search by **metadata** — camera, lens, ISO, date, city, filename, and more (e.g. `camera:sony iso<800`)
+
+**What Lite leaves out:**
+- **Semantic (AI) search** — you can’t type `sunset on beach` and have the app guess meaning; use metadata filters or your eyes instead
+- **Face-based filters** — no `has:face` / `people` style queries
+- **AI model download** — no ~600 MB (Windows) or ~150 MB (Mac) model install
+
+**Why Lite feels faster and uses less disk:**
+- No background AI indexing eating CPU, GPU, and RAM while you browse
+- Tuned prefetch so the next photos in the gallery and film strip load sooner when you scroll or arrow through a folder
+- Smaller app footprint (~500 MB install vs ~1.5 GB+ for Full after models)
+
+**How to get Lite:** On **Windows**, choose **Lite** in **`RAWviewer_Setup.exe`**. On **Mac**, download **`RAWviewer-v2.4-macOS-Lite.zip`**. Already on Full? You can install Lite side by side — they don’t share the same shortcut name.
+
+Not sure which to pick? **Lite** if you cull by eye and search by camera/date/location. **Full** if you want to describe photos in everyday words or filter by faces.
+
+### Improvements & fixes
+
+- **Portrait photos look right** — Gallery thumbnails and the film strip no longer show vertical shots sideways or “twisted twice.”
+- **Smoother on huge folders (especially Mac)** — Large libraries scroll more reliably; the app eases off when your Mac is busy instead of freezing.
+- **Gallery multi-select** — **Ctrl+click** (Windows) or **Cmd+click** (Mac) to pick photos; **Shift+click** for a range. Works with drag-out and the bottom **Open / Share** bar.
+- **Lite search stays light** — Typing casual words like `sunset` in **Lite** no longer tries to load the heavy AI engine. Use filters such as `camera:sony` or `iso<800` instead.
+- **Windows maximize button** — Maximize and restore work on the first click after reopening the app.
+
+### Gallery & everyday workflow
+
+- **Multi-select** — Ctrl/Cmd+click toggles a thumbnail on or off; Shift+click selects a continuous range (great for picking a burst or a run of keepers).
+- **Drag out** — One thumbnail drags one file; a multi-selection drags every selected file together.
+- **No accidental re-open** — Dragging a photo from RAWviewer and dropping it back on the window no longer opens it again.
+- **Search while indexing** — Progress messages stay clearer; Lite won’t pretend AI search is ready when only metadata has finished indexing.
+
+### Portrait orientation
+
+- Vertical RAW and JPEG shots appear upright in the gallery grid and film strip.
+- Cached thumbnails from older versions are refreshed when needed — run **`clear_cache`** once if you still see old sideways previews.
+
+### Large libraries (Mac)
+
+- Better behavior when a folder has thousands of photos — less stutter, fewer “system busy” moments.
+- Background search/indexing pauses while you scroll the gallery and picks up again when you stop.
+- On 8 GB Macs, the app stays conservative; on 16 GB+ machines it can work a bit harder automatically.
+
+### Drag & drop
+
+- **Single-image view**: Drag the photo to export the original file.
+- **Gallery**: Drag one thumbnail, or drag while several are selected to export all of them.
 - **Filmstrip**: Drag the active strip thumbnail the same way.
 - **Drop in** (unchanged): Drag a folder or image onto the window to open it in RAWviewer.
 
-### 📦 Install & uninstall
+### Install & uninstall
+
 - **Windows install**: Unified **`RAWviewer_Setup.exe`** — choose **Full (CUDA / DirectML)** or **Lite** in the wizard; launch **`RAWviewer.exe`** (not Setup) after install. Default folder: `%LOCALAPPDATA%\RAWviewer`.
-- **Windows uninstall**: **Settings → Apps → RAWviewer → Uninstall**, or **`uninstall.bat`** in the install folder. Removes the app, **`%USERPROFILE%\.rawviewer_cache`**, and **`%LOCALAPPDATA%\RAWviewer`** logs/tiles. Set **`RAWVIEWER_UNINSTALL_FULL=1`** before **`uninstall.bat`** to also clear QSettings preferences.
+- **Windows uninstall**: **Settings → Apps → RAWviewer → Uninstall**, or **`uninstall.bat`** in the install folder. Removes the app, **`%USERPROFILE%\.rawviewer_cache`**, and **`%LOCALAPPDATA%\RAWviewer`** logs/tiles. Set **`RAWVIEWER_UNINSTALL_FULL=1`** before **`uninstall.bat`** to also clear saved preferences.
 - **macOS install**: Extract release zip → **`bash install_macos_app.sh`** (see **`Start Here.txt`** in the zip). Copies the app to **Applications** and clears download quarantine.
-- **macOS uninstall**: Release zips now include **`uninstall_macos_app.sh`** and **`Uninstall RAWviewer.command`** — removes **Applications** copies, **`~/.rawviewer_cache`**, logs, and preferences. Keep the zip (or re-download) to run uninstall later; Trash alone does not clear cache.
+- **macOS uninstall**: Release zips include **`uninstall_macos_app.sh`** and **`Uninstall RAWviewer.command`** — removes **Applications** copies, **`~/.rawviewer_cache`**, logs, and preferences. Keep the zip (or re-download) to run uninstall later; Trash alone does not clear cache.
 - **Documentation**: README, **`Start Here.txt`**, and **`scripts/Launch/README.md`** updated with install/uninstall steps and an uninstall-vs-**`clear_cache`** table for both platforms.
 
 ---

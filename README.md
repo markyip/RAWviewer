@@ -15,11 +15,11 @@
 
 **RAWviewer** is a fast photo viewer for **Windows and macOS**. Open a folder of RAW or JPEG files, check sharpness, search your shots, and cull rejects — **100% on your computer, no cloud upload.**
 
-**v2.4 stability focus:** Large libraries on **macOS** are handled more reliably (file-descriptor limits, memory-aware indexing, I/O pressure recovery), and **thumbnail orientation** is consistent across gallery, film strip, and AI index warm-up — portrait RAW shots display upright without double-rotation glitches.
+**What’s new in v2.4:** **Lite** edition and a **single Windows installer**; **drag photos out** to other apps; **composition guides** (**G**); plus steadier large folders and correct portrait thumbnails.
 
 Official releases: [GitHub Releases](https://github.com/markyip/RAWviewer/releases/latest)
 
-**Contents:** [Choose your version](#choose-your-version) · [Download & install](#download--install) · [Using RAWviewer](#using-rawviewer) · [Troubleshooting](#something-not-working) · [Advanced reference](#advanced-reference) · [For developers](#for-developers)
+**Contents:** [Choose your version](#choose-your-version) · [RAWviewer Lite](#rawviewer-lite) · [Download & install](#download--install) · [Using RAWviewer](#using-rawviewer) · [Troubleshooting](#something-not-working) · [Advanced reference](#advanced-reference) · [For developers](#for-developers)
 
 ---
 
@@ -30,13 +30,29 @@ Official releases: [GitHub Releases](https://github.com/markyip/RAWviewer/releas
 | **Best for** | Fast browsing and culling; smaller download | AI-powered search and face filters |
 | **Gallery search** | Metadata only (camera, ISO, date, GPS, filename, …) | Plain-language AI search *plus* metadata filters |
 | **Face filters** (`has:face`, `people`, …) | No | Yes |
-| **GPS location map** (`M` in single view) | Yes | Yes |
 | **Install size / time** | Smaller; no AI model download | Larger; downloads AI models on first setup (Full only) |
 
 **Windows installer:** `RAWviewer_Setup.exe` (Unified Installer)  
 **macOS zips:** `RAWviewer-v2.4-macOS.zip` · `RAWviewer-v2.4-macOS-Lite.zip`
 
 Not sure? Start with **Lite** if you mainly browse and cull by eye. Choose **Full** if you want to search with words like `sunset on beach` or filter by detected faces.
+
+---
+
+## RAWviewer Lite
+
+**Lite** is the same RAWviewer viewing experience as **Full**, without the offline AI search stack. You get the gallery, film strip, zoom, histogram, focus overlay, composition guides, drag-out sharing, and metadata-based gallery search — but not plain-language semantic search or face filters.
+
+| | **Why choose Lite** |
+|---|---------------------|
+| **Less storage** | Smaller download and install; no large AI model files on disk |
+| **Faster feel** | No background AI indexing; Lite is tuned to prefetch nearby photos so scrolling and **← / →** navigation stay responsive |
+| **Same culling tools** | Discard folder, bookmarks, multi-select, drag to other apps |
+| **Search** | By metadata only (`camera:`, `iso:`, `city:`, date, filename, …) — not by describing a scene in words |
+
+**Trade-off:** Lite does **not** run semantic search. Typing `sunset` or `dog on beach` won’t match photos by meaning. Use filters like `camera:canon year>=2024`, or switch to **Full** if you want AI-powered search and face filters.
+
+**Get Lite:** **Windows** — select **Lite** in `RAWviewer_Setup.exe`. **Mac** — `RAWviewer-v2.4-macOS-Lite.zip`.
 
 ---
 
@@ -54,7 +70,7 @@ Not sure? Start with **Lite** if you mainly browse and cull by eye. Choose **Ful
 
 Setup also registers RAWviewer in Windows **Open with** for common photo formats, so you can right-click a file in Explorer and choose RAWviewer.
 
-**Uninstall:** **Settings → Apps → RAWviewer → Uninstall**, or run **`uninstall.bat`** in the install folder (`%LOCALAPPDATA%\RAWviewer`). This removes the app, your photo cache (`%USERPROFILE%\.rawviewer_cache`), logs, and map tiles under `%LOCALAPPDATA%\RAWviewer`. Window layout and sort preferences are kept unless you set **`RAWVIEWER_UNINSTALL_FULL=1`** before running **`uninstall.bat`** (that also clears `HKCU\Software\RAWviewer`).
+**Uninstall:** **Settings → Apps → RAWviewer → Uninstall**, or run **`uninstall.bat`** in the install folder (`%LOCALAPPDATA%\RAWviewer`). This removes the app, your photo cache (`%USERPROFILE%\.rawviewer_cache`), and logs. Window layout and sort preferences are kept unless you set **`RAWVIEWER_UNINSTALL_FULL=1`** before running **`uninstall.bat`** (that also clears `HKCU\Software\RAWviewer`).
 
 If Windows shows **“Protected your PC”**: click **More info** → **Run anyway**.
 
@@ -87,8 +103,7 @@ To run from the extracted folder without installing: `bash remove_macos_quaranti
 | **macOS** | macOS 13 Ventura or newer |
 | **Disk (Lite)** | ~500 MB install + cache as you browse |
 | **Disk (Full)** | ~1.5 GB+ (includes AI models after first setup) |
-| **RAM** | 8 GB minimum; **16 GB+** recommended for **Full** + large folders (10k+ photos). RAWviewer tunes concurrency and cache from installed RAM at startup (see [Automatic memory tuning](#automatic-memory-tuning)). On **macOS**, v2.4 also raises the per-process open-file limit so large libraries are less likely to hit system “too many open files” errors during prefetch. |
-| **GPS map** | Internet on first use per area (map tiles are cached locally) |
+| **RAM** | 8 GB minimum; **16 GB+** recommended for **Full** + large folders (10k+ photos). RAWviewer adjusts how hard it works based on your RAM (see [Automatic memory tuning](#automatic-memory-tuning)). On **macOS**, v2.4 is better at handling very large folders without stuttering. |
 
 ### Uninstall vs clear cache
 
@@ -108,15 +123,15 @@ To run from the extracted folder without installing: `bash remove_macos_quaranti
 2. **Gallery view** — scroll the grid; click a photo for full-screen view.
 3. **Check sharpness** — press **`Space`** for 100% zoom; **`←` / `→`** for prev/next.
 4. **Search** — click the search icon in gallery view. **Full:** type plain words (`sunset`, `airplane`) or filters (`camera:sony` `iso<800`). **Lite:** metadata filters only (see [Advanced → Gallery search syntax](#gallery-search-syntax)).
-5. **GPS map** — in single view, press **`M`** to show or hide a map of nearby photos with GPS (needs internet for tiles).
-6. **Open in another app** — use the bottom external-app button to open the current photo, gallery selection, or bookmarked photos in an editor. On Windows, single files use the native **Open with** picker; on macOS, choose a `.app` once and reuse it.
-7. **Reject a shot** — **`↓`** moves it to a **Discard** subfolder; **Delete** removes it (with confirmation).
-8. **`Esc`** returns from single view to the gallery.
+5. **Open in another app** — use the bottom external-app button to open the current photo, gallery selection, or bookmarked photos in an editor. On Windows, single files use the native **Open with** picker; on macOS, choose a `.app` once and reuse it.
+6. **Reject a shot** — **`↓`** moves it to a **Discard** subfolder; **Delete** removes it (with confirmation).
+7. **`Esc`** returns from single view to the gallery.
 
 ### Keyboard shortcuts
 
 | Key | Action |
 |-----|--------|
+| **G** | Cycle composition guide (off / rule of thirds / diagonals / both / phi grid) |
 | **Space** | Fit ↔ 100% zoom |
 | **← / →** | Previous / next image |
 | **↓** | Move to Discard folder |
@@ -124,7 +139,6 @@ To run from the extracted folder without installing: `bash remove_macos_quaranti
 | **Esc** | Back to gallery |
 | **H** | Show / hide histogram |
 | **F** | Show focus / subject box (when supported) |
-| **M** | Show / hide GPS location map (single view; photos need GPS) |
 | **↑** | Bookmark / unbookmark (single view, or selected thumbnails in gallery) |
 
 ### Mouse & trackpad
@@ -134,12 +148,14 @@ To run from the extracted folder without installing: `bash remove_macos_quaranti
 - **Pinch / Ctrl+scroll** — zoom
 - **Scroll wheel** — next/previous (single view) or scroll gallery grid
 - **Film strip** — move the pointer to the bottom in single view for thumbnails
+- **Gallery multi-select** — **Ctrl+click** (Windows) or **Cmd+click** (Mac) to add or remove photos from a selection; **Shift+click** a second photo to select the range in between. Drag any selected thumbnail outward to copy or share all selected files.
 
 ### Search tips
 
 - **Full:** type everyday words: `dog on beach`, `crowd`, `portrait`.
 - Add filters on the same line: `jet takeoff camera:canon iso<800`.
 - Words like **`people`** or **`face`** filter by detected faces (**Full** only) — if nothing matches, try `crowd` or `spectators` instead.
+- **Lite:** everyday words won’t run AI search — use filters like `camera:sony`, `iso<800`, or `city:tokyo`.
 - Clear the search box to show the whole folder again.
 
 Full search syntax, focus-overlay brands, and power-user options are in **[Advanced reference](#advanced-reference)** below.
@@ -148,14 +164,17 @@ Full search syntax, focus-overlay brands, and power-user options are in **[Advan
 
 ## What you get
 
+- **Lite or Full** — Lite for fast browse-and-cull; Full adds plain-language AI search and face filters
+- **One Windows installer** — `RAWviewer_Setup.exe` lets you pick Full (CUDA / DirectML) or Lite in one wizard
+- **Drag photos out** — From single view, gallery, or film strip to Explorer, Finder, Mail, editors, and more
+- **Composition guides** — Press **G** for rule-of-thirds, diagonal, or phi grid overlays while reviewing shots
 - Fast **RAW + JPEG** viewing (Canon, Nikon, Sony, DNG, and many more)
-- **Lite** or **Full** builds — pick the size and features you need
-- **Stable large folders** — especially on **macOS**: higher file-descriptor limits, memory-tier tuning, and graceful recovery when the system is under I/O pressure (10k+ photo libraries)
-- **Correct thumbnail orientation** — gallery grid, film strip, and semantic index warm-up respect EXIF display orientation; portrait RAW no longer appears sideways or double-rotated
+- **Large folders feel smoother** — especially on Mac, with tens of thousands of photos
+- **Portrait photos look correct** — gallery and film-strip thumbnails no longer appear sideways
+- **Select several gallery photos** — Ctrl/Cmd+click and Shift+click, then drag them out together
 - **Offline AI search** (**Full**) — describe photos in plain language; nothing leaves your PC
 - **Metadata filters** — camera, lens, ISO, date, GPS, file type (both Lite and Full)
-- **GPS cluster map** (`M`) — see where nearby shots in the folder were taken
-- **Open in another app** — send the current photo, gallery selection, or bookmarks to an external editor
+- **Open in another app** — send the current photo, a gallery selection, or bookmarks to an external editor
 - **Focus overlay** (`F`) on many Canon / Nikon / Sony / Olympus / Panasonic files
 - **Windows Open with** — registered for common RAW and photo formats after install
 - Remembers your last folder and position
@@ -182,6 +201,7 @@ Full search syntax, focus-overlay brands, and power-user options are in **[Advan
 | AI search missing after install (**Full**) | Open gallery **Search** → accept the download prompt |
 | RAWviewer not in Open with | Re-run the installer (repair), or reinstall |
 | Leftover cache after uninstall | Run **`uninstall.bat`** again, or delete `%USERPROFILE%\.rawviewer_cache` manually |
+| Maximize button needs two clicks | Update to **v2.4** — fixed for the custom title bar on Windows |
 | Out of memory during AI indexing | See [Automatic memory tuning](#automatic-memory-tuning); use **Lite** on 8 GB PCs or set `RAWVIEWER_MEMORY_TIER_AUTO=0` and lower workers manually |
 | Crash | Enable file logging with `RAWVIEWER_FILE_LOG=1`, then check the install folder |
 
@@ -197,8 +217,8 @@ Full search syntax, focus-overlay brands, and power-user options are in **[Advan
 | Need to uninstall completely | Use **`uninstall_macos_app.sh`** or **`Uninstall RAWviewer.command`** from the release zip — not Trash alone |
 | Uninstall scripts missing | Re-download the release zip from [Releases](https://github.com/markyip/RAWviewer/releases/latest); scripts are inside the extracted folder |
 | macOS “out of memory” / heavy swap during indexing | See [Automatic memory tuning](#automatic-memory-tuning). On 8 GB Macs, prefer **Lite** or wait for indexing to finish before opening gallery on huge folders |
-| Gallery stutters or “too many open files” on large folders | Update to **v2.4** — raises macOS file-descriptor limits and backs off prefetch after I/O pressure. If it persists, run **`clear_cache.sh`** and reopen the folder |
-| Thumbnails sideways or rotated wrong (portrait RAW) | Update to **v2.4** — orientation fixes apply to gallery, film strip, and index warm-up. Run **`clear_cache.sh`** once if old sideways thumbnails were cached |
+| Gallery stutters on a huge folder | Update to **v2.4**. If it persists, run **`clear_cache.sh`** and reopen the folder |
+| Thumbnails sideways or wrong way up (portrait shots) | Update to **v2.4**. Run **`clear_cache.sh`** once if old thumbnails were cached before the fix |
 
 More detail: [`scripts/Launch/README.md`](scripts/Launch/README.md)
 

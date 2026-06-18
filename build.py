@@ -500,9 +500,9 @@ def main():
 
     system_name = platform.system()
     if is_lite and system_name == "Windows":
-        print("[INFO] Windows lite: no semantic/face AI / map overlay; EXIF+GPS gallery search only.")
+        print("[INFO] Windows lite: no semantic/face AI; EXIF+GPS gallery search only.")
     elif is_lite and system_name == "Darwin":
-        print("[INFO] macOS lite: semantic/face AI / map overlay off; EXIF+GPS metadata search only.")
+        print("[INFO] macOS lite: semantic/face AI off; EXIF+GPS metadata search only.")
     if system_name == 'Windows':
         print("RAWviewer Windows Build Script")
         print(f"[INFO] Windows acceleration backend: {args.windows_accel}")
@@ -691,7 +691,7 @@ def main():
     if platform.system() == "Darwin":
         print(f"[INFO] macOS app bundle: dist/{app_bundle_name}.app")
         if is_lite:
-            print("[INFO] macOS lite release: no MobileCLIP / face AI / map overlay; EXIF+GPS gallery search only.")
+            print("[INFO] macOS lite release: no MobileCLIP / face AI; EXIF+GPS gallery search only.")
         else:
             print("[INFO] macOS release: MobileCLIP Core ML models are NOT bundled; users download in-app on first use.")
     elif platform.system() == "Windows":
@@ -775,9 +775,6 @@ def main():
                 "--exclude-module", "httpx",
                 "--exclude-module", "CoreML",
                 "--exclude-module", "Vision",
-                "--exclude-module", "location_map_engine",
-                "--exclude-module", "rawviewer_ui.location_map_overlay",
-                "--exclude-module", "gps_neighbors",
             ])
         else:
             cmd_base.extend([
