@@ -3,6 +3,22 @@ from PyQt6.QtWidgets import QLabel, QApplication
 from PyQt6.QtCore import pyqtSignal, Qt, QObject, QPoint, QUrl, QMimeData
 from PyQt6.QtGui import QPixmap, QDrag
 
+RAWVIEWER_INTERNAL_FILE_DRAG_MIME = "application/x-rawviewer-internal-file-drag"
+
+
+def stamp_rawviewer_export_drag(mime_data: QMimeData) -> None:
+    """Mark drags started inside RAWviewer so drops on the app do not reopen files."""
+    mime_data.setData(RAWVIEWER_INTERNAL_FILE_DRAG_MIME, b"1")
+
+
+def is_rawviewer_export_drag(mime_data) -> bool:
+    try:
+        return mime_data is not None and mime_data.hasFormat(
+            RAWVIEWER_INTERNAL_FILE_DRAG_MIME
+        )
+    except Exception:
+        return False
+
 
 class ThumbnailLabel(QLabel):
     """
@@ -91,6 +107,7 @@ class ThumbnailLabel(QLabel):
         drag = QDrag(self)
         mime_data = QMimeData()
         mime_data.setUrls([QUrl.fromLocalFile(p) for p in drag_paths])
+        stamp_rawviewer_export_drag(mime_data)
         drag.setMimeData(mime_data)
         
         px = self.pixmap()

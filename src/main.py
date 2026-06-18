@@ -4853,18 +4853,23 @@ class CustomTitleBar(QFrame):
         self._dragging = False
         self._drag_pos = None
 
-    def _toggle_maximize(self):
+    def _sync_maximize_state(self) -> None:
+        """Keep title-bar button/icon aligned with the real window state."""
         import qtawesome as qta
-        if self._is_maximized:
+
+        maximized = bool(self.parent.isMaximized())
+        self._is_maximized = maximized
+        if maximized:
+            self.max_btn.setIcon(qta.icon("fa5s.clone", color="#E0E0E0"))
+        else:
+            self.max_btn.setIcon(qta.icon("fa5.square", color="#E0E0E0"))
+
+    def _toggle_maximize(self):
+        if self.parent.isMaximized():
             self.parent.showNormal()
-            self.max_btn.setIcon(qta.icon('fa5.square', color='#E0E0E0'))
         else:
             self.parent.showMaximized()
-            self.max_btn.setIcon(qta.icon('fa5s.clone', color='#E0E0E0'))
-        self._is_maximized = not self._is_maximized
-        # Update title bar state
-        if hasattr(self.parent, 'title_bar') and self.parent.title_bar is not None:
-            self.parent.title_bar._is_maximized = self._is_maximized
+        self._sync_maximize_state()
         
         # Trigger gallery layout update after maximize/restore
         if hasattr(self.parent, 'view_mode') and self.parent.view_mode == 'gallery':
@@ -6650,6 +6655,7 @@ class RAWImageViewer(QMainWindow):
         self._loading_from_gallery = False  # Flag for gallery loading
         self._loading_from_filmstrip = False  # Flag for filmstrip loading
         self._gallery_selected_paths = set()  # normpath keys for multi-select in gallery
+        self._gallery_selection_anchor = None  # normpath key for Shift+click range
         self._gallery_bookmarked_paths = set()  # normpath keys for bookmarked share targets
         self._gallery_preview_pending_full = False  # Gallery thumb on screen; full-res pending
         self._gallery_instant_display_quality = False  # True when gallery→single already shows preview/full
@@ -9867,6 +9873,7 @@ class RAWImageViewer(QMainWindow):
             main_layout.addWidget(self.title_bar)
             self.title_bar.setMouseTracking(True)
             self.title_bar.installEventFilter(self)
+            self.title_bar._sync_maximize_state()
             self.status_metadata_label = self.title_bar.metadata_label
         else:
             self.top_metadata_bar = TopMetadataBar(self)
@@ -9972,7 +9979,7 @@ class RAWImageViewer(QMainWindow):
             "Up Arrow — Bookmark / unbookmark image(s)\n"
             "Down Arrow — Move image(s) to Discard folder\n"
             "Delete — Delete image(s)\n"
-            "Gallery: Ctrl/Cmd+drag over thumbnails — Toggle selection\n"
+            "Gallery: Ctrl/Cmd+click — toggle selection; Shift+click two photos for range\n"
             "H — Show/hide histogram\n"
             "G — Cycle composition guide (off / 3×3 / diagonal / both / golden)\n"
             "F — Show/hide focus point\n"
@@ -10172,10 +10179,16 @@ class RAWImageViewer(QMainWindow):
         self.share_bottom_button = QPushButton()
         self.share_bottom_button.setFlat(True)
         self.share_bottom_button.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        self.share_bottom_button.setIcon(qta.icon("fa5s.share-alt", color="#B0B0B0"))
-        self.share_bottom_button.setIconSize(QSize(20, 20))
+        try:
+            self.share_bottom_button.setIcon(qta.icon("fa5s.share-alt", color="#B0B0B0"))
+            self.share_bottom_button.setIconSize(QSize(20, 20))
+        except Exception as e:
+            safe_print(f"[WARNING] Share icon unavailable: {e}, using text fallback", flush=True)
+            self.share_bottom_button.setText("Open")
         self.share_bottom_button.setStyleSheet(bottom_icon_btn_style)
-        self.share_bottom_button.setToolTip("Share")
+        self.share_bottom_button.setToolTip(
+            "Open in another app" if sys.platform == "win32" else "Share"
+        )
         # pressed (mouse-down), not clicked (mouse-up): NSSharingServicePicker must not
         # open on mouseUp or the macOS share sheet spins empty (AppKit console warning).
         self.share_bottom_button.pressed.connect(self._on_share_bottom_button_clicked)
@@ -10395,6 +10408,9 @@ class RAWImageViewer(QMainWindow):
             self.shortcuts_hint_button, 0, alignment=Qt.AlignmentFlag.AlignVCenter)
 
         self.right_status_trailing = QWidget()
+        self.right_status_trailing.setSizePolicy(
+            QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Preferred
+        )
         _rtl = QHBoxLayout(self.right_status_trailing)
         _rtl.setContentsMargins(0, 0, 0, 0)
         _rtl.setSpacing(12)
@@ -10771,6 +10787,16 @@ class RAWImageViewer(QMainWindow):
     def _invalidate_semantic_coverage_cache(self) -> None:
         self._semantic_coverage_cache = None
         self._semantic_coverage_cache_ts = 0.0
+        self._gallery_search_ready_cache = None
+        self._gallery_search_ready_cache_ts = 0.0
+
+    def _gallery_search_semantic_work_active(self) -> bool:
+        """True while semantic/metadata prep blocks typing in the search field."""
+        return bool(
+            getattr(self, "_semantic_indexing_in_progress", False)
+            or getattr(self, "_semantic_index_prep_in_progress", False)
+            or getattr(self, "_semantic_asset_download_in_progress", False)
+        )
 
     def _gallery_search_index_corpus(self) -> list:
         """Full folder corpus for indexing — not filtered search results."""
@@ -10878,11 +10904,18 @@ class RAWImageViewer(QMainWindow):
             self._reset_gallery_search_to_idle()
 
     def _is_gallery_semantic_search_ready(self, corpus_files=None) -> bool:
-        """True only when semantic + face indexing are fully complete for this corpus."""
+        """True when semantic embeddings and face scan (if enabled) are complete."""
         corpus = list(corpus_files or self._gallery_search_index_corpus() or [])
         if not corpus:
             return False
-        # Self-heal stale flags if a worker finished without a matching token callback.
+        if getattr(self, "_defer_semantic_after_metadata", False):
+            # Deferred user semantic must not trust a session marked ready before
+            # metadata-only background indexing finished.
+            self._gallery_search_index_session_key = None
+            self._gallery_search_ready_cache = None
+            self._gallery_search_ready_cache_ts = 0.0
+        elif self._is_gallery_search_index_session_complete(corpus):
+            return True
         if (
             getattr(self, "_semantic_indexing_in_progress", False)
             and getattr(self, "_semantic_index_active_token", None) is None
@@ -10891,49 +10924,97 @@ class RAWImageViewer(QMainWindow):
                 "[SEARCH][READY] Clearing stale semantic indexing flag (no active token)."
             )
             self._semantic_indexing_in_progress = False
-        if (
-            getattr(self, "_face_indexing_in_progress", False)
-            and getattr(self, "_face_index_active_token", None) is None
-        ):
-            logging.getLogger(__name__).warning(
-                "[SEARCH][READY] Clearing stale face indexing flag (no active token)."
-            )
-            self._face_indexing_in_progress = False
         if getattr(self, "_semantic_index_prep_in_progress", False):
             return False
-        from semantic_search import semantic_embeddings_enabled, face_scan_enabled
-
         if getattr(self, "_semantic_indexing_in_progress", False):
             return False
-
-        if not semantic_embeddings_enabled():
-            if not bool(getattr(self, "_metadata_index_run_done", False)):
-                return False
-            if not face_scan_enabled():
-                return True
-            try:
-                index = self._get_semantic_index()
-                return index.get_face_pending_count(corpus) == 0
-            except Exception:
-                return False
-
-        try:
-            index = self._get_semantic_index()
-            if not index.semantic_backend_available():
-                return False
-            if len(index.get_pending_embedding_paths(corpus)) > 0:
-                return False
-            if not face_scan_enabled():
-                return True
-            return index.get_face_pending_count(corpus) == 0
-        except Exception:
+        if getattr(self, "_face_indexing_in_progress", False):
             return False
 
+        now = time.time()
+        cache = getattr(self, "_gallery_search_ready_cache", None)
+        if cache and (now - getattr(self, "_gallery_search_ready_cache_ts", 0.0)) < 3.0:
+            if (
+                cache.get("folder") == getattr(self, "current_folder", None)
+                and cache.get("count") == len(corpus)
+            ):
+                return bool(cache.get("ready", False))
+
+        from semantic_search import face_scan_enabled, semantic_embeddings_enabled
+
+        ready = False
+        if not semantic_embeddings_enabled():
+            ready = bool(getattr(self, "_metadata_index_run_done", False))
+        else:
+            try:
+                index = self._get_semantic_index()
+                if index.semantic_backend_available():
+                    # Metadata-only rows (semantic_ready=1, dim=0) must still block search.
+                    ready = self._is_gallery_search_fully_indexed(corpus)
+            except Exception:
+                ready = False
+
+        if ready and face_scan_enabled():
+            try:
+                ready = self._get_semantic_index().get_face_pending_count(corpus) == 0
+            except Exception:
+                ready = False
+
+        self._gallery_search_ready_cache = {
+            "folder": getattr(self, "current_folder", None),
+            "count": len(corpus),
+            "ready": ready,
+        }
+        self._gallery_search_ready_cache_ts = now
+        if ready and not getattr(self, "_defer_semantic_after_metadata", False):
+            self._mark_gallery_search_index_session_complete(corpus)
+        return ready
+
+    def _chain_face_index_after_semantic(
+        self, corpus_files, *, face_pending: int | None = None
+    ) -> None:
+        """Start face scan after semantic pass — search field stays locked until done."""
+        from semantic_search import face_scan_enabled
+
+        if not face_scan_enabled():
+            self._finish_gallery_search_unlock(corpus_files)
+            return
+        if getattr(self, "_face_indexing_in_progress", False):
+            self._sync_gallery_search_input_editable()
+            return
+        corpus = list(corpus_files or self._gallery_search_index_corpus() or [])
+        if not corpus:
+            return
+        try:
+            pending = (
+                int(face_pending)
+                if face_pending is not None
+                else int(self._get_semantic_index().get_face_pending_count(corpus) or 0)
+            )
+        except Exception:
+            return
+        if pending <= 0:
+            self._finish_gallery_search_unlock(corpus)
+            return
+        self._gallery_search_show_index_progress = True
+        self._set_gallery_search_status(
+            self._format_index_progress("Face", 0, pending)
+        )
+        self._invalidate_semantic_coverage_cache()
+        self._start_face_index_background(corpus, show_search_progress=True)
+        self._sync_gallery_search_input_editable()
+
     def _finish_gallery_search_unlock(self, corpus_files=None) -> None:
-        """Semantic index is ready — enable typing in the search field."""
+        """Semantic + face indexing complete — enable typing in the search field."""
         corpus = corpus_files or self._gallery_search_index_corpus()
         if corpus:
             self._mark_gallery_search_index_session_complete(corpus)
+            self._gallery_search_ready_cache = {
+                "folder": getattr(self, "current_folder", None),
+                "count": len(corpus),
+                "ready": True,
+            }
+            self._gallery_search_ready_cache_ts = time.time()
         folder = getattr(self, "current_folder", None)
         if folder:
             self._set_semantic_index_incomplete(folder, False)
@@ -10953,51 +11034,34 @@ class RAWImageViewer(QMainWindow):
             inp.setFocus()
 
     def _sync_gallery_search_input_editable(self) -> None:
-        """Hard lock search input until semantic+face indexing is fully ready."""
+        """Lock search input until semantic embeddings and face scan (if enabled) finish."""
         inp = getattr(self, "gallery_search_input", None)
         if inp is None:
             return
-        wants = bool(getattr(self, "_gallery_search_user_wants_semantic", False))
         expanded = bool(getattr(self, "_search_panel_expanded", False))
-        if self._is_gallery_search_indexing_active():
+        if (
+            self._gallery_search_semantic_work_active()
+            or getattr(self, "_face_indexing_in_progress", False)
+        ):
             ready = False
         else:
             ready = self._is_gallery_semantic_search_ready()
-        # Requirement: while search panel is open, disable input unless indexing is fully ready.
         locked = expanded and not ready
         inp.setReadOnly(locked)
         prev_locked = getattr(self, "_gallery_search_input_locked_prev", None)
         if prev_locked is None or bool(prev_locked) != bool(locked):
-            logging.getLogger(__name__).info(
-                "[SEARCH][INPUT] lock_state changed: locked=%s expanded=%s wants=%s ready=%s indexing_active=%s defer_after_metadata=%s",
+            logging.getLogger(__name__).debug(
+                "[SEARCH][INPUT] lock_state changed: locked=%s expanded=%s ready=%s semantic_work=%s face_work=%s",
                 locked,
                 expanded,
-                wants,
                 ready,
-                self._is_gallery_search_indexing_active(),
-                bool(getattr(self, "_defer_semantic_after_metadata", False)),
+                self._gallery_search_semantic_work_active(),
+                getattr(self, "_face_indexing_in_progress", False),
             )
         self._gallery_search_input_locked_prev = bool(locked)
-        if locked:
-            inp.setCursor(QCursor(Qt.CursorShape.ArrowCursor))
-            try:
-                corpus = self._gallery_search_index_corpus()
-                index = self._get_semantic_index()
-                pending_emb = len(index.get_pending_embedding_paths(corpus))
-                pending_face = int(index.get_face_pending_count(corpus) or 0)
-                logging.getLogger(__name__).info(
-                    "[SEARCH][LOCK] expanded=%s wants=%s ready=%s pending_emb=%d pending_face=%d indexing_active=%s",
-                    expanded,
-                    wants,
-                    ready,
-                    pending_emb,
-                    pending_face,
-                    self._is_gallery_search_indexing_active(),
-                )
-            except Exception:
-                pass
-        else:
-            inp.setCursor(QCursor(Qt.CursorShape.IBeamCursor))
+        inp.setCursor(
+            QCursor(Qt.CursorShape.ArrowCursor if locked else Qt.CursorShape.IBeamCursor)
+        )
 
     def _apply_gallery_search_status_placeholder(self) -> None:
         """Show indexing progress inside the search field placeholder."""
@@ -11674,6 +11738,8 @@ class RAWImageViewer(QMainWindow):
                 logging.getLogger(__name__).info(
                     "[INDEX][CHAIN] Triggering deferred semantic start immediately after silent metadata."
                 )
+                self._gallery_search_index_session_key = None
+                self._invalidate_semantic_coverage_cache()
                 self._gallery_search_user_wants_semantic = True
                 self._gallery_search_show_index_progress = True
                 self._start_user_semantic_indexing(corpus)
@@ -11694,10 +11760,11 @@ class RAWImageViewer(QMainWindow):
             if pending_emb > 0:
                 QTimer.singleShot(0, lambda: self._start_user_semantic_indexing(corpus))
             elif face_pending > 0:
-                self._gallery_search_show_index_progress = True
-                self._start_face_index_background(corpus)
+                self._chain_face_index_after_semantic(corpus, face_pending=face_pending)
             elif self._is_gallery_semantic_search_ready(corpus):
                 self._finish_gallery_search_unlock(corpus)
+            else:
+                self._sync_gallery_search_input_editable()
             self._gallery_search_user_collapsed_while_busy = False
             return
 
@@ -11727,9 +11794,10 @@ class RAWImageViewer(QMainWindow):
             self._ensure_gallery_search_collapsed()
         self._sync_gallery_search_input_editable()
         if will_run_face:
-            self._start_face_index_background(corpus)
+            show = bool(getattr(self, "_gallery_search_show_index_progress", False))
+            self._start_face_index_background(corpus, show_search_progress=show)
 
-    def _start_face_index_background(self, corpus_files) -> None:
+    def _start_face_index_background(self, corpus_files, *, show_search_progress: bool = True) -> None:
         """Second pass: face_count backfill after semantic search is usable."""
         import time
 
@@ -11822,7 +11890,16 @@ class RAWImageViewer(QMainWindow):
 
         self._set_gallery_search_status(
             self._format_index_progress("Face", 0, pending)
-        )
+        ) if show_search_progress else None
+        if not show_search_progress and hasattr(self, "status_bar"):
+            try:
+                self.status_bar.showMessage(
+                    f"Face scan in background — {pending} photos remaining",
+                    4000,
+                )
+            except Exception:
+                pass
+        self._face_index_show_search_progress = bool(show_search_progress)
         logger.info(
             "[INDEX][FACE] Start worker "
             f"(pending={int(pending or 0)}, corpus_size={len(corpus_files or [])})"
@@ -11832,6 +11909,8 @@ class RAWImageViewer(QMainWindow):
 
     def _on_face_index_progress(self, token, i, n, message):
         if token != getattr(self, "_face_index_active_token", None):
+            return
+        if not getattr(self, "_face_index_show_search_progress", True):
             return
 
         msg = str(message or "").strip()
@@ -11875,8 +11954,9 @@ class RAWImageViewer(QMainWindow):
         if pending_emb > 0:
             self._gallery_search_show_index_progress = True
             self._start_user_semantic_indexing(corpus)
+        elif self._is_gallery_semantic_search_ready(corpus):
+            QTimer.singleShot(0, lambda c=list(corpus or []): self._finish_gallery_search_unlock(c))
         elif face_pending > 0:
-            self._gallery_search_show_index_progress = True
             self._sync_gallery_search_input_editable()
         else:
             QTimer.singleShot(0, lambda c=list(corpus or []): self._finish_gallery_search_unlock(c))
@@ -12121,12 +12201,12 @@ class RAWImageViewer(QMainWindow):
             face_pending = int(index.get_face_pending_count(corpus_files) or 0)
             if pending_emb == 0 and face_pending > 0:
                 logger.info(
-                    "[INDEX][USER] Embeddings complete; starting face scan (pending=%d)",
+                    "[INDEX][USER] Embeddings complete; chaining face scan (pending=%d)",
                     face_pending,
                 )
-                self._gallery_search_show_index_progress = True
-                self._start_face_index_background(corpus_files)
-                self._sync_gallery_search_input_editable()
+                self._chain_face_index_after_semantic(
+                    corpus_files, face_pending=face_pending
+                )
                 return
         except Exception:
             pass
@@ -12180,18 +12260,20 @@ class RAWImageViewer(QMainWindow):
                 self._finish_gallery_search_unlock(corpus_files)
                 return
             if int(face_pending or 0) > 0:
-                self._gallery_search_show_index_progress = True
-                self._set_gallery_search_status(
-                    self._format_index_progress("Face", 0, int(face_pending))
+                self._chain_face_index_after_semantic(
+                    corpus_files, face_pending=int(face_pending)
                 )
-                self._start_face_index_background(corpus_files)
-                self._sync_gallery_search_input_editable()
                 return
             self._set_gallery_search_status("Indexing metadata…")
             self._sync_gallery_search_input_editable()
             return
 
-        if not pending and int(face_pending or 0) <= 0:
+        if not pending:
+            if int(face_pending or 0) > 0:
+                self._chain_face_index_after_semantic(
+                    corpus_files, face_pending=int(face_pending)
+                )
+                return
             self._finish_gallery_search_unlock(corpus_files)
             return
 
@@ -12205,14 +12287,6 @@ class RAWImageViewer(QMainWindow):
                 run_semantic_embeddings=True,
                 show_search_progress=True,
             )
-            self._sync_gallery_search_input_editable()
-            return
-
-        # No semantic/metadata work left, but face pass is still pending.
-        if int(face_pending or 0) > 0:
-            self._gallery_search_show_index_progress = True
-            self._set_gallery_search_status(self._format_index_progress("Face", 0, int(face_pending)))
-            self._start_face_index_background(corpus_files)
             self._sync_gallery_search_input_editable()
             return
 
@@ -12240,9 +12314,10 @@ class RAWImageViewer(QMainWindow):
         self._gallery_search_user_collapsed_while_busy = False
         self._gallery_search_user_wants_semantic = True
         self._defer_semantic_after_metadata = True
+        self._gallery_search_index_session_key = None
+        self._invalidate_semantic_coverage_cache()
         self._gallery_search_show_index_progress = True
         self._gallery_search_status_full = ""
-        self._invalidate_semantic_coverage_cache()
         corpus_files = self._gallery_search_index_corpus()
         logger.info(
             "[SEARCH][BUTTON] collapsed -> expand and request semantic (corpus=%d)",
@@ -12260,6 +12335,7 @@ class RAWImageViewer(QMainWindow):
             self._finish_gallery_search_unlock(corpus_files)
             return
 
+        self._invalidate_semantic_coverage_cache()
         self._start_user_semantic_indexing(corpus_files)
 
     def _build_semantic_index_current_folder(self):
@@ -12430,9 +12506,19 @@ class RAWImageViewer(QMainWindow):
             metadata_hits, semantic_query = index.search_metadata_text(
                 query, base_files, top_k=max(1, len(base_files)), sort_newest=sort_newest
             )
+            from semantic_search import semantic_embeddings_enabled
+
             used_semantic_backend = False
             if not semantic_query:
                 hits = metadata_hits
+            elif not semantic_embeddings_enabled():
+                hits = metadata_hits
+                if not hits:
+                    self.status_bar.showMessage(
+                        "No matches — this build supports metadata filters only "
+                        "(e.g. camera:sony iso<800 city:tokyo).",
+                        6000,
+                    )
             elif not index.semantic_backend_available():
                 hits = []
                 self.status_bar.showMessage(
@@ -13226,6 +13312,8 @@ class RAWImageViewer(QMainWindow):
         else:
             self.view_mode_button.setText("Gallery")
         self._schedule_search_expand_overlay_sync()
+        if hasattr(self, "share_bottom_button"):
+            self._sync_share_button_visibility()
         
         ui_time = time.time() - ui_start
         logger.info(f"[VIEW_MODE] Step 3: UI elements shown (elapsed: {ui_time:.3f}s)")
@@ -14907,6 +14995,44 @@ class RAWImageViewer(QMainWindow):
             & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.MetaModifier)
         )
 
+    @staticmethod
+    def _gallery_has_shift_modifier(modifiers) -> bool:
+        return bool(modifiers & Qt.KeyboardModifier.ShiftModifier)
+
+    def _gallery_refresh_selection_ui(self) -> None:
+        gj = getattr(self, "gallery_justified", None)
+        if gj is not None and hasattr(gj, "refresh_gallery_selection_visuals"):
+            gj.refresh_gallery_selection_visuals()
+        self._sync_gallery_selection_chrome()
+        self._sync_share_button_visibility()
+
+    def _gallery_set_selection_keys(self, keys: set) -> None:
+        self._gallery_selected_paths = set(keys)
+        self._gallery_refresh_selection_ui()
+
+    def _gallery_shift_click_selection(self, file_path: str) -> None:
+        """Shift+click: first click sets anchor; second selects the inclusive range."""
+        canonical = self._gallery_canonical_path(file_path)
+        if not canonical:
+            return
+        key = _norm_path(canonical)
+        anchor = getattr(self, "_gallery_selection_anchor", None)
+        paths = self.image_files or []
+        norm_list = [_norm_path(p) for p in paths if p]
+        if not anchor or anchor not in norm_list:
+            self._gallery_selection_anchor = key
+            self._gallery_set_selection_keys({key})
+            return
+        try:
+            i0 = norm_list.index(anchor)
+            i1 = norm_list.index(key)
+        except ValueError:
+            self._gallery_selection_anchor = key
+            self._gallery_set_selection_keys({key})
+            return
+        lo, hi = (i0, i1) if i0 <= i1 else (i1, i0)
+        self._gallery_set_selection_keys({norm_list[i] for i in range(lo, hi + 1)})
+
     def _gallery_canonical_path(self, file_path: str) -> Optional[str]:
         if not file_path or not self.image_files:
             return None
@@ -14927,11 +15053,8 @@ class RAWImageViewer(QMainWindow):
         if not selected:
             return
         selected.clear()
-        gj = getattr(self, "gallery_justified", None)
-        if gj is not None and hasattr(gj, "refresh_gallery_selection_visuals"):
-            gj.refresh_gallery_selection_visuals()
-        self._sync_gallery_selection_chrome()
-        self._sync_share_button_visibility()
+        self._gallery_selection_anchor = None
+        self._gallery_refresh_selection_ui()
 
     @staticmethod
     def _share_button_platform_enabled() -> bool:
@@ -14946,7 +15069,8 @@ class RAWImageViewer(QMainWindow):
         if hasattr(self, "status_bar") and self.status_bar:
             self.status_bar.showMessage(
                 f"{n} image{'s' if n != 1 else ''} selected — "
-                "Delete to remove, Down to Discard (Ctrl/Cmd+drag toggles)",
+                "Delete to remove, Down to Discard "
+                "(Ctrl/Cmd+click toggles, Shift+click range)",
                 5000,
             )
 
@@ -15061,11 +15185,11 @@ class RAWImageViewer(QMainWindow):
         if not self._share_button_platform_enabled():
             btn.hide()
             return
-        vm = getattr(self, "view_mode", "single")
-        if vm == "single":
-            vis = bool(self.image_files)
-        else:
-            vis = self._gallery_has_selection() or self._gallery_has_bookmarks()
+        vis = bool(self._gallery_share_target_paths())
+        if getattr(self, "view_mode", "single") == "single" and not getattr(
+            self, "image_files", None
+        ):
+            vis = False
         btn.setVisible(vis)
 
     def _gallery_share_target_paths(self) -> List[str]:
@@ -15074,8 +15198,11 @@ class RAWImageViewer(QMainWindow):
         if vm == "gallery":
             if self._gallery_has_selection():
                 paths = self._gallery_selected_canonical_paths()
-            else:
+            elif self._gallery_has_bookmarks():
                 paths = self._gallery_bookmarked_canonical_paths()
+            else:
+                p = getattr(self, "current_file_path", None)
+                paths = [p] if p else []
         else:
             p = getattr(self, "current_file_path", None)
             paths = [p] if p else []
@@ -15090,17 +15217,13 @@ class RAWImageViewer(QMainWindow):
         if not canonical:
             return
         key = _norm_path(canonical)
-        selected = getattr(self, "_gallery_selected_paths", set())
+        selected = set(getattr(self, "_gallery_selected_paths", set()) or set())
         if key in selected:
             selected.discard(key)
         else:
             selected.add(key)
-        self._gallery_selected_paths = selected
-        gj = getattr(self, "gallery_justified", None)
-        if gj is not None and hasattr(gj, "refresh_gallery_selection_visuals"):
-            gj.refresh_gallery_selection_visuals()
-        self._sync_gallery_selection_chrome()
-        self._sync_share_button_visibility()
+        self._gallery_selection_anchor = key
+        self._gallery_set_selection_keys(selected)
 
     def _gallery_selected_canonical_paths(self) -> List[str]:
         selected = getattr(self, "_gallery_selected_paths", set()) or set()
@@ -15291,6 +15414,7 @@ class RAWImageViewer(QMainWindow):
     def _gallery_item_clicked(self, file_path):
         """Handle gallery item click - switch to single view and load image"""
         self._clear_gallery_selection()
+        self._gallery_selection_anchor = _norm_path(file_path)
         # SYNC: Update current file index immediately to prevent navigation jumps
         target = _norm_path(file_path)
         if self.image_files:
@@ -15939,7 +16063,7 @@ class RAWImageViewer(QMainWindow):
             "Down Arrow — Move image(s) to Discard folder\n"
             "Delete — Delete image(s)\n"
             "Ctrl+C / Cmd+C — Copy image file to clipboard (paste into messaging apps)\n"
-            "Gallery: Ctrl/Cmd+drag over thumbnails — Toggle selection\n"
+            "Gallery: Ctrl/Cmd+click — toggle selection; Shift+click two photos for range\n"
             "H — Show/hide histogram\n"
             "G — Cycle composition guide (off / 3×3 / diagonal / both / golden)\n"
             "F — Show/hide focus point"
@@ -16789,6 +16913,13 @@ class RAWImageViewer(QMainWindow):
         """True when mime data contains any local folder or file, permitting the drop to show warning pops."""
         if mime_data is None or not mime_data.hasUrls():
             return False
+        try:
+            from rawviewer_ui.widgets import is_rawviewer_export_drag
+
+            if is_rawviewer_export_drag(mime_data):
+                return False
+        except Exception:
+            pass
         for url in mime_data.urls():
             if url.isLocalFile():
                 return True
@@ -16798,6 +16929,13 @@ class RAWImageViewer(QMainWindow):
         """Open a dropped folder or image file. Shows a styled alert and stays on page if unsupported."""
         if mime_data is None or not mime_data.hasUrls():
             return False
+        try:
+            from rawviewer_ui.widgets import is_rawviewer_export_drag
+
+            if is_rawviewer_export_drag(mime_data):
+                return False
+        except Exception:
+            pass
         exts = self.get_supported_extensions()
         for url in mime_data.urls():
             if not url.isLocalFile():
@@ -18283,18 +18421,97 @@ class RAWImageViewer(QMainWindow):
 
     def _dispatch_share_bottom(self, paths: List[str]) -> None:
         _share_log(logging.INFO, "share dispatch paths=%d platform=%s", len(paths), sys.platform)
-        if sys.platform == "darwin":
-            self._share_paths_os(paths)
-        elif sys.platform == "win32":
-            if len(paths) == 1:
-                self._open_image_with_app(paths[0])
-            else:
-                self._share_paths_os(paths)
+        valid = self._valid_open_target_paths(list(paths))
+        if not valid:
+            self.status_bar.showMessage("No file to share", 2000)
+            return
+        if len(valid) == 1 and sys.platform == "win32":
+            self._open_image_with_app(valid[0])
+            return
+        self._show_gallery_open_share_menu(valid)
+
+    def _exec_share_anchor_menu(self, menu) -> None:
+        btn = getattr(self, "share_bottom_button", None)
+        pos = QCursor.pos()
+        if btn is not None and btn.isVisible():
+            pos = btn.mapToGlobal(QPoint(0, btn.height()))
+        menu.exec(pos)
+
+    def _show_gallery_open_share_menu(self, paths: List[str]) -> None:
+        """Open in another app and/or share for one or more gallery targets."""
+        paths = list(paths)
+        n = len(paths)
+        menu = QMenu(self)
+
+        if sys.platform == "win32":
+            last_exe = str(
+                self.get_settings().value(self._windows_editing_app_settings_key(), "") or ""
+            )
+            if last_exe and os.path.isfile(last_exe):
+                last_action = QAction(
+                    f"Open with {self._format_app_name(last_exe)}", self
+                )
+                last_action.triggered.connect(
+                    lambda _checked=False, ps=list(paths), exe=last_exe: self._open_with_windows_exe_path(
+                        ps, exe
+                    )
+                )
+                menu.addAction(last_action)
+            open_other = QAction("Open with other app...", self)
+            open_other.triggered.connect(
+                lambda _checked=False, ps=list(paths): self._open_windows_choose_editing_app(ps)
+            )
+            menu.addAction(open_other)
+        elif sys.platform == "darwin":
+            last_app = str(
+                self.get_settings().value(self._macos_editing_app_settings_key(), "") or ""
+            )
+            if last_app and os.path.isdir(last_app):
+                last_action = QAction(
+                    f"Open with {self._format_app_name(last_app)}", self
+                )
+                last_action.triggered.connect(
+                    lambda _checked=False, ps=list(paths), app=last_app: self._open_with_macos_app_path(
+                        ps, app
+                    )
+                )
+                menu.addAction(last_action)
+            open_other = QAction("Open with other app...", self)
+            open_other.triggered.connect(
+                lambda _checked=False, ps=list(paths): self._open_macos_choose_editing_app(ps)
+            )
+            menu.addAction(open_other)
         else:
-            if len(paths) == 1:
-                self._open_image_with_app(paths[0])
-            else:
-                self._share_paths_os(paths)
+            open_other = QAction("Open with other app...", self)
+            open_other.triggered.connect(
+                lambda _checked=False, ps=list(paths): self._open_paths_in_editing_app(ps)
+            )
+            menu.addAction(open_other)
+
+        menu.addSeparator()
+        if sys.platform == "darwin":
+            share_action = QAction("Share...", self)
+            share_action.triggered.connect(
+                lambda _checked=False, ps=list(paths): self._share_paths_os(ps)
+            )
+            menu.addAction(share_action)
+        else:
+            share_action = QAction("Copy for sharing (Mail, Teams, …)", self)
+            share_action.triggered.connect(
+                lambda _checked=False, ps=list(paths): self._share_paths_os(ps)
+            )
+            menu.addAction(share_action)
+            if n > 1:
+                copy_action = QAction("Copy file paths", self)
+                copy_action.triggered.connect(
+                    lambda _checked=False, ps=list(paths): (
+                        self._copy_paths_to_clipboard(ps),
+                        self.status_bar.showMessage("Paths copied to clipboard", 2500),
+                    )
+                )
+                menu.addAction(copy_action)
+
+        self._exec_share_anchor_menu(menu)
 
     def _valid_open_target_paths(self, paths: List[str]) -> List[str]:
         raw_in = list(paths)
@@ -18462,40 +18679,11 @@ class RAWImageViewer(QMainWindow):
             self.status_bar.showMessage("No editing app selected", 2500)
 
     def _open_paths_in_windows_editing_app(self, paths: List[str]) -> None:
-        """Windows: single file uses native Open With; multi-file can launch a chosen editor."""
+        """Windows: single file uses native Open With; multi-file shows open/share menu."""
         if len(paths) == 1:
             self._open_image_with_app(paths[0])
             return
-
-        menu = QMenu(self)
-        last_exe = str(self.get_settings().value(self._windows_editing_app_settings_key(), "") or "")
-        if last_exe and os.path.isfile(last_exe):
-            last_action = QAction(f"Open with {self._format_app_name(last_exe)}", self)
-            last_action.triggered.connect(
-                lambda _checked=False, ps=list(paths), exe=last_exe: self._open_with_windows_exe_path(ps, exe)
-            )
-            menu.addAction(last_action)
-
-        choose_action = QAction("Choose Editing App...", self)
-        choose_action.triggered.connect(
-            lambda _checked=False, ps=list(paths): self._open_windows_choose_editing_app(ps)
-        )
-        menu.addAction(choose_action)
-
-        copy_action = QAction("Copy File Paths", self)
-        copy_action.triggered.connect(
-            lambda _checked=False, ps=list(paths): (
-                self._copy_paths_to_clipboard(ps),
-                self.status_bar.showMessage("Paths copied to clipboard", 2500),
-            )
-        )
-        menu.addAction(copy_action)
-
-        btn = getattr(self, "share_bottom_button", None)
-        pos = QCursor.pos()
-        if btn is not None and btn.isVisible():
-            pos = btn.mapToGlobal(QPoint(0, btn.height()))
-        menu.exec(pos)
+        self._show_gallery_open_share_menu(paths)
 
     def _share_paths_os(self, paths: List[str]) -> None:
         """macOS share sheet or Windows share/clipboard for one or more files."""
@@ -23394,7 +23582,7 @@ class RAWImageViewer(QMainWindow):
             "Up Arrow — Bookmark / unbookmark image(s)\n"
             "Down Arrow — Move image(s) to Discard folder\n"
             "Delete — Delete image(s)\n"
-            "Gallery: Ctrl/Cmd+drag over thumbnails — Toggle selection\n"
+            "Gallery: Ctrl/Cmd+click — toggle selection; Shift+click two photos for range\n"
             "H — Show/hide histogram\n"
             "G — Cycle composition guide (off / 3×3 / diagonal / both / golden)\n"
             "F — Show/hide focus point\n"
@@ -25554,9 +25742,9 @@ class RAWImageViewer(QMainWindow):
                     )
                 except Exception:
                     self._handling_window_state_change = False
-            # Update title bar's internal maximized state
+            # Update title bar maximize button to match actual window state.
             if hasattr(self, 'title_bar') and self.title_bar is not None:
-                self.title_bar._is_maximized = self.isMaximized()
+                self.title_bar._sync_maximize_state()
         super().changeEvent(event)
     
     

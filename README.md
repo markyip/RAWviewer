@@ -15,6 +15,8 @@
 
 **RAWviewer** is a fast photo viewer for **Windows and macOS**. Open a folder of RAW or JPEG files, check sharpness, search your shots, and cull rejects — **100% on your computer, no cloud upload.**
 
+**v2.4 stability focus:** Large libraries on **macOS** are handled more reliably (file-descriptor limits, memory-aware indexing, I/O pressure recovery), and **thumbnail orientation** is consistent across gallery, film strip, and AI index warm-up — portrait RAW shots display upright without double-rotation glitches.
+
 Official releases: [GitHub Releases](https://github.com/markyip/RAWviewer/releases/latest)
 
 **Contents:** [Choose your version](#choose-your-version) · [Download & install](#download--install) · [Using RAWviewer](#using-rawviewer) · [Troubleshooting](#something-not-working) · [Advanced reference](#advanced-reference) · [For developers](#for-developers)
@@ -85,7 +87,7 @@ To run from the extracted folder without installing: `bash remove_macos_quaranti
 | **macOS** | macOS 13 Ventura or newer |
 | **Disk (Lite)** | ~500 MB install + cache as you browse |
 | **Disk (Full)** | ~1.5 GB+ (includes AI models after first setup) |
-| **RAM** | 8 GB minimum; **16 GB+** recommended for **Full** + large folders (10k+ photos). RAWviewer tunes concurrency and cache from installed RAM at startup (see [Automatic memory tuning](#automatic-memory-tuning)). |
+| **RAM** | 8 GB minimum; **16 GB+** recommended for **Full** + large folders (10k+ photos). RAWviewer tunes concurrency and cache from installed RAM at startup (see [Automatic memory tuning](#automatic-memory-tuning)). On **macOS**, v2.4 also raises the per-process open-file limit so large libraries are less likely to hit system “too many open files” errors during prefetch. |
 | **GPS map** | Internet on first use per area (map tiles are cached locally) |
 
 ### Uninstall vs clear cache
@@ -148,6 +150,8 @@ Full search syntax, focus-overlay brands, and power-user options are in **[Advan
 
 - Fast **RAW + JPEG** viewing (Canon, Nikon, Sony, DNG, and many more)
 - **Lite** or **Full** builds — pick the size and features you need
+- **Stable large folders** — especially on **macOS**: higher file-descriptor limits, memory-tier tuning, and graceful recovery when the system is under I/O pressure (10k+ photo libraries)
+- **Correct thumbnail orientation** — gallery grid, film strip, and semantic index warm-up respect EXIF display orientation; portrait RAW no longer appears sideways or double-rotated
 - **Offline AI search** (**Full**) — describe photos in plain language; nothing leaves your PC
 - **Metadata filters** — camera, lens, ISO, date, GPS, file type (both Lite and Full)
 - **GPS cluster map** (`M`) — see where nearby shots in the folder were taken
@@ -193,6 +197,8 @@ Full search syntax, focus-overlay brands, and power-user options are in **[Advan
 | Need to uninstall completely | Use **`uninstall_macos_app.sh`** or **`Uninstall RAWviewer.command`** from the release zip — not Trash alone |
 | Uninstall scripts missing | Re-download the release zip from [Releases](https://github.com/markyip/RAWviewer/releases/latest); scripts are inside the extracted folder |
 | macOS “out of memory” / heavy swap during indexing | See [Automatic memory tuning](#automatic-memory-tuning). On 8 GB Macs, prefer **Lite** or wait for indexing to finish before opening gallery on huge folders |
+| Gallery stutters or “too many open files” on large folders | Update to **v2.4** — raises macOS file-descriptor limits and backs off prefetch after I/O pressure. If it persists, run **`clear_cache.sh`** and reopen the folder |
+| Thumbnails sideways or rotated wrong (portrait RAW) | Update to **v2.4** — orientation fixes apply to gallery, film strip, and index warm-up. Run **`clear_cache.sh`** once if old sideways thumbnails were cached |
 
 More detail: [`scripts/Launch/README.md`](scripts/Launch/README.md)
 

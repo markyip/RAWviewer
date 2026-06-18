@@ -17,7 +17,9 @@ from PyQt6.QtWidgets import (
     QApplication,
 )
 
-# Single justified row (same idea as gallery row: width = row_height * aspect)
+from rawviewer_ui.widgets import stamp_rawviewer_export_drag
+
+# Single justified row
 ROW_H = 78
 MIN_GAP = 2
 SIDE_MARGIN = 4
@@ -134,6 +136,7 @@ class FilmstripCell(QLabel):
         drag = QDrag(self)
         mime_data = QMimeData()
         mime_data.setUrls([QUrl.fromLocalFile(self.file_path)])
+        stamp_rawviewer_export_drag(mime_data)
         drag.setMimeData(mime_data)
         
         px = self.pixmap()

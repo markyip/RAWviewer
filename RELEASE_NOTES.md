@@ -6,12 +6,26 @@
 Version **2.4** uses **`build.py`** as the single source of truth: `VERSION` syncs to `src/app_version.py`, `pixi.toml`, macOS `Info.plist`, and runtime update checks.
 
 ### Highlights
+- **macOS large libraries**: Raised file-descriptor limits (macOS defaults are too low for gallery prefetch), automatic memory-tier tuning, and faster recovery from “too many open files” pressure — large folders on Mac stay responsive instead of stalling or crashing.
+- **Thumbnail orientation**: Portrait RAW and cached gallery thumbnails now respect EXIF display orientation consistently across the grid, film strip, and semantic index warm-up (fixes double-rotation and sideways portrait shots).
 - **Lite profile**: Adaptive prefetch/cache, map disabled by default, smaller installers (map stack omitted).
 - **Composition grid**: **G** cycles Off → rule of thirds → diagonals → both → golden ratio.
 - **Drag out photos**: Drag the current image or gallery selection to the desktop, another folder, or another app (Explorer, Finder, Mail, Lightroom, etc.) — originals are copied as file URLs with a thumbnail preview while dragging.
 - **Reliability**: Display-tier preview failures automatically retry full decode; keyboard shortcut help is hover-only on **i**.
 - **Large-Folder Stability**: Optimized prefetch slot reservation under low capacity caps, debounced thumbnail error retries to prevent event loop storms, and quick recovery from EMFILE (too-many-open-files) pressure with a shorter 12-second cooldown and a minor background prefetch trickle.
 - **Cache Eviction**: Replaced the abrupt full clear of the embedded scan cache with a FIFO (first-in-first-out) eviction strategy to avoid duplicate file I/O in large folders.
+
+### 🍎 macOS & large libraries
+- **File-descriptor headroom**: On startup, RAWviewer raises the soft `RLIMIT_NOFILE` cap (macOS often ships with 256) so gallery prefetch and background indexing can open many RAW/JPEG handles without hitting EMFILE.
+- **I/O pressure recovery**: After “too many open files” errors, concurrent loads back off for a short cooldown and resume with a lighter prefetch trickle instead of wedging the UI.
+- **Memory-tier auto-tuning**: Installed RAM selects worker counts, cache sizes, and whether face scan runs during indexing — 8 GB Macs get conservative defaults; 16 GB+ machines scale up automatically.
+- **Scroll-friendly indexing**: Background metadata and semantic indexing pause while you scroll the gallery and resume after idle.
+
+### 🖼️ Thumbnail orientation
+- **Gallery & film strip**: Indexer-cached thumbnails validate cache metadata version so stale sideways thumbnails are not reused after orientation fixes.
+- **No double-rotation**: Pre-warmed index thumbnails and semantic warm-up paths apply container EXIF correction once — portrait RAW shots no longer appear rotated twice.
+- **Semantic warm-up**: Index thumbnail warm-up re-orients mis-cached portrait RAW entries so AI indexing previews match what you see when scrolling the gallery.
+- **Core ML batching (macOS Full)**: Semantic indexing uses batched Core ML predictions where supported for faster passes on large folders.
 
 ### 🖼️ Drag & drop
 - **Single-image view**: Click and drag the photo from the main viewer (fit-to-window) to drop the original file elsewhere.

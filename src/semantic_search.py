@@ -2314,6 +2314,8 @@ class SemanticImageIndex:
 
     @staticmethod
     def semantic_backend_available() -> bool:
+        if not semantic_embeddings_enabled():
+            return False
         if resolve_mobileclip_backend().available():
             return True
         try:
@@ -3709,7 +3711,22 @@ class SemanticImageIndex:
         try:
             conn = sqlite3.connect(self.db_path, timeout=30.0)
             try:
-                return len(self._face_pending_paths(conn, canonical))
+                pending = set(self._face_pending_paths(conn, canonical))
+                # Rows not in the DB yet also need a face scan pass.
+                chunk_size = 900
+                indexed_paths: set[str] = set()
+                for i in range(0, len(canonical), chunk_size):
+                    chunk = canonical[i : i + chunk_size]
+                    qs = ",".join(["?"] * len(chunk))
+                    cursor = conn.execute(
+                        f"SELECT file_path FROM semantic_index WHERE file_path IN ({qs})",
+                        chunk,
+                    )
+                    indexed_paths.update(row[0] for row in cursor.fetchall())
+                for cp in canonical:
+                    if cp not in indexed_paths:
+                        pending.add(cp)
+                return len(pending)
             finally:
                 conn.close()
         except Exception:
@@ -4626,9 +4643,12 @@ class SemanticImageIndex:
         canonical_map = {self._canonical_path(p): p for p in indexable_paths if p}
         for cp, original in canonical_map.items():
             row = row_map.get(cp)
-            if row and int(self._row_value(row, 'semantic_ready', 0) or 0) == 1 and int(self._row_value(row, 'dim', 0) or 0) == 0:
+            sr = int(self._row_value(row, "semantic_ready", 0) or 0) if row else 0
+            dim = int(self._row_value(row, "dim", 0) or 0) if row else 0
+            # Match get_pending_paths: missing row, metadata-only (sr=0), or no embedding yet.
+            if (not row) or sr == 0 or (sr == 1 and dim == 0):
                 pending.append(original)
-                
+
         return pending
 
 
@@ -5421,6 +5441,8 @@ class SemanticImageIndex:
     def search_text(
         self, query: str, candidate_paths: Sequence[str], top_k: int = 200, min_score: float = 0.0
     ) -> List[SearchHit]:
+        if not semantic_embeddings_enabled():
+            return []
         raw_query = (query or "").strip()
         if not raw_query:
             return []

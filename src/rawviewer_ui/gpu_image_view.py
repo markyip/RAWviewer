@@ -31,6 +31,7 @@ from PyQt6.QtWidgets import (
 )
 
 from rawviewer_ui.composition_grid import CompositionGridGraphicsItem
+from rawviewer_ui.widgets import stamp_rawviewer_export_drag
 
 
 def _env_true(name: str) -> bool:
@@ -498,6 +499,7 @@ class GpuImageView(QGraphicsView):
         drag = QDrag(self)
         mime_data = QMimeData()
         mime_data.setUrls([QUrl.fromLocalFile(self.file_path)])
+        stamp_rawviewer_export_drag(mime_data)
         drag.setMimeData(mime_data)
 
         # Try to capture the current viewport pixmap to use as the drag thumbnail
