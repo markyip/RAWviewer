@@ -494,6 +494,10 @@ def load_pixmap_safe(file_path: str, max_edge: int = 0) -> QPixmap:
     cached_pixmap = cache.get_pixmap(file_path)
     if cached_pixmap is not None and not cached_pixmap.isNull():
         return cached_pixmap
+
+    if is_raw_file(file_path):
+        preview_max = max_edge if max_edge > 0 else 2048
+        return load_raw_preview_pixmap(file_path, max_size=preview_max)
     
     # 對於 TIFF 文件，使用 PIL 避免 Qt 警告
     if is_tiff_file(file_path):
@@ -650,6 +654,145 @@ def array_matches_exif_display(
         int(exif_data.get("orientation", 1) or 1),
         tolerance=tolerance,
     )
+
+
+def apply_container_orientation_to_array(
+    image_array: np.ndarray,
+    orientation: int,
+    exif_data: Optional[Dict[str, Any]] = None,
+) -> Optional[np.ndarray]:
+    """Apply container EXIF orientation once; skip when pixels already match display."""
+    if image_array is None:
+        return None
+    o = int(orientation or 1)
+    if o == 1:
+        return image_array
+
+    h, w = image_array.shape[:2]
+    
+    # Safety guard: Determine expected vs actual display orientation to avoid double rotation.
+    # If original dimensions are not available, we assume the camera sensor is landscape (e.g. 3x2).
+    ow = int((exif_data or {}).get("original_width") or 0)
+    oh = int((exif_data or {}).get("original_height") or 0)
+    if ow <= 0 or oh <= 0:
+        ow, oh = 3, 2  # Default to landscape sensor aspect ratio
+    
+    dw, dh = exif_display_dimensions(ow, oh, o)
+    if (dh > dw) == (h > w):
+        import logging
+        logging.getLogger(__name__).debug(
+            f"apply_container_orientation_to_array: skipping orientation {o} "
+            f"because array shape {w}x{h} already matches expected display orientation."
+        )
+        return image_array
+
+    if o == 2:
+        return np.fliplr(image_array)
+    if o == 3:
+        return np.rot90(image_array, 2)
+    if o == 4:
+        return np.flipud(image_array)
+    if o == 5:
+        return np.rot90(np.fliplr(image_array), 1)
+    if o == 6:
+        return np.rot90(image_array, 3)
+    if o == 7:
+        return np.rot90(np.fliplr(image_array), 3)
+    if o == 8:
+        return np.rot90(image_array, 1)
+    return image_array
+
+
+def rgb_array_to_qpixmap(rgb_image: np.ndarray) -> QPixmap:
+    """Convert oriented uint8 RGB/grayscale ndarray to QPixmap."""
+    if rgb_image is None or not hasattr(rgb_image, "shape"):
+        return QPixmap()
+    if rgb_image.dtype != np.uint8:
+        rgb_image = rgb_image.astype(np.uint8)
+    h, w = rgb_image.shape[:2]
+    if len(rgb_image.shape) == 2:
+        qimg = QImage(
+            rgb_image.tobytes(), w, h, w, QImage.Format.Format_Grayscale8
+        )
+    elif rgb_image.shape[2] >= 3:
+        channels = int(rgb_image.shape[2])
+        if not rgb_image.flags["C_CONTIGUOUS"]:
+            rgb_image = np.ascontiguousarray(rgb_image)
+        q_format = (
+            QImage.Format.Format_RGB888
+            if channels == 3
+            else QImage.Format.Format_RGBA8888
+        )
+        qimg = QImage(
+            rgb_image.tobytes(), w, h, channels * w, q_format
+        )
+    else:
+        return QPixmap()
+    return QPixmap.fromImage(qimg) if not qimg.isNull() else QPixmap()
+
+
+def load_raw_preview_array(
+    file_path: str,
+    max_size: int = 2048,
+    *,
+    apply_container_orientation: bool = True,
+) -> Optional[np.ndarray]:
+    """Single RAW preview path: cache → ThumbnailExtractor → container EXIF (once)."""
+    cache = get_image_cache()
+    for getter in (cache.get_thumbnail, cache.get_preview):
+        try:
+            cached = getter(file_path)
+        except Exception:
+            cached = None
+        if cached is not None and hasattr(cached, "shape"):
+            return np.asarray(cached, dtype=np.uint8)
+
+    from enhanced_raw_processor import ThumbnailExtractor
+
+    thumb = ThumbnailExtractor().extract_thumbnail_from_raw(
+        file_path, max_size=max_size, allow_scan_fallback=True
+    )
+    if thumb is None:
+        return None
+
+    if hasattr(thumb, "width"):
+        from enhanced_raw_processor import _qimage_to_rgb_array
+
+        thumb = _qimage_to_rgb_array(thumb)
+    if thumb is None or not isinstance(thumb, np.ndarray):
+        return None
+
+    if not apply_container_orientation:
+        return thumb
+
+    exif_data = cache.get_exif(file_path)
+    if not exif_data:
+        try:
+            from enhanced_raw_processor import EXIFExtractor
+
+            exif_data = EXIFExtractor().extract_exif_data(file_path)
+        except Exception:
+            exif_data = None
+    orientation = int((exif_data or {}).get("orientation", 1) or 1)
+    if orientation != 1:
+        thumb = apply_container_orientation_to_array(thumb, orientation, exif_data)
+    return thumb
+
+
+def load_raw_preview_pixmap(file_path: str, max_size: int = 2048) -> QPixmap:
+    """Oriented RAW preview as QPixmap (shared by single view fallbacks and gallery)."""
+    cache = get_image_cache()
+    cached_pixmap = cache.get_pixmap(file_path)
+    if cached_pixmap is not None and not cached_pixmap.isNull():
+        return cached_pixmap
+
+    arr = load_raw_preview_array(file_path, max_size=max_size)
+    if arr is None:
+        return QPixmap()
+    pixmap = rgb_array_to_qpixmap(arr)
+    if not pixmap.isNull():
+        cache.put_pixmap(file_path, pixmap)
+    return pixmap
 
 
 def exif_rotation_degrees_for_pixmap(

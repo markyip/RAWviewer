@@ -555,6 +555,7 @@ class ImageLoadManager(QObject):
         self._stopped = False  # Flag to stop scheduling new tasks
         self._gallery_warmup_throttle_depth = 0
         self._io_pressure_throttle_depth = 0
+        self._indexing_throttle_depth = 0
         self._initialized = True
 
     def enter_io_pressure_throttle(self) -> None:
@@ -614,6 +615,45 @@ class ImageLoadManager(QObject):
         saved_raw = getattr(self, "_warmup_saved_raw_limit", None)
         if saved_raw is not None:
             self._raw_load_limit = saved_raw
+
+    def enter_semantic_indexing_throttle(self) -> None:
+        """Lower gallery/preload concurrency while semantic or face indexing runs."""
+        self._indexing_throttle_depth = (
+            int(getattr(self, "_indexing_throttle_depth", 0) or 0) + 1
+        )
+        if self._indexing_throttle_depth != 1:
+            return
+        self._indexing_saved_max_threads = self._thread_pool.maxThreadCount()
+        indexing_max = _env_int("RAWVIEWER_INDEXING_MAX_WORKERS", 6, minimum=2)
+        self._thread_pool.setMaxThreadCount(
+            min(indexing_max, self._indexing_saved_max_threads)
+        )
+        self._indexing_saved_raw_limit = self._raw_load_limit
+        self._raw_load_limit = min(1, int(self._raw_load_limit or 1))
+        import logging
+
+        logging.getLogger(__name__).info(
+            "[LOAD] Semantic indexing throttle ON (max_workers=%d raw_limit=%d)",
+            self._thread_pool.maxThreadCount(),
+            self._raw_load_limit,
+        )
+
+    def exit_semantic_indexing_throttle(self) -> None:
+        depth = int(getattr(self, "_indexing_throttle_depth", 0) or 0)
+        if depth <= 0:
+            return
+        self._indexing_throttle_depth = depth - 1
+        if self._indexing_throttle_depth > 0:
+            return
+        saved_threads = getattr(self, "_indexing_saved_max_threads", None)
+        if saved_threads is not None:
+            self._thread_pool.setMaxThreadCount(saved_threads)
+        saved_raw = getattr(self, "_indexing_saved_raw_limit", None)
+        if saved_raw is not None:
+            self._raw_load_limit = saved_raw
+        import logging
+
+        logging.getLogger(__name__).info("[LOAD] Semantic indexing throttle OFF")
     
     def load_image(self, file_path: str, priority: Priority = Priority.CURRENT,
                    cancel_existing: bool = True, use_full_resolution: bool = False,

@@ -46,11 +46,11 @@ export QT_LOGGING_RULES="${QT_LOGGING_RULES:-qt.pointer.dispatch=false}"
 # Semantic search (CLIP embeddings). Off by default in app; enable for dev like run_debug.bat.
 export RAWVIEWER_ENABLE_SEMANTIC_SEARCH="${RAWVIEWER_ENABLE_SEMANTIC_SEARCH:-1}"
 export RAWVIEWER_AUTO_METADATA_INDEX="${RAWVIEWER_AUTO_METADATA_INDEX:-1}"
-# Semantic index speed (macOS Core ML): parallel thumb warm + encode chunks of 8
-# export RAWVIEWER_SEMANTIC_WARM_THUMBS=1
-# export RAWVIEWER_SEMANTIC_COREML_CHUNK=16
+# Semantic index: auto-tune batch/chunk (Core ML + ONNX). RAM tier auto: RAWVIEWER_MEMORY_TIER_AUTO=1 (default)
+# export RAWVIEWER_MEMORY_TIER_AUTO=0
+# export RAWVIEWER_SEMANTIC_BATCH_AUTO=0
+# export RAWVIEWER_SEMANTIC_BATCH_CANDIDATES=8,16,32,64
 # export RAWVIEWER_SEMANTIC_PREP_WORKERS=8
-# export RAWVIEWER_COREML_COMPUTE_UNITS=all
 # GPU-accelerated single-image view (QGraphicsView + OpenGL). Default on for dev.
 # Opt out: RAWVIEWER_GPU_VIEW=0
 export RAWVIEWER_GPU_VIEW="${RAWVIEWER_GPU_VIEW:-1}"
@@ -63,6 +63,8 @@ export RAWVIEWER_SHARE_MENU="${RAWVIEWER_SHARE_MENU:-1}"
 # export RAWVIEWER_MACOS_FORCE_FOREGROUND=1
 # pyexiv2 check before app launch. Override: RAWVIEWER_TEST_PYEXIV2=0
 export RAWVIEWER_TEST_PYEXIV2="${RAWVIEWER_TEST_PYEXIV2:-1}"
+# AppKit (pyobjc-framework-Cocoa) required for macOS Share + NSOpenPanel. Skip: RAWVIEWER_TEST_APPKIT=0
+export RAWVIEWER_TEST_APPKIT="${RAWVIEWER_TEST_APPKIT:-1}"
 # Semantic backend check before app launch. Override: RAWVIEWER_TEST_SEMANTIC=0
 export RAWVIEWER_TEST_SEMANTIC="${RAWVIEWER_TEST_SEMANTIC:-1}"
 export PYTHONPATH="${REPO_ROOT}/src:${PYTHONPATH:-}"
@@ -87,6 +89,22 @@ print("pyexiv2 OK:", pyexiv2.__file__)
 PY
     then
         echo "[ERROR] pyexiv2 import failed. Run with RAWVIEWER_TEST_PYEXIV2=0 to skip this check."
+        pause_if_interactive
+        exit 1
+    fi
+fi
+
+if [ "$(uname -s)" = "Darwin" ] && [ "${RAWVIEWER_TEST_APPKIT}" = "1" ]; then
+    echo "Testing AppKit (pyobjc-framework-Cocoa) for macOS Share..."
+    if ! python3 - <<'PY'
+from AppKit import NSSharingService, NSURL
+print("AppKit OK:", NSSharingService)
+PY
+    then
+        echo "[ERROR] AppKit import failed — Share and macOS file dialogs will not work."
+        echo "  pixi:  cd \"${REPO_ROOT}\" && pixi install"
+        echo "  venv:  pip install pyobjc-framework-Cocoa pyobjc-framework-Quartz"
+        echo "  Skip:  RAWVIEWER_TEST_APPKIT=0"
         pause_if_interactive
         exit 1
     fi
@@ -134,8 +152,25 @@ if [ "${RAWVIEWER_SHARE_TRY_NATIVE_PICKER:-}" = "1" ] || [ "${RAWVIEWER_SHARE_NA
     _share_label="picker+menu-fallback"
 fi
 echo "Launching RAWviewer from ${REPO_ROOT} (GPU ${_gpu_label}, share ${_share_label}, semantic ${RAWVIEWER_ENABLE_SEMANTIC_SEARCH:-1})..."
-if ! python3 src/main.py "$@"; then
-    echo "[ERROR] RAWviewer exited with an error."
+set +e
+python3 src/main.py "$@"
+_launch_ec=$?
+set -e
+if [ "$_launch_ec" -ne 0 ]; then
+    if [ "$_launch_ec" -eq 137 ] || [ "$_launch_ec" -eq 9 ]; then
+        echo "[ERROR] RAWviewer was killed by macOS (SIGKILL, exit ${_launch_ec})."
+        echo "  This usually means the system ran out of memory — common when:"
+        echo "    • Restoring a large folder + semantic / metadata indexing"
+        echo "    • Core ML embedding + gallery prefetch on a 16 GB Mac"
+        echo "  Try one or more of these, then relaunch:"
+        echo "    RAWVIEWER_DISABLE_SESSION_RESTORE=1 ./scripts/Launch/shell/launch_dev.sh"
+        echo "    RAWVIEWER_ENABLE_SEMANTIC_SEARCH=0 ./scripts/Launch/shell/launch_dev.sh"
+        echo "    RAWVIEWER_AUTO_METADATA_INDEX=0 ./scripts/Launch/shell/launch_dev.sh"
+        echo "    RAWVIEWER_GPU_VIEW=0 ./scripts/Launch/shell/launch_dev.sh"
+        echo "  Or clear caches: ./scripts/Launch/shell/clear_cache.sh"
+    else
+        echo "[ERROR] RAWviewer exited with an error (code ${_launch_ec})."
+    fi
     pause_if_interactive
-    exit 1
+    exit "$_launch_ec"
 fi

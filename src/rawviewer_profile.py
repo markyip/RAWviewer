@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import os
+import time
 
 LITE_PREFETCH_DEFAULTS: dict[str, str] = {
     "RAWVIEWER_ENABLE_SEMANTIC_SEARCH": "0",
@@ -26,6 +28,74 @@ LITE_PREFETCH_DEFAULTS: dict[str, str] = {
     "RAWVIEWER_PREVIEW_CACHE_ADAPTIVE": "1",
     "RAWVIEWER_MEMORY_PREVIEW_MAX": "2304",
     "RAWVIEWER_ENABLE_LOCATION_MAP": "0",
+}
+
+
+# RAM-tier defaults (setdefault at startup). Opt out: RAWVIEWER_MEMORY_TIER_AUTO=0
+MEMORY_TIER_DEFAULTS: dict[str, dict[str, str]] = {
+    # ≤8 GB MacBook Air class — avoid OOM during semantic index + large folders
+    "low": {
+        "RAWVIEWER_ENABLE_FACE_SCAN": "0",
+        "RAWVIEWER_SEMANTIC_PREP_WORKERS": "2",
+        "RAWVIEWER_SEMANTIC_BATCH_CANDIDATES": "4,8,16",
+        "RAWVIEWER_SEMANTIC_BATCH_MAX": "16",
+        "RAWVIEWER_SEMANTIC_BATCH_TUNE_SAMPLES": "16",
+        "RAWVIEWER_INDEX_METADATA_WORKERS": "2",
+        "RAWVIEWER_MEMORY_PREVIEW_MAX": "1280",
+        "RAWVIEWER_PREVIEW_CACHE_ITEMS": "8",
+        "RAWVIEWER_PREVIEW_CACHE_ITEMS_MAX": "12",
+        "RAWVIEWER_IDLE_DISPLAY_PREFETCH": "0",
+        "RAWVIEWER_LOAD_MAX_WORKERS": "8",
+        "RAWVIEWER_RAW_LOAD_LIMIT": "2",
+        "RAWVIEWER_FILMSTRIP_PREFETCH_RADIUS": "12",
+        "RAWVIEWER_NAV_PRELOAD_RADIUS_MAX": "6",
+        "RAWVIEWER_GALLERY_PREFETCH_SCREENS": "3",
+        "RAWVIEWER_GALLERY_ENTRY_PREFETCH_RADIUS": "16",
+        "RAWVIEWER_GALLERY_IDLE_PRELOAD_BATCH": "40",
+        "RAWVIEWER_GALLERY_WARMUP_MAX_WORKERS": "6",
+    },
+    # 10–12 GB unified memory
+    "medium": {
+        "RAWVIEWER_SEMANTIC_PREP_WORKERS": "4",
+        "RAWVIEWER_SEMANTIC_BATCH_MAX": "32",
+        "RAWVIEWER_INDEX_METADATA_WORKERS": "3",
+        "RAWVIEWER_MEMORY_PREVIEW_MAX": "1536",
+        "RAWVIEWER_PREVIEW_CACHE_ITEMS": "10",
+        "RAWVIEWER_PREVIEW_CACHE_ITEMS_MAX": "16",
+        "RAWVIEWER_IDLE_DISPLAY_PREFETCH_QUEUE_CAP": "10",
+        "RAWVIEWER_LOAD_MAX_WORKERS": "12",
+        "RAWVIEWER_RAW_LOAD_LIMIT": "3",
+        "RAWVIEWER_FILMSTRIP_PREFETCH_RADIUS": "20",
+        "RAWVIEWER_NAV_PRELOAD_RADIUS_MAX": "8",
+        "RAWVIEWER_GALLERY_IDLE_PRELOAD_BATCH": "72",
+    },
+    # 16 GB — conservative defaults to avoid jetsam during semantic + face indexing
+    "balanced": {
+        "RAWVIEWER_SEMANTIC_PREP_WORKERS": "3",
+        "RAWVIEWER_SEMANTIC_BATCH_MAX": "32",
+        "RAWVIEWER_SEMANTIC_BATCH_CANDIDATES": "8,16,32",
+        "RAWVIEWER_SEMANTIC_COREML_CHUNK_CANDIDATES": "4,8,16",
+        "RAWVIEWER_INDEX_METADATA_WORKERS": "3",
+        "RAWVIEWER_FACE_SCAN_WORKERS": "2",
+        "RAWVIEWER_INDEXING_MAX_WORKERS": "6",
+        "RAWVIEWER_MEMORY_PREVIEW_MAX": "1536",
+        "RAWVIEWER_PREVIEW_CACHE_ITEMS": "8",
+        "RAWVIEWER_PREVIEW_CACHE_ITEMS_MAX": "12",
+        "RAWVIEWER_IDLE_DISPLAY_PREFETCH": "0",
+        "RAWVIEWER_LOAD_MAX_WORKERS": "8",
+        "RAWVIEWER_RAW_LOAD_LIMIT": "2",
+        "RAWVIEWER_GALLERY_WARMUP_MAX_WORKERS": "6",
+        "RAWVIEWER_GALLERY_IDLE_PRELOAD_BATCH": "48",
+        "RAWVIEWER_FILMSTRIP_PREFETCH_RADIUS": "16",
+        "RAWVIEWER_NAV_PRELOAD_RADIUS_MAX": "6",
+    },
+    # 24 GB — near stock full defaults
+    "high": {
+        "RAWVIEWER_SEMANTIC_PREP_WORKERS": "8",
+        "RAWVIEWER_PREVIEW_CACHE_ITEMS_MAX": "32",
+    },
+    # 32 GB+ — no overrides (env / code defaults)
+    "ultra": {},
 }
 
 
@@ -61,6 +131,94 @@ def apply_profile_runtime_defaults() -> None:
         return
     for key, value in LITE_PREFETCH_DEFAULTS.items():
         os.environ.setdefault(key, value)
+
+
+def memory_tier_auto_enabled() -> bool:
+    raw = os.environ.get("RAWVIEWER_MEMORY_TIER_AUTO", "1").strip().lower()
+    return raw not in ("0", "false", "no", "off")
+
+
+def system_total_ram_gb() -> float | None:
+    """Installed RAM (stable at startup; prefer over 'available' for tiering)."""
+    try:
+        import psutil
+
+        return float(psutil.virtual_memory().total) / (1024**3)
+    except Exception:
+        return None
+
+
+def classify_memory_tier(total_ram_gb: float | None) -> str:
+    if total_ram_gb is None:
+        return "balanced"
+    if total_ram_gb < 10.0:
+        return "low"
+    if total_ram_gb < 14.0:
+        return "medium"
+    if total_ram_gb < 20.0:
+        return "balanced"
+    if total_ram_gb < 28.0:
+        return "high"
+    return "ultra"
+
+
+def memory_tier_defaults(tier: str | None = None) -> dict[str, str]:
+    if tier is None:
+        tier = classify_memory_tier(system_total_ram_gb())
+    return dict(MEMORY_TIER_DEFAULTS.get(tier, {}))
+
+
+def _memory_tier_note_path() -> str:
+    return os.path.join(os.path.expanduser("~"), ".rawviewer_cache", "memory_tier.json")
+
+
+def _write_memory_tier_note(tier: str, total_gb: float | None, applied: int) -> None:
+    try:
+        path = _memory_tier_note_path()
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        payload = {
+            "tier": tier,
+            "total_ram_gb": round(float(total_gb), 2) if total_gb is not None else None,
+            "applied_defaults": applied,
+            "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        }
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2, sort_keys=True)
+    except Exception:
+        pass
+
+
+def apply_memory_tier_defaults() -> str:
+    """Apply RAM-tier env defaults once per process (setdefault; user exports win)."""
+    if not memory_tier_auto_enabled():
+        return "disabled"
+    total_gb = system_total_ram_gb()
+    tier = classify_memory_tier(total_gb)
+    defaults = memory_tier_defaults(tier)
+    applied = 0
+    for key, value in defaults.items():
+        if key not in os.environ:
+            os.environ[key] = value
+            applied += 1
+        elif not str(os.environ.get(key, "")).strip():
+            os.environ[key] = value
+            applied += 1
+    _write_memory_tier_note(tier, total_gb, applied)
+    return tier
+
+
+def memory_tier_startup_summary() -> str:
+    total_gb = system_total_ram_gb()
+    tier = classify_memory_tier(total_gb)
+    if total_gb is None:
+        return f"memory tier={tier} (RAM unknown)"
+    return f"memory tier={tier} ({total_gb:.1f} GB RAM)"
+
+
+def apply_runtime_defaults() -> str:
+    """Lite profile + RAM-tier defaults (call before heavy imports)."""
+    apply_profile_runtime_defaults()
+    return apply_memory_tier_defaults()
 
 
 def _read_int(name: str, default: int, *, minimum: int = 1, maximum: int = 64) -> int:

@@ -52,6 +52,11 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/9c/42/7703bd45b62fecd44cd7d3495423097e2f7d28bc2e99e7c1af68892ab157/pycountry-26.2.16-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/98/d6/aefbe870b5ca45f5d98e46e3a8035c92e594b3ef33c4dea2eed67b971c49/pyexiv2-2.15.5-cp312-none-macosx_13_0_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/f4/7e/a72dd26f3b0f4f2bf1dd8923c85f7ceb43172af56d63c7383eb62b332364/pygments-2.20.0-py3-none-any.whl
+      - pypi: https://files.pythonhosted.org/packages/24/be/4771f4fd786f0e1a2bd6d8931a72a5f3929b7bb1b28a1fe6ca8a08371c55/pyobjc_core-12.2-cp312-cp312-macosx_10_13_universal2.whl
+      - pypi: https://files.pythonhosted.org/packages/30/66/5a91f2eddfced4f26bc2df2bcebb7f5f10c5bf5666aff6fa00ded845af07/pyobjc_framework_cocoa-12.2-cp312-cp312-macosx_10_13_universal2.whl
+      - pypi: https://files.pythonhosted.org/packages/a2/55/8bf3985e5639d95a44ee6431ee00f1ee823a36f9d1d5a5fe5efb60427386/pyobjc_framework_coreml-12.2-cp312-cp312-macosx_10_13_universal2.whl
+      - pypi: https://files.pythonhosted.org/packages/96/98/3b1fa78ddb1cd10d0edd4d49a3d00301d941f535694ac444fbed53ec7504/pyobjc_framework_quartz-12.2-cp312-cp312-macosx_10_13_universal2.whl
+      - pypi: https://files.pythonhosted.org/packages/da/e6/c8606a1a106f5361360762eb26a9736ad4ea9528202b85b6dfe2a9e8a82f/pyobjc_framework_vision-12.2-cp312-cp312-macosx_10_13_universal2.whl
       - pypi: https://files.pythonhosted.org/packages/33/44/fcd3dd3f64c83c96bf9bce76ec16cca64bd9b91702c3d08fd8e3dafc73d9/pyqt6-6.11.0-cp310-abi3-macosx_10_14_universal2.whl
       - pypi: https://files.pythonhosted.org/packages/38/cb/ef930289bcd3b4be77a619d6b89ccdd0f53d753053a45f69ed590fd49777/pyqt6_qt6-6.11.1-py3-none-macosx_10_14_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/46/27/47598e701d284497216bf97bf8b6a69f5e61412e716c232ff2b7e6cb2100/pyqt6_sip-13.11.1-cp312-cp312-macosx_10_9_universal2.whl
@@ -114,6 +119,11 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/9c/42/7703bd45b62fecd44cd7d3495423097e2f7d28bc2e99e7c1af68892ab157/pycountry-26.2.16-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/23/2c/87154e3d23602c1309e3aa10ff955a707cc311d82eac522c5b4d2e7fdba1/pyexiv2-2.15.5-cp312-none-macosx_14_0_arm64.whl
       - pypi: https://files.pythonhosted.org/packages/f4/7e/a72dd26f3b0f4f2bf1dd8923c85f7ceb43172af56d63c7383eb62b332364/pygments-2.20.0-py3-none-any.whl
+      - pypi: https://files.pythonhosted.org/packages/24/be/4771f4fd786f0e1a2bd6d8931a72a5f3929b7bb1b28a1fe6ca8a08371c55/pyobjc_core-12.2-cp312-cp312-macosx_10_13_universal2.whl
+      - pypi: https://files.pythonhosted.org/packages/30/66/5a91f2eddfced4f26bc2df2bcebb7f5f10c5bf5666aff6fa00ded845af07/pyobjc_framework_cocoa-12.2-cp312-cp312-macosx_10_13_universal2.whl
+      - pypi: https://files.pythonhosted.org/packages/a2/55/8bf3985e5639d95a44ee6431ee00f1ee823a36f9d1d5a5fe5efb60427386/pyobjc_framework_coreml-12.2-cp312-cp312-macosx_10_13_universal2.whl
+      - pypi: https://files.pythonhosted.org/packages/96/98/3b1fa78ddb1cd10d0edd4d49a3d00301d941f535694ac444fbed53ec7504/pyobjc_framework_quartz-12.2-cp312-cp312-macosx_10_13_universal2.whl
+      - pypi: https://files.pythonhosted.org/packages/da/e6/c8606a1a106f5361360762eb26a9736ad4ea9528202b85b6dfe2a9e8a82f/pyobjc_framework_vision-12.2-cp312-cp312-macosx_10_13_universal2.whl
       - pypi: https://files.pythonhosted.org/packages/33/44/fcd3dd3f64c83c96bf9bce76ec16cca64bd9b91702c3d08fd8e3dafc73d9/pyqt6-6.11.0-cp310-abi3-macosx_10_14_universal2.whl
       - pypi: https://files.pythonhosted.org/packages/09/7d/d016af2de1975a0d90c9a911e3d82b2e8c8fe899f8af746ade42186f3845/pyqt6_qt6-6.11.1-py3-none-macosx_11_0_arm64.whl
       - pypi: https://files.pythonhosted.org/packages/46/27/47598e701d284497216bf97bf8b6a69f5e61412e716c232ff2b7e6cb2100/pyqt6_sip-13.11.1-cp312-cp312-macosx_10_9_universal2.whl
@@ -1249,6 +1259,44 @@ packages:
   requires_dist:
   - colorama>=0.4.6 ; extra == 'windows-terminal'
   requires_python: '>=3.9'
+- pypi: https://files.pythonhosted.org/packages/24/be/4771f4fd786f0e1a2bd6d8931a72a5f3929b7bb1b28a1fe6ca8a08371c55/pyobjc_core-12.2-cp312-cp312-macosx_10_13_universal2.whl
+  name: pyobjc-core
+  version: '12.2'
+  sha256: 7677ed758a367bbbb5589d6f5276fb360a45c89168276c26162f61840b0fa03d
+  requires_python: '>=3.10'
+- pypi: https://files.pythonhosted.org/packages/30/66/5a91f2eddfced4f26bc2df2bcebb7f5f10c5bf5666aff6fa00ded845af07/pyobjc_framework_cocoa-12.2-cp312-cp312-macosx_10_13_universal2.whl
+  name: pyobjc-framework-cocoa
+  version: '12.2'
+  sha256: 06cb92d97d1af9d1f459ae6cf1d1a7b824c12d3aff1b709885966acd6b7208c2
+  requires_dist:
+  - pyobjc-core>=12.2
+  requires_python: '>=3.10'
+- pypi: https://files.pythonhosted.org/packages/a2/55/8bf3985e5639d95a44ee6431ee00f1ee823a36f9d1d5a5fe5efb60427386/pyobjc_framework_coreml-12.2-cp312-cp312-macosx_10_13_universal2.whl
+  name: pyobjc-framework-coreml
+  version: '12.2'
+  sha256: 011dc67f11144817c9cf728cb7ae3d520001c4e099f9efb6a4c9fec4c19e6413
+  requires_dist:
+  - pyobjc-core>=12.2
+  - pyobjc-framework-cocoa>=12.2
+  requires_python: '>=3.10'
+- pypi: https://files.pythonhosted.org/packages/96/98/3b1fa78ddb1cd10d0edd4d49a3d00301d941f535694ac444fbed53ec7504/pyobjc_framework_quartz-12.2-cp312-cp312-macosx_10_13_universal2.whl
+  name: pyobjc-framework-quartz
+  version: '12.2'
+  sha256: 8b238979d62b6e0b90d466477eee968d8f2f6720e850af2472e01cef349293b4
+  requires_dist:
+  - pyobjc-core>=12.2
+  - pyobjc-framework-cocoa>=12.2
+  requires_python: '>=3.10'
+- pypi: https://files.pythonhosted.org/packages/da/e6/c8606a1a106f5361360762eb26a9736ad4ea9528202b85b6dfe2a9e8a82f/pyobjc_framework_vision-12.2-cp312-cp312-macosx_10_13_universal2.whl
+  name: pyobjc-framework-vision
+  version: '12.2'
+  sha256: 77628f8c12a2f8072e8a8ab780cd0fd716f279153dcd883ce058bf2d1843b16d
+  requires_dist:
+  - pyobjc-core>=12.2
+  - pyobjc-framework-cocoa>=12.2
+  - pyobjc-framework-quartz>=12.2
+  - pyobjc-framework-coreml>=12.2
+  requires_python: '>=3.10'
 - pypi: https://files.pythonhosted.org/packages/33/44/fcd3dd3f64c83c96bf9bce76ec16cca64bd9b91702c3d08fd8e3dafc73d9/pyqt6-6.11.0-cp310-abi3-macosx_10_14_universal2.whl
   name: pyqt6
   version: 6.11.0

@@ -204,6 +204,13 @@ class LRUCache:
         self.hits = 0
         self.misses = 0
 
+    def shrink_to_size(self, new_max_size: int) -> None:
+        """Update max_size and remove excess items thread-safely."""
+        with self.lock:
+            self.max_size = new_max_size
+            while len(self.cache) > self.max_size:
+                self.cache.popitem(last=False)
+
     def __contains__(self, key: str) -> bool:
         with self.lock:
             return key in self.cache
@@ -1258,9 +1265,9 @@ class MemoryMonitor:
         preview_items = recommended_preview_cache_items(available_gb)
 
         return {
-            'full_images': min(max_full_images, 100),
-            'thumbnails': min(max_thumbnails, 2000),
-            'preview_images': preview_items,
+            'full_images': min(max_full_images, 8),
+            'thumbnails': min(max_thumbnails, 1000),
+            'preview_images': min(preview_items, 16),
             'cache_budget_mb': int(cache_budget_gb * 1024)
         }
 
@@ -1326,8 +1333,10 @@ class ImageCache(QObject):
 
         # Memory management
         self.max_memory_mb = cache_sizes['cache_budget_mb']
-        self.memory_check_interval = 60  # seconds
+        self.memory_check_interval = 5  # seconds
         self.last_memory_check = 0
+        self.last_aggressive_purge = 0.0
+        self.last_reduce_cache = 0.0
 
     @staticmethod
     def _path_key(file_path: str) -> str:
@@ -1341,22 +1350,72 @@ class ImageCache(QObject):
 
         self.last_memory_check = current_time
         memory_info = self.memory_monitor.get_memory_info()
+        percent_used = memory_info['system_percent_used']
+        rss_mb = memory_info['process_rss_mb']
 
-        # Emit warning if memory usage is high
-        if memory_info['system_percent_used'] > 85:
-            self.memory_warning.emit(memory_info['system_percent_used'])
+        # Critical pressure check (raise threshold to 4000 MB as semantic models occupy ~3GB)
+        if percent_used > 90 or rss_mb > 4000:
+            if current_time - getattr(self, 'last_aggressive_purge', 0.0) < 60.0:
+                # Under cooldown to prevent app freeze / infinite loop of purging
+                return False
+            self.last_aggressive_purge = current_time
+            logger.warning(
+                "CRITICAL memory pressure detected (system: %.1f%% used, process RSS: %.1f MB). Aggressively purging caches.",
+                percent_used,
+                rss_mb,
+            )
+            self.memory_warning.emit(percent_used)
+            self._aggressive_purge()
+            return True
 
-            # Reduce cache sizes under memory pressure
+        # Normal memory pressure warning / reduction
+        if percent_used > 85:
+            if current_time - getattr(self, 'last_reduce_cache', 0.0) < 20.0:
+                # Under cooldown
+                return False
+            self.last_reduce_cache = current_time
+            logger.warning(
+                "Memory pressure detected (system: %.1f%% used, process RSS: %.1f MB). Reducing cache sizes.",
+                percent_used,
+                rss_mb,
+            )
+            self.memory_warning.emit(percent_used)
             self._reduce_cache_sizes()
             return True
 
         return False
 
+    def _aggressive_purge(self) -> None:
+        """Aggressively clear heavy caches and drop their capacities to a minimum under critical pressure."""
+        logger.info("Performing aggressive cache purge...")
+        
+        # Clear heavy caches entirely
+        self.full_image_cache.clear()
+        self.pixmap_cache.clear()
+        
+        # Aggressively drop capacities to 3 thread-safely
+        self.full_image_cache.shrink_to_size(3)
+        self.pixmap_cache.shrink_to_size(3)
+        
+        # Reduce and clear other caches aggressively thread-safely
+        new_thumbnail_size = max(10, int(self.thumbnail_cache.max_size * 0.5))
+        new_grid_size = max(5, int(self.grid_cache.max_size * 0.5))
+        new_preview_size = max(4, int(self.preview_cache.max_size * 0.5))
+        
+        self.thumbnail_cache.shrink_to_size(new_thumbnail_size)
+        self.grid_cache.shrink_to_size(new_grid_size)
+        self.preview_cache.shrink_to_size(new_preview_size)
+        
+        import gc
+        gc.collect()
+
     def _reduce_cache_sizes(self) -> None:
         """Reduce cache sizes when under memory pressure."""
         # Reduce by 25%
         new_full_size = max(5, int(self.full_image_cache.max_size * 0.75))
+        new_pixmap_size = max(5, int(self.pixmap_cache.max_size * 0.75))
         new_thumbnail_size = max(20, int(self.thumbnail_cache.max_size * 0.75))
+        new_grid_size = max(10, int(self.grid_cache.max_size * 0.75))
         min_preview = _env_int(
             "RAWVIEWER_PREVIEW_CACHE_ITEMS_MIN", 6, minimum=4, maximum=32
         )
@@ -1364,20 +1423,12 @@ class ImageCache(QObject):
             min_preview, int(self.preview_cache.max_size * 0.75)
         )
 
-        # Clear excess items
-        while len(self.full_image_cache.cache) > new_full_size:
-            self.full_image_cache.cache.popitem(last=False)
-
-        while len(self.thumbnail_cache.cache) > new_thumbnail_size:
-            self.thumbnail_cache.cache.popitem(last=False)
-
-        while len(self.preview_cache.cache) > new_preview_size:
-            self.preview_cache.cache.popitem(last=False)
-
-        # Update max sizes
-        self.full_image_cache.max_size = new_full_size
-        self.thumbnail_cache.max_size = new_thumbnail_size
-        self.preview_cache.max_size = new_preview_size
+        # Clear excess items thread-safely and update max sizes
+        self.full_image_cache.shrink_to_size(new_full_size)
+        self.pixmap_cache.shrink_to_size(new_pixmap_size)
+        self.thumbnail_cache.shrink_to_size(new_thumbnail_size)
+        self.grid_cache.shrink_to_size(new_grid_size)
+        self.preview_cache.shrink_to_size(new_preview_size)
 
     def get_thumbnail(self, file_path: str) -> Optional[np.ndarray]:
         """Get cached thumbnail or return None if not cached."""
@@ -1735,6 +1786,15 @@ class ImageCache(QObject):
                 self.exif_memory_cache.put(file_path, exif_data)
 
         if exif_data is not None:
+            try:
+                from enhanced_raw_processor import RAW_EXIF_SENSOR_META_VER
+                cached_ver = exif_data.get('raw_exif_sensor_meta_ver', 0)
+                if cached_ver < RAW_EXIF_SENSOR_META_VER:
+                    self.cache_miss.emit(file_path, 'exif')
+                    return None
+            except Exception:
+                pass
+
             self.cache_hit.emit(file_path, 'exif')
             return exif_data
         else:
@@ -1776,10 +1836,22 @@ class ImageCache(QObject):
         results = {}
         missing_paths = []
         
+        try:
+            from enhanced_raw_processor import RAW_EXIF_SENSOR_META_VER
+            has_ver = True
+        except Exception:
+            has_ver = False
+            RAW_EXIF_SENSOR_META_VER = 0
+            
         # Check memory cache first
         for path in file_paths:
             exif = self.exif_memory_cache.get(path)
             if exif:
+                if has_ver:
+                    cached_ver = exif.get('raw_exif_sensor_meta_ver', 0)
+                    if cached_ver < RAW_EXIF_SENSOR_META_VER:
+                        missing_paths.append(path)
+                        continue
                 results[path] = exif
             else:
                 missing_paths.append(path)
@@ -1788,6 +1860,10 @@ class ImageCache(QObject):
             # Fetch missing from persistent cache
             db_results = self.exif_cache.get_multiple(missing_paths, file_stats, fast_mode)
             for path, exif in db_results.items():
+                if has_ver:
+                    cached_ver = exif.get('raw_exif_sensor_meta_ver', 0)
+                    if cached_ver < RAW_EXIF_SENSOR_META_VER:
+                        continue
                 self.exif_memory_cache.put(path, exif)
                 results[path] = exif
                 

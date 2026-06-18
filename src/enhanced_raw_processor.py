@@ -40,7 +40,7 @@ from raw_file_extensions import RAW_FILE_EXTENSIONS
 
 # Cached EXIF rows without this version used embedded-JPEG dimensions as "original" (e.g. 1920×1080).
 # Cached EXIF rows without this version used buggy orientation logic (e.g. LibRaw 5 mis-mapped, Sony MakerNote missing, or Silent Failures).
-RAW_EXIF_SENSOR_META_VER = 7
+RAW_EXIF_SENSOR_META_VER = 8
 
 _rawpy_global_lock = threading.Lock()
 
@@ -615,7 +615,7 @@ class ThumbnailExtractor(QObject):
                             jpeg_image.close()
                         else:
                             import logging
-                            logging.getLogger(__name__).warning(f"[SIPS] Failed to generate thumbnail for {file_path}. Exit code: {result.returncode}, Error: {result.stderr.decode('utf-8', 'ignore')}")
+                            logging.getLogger(__name__).debug(f"[SIPS] Failed to generate thumbnail for {file_path}. Exit code: {result.returncode}, Error: {result.stderr.decode('utf-8', 'ignore')}")
                             
                             # Fallback to QuickLook (qlmanage)
                             try:
@@ -666,7 +666,9 @@ class ThumbnailExtractor(QObject):
                 if flip != 0:
                     flip_map = {0: 1, 3: 3, 5: 8, 6: 6}
                     orientation = int(flip_map.get(flip, flip))
-                    thumb_array = self._apply_orientation_correction(
+                    from common_image_loader import apply_container_orientation_to_array
+
+                    thumb_array = apply_container_orientation_to_array(
                         thumb_array, orientation
                     )
                 
@@ -1455,35 +1457,13 @@ class EnhancedRAWProcessor(QThread):
         """Apply orientation correction to image array."""
         if image_array is None:
             return None
-            
-        # Check if camera stores data pre-rotated
         if self._is_camera_pre_rotated(exif_data):
             return image_array
+        from common_image_loader import apply_container_orientation_to_array
 
-        if orientation == 1:
-            return image_array
-        elif orientation == 2:
-            return np.fliplr(image_array)
-        elif orientation == 3:
-            return np.rot90(image_array, 2)
-        elif orientation == 4:
-            return np.flipud(image_array)
-        elif orientation == 5:
-            # Mirrored horizontal + Rotated 270° CW (k=1 CCW)
-            return np.rot90(np.fliplr(image_array), 1)
-        elif orientation == 6:
-            # Orientation 6: Image is rotated 90° CW.
-            # We need to rotate it 90° CW (k=3) to fix it.
-            return np.rot90(image_array, 3)
-        elif orientation == 7:
-            # Mirror LR + rotate 90° CW
-            return np.rot90(np.fliplr(image_array), 3)
-        elif orientation == 8:
-            # Orientation 8: Image is rotated 270° CW (90° CCW).
-            # We need to rotate it 90° CCW (k=1) to fix it.
-            return np.rot90(image_array, 1)
-        else:
-            return image_array
+        return apply_container_orientation_to_array(
+            image_array, orientation, exif_data
+        )
 
     def _is_camera_pre_rotated(self, exif_data: Dict[str, Any] = None) -> bool:
         """Check if camera stores data pre-rotated."""

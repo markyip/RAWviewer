@@ -1461,42 +1461,17 @@ class RAWProcessor(QThread):
             return 1  # Default orientation if EXIF reading fails
 
     def apply_orientation_correction(self, image_array, orientation):
-        """Apply orientation correction to numpy array"""
-        if orientation == 1:
-            # Normal orientation, no changes needed
-            return image_array
-
-        # Check if this is a camera that stores RAW data pre-rotated
-        # Some cameras (like Sony) store RAW data in the correct orientation
-        # and the EXIF orientation tag may be misleading
+        """Apply orientation correction to numpy array, with safety guards to prevent double rotation"""
         if self.is_raw_data_pre_rotated():
             return image_array
 
-        if orientation == 2:
-            # Mirrored horizontal
-            return np.fliplr(image_array)
-        elif orientation == 3:
-            # Rotated 180 degrees
-            return np.rot90(image_array, 2)
-        elif orientation == 4:
-            # Mirrored vertical
-            return np.flipud(image_array)
-        elif orientation == 5:
-            # Mirrored horizontal + Rotated 270° CW (k=1 CCW)
-            return np.rot90(np.fliplr(image_array), 1)
-        elif orientation == 6:
-            # Orientation 6: Image is rotated 90° CW. 
-            # We need to rotate it 90° CW (k=3) to fix it.
-            return np.rot90(image_array, 3)
-        elif orientation == 7:
-            # Mirror LR + rotate 90° CW
-            return np.rot90(np.fliplr(image_array), 3)
-        elif orientation == 8:
-            # Orientation 8: Image is rotated 270° CW (90° CCW).
-            # We need to rotate it 90° CCW (k=1) to fix it.
-            return np.rot90(image_array, 1)
-        else:
-            return image_array
+        from common_image_loader import apply_container_orientation_to_array
+        from image_cache import get_image_cache
+        
+        cache = get_image_cache()
+        exif_data = cache.get_exif(self.file_path) if cache else None
+            
+        return apply_container_orientation_to_array(image_array, orientation, exif_data)
 
     def is_raw_data_pre_rotated(self):
         """Check if this camera/file stores RAW data pre-rotated - optimized"""
@@ -1977,32 +1952,50 @@ class RAWProcessor(QThread):
                                     except Exception as cache_error:
                                         logger.debug(f"[RAW_PROC] Failed to save to disk cache: {cache_error}")
                                     
-                                    # Load JPEG and apply EXIF orientation
-                                    pil_image = Image.open(BytesIO(jpeg_data))
-                                    pil_image = ImageOps.exif_transpose(pil_image)
-                                    if pil_image.mode != 'RGB':
-                                        pil_image = pil_image.convert('RGB')
-                                    
-                                    thumbnail_data = np.array(pil_image, dtype=np.uint8)
-                                    
-                                    # Apply orientation correction
-                                    orientation = self.get_orientation_from_exif(self.file_path)
-                                    thumbnail_data = self.apply_orientation_correction(thumbnail_data, orientation)
-                                    
-                                    # Cache the thumbnail
-                                    cache.put_thumbnail(self.file_path, thumbnail_data)
-                                    logger.info(f"[RAW_PROC] Embedded JPEG thumbnail cached: {os.path.basename(self.file_path)} ({thumbnail_data.shape[1]}x{thumbnail_data.shape[0]})")
-                                    
-                                    # Emit thumbnail immediately for fast display
-                                    if not self.use_full_resolution:
-                                        logger.info(f"[RAW_PROC] Emitting embedded JPEG thumbnail immediately")
-                                        self.thumbnail_fallback_used.emit("Loading thumbnail...")
-                                        self.image_processed.emit(thumbnail_data)
-                                        logger.info(f"[RAW_PROC] Embedded JPEG thumbnail emitted successfully")
-                                    
-                                    # Mark that we have thumbnail from embedded JPEG
-                                    # We still need to open RAW file for full image processing, but thumbnail is done
-                                    # thumbnail_data is now set, so subsequent code will skip thumbnail extraction
+                                    # Embedded JPEG: segment EXIF transpose + container EXIF (once, shared helper)
+                                    from common_image_loader import (
+                                        decode_embedded_jpeg_bytes,
+                                        apply_container_orientation_to_array,
+                                    )
+
+                                    thumbnail_data = decode_embedded_jpeg_bytes(
+                                        jpeg_data, 0
+                                    )
+                                    if thumbnail_data is not None:
+                                        orientation = self.get_orientation_from_exif(
+                                            self.file_path
+                                        )
+                                        if orientation != 1:
+                                            exif_for_o = cached_exif or {}
+                                            if not exif_for_o.get("orientation"):
+                                                exif_for_o = dict(exif_for_o)
+                                                exif_for_o["orientation"] = orientation
+                                            thumbnail_data = apply_container_orientation_to_array(
+                                                thumbnail_data,
+                                                orientation,
+                                                exif_for_o or None,
+                                            )
+
+                                        cache.put_thumbnail(self.file_path, thumbnail_data)
+                                        logger.info(
+                                            "[RAW_PROC] Embedded JPEG thumbnail cached: %s (%dx%d)",
+                                            os.path.basename(self.file_path),
+                                            thumbnail_data.shape[1],
+                                            thumbnail_data.shape[0],
+                                        )
+
+                                        if not self.use_full_resolution:
+                                            logger.info(
+                                                "[RAW_PROC] Emitting embedded JPEG thumbnail immediately"
+                                            )
+                                            self.thumbnail_fallback_used.emit(
+                                                "Loading thumbnail..."
+                                            )
+                                            self._orientation_already_applied = True
+                                            self.image_processed.emit(thumbnail_data)
+                                            logger.info(
+                                                "[RAW_PROC] Embedded JPEG thumbnail emitted successfully"
+                                            )
                                 else:
                                     logger.debug(f"[RAW_PROC] No embedded JPEG thumbnail found, will process RAW")
                         except Exception as embedded_error:
@@ -6538,152 +6531,11 @@ class RAWImageViewer(QMainWindow):
     _PRELOAD_PREV_COUNT = 4
 
     def _load_pixmap_safe(self, file_path):
-        """Safely load QPixmap, using rawpy for RAW files and PIL for TIFF files to avoid Qt warnings"""
-        import os
-        from PyQt6.QtGui import QPixmap, QImage
-        
-        file_ext = os.path.splitext(file_path)[1].lower()
-        
-        # Check if this is a RAW file (NOT TIFF)
-        raw_extensions = ['.arw', '.cr2', '.nef', '.raf', '.orf', '.dng', '.cr3', '.rw2', '.rwl', '.srw', 
-                         '.pef', '.x3f', '.3fr', '.fff', '.iiq', '.cap', '.erf', '.mef', '.mos', '.nrw', '.srf']
-        is_raw = file_ext in raw_extensions
-        
-        # For RAW files, use rawpy to extract embedded preview (NOT PIL - RAW files should not be treated as TIFF)
-        if is_raw:
-            try:
-                import rawpy
-                import io
-                from PIL import Image
-                
-                with rawpy.imread(file_path) as raw:
-                    thumb = raw.extract_thumb()
-                    if thumb is not None:
-                        if thumb.format == rawpy.ThumbFormat.JPEG:
-                            from PIL import ImageOps
-                            jpeg_image = Image.open(io.BytesIO(thumb.data))
-                            
-                            # Get EXIF orientation from the main file (cached), NOT the embedded thumbnail
-                            try:
-                                orientation = 1
-                                if hasattr(self, 'get_orientation_from_exif'):
-                                    orientation = self.get_orientation_from_exif(file_path)
-                                
-                                # Apply manual orientation correction
-                                if orientation == 3:
-                                    jpeg_image = jpeg_image.transpose(Image.Transpose.ROTATE_180)
-                                elif orientation == 6:
-                                    jpeg_image = jpeg_image.transpose(Image.Transpose.ROTATE_270)  # Correct for 90 CW
-                                elif orientation == 8:
-                                    jpeg_image = jpeg_image.transpose(Image.Transpose.ROTATE_90)   # Correct for 90 CCW
-                                elif orientation == 2:
-                                    jpeg_image = jpeg_image.transpose(Image.Transpose.FLIP_LEFT_RIGHT)
-                                elif orientation == 4:
-                                    jpeg_image = jpeg_image.transpose(Image.Transpose.FLIP_TOP_BOTTOM)
-                                elif orientation == 5:
-                                    jpeg_image = jpeg_image.transpose(Image.Transpose.FLIP_LEFT_RIGHT).transpose(Image.Transpose.ROTATE_270)
-                                elif orientation == 7:
-                                    jpeg_image = jpeg_image.transpose(Image.Transpose.FLIP_LEFT_RIGHT).transpose(Image.Transpose.ROTATE_90)
-                            except Exception as e:
-                                safe_print(f"[LOAD] Failed to apply orientation to preview: {e}")
-                                # Fallback to auto-transpose if manual fail
-                                jpeg_image = ImageOps.exif_transpose(jpeg_image)
-                            if jpeg_image.mode != 'RGB':
-                                jpeg_image = jpeg_image.convert('RGB')
-                            width, height = jpeg_image.size
-                            image_bytes = jpeg_image.tobytes('raw', 'RGB')
-                            bytes_per_line = 3 * width
-                            qimage = QImage(image_bytes, width, height, bytes_per_line, QImage.Format.Format_RGB888)
-                            if not qimage.isNull():
-                                return QPixmap.fromImage(qimage)
-                        elif thumb.format == rawpy.ThumbFormat.BITMAP:
-                            import numpy as np
-                            thumb_data = thumb.data
-                            if thumb_data is not None:
-                                height, width = thumb_data.shape[:2]
-                                if len(thumb_data.shape) == 2:  # Grayscale
-                                    qimage = QImage(thumb_data.tobytes(), width, height, QImage.Format.Format_Grayscale8)
-                                elif thumb_data.shape[2] == 3:  # RGB
-                                    bytes_per_line = 3 * width
-                                    qimage = QImage(thumb_data.tobytes('raw', 'RGB'), width, height, bytes_per_line, QImage.Format.Format_RGB888)
-                                else:
-                                    pil_img = Image.fromarray(thumb_data)
-                                    if pil_img.mode != 'RGB':
-                                        pil_img = pil_img.convert('RGB')
-                                    width, height = pil_img.size
-                                    image_bytes = pil_img.tobytes('raw', 'RGB')
-                                    bytes_per_line = 3 * width
-                                    qimage = QImage(image_bytes, width, height, bytes_per_line, QImage.Format.Format_RGB888)
-                                if not qimage.isNull():
-                                    return QPixmap.fromImage(qimage)
-            except Exception as e:
-                import logging
-                logger = logging.getLogger(__name__)
-                logger.debug(f"[LOAD] Failed to extract RAW preview: {os.path.basename(file_path)}: {e}")
-            # Return empty pixmap for RAW files if extraction failed
-            return QPixmap()
-        
-        # For TIFF files (NOT RAW), use PIL to avoid Qt TIFF plugin warnings
-        is_tiff = file_ext in ('.tiff', '.tif')
-        
-        # Also check file content to detect TIFF files with wrong extension (but NOT RAW files)
-        if not is_tiff:
-            try:
-                from PIL import Image
-                with Image.open(file_path) as test_img:
-                    if test_img.format in ('TIFF', 'TIF'):
-                        is_tiff = True
-            except:
-                pass  # Not a PIL-readable file or not TIFF
-        
-        # For TIFF files, use PIL to avoid Qt TIFF plugin warnings
-        if is_tiff:
-            try:
-                from PIL import Image, ImageOps
-                with Image.open(file_path) as pil_image:
-                    # Apply EXIF orientation correction
-                    pil_image = ImageOps.exif_transpose(pil_image)
-                    
-                    # Convert to RGB if necessary
-                    if pil_image.mode not in ('RGB', 'L'):
-                        pil_image = pil_image.convert('RGB')
-                    
-                    width, height = pil_image.size
-                    if pil_image.mode == 'RGB':
-                        qimage = QImage(pil_image.tobytes('raw', 'RGB'), width, height, QImage.Format.Format_RGB888)
-                    elif pil_image.mode == 'L':
-                        qimage = QImage(pil_image.tobytes('raw', 'L'), width, height, QImage.Format.Format_Grayscale8)
-                    else:
-                        rgb_pil = pil_image.convert('RGB')
-                        qimage = QImage(rgb_pil.tobytes('raw', 'RGB'), width, height, QImage.Format.Format_RGB888)
-                    
-                    if not qimage.isNull():
-                        return QPixmap.fromImage(qimage)
-            except Exception as e:
-                import logging
-                logger = logging.getLogger(__name__)
-                logger.debug(f"[LOAD] PIL fallback failed for TIFF: {os.path.basename(file_path)}: {e}")
-                # For TIFF files, never use QPixmap(file_path) as it triggers warnings
-                # Return empty QPixmap instead
-                return QPixmap()
-        
-        # For other formats (JPEG, PNG, etc.), use QImageReader with setAutoTransform
-        # This automatically applies EXIF orientation
-        try:
-            from PyQt6.QtGui import QImageReader
-            reader = QImageReader(file_path)
-            reader.setAutoTransform(True)  # Apply EXIF orientation automatically
-            pixmap = QPixmap.fromImageReader(reader)
-            if not pixmap.isNull():
-                return pixmap
-        except Exception as e:
-            import logging
-            logger = logging.getLogger(__name__)
-            logger.debug(f"[LOAD] QImageReader failed for {os.path.basename(file_path)}: {e}")
-        
-        # Fallback to QPixmap (won't apply orientation, but better than nothing)
-        return QPixmap(file_path)
-    
+        """Delegate to common_image_loader (RAW + TIFF + JPEG with shared orientation)."""
+        from common_image_loader import load_pixmap_safe
+
+        return load_pixmap_safe(file_path)
+
     def __init__(self):
         safe_print("  [RAWImageViewer] Starting initialization...", flush=True)
         super().__init__()
@@ -10805,6 +10657,34 @@ class RAWImageViewer(QMainWindow):
         else:
             self._pending_pause_semantic_index = True
 
+    def _begin_indexing_load_throttle(self) -> None:
+        """Cut ILM concurrency while semantic or face indexing holds large RAM."""
+        depth = int(getattr(self, "_indexing_load_throttle_depth", 0) or 0) + 1
+        self._indexing_load_throttle_depth = depth
+        if depth != 1:
+            return
+        mgr = getattr(self, "image_manager", None)
+        if mgr is not None and hasattr(mgr, "enter_semantic_indexing_throttle"):
+            try:
+                mgr.enter_semantic_indexing_throttle()
+            except Exception:
+                pass
+
+    def _end_indexing_load_throttle(self) -> None:
+        depth = int(getattr(self, "_indexing_load_throttle_depth", 0) or 0)
+        if depth <= 0:
+            return
+        depth -= 1
+        self._indexing_load_throttle_depth = depth
+        if depth != 0:
+            return
+        mgr = getattr(self, "image_manager", None)
+        if mgr is not None and hasattr(mgr, "exit_semantic_indexing_throttle"):
+            try:
+                mgr.exit_semantic_indexing_throttle()
+            except Exception:
+                pass
+
     def _defer_background_indexing_for_gallery(self) -> None:
         """Pause semantic/face background work while gallery thumbnails first paint."""
         import logging
@@ -11601,6 +11481,7 @@ class RAWImageViewer(QMainWindow):
         token = time.time_ns()
         self._semantic_index_active_token = token
         self._semantic_indexing_in_progress = True
+        self._begin_indexing_load_throttle()
         self._semantic_index_progress_total = total_files
         self._semantic_index_progress_base = 0
         self._semantic_index_run_semantic_embeddings = run_semantic_embeddings
@@ -11724,12 +11605,24 @@ class RAWImageViewer(QMainWindow):
                     self._last_semantic_progress_reload_time = now
                     gj._request_load_visible_images(100)
 
-        if not getattr(self, "_gallery_search_show_index_progress", False):
-            return
         msg = str(message or "").strip()
         pass_kind = getattr(self, "_semantic_index_pass_kind", None)
-        if pass_kind == "silent_metadata":
+        show_progress = getattr(self, "_gallery_search_show_index_progress", False)
+
+        if not show_progress:
+            # If search UI doesn't want progress, route standard indexing/thumbnail messages to status bar only
+            if msg and self._should_show_search_index_progress(msg):
+                self._set_gallery_search_status(msg)
+            else:
+                total = max(1, int(n) if n else self._semantic_index_progress_total)
+                done = min(total, max(0, int(i)))
+                label = "Semantic" if getattr(self, "_semantic_index_run_semantic_embeddings", True) else "Metadata"
+                self._set_gallery_search_status(
+                    self._format_index_progress(label, done, total)
+                )
             return
+
+        # Below is when show_progress is True (e.g. search UI is expanded/active)
         if pass_kind == "user_semantic" and msg.lower().startswith("metadata:"):
             return
         if msg and self._should_show_search_index_progress(msg):
@@ -11755,6 +11648,8 @@ class RAWImageViewer(QMainWindow):
             return
         pass_kind = getattr(self, "_semantic_index_pass_kind", None)
         self._semantic_indexing_in_progress = False
+        if not getattr(self, "_face_indexing_in_progress", False):
+            self._end_indexing_load_throttle()
         self._semantic_index_active_token = None
         self._semantic_index_signals = None
         self._semantic_index_progress_base = 0
@@ -11885,6 +11780,7 @@ class RAWImageViewer(QMainWindow):
         token = time.time_ns()
         self._face_index_active_token = token
         self._face_indexing_in_progress = True
+        self._begin_indexing_load_throttle()
         try:
             unique_corpus, _ = index._filter_duplicate_raw_companions(corpus_files)
             total_files = len(unique_corpus)
@@ -11953,6 +11849,8 @@ class RAWImageViewer(QMainWindow):
         if token != getattr(self, "_face_index_active_token", None):
             return
         self._face_indexing_in_progress = False
+        if not getattr(self, "_semantic_indexing_in_progress", False):
+            self._end_indexing_load_throttle()
         self._face_index_active_token = None
         self._face_index_signals = None
         corpus = self._gallery_search_index_corpus()
@@ -11988,6 +11886,8 @@ class RAWImageViewer(QMainWindow):
         if token != getattr(self, "_face_index_active_token", None):
             return
         self._face_indexing_in_progress = False
+        if not getattr(self, "_semantic_indexing_in_progress", False):
+            self._end_indexing_load_throttle()
         self._face_index_active_token = None
         self._face_index_signals = None
         try:
@@ -12002,6 +11902,8 @@ class RAWImageViewer(QMainWindow):
         if token != self._semantic_index_active_token:
             return
         self._semantic_indexing_in_progress = False
+        if not getattr(self, "_face_indexing_in_progress", False):
+            self._end_indexing_load_throttle()
         self._semantic_index_active_token = None
         self._semantic_index_signals = None
         self._semantic_index_progress_base = 0
@@ -14302,65 +14204,11 @@ class RAWImageViewer(QMainWindow):
             return None
     
     def _extract_embedded_preview(self, file_path):
-        """Extract embedded JPEG preview from RAW file for gallery display"""
-        import os
-        import logging
-        import io
-        logger = logging.getLogger(__name__)
-        
-        try:
-            with rawpy.imread(file_path) as raw:
-                thumb = raw.extract_thumb()
-                
-                if thumb.format == rawpy.ThumbFormat.JPEG:
-                    from PIL import Image
-                    pil_image = Image.open(io.BytesIO(thumb.data))
-                    if pil_image.mode != 'RGB':
-                        pil_image = pil_image.convert('RGB')
-                    
-                    # Convert PIL Image to QPixmap
-                    from PyQt6.QtGui import QImage, QPixmap
-                    width, height = pil_image.size
-                    image_bytes = pil_image.tobytes('raw', 'RGB')
-                    bytes_per_line = 3 * width  # RGB = 3 channels
-                    qimage = QImage(image_bytes, width, height, bytes_per_line, QImage.Format.Format_RGB888)
-                    
-                    if not qimage.isNull():
-                        pixmap = QPixmap.fromImage(qimage)
-                        logger.debug(f"[GALLERY] Extracted embedded JPEG preview from RAW: {os.path.basename(file_path)}, size: {width}x{height}")
-                        return pixmap
-                
-                # Fallback: decode RAW (expensive, but better than nothing)
-                # Only use this if embedded JPEG is not available
-                logger.debug(f"[GALLERY] No embedded JPEG found, decoding RAW for thumbnail: {os.path.basename(file_path)}")
-                rgb = raw.postprocess(
-                    half_size=True,  # Use half size for speed
-                    output_bps=8,
-                    use_camera_wb=True,
-                    demosaic_algorithm=rawpy.DemosaicAlgorithm.LINEAR
-                )
-                
-                # Convert numpy array to QPixmap
-                shape = rgb.shape
-                h, w = shape[0], shape[1]
-                c = shape[2] if len(shape) > 2 else 1
-                
-                q_format = QImage.Format.Format_RGB888
-                if c == 1:
-                    q_format = QImage.Format.Format_Grayscale8
-                elif c == 4:
-                    q_format = QImage.Format.Format_RGBA8888
+        """Extract oriented RAW preview for gallery fallbacks (shared loader)."""
+        from common_image_loader import load_raw_preview_pixmap
 
-                q_img = QImage(rgb.data, w, h, c * w, q_format)
-                if not q_img.isNull():
-                    pixmap = QPixmap.fromImage(q_img)
-                    logger.debug(f"[GALLERY] Decoded RAW for thumbnail: {os.path.basename(file_path)}, size: {w}x{h}")
-                    return pixmap
-                    
-        except Exception as e:
-            logger.debug(f"[GALLERY] Failed to extract embedded preview from RAW: {os.path.basename(file_path)}: {e}")
-        
-        return None
+        pixmap = load_raw_preview_pixmap(file_path, max_size=1024)
+        return pixmap if pixmap is not None and not pixmap.isNull() else None
     
     def _get_gallery_pixmap(self, file_path):
         """Get pixmap for gallery view, loading if necessary - optimized for performance"""
@@ -19351,9 +19199,14 @@ class RAWImageViewer(QMainWindow):
         else:
             _share_log(logging.INFO, "share menu: %d service(s)", len(visible))
         if not visible:
+            self.status_bar.showMessage(
+                "No share services available for this file — use Finder → Share",
+                5000,
+            )
             return False
 
         menu = QMenu(self)
+        menu.setWindowFlag(Qt.WindowType.Popup, True)
         for svc in visible:
             try:
                 title = str(svc.title() or "Share").strip()
@@ -19373,10 +19226,13 @@ class RAWImageViewer(QMainWindow):
             self.activateWindow()
         except Exception:
             pass
+        _activate_macos_foreground_for_share()
         if btn is not None and btn.isVisible():
-            menu.popup(btn.mapToGlobal(QPoint(0, btn.height())))
+            pos = btn.mapToGlobal(QPoint(0, btn.height()))
         else:
-            menu.exec(QCursor.pos())
+            pos = QCursor.pos()
+        # exec (not popup): popup often fails to appear above frameless Qt6 windows on macOS.
+        menu.exec(pos)
         return True
 
     def _share_macos_picker_ui_for_url(self, urls) -> None:
@@ -19555,7 +19411,10 @@ class RAWImageViewer(QMainWindow):
 
         self._macos_cleanup_share_temp()
         if paths:
-            self._copy_current_file_path_to_clipboard()
+            if len(paths) == 1:
+                self._copy_file_path_to_clipboard(paths[0])
+            else:
+                self._copy_paths_to_clipboard(paths)
         self.status_bar.showMessage("Share unavailable — path copied to clipboard", 4000)
 
     def _share_macos_auto_menu_fallback(self, paths: List[str]) -> None:
@@ -21264,32 +21123,22 @@ class RAWImageViewer(QMainWindow):
                     logger = logging.getLogger(__name__)
                     logger.debug(f"Failed to start pixmap converter for {next_file}: {e}")
             
-            # If we don't have full image yet, start processing it in background
+            # If we don't have full image yet, preload via ImageLoadManager (same pipeline as navigation)
             elif cached_image is None:
                 try:
-                    # Use RAWProcessor (v0.5 style) to preload full image for consistency
-                    # Determine if this is a RAW file
-                    raw_extensions = {'.cr2', '.cr3', '.nef', '.arw', '.dng', '.orf', '.rw2', 
-                                     '.pef', '.srw', '.x3f', '.raf', '.3fr', '.fff', '.iiq', 
-                                     '.cap', '.erf', '.mef', '.mos', '.nrw', '.rwl', '.srf'}
-                    file_ext = os.path.splitext(next_file)[1].lower()
-                    is_raw = file_ext in raw_extensions
-                    
-                    preload_processor = RAWProcessor(next_file, is_raw=is_raw, use_full_resolution=False)
-                    preload_processor.image_processed.connect(
-                        lambda img, fp=next_file: self._on_preloaded_image_ready(fp, img))
-                    preload_processor.error_occurred.connect(
-                        lambda err, fp=next_file: self._on_preload_error(fp, err))
-                    preload_processor.start()
-                    
-                    # Store reference to prevent garbage collection
-                    if not hasattr(self, '_preload_processors'):
-                        self._preload_processors = []
-                    self._preload_processors.append(preload_processor)
+                    mgr = getattr(self, "image_manager", None)
+                    if mgr is not None:
+                        mgr.load_image(
+                            file_path=next_file,
+                            priority=Priority.PRELOAD_NEXT,
+                            cancel_existing=False,
+                            use_full_resolution=False,
+                            stages={"full"},
+                        )
                 except Exception as e:
                     import logging
                     logger = logging.getLogger(__name__)
-                    logger.debug(f"Failed to start preload processor for {next_file}: {e}")
+                    logger.debug(f"Failed to queue ILM preload for {next_file}: {e}")
         except Exception as e:
             import logging
             logger = logging.getLogger(__name__)
@@ -21587,11 +21436,8 @@ class RAWImageViewer(QMainWindow):
                                          bytes_per_line, q_format)
                         pixmap = QPixmap.fromImage(q_image)
                         
-                        # CRITICAL: Apply orientation correction to pixmap before caching
-                        # This ensures cached pixmaps have correct orientation
-                        orientation = self.get_orientation_from_exif(self.current_file_path)
-                        logger.info(f"[PROCESS] Applying orientation correction to full resolution pixmap: {orientation}")
-                        pixmap = self.apply_orientation_to_pixmap(pixmap, orientation)
+                        # RAWProcessor already oriented rgb_image; do not rotate again
+                        self._orientation_already_applied = True
                         
                         self.current_pixmap = pixmap
                         
@@ -21638,14 +21484,8 @@ class RAWImageViewer(QMainWindow):
                     # Use display_pixmap to handle zoom restoration if needed
                     self.display_pixmap(pixmap)
                     
-                    # PERFORMANCE FIX: Start preloading after image is displayed (matches RAWviewer-1.0 behavior)
-                    # This reduces resource competition with current image loading
+                    # Preload handled by _start_preloading() → ImageLoadManager
                     self._start_preloading()
-                    
-                    # Start aggressive preloading: pre-process next image's full version in background
-                    # This ensures next image is ready when user navigates
-                    from PyQt6.QtCore import QTimer
-                    QTimer.singleShot(100, lambda: self._preload_next_image_full())
                     
                     # Calculate total time from navigation to display
                     # Update status bar to show original dimensions from cache
@@ -25888,9 +25728,17 @@ def main():
 
     # Packaged or installed app: enable semantic search by default (dev uses launch_dev.sh / run_debug.bat).
     # Lite builds bake PROFILE=lite and skip AI/face via rawviewer_profile defaults.
-    from rawviewer_profile import apply_profile_runtime_defaults, is_lite_build
+    from rawviewer_profile import (
+        apply_memory_tier_defaults,
+        apply_profile_runtime_defaults,
+        is_lite_build,
+        memory_tier_startup_summary,
+    )
 
     apply_profile_runtime_defaults()
+    tier = apply_memory_tier_defaults()
+    if tier != "disabled":
+        safe_print(f"[PROFILE] {memory_tier_startup_summary()}", flush=True)
 
     # On Windows, the installed app runs inside a Pixi virtual environment (so sys.frozen is False),
     # but we can detect it by checking if "_internal/pixi/pixi.exe" exists in the root directory.
@@ -26176,6 +26024,15 @@ if __name__ == '__main__' and _IS_GUI_MAIN_PROCESS:
     safe_print("=" * 80, flush=True)
     safe_print("RAWviewer Starting...", flush=True)
     safe_print("=" * 80, flush=True)
+
+    try:
+        from rawviewer_profile import apply_runtime_defaults, memory_tier_startup_summary
+
+        tier = apply_runtime_defaults()
+        if tier != "disabled":
+            safe_print(f"[PROFILE] {memory_tier_startup_summary()}", flush=True)
+    except Exception:
+        pass
     
     # Setup logging before anything else
     try:

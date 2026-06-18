@@ -42,6 +42,7 @@ except Exception:
 ProgressCallback = Optional[Callable[[int, int, str], None]]
 
 _YUNET_INFER_LOCK = threading.Lock()
+_COREML_PREDICTION_LOCK = threading.Lock()
 _INDEX_THREAD_LOCAL = threading.local()
 _YUNET_SINGLETON = None
 _YUNET_SINGLETON_MODEL_PATH = ""
@@ -141,6 +142,53 @@ def semantic_batch_tune_sample_count() -> int:
     return max(8, min(v, 128))
 
 
+def semantic_coreml_tune_sample_count() -> int:
+    """Core ML encodes serially — keep auto-tune short so indexing does not look stuck."""
+    raw = os.environ.get("RAWVIEWER_SEMANTIC_COREML_TUNE_SAMPLES", "").strip()
+    if not raw:
+        return 24
+    try:
+        v = int(raw)
+    except Exception:
+        v = 24
+    return max(8, min(v, 48))
+
+
+def semantic_coreml_batch_candidates() -> List[int]:
+    """Chunk sizes to benchmark for Core ML (parallel prep only; inference is per-image)."""
+    raw = os.environ.get("RAWVIEWER_SEMANTIC_COREML_CHUNK_CANDIDATES", "").strip()
+    cap = min(semantic_batch_max(), 32)
+    if raw:
+        out: List[int] = []
+        for item in raw.split(","):
+            item = item.strip()
+            if not item:
+                continue
+            try:
+                out.append(max(1, min(cap, int(item))))
+            except Exception:
+                continue
+        if out:
+            seen: set[int] = set()
+            uniq: List[int] = []
+            for v in sorted(out):
+                if v not in seen:
+                    seen.add(v)
+                    uniq.append(v)
+            return uniq
+    return [c for c in (4, 8, 16, 32) if c <= cap]
+
+
+def semantic_coreml_tune_early_stop_ratio() -> float:
+    """Stop trying larger chunks when throughput drops below best * ratio."""
+    raw = os.environ.get("RAWVIEWER_SEMANTIC_COREML_TUNE_EARLY_STOP", "0.85").strip()
+    try:
+        r = float(raw)
+    except Exception:
+        r = 0.85
+    return max(0.5, min(r, 1.0))
+
+
 def semantic_batch_tie_ratio() -> float:
     """On equal throughput (within this ratio of the best), prefer a larger batch."""
     raw = os.environ.get("RAWVIEWER_SEMANTIC_BATCH_TIE_RATIO", "0.92").strip()
@@ -159,13 +207,40 @@ def semantic_encode_prep_workers() -> int:
             return max(1, min(int(raw), 48))
         except Exception:
             pass
+    try:
+        from rawviewer_profile import classify_memory_tier, system_total_ram_gb
+
+        tier = classify_memory_tier(system_total_ram_gb())
+        tier_default = {
+            "low": 2,
+            "medium": 3,
+            "balanced": 3,
+            "high": 6,
+            "ultra": 8,
+        }.get(tier)
+        if tier_default is not None:
+            return tier_default
+    except Exception:
+        pass
     cpu = os.cpu_count() or 4
-    return max(4, min(24, cpu - 1))
+    return max(2, min(8, cpu // 2))
 
 
 def semantic_coreml_chunk_size() -> int:
-    """Paths per encode chunk on macOS Core ML (parallel prep, serial inference)."""
-    raw = os.environ.get("RAWVIEWER_SEMANTIC_COREML_CHUNK", "8").strip()
+    """Fallback chunk when auto-tune is off (default 8)."""
+    forced = semantic_coreml_chunk_forced()
+    if forced is not None:
+        return forced
+    return 8
+
+
+def semantic_coreml_chunk_forced() -> Optional[int]:
+    """Explicit RAWVIEWER_SEMANTIC_COREML_CHUNK only (unset = not forced)."""
+    if "RAWVIEWER_SEMANTIC_COREML_CHUNK" not in os.environ:
+        return None
+    raw = os.environ.get("RAWVIEWER_SEMANTIC_COREML_CHUNK", "").strip()
+    if not raw:
+        return None
     try:
         v = int(raw)
     except Exception:
@@ -206,7 +281,7 @@ def semantic_batch_candidates() -> List[int]:
 
 
 # Bump when auto-tune defaults/logic change so ~/.rawviewer_cache picks are refreshed.
-SEMANTIC_BATCH_TUNE_CACHE_VERSION = "v4"
+SEMANTIC_BATCH_TUNE_CACHE_VERSION = "v6"
 
 
 def _thumbnail_jpeg_bytes(arr: np.ndarray, quality: int = 85) -> bytes:
@@ -237,7 +312,7 @@ def _maybe_persist_index_thumbnail(file_path: str, im: Image.Image) -> None:
 
 def _prep_mobileclip_image_chw_resized(file_path: str, size: tuple[int, int] = (256, 256)) -> np.ndarray:
     """Load, resize to size (width, height), and return NCHW float tensor slice for one image."""
-    im = _load_index_source_image(file_path, max_size=1024)
+    im = _load_index_source_image(file_path, max_size=1024, qt_decode=False)
     _maybe_persist_index_thumbnail(file_path, im)
     im = im.resize(size, Image.Resampling.BICUBIC)
     rgb = np.asarray(im.convert("RGB"), dtype=np.float32) / 255.0
@@ -942,6 +1017,7 @@ class MobileCLIPCoreMLBackend:
         self._CoreML = None
         self._Foundation = None
         self._Quartz = None
+        self._objc = None
 
     @classmethod
     def _find_bundle_basenames(cls, model_dir: str) -> tuple[str, str] | None:
@@ -1129,57 +1205,63 @@ class MobileCLIPCoreMLBackend:
         import CoreML
         import Foundation
         import Quartz
+        import objc
 
         self._CoreML = CoreML
         self._Foundation = Foundation
         self._Quartz = Quartz
+        self._objc = objc
 
-        def _load_one(path: str):
-            url = Foundation.NSURL.fileURLWithPath_(path)
-            
-            # Persistent cache for compiled models to avoid O(seconds) re-compilation
-            cache_dir = os.path.expanduser("~/.rawviewer_cache/compiled_models")
-            os.makedirs(cache_dir, exist_ok=True)
-            
-            try:
-                st = os.stat(path)
-                mtime = int(st.st_mtime)
-            except Exception:
-                mtime = 0
-            
-            h = hashlib.md5(f"{path}_{mtime}".encode()).hexdigest()
-            compiled_path = os.path.join(cache_dir, f"{os.path.basename(path)}_{h}.mlmodelc")
-            compiled_url = Foundation.NSURL.fileURLWithPath_(compiled_path)
-            
-            if not os.path.exists(compiled_path):
-                tmp_url, compile_error = CoreML.MLModel.compileModelAtURL_error_(url, None)
-                if compile_error is not None or tmp_url is None:
-                    raise RuntimeError(f"Failed to compile Core ML model: {compile_error}")
+        with _COREML_PREDICTION_LOCK:
+            if self._image_model is not None and self._text_model is not None:
+                return
 
-                mgr = Foundation.NSFileManager.defaultManager()
-                if os.path.exists(compiled_path):
-                    mgr.removeItemAtURL_error_(compiled_url, None)
+            def _load_one(path: str):
+                url = Foundation.NSURL.fileURLWithPath_(path)
+                
+                # Persistent cache for compiled models to avoid O(seconds) re-compilation
+                cache_dir = os.path.expanduser("~/.rawviewer_cache/compiled_models")
+                os.makedirs(cache_dir, exist_ok=True)
+                
+                try:
+                    st = os.stat(path)
+                    mtime = int(st.st_mtime)
+                except Exception:
+                    mtime = 0
+                
+                h = hashlib.md5(f"{path}_{mtime}".encode()).hexdigest()
+                compiled_path = os.path.join(cache_dir, f"{os.path.basename(path)}_{h}.mlmodelc")
+                compiled_url = Foundation.NSURL.fileURLWithPath_(compiled_path)
+                
+                if not os.path.exists(compiled_path):
+                    tmp_url, compile_error = CoreML.MLModel.compileModelAtURL_error_(url, None)
+                    if compile_error is not None or tmp_url is None:
+                        raise RuntimeError(f"Failed to compile Core ML model: {compile_error}")
 
-                success, move_error = mgr.moveItemAtURL_toURL_error_(tmp_url, compiled_url, None)
-                if not success:
-                    compiled_url = tmp_url
+                    mgr = Foundation.NSFileManager.defaultManager()
+                    if os.path.exists(compiled_path):
+                        mgr.removeItemAtURL_error_(compiled_url, None)
 
-            config = CoreML.MLModelConfiguration.alloc().init()
-            try:
-                config.setComputeUnits_(_coreml_compute_units())
-            except Exception:
-                pass
-            model, load_error = CoreML.MLModel.modelWithContentsOfURL_configuration_error_(
-                compiled_url, config, None
-            )
-            if load_error is not None or model is None:
-                model, load_error = CoreML.MLModel.modelWithContentsOfURL_error_(compiled_url, None)
-            if load_error is not None or model is None:
-                raise RuntimeError(f"Failed to load Core ML model: {load_error}")
-            return model
+                    success, move_error = mgr.moveItemAtURL_toURL_error_(tmp_url, compiled_url, None)
+                    if not success:
+                        compiled_url = tmp_url
 
-        self._image_model = _load_one(self.image_model_path)
-        self._text_model = _load_one(self.text_model_path)
+                config = CoreML.MLModelConfiguration.alloc().init()
+                try:
+                    config.setComputeUnits_(_coreml_compute_units())
+                except Exception:
+                    pass
+                model, load_error = CoreML.MLModel.modelWithContentsOfURL_configuration_error_(
+                    compiled_url, config, None
+                )
+                if load_error is not None or model is None:
+                    model, load_error = CoreML.MLModel.modelWithContentsOfURL_error_(compiled_url, None)
+                if load_error is not None or model is None:
+                    raise RuntimeError(f"Failed to load Core ML model: {load_error}")
+                return model
+
+            self._image_model = _load_one(self.image_model_path)
+            self._text_model = _load_one(self.text_model_path)
 
     @staticmethod
     def _native_feature_name(model, direction: str) -> str:
@@ -1210,21 +1292,26 @@ class MobileCLIPCoreMLBackend:
     def encode_text(self, text: str) -> np.ndarray:
         self._load_models()
         CoreML = self._CoreML
-        tokenizer = self._ensure_tokenizer()
-        tokens = np.asarray([tokenizer.encode_for_clip(text)], dtype=np.int32)
-        input_name = self._native_feature_name(self._text_model, "input")
-        output_name = self._native_feature_name(self._text_model, "output")
-        multi_array = self._int32_multi_array(tokens.reshape(-1))
-        feature = CoreML.MLFeatureValue.featureValueWithMultiArray_(multi_array)
-        provider, err = CoreML.MLDictionaryFeatureProvider.alloc().initWithDictionary_error_(
-            {input_name: feature}, None
-        )
-        if err is not None or provider is None:
-            raise RuntimeError(f"Failed to create Core ML text input: {err}")
-        out, err = self._text_model.predictionFromFeatures_error_(provider, None)
-        if err is not None or out is None:
-            raise RuntimeError(f"MobileCLIP text prediction failed: {err}")
-        return self._normalize(self._multi_array_to_numpy(out.featureValueForName_(output_name).multiArrayValue()))
+        Foundation = self._Foundation
+        objc = self._objc
+        with objc.autorelease_pool():
+            tokenizer = self._ensure_tokenizer()
+            tokens = np.asarray([tokenizer.encode_for_clip(text)], dtype=np.int32)
+            input_name = self._native_feature_name(self._text_model, "input")
+            output_name = self._native_feature_name(self._text_model, "output")
+            multi_array = self._int32_multi_array(tokens.reshape(-1))
+            feature = CoreML.MLFeatureValue.featureValueWithMultiArray_(multi_array)
+            provider, err = CoreML.MLDictionaryFeatureProvider.alloc().initWithDictionary_error_(
+                {input_name: feature}, None
+            )
+            if err is not None or provider is None:
+                raise RuntimeError(f"Failed to create Core ML text input: {err}")
+            with _COREML_PREDICTION_LOCK:
+                out, err = self._text_model.predictionFromFeatures_error_(provider, None)
+            if err is not None or out is None:
+                raise RuntimeError(f"MobileCLIP text prediction failed: {err}")
+            numpy_arr = self._multi_array_to_numpy(out.featureValueForName_(output_name).multiArrayValue())
+        return self._normalize(numpy_arr)
 
     def _float32_multi_array_nchw(self, tensor_nchw: np.ndarray):
         CoreML = self._CoreML
@@ -1241,10 +1328,13 @@ class MobileCLIPCoreMLBackend:
 
     def encode_image(self, file_path: str) -> np.ndarray:
         self._load_models()
-        im = _load_index_source_image(file_path, max_size=1024).resize(
-            (256, 256), Image.Resampling.BICUBIC
-        )
-        return self._encode_pil_image(im)
+        Foundation = self._Foundation
+        objc = self._objc
+        with objc.autorelease_pool():
+            im = _load_index_source_image(file_path, max_size=1024, qt_decode=False).resize(
+                (256, 256), Image.Resampling.BICUBIC
+            )
+            return self._encode_pil_image(im)
 
     def encode_images(self, file_paths: Sequence[str]) -> List[np.ndarray]:
         """Parallel load/resize, then serial Core ML inference (I/O bound on large albums)."""
@@ -1258,7 +1348,7 @@ class MobileCLIPCoreMLBackend:
         workers = semantic_encode_prep_workers()
 
         def _prep(path: str) -> Image.Image:
-            return _load_index_source_image(path, max_size=1024).resize(
+            return _load_index_source_image(path, max_size=1024, qt_decode=False).resize(
                 (256, 256), Image.Resampling.BICUBIC
             )
 
@@ -1273,43 +1363,48 @@ class MobileCLIPCoreMLBackend:
 
     def _encode_pil_image(self, im: Image.Image) -> np.ndarray:
         CoreML = self._CoreML
-        desc = self._image_model.modelDescription()
-        input_name = self._native_feature_name(self._image_model, "input")
-        output_name = self._native_feature_name(self._image_model, "output")
-        by_name = desc.inputDescriptionsByName()
-        feature_desc = by_name.objectForKey_(input_name) if by_name is not None else None
-        if feature_desc is None and by_name is not None:
-            for key in by_name:
-                if str(key) == str(input_name):
-                    feature_desc = by_name.objectForKey_(key)
-                    break
-        if feature_desc is None:
-            raise RuntimeError("Core ML image model has no input description")
-        in_type = int(feature_desc.type())
+        Foundation = self._Foundation
+        objc = self._objc
+        with objc.autorelease_pool():
+            desc = self._image_model.modelDescription()
+            input_name = self._native_feature_name(self._image_model, "input")
+            output_name = self._native_feature_name(self._image_model, "output")
+            by_name = desc.inputDescriptionsByName()
+            feature_desc = by_name.objectForKey_(input_name) if by_name is not None else None
+            if feature_desc is None and by_name is not None:
+                for key in by_name:
+                    if str(key) == str(input_name):
+                        feature_desc = by_name.objectForKey_(key)
+                        break
+            if feature_desc is None:
+                raise RuntimeError("Core ML image model has no input description")
+            in_type = int(feature_desc.type())
 
-        feature = None
-        if in_type == CoreML.MLFeatureTypeMultiArray:
-            rgb = np.asarray(im.convert("RGB"), dtype=np.float32) / 255.0
-            nchw = np.transpose(rgb, (2, 0, 1))[np.newaxis, ...]
-            multi = self._float32_multi_array_nchw(nchw)
-            feature = CoreML.MLFeatureValue.featureValueWithMultiArray_(multi)
-        elif in_type == CoreML.MLFeatureTypeImage:
-            pixel_buffer = self._image_to_pixel_buffer(im)
-            feature = CoreML.MLFeatureValue.alloc().initWithValue_type_(
-                pixel_buffer, CoreML.MLFeatureTypeImage
+            feature = None
+            if in_type == CoreML.MLFeatureTypeMultiArray:
+                rgb = np.asarray(im.convert("RGB"), dtype=np.float32) / 255.0
+                nchw = np.transpose(rgb, (2, 0, 1))[np.newaxis, ...]
+                multi = self._float32_multi_array_nchw(nchw)
+                feature = CoreML.MLFeatureValue.featureValueWithMultiArray_(multi)
+            elif in_type == CoreML.MLFeatureTypeImage:
+                pixel_buffer = self._image_to_pixel_buffer(im)
+                feature = CoreML.MLFeatureValue.alloc().initWithValue_type_(
+                    pixel_buffer, CoreML.MLFeatureTypeImage
+                )
+            else:
+                raise RuntimeError(f"Unsupported Core ML image encoder input type: {in_type}")
+
+            provider, err = CoreML.MLDictionaryFeatureProvider.alloc().initWithDictionary_error_(
+                {input_name: feature}, None
             )
-        else:
-            raise RuntimeError(f"Unsupported Core ML image encoder input type: {in_type}")
-
-        provider, err = CoreML.MLDictionaryFeatureProvider.alloc().initWithDictionary_error_(
-            {input_name: feature}, None
-        )
-        if err is not None or provider is None:
-            raise RuntimeError(f"Failed to create Core ML image input: {err}")
-        out, err = self._image_model.predictionFromFeatures_error_(provider, None)
-        if err is not None or out is None:
-            raise RuntimeError(f"MobileCLIP image prediction failed: {err}")
-        return self._normalize(self._multi_array_to_numpy(out.featureValueForName_(output_name).multiArrayValue()))
+            if err is not None or provider is None:
+                raise RuntimeError(f"Failed to create Core ML image input: {err}")
+            with _COREML_PREDICTION_LOCK:
+                out, err = self._image_model.predictionFromFeatures_error_(provider, None)
+            if err is not None or out is None:
+                raise RuntimeError(f"MobileCLIP image prediction failed: {err}")
+            numpy_arr = self._multi_array_to_numpy(out.featureValueForName_(output_name).multiArrayValue())
+        return self._normalize(numpy_arr)
 
     def _int32_multi_array(self, values: np.ndarray):
         CoreML = self._CoreML
@@ -1362,6 +1457,17 @@ class MobileCLIPCoreMLBackend:
         finally:
             Quartz.CVPixelBufferUnlockBaseAddress(pixel_buffer, 0)
         return pixel_buffer
+
+    def release_gpu_sessions(self) -> None:
+        """Drop Core ML models and sessions to free VRAM/system memory."""
+        self._image_model = None
+        self._text_model = None
+        self._CoreML = None
+        self._Foundation = None
+        self._Quartz = None
+        self._objc = None
+        import gc
+        gc.collect()
 
 
 class MobileCLIPONNXBackend:
@@ -2532,7 +2638,7 @@ class SemanticImageIndex:
             im = None
             if include_face:
                 try:
-                    im = _load_index_source_image(file_path, max_size=1280)
+                    im = _load_index_source_image(file_path, max_size=1280, qt_decode=False)
                 except Exception:
                     pass
 
@@ -2600,11 +2706,47 @@ class SemanticImageIndex:
                 result["width"] = int(result["width"] or w)
                 result["height"] = int(result["height"] or h)
                 
-            result["orientation"] = self._tag_int(
-                tags,
-                "EXIF Orientation",
-                "Image Orientation"
-            ) or 1
+            # Robust orientation extraction logic
+            orientation = 1
+            for key in ("Exif.Image.Orientation", "Exif.Photo.Orientation", "Image Orientation", "EXIF Orientation"):
+                val = tags.get(key)
+                if val is not None:
+                    try:
+                        vals = getattr(val, "values", val)
+                        if isinstance(vals, (list, tuple)) and vals:
+                            o = vals[0]
+                        else:
+                            o = vals
+                        if isinstance(o, int) and 1 <= o <= 8:
+                            orientation = o
+                            break
+                    except Exception:
+                        pass
+                    
+                    orientation_str = str(val).strip()
+                    orientation_map = {
+                        'Horizontal (normal)': 1,
+                        'Mirrored horizontal': 2,
+                        'Rotated 180': 3,
+                        'Mirrored vertical': 4,
+                        'Mirrored horizontal then rotated 90 CCW': 5,
+                        'Rotated 90 CW': 6,
+                        'Mirrored horizontal then rotated 90 CW': 7,
+                        'Rotated 90 CCW': 8
+                    }
+                    if orientation_str in orientation_map:
+                        orientation = orientation_map[orientation_str]
+                        break
+                    
+                    try:
+                        first = orientation_str.split()[0]
+                        o = int(first)
+                        if 1 <= o <= 8:
+                            orientation = o
+                            break
+                    except Exception:
+                        pass
+            result["orientation"] = orientation
             
             # GPS Extraction
             lat = tags.get("GPS GPSLatitude") or tags.get("EXIF GPSLatitude") or tags.get("GPSLatitude")
@@ -2647,21 +2789,10 @@ class SemanticImageIndex:
             
             # Automatically backfill and populate the main gallery's PersistentEXIFCache/ImageCache!
             try:
-                orientation = 1
-                for key in ("Exif.Image.Orientation", "Exif.Photo.Orientation", "Image Orientation", "EXIF Orientation"):
-                    val = tags.get(key)
-                    if val is not None:
-                        try:
-                            s = str(val).strip()
-                            first = s.split()[0]
-                            o = int(first)
-                            if 1 <= o <= 8:
-                                orientation = o
-                                break
-                        except Exception:
-                            pass
+                orientation = result.get("orientation") or 1
 
                 from image_cache import get_image_cache
+                from enhanced_raw_processor import RAW_EXIF_SENSOR_META_VER
 
                 t_cache = time.time()
                 cache = get_image_cache()
@@ -2672,6 +2803,7 @@ class SemanticImageIndex:
                     "capture_time": str(result["capture_time"]),
                     "original_width": int(result["width"] or 0),
                     "original_height": int(result["height"] or 0),
+                    "raw_exif_sensor_meta_ver": RAW_EXIF_SENSOR_META_VER,
                     "exif_data": {
                         "original_width": int(result["width"] or 0),
                         "original_height": int(result["height"] or 0),
@@ -2681,6 +2813,7 @@ class SemanticImageIndex:
                         "camera_model": str(result["camera_model"]),
                         "lens_model": str(result["lens_model"]),
                         "iso": int(result["iso"] or 0),
+                        "raw_exif_sensor_meta_ver": RAW_EXIF_SENSOR_META_VER,
                     }
                 }
                 if file_stat is not None:
@@ -2725,7 +2858,7 @@ class SemanticImageIndex:
             try:
                 url = Foundation.NSURL.fileURLWithPath_(path)
                 request = Vision.VNDetectFaceRectanglesRequest.alloc().init()
-                handler = Vision.VNImageRequestHandler.alloc().initWithURL_options_(url, {})
+                handler = Vision.VNImageRequestHandler.alloc().initWithURL_options_(url, None)
                 ok, err = handler.performRequests_error_([request], None)
                 if not ok or err is not None:
                     return None
@@ -2739,7 +2872,7 @@ class SemanticImageIndex:
                 im = preloaded_im
             else:
                 im = _load_index_source_image(
-                    file_path, max_size=SemanticImageIndex.face_detection_max_edge()
+                    file_path, max_size=SemanticImageIndex.face_detection_max_edge(), qt_decode=False
                 )
             
             if sys.platform != "darwin":
@@ -2923,7 +3056,7 @@ class SemanticImageIndex:
             return backend.encode_image(file_path)
         model = self._ensure_model()
         try:
-            im = _load_index_source_image(file_path, max_size=1024)
+            im = _load_index_source_image(file_path, max_size=1024, qt_decode=False)
             emb = model.encode(im, normalize_embeddings=True)
             return np.asarray(emb, dtype=np.float32)
         except Exception as exc:
@@ -2972,7 +3105,13 @@ class SemanticImageIndex:
         )
 
     def _auto_select_semantic_batch_size(
-        self, pending_for_semantic: Sequence[tuple[str, os.stat_result]], accel_detail: str = ""
+        self,
+        pending_for_semantic: Sequence[tuple[str, os.stat_result]],
+        accel_detail: str = "",
+        progress_callback: ProgressCallback = None,
+        *,
+        progress_album_total: int = 0,
+        progress_indexed_base: int = 0,
     ) -> int:
         import logging
 
@@ -2983,47 +3122,107 @@ class SemanticImageIndex:
         forced = semantic_batch_size_forced()
         if forced is not None:
             return forced
-        if not semantic_batch_auto_enabled():
-            return semantic_batch_size()
 
-        candidates = semantic_batch_candidates()
+        is_coreml = False
         if self.model_name.startswith("mobileclip-"):
             backend = self._mobileclip_backend or resolve_mobileclip_backend()
             self._mobileclip_backend = backend
-            if isinstance(backend, MobileCLIPCoreMLBackend):
+            is_coreml = isinstance(backend, MobileCLIPCoreMLBackend)
+            if is_coreml:
+                coreml_forced = semantic_coreml_chunk_forced()
+                if coreml_forced is not None:
+                    logger.info(
+                        "[INDEX][SPEED] Core ML encode chunk (forced): %d",
+                        coreml_forced,
+                    )
+                    return min(total, coreml_forced)
+                # By default, do not auto-tune Core ML on macOS to save startup time
+                # and avoid memory spikes. Use the chunk size from config directly.
+                if not os.environ.get("RAWVIEWER_SEMANTIC_COREML_TUNE", "").strip().lower() in ("1", "true", "yes", "on"):
+                    chunk = semantic_coreml_chunk_size()
+                    logger.info(
+                        "[INDEX][SPEED] Core ML encode chunk size: %d (auto-tune off by default)",
+                        chunk,
+                    )
+                    return min(total, chunk)
+            elif not isinstance(backend, MobileCLIPONNXBackend):
+                return 1
+
+        if not semantic_batch_auto_enabled():
+            if is_coreml:
                 chunk = semantic_coreml_chunk_size()
                 logger.info(
-                    "[INDEX][SPEED] Core ML encode chunk size: %d (parallel prep)",
+                    "[INDEX][SPEED] Core ML encode chunk size: %d (auto-tune off)",
                     chunk,
                 )
                 return min(total, chunk)
-            if not isinstance(backend, MobileCLIPONNXBackend):
-                return 1
+            return semantic_batch_size()
+
+        candidates = (
+            semantic_coreml_batch_candidates()
+            if is_coreml
+            else semantic_batch_candidates()
+        )
+        tune_label = "Core ML encode chunk" if is_coreml else "Semantic batch"
 
         cache_key = self._semantic_batch_cache_key(accel_detail)
         cache = _load_semantic_batch_cache()
         cached = cache.get(cache_key)
         if cached in candidates:
-            logger.info("[INDEX][SPEED] Semantic batch auto cached: %d", int(cached))
+            logger.info(
+                "[INDEX][SPEED] %s auto cached: %d",
+                tune_label,
+                int(cached),
+            )
             return int(cached)
 
-        max_cand = max(candidates)
-        sample_n = min(
-            total,
-            max(semantic_batch_tune_sample_count(), max_cand),
-        )
+        if is_coreml:
+            sample_n = min(total, semantic_coreml_tune_sample_count())
+        else:
+            max_cand = max(candidates)
+            sample_n = min(
+                total,
+                max(semantic_batch_tune_sample_count(), max_cand),
+            )
         sample_paths = [cp for cp, _ in list(pending_for_semantic)[:sample_n]]
-        best_batch = 1
+        best_batch = candidates[0] if candidates else 1
         best_tput = 0.0
         tie_ratio = semantic_batch_tie_ratio()
+        early_stop_ratio = semantic_coreml_tune_early_stop_ratio() if is_coreml else 0.0
         logger.info(
-            "[INDEX][SPEED] Auto-tuning semantic batch size on %d samples; "
-            "candidates=%s (tie_ratio=%.2f)",
+            "[INDEX][SPEED] Auto-tuning %s on %d samples; candidates=%s (tie_ratio=%.2f)",
+            tune_label.lower(),
             sample_n,
             candidates,
             tie_ratio,
         )
-        for cand in candidates:
+        if progress_callback:
+            progress_callback(
+                progress_indexed_base,
+                progress_album_total or total,
+                format_index_progress("Semantic", progress_indexed_base, progress_album_total or total)
+                if progress_album_total > 0
+                else f"Semantic: tuning 0/{len(candidates)}",
+            )
+
+        for ci, cand in enumerate(candidates):
+            logger.info(
+                "[INDEX][SPEED] Testing %s candidate %d/%d (size=%d)...",
+                tune_label.lower(),
+                ci + 1,
+                len(candidates),
+                cand,
+            )
+            if progress_callback:
+                tune_msg = f"Semantic: tuning {ci + 1}/{len(candidates)}"
+                if progress_album_total > 0:
+                    progress_callback(
+                        progress_indexed_base,
+                        progress_album_total,
+                        tune_msg,
+                    )
+                else:
+                    progress_callback(ci + 1, len(candidates), tune_msg)
             t0 = time.time()
             ok = True
             try:
@@ -3040,10 +3239,11 @@ class SemanticImageIndex:
             elapsed = max(1e-9, time.time() - t0)
             tput = (sample_n / elapsed) if ok else 0.0
             logger.info(
-                "[INDEX][SPEED] Batch candidate %d -> %.2f img/s (%s)",
+                "[INDEX][SPEED] Batch candidate %d -> %.2f img/s (%s, %.1fs)",
                 cand,
                 tput,
                 "ok" if ok else "failed",
+                elapsed,
             )
             if ok:
                 if tput > best_tput:
@@ -3057,13 +3257,31 @@ class SemanticImageIndex:
                 ):
                     # True tie only: never prefer a larger batch when it is slower.
                     best_batch = cand
+                elif (
+                    is_coreml
+                    and early_stop_ratio > 0
+                    and best_tput > 0
+                    and tput < best_tput * early_stop_ratio
+                    and cand > best_batch
+                ):
+                    logger.info(
+                        "[INDEX][SPEED] Core ML tune early stop at size=%d "
+                        "(%.2f img/s vs best %d at %.2f img/s)",
+                        cand,
+                        tput,
+                        best_batch,
+                        best_tput,
+                    )
+                    break
 
         cache[cache_key] = int(best_batch)
         _save_semantic_batch_cache(cache)
         logger.info(
-            "[INDEX][SPEED] Auto-selected semantic batch size: %d (%.2f img/s on samples)",
+            "[INDEX][SPEED] Auto-selected %s size: %d (%.2f img/s on %d samples)",
+            tune_label.lower(),
             best_batch,
             best_tput,
+            sample_n,
         )
         return int(best_batch)
 
@@ -3086,8 +3304,16 @@ class SemanticImageIndex:
                 return max(1, min(16, int(raw)))
             except ValueError:
                 pass
+        try:
+            from rawviewer_profile import classify_memory_tier, system_total_ram_gb
+
+            tier = classify_memory_tier(system_total_ram_gb())
+            if tier in ("low", "medium", "balanced"):
+                return 2
+        except Exception:
+            pass
         cpu = os.cpu_count() or 4
-        return min(6, max(2, cpu - 1))
+        return min(4, max(2, cpu // 2))
 
     @staticmethod
     def _face_scan_inflight_chunk() -> int:
@@ -3267,27 +3493,42 @@ class SemanticImageIndex:
         )
         total = len(pending)
         warmed_base = progress_indexed_base + (len(paths) - len(pending)) * 0.1
+
+        def _thumb_progress_ui_count(done: int) -> int:
+            """User-visible thumbnail count (not album-weighted 10% slice)."""
+            return min(total, max(0, int(done)))
+
+        def _thumb_progress_message(done: int) -> str:
+            return format_index_progress(
+                "Preparing thumbnails", _thumb_progress_ui_count(done), total
+            )
+
+        def _emit_thumb_progress(done: int) -> None:
+            if not progress_callback:
+                return
+            ui_done = _thumb_progress_ui_count(done)
+            if progress_album_total > 0:
+                progress_callback(
+                    int(warmed_base + ui_done * 0.1),
+                    progress_album_total,
+                    _thumb_progress_message(done),
+                )
+            else:
+                progress_callback(ui_done, total, _thumb_progress_message(done))
+
+        def _should_emit_thumb_progress(done: int) -> bool:
+            if done <= 3 or done >= total:
+                return True
+            # ~1% steps, at least every 10 files (backend can finish >>10/s).
+            step = max(10, total // 100)
+            return done % step == 0
+
         if workers <= 1 or total < 4:
             for i, path in enumerate(pending, start=1):
                 if _warm_one(path):
                     warmed += 1
-                if progress_callback and (i <= 2 or i >= total or i % 25 == 0):
-                    if progress_album_total > 0:
-                        progress_callback(
-                            int(warmed_base + i * 0.1),
-                            progress_album_total,
-                            format_index_progress(
-                                "Preparing thumbnails",
-                                int(warmed_base + i * 0.1),
-                                progress_album_total,
-                            ),
-                        )
-                    else:
-                        progress_callback(
-                            i,
-                            total,
-                            format_index_progress("Preparing thumbnails", i, total),
-                        )
+                if _should_emit_thumb_progress(i):
+                    _emit_thumb_progress(i)
         else:
             completed = 0
             with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
@@ -3296,27 +3537,8 @@ class SemanticImageIndex:
                     completed += 1
                     if future.result():
                         warmed += 1
-                    if progress_callback and (
-                        completed <= 2 or completed >= total or completed % 25 == 0
-                    ):
-                        if progress_album_total > 0:
-                            progress_callback(
-                                int(warmed_base + completed * 0.1),
-                                progress_album_total,
-                                format_index_progress(
-                                    "Preparing thumbnails",
-                                    int(warmed_base + completed * 0.1),
-                                    progress_album_total,
-                                ),
-                            )
-                        else:
-                            progress_callback(
-                                completed,
-                                total,
-                                format_index_progress(
-                                    "Preparing thumbnails", completed, total
-                                ),
-                            )
+                    if _should_emit_thumb_progress(completed):
+                        _emit_thumb_progress(completed)
         logger.info(
             "[INDEX] %s thumbnail warm-up done: %d/%d in %.2fs",
             purpose,
@@ -3810,6 +4032,10 @@ class SemanticImageIndex:
                         else:
                             failed += 1
                         
+                        if i % 100 == 0:
+                            import gc
+                            gc.collect()
+
                         if progress_callback and (i <= 2 or i >= total_extract or i % 10 == 0):
                             progress_callback(
                                 progress_indexed_base,
@@ -3911,6 +4137,9 @@ class SemanticImageIndex:
                     batch_size = self._auto_select_semantic_batch_size(
                         pending_for_semantic,
                         sem_accel_detail,
+                        progress_callback,
+                        progress_album_total=progress_album_total,
+                        progress_indexed_base=progress_indexed_base,
                     )
                     logger.info(
                         "[INDEX][SPEED] Semantic batch size: %d",
@@ -4054,6 +4283,8 @@ class SemanticImageIndex:
                                 elapsed_so_far,
                                 throughput_so_far,
                             )
+                        import gc
+                        gc.collect()
                     if batch_writes:
                         conn.commit()
                         batch_writes = 0

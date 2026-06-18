@@ -19,14 +19,15 @@ Environment toggles:
 
 import os
 
-from PyQt6.QtCore import Qt, QRect, QRectF, QPointF, pyqtSignal, QEvent
-from PyQt6.QtGui import QKeyEvent, QPixmap, QPainter, QColor, QPen
+from PyQt6.QtCore import Qt, QRect, QRectF, QPoint, QPointF, pyqtSignal, QEvent, QMimeData, QUrl, QEventLoop
+from PyQt6.QtGui import QKeyEvent, QPixmap, QPainter, QColor, QPen, QDrag
 from PyQt6.QtWidgets import (
     QGraphicsView,
     QGraphicsScene,
     QGraphicsPixmapItem,
     QGraphicsRectItem,
     QLabel,
+    QApplication,
 )
 
 from rawviewer_ui.composition_grid import CompositionGridGraphicsItem
@@ -356,9 +357,6 @@ class GpuImageView(QGraphicsView):
         self.scale(1.0, 1.0)
         
         # Ensure scrollbars are updated based on the new scale
-        from PyQt6.QtCore import QEventLoop
-        from PyQt6.QtWidgets import QApplication
-
         QApplication.processEvents(
             QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents
         )
@@ -403,9 +401,6 @@ class GpuImageView(QGraphicsView):
         self.scale(s, s)
         
         # Ensure scrollbars are updated based on the new scale
-        from PyQt6.QtCore import QEventLoop
-        from PyQt6.QtWidgets import QApplication
-
         QApplication.processEvents(
             QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents
         )

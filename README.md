@@ -17,7 +17,7 @@
 
 Official releases: [GitHub Releases](https://github.com/markyip/RAWviewer/releases/latest)
 
-**Contents:** [Choose your version](#choose-your-version) · [Download & install](#download--install) · [Using RAWviewer](#using-rawviewer) · [Troubleshooting](#something-not-working) · [For developers](#for-developers)
+**Contents:** [Choose your version](#choose-your-version) · [Download & install](#download--install) · [Using RAWviewer](#using-rawviewer) · [Troubleshooting](#something-not-working) · [Advanced reference](#advanced-reference) · [For developers](#for-developers)
 
 ---
 
@@ -85,6 +85,7 @@ To run from the extracted folder without installing: `bash remove_macos_quaranti
 | **macOS** | macOS 13 Ventura or newer |
 | **Disk (Lite)** | ~500 MB install + cache as you browse |
 | **Disk (Full)** | ~1.5 GB+ (includes AI models after first setup) |
+| **RAM** | 8 GB minimum; **16 GB+** recommended for **Full** + large folders (10k+ photos). RAWviewer tunes concurrency and cache from installed RAM at startup (see [Automatic memory tuning](#automatic-memory-tuning)). |
 | **GPS map** | Internet on first use per area (map tiles are cached locally) |
 
 ### Uninstall vs clear cache
@@ -177,6 +178,7 @@ Full search syntax, focus-overlay brands, and power-user options are in **[Advan
 | AI search missing after install (**Full**) | Open gallery **Search** → accept the download prompt |
 | RAWviewer not in Open with | Re-run the installer (repair), or reinstall |
 | Leftover cache after uninstall | Run **`uninstall.bat`** again, or delete `%USERPROFILE%\.rawviewer_cache` manually |
+| Out of memory during AI indexing | See [Automatic memory tuning](#automatic-memory-tuning); use **Lite** on 8 GB PCs or set `RAWVIEWER_MEMORY_TIER_AUTO=0` and lower workers manually |
 | Crash | Enable file logging with `RAWVIEWER_FILE_LOG=1`, then check the install folder |
 
 ### macOS
@@ -190,6 +192,7 @@ Full search syntax, focus-overlay brands, and power-user options are in **[Advan
 | Download failed (SSL / certificate error) | Update to **v2.4** or newer (bundles certifi). On a corporate VPN or proxy, add your organization’s root certificate to **Keychain Access** and set it to **Always Trust** |
 | Need to uninstall completely | Use **`uninstall_macos_app.sh`** or **`Uninstall RAWviewer.command`** from the release zip — not Trash alone |
 | Uninstall scripts missing | Re-download the release zip from [Releases](https://github.com/markyip/RAWviewer/releases/latest); scripts are inside the extracted folder |
+| macOS “out of memory” / heavy swap during indexing | See [Automatic memory tuning](#automatic-memory-tuning). On 8 GB Macs, prefer **Lite** or wait for indexing to finish before opening gallery on huge folders |
 
 More detail: [`scripts/Launch/README.md`](scripts/Launch/README.md)
 
@@ -218,6 +221,42 @@ Separate words with spaces. Use `key:value` filters:
 
 **Indexing:** On **Full** builds, semantic search and face counts run in the background on large folders (metadata + AI first, faces after). The gallery becomes searchable before face tagging finishes.
 
+### Automatic memory tuning
+
+On every launch, RAWviewer reads **installed system RAM** (not free RAM at that moment) and applies conservative defaults for load concurrency, preview cache, prefetch, and indexing — **only when you have not already set the same environment variables yourself**.
+
+| Tier | Installed RAM | Typical Mac | What changes (summary) |
+|------|---------------|-------------|-------------------------|
+| **low** | &lt; 10 GB | 8 GB MacBook Air | Face scan off during indexing; fewer parallel workers; smaller preview cache; less idle prefetch |
+| **medium** | 10–14 GB | 12 GB unified | Moderate limits on workers and cache |
+| **balanced** | 14–20 GB | 16 GB | Light tuning (default on many laptops) |
+| **high** | 20–28 GB | 24 GB | Slightly higher cache / worker caps |
+| **ultra** | ≥ 28 GB | 32 GB+ studio machines | Stock app defaults (no overrides) |
+
+**What you might notice**
+
+- Startup log (dev / Terminal): `[PROFILE] memory tier=balanced (16.0 GB RAM)`
+- A note file: `~/.rawviewer_cache/memory_tier.json` (tier, RAM, how many defaults were applied)
+- **Lite** builds still use Lite profile defaults first; RAM tier only fills in gaps
+- **Full** on an 8 GB Mac: semantic AI search can still run, but face indexing is disabled automatically to reduce memory pressure
+
+**Disable auto-tuning** (use only your own env vars or scripts):
+
+```bash
+export RAWVIEWER_MEMORY_TIER_AUTO=0
+```
+
+**Force a specific override** (wins over auto-tuning — examples for low-RAM machines):
+
+```bash
+export RAWVIEWER_ENABLE_FACE_SCAN=0
+export RAWVIEWER_SEMANTIC_PREP_WORKERS=2
+export RAWVIEWER_MEMORY_PREVIEW_MAX=1280
+export RAWVIEWER_IDLE_DISPLAY_PREFETCH=0
+```
+
+Semantic batch/chunk size for AI indexing is **auto-tuned separately** on first index pass (Core ML on macOS, ONNX on Windows); results are cached under `~/.rawviewer_cache/semantic_batch_tuning.json`.
+
 ### MobileCLIP models (Full — AI search)
 
 | Platform | When downloaded | Change variant (Windows) |
@@ -245,6 +284,8 @@ Requires **pyexiv2** for maker-note AF on RAW.
 
 | Variable | Effect |
 |----------|--------|
+| `RAWVIEWER_MEMORY_TIER_AUTO=1` | **Default.** Tune workers, cache, and prefetch from installed RAM at startup |
+| `RAWVIEWER_MEMORY_TIER_AUTO=0` | Disable RAM-tier defaults; only explicit env vars apply |
 | `RAWVIEWER_MOBILECLIP_VARIANT` | Windows ONNX model: `b` (default), `s0`, `s2`, `l14` |
 | `RAWVIEWER_GPU_VIEW=1` | GPU single-image viewport (OpenGL zoom/pan; on by default in release builds) |
 | `RAWVIEWER_GPU_VIEW=0` | Force legacy scroll-area single-image view |
@@ -253,6 +294,12 @@ Requires **pyexiv2** for maker-note AF on RAW.
 | `RAWVIEWER_SHARE_MENU=1` | macOS: Qt share menu (recommended) |
 | `RAWVIEWER_SHARE_TRY_NATIVE_PICKER=1` | macOS: try native share sheet first |
 | `RAWVIEWER_INDEX_DEFER_FACE_SCAN=1` | Defer face scan until after semantic index (default) |
+| `RAWVIEWER_SEMANTIC_PREP_WORKERS` | Parallel CPU workers before AI encode (RAM tier may set this) |
+| `RAWVIEWER_SEMANTIC_BATCH_AUTO=1` | Auto-tune AI batch/chunk size on index (default) |
+| `RAWVIEWER_SEMANTIC_BATCH_CANDIDATES` | Candidate batch sizes for auto-tune (default `8,16,32,64,128`) |
+| `RAWVIEWER_PREVIEW_CACHE_ITEMS` | Cap in-memory preview LRU count |
+| `RAWVIEWER_MEMORY_PREVIEW_MAX` | Max long edge for in-memory RAW/JPEG preview (pixels) |
+| `RAWVIEWER_IDLE_DISPLAY_PREFETCH=0` | Disable idle neighbor prefetch in single view |
 
 Full list and dev defaults: [`scripts/Launch/README.md`](scripts/Launch/README.md), [`docs/macos-sharing-v21-v22.md`](docs/macos-sharing-v21-v22.md).
 
@@ -338,7 +385,7 @@ scripts\Launch\bat\build_windows_lite.bat
 
 - **ImageLoadManager** — threaded load queue  
 - **UnifiedImageProcessor** — RAW/JPEG/TIFF via one path  
-- **Cache** — memory-first; optional disk cache via env  
+- **Cache** — memory-first; optional disk cache via env; **RAM-tier defaults** at startup (`rawviewer_profile.py`)
 - **Semantic index** — SQLite + local embeddings (Core ML on macOS, ONNX on Windows; Full builds only)
 
 ---

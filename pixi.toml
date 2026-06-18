@@ -55,6 +55,16 @@ comtypes = "*"
 # macOS EXIF (Exiv2). After `pixi install`, ensure native libs: brew install inih gettext
 [target.osx-arm64.pypi-dependencies]
 pyexiv2 = ">=2.15.4"
+pyobjc-framework-Cocoa = "*"
+pyobjc-framework-Quartz = "*"
+pyobjc-framework-CoreML = "*"
+pyobjc-framework-Vision = "*"
+scipy = "*"
 
 [target.osx-64.pypi-dependencies]
 pyexiv2 = ">=2.15.4"
+pyobjc-framework-Cocoa = "*"
+pyobjc-framework-Quartz = "*"
+pyobjc-framework-CoreML = "*"
+pyobjc-framework-Vision = "*"
+scipy = "*"
