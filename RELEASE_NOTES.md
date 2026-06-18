@@ -8,9 +8,16 @@ Version **2.4** uses **`build.py`** as the single source of truth: `VERSION` syn
 ### Highlights
 - **Lite profile**: Adaptive prefetch/cache, map disabled by default, smaller installers (map stack omitted).
 - **Composition grid**: **G** cycles Off → rule of thirds → diagonals → both → golden ratio.
+- **Drag out photos**: Drag the current image or gallery selection to the desktop, another folder, or another app (Explorer, Finder, Mail, Lightroom, etc.) — originals are copied as file URLs with a thumbnail preview while dragging.
 - **Reliability**: Display-tier preview failures automatically retry full decode; keyboard shortcut help is hover-only on **i**.
 - **Large-Folder Stability**: Optimized prefetch slot reservation under low capacity caps, debounced thumbnail error retries to prevent event loop storms, and quick recovery from EMFILE (too-many-open-files) pressure with a shorter 12-second cooldown and a minor background prefetch trickle.
 - **Cache Eviction**: Replaced the abrupt full clear of the embedded scan cache with a FIFO (first-in-first-out) eviction strategy to avoid duplicate file I/O in large folders.
+
+### 🖼️ Drag & drop
+- **Single-image view**: Click and drag the photo from the main viewer (fit-to-window) to drop the original file elsewhere.
+- **Gallery**: Drag a thumbnail to export one file; if that thumbnail is part of a multi-selection, **all selected photos** are dragged together.
+- **Filmstrip**: Drag the active strip thumbnail the same way.
+- **Drop in** (unchanged): Drag a folder or image onto the window to open it in RAWviewer.
 
 ### 📦 Install & uninstall
 - **Windows install**: Unified **`RAWviewer_Setup.exe`** — choose **Full (CUDA / DirectML)** or **Lite** in the wizard; launch **`RAWviewer.exe`** (not Setup) after install. Default folder: `%LOCALAPPDATA%\RAWviewer`.

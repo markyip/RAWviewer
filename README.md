@@ -4,10 +4,14 @@
   <img src="icons/appicon.ico" alt="RAWviewer Icon" width="256">
 </p>
 
-![Version](https://img.shields.io/badge/version-2.4-blue)
-![Downloads](https://img.shields.io/github/downloads/markyip/RAWviewer/total) 
-![License](https://img.shields.io/badge/license-MIT-green)
-[![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-Donate-orange?logo=buy-me-a-coffee)](https://www.buymeacoffee.com/markyip)
+<p align="center">
+  <img src="https://img.shields.io/badge/version-2.4-blue" alt="Version">
+  <img src="https://img.shields.io/github/downloads/markyip/RAWviewer/total" alt="Downloads">
+  <img src="https://img.shields.io/badge/license-MIT-green" alt="License">
+  <a href="https://www.buymeacoffee.com/markyip">
+    <img src="https://img.shields.io/badge/Buy%20Me%20a%20Coffee-Donate-orange?logo=buy-me-a-coffee" alt="Buy Me a Coffee">
+  </a>
+</p>
 
 **RAWviewer** is a fast photo viewer for **Windows and macOS**. Open a folder of RAW or JPEG files, check sharpness, search your shots, and cull rejects — **100% on your computer, no cloud upload.**
 
