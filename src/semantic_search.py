@@ -798,6 +798,18 @@ def _index_source_thumbnail_present(cache, file_path: str) -> bool:
     return False
 
 
+def _index_thumbnail_needs_warm(cache, file_path: str) -> bool:
+    """True when index tiers are missing or thumbnail pixels have wrong orientation."""
+    if not _index_source_thumbnail_present(cache, file_path):
+        return True
+    arr = _cached_index_source_array(cache, file_path)
+    if arr is None:
+        return True
+    from common_image_loader import index_thumbnail_needs_orient_fix
+
+    return index_thumbnail_needs_orient_fix(file_path, arr, cache=cache)
+
+
 def _load_face_scan_image(file_path: str, max_size: int) -> Optional[Image.Image]:
     """Face detection input from ImageCache only (semantic / gallery warm-up).
 
@@ -859,6 +871,21 @@ def _load_index_source_image(
     try:
         arr = _cached_index_source_array(cache, file_path)
         if arr is not None:
+            from common_image_loader import (
+                finalize_index_thumbnail_array,
+                index_thumbnail_needs_orient_fix,
+            )
+
+            if index_thumbnail_needs_orient_fix(file_path, arr, cache=cache):
+                fixed = finalize_index_thumbnail_array(file_path, arr, cache=cache)
+                if fixed is not None:
+                    arr = fixed
+                    try:
+                        cache.put_thumbnail(
+                            file_path, arr, _thumbnail_jpeg_bytes(arr)
+                        )
+                    except Exception:
+                        pass
             im = Image.fromarray(arr).convert("RGB")
             _INDEX_THREAD_LOCAL.last_original_sizes = (im.width, im.height)
             im.thumbnail((max_size, max_size), Image.Resampling.BICUBIC)
@@ -901,8 +928,10 @@ def _load_index_source_image(
                     if thumb is not None:
                         arr = np.asarray(thumb, dtype=np.uint8)
                 if arr is not None:
+                    from common_image_loader import finalize_index_thumbnail_array
+
+                    arr = finalize_index_thumbnail_array(file_path, arr, cache=cache)
                     im = Image.fromarray(arr).convert("RGB")
-                    im = _apply_exif_rotation_to_pil(file_path, im, cache)
                     _INDEX_THREAD_LOCAL.last_original_sizes = (im.width, im.height)
                     im.thumbnail((max_size, max_size), Image.Resampling.BICUBIC)
                     return im
@@ -928,10 +957,12 @@ def _load_index_source_image(
                     arr = _qimage_to_rgb_array(thumb)
                     if arr is None:
                         raise ValueError("QImage conversion failed")
-                    im = Image.fromarray(arr).convert("RGB")
                 else:
-                    im = Image.fromarray(np.asarray(thumb, dtype=np.uint8)).convert("RGB")
-                im = _apply_exif_rotation_to_pil(file_path, im, cache)
+                    arr = np.asarray(thumb, dtype=np.uint8)
+                from common_image_loader import finalize_index_thumbnail_array
+
+                arr = finalize_index_thumbnail_array(file_path, arr, cache=cache)
+                im = Image.fromarray(arr).convert("RGB")
                 _INDEX_THREAD_LOCAL.last_original_sizes = (im.width, im.height)
                 im.thumbnail((max_size, max_size), Image.Resampling.BICUBIC)
                 return im
@@ -957,7 +988,6 @@ def _load_index_source_image(
                         else:
                             im = None
                     if im is not None:
-                        im = _apply_exif_rotation_to_pil(file_path, im, cache)
                         _INDEX_THREAD_LOCAL.last_original_sizes = (im.width, im.height)
                         im.thumbnail((max_size, max_size), Image.Resampling.BICUBIC)
                         return im
@@ -3507,7 +3537,7 @@ class SemanticImageIndex:
             return 0
 
         cache = get_image_cache()
-        pending = [p for p in paths if not _index_source_thumbnail_present(cache, p)]
+        pending = [p for p in paths if _index_thumbnail_needs_warm(cache, p)]
         already_cached = len(paths) - len(pending)
         if not pending:
             logger.info(
@@ -3532,28 +3562,45 @@ class SemanticImageIndex:
         warmed = 0
 
         def _warm_one(path: str) -> bool:
-            if _index_source_thumbnail_present(cache, path):
-                return True
             try:
                 from enhanced_raw_processor import (
                     ThumbnailExtractor,
                     extract_embedded_jpeg_by_scan,
                 )
-                from common_image_loader import is_raw_file
+                from common_image_loader import (
+                    finalize_index_thumbnail_array,
+                    index_thumbnail_needs_orient_fix,
+                    is_raw_file,
+                )
 
-                if is_raw_file(path):
-                    arr = extract_embedded_jpeg_by_scan(path, 1024)
-                    if arr is None:
-                        arr = ThumbnailExtractor().extract_thumbnail_from_raw(
-                            path, max_size=1024, allow_scan_fallback=False
-                        )
-                        if arr is not None:
-                            arr = np.asarray(arr, dtype=np.uint8)
+                arr = _cached_index_source_array(cache, path)
+                if arr is not None and not index_thumbnail_needs_orient_fix(
+                    path, arr, cache=cache
+                ):
+                    return True
+
+                if arr is not None and index_thumbnail_needs_orient_fix(
+                    path, arr, cache=cache
+                ):
+                    arr = finalize_index_thumbnail_array(path, arr, cache=cache)
                 else:
-                    with Image.open(path) as im:
-                        im = ImageOps.exif_transpose(im).convert("RGB")
-                        im.thumbnail((1024, 1024), Image.Resampling.BICUBIC)
-                        arr = np.asarray(im)
+                    if is_raw_file(path):
+                        arr = extract_embedded_jpeg_by_scan(path, 1024)
+                        if arr is None:
+                            arr = ThumbnailExtractor().extract_thumbnail_from_raw(
+                                path, max_size=1024, allow_scan_fallback=False
+                            )
+                            if arr is not None:
+                                arr = np.asarray(arr, dtype=np.uint8)
+                        if arr is not None:
+                            arr = finalize_index_thumbnail_array(
+                                path, arr, cache=cache
+                            )
+                    else:
+                        with Image.open(path) as im:
+                            im = ImageOps.exif_transpose(im).convert("RGB")
+                            im.thumbnail((1024, 1024), Image.Resampling.BICUBIC)
+                            arr = np.asarray(im)
 
                 if arr is not None:
                     jpeg = None

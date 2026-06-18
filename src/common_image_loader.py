@@ -765,6 +765,16 @@ def load_raw_preview_array(
     if not apply_container_orientation:
         return thumb
 
+    return finalize_index_thumbnail_array(file_path, thumb, cache=cache)
+
+
+def resolve_container_exif_for_file(
+    file_path: str,
+    *,
+    cache=None,
+) -> tuple[Optional[Dict[str, Any]], int]:
+    """Return (exif_data, orientation) from ImageCache or container EXIF on disk."""
+    cache = cache or get_image_cache()
     exif_data = cache.get_exif(file_path)
     if not exif_data:
         try:
@@ -774,9 +784,42 @@ def load_raw_preview_array(
         except Exception:
             exif_data = None
     orientation = int((exif_data or {}).get("orientation", 1) or 1)
+    return exif_data, orientation
+
+
+def index_thumbnail_needs_orient_fix(
+    file_path: str,
+    arr: np.ndarray,
+    *,
+    cache=None,
+) -> bool:
+    """True when cached index pixels don't match container EXIF display orientation."""
+    if arr is None:
+        return True
+    exif_data, _ = resolve_container_exif_for_file(file_path, cache=cache)
+    if not exif_data:
+        return False
+    h, w = arr.shape[:2]
+    return not array_matches_exif_display(w, h, exif_data)
+
+
+def finalize_index_thumbnail_array(
+    file_path: str,
+    arr: np.ndarray,
+    *,
+    cache=None,
+) -> np.ndarray:
+    """Apply container EXIF orientation so semantic warm-up matches gallery thumbnails."""
+    if arr is None:
+        return arr
+    if not is_raw_file(file_path):
+        return arr
+    exif_data, orientation = resolve_container_exif_for_file(file_path, cache=cache)
     if orientation != 1:
-        thumb = apply_container_orientation_to_array(thumb, orientation, exif_data)
-    return thumb
+        oriented = apply_container_orientation_to_array(arr, orientation, exif_data)
+        if oriented is not None:
+            return oriented
+    return arr
 
 
 def load_raw_preview_pixmap(file_path: str, max_size: int = 2048) -> QPixmap:
