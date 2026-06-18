@@ -2437,12 +2437,6 @@ class SemanticImageIndex:
         For RAW, prefer rawpy header read only (PIL often fails on ARW). On network
         drives this can still take seconds per file under parallel indexing.
         """
-        # Check thread-local cache first
-        if hasattr(_INDEX_THREAD_LOCAL, "last_original_sizes"):
-            w, h = _INDEX_THREAD_LOCAL.last_original_sizes
-            if w > 0 and h > 0:
-                return w, h
-
         ext = os.path.splitext(file_path)[1].lower().lstrip(".")
         if ext in RAW_FILE_EXTENSIONS:
             try:
@@ -2451,9 +2445,6 @@ class SemanticImageIndex:
                 with rawpy.imread(file_path) as raw:
                     w = int(raw.sizes.width)
                     h = int(raw.sizes.height)
-                    flip = int(getattr(raw.sizes, "flip", 0) or 0)
-                    if flip in (5, 6, 7, 8):
-                        w, h = h, w
                     if w > 0 and h > 0:
                         return w, h
             except Exception:
