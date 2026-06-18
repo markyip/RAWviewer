@@ -818,19 +818,45 @@ def _load_face_scan_image(file_path: str, max_size: int) -> Optional[Image.Image
     return im
 
 
+def _apply_exif_rotation_to_pil(file_path: str, im: Image.Image, cache) -> Image.Image:
+    try:
+        from common_image_loader import exif_display_dimensions
+        from PIL import ImageOps
+        
+        exif_data = cache.get_exif(file_path)
+        if not exif_data:
+            from enhanced_raw_processor import EXIFExtractor
+            exif_data = EXIFExtractor().extract_exif_data(file_path)
+        
+        if exif_data:
+            orientation = int(exif_data.get("orientation", 1) or 1)
+            if orientation in (2, 3, 4, 5, 6, 7, 8):
+                ow = int(exif_data.get("original_width") or 0)
+                oh = int(exif_data.get("original_height") or 0)
+                if ow > 0 and oh > 0:
+                    dw, dh = exif_display_dimensions(ow, oh, orientation)
+                    if not ((dh > dw) == (im.height > im.width)):
+                        exif = im.getexif()
+                        exif[0x0112] = orientation
+                        im = ImageOps.exif_transpose(im)
+    except Exception:
+        pass
+    return im
+
+
 def _load_index_source_image(
     file_path: str, max_size: int = 1024, *, qt_decode: bool = True
 ) -> Image.Image:
     """Load a small RGB image suitable for indexing/detection, preferring app caches.
 
     When ``qt_decode`` is False, skip QImageReader / Qt-based decoders so face scan
-  workers never touch Qt from a background thread pool (can crash the process).
+    workers never touch Qt from a background thread pool (can crash the process).
     """
     _INDEX_THREAD_LOCAL.last_original_sizes = (0, 0)
+    from image_cache import get_image_cache
+    cache = get_image_cache()
 
     try:
-        from image_cache import get_image_cache
-        cache = get_image_cache()
         arr = _cached_index_source_array(cache, file_path)
         if arr is not None:
             im = Image.fromarray(arr).convert("RGB")
@@ -876,6 +902,7 @@ def _load_index_source_image(
                         arr = np.asarray(thumb, dtype=np.uint8)
                 if arr is not None:
                     im = Image.fromarray(arr).convert("RGB")
+                    im = _apply_exif_rotation_to_pil(file_path, im, cache)
                     _INDEX_THREAD_LOCAL.last_original_sizes = (im.width, im.height)
                     im.thumbnail((max_size, max_size), Image.Resampling.BICUBIC)
                     return im
@@ -904,6 +931,7 @@ def _load_index_source_image(
                     im = Image.fromarray(arr).convert("RGB")
                 else:
                     im = Image.fromarray(np.asarray(thumb, dtype=np.uint8)).convert("RGB")
+                im = _apply_exif_rotation_to_pil(file_path, im, cache)
                 _INDEX_THREAD_LOCAL.last_original_sizes = (im.width, im.height)
                 im.thumbnail((max_size, max_size), Image.Resampling.BICUBIC)
                 return im
@@ -929,6 +957,7 @@ def _load_index_source_image(
                         else:
                             im = None
                     if im is not None:
+                        im = _apply_exif_rotation_to_pil(file_path, im, cache)
                         _INDEX_THREAD_LOCAL.last_original_sizes = (im.width, im.height)
                         im.thumbnail((max_size, max_size), Image.Resampling.BICUBIC)
                         return im
@@ -1337,7 +1366,7 @@ class MobileCLIPCoreMLBackend:
             return self._encode_pil_image(im)
 
     def encode_images(self, file_paths: Sequence[str]) -> List[np.ndarray]:
-        """Parallel load/resize, then serial Core ML inference (I/O bound on large albums)."""
+        """Parallel load/resize, then batched Core ML inference (much faster, pushes loops to ANE/GPU)."""
         self._load_models()
         paths = [p for p in (file_paths or []) if p]
         if not paths:
@@ -1359,7 +1388,70 @@ class MobileCLIPCoreMLBackend:
                 max_workers=min(workers, len(paths))
             ) as executor:
                 images = list(executor.map(_prep, paths))
-        return [self._encode_pil_image(im) for im in images]
+
+        CoreML = self._CoreML
+        Foundation = self._Foundation
+        objc = self._objc
+
+        embeddings = []
+        with objc.autorelease_pool():
+            desc = self._image_model.modelDescription()
+            input_name = self._native_feature_name(self._image_model, "input")
+            output_name = self._native_feature_name(self._image_model, "output")
+            by_name = desc.inputDescriptionsByName()
+            feature_desc = by_name.objectForKey_(input_name) if by_name is not None else None
+            if feature_desc is None and by_name is not None:
+                for key in by_name:
+                    if str(key) == str(input_name):
+                        feature_desc = by_name.objectForKey_(key)
+                        break
+            if feature_desc is None:
+                raise RuntimeError("Core ML image model has no input description")
+            in_type = int(feature_desc.type())
+
+            providers = []
+            for im in images:
+                feature = None
+                if in_type == CoreML.MLFeatureTypeMultiArray:
+                    rgb = np.asarray(im.convert("RGB"), dtype=np.float32) / 255.0
+                    nchw = np.transpose(rgb, (2, 0, 1))[np.newaxis, ...]
+                    multi = self._float32_multi_array_nchw(nchw)
+                    feature = CoreML.MLFeatureValue.featureValueWithMultiArray_(multi)
+                elif in_type == CoreML.MLFeatureTypeImage:
+                    pixel_buffer = self._image_to_pixel_buffer(im)
+                    feature = CoreML.MLFeatureValue.alloc().initWithValue_type_(
+                        pixel_buffer, CoreML.MLFeatureTypeImage
+                    )
+                else:
+                    raise RuntimeError(f"Unsupported Core ML image encoder input type: {in_type}")
+
+                provider, err = CoreML.MLDictionaryFeatureProvider.alloc().initWithDictionary_error_(
+                    {input_name: feature}, None
+                )
+                if err is not None or provider is None:
+                    raise RuntimeError(f"Failed to create Core ML feature provider: {err}")
+                providers.append(provider)
+
+            # Create native batch provider
+            batch_provider = CoreML.MLArrayBatchProvider.alloc().initWithFeatureProviderArray_(providers)
+
+            # Execute predictions in one batch
+            with _COREML_PREDICTION_LOCK:
+                predictions, err = self._image_model.predictionsFromBatch_error_(batch_provider, None)
+            
+            if err is not None or predictions is None:
+                raise RuntimeError(f"MobileCLIP Core ML batch prediction failed: {err}")
+
+            # Extract output features
+            count = int(predictions.count())
+            for i in range(count):
+                out_provider = predictions.featuresAtIndex_(i)
+                numpy_arr = self._multi_array_to_numpy(
+                    out_provider.featureValueForName_(output_name).multiArrayValue()
+                )
+                embeddings.append(self._normalize(numpy_arr))
+
+        return embeddings
 
     def _encode_pil_image(self, im: Image.Image) -> np.ndarray:
         CoreML = self._CoreML
