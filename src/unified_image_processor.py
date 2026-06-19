@@ -688,17 +688,37 @@ class UnifiedImageProcessor:
         if orientation != 1:
             embedded = self._apply_orientation_correction(embedded, orientation, exif_data)
 
-        self.cache.put_preview(file_path, embedded)
+        preview_tier = self._preview_tier_from_embedded(embedded)
+        self.cache.put_preview(file_path, preview_tier)
         self.cache.put_full_image(file_path, embedded)
         import logging
 
         logging.getLogger(__name__).info(
             "[PREVIEW] Using full-resolution embedded JPEG for %s (%dx%d)",
             os.path.basename(file_path),
-            w,
-            h,
+            embedded.shape[1],
+            embedded.shape[0],
         )
         return embedded
+
+    @staticmethod
+    def _preview_tier_from_embedded(embedded: np.ndarray) -> np.ndarray:
+        """Store a memory-budget preview tier separately from the sensor-sized buffer."""
+        max_edge = memory_preview_max_edge()
+        h, w = embedded.shape[:2]
+        if max(h, w) <= max_edge:
+            return embedded
+        scale = max_edge / float(max(h, w))
+        new_w = max(1, int(w * scale))
+        new_h = max(1, int(h * scale))
+        try:
+            from PIL import Image
+
+            pil = Image.fromarray(embedded)
+            pil = pil.resize((new_w, new_h), Image.Resampling.HAMMING)
+            return np.asarray(pil)
+        except Exception:
+            return embedded
 
     def _process_raw_image(self, file_path: str, 
                           use_full_resolution: bool = False,

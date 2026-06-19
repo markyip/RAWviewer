@@ -6615,6 +6615,10 @@ class RAWImageViewer(QMainWindow):
         self._single_view_load_request_ts = 0.0
         self._single_view_load_request_path = None
         self._single_view_first_render_logged = False
+        self._session_restore_defer_preload = False
+        self._session_restore_prefetch_timer = None
+        self._session_restore_staged_scheduled = False
+        self._session_restore_full_decode_allowed = False
         self._single_view_ttfr_watch_generation = 0
         self._defer_sensor_full_decode_path = None
         self._sensor_full_decode_queued_norm = None
@@ -8479,6 +8483,8 @@ class RAWImageViewer(QMainWindow):
 
     def _maybe_queue_background_full_decode(self, file_path: str) -> None:
         """Queue sensor-res decode only when the on-screen buffer is not already full resolution."""
+        if self._should_defer_full_decode():
+            return
         if not file_path:
             return
         try:
@@ -8512,7 +8518,13 @@ class RAWImageViewer(QMainWindow):
         self._gallery_instant_display_quality = False
         self._last_loaded_path = file_path
         if not self.image_cache.get_exif(file_path):
-            self.image_manager.request_load(file_path, priority=False, stages={"exif"})
+            self.image_manager.load_image(
+                file_path,
+                priority=Priority.BACKGROUND,
+                cancel_existing=False,
+                use_full_resolution=False,
+                stages={"exif"},
+            )
         self._maybe_queue_background_full_decode(file_path)
         self._start_preloading()
         if hasattr(self, "loading_overlay"):
@@ -16881,6 +16893,8 @@ class RAWImageViewer(QMainWindow):
 
     def _should_hold_full_until_preview_paint(self, file_path: str) -> bool:
         """preview_first_stages: do not paint full-res before embedded preview lands."""
+        if self._should_defer_full_decode():
+            return True
         defer = getattr(self, "_defer_sensor_full_decode_path", None)
         if not defer or _norm_path(defer) != _norm_path(file_path or ""):
             return False
@@ -16965,7 +16979,11 @@ class RAWImageViewer(QMainWindow):
             stages={"exif"},
         )
 
-    def _flush_deferred_sensor_full_decode(self, file_path: str | None = None) -> None:
+    def _flush_deferred_sensor_full_decode(
+        self, file_path: str | None = None, *, force: bool = False
+    ) -> None:
+        if not force and self._should_defer_full_decode():
+            return
         fp = file_path or getattr(self, "_defer_sensor_full_decode_path", None)
         if not fp:
             return
@@ -16985,12 +17003,14 @@ class RAWImageViewer(QMainWindow):
                 return
         except Exception:
             pass
-        self._queue_sensor_full_decode(fp, priority_current=False)
+        self._queue_sensor_full_decode(fp, priority_current=False, force=force)
 
     def _queue_sensor_full_decode(
-        self, file_path: str, *, priority_current: bool = True
+        self, file_path: str, *, priority_current: bool = True, force: bool = False
     ) -> None:
         """Decode sensor-resolution buffer (e.g. after showing a cached preview tier)."""
+        if not force and self._should_defer_full_decode():
+            return
         if not file_path:
             return
         try:
@@ -17633,8 +17653,12 @@ class RAWImageViewer(QMainWindow):
                     "[LOAD] Single-view navigation: instant display from prefetch cache"
                 )
                 if not self.image_cache.get_exif(requested_file_path):
-                    self.image_manager.request_load(
-                        requested_file_path, priority=False, stages={"exif"}
+                    self.image_manager.load_image(
+                        requested_file_path,
+                        priority=Priority.BACKGROUND,
+                        cancel_existing=False,
+                        use_full_resolution=False,
+                        stages={"exif"},
                     )
                 if not (
                     use_libraw_consistent_preview_first()
@@ -17690,8 +17714,12 @@ class RAWImageViewer(QMainWindow):
                         requested_file_path, preview_cached, from_cache="preview"
                     ):
                         if not self.image_cache.get_exif(requested_file_path):
-                            self.image_manager.request_load(
-                                requested_file_path, priority=False, stages={"exif"}
+                            self.image_manager.load_image(
+                                requested_file_path,
+                                priority=Priority.BACKGROUND,
+                                cancel_existing=False,
+                                use_full_resolution=False,
+                                stages={"exif"},
                             )
                         else:
                             try:
@@ -17731,8 +17759,12 @@ class RAWImageViewer(QMainWindow):
                         requested_file_path, cached_image, from_cache="full_image"
                     ):
                         if not self.image_cache.get_exif(requested_file_path):
-                            self.image_manager.request_load(
-                                requested_file_path, priority=False, stages={"exif"}
+                            self.image_manager.load_image(
+                                requested_file_path,
+                                priority=Priority.BACKGROUND,
+                                cancel_existing=False,
+                                use_full_resolution=False,
+                                stages={"exif"},
                             )
                         logger.info(
                             f"[LOAD] Successfully displayed cached full image for {filename} "
@@ -17798,7 +17830,13 @@ class RAWImageViewer(QMainWindow):
                         # Ensure EXIF is loaded even on cache hit
                         if not self.image_cache.get_exif(requested_file_path):
                             logger.info(f"[LOAD] Cache hit for pixmap, but missing EXIF. Requesting EXIF load.")
-                            self.image_manager.request_load(requested_file_path, priority=False, stages={"exif"})
+                            self.image_manager.load_image(
+                                requested_file_path,
+                                priority=Priority.BACKGROUND,
+                                cancel_existing=False,
+                                use_full_resolution=False,
+                                stages={"exif"},
+                            )
                             
                         logger.info(f"[LOAD] Successfully displayed cached pixmap for {filename} (total: {time.time() - load_start:.3f}s)")
                         if hasattr(self, "loading_overlay"):
@@ -21018,8 +21056,89 @@ class RAWImageViewer(QMainWindow):
                     out.append(self.image_files[j])
         return out
 
+    def _session_restore_burst_active(self) -> bool:
+        return bool(getattr(self, "_session_restore_defer_preload", False))
+
+    def _should_defer_nav_preload(self) -> bool:
+        """Hold neighbor prefetch during session restore until the staged nav phase."""
+        if not self._session_restore_burst_active():
+            return False
+        flag = os.environ.get("RAWVIEWER_SESSION_RESTORE_DEFER_PRELOAD", "1").strip().lower()
+        return flag not in ("0", "false", "no", "off")
+
+    def _should_defer_full_decode(self) -> bool:
+        """Hold sensor-res decode during session restore until the staged full-decode phase."""
+        if not self._session_restore_burst_active():
+            return False
+        if getattr(self, "_session_restore_full_decode_allowed", False):
+            return False
+        flag = os.environ.get("RAWVIEWER_SESSION_RESTORE_DEFER_PRELOAD", "1").strip().lower()
+        return flag not in ("0", "false", "no", "off")
+
+    def _schedule_post_session_restore_prefetch(self) -> None:
+        """Staged heavy loads after session-restore TTFR: full decode, then nav preload."""
+        if not self._should_defer_nav_preload():
+            return
+        if not getattr(self, "_single_view_first_render_logged", False):
+            return
+        if getattr(self, "_session_restore_staged_scheduled", False):
+            return
+        self._session_restore_staged_scheduled = True
+        full_delay_ms = _env_int(
+            "RAWVIEWER_SESSION_RESTORE_FULL_DECODE_DELAY_MS", 2500, minimum=500
+        )
+        QTimer.singleShot(full_delay_ms, self._run_post_session_restore_full_decode)
+
+    def _run_post_session_restore_full_decode(self) -> None:
+        import logging
+
+        logger = logging.getLogger(__name__)
+        if not self._session_restore_burst_active():
+            return
+        self._session_restore_full_decode_allowed = True
+        logger.info(
+            "[SESSION] Starting deferred full decode for current image "
+            "(RAWVIEWER_SESSION_RESTORE_FULL_DECODE_DELAY_MS)"
+        )
+        self._flush_deferred_full_exif_after_first_paint()
+        self._flush_deferred_sensor_full_decode(force=True)
+        preload_delay_ms = _env_int(
+            "RAWVIEWER_SESSION_RESTORE_PRELOAD_DELAY_MS", 800, minimum=0
+        )
+        QTimer.singleShot(preload_delay_ms, self._run_post_session_restore_nav_preload)
+
+    def _run_post_session_restore_nav_preload(self) -> None:
+        import logging
+
+        logger = logging.getLogger(__name__)
+        if not getattr(self, "_session_restore_defer_preload", False):
+            return
+        self._session_restore_defer_preload = False
+        self._session_restore_staged_scheduled = False
+        try:
+            lm = getattr(self, "image_manager", None)
+            if lm is not None and hasattr(lm, "exit_gallery_warmup_throttle"):
+                lm.exit_gallery_warmup_throttle()
+        except Exception:
+            pass
+        logger.info("[SESSION] Starting deferred nav preload after session restore")
+        self._start_preloading()
+        self._schedule_idle_display_prefetch()
+        try:
+            self._queue_display_tier_prefetch_for_paths(
+                self._paths_within_nav_prefetch_radius()
+            )
+        except Exception:
+            pass
+
+    def _run_post_session_restore_prefetch(self) -> None:
+        """Legacy alias — nav preload phase only."""
+        self._run_post_session_restore_nav_preload()
+
     def _queue_display_tier_prefetch_for_paths(self, paths) -> None:
         """Background embedded-preview decode for navigation neighbors (not sensor full)."""
+        if self._should_defer_nav_preload():
+            return
         from image_load_manager import Priority
 
         for path in paths or []:
@@ -21182,8 +21301,11 @@ class RAWImageViewer(QMainWindow):
         except Exception:
             pass
 
-        self._flush_deferred_sensor_full_decode()
-        self._flush_deferred_full_exif_after_first_paint()
+        if self._should_defer_nav_preload():
+            self._schedule_post_session_restore_prefetch()
+        else:
+            self._flush_deferred_sensor_full_decode()
+            self._flush_deferred_full_exif_after_first_paint()
         try:
             fp = getattr(self, "current_file_path", None)
             if fp:
@@ -21193,13 +21315,14 @@ class RAWImageViewer(QMainWindow):
         except Exception:
             pass
         QTimer.singleShot(0, self._prefetch_filmstrip_thumbnails)
-        self._schedule_idle_display_prefetch()
-        try:
-            self._queue_display_tier_prefetch_for_paths(
-                self._paths_within_nav_prefetch_radius()
-            )
-        except Exception:
-            pass
+        if not self._should_defer_nav_preload():
+            self._schedule_idle_display_prefetch()
+            try:
+                self._queue_display_tier_prefetch_for_paths(
+                    self._paths_within_nav_prefetch_radius()
+                )
+            except Exception:
+                pass
         from semantic_search import metadata_auto_index_enabled
         if metadata_auto_index_enabled():
             if not self._semantic_indexing_in_progress and not getattr(self, "_semantic_index_prep_in_progress", False):
@@ -21400,6 +21523,8 @@ class RAWImageViewer(QMainWindow):
         if not self.image_files or self.current_file_index < 0:
             return
         if len(self.image_files) <= 1:
+            return
+        if self._should_defer_nav_preload():
             return
 
         self._preload_adjacent_display_buffers()
@@ -25074,17 +25199,18 @@ class RAWImageViewer(QMainWindow):
         )
         if len(image_files) > 1:
             self._schedule_folder_sort_refinement(token, file_stats)
-        try:
-            from PyQt6.QtCore import QTimer
-
-            QTimer.singleShot(
-                0,
-                lambda: self._queue_display_tier_prefetch_for_paths(
-                    self._paths_within_nav_prefetch_radius(self.current_file_index)
-                ),
-            )
-        except Exception:
-            pass
+        if self._should_defer_nav_preload():
+            self._schedule_post_session_restore_prefetch()
+        else:
+            try:
+                QTimer.singleShot(
+                    0,
+                    lambda: self._queue_display_tier_prefetch_for_paths(
+                        self._paths_within_nav_prefetch_radius(self.current_file_index)
+                    ),
+                )
+            except Exception:
+                pass
 
     def _apply_instant_single_file_open(
         self,
@@ -25934,7 +26060,21 @@ class RAWImageViewer(QMainWindow):
                         else:
                             self.view_mode = 'single'
                         self._orientation_already_applied = False # Reset flag on mode switch to be safe
-                        
+
+                        self._session_restore_defer_preload = True
+                        self._session_restore_staged_scheduled = False
+                        self._session_restore_full_decode_allowed = False
+                        logger.info(
+                            "[SESSION] Deferring heavy loads until first paint "
+                            "(full decode ~2.5s later; "
+                            "RAWVIEWER_SESSION_RESTORE_DEFER_PRELOAD=0 to disable)"
+                        )
+                        try:
+                            lm = getattr(self, "image_manager", None)
+                            if lm is not None and hasattr(lm, "enter_gallery_warmup_throttle"):
+                                lm.enter_gallery_warmup_throttle()
+                        except Exception:
+                            pass
                         self.load_folder_images(folder, start_file=file)
                         return True
                     except (PermissionError, OSError) as e:

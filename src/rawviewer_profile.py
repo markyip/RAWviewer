@@ -132,11 +132,14 @@ def memory_tier_auto_enabled() -> bool:
 def system_total_ram_gb() -> float | None:
     """Installed RAM (stable at startup; prefer over 'available' for tiering)."""
     try:
-        import psutil
+        from image_cache import system_memory_total_bytes
 
-        return float(psutil.virtual_memory().total) / (1024**3)
+        total_bytes = system_memory_total_bytes()
+        if total_bytes:
+            return float(total_bytes) / (1024**3)
     except Exception:
-        return None
+        pass
+    return None
 
 
 def classify_memory_tier(total_ram_gb: float | None) -> str:

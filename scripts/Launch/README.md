@@ -179,12 +179,23 @@ Share opt-in (see [`docs/macos-sharing-v21-v22.md`](../../docs/macos-sharing-v21
 
 Pass env vars as arguments: `./scripts/Launch/shell/launch_dev.sh RAWVIEWER_GPU_VIEW=0`
 
+**Session restore / memory (v2.4.1):**
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `RAWVIEWER_SESSION_RESTORE_DEFER_PRELOAD` | `1` | Stagger full decode and neighbor prefetch after relaunch |
+| `RAWVIEWER_SESSION_RESTORE_FULL_DECODE_DELAY_MS` | `2500` | Wait after first paint before full decode |
+| `RAWVIEWER_SESSION_RESTORE_PRELOAD_DELAY_MS` | `800` | Wait after full decode before neighbor prefetch |
+| `RAWVIEWER_DISABLE_SESSION_RESTORE` | `0` | Skip restoring last folder (also set for one launch after `clear_cache.sh`) |
+
+On macOS, `launch_dev.sh` prints OOM hints when exit code is **137** or **9**.
+
 ### macOS — release smoke test (manual)
 
 After `build_macos.sh` or `pixi run python build.py`:
 
 1. **Gatekeeper:** `xattr -cr dist/RAWviewer.app` then `open dist/RAWviewer.app`.
-2. **About / version:** Help or logs should report app version **2.4** (from `app_version.py`, synced from `build.py`).
+2. **About / version:** Help or logs should report app version **2.4.1** (from `app_version.py`, synced from `build.py`).
 3. **Single-image view:** Open a JPEG/RAW folder → one file → bottom **share** icon visible.
 4. **Share:** Click share → Qt menu lists Mail / Messages / etc.; pick Mail and confirm attachment path (not an empty spinner).
 5. **Semantic (if models bundled):** Search field accepts a text query; index progress in status area.

@@ -3,7 +3,7 @@
 ## 🚀 Version 2.4.1
 **Release Date: June 19, 2026**
 
-Bug-fix release for **Canon CR2/CR3** (and similar RAW) orientation and capture-date handling. Treats **gallery mixed orientation** and **single-image rotation** as separate issues.
+Bug-fix release for **Canon CR2/CR3** (and similar RAW) orientation and capture-date handling, plus **memory safety on relaunch** when session restore reopens a large folder. Treats **gallery mixed orientation**, **single-image rotation**, and **out-of-memory on restart** as separate issues.
 
 ### Gallery — mixed portrait / landscape thumbnails
 
@@ -26,11 +26,34 @@ Gallery and single view used **different preview paths**: gallery favored embedd
 - **Unified orientation lookup** — Single view uses `EXIFExtractor` (LibRaw flip + embedded JPEG), not header-only exifread alone.
 - **Canon CR2/CR3 metadata** — When exifread returns sparse tags, pyexiv2 fills in **orientation** and **DateTimeOriginal** (also improves capture-date sorting).
 
+### Memory — relaunch / session restore (macOS & Windows)
+
+On **8–16 GB** machines, closing RAWviewer and reopening it could restore the last folder and file while **full-resolution decode**, **neighbor prefetch**, and **AI/metadata indexing** all started in the same second — sometimes killing the app (macOS jetsam, exit **137**) or freezing Windows under heavy paging.
+
+**What's fixed in 2.4.1:**
+- **Staged session restore** — After the first preview paints, full decode for the current image waits **~2.5 s**, then neighbor prefetch waits **~0.8 s** more. Normal folder open and gallery navigation are unchanged.
+- **Preview vs full cache tiers** — Full-resolution embedded JPEGs are stored separately from the smaller preview tier used for fit-to-window, reducing peak RAM during upgrades.
+- **macOS memory stats fallback** — On newer macOS kernels where `psutil` fails, RAM tier and cache pressure use `sysctl` + `vm_stat` instead of a fake 50% value.
+
+**What you might notice after relaunch:** Fit view may stay on a fast preview for a few seconds before full quality; arrow-key navigation to the next file may be slightly slower for the first ~3 s. **Space / double-click zoom to 100%** still requests full resolution immediately.
+
+**If relaunch still fails on low RAM:** Use **Lite**, set `RAWVIEWER_DISABLE_SESSION_RESTORE=1`, or temporarily disable semantic search — see README troubleshooting.
+
+**Tuning (optional):**
+
+| Variable | Default | Effect |
+|----------|---------|--------|
+| `RAWVIEWER_SESSION_RESTORE_DEFER_PRELOAD` | `1` | Staged heavy loads after session restore |
+| `RAWVIEWER_SESSION_RESTORE_FULL_DECODE_DELAY_MS` | `2500` | Delay before full decode on relaunch |
+| `RAWVIEWER_SESSION_RESTORE_PRELOAD_DELAY_MS` | `800` | Extra delay before neighbor prefetch |
+| `RAWVIEWER_DISABLE_SESSION_RESTORE` | `0` | Skip restoring last folder on launch |
+
 ### Recommended test after upgrade
 
-1. Optional but best: **`clear_cache.sh`** once.
+1. Optional but best: **`clear_cache.sh`** once (orientation cache refresh).
 2. Open a folder of Canon (or other) portrait RAWs — gallery should be consistent.
 3. Click into single view — direction should match the gallery; full quality loads in the background.
+4. **Relaunch test:** Close RAWviewer, reopen the same session on a large RAW folder — app should stay up; check logs for `[SESSION] Deferring heavy loads until first paint`.
 
 ---
 

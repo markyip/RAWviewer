@@ -24,6 +24,8 @@ from PyQt6.QtCore import QObject, pyqtSignal
 
 logger = logging.getLogger(__name__)
 
+_psutil_vm_fallback_logged = False
+
 
 def _sysctl_hw_memsize_bytes() -> Optional[int]:
     """Physical RAM via sysctl (macOS fallback when psutil virtual_memory fails)."""
@@ -40,20 +42,86 @@ def _sysctl_hw_memsize_bytes() -> Optional[int]:
         return None
 
 
+def _darwin_page_size_bytes() -> int:
+    if platform.system() != "Darwin":
+        return 4096
+    try:
+        out = subprocess.check_output(["pagesize"], text=True, timeout=2).strip()
+        return max(4096, int(out))
+    except Exception:
+        return 4096
+
+
+def _parse_vm_stat_page_count(vm_stat_output: str, label: str) -> int:
+    prefix = f"{label}:"
+    for line in vm_stat_output.splitlines():
+        if not line.startswith(prefix):
+            continue
+        raw = line.split(":", 1)[1].strip().rstrip(".")
+        try:
+            return int(raw.replace(",", ""))
+        except ValueError:
+            return 0
+    return 0
+
+
+def _darwin_memory_stats_from_vm_stat() -> Optional[Tuple[int, int, float]]:
+    """Installed RAM, available bytes, and percent used via sysctl + vm_stat."""
+    if platform.system() != "Darwin":
+        return None
+    total = _sysctl_hw_memsize_bytes()
+    if not total:
+        return None
+    try:
+        vm_out = subprocess.check_output(["vm_stat"], text=True, timeout=2)
+    except Exception:
+        return None
+
+    page_size = _darwin_page_size_bytes()
+    free_pages = _parse_vm_stat_page_count(vm_out, "Pages free")
+    inactive_pages = _parse_vm_stat_page_count(vm_out, "Pages inactive")
+    speculative_pages = _parse_vm_stat_page_count(vm_out, "Pages speculative")
+    available_pages = free_pages + inactive_pages + speculative_pages
+    available = min(total, available_pages * page_size)
+    used = max(0, total - available)
+    percent = min(100.0, max(0.0, (used / total) * 100.0))
+    return total, available, percent
+
+
+def system_memory_total_bytes() -> Optional[int]:
+    """Total installed RAM in bytes (psutil with sysctl fallback)."""
+    try:
+        return int(psutil.virtual_memory().total)
+    except Exception:
+        return _sysctl_hw_memsize_bytes()
+
+
 def _safe_virtual_memory():
-    """psutil.virtual_memory() with sysctl fallback for newer macOS kernels."""
+    """psutil.virtual_memory() with sysctl/vm_stat fallback for newer macOS kernels."""
+    global _psutil_vm_fallback_logged
     try:
         return psutil.virtual_memory()
     except Exception as exc:
-        logger.warning(
-            "psutil.virtual_memory() failed (%s); using fallback memory stats",
-            exc,
-        )
-        total = _sysctl_hw_memsize_bytes() or (8 * 1024**3)
-        available = total // 2
+        if not _psutil_vm_fallback_logged:
+            logger.warning(
+                "psutil.virtual_memory() failed (%s); using fallback memory stats",
+                exc,
+            )
+            _psutil_vm_fallback_logged = True
+        fallback = _darwin_memory_stats_from_vm_stat()
         from types import SimpleNamespace
 
-        return SimpleNamespace(total=total, available=available, percent=50.0)
+        if fallback is not None:
+            total, available, percent = fallback
+            return SimpleNamespace(total=total, available=available, percent=percent)
+
+        total = _sysctl_hw_memsize_bytes() or (8 * 1024**3)
+        available = total // 4
+        return SimpleNamespace(
+            total=total,
+            available=available,
+            percent=min(100.0, max(0.0, ((total - available) / total) * 100.0)),
+        )
 
 
 def disk_preview_max_edge() -> int:

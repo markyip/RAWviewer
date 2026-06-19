@@ -121,6 +121,7 @@ To clear thumbnails only: **`scripts\Launch\bat\clear_cache.bat`** (Windows) · 
 | RAWviewer not in Open with | Re-run the installer (repair), or reinstall |
 | Leftover cache after uninstall | Run **`uninstall.bat`** again, or delete `%USERPROFILE%\.rawviewer_cache` manually |
 | Out of memory during AI indexing | See [Automatic memory tuning](#automatic-memory-tuning); use **Lite** on 8 GB PCs or set `RAWVIEWER_MEMORY_TIER_AUTO=0` and lower workers manually |
+| App slow or exits after reopening last folder | **v2.4.1+** staggers full decode and prefetch on session restore. Still tight on 8 GB? Use **Lite**, or `RAWVIEWER_DISABLE_SESSION_RESTORE=1` |
 | Crash | Enable file logging with `RAWVIEWER_FILE_LOG=1`, then check the install folder |
 
 ### macOS
@@ -135,6 +136,7 @@ To clear thumbnails only: **`scripts\Launch\bat\clear_cache.bat`** (Windows) · 
 | Need to uninstall completely | Use **`uninstall_macos_app.sh`** or **`Uninstall RAWviewer.command`** from the release zip — not Trash alone |
 | Uninstall scripts missing | Re-download the release zip from [Releases](https://github.com/markyip/RAWviewer/releases/latest); scripts are inside the extracted folder |
 | macOS “out of memory” / heavy swap during indexing | See [Automatic memory tuning](#automatic-memory-tuning). On 8 GB Macs, prefer **Lite** or wait for indexing to finish before opening gallery on huge folders |
+| Killed on relaunch (`Killed: 9` / exit 137 in Terminal) | **v2.4.1+** fixes most session-restore bursts. Try **Lite**, `RAWVIEWER_DISABLE_SESSION_RESTORE=1`, or `RAWVIEWER_ENABLE_SEMANTIC_SEARCH=0` |
 | Gallery stutters on a huge folder | Update to **v2.4**. If it persists, run **`clear_cache.sh`** and reopen the folder |
 | Thumbnails sideways or wrong way up (portrait shots) | Update to **v2.4**. Run **`clear_cache.sh`** once if old thumbnails were cached before the fix |
 
@@ -183,6 +185,7 @@ On every launch, RAWviewer reads **installed system RAM** (not free RAM at that 
 - A note file: `~/.rawviewer_cache/memory_tier.json` (tier, RAM, how many defaults were applied)
 - **Lite** builds still use Lite profile defaults first; RAM tier only fills in gaps
 - **Full** on an 8 GB Mac: semantic AI search can still run, but face indexing is disabled automatically to reduce memory pressure
+- **Relaunch (v2.4.1+):** Session restore staggers full decode and prefetch so reopening the last folder is less likely to OOM; see release notes if fit view stays soft for a few seconds
 
 **Disable auto-tuning** (use only your own env vars or scripts):
 
@@ -244,6 +247,9 @@ Requires **pyexiv2** for maker-note AF on RAW.
 | `RAWVIEWER_PREVIEW_CACHE_ITEMS` | Cap in-memory preview LRU count |
 | `RAWVIEWER_MEMORY_PREVIEW_MAX` | Max long edge for in-memory RAW/JPEG preview (pixels) |
 | `RAWVIEWER_IDLE_DISPLAY_PREFETCH=0` | Disable idle neighbor prefetch in single view |
+| `RAWVIEWER_SESSION_RESTORE_DEFER_PRELOAD=1` | **Default.** After relaunch, delay full decode and neighbor prefetch (see v2.4.1 release notes) |
+| `RAWVIEWER_SESSION_RESTORE_FULL_DECODE_DELAY_MS` | Milliseconds to wait after first paint before full decode on session restore (default `2500`) |
+| `RAWVIEWER_DISABLE_SESSION_RESTORE=1` | Do not reopen the last folder/file on launch |
 
 Full list and dev defaults: [`scripts/Launch/README.md`](scripts/Launch/README.md), [`docs/macos-sharing-v21-v22.md`](docs/macos-sharing-v21-v22.md).
 
