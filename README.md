@@ -68,6 +68,12 @@ Pick **Lite** for a smaller install and browse-by-eye workflow. Pick **Full** to
 
 ---
 
+## GPS map & geotagging — [LocateIt](https://github.com/markyip/LocateIt)
+
+A GPS cluster map was prototyped inside RAWviewer, but it did not perform well enough on large folders to keep in the main app. **[LocateIt](https://github.com/markyip/LocateIt)** is a separate tool for that job: open an album, see where shots were taken on an interactive map, and **geotag photos missing GPS** by dragging them onto the map and saving back to the original files (JPEG and RAW).
+
+---
+
 ## Download & install
 
 ### Windows
