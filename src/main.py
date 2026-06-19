@@ -13971,6 +13971,7 @@ class RAWImageViewer(QMainWindow):
                 except Exception as ex:
                     logger.warning(f"[GALLERY] Could not pre-seed semantic metadata: {ex}")
 
+                self._maybe_clear_empty_bookmark_filter()
                 display_files = self._gallery_files_for_display()
                 if not display_files and getattr(self, "_gallery_bookmark_filter_active", False):
                     self.gallery_justified.set_images(
@@ -15191,6 +15192,7 @@ class RAWImageViewer(QMainWindow):
         self._refresh_filmstrip_bookmark_visuals()
         self._refresh_gallery_bookmark_visuals()
         self._sync_bookmark_indicator()
+        cleared_empty_filter = self._maybe_clear_empty_bookmark_filter()
         if (
             getattr(self, "view_mode", "") == "gallery"
             and getattr(self, "_gallery_bookmark_filter_active", False)
@@ -15198,6 +15200,8 @@ class RAWImageViewer(QMainWindow):
             self._apply_gallery_bookmark_filter()
         elif getattr(self, "view_mode", "") == "gallery":
             self._sync_share_button_visibility()
+            if cleared_empty_filter:
+                self._apply_gallery_bookmark_filter()
         if getattr(self, "view_mode", "single") == "single" and getattr(
             self, "_gallery_bookmark_filter_active", False
         ):
@@ -15268,6 +15272,16 @@ class RAWImageViewer(QMainWindow):
         if btn.isVisible() != vis:
             btn.setVisible(vis)
 
+    def _maybe_clear_empty_bookmark_filter(self) -> bool:
+        """Leave bookmark-only view when the folder has no bookmarks left."""
+        if not getattr(self, "_gallery_bookmark_filter_active", False):
+            return False
+        if getattr(self, "_gallery_bookmarked_paths", set()):
+            return False
+        self._gallery_bookmark_filter_active = False
+        self._sync_bookmark_indicator()
+        return True
+
     def _clear_gallery_bookmark_filter(self) -> bool:
         """Leave bookmark-only gallery view; keep active search results if any."""
         if getattr(self, "view_mode", "") != "gallery":
@@ -15301,6 +15315,7 @@ class RAWImageViewer(QMainWindow):
     def _apply_gallery_bookmark_filter(self) -> None:
         if getattr(self, "view_mode", "") != "gallery":
             return
+        self._maybe_clear_empty_bookmark_filter()
         filter_active = bool(getattr(self, "_gallery_bookmark_filter_active", False))
         display_files = self._gallery_files_for_display()
         display_keys = {_norm_path(p) for p in display_files}
