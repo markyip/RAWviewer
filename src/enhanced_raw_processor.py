@@ -40,7 +40,8 @@ from raw_file_extensions import RAW_FILE_EXTENSIONS
 
 # Cached EXIF rows without this version used embedded-JPEG dimensions as "original" (e.g. 1920×1080).
 # Cached EXIF rows without this version used buggy orientation logic (e.g. LibRaw 5 mis-mapped, Sony MakerNote missing, or Silent Failures).
-RAW_EXIF_SENSOR_META_VER = 8
+# v9: invalidate rows that stored orientation=1 for Canon CR2/CR3 while LibRaw flip / embedded JPEG said otherwise.
+RAW_EXIF_SENSOR_META_VER = 9
 
 _rawpy_global_lock = threading.Lock()
 
@@ -175,6 +176,51 @@ def _largest_jpeg_from_blob(blob: bytes, max_size: int) -> Optional[np.ndarray]:
             pass
             
     return None
+
+
+def probe_effective_raw_orientation(
+    file_path: str, raw_object: Optional[rawpy.RawPy] = None
+) -> int:
+    """LibRaw flip + embedded-JPEG orientation when container EXIF is missing/wrong."""
+    orientation = 1
+    try:
+        if raw_object is not None:
+            flip = int(getattr(raw_object.sizes, "flip", 0) or 0)
+            if flip != 0:
+                flip_map = {0: 1, 3: 3, 5: 8, 6: 6}
+                orientation = int(flip_map.get(flip, flip))
+            if orientation <= 1:
+                embedded_o = _orientation_from_embedded_preview(file_path, raw_object)
+                if embedded_o not in (1, orientation):
+                    orientation = embedded_o
+            return int(orientation or 1)
+        with _rawpy_global_lock:
+            with rawpy.imread(file_path) as raw:
+                return probe_effective_raw_orientation(file_path, raw)
+    except Exception:
+        if orientation <= 1:
+            try:
+                embedded_o = _orientation_from_embedded_preview(file_path, raw_object)
+                if embedded_o not in (1, orientation):
+                    orientation = embedded_o
+            except Exception:
+                pass
+    return int(orientation or 1)
+
+
+def cached_raw_exif_orientation_trustworthy(
+    file_path: str, cached: Dict[str, Any]
+) -> bool:
+    """False when persisted EXIF orientation disagrees with LibRaw / embedded preview."""
+    import common_image_loader
+
+    if not common_image_loader.is_raw_file(file_path):
+        return True
+    cached_o = int(cached.get("orientation", 1) or 1)
+    effective = probe_effective_raw_orientation(file_path)
+    if effective <= 1:
+        return True
+    return cached_o == effective
 
 
 def _orientation_from_embedded_preview(
@@ -556,14 +602,9 @@ class ThumbnailExtractor(QObject):
                                    raw_object: Optional[rawpy.RawPy] = None) -> Optional[np.ndarray]:
         """Extract embedded thumbnail from RAW file and resize to max_size."""
         thumb = None
-        
-        # Prioritize reading just the head/tail for the embedded JPEG via fast scan to get an instant preview.
-        if allow_scan_fallback and raw_object is None:
-            scan_max = max_size if max_size > 0 else 8192
-            thumb = extract_embedded_jpeg_by_scan(file_path, scan_max)
-            if thumb is not None:
-                return thumb
 
+        # Prefer LibRaw's embedded JPEG segment (keeps preview EXIF orientation). Byte-scan
+        # previews are faster but often lack orientation tags (Canon CR2/CR3).
         try:
             if raw_object is not None:
                 thumb = self._extract_from_raw_obj(raw_object, file_path, max_size)
@@ -573,7 +614,6 @@ class ThumbnailExtractor(QObject):
                         thumb = self._extract_from_raw_obj(raw, file_path, max_size)
         except Exception as e:
             import logging
-            # Expected for some ARW/RAW; fallbacks (embedded JPEG scan, etc.) follow.
             logging.getLogger(__name__).debug(
                 "raw.extract_thumb failed for %s: %s",
                 os.path.basename(file_path),
@@ -591,7 +631,12 @@ class ThumbnailExtractor(QObject):
         # If rawpy fails entirely (e.g. unsupported DNG) or returns None, use non-LibRaw fallbacks.
         is_slow = is_slow_storage_path(file_path)
         if thumb is None and allow_scan_fallback and not is_slow:
-            thumb = extract_embedded_jpeg_by_scan(file_path, max_size)
+            scan_max = max_size if max_size > 0 else 8192
+            thumb = extract_embedded_jpeg_by_scan(file_path, scan_max)
+            if thumb is not None:
+                from common_image_loader import finalize_index_thumbnail_array
+
+                return finalize_index_thumbnail_array(file_path, thumb)
         if thumb is None and allow_scan_fallback:
             thumb = _thumbnail_via_qimage_reader(file_path, max_size, auto_transform=False)
         if thumb is None and allow_scan_fallback and sys.platform == "darwin":
@@ -829,11 +874,17 @@ class EXIFExtractor(QObject):
                 if os.environ.get("RAWVIEWER_VERBOSE_ORIENTATION_LOGS") == "1":
                     # print(f"[ORIENTATION] EXIFExtractor: Stale cache version ({cached_ver} < {RAW_EXIF_SENSOR_META_VER}) for {os.path.basename(file_path)}, forcing re-extraction...")
                     pass
-            else:
+            elif cached_raw_exif_orientation_trustworthy(file_path, cached):
                 if os.environ.get("RAWVIEWER_VERBOSE_ORIENTATION_LOGS") == "1":
                     # print(f"[ORIENTATION] EXIFExtractor: Found valid cached orientation={cached.get('orientation')} for {os.path.basename(file_path)}")
                     pass
                 return cached
+            else:
+                try:
+                    self.cache.exif_cache.remove(file_path)
+                    self.cache.exif_memory_cache.remove(file_path)
+                except Exception:
+                    pass
 
         try:
             import metadata_backend

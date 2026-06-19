@@ -745,7 +745,10 @@ def load_raw_preview_array(
         except Exception:
             cached = None
         if cached is not None and hasattr(cached, "shape"):
-            return np.asarray(cached, dtype=np.uint8)
+            arr = np.asarray(cached, dtype=np.uint8)
+            if is_raw_file(file_path):
+                return finalize_index_thumbnail_array(file_path, arr, cache=cache)
+            return arr
 
     from enhanced_raw_processor import ThumbnailExtractor
 

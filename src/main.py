@@ -9671,47 +9671,18 @@ class RAWImageViewer(QMainWindow):
         self.status_bar.showMessage(f"{filename}: {status_message}")
 
     def get_orientation_from_exif(self, file_path):
-        """Extract orientation from EXIF data for non-RAW files"""
+        """Extract orientation via EXIFExtractor (RAW fallbacks included)."""
         try:
-            if hasattr(self, "image_cache") and self.image_cache is not None:
-                cached = self.image_cache.get_exif(file_path)
-                if cached:
-                    cached_orientation = cached.get("orientation")
-                    if isinstance(cached_orientation, int) and 1 <= cached_orientation <= 8:
-                        return cached_orientation
+            from enhanced_raw_processor import EXIFExtractor
+
+            exif = EXIFExtractor().extract_exif_data(file_path)
+            if exif:
+                orientation = int(exif.get("orientation", 1) or 1)
+                if 1 <= orientation <= 8:
+                    return orientation
         except Exception:
             pass
-        try:
-            tags = process_file_from_path(file_path, details=False)
-
-            # Check for orientation tag
-            orientation_tag = tags.get("Image Orientation")
-            if orientation_tag:
-                orientation_str = str(orientation_tag)
-
-                # Map orientation descriptions to numeric values
-                orientation_map = {
-                    'Horizontal (normal)': 1,
-                    'Mirrored horizontal': 2,
-                    'Rotated 180': 3,
-                    'Mirrored vertical': 4,
-                    'Mirrored horizontal then rotated 90 CCW': 5,
-                    'Rotated 90 CW': 6,
-                    'Mirrored horizontal then rotated 90 CW': 7,
-                    'Rotated 90 CCW': 8
-                }
-
-                orientation_value = orientation_map.get(orientation_str, 1)
-                try:
-                    if hasattr(self, "image_cache") and self.image_cache is not None:
-                        self.image_cache.put_exif(file_path, {"orientation": orientation_value})
-                except Exception:
-                    pass
-                return orientation_value
-
-            return 1  # Default orientation (no rotation needed)
-        except Exception:
-            return 1  # Default orientation if EXIF reading fails
+        return 1
 
     def apply_orientation_to_pixmap(self, pixmap, orientation):
         """Apply orientation correction to QPixmap"""
@@ -17887,7 +17858,9 @@ class RAWImageViewer(QMainWindow):
                 # Single-step navigation: only request full-res decode if navigating zoomed-in (preserve_zoom_navigation is active)
                 # to prevent slow demosaicing lag when simply browsing fit-to-window previews.
                 request_full_res = (
-                    preserve_zoom_navigation or force_full_res_for_dng or from_gallery or (nav_single_step and preserve_zoom_navigation)
+                    preserve_zoom_navigation
+                    or force_full_res_for_dng
+                    or (nav_single_step and preserve_zoom_navigation)
                 )
                 # Allow embedded JPEG first frame (libraw_fit = False) if:
                 # 1. Progressive RAW load is explicitly set
@@ -17921,7 +17894,6 @@ class RAWImageViewer(QMainWindow):
                         or libraw_nav_fit
                         or force_full_res_for_dng
                         or (nav_single_step and preserve_zoom_navigation)
-                        or from_gallery
                         or quality_on_screen
                     )
                     else None

@@ -1436,11 +1436,35 @@ class ImageCache(QObject):
         self._check_memory_pressure()
 
         key = self._path_key(file_path)
+
+        def _validate_raw_thumbnail(arr: Optional[np.ndarray]) -> Optional[np.ndarray]:
+            if arr is None:
+                return None
+            try:
+                from common_image_loader import (
+                    finalize_index_thumbnail_array,
+                    index_thumbnail_needs_orient_fix,
+                    is_raw_file,
+                )
+
+                if not is_raw_file(file_path):
+                    return arr
+                if not index_thumbnail_needs_orient_fix(file_path, arr, cache=self):
+                    return arr
+                repaired = finalize_index_thumbnail_array(file_path, arr, cache=self)
+                return repaired if repaired is not None else arr
+            except Exception:
+                return arr
+
         # Check in-memory cache first
         thumbnail = self.thumbnail_cache.get(key)
         if thumbnail is not None:
+            validated = _validate_raw_thumbnail(thumbnail)
+            if validated is not thumbnail:
+                self.thumbnail_cache.put(key, validated.copy())
+                self.disk_thumbnail_cache.remove(file_path)
             self.cache_hit.emit(file_path, 'thumbnail')
-            return thumbnail
+            return validated
         
         # Check disk cache for JPEG thumbnails
         jpeg_data = self.disk_thumbnail_cache.get(file_path)
@@ -1451,6 +1475,9 @@ class ImageCache(QObject):
                 thumbnail = decode_embedded_jpeg_bytes(jpeg_data, max_size=0)
                 if thumbnail is None:
                     raise ValueError("decode_embedded_jpeg_bytes failed")
+                thumbnail = _validate_raw_thumbnail(thumbnail)
+                if thumbnail is None:
+                    raise ValueError("thumbnail orientation validation failed")
                 # Also cache in memory for faster subsequent access
                 self.thumbnail_cache.put(key, thumbnail.copy())
                 self.cache_hit.emit(file_path, 'thumbnail')
@@ -1787,9 +1814,15 @@ class ImageCache(QObject):
 
         if exif_data is not None:
             try:
-                from enhanced_raw_processor import RAW_EXIF_SENSOR_META_VER
+                from enhanced_raw_processor import (
+                    RAW_EXIF_SENSOR_META_VER,
+                    cached_raw_exif_orientation_trustworthy,
+                )
                 cached_ver = exif_data.get('raw_exif_sensor_meta_ver', 0)
                 if cached_ver < RAW_EXIF_SENSOR_META_VER:
+                    self.cache_miss.emit(file_path, 'exif')
+                    return None
+                if not cached_raw_exif_orientation_trustworthy(file_path, exif_data):
                     self.cache_miss.emit(file_path, 'exif')
                     return None
             except Exception:
@@ -1837,11 +1870,15 @@ class ImageCache(QObject):
         missing_paths = []
         
         try:
-            from enhanced_raw_processor import RAW_EXIF_SENSOR_META_VER
+            from enhanced_raw_processor import (
+                RAW_EXIF_SENSOR_META_VER,
+                cached_raw_exif_orientation_trustworthy,
+            )
             has_ver = True
         except Exception:
             has_ver = False
             RAW_EXIF_SENSOR_META_VER = 0
+            cached_raw_exif_orientation_trustworthy = None
             
         # Check memory cache first
         for path in file_paths:
@@ -1850,6 +1887,9 @@ class ImageCache(QObject):
                 if has_ver:
                     cached_ver = exif.get('raw_exif_sensor_meta_ver', 0)
                     if cached_ver < RAW_EXIF_SENSOR_META_VER:
+                        missing_paths.append(path)
+                        continue
+                    if cached_raw_exif_orientation_trustworthy and not cached_raw_exif_orientation_trustworthy(path, exif):
                         missing_paths.append(path)
                         continue
                 results[path] = exif
@@ -1863,6 +1903,8 @@ class ImageCache(QObject):
                 if has_ver:
                     cached_ver = exif.get('raw_exif_sensor_meta_ver', 0)
                     if cached_ver < RAW_EXIF_SENSOR_META_VER:
+                        continue
+                    if cached_raw_exif_orientation_trustworthy and not cached_raw_exif_orientation_trustworthy(path, exif):
                         continue
                 self.exif_memory_cache.put(path, exif)
                 results[path] = exif
@@ -1881,7 +1923,7 @@ class ImageCache(QObject):
         self.disk_grid_cache.remove(file_path)
         self.disk_preview_cache.remove(file_path)
         self.exif_memory_cache.remove(file_path)
-        # Note: EXIF persistent cache handles file modification time automatically
+        self.exif_cache.remove(file_path)
 
     def clear_all(self) -> None:
         """Clear all caches."""

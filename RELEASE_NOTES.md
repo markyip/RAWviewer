@@ -1,5 +1,39 @@
 # RAWviewer Release Notes
 
+## 🚀 Version 2.4.1
+**Release Date: June 19, 2026**
+
+Bug-fix release for **Canon CR2/CR3** (and similar RAW) orientation and capture-date handling. Treats **gallery mixed orientation** and **single-image rotation** as separate issues.
+
+### Gallery — mixed portrait / landscape thumbnails
+
+Some users saw **some vertical shots correct and others sideways** in the gallery after upgrading to v2.4. That pattern usually means **old cached thumbnails or EXIF rows** (from before v2.4 orientation fixes) sitting beside freshly warmed ones — not only a live warm-up clash (semantic vs gallery indexing, addressed in v2.4).
+
+**What's fixed in 2.4.1:**
+- **EXIF cache validation** — Persisted orientation is checked against LibRaw flip and embedded-JPEG orientation; stale `orientation=1` rows for portrait Canon RAW are rejected and re-extracted.
+- **Cache version bump** (`sensor_meta_ver` 9) — Forces refresh of outdated EXIF metadata on upgrade.
+- **Thumbnail load repair** — When a cached gallery thumbnail's pixels don't match container orientation, it is corrected or dropped instead of reused.
+
+**If thumbnails still look wrong once:** Run **`scripts/Launch/shell/clear_cache.sh`** (macOS) or **`clear_cache.bat`** (Windows), then reopen the folder. This clears mixed old/new cache in one step.
+
+### Single-image view — rotation unlike gallery
+
+Gallery and single view used **different preview paths**: gallery favored embedded JPEG previews (with EXIF transpose); opening from gallery could **force immediate full LibRaw decode** with wrong container orientation on Canon CR2/CR3.
+
+**What's fixed in 2.4.1:**
+- **Same preview pipeline** — RAW thumbnails prefer LibRaw's embedded JPEG segment; byte-scan fallbacks apply container orientation after decode.
+- **Gallery → single** — No longer skips straight to full-resolution LibRaw; uses the same progressive preview → full decode path as normal navigation.
+- **Unified orientation lookup** — Single view uses `EXIFExtractor` (LibRaw flip + embedded JPEG), not header-only exifread alone.
+- **Canon CR2/CR3 metadata** — When exifread returns sparse tags, pyexiv2 fills in **orientation** and **DateTimeOriginal** (also improves capture-date sorting).
+
+### Recommended test after upgrade
+
+1. Optional but best: **`clear_cache.sh`** once.
+2. Open a folder of Canon (or other) portrait RAWs — gallery should be consistent.
+3. Click into single view — direction should match the gallery; full quality loads in the background.
+
+---
+
 ## 🚀 Version 2.4
 **Release Date: June 19, 2026**
 
