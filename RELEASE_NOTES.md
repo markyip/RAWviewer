@@ -1,15 +1,16 @@
 # RAWviewer Release Notes
 
 ## 🚀 Version 2.4
-**Release Date: June 16, 2026**
+**Release Date: June 19, 2026**
 
 ### Highlights — new in 2.4
 
 - **RAWviewer Lite** — A lighter edition for fast browsing and culling: smaller download, no AI model install, and gallery search by camera, ISO, date, GPS, and filename. On **Windows**, pick **Lite** in the installer; on **Mac**, use **`RAWviewer-v2.4-macOS-Lite.zip`**.
 - **One Windows installer** — **`RAWviewer_Setup.exe`** is all you need. In the wizard, choose **Full (CUDA)**, **Full (DirectML)**, or **Lite** — no more hunting for separate setup files.
-- **Drag photos out** — Drag the image on screen, a gallery thumbnail, or a film-strip thumb to Explorer, Finder, Mail, WhatsApp (where supported), Lightroom, or any app that accepts files. Select several gallery photos first and drag once to export them all.
+- **Drag photos out** — Drag a gallery thumbnail or a film-strip thumb to Explorer, Finder, Mail, WhatsApp (where supported), Lightroom, or any app that accepts files. Select several gallery photos first and drag once to export them all.
 - **Composition guides** — Press **G** in single-image view to cycle overlays: rule of thirds, diagonals, or phi grid — handy for checking framing while you cull.
-- **Release highlights image** — The GitHub release includes a new visual summary of v2.4 so you can see what’s new at a glance before you download.
+- **Bookmarks** — Star keepers per folder; filter the gallery to bookmarked shots only; share or slideshow your picks; works with gallery search (see below).
+- **Release highlights image** — The GitHub release includes a new visual summary of v2.4 so you can see what's new at a glance before you download.
 
 ### Introducing RAWviewer Lite
 
@@ -22,7 +23,7 @@
 - Gallery search by **metadata** — camera, lens, ISO, date, city, filename, and more (e.g. `camera:sony iso<800`)
 
 **What Lite leaves out:**
-- **Semantic (AI) search** — you can’t type `sunset on beach` and have the app guess meaning; use metadata filters or your eyes instead
+- **Semantic (AI) search** — you can't type `sunset on beach` and have the app guess meaning; use metadata filters or your eyes instead
 - **Face-based filters** — no `has:face` / `people` style queries
 - **AI model download** — no ~600 MB (Windows) or ~150 MB (Mac) model install
 
@@ -31,24 +32,34 @@
 - Tuned prefetch so the next photos in the gallery and film strip load sooner when you scroll or arrow through a folder
 - Smaller app footprint (~500 MB install vs ~1.5 GB+ for Full after models)
 
-**How to get Lite:** On **Windows**, choose **Lite** in **`RAWviewer_Setup.exe`**. On **Mac**, download **`RAWviewer-v2.4-macOS-Lite.zip`**. Already on Full? You can install Lite side by side — they don’t share the same shortcut name.
+**How to get Lite:** On **Windows**, choose **Lite** in **`RAWviewer_Setup.exe`**. On **Mac**, download **`RAWviewer-v2.4-macOS-Lite.zip`**. Already on Full? You can install Lite side by side — they don't share the same shortcut name.
 
 Not sure which to pick? **Lite** if you cull by eye and search by camera/date/location. **Full** if you want to describe photos in everyday words or filter by faces.
 
+### Bookmarks
+
+- **Mark keepers per folder** — Press **↑** to toggle. In **single view**, click the **star** on the bottom-right bar too.
+- **Single-image view** — White star = bookmarked; outline star = not bookmarked. Click the star or press **↑** to toggle either way.
+- **Gallery** — Star badges on thumbnails and in the film strip. **↑** toggles the current selection; with multiple thumbnails selected (**Ctrl/Cmd+click**, **Shift+click**), **↑** or the bottom **star** toggles all selected photos at once.
+- **Bookmark-only gallery** — In gallery view, click the **outline star** (nothing selected) to show bookmarked photos only (star turns **gold**). Click again or press **Esc** to return to the full grid. With thumbnails selected, the star toggles bookmarks (same as **↑**).
+- **Search + bookmarks** — Search still runs on the whole folder; the bookmark filter narrows what you **see**. Turn off the filter to see all search matches; clear search with the filter still on to see every bookmark.
+- **Share / Open** — In **single view**, opens or shares the current photo. In **gallery**, the button appears when you multi-select photos **or** when bookmark filter is on. With filter on and nothing selected, it targets **all visible bookmarked** photos.
+- **Slideshow** — Play button in gallery and single view. In bookmark-filter mode, slideshow cycles **bookmarked photos only**.
+- **Esc order (gallery)** — Clears multi-select first, then exits bookmark filter (before leaving gallery from single view).
+- **Persistence** — Bookmarks are saved per folder locally and restored when you reopen that folder.
+
 ### Improvements & fixes
 
-- **Portrait photos look right** — Gallery thumbnails and the film strip no longer show vertical shots sideways or “twisted twice.”
+- **Portrait photos look right** — Gallery thumbnails and the film strip no longer show vertical shots sideways or "twisted twice."
 - **Smoother on huge folders (especially Mac)** — Large libraries scroll more reliably; the app eases off when your Mac is busy instead of freezing.
-- **Gallery multi-select** — **Ctrl+click** (Windows) or **Cmd+click** (Mac) to pick photos; **Shift+click** for a range. Works with drag-out and the bottom **Open / Share** bar.
-- **Lite search stays light** — Typing casual words like `sunset` in **Lite** no longer tries to load the heavy AI engine. Use filters such as `camera:sony` or `iso<800` instead.
-- **Windows maximize button** — Maximize and restore work on the first click after reopening the app.
+- **Gallery multi-select** — **Ctrl+click** (Windows) or **Cmd+click** (Mac) to pick photos; **Shift+click** for a range (follows visible gallery order, including search and bookmark filter). Works with drag-out and the bottom **Share / Open** bar.
 
 ### Gallery & everyday workflow
 
 - **Multi-select** — Ctrl/Cmd+click toggles a thumbnail on or off; Shift+click selects a continuous range (great for picking a burst or a run of keepers).
 - **Drag out** — One thumbnail drags one file; a multi-selection drags every selected file together.
 - **No accidental re-open** — Dragging a photo from RAWviewer and dropping it back on the window no longer opens it again.
-- **Search while indexing** — Progress messages stay clearer; Lite won’t pretend AI search is ready when only metadata has finished indexing.
+- **Search while indexing** — Progress messages stay clearer; Lite won't pretend AI search is ready when only metadata has finished indexing.
 
 ### Portrait orientation
 
@@ -57,13 +68,12 @@ Not sure which to pick? **Lite** if you cull by eye and search by camera/date/lo
 
 ### Large libraries (Mac)
 
-- Better behavior when a folder has thousands of photos — less stutter, fewer “system busy” moments.
+- Better behavior when a folder has thousands of photos — less stutter, fewer "system busy" moments.
 - Background search/indexing pauses while you scroll the gallery and picks up again when you stop.
 - On 8 GB Macs, the app stays conservative; on 16 GB+ machines it can work a bit harder automatically.
 
 ### Drag & drop
 
-- **Single-image view**: Drag the photo to export the original file.
 - **Gallery**: Drag one thumbnail, or drag while several are selected to export all of them.
 - **Filmstrip**: Drag the active strip thumbnail the same way.
 - **Drop in** (unchanged): Drag a folder or image onto the window to open it in RAWviewer.
@@ -179,7 +189,7 @@ Unified 2.2 release — search, gallery, film strip, frameless window polish, RA
 **Search & gallery**
 - **Search → gallery navigation**: Clicking a search result opens the correct image; film strip and arrow keys stay within filtered results.
 - **Gallery refresh after EXIF sort**: Gallery auto-updates when background capture-time refinement completes.
-- **Gallery thumbnails**: Click handler uses the widget’s current path so reordered/filtered grids navigate correctly.
+- **Gallery thumbnails**: Click handler uses the widget's current path so reordered/filtered grids navigate correctly.
 - **Search panel UI**: Collapsing the search field no longer shifts nearby status-bar icons; fixed width jump when clearing the query.
 - **Search indexing UX**: No flash of stale `Semantic/Face X/10` progress after search completes; session-aware index status.
 - **Semantic indexing**: Skip duplicate RAW companion files when writing to the index; resolved progress bar resets by scaling progress between thumbnail warming (10%) and MobileCLIP neural pass (90%); prevented brief double-count displays by filtering duplicate companion files in start fallbacks.

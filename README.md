@@ -13,46 +13,58 @@
   </a>
 </p>
 
-**RAWviewer** is a fast photo viewer for **Windows and macOS**. Open a folder of RAW or JPEG files, check sharpness, search your shots, and cull rejects — **100% on your computer, no cloud upload.**
+**RAWviewer** is a fast photo viewer for **Windows and macOS**. Browse folders of RAW and JPEG files, check sharpness, cull rejects, and search your library — **on your computer, no cloud upload.**
 
-**What’s new in v2.4:** **Lite** edition and a **single Windows installer**; **drag photos out** to other apps; **composition guides** (**G**); plus steadier large folders and correct portrait thumbnails.
-
-Official releases: [GitHub Releases](https://github.com/markyip/RAWviewer/releases/latest)
-
-**Contents:** [Choose your version](#choose-your-version) · [RAWviewer Lite](#rawviewer-lite) · [Download & install](#download--install) · [Using RAWviewer](#using-rawviewer) · [Troubleshooting](#something-not-working) · [Advanced reference](#advanced-reference) · [For developers](#for-developers)
+Download: **[GitHub Releases](https://github.com/markyip/RAWviewer/releases/latest)**
 
 ---
 
-## Choose your version
+## Using RAWviewer
 
-| | **Lite** | **Full** |
-|---|----------|----------|
-| **Best for** | Fast browsing and culling; smaller download | AI-powered search and face filters |
-| **Gallery search** | Metadata only (camera, ISO, date, GPS, filename, …) | Plain-language AI search *plus* metadata filters |
-| **Face filters** (`has:face`, `people`, …) | No | Yes |
-| **Install size / time** | Smaller; no AI model download | Larger; downloads AI models on first setup (Full only) |
+Open a folder (menu, drag-and-drop, or double-click a photo). Scroll the **gallery**; click a thumbnail for full-screen view.
 
-**Windows installer:** `RAWviewer_Setup.exe` (Unified Installer)  
-**macOS zips:** `RAWviewer-v2.4-macOS.zip` · `RAWviewer-v2.4-macOS-Lite.zip`
+| Key | Action |
+|-----|--------|
+| **Space** / **Double-click** | Toggle fit-to-window / 100% zoom |
+| **Pinch** / **Ctrl+scroll** | Zoom in or out |
+| **←** / **→** | Previous / next image |
+| **Scroll wheel** | Previous / next (single view, fit mode) |
+| **↑** | Bookmark / unbookmark (bottom **star** in single view too) |
+| **↓** | Move to Discard folder |
+| **Delete** | Delete image(s) |
+| **Esc** | Gallery: clear selection → exit bookmark filter · Single view: back to gallery |
+| **Ctrl/Cmd+click** | Gallery: toggle selection |
+| **Shift+click** | Gallery: select range (visible order) |
+| **G** | Cycle composition guide |
+| **H** | Show / hide histogram |
+| **F** | Show / hide focus overlay (supported files) |
 
-Not sure? Start with **Lite** if you mainly browse and cull by eye. Choose **Full** if you want to search with words like `sunset on beach` or filter by detected faces.
+**Gallery bookmarks:** Click the outline **star** (nothing selected) to show bookmarked shots only; gold star = filter on. With photos selected, **↑** or the star toggles bookmarks on the selection.
+
+**Search:** gallery search icon — `camera:sony`, `iso<800`, … (**Full** also accepts `sunset on beach`). **Share:** bottom **Share / Open** button, or drag gallery / film-strip thumbnails out.
+
+Search syntax → [Advanced reference](#advanced-reference).
 
 ---
 
-## RAWviewer Lite
+## Lite vs Full
 
-**Lite** is the same RAWviewer viewing experience as **Full**, without the offline AI search stack. You get the gallery, film strip, zoom, histogram, focus overlay, composition guides, drag-out sharing, and metadata-based gallery search — but not plain-language semantic search or face filters.
+Both editions share the same viewer, culling tools, bookmarks, and metadata search. **Full** adds offline AI search and face filters.
 
-| | **Why choose Lite** |
-|---|---------------------|
-| **Less storage** | Smaller download and install; no large AI model files on disk |
-| **Faster feel** | No background AI indexing; Lite is tuned to prefetch nearby photos so scrolling and **← / →** navigation stay responsive |
-| **Same culling tools** | Discard folder, bookmarks, multi-select, drag to other apps |
-| **Search** | By metadata only (`camera:`, `iso:`, `city:`, date, filename, …) — not by describing a scene in words |
+| | Lite | Full |
+|---|:--:|:--:|
+| Gallery, film strip, zoom, histogram, bookmarks, culling | ✅ | ✅ |
+| Metadata search (`camera:`, `iso:`, `date:`, …) | ✅ | ✅ |
+| Plain-language search | — | ✅ |
+| Face filters (`has:face`, …) | — | ✅ |
 
-**Trade-off:** Lite does **not** run semantic search. Typing `sunset` or `dog on beach` won’t match photos by meaning. Use filters like `camera:canon year>=2024`, or switch to **Full** if you want AI-powered search and face filters.
+Pick **Lite** for a smaller install and browse-by-eye workflow. Pick **Full** to search with everyday words — still 100% offline.
 
-**Get Lite:** **Windows** — select **Lite** in `RAWviewer_Setup.exe`. **Mac** — `RAWviewer-v2.4-macOS-Lite.zip`.
+---
+
+## Supported formats
+
+**RAW:** CR2, CR3, NEF, ARW, DNG, ORF, RW2, RAF, and other LibRaw types · **Standard:** JPEG, TIFF, HEIF
 
 ---
 
@@ -60,135 +72,28 @@ Not sure? Start with **Lite** if you mainly browse and cull by eye. Choose **Ful
 
 ### Windows
 
-1. Download **`RAWviewer_Setup.exe`** from **[Releases](https://github.com/markyip/RAWviewer/releases/latest)** and run it.
-2. In the setup wizard, choose your profile:
-   - **Full — CUDA** (NVIDIA GPU with CUDA for fastest AI search)
-   - **Full — DirectML** (AMD, Intel, or NVIDIA GPU; recommended for most PCs)
-   - **Lite** (browsing and culling only; smaller download, no AI models)
-3. Stay online — setup downloads the app runtime and dependencies. **Full** builds also download AI search models (~600 MB); this can take several minutes.
-4. Open **RAWviewer** from the Desktop shortcut, Start Menu, or **`RAWviewer.exe`** in your install folder (default: `%LOCALAPPDATA%\RAWviewer`).
+1. Download **`RAWviewer_Setup.exe`** from [Releases](https://github.com/markyip/RAWviewer/releases/latest).
+2. Choose **Full (CUDA)**, **Full (DirectML)**, or **Lite** in the wizard. **Full** also downloads AI models (~600 MB).
+3. Launch **`RAWviewer.exe`** or the Desktop shortcut (not the Setup file again).
 
-Setup also registers RAWviewer in Windows **Open with** for common photo formats, so you can right-click a file in Explorer and choose RAWviewer.
+Registers **Open with** for common photo formats. Uninstall: Settings → Apps, or **`uninstall.bat`** in `%LOCALAPPDATA%\RAWviewer`.
 
-**Uninstall:** **Settings → Apps → RAWviewer → Uninstall**, or run **`uninstall.bat`** in the install folder (`%LOCALAPPDATA%\RAWviewer`). This removes the app, your photo cache (`%USERPROFILE%\.rawviewer_cache`), and logs. Window layout and sort preferences are kept unless you set **`RAWVIEWER_UNINSTALL_FULL=1`** before running **`uninstall.bat`** (that also clears `HKCU\Software\RAWviewer`).
+### macOS (13+)
 
-If Windows shows **“Protected your PC”**: click **More info** → **Run anyway**.
+1. Download **`RAWviewer-v2.4-macOS.zip`** (Full) or **`RAWviewer-v2.4-macOS-Lite.zip`** (Lite).
+2. Extract, open Terminal in that folder, run: `bash install_macos_app.sh`
 
-> **`RAWviewer_Setup.exe` is the installer only** — it does not open the photo viewer. Use **`RAWviewer.exe`** or the Desktop shortcut.
+**Full:** may download AI models (~150 MB) on first gallery search. Uninstall: **`uninstall_macos_app.sh`** or **`Uninstall RAWviewer.command`** in the zip (keeps cache cleared; Trash alone does not).
 
-### macOS (13 Ventura or newer)
+### Requirements
 
-1. Download **`RAWviewer-v2.4-macOS.zip`** (Full) or **`RAWviewer-v2.4-macOS-Lite.zip`** (Lite) from **[Releases](https://github.com/markyip/RAWviewer/releases/latest)** and extract the zip.
-2. Open **Terminal**, go to the extracted folder (`cd ` then drag the folder onto Terminal), and run:
+Windows 10+ · macOS 13+ · 8 GB RAM (16 GB+ recommended for **Full** + large folders) · ~500 MB disk (**Lite**) or ~1.5 GB+ (**Full** with models)
 
-```bash
-bash install_macos_app.sh
-```
-
-3. Click **Install**, then **Open** in the dialogs. RAWviewer is copied to **Applications**.
-
-**Full builds only:** the first time you use gallery **Search**, RAWviewer may ask to download offline AI models (~150 MB, one-time, needs internet).
-
-To run from the extracted folder without installing: `bash remove_macos_quarantine.sh`
-
-**Uninstall:** In the extracted release folder (keep the zip or re-download from Releases), run **`bash uninstall_macos_app.sh`** or double-click **`Uninstall RAWviewer.command`** (right-click → **Open** if macOS blocks it). This removes RAWviewer from **Applications** and deletes your photo cache (`~/.rawviewer_cache`), logs, and preferences. Dragging the app to Trash alone does not clear cache.
-
-> **Mac too old?** Prebuilt apps need **macOS 13+**. See [macOS version support](#macos-version-support) below.
-
-### System requirements
-
-| | Requirement |
-|---|-------------|
-| **Windows** | Windows 10 or newer |
-| **macOS** | macOS 13 Ventura or newer |
-| **Disk (Lite)** | ~500 MB install + cache as you browse |
-| **Disk (Full)** | ~1.5 GB+ (includes AI models after first setup) |
-| **RAM** | 8 GB minimum; **16 GB+** recommended for **Full** + large folders (10k+ photos). RAWviewer adjusts how hard it works based on your RAM (see [Automatic memory tuning](#automatic-memory-tuning)). On **macOS**, v2.4 is better at handling very large folders without stuttering. |
-
-### Uninstall vs clear cache
-
-| Action | Windows | macOS |
-|--------|---------|-------|
-| **Uninstall app** | Settings → Apps, or **`uninstall.bat`** in `%LOCALAPPDATA%\RAWviewer` | **`uninstall_macos_app.sh`** or **`Uninstall RAWviewer.command`** in the release zip folder |
-| **Removes app** | Install folder | **`RAWviewer.app`** / **`RAWviewer_Lite.app`** in Applications |
-| **Removes photo cache** | `%USERPROFILE%\.rawviewer_cache` | `~/.rawviewer_cache` |
-| **Removes preferences** | Only if **`RAWVIEWER_UNINSTALL_FULL=1`** | Always (with uninstall script) |
-| **Clear cache only (keep app)** | **`scripts\Launch\bat\clear_cache.bat`** | **`scripts/Launch/shell/clear_cache.sh`** |
+To clear thumbnails only: **`scripts\Launch\bat\clear_cache.bat`** (Windows) · **`scripts/Launch/shell/clear_cache.sh`** (Mac)
 
 ---
 
-## Using RAWviewer
-
-1. **Open a folder** — File menu, drag-and-drop, or double-click a photo (Windows: use **Open with → RAWviewer** after install).
-2. **Gallery view** — scroll the grid; click a photo for full-screen view.
-3. **Check sharpness** — press **`Space`** for 100% zoom; **`←` / `→`** for prev/next.
-4. **Search** — click the search icon in gallery view. **Full:** type plain words (`sunset`, `airplane`) or filters (`camera:sony` `iso<800`). **Lite:** metadata filters only (see [Advanced → Gallery search syntax](#gallery-search-syntax)).
-5. **Open in another app** — use the bottom external-app button to open the current photo, gallery selection, or bookmarked photos in an editor. On Windows, single files use the native **Open with** picker; on macOS, choose a `.app` once and reuse it.
-6. **Reject a shot** — **`↓`** moves it to a **Discard** subfolder; **Delete** removes it (with confirmation).
-7. **`Esc`** returns from single view to the gallery.
-
-### Keyboard shortcuts
-
-| Key | Action |
-|-----|--------|
-| **G** | Cycle composition guide (off / rule of thirds / diagonals / both / phi grid) |
-| **Space** | Fit ↔ 100% zoom |
-| **← / →** | Previous / next image |
-| **↓** | Move to Discard folder |
-| **Delete** | Delete (with confirm) |
-| **Esc** | Back to gallery |
-| **H** | Show / hide histogram |
-| **F** | Show focus / subject box (when supported) |
-| **↑** | Bookmark / unbookmark (single view, or selected thumbnails in gallery) |
-
-### Mouse & trackpad
-
-- **Double-click** — zoom in on a point, or back to fit
-- **Drag** — pan when zoomed in
-- **Pinch / Ctrl+scroll** — zoom
-- **Scroll wheel** — next/previous (single view) or scroll gallery grid
-- **Film strip** — move the pointer to the bottom in single view for thumbnails
-- **Gallery multi-select** — **Ctrl+click** (Windows) or **Cmd+click** (Mac) to add or remove photos from a selection; **Shift+click** a second photo to select the range in between. Drag any selected thumbnail outward to copy or share all selected files.
-
-### Search tips
-
-- **Full:** type everyday words: `dog on beach`, `crowd`, `portrait`.
-- Add filters on the same line: `jet takeoff camera:canon iso<800`.
-- Words like **`people`** or **`face`** filter by detected faces (**Full** only) — if nothing matches, try `crowd` or `spectators` instead.
-- **Lite:** everyday words won’t run AI search — use filters like `camera:sony`, `iso<800`, or `city:tokyo`.
-- Clear the search box to show the whole folder again.
-
-Full search syntax, focus-overlay brands, and power-user options are in **[Advanced reference](#advanced-reference)** below.
-
----
-
-## What you get
-
-- **Lite or Full** — Lite for fast browse-and-cull; Full adds plain-language AI search and face filters
-- **One Windows installer** — `RAWviewer_Setup.exe` lets you pick Full (CUDA / DirectML) or Lite in one wizard
-- **Drag photos out** — From single view, gallery, or film strip to Explorer, Finder, Mail, editors, and more
-- **Composition guides** — Press **G** for rule-of-thirds, diagonal, or phi grid overlays while reviewing shots
-- Fast **RAW + JPEG** viewing (Canon, Nikon, Sony, DNG, and many more)
-- **Large folders feel smoother** — especially on Mac, with tens of thousands of photos
-- **Portrait photos look correct** — gallery and film-strip thumbnails no longer appear sideways
-- **Select several gallery photos** — Ctrl/Cmd+click and Shift+click, then drag them out together
-- **Offline AI search** (**Full**) — describe photos in plain language; nothing leaves your PC
-- **Metadata filters** — camera, lens, ISO, date, GPS, file type (both Lite and Full)
-- **Open in another app** — send the current photo, a gallery selection, or bookmarks to an external editor
-- **Focus overlay** (`F`) on many Canon / Nikon / Sony / Olympus / Panasonic files
-- **Windows Open with** — registered for common RAW and photo formats after install
-- Remembers your last folder and position
-
----
-
-## Supported formats
-
-**RAW:** CR2, CR3, NEF, ARW, DNG, ORF, RW2, RAF, and other LibRaw types  
-**Standard:** JPEG, TIFF, HEIF
-
----
-
-## Something not working?
+## Troubleshooting
 
 ### Windows
 
@@ -201,7 +106,6 @@ Full search syntax, focus-overlay brands, and power-user options are in **[Advan
 | AI search missing after install (**Full**) | Open gallery **Search** → accept the download prompt |
 | RAWviewer not in Open with | Re-run the installer (repair), or reinstall |
 | Leftover cache after uninstall | Run **`uninstall.bat`** again, or delete `%USERPROFILE%\.rawviewer_cache` manually |
-| Maximize button needs two clicks | Update to **v2.4** — fixed for the custom title bar on Windows |
 | Out of memory during AI indexing | See [Automatic memory tuning](#automatic-memory-tuning); use **Lite** on 8 GB PCs or set `RAWVIEWER_MEMORY_TIER_AUTO=0` and lower workers manually |
 | Crash | Enable file logging with `RAWVIEWER_FILE_LOG=1`, then check the install folder |
 
@@ -426,7 +330,7 @@ Pull requests welcome on [GitHub](https://github.com/markyip/RAWviewer).
 
 ## Support
 
-1. Check [Troubleshooting](#something-not-working) above  
+1. Check [Troubleshooting](#troubleshooting) above  
 2. Search [existing issues](https://github.com/markyip/RAWviewer/issues)  
 3. Open a new issue with OS version, steps, and logs if possible  
 

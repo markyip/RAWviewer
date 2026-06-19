@@ -19,12 +19,14 @@ INSTALL
 
 5. Click **Install**, then **Open** in the dialogs.
 
-SEMANTIC SEARCH (first use)
----------------------------
+SEMANTIC SEARCH (Full builds — first use)
+---------------------------------------
 
-When you open gallery search for the first time, RAWviewer may ask to
+**Lite** builds skip this — they use metadata search only.
+
+When you open gallery search for the first time on a **Full** build, RAWviewer may ask to
 download the offline AI models (~150 MB, one-time, needs internet).
-Click Download. Official release zips built with build_macos.sh already
+Click Download. Official **Full** release zips built with build_macos.sh already
 include these models; older or custom builds may need this step.
 
 RUN FROM THIS FOLDER (no Applications copy)

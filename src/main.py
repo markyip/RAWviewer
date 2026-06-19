@@ -4676,26 +4676,81 @@ class _LegacyGalleryCompatBlock:
 # Components moved to src/ui/ and src/enhanced_raw_processor.py
 
 class ResizeGripIndicator(QWidget):
-    """Bottom-right resize grip shown on hover (frameless window)."""
+    """Bottom-right resize hint for frameless windows (overlay, not app chrome)."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setFixedSize(16, 16)
-        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self._hint_visible = False
+        self.setCursor(Qt.CursorShape.SizeFDiagCursor)
         self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
         self.hide()
 
+    def set_hint_visible(self, visible: bool) -> None:
+        visible = bool(visible)
+        if self._hint_visible == visible:
+            return
+        self._hint_visible = visible
+        self.update()
+
+    def _viewer(self):
+        return self.parent()
+
+    def mousePressEvent(self, event):
+        viewer = self._viewer()
+        if (
+            viewer is not None
+            and hasattr(viewer, "_begin_resize_at_edge")
+            and viewer._begin_resize_at_edge(event, "bottom_right")
+        ):
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        viewer = self._viewer()
+        if (
+            viewer is not None
+            and hasattr(viewer, "_continue_resize_drag")
+            and viewer._continue_resize_drag(event)
+        ):
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        viewer = self._viewer()
+        if viewer is not None and hasattr(viewer, "_finish_resize_drag"):
+            if viewer._finish_resize_drag():
+                event.accept()
+                return
+        super().mouseReleaseEvent(event)
+
+    def enterEvent(self, event):
+        self.set_hint_visible(True)
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self.set_hint_visible(False)
+        super().leaveEvent(event)
+
     def paintEvent(self, event):
+        if not self._hint_visible:
+            return
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor(176, 176, 176, 200))
-        # Classic lower-right dotted grip (3 diagonal rows).
-        for row, count in enumerate((1, 2, 3)):
+        painter.setBrush(QColor(176, 176, 176, 100))
+        spacing = 3
+        dot = 2
+        origin_x = self.width() - dot
+        origin_y = self.height() - dot
+        for row in range(3):
+            count = 3 - row
             for col in range(count):
-                x = 10 - col * 4
-                y = 10 - row * 4
-                painter.drawEllipse(x, y, 2, 2)
+                x = origin_x - (count - 1 - col) * spacing
+                y = origin_y - row * spacing
+                painter.drawEllipse(x, y, dot, dot)
         painter.end()
 
 
@@ -4867,6 +4922,12 @@ class CustomTitleBar(QFrame):
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
+            parent = self.parent
+            if parent is not None and hasattr(parent, "_title_bar_corner_resize_at"):
+                pos = parent.mapFromGlobal(event.globalPosition().toPoint())
+                if parent._title_bar_corner_resize_at(pos):
+                    super().mousePressEvent(event)
+                    return
             # Top frame strip is reserved for window resize (handled by parent event filter).
             if event.position().y() <= 10:
                 super().mousePressEvent(event)
@@ -6583,6 +6644,7 @@ class RAWImageViewer(QMainWindow):
         self._gallery_selected_paths = set()  # normpath keys for multi-select in gallery
         self._gallery_selection_anchor = None  # normpath key for Shift+click range
         self._gallery_bookmarked_paths = set()  # normpath keys for bookmarked share targets
+        self._gallery_bookmark_filter_active = False  # gallery-only: show bookmarked images only
         self._gallery_preview_pending_full = False  # Gallery thumb on screen; full-res pending
         self._gallery_instant_display_quality = False  # True when gallery→single already shows preview/full
         self._skip_resolution_crossfade_once = False
@@ -6602,6 +6664,7 @@ class RAWImageViewer(QMainWindow):
 
         self._slideshow_timer = None
         self._slideshow_force_fit_next = False
+        self._slideshow_scope_paths = None  # when set, slideshow cycles this list only
         # Non-destructive per-file visual rotation (clockwise degrees: 0/90/180/270)
         self._visual_rotation_degrees = {}
         self._load_persisted_visual_rotations()
@@ -8289,13 +8352,41 @@ class RAWImageViewer(QMainWindow):
         query = (getattr(self, "_last_semantic_query", "") or "").strip()
         return bool(query and getattr(self, "_semantic_search_backup_files", None) is not None)
 
+    def _filter_paths_to_bookmarked(self, files: List[str]) -> List[str]:
+        bookmarked = getattr(self, "_gallery_bookmarked_paths", set()) or set()
+        if not bookmarked:
+            return []
+        return [p for p in files if p and _norm_path(p) in bookmarked]
+
+    def _gallery_effective_files(self) -> List[str]:
+        """Current gallery scope: folder/search results, optionally ∩ bookmarks."""
+        files = list(getattr(self, "image_files", []) or [])
+        if getattr(self, "_gallery_bookmark_filter_active", False):
+            files = self._filter_paths_to_bookmarked(files)
+        return files
+
+    def _gallery_search_base_files(self) -> List[str]:
+        """Files searched by the gallery bar (full folder/corpus; bookmark filter is display-only)."""
+        if self._semantic_search_corpus_files:
+            return list(self._semantic_search_corpus_files)
+        return list(getattr(self, "image_files", []) or [])
+
     def _navigation_files(self) -> list:
         """Files used for filmstrip and prev/next while browsing."""
         if self._is_semantic_search_filter_active():
             result = getattr(self, "_semantic_search_result_paths", None)
             if result is not None:
-                return [p for p in result if os.path.isfile(p)]
-        return list(getattr(self, "image_files", []) or [])
+                files = [p for p in result if os.path.isfile(p)]
+            else:
+                files = list(getattr(self, "image_files", []) or [])
+        else:
+            files = list(getattr(self, "image_files", []) or [])
+        scope = getattr(self, "_slideshow_scope_paths", None)
+        if scope:
+            return [p for p in scope if p and os.path.isfile(p)]
+        if getattr(self, "_gallery_bookmark_filter_active", False):
+            files = self._filter_paths_to_bookmarked(files)
+        return files
 
     def _adopt_gallery_navigation_path(self) -> None:
         """When leaving gallery, align single-view navigation with the gallery viewport."""
@@ -9801,6 +9892,13 @@ class RAWImageViewer(QMainWindow):
             main_layout.addWidget(self.title_bar)
             self.title_bar.setMouseTracking(True)
             self.title_bar.installEventFilter(self)
+            for _title_ctrl in (
+                self.title_bar.min_btn,
+                self.title_bar.max_btn,
+                self.title_bar.close_btn,
+            ):
+                _title_ctrl.setMouseTracking(True)
+                _title_ctrl.installEventFilter(self)
             self.title_bar._sync_maximize_state()
             self.status_metadata_label = self.title_bar.metadata_label
         else:
@@ -9897,23 +9995,7 @@ class RAWImageViewer(QMainWindow):
         self.image_label.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
         # Create instruction text with modern folder icon
         # Use modern folder icon (📁) instead of old style (🗁)
-        self.image_label.setText(
-            "No image loaded\n\n"
-            "Click 📁 or drag and drop a folder or image to load it\n"
-            "Press Space or Double-click to toggle fit-to-window / 100% zoom\n"
-            "Click and drag to pan when zoomed\n"
-            "Use Left/Right arrow keys to navigate between images (preserves zoom if zoomed in)\n"
-            "Bottom bar: Share and other controls when images are loaded\n"
-            "Up Arrow — Bookmark / unbookmark image(s)\n"
-            "Down Arrow — Move image(s) to Discard folder\n"
-            "Delete — Delete image(s)\n"
-            "Gallery: Ctrl/Cmd+click — toggle selection; Shift+click two photos for range\n"
-            "H — Show/hide histogram\n"
-            "G — Cycle composition guide (off / 3×3 / diagonal / both / phi grid)\n"
-            "F — Show/hide focus point\n"
-            "Scroll wheel (fit-to-window): Scroll down = next image, Scroll up = previous image\n"
-            "Horizontal wheel (zoom mode): Scroll left/right to pan the image"
-        )
+        self.image_label.setText(self._no_image_loaded_help_text())
         self.image_label.setStyleSheet(
             "QLabel { color: #666; font-size: 14px; background-color: transparent; }")
         self.image_label.setMinimumSize(400, 300)
@@ -9994,21 +10076,161 @@ class RAWImageViewer(QMainWindow):
         
         # Left side buttons container — fixed footprint; search field overlays beside it.
         left_buttons_widget = QWidget()
+        left_buttons_widget.setFixedHeight(28)
         left_buttons_widget.setSizePolicy(
-            QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Preferred
+            QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed
         )
         left_buttons_layout = QHBoxLayout(left_buttons_widget)
-        left_buttons_layout.setContentsMargins(0, 0, 0, 0)
+        left_buttons_layout.setContentsMargins(8, 0, 0, 0)
         # Add 8px spacing between buttons
         left_buttons_layout.setSpacing(8)
 
         import qtawesome as qta
-        bottom_icon_btn_style = """
+        bottom_icon_only_btn_style = """
+            QPushButton,
+            QPushButton:flat {
+                color: #B0B0B0;
+                padding: 0px;
+                margin: 0px;
+                border: none;
+                background: transparent;
+                min-width: 28px;
+                max-width: 28px;
+                min-height: 28px;
+                max-height: 28px;
+                border-radius: 4px;
+            }
+            QPushButton:hover,
+            QPushButton:flat:hover,
+            QPushButton:hover:enabled,
+            QPushButton:flat:hover:enabled {
+                color: #E0E0E0;
+                padding: 0px;
+                margin: 0px;
+                background-color: rgba(255, 255, 255, 0.05);
+            }
+            QPushButton:pressed,
+            QPushButton:flat:pressed {
+                padding: 0px;
+                margin: 0px;
+                background-color: rgba(255, 255, 255, 0.1);
+            }
+        """
+        bottom_icon_btn_style = bottom_icon_only_btn_style
+
+        def _style_bottom_icon_button(btn: QPushButton) -> None:
+            btn.setFlat(True)
+            btn.setAutoDefault(False)
+            btn.setDefault(False)
+            btn.setFixedSize(28, 28)
+            btn.setIconSize(QSize(20, 20))
+            btn.setStyleSheet(bottom_icon_only_btn_style)
+            btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+
+        # Open button (left side) - Using qtawesome for reliability
+        self.open_button = QPushButton()
+        self.open_button.setIcon(qta.icon('fa5s.folder-open', color='#B0B0B0'))
+        self.open_button.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.open_button.setToolTip("Open Image File")
+        self.open_button.clicked.connect(self.open_file)
+        _style_bottom_icon_button(self.open_button)
+        left_buttons_layout.addWidget(self.open_button, 0, alignment=Qt.AlignmentFlag.AlignVCenter)
+        
+        # Gallery view toggle button
+        self.view_mode_button = QPushButton()
+        # Use qtawesome icon if available, otherwise fallback to text
+        if qta is not None:
+            try:
+                gallery_icon = qta.icon('fa5s.th', color='#B0B0B0')
+                self.view_mode_button.setIcon(gallery_icon)
+                self.view_mode_button.setIconSize(QSize(20, 20))
+            except Exception as e:
+                safe_print(f"[WARNING] Failed to set qtawesome icon: {e}, using text fallback", flush=True)
+                self.view_mode_button.setText("Gallery")
+        else:
+            self.view_mode_button.setText("Gallery")
+        self.view_mode_button.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.view_mode_button.clicked.connect(self.toggle_view_mode)
+        _style_bottom_icon_button(self.view_mode_button)
+        left_buttons_layout.addWidget(self.view_mode_button, 0, alignment=Qt.AlignmentFlag.AlignVCenter)
+        self.view_mode_button.hide()  # Hidden by default until images are loaded
+
+        self.share_bottom_button = QPushButton()
+        self.share_bottom_button.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        try:
+            self.share_bottom_button.setIcon(qta.icon("fa5s.share-alt", color="#B0B0B0"))
+        except Exception as e:
+            safe_print(f"[WARNING] Share icon unavailable: {e}, using text fallback", flush=True)
+            self.share_bottom_button.setText("Open")
+        _style_bottom_icon_button(self.share_bottom_button)
+        self.share_bottom_button.setToolTip(
+            "Open in another app" if sys.platform == "win32" else "Share"
+        )
+        # pressed (mouse-down), not clicked (mouse-up): NSSharingServicePicker must not
+        # open on mouseUp or the macOS share sheet spins empty (AppKit console warning).
+        self.share_bottom_button.pressed.connect(self._on_share_bottom_button_clicked)
+        self.share_bottom_button.hide()
+
+        self.batch_mark_indicator = QPushButton()
+        self.batch_mark_indicator.setObjectName("batchMarkIndicator")
+        self.batch_mark_indicator.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self._bookmark_filter_star_icon = qta.icon("fa5s.star", color="#FFD700")
+        self._bookmark_star_bookmarked_icon = qta.icon("fa5s.star", color="#E0E0E0")
+        try:
+            self._bookmark_star_outline_icon = qta.icon("mdi.star-outline", color="#B0B0B0")
+        except Exception:
+            # fa5r/far regular fonts are not bundled in all qtawesome builds.
+            self._bookmark_star_outline_icon = qta.icon("fa5s.star", color="#808080")
+        _style_bottom_icon_button(self.batch_mark_indicator)
+        self.batch_mark_indicator.clicked.connect(self._on_bookmark_slot_clicked)
+        self.batch_mark_indicator.setToolTip("Bookmarked for opening in another app (↑ to toggle)")
+        self.batch_mark_indicator.hide()
+
+        self.slideshow_bottom_button = QPushButton()
+        self.slideshow_bottom_button.setObjectName("slideshowBottomButton")
+        self.slideshow_bottom_button.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.slideshow_bottom_button.setIcon(qta.icon("fa5s.play", color="#B0B0B0"))
+        _style_bottom_icon_button(self.slideshow_bottom_button)
+        self.slideshow_bottom_button.clicked.connect(self._on_slideshow_bottom_clicked)
+        self.slideshow_bottom_button.hide()
+        left_buttons_layout.addWidget(self.slideshow_bottom_button, 0, alignment=Qt.AlignmentFlag.AlignVCenter)
+
+        self.rotate_bottom_button = QPushButton()
+        self.rotate_bottom_button.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.rotate_bottom_button.setIcon(qta.icon("fa5s.redo", color="#B0B0B0"))
+        _style_bottom_icon_button(self.rotate_bottom_button)
+        self.rotate_bottom_button.clicked.connect(self._rotate_current_image_clockwise_persist)
+        self.rotate_bottom_button.hide()
+        left_buttons_layout.addWidget(self.rotate_bottom_button, 0, alignment=Qt.AlignmentFlag.AlignVCenter)
+
+        # RAW/JPEG Toggle button (before search so expand field stays adjacent to search icon)
+        self.raw_toggle_button = QPushButton()
+        self.raw_toggle_button.setFlat(True)
+        self.raw_toggle_button.setAutoDefault(False)
+        self.raw_toggle_button.setDefault(False)
+        self.raw_toggle_button.setFixedSize(44, 28)
+        self.raw_toggle_button.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.raw_toggle_button.clicked.connect(self.toggle_raw_jpeg_workflow)
+        self.raw_toggle_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.raw_toggle_button.hide()
+        left_buttons_layout.addWidget(self.raw_toggle_button, 0, alignment=Qt.AlignmentFlag.AlignVCenter)
+
+        # Sort toggle (gallery only) — before search icon so Search sits beside the expand field.
+        self.sort_toggle_button = QPushButton()
+        self.sort_toggle_button.setFlat(True)
+        self.sort_toggle_button.setAutoDefault(False)
+        self.sort_toggle_button.setDefault(False)
+        self.sort_toggle_button.setFixedHeight(28)
+        self.sort_toggle_button.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self._update_sort_button_text()
+        self.sort_toggle_button.clicked.connect(self.toggle_sort_method)
+        self.sort_toggle_button.setStyleSheet("""
             QPushButton {
                 color: #B0B0B0;
                 font-size: 13px;
                 font-weight: 500;
-                padding: 4px 8px;
+                padding: 0px 10px;
+                margin: 0px;
                 border: none;
                 background: transparent;
                 text-align: center;
@@ -10024,164 +10246,32 @@ class RAWImageViewer(QMainWindow):
             QPushButton:pressed {
                 background-color: rgba(255, 255, 255, 0.1);
             }
-            QPushButton:checked {
-                background-color: rgba(255, 255, 255, 0.08);
-            }
-        """
-
-        # Open button (left side) - Using qtawesome for reliability
-        self.open_button = QPushButton()
-        self.open_button.setIcon(qta.icon('fa5s.folder-open', color='#B0B0B0'))
-        self.open_button.setIconSize(QSize(20, 20))
-
-        self.open_button.setFlat(True)
-        self.open_button.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        self.open_button.setToolTip("Open Image File")
-        self.open_button.clicked.connect(self.open_file)
-        self.open_button.setStyleSheet(bottom_icon_btn_style)
-        self.open_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        left_buttons_layout.addWidget(self.open_button, 0, alignment=Qt.AlignmentFlag.AlignVCenter)
-        
-        # Sort toggle button (left side) - Material Design 3 text button style
-        # Hidden by default in single view, shown in gallery view
-        self.sort_toggle_button = QPushButton()
-        self.sort_toggle_button.setFlat(True)
-        self.sort_toggle_button.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        self._update_sort_button_text()
-        self.sort_toggle_button.clicked.connect(self.toggle_sort_method)
-        self.sort_toggle_button.setStyleSheet("""
-            QPushButton {
-                color: #B0B0B0;
-                font-size: 13px;
-                font-weight: 500;
-                padding: 4px 10px;
-                border: none;
-                background: transparent;
-                text-align: left;
-                letter-spacing: 0.25px;
-                min-height: 28px;
-                max-height: 28px;
-            }
-            QPushButton:hover {
-                color: #E0E0E0;
-                background-color: rgba(255, 255, 255, 0.05);
-                border-radius: 4px;
-            }
-            QPushButton:pressed {
-                background-color: rgba(255, 255, 255, 0.1);
-            }
         """)
         self.sort_toggle_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        left_buttons_layout.addWidget(self.sort_toggle_button)
+        left_buttons_layout.addWidget(
+            self.sort_toggle_button, 0, alignment=Qt.AlignmentFlag.AlignVCenter
+        )
         self.sort_toggle_button.hide()  # Hidden by default (single view)
-        
-        # Gallery view toggle button
-        self.view_mode_button = QPushButton()
-        # Use qtawesome icon if available, otherwise fallback to text
-        if qta is not None:
-            try:
-                gallery_icon = qta.icon('fa5s.th', color='#B0B0B0')
-                self.view_mode_button.setIcon(gallery_icon)
-                self.view_mode_button.setIconSize(QSize(20, 20))
-            except Exception as e:
-                safe_print(f"[WARNING] Failed to set qtawesome icon: {e}, using text fallback", flush=True)
-                self.view_mode_button.setText("Gallery")
-        else:
-            self.view_mode_button.setText("Gallery")
-        self.view_mode_button.setFlat(True)
-        self.view_mode_button.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        self.view_mode_button.clicked.connect(self.toggle_view_mode)
-        self.view_mode_button.setStyleSheet(bottom_icon_btn_style)
-        self.view_mode_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        left_buttons_layout.addWidget(self.view_mode_button, 0, alignment=Qt.AlignmentFlag.AlignVCenter)
-        self.view_mode_button.hide()  # Hidden by default until images are loaded
-
-        self.share_bottom_button = QPushButton()
-        self.share_bottom_button.setFlat(True)
-        self.share_bottom_button.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        try:
-            self.share_bottom_button.setIcon(qta.icon("fa5s.share-alt", color="#B0B0B0"))
-            self.share_bottom_button.setIconSize(QSize(20, 20))
-        except Exception as e:
-            safe_print(f"[WARNING] Share icon unavailable: {e}, using text fallback", flush=True)
-            self.share_bottom_button.setText("Open")
-        self.share_bottom_button.setStyleSheet(bottom_icon_btn_style)
-        self.share_bottom_button.setToolTip(
-            "Open in another app" if sys.platform == "win32" else "Share"
-        )
-        # pressed (mouse-down), not clicked (mouse-up): NSSharingServicePicker must not
-        # open on mouseUp or the macOS share sheet spins empty (AppKit console warning).
-        self.share_bottom_button.pressed.connect(self._on_share_bottom_button_clicked)
-        self.share_bottom_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.share_bottom_button.hide()
-
-        self.batch_mark_indicator = QLabel()
-        self.batch_mark_indicator.setObjectName("batchMarkIndicator")
-        self.batch_mark_indicator.setFixedSize(20, 20)
-        self.batch_mark_indicator.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.batch_mark_indicator.setPixmap(
-            qta.icon("fa5s.star", color="#FFD700").pixmap(QSize(16, 16))
-        )
-        self.batch_mark_indicator.setToolTip("Bookmarked for opening in another app (↑ to toggle)")
-        self.batch_mark_indicator.hide()
-
-        self.slideshow_bottom_button = QPushButton()
-        self.slideshow_bottom_button.setObjectName("slideshowBottomButton")
-        self.slideshow_bottom_button.setCheckable(True)
-        self.slideshow_bottom_button.setFlat(True)
-        self.slideshow_bottom_button.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        self.slideshow_bottom_button.setIcon(qta.icon("fa5s.play", color="#B0B0B0"))
-        self.slideshow_bottom_button.setIconSize(QSize(20, 20))
-        self.slideshow_bottom_button.setStyleSheet(
-            bottom_icon_btn_style
-        )
-        self.slideshow_bottom_button.toggled.connect(self._on_slideshow_bottom_toggled)
-        self.slideshow_bottom_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.slideshow_bottom_button.hide()
-        left_buttons_layout.addWidget(self.slideshow_bottom_button, 0, alignment=Qt.AlignmentFlag.AlignVCenter)
-
-        self.rotate_bottom_button = QPushButton()
-        self.rotate_bottom_button.setFlat(True)
-        self.rotate_bottom_button.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        self.rotate_bottom_button.setIcon(qta.icon("fa5s.redo", color="#B0B0B0"))
-        self.rotate_bottom_button.setIconSize(QSize(20, 20))
-        self.rotate_bottom_button.setStyleSheet(bottom_icon_btn_style)
-        self.rotate_bottom_button.clicked.connect(self._rotate_current_image_clockwise_persist)
-        self.rotate_bottom_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.rotate_bottom_button.hide()
-        left_buttons_layout.addWidget(self.rotate_bottom_button, 0, alignment=Qt.AlignmentFlag.AlignVCenter)
-
-        # RAW/JPEG Toggle button (before search so expand field stays adjacent to search icon)
-        self.raw_toggle_button = QPushButton()
-        self.raw_toggle_button.setFlat(True)
-        self.raw_toggle_button.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        self.raw_toggle_button.setStyleSheet(bottom_icon_btn_style)
-        self.raw_toggle_button.clicked.connect(self.toggle_raw_jpeg_workflow)
-        self.raw_toggle_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.raw_toggle_button.hide()
-        left_buttons_layout.addWidget(self.raw_toggle_button, 0, alignment=Qt.AlignmentFlag.AlignVCenter)
 
         self.search_bottom_button = QPushButton()
-        self.search_bottom_button.setFlat(True)
-        self.search_bottom_button.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         if qta is not None:
             try:
                 self.search_bottom_button.setIcon(qta.icon("fa5s.search", color="#B0B0B0"))
-                self.search_bottom_button.setIconSize(QSize(20, 20))
             except Exception:
                 self.search_bottom_button.setText("Search")
         else:
             self.search_bottom_button.setText("Search")
-        self.search_bottom_button.setStyleSheet(bottom_icon_btn_style)
+        self.search_bottom_button.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        _style_bottom_icon_button(self.search_bottom_button)
         self.search_bottom_button.clicked.connect(self._on_search_bottom_clicked)
-        self.search_bottom_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.search_bottom_button.hide()
         left_buttons_layout.addWidget(self.search_bottom_button, 0, alignment=Qt.AlignmentFlag.AlignVCenter)
 
         # Search panel: in-row width animation (v2.1 layout — avoids overlay blocking Open)
         self.search_expand_container = QWidget()
+        self.search_expand_container.setFixedHeight(28)
         self.search_expand_container.setSizePolicy(
-            QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred
+            QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed
         )
         self.search_expand_container.setMinimumWidth(0)
         self.search_expand_container.setMaximumWidth(0)
@@ -10189,6 +10279,7 @@ class RAWImageViewer(QMainWindow):
         self.search_expand_layout.setContentsMargins(0, 0, 0, 0)
 
         self.gallery_search_panel = QWidget()
+        self.gallery_search_panel.setFixedHeight(28)
         _gsp = QHBoxLayout(self.gallery_search_panel)
         _gsp.setContentsMargins(0, 0, 10, 0)
         _gsp.setSpacing(8)
@@ -10218,6 +10309,7 @@ class RAWImageViewer(QMainWindow):
         self.gallery_search_input.setClearButtonEnabled(True)
         self.gallery_search_input.setMinimumWidth(140)
         self.gallery_search_input.setMaximumWidth(300)
+        self.gallery_search_input.setFixedHeight(28)
         self.gallery_search_input.setSizePolicy(
             QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed
         )
@@ -10227,9 +10319,9 @@ class RAWImageViewer(QMainWindow):
                 background-color: #2A2A2A;
                 border: 1px solid #3A3A3A;
                 border-radius: 6px;
-                padding: 4px 28px 4px 10px;
+                padding: 0px 28px 0px 10px;
                 font-size: 13px;
-                min-height: 20px;
+                min-height: 0px;
                 max-height: 28px;
                 outline: none;
             }
@@ -10274,22 +10366,22 @@ class RAWImageViewer(QMainWindow):
         self.shortcuts_hint_button = QPushButton("i")
         self.shortcuts_hint_button.setFlat(True)
         self.shortcuts_hint_button.setCursor(QCursor(Qt.CursorShape.ArrowCursor))
-        self.shortcuts_hint_button.setFixedSize(22, 22)
+        self.shortcuts_hint_button.setFixedSize(28, 28)
         self.shortcuts_hint_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.shortcuts_hint_button.setToolTip(self._keyboard_shortcuts_tooltip())
         self.shortcuts_hint_button.setStyleSheet("""
             QPushButton {
                 color: #888888;
-                font-size: 11px;
+                font-size: 12px;
                 font-weight: 600;
                 padding: 0px;
                 border: none;
                 background: transparent;
-                border-radius: 11px;
-                min-width: 22px;
-                max-width: 22px;
-                min-height: 22px;
-                max-height: 22px;
+                border-radius: 14px;
+                min-width: 28px;
+                max-width: 28px;
+                min-height: 28px;
+                max-height: 28px;
             }
             QPushButton:hover {
                 color: #E0E0E0;
@@ -10301,22 +10393,28 @@ class RAWImageViewer(QMainWindow):
         """)
 
         # Trailing status: [share][i] in right_status_actions, then counter (v2.1 two-level layout).
-        _counter_label_style = """
-            QLabel {
+        _counter_right_pad = 6 if platform.system() == "Windows" else 4
+        _counter_label_style = f"""
+            QLabel {{
                 color: #B0B0B0;
                 font-size: 13px;
                 font-weight: 400;
-                padding: 4px 8px 4px 0px;
+                padding: 0px {_counter_right_pad}px 0px 0px;
                 letter-spacing: 0.25px;
-            }
+            }}
         """
         self.status_counter_label = QLabel("")
+        self.status_counter_label.setFixedHeight(28)
         self.status_counter_label.setAlignment(
             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
         )
         self.status_counter_label.setStyleSheet(_counter_label_style)
 
         self.right_status_actions = QWidget()
+        self.right_status_actions.setFixedHeight(28)
+        self.right_status_actions.setSizePolicy(
+            QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed
+        )
         right_status_actions_layout = QHBoxLayout(self.right_status_actions)
         right_status_actions_layout.setContentsMargins(0, 0, 0, 0)
         right_status_actions_layout.setSpacing(8)
@@ -10328,8 +10426,9 @@ class RAWImageViewer(QMainWindow):
             self.shortcuts_hint_button, 0, alignment=Qt.AlignmentFlag.AlignVCenter)
 
         self.right_status_trailing = QWidget()
+        self.right_status_trailing.setFixedHeight(28)
         self.right_status_trailing.setSizePolicy(
-            QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Preferred
+            QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed
         )
         _rtl = QHBoxLayout(self.right_status_trailing)
         _rtl.setContentsMargins(0, 0, 0, 0)
@@ -10349,9 +10448,13 @@ class RAWImageViewer(QMainWindow):
         # Add custom widget to status bar
         self.status_bar.addPermanentWidget(status_widget, 1)
 
-        # Hover-only size grip for frameless edge resize (does not consume layout space).
+        # Bottom-right resize grip (frameless Windows) — raised above status bar chrome.
         self._resize_grip = ResizeGripIndicator(self)
         self._position_resize_grip()
+        self.status_bar.setMouseTracking(True)
+        self.status_bar.installEventFilter(self)
+        status_widget.setMouseTracking(True)
+        status_widget.installEventFilter(self)
 
         # Track mouse over client area so edge cursors / grip appear without clicking first.
         self.setMouseTracking(True)
@@ -10464,12 +10567,6 @@ class RAWImageViewer(QMainWindow):
 
         file_menu.addSeparator()
 
-        self.copy_path_action = QAction("Copy Image File", self)
-        self.copy_path_action.setShortcut(QKeySequence.StandardKey.Copy)
-        self.copy_path_action.setStatusTip("Copy the current image file to the clipboard to paste/send in messaging apps")
-        self.copy_path_action.triggered.connect(self._copy_current_file_path_to_clipboard)
-        file_menu.addAction(self.copy_path_action)
-
         reveal_name = (
             "Reveal in Finder"
             if sys.platform == "darwin"
@@ -10498,7 +10595,6 @@ class RAWImageViewer(QMainWindow):
         # Shortcuts still work when the menu bar is hidden (Windows frameless UI)
         self.addAction(open_action)
         self.addAction(open_folder_action)
-        self.addAction(self.copy_path_action)
         self.addAction(self.reveal_action)
         self.addAction(exit_action)
         self.addAction(shortcuts_action)
@@ -10668,6 +10764,7 @@ class RAWImageViewer(QMainWindow):
         self._semantic_coverage_cache = None
         self._semantic_coverage_cache_ts = 0.0
         self._metadata_index_run_done = False
+        self._gallery_bookmark_filter_active = False
         if hasattr(self, "_metadata_index_defer_timer"):
             self._metadata_index_defer_timer.stop()
         self._gallery_search_user_collapsed_while_busy = False
@@ -12339,8 +12436,21 @@ class RAWImageViewer(QMainWindow):
             self.status_counter_label.setText("")
             return
         if getattr(self, "view_mode", "single") == "gallery":
-            total = len(self.image_files) if self.image_files else 0
-            self.status_counter_label.setText(f"{total} images")
+            if getattr(self, "_gallery_bookmark_filter_active", False):
+                total = len(self._gallery_files_for_display())
+                self.status_counter_label.setText(
+                    f"{total} bookmarked" if total != 1 else "1 bookmarked"
+                )
+            elif self._is_semantic_search_filter_active():
+                total = len(self.image_files) if self.image_files else 0
+                self.status_counter_label.setText(
+                    f"{total} results" if total != 1 else "1 result"
+                )
+            else:
+                total = len(self.image_files) if self.image_files else 0
+                self.status_counter_label.setText(
+                    f"{total} images" if total != 1 else "1 image"
+                )
             self.status_counter_label.show()
         elif self.image_files and self.current_file_index >= 0:
             total_files = len(self.image_files)
@@ -12391,15 +12501,15 @@ class RAWImageViewer(QMainWindow):
             return
         try:
             index = self._get_semantic_index()
-            base_files = (
-                list(self._semantic_search_corpus_files)
-                if self._semantic_search_corpus_files
-                else []
-            )
+            base_files = self._gallery_search_base_files()
             if not base_files:
-                base_files = list(self.image_files)
+                return
             if self._semantic_search_backup_files is None:
-                self._semantic_search_backup_files = list(base_files)
+                self._semantic_search_backup_files = list(
+                    self._semantic_search_corpus_files
+                    if self._semantic_search_corpus_files
+                    else getattr(self, "image_files", []) or []
+                )
             if getattr(self, "_semantic_indexing_in_progress", False):
                 progress = (
                     getattr(self, "_gallery_search_status_full", "") or ""
@@ -12461,7 +12571,13 @@ class RAWImageViewer(QMainWindow):
                 self.current_file_path = None
                 backend_missing = bool(semantic_query) and not index.semantic_backend_available()
                 empty_msg = (
-                    "Semantic search unavailable" if backend_missing else "No matching images"
+                    "Semantic search unavailable"
+                    if backend_missing
+                    else (
+                        "No matching bookmarked images"
+                        if getattr(self, "_gallery_bookmark_filter_active", False)
+                        else "No matching images"
+                    )
                 )
                 self._switch_to_gallery_for_search()
                 if hasattr(self, "gallery_justified") and self.gallery_justified:
@@ -12491,13 +12607,22 @@ class RAWImageViewer(QMainWindow):
                 self.current_file_index = -1
                 self.current_file_path = None
                 self._switch_to_gallery_for_search()
-                if hasattr(self, "gallery_justified") and self.gallery_justified:
+                empty_msg = (
+                    "No matching bookmarked images"
+                    if getattr(self, "_gallery_bookmark_filter_active", False)
+                    else "No matching images"
+                )
+                if getattr(self, "_gallery_bookmark_filter_active", False):
+                    self._apply_gallery_bookmark_filter()
+                    if hasattr(self, "gallery_justified") and self.gallery_justified:
+                        self.gallery_justified.show_empty_message(empty_msg)
+                elif hasattr(self, "gallery_justified") and self.gallery_justified:
                     self.gallery_justified.clear_thumbnail_widgets()
                     self.gallery_justified.set_images([])
-                    self.gallery_justified.show_empty_message("No matching images")
-                self._sync_gallery_scrollbar_policy()
-                self._update_gallery_counter()
-                self.status_bar.showMessage("No matching images", 3000)
+                    self.gallery_justified.show_empty_message(empty_msg)
+                    self._sync_gallery_scrollbar_policy()
+                    self._update_gallery_counter()
+                self.status_bar.showMessage(empty_msg, 3000)
                 self._last_semantic_query = query
                 return
 
@@ -12507,15 +12632,28 @@ class RAWImageViewer(QMainWindow):
             self.current_file_path = self.image_files[0]
 
             self._switch_to_gallery_for_search()
-            self._update_gallery_counter()
-            if hasattr(self, "gallery_justified") and self.gallery_justified:
-                self.gallery_justified.hide_empty_message()
-            self._sync_gallery_scrollbar_policy()
-            self._update_gallery_view()
+            if getattr(self, "_gallery_bookmark_filter_active", False):
+                self._apply_gallery_bookmark_filter()
+            else:
+                self._update_gallery_counter()
+                if hasattr(self, "gallery_justified") and self.gallery_justified:
+                    self.gallery_justified.hide_empty_message()
+                self._sync_gallery_scrollbar_policy()
+                self._update_gallery_view()
 
             top = max(hits, key=lambda h: h.score) if hits else None
+            effective_n = len(self._gallery_effective_files())
             if used_semantic_backend and top is not None:
-                message = f"Semantic search: {len(ranked_paths)} result(s) | top score {top.score:.3f}"
+                if getattr(self, "_gallery_bookmark_filter_active", False):
+                    message = (
+                        f"Search: {effective_n} bookmarked match"
+                        f"{'es' if effective_n != 1 else ''}"
+                        f" | top score {top.score:.3f}"
+                    )
+                else:
+                    message = f"Semantic search: {len(ranked_paths)} result(s) | top score {top.score:.3f}"
+            elif getattr(self, "_gallery_bookmark_filter_active", False):
+                message = f"EXIF search: {effective_n} bookmarked match{'es' if effective_n != 1 else ''}"
             else:
                 message = f"EXIF search: {len(ranked_paths)} result(s)"
             self.status_bar.showMessage(message, 5000)
@@ -12569,12 +12707,22 @@ class RAWImageViewer(QMainWindow):
             self._show_gallery_view()
         elif getattr(self, "view_mode", "single") == "gallery":
             self._sync_gallery_scrollbar_policy()
-            self._update_gallery_view()
+            if getattr(self, "_gallery_bookmark_filter_active", False):
+                self._apply_gallery_bookmark_filter()
+            else:
+                self._update_gallery_view()
         else:
             self.load_raw_image(self.current_file_path)
             self._sync_filmstrip_to_folder()
         if not silent:
-            self.status_bar.showMessage("Semantic search filter cleared", 3000)
+            if getattr(self, "_gallery_bookmark_filter_active", False):
+                n = len(self._gallery_effective_files())
+                self.status_bar.showMessage(
+                    f"Showing {n} bookmarked image{'s' if n != 1 else ''}",
+                    3000,
+                )
+            else:
+                self.status_bar.showMessage("Semantic search filter cleared", 3000)
 
     def get_settings(self):
         return QSettings("RAWviewer", "RAWviewer")
@@ -12999,61 +13147,64 @@ class RAWImageViewer(QMainWindow):
 
         self.raw_toggle_button.setIcon(QIcon())
         self.raw_toggle_button.setText("RAW")
+        self.raw_toggle_button.setFixedSize(44, 28)
 
         settings = self.get_settings()
         use_embedded = settings.value("use_embedded_jpeg_workflow", True, type=bool)
 
         btn_font = self.raw_toggle_button.font()
         btn_font.setBold(not use_embedded)
+        btn_font.setPointSize(13 if use_embedded else 16)
         self.raw_toggle_button.setFont(btn_font)
+
+        raw_btn_base = """
+            QPushButton {
+                padding: 0px;
+                border: none;
+                background: transparent;
+                text-align: center;
+                letter-spacing: 0.5px;
+                min-width: 44px;
+                max-width: 44px;
+                min-height: 28px;
+                max-height: 28px;
+            }
+            QPushButton:hover {
+                background-color: rgba(255, 255, 255, 0.05);
+                border-radius: 4px;
+            }
+            QPushButton:pressed {
+                background-color: rgba(255, 255, 255, 0.1);
+            }
+        """
 
         if use_embedded:
             self.raw_toggle_button.setToolTip(
                 "Embedded JPEG workflow (Fast)\nClick to toggle to RAW image workflow (High Quality)"
             )
-            self.raw_toggle_button.setStyleSheet("""
+            self.raw_toggle_button.setStyleSheet(raw_btn_base + """
                 QPushButton {
                     color: #B0B0B0;
                     font-size: 13px;
                     font-weight: 500;
-                    padding: 4px 8px;
-                    border: none;
-                    background: transparent;
-                    text-align: center;
-                    letter-spacing: 0.5px;
-                    min-height: 28px;
-                    max-height: 28px;
                 }
                 QPushButton:hover {
                     color: #E0E0E0;
-                    background-color: rgba(255, 255, 255, 0.05);
-                    border-radius: 4px;
-                }
-                QPushButton:pressed {
-                    background-color: rgba(255, 255, 255, 0.1);
                 }
             """)
         else:
             self.raw_toggle_button.setToolTip(
                 "RAW workflow (High Quality)\nClick to toggle to Embedded JPEG workflow (Fast)"
             )
-            self.raw_toggle_button.setStyleSheet("""
+            self.raw_toggle_button.setStyleSheet(raw_btn_base + """
                 QPushButton {
                     color: #D2D2D2;
                     font-size: 16px;
                     font-weight: 700;
-                    padding: 4px 8px;
-                    border: none;
-                    background: transparent;
-                    text-align: center;
-                    letter-spacing: 0.5px;
-                    min-height: 28px;
-                    max-height: 28px;
                 }
                 QPushButton:hover {
                     color: #E4E4E4;
                     background-color: rgba(255, 255, 255, 0.08);
-                    border-radius: 4px;
                 }
                 QPushButton:pressed {
                     color: #FFFFFF;
@@ -13232,6 +13383,7 @@ class RAWImageViewer(QMainWindow):
         self._schedule_search_expand_overlay_sync()
         if hasattr(self, "share_bottom_button"):
             self._sync_share_button_visibility()
+        self._sync_slideshow_button_visibility()
         
         ui_time = time.time() - ui_start
         logger.info(f"[VIEW_MODE] Step 3: UI elements shown (elapsed: {ui_time:.3f}s)")
@@ -13505,10 +13657,8 @@ class RAWImageViewer(QMainWindow):
         # because we do not call update_status_bar() when entering gallery (counter text differs).
         if hasattr(self, "share_bottom_button"):
             self._sync_share_button_visibility()
-        if hasattr(self, "batch_mark_indicator"):
-            self.batch_mark_indicator.hide()
-        if hasattr(self, "slideshow_bottom_button"):
-            self.slideshow_bottom_button.hide()
+        self._sync_bookmark_indicator()
+        self._sync_slideshow_button_visibility()
         if hasattr(self, "rotate_bottom_button"):
             self.rotate_bottom_button.hide()
         if hasattr(self, "raw_toggle_button"):
@@ -13821,9 +13971,18 @@ class RAWImageViewer(QMainWindow):
                 except Exception as ex:
                     logger.warning(f"[GALLERY] Could not pre-seed semantic metadata: {ex}")
 
-                self.gallery_justified.set_images(
-                    self.image_files, bulk_metadata if bulk_metadata else None
-                )
+                display_files = self._gallery_files_for_display()
+                if not display_files and getattr(self, "_gallery_bookmark_filter_active", False):
+                    self.gallery_justified.set_images(
+                        [], bulk_metadata if bulk_metadata else None
+                    )
+                    self.gallery_justified.show_empty_message("No bookmarked images")
+                else:
+                    if hasattr(self.gallery_justified, "hide_empty_message"):
+                        self.gallery_justified.hide_empty_message()
+                    self.gallery_justified.set_images(
+                        display_files, bulk_metadata if bulk_metadata else None
+                    )
                 current_file = getattr(self, "current_file_path", None)
                 if current_file and hasattr(self.gallery_justified, "scroll_to_file"):
                     self.gallery_justified.scroll_to_file(current_file)
@@ -13832,7 +13991,7 @@ class RAWImageViewer(QMainWindow):
                 self._warm_gallery_from_filmstrip_cache()
                 if hasattr(self.gallery_justified, "sync_visual_rotations"):
                     self.gallery_justified.sync_visual_rotations()
-                file_count = len(self.image_files or [])
+                file_count = len(display_files or [])
                 first_load_ms = min(900, max(250, 200 + file_count // 40))
                 QTimer.singleShot(first_load_ms, self.gallery_justified.load_visible_images)
                 QTimer.singleShot(first_load_ms + 500, self.gallery_justified.load_visible_images)
@@ -14928,15 +15087,28 @@ class RAWImageViewer(QMainWindow):
         self._gallery_selected_paths = set(keys)
         self._gallery_refresh_selection_ui()
 
+    def _gallery_selection_ordered_paths(self) -> List[str]:
+        """Ordered paths used for Shift+click range selection (matches on-screen gallery)."""
+        if getattr(self, "view_mode", "") == "gallery":
+            gj = getattr(self, "gallery_justified", None)
+            if gj is not None:
+                visible = list(getattr(gj, "images", []) or [])
+                if visible:
+                    return visible
+            return self._gallery_files_for_display()
+        return list(getattr(self, "image_files", []) or [])
+
     def _gallery_shift_click_selection(self, file_path: str) -> None:
         """Shift+click: first click sets anchor; second selects the inclusive range."""
         canonical = self._gallery_canonical_path(file_path)
         if not canonical:
             return
         key = _norm_path(canonical)
-        anchor = getattr(self, "_gallery_selection_anchor", None)
-        paths = self.image_files or []
+        paths = self._gallery_selection_ordered_paths()
         norm_list = [_norm_path(p) for p in paths if p]
+        if key not in norm_list:
+            return
+        anchor = getattr(self, "_gallery_selection_anchor", None)
         if not anchor or anchor not in norm_list:
             self._gallery_selection_anchor = key
             self._gallery_set_selection_keys({key})
@@ -15019,7 +15191,17 @@ class RAWImageViewer(QMainWindow):
         self._refresh_filmstrip_bookmark_visuals()
         self._refresh_gallery_bookmark_visuals()
         self._sync_bookmark_indicator()
-        self._sync_share_button_visibility()
+        if (
+            getattr(self, "view_mode", "") == "gallery"
+            and getattr(self, "_gallery_bookmark_filter_active", False)
+        ):
+            self._apply_gallery_bookmark_filter()
+        elif getattr(self, "view_mode", "") == "gallery":
+            self._sync_share_button_visibility()
+        if getattr(self, "view_mode", "single") == "single" and getattr(
+            self, "_gallery_bookmark_filter_active", False
+        ):
+            self._sync_filmstrip_to_folder()
         self._save_persisted_gallery_bookmarks()
 
     def _gallery_toggle_selected_bookmarks(self) -> None:
@@ -15057,14 +15239,7 @@ class RAWImageViewer(QMainWindow):
             self.status_bar.showMessage(msg, 2500)
 
     def _gallery_bookmarked_canonical_paths(self) -> List[str]:
-        bookmarked = getattr(self, "_gallery_bookmarked_paths", set()) or set()
-        if not bookmarked:
-            return []
-        out: List[str] = []
-        for p in self.image_files or []:
-            if _norm_path(p) in bookmarked:
-                out.append(p)
-        return out
+        return self._filter_paths_to_bookmarked(list(getattr(self, "image_files", []) or []))
 
     def _current_image_bookmarked(self) -> bool:
         path = getattr(self, "current_file_path", None)
@@ -15072,16 +15247,164 @@ class RAWImageViewer(QMainWindow):
             return False
         return _norm_path(path) in getattr(self, "_gallery_bookmarked_paths", set())
 
-    def _sync_bookmark_indicator(self) -> None:
-        indicator = getattr(self, "batch_mark_indicator", None)
-        if indicator is None:
+    def _gallery_files_for_display(self) -> List[str]:
+        """Gallery file list, optionally narrowed to bookmarked images only."""
+        if getattr(self, "view_mode", "") != "gallery":
+            return list(getattr(self, "image_files", []) or [])
+        return self._gallery_effective_files()
+
+    def _should_show_slideshow_button(self) -> bool:
+        if not getattr(self, "image_files", None):
+            return False
+        if getattr(self, "view_mode", "single") == "single":
+            return True
+        return getattr(self, "view_mode", "") == "gallery"
+
+    def _sync_slideshow_button_visibility(self) -> None:
+        btn = getattr(self, "slideshow_bottom_button", None)
+        if btn is None:
             return
-        show = (
-            getattr(self, "view_mode", "single") == "single"
-            and bool(getattr(self, "image_files", None))
-            and self._current_image_bookmarked()
-        )
-        indicator.setVisible(show)
+        vis = self._should_show_slideshow_button()
+        if btn.isVisible() != vis:
+            btn.setVisible(vis)
+
+    def _clear_gallery_bookmark_filter(self) -> bool:
+        """Leave bookmark-only gallery view; keep active search results if any."""
+        if getattr(self, "view_mode", "") != "gallery":
+            return False
+        if not getattr(self, "_gallery_bookmark_filter_active", False):
+            return False
+        self._gallery_bookmark_filter_active = False
+        self._sync_bookmark_indicator()
+        self._apply_gallery_bookmark_filter()
+        return True
+
+    def _on_bookmark_slot_clicked(self) -> None:
+        vm = getattr(self, "view_mode", "")
+        if vm == "single":
+            path = getattr(self, "current_file_path", None)
+            if path:
+                self._gallery_toggle_path_bookmark(path)
+            return
+        if vm != "gallery":
+            return
+        if self._gallery_has_selection():
+            self._gallery_toggle_selected_bookmarks()
+            return
+        if getattr(self, "_gallery_bookmark_filter_active", False):
+            self._clear_gallery_bookmark_filter()
+            return
+        self._gallery_bookmark_filter_active = True
+        self._sync_bookmark_indicator()
+        self._apply_gallery_bookmark_filter()
+
+    def _apply_gallery_bookmark_filter(self) -> None:
+        if getattr(self, "view_mode", "") != "gallery":
+            return
+        filter_active = bool(getattr(self, "_gallery_bookmark_filter_active", False))
+        display_files = self._gallery_files_for_display()
+        display_keys = {_norm_path(p) for p in display_files}
+        selected = set(getattr(self, "_gallery_selected_paths", set()) or set())
+        if selected - display_keys:
+            self._gallery_selected_paths = selected & display_keys
+            self._gallery_refresh_selection_ui()
+        gj = getattr(self, "gallery_justified", None)
+        if gj is not None:
+            meta = getattr(self, "_gallery_bulk_metadata", None) or {}
+            if filter_active:
+                if not display_files:
+                    empty_msg = (
+                        "No matching bookmarked images"
+                        if self._is_semantic_search_filter_active()
+                        else "No bookmarked images"
+                    )
+                    gj.set_images([], meta if meta else None)
+                    gj.show_empty_message(empty_msg)
+                else:
+                    if hasattr(gj, "hide_empty_message"):
+                        gj.hide_empty_message()
+                    gj.set_images(display_files, meta if meta else None)
+            else:
+                if hasattr(gj, "hide_empty_message"):
+                    gj.hide_empty_message()
+                anchor = None
+                if hasattr(gj, "get_scroll_anchor_path"):
+                    try:
+                        anchor = gj.get_scroll_anchor_path()
+                    except Exception:
+                        anchor = None
+                display_files = list(getattr(self, "image_files", []) or [])
+                if not display_files:
+                    gj.set_images([], meta if meta else None)
+                    empty_msg = (
+                        "No matching images"
+                        if self._is_semantic_search_filter_active()
+                        else "No images"
+                    )
+                    gj.show_empty_message(empty_msg)
+                else:
+                    self._sync_gallery_to_folder_files(
+                        meta if meta else None,
+                        scroll_anchor_path=anchor,
+                        force=True,
+                    )
+        self._sync_gallery_scrollbar_policy()
+        self._update_gallery_counter()
+        self._sync_share_button_visibility()
+        self._sync_slideshow_button_visibility()
+        if hasattr(self, "status_bar") and self.status_bar:
+            if filter_active:
+                n = len(display_files)
+                if self._is_semantic_search_filter_active():
+                    self.status_bar.showMessage(
+                        f"Showing {n} bookmarked search match{'es' if n != 1 else ''}",
+                        2500,
+                    )
+                else:
+                    self.status_bar.showMessage(
+                        f"Showing {n} bookmarked image{'s' if n != 1 else ''}",
+                        2500,
+                    )
+            elif self._is_semantic_search_filter_active():
+                n = len(getattr(self, "image_files", []) or [])
+                self.status_bar.showMessage(
+                    f"Showing {n} search result{'s' if n != 1 else ''}",
+                    2500,
+                )
+            else:
+                self.status_bar.showMessage("Showing all images", 2000)
+
+    def _sync_bookmark_indicator(self) -> None:
+        btn = getattr(self, "batch_mark_indicator", None)
+        if btn is None:
+            return
+        in_single = getattr(self, "view_mode", "single") == "single"
+        in_gallery = getattr(self, "view_mode", "") == "gallery"
+        has_files = bool(getattr(self, "image_files", None))
+        if not has_files or (not in_single and not in_gallery):
+            btn.hide()
+            return
+        btn.show()
+        btn.setFixedSize(28, 28)
+        btn.setIconSize(QSize(20, 20))
+        if in_single:
+            btn.setEnabled(True)
+            btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+            if self._current_image_bookmarked():
+                btn.setIcon(getattr(self, "_bookmark_star_bookmarked_icon", QIcon()))
+                btn.setToolTip("Bookmarked — click star or ↑ to remove")
+            else:
+                btn.setIcon(getattr(self, "_bookmark_star_outline_icon", QIcon()))
+                btn.setToolTip("Bookmark for opening in another app — click star or ↑")
+            return
+        btn.setEnabled(True)
+        btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        if getattr(self, "_gallery_bookmark_filter_active", False):
+            btn.setIcon(getattr(self, "_bookmark_filter_star_icon", QIcon()))
+            btn.setToolTip("Showing bookmarked images only (click star or Esc to show all)")
+        else:
+            btn.setIcon(getattr(self, "_bookmark_star_outline_icon", QIcon()))
+            btn.setToolTip("Show bookmarked images only")
 
     def _refresh_filmstrip_bookmark_visuals(self) -> None:
         bar = self._filmstrip_bar()
@@ -15108,19 +15431,19 @@ class RAWImageViewer(QMainWindow):
             self, "image_files", None
         ):
             vis = False
-        btn.setVisible(vis)
+        if btn.isVisible() != vis:
+            btn.setVisible(vis)
 
     def _gallery_share_target_paths(self) -> List[str]:
-        """Paths to open/share: gallery selection, else bookmarks; single view uses current file."""
+        """Paths to open/share: gallery multi-select, else all visible bookmarked when filter on; single view uses current file."""
         vm = getattr(self, "view_mode", "")
         if vm == "gallery":
             if self._gallery_has_selection():
                 paths = self._gallery_selected_canonical_paths()
-            elif self._gallery_has_bookmarks():
-                paths = self._gallery_bookmarked_canonical_paths()
+            elif getattr(self, "_gallery_bookmark_filter_active", False):
+                paths = self._gallery_files_for_display()
             else:
-                p = getattr(self, "current_file_path", None)
-                paths = [p] if p else []
+                paths = []
         else:
             p = getattr(self, "current_file_path", None)
             paths = [p] if p else []
@@ -15332,7 +15655,6 @@ class RAWImageViewer(QMainWindow):
     def _gallery_item_clicked(self, file_path):
         """Handle gallery item click - switch to single view and load image"""
         self._clear_gallery_selection()
-        self._gallery_selection_anchor = _norm_path(file_path)
         # SYNC: Update current file index immediately to prevent navigation jumps
         target = _norm_path(file_path)
         if self.image_files:
@@ -15980,11 +16302,23 @@ class RAWImageViewer(QMainWindow):
             "Up Arrow — Bookmark / unbookmark image(s)\n"
             "Down Arrow — Move image(s) to Discard folder\n"
             "Delete — Delete image(s)\n"
-            "Ctrl+C / Cmd+C — Copy image file to clipboard (paste into messaging apps)\n"
+            "Esc — Gallery: clear selection / exit bookmark filter; single view: back to gallery\n"
             "Gallery: Ctrl/Cmd+click — toggle selection; Shift+click two photos for range\n"
             "H — Show/hide histogram\n"
             "G — Cycle composition guide (off / 3×3 / diagonal / both / phi grid)\n"
             "F — Show/hide focus point"
+        )
+
+    def _no_image_loaded_help_text(self) -> str:
+        """Empty-state instructions (single view / no folder loaded)."""
+        return (
+            "No image loaded\n\n"
+            "Click 📁 or drag and drop a folder or image to load it\n"
+            f"{self._keyboard_shortcuts_help_text()}\n"
+            "Click and drag to pan when zoomed\n"
+            "Scroll wheel (fit-to-window): Scroll down = next image, Scroll up = previous image\n"
+            "Horizontal wheel (zoom mode): Scroll left/right to pan the image\n"
+            "Bottom bar: Share/Open and other controls when images are loaded"
         )
 
     def _keyboard_shortcuts_tooltip(self) -> str:
@@ -18087,61 +18421,147 @@ class RAWImageViewer(QMainWindow):
         except Exception:
             pass
 
+    def _slideshow_is_active(self) -> bool:
+        t = getattr(self, "_slideshow_timer", None)
+        return t is not None and t.isActive()
+
     def _stop_slideshow(self):
         t = getattr(self, "_slideshow_timer", None)
         if t is not None and t.isActive():
             t.stop()
-        btn = getattr(self, "slideshow_bottom_button", None)
-        if btn is not None:
-            btn.blockSignals(True)
-            btn.setChecked(False)
-            btn.blockSignals(False)
-            self._sync_slideshow_button_icon(False)
+        self._slideshow_scope_paths = None
+        self._sync_slideshow_button_icon(False)
+
+    def _slideshow_scope_start_path(self, scope: List[str]) -> str:
+        scope_norm = {_norm_path(p): p for p in scope if p}
+        cp = getattr(self, "current_file_path", None)
+        if cp and _norm_path(cp) in scope_norm:
+            return scope_norm[_norm_path(cp)]
+        gj = getattr(self, "gallery_justified", None)
+        anchor = None
+        if gj is not None and hasattr(gj, "get_scroll_anchor_path"):
+            try:
+                anchor = gj.get_scroll_anchor_path()
+            except Exception:
+                anchor = None
+        if anchor and _norm_path(anchor) in scope_norm:
+            return scope_norm[_norm_path(anchor)]
+        return scope[0]
+
+    def _open_slideshow_image(self, path: str) -> None:
+        idx = _find_file_index_in_list(self.image_files, path, default=-1)
+        if idx >= 0:
+            self.current_file_index = idx
+        self.current_file_path = path
+        self.load_raw_image(path)
+
+    def _slideshow_advance(self, direction: str) -> None:
+        scope = getattr(self, "_slideshow_scope_paths", None)
+        if scope:
+            files = [p for p in scope if p and os.path.isfile(p)]
+            if len(files) <= 1:
+                return
+            cur = getattr(self, "current_file_path", None)
+            idx = 0
+            if cur:
+                for i, p in enumerate(files):
+                    if _norm_path(p) == _norm_path(cur):
+                        idx = i
+                        break
+            if direction == "next":
+                idx = (idx + 1) % len(files)
+            else:
+                idx = (idx - 1) % len(files)
+            self._open_slideshow_image(files[idx])
+            return
+        if direction == "next":
+            self.navigate_to_next_image()
+        else:
+            self.navigate_to_previous_image()
 
     def _on_slideshow_tick(self):
         if getattr(self, "view_mode", "single") != "single":
             self._stop_slideshow()
             return
-        if not self.image_files or self.current_file_index < 0:
-            self._stop_slideshow()
+        if not self._slideshow_is_active():
             return
-        btn = getattr(self, "slideshow_bottom_button", None)
-        if btn is None or not btn.isChecked():
+        scope = getattr(self, "_slideshow_scope_paths", None)
+        files = (
+            [p for p in scope if p and os.path.isfile(p)]
+            if scope
+            else self._navigation_files()
+        )
+        cur = getattr(self, "current_file_path", None)
+        if not files or not cur:
             self._stop_slideshow()
             return
         self._slideshow_force_fit_next = True
-        self._debounced_navigate("next", from_slideshow=True)
+        self._slideshow_advance("next")
 
-    def _on_slideshow_bottom_toggled(self, on: bool):
-        if getattr(self, '_is_delete_dialog_open', False):
-            b = getattr(self, "slideshow_bottom_button", None)
-            if b is not None:
-                b.setChecked(False)
-            return
-        if on:
-            if getattr(self, "view_mode", "single") != "single" or not self.image_files:
-                b = getattr(self, "slideshow_bottom_button", None)
-                if b is not None:
-                    b.blockSignals(True)
-                    b.setChecked(False)
-                    b.blockSignals(False)
-                    self._sync_slideshow_button_icon(False)
-                return
-            self.fit_to_window = True
-            self.current_zoom_level = 1.0
-            self.zoom_center_point = None
-            if getattr(self, "current_pixmap", None) and not self.current_pixmap.isNull():
-                self.scale_image_to_fit()
-                self.update_status_bar()
-            if self._slideshow_timer is None:
-                self._slideshow_timer = QTimer(self)
-                self._slideshow_timer.timeout.connect(self._on_slideshow_tick)
-            self._slideshow_timer.start(self._slideshow_interval_ms())
-            self._sync_slideshow_button_icon(True)
+    def _start_slideshow_timer(self) -> None:
+        if self._slideshow_timer is None:
+            self._slideshow_timer = QTimer(self)
+            self._slideshow_timer.timeout.connect(self._on_slideshow_tick)
+        self._slideshow_timer.start(self._slideshow_interval_ms())
+        self._sync_slideshow_button_icon(True)
+
+    def _gallery_slideshow_scope(self) -> List[str]:
+        if getattr(self, "_gallery_bookmark_filter_active", False):
+            return self._gallery_files_for_display()
+        return list(getattr(self, "image_files", []) or [])
+
+    def _begin_slideshow_at_path(self, start: str, *, scope_paths: Optional[List[str]]) -> None:
+        idx = _find_file_index_in_list(self.image_files, start, default=-1)
+        if idx >= 0:
+            self.current_file_index = idx
+        self.current_file_path = start
+        self._slideshow_scope_paths = list(scope_paths) if scope_paths else None
+        if getattr(self, "view_mode", "") != "single":
+            self.view_mode = "single"
+            self._show_single_view()
         else:
-            if self._slideshow_timer is not None and self._slideshow_timer.isActive():
-                self._slideshow_timer.stop()
-            self._sync_slideshow_button_icon(False)
+            self._open_slideshow_image(start)
+            self._sync_filmstrip_to_folder()
+        self.fit_to_window = True
+        self.current_zoom_level = 1.0
+        self.zoom_center_point = None
+        if getattr(self, "current_pixmap", None) and not self.current_pixmap.isNull():
+            self.scale_image_to_fit()
+        self.update_status_bar()
+        self._start_slideshow_timer()
+
+    def _on_slideshow_bottom_clicked(self) -> None:
+        if getattr(self, "_is_delete_dialog_open", False):
+            return
+        if self._slideshow_is_active():
+            self._stop_slideshow()
+            return
+        vm = getattr(self, "view_mode", "")
+        if vm == "gallery":
+            scope = self._gallery_slideshow_scope()
+            if not scope:
+                return
+            bookmark_scope = bool(getattr(self, "_gallery_bookmark_filter_active", False))
+            start = self._slideshow_scope_start_path(scope)
+            self._begin_slideshow_at_path(
+                start,
+                scope_paths=scope if bookmark_scope else None,
+            )
+            return
+        if vm != "single" or not self.image_files:
+            return
+        if getattr(self, "_gallery_bookmark_filter_active", False):
+            scope = self._gallery_bookmarked_canonical_paths()
+            if scope:
+                start = getattr(self, "current_file_path", None) or scope[0]
+                if _norm_path(start) not in {_norm_path(p) for p in scope}:
+                    start = scope[0]
+                self._begin_slideshow_at_path(start, scope_paths=scope)
+                return
+        self._begin_slideshow_at_path(
+            getattr(self, "current_file_path", None) or self.image_files[0],
+            scope_paths=None,
+        )
 
     def _share_status_debug(self, msg: str, ms: int = 8000) -> None:
         """Surface share diagnostics in the status bar when debug is enabled."""
@@ -18167,7 +18587,7 @@ class RAWImageViewer(QMainWindow):
             pass
 
     def _on_share_bottom_button_clicked(self):
-        """Open/share selected gallery images, bookmarked images, or the current file."""
+        """Open/share gallery multi-selection, filtered bookmarks, or the current file in single view."""
         try:
             paths = self._gallery_share_target_paths()
             _share_log(
@@ -18181,7 +18601,7 @@ class RAWImageViewer(QMainWindow):
             if paths:
                 _share_log(logging.INFO, "targets: %s", paths[:3] if len(paths) > 3 else paths)
             if not paths:
-                _share_log(logging.WARNING, "no share targets (gallery selection or current file)")
+                _share_log(logging.WARNING, "no share targets (gallery selection or bookmark filter)")
                 self.status_bar.showMessage("No images selected to share", 2500)
                 return
             self._dispatch_share_bottom(list(paths))
@@ -19895,8 +20315,7 @@ class RAWImageViewer(QMainWindow):
         self._crossfade_next_paint = True
 
         if getattr(self, "_slideshow_force_fit_next", False):
-            sb = getattr(self, "slideshow_bottom_button", None)
-            if sb is not None and sb.isChecked():
+            if self._slideshow_is_active():
                 self.fit_to_window = True
                 self.current_zoom_level = 1.0
                 self.zoom_center_point = None
@@ -21679,6 +22098,8 @@ class RAWImageViewer(QMainWindow):
             if self._gallery_has_selection():
                 self._clear_gallery_selection()
                 return
+            if self._clear_gallery_bookmark_filter():
+                return
         elif vm == "single" and self._is_exif_sort_ready():
             self.toggle_view_mode()
 
@@ -22824,21 +23245,33 @@ class RAWImageViewer(QMainWindow):
         grip = getattr(self, "_resize_grip", None)
         if grip is None:
             return
-        inset = 2
         grip.move(
-            max(0, self.width() - grip.width() - inset),
-            max(0, self.height() - grip.height() - inset),
+            max(0, self.width() - grip.width()),
+            max(0, self.height() - grip.height()),
         )
-        grip.raise_()
+        if self.isMaximized():
+            grip.hide()
+        else:
+            grip.show()
+            grip.raise_()
+
+    def _sync_resize_grip_hint(self, pos: QPoint) -> None:
+        grip = getattr(self, "_resize_grip", None)
+        if grip is None or self.isMaximized():
+            return
+        active = bool(getattr(self, "_resize_edge_active", None))
+        near = self._pointer_near_bottom_right_grip(pos) or self._get_resize_edge(pos) == "bottom_right"
+        if hasattr(grip, "set_hint_visible"):
+            grip.set_hint_visible(active or near)
+        self._position_resize_grip()
 
     def _bottom_right_grip_rect(self, *, margin: int = 6) -> QRect:
-        """Screen hit area for the hover-only resize grip (wider than the 10px edge band)."""
+        """Hit area for the lower-right resize hint."""
         grip = getattr(self, "_resize_grip", None)
         if grip is None:
             return QRect()
-        inset = 2
-        gx = max(0, self.width() - grip.width() - inset)
-        gy = max(0, self.height() - grip.height() - inset)
+        gx = max(0, self.width() - grip.width())
+        gy = max(0, self.height() - grip.height())
         pad = max(0, int(margin))
         return QRect(
             gx - pad,
@@ -22889,12 +23322,28 @@ class RAWImageViewer(QMainWindow):
             return sb.width()
         return 0
 
+    def _title_bar_corner_resize_at(self, pos: QPoint) -> bool:
+        """Top corners of the custom title bar stay resizable on frameless windows."""
+        tb = getattr(self, "title_bar", None)
+        if tb is None or not tb.isVisible():
+            return False
+        if pos.y() >= tb.height():
+            return False
+        border = self._frame_resize_border()
+        if pos.x() <= border and pos.y() <= border:
+            return True
+        if pos.x() >= self.width() - border and pos.y() <= border:
+            return True
+        return False
+
     def _title_bar_blocks_resize_at(self, pos: QPoint) -> bool:
         if not (hasattr(self, "title_bar") and self.title_bar is not None):
             return False
         if pos.y() >= self.title_bar.height():
             return False
-        return pos.y() > self._frame_resize_border()
+        if self._title_bar_corner_resize_at(pos):
+            return False
+        return True
 
     def _scrollbar_blocks_resize_at(self, pos: QPoint) -> bool:
         gutter = self._gallery_frame_right_gutter()
@@ -22908,15 +23357,32 @@ class RAWImageViewer(QMainWindow):
             return False
         return pos.x() >= self.width() - sb_w
 
+    def _status_bar_corner_resize_at(self, pos: QPoint) -> bool:
+        """Bottom corners over the status bar stay draggable on frameless windows."""
+        sb = getattr(self, "status_bar", None)
+        if sb is None or not sb.isVisible():
+            return False
+        status_h = sb.height()
+        if status_h <= 0 or pos.y() < self.height() - status_h:
+            return False
+        border = self._frame_resize_border()
+        if pos.x() <= border or pos.x() >= self.width() - border:
+            return True
+        return self._pointer_near_bottom_right_grip(pos)
+
     def _status_bar_blocks_resize_at(self, pos: QPoint) -> bool:
-        """Bottom status row hosts Open / Gallery controls — never treat as resize edge."""
+        """Bottom status row hosts controls — block edge resize except corners."""
         sb = getattr(self, "status_bar", None)
         if sb is None or not sb.isVisible():
             return False
         status_h = sb.height()
         if status_h <= 0:
             return False
-        return pos.y() >= self.height() - status_h
+        if pos.y() < self.height() - status_h:
+            return False
+        if self._status_bar_corner_resize_at(pos):
+            return False
+        return True
 
     def _is_status_bar_chrome_widget(self, obj) -> bool:
         sb = getattr(self, "status_bar", None)
@@ -22928,6 +23394,29 @@ class RAWImageViewer(QMainWindow):
             w = w.parentWidget()
         return False
 
+    def _is_title_bar_chrome_widget(self, obj) -> bool:
+        tb = getattr(self, "title_bar", None)
+        if tb is None:
+            return False
+        w = obj
+        while w is not None:
+            if w is tb:
+                return True
+            w = w.parentWidget()
+        return False
+
+    def _allow_frame_resize_event(self, obj, pos: QPoint) -> bool:
+        resizing = bool(getattr(self, "_resize_edge_active", None))
+        if resizing:
+            return True
+        status_chrome = self._is_status_bar_chrome_widget(obj)
+        title_chrome = self._is_title_bar_chrome_widget(obj)
+        if status_chrome and not self._status_bar_corner_resize_at(pos):
+            return False
+        if title_chrome and not self._title_bar_corner_resize_at(pos):
+            return False
+        return True
+
     def _resize_blocked_at(self, pos: QPoint) -> bool:
         if self.isMaximized():
             return True
@@ -22938,6 +23427,31 @@ class RAWImageViewer(QMainWindow):
         if self._scrollbar_blocks_resize_at(pos):
             return True
         return False
+
+    def _begin_resize_at_edge(self, event, edge: str) -> bool:
+        if event.button() != Qt.MouseButton.LeftButton:
+            return False
+        if self.isMaximized():
+            return False
+        self._resize_edge_active = edge
+        if hasattr(event, "globalPosition"):
+            self._resize_start_pos = event.globalPosition().toPoint()
+        else:
+            self._resize_start_pos = event.globalPos()
+        self._resize_start_geometry = self.geometry()
+        self._is_resizing = True
+        grip = getattr(self, "_resize_grip", None)
+        if grip is not None:
+            grip.hide()
+        if hasattr(self, "view_mode") and self.view_mode == "gallery":
+            gallery = getattr(self, "gallery_justified", None)
+            if gallery is not None:
+                gallery._ignore_resize_events = True
+        try:
+            self.grabMouse()
+        except Exception:
+            pass
+        return True
 
     def _begin_resize_if_edge(self, event, pos: QPoint) -> bool:
         if event.button() != Qt.MouseButton.LeftButton:
@@ -23058,14 +23572,19 @@ class RAWImageViewer(QMainWindow):
 
         if self._title_bar_blocks_resize_at(pos):
             self.unsetCursor()
-            if grip is not None:
-                grip.hide()
+            if grip is not None and hasattr(grip, "set_hint_visible"):
+                grip.set_hint_visible(False)
             return
 
         if self._scrollbar_blocks_resize_at(pos):
             self.setCursor(Qt.CursorShape.ArrowCursor)
-            if grip is not None:
-                grip.hide()
+            if grip is not None and hasattr(grip, "set_hint_visible"):
+                grip.set_hint_visible(False)
+            return
+
+        if self._status_bar_blocks_resize_at(pos):
+            self.unsetCursor()
+            self._sync_resize_grip_hint(pos)
             return
 
         border = self._frame_resize_border()
@@ -23091,15 +23610,7 @@ class RAWImageViewer(QMainWindow):
         else:
             self.unsetCursor()
 
-        edge = self._get_resize_edge(pos)
-        near_grip = self._pointer_near_bottom_right_grip(pos)
-        if grip is not None:
-            if edge == "bottom_right" or near_grip:
-                self._position_resize_grip()
-                grip.show()
-                grip.raise_()
-            else:
-                grip.hide()
+        self._sync_resize_grip_hint(pos)
 
     def mousePressEvent(self, event):
         """Handle mouse press for window resizing"""
@@ -23325,23 +23836,7 @@ class RAWImageViewer(QMainWindow):
             self.folder_path = None
         self._sync_single_image_histogram()
         
-        message = (
-            "No image loaded\n\n"
-            "Click 📁 or drag and drop a folder or image to load it\n"
-            "Press Space or Double-click to toggle fit-to-window / 100% zoom\n"
-            "Click and drag to pan when zoomed\n"
-            "Use Left/Right arrow keys to navigate between images (preserves zoom if zoomed in)\n"
-            "Bottom bar: Share and other controls when images are loaded\n"
-            "Up Arrow — Bookmark / unbookmark image(s)\n"
-            "Down Arrow — Move image(s) to Discard folder\n"
-            "Delete — Delete image(s)\n"
-            "Gallery: Ctrl/Cmd+click — toggle selection; Shift+click two photos for range\n"
-            "H — Show/hide histogram\n"
-            "G — Cycle composition guide (off / 3×3 / diagonal / both / phi grid)\n"
-            "F — Show/hide focus point\n"
-            "Scroll wheel (fit-to-window): Scroll down = next image, Scroll up = previous image\n"
-            "Horizontal wheel (zoom mode): Scroll left/right to pan the image"
-        )
+        message = self._no_image_loaded_help_text()
         
         if hasattr(self, 'view_mode') and self.view_mode == 'gallery' and hasattr(self, 'gallery_justified') and self.gallery_justified:
             self.gallery_justified.show_empty_message("No image loaded\nClick 📁 or drag and drop a folder or image to load it")
@@ -23531,10 +24026,7 @@ class RAWImageViewer(QMainWindow):
             )
         if hasattr(self, "share_bottom_button"):
             self._sync_share_button_visibility()
-            if hasattr(self, "slideshow_bottom_button"):
-                self.slideshow_bottom_button.setVisible(
-                    bool(self.image_files) and self.view_mode == "single"
-                )
+            self._sync_slideshow_button_visibility()
             cp = getattr(self, "current_file_path", None)
             show_rotate = bool(
                 self.image_files
@@ -24131,9 +24623,11 @@ class RAWImageViewer(QMainWindow):
             QEvent.Type.MouseButtonPress,
             QEvent.Type.MouseButtonRelease,
         ):
-            if not self._is_status_bar_chrome_widget(obj):
-                if self._handle_frame_resize_event(event):
-                    return True
+            pos = self._resize_pos_from_event(event)
+            if self._allow_frame_resize_event(obj, pos) and self._handle_frame_resize_event(
+                event
+            ):
+                return True
 
         if (
             event.type() == QEvent.Type.Resize
@@ -24142,10 +24636,8 @@ class RAWImageViewer(QMainWindow):
             self._position_gallery_frame_grip()
 
         if event.type() == QEvent.Type.Leave and not getattr(self, "_resize_edge_active", None):
-            grip = getattr(self, "_resize_grip", None)
-            if grip is not None:
-                grip.hide()
-            self.unsetCursor()
+            if not self._is_status_bar_chrome_widget(obj):
+                self.unsetCursor()
 
         if event.type() == QEvent.Type.KeyPress:
             # Handle application-wide shortcuts even when sub-widgets (like viewport) have focus
@@ -24846,7 +25338,13 @@ class RAWImageViewer(QMainWindow):
         meta = bulk_metadata
         if meta is None:
             meta = getattr(self, "_gallery_bulk_metadata", None) or {}
-        files = list(self.image_files)
+        if (
+            getattr(self, "view_mode", "") == "gallery"
+            and getattr(self, "_gallery_bookmark_filter_active", False)
+        ):
+            files = self._gallery_files_for_display()
+        else:
+            files = list(self.image_files)
         gallery_order = list(getattr(gj, "images", []) or [])
         layout_seq = tuple(getattr(gj, "_layout_image_sequence", ()) or ())
         order_mismatch = gallery_order != files or layout_seq != tuple(files)

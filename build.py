@@ -663,7 +663,9 @@ def main():
         icon_file = os.path.join('icons', 'appicon.ico')  # fallback
     icon_path = os.path.abspath(icon_file)
     if not os.path.exists(icon_path):
-        print(f"[WARNING] Icon file not found: {icon_path}")
+        print(f"[ERROR] Icon file not found: {icon_path}")
+        if platform.system() == "Windows":
+            sys.exit(1)
         icon_arg = ''
     else:
         icon_arg = f'--icon "{icon_path}"'

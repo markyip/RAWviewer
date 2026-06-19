@@ -325,6 +325,25 @@ else:
     BUNDLE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     EXE_DIR = BUNDLE_DIR
 
+def _installer_icon_path() -> str | None:
+    """Resolve branded icon from PyInstaller bundle or repo icons/."""
+    for rel in (
+        os.path.join("icons", "appicon.ico"),
+        os.path.join("icons", "appicon.png"),
+    ):
+        for base in (BUNDLE_DIR, EXE_DIR):
+            path = os.path.join(base, rel)
+            if os.path.isfile(path):
+                return path
+    return None
+
+
+def _installed_app_icon_path(install_dir: str) -> str | None:
+    ico = os.path.join(install_dir, "icons", "appicon.ico")
+    if os.path.isfile(ico):
+        return ico
+    return _installer_icon_path()
+
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QLineEdit, QProgressBar, QPlainTextEdit,
@@ -332,6 +351,28 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtGui import QIcon, QFont, QColor, QPalette
 from PyQt6.QtCore import Qt, pyqtSignal, QObject, QThread
+
+
+def _apply_installer_process_icon() -> None:
+    """Taskbar / Alt+Tab icon for the setup wizard (Windows needs explicit AppUserModelID)."""
+    if sys.platform == "win32":
+        try:
+            import ctypes
+
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+                "com.markyip.rawviewer.setup"
+            )
+        except Exception:
+            pass
+    path = _installer_icon_path()
+    if not path:
+        return
+    icon = QIcon(path)
+    if icon.isNull():
+        return
+    app = QApplication.instance()
+    if app is not None:
+        app.setWindowIcon(icon)
 
 class InstallWorker(QObject):
     finished = pyqtSignal(bool, str)
@@ -554,6 +595,12 @@ oWS.Run "{pixi_exe} run start-windowless", 0, False
                     "Start Menu",
                     "Programs",
                 )
+                installed_icon = _installed_app_icon_path(target_dir)
+                icon_for_shortcuts = (
+                    installed_icon
+                    if installed_icon
+                    else (target_exe if os.path.isfile(target_exe) else setup_exe)
+                )
 
                 vbs_script = f"""
 Set oWS = WScript.CreateObject("WScript.Shell")
@@ -561,14 +608,14 @@ sLinkFile = "{os.path.join(desktop, 'RAWviewer.lnk')}"
 Set oLink = oWS.CreateShortcut(sLinkFile)
 oLink.TargetPath = "{launch_target}"
 oLink.WorkingDirectory = "{target_dir}"
-oLink.IconLocation = "{target_exe if os.path.isfile(target_exe) else setup_exe}"
+oLink.IconLocation = "{icon_for_shortcuts}"
 oLink.Save
 
 sLinkFile2 = "{os.path.join(programs, 'RAWviewer.lnk')}"
 Set oLink2 = oWS.CreateShortcut(sLinkFile2)
 oLink2.TargetPath = "{launch_target}"
 oLink2.WorkingDirectory = "{target_dir}"
-oLink2.IconLocation = "{target_exe if os.path.isfile(target_exe) else setup_exe}"
+oLink2.IconLocation = "{icon_for_shortcuts}"
 oLink2.Save
 """
                 vbs_path = os.path.join(target_dir, "create_shortcuts.vbs")
@@ -588,7 +635,9 @@ oLink2.Save
                 import ctypes
 
                 key_path = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\RAWviewer"
-                icon_path = target_exe if os.path.isfile(target_exe) else setup_exe
+                icon_path = _installed_app_icon_path(target_dir) or (
+                    target_exe if os.path.isfile(target_exe) else setup_exe
+                )
                 install_date = time.strftime("%Y%m%d")
                 uninst_path = os.path.join(target_dir, "uninstall.bat")
                 silent_cmd = f'"{uninst_path}"'
@@ -645,6 +694,10 @@ class InstallerGUI(QMainWindow):
 
         self.init_ui()
         self.load_styles()
+        _apply_installer_process_icon()
+        icon_path = _installer_icon_path()
+        if icon_path:
+            self.setWindowIcon(QIcon(icon_path))
 
     def init_ui(self):
         self.main_container = QFrame()
@@ -661,6 +714,13 @@ class InstallerGUI(QMainWindow):
         
         win_title = QLabel("RAWVIEWER SETUP")
         win_title.setStyleSheet("font-size: 11px; font-weight: 800; letter-spacing: 1px; color: #888;")
+        icon_path = _installer_icon_path()
+        if icon_path:
+            title_icon = QLabel()
+            title_icon.setFixedSize(18, 18)
+            title_icon.setPixmap(QIcon(icon_path).pixmap(18, 18))
+            title_icon.setStyleSheet("background: transparent; border: none;")
+            title_layout.addWidget(title_icon)
         title_layout.addWidget(win_title)
         title_layout.addStretch()
         
@@ -1004,6 +1064,7 @@ class InstallerGUI(QMainWindow):
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
+    _apply_installer_process_icon()
     window = InstallerGUI()
     window.show()
     sys.exit(app.exec())

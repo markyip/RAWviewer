@@ -33,8 +33,6 @@ def phi_grid_positions() -> Tuple[float, float]:
 
 
 def next_grid_mode(mode: str) -> str:
-    if mode == "golden_spiral":
-        mode = "golden"
     try:
         idx = GRID_MODES.index(mode)
     except ValueError:
@@ -43,8 +41,6 @@ def next_grid_mode(mode: str) -> str:
 
 
 def grid_mode_label(mode: str) -> str:
-    if mode == "golden_spiral":
-        mode = "golden"
     return {
         "off": "Off",
         "thirds": "3×3 grid",
@@ -72,8 +68,6 @@ def draw_composition_grid(
     cosmetic: bool = False,
 ) -> None:
     """Draw guide lines in image pixel coordinates (0,0)–(width,height)."""
-    if mode == "golden_spiral":
-        mode = "golden"
     if mode == "off" or width <= 0 or height <= 0:
         return
     w, h = float(width), float(height)
@@ -121,10 +115,7 @@ class CompositionGridGraphicsItem(QGraphicsItem):
 
     def set_grid(self, width: int, height: int, mode: str) -> None:
         if mode not in GRID_MODES:
-            if mode == "golden_spiral":
-                mode = "golden"
-            else:
-                mode = "off"
+            mode = "off"
         self.prepareGeometryChange()
         self._w = max(0, int(width))
         self._h = max(0, int(height))

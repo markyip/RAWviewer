@@ -610,6 +610,8 @@ class JustifiedGallery(QWidget):
                 # Ensure worker wiring exists before first render pass.
                 self._post_init()
             new_images = list(images or [])
+            if new_images:
+                self.hide_empty_message()
             same_order = (
                 len(new_images) == len(self.images)
                 and all(a == b for a, b in zip(new_images, self.images))
