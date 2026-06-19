@@ -62,12 +62,6 @@ Pick **Lite** for a smaller install and browse-by-eye workflow. Pick **Full** to
 
 ---
 
-## Supported formats
-
-**RAW:** CR2, CR3, NEF, ARW, DNG, ORF, RW2, RAF, and other LibRaw types · **Standard:** JPEG, TIFF, HEIF
-
----
-
 ## GPS map & geotagging — [LocateIt](https://github.com/markyip/LocateIt)
 
 A GPS cluster map was prototyped inside RAWviewer, but it did not perform well enough on large folders to keep in the main app. **[LocateIt](https://github.com/markyip/LocateIt)** is a separate tool for that job: open an album, see where shots were taken on an interactive map, and **geotag photos missing GPS** by dragging them onto the map and saving back to the original files (JPEG and RAW).
@@ -86,16 +80,30 @@ Registers **Open with** for common photo formats. Uninstall: Settings → Apps, 
 
 ### macOS (13+)
 
-1. Download **`RAWviewer-v2.4-macOS.zip`** (Full) or **`RAWviewer-v2.4-macOS-Lite.zip`** (Lite).
-2. Extract, open Terminal in that folder, run: `bash install_macos_app.sh`
+1. Download **`RAWviewer-v2.4-macOS.zip`** (Full) or **`RAWviewer-v2.4-macOS-Lite.zip`** (Lite) from **[Releases](https://github.com/markyip/RAWviewer/releases/latest)** and extract the zip.
+2. Open **Terminal**, go to the extracted folder (`cd ` then drag the folder onto Terminal), and run:
 
-**Full:** may download AI models (~150 MB) on first gallery search. Uninstall: **`uninstall_macos_app.sh`** or **`Uninstall RAWviewer.command`** in the zip (keeps cache cleared; Trash alone does not).
+```bash
+bash install_macos_app.sh
+```
+
+3. Click **Install**, then **Open** in the dialogs. RAWviewer is copied to **Applications**.
+
+**Full edition:** The first time you use gallery **Search**, RAWviewer may prompt to download the offline AI models from [Hugging Face](https://huggingface.co/) (~150 MB on macOS, one-time, needs internet). Without a Hugging Face account, that download may take longer. Click **Download** when prompted — progress appears in the search bar as `Downloading... N%`. Windows setup fetches the same models automatically during install.
+
+Uninstall: **`uninstall_macos_app.sh`** or **`Uninstall RAWviewer.command`** in the zip (keeps cache cleared; Trash alone does not).
 
 ### Requirements
 
 Windows 10+ · macOS 13+ · 8 GB RAM (16 GB+ recommended for **Full** + large folders) · ~500 MB disk (**Lite**) or ~1.5 GB+ (**Full** with models)
 
 To clear thumbnails only: **`scripts\Launch\bat\clear_cache.bat`** (Windows) · **`scripts/Launch/shell/clear_cache.sh`** (Mac)
+
+---
+
+## Supported formats
+
+**RAW:** CR2, CR3, NEF, ARW, DNG, ORF, RW2, RAF, and other LibRaw types · **Standard:** JPEG, TIFF, HEIF
 
 ---
 
