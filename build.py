@@ -269,7 +269,6 @@ def install_dependencies(windows_accel: str = "cuda", *, profile: str = "full"):
         'numpy',   # Required for image processing (used in all modules)
         'qtawesome', # Required for icons in main.py
         'pyqtgraph',  # Optional/Future dependency included in requirements.txt
-        'reverse-geocoder',  # Offline city/country lookup from GPS EXIF
         'pycountry',  # ISO country code -> full country name
     ]
 
@@ -291,7 +290,6 @@ def install_dependencies(windows_accel: str = "cuda", *, profile: str = "full"):
             dependencies.append('opencv-python-headless')
             dependencies.append('huggingface-hub')
     elif system_name == "Darwin":
-        dependencies.append('scipy')  # reverse_geocoder GPS lookup (scipy.spatial.cKDTree)
         if not lite:
             dependencies.append('huggingface-hub')
             dependencies.append('pyobjc-framework-CoreML')
@@ -686,7 +684,8 @@ def main():
     # Add --add-data for imageformats and icons directory
     add_data_args = [
         f'--add-data "{imageformats_src}{add_data_sep}imageformats"',
-        f'--add-data "icons{add_data_sep}icons"'
+        f'--add-data "icons{add_data_sep}icons"',
+        f'--add-data "src{os.sep}icons{add_data_sep}icons"'
     ]
     app_bundle_name = _macos_app_bundle_name(args.profile)
     windows_pixi_manifest = None
@@ -760,8 +759,6 @@ def main():
             "--hidden-import", "certifi",
             "--hidden-import", "ssl_certs",
             "--collect-data", "certifi",
-            "--hidden-import", "reverse_geocoder",
-            "--hidden-import", "scipy.spatial.cKDTree",
             "--exclude-module", "coremltools",
             "--exclude-module", "torch",
             "--exclude-module", "torchvision",

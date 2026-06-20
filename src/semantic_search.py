@@ -1011,6 +1011,7 @@ class SearchHit:
     gps_lat: Optional[float] = None
     gps_lon: Optional[float] = None
     city: str = ""
+    landmark: str = ""
     admin1: str = ""
     country: str = ""
     country_code: str = ""
@@ -2058,6 +2059,51 @@ def get_semantic_capture_times_for_folder(
     return result_map
 
 
+class CustomReverseGeocoder:
+    """Lightweight pure-Python drop-in replacement for reverse-geocoder that uses GeoNames and Wikidata databases."""
+    def __init__(self, cities: list, landmarks: list = None):
+        self.cities = cities
+        self.landmarks = landmarks or []
+
+    def search(self, coords: list[tuple[float, float]], mode: int = 1) -> list[dict]:
+        if not coords or not self.cities:
+            return []
+        target_lat, target_lon = coords[0]
+        
+        # 1. Search nearest city
+        best_city_dist = float('inf')
+        best_city = None
+        for lat, lon, name, admin1, cc in self.cities:
+            dist = (lat - target_lat) ** 2 + (lon - target_lon) ** 2
+            if dist < best_city_dist:
+                best_city_dist = dist
+                best_city = {"name": name, "admin1": admin1, "cc": cc}
+                
+        # 2. Search nearest landmark/tourist attraction
+        # A threshold of 15 km is approximately 0.135 degrees.
+        # Squared distance threshold: (15 / 111) ^ 2 ≈ 0.0182
+        best_landmark_dist = float('inf')
+        best_landmark = None
+        for lat, lon, name, cc in self.landmarks:
+            dist = (lat - target_lat) ** 2 + (lon - target_lon) ** 2
+            if dist < best_landmark_dist:
+                best_landmark_dist = dist
+                best_landmark = name
+                
+        landmark_name = ""
+        if best_landmark and best_landmark_dist < 0.0182:
+            landmark_name = best_landmark
+
+        if best_city:
+            return [{
+                "name": best_city["name"],
+                "admin1": best_city["admin1"],
+                "cc": best_city["cc"],
+                "landmark": landmark_name
+            }]
+        return []
+
+
 class SemanticImageIndex:
     """SQLite-backed CLIP embedding index for local semantic search."""
 
@@ -2235,6 +2281,7 @@ class SemanticImageIndex:
                 gps_lon REAL,
                 gps_raw TEXT,
                 city TEXT,
+                landmark TEXT,
                 admin1 TEXT,
                 country TEXT,
                 country_code TEXT,
@@ -2279,6 +2326,8 @@ class SemanticImageIndex:
             self._conn.execute("ALTER TABLE semantic_index ADD COLUMN gps_raw TEXT")
         if "city" not in cols:
             self._conn.execute("ALTER TABLE semantic_index ADD COLUMN city TEXT")
+        if "landmark" not in cols:
+            self._conn.execute("ALTER TABLE semantic_index ADD COLUMN landmark TEXT")
         if "admin1" not in cols:
             self._conn.execute("ALTER TABLE semantic_index ADD COLUMN admin1 TEXT")
         if "country" not in cols:
@@ -2357,22 +2406,55 @@ class SemanticImageIndex:
             if self._reverse_geocoder is not None:
                 return self._reverse_geocoder
             try:
-                import reverse_geocoder as rg  # type: ignore
-                # reverse_geocoder lazy-loads its CSV on the first .search() call.
-                # Its lazy loader is NOT thread-safe, which causes massive I/O stalls
-                # if multiple worker threads call .search() concurrently.
-                # We initialize it here once inside the lock.
-                # CRITICAL: We MUST use mode=1, otherwise it defaults to mode=2
-                # which creates a multiprocessing.Pool. On Windows, this causes a fork bomb
-                # that exhausts system memory because it spawns new Python interpreters!
+                import gzip
+                import csv
                 import logging
-                logging.getLogger(__name__).info("[VISION] Initializing reverse geocoder KD-tree...")
-                rg.search((0.0, 0.0), mode=1)
-            except Exception:
+                
+                base_dir = os.path.dirname(os.path.abspath(__file__))
+                db_path = os.path.join(base_dir, "icons", "cities500.csv.gz")
+                if not os.path.isfile(db_path):
+                    db_path = os.path.join("src", "icons", "cities500.csv.gz")
+                
+                logging.getLogger(__name__).info("[VISION] Loading custom reverse geocoder database from %s...", db_path)
+                cities = []
+                with gzip.open(db_path, "rt", encoding="utf-8") as f:
+                    reader = csv.reader(f)
+                    for row in reader:
+                        cities.append((
+                            float(row[0]),
+                            float(row[1]),
+                            row[2],
+                            row[3],
+                            row[4]
+                        ))
+                
+                # Load landmarks
+                landmarks_path = os.path.join(base_dir, "icons", "landmarks.csv.gz")
+                if not os.path.isfile(landmarks_path):
+                    landmarks_path = os.path.join("src", "icons", "landmarks.csv.gz")
+                
+                landmarks = []
+                if os.path.isfile(landmarks_path):
+                    logging.getLogger(__name__).info("[VISION] Loading custom landmarks database from %s...", landmarks_path)
+                    try:
+                        with gzip.open(landmarks_path, "rt", encoding="utf-8") as f:
+                            reader = csv.reader(f)
+                            for row in reader:
+                                landmarks.append((
+                                    float(row[0]),
+                                    float(row[1]),
+                                    row[2],
+                                    row[3]
+                                ))
+                    except Exception as e:
+                        logging.getLogger(__name__).warning("[VISION] Failed to parse landmarks file: %s", e)
+                
+                self._reverse_geocoder = CustomReverseGeocoder(cities, landmarks)
+            except Exception as e:
+                import logging
+                logging.getLogger(__name__).warning("[VISION] Failed to load custom reverse geocoder: %s", e)
                 self._reverse_geocoder = False
-                return False
-            self._reverse_geocoder = rg
-            return rg
+            return self._reverse_geocoder
 
     @staticmethod
     def _country_name_from_code(code: str) -> str:
@@ -2563,8 +2645,8 @@ class SemanticImageIndex:
                 semantic_ready,
                 model_name, dim, embedding,
                 capture_time, camera_model, lens_model, iso, width, height,
-                gps_lat, gps_lon, gps_raw, city, admin1, country, country_code, face_count, orientation, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                gps_lat, gps_lon, gps_raw, city, landmark, admin1, country, country_code, face_count, orientation, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(file_path) DO UPDATE SET
                 file_name=excluded.file_name,
                 file_signature=excluded.file_signature,
@@ -2585,6 +2667,7 @@ class SemanticImageIndex:
                 gps_lon=excluded.gps_lon,
                 gps_raw=excluded.gps_raw,
                 city=excluded.city,
+                landmark=excluded.landmark,
                 admin1=excluded.admin1,
                 country=excluded.country,
                 country_code=excluded.country_code,
@@ -2613,6 +2696,7 @@ class SemanticImageIndex:
                 float(meta["gps_lon"]) if meta.get("gps_lon") is not None else None,
                 str(meta.get("gps_raw") or ""),
                 str(meta.get("city") or ""),
+                str(meta.get("landmark") or ""),
                 str(meta.get("admin1") or ""),
                 str(meta.get("country") or ""),
                 str(meta.get("country_code") or ""),
@@ -2743,6 +2827,7 @@ class SemanticImageIndex:
             "gps_lon": None,
             "gps_raw": "",
             "city": "",
+            "landmark": "",
             "admin1": "",
             "country": "",
             "country_code": "",
@@ -2893,6 +2978,7 @@ class SemanticImageIndex:
                             if recs:
                                 rec = recs[0] or {}
                                 result["city"] = str(rec.get("name", "") or "")
+                                result["landmark"] = str(rec.get("landmark", "") or "")
                                 result["admin1"] = str(rec.get("admin1", "") or "")
                                 cc = str(rec.get("cc", "") or "").upper()
                                 result["country_code"] = cc
@@ -4691,7 +4777,7 @@ class SemanticImageIndex:
             query = f"""
                 SELECT file_path, file_name, file_signature, dim, embedding, capture_time, 
                        camera_model, lens_model, iso, gps_lat, gps_lon, width, height, 
-                       city, admin1, country, country_code, face_count, semantic_ready,
+                       city, landmark, admin1, country, country_code, face_count, semantic_ready,
                        file_size, file_mtime, mtime_ns, model_name
                 FROM semantic_index
                 WHERE file_path IN ({placeholders})
@@ -4735,6 +4821,7 @@ class SemanticImageIndex:
                     'width': 0,
                     'height': 0,
                     'city': "",
+                    'landmark': "",
                     'admin1': "",
                     'country': "",
                     'country_code': "",
@@ -4888,12 +4975,18 @@ class SemanticImageIndex:
 
     @staticmethod
     def _contains_loose(haystack: str, needle: str) -> bool:
-        h = str(haystack or "").lower()
+        h = str(haystack or "").strip().lower()
         n = str(needle or "").strip().lower()
-        if not n:
+        if not n or not h:
             return False
         variants = {n, n.replace("_", " "), n.replace(" ", "_")}
-        return any(v and v in h for v in variants)
+        if any(v and v in h for v in variants):
+            return True
+        if len(h) >= 4:
+            for v in variants:
+                if h in v:
+                    return True
+        return False
 
     def _apply_filters(
         self, rows: Sequence[sqlite3.Row], query_text: str
@@ -5009,11 +5102,15 @@ class SemanticImageIndex:
                         filtered = [r for r in filtered if self._row_matches_format_specs(r, specs)]
                 continue
 
-            if low.startswith("city:"):
+            if low.startswith("city:") or low.startswith("landmark:"):
                 matched = True
                 needle = t.split(":", 1)[1].strip().lower()
                 if needle:
-                    filtered = [r for r in filtered if self._contains_loose(str(r["city"] or ""), needle)]
+                    filtered = [
+                        r for r in filtered 
+                        if self._contains_loose(str(r["city"] or ""), needle)
+                        or self._contains_loose(str(r.get("landmark") or ""), needle)
+                    ]
                 continue
 
             if low.startswith("admin:"):
@@ -5356,6 +5453,19 @@ class SemanticImageIndex:
         if needle in _LOCATIONS:
             return True
             
+        # Check database names dynamically
+        geo = self._ensure_reverse_geocoder()
+        if geo and hasattr(geo, "cities"):
+            for lat, lon, name, admin1, cc in geo.cities:
+                n_lower = name.lower()
+                if len(n_lower) >= 4 and (n_lower == needle or n_lower in needle or needle in n_lower):
+                    return True
+            if hasattr(geo, "landmarks"):
+                for lat, lon, name, cc in geo.landmarks:
+                    n_lower = name.lower()
+                    if len(n_lower) >= 4 and (n_lower == needle or n_lower in needle or needle in n_lower):
+                        return True
+            
         if pycountry is not None:
             try:
                 # Check for country names
@@ -5379,7 +5489,7 @@ class SemanticImageIndex:
         """
         filtered = list(rows)
         remaining: List[str] = []
-        metadata_fields = ("city", "admin1", "country", "country_code", "camera_model", "lens_model", "file_name")
+        metadata_fields = ("city", "landmark", "admin1", "country", "country_code", "camera_model", "lens_model", "file_name")
 
         import logging
         logger = logging.getLogger(__name__)
@@ -5416,10 +5526,13 @@ class SemanticImageIndex:
                     contradiction_count = 0
                     for r in filtered:
                         city = str(self._row_value(r, "city") or "").lower()
+                        landmark = str(self._row_value(r, "landmark") or "").lower()
                         country = str(self._row_value(r, "country") or "").lower()
                         # If the image HAS location metadata, it must match the term
-                        if city or country:
-                            if self._contains_loose(city, needle) or self._contains_loose(country, needle):
+                        if city or landmark or country:
+                            if (self._contains_loose(city, needle) or 
+                                self._contains_loose(landmark, needle) or 
+                                self._contains_loose(country, needle)):
                                 new_filtered.append(r)
                             else:
                                 # Contradiction! (Has location, but it's different)
@@ -5483,6 +5596,7 @@ class SemanticImageIndex:
                     gps_lat=float(r["gps_lat"]) if r["gps_lat"] is not None else None,
                     gps_lon=float(r["gps_lon"]) if r["gps_lon"] is not None else None,
                     city=str(r["city"] or ""),
+                    landmark=str(r["landmark"] or ""),
                     admin1=str(r["admin1"] or ""),
                     country=str(r["country"] or ""),
                     country_code=str(r["country_code"] or ""),
@@ -5523,6 +5637,7 @@ class SemanticImageIndex:
                     gps_lat=float(r["gps_lat"]) if r["gps_lat"] is not None else None,
                     gps_lon=float(r["gps_lon"]) if r["gps_lon"] is not None else None,
                     city=str(r["city"] or ""),
+                    landmark=str(r["landmark"] or ""),
                     admin1=str(r["admin1"] or ""),
                     country=str(r["country"] or ""),
                     country_code=str(r["country_code"] or ""),
@@ -5561,6 +5676,7 @@ class SemanticImageIndex:
                 gps_lat=float(r["gps_lat"]) if r["gps_lat"] is not None else None,
                 gps_lon=float(r["gps_lon"]) if r["gps_lon"] is not None else None,
                 city=str(r["city"] or ""),
+                landmark=str(r["landmark"] or ""),
                 admin1=str(r["admin1"] or ""),
                 country=str(r["country"] or ""),
                 country_code=str(r["country_code"] or ""),
@@ -5612,6 +5728,7 @@ class SemanticImageIndex:
             # it might have been indexed when the geocoder was unavailable. 
             # Try to fix it on the fly.
             city = str(row["city"] or "")
+            landmark = str(row["landmark"] or "")
             admin1 = str(row["admin1"] or "")
             country = str(row["country"] or "")
             gps_lat = row["gps_lat"]
@@ -5625,13 +5742,14 @@ class SemanticImageIndex:
                         if recs:
                             rec = recs[0] or {}
                             city = str(rec.get("name", "") or "")
+                            landmark = str(rec.get("landmark", "") or "")
                             admin1 = str(rec.get("admin1", "") or "")
                             cc = str(rec.get("cc", "") or "").upper()
                             country = self._country_name_from_code(cc)
                             # Update DB so we don't have to geocode this file again
                             self._conn.execute(
-                                "UPDATE semantic_index SET city=?, admin1=?, country=?, country_code=? WHERE file_path=?",
-                                (city, admin1, country, cc, original)
+                                "UPDATE semantic_index SET city=?, landmark=?, admin1=?, country=?, country_code=? WHERE file_path=?",
+                                (city, landmark, admin1, country, cc, original)
                             )
                             self._conn.commit()
                     except Exception:
@@ -5650,6 +5768,7 @@ class SemanticImageIndex:
                     "gps_lat": gps_lat,
                     "gps_lon": gps_lon,
                     "city": city,
+                    "landmark": landmark,
                     "admin1": admin1,
                     "country": country,
                     "country_code": str(row["country_code"] or ""),
@@ -5678,6 +5797,7 @@ class SemanticImageIndex:
                     "gps_lat": meta.get("gps_lat"),
                     "gps_lon": meta.get("gps_lon"),
                     "city": str(meta.get("city") or ""),
+                    "landmark": str(meta.get("landmark") or ""),
                     "admin1": str(meta.get("admin1") or ""),
                     "country": str(meta.get("country") or ""),
                     "country_code": str(meta.get("country_code") or ""),

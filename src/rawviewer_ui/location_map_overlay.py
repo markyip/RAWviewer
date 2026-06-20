@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 from typing import Optional, Callable
 
-from PyQt6.QtCore import QObject, Qt, QThread, pyqtSignal, QPoint, QRectF
+from PyQt6.QtCore import QObject, Qt, pyqtSignal, QPoint, QRectF, QRunnable, QThreadPool
 from PyQt6.QtGui import QCursor, QMouseEvent, QPainter, QPainterPath, QColor, QPen
 from PyQt6.QtWidgets import QSizePolicy, QVBoxLayout, QWidget
 
@@ -23,21 +23,6 @@ from location_map_engine import (
 
 logger = logging.getLogger(__name__)
 
-_active_workers = set()
-_active_probes = set()
-_about_to_quit_connected = False
-
-def _cleanup_threads():
-    for w in list(_active_workers):
-        if w.isRunning():
-            w.requestInterruption()
-            w.wait(1000)
-    for p in list(_active_probes):
-        if p.isRunning():
-            p.requestInterruption()
-            p.wait(1000)
-    _active_workers.clear()
-    _active_probes.clear()
 
 
 def _tag_text(tags: dict, *keys: str) -> str:
@@ -123,32 +108,41 @@ def extract_gps_coordinates(file_path: str) -> Optional[tuple[float, float]]:
     return lat_dec, lon_dec
 
 
-class _MapLoadWorker(QThread):
-    """Background thread loader for extracting EXIF coordinates and loading map tiles."""
-
+class MapLoadSignals(QObject):
     finished = pyqtSignal(object, str)  # LocationMapModel | None, error
+
+
+class _MapLoadWorker(QRunnable):
+    """Background loader for extracting EXIF coordinates and loading map tiles."""
 
     def __init__(
         self,
         current_path: str,
         cache_dir: Path,
+        signals: MapLoadSignals,
     ):
         super().__init__()
         self._current_path = current_path
         self._cache_dir = cache_dir
+        self.signals = signals
+        self._cancelled = False
+
+    def cancel(self) -> None:
+        self._cancelled = True
 
     def run(self) -> None:
         try:
-            if self.isInterruptionRequested():
+            if self._cancelled:
                 return
             
             # 1. Extract GPS for current file
             coords = extract_gps_coordinates(self._current_path)
             if coords is None:
-                self.finished.emit(None, "no_gps")
+                if not self._cancelled:
+                    self.signals.finished.emit(None, "no_gps")
                 return
             
-            if self.isInterruptionRequested():
+            if self._cancelled:
                 return
             
             lat, lon = coords
@@ -160,15 +154,38 @@ class _MapLoadWorker(QThread):
                 self._cache_dir,
             )
             
-            if self.isInterruptionRequested():
+            if self._cancelled:
                 return
                 
-            self.finished.emit(model, "")
+            self.signals.finished.emit(model, "")
         except Exception as exc:
-            if self.isInterruptionRequested():
+            if self._cancelled:
                 return
             logger.warning("Map build worker failed: %s", exc, exc_info=True)
-            self.finished.emit(None, str(exc))
+            self.signals.finished.emit(None, str(exc))
+
+
+class ProbeSignals(QObject):
+    result = pyqtSignal(bool)
+
+
+class _Probe(QRunnable):
+    """Background loader/probe to check if OpenStreetMap tiles are online."""
+
+    def __init__(self, signals: ProbeSignals):
+        super().__init__()
+        self.signals = signals
+        self._cancelled = False
+
+    def cancel(self) -> None:
+        self._cancelled = True
+
+    def run(self) -> None:
+        if self._cancelled:
+            return
+        res = probe_map_tiles_online()
+        if not self._cancelled:
+            self.signals.result.emit(res)
 
 
 class _MapCanvas(QWidget):
@@ -226,10 +243,11 @@ class ImageLocationMapWidget(QWidget):
         self._model: Optional[LocationMapModel] = None
         self._worker: Optional[_MapLoadWorker] = None
         self._load_generation = 0
-        self._probe: Optional[QThread] = None
+        self._probe: Optional[_Probe] = None
         self._drag_press_global: Optional[QPoint] = None
         self._drag_pos_at_press: Optional[QPoint] = None
         self._online: Optional[bool] = None
+        self._active_signals = set()
 
         self.setFixedSize(self._CARD_W, self._CARD_H)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
@@ -278,28 +296,18 @@ class ImageLocationMapWidget(QWidget):
         self._load_generation += 1
         load_generation = self._load_generation
         
+        signals = MapLoadSignals()
+        self._active_signals.add(signals)
+
         worker = _MapLoadWorker(
             current_path,
             cache_dir or default_map_cache_dir(),
+            signals,
         )
         self._worker = worker
-        
-        _active_workers.add(worker)
-        worker.finished.connect(lambda: _active_workers.discard(worker))
-        worker.finished.connect(worker.deleteLater)
-
-        global _about_to_quit_connected
-        if not _about_to_quit_connected:
-            from PyQt6.QtWidgets import QApplication
-            app = QApplication.instance()
-            if app:
-                try:
-                    app.aboutToQuit.connect(_cleanup_threads)
-                    _about_to_quit_connected = True
-                except Exception:
-                    pass
 
         def _done(model: object, err: str) -> None:
+            self._active_signals.discard(signals)
             if load_generation != self._load_generation or self._worker is not worker:
                 return
             self._worker = None
@@ -317,8 +325,8 @@ class ImageLocationMapWidget(QWidget):
             self._canvas.update()
             self.show()
 
-        worker.finished.connect(_done)
-        worker.start()
+        signals.finished.connect(_done)
+        QThreadPool.globalInstance().start(worker)
 
     def ensure_online(self, callback: Callable[[bool], None]) -> None:
         if self._online is not None:
@@ -327,65 +335,43 @@ class ImageLocationMapWidget(QWidget):
 
         self._cancel_probe()
 
-        class _Probe(QThread):
-            result = pyqtSignal(bool)
+        signals = ProbeSignals()
+        self._active_signals.add(signals)
 
-            def run(self_inner) -> None:
-                if self_inner.isInterruptionRequested():
-                    return
-                self_inner.result.emit(probe_map_tiles_online())
-
-        probe = _Probe()
+        probe = _Probe(signals)
         self._probe = probe
-        
-        _active_probes.add(probe)
-        probe.finished.connect(lambda: _active_probes.discard(probe))
-        probe.finished.connect(probe.deleteLater)
-
-        global _about_to_quit_connected
-        if not _about_to_quit_connected:
-            from PyQt6.QtWidgets import QApplication
-            app = QApplication.instance()
-            if app:
-                try:
-                    app.aboutToQuit.connect(_cleanup_threads)
-                    _about_to_quit_connected = True
-                except Exception:
-                    pass
 
         def _on_result(ok: bool) -> None:
+            self._active_signals.discard(signals)
             if self._probe is not probe:
                 return
             self._probe = None
             self._online = ok
             callback(ok)
 
-        def _probe_finished() -> None:
-            if self._probe is probe:
-                self._probe = None
-
-        probe.result.connect(_on_result)
-        probe.finished.connect(_probe_finished)
-        probe.start()
+        signals.result.connect(_on_result)
+        QThreadPool.globalInstance().start(probe)
 
     def _cancel_worker(self) -> None:
         worker = self._worker
         if worker is not None:
             self._worker = None
             self._load_generation += 1
-            if worker.isRunning():
-                worker.requestInterruption()
+            try:
+                worker.cancel()
+                self._active_signals.discard(worker.signals)
+            except RuntimeError:
+                pass
 
     def _cancel_probe(self) -> None:
         probe = self._probe
         if probe is not None:
             self._probe = None
             try:
-                probe.result.disconnect()
-            except (TypeError, RuntimeError):
+                probe.cancel()
+                self._active_signals.discard(probe.signals)
+            except RuntimeError:
                 pass
-            if probe.isRunning():
-                probe.requestInterruption()
 
     def closeEvent(self, event) -> None:
         self._cancel_probe()

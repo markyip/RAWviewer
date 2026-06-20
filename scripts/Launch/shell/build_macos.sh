@@ -76,7 +76,7 @@ echo "Upgrading pip..."
 "$PYTHON_BIN" -m pip install --upgrade pip
 
 echo "Installing core dependencies..."
-CORE_DEPS="PyQt6 rawpy send2trash pyinstaller natsort exifread Pillow psutil numpy scipy qtawesome pyqtgraph reverse-geocoder pycountry certifi pyobjc-framework-Cocoa pyobjc-framework-Quartz"
+CORE_DEPS="PyQt6 rawpy send2trash pyinstaller natsort exifread Pillow psutil numpy qtawesome pyqtgraph pycountry certifi pyobjc-framework-Cocoa pyobjc-framework-Quartz"
 if [[ "$PROFILE" == "full" ]]; then
     CORE_DEPS="$CORE_DEPS requests huggingface-hub pyobjc-framework-CoreML pyobjc-framework-Vision"
 fi
