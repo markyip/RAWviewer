@@ -268,7 +268,6 @@ def install_dependencies(windows_accel: str = "cuda", *, profile: str = "full"):
         'psutil',  # Added for system memory info in image_cache
         'numpy',   # Required for image processing (used in all modules)
         'qtawesome', # Required for icons in main.py
-        'pyqtgraph',  # Optional/Future dependency included in requirements.txt
         'pycountry',  # ISO country code -> full country name
     ]
 
@@ -767,7 +766,27 @@ def main():
             "--exclude-module", "sklearn",
             "--exclude-module", "tokenizers",
             "--exclude-module", "safetensors",
+            # Exclude unused native extensions & optional/future packages
+            "--exclude-module", "cv2",
+            "--exclude-module", "pyqtgraph",
         ])
+        
+        # Exclude unused heavy PyQt6 modules to keep built bundle lightweight
+        unused_pyqt6 = [
+            "PyQt6.Qt3DAnimation", "PyQt6.Qt3DCore", "PyQt6.Qt3DExtras", "PyQt6.Qt3DInput",
+            "PyQt6.Qt3DLogic", "PyQt6.Qt3DRender", "PyQt6.QtBluetooth", "PyQt6.QtCharts",
+            "PyQt6.QtDataVisualization", "PyQt6.QtDesigner", "PyQt6.QtHelp", "PyQt6.QtMultimedia",
+            "PyQt6.QtMultimediaWidgets", "PyQt6.QtNetwork", "PyQt6.QtNfc", "PyQt6.QtPdf",
+            "PyQt6.QtPdfWidgets", "PyQt6.QtPositioning", "PyQt6.QtQml", "PyQt6.QtQuick",
+            "PyQt6.QtQuick3D", "PyQt6.QtQuickWidgets", "PyQt6.QtRemoteObjects", "PyQt6.QtSensors",
+            "PyQt6.QtSerialBus", "PyQt6.QtSerialPort", "PyQt6.QtSpatialAudio", "PyQt6.QtSql",
+            "PyQt6.QtTest", "PyQt6.QtTextToSpeech", "PyQt6.QtWebChannel", "PyQt6.QtWebEngineCore",
+            "PyQt6.QtWebEngineWidgets", "PyQt6.QtWebSockets", "PyQt6.QtXml", "PyQt6.QtSvg",
+            "PyQt6.QtSvgWidgets"
+        ]
+        for mod in unused_pyqt6:
+            cmd_base.extend(["--exclude-module", mod])
+
         if is_lite:
             cmd_base.extend([
                 "--exclude-module", "huggingface_hub",
