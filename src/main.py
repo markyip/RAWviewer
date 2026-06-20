@@ -207,6 +207,7 @@ image_covers_sensor_resolution = None
 ImageHistogramWidget = None
 ThumbnailLabel = None
 ExternalJustifiedGallery = None
+ImageLocationMapWidget = None
 
 # metadata_backend symbols
 exif_backend_mode = None
@@ -1039,7 +1040,7 @@ def _lazy_import_heavy_modules(splash=None):
            Priority, is_raw_file, load_pixmap_safe, check_memory_cache_for_image, \
            use_libraw_consistent_preview_first, image_covers_sensor_resolution, \
            use_progressive_raw_loading, metadata_index_idle_delay_ms, ImageHistogramWidget, ThumbnailLabel, ExternalJustifiedGallery, \
-           exif_backend_mode, exif_orientation_after_cw90, has_pyexiv2, process_file_from_path
+           exif_backend_mode, exif_orientation_after_cw90, has_pyexiv2, process_file_from_path, ImageLocationMapWidget
     
     def _update_splash(msg):
         if splash:
@@ -1129,8 +1130,10 @@ def _lazy_import_heavy_modules(splash=None):
     _update_splash("Loading UI components...")
     from rawviewer_ui.widgets import ThumbnailLabel as _ThumbnailLabel
     from rawviewer_ui.gallery_view import JustifiedGallery as _ExternalJustifiedGallery
+    from rawviewer_ui.location_map_overlay import ImageLocationMapWidget as _ImageLocationMapWidget
     ThumbnailLabel = _ThumbnailLabel
     ExternalJustifiedGallery = _ExternalJustifiedGallery
+    ImageLocationMapWidget = _ImageLocationMapWidget
     
     _update_splash("Startup complete")
 
@@ -5643,13 +5646,15 @@ class SingleImageViewOverlay(QWidget):
     )
 
     def __init__(self, scroll_area, histogram_widget, viewer=None, parent=None,
-                 gpu_view=None):
+                 gpu_view=None, map_widget=None):
         super().__init__(parent)
         self._viewer = viewer
         self._scroll = scroll_area
         self._gpu_view = gpu_view
         self._hist = histogram_widget
+        self._map = map_widget
         self._hist_user_placed = False
+        self._map_user_placed = False
         self._filmstrip_pointer_active = False
         self._filmstrip_reveal = False
         scroll_area.setParent(self)
@@ -5657,6 +5662,9 @@ class SingleImageViewOverlay(QWidget):
             gpu_view.setParent(self)
             gpu_view.viewport().installEventFilter(self)
         histogram_widget.setParent(self)
+        if map_widget is not None:
+            map_widget.setParent(self)
+            map_widget.hide()
         self.setObjectName("single_view_container")
         self.setStyleSheet("#single_view_container { background-color: #1E1E1E; }")
         self.setSizePolicy(
@@ -6025,6 +6033,7 @@ class SingleImageViewOverlay(QWidget):
             viewer._try_apply_pending_overlay_positions()
         self._layout_filmstrip()
         self._layout_histogram()
+        self._layout_map()
         self.relayout_rating_badge()
         self._raise_single_view_layers()
 
@@ -6035,8 +6044,39 @@ class SingleImageViewOverlay(QWidget):
             self._gpu_view.raise_()
         if hasattr(self, "rating_badge") and self.rating_badge.isVisible():
             self.rating_badge.raise_()
+        if self._map is not None and self._map.isVisible():
+            self._map.raise_()
         if self._hist.isVisible():
             self._hist.raise_()
+
+    def _layout_map(self):
+        m = self._map
+        if m is None or not m.isVisible():
+            return
+        pw, ph = self.width(), self.height()
+        mw, mh = m.width(), m.height()
+        if pw < 1 or ph < 1:
+            return
+        if not self._map_user_placed:
+            x = self._HIST_MARGIN
+            y = self._HIST_MARGIN
+            x = min(max(0, x), max(0, pw - mw))
+            y = min(max(0, y), max(0, ph - mh))
+            m.move(x, y)
+        else:
+            x = min(max(0, m.x()), max(0, pw - mw))
+            y = min(max(0, m.y()), max(0, ph - mh))
+            m.move(x, y)
+        m.raise_()
+
+    def relayout_map(self):
+        self._layout_map()
+
+    def mark_map_user_moved(self):
+        self._map_user_placed = True
+        viewer = getattr(self, "_viewer", None)
+        if viewer is not None and hasattr(viewer, "schedule_save_session_state"):
+            viewer.schedule_save_session_state()
 
     def overlay_session_snapshot(self) -> dict:
         """Normalized overlay positions (0–1) for cross-session restore."""
@@ -6044,6 +6084,8 @@ class SingleImageViewOverlay(QWidget):
         out: dict = {}
         if self._hist_user_placed:
             out["histogram"] = {"x": self._hist.x() / pw, "y": self._hist.y() / ph}
+        if self._map is not None and self._map.isVisible() and self._map_user_placed:
+            out["map"] = {"x": self._map.x() / pw, "y": self._map.y() / ph}
         return out
 
     def apply_overlay_session_positions(self, data: dict) -> None:
@@ -6061,6 +6103,19 @@ class SingleImageViewOverlay(QWidget):
                     min(max(0, y), max(0, ph - hh)),
                 )
                 self._hist_user_placed = True
+            except (KeyError, TypeError, ValueError):
+                pass
+        map_pos = data.get("map")
+        if map_pos and self._map is not None:
+            try:
+                x = int(float(map_pos["x"]) * pw)
+                y = int(float(map_pos["y"]) * ph)
+                mw, mh = self._map.width(), self._map.height()
+                self._map.move(
+                    min(max(0, x), max(0, pw - mw)),
+                    min(max(0, y), max(0, ph - mh)),
+                )
+                self._map_user_placed = True
             except (KeyError, TypeError, ValueError):
                 pass
 
@@ -6747,6 +6802,15 @@ class RAWImageViewer(QMainWindow):
         self._save_session_debounce_timer.setSingleShot(True)
         self._save_session_debounce_timer.setInterval(420)
         self._save_session_debounce_timer.timeout.connect(self.save_session_state)
+        
+        self._map_overlay_visible = True
+        self._map_user_hidden = False
+        self._map_online = None
+        self._map_gallery_title = None
+        self._map_gallery_return_path = None
+        self._map_sync_timer = QTimer(self)
+        self._map_sync_timer.setSingleShot(True)
+        self._map_sync_timer.timeout.connect(self._sync_location_map_now)
         self._defer_post_deletion_load_generation = 0
         
         # Deferred metadata indexing components
@@ -9997,6 +10061,10 @@ class RAWImageViewer(QMainWindow):
         self.single_image_histogram.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._histogram_overlay_visible = True
 
+        self.single_image_location_map = ImageLocationMapWidget()
+        self.single_image_location_map.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.single_image_location_map.hide()
+
         # Route B: GPU-accelerated single-image view (QGraphicsView + OpenGL).
         # On by default; set RAWVIEWER_GPU_VIEW=0 for the legacy QScrollArea/QLabel path.
         self.gpu_view = None
@@ -10020,7 +10088,7 @@ class RAWImageViewer(QMainWindow):
 
         self.single_view_container = SingleImageViewOverlay(
             self.scroll_area, self.single_image_histogram, viewer=self,
-            gpu_view=self.gpu_view)
+            gpu_view=self.gpu_view, map_widget=self.single_image_location_map)
         self._wire_filmstrip()
         main_layout.addWidget(self.single_view_container)
         # --- Status bar with Material Design 3 styling ---
@@ -10463,6 +10531,8 @@ class RAWImageViewer(QMainWindow):
             self.gpu_view.installEventFilter(self)
             self.gpu_view.viewport().installEventFilter(self)
         self.single_image_histogram.installEventFilter(self)
+        if self.single_image_location_map is not None:
+            self.single_image_location_map.installEventFilter(self)
 
         # F must work even when no child widget accepts keyboard focus (QLabel default
         # is NoFocus). WindowShortcut fires while this window is active.
@@ -16304,7 +16374,8 @@ class RAWImageViewer(QMainWindow):
             "Gallery: Ctrl/Cmd+click — toggle selection; Shift+click two photos for range\n"
             "H — Show/hide histogram\n"
             "G — Cycle composition guide (off / 3×3 / diagonal / both / phi grid)\n"
-            "F — Show/hide focus point"
+            "F — Show/hide focus point\n"
+            "M — Show/hide location map"
         )
 
     def _no_image_loaded_help_text(self) -> str:
@@ -18416,6 +18487,7 @@ class RAWImageViewer(QMainWindow):
             c = getattr(self, "single_view_container", None)
             if c is not None and hasattr(c, "relayout_histogram"):
                 c.relayout_histogram()
+        self._sync_location_map()
 
     def _clear_single_image_histogram(self):
         w = getattr(self, "single_image_histogram", None)
@@ -18426,6 +18498,61 @@ class RAWImageViewer(QMainWindow):
             c = getattr(self, "single_view_container", None)
             if c is not None and hasattr(c, "relayout_histogram"):
                 c.relayout_histogram()
+        self._clear_location_map()
+
+    def _sync_location_map(self) -> None:
+        """Debounced refresh — avoids canceling map load on every histogram tick."""
+        timer = getattr(self, "_map_sync_timer", None)
+        if timer is not None:
+            timer.start(250)
+            return
+        self._sync_location_map_now()
+
+    def _sync_location_map_now(self):
+        """Refresh GPS map when in single-image mode (requires network + GPS)."""
+        w = getattr(self, "single_image_location_map", None)
+        if w is None:
+            return
+        if getattr(self, "view_mode", "single") != "single":
+            w.clear()
+            return
+        path = getattr(self, "current_file_path", None)
+        pm = getattr(self, "current_pixmap", None)
+        if not path or pm is None or pm.isNull():
+            w.clear()
+            c = getattr(self, "single_view_container", None)
+            if c is not None and hasattr(c, "relayout_map"):
+                c.relayout_map()
+            return
+        if self._map_user_hidden or not getattr(self, "_map_overlay_visible", True):
+            w.hide()
+            c = getattr(self, "single_view_container", None)
+            if c is not None and hasattr(c, "relayout_map"):
+                c.relayout_map()
+            return
+
+        def _apply_online(ok: bool) -> None:
+            self._map_online = ok
+            if not ok:
+                w.clear()
+                return
+            w.load_for_file(path)
+            c = getattr(self, "single_view_container", None)
+            if c is not None and hasattr(c, "relayout_map"):
+                c.relayout_map()
+
+        if self._map_online is None:
+            w.ensure_online(_apply_online)
+        else:
+            _apply_online(self._map_online)
+
+    def _clear_location_map(self):
+        w = getattr(self, "single_image_location_map", None)
+        if w is not None:
+            w.clear()
+            c = getattr(self, "single_view_container", None)
+            if c is not None and hasattr(c, "relayout_map"):
+                c.relayout_map()
 
     def _slideshow_interval_ms(self) -> int:
         try:
@@ -22314,6 +22441,15 @@ class RAWImageViewer(QMainWindow):
                 c = getattr(self, "single_view_container", None)
                 if c is not None and hasattr(c, "relayout_histogram"):
                     c.relayout_histogram()
+                return True
+
+        if key == Qt.Key.Key_M:
+            if vm == "single":
+                self._map_overlay_visible = not getattr(self, "_map_overlay_visible", True)
+                self._map_user_hidden = not self._map_overlay_visible
+                if self._map_overlay_visible and self._map_online is False:
+                    self._map_online = None
+                self._sync_location_map()
                 return True
 
         return False
