@@ -1,9 +1,10 @@
 # RAWviewer Release Notes
 
-## 🚀 Version 2.4.1
-**Release Date: June 19, 2026**
+## 🚀 Version 2.5.0
+**Release Date: June 22, 2026**
 
-Bug-fix release for **Canon CR2/CR3** (and similar RAW) orientation and capture-date handling, plus **memory safety on relaunch** when session restore reopens a large folder. Treats **gallery mixed orientation**, **single-image rotation**, and **out-of-memory on restart** as separate issues.
+Major release introducing a custom gallery zoom slider, scroll anchoring, and verbose development logging, alongside fixes for **Canon CR2/CR3** (and similar RAW) orientation, capture-date handling, and **memory safety on relaunch** when session restore reopens a large folder.
+
 
 ### Gallery Zoom Slider & Debug Logging (June 22, 2026 updates)
 
@@ -18,7 +19,7 @@ Bug-fix release for **Canon CR2/CR3** (and similar RAW) orientation and capture-
 
 Some users saw **some vertical shots correct and others sideways** in the gallery after upgrading to v2.4. That pattern usually means **old cached thumbnails or EXIF rows** (from before v2.4 orientation fixes) sitting beside freshly warmed ones — not only a live warm-up clash (semantic vs gallery indexing, addressed in v2.4).
 
-**What's fixed in 2.4.1:**
+**What's fixed in 2.5.0 / 2.4.1:**
 - **EXIF cache validation** — Persisted orientation is checked against LibRaw flip and embedded-JPEG orientation; stale `orientation=1` rows for portrait Canon RAW are rejected and re-extracted.
 - **Cache version bump** (`sensor_meta_ver` 9) — Forces refresh of outdated EXIF metadata on upgrade.
 - **Thumbnail load repair** — When a cached gallery thumbnail's pixels don't match container orientation, it is corrected or dropped instead of reused.
@@ -29,7 +30,7 @@ Some users saw **some vertical shots correct and others sideways** in the galler
 
 Gallery and single view used **different preview paths**: gallery favored embedded JPEG previews (with EXIF transpose); opening from gallery could **force immediate full LibRaw decode** with wrong container orientation on Canon CR2/CR3.
 
-**What's fixed in 2.4.1:**
+**What's fixed in 2.5.0 / 2.4.1:**
 - **Same preview pipeline** — RAW thumbnails prefer LibRaw's embedded JPEG segment; byte-scan fallbacks apply container orientation after decode.
 - **Gallery → single** — No longer skips straight to full-resolution LibRaw; uses the same progressive preview → full decode path as normal navigation.
 - **Unified orientation lookup** — Single view uses `EXIFExtractor` (LibRaw flip + embedded JPEG), not header-only exifread alone.
@@ -39,7 +40,7 @@ Gallery and single view used **different preview paths**: gallery favored embedd
 
 On **8–16 GB** machines, closing RAWviewer and reopening it could restore the last folder and file while **full-resolution decode**, **neighbor prefetch**, and **AI/metadata indexing** all started in the same second — sometimes killing the app (macOS jetsam, exit **137**) or freezing Windows under heavy paging.
 
-**What's fixed in 2.4.1:**
+**What's fixed in 2.5.0 / 2.4.1:**
 - **Staged session restore** — After the first preview paints, full decode for the current image waits **~2.5 s**, then neighbor prefetch waits **~0.8 s** more. Normal folder open and gallery navigation are unchanged.
 - **Preview vs full cache tiers** — Full-resolution embedded JPEGs are stored separately from the smaller preview tier used for fit-to-window, reducing peak RAM during upgrades.
 - **macOS memory stats fallback** — On newer macOS kernels where `psutil` fails, RAM tier and cache pressure use `sysctl` + `vm_stat` instead of a fake 50% value.
@@ -350,8 +351,8 @@ Includes fixes from **2.0.1** (Pixel DNG, gallery aspect ratio, DNG single-view 
 
 # RAWviewer 版本發布說明 (繁體中文)
 
-## 🚀 版本 2.4.1
-**發布日期：2026 年 6 月 19 日 (2026 年 6 月 22 日更新)**
+## 🚀 版本 2.5.0
+**發布日期：2026 年 6 月 22 日**
 
 此版本為 **Canon CR2/CR3** (及類似 RAW 格式) 的旋轉方向與拍攝日期處理提供錯誤修正，並提升在工作階段還原 (Session Restore) 開啟大型資料夾時的**記憶體安全性**。將**藝廊混合方向**、**單張影像旋轉**以及**重啟時記憶體不足**作為獨立問題進行處理。
 
@@ -367,7 +368,7 @@ Includes fixes from **2.0.1** (Pixel DNG, gallery aspect ratio, DNG single-view 
 
 部分使用者在升級到 v2.4 後，在藝廊中會看到**部分直幅拍攝的相片方向正確，而其他相片卻橫向顯示**。此現象通常代表舊的快取縮圖或 EXIF 快取列（在 v2.4 旋轉方向修復之前建立的）與新快取的縮圖並存。
 
-**v2.4.1 中的修復內容：**
+**v2.5.0 / v2.4.1 中的修復內容：**
 - **EXIF 快取驗證** —— 將儲存的旋轉方向與 LibRaw 翻轉及內嵌 JPEG 的旋轉方向進行比對；無效的直幅 Canon RAW 檔案 `orientation=1` 快取列將被拒絕並重新擷取。
 - **快取版本升級** (`sensor_meta_ver` 9) —— 強制在升級時重新整理過期的 EXIF 中繼資料。
 - **縮圖載入修復** —— 當快取的藝廊縮圖像素與容器方向不符時，會將其修正或捨棄，而不再重複使用。
@@ -378,7 +379,7 @@ Includes fixes from **2.0.1** (Pixel DNG, gallery aspect ratio, DNG single-view 
 
 藝廊與單張檢視先前使用**不同的預覽路徑**：藝廊偏好使用內嵌 JPEG 預覽（帶有 EXIF 轉置）；從藝廊開啟時，可能會**強制立即進行完整的 LibRaw 解碼**，導致 Canon CR2/CR3 的容器方向出錯。
 
-**v2.4.1 中的修復內容：**
+**v2.5.0 / v2.4.1 中的修復內容：**
 - **統一預覽管線** —— RAW 縮圖偏好使用 LibRaw 的內嵌 JPEG 區段；位元組掃描後備方案會在解碼後套用容器方向。
 - **藝廊 → 單張** —— 不再直接跳至完整解析度的 LibRaw 解碼；使用與正常瀏覽相同的「漸進式預覽 → 完整解碼」路徑。
 - **統一旋轉方向查表** —— 單張檢視使用 `EXIFExtractor`（結合 LibRaw 翻轉與內嵌 JPEG），而非僅靠檔頭偵測的 exifread。
@@ -388,7 +389,7 @@ Includes fixes from **2.0.1** (Pixel DNG, gallery aspect ratio, DNG single-view 
 
 在 **8–16 GB** 記憶體的電腦上，關閉 RAWviewer 並重新開啟時可能會還原上次的資料夾與檔案，此時**完整解析度解碼**、**鄰近預載**與 **AI/中繼資料索引**會同時啟動，有時會導致程式崩潰（macOS jetsam 記憶體管理限制，退出碼 **137**）或因大量分頁導致 Windows 凍結。
 
-**v2.4.1 中的修復內容：**
+**v2.5.0 / v2.4.1 中的修復內容：**
 - **階段式工作階段還原** —— 在第一個預覽畫面繪製後，目前影像的完整解碼會等待 **~2.5 秒**，接著鄰近預載會再額外等待 **~0.8 秒**。正常的資料夾開啟與藝廊瀏覽則不受影響。
 - **預覽 vs 完整快取分級** —— 完整解析度的內嵌 JPEG 另外儲存，與適合視窗模式所使用的較小預覽層級分開，以降低升級時的記憶體高峰值。
 - **macOS 記憶體統計後備方案** —— 在較新的 macOS 核心上（此時 `psutil` 無法正常執行），記憶體分級和快取壓力會改用 `sysctl` + `vm_stat`，而非固定的 50% 虛擬值。

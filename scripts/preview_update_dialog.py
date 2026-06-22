@@ -20,7 +20,7 @@ def main() -> int:
     app.setApplicationName("RAWviewer Update Preview")
 
     current = os.environ.get("RAWVIEWER_MOCK_CURRENT_VERSION", APP_VERSION).strip()
-    latest = os.environ.get("RAWVIEWER_MOCK_UPDATE_VERSION", "2.4.0").strip()
+    latest = os.environ.get("RAWVIEWER_MOCK_UPDATE_VERSION", "2.6.0").strip()
     dismissed = show_release_update_dialog(
         current=current,
         latest=latest,

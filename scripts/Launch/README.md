@@ -2,7 +2,7 @@
 
 Scripts for local development and packaging. All paths assume the **repository root** as the working directory (each script `cd`s there automatically).
 
-**Version:** release **v2.4** (`build.py` `VERSION` is the single source; syncs `app_version.py`, `pixi.toml`, and `Info.plist`).
+**Version:** release **v2.5** (`build.py` `VERSION` is the single source; syncs `app_version.py`, `pixi.toml`, and `Info.plist`).
 
 ## Windows (`.bat`)
 
@@ -117,7 +117,7 @@ chmod +x scripts/Launch/shell/*.sh
 **End-user install:** extract the zip, then in Terminal:
 
 ```bash
-cd /path/to/RAWviewer-v2.4-macOS
+cd /path/to/RAWviewer-v2.5-macOS
 bash install_macos_app.sh
 ```
 
@@ -130,7 +130,7 @@ The script clears macOS download quarantine, copies RAWviewer to Applications, a
 Keep the extracted release folder (or re-download the zip from Releases). Then:
 
 ```bash
-cd /path/to/RAWviewer-v2.4-macOS
+cd /path/to/RAWviewer-v2.5-macOS
 bash uninstall_macos_app.sh
 ```
 
@@ -195,7 +195,7 @@ On macOS, `launch_dev.sh` prints OOM hints when exit code is **137** or **9**.
 After `build_macos.sh` or `pixi run python build.py`:
 
 1. **Gatekeeper:** `xattr -cr dist/RAWviewer.app` then `open dist/RAWviewer.app`.
-2. **About / version:** Help or logs should report app version **2.4.1** (from `app_version.py`, synced from `build.py`).
+2. **About / version:** Help or logs should report app version **2.5.0** (from `app_version.py`, synced from `build.py`).
 3. **Single-image view:** Open a JPEG/RAW folder → one file → bottom **share** icon visible.
 4. **Share:** Click share → Qt menu lists Mail / Messages / etc.; pick Mail and confirm attachment path (not an empty spinner).
 5. **Semantic (if models bundled):** Search field accepts a text query; index progress in status area.
