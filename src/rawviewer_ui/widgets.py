@@ -1,7 +1,7 @@
 import os
-from PyQt6.QtWidgets import QLabel, QApplication
-from PyQt6.QtCore import pyqtSignal, Qt, QObject, QPoint, QUrl, QMimeData
-from PyQt6.QtGui import QPixmap, QDrag
+from PyQt6.QtWidgets import QLabel, QApplication, QSlider, QStyle, QStyleOptionSlider
+from PyQt6.QtCore import pyqtSignal, Qt, QObject, QPoint, QUrl, QMimeData, QPointF
+from PyQt6.QtGui import QPixmap, QDrag, QPainter, QColor, QPolygonF
 
 RAWVIEWER_INTERNAL_FILE_DRAG_MIME = "application/x-rawviewer-internal-file-drag"
 
@@ -42,7 +42,7 @@ class ThumbnailLabel(QLabel):
         self._drag_started = False
 
         # Optimize property settings for performance
-        self.setScaledContents(False)  # We manually scale for better quality
+        self.setScaledContents(True)   # Enable scaling for smooth thumbnail transitions during zoom
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.setStyleSheet(self._STYLE_DEFAULT)
 
@@ -177,4 +177,94 @@ class ImageLoaded(QObject):
 
     # index (if needed), pixmap/image, generation
     loaded = pyqtSignal(int, object, int)
+
+
+class GalleryZoomSlider(QSlider):
+    """
+    Custom-styled slider with a slanted wedge-shaped track and circular thumb handle.
+    Represents thumbnail sizes scaling from smaller to larger.
+    """
+    def __init__(self, orientation=Qt.Orientation.Horizontal, parent=None):
+        super().__init__(orientation, parent)
+        self.setStyleSheet("background: transparent; border: none;")
+        if orientation == Qt.Orientation.Horizontal:
+            self.setFixedHeight(28)
+            self.setMinimumWidth(120)
+            self.setMaximumWidth(180)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        opt = QStyleOptionSlider()
+        self.initStyleOption(opt)
+
+        # Get subcontrol rects
+        groove_rect = self.style().subControlRect(
+            QStyle.ComplexControl.CC_Slider, opt, QStyle.SubControl.SC_SliderGroove, self
+        )
+        handle_rect = self.style().subControlRect(
+            QStyle.ComplexControl.CC_Slider, opt, QStyle.SubControl.SC_SliderHandle, self
+        )
+
+        y_center = groove_rect.center().y()
+        
+        # Calculate horizontal range for the wedge (center of handle at min to center of handle at max)
+        hw = handle_rect.width()
+        x_start = groove_rect.left() + hw // 2
+        x_end = groove_rect.right() - hw // 2
+        current_x = handle_rect.center().x()
+
+        # Clamp current_x to [x_start, x_end] to prevent division by zero or out of bounds
+        if x_end <= x_start:
+            x_start = 10
+            x_end = self.width() - 10
+        current_x = max(x_start, min(current_x, x_end))
+
+        # Wedge thickness configurations
+        min_thick = 3.0
+        max_thick = 12.0
+
+        # Calculate current thickness at current_x
+        fraction = 0.0
+        if x_end > x_start:
+            fraction = (current_x - x_start) / (x_end - x_start)
+        current_thick = min_thick + (max_thick - min_thick) * fraction
+
+        # Draw inactive part (from current_x to x_end)
+        inactive_poly = QPolygonF([
+            QPointF(current_x, y_center - current_thick / 2.0),
+            QPointF(x_end, y_center - max_thick / 2.0),
+            QPointF(x_end, y_center + max_thick / 2.0),
+            QPointF(current_x, y_center + current_thick / 2.0)
+        ])
+        
+        # Inactive color: subtle dark-mode transparent gray
+        inactive_color = QColor(255, 255, 255, 30)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(inactive_color)
+        painter.drawPolygon(inactive_poly)
+
+        # Draw active part (from x_start to current_x)
+        active_poly = QPolygonF([
+            QPointF(x_start, y_center - min_thick / 2.0),
+            QPointF(current_x, y_center - current_thick / 2.0),
+            QPointF(current_x, y_center + current_thick / 2.0),
+            QPointF(x_start, y_center + min_thick / 2.0)
+        ])
+        
+        # Active color: clean white to match overall style
+        active_color = QColor("#E0E0E0")
+        painter.setBrush(active_color)
+        painter.drawPolygon(active_poly)
+
+        # Draw active start dot (small white dot)
+        painter.setBrush(QColor("#FFFFFF"))
+        painter.drawEllipse(QPointF(x_start, y_center), min_thick / 2.0, min_thick / 2.0)
+
+        # Draw thumb handle (solid white circle)
+        painter.setBrush(QColor("#FFFFFF"))
+        thumb_radius = 9.0
+        painter.drawEllipse(QPointF(current_x, y_center), thumb_radius, thumb_radius)
 

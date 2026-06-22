@@ -1507,6 +1507,13 @@ class JustifiedGallery(QWidget):
             return
         self._gallery_width_defer_count = 0
 
+        # Find the first visible image path to anchor the viewport zoom
+        anchor_path = None
+        if self._gallery_layout_items:
+            first_idx = self._get_first_visible_image_index()
+            if 0 <= first_idx < len(self._gallery_layout_items):
+                anchor_path = self._gallery_layout_items[first_idx]["file_path"]
+
         self._building = True
         if self._resize_timer is not None and self._resize_timer.isActive():
             self._resize_timer.stop()
@@ -1598,6 +1605,8 @@ class JustifiedGallery(QWidget):
                     self._total_content_height,
                 )
             should_load_visible = True
+            if anchor_path:
+                self.scroll_to_file(anchor_path)
             if len(self.images) > 100:
                 self._schedule_aspects_settle_rebuild()
             if len(self.images) > 1000:
@@ -1646,6 +1655,24 @@ class JustifiedGallery(QWidget):
                 break
             visible.append((i, item))
         return visible
+
+    def _get_first_visible_image_index(self):
+        p = self._scroll_area
+        if p is None:
+            p = self.parent()
+            while p and not isinstance(p, QScrollArea):
+                p = p.parent()
+        if not isinstance(p, QScrollArea):
+            return -1
+        
+        sb = p.verticalScrollBar()
+        scroll_y = sb.value()
+        
+        # Find the first item whose bottom is below scroll_y
+        for i, item in enumerate(self._gallery_layout_items):
+            if item["rect"].bottom() > scroll_y:
+                return i
+        return -1
 
     def load_visible_images(self):
         # Stop background preloading when loading visible images (e.g. during scroll)
@@ -1796,7 +1823,18 @@ class JustifiedGallery(QWidget):
                     if not self._load_timer.isActive():
                         self._load_timer.start(16)
                     break
-                w = self._widget_pool.pop() if self._widget_pool else ThumbnailLabel(self)
+                # Try to find a widget in the pool that already has the same file_path
+                widget_index = -1
+                for i, pw in enumerate(self._widget_pool):
+                    if pw.file_path == path:
+                        widget_index = i
+                        break
+                
+                if widget_index != -1:
+                    w = self._widget_pool.pop(widget_index)
+                else:
+                    w = self._widget_pool.pop() if self._widget_pool else ThumbnailLabel(self)
+                
                 w.file_path = path
                 w.index = idx  # Keep track of index on the widget
                 display_rect = self._content_rect_to_viewport(rect)

@@ -208,9 +208,6 @@ def semantic_encode_prep_workers(sample_path: Optional[str] = None) -> int:
         except Exception:
             pass
 
-    from common_image_loader import is_external_or_network_volume
-    if is_external_or_network_volume(sample_path):
-        return 4
 
     try:
         from rawviewer_profile import classify_memory_tier, system_total_ram_gb

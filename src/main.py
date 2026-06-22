@@ -281,9 +281,16 @@ def _enable_fatal_crash_dump_if_needed():
         except OSError:
             return
 
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        dump_path = os.path.join(dump_dir, f"fatal_dump_{ts}.log")
-        f = open(dump_path, "a", encoding="utf-8", buffering=1)
+        is_dev = os.environ.get("RAWVIEWER_DEBUG", "").strip() in ("1", "true", "True", "YES", "yes")
+        if is_dev:
+            dump_path = os.path.join(dump_dir, "fatal_dump_dev.log")
+            mode = "w"
+        else:
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            dump_path = os.path.join(dump_dir, f"fatal_dump_{ts}.log")
+            mode = "a"
+
+        f = open(dump_path, mode, encoding="utf-8", buffering=1)
         faulthandler.enable(file=f, all_threads=True)
         faulthandler.register(signal.SIGABRT, file=f, all_threads=True)
     except Exception:
@@ -1180,6 +1187,8 @@ class FocusGallerySwitchFilter(logging.Filter):
         "[TTFR]",
         "[MANAGER]",
         "[SHARE]",
+        "[CLOSE]",
+        "[PROFILE]",
     )
 
     def filter(self, record: logging.LogRecord) -> bool:
@@ -1210,10 +1219,16 @@ def setup_logging():
         # Always attach a console/stream handler when possible.
         stream = sys.stdout if sys.stdout is not None else getattr(sys, "__stdout__", None)
         focus_gallery_switch = _env_true("RAWVIEWER_FOCUS_GALLERY_SWITCH", default=False)
-        verbose_info = _env_true("RAWVIEWER_VERBOSE_INFO_LOGS", default=False) or focus_gallery_switch
+        is_dev = os.environ.get("RAWVIEWER_DEBUG", "").strip() in ("1", "true", "True", "YES", "yes")
+        
+        verbose_info = _env_true("RAWVIEWER_VERBOSE_INFO_LOGS", default=False) or focus_gallery_switch or is_dev
+        
         if stream is not None:
             console_handler = logging.StreamHandler(stream)
-            console_handler.setLevel(logging.INFO)
+            if is_dev:
+                console_handler.setLevel(logging.DEBUG)
+            else:
+                console_handler.setLevel(logging.INFO)
             console_handler.setFormatter(formatter)
             console_handler.addFilter(NoisyInfoFilter(verbose_info))
             if focus_gallery_switch:
@@ -1225,12 +1240,18 @@ def setup_logging():
 
         # Optional file logging (opt-in) to avoid creating a logs folder in normal releases.
         enable_file_log = os.environ.get("RAWVIEWER_FILE_LOG", "").strip() in ("1", "true", "True", "YES", "yes")
+        if is_dev:
+            enable_file_log = True
+
         if enable_file_log:
             log_dir = _runtime_log_dir()
             os.makedirs(log_dir, exist_ok=True)
 
-            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-            log_file = os.path.join(log_dir, f'rawviewer_{timestamp}.log')
+            if is_dev:
+                log_file = os.path.join(log_dir, 'rawviewer_dev.log')
+            else:
+                timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                log_file = os.path.join(log_dir, f'rawviewer_{timestamp}.log')
 
             file_handler = logging.FileHandler(log_file, encoding='utf-8', mode='w')
             file_handler.setLevel(logging.DEBUG)
@@ -10319,6 +10340,33 @@ class RAWImageViewer(QMainWindow):
         )
         self.sort_toggle_button.hide()  # Hidden by default (single view)
 
+        # Size slider (gallery zoom)
+        from rawviewer_ui.widgets import GalleryZoomSlider
+        self.size_slider = GalleryZoomSlider(Qt.Orientation.Horizontal, self)
+        
+        # Read saved row height from settings
+        settings = self.get_settings()
+        saved_row_height = int(settings.value("gallery_row_height", 220))
+        saved_row_height = max(220, min(500, saved_row_height))
+        
+        self.size_slider.setRange(220, 500)
+        self.size_slider.setValue(saved_row_height)
+        self.size_slider.setToolTip("Adjust thumbnail size")
+        self.size_slider.hide()  # Hidden by default (single view)
+        
+        # Add to layout
+        left_buttons_layout.addWidget(
+            self.size_slider, 0, alignment=Qt.AlignmentFlag.AlignVCenter
+        )
+        
+        # Debounce timer for smooth dragging without layout lag
+        self._zoom_debounce_timer = QTimer(self)
+        self._zoom_debounce_timer.setSingleShot(True)
+        self._zoom_debounce_timer.timeout.connect(self._rebuild_gallery_zoom)
+        
+        self.size_slider.valueChanged.connect(self._on_zoom_slider_changed)
+        self.size_slider.sliderReleased.connect(self._on_zoom_slider_released)
+
         self.search_bottom_button = QPushButton()
         if qta is not None:
             try:
@@ -13638,6 +13686,8 @@ class RAWImageViewer(QMainWindow):
         # In single view mode: hide sort button and size slider, show Gallery button only if EXIF sort is ready
         if hasattr(self, 'sort_toggle_button'):
             self.sort_toggle_button.hide()
+        if hasattr(self, 'size_slider'):
+            self.size_slider.hide()
 
         if hasattr(self, 'view_mode_button'):
             self.view_mode_button.setVisible(self._is_exif_sort_ready())
@@ -13926,6 +13976,8 @@ class RAWImageViewer(QMainWindow):
         # Show sort button and size slider in gallery mode
         if hasattr(self, 'sort_toggle_button'):
             self.sort_toggle_button.show()
+        if hasattr(self, 'size_slider'):
+            self.size_slider.show()
 
         if hasattr(self, "search_bottom_button"):
             self.search_bottom_button.setVisible(self._is_exif_sort_ready())
@@ -14054,6 +14106,15 @@ class RAWImageViewer(QMainWindow):
 
         # Create optimized justified gallery widget from rawviewer_ui module.
         justified_gallery = ExternalJustifiedGallery([], self)  # Empty list initially, will be populated
+        
+        # Restore saved row height from settings
+        try:
+            settings = self.get_settings()
+            saved_row_height = int(settings.value("gallery_row_height", 220))
+            saved_row_height = max(220, min(500, saved_row_height))
+            justified_gallery.TARGET_ROW_HEIGHT = saved_row_height
+        except Exception:
+            pass
 
         justified_gallery.installEventFilter(self)
         gallery_scroll.setWidget(justified_gallery)
@@ -14098,6 +14159,27 @@ class RAWImageViewer(QMainWindow):
         # NOTE: rawviewer_ui.gallery_view.JustifiedGallery already wires scrollbar events
         # internally (valueChanged + sliderPressed/Released). Avoid duplicate connections
         # here; they can trigger redundant scheduling and visible scroll lag.
+
+    def _on_zoom_slider_changed(self, value):
+        if hasattr(self, 'gallery_justified') and self.gallery_justified:
+            self.gallery_justified.TARGET_ROW_HEIGHT = value
+            self._zoom_debounce_timer.stop()
+            self._zoom_debounce_timer.start(100)  # 100ms debounce
+
+    def _on_zoom_slider_released(self):
+        if self._zoom_debounce_timer.isActive():
+            self._zoom_debounce_timer.stop()
+            self._rebuild_gallery_zoom()
+
+    def _rebuild_gallery_zoom(self):
+        if hasattr(self, 'gallery_justified') and self.gallery_justified:
+            value = self.size_slider.value()
+            self.gallery_justified.TARGET_ROW_HEIGHT = value
+            self.gallery_justified.build_gallery(force=True)
+            try:
+                self.get_settings().setValue("gallery_row_height", value)
+            except Exception:
+                pass
 
     def _on_gallery_metadata_ready(self, meta, folder_at_request):
         """Thread-safe handler for metadata fetch completion"""
@@ -24385,6 +24467,8 @@ class RAWImageViewer(QMainWindow):
             self.status_counter_label.setVisible(False)
         if hasattr(self, 'sort_toggle_button'):
             self.sort_toggle_button.setVisible(False)
+        if hasattr(self, 'size_slider'):
+            self.size_slider.setVisible(False)
             
         if hasattr(self, 'status_bar'):
             self.status_bar.showMessage("Ready")
@@ -24419,6 +24503,8 @@ class RAWImageViewer(QMainWindow):
             self.status_counter_label.setVisible(False)
         if hasattr(self, 'sort_toggle_button'):
             self.sort_toggle_button.setVisible(False)
+        if hasattr(self, 'size_slider'):
+            self.size_slider.setVisible(False)
         
         # Update status bar
         self.status_bar.showMessage("No images found")
@@ -24552,6 +24638,11 @@ class RAWImageViewer(QMainWindow):
                 self.sort_toggle_button.setVisible(True)  # Show in gallery mode
             else:
                 self.sort_toggle_button.setVisible(False)  # Hide in single mode
+        if hasattr(self, 'size_slider'):
+            if self.view_mode == 'gallery':
+                self.size_slider.setVisible(True)
+            else:
+                self.size_slider.setVisible(False)
         
         # Gallery toggle only in single-image mode (in gallery you return by tapping a thumbnail)
         if hasattr(self, 'view_mode_button'):
