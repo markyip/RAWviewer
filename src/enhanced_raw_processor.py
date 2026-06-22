@@ -1043,8 +1043,8 @@ class EXIFExtractor(QObject):
                 except:
                     pass
 
-            # Fourth pass: If on macOS and missing dimensions or orientation, fallback to native sips
-            if (original_width <= 0 or original_height <= 0 or orientation == 1) and sys.platform == 'darwin':
+            # Fourth pass: If on macOS and missing dimensions, fallback to native sips
+            if (original_width <= 0 or original_height <= 0) and sys.platform == 'darwin':
                 try:
                     import subprocess
                     result = subprocess.run(['sips', '-g', 'pixelWidth', '-g', 'pixelHeight', '-g', 'orientation', file_path], 

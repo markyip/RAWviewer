@@ -2711,7 +2711,12 @@ class _ReleaseUpdateCheckWorker(QRunnable):
                 "offline": True,
                 "error": "",
             }
-        self.signals.finished.emit(result)
+        try:
+            from PyQt6 import sip
+            if not sip.isdeleted(self.signals):
+                self.signals.finished.emit(result)
+        except Exception:
+            pass
 
 class _SemanticIndexPrepWorker(QRunnable):
     """Background task to prepare semantic index build (coverage & pending scans)."""
@@ -2728,9 +2733,19 @@ class _SemanticIndexPrepWorker(QRunnable):
             face_pending = 0
             if not pending:
                 face_pending = self.index.get_face_pending_count(self.corpus_files)
-            self.signals.done.emit(coverage, pending, face_pending)
+            try:
+                from PyQt6 import sip
+                if not sip.isdeleted(self.signals):
+                    self.signals.done.emit(coverage, pending, face_pending)
+            except Exception:
+                pass
         except Exception as e:
-            self.signals.error.emit(str(e))
+            try:
+                from PyQt6 import sip
+                if not sip.isdeleted(self.signals):
+                    self.signals.error.emit(str(e))
+            except Exception:
+                pass
 
 class SemanticAssetDownloadSignals(QObject):
     """Signal carrier for background semantic backend asset download."""
@@ -11646,9 +11661,14 @@ class RAWImageViewer(QMainWindow):
             def run(self_inner):
                 try:
                     def _progress(done, total, message):
-                        self_inner.signals.progress.emit(
-                            self_inner.token, done, total, str(message)
-                        )
+                        try:
+                            from PyQt6 import sip
+                            if not sip.isdeleted(self_inner.signals):
+                                self_inner.signals.progress.emit(
+                                    self_inner.token, done, total, str(message)
+                                )
+                        except Exception:
+                            pass
 
                     defer_faces = self_inner.index._defer_face_scan_during_build()
                     result = self_inner.index.build_index(
@@ -11666,9 +11686,19 @@ class RAWImageViewer(QMainWindow):
                             and result.get("faces_pending", 0) > 0
                         )
                     )
-                    self_inner.signals.done.emit(self_inner.token, result)
+                    try:
+                        from PyQt6 import sip
+                        if not sip.isdeleted(self_inner.signals):
+                            self_inner.signals.done.emit(self_inner.token, result)
+                    except Exception:
+                        pass
                 except Exception as e:
-                    self_inner.signals.error.emit(self_inner.token, str(e))
+                    try:
+                        from PyQt6 import sip
+                        if not sip.isdeleted(self_inner.signals):
+                            self_inner.signals.error.emit(self_inner.token, str(e))
+                    except Exception:
+                        pass
 
         if hasattr(self, "gallery_search_input") and self.gallery_search_input is not None:
             ph = self.gallery_search_input.placeholderText() or "Search gallery"
@@ -11940,9 +11970,14 @@ class RAWImageViewer(QMainWindow):
             def run(self_inner):
                 try:
                     def _progress(done, total, message):
-                        self_inner.signals.progress.emit(
-                            self_inner.token, done, total, str(message)
-                        )
+                        try:
+                            from PyQt6 import sip
+                            if not sip.isdeleted(self_inner.signals):
+                                self_inner.signals.progress.emit(
+                                    self_inner.token, done, total, str(message)
+                                )
+                        except Exception:
+                            pass
 
                     count = self_inner.index.backfill_face_counts(
                         self_inner.files,
@@ -11950,11 +11985,21 @@ class RAWImageViewer(QMainWindow):
                         album_total=self_inner.album_total,
                         album_indexed_base=0,
                     )
-                    self_inner.signals.done.emit(
-                        self_inner.token, {"faces_scanned": count}
-                    )
+                    try:
+                        from PyQt6 import sip
+                        if not sip.isdeleted(self_inner.signals):
+                            self_inner.signals.done.emit(
+                                self_inner.token, {"faces_scanned": count}
+                            )
+                    except Exception:
+                        pass
                 except Exception as e:
-                    self_inner.signals.error.emit(self_inner.token, str(e))
+                    try:
+                        from PyQt6 import sip
+                        if not sip.isdeleted(self_inner.signals):
+                            self_inner.signals.error.emit(self_inner.token, str(e))
+                    except Exception:
+                        pass
 
         self._set_gallery_search_status(
             self._format_index_progress("Face", 0, pending)
@@ -12133,14 +12178,29 @@ class RAWImageViewer(QMainWindow):
 
                         pct_val = max(0, min(100, int(pct)))
                         text = (message or download_status_text(pct_val)).strip()
-                        self_inner.signals.progress.emit(self_inner.token, pct_val, text)
+                        try:
+                            from PyQt6 import sip
+                            if not sip.isdeleted(self_inner.signals):
+                                self_inner.signals.progress.emit(self_inner.token, pct_val, text)
+                        except Exception:
+                            pass
 
                     path = self_inner.index.download_semantic_backend_assets(
                         progress_callback=_progress
                     )
-                    self_inner.signals.done.emit(self_inner.token, path, list(self_inner.files))
+                    try:
+                        from PyQt6 import sip
+                        if not sip.isdeleted(self_inner.signals):
+                            self_inner.signals.done.emit(self_inner.token, path, list(self_inner.files))
+                    except Exception:
+                        pass
                 except Exception as e:
-                    self_inner.signals.error.emit(self_inner.token, str(e))
+                    try:
+                        from PyQt6 import sip
+                        if not sip.isdeleted(self_inner.signals):
+                            self_inner.signals.error.emit(self_inner.token, str(e))
+                    except Exception:
+                        pass
 
         self._set_gallery_search_status("Downloading... 0%")
         worker = _SemanticAssetDownloadWorker(token, index, list(corpus_files), signals)
@@ -13265,6 +13325,166 @@ class RAWImageViewer(QMainWindow):
                 }
             """)
 
+    def is_animated_image(self, file_path: str) -> bool:
+        if not file_path:
+            return False
+        ext = os.path.splitext(file_path)[1].lower()
+        if ext == '.gif':
+            return True
+        if ext == '.webp':
+            try:
+                from PIL import Image
+                with Image.open(file_path) as img:
+                    return getattr(img, "is_animated", False) and img.n_frames > 1
+            except Exception:
+                return False
+        return False
+
+    def _stop_animations(self):
+        if hasattr(self, "_current_movie") and self._current_movie:
+            try:
+                self._current_movie.stop()
+            except Exception:
+                pass
+            self.image_label.setMovie(None)
+            self._current_movie = None
+            
+        if hasattr(self, "_webp_timer") and self._webp_timer:
+            try:
+                self._webp_timer.stop()
+            except Exception:
+                pass
+            self._webp_timer = None
+            
+        self._current_webp_frames = []
+        self._current_webp_durations = []
+        self._current_webp_idx = 0
+        self._original_movie_size = None
+
+    def _load_and_start_animation(self, file_path):
+        self._stop_animations()
+        
+        # Hide GPU view, show scroll area/image label
+        if getattr(self, "gpu_view", None) is not None:
+            self.gpu_view.hide()
+        self.scroll_area.show()
+        self.image_label.show()
+        self.image_label.setText("")
+        
+        # Hide loading overlay if visible
+        if hasattr(self, "loading_overlay") and self.loading_overlay:
+            self.loading_overlay.hide_loading()
+            
+        ext = os.path.splitext(file_path)[1].lower()
+        if ext == '.gif':
+            from PyQt6.QtGui import QMovie
+            self._current_movie = QMovie(file_path)
+            self.image_label.setMovie(self._current_movie)
+            
+            def on_frame_changed(frame_no):
+                if not self._current_movie:
+                    return
+                try:
+                    self._current_movie.frameChanged.disconnect(on_frame_changed)
+                except Exception:
+                    pass
+                movie_size = self._current_movie.frameRect().size()
+                self._original_movie_size = movie_size
+                self._update_gif_scaling()
+                
+            self._current_movie.frameChanged.connect(on_frame_changed)
+            self._current_movie.start()
+            self.status_bar.showMessage(f"Playing GIF: {os.path.basename(file_path)}")
+            return True
+        elif ext == '.webp':
+            try:
+                from PIL import Image
+                self._current_webp_frames = []
+                self._current_webp_durations = []
+                self._current_webp_idx = 0
+                
+                with Image.open(file_path) as img:
+                    n_frames = getattr(img, "n_frames", 1)
+                    if n_frames <= 1:
+                        return False
+                    
+                    for frame_idx in range(n_frames):
+                        img.seek(frame_idx)
+                        frame_rgba = img.convert("RGBA")
+                        w, h = frame_rgba.size
+                        data = frame_rgba.tobytes("raw", "RGBA")
+                        qim = QImage(data, w, h, QImage.Format.Format_RGBA8888).copy()
+                        self._current_webp_frames.append(QPixmap.fromImage(qim))
+                        duration = img.info.get("duration", 100)
+                        if duration <= 0:
+                            duration = 100
+                        self._current_webp_durations.append(duration)
+                
+                if self._current_webp_frames:
+                    self._webp_timer = QTimer(self)
+                    self._webp_timer.setSingleShot(True)
+                    self._webp_timer.timeout.connect(self._play_next_webp_frame)
+                    self._play_next_webp_frame()
+                    self.status_bar.showMessage(f"Playing WebP: {os.path.basename(file_path)}")
+                    return True
+            except Exception as e:
+                import logging
+                logging.getLogger(__name__).error(f"Error loading animated WebP: {e}", exc_info=True)
+                self.image_label.setText(f"Error loading WebP: {e}")
+                return False
+        return False
+
+    def _play_next_webp_frame(self):
+        if not hasattr(self, "_current_webp_frames") or not self._current_webp_frames:
+            return
+        idx = self._current_webp_idx
+        pixmap = self._current_webp_frames[idx]
+        
+        display_pixmap = pixmap
+        if self.fit_to_window:
+            v_size = self.scroll_area.viewport().size()
+            display_pixmap = pixmap.scaled(v_size, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+        
+        self.image_label.setPixmap(display_pixmap)
+        self.image_label.resize(display_pixmap.size())
+        
+        duration = self._current_webp_durations[idx]
+        self._current_webp_idx = (idx + 1) % len(self._current_webp_frames)
+        
+        if hasattr(self, "_webp_timer") and self._webp_timer:
+            self._webp_timer.start(duration)
+
+    def _update_webp_scaling(self):
+        if hasattr(self, "_current_webp_frames") and self._current_webp_frames:
+            idx = (self._current_webp_idx - 1) % len(self._current_webp_frames)
+            pixmap = self._current_webp_frames[idx]
+            display_pixmap = pixmap
+            if self.fit_to_window:
+                v_size = self.scroll_area.viewport().size()
+                display_pixmap = pixmap.scaled(v_size, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+            self.image_label.setPixmap(display_pixmap)
+            self.image_label.resize(display_pixmap.size())
+
+    def _update_gif_scaling(self):
+        if not hasattr(self, "_current_movie") or not self._current_movie:
+            return
+        orig_size = getattr(self, "_original_movie_size", None)
+        if not orig_size or orig_size.isEmpty():
+            return
+        if self.fit_to_window:
+            v_size = self.scroll_area.viewport().size()
+            w_ratio = v_size.width() / orig_size.width()
+            h_ratio = v_size.height() / orig_size.height()
+            ratio = min(w_ratio, h_ratio)
+            fitted_size = QSize(int(orig_size.width() * ratio), int(orig_size.height() * ratio))
+            self._current_movie.setScaledSize(fitted_size)
+            self.image_label.resize(fitted_size)
+        else:
+            self._current_movie.setScaledSize(orig_size)
+            self.image_label.resize(orig_size)
+
+
+
     # GALLERY FUNCTIONALITY COMMENTED OUT
     def toggle_view_mode(self):
         """Toggle between single image view and gallery view"""
@@ -13415,9 +13635,10 @@ class RAWImageViewer(QMainWindow):
         if hasattr(self, 'status_counter_label'):
             self._refresh_image_counter()
         
-        # In single view mode: hide sort button, show Gallery button only if EXIF sort is ready
+        # In single view mode: hide sort button and size slider, show Gallery button only if EXIF sort is ready
         if hasattr(self, 'sort_toggle_button'):
             self.sort_toggle_button.hide()
+
         if hasattr(self, 'view_mode_button'):
             self.view_mode_button.setVisible(self._is_exif_sort_ready())
         if hasattr(self, "search_bottom_button"):
@@ -13593,6 +13814,7 @@ class RAWImageViewer(QMainWindow):
     # GALLERY FUNCTIONALITY COMMENTED OUT
     def _show_gallery_view(self):
         """Show gallery view - based on reference code"""
+        self._stop_animations()
         import logging
         import os
         import time
@@ -13701,9 +13923,10 @@ class RAWImageViewer(QMainWindow):
             self, "gallery_search_panel"
         ):
             self.search_expand_layout.setCurrentWidget(self.gallery_search_panel)
-        # Show sort button in gallery mode
+        # Show sort button and size slider in gallery mode
         if hasattr(self, 'sort_toggle_button'):
             self.sort_toggle_button.show()
+
         if hasattr(self, "search_bottom_button"):
             self.search_bottom_button.setVisible(self._is_exif_sort_ready())
         # Single-image actions stay in update_status_bar for single mode only; hide here
@@ -13831,6 +14054,7 @@ class RAWImageViewer(QMainWindow):
 
         # Create optimized justified gallery widget from rawviewer_ui module.
         justified_gallery = ExternalJustifiedGallery([], self)  # Empty list initially, will be populated
+
         justified_gallery.installEventFilter(self)
         gallery_scroll.setWidget(justified_gallery)
         gallery_layout.addWidget(gallery_scroll)
@@ -14090,13 +14314,23 @@ class RAWImageViewer(QMainWindow):
                             # in a background thread while the gallery is also loading thumbnails.
                             # Just use what's in the SQLite cache (opportunistic like v1.6.0).
                             meta = cache.get_multiple_exif(self_inner.files, fast_mode=True)
-                            self_inner.signals.ready.emit(meta, self_inner.folder_path)
+                            try:
+                                from PyQt6 import sip
+                                if not sip.isdeleted(self_inner.signals):
+                                    self_inner.signals.ready.emit(meta, self_inner.folder_path)
+                            except Exception:
+                                pass
                         except Exception as e:
                             import logging
                             logger = logging.getLogger(__name__)
                             logger.error(f"[GALLERY] Metadata fetch error: {e}")
                             # Emit empty meta but still valid folder path string
-                            self_inner.signals.ready.emit({}, self_inner.folder_path)
+                            try:
+                                from PyQt6 import sip
+                                if not sip.isdeleted(self_inner.signals):
+                                    self_inner.signals.ready.emit({}, self_inner.folder_path)
+                            except Exception:
+                                pass
 
                 fetcher = _GalleryMetadataFetch(files_snapshot, signals, folder_at_request)
                 self._active_metadata_fetcher = fetcher
@@ -17508,6 +17742,36 @@ class RAWImageViewer(QMainWindow):
                     self.loading_overlay.hide_loading()
                 return
 
+            # Stop any active animations
+            self._stop_animations()
+
+            # Handle animated images (GIF/WebP)
+            if self.is_animated_image(file_path):
+                self.current_file_path = file_path
+                self._last_loaded_path = file_path
+                if self.image_files and file_path in self.image_files:
+                    self.current_file_index = self.image_files.index(file_path)
+                self._sync_filmstrip_index()
+                
+                started = self._load_and_start_animation(file_path)
+                if started:
+                    # Load EXIF in background for status HUD
+                    if not self.image_cache.get_exif(file_path):
+                        self.image_manager.load_image(
+                            file_path,
+                            priority=Priority.BACKGROUND,
+                            cancel_existing=False,
+                            use_full_resolution=False,
+                            stages={"exif"},
+                        )
+                    self.update_status_bar()
+                    self._start_preloading()
+                    return
+
+            # Restore GPU view if enabled for standard static images
+            if getattr(self, "gpu_view", None) is not None:
+                self.gpu_view.show()
+
             # Store the requested file path for later comparison (after cleanup)
             # This allows us to detect if file changed during cleanup due to rapid navigation
             requested_file_path = file_path
@@ -18267,6 +18531,9 @@ class RAWImageViewer(QMainWindow):
 
     def display_numpy_image(self, rgb_image):
         """Display a numpy image array."""
+        if hasattr(self, 'current_file_path') and self.is_animated_image(self.current_file_path):
+            return
+            
         import logging
         import time
         logger = logging.getLogger(__name__)
@@ -20442,6 +20709,9 @@ class RAWImageViewer(QMainWindow):
 
     def display_pixmap(self, pixmap):
         """Display a QPixmap."""
+        if hasattr(self, 'current_file_path') and self.is_animated_image(self.current_file_path):
+            return
+            
         import logging
         import time
         logger = logging.getLogger(__name__)
@@ -23093,6 +23363,17 @@ class RAWImageViewer(QMainWindow):
         """Toggle between fit-to-window and 100% zoom modes"""
         import logging
         logger = logging.getLogger(__name__)
+        
+        # Route animated images zoom toggling first
+        if hasattr(self, "current_file_path") and self.is_animated_image(self.current_file_path):
+            self.fit_to_window = not self.fit_to_window
+            if hasattr(self, "_current_movie") and self._current_movie:
+                self._update_gif_scaling()
+            else:
+                self._update_webp_scaling()
+            self.update_status_bar()
+            return
+
         # Route B: GPU view manages its own fit/zoom transform.
         if getattr(self, "gpu_view", None) is not None:
             self._stop_slideshow()
@@ -23435,7 +23716,12 @@ class RAWImageViewer(QMainWindow):
         
         # No rounded corners to update
         # Rescale image when window is resized, but only in fit-to-window mode
-        if self.current_pixmap and self.fit_to_window:
+        if hasattr(self, "current_file_path") and self.is_animated_image(self.current_file_path):
+            if hasattr(self, "_current_movie") and self._current_movie:
+                self._update_gif_scaling()
+            else:
+                self._update_webp_scaling()
+        elif self.current_pixmap and self.fit_to_window:
             self.scale_image_to_fit()
         # GALLERY FUNCTIONALITY COMMENTED OUT
         # Update gallery layout if in gallery view mode (justified layout rebuilds automatically on resize)
@@ -25262,7 +25548,12 @@ class RAWImageViewer(QMainWindow):
                         folder_path, start_path
                     )
                     scan_s = time.time() - t0
-                    signals.ready.emit(token, files, stats, start_idx, scan_s)
+                    try:
+                        from PyQt6 import sip
+                        if not sip.isdeleted(signals):
+                            signals.ready.emit(token, files, stats, start_idx, scan_s)
+                    except Exception:
+                        pass
                 except Exception:
                     pass
 
@@ -25508,10 +25799,20 @@ class RAWImageViewer(QMainWindow):
                             pass
                     fallback = list(getattr(viewer, "image_files", []) or paths)
                     if fallback:
-                        self_inner.signals.ready.emit(token, fallback, {})
+                        try:
+                            from PyQt6 import sip
+                            if not sip.isdeleted(self_inner.signals):
+                                self_inner.signals.ready.emit(token, fallback, {})
+                        except Exception:
+                            pass
                     return
 
-                self_inner.signals.ready.emit(token, sorted_files, bulk_metadata)
+                try:
+                    from PyQt6 import sip
+                    if not sip.isdeleted(self_inner.signals):
+                        self_inner.signals.ready.emit(token, sorted_files, bulk_metadata)
+                except Exception:
+                    pass
 
         def _start_worker():
             if token != getattr(viewer, "_folder_load_generation", None):
@@ -25825,6 +26126,8 @@ class RAWImageViewer(QMainWindow):
         import logging
         logger = logging.getLogger(__name__)
         folder_path = os.path.abspath(folder_path)
+        if hasattr(self, "image_manager") and self.image_manager is not None:
+            self.image_manager.update_volume_throttling(folder_path)
         same_folder = bool(
             getattr(self, "current_folder", None)
             and _norm_path(getattr(self, "current_folder")) == _norm_path(folder_path)
@@ -25993,29 +26296,44 @@ class RAWImageViewer(QMainWindow):
                                 )
                         sort_time = time.time() - sort_start
 
-                        self_inner.signals.ready.emit(
-                            self_inner.token,
-                            image_files,
-                            bulk_metadata,
-                            file_stats,
-                            self_inner.folder_path,
-                            self_inner.start_file,
-                            self_inner.start_view,
-                            scan_time,
-                            sort_time,
-                        )
+                        try:
+                            from PyQt6 import sip
+                            if not sip.isdeleted(self_inner.signals):
+                                self_inner.signals.ready.emit(
+                                    self_inner.token,
+                                    image_files,
+                                    bulk_metadata,
+                                    file_stats,
+                                    self_inner.folder_path,
+                                    self_inner.start_file,
+                                    self_inner.start_view,
+                                    scan_time,
+                                    sort_time,
+                                )
+                        except Exception:
+                            pass
                     except OSError as e:
-                        self_inner.signals.error.emit(
-                            self_inner.token,
-                            "Folder Access Error",
-                            f"Cannot read folder contents:\n{str(e)}",
-                        )
+                        try:
+                            from PyQt6 import sip
+                            if not sip.isdeleted(self_inner.signals):
+                                self_inner.signals.error.emit(
+                                    self_inner.token,
+                                    "Folder Access Error",
+                                    f"Cannot read folder contents:\n{str(e)}",
+                                )
+                        except Exception:
+                            pass
                     except Exception as e:
-                        self_inner.signals.error.emit(
-                            self_inner.token,
-                            "Folder Load Error",
-                            f"Unexpected error loading folder:\n{str(e)}",
-                        )
+                        try:
+                            from PyQt6 import sip
+                            if not sip.isdeleted(self_inner.signals):
+                                self_inner.signals.error.emit(
+                                    self_inner.token,
+                                    "Folder Load Error",
+                                    f"Unexpected error loading folder:\n{str(e)}",
+                                )
+                        except Exception:
+                            pass
 
             worker = _FolderLoadWorker(token, folder_path, extensions, newest_first, start_file, start_view, signals)
             self._active_folder_load_worker = worker
@@ -26262,6 +26580,7 @@ class RAWImageViewer(QMainWindow):
         logger.info("[CLOSE] Application close event triggered, starting cleanup...")
         
         try:
+            self._stop_animations()
             if getattr(self, "_save_session_debounce_timer", None) is not None:
                 self._save_session_debounce_timer.stop()
             # Save session state first

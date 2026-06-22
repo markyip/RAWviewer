@@ -199,7 +199,7 @@ def semantic_batch_tie_ratio() -> float:
     return max(0.5, min(r, 1.0))
 
 
-def semantic_encode_prep_workers() -> int:
+def semantic_encode_prep_workers(sample_path: Optional[str] = None) -> int:
     """Parallel CPU workers for resize/load before ONNX image batch."""
     raw = os.environ.get("RAWVIEWER_SEMANTIC_PREP_WORKERS", "").strip()
     if raw:
@@ -207,6 +207,11 @@ def semantic_encode_prep_workers() -> int:
             return max(1, min(int(raw), 48))
         except Exception:
             pass
+
+    from common_image_loader import is_external_or_network_volume
+    if is_external_or_network_volume(sample_path):
+        return 4
+
     try:
         from rawviewer_profile import classify_memory_tier, system_total_ram_gb
 
@@ -1405,7 +1410,8 @@ class MobileCLIPCoreMLBackend:
         if len(paths) == 1:
             return [self.encode_image(paths[0])]
 
-        workers = semantic_encode_prep_workers()
+        sample_path = paths[0] if paths else None
+        workers = semantic_encode_prep_workers(sample_path)
 
         def _prep(path: str) -> Image.Image:
             return _load_index_source_image(path, max_size=1024, qt_decode=False).resize(
@@ -1788,7 +1794,8 @@ class MobileCLIPONNXBackend:
         if not paths:
             return []
         size = self._get_input_size()
-        workers = semantic_encode_prep_workers()
+        sample_path = paths[0] if paths else None
+        workers = semantic_encode_prep_workers(sample_path)
         if len(paths) == 1 or workers <= 1:
             tensors = [_prep_mobileclip_image_chw_resized(p, size) for p in paths]
         else:
@@ -3497,7 +3504,7 @@ class SemanticImageIndex:
         return np.asarray(model.encode(text, normalize_embeddings=True), dtype=np.float32)
 
     @staticmethod
-    def _face_scan_worker_count() -> int:
+    def _face_scan_worker_count(sample_path: Optional[str] = None) -> int:
         """Parallel image-load workers for face scan. YuNet inference is serialized."""
         raw = os.environ.get("RAWVIEWER_FACE_SCAN_WORKERS", "").strip()
         if raw:
@@ -3505,6 +3512,10 @@ class SemanticImageIndex:
                 return max(1, min(16, int(raw)))
             except ValueError:
                 pass
+
+        from common_image_loader import is_external_or_network_volume
+        if is_external_or_network_volume(sample_path):
+            return 2
         try:
             from rawviewer_profile import classify_memory_tier, system_total_ram_gb
 
@@ -3644,7 +3655,8 @@ class SemanticImageIndex:
             )
 
         if max_workers is None:
-            max_workers = semantic_encode_prep_workers()
+            sample_path = pending[0] if pending else None
+            max_workers = semantic_encode_prep_workers(sample_path)
         workers = max(1, int(max_workers))
         t0 = time.time()
         warmed = 0
@@ -3903,10 +3915,11 @@ class SemanticImageIndex:
                 "[INDEX] Face scan filling %d missing thumbnails (semantic pass should have cached most)",
                 len(cache_misses),
             )
+            sample_path = cache_misses[0] if cache_misses else None
             face_warm_workers = (
                 1
                 if sys.platform == "win32"
-                else min(semantic_encode_prep_workers(), 4)
+                else min(semantic_encode_prep_workers(sample_path), 4)
             )
             self._ensure_index_thumbnails_cached(
                 cache_misses,
@@ -3924,7 +3937,8 @@ class SemanticImageIndex:
 
         _yunet_warmup()
 
-        workers = self._face_scan_worker_count()
+        sample_path = face_pending[0] if face_pending else None
+        workers = self._face_scan_worker_count(sample_path)
         chunk_size = self._face_scan_inflight_chunk()
         t_face_start = time.time()
         batch_writes = 0
@@ -4216,7 +4230,8 @@ class SemanticImageIndex:
                 t_meta_start = time.time()
                 from common_image_loader import index_metadata_worker_count
 
-                max_workers = index_metadata_worker_count(total_extract)
+                sample_fp = to_extract[0][0] if to_extract else None
+                max_workers = index_metadata_worker_count(total_extract, sample_fp)
                 logger.info(
                     "[INDEX] Metadata workers=%d for %d files",
                     max_workers,

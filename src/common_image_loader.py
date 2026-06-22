@@ -1101,6 +1101,21 @@ def is_slow_storage_path(path: str) -> bool:
     return False
 
 
+def is_external_or_network_volume(path: Optional[str] = None) -> bool:
+    """True if path (or the current working directory if path is not given) is on a macOS external or network mount under /Volumes/."""
+    import sys
+    if sys.platform != "darwin":
+        return False
+    if path:
+        norm = os.path.normpath(path)
+        return norm.startswith("/Volumes/")
+    try:
+        return os.getcwd().startswith("/Volumes/")
+    except Exception:
+        pass
+    return False
+
+
 def sort_probe_worker_count(
     sample_path: Optional[str] = None,
     *,
@@ -1112,7 +1127,7 @@ def sort_probe_worker_count(
     Override: RAWVIEWER_SORT_PROBE_WORKERS (1–32).
     Conservative mode (fast-open window): RAWVIEWER_SORT_PROBE_WORKERS_CONSERVATIVE or min(3, default).
     Slow storage (UNC / RAWVIEWER_SLOW_STORAGE_PREFIXES): capped at 3.
-  """
+    """
     override = os.environ.get("RAWVIEWER_SORT_PROBE_WORKERS", "").strip()
     if override:
         return _env_int_bounded("RAWVIEWER_SORT_PROBE_WORKERS", 4, minimum=1, maximum=32)
@@ -1121,6 +1136,7 @@ def sort_probe_worker_count(
         return 2
 
     cpu = os.cpu_count() or 4
+
     if conservative:
         cons = os.environ.get("RAWVIEWER_SORT_PROBE_WORKERS_CONSERVATIVE", "").strip()
         if cons:
@@ -1137,7 +1153,7 @@ def sort_probe_worker_count(
     return min(12, max(4, cpu - 1))
 
 
-def index_metadata_worker_count(total_files: int) -> int:
+def index_metadata_worker_count(total_files: int, sample_path: Optional[str] = None) -> int:
     """
     Parallel metadata extraction during semantic index build.
 
@@ -1149,14 +1165,16 @@ def index_metadata_worker_count(total_files: int) -> int:
         return _env_int_bounded("RAWVIEWER_INDEX_METADATA_WORKERS", 2, minimum=1, maximum=16)
 
     cpu = os.cpu_count() or 4
+
     if total_files > 2000:
         return min(3, max(2, cpu // 2))
     return min(6, max(2, cpu - 1))
 
 
-def raw_concurrent_load_limit() -> int:
+def raw_concurrent_load_limit(sample_path: Optional[str] = None) -> int:
     """Max concurrent LibRaw full/preview decodes in ImageLoadManager."""
     cpu = os.cpu_count() or 4
+
     default = max(4, cpu)
     return _env_int_bounded("RAWVIEWER_RAW_LOAD_LIMIT", default, minimum=1, maximum=32)
 
@@ -1166,5 +1184,6 @@ def process_pool_worker_count() -> int:
     cpu = os.cpu_count() or 4
     default = max(2, cpu - 1)
     return _env_int_bounded("RAWVIEWER_PROCESS_POOL_WORKERS", default, minimum=1, maximum=32)
+
 
 

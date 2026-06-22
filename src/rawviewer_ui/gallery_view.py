@@ -194,6 +194,8 @@ class JustifiedGallery(QWidget):
         self.images = images
         self._rebuild_normalized_map()
 
+        self.TARGET_ROW_HEIGHT = 220
+
         # Virtualization Data
         self._gallery_layout_items = []  # List of {rect, file_path, aspect}
         self._visible_widgets = {}  # {index: ThumbnailLabel}
@@ -209,7 +211,7 @@ class JustifiedGallery(QWidget):
         # Thumbnail cache: base + per-bucket scaled
         self._thumbnail_cache = LRUCache(10000)
         self._thumb_base_key = "__base__"
-        self._row_height_buckets = [180, 220, 260, 300, 340]
+        self._row_height_buckets = list(range(100, 520, 20))
         self._width_bucket_px = 64  # quantize widths to avoid mismatched cached pixmaps
         # Mapping of file_path to list of indices (for when the same file appears multiple times)
         self._path_to_indices = {}
@@ -299,6 +301,8 @@ class JustifiedGallery(QWidget):
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
         QTimer.singleShot(0, self._post_init)
+
+
 
     def _post_init(self):
         try:
@@ -1387,6 +1391,7 @@ class JustifiedGallery(QWidget):
         self._current_scroll_speed = 0
         self._last_scroll_settle_t = time.time()
         self._thumb_first_after_settle_t = self._last_scroll_settle_t
+        self._last_scroll_event_t = 0.0  # Reset scroll event timestamp so we enable DB loading
         self.load_visible_images()
         
         # Defer resuming indexing for 5 seconds of idle gallery time
@@ -1508,6 +1513,8 @@ class JustifiedGallery(QWidget):
         self._last_layout_viewport_width = viewport_width
         should_load_visible = False
         try:
+
+
             self._gallery_layout_items.clear()
             self._path_to_indices.clear()
 
@@ -1825,35 +1832,50 @@ class JustifiedGallery(QWidget):
             else:
                 base = self._thumbnail_cache.get((path, self._thumb_base_key))
                 if not base:
-                    try:
-                        from image_cache import get_image_cache
-                        global_cache = get_image_cache()
-                        # Level-Adaptive Mipmap Loading based on screen tile physical size
-                        max_dim = max(physical_size.width(), physical_size.height())
-                        
-                        if max_dim > 256:
-                            global_thumb = global_cache.get_grid(path)
-                        else:
-                            global_thumb = global_cache.get_thumbnail(path)
+                    # Avoid main thread SQLite lock contention/stutter by skipping synchronous fetches during active scrolls
+                    is_scrolling = (time.time() - self._last_scroll_event_t) < 0.25
+                    if is_scrolling:
+                        pass
+                    else:
+                        try:
+                            from image_cache import get_image_cache
+                            global_cache = get_image_cache()
+                            # Level-Adaptive Mipmap Loading based on screen tile physical size
+                            max_dim = max(physical_size.width(), physical_size.height())
                             
-                        # Double-fallback logic:
-                        if global_thumb is None:
-                            global_thumb = global_cache.get_thumbnail(path)
-                        if global_thumb is None:
-                            global_thumb = global_cache.get_grid(path)
-                            
-                        if global_thumb is not None:
-                            arr = np.ascontiguousarray(global_thumb)
-                            h_img, w_img = arr.shape[:2]
-                            bytes_per_line = arr.strides[0]
-                            qimg = QImage(arr.data, w_img, h_img, bytes_per_line, QImage.Format.Format_RGB888).copy()
-                            base = QPixmap.fromImage(qimg)
-                            if base and not base.isNull():
-                                self._thumbnail_cache.put((path, self._thumb_base_key), base)
-                    except Exception as e:
-                        logger.debug(f"Sync adaptive mipmap fetch failed for {path}: {e}")
+                            if max_dim > 256:
+                                global_thumb = global_cache.get_grid(path)
+                            else:
+                                global_thumb = global_cache.get_thumbnail(path)
+                                
+                            # Double-fallback logic:
+                            if global_thumb is None:
+                                global_thumb = global_cache.get_thumbnail(path)
+                            if global_thumb is None:
+                                global_thumb = global_cache.get_grid(path)
+                                
+                            if global_thumb is not None:
+                                arr = np.ascontiguousarray(global_thumb)
+                                h_img, w_img = arr.shape[:2]
+                                bytes_per_line = arr.strides[0]
+                                qimg = QImage(arr.data, w_img, h_img, bytes_per_line, QImage.Format.Format_RGB888).copy()
+                                base = QPixmap.fromImage(qimg)
+                                if base and not base.isNull():
+                                    self._thumbnail_cache.put((path, self._thumb_base_key), base)
+                                else:
+                                    # Cache empty pixmap so we do not attempt synchronous DB queries repeatedly
+                                    null_px = QPixmap()
+                                    self._thumbnail_cache.put((path, self._thumb_base_key), null_px)
+                                    base = null_px
+                            else:
+                                # Cache empty pixmap so we do not attempt synchronous DB queries repeatedly
+                                null_px = QPixmap()
+                                self._thumbnail_cache.put((path, self._thumb_base_key), null_px)
+                                base = null_px
+                        except Exception as e:
+                            logger.debug(f"Sync adaptive mipmap fetch failed for {path}: {e}")
                 
-                if base:
+                if base and not base.isNull():
                     scaled = self._fit_rotated_thumbnail(path, base, physical_size)
                     scaled.setDevicePixelRatio(dpr)
                     self._thumbnail_cache.put(scaled_key, scaled)
