@@ -3,23 +3,30 @@
 ## 🚀 Version 2.5.0
 **Release Date: June 22, 2026**
 
-Major release introducing a custom gallery zoom slider, scroll anchoring, and verbose development logging, alongside fixes for **Canon CR2/CR3** (and similar RAW) orientation, capture-date handling, and **memory safety on relaunch** when session restore reopens a large folder.
+Major release introducing a custom gallery zoom slider, interactive GPS map display overlay, and animated GIF/WebP playback.
 
+### Gallery Zoom Slider
+- **Gallery Zoom Slider** — Added a custom slanted wedge-shaped zoom track and a white circular thumb handle in the justified gallery view. Minimum row height is locked to 220px to support zoom-in only, and settings are preserved in `QSettings`. Zoom recalculations are debounced (100ms) for smooth layout transitions and buttery smooth performance.
 
-### Gallery Zoom Slider & Debug Logging (June 22, 2026 updates)
+### Interactive GPS Map Display Overlay
+- **GPS Map Overlay** — Press **M** in single-image view to show/hide the interactive tile-based map card displaying the photo's GPS coordinates and location pin.
+- **Offline Reverse-Geocoding for Search** — Bundles preloaded worldwide cities (all cities with population > 500, covering over 100,000+ locations) and landmarks databases (`cities500.csv.gz` and `landmarks.csv.gz`). During background indexing, GPS coordinates are resolved to city, region, and country names and stored locally — enabling gallery search by location (e.g. `city:tokyo`, `country:jp`) with no internet required.
 
-- **Gallery Zoom Slider** — Added a custom slanted wedge-shaped zoom track and white circular thumb handle in the justified gallery view. Minimum row height is locked to 220px to support zoom-in only, and the settings are preserved in `QSettings`. Dragging recalculations are debounced (100ms) for buttery smooth performance.
-- **Scroll Anchoring & Scrollbar Updates** — Re-rendering and resizing updates now anchor perfectly to the first visible image in the viewport. Scrollbar range updates are synchronized with Qt's layout cycle to prevent scroll viewport resets on resize.
-- **Verbose Dev Logging & Overwrite Mode** — Running in development/debug mode (`RAWVIEWER_DEBUG=1`) auto-enables verbose `DEBUG` level console logging and generates clean, non-timestamped files (`rawviewer_dev.log` and `fatal_dump_dev.log`) that overwrite on every run, preventing log pollution.
-- **Shutdown Verbosity Whitelist** — Added whitelisting for `[CLOSE]` and `[PROFILE]` prefix logs so shutdown cleanup and startup defaults are always displayed in the terminal during development.
-- **Throttling Reversion** — Removed the remaining external volume checks to ensure external and internal drives run at the same full performance limits.
+### Animated GIF & WebP Playback
+- **Animated Previews** — Enhanced the image viewer pipeline to support playing, scaling, and animating GIF and WebP files. Displays playback status messages and handles dynamic window scaling seamlessly.
 
+---
+
+## 🚀 Version 2.4.1
+**Release Date: June 19, 2026**
+
+Bug-fix release for **Canon CR2/CR3** (and similar RAW) orientation and capture-date handling, plus **memory safety on relaunch** when session restore reopens a large folder. Treats **gallery mixed orientation**, **single-image rotation**, and **out-of-memory on restart** as separate issues.
 
 ### Gallery — mixed portrait / landscape thumbnails
 
 Some users saw **some vertical shots correct and others sideways** in the gallery after upgrading to v2.4. That pattern usually means **old cached thumbnails or EXIF rows** (from before v2.4 orientation fixes) sitting beside freshly warmed ones — not only a live warm-up clash (semantic vs gallery indexing, addressed in v2.4).
 
-**What's fixed in 2.5.0 / 2.4.1:**
+**What's fixed in 2.4.1:**
 - **EXIF cache validation** — Persisted orientation is checked against LibRaw flip and embedded-JPEG orientation; stale `orientation=1` rows for portrait Canon RAW are rejected and re-extracted.
 - **Cache version bump** (`sensor_meta_ver` 9) — Forces refresh of outdated EXIF metadata on upgrade.
 - **Thumbnail load repair** — When a cached gallery thumbnail's pixels don't match container orientation, it is corrected or dropped instead of reused.
@@ -30,7 +37,7 @@ Some users saw **some vertical shots correct and others sideways** in the galler
 
 Gallery and single view used **different preview paths**: gallery favored embedded JPEG previews (with EXIF transpose); opening from gallery could **force immediate full LibRaw decode** with wrong container orientation on Canon CR2/CR3.
 
-**What's fixed in 2.5.0 / 2.4.1:**
+**What's fixed in 2.4.1:**
 - **Same preview pipeline** — RAW thumbnails prefer LibRaw's embedded JPEG segment; byte-scan fallbacks apply container orientation after decode.
 - **Gallery → single** — No longer skips straight to full-resolution LibRaw; uses the same progressive preview → full decode path as normal navigation.
 - **Unified orientation lookup** — Single view uses `EXIFExtractor` (LibRaw flip + embedded JPEG), not header-only exifread alone.
@@ -40,7 +47,7 @@ Gallery and single view used **different preview paths**: gallery favored embedd
 
 On **8–16 GB** machines, closing RAWviewer and reopening it could restore the last folder and file while **full-resolution decode**, **neighbor prefetch**, and **AI/metadata indexing** all started in the same second — sometimes killing the app (macOS jetsam, exit **137**) or freezing Windows under heavy paging.
 
-**What's fixed in 2.5.0 / 2.4.1:**
+**What's fixed in 2.4.1:**
 - **Staged session restore** — After the first preview paints, full decode for the current image waits **~2.5 s**, then neighbor prefetch waits **~0.8 s** more. Normal folder open and gallery navigation are unchanged.
 - **Preview vs full cache tiers** — Full-resolution embedded JPEGs are stored separately from the smaller preview tier used for fit-to-window, reducing peak RAM during upgrades.
 - **macOS memory stats fallback** — On newer macOS kernels where `psutil` fails, RAM tier and cache pressure use `sysctl` + `vm_stat` instead of a fake 50% value.
@@ -354,64 +361,15 @@ Includes fixes from **2.0.1** (Pixel DNG, gallery aspect ratio, DNG single-view 
 ## 🚀 版本 2.5.0
 **發布日期：2026 年 6 月 22 日**
 
-此版本為 **Canon CR2/CR3** (及類似 RAW 格式) 的旋轉方向與拍攝日期處理提供錯誤修正，並提升在工作階段還原 (Session Restore) 開啟大型資料夾時的**記憶體安全性**。將**藝廊混合方向**、**單張影像旋轉**以及**重啟時記憶體不足**作為獨立問題進行處理。
+主要版本，引入了自訂藝廊縮放滑桿、捲動錨定、支援離線資料庫的互動式 GPS 地圖顯示覆蓋圖層，以及動畫 GIF/WebP 播放功能。
 
-### 藝廊縮放滑桿與偵錯日誌更新 (2026 年 6 月 22 日更新)
+### 藝廊縮放滑桿與捲動錨定
+- **藝廊縮放滑桿** —— 在藝廊視圖中新增了自訂 slanted 楔形縮放軌道和白色圓形滑桿按鈕。最小列高鎖定為 220px，僅支援放大，且設定值會保留在 `QSettings` 中。拖曳時的重新計算具有 100 毫秒的防抖延遲，確保效能流暢。
+- **捲動錨定** —— 重新轉譯和調整大小的更新現在能完美錨定到視窗中顯示的第一張影像，防止在調整大小或縮放時視窗滾動位置被重設。
 
-- **藝廊縮放滑桿** —— 在合理的藝廊視圖中新增了自訂 slanted 楔形縮放軌道和白色圓形滑桿按鈕。最小列高鎖定為 220px，僅支援放大，且設定值會保留在 `QSettings` 中。拖曳時的重新計算具有 100 毫秒的防抖延遲，確保效能流暢。
-- **捲動錨定與滾動條更新** —— 重新轉譯和調整大小的更新現在能完美錨定到視窗中顯示的第一張影像。滾動條範圍更新與 Qt 的版面配置週期同步，防止在調整大小時視窗滾動位置被重設。
-- **詳細開發日誌與覆寫模式** —— 在開發/偵錯模式 (`RAWVIEWER_DEBUG=1`) 下執行時，自動啟用詳細的 `DEBUG` 等級主控台日誌，並產生乾淨、無時間戳記的檔案（`rawviewer_dev.log` 和 `fatal_dump_dev.log`），且每次執行都會覆寫，防止日誌檔案過多。
-- **關閉程式詳細度白名單** —— 新增對 `[CLOSE]` 和 `[PROFILE]` 前置字串日誌的白名單支援，以便在開發期間始終在終端機中顯示關閉程式清理和啟動預設值的詳細資訊。
-- **磁碟限制還原** —— 移除了剩餘的外部硬碟讀取限制檢查，確保外部和內部硬碟在相同的高效能限制下運行。
+### 互動式 GPS 地圖顯示覆蓋
+- **GPS 地圖覆蓋** —— 在單張影像檢視中按下 **M** 鍵，可顯示/隱藏互動式瓦片地圖卡片，顯示相片的 GPS 座標和位置大頭針。
+- **離線逆地理編碼（搜尋功能）** —— 隨附預載的全球城市（涵蓋所有人口大於 500 的 10 萬多個城市）與地標資料庫（`cities500.csv.gz` 與 `landmarks.csv.gz`）。在背景索引期間，GPS 座標將被解析為城市、地區和國家名稱並儲存於本機，讓您無需網路即可透過位置進行藝廊搜尋（例如 `city:tokyo`、`country:jp`）。
 
-### 藝廊 —— 混合直式 / 橫式縮圖
-
-部分使用者在升級到 v2.4 後，在藝廊中會看到**部分直幅拍攝的相片方向正確，而其他相片卻橫向顯示**。此現象通常代表舊的快取縮圖或 EXIF 快取列（在 v2.4 旋轉方向修復之前建立的）與新快取的縮圖並存。
-
-**v2.5.0 / v2.4.1 中的修復內容：**
-- **EXIF 快取驗證** —— 將儲存的旋轉方向與 LibRaw 翻轉及內嵌 JPEG 的旋轉方向進行比對；無效的直幅 Canon RAW 檔案 `orientation=1` 快取列將被拒絕並重新擷取。
-- **快取版本升級** (`sensor_meta_ver` 9) —— 強制在升級時重新整理過期的 EXIF 中繼資料。
-- **縮圖載入修復** —— 當快取的藝廊縮圖像素與容器方向不符時，會將其修正或捨棄，而不再重複使用。
-
-**若縮圖仍顯示錯誤：** 請執行 **`scripts/Launch/shell/clear_cache.sh`** (macOS) 或 **`clear_cache.bat`** (Windows) 清除快取，然後重新開啟該資料夾。
-
-### 單張影像檢視 —— 旋轉方向與藝廊不一致
-
-藝廊與單張檢視先前使用**不同的預覽路徑**：藝廊偏好使用內嵌 JPEG 預覽（帶有 EXIF 轉置）；從藝廊開啟時，可能會**強制立即進行完整的 LibRaw 解碼**，導致 Canon CR2/CR3 的容器方向出錯。
-
-**v2.5.0 / v2.4.1 中的修復內容：**
-- **統一預覽管線** —— RAW 縮圖偏好使用 LibRaw 的內嵌 JPEG 區段；位元組掃描後備方案會在解碼後套用容器方向。
-- **藝廊 → 單張** —— 不再直接跳至完整解析度的 LibRaw 解碼；使用與正常瀏覽相同的「漸進式預覽 → 完整解碼」路徑。
-- **統一旋轉方向查表** —— 單張檢視使用 `EXIFExtractor`（結合 LibRaw 翻轉與內嵌 JPEG），而非僅靠檔頭偵測的 exifread。
-- **Canon CR2/CR3 中繼資料** —— 當 exifread 傳回稀疏標籤時，由 pyexiv2 補充**旋轉方向**與 **DateTimeOriginal**（同時改善拍攝日期排序）。
-
-### 記憶體 —— 重新啟動 / 工作階段還原 (macOS & Windows)
-
-在 **8–16 GB** 記憶體的電腦上，關閉 RAWviewer 並重新開啟時可能會還原上次的資料夾與檔案，此時**完整解析度解碼**、**鄰近預載**與 **AI/中繼資料索引**會同時啟動，有時會導致程式崩潰（macOS jetsam 記憶體管理限制，退出碼 **137**）或因大量分頁導致 Windows 凍結。
-
-**v2.5.0 / v2.4.1 中的修復內容：**
-- **階段式工作階段還原** —— 在第一個預覽畫面繪製後，目前影像的完整解碼會等待 **~2.5 秒**，接著鄰近預載會再額外等待 **~0.8 秒**。正常的資料夾開啟與藝廊瀏覽則不受影響。
-- **預覽 vs 完整快取分級** —— 完整解析度的內嵌 JPEG 另外儲存，與適合視窗模式所使用的較小預覽層級分開，以降低升級時的記憶體高峰值。
-- **macOS 記憶體統計後備方案** —— 在較新的 macOS 核心上（此時 `psutil` 無法正常執行），記憶體分級和快取壓力會改用 `sysctl` + `vm_stat`，而非固定的 50% 虛擬值。
-
----
-
-## 🚀 版本 2.4
-**發布日期：2026 年 6 月 19 日**
-
-### 功能特點 —— v2.4 全新推出
-
-- **RAWviewer Lite 輕量版** —— 專為快速瀏覽和篩選相片設計的輕量版本：下載檔案更小、無需安裝 AI 模型，且支援透過相機、ISO、日期、GPS 和檔名進行藝廊搜尋。在 **Windows** 上，於安裝精靈中選擇 **Lite**；在 **Mac** 上，請下載 **`RAWviewer-v2.4-macOS-Lite.zip`**。
-- **單一 Windows 安裝程式** —— 只需 **`RAWviewer_Setup.exe`** 即可。在安裝精靈中，可直接選擇 **Full (CUDA)**、**Full (DirectML)** 或 **Lite** —— 無需再尋找不同的安裝檔案。
-- **拖曳匯出相片** —— 可以將藝廊縮圖或底片縮圖直接拖曳至檔案總管、Finder、郵件、WhatsApp、Lightroom 或任何支援檔案拖入的應用程式。您可以先選取多張相片，然後一次拖曳進行批次匯出。
-- **三分法等構圖線** —— 在單張影像檢視中按下 **G** 鍵，可循環切換覆蓋圖層：三分法則、對角線或黃金比例網格，便於在篩選時檢查畫面構圖。
-- **書籤功能** —— 為每個資料夾標記精選相片；過濾藝廊以僅顯示已加書籤的相片；分享或以幻燈片播放您的精選；與藝廊搜尋整合。
-
-### 書籤功能細節
-
-- **標記精選相片** —— 按 **↑** 鍵可切換狀態。在**單張檢視**中，也可按一下右下角工具列的**星號**按鈕。
-- **單張影像檢視** —— 白色星號 = 已加書籤；空心星號 = 未加書籤。
-- **藝廊** —— 縮圖和底片縮圖上會有星號標籤。使用 **↑** 可切換目前選取相片的狀態；選取多張縮圖時，按 **↑** 或底部的**星號**按鈕可一次切換所有選取相片的狀態。
-- **僅顯示書籤藝廊** —— 在藝廊檢視中，於未選取任何相片時按一下**空心星號**按鈕（星號會變為**金色**），即可僅顯示有書籤的相片。再次按一下或按 **Esc** 返回完整網格。
-- **搜尋 + 書籤** —— 搜尋依然是在整個資料夾中執行；書籤過濾器僅用於篩選您**看得到**的結果。
-
+### 動畫 GIF 與 WebP 播放
+- **動畫預覽** —— 增強了影像檢視器管線，完整支援播放、縮放和播放動畫 GIF 及 WebP 檔案，顯示播放狀態訊息，並無縫處理動態視窗縮放。
