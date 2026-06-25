@@ -194,6 +194,7 @@ class _MapCanvas(QWidget):
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
         self._model: Optional[LocationMapModel] = None
+        self._loading: bool = False
         self.setFixedSize(WIDGET_W, WIDGET_H)
         self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
@@ -204,11 +205,15 @@ class _MapCanvas(QWidget):
         self._model = model
         self.update()
 
+    def set_loading(self, loading: bool) -> None:
+        self._loading = loading
+        self.update()
+
     def paintEvent(self, event) -> None:
         del event
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        
+
         # Round the canvas edges to match the card container
         path = QPainterPath()
         path.addRoundedRect(QRectF(self.rect()), 4.0, 4.0)
@@ -216,9 +221,20 @@ class _MapCanvas(QWidget):
 
         if self._model is None:
             p.fillRect(self.rect(), QColor(20, 22, 26))
+            if self._loading:
+                # Show a subtle loading indicator while tiles are being fetched
+                p.setPen(QPen(QColor(180, 180, 180, 200)))
+                font = p.font()
+                font.setPointSize(11)
+                p.setFont(font)
+                p.drawText(
+                    self.rect(),
+                    Qt.AlignmentFlag.AlignCenter,
+                    "Loading map\u2026",
+                )
             p.end()
             return
-            
+
         # Draw cropped background tiles
         p.drawPixmap(0, 0, self._model.cropped)
         # Draw pins
@@ -228,7 +244,7 @@ class _MapCanvas(QWidget):
         font = p.font()
         font.setPointSize(8)
         p.setFont(font)
-        p.drawText(6, WIDGET_H - 6, "© OpenStreetMap contributors")
+        p.drawText(6, WIDGET_H - 6, "\u00a9 OpenStreetMap contributors")
         p.end()
 
 
@@ -272,6 +288,7 @@ class ImageLocationMapWidget(QWidget):
     def clear(self) -> None:
         self._cancel_worker()
         self._model = None
+        self._canvas.set_loading(False)
         self._canvas.set_model(None)
         self.hide()
 
@@ -292,10 +309,15 @@ class ImageLocationMapWidget(QWidget):
         if self._online is False:
             self.clear()
             return
-        
+
+        # Show the card immediately with a loading placeholder so the user gets
+        # instant feedback when they press M on a geotagged image.
+        self._canvas.set_loading(True)
+        self.show()
+
         self._load_generation += 1
         load_generation = self._load_generation
-        
+
         signals = MapLoadSignals()
         self._active_signals.add(signals)
 
@@ -311,7 +333,10 @@ class ImageLocationMapWidget(QWidget):
             if load_generation != self._load_generation or self._worker is not worker:
                 return
             self._worker = None
-            
+
+            # Always clear the loading state first
+            self._canvas.set_loading(False)
+
             if model is None:
                 if err == "no_gps":
                     logger.debug("Location map hidden: no GPS metadata for %s", os.path.basename(current_path))
@@ -319,11 +344,11 @@ class ImageLocationMapWidget(QWidget):
                     logger.warning("Location map load failed: %s", err or "unknown")
                 self.clear()
                 return
-                
+
             self._model = model
             self._canvas.set_model(model)
             self._canvas.update()
-            self.show()
+            # Widget is already visible; no need to call show() again
 
         signals.finished.connect(_done)
         QThreadPool.globalInstance().start(worker)
