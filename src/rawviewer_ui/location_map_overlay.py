@@ -110,6 +110,7 @@ def extract_gps_coordinates(file_path: str) -> Optional[tuple[float, float]]:
 
 class MapLoadSignals(QObject):
     finished = pyqtSignal(object, str)  # LocationMapModel | None, error
+    gps_found = pyqtSignal()  # emitted once GPS coords are confirmed
 
 
 class _MapLoadWorker(QRunnable):
@@ -142,6 +143,12 @@ class _MapLoadWorker(QRunnable):
                     self.signals.finished.emit(None, "no_gps")
                 return
             
+            if self._cancelled:
+                return
+
+            # GPS confirmed — tell the UI to show the loading placeholder now
+            self.signals.gps_found.emit()
+
             if self._cancelled:
                 return
             
@@ -301,19 +308,16 @@ class ImageLocationMapWidget(QWidget):
         self._cancel_worker()
         self._model = None
         self._canvas.set_model(None)
+        # Always start hidden; only show once GPS is confirmed by the worker.
+        # This prevents a spurious "Loading map…" popup on images without GPS data.
+        self._canvas.set_loading(False)
+        self.hide()
 
         if not current_path or not os.path.isfile(current_path):
-            self.clear()
             return
 
         if self._online is False:
-            self.clear()
             return
-
-        # Show the card immediately with a loading placeholder so the user gets
-        # instant feedback when they press M on a geotagged image.
-        self._canvas.set_loading(True)
-        self.show()
 
         self._load_generation += 1
         load_generation = self._load_generation
@@ -327,6 +331,16 @@ class ImageLocationMapWidget(QWidget):
             signals,
         )
         self._worker = worker
+
+        def _on_gps_found() -> None:
+            """GPS coordinates confirmed — now it is safe to show the loading card."""
+            if load_generation != self._load_generation or self._worker is not worker:
+                return
+            self._canvas.set_loading(True)
+            self.show()
+            # _layout_map() skips hidden widgets, so re-layout now that we are
+            # visible so the container can position and raise the card correctly.
+            self._relayout_parent()
 
         def _done(model: object, err: str) -> None:
             self._active_signals.discard(signals)
@@ -342,16 +356,26 @@ class ImageLocationMapWidget(QWidget):
                     logger.debug("Location map hidden: no GPS metadata for %s", os.path.basename(current_path))
                 else:
                     logger.warning("Location map load failed: %s", err or "unknown")
-                self.clear()
+                self.hide()
                 return
 
             self._model = model
             self._canvas.set_model(model)
             self._canvas.update()
-            # Widget is already visible; no need to call show() again
+            # Ensure the widget is visible (gps_found will have shown it already
+            # for the loading phase, but show() is idempotent).
+            self.show()
+            self._relayout_parent()
 
+        signals.gps_found.connect(_on_gps_found)
         signals.finished.connect(_done)
         QThreadPool.globalInstance().start(worker)
+
+    def _relayout_parent(self) -> None:
+        """Ask the parent single-view container to re-position and raise this widget."""
+        parent = self.parentWidget()
+        if parent is not None and hasattr(parent, "relayout_map"):
+            parent.relayout_map()
 
     def ensure_online(self, callback: Callable[[bool], None]) -> None:
         if self._online is not None:

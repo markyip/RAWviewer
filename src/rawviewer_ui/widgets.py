@@ -208,7 +208,10 @@ class GalleryZoomSlider(QSlider):
             QStyle.ComplexControl.CC_Slider, opt, QStyle.SubControl.SC_SliderHandle, self
         )
 
-        y_center = groove_rect.center().y()
+        # Use widget mid-point for y_center: the native Windows style engine may
+        # report a groove_rect centre that is offset from the actual widget
+        # centre, causing the track and thumb to appear visually off-centre.
+        y_center = self.height() // 2
         
         # Calculate horizontal range for the wedge (center of handle at min to center of handle at max)
         hw = handle_rect.width()
