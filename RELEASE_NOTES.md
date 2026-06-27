@@ -1,7 +1,7 @@
 # RAWviewer Release Notes
 
 ## 🚀 Version 2.5.0
-**Release Date: June 22, 2026**
+**Release Date: June 25, 2026**
 
 Major release introducing a custom gallery zoom slider, interactive GPS map display overlay, and animated GIF/WebP playback.
 

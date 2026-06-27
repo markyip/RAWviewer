@@ -8887,6 +8887,15 @@ class RAWImageViewer(QMainWindow):
     def _on_filmstrip_thumbnails_needed(self, paths) -> None:
         if getattr(self, "view_mode", "single") != "single":
             return
+            
+        # Defer filmstrip thumbnail requests from the UI during fast-open 
+        # until the first image is actually on screen.
+        if not getattr(self, "_single_view_first_render_logged", False):
+            if not hasattr(self, "_deferred_filmstrip_paths"):
+                self._deferred_filmstrip_paths = set()
+            self._deferred_filmstrip_paths.update(paths)
+            return
+            
         from image_load_manager import Priority
 
         bar = self._filmstrip_bar()
@@ -8920,6 +8929,11 @@ class RAWImageViewer(QMainWindow):
         """Warm filmstrip thumbnails around the current image (before hover reveal)."""
         if getattr(self, "view_mode", "single") != "single":
             return
+            
+        # Defer filmstrip prefetch until the first image is actually on screen.
+        if not getattr(self, "_single_view_first_render_logged", False):
+            return
+
         files = self._navigation_files()
         if len(files) <= 1:
             return
@@ -10347,9 +10361,9 @@ class RAWImageViewer(QMainWindow):
         # Read saved row height from settings
         settings = self.get_settings()
         saved_row_height = int(settings.value("gallery_row_height", 220))
-        saved_row_height = max(220, min(500, saved_row_height))
+        saved_row_height = max(220, min(380, saved_row_height))
         
-        self.size_slider.setRange(220, 500)
+        self.size_slider.setRange(220, 380)
         self.size_slider.setValue(saved_row_height)
         self.size_slider.setToolTip("Adjust thumbnail size")
         self.size_slider.hide()  # Hidden by default (single view)
@@ -10364,6 +10378,7 @@ class RAWImageViewer(QMainWindow):
         self._zoom_debounce_timer.setSingleShot(True)
         self._zoom_debounce_timer.timeout.connect(self._rebuild_gallery_zoom)
         
+        self.size_slider.sliderPressed.connect(self._on_zoom_slider_pressed)
         self.size_slider.valueChanged.connect(self._on_zoom_slider_changed)
         self.size_slider.sliderReleased.connect(self._on_zoom_slider_released)
 
@@ -14160,15 +14175,22 @@ class RAWImageViewer(QMainWindow):
         # internally (valueChanged + sliderPressed/Released). Avoid duplicate connections
         # here; they can trigger redundant scheduling and visible scroll lag.
 
+    def _on_zoom_slider_pressed(self):
+        pass
+
     def _on_zoom_slider_changed(self, value):
         if hasattr(self, 'gallery_justified') and self.gallery_justified:
             self.gallery_justified.TARGET_ROW_HEIGHT = value
-            self._zoom_debounce_timer.stop()
-            self._zoom_debounce_timer.start(100)  # 100ms debounce
+            if not self.size_slider.isSliderDown():
+                self._zoom_debounce_timer.stop()
+                self._zoom_debounce_timer.start(100)
 
     def _on_zoom_slider_released(self):
-        if self._zoom_debounce_timer.isActive():
-            self._zoom_debounce_timer.stop()
+        if hasattr(self, 'gallery_justified') and self.gallery_justified:
+            value = self.size_slider.value()
+            self.get_settings().setValue("gallery_row_height", value)
+            if self._zoom_debounce_timer.isActive():
+                self._zoom_debounce_timer.stop()
             self._rebuild_gallery_zoom()
 
     def _rebuild_gallery_zoom(self):
@@ -21616,6 +21638,9 @@ class RAWImageViewer(QMainWindow):
 
     def _queue_display_tier_prefetch_for_paths(self, paths) -> None:
         """Background embedded-preview decode for navigation neighbors (not sensor full)."""
+        if not getattr(self, "_single_view_first_render_logged", False):
+            return
+            
         if self._should_defer_nav_preload():
             return
         from image_load_manager import Priority
@@ -21785,6 +21810,12 @@ class RAWImageViewer(QMainWindow):
         else:
             self._flush_deferred_sensor_full_decode()
             self._flush_deferred_full_exif_after_first_paint()
+            
+        if hasattr(self, "_deferred_filmstrip_paths") and self._deferred_filmstrip_paths:
+            paths = list(self._deferred_filmstrip_paths)
+            self._deferred_filmstrip_paths.clear()
+            self._on_filmstrip_thumbnails_needed(paths)
+            
         try:
             fp = getattr(self, "current_file_path", None)
             if fp:
@@ -25043,7 +25074,9 @@ class RAWImageViewer(QMainWindow):
                 metadata_extracted_from_cache = False
         
         # Fallback: If no exif_tags OR if we didn't extract any metadata from cache, try direct extraction
-        if (not exif_tags or not metadata_extracted_from_cache) and allow_expensive_exif_probe:
+        # Only allow expensive synchronous extraction if not in fast_open startup/navigation phase to keep main thread fluid
+        is_fast_open_active = getattr(self, "_folder_fast_open_token", None) is not None
+        if (not exif_tags or not metadata_extracted_from_cache) and allow_expensive_exif_probe and not is_fast_open_active:
             _probe_ts[self.current_file_path] = now_ts
             self._status_exif_probe_ts = _probe_ts
             logger.info(f"[STATUS] Using fallback EXIF extraction - exif_tags: {exif_tags is not None}, metadata_extracted: {metadata_extracted_from_cache}")
@@ -25088,7 +25121,8 @@ class RAWImageViewer(QMainWindow):
             )
         
         # Final fallback: direct EXIF read (pyexiv2 preferred, else exifread)
-        if not exif_info and self.current_file_path and allow_expensive_exif_probe:
+        # Skip this heavy fallback synchronous IO on the main thread during fast-open loading
+        if not exif_info and self.current_file_path and allow_expensive_exif_probe and not is_fast_open_active:
             logger.warning(
                 "[STATUS] No metadata from cache/fallback; direct EXIF read "
                 "(metadata_backend)."
@@ -26428,8 +26462,17 @@ class RAWImageViewer(QMainWindow):
 
             worker = _FolderLoadWorker(token, folder_path, extensions, newest_first, start_file, start_view, signals)
             self._active_folder_load_worker = worker
-            QThreadPool.globalInstance().start(worker)
-            logger.info("[FOLDER] Background folder load started for %s", folder_path)
+            if fast_open:
+                # Delay folder scan thread pool start completely by 2.5 seconds to ensure
+                # the cold-cache RAW decode completes first without thread/IO contention.
+                def _deferred_start(w=worker):
+                    if token == getattr(viewer, "_folder_load_generation", None):
+                        QThreadPool.globalInstance().start(w, priority=-1)
+                QTimer.singleShot(2500, _deferred_start)
+                logger.info("[FOLDER] Background folder load deferred by 2.5s to prioritize first image load")
+            else:
+                QThreadPool.globalInstance().start(worker)
+                logger.info("[FOLDER] Background folder load started for %s", folder_path)
         except Exception as e:
             logger.error(f"Unexpected error in load_folder_images for {folder_path}: {e}", exc_info=True)
             self.show_error("Folder Load Error", f"Unexpected error loading folder:\n{str(e)}")

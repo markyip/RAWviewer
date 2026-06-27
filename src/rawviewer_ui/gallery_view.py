@@ -211,8 +211,14 @@ class JustifiedGallery(QWidget):
         # Thumbnail cache: base + per-bucket scaled
         self._thumbnail_cache = LRUCache(10000)
         self._thumb_base_key = "__base__"
-        self._row_height_buckets = list(range(100, 520, 20))
+        self._row_height_buckets = list(range(100, 400, 20)) # updated max to 400
         self._width_bucket_px = 64  # quantize widths to avoid mismatched cached pixmaps
+        
+        # Zoom state variables
+        self._is_zooming = False
+        self._zoom_start_row_height = 220
+        self._zoom_locked_layout_items = []
+        
         # Mapping of file_path to list of indices (for when the same file appears multiple times)
         self._path_to_indices = {}
         # Track what thumbnails we've recently requested so we can cancel far-away work
@@ -1552,7 +1558,7 @@ class JustifiedGallery(QWidget):
                     return
                 spacing = (len(r) - 1) * self.MIN_SPACING
                 row_h = self.TARGET_ROW_HEIGHT if is_last else (net_width - spacing) / a_sum
-                row_h = max(self.TARGET_ROW_HEIGHT * 0.5, min(self.TARGET_ROW_HEIGHT * 2.0, row_h))
+                row_h = max(self.TARGET_ROW_HEIGHT * 0.4, min(self.TARGET_ROW_HEIGHT * 2.2, row_h))
 
                 curr_x = left_margin
                 for i, (item, aspect) in enumerate(r):

@@ -193,6 +193,54 @@ class GalleryZoomSlider(QSlider):
             self.setMaximumWidth(180)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
 
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.setSliderDown(True)
+            self.sliderPressed.emit()
+            val = self._value_for_pos(event.pos())
+            self.setValue(val)
+            event.accept()
+        else:
+            super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if event.buttons() & Qt.MouseButton.LeftButton:
+            val = self._value_for_pos(event.pos())
+            self.setValue(val)
+            event.accept()
+        else:
+            super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.setSliderDown(False)
+            self.sliderReleased.emit()
+            event.accept()
+        else:
+            super().mouseReleaseEvent(event)
+
+    def _value_for_pos(self, pos):
+        opt = QStyleOptionSlider()
+        self.initStyleOption(opt)
+        groove_rect = self.style().subControlRect(
+            QStyle.ComplexControl.CC_Slider, opt, QStyle.SubControl.SC_SliderGroove, self
+        )
+        handle_rect = self.style().subControlRect(
+            QStyle.ComplexControl.CC_Slider, opt, QStyle.SubControl.SC_SliderHandle, self
+        )
+        
+        hw = handle_rect.width()
+        x_start = groove_rect.left() + hw // 2
+        x_end = groove_rect.right() - hw // 2
+        
+        if x_end <= x_start:
+            return self.minimum()
+            
+        fraction = (pos.x() - x_start) / (x_end - x_start)
+        fraction = max(0.0, min(1.0, fraction))
+        
+        return int(self.minimum() + fraction * (self.maximum() - self.minimum()))
+
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
