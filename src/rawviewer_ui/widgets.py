@@ -184,6 +184,8 @@ class GalleryZoomSlider(QSlider):
     Custom-styled slider with a slanted wedge-shaped track and circular thumb handle.
     Represents thumbnail sizes scaling from smaller to larger.
     """
+    ZOOM_STEP = 20
+
     def __init__(self, orientation=Qt.Orientation.Horizontal, parent=None):
         super().__init__(orientation, parent)
         self.setStyleSheet("background: transparent; border: none;")
@@ -192,6 +194,21 @@ class GalleryZoomSlider(QSlider):
             self.setMinimumWidth(120)
             self.setMaximumWidth(180)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setSingleStep(self.ZOOM_STEP)
+        self.setPageStep(self.ZOOM_STEP)
+
+    def setValue(self, val):
+        min_val = self.minimum()
+        max_val = self.maximum()
+        
+        # Calculate possible step values
+        steps = list(range(min_val, max_val + 1, self.ZOOM_STEP))
+        if not steps or steps[-1] != max_val:
+            steps.append(max_val)
+            
+        # Find closest step
+        snapped = min(steps, key=lambda x: abs(x - val))
+        super().setValue(snapped)
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
