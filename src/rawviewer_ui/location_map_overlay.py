@@ -7,9 +7,9 @@ import os
 from pathlib import Path
 from typing import Optional, Callable
 
-from PyQt6.QtCore import QObject, Qt, pyqtSignal, QPoint, QRectF, QRunnable, QThreadPool
-from PyQt6.QtGui import QCursor, QMouseEvent, QPainter, QPainterPath, QColor, QPen
-from PyQt6.QtWidgets import QSizePolicy, QVBoxLayout, QWidget
+from PyQt6.QtCore import QObject, Qt, pyqtSignal, QPoint, QRectF, QRunnable, QThreadPool, QUrl
+from PyQt6.QtGui import QCursor, QMouseEvent, QPainter, QPainterPath, QColor, QPen, QDesktopServices
+from PyQt6.QtWidgets import QSizePolicy, QVBoxLayout, QWidget, QLabel, QHBoxLayout
 
 import metadata_backend
 from location_map_engine import (
@@ -255,8 +255,72 @@ class _MapCanvas(QWidget):
         p.end()
 
 
+class MapCoordinateBadge(QWidget):
+    """Clickable GPS coordinate badge overlay that opens Google Maps."""
+
+    def __init__(self, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self.lat = 0.0
+        self.lon = 0.0
+
+        # Premium dark glassmorphic styling
+        self.setStyleSheet("""
+            QWidget {
+                background-color: rgba(15, 17, 20, 195);
+                border: 1px solid rgba(255, 255, 255, 35);
+                border-radius: 4px;
+            }
+            QLabel {
+                color: #ECECEC;
+                font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, Roboto, sans-serif;
+                font-size: 10px;
+                font-weight: 500;
+                background-color: transparent;
+                border: none;
+            }
+            QWidget:hover {
+                background-color: rgba(30, 35, 45, 225);
+                border: 1px solid rgba(255, 255, 255, 60);
+            }
+        """)
+
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(6, 4, 6, 4)
+        layout.setSpacing(4)
+
+        self.label = QLabel(self)
+        self.label.setText("📍 0.00000\u00b0 N, 0.00000\u00b0 E")
+        layout.addWidget(self.label)
+
+        self.adjustSize()
+
+    def set_coordinates(self, lat: float, lon: float) -> None:
+        self.lat = lat
+        self.lon = lon
+        lat_dir = "N" if lat >= 0 else "S"
+        lon_dir = "E" if lon >= 0 else "W"
+        self.label.setText(f"📍 {abs(lat):.5f}\u00b0 {lat_dir}, {abs(lon):.5f}\u00b0 {lon_dir}")
+        self.adjustSize()
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event: QMouseEvent) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            url_str = f"https://www.google.com/maps/search/?api=1&query={self.lat},{self.lon}"
+            QDesktopServices.openUrl(QUrl(url_str))
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+
 class ImageLocationMapWidget(QWidget):
-    """352×264 draggable map card overlay showing stitched tiles without zoom/pan controls."""
+    """352\u00d7264 draggable map card overlay showing stitched tiles without zoom/pan controls."""
 
     _CARD_W = WIDGET_W + 8
     _CARD_H = WIDGET_H + 8
@@ -283,6 +347,10 @@ class ImageLocationMapWidget(QWidget):
         self._canvas = _MapCanvas(self)
         layout.addWidget(self._canvas)
 
+        # Coordinates badge overlay
+        self._coordinate_badge = MapCoordinateBadge(self)
+        self._coordinate_badge.hide()
+
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
@@ -297,6 +365,7 @@ class ImageLocationMapWidget(QWidget):
         self._model = None
         self._canvas.set_loading(False)
         self._canvas.set_model(None)
+        self._coordinate_badge.hide()
         self.hide()
 
     def load_for_file(
@@ -309,8 +378,9 @@ class ImageLocationMapWidget(QWidget):
         self._model = None
         self._canvas.set_model(None)
         # Always start hidden; only show once GPS is confirmed by the worker.
-        # This prevents a spurious "Loading map…" popup on images without GPS data.
+        # This prevents a spurious "Loading map\u2026" popup on images without GPS data.
         self._canvas.set_loading(False)
+        self._coordinate_badge.hide()
         self.hide()
 
         if not current_path or not os.path.isfile(current_path):
@@ -333,7 +403,7 @@ class ImageLocationMapWidget(QWidget):
         self._worker = worker
 
         def _on_gps_found() -> None:
-            """GPS coordinates confirmed — now it is safe to show the loading card."""
+            """GPS coordinates confirmed \u2014 now it is safe to show the loading card."""
             if load_generation != self._load_generation or self._worker is not worker:
                 return
             self._canvas.set_loading(True)
@@ -356,12 +426,24 @@ class ImageLocationMapWidget(QWidget):
                     logger.debug("Location map hidden: no GPS metadata for %s", os.path.basename(current_path))
                 else:
                     logger.warning("Location map load failed: %s", err or "unknown")
+                self._coordinate_badge.hide()
                 self.hide()
                 return
 
             self._model = model
             self._canvas.set_model(model)
             self._canvas.update()
+
+            # Show and position coordinate badge
+            self._coordinate_badge.set_coordinates(model.lat, model.lon)
+            canvas_right = 4 + WIDGET_W
+            canvas_top = 4
+            x = canvas_right - self._coordinate_badge.width() - 8
+            y = canvas_top + 8
+            self._coordinate_badge.move(x, y)
+            self._coordinate_badge.show()
+            self._coordinate_badge.raise_()
+
             # Ensure the widget is visible (gps_found will have shown it already
             # for the loading phase, but show() is idempotent).
             self.show()
