@@ -1670,6 +1670,7 @@ from rawviewer_app.signals import (
     SemanticIndexPrepSignals,
     SemanticIndexSignals,
     SemanticSearchResortSignals,
+    WebpDecodeSignals,
 )
 from rawviewer_app.widgets import (
     CustomConfirmDialog,
@@ -8761,6 +8762,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self._current_webp_frames = []
         self._current_webp_durations = []
         self._current_webp_idx = 0
+        self._webp_decode_generation = getattr(self, "_webp_decode_generation", 0) + 1
         self._original_movie_size = None
 
     def _load_and_start_animation(self, file_path):
@@ -8802,42 +8804,97 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             self.status_bar.showMessage(f"Playing GIF: {os.path.basename(file_path)}")
             return True
         elif ext == '.webp':
-            try:
-                from PIL import Image
-                self._current_webp_frames = []
-                self._current_webp_durations = []
-                self._current_webp_idx = 0
-                
-                with Image.open(file_path) as img:
-                    n_frames = getattr(img, "n_frames", 1)
-                    if n_frames <= 1:
-                        return False
-                    
-                    for frame_idx in range(n_frames):
-                        img.seek(frame_idx)
-                        frame_rgba = img.convert("RGBA")
-                        w, h = frame_rgba.size
-                        data = frame_rgba.tobytes("raw", "RGBA")
-                        qim = QImage(data, w, h, QImage.Format.Format_RGBA8888).copy()
-                        self._current_webp_frames.append(QPixmap.fromImage(qim))
-                        duration = img.info.get("duration", 100)
-                        if duration <= 0:
-                            duration = 100
-                        self._current_webp_durations.append(duration)
-                
-                if self._current_webp_frames:
-                    self._webp_timer = QTimer(self)
-                    self._webp_timer.setSingleShot(True)
-                    self._webp_timer.timeout.connect(self._play_next_webp_frame)
-                    self._play_next_webp_frame()
-                    self.status_bar.showMessage(f"Playing WebP: {os.path.basename(file_path)}")
-                    return True
-            except Exception as e:
-                import logging
-                logging.getLogger(__name__).error(f"Error loading animated WebP: {e}", exc_info=True)
-                self.image_label.setText(f"Error loading WebP: {e}")
-                return False
+            token = getattr(self, "_webp_decode_generation", 0) + 1
+            self._webp_decode_generation = token
+            self._current_webp_frames = []
+            self._current_webp_durations = []
+            self._current_webp_idx = 0
+
+            signals = getattr(self, "_webp_decode_signals", None)
+            if signals is None:
+                signals = WebpDecodeSignals()
+                signals.ready.connect(self._on_webp_frames_decoded)
+                signals.failed.connect(self._on_webp_decode_failed)
+                self._webp_decode_signals = signals
+
+            self.status_bar.showMessage(
+                f"Decoding WebP: {os.path.basename(file_path)}"
+            )
+
+            class _WebpDecodeWorker(QRunnable):
+                def run(self_inner):
+                    try:
+                        from PIL import Image
+
+                        frames = []
+                        durations = []
+                        with Image.open(file_path) as img:
+                            n_frames = getattr(img, "n_frames", 1)
+                            if n_frames <= 1:
+                                raise ValueError("WebP is not animated")
+                            for frame_idx in range(n_frames):
+                                img.seek(frame_idx)
+                                frame_rgba = img.convert("RGBA")
+                                w, h = frame_rgba.size
+                                data = frame_rgba.tobytes("raw", "RGBA")
+                                qim = QImage(
+                                    data, w, h, QImage.Format.Format_RGBA8888
+                                ).copy()
+                                frames.append(qim)
+                                duration = img.info.get("duration", 100)
+                                if duration <= 0:
+                                    duration = 100
+                                durations.append(duration)
+                    except Exception as e:
+                        try:
+                            from PyQt6 import sip
+
+                            if not sip.isdeleted(signals):
+                                signals.failed.emit(file_path, str(e))
+                        except Exception:
+                            pass
+                        return
+
+                    try:
+                        from PyQt6 import sip
+
+                        if not sip.isdeleted(signals):
+                            signals.ready.emit(token, file_path, frames, durations)
+                    except Exception:
+                        pass
+
+            QThreadPool.globalInstance().start(_WebpDecodeWorker())
+            return True
         return False
+
+    def _on_webp_frames_decoded(
+        self, token: int, file_path: str, qimages: list, durations: list
+    ) -> None:
+        if token != getattr(self, "_webp_decode_generation", None):
+            return
+        if _norm_path(file_path) != _norm_path(getattr(self, "current_file_path", None)):
+            return
+        if not qimages:
+            return
+
+        self._current_webp_frames = [QPixmap.fromImage(qim) for qim in qimages]
+        self._current_webp_durations = list(durations)
+        self._current_webp_idx = 0
+        self._webp_timer = QTimer(self)
+        self._webp_timer.setSingleShot(True)
+        self._webp_timer.timeout.connect(self._play_next_webp_frame)
+        self._play_next_webp_frame()
+        self.status_bar.showMessage(f"Playing WebP: {os.path.basename(file_path)}")
+
+    def _on_webp_decode_failed(self, file_path: str, error_message: str) -> None:
+        if _norm_path(file_path) != _norm_path(getattr(self, "current_file_path", None)):
+            return
+        import logging
+
+        logging.getLogger(__name__).error(
+            "Error loading animated WebP: %s", error_message, exc_info=True
+        )
+        self.image_label.setText(f"Error loading WebP: {error_message}")
 
     def _play_next_webp_frame(self):
         if not hasattr(self, "_current_webp_frames") or not self._current_webp_frames:

@@ -35,7 +35,7 @@ class SemanticSearchResortSignals(QObject):
 
 class WebpDecodeSignals(QObject):
     """Signal carrier for background animated WebP frame decode."""
-    ready = pyqtSignal(str, list, list)  # file_path, QImage frames, durations ms
+    ready = pyqtSignal(int, str, list, list)  # token, file_path, QImage frames, durations ms
     failed = pyqtSignal(str, str)  # file_path, error message
 
 class SemanticIndexSignals(QObject):
