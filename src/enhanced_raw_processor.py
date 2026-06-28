@@ -219,6 +219,8 @@ def cached_raw_exif_orientation_trustworthy(
 
     if not common_image_loader.is_raw_file(file_path):
         return True
+    if cached.get("verified_orientation"):
+        return True
     cached_o = int(cached.get("orientation", 1) or 1)
     effective = probe_effective_raw_orientation(file_path)
     if effective <= 1:

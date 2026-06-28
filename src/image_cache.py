@@ -1955,6 +1955,31 @@ class ImageCache(QObject):
         """In-memory EXIF only (no SQLite) — for cache-hit emit during preview-first."""
         return self.exif_memory_cache.get(file_path)
 
+    def get_exif_for_ui(self, file_path: str) -> Optional[Dict[str, Any]]:
+        """UI hot path: memory first, disk second; skip orientation probe when verified."""
+        exif_data = self.exif_memory_cache.get(file_path)
+        if exif_data is None:
+            exif_data = self.exif_cache.get(file_path)
+            if exif_data is not None:
+                self.exif_memory_cache.put(file_path, exif_data)
+        if exif_data is None:
+            return None
+        try:
+            from enhanced_raw_processor import (
+                RAW_EXIF_SENSOR_META_VER,
+                cached_raw_exif_orientation_trustworthy,
+            )
+            cached_ver = exif_data.get("raw_exif_sensor_meta_ver", 0)
+            if cached_ver < RAW_EXIF_SENSOR_META_VER:
+                return None
+            if exif_data.get("verified_orientation"):
+                return exif_data
+            if not cached_raw_exif_orientation_trustworthy(file_path, exif_data):
+                return None
+        except Exception:
+            pass
+        return exif_data
+
     def get_exif(self, file_path: str) -> Optional[Dict[str, Any]]:
         """Get cached EXIF data or return None if not cached."""
         self.stats['exif_requests'] += 1

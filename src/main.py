@@ -20392,6 +20392,14 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 return
         except Exception:
             pass
+        if isinstance(cached_exif, dict):
+            ow = cached_exif.get("original_width")
+            oh = cached_exif.get("original_height")
+            if ow and oh:
+                if cached_exif.get("verified_orientation"):
+                    return
+                if max(int(ow), int(oh)) > 1920:
+                    return
         # Attempt each file at most once per session: prevents both concurrent duplicate
         # probes and a re-probe loop when extraction fails (we then keep display dims).
         attempted = getattr(self, "_sensor_dim_probe_attempted", None)
@@ -20414,9 +20422,12 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             ow = oh = None
             try:
                 import rawpy
-                with rawpy.imread(path) as raw:
-                    ow = int(raw.sizes.width)
-                    oh = int(raw.sizes.height)
+                from enhanced_raw_processor import _rawpy_global_lock
+
+                with _rawpy_global_lock:
+                    with rawpy.imread(path) as raw:
+                        ow = int(raw.sizes.width)
+                        oh = int(raw.sizes.height)
             except Exception:
                 ow = oh = None
             if not ow or not oh:
@@ -20554,7 +20565,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         display_height = None
 
         # Get original dimensions from cache (authoritative source)
-        cached_exif = self.image_cache.get_exif(self.current_file_path)
+        cached_exif = self.image_cache.get_exif_for_ui(self.current_file_path)
         if cached_exif and cached_exif.get("minimal_preview_exif"):
             self._apply_preview_first_status_bar(cached_exif)
             if hasattr(self, "status_counter_label"):
@@ -20706,7 +20717,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         # lines. When nothing user-visible changed, re-apply the cached text
         # silently and skip the heavy EXIF parse + logging.
         if self.view_mode == 'single':
-            _dedup_exif = self.image_cache.get_exif(self.current_file_path)
+            _dedup_exif = self.image_cache.get_exif_for_ui(self.current_file_path)
             _dedup_exif_len = 0
             if _dedup_exif:
                 _ed = _dedup_exif.get('exif_data')
@@ -20734,7 +20745,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
 
         # Try to get EXIF data from cache first (faster) - matching reference version
         exif_info = []
-        cached_exif = self.image_cache.get_exif(self.current_file_path)
+        cached_exif = self.image_cache.get_exif_for_ui(self.current_file_path)
         import logging
         import time
         logger = logging.getLogger(__name__)
