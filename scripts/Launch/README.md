@@ -188,7 +188,7 @@ Pass env vars as arguments: `./scripts/Launch/shell/launch_dev.sh RAWVIEWER_GPU_
 | `RAWVIEWER_SESSION_RESTORE_PRELOAD_DELAY_MS` | `800` | Wait after full decode before neighbor prefetch |
 | `RAWVIEWER_DISABLE_SESSION_RESTORE` | `0` | Skip restoring last folder (also set for one launch after `clear_cache.sh`) |
 
-**Folder / gallery diagnostics (v2.5.1+, dev logs):**
+**Folder / gallery diagnostics (v2.5.0, dev logs):**
 
 | Log prefix | Meaning |
 |------------|---------|
