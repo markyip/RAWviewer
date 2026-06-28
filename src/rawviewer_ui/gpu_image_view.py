@@ -61,6 +61,21 @@ class GpuImageView(QGraphicsView):
     _FIT_SCALE_EPS = 1.002  # treat within ~0.2% of fit as fit-to-window
 
     def __init__(self, parent=None, background="#1E1E1E"):
+        # Attributes read from event()/viewportEvent() must exist before super().__init__()
+        # because Qt may deliver events during construction.
+        self._fit_mode = True
+        self._zoom_intent_100 = False
+        self._has_pixmap = False
+        self._img_w = 0
+        self._img_h = 0
+        self._overlay_item = None
+        self._grid_mode = "off"
+        self._shortcut_handler = None
+        self._edr_initialized = False
+        self.file_path = None
+        self._drag_start_pos = None
+        self._drag_started = False
+
         super().__init__(parent)
         self._scene = QGraphicsScene(self)
         self.setScene(self._scene)
@@ -71,16 +86,8 @@ class GpuImageView(QGraphicsView):
 
         # Dashed focus / subject overlay rectangle (scene coords == image pixels). Uses a
         # cosmetic pen so the on-screen line width stays constant at any zoom level.
-        self._overlay_item = None
         self._grid_item = CompositionGridGraphicsItem()
         self._scene.addItem(self._grid_item)
-        self._grid_mode = "off"
-
-        self._fit_mode = True
-        self._zoom_intent_100 = False
-        self._has_pixmap = False
-        self._img_w = 0
-        self._img_h = 0
 
         self.setRenderHints(
             QPainter.RenderHint.SmoothPixmapTransform | QPainter.RenderHint.Antialiasing
@@ -98,18 +105,13 @@ class GpuImageView(QGraphicsView):
         )
         self.viewport().setMouseTracking(True)
         self.viewport().setAttribute(Qt.WidgetAttribute.WA_Hover, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_AcceptTouchEvents, True)
+        self.viewport().setAttribute(Qt.WidgetAttribute.WA_AcceptTouchEvents, True)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-        # Set by RAWImageViewer: callable(QKeyEvent) -> bool
-        self._shortcut_handler = None
 
         self._maybe_enable_opengl()
-        self._edr_initialized = False
         from PyQt6.QtCore import QTimer
         QTimer.singleShot(500, self._enable_macos_edr)
-        self.file_path = None
-        self._drag_start_pos = None
-        self._drag_started = False
-
 
         # Centered placeholder text shown when no image is loaded (parity with the
         # legacy QLabel instruction screen, which the GPU view would otherwise cover).
@@ -138,6 +140,7 @@ class GpuImageView(QGraphicsView):
             # Re-enable tracking on the new viewport (HoverMove works before first click).
             self.viewport().setMouseTracking(True)
             self.viewport().setAttribute(Qt.WidgetAttribute.WA_Hover, True)
+            self.viewport().setAttribute(Qt.WidgetAttribute.WA_AcceptTouchEvents, True)
             self.viewport().setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         except Exception:
             # Raster fallback keeps the feature working without a GL context.
@@ -494,9 +497,7 @@ class GpuImageView(QGraphicsView):
         if event.button() == Qt.MouseButton.LeftButton and self._fit_mode and self.file_path:
             self._drag_start_pos = event.position().toPoint()
             self._drag_started = False
-            event.accept()
-        else:
-            super().mousePressEvent(event)
+        super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event) -> None:
         host = self.parentWidget()
@@ -520,9 +521,7 @@ class GpuImageView(QGraphicsView):
         if event.button() == Qt.MouseButton.LeftButton and self._fit_mode:
             self._drag_start_pos = None
             self._drag_started = False
-            event.accept()
-        else:
-            super().mouseReleaseEvent(event)
+        super().mouseReleaseEvent(event)
 
     def _start_drag(self) -> None:
         if not self.file_path or not os.path.exists(self.file_path):
@@ -545,18 +544,33 @@ class GpuImageView(QGraphicsView):
 
         drag.exec(Qt.DropAction.CopyAction)
 
-    def event(self, event) -> bool:
+    def _handle_native_gesture(self, event) -> bool:
         """Trackpad pinch (macOS) and smart-zoom gestures."""
-        if event.type() == QEvent.Type.NativeGesture and self._has_pixmap:
-            gtype = event.gestureType()
-            if gtype == Qt.NativeGestureType.ZoomNativeGesture:
-                self.zoom_by(1.0 + event.value() * 0.5)
-                event.accept()
-                return True
-            if gtype == Qt.NativeGestureType.SmartZoomNativeGesture:
-                self.toggle_fit()
-                event.accept()
-                return True
+        if not self._has_pixmap or event.type() != QEvent.Type.NativeGesture:
+            return False
+        gtype = event.gestureType()
+        if gtype == Qt.NativeGestureType.ZoomNativeGesture:
+            self.zoom_by(1.0 + event.value() * 0.5)
+            event.accept()
+            return True
+        if gtype == Qt.NativeGestureType.SmartZoomNativeGesture:
+            self.toggle_fit()
+            event.accept()
+            return True
+        return False
+
+    def viewportEvent(self, event) -> bool:
+        # macOS delivers pinch/double-click to the OpenGL viewport, not the view's event().
+        if self._handle_native_gesture(event):
+            return True
+        if event.type() == QEvent.Type.MouseButtonDblClick:
+            self.mouseDoubleClickEvent(event)
+            return True
+        return super().viewportEvent(event)
+
+    def event(self, event) -> bool:
+        if self._handle_native_gesture(event):
+            return True
         return super().event(event)
 
     def keyPressEvent(self, event: QKeyEvent) -> None:
@@ -589,14 +603,16 @@ class GpuImageView(QGraphicsView):
         super().wheelEvent(event)
 
     def mouseDoubleClickEvent(self, event) -> None:
-        if event.button() == Qt.MouseButton.LeftButton and self._has_pixmap:
-            scene_pt = self.mapToScene(event.position().toPoint())
-            self.doubleClickedAt.emit(
-                QPointF(
+        if event.button() == Qt.MouseButton.LeftButton:
+            if self._has_pixmap:
+                scene_pt = self.mapToScene(event.position().toPoint())
+                pt = QPointF(
                     max(0.0, min(scene_pt.x(), max(0, self._img_w - 1))),
                     max(0.0, min(scene_pt.y(), max(0, self._img_h - 1))),
                 )
-            )
+            else:
+                pt = QPointF(0.0, 0.0)
+            self.doubleClickedAt.emit(pt)
         event.accept()
 
     def resizeEvent(self, event) -> None:
