@@ -2131,6 +2131,19 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         path = file_path or getattr(self, "current_file_path", None)
         if not path:
             return False
+        if self.is_animated_image(path):
+            if _norm_path(getattr(self, "current_file_path", "")) != _norm_path(path):
+                return False
+            if getattr(self, "_current_movie", None) is not None:
+                return True
+            if getattr(self, "_current_webp_frames", None):
+                return len(self._current_webp_frames) > 0
+            label = getattr(self, "image_label", None)
+            if label is not None:
+                lp = label.pixmap()
+                if lp is not None and not lp.isNull():
+                    return True
+            return False
         if _norm_path(getattr(self, "_displayed_content_path", "")) != _norm_path(path):
             return False
         gv = getattr(self, "gpu_view", None)
@@ -3852,6 +3865,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
 
     def _clear_stale_single_view_image(self) -> None:
         """Remove the previous image so navigation does not linger on the wrong file."""
+        self._stop_animations()
         self._displayed_content_path = None
         self._cancel_content_crossfade()
         gv = getattr(self, "gpu_view", None)
@@ -8763,10 +8777,37 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self._current_webp_durations = []
         self._current_webp_idx = 0
         self._webp_decode_generation = getattr(self, "_webp_decode_generation", 0) + 1
+        self._webp_decode_in_progress_path = None
         self._original_movie_size = None
+
+    def _animated_playback_active(self, file_path: str | None = None) -> bool:
+        """True when GIF/WebP animation is loaded or decoding for this path."""
+        path = file_path or getattr(self, "current_file_path", None)
+        if not path or not self.is_animated_image(path):
+            return False
+        if _norm_path(path) != _norm_path(getattr(self, "current_file_path", None) or ""):
+            return False
+        if getattr(self, "_current_movie", None) is not None:
+            return True
+        if getattr(self, "_current_webp_frames", None):
+            return len(self._current_webp_frames) > 0
+        pending = getattr(self, "_webp_decode_in_progress_path", None)
+        return bool(pending and _norm_path(pending) == _norm_path(path))
+
+    def _mark_animated_content_displayed(self, file_path: str) -> None:
+        self._displayed_content_path = file_path
+        self._on_single_view_content_displayed()
 
     def _load_and_start_animation(self, file_path):
         self._stop_animations()
+        # Animated GIF/WebP always play fit-to-window; no 100% zoom or pan.
+        self.fit_to_window = True
+        self.current_zoom_level = 1.0
+        self.zoom_center_point = None
+        self._pending_zoom = False
+        self._pending_zoom_center = None
+        self._pending_zoom_thumbnail_size = None
+        self._pending_zoom_toggle = False
         
         # Hide GPU view, show scroll area/image label (animated formats only)
         container = getattr(self, "single_view_container", None)
@@ -8801,11 +8842,13 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 
             self._current_movie.frameChanged.connect(on_frame_changed)
             self._current_movie.start()
+            self._mark_animated_content_displayed(file_path)
             self.status_bar.showMessage(f"Playing GIF: {os.path.basename(file_path)}")
             return True
         elif ext == '.webp':
             token = getattr(self, "_webp_decode_generation", 0) + 1
             self._webp_decode_generation = token
+            self._webp_decode_in_progress_path = file_path
             self._current_webp_frames = []
             self._current_webp_durations = []
             self._current_webp_idx = 0
@@ -8877,6 +8920,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         if not qimages:
             return
 
+        self._webp_decode_in_progress_path = None
         self._current_webp_frames = [QPixmap.fromImage(qim) for qim in qimages]
         self._current_webp_durations = list(durations)
         self._current_webp_idx = 0
@@ -8884,11 +8928,13 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self._webp_timer.setSingleShot(True)
         self._webp_timer.timeout.connect(self._play_next_webp_frame)
         self._play_next_webp_frame()
+        self._mark_animated_content_displayed(file_path)
         self.status_bar.showMessage(f"Playing WebP: {os.path.basename(file_path)}")
 
     def _on_webp_decode_failed(self, file_path: str, error_message: str) -> None:
         if _norm_path(file_path) != _norm_path(getattr(self, "current_file_path", None)):
             return
+        self._webp_decode_in_progress_path = None
         import logging
 
         logging.getLogger(__name__).error(
@@ -9143,7 +9189,12 @@ class RAWImageViewer(SessionMixin, QMainWindow):
 
             gallery_instant = False
             if path_changed or from_gallery:
-                if self._paint_instant_preview_for_path(path, prefer_gallery=from_gallery):
+                if self._animated_playback_active(path):
+                    logger.info(
+                        "[VIEW_MODE] Keeping active GIF/WebP playback for %s",
+                        os.path.basename(path),
+                    )
+                elif self._paint_instant_preview_for_path(path, prefer_gallery=from_gallery):
                     gallery_instant = getattr(self, "_gallery_instant_display_quality", False)
                 elif path_changed:
                     self._clear_stale_single_view_image()
@@ -12348,6 +12399,12 @@ class RAWImageViewer(SessionMixin, QMainWindow):
 
     def image_double_click_event(self, event):
         try:
+            if (
+                hasattr(self, "current_file_path")
+                and self.current_file_path
+                and self.is_animated_image(self.current_file_path)
+            ):
+                return
             if not self.current_pixmap:
                 if hasattr(self, 'current_file_path') and self.current_file_path:
                     self._pending_zoom_toggle = True
@@ -18274,6 +18331,12 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         
         if key == Qt.Key.Key_Space:
             if vm == "single":
+                if (
+                    hasattr(self, "current_file_path")
+                    and self.current_file_path
+                    and self.is_animated_image(self.current_file_path)
+                ):
+                    return True
                 import logging
                 logger = logging.getLogger(__name__)
                 logger.info(
@@ -18979,14 +19042,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         import logging
         logger = logging.getLogger(__name__)
         
-        # Route animated images zoom toggling first
+        # Animated GIF/WebP: fit-to-window only (no Space/double-click zoom).
         if hasattr(self, "current_file_path") and self.is_animated_image(self.current_file_path):
-            self.fit_to_window = not self.fit_to_window
-            if hasattr(self, "_current_movie") and self._current_movie:
-                self._update_gif_scaling()
-            else:
-                self._update_webp_scaling()
-            self.update_status_bar()
             return
 
         # Route B: GPU view manages its own fit/zoom transform.
@@ -19826,16 +19883,10 @@ class RAWImageViewer(SessionMixin, QMainWindow):
     
 
     def get_supported_extensions(self):
-        """Get list of supported image file extensions"""
-        return [
-            # RAW formats
-            '.cr2', '.cr3', '.nef', '.arw', '.dng', '.orf', '.rw2', '.pef',
-            '.srw', '.x3f', '.raf', '.3fr', '.fff', '.iiq', '.cap', '.erf',
-            '.mef', '.mos', '.nrw', '.rwl', '.srf',
-            # Standard image formats
-            '.jpeg', '.jpg', '.png', '.webp', '.heif', '.heic',
-            '.tif', '.tiff',
-        ]
+        """Get list of supported image file extensions."""
+        from raw_file_extensions import get_supported_extensions
+
+        return get_supported_extensions()
 
     def is_image_file(self, file_path):
         """Check if file is a supported image format"""
@@ -21264,7 +21315,18 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         image_files = self._mtime_sort_image_files(image_files, file_stats)
         start_idx = 0
         if start_path:
-            start_norm = _norm_path(start_path)
+            start_abs = os.path.abspath(start_path)
+            start_norm = _norm_path(start_abs)
+            if not any(_norm_path(fp) == start_norm for fp in image_files):
+                if self.is_image_file(start_abs) and os.path.isfile(start_abs):
+                    image_files.append(start_abs)
+                    if start_abs not in file_stats:
+                        try:
+                            st = os.stat(start_abs)
+                            file_stats[start_abs] = (st.st_size, st.st_mtime)
+                        except OSError:
+                            file_stats[start_abs] = (0, 0)
+                    image_files = self._mtime_sort_image_files(image_files, file_stats)
             for i, fp in enumerate(image_files):
                 if _norm_path(fp) == start_norm:
                     start_idx = i
