@@ -212,12 +212,11 @@ def _exif_sql_path_expr(column: str = "file_path") -> str:
 
 
 def _exif_sql_folder_like_pattern(folder_path: str) -> str:
-    """LIKE prefix for all files under folder_path (must match _exif_sql_path_expr slashes)."""
+    """LIKE prefix for all files under folder_path (matches stored canonical keys)."""
     root = _exif_cache_path_key(os.path.abspath(folder_path)).rstrip("\\/")
-    root_lower = root.lower()
     if os.sep == "\\":
-        return root_lower + "\\%"
-    return root_lower.replace("\\", "/") + "/%"
+        return root + "\\%"
+    return root.replace("\\", "/") + "/%"
 
 
 def _exif_sql_folder_like_patterns(folder_path: str) -> List[str]:
@@ -424,7 +423,7 @@ class PersistentEXIFCache:
             # Enable WAL mode for better concurrent performance
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA synchronous=NORMAL")
-            conn.execute("PRAGMA cache_size=1000")
+            conn.execute("PRAGMA cache_size=-65536")
             self._local.conn = conn
         return self._local.conn
 
@@ -438,7 +437,7 @@ class PersistentEXIFCache:
             )
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA synchronous=NORMAL")
-            conn.execute("PRAGMA cache_size=1000")
+            conn.execute("PRAGMA cache_size=-65536")
             self._writer_conn = conn
         return self._writer_conn
 
@@ -581,7 +580,7 @@ class PersistentEXIFCache:
                 cursor = conn.execute(
                     "SELECT file_size, file_mtime, orientation, camera_make, camera_model, exif_data, "
                     "capture_time, original_width, original_height, sensor_meta_ver "
-                    "FROM exif_cache WHERE lower(file_path) = lower(?)",
+                    "FROM exif_cache WHERE file_path = ?",
                     (cache_key,),
                 )
                 row = cursor.fetchone()
@@ -626,7 +625,7 @@ class PersistentEXIFCache:
                 self._flush_pending_writes()
                 writer = self._get_writer_connection()
                 cursor = writer.execute(
-                    "DELETE FROM exif_cache WHERE lower(file_path) = lower(?)",
+                    "DELETE FROM exif_cache WHERE file_path = ?",
                     (cache_key,),
                 )
                 writer.commit()
@@ -735,11 +734,10 @@ class PersistentEXIFCache:
                     norm_keys.append(nk)
                 placeholders = ",".join(["?"] * len(norm_keys))
 
-                path_expr = _exif_sql_path_expr("file_path")
                 query = (
                     f"SELECT file_path, file_size, file_mtime, orientation, camera_make, camera_model, "
                     f"exif_data, capture_time, original_width, original_height, sensor_meta_ver "
-                    f"FROM exif_cache WHERE {path_expr} IN ({placeholders})"
+                    f"FROM exif_cache WHERE file_path IN ({placeholders})"
                 )
                 with self.lock:
                     cursor = conn.execute(query, norm_keys)
@@ -855,7 +853,6 @@ class PersistentEXIFCache:
         out: Dict[str, str] = {}
         try:
             conn = self._get_connection()
-            path_expr = _exif_sql_path_expr("file_path")
             # SQLite default max bind variables is 999; one key per path only.
             for i in range(0, len(file_paths), 450):
                 chunk = file_paths[i : i + 450]
@@ -868,7 +865,7 @@ class PersistentEXIFCache:
                 placeholders = ",".join(["?"] * len(query_keys))
                 query = (
                     f"SELECT file_path, capture_time, exif_data FROM exif_cache "
-                    f"WHERE {path_expr} IN ({placeholders})"
+                    f"WHERE file_path IN ({placeholders})"
                 )
                 with self.lock:
                     rows = conn.execute(query, query_keys).fetchall()
@@ -897,16 +894,15 @@ class PersistentEXIFCache:
         patterns = _exif_sql_folder_like_patterns(folder_path)
         if not patterns:
             return {}
-        path_expr = _exif_sql_path_expr("file_path")
         out: Dict[str, str] = {}
         try:
             conn = self._get_connection()
             for pattern in patterns:
                 with self.lock:
                     rows = conn.execute(
-                        f"SELECT file_path, capture_time FROM exif_cache "
-                        f"WHERE {path_expr} LIKE ? "
-                        f"AND capture_time IS NOT NULL AND capture_time != ''",
+                        "SELECT file_path, capture_time FROM exif_cache "
+                        "WHERE file_path LIKE ? "
+                        "AND capture_time IS NOT NULL AND capture_time != ''",
                         (pattern,),
                     ).fetchall()
                 for db_path, ct_col in rows:
@@ -920,8 +916,8 @@ class PersistentEXIFCache:
                 for pattern in patterns:
                     with self.lock:
                         rows = conn.execute(
-                            f"SELECT file_path, exif_data FROM exif_cache "
-                            f"WHERE {path_expr} LIKE ? AND exif_data IS NOT NULL",
+                            "SELECT file_path, exif_data FROM exif_cache "
+                            "WHERE file_path LIKE ? AND exif_data IS NOT NULL",
                             (pattern,),
                         ).fetchall()
                     for db_path, blob in rows:
