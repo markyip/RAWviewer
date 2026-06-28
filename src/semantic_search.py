@@ -2077,11 +2077,13 @@ class CustomReverseGeocoder:
         # 1. Search nearest city
         best_city_dist = float('inf')
         best_city = None
-        for lat, lon, name, admin1, cc in self.cities:
+        for item in self.cities:
+            lat, lon, name, admin1, cc = item[:5]
+            alternates = item[5] if len(item) > 5 else ""
             dist = (lat - target_lat) ** 2 + (lon - target_lon) ** 2
             if dist < best_city_dist:
                 best_city_dist = dist
-                best_city = {"name": name, "admin1": admin1, "cc": cc}
+                best_city = {"name": name, "admin1": admin1, "cc": cc, "alternates": alternates}
                 
         # 2. Search nearest landmark/tourist attraction
         # A threshold of 15 km is approximately 0.135 degrees.
@@ -2103,6 +2105,7 @@ class CustomReverseGeocoder:
                 "name": best_city["name"],
                 "admin1": best_city["admin1"],
                 "cc": best_city["cc"],
+                "alternates": best_city["alternates"],
                 "landmark": landmark_name
             }]
         return []
@@ -2429,7 +2432,8 @@ class SemanticImageIndex:
                             float(row[1]),
                             row[2],
                             row[3],
-                            row[4]
+                            row[4],
+                            row[5] if len(row) > 5 else ""
                         ))
                 
                 # Load landmarks
@@ -2981,7 +2985,9 @@ class SemanticImageIndex:
                             dur_geo = time.time() - t_geo
                             if recs:
                                 rec = recs[0] or {}
-                                result["city"] = str(rec.get("name", "") or "")
+                                city_name = str(rec.get("name", "") or "")
+                                alternates = str(rec.get("alternates", "") or "")
+                                result["city"] = f"{city_name}, {alternates}" if alternates else city_name
                                 result["landmark"] = str(rec.get("landmark", "") or "")
                                 result["admin1"] = str(rec.get("admin1", "") or "")
                                 cc = str(rec.get("cc", "") or "").upper()
@@ -5753,7 +5759,9 @@ class SemanticImageIndex:
                         recs = geo.search([(float(gps_lat), float(gps_lon))], mode=1)
                         if recs:
                             rec = recs[0] or {}
-                            city = str(rec.get("name", "") or "")
+                            city_name = str(rec.get("name", "") or "")
+                            alternates = str(rec.get("alternates", "") or "")
+                            city = f"{city_name}, {alternates}" if alternates else city_name
                             landmark = str(rec.get("landmark", "") or "")
                             admin1 = str(rec.get("admin1", "") or "")
                             cc = str(rec.get("cc", "") or "").upper()

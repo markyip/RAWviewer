@@ -269,6 +269,7 @@ def install_dependencies(windows_accel: str = "cuda", *, profile: str = "full"):
         'numpy',   # Required for image processing (used in all modules)
         'qtawesome', # Required for icons in main.py
         'pycountry',  # ISO country code -> full country name
+        'pillow-heif',
     ]
 
     if system_name in ("Darwin", "Windows"):
@@ -454,6 +455,63 @@ def build_windows_launcher_stub(icon_path: str | None) -> Path:
         sys.exit(1)
     print(f"[INFO] Launcher stub ready: {out} ({out.stat().st_size:,} bytes)")
     return out
+
+
+def _prune_built_app(exe_path: Path, profile: str) -> None:
+    if platform.system() != 'Darwin':
+        return
+    print(f"[INFO] Starting post-build pruning for: {exe_path}")
+    
+    # 1. Prune pycountry locales (saves ~20.0 MB)
+    locales_dir = exe_path / "Contents" / "Resources" / "pycountry" / "locales"
+    if locales_dir.exists():
+        print(f"  Pruning pycountry locales from: {locales_dir}")
+        shutil.rmtree(locales_dir, ignore_errors=True)
+        
+    # 2. Prune unused Qt6 native frameworks (saves ~7.0 MB)
+    qt_lib_dir = exe_path / "Contents" / "Frameworks" / "PyQt6" / "Qt6" / "lib"
+    if qt_lib_dir.exists():
+        unused_frameworks = [
+            "QtPdf.framework",
+            "QtPdfWidgets.framework",
+            "Qt3DAnimation.framework",
+            "Qt3DCore.framework",
+            "Qt3DExtras.framework",
+            "Qt3DInput.framework",
+            "Qt3DLogic.framework",
+            "Qt3DRender.framework",
+            "QtBluetooth.framework",
+            "QtCharts.framework",
+            "QtDataVisualization.framework",
+            "QtDesigner.framework",
+            "QtHelp.framework",
+            "QtMultimedia.framework",
+            "QtMultimediaWidgets.framework",
+            "QtNfc.framework",
+            "QtPositioning.framework",
+            "QtQml.framework",
+            "QtQuick.framework",
+            "QtQuick3D.framework",
+            "QtQuickWidgets.framework",
+            "QtRemoteObjects.framework",
+            "QtSensors.framework",
+            "QtSerialBus.framework",
+            "QtSerialPort.framework",
+            "QtSpatialAudio.framework",
+            "QtSql.framework",
+            "QtTest.framework",
+            "QtTextToSpeech.framework",
+            "QtWebChannel.framework",
+            "QtWebEngineCore.framework",
+            "QtWebEngineWidgets.framework",
+            "QtWebSockets.framework",
+            "QtXml.framework",
+        ]
+        for fw in unused_frameworks:
+            fw_path = qt_lib_dir / fw
+            if fw_path.exists():
+                print(f"  Pruning unused Qt6 framework: {fw_path}")
+                shutil.rmtree(fw_path, ignore_errors=True)
 
 
 def main():
@@ -680,12 +738,25 @@ def main():
         imageformats_src = os.path.join(
             pyqt_path, 'Qt6', 'plugins', 'imageformats')
         add_data_sep = ':'
-    # Add --add-data for imageformats and icons directory
-    add_data_args = [
-        f'--add-data "{imageformats_src}{add_data_sep}imageformats"',
-        f'--add-data "icons{add_data_sep}icons"',
-        f'--add-data "src{os.sep}icons{add_data_sep}icons"'
-    ]
+    # Selectively copy icons and database files to avoid platform duplicates
+    if platform.system() == 'Windows':
+        add_data_args = [
+            f'--add-data "{imageformats_src}{add_data_sep}imageformats"',
+            f'--add-data "icons{os.sep}appicon.ico{add_data_sep}icons"',
+            f'--add-data "icons{os.sep}appicon.png{add_data_sep}icons"',
+            f'--add-data "src{os.sep}icons{os.sep}folder_open_md3.svg{add_data_sep}icons"',
+            f'--add-data "src{os.sep}icons{os.sep}cities500.csv.gz{add_data_sep}icons"',
+            f'--add-data "src{os.sep}icons{os.sep}landmarks.csv.gz{add_data_sep}icons"',
+        ]
+    else:
+        add_data_args = [
+            f'--add-data "{imageformats_src}{add_data_sep}imageformats"',
+            f'--add-data "icons{os.sep}appicon.icns{add_data_sep}icons"',
+            f'--add-data "icons{os.sep}appicon.png{add_data_sep}icons"',
+            f'--add-data "src{os.sep}icons{os.sep}folder_open_md3.svg{add_data_sep}icons"',
+            f'--add-data "src{os.sep}icons{os.sep}cities500.csv.gz{add_data_sep}icons"',
+            f'--add-data "src{os.sep}icons{os.sep}landmarks.csv.gz{add_data_sep}icons"',
+        ]
     app_bundle_name = _macos_app_bundle_name(args.profile)
     windows_pixi_manifest = None
     if platform.system() == "Darwin":
@@ -769,6 +840,7 @@ def main():
             # Exclude unused native extensions & optional/future packages
             "--exclude-module", "cv2",
             "--exclude-module", "pyqtgraph",
+            "--exclude-module", "hf_xet",
         ])
         
         # Exclude unused heavy PyQt6 modules to keep built bundle lightweight
@@ -841,6 +913,7 @@ def main():
             "--exclude-module", "natsort",
             "--exclude-module", "send2trash",
             "--exclude-module", "exifread",
+            "--exclude-module", "hf_xet",
         ])
         
         add_data_args.append('--add-data "src;src"')
@@ -900,6 +973,7 @@ def main():
         if platform.system() == 'Darwin':
             print("Patching macOS Info.plist...")
             update_macos_plist(str(exe_path), profile=args.profile)
+            _prune_built_app(exe_path, args.profile)
             print("Re-signing macOS app bundle (ad-hoc)...")
             run_command(['codesign', '--force', '--deep', '-s', '-', str(exe_path)])
             print("Clearing macOS quarantine attribute...")

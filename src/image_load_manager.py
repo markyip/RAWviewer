@@ -21,6 +21,33 @@ import concurrent.futures
 from image_cache import get_image_cache
 # UnifiedImageProcessor will be imported lazily to avoid circular import issues
 
+# Thread-local storage to track if current thread is executing a CURRENT priority task
+worker_thread_local = threading.local()
+
+def yield_if_current_task_active() -> None:
+    """Yield execution if another thread is running a high priority task."""
+    import time
+    if threading.current_thread() is threading.main_thread():
+        return
+    current_priority = getattr(worker_thread_local, 'priority', None)
+    if current_priority == Priority.CURRENT:
+        return
+        
+    manager = _global_manager
+    if not manager:
+        return
+        
+    while True:
+        has_current = False
+        with manager._queue_lock:
+            for t in manager._active_tasks.values():
+                if getattr(t, "priority", None) == Priority.CURRENT and not t.is_cancelled():
+                    has_current = True
+                    break
+        if not has_current:
+            break
+        time.sleep(0.05)
+
 
 def _env_true(name: str, default: bool = False) -> bool:
     raw = os.environ.get(name)
@@ -158,6 +185,32 @@ class ImageLoadWorker(QRunnable):
         self.manager = manager
         self._processor = None  # 延遲初始化，避免導入時創建
 
+    def _has_active_current_task_elsewhere(self) -> bool:
+        try:
+            from image_load_manager import Priority
+            with self.manager._queue_lock:
+                for t in self.manager._active_tasks.values():
+                    if (
+                        getattr(t, "priority", None) == Priority.CURRENT
+                        and t is not self.task
+                        and not t.is_cancelled()
+                    ):
+                        return True
+        except Exception:
+            pass
+        return False
+
+    def _yield_if_needed(self) -> None:
+        from image_load_manager import Priority
+        if self.task.priority == Priority.CURRENT:
+            return
+        import time
+        while self._has_active_current_task_elsewhere():
+            if self.task.is_cancelled():
+                break
+            time.sleep(0.05)
+
+
     @staticmethod
     def _uses_display_preview_tier(task: ImageLoadTask) -> bool:
         """CURRENT single-view loads use ~1920px embedded preview, not 512px gallery grid."""
@@ -193,13 +246,15 @@ class ImageLoadWorker(QRunnable):
 
     def run(self):
         """執行任務"""
-        if self.task.is_cancelled():
-            if self._safe_emit():
-                self.manager._task_finished(self.task)
-            return
-        
-        file_path = self.task.file_path
+        worker_thread_local.priority = getattr(self.task, 'priority', None)
         try:
+            if self.task.is_cancelled():
+                if self._safe_emit():
+                    self.manager._task_finished(self.task)
+                return
+            
+            file_path = self.task.file_path
+            self._yield_if_needed()
             stages = self.task.stages or set()
             if self._safe_emit() and not self.task.is_cancelled():
                 self.manager.progress_updated.emit(file_path, "Loading image...")
@@ -208,6 +263,7 @@ class ImageLoadWorker(QRunnable):
             
             # COMBINED OPTIMIZATION: If both exif and thumbnail are needed, do them in one pass.
             if 'exif' in stages and 'thumbnail' in stages and not self.task.is_cancelled():
+                self._yield_if_needed()
                 if self._safe_emit():
                     self.manager.progress_updated.emit(file_path, "Reading metadata & preview...")
                 
@@ -217,6 +273,7 @@ class ImageLoadWorker(QRunnable):
                     allow_heavy_fallback=allow_heavy_fallback,
                     target_size=self.task.thumbnail_target_size
                 )
+
 
                 preview_tier = allow_heavy_fallback
                 min_preview_dim = _min_acceptable_preview_dim(file_path)
@@ -264,6 +321,7 @@ class ImageLoadWorker(QRunnable):
             else:
                 # Sequential or partial stages
                 if 'exif' in stages and not self.task.is_cancelled():
+                    self._yield_if_needed()
                     if self._safe_emit():
                         self.manager.progress_updated.emit(file_path, "Reading metadata...")
                     exif_data = processor.process_exif(file_path)
@@ -275,8 +333,10 @@ class ImageLoadWorker(QRunnable):
                             self.manager.exif_data_ready.emit(file_path, {})
                 
                 if 'thumbnail' in stages and not self.task.is_cancelled():
+                    self._yield_if_needed()
                     if self._safe_emit():
                         self.manager.progress_updated.emit(file_path, "Extracting preview...")
+
                     allow_heavy_fallback = self._uses_display_preview_tier(self.task)
                     thumbnail = None
                     exif_data = None
@@ -338,12 +398,14 @@ class ImageLoadWorker(QRunnable):
             
             # 處理完整圖像（只在需要時）
             if 'full' in stages and not self.task.is_cancelled():
+                self._yield_if_needed()
                 if self.task.use_full_resolution:
                     if self._safe_emit():
                         self.manager.progress_updated.emit(file_path, "Loading full resolution...")
                 else:
                     if self._safe_emit():
                         self.manager.progress_updated.emit(file_path, "Processing image...")
+
                 result = processor.process_full_image(
                     file_path,
                     use_full_resolution=self.task.use_full_resolution,
@@ -383,9 +445,9 @@ class ImageLoadWorker(QRunnable):
             if self._safe_emit():
                 self.manager.error_occurred.emit(file_path, str(e))
         finally:
-            # 任務完成，調度下一個
             if self._safe_emit():
                 self.manager._task_finished(self.task)
+            worker_thread_local.priority = None
 
     def _handle_thumbnail_result(self, file_path, thumbnail):
         """Internal helper to process and emit thumbnail results."""
@@ -791,6 +853,21 @@ class ImageLoadManager(QObject):
                 self._task_keys_by_path[file_path].discard(key)
             if not self._task_keys_by_path.get(file_path):
                 self._task_keys_by_path.pop(file_path, None)
+                
+    def cancel_tasks_by_priority(self, priority: Priority) -> None:
+        """Cancel all tasks matching the specified priority."""
+        with self._queue_lock:
+            for key in list(self._active_tasks.keys()):
+                task = self._active_tasks.get(key)
+                if task is None or task.priority != priority:
+                    continue
+                task.cancel()
+                self._active_tasks.pop(key, None)
+                file_path = getattr(task, 'file_path', None)
+                if file_path and file_path in self._task_keys_by_path:
+                    self._task_keys_by_path[file_path].discard(key)
+                    if not self._task_keys_by_path.get(file_path):
+                        self._task_keys_by_path.pop(file_path, None)
     
     def cancel_all_tasks(self):
         """取消所有任務"""

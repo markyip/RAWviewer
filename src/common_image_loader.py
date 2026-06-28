@@ -52,6 +52,12 @@ from PyQt6.QtCore import QLoggingCategory
 # Silence qt.imageformats warnings (e.g. missing TIFF tag warnings on RAW files)
 QLoggingCategory.setFilterRules("qt.imageformats.warning=false\nqt.imageformats.tiff.warning=false")
 # PIL Image will be imported lazily to avoid import delays
+try:
+    from pillow_heif import register_heif_opener
+    register_heif_opener()
+except ImportError:
+    pass
+
 
 from image_cache import get_image_cache
 from raw_file_extensions import RAW_FILE_EXTENSIONS
@@ -498,6 +504,13 @@ def load_pixmap_safe(file_path: str, max_edge: int = 0) -> QPixmap:
     if is_raw_file(file_path):
         preview_max = max_edge if max_edge > 0 else 2048
         return load_raw_preview_pixmap(file_path, max_size=preview_max)
+    
+    # Check if this is an HDR HEIF/AVIF or TIFF
+    hdr_pixmap = try_load_hdr_image_pixmap(file_path, max_edge=max_edge)
+    if hdr_pixmap is not None:
+        cache.put_pixmap(file_path, hdr_pixmap)
+        return hdr_pixmap
+
     
     # 對於 TIFF 文件，使用 PIL 避免 Qt 警告
     if is_tiff_file(file_path):
@@ -1184,6 +1197,257 @@ def process_pool_worker_count() -> int:
     cpu = os.cpu_count() or 4
     default = max(2, cpu - 1)
     return _env_int_bounded("RAWVIEWER_PROCESS_POOL_WORKERS", default, minimum=1, maximum=32)
+
+
+def is_macos_edr_enabled() -> bool:
+    import platform
+    import os
+    if platform.system() != "Darwin":
+        return False
+    return os.environ.get("RAWVIEWER_DISABLE_EDR", "0") not in ("1", "true", "yes", "on")
+
+
+def pq_to_linear(v: np.ndarray) -> np.ndarray:
+    m1 = 2610.0 / 16384.0
+    m2 = (2523.0 / 32.0) * 128.0
+    c1 = 3424.0 / 4096.0
+    c2 = (2413.0 / 4096.0) * 32.0
+    c3 = (2392.0 / 4096.0) * 32.0
+    
+    v_pow = np.power(v, 1.0 / m2)
+    numerator = np.maximum(v_pow - c1, 0.0)
+    denominator = c2 - c3 * v_pow
+    # Avoid divide by zero
+    denominator = np.where(denominator == 0.0, 1e-8, denominator)
+    linear = np.power(numerator / denominator, 1.0 / m1)
+    return linear
+
+
+def hlg_to_linear(v: np.ndarray) -> np.ndarray:
+    a = 0.17883277
+    b = 0.28466892
+    c = 0.55991073
+    
+    linear = np.zeros_like(v, dtype=np.float32)
+    mask_low = v <= 0.5
+    linear[mask_low] = (v[mask_low] ** 2) / 3.0
+    
+    mask_high = ~mask_low
+    # Avoid domain error in exp
+    exponent = np.clip((v[mask_high] - c) / a, -80.0, 80.0)
+    linear[mask_high] = (np.exp(exponent) + b) / 12.0
+    return linear
+
+
+def linear_to_srgb(l: np.ndarray) -> np.ndarray:
+    srgb = np.zeros_like(l, dtype=np.float32)
+    mask_low = l <= 0.0031308
+    srgb[mask_low] = 12.92 * l[mask_low]
+    mask_high = ~mask_low
+    srgb[mask_high] = 1.055 * np.power(np.maximum(l[mask_high], 0.0), 1.0 / 2.4) - 0.055
+    return np.clip(srgb, 0.0, 1.0)
+
+
+def tone_map_reinhard(img_float: np.ndarray, exposure: float = 1.0) -> np.ndarray:
+    img_exposed = img_float * exposure
+    mapped = img_exposed / (1.0 + img_exposed)
+    return np.clip(mapped, 0.0, 1.0)
+
+
+def try_load_hdr_image_pixmap(file_path: str, max_edge: int = 0) -> Optional[QPixmap]:
+    """Try to decode HEIF/AVIF/TIFF HDR images with EDR on macOS or SDR tone-mapping."""
+    import os
+    from PIL import Image
+    
+    ext = file_path.lower()
+    
+    is_heif_or_avif = ext.endswith(('.heic', '.heif', '.avif'))
+    is_tiff = ext.endswith(('.tif', '.tiff'))
+    
+    if not (is_heif_or_avif or is_tiff):
+        return None
+
+    try:
+        bit_depth = 8
+        transfer = 2
+        icc_profile = b""
+        arr = None
+        channels = 3
+        h, w = 0, 0
+
+        if is_heif_or_avif:
+            import pillow_heif
+            heif_file = pillow_heif.read_heif(file_path)
+            bit_depth = heif_file.info.get("bit_depth", 8)
+            nclx = heif_file.info.get("nclx", {})
+            if nclx:
+                transfer = nclx.get("transfer_characteristics", 2)
+            icc_profile = heif_file.info.get("icc_profile", b"")
+            w, h = heif_file.size
+            channels = 4 if heif_file.mode == 'RGBA' else 3
+            
+            # Check if HDR
+            is_hdr = (bit_depth > 8) or (transfer in (16, 18))
+            if not is_hdr:
+                return None
+                
+            if bit_depth > 8:
+                arr = np.frombuffer(heif_file.data, dtype=np.uint16)
+                arr = arr.reshape((h, w, channels))
+            else:
+                arr = np.frombuffer(heif_file.data, dtype=np.uint8)
+                arr = arr.reshape((h, w, channels))
+
+        elif is_tiff:
+            with Image.open(file_path) as pil_img:
+                # Check BitsPerSample tag 258
+                bits = pil_img.tag.get(258)
+                is_16bit = False
+                if bits:
+                    if isinstance(bits, tuple):
+                        is_16bit = any(b > 8 for b in bits)
+                    else:
+                        is_16bit = bits > 8
+                if not is_16bit:
+                    is_16bit = pil_img.mode in ("I;16", "I;16L", "I;16B", "RGBA;16", "RGB;16")
+                
+                if not is_16bit:
+                    return None
+                icc_profile = pil_img.info.get("icc_profile", b"")
+                w, h = pil_img.size
+                
+            import cv2
+            arr = cv2.imread(file_path, cv2.IMREAD_UNCHANGED)
+            if arr is None:
+                return None
+            bit_depth = 16
+            
+            if len(arr.shape) == 3:
+                channels = arr.shape[2]
+                if channels == 3:
+                    arr = cv2.cvtColor(arr, cv2.COLOR_BGR2RGB)
+                elif channels == 4:
+                    arr = cv2.cvtColor(arr, cv2.COLOR_BGRA2RGBA)
+            else:
+                channels = 1
+
+        if arr is None:
+            return None
+
+        # Determine float representation [0.0, 1.0]
+        if arr.dtype == np.uint16:
+            max_val = 65535.0 if arr.max() > 4095 else ((2 ** bit_depth) - 1)
+            img_float = arr.astype(np.float32) / max_val
+        else:
+            img_float = arr.astype(np.float32) / 255.0
+
+        from PyQt6.QtGui import QColorSpace
+        from PyQt6.QtCore import Qt
+        
+        # 1. macOS Native EDR path
+        if is_macos_edr_enabled():
+            # Pad to 4 channels for QImage RGBX64 or RGBA64
+            if channels == 3:
+                padded = np.empty((h, w, 4), dtype=np.uint16)
+                if arr.dtype == np.uint16:
+                    padded[:, :, :3] = arr
+                else:
+                    padded[:, :, :3] = (img_float[:, :, :3] * 65535.0).astype(np.uint16)
+                padded[:, :, 3] = 65535
+                arr_64 = padded
+                q_format = QImage.Format.Format_RGBX64
+            elif channels == 4:
+                if arr.dtype == np.uint16:
+                    arr_64 = arr
+                else:
+                    arr_64 = (img_float * 65535.0).astype(np.uint16)
+                q_format = QImage.Format.Format_RGBA64
+            else:  # Grayscale -> RGBX64
+                padded = np.empty((h, w, 4), dtype=np.uint16)
+                val_16 = (img_float[:, :, 0] * 65535.0).astype(np.uint16) if len(img_float.shape) == 3 else (img_float * 65535.0).astype(np.uint16)
+                padded[:, :, 0] = val_16
+                padded[:, :, 1] = val_16
+                padded[:, :, 2] = val_16
+                padded[:, :, 3] = 65535
+                arr_64 = padded
+                q_format = QImage.Format.Format_RGBX64
+
+            arr_64 = np.ascontiguousarray(arr_64)
+            qimage = QImage(
+                arr_64.data,
+                w,
+                h,
+                w * 8,
+                q_format
+            )
+            
+            # Set the color space so Quartz/Metal rendering will treat values correctly
+            if icc_profile:
+                cs = QColorSpace.fromIccProfile(icc_profile)
+                if cs.isValid():
+                    qimage.setColorSpace(cs)
+            else:
+                # Fallback: assume standard PQ/HLG space
+                if transfer == 16:
+                    # PQ
+                    qimage.setColorSpace(QColorSpace(QColorSpace.NamedColorSpace.SRgb))
+                else:
+                    # default sRGB
+                    qimage.setColorSpace(QColorSpace(QColorSpace.NamedColorSpace.SRgb))
+
+        # 2. Windows / SDR Tone-mapping path
+        else:
+            rgb_float = img_float[:, :, :3] if channels >= 3 else (np.stack([img_float]*3, axis=-1) if len(img_float.shape) == 2 else np.stack([img_float[:, :, 0]]*3, axis=-1))
+            
+            # Linearize
+            if transfer == 16:
+                linear = pq_to_linear(rgb_float)
+            elif transfer == 18:
+                linear = hlg_to_linear(rgb_float)
+            else:
+                linear = np.power(rgb_float, 2.2)
+                
+            # Tone-map using Reinhard
+            sdr_linear = tone_map_reinhard(linear, exposure=1.0)
+            # Gamma correct to sRGB
+            sdr_rgb = linear_to_srgb(sdr_linear)
+            sdr_uint8 = (sdr_rgb * 255.0).astype(np.uint8)
+
+            if channels == 4:
+                sdr_rgba = np.empty((h, w, 4), dtype=np.uint8)
+                sdr_rgba[:, :, :3] = sdr_uint8
+                sdr_rgba[:, :, 3] = (img_float[:, :, 3] * 255.0).astype(np.uint8)
+                out_arr = sdr_rgba
+                q_format = QImage.Format.Format_RGBA8888
+            else:
+                out_arr = sdr_uint8
+                q_format = QImage.Format.Format_RGB888
+
+            out_arr = np.ascontiguousarray(out_arr)
+            qimage = QImage(out_arr.data, w, h, w * out_arr.shape[2], q_format)
+            qimage.setColorSpace(QColorSpace(QColorSpace.NamedColorSpace.SRgb))
+
+        # Perform downsizing if requested
+        if max_edge > 0 and max(w, h) > max_edge:
+            from PyQt6.QtCore import QSize
+            if w >= h:
+                sw = max_edge
+                sh = max(1, int(h * max_edge / max(w, 1)))
+            else:
+                sh = max_edge
+                sw = max(1, int(w * max_edge / max(h, 1)))
+            qimage = qimage.scaled(
+                QSize(sw, sh),
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation
+            )
+
+        return QPixmap.fromImage(qimage)
+
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning(f"Failed to load HDR image {os.path.basename(file_path)}: {e}")
+        return None
 
 
 

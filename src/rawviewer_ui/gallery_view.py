@@ -2040,6 +2040,15 @@ class JustifiedGallery(QWidget):
         else:
             self._idle_preload_timer.stop()
 
+    def pause_idle_preload(self):
+        """Immediately pause idle background thumbnail generation."""
+        if hasattr(self, "_idle_preload_timer") and self._idle_preload_timer.isActive():
+            self._idle_preload_timer.stop()
+        if self.load_manager:
+            idle_priority = _gallery_idle_load_priority()
+            self.load_manager.cancel_tasks_by_priority(idle_priority)
+
+
     def _preload_remaining_thumbnails_background(self):
         """Silently preload thumbnails for out-of-viewport images during idle stages to smooth out future scrolling."""
         if self._building or not self.images or self.load_manager is None:

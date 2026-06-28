@@ -43,6 +43,8 @@ from raw_file_extensions import RAW_FILE_EXTENSIONS
 # v9: invalidate rows that stored orientation=1 for Canon CR2/CR3 while LibRaw flip / embedded JPEG said otherwise.
 RAW_EXIF_SENSOR_META_VER = 9
 
+from image_load_manager import yield_if_current_task_active
+
 _rawpy_global_lock = threading.Lock()
 
 
@@ -194,6 +196,7 @@ def probe_effective_raw_orientation(
                 if embedded_o not in (1, orientation):
                     orientation = embedded_o
             return int(orientation or 1)
+        yield_if_current_task_active()
         with _rawpy_global_lock:
             with rawpy.imread(file_path) as raw:
                 return probe_effective_raw_orientation(file_path, raw)
@@ -231,6 +234,7 @@ def _orientation_from_embedded_preview(
         if raw_object is not None:
             thumb = raw_object.extract_thumb()
         else:
+            yield_if_current_task_active()
             with _rawpy_global_lock:
                 with rawpy.imread(file_path) as raw:
                     thumb = raw.extract_thumb()
@@ -437,159 +441,14 @@ def _extract_embedded_jpeg_by_scan_impl(file_path: str, max_size: int) -> Option
                             w, h, os.path.basename(file_path)
                         )
                         return decoded
-
-        # Fallback to byte scan
-        chunk_size = 4 * 1024 * 1024
-        
-        head = b""
-        tail = b""
-        
-        with open(file_path, "rb") as f:
-            if size <= chunk_size * 2:
-                # Read entire file if it's small enough
-                head = f.read()
-            else:
-                # Read head
-                head = f.read(chunk_size)
-                # Read tail
-                f.seek(size - chunk_size)
-                tail = f.read(chunk_size)
-                
-    # Scan head and tail
-        # We will collect candidate JPEGs: (area, segment_bytes, abs_offset, w, h)
-        candidates = []
-        
-        def scan_chunk(chunk_bytes, base_offset):
-            start = 0
-            chunk_len = len(chunk_bytes)
-            while True:
-                idx = chunk_bytes.find(b"\xff\xd8\xff", start)
-                if idx < 0:
-                    break
-                
-                # Check dimensions
-                header_chunk = chunk_bytes[idx : min(chunk_len, idx + 65536)]
-                dims = get_jpeg_dimensions(header_chunk)
-                if dims is not None:
-                    w, h = dims
-                    area = w * h
-                    if w >= 32 and h >= 32:
-                        end_marker = chunk_bytes.find(b"\xff\xd9", idx + 3)
-                        if end_marker >= 0:
-                            segment = chunk_bytes[idx : end_marker + 2]
-                            candidates.append((area, segment, base_offset + idx, w, h))
-                        else:
-                            # Not fully contained in the chunk (cut off).
-                            # We will read the rest of the file from the start of the JPEG on-demand later.
-                            candidates.append((area, None, base_offset + idx, w, h))
-                start = idx + 3
-
-        scan_chunk(head, 0)
-        if tail:
-            scan_chunk(tail, size - chunk_size)
-            
-        # Select candidate with the largest area
-        import logging
-        logger = logging.getLogger(__name__)
-        
-        if candidates:
-            candidates.sort(key=lambda x: x[0], reverse=True)
-            best_w = candidates[0][3]
-        else:
-            best_w = 0
-
-        logger.info("[SCAN] Initial scan found %d candidates for %s. Best width: %d", len(candidates), os.path.basename(file_path), best_w)
-
-        is_dng = file_path.lower().endswith(".dng")
-        if (not candidates or best_w < 1500) and is_dng:
-            logger.info("[SCAN] Running whole-file scan for %s...", os.path.basename(file_path))
-            # Full file sequential scan in chunks
-            full_scan_candidates = []
-            scan_chunk_size = 8 * 1024 * 1024
-            overlap = 65536
-            offset = 0
-            try:
-                with open(file_path, "rb") as f:
-                    while True:
-                        f.seek(offset)
-                        chunk = f.read(scan_chunk_size + overlap)
-                        if not chunk:
-                            break
-                        
-                        start = 0
-                        chunk_len = len(chunk)
-                        while True:
-                            idx = chunk.find(b"\xff\xd8\xff", start)
-                            if idx < 0:
-                                break
-                            header_chunk = chunk[idx : min(chunk_len, idx + 65536)]
-                            dims = get_jpeg_dimensions(header_chunk)
-                            if dims is not None:
-                                w, h = dims
-                                area = w * h
-                                if w >= 32 and h >= 32:
-                                    end_marker = chunk.find(b"\xff\xd9", idx + 3)
-                                    if end_marker >= 0:
-                                        segment = chunk[idx : end_marker + 2]
-                                        full_scan_candidates.append((area, segment, offset + idx, w, h))
-                                    else:
-                                        full_scan_candidates.append((area, None, offset + idx, w, h))
-                            start = idx + 3
-                        
-                        if len(chunk) < scan_chunk_size + overlap:
-                            break
-                        offset += scan_chunk_size
-            except Exception as scan_e:
-                logger.error("[SCAN] Error scanning %s: %s", file_path, scan_e)
-            
-            if full_scan_candidates:
-                candidates = full_scan_candidates
-                candidates.sort(key=lambda x: x[0], reverse=True)
-                logger.info("[SCAN] Whole-file scan found %d candidates. New best width: %d", len(candidates), candidates[0][3])
-            else:
-                logger.info("[SCAN] Whole-file scan found 0 candidates.")
-
-        if not candidates:
-            # Mark as miss
-            with _embedded_scan_miss_lock:
-                if len(_embedded_scan_miss_cache) >= _embedded_scan_miss_cache_max:
-                    _embedded_scan_miss_cache.clear()
-                _embedded_scan_miss_cache.add(miss_key)
-            return None
-            
-        # Try decoding candidates in order of area size
-        for best_area, best_segment, best_abs_offset, best_w, best_h in candidates:
-            # If the segment was cut off, read it now from the file
-            if best_segment is None:
-                try:
-                    with open(file_path, "rb") as f:
-                        f.seek(best_abs_offset)
-                        # Previews are usually not larger than 8MB, but we read up to 16MB or to the end
-                        remaining = f.read(16 * 1024 * 1024)
-                        end_marker = remaining.find(b"\xff\xd9")
-                        if end_marker >= 0:
-                            best_segment = remaining[:end_marker + 2]
-                        else:
-                            best_segment = remaining
-                except Exception:
-                    continue
-                    
-            if best_segment:
-                best_arr = decode_embedded_jpeg_bytes(best_segment, max_size)
-                if best_arr is not None:
-                    return best_arr
-
-        # Mark as miss if all candidates failed to decode
+        # TIFF parse failed or yielded no decodable preview; cache as miss and return None
         with _embedded_scan_miss_lock:
             if len(_embedded_scan_miss_cache) >= _embedded_scan_miss_cache_max:
                 _embedded_scan_miss_cache.clear()
             _embedded_scan_miss_cache.add(miss_key)
-            
+        return None
     except Exception:
         return None
-
-    return None
-
 
 class ThumbnailExtractor(QObject):
     """Fast thumbnail extractor for immediate display."""
@@ -609,6 +468,7 @@ class ThumbnailExtractor(QObject):
             if raw_object is not None:
                 thumb = self._extract_from_raw_obj(raw_object, file_path, max_size)
             else:
+                yield_if_current_task_active()
                 with _rawpy_global_lock:
                     with rawpy.imread(file_path) as raw:
                         thumb = self._extract_from_raw_obj(raw, file_path, max_size)
@@ -1011,6 +871,7 @@ class EXIFExtractor(QObject):
                                 # print(f"[ORIENTATION] EXIFExtractor: Falling back to LibRaw flip={sizes.flip} -> Orientation {orientation} for {os.path.basename(file_path)}")
                                 pass
                     else:
+                        yield_if_current_task_active()
                         with _rawpy_global_lock:
                             with rawpy.imread(file_path) as raw:
                                 sizes = raw.sizes
@@ -1256,6 +1117,7 @@ class OptimizedRAWProcessor(QObject):
     def process_raw_fast(self, file_path: str, exif_data: Dict[str, Any] = None) -> Optional[np.ndarray]:
         """Process RAW file with optimized parameters for speed."""
         try:
+            yield_if_current_task_active()
             with _rawpy_global_lock:
                 with rawpy.imread(file_path) as raw:
                     params = self.get_optimized_processing_params(
@@ -1275,6 +1137,7 @@ class OptimizedRAWProcessor(QObject):
     def process_raw_quality(self, file_path: str, exif_data: Dict[str, Any] = None) -> Optional[np.ndarray]:
         """Process RAW file with quality parameters (slower)."""
         try:
+            yield_if_current_task_active()
             with _rawpy_global_lock:
                 with rawpy.imread(file_path) as raw:
                     # Quality processing parameters

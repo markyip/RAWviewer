@@ -47,6 +47,7 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/f3/d4/9770d14ba719432bb90a421bfd443872ed0f70f7264b64bec12ea363d5fd/numpy-2.4.6-cp312-cp312-macosx_14_0_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/2d/1e/6f9e38005a6f7f22af785df42a43139d0e20f169eb5787ce8be37ee7fcc9/opencv_python_headless-4.13.0.92-cp37-abi3-macosx_14_0_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/58/be/7482c8a5ebebbc6470b3eb791812fff7d5e0216c2be3827b30b8bb6603ed/pillow-12.2.0-cp312-cp312-macosx_10_13_x86_64.whl
+      - pypi: https://files.pythonhosted.org/packages/ce/ba/1a8f5a42c14cf8ad7c7a6b459de33e2bbd693a15690802463b370ee578cd/pillow_heif-1.4.0-cp312-cp312-macosx_10_15_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/e7/36/5ee6e05c9bd427237b11b3937ad82bb8ad2752d72c6969314590dd0c2f6e/psutil-7.2.2-cp36-abi3-macosx_10_9_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/9c/42/7703bd45b62fecd44cd7d3495423097e2f7d28bc2e99e7c1af68892ab157/pycountry-26.2.16-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/98/d6/aefbe870b5ca45f5d98e46e3a8035c92e594b3ef33c4dea2eed67b971c49/pyexiv2-2.15.5-cp312-none-macosx_13_0_x86_64.whl
@@ -110,6 +111,7 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/ad/fe/c0a6b7b2ca128a8fb228575147073b660656734b8ebe4d76c8fd748dcc79/numpy-2.4.6-cp312-cp312-macosx_14_0_arm64.whl
       - pypi: https://files.pythonhosted.org/packages/79/42/2310883be3b8826ac58c3f2787b9358a2d46923d61f88fedf930bc59c60c/opencv_python_headless-4.13.0.92-cp37-abi3-macosx_13_0_arm64.whl
       - pypi: https://files.pythonhosted.org/packages/d8/95/0a351b9289c2b5cbde0bacd4a83ebc44023e835490a727b2a3bd60ddc0f4/pillow-12.2.0-cp312-cp312-macosx_11_0_arm64.whl
+      - pypi: https://files.pythonhosted.org/packages/cd/64/e659dd4a9b54ad148b8e753df6c9b84e0140065bebb69665b583b53804a8/pillow_heif-1.4.0-cp312-cp312-macosx_11_0_arm64.whl
       - pypi: https://files.pythonhosted.org/packages/80/c4/f5af4c1ca8c1eeb2e92ccca14ce8effdeec651d5ab6053c589b074eda6e1/psutil-7.2.2-cp36-abi3-macosx_11_0_arm64.whl
       - pypi: https://files.pythonhosted.org/packages/9c/42/7703bd45b62fecd44cd7d3495423097e2f7d28bc2e99e7c1af68892ab157/pycountry-26.2.16-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/23/2c/87154e3d23602c1309e3aa10ff955a707cc311d82eac522c5b4d2e7fdba1/pyexiv2-2.15.5-cp312-none-macosx_14_0_arm64.whl
@@ -178,6 +180,7 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/a4/e4/9b378a5466ea0bed65e5beb8e09254973c580a6522810a38afbcc45e5105/onnxruntime_gpu-1.26.0-cp312-cp312-win_amd64.whl
       - pypi: https://files.pythonhosted.org/packages/4a/90/b338326131ccb2aaa3c2c85d00f41822c0050139a4bfe723cfd95455bd2d/opencv_python_headless-4.13.0.92-cp37-abi3-win_amd64.whl
       - pypi: https://files.pythonhosted.org/packages/5d/7b/25a221d2c761c6a8ae21bfa3874988ff2583e19cf8a27bf2fee358df7942/pillow-12.2.0-cp312-cp312-win_amd64.whl
+      - pypi: https://files.pythonhosted.org/packages/99/ef/f240ce0e84a6d0cf8dfee1834b4aec29f209c08e3d2047196cee65527fb7/pillow_heif-1.4.0-cp312-cp312-win_amd64.whl
       - pypi: https://files.pythonhosted.org/packages/0a/19/8d0cb6f20a1ef7b18f1c8986ad5783f22f84cce39c6ce9a6e645ea55192e/protobuf-7.35.1-cp310-abi3-win_amd64.whl
       - pypi: https://files.pythonhosted.org/packages/b4/90/e2159492b5426be0c1fef7acba807a03511f97c5f86b3caeda6ad92351a7/psutil-7.2.2-cp37-abi3-win_amd64.whl
       - pypi: https://files.pythonhosted.org/packages/9c/42/7703bd45b62fecd44cd7d3495423097e2f7d28bc2e99e7c1af68892ab157/pycountry-26.2.16-py3-none-any.whl
@@ -1070,6 +1073,90 @@ packages:
   - pytest-xdist ; extra == 'tests'
   - trove-classifiers>=2024.10.12 ; extra == 'tests'
   - defusedxml ; extra == 'xmp'
+  requires_python: '>=3.10'
+- pypi: https://files.pythonhosted.org/packages/99/ef/f240ce0e84a6d0cf8dfee1834b4aec29f209c08e3d2047196cee65527fb7/pillow_heif-1.4.0-cp312-cp312-win_amd64.whl
+  name: pillow-heif
+  version: 1.4.0
+  sha256: 107d598a1b1694ba6f371927ffd6d72d6f9af2ca4082577d9edbfdeed465f940
+  requires_dist:
+  - pillow>=11.1.0
+  - sphinx>=4.4 ; extra == 'docs'
+  - sphinx-issues>=3.0.1 ; extra == 'docs'
+  - sphinx-rtd-theme>=1.0 ; extra == 'docs'
+  - pytest ; extra == 'tests-min'
+  - defusedxml ; extra == 'tests-min'
+  - packaging ; extra == 'tests-min'
+  - pytest ; extra == 'tests'
+  - defusedxml ; extra == 'tests'
+  - packaging ; extra == 'tests'
+  - numpy ; extra == 'tests'
+  - pympler ; extra == 'tests'
+  - pytest ; extra == 'dev'
+  - defusedxml ; extra == 'dev'
+  - packaging ; extra == 'dev'
+  - numpy ; extra == 'dev'
+  - pympler ; extra == 'dev'
+  - opencv-python==4.13.0.92 ; extra == 'dev'
+  - pre-commit ; extra == 'dev'
+  - pylint ; extra == 'dev'
+  - coverage ; extra == 'dev'
+  - setuptools ; extra == 'dev'
+  requires_python: '>=3.10'
+- pypi: https://files.pythonhosted.org/packages/cd/64/e659dd4a9b54ad148b8e753df6c9b84e0140065bebb69665b583b53804a8/pillow_heif-1.4.0-cp312-cp312-macosx_11_0_arm64.whl
+  name: pillow-heif
+  version: 1.4.0
+  sha256: ade286eeadb361773604e294f98c4a1b64b577aca271faa6971e2fbd018918c7
+  requires_dist:
+  - pillow>=11.1.0
+  - sphinx>=4.4 ; extra == 'docs'
+  - sphinx-issues>=3.0.1 ; extra == 'docs'
+  - sphinx-rtd-theme>=1.0 ; extra == 'docs'
+  - pytest ; extra == 'tests-min'
+  - defusedxml ; extra == 'tests-min'
+  - packaging ; extra == 'tests-min'
+  - pytest ; extra == 'tests'
+  - defusedxml ; extra == 'tests'
+  - packaging ; extra == 'tests'
+  - numpy ; extra == 'tests'
+  - pympler ; extra == 'tests'
+  - pytest ; extra == 'dev'
+  - defusedxml ; extra == 'dev'
+  - packaging ; extra == 'dev'
+  - numpy ; extra == 'dev'
+  - pympler ; extra == 'dev'
+  - opencv-python==4.13.0.92 ; extra == 'dev'
+  - pre-commit ; extra == 'dev'
+  - pylint ; extra == 'dev'
+  - coverage ; extra == 'dev'
+  - setuptools ; extra == 'dev'
+  requires_python: '>=3.10'
+- pypi: https://files.pythonhosted.org/packages/ce/ba/1a8f5a42c14cf8ad7c7a6b459de33e2bbd693a15690802463b370ee578cd/pillow_heif-1.4.0-cp312-cp312-macosx_10_15_x86_64.whl
+  name: pillow-heif
+  version: 1.4.0
+  sha256: 5c6181fb25c7d28f98702160b98967d1d7d432d71decac9351f5a47ee33554e0
+  requires_dist:
+  - pillow>=11.1.0
+  - sphinx>=4.4 ; extra == 'docs'
+  - sphinx-issues>=3.0.1 ; extra == 'docs'
+  - sphinx-rtd-theme>=1.0 ; extra == 'docs'
+  - pytest ; extra == 'tests-min'
+  - defusedxml ; extra == 'tests-min'
+  - packaging ; extra == 'tests-min'
+  - pytest ; extra == 'tests'
+  - defusedxml ; extra == 'tests'
+  - packaging ; extra == 'tests'
+  - numpy ; extra == 'tests'
+  - pympler ; extra == 'tests'
+  - pytest ; extra == 'dev'
+  - defusedxml ; extra == 'dev'
+  - packaging ; extra == 'dev'
+  - numpy ; extra == 'dev'
+  - pympler ; extra == 'dev'
+  - opencv-python==4.13.0.92 ; extra == 'dev'
+  - pre-commit ; extra == 'dev'
+  - pylint ; extra == 'dev'
+  - coverage ; extra == 'dev'
+  - setuptools ; extra == 'dev'
   requires_python: '>=3.10'
 - conda: https://conda.anaconda.org/conda-forge/noarch/pip-26.1.2-pyh8b19718_0.conda
   sha256: 29b7d75bf81ad11645a8e320b369abdc90a92b93f2a9178e853d9dddf82e5106

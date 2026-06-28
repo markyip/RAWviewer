@@ -76,6 +76,7 @@ STANDARD_IMAGE_EXTENSIONS: frozenset[str] = frozenset(
         "webp",
         "heif",
         "heic",
+        "avif",
         "tif",
         "tiff",
     }
@@ -114,6 +115,7 @@ def get_supported_extensions() -> list[str]:
         ".webp",
         ".heif",
         ".heic",
+        ".avif",
         ".tif",
         ".tiff",
     ]

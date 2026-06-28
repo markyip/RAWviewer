@@ -15,6 +15,16 @@ Major release introducing a custom gallery zoom slider, interactive GPS map disp
 ### Animated GIF & WebP Playback
 - **Animated Previews** — Enhanced the image viewer pipeline to support playing, scaling, and animating GIF and WebP files. Displays playback status messages and handles dynamic window scaling seamlessly.
 
+### Navigation Responsiveness & Performance
+The first image after launch opens fast, but moving to the **next** image could stall for several seconds before the preview updated — especially on external drives. This was caused by background warm-up work flooding the worker pool and main thread right after the first paint. This update keeps navigation snappy without changing what you see:
+
+- **Staggered thumbnail warm-up** — Filmstrip thumbnail prefetching now drip-feeds through a single chunked, throttled queue after a short grace period instead of dumping the whole prefetch radius at once. This prevents the worker pool and UI thread from being saturated immediately after the first image renders.
+- **Prefetch yields to navigation** — Starting a navigation now cancels in-flight low-priority prefetch/background loads and pauses warm-up during a brief quiet window, so your current image always wins the race for I/O and CPU.
+- **Off-thread sensor-dimension lookup** — Resolving true RAW sensor dimensions for the status bar (`rawpy.imread`) used to run synchronously on the UI thread and block every navigation on external drives. It now runs on a background thread and refreshes the HUD when ready, with each file probed at most once per session.
+- **Status bar dedup / debounce** — The status HUD is rebuilt many times per image (thumbnail ready, full image ready, EXIF ready, …). Identical updates are now skipped via a lightweight signature check, avoiding redundant EXIF re-parsing, HUD re-layout, and duplicate log output.
+
+**What you might notice:** navigating to the next photo updates immediately instead of stalling, and subsequent images stay responsive while thumbnails fill in smoothly in the background.
+
 ---
 
 ## 🚀 Version 2.4.1

@@ -103,9 +103,13 @@ class GpuImageView(QGraphicsView):
         self._shortcut_handler = None
 
         self._maybe_enable_opengl()
+        self._edr_initialized = False
+        from PyQt6.QtCore import QTimer
+        QTimer.singleShot(500, self._enable_macos_edr)
         self.file_path = None
         self._drag_start_pos = None
         self._drag_started = False
+
 
         # Centered placeholder text shown when no image is loaded (parity with the
         # legacy QLabel instruction screen, which the GPU view would otherwise cover).
@@ -138,6 +142,33 @@ class GpuImageView(QGraphicsView):
         except Exception:
             # Raster fallback keeps the feature working without a GL context.
             pass
+
+
+    def _enable_macos_edr(self) -> None:
+        """Enable macOS EDR (Extended Dynamic Range) support on the viewport's CALayer."""
+        if getattr(self, "_edr_initialized", False):
+            return
+        import platform
+        if platform.system() == "Darwin":
+            try:
+                import objc
+                vp = self.viewport()
+                if vp is None:
+                    return
+                ptr = int(vp.winId())
+                if not ptr:
+                    return
+                view = objc.objc_object(c_void_p=ptr)
+                view.setWantsLayer_(True)
+                layer = view.layer()
+                if layer is not None:
+                    layer.setWantsExtendedDynamicRangeContent_(True)
+                    self._edr_initialized = True
+            except Exception as e:
+                import logging
+                logging.getLogger(__name__).debug(f"Failed to enable EDR on CALayer: {e}")
+
+
 
     # ------------------------------------------------------------------ state
     def has_pixmap(self) -> bool:
@@ -573,3 +604,5 @@ class GpuImageView(QGraphicsView):
         if self._fit_mode and self._has_pixmap:
             self.fit_to_window()
         self._update_placeholder()
+
+

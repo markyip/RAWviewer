@@ -37,6 +37,8 @@ opencv-python-headless = "*"
 huggingface_hub = "*"
 requests = "*"
 certifi = "*"
+pillow-heif = "*"
+
 
 # Windows semantic search (MobileCLIP ONNX). Default for `pixi install` / `pixi run`.
 # - Local dev: onnxruntime-gpu (CUDA EP when a GPU is available).

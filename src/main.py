@@ -6612,6 +6612,11 @@ def _share_windows_via_winrt(path: str, owner_hwnd: int) -> bool:
 
 
 class RAWImageViewer(QMainWindow):
+    # Emitted from a background worker once true sensor dimensions for a RAW file have
+    # been resolved (off the main thread). Carries the file path; the slot refreshes the
+    # status bar if that file is still current.
+    _sensor_dims_resolved = pyqtSignal(str)
+
     # Avoid UI-thread sort / EXIF prefetch for huge folders (crashes / multi-minute freezes).
     _GALLERY_UI_SORT_MAX_FILES = 400
     _GALLERY_LAYOUT_META_SEED_MAX = 400
@@ -8804,11 +8809,22 @@ class RAWImageViewer(QMainWindow):
             bulk = getattr(self, "_gallery_bulk_metadata", None) or {}
             idx = getattr(self, "current_file_index", -1)
             bar.set_files(files, bulk_metadata=bulk, select_index=idx)
-            self._sync_filmstrip_index(center=True)
             self._refresh_filmstrip_bookmark_visuals()
-            QTimer.singleShot(0, self._prefetch_filmstrip_thumbnails)
+
+            # If the first single-view image hasn't finished its full-res
+            # upgrade yet, defer the visible-cell thumbnail refresh so that
+            # the burst of rawpy.extract_thumb calls doesn't compete with the
+            # main-thread QPixmap conversion for the GIL.
+            _first_render_done = getattr(self, "_single_view_first_render_logged", False)
+            _filmstrip_refresh_delay = 0 if _first_render_done else 1500
+            if _filmstrip_refresh_delay > 0:
+                QTimer.singleShot(_filmstrip_refresh_delay, lambda: self._sync_filmstrip_index(center=True))
+            else:
+                self._sync_filmstrip_index(center=True)
+            QTimer.singleShot(1500, self._prefetch_filmstrip_thumbnails)
         finally:
             self._sync_filmstrip_in_progress = False
+
 
     def _filmstrip_is_visible_enough(self) -> bool:
         """True when the bottom filmstrip is shown enough to keep selection in view."""
@@ -8896,9 +8912,8 @@ class RAWImageViewer(QMainWindow):
             self._deferred_filmstrip_paths.update(paths)
             return
             
-        from image_load_manager import Priority
-
         bar = self._filmstrip_bar()
+        to_load = []
         for path in paths:
             if bar is not None:
                 cached = self.image_cache.get_thumbnail(path)
@@ -8906,15 +8921,10 @@ class RAWImageViewer(QMainWindow):
                     bar.apply_thumbnail(path, cached)
                     self._note_filmstrip_thumbnail_warmed(path)
                     continue
-            # Same standard thumbnail task as gallery (no target size) so decode
-            # populates global ImageCache once and dedupes with gallery loads.
-            self.image_manager.load_image(
-                file_path=path,
-                priority=Priority.BACKGROUND,
-                cancel_existing=False,
-                use_full_resolution=False,
-                stages={"thumbnail"},
-            )
+            to_load.append(path)
+        # Enqueue uncached thumbnails in small chunks so a large batch (e.g. filmstrip
+        # reveal) can't flood the worker pool / main-thread signal queue at once.
+        self._enqueue_filmstrip_thumbnails_chunked(to_load)
 
     def _filmstrip_prefetch_radius(self) -> int:
         try:
@@ -8934,31 +8944,155 @@ class RAWImageViewer(QMainWindow):
         if not getattr(self, "_single_view_first_render_logged", False):
             return
 
+        # Hold off while the user is actively navigating — retry once the quiet window passes.
+        if self._in_nav_quiet_window():
+            QTimer.singleShot(250, self._prefetch_filmstrip_thumbnails)
+            return
+
         files = self._navigation_files()
         if len(files) <= 1:
             return
         idx = getattr(self, "current_file_index", -1)
         if idx < 0:
             return
-        from image_load_manager import Priority
 
         radius = self._filmstrip_prefetch_radius()
         lo = max(0, idx - radius)
         hi = min(len(files), idx + radius + 1)
         current = getattr(self, "current_file_path", None)
-        for i in range(lo, hi):
+        # Order by distance from current so the nearest thumbnails warm first, then
+        # hand off to the chunked enqueuer instead of dumping the whole radius at once.
+        order = sorted(range(lo, hi), key=lambda i: abs(i - idx))
+        pending = []
+        for i in order:
             path = files[i]
             if current and _norm_path(path) == _norm_path(current):
                 continue
             if self.image_cache.get_thumbnail(path) is not None:
                 continue
+            pending.append(path)
+        self._enqueue_filmstrip_thumbnails_chunked(pending)
+
+    def _in_nav_quiet_window(self) -> bool:
+        """True if the user navigated very recently.
+
+        Background prefetch (filmstrip warm-up) is held off during this window so the
+        foreground image load keeps worker slots and the main thread stays responsive.
+        """
+        import time
+        quiet_ms = _env_int("RAWVIEWER_NAV_PREFETCH_QUIET_MS", 450, minimum=0)
+        if quiet_ms <= 0:
+            return False
+        last = float(getattr(self, "_last_navigation_time", 0.0) or 0.0)
+        if last <= 0.0:
+            return False
+        return (time.time() - last) * 1000.0 < quiet_ms
+
+    def _pause_prefetch_for_navigation(self) -> None:
+        """Drop queued low-priority neighbor/filmstrip prefetch on user navigation.
+
+        Those tasks belong to the previous position and otherwise sit ahead of the new
+        foreground load in the worker pool (and flood the main-thread signal queue),
+        delaying the image the user asked for. Neighbors re-queue after the new image paints.
+        """
+        # Stop dripping filmstrip thumbnails; the new position will reseed the queue.
+        self._filmstrip_prefetch_pending = []
+        self._filmstrip_prefetch_draining = False
+        try:
+            lm = getattr(self, "image_manager", None)
+            if lm is None:
+                return
+            from image_load_manager import Priority
+            if hasattr(lm, "cancel_tasks_by_priority"):
+                lm.cancel_tasks_by_priority(Priority.PRELOAD_NEXT)
+                lm.cancel_tasks_by_priority(Priority.BACKGROUND)
+        except Exception:
+            pass
+
+    def _schedule_deferred_filmstrip_flush(self) -> None:
+        """Spread the post-first-render filmstrip thumbnail flush over time.
+
+        v2.5.0 dumped every deferred filmstrip path at once the instant the first image
+        painted — exactly when the user navigates to the second image — flooding the worker
+        pool and main thread. We now wait a short grace period and release in small chunks,
+        backing off whenever the user is actively navigating.
+        """
+        if not (hasattr(self, "_deferred_filmstrip_paths") and self._deferred_filmstrip_paths):
+            return
+        grace_ms = _env_int("RAWVIEWER_FILMSTRIP_FLUSH_GRACE_MS", 1200, minimum=0)
+        QTimer.singleShot(grace_ms, self._flush_deferred_filmstrip_chunked)
+
+    def _flush_deferred_filmstrip_chunked(self) -> None:
+        if not (hasattr(self, "_deferred_filmstrip_paths") and self._deferred_filmstrip_paths):
+            return
+        # Back off while the user is navigating; retry shortly.
+        if self._in_nav_quiet_window():
+            QTimer.singleShot(200, self._flush_deferred_filmstrip_chunked)
+            return
+        chunk = _env_int("RAWVIEWER_FILMSTRIP_FLUSH_CHUNK", 4, minimum=1)
+        interval_ms = _env_int("RAWVIEWER_FILMSTRIP_FLUSH_INTERVAL_MS", 180, minimum=0)
+        batch = []
+        for _ in range(chunk):
+            if not self._deferred_filmstrip_paths:
+                break
+            batch.append(self._deferred_filmstrip_paths.pop())
+        if batch:
+            self._on_filmstrip_thumbnails_needed(batch)
+        if self._deferred_filmstrip_paths:
+            QTimer.singleShot(interval_ms, self._flush_deferred_filmstrip_chunked)
+
+    def _enqueue_filmstrip_thumbnails_chunked(self, paths) -> None:
+        """Queue filmstrip thumbnail loads to be released a few at a time.
+
+        Bulk-enqueueing the whole prefetch radius (e.g. 57 RAWs) saturated the worker
+        pool and main-thread signal queue on external drives, stalling the first
+        navigation for seconds. We drip-feed instead and pause during navigation.
+        """
+        if not paths:
+            return
+        if not hasattr(self, "_filmstrip_prefetch_pending") or self._filmstrip_prefetch_pending is None:
+            self._filmstrip_prefetch_pending = []
+        existing = set(self._filmstrip_prefetch_pending)
+        for p in paths:
+            if p not in existing:
+                self._filmstrip_prefetch_pending.append(p)
+        if not getattr(self, "_filmstrip_prefetch_draining", False):
+            self._filmstrip_prefetch_draining = True
+            self._drain_filmstrip_prefetch_chunk()
+
+    def _drain_filmstrip_prefetch_chunk(self) -> None:
+        pending = getattr(self, "_filmstrip_prefetch_pending", None)
+        if not pending:
+            self._filmstrip_prefetch_draining = False
+            return
+        # Yield to the user — don't compete for I/O while a navigation is in flight.
+        if self._in_nav_quiet_window():
+            QTimer.singleShot(200, self._drain_filmstrip_prefetch_chunk)
+            return
+        from image_load_manager import Priority
+        chunk = _env_int("RAWVIEWER_FILMSTRIP_FLUSH_CHUNK", 4, minimum=1)
+        interval_ms = _env_int("RAWVIEWER_FILMSTRIP_FLUSH_INTERVAL_MS", 180, minimum=0)
+        current = getattr(self, "current_file_path", None)
+        sent = 0
+        while pending and sent < chunk:
+            path = pending.pop(0)
+            if current and _norm_path(path) == _norm_path(current):
+                continue
+            if self.image_cache.get_thumbnail(path) is not None:
+                continue
+            # BACKGROUND priority so neighbor display prefetch (PRELOAD_NEXT) wins.
             self.image_manager.load_image(
                 file_path=path,
-                priority=Priority.PRELOAD_NEXT,
+                priority=Priority.BACKGROUND,
                 cancel_existing=False,
                 use_full_resolution=False,
                 stages={"thumbnail"},
             )
+            sent += 1
+        if pending:
+            QTimer.singleShot(interval_ms, self._drain_filmstrip_prefetch_chunk)
+        else:
+            self._filmstrip_prefetch_draining = False
 
     def _hide_all_loading_indicators(self):
         """Helper to hide all loading indicators across modes"""
@@ -16313,9 +16447,31 @@ class RAWImageViewer(QMainWindow):
 
         def _probe_one(p: str) -> tuple[str, float]:
             try:
+                from image_load_manager import get_image_load_manager, Priority
+                import time
+                manager = get_image_load_manager()
+                if manager is not None:
+                    while True:
+                        has_current = False
+                        with manager._queue_lock:
+                            for t in manager._active_tasks.values():
+                                if (
+                                    getattr(t, "priority", None) == Priority.CURRENT
+                                    and not t.is_cancelled()
+                                ):
+                                    has_current = True
+                                    break
+                        if not has_current:
+                            break
+                        time.sleep(0.05)
+            except Exception:
+                pass
+
+            try:
                 return p, probe_capture_timestamp_from_file(p)
             except Exception:
                 return p, 0.0
+
 
         with ThreadPoolExecutor(max_workers=workers) as pool:
             for p, ts in pool.map(_probe_one, missing_paths, chunksize=chunksize):
@@ -17823,6 +17979,25 @@ class RAWImageViewer(QMainWindow):
         logger.info(f"[LOAD] File path: {file_path}")
         logger.info(f"[LOAD] Previous file: {getattr(self, 'current_file_path', 'None')}")
         logger.info(f"[LOAD] Navigation state - in_progress: {getattr(self, '_navigation_in_progress', False)}")
+        
+        # Pause background gallery idle preloading when navigating to a new image
+        try:
+            if hasattr(self, 'gallery_view') and hasattr(self.gallery_view, 'pause_idle_preload'):
+                self.gallery_view.pause_idle_preload()
+        except Exception as e:
+            logger.debug(f"[LOAD] Failed to pause gallery idle preload: {e}")
+
+        # Stop the metadata-index defer timer so _SemanticIndexPrepWorker
+        # is not triggered during navigation.  It will be restarted by
+        # display_pixmap() after the new image is painted.
+        try:
+            t = getattr(self, "_metadata_index_defer_timer", None)
+            if t is not None and t.isActive():
+                t.stop()
+                logger.debug("[LOAD] Stopped _metadata_index_defer_timer for navigation")
+        except Exception as e:
+            logger.debug(f"[LOAD] Failed to stop metadata index timer: {e}")
+            
         try:
             self._single_view_load_request_ts = float(load_start)
             self._single_view_load_request_path = str(file_path or "")
@@ -21811,10 +21986,7 @@ class RAWImageViewer(QMainWindow):
             self._flush_deferred_sensor_full_decode()
             self._flush_deferred_full_exif_after_first_paint()
             
-        if hasattr(self, "_deferred_filmstrip_paths") and self._deferred_filmstrip_paths:
-            paths = list(self._deferred_filmstrip_paths)
-            self._deferred_filmstrip_paths.clear()
-            self._on_filmstrip_thumbnails_needed(paths)
+        self._schedule_deferred_filmstrip_flush()
             
         try:
             fp = getattr(self, "current_file_path", None)
@@ -21824,7 +21996,7 @@ class RAWImageViewer(QMainWindow):
                     self._apply_preview_first_status_bar(cached)
         except Exception:
             pass
-        QTimer.singleShot(0, self._prefetch_filmstrip_thumbnails)
+        QTimer.singleShot(1500, self._prefetch_filmstrip_thumbnails)
         if not self._should_defer_nav_preload():
             self._schedule_idle_display_prefetch()
             try:
@@ -22979,6 +23151,7 @@ class RAWImageViewer(QMainWindow):
                    f"time={current_time:.3f}")
         self._navigation_in_progress = True
         self._last_navigation_time = current_time
+        self._pause_prefetch_for_navigation()
         self._cancel_content_crossfade()
         self._skip_resolution_crossfade_once = True
         self._clear_pending_resolution_crossfade()
@@ -24644,6 +24817,95 @@ class RAWImageViewer(QMainWindow):
             self.status_metadata_label.setText(display)
             self.status_metadata_label.setVisible(bool(display))
 
+    def _request_sensor_dimensions_async(self, file_path, cached_exif) -> None:
+        """Resolve a RAW file's true sensor dimensions on a worker thread.
+
+        Reading sensor size needs rawpy.imread()/EXIF header parsing, which is slow on
+        external/network drives. Doing it inline in update_status_bar() blocks the main
+        thread on every navigation, so we offload it and refresh the HUD when done.
+        """
+        if not file_path:
+            return
+        try:
+            from common_image_loader import is_raw_file as _is_raw
+            if not _is_raw(file_path):
+                return
+        except Exception:
+            pass
+        # Attempt each file at most once per session: prevents both concurrent duplicate
+        # probes and a re-probe loop when extraction fails (we then keep display dims).
+        attempted = getattr(self, "_sensor_dim_probe_attempted", None)
+        if attempted is None:
+            attempted = set()
+            self._sensor_dim_probe_attempted = attempted
+        if file_path in attempted:
+            return
+        attempted.add(file_path)
+
+        # Connect the completion signal once.
+        if not getattr(self, "_sensor_dims_signal_connected", False):
+            try:
+                self._sensor_dims_resolved.connect(self._on_sensor_dims_resolved)
+            except Exception:
+                pass
+            self._sensor_dims_signal_connected = True
+
+        def _probe(path=file_path):
+            ow = oh = None
+            try:
+                import rawpy
+                with rawpy.imread(path) as raw:
+                    ow = int(raw.sizes.width)
+                    oh = int(raw.sizes.height)
+            except Exception:
+                ow = oh = None
+            if not ow or not oh:
+                try:
+                    tags = process_file_from_path(path, details=False)
+                    for w_tag in ("EXIF ExifImageWidth", "Image ImageWidth", "Image Width"):
+                        if w_tag in tags:
+                            ow = int(str(tags[w_tag]))
+                            break
+                    for h_tag in (
+                        "EXIF ExifImageLength", "Image ImageLength", "Image Height",
+                        "Image Length", "EXIF ExifImageHeight",
+                    ):
+                        if h_tag in tags:
+                            oh = int(str(tags[h_tag]))
+                            break
+                except Exception:
+                    ow = oh = None
+            try:
+                if ow and oh:
+                    ce = self.image_cache.get_exif(path) or (cached_exif if isinstance(cached_exif, dict) else {})
+                    if isinstance(ce, dict):
+                        ce = dict(ce)
+                        ce["original_width"] = ow
+                        ce["original_height"] = oh
+                        self.image_cache.put_exif(path, ce)
+            except Exception:
+                pass
+            try:
+                self._sensor_dims_resolved.emit(path)
+            except Exception:
+                pass
+
+        try:
+            import threading
+            threading.Thread(
+                target=_probe, name="sensor-dim-probe", daemon=True
+            ).start()
+        except Exception:
+            attempted.discard(file_path)
+
+    @pyqtSlot(str)
+    def _on_sensor_dims_resolved(self, file_path: str) -> None:
+        try:
+            if _norm_path(file_path) == _norm_path(getattr(self, "current_file_path", None)):
+                self.update_status_bar()
+        except Exception:
+            pass
+
     def update_status_bar(self, width=None, height=None):
         """Update status bar with comprehensive information including EXIF data
         
@@ -24758,30 +25020,16 @@ class RAWImageViewer(QMainWindow):
                 original_height = None
 
         if not original_width or not original_height:
-            # Try to extract original dimensions for RAW files using rawpy
             raw_map = {'.arw', '.cr2', '.cr3', '.nef', '.dng', '.raf', '.orf', '.rw2'}
             is_raw = os.path.splitext(self.current_file_path)[1].lower() in raw_map
-            
+
             if is_raw:
-                try:
-                    import rawpy
-                    with rawpy.imread(self.current_file_path) as raw:
-                        original_width = raw.sizes.width
-                        original_height = raw.sizes.height
-                        import logging
-                        logger = logging.getLogger(__name__)
-                        logger.info(f"[STATUS] Extracted real RAW dimensions via rawpy: {original_width}x{original_height}")
-                        
-                        # Update cache if we have cached_exif (even if it was missing dimensions)
-                        if cached_exif:
-                            cached_exif['original_width'] = original_width
-                            cached_exif['original_height'] = original_height
-                            self.image_cache.put_exif(self.current_file_path, cached_exif)
-                except Exception as e:
-                    pass
-            
-            # Fallback to EXIF reader for other files or if rawpy fails
-            if not original_width or not original_height:
+                # Resolve true sensor dimensions OFF the main thread; the HUD refreshes
+                # via _on_sensor_dims_resolved once ready. (rawpy.imread on an external
+                # drive used to block the UI on every navigation.)
+                self._request_sensor_dimensions_async(self.current_file_path, cached_exif)
+            else:
+                # Non-RAW: lightweight EXIF header read is cheap enough inline.
                 try:
                     tags = process_file_from_path(
                         self.current_file_path, details=False
@@ -24825,7 +25073,7 @@ class RAWImageViewer(QMainWindow):
                 import logging
 
                 logging.getLogger(__name__).info(
-                    f"[STATUS] Cached dimensions match preview pixmap ({original_width}x{original_height}); re-resolve sensor size via rawpy"
+                    f"[STATUS] Cached dimensions match preview pixmap ({original_width}x{original_height}); using display dims"
                 )
                 original_width = original_height = None
 
@@ -24889,6 +25137,40 @@ class RAWImageViewer(QMainWindow):
             zoom_level = "Fit"
         else:
             zoom_level = f"{int(self.current_zoom_level * 100)}%"
+
+        # --- Status bar dedup / debounce -----------------------------------
+        # update_status_bar() is called many times per image (thumbnail ready,
+        # full image ready, display_pixmap, minimal+full EXIF ready, etc.).
+        # Re-parsing EXIF and re-applying identical HUD text on every call wastes
+        # main-thread cycles and floods the log with duplicate [STATUS]/[TRACK]
+        # lines. When nothing user-visible changed, re-apply the cached text
+        # silently and skip the heavy EXIF parse + logging.
+        if self.view_mode == 'single':
+            _dedup_exif = self.image_cache.get_exif(self.current_file_path)
+            _dedup_exif_len = 0
+            if _dedup_exif:
+                _ed = _dedup_exif.get('exif_data')
+                if isinstance(_ed, dict):
+                    _dedup_exif_len = len(_ed)
+            status_signature = (
+                self.current_file_path,
+                zoom_level,
+                original_width, original_height,
+                width, height,
+                display_width, display_height,
+                bool(getattr(self, '_is_half_size_displayed', False)),
+                _dedup_exif_len,
+            )
+            if (
+                getattr(self, '_last_status_signature', None) == status_signature
+                and getattr(self, '_last_status_metadata_text', None) is not None
+            ):
+                self._apply_top_metadata_text(self._last_status_metadata_text)
+                if hasattr(self, "status_counter_label"):
+                    self._refresh_image_counter()
+                return
+        else:
+            status_signature = None
 
         # Try to get EXIF data from cache first (faster) - matching reference version
         exif_info = []
@@ -25229,7 +25511,11 @@ class RAWImageViewer(QMainWindow):
         # Show and set metadata text in single view mode (top bar, centered).
         if self.view_mode == 'single':
             self._apply_top_metadata_text(metadata_text)
-            # Track metadata display
+            # Remember signature + rendered text so identical follow-up calls can
+            # short-circuit (see dedup guard above) instead of re-parsing/re-logging.
+            self._last_status_signature = status_signature
+            self._last_status_metadata_text = metadata_text
+            # Track metadata display (logged once per distinct render thanks to dedup)
             import logging
             logger = logging.getLogger(__name__)
             # Extract individual EXIF fields for tracking
@@ -25949,9 +26235,9 @@ class RAWImageViewer(QMainWindow):
         if getattr(self, "_folder_fast_open_token", None) == token:
             import logging
             logging.getLogger(__name__).info(
-                "[FOLDER] Delaying EXIF sort refinement background threads by 2.5s for fast-open load prioritization"
+                "[FOLDER] Delaying EXIF sort refinement background threads by 5.0s for fast-open load prioritization"
             )
-            QTimer.singleShot(2500, _start_worker)
+            QTimer.singleShot(5000, _start_worker)
         else:
             _start_worker()
 
@@ -26463,13 +26749,13 @@ class RAWImageViewer(QMainWindow):
             worker = _FolderLoadWorker(token, folder_path, extensions, newest_first, start_file, start_view, signals)
             self._active_folder_load_worker = worker
             if fast_open:
-                # Delay folder scan thread pool start completely by 2.5 seconds to ensure
+                # Delay folder scan thread pool start completely by 5 seconds to ensure
                 # the cold-cache RAW decode completes first without thread/IO contention.
                 def _deferred_start(w=worker):
                     if token == getattr(viewer, "_folder_load_generation", None):
                         QThreadPool.globalInstance().start(w, priority=-1)
-                QTimer.singleShot(2500, _deferred_start)
-                logger.info("[FOLDER] Background folder load deferred by 2.5s to prioritize first image load")
+                QTimer.singleShot(5000, _deferred_start)
+                logger.info("[FOLDER] Background folder load deferred by 5.0s to prioritize first image load")
             else:
                 QThreadPool.globalInstance().start(worker)
                 logger.info("[FOLDER] Background folder load started for %s", folder_path)
