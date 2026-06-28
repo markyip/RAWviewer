@@ -50,6 +50,16 @@ def _gallery_viewport_buffer_screens() -> float:
         return 1.25
 
 
+def _gallery_scroll_buffer_screens() -> float:
+    """Wider widget pool while scrolling to reduce tile churn when thumbnails are warm."""
+    base = _gallery_viewport_buffer_screens()
+    raw = os.environ.get("RAWVIEWER_GALLERY_SCROLL_BUFFER_SCREENS", "2.5").strip()
+    try:
+        return max(base, float(raw))
+    except ValueError:
+        return max(base, 2.5)
+
+
 def _gallery_current_active_reserve(active_cap: int) -> int:
     """Slots reserved for visible (CURRENT) gallery tiles; prefetch cannot use them."""
     default = max(4, active_cap // 3)
@@ -284,6 +294,7 @@ class JustifiedGallery(QWidget):
         self._last_scroll_time = time.time()
         self._current_scroll_speed = 0.0
         self._is_scrolling_fast = False
+        self._scroll_indexing_paused = False
         # Trackpads emit many small deltas; a lower threshold causes "fast scroll" mode
         # and blank tiles. macOS defaults higher; override with RAWVIEWER_GALLERY_FAST_SCROLL_PX_S.
         default_fast = 12000 if sys.platform == "darwin" else 6000
@@ -370,6 +381,40 @@ class JustifiedGallery(QWidget):
             return
         self._last_load_visible_request_ts = now
         self._load_timer.start(max(1, int(delay_ms)))
+
+    def _is_actively_scrolling(self) -> bool:
+        """True during an in-progress scroll gesture (trackpad, wheel, or scrollbar)."""
+        return (time.time() - self._last_scroll_event_t) < 0.18
+
+    @staticmethod
+    def _pixmap_matches(widget, pixmap: Optional[QPixmap]) -> bool:
+        """True when the widget already displays the same pixmap instance."""
+        if pixmap is None or pixmap.isNull():
+            current = widget.pixmap()
+            return current is None or current.isNull()
+        current = widget.pixmap()
+        if current is None or current.isNull():
+            return False
+        try:
+            return int(current.cacheKey()) == int(pixmap.cacheKey())
+        except Exception:
+            return current is pixmap
+
+    def _paths_have_base_thumbnails(self, paths) -> bool:
+        for path in paths:
+            if not path:
+                continue
+            if self._thumbnail_cache.get((path, self._thumb_base_key)) is None:
+                return False
+        return True
+
+    def _apply_pixmap_if_changed(self, widget, pixmap: Optional[QPixmap]) -> None:
+        if self._pixmap_matches(widget, pixmap):
+            return
+        if pixmap is None or pixmap.isNull():
+            widget.setPixmap(QPixmap())
+        else:
+            widget.setPixmap(pixmap)
 
     def _scale_crop_to_fit(self, pixmap: QPixmap, target_size):
         """Scale pixmap to fully cover target_size, then center-crop to exact size."""
@@ -1258,14 +1303,8 @@ class JustifiedGallery(QWidget):
                 pixel = event.pixelDelta()
                 angle = event.angleDelta()
                 if not pixel.isNull() and pixel.y() != 0:
-                    self._wheel_timer.stop()
-                    self._wheel_accum_px = 0.0
-                    new_val = int(
-                        max(sb.minimum(), min(sb.maximum(), sb.value() - pixel.y()))
-                    )
-                    sb.setValue(new_val)
-                    event.accept()
-                    return True
+                    # Trackpad pixel scrolling: let QScrollArea handle natively (smoother on macOS).
+                    return False
                 if angle.y() != 0:
                     notches = angle.y() / 120.0
                     delta_y = int(notches * 120)
@@ -1338,11 +1377,12 @@ class JustifiedGallery(QWidget):
     def _on_scroll(self, value):
         now = time.time()
         
-        # Pause background indexing during active scrolling to eliminate resource contention and keep UX smooth
-        if self.parent_viewer is not None:
+        # Pause background indexing once per scroll burst (not every valueChanged tick).
+        if self.parent_viewer is not None and not self._scroll_indexing_paused:
             if hasattr(self.parent_viewer, "_pause_semantic_indexing_deferred"):
                 try:
                     self.parent_viewer._pause_semantic_indexing_deferred()
+                    self._scroll_indexing_paused = True
                     timer = getattr(self.parent_viewer, "_resume_indexing_timer", None)
                     if timer is not None:
                         timer.stop()
@@ -1382,6 +1422,8 @@ class JustifiedGallery(QWidget):
         # Throttle (do NOT restart continuously): allow periodic updates while scrolling.
         # The settle timer below guarantees a final update when scrolling stops.
         interval = 50 if not self._is_scrolling_fast else 150
+        if self._is_actively_scrolling() and not self._active_tasks:
+            interval = max(interval, 120)
         if not self._load_timer.isActive():
             self._load_timer.start(interval)
 
@@ -1395,6 +1437,7 @@ class JustifiedGallery(QWidget):
         # When the user stops scrolling, treat as "not scrolling fast" so we actually schedule work.
         self._is_scrolling_fast = False
         self._current_scroll_speed = 0
+        self._scroll_indexing_paused = False
         self._last_scroll_settle_t = time.time()
         self._thumb_first_after_settle_t = self._last_scroll_settle_t
         self._last_scroll_event_t = 0.0  # Reset scroll event timestamp so we enable DB loading
@@ -1712,7 +1755,12 @@ class JustifiedGallery(QWidget):
         scroll_y = scrollbar.value()
         v_h = v_port.height()
 
-        buffer_screens = _gallery_viewport_buffer_screens()
+        actively_scrolling = self._is_actively_scrolling()
+        buffer_screens = (
+            _gallery_scroll_buffer_screens()
+            if actively_scrolling
+            else _gallery_viewport_buffer_screens()
+        )
         buffer_px = int(v_h * buffer_screens)
         buffer_top = max(0, scroll_y - buffer_px)
         buffer_h = v_h + (2 * buffer_px)
@@ -1748,8 +1796,8 @@ class JustifiedGallery(QWidget):
             if idx not in visible_indices_set:
                 w = self._visible_widgets.pop(idx)
                 w.hide()
-                # During fast scroll, keep the last pixmap in the pool to avoid blank flashes.
-                if not is_fast:
+                # During scroll, keep pixmaps in the pool to avoid repaint churn on re-entry.
+                if not is_fast and not actively_scrolling:
                     w.clear()
                     w.original_pixmap = None
                 w.file_path = None
@@ -1762,7 +1810,7 @@ class JustifiedGallery(QWidget):
         # (or a short timeout), then enable prefetch.
         warmup_elapsed = time.time() - float(getattr(self, "_gallery_set_images_ts", 0.0) or 0.0)
         warmup_active = self._gallery_warmup_active()
-        allow_prefetch = (not is_fast) and (not warmup_active) and (
+        allow_prefetch = (not is_fast) and (not actively_scrolling) and (not warmup_active) and (
             self._first_thumb_ready_after_set or warmup_elapsed > 1.5
         )
 
@@ -1786,20 +1834,23 @@ class JustifiedGallery(QWidget):
         if center_paths:
             wanted_paths |= center_paths
 
-        # Cancel thumbnail work that is no longer near the scrollbar thumb.
-        # Skip cancel for visible RAW/DNG tiles still decoding at CURRENT priority.
-        to_cancel = self._requested_thumbnail_paths - wanted_paths
-        protected_paths: set[str] = set()
-        for fp in list(to_cancel):
-            if self._should_protect_active_raw_thumbnail(fp, visible_paths):
-                protected_paths.add(fp)
-                continue
-            try:
-                self.load_manager.cancel_task(fp)
-            except Exception:
-                pass
-            self._active_tasks.pop(fp, None)
-        self._requested_thumbnail_paths = wanted_paths | protected_paths
+        if not actively_scrolling:
+            # Cancel thumbnail work that is no longer near the scrollbar thumb.
+            # Skip cancel for visible RAW/DNG tiles still decoding at CURRENT priority.
+            to_cancel = self._requested_thumbnail_paths - wanted_paths
+            protected_paths: set[str] = set()
+            for fp in list(to_cancel):
+                if self._should_protect_active_raw_thumbnail(fp, visible_paths):
+                    protected_paths.add(fp)
+                    continue
+                try:
+                    self.load_manager.cancel_task(fp)
+                except Exception:
+                    pass
+                self._active_tasks.pop(fp, None)
+            self._requested_thumbnail_paths = wanted_paths | protected_paths
+        else:
+            self._requested_thumbnail_paths = set(visible_paths)
 
         load_tasks = []
         created_widgets = 0
@@ -1870,7 +1921,7 @@ class JustifiedGallery(QWidget):
             scaled_key = self._scaled_cache_key(path, physical_size)
             cached_scaled = self._thumbnail_cache.get(scaled_key)
             if cached_scaled:
-                w.setPixmap(cached_scaled)
+                self._apply_pixmap_if_changed(w, cached_scaled)
                 w.setText("")
                 cache_hit = True
             else:
@@ -1923,22 +1974,23 @@ class JustifiedGallery(QWidget):
                     scaled = self._fit_rotated_thumbnail(path, base, physical_size)
                     scaled.setDevicePixelRatio(dpr)
                     self._thumbnail_cache.put(scaled_key, scaled)
-                    w.setPixmap(scaled)
+                    self._apply_pixmap_if_changed(w, scaled)
                     w.setText("")
                     cache_hit = True
                 else:
                     if w.file_path != path or not w.pixmap() or w.pixmap().isNull():
-                        w.setPixmap(QPixmap())
+                        self._apply_pixmap_if_changed(w, QPixmap())
                     w.setText("")
 
             w.show()
-            pv = self.parent_viewer
-            if pv is not None and hasattr(pv, "_is_gallery_path_selected"):
-                if hasattr(w, "set_gallery_selected"):
-                    w.set_gallery_selected(pv._is_gallery_path_selected(path))
-            if pv is not None and hasattr(pv, "_is_gallery_path_bookmarked"):
-                if hasattr(w, "set_gallery_bookmarked"):
-                    w.set_gallery_bookmarked(pv._is_gallery_path_bookmarked(path))
+            if not actively_scrolling:
+                pv = self.parent_viewer
+                if pv is not None and hasattr(pv, "_is_gallery_path_selected"):
+                    if hasattr(w, "set_gallery_selected"):
+                        w.set_gallery_selected(pv._is_gallery_path_selected(path))
+                if pv is not None and hasattr(pv, "_is_gallery_path_bookmarked"):
+                    if hasattr(w, "set_gallery_bookmarked"):
+                        w.set_gallery_bookmarked(pv._is_gallery_path_bookmarked(path))
             thumb_missing = not cache_hit
             
             m = self._metadata_cache.get(path)
@@ -1952,6 +2004,16 @@ class JustifiedGallery(QWidget):
                 
             if stages and path not in self._active_tasks:
                 load_tasks.append((path, Priority.CURRENT, stages))
+
+        if actively_scrolling and not load_tasks and not self._active_tasks:
+            viewport_rect = QRect(0, scroll_y, v_port.width(), v_h)
+            viewport_items = self._get_visible_range(viewport_rect)
+            viewport_paths = {
+                item["file_path"] for _, item in viewport_items if item.get("file_path")
+            }
+            if self._paths_have_base_thumbnails(viewport_paths):
+                self._idle_preload_timer.start(1000)
+                return
 
         if center_paths:
             for path in center_paths:

@@ -2795,9 +2795,26 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         pm = getattr(self, "current_pixmap", None)
         if gv is not None and gv.has_pixmap():
             should_upgrade = self._needs_full_resolution_upgrade(fp)
-            self._gpu_zoom_in_to_point_finish()
+            focus_jump = bool(
+                getattr(self, "_pending_zoom_focus_subject", False)
+                or getattr(self, "_focus_zoom_anchor_active", False)
+            )
             if should_upgrade:
+                self._pending_zoom = True
+                self._pending_zoom_center = (
+                    self.zoom_center_point
+                    if getattr(self, "zoom_center_point", None) is not None
+                    else None
+                )
+                self._pending_zoom_thumbnail_size = (
+                    pm.size() if pm is not None and not pm.isNull() else None
+                )
+                gv._zoom_intent_100 = True
                 self._queue_sensor_full_decode(fp, priority_current=True)
+                if not focus_jump:
+                    self._gpu_zoom_in_to_point_finish()
+                return
+            self._gpu_zoom_in_to_point_finish()
             return
         if pm is None or pm.isNull():
             return
@@ -3244,14 +3261,16 @@ class RAWImageViewer(SessionMixin, QMainWindow):
     ) -> None:
         """Swap the GPU pixmap without losing a focus-box or pending zoom anchor."""
         reanchor = self._should_reanchor_focus_on_pixmap_upgrade(pixmap)
-        old_pm = getattr(self, "current_pixmap", None)
-        size_changed = self._pixmap_size_changed(old_pm, pixmap)
-
-        if reanchor and size_changed:
+        if reanchor:
             target = self._focus_zoom_target_for_pixmap(pixmap)
             if target is not None:
                 scale = float(gv.current_scale()) if gv.has_pixmap() else 1.0
-                if getattr(gv, "_zoom_intent_100", False) or scale >= 1.0 - 1e-4:
+                if (
+                    getattr(gv, "_zoom_intent_100", False)
+                    or getattr(self, "_pending_zoom_focus_subject", False)
+                    or getattr(self, "_focus_zoom_anchor_active", False)
+                    or scale >= 1.0 - 1e-4
+                ):
                     scale = max(scale, 1.0)
                 gv.set_pixmap_zoomed_at(
                     pixmap,
@@ -3266,12 +3285,6 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 return
 
         gv.set_pixmap(pixmap, preserve_view=True if preserve else None)
-        if reanchor:
-            target = self._focus_zoom_target_for_pixmap(pixmap)
-            if target is not None:
-                gv.center_on_image_point(float(target.x()), float(target.y()))
-                self.zoom_center_point = target
-                self._finish_focus_zoom_anchor_if_sensor_res()
 
     def _clear_pending_point_zoom_state(self) -> None:
         self._pending_zoom = False
@@ -12823,10 +12836,22 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             if getattr(self, "_focus_zoom_anchor_active", False) or getattr(
                 self, "_pending_zoom_focus_subject", False
             ):
-                target = self._focus_zoom_target_for_pixmap(pm)
-                if target is not None:
-                    gv.center_on_image_point(float(target.x()), float(target.y()))
-                    self.zoom_center_point = target
+                if self._apply_pending_gpu_point_zoom_in_place(pm, gv):
+                    return
+                if self._single_view_is_fit_mode() or getattr(
+                    self, "_pending_zoom", False
+                ):
+                    target = self._focus_zoom_target_for_pixmap(pm)
+                    if target is not None:
+                        gv.set_pixmap_zoomed_at(
+                            pm,
+                            float(target.x()),
+                            float(target.y()),
+                            scale=1.0,
+                        )
+                        self.zoom_center_point = target
+                        self.fit_to_window = False
+                        self.current_zoom_level = float(gv.current_scale())
                 self._finish_focus_zoom_anchor_if_sensor_res()
                 return
         if getattr(self, "_pending_zoom", False) or (
@@ -13261,6 +13286,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             logger.info(f"[CLEANUP] ========== _cleanup_current_processing() STARTED at {cleanup_start:.3f} ==========")
         
         try:
+            self._cancel_display_pixmap_converter()
+
             # Stop any current processing
             if self.current_processor is not None:
                 processor_type = type(self.current_processor).__name__
@@ -14193,6 +14220,142 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         # Show thumbnail in fit-to-window mode for quick overview
         return True
 
+    def _cancel_display_pixmap_converter(self) -> None:
+        converter = getattr(self, "_display_pixmap_converter", None)
+        if converter is None:
+            self._pending_display_pixmap_context = None
+            return
+        try:
+            converter.stop_processing()
+            try:
+                converter.pixmap_ready.disconnect(self._on_display_numpy_pixmap_ready)
+            except Exception:
+                pass
+            converter.quit()
+            converter.wait(80)
+        except Exception:
+            pass
+        self._display_pixmap_converter = None
+        self._pending_display_pixmap_context = None
+
+    def _start_display_numpy_pixmap_worker(
+        self,
+        file_path: str,
+        rgb_image,
+        *,
+        width: int,
+        height: int,
+        is_half_size: bool,
+    ) -> None:
+        """Convert a full-resolution numpy buffer to QPixmap off the UI thread."""
+        import logging
+
+        logger = logging.getLogger(__name__)
+        self._cancel_display_pixmap_converter()
+        self._pending_display_pixmap_context = {
+            "file_path": file_path,
+            "width": width,
+            "height": height,
+            "is_half_size": is_half_size,
+            "orientation_already_applied": getattr(
+                self, "_orientation_already_applied", False
+            ),
+        }
+        converter = PixmapConverter(file_path, rgb_image, None)
+        converter.pixmap_ready.connect(self._on_display_numpy_pixmap_ready)
+        self._display_pixmap_converter = converter
+        logger.info(
+            "[DISPLAY] Queued background QPixmap conversion for %s (%dx%d)",
+            os.path.basename(file_path),
+            width,
+            height,
+        )
+        converter.start()
+
+    def _on_display_numpy_pixmap_ready(self, file_path: str, pixmap) -> None:
+        """Finish display_numpy_image on the UI thread after background conversion."""
+        import logging
+        import time
+
+        logger = logging.getLogger(__name__)
+        ctx = getattr(self, "_pending_display_pixmap_context", None) or {}
+        if _norm_path(ctx.get("file_path", "")) != _norm_path(file_path):
+            return
+        if _norm_path(file_path) != _norm_path(getattr(self, "current_file_path", None)):
+            return
+
+        width = int(ctx.get("width") or (pixmap.width() if pixmap else 0))
+        height = int(ctx.get("height") or (pixmap.height() if pixmap else 0))
+        is_half_size = bool(ctx.get("is_half_size"))
+        self._pending_display_pixmap_context = None
+        self._display_pixmap_converter = None
+
+        if pixmap is None or pixmap.isNull():
+            logger.warning("[DISPLAY] Background QPixmap conversion returned empty pixmap")
+            return
+
+        if hasattr(self, "current_file_path") and self.current_file_path:
+            orientation_already_applied = bool(
+                ctx.get("orientation_already_applied")
+            )
+            if not orientation_already_applied:
+                orientation = self.get_orientation_from_exif(self.current_file_path)
+                if orientation != 1:
+                    logger.info(f"[DISPLAY] Applying orientation correction: {orientation}")
+                    pixmap = self.apply_orientation_to_pixmap(pixmap, orientation)
+
+        self._is_half_size_displayed = is_half_size
+        if is_half_size:
+            logger.debug(
+                f"[DISPLAY] Below sensor resolution on screen ({width}x{height})"
+            )
+        else:
+            self._smooth_zoom_full_request_sent = False
+            logger.info(
+                f"[DISPLAY] Sensor-resolution buffer on screen ({width}x{height})"
+            )
+
+        if hasattr(self, "current_file_path") and self.current_file_path and not is_half_size:
+            logger.info("[DISPLAY] Caching FULL resolution pixmap")
+            self.image_cache.put_pixmap(self.current_file_path, pixmap)
+        else:
+            logger.info("[DISPLAY] Skipping cache for thumbnail/half_size image")
+
+        if not is_half_size and hasattr(self, "_pending_zoom_restore") and self._pending_zoom_restore:
+            logger.info("[DISPLAY] Full resolution loaded, will restore zoom after display")
+
+        pixmap_display_start = time.time()
+        logger.info("[DISPLAY] Calling display_pixmap()")
+        self.display_pixmap(pixmap)
+        pixmap_display_time = time.time() - pixmap_display_start
+
+        if not is_half_size and hasattr(self, "_pending_zoom_restore") and self._pending_zoom_restore:
+            logger.info("[DISPLAY] Full resolution displayed, restoring zoom state")
+            self._pending_zoom_restore = False
+            self.fit_to_window = False
+            pending_zoom_level = getattr(self, "_pending_zoom_level", None)
+            pending_zoom_center = getattr(self, "_pending_zoom_center", None)
+            self.current_zoom_level = pending_zoom_level or 1.0
+            self.zoom_center_point = pending_zoom_center
+            if hasattr(self, "_restore_start_scroll_x") and hasattr(self, "_restore_start_scroll_y"):
+                self.start_scroll_x = self._restore_start_scroll_x
+                self.start_scroll_y = self._restore_start_scroll_y
+            self.apply_zoom_and_pan()
+            self.update_status_bar()
+            if hasattr(self, "_pending_zoom_center"):
+                delattr(self, "_pending_zoom_center")
+            if hasattr(self, "_pending_zoom_level"):
+                delattr(self, "_pending_zoom_level")
+            logger.info("[DISPLAY] Zoom state restored after full resolution display")
+            self._finish_nav_zoom_preserve()
+
+        logger.info(
+            "[DISPLAY] Background QPixmap display complete: %dx%d (pixmap: %.3fs)",
+            width,
+            height,
+            pixmap_display_time,
+        )
+
     def display_numpy_image(self, rgb_image):
         """Display a numpy image array."""
         if hasattr(self, 'current_file_path') and self.is_animated_image(self.current_file_path):
@@ -14241,12 +14404,12 @@ class RAWImageViewer(SessionMixin, QMainWindow):
 
             logger.info(f"[DISPLAY] ========== display_numpy_image() STARTED at {display_start:.3f} ==========")
             logger.info(f"[DISPLAY] Image dimensions: {width}x{height}, channels: {channels}")
+
+            max_dimension = max(width, height)
+            is_full_resolution = max_dimension >= 3000
             
             # Check if we have a cached pixmap first (fastest path)
             if hasattr(self, 'current_file_path') and self.current_file_path:
-                # Use max dimension to handle both portrait and landscape orientations
-                max_dimension = max(width, height)
-                is_full_resolution = max_dimension >= 3000
                 logger.info(f"[DISPLAY] Full resolution check: {is_full_resolution} (max dimension: {max_dimension}, {width}x{height})")
                 
                 if is_full_resolution:
@@ -14274,7 +14437,31 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                             self.display_pixmap(cached_pixmap)
                             return
             
-            # Convert to QPixmap
+            exif_for_flag = None
+            if hasattr(self, "current_file_path") and self.current_file_path:
+                try:
+                    exif_for_flag = self.image_cache.get_exif(self.current_file_path)
+                except Exception:
+                    pass
+            is_half_size = not image_covers_sensor_resolution(
+                width, height, exif_for_flag
+            )
+
+            if (
+                is_full_resolution
+                and hasattr(self, "current_file_path")
+                and self.current_file_path
+            ):
+                self._start_display_numpy_pixmap_worker(
+                    self.current_file_path,
+                    rgb_image,
+                    width=width,
+                    height=height,
+                    is_half_size=is_half_size,
+                )
+                return
+
+            # Convert to QPixmap (preview / sub-full-res path stays on UI thread)
             bytes_per_line = channels * width
             logger.info(f"[DISPLAY] Converting numpy array to QPixmap - bytes_per_line: {bytes_per_line}")
 
@@ -14319,15 +14506,6 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 else:
                     logger.debug(f"[DISPLAY] Orientation already applied by processor, skipping")
                     # safe_print(f"[ORIENTATION] display_numpy_image: Skipping orientation correction (already applied)")
-            exif_for_flag = None
-            if hasattr(self, "current_file_path") and self.current_file_path:
-                try:
-                    exif_for_flag = self.image_cache.get_exif(self.current_file_path)
-                except Exception:
-                    pass
-            is_half_size = not image_covers_sensor_resolution(
-                width, height, exif_for_flag
-            )
             self._is_half_size_displayed = is_half_size
             if is_half_size:
                 logger.debug(
@@ -16524,6 +16702,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                     getattr(self, "_pending_zoom_toggle", False)
                     or getattr(self, "_pending_zoom", False)
                     or getattr(self, "_pending_gpu_zoom_point", None) is not None
+                    or getattr(self, "_pending_zoom_focus_subject", False)
+                    or getattr(self, "_focus_zoom_anchor_active", False)
                     or (
                         getattr(gv, "_zoom_intent_100", False)
                         and not getattr(self, "_workflow_toggle_fit_until_display", False)
