@@ -208,7 +208,10 @@ class GalleryZoomSlider(QSlider):
             
         # Find closest step
         snapped = min(steps, key=lambda x: abs(x - val))
+        old = self.value()
         super().setValue(snapped)
+        if snapped != old:
+            self.valueChanged.emit(snapped)
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:

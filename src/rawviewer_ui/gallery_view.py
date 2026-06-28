@@ -226,14 +226,14 @@ class JustifiedGallery(QWidget):
         
         # Zoom state variables
         self._is_zooming = False
-        self._zoom_start_row_height = 220
-        self._zoom_locked_layout_items = []
+        self._zoom_anchor_state = None
         
         # Mapping of file_path to list of indices (for when the same file appears multiple times)
         self._path_to_indices = {}
         # Track what thumbnails we've recently requested so we can cancel far-away work
         self._requested_thumbnail_paths = set()
         self._pending_scroll_to_path = None
+        self._pending_scroll_anchor_state = None
         self._is_scrollbar_dragging = False
         self._last_scheduled_scroll_y = 0
         self._scroll_area = None
@@ -252,6 +252,7 @@ class JustifiedGallery(QWidget):
         self._pending_build_force = False
         self._gallery_folder_token = None
         self._ignore_resize_events = False
+        self._gallery_zoom_rebuild = False
 
         self._loading_label = None
         self._empty_label = None
@@ -400,6 +401,8 @@ class JustifiedGallery(QWidget):
         self._last_layout_content_height = 0
         self._last_layout_viewport_width = -1
         self._last_build_ts = 0.0
+        self._is_zooming = False
+        self._zoom_anchor_state = None
 
     def _layout_matches_current_images(self, images: Optional[List[str]] = None) -> bool:
         """True when cached layout rects correspond to the current image list."""
@@ -478,6 +481,8 @@ class JustifiedGallery(QWidget):
 
     def prepare_for_folder_change(self) -> None:
         """Drop in-flight gallery thumbnail state when the folder scope changes."""
+        self._is_zooming = False
+        self._zoom_anchor_state = None
         self._gallery_warmup_until = 0.0
         self._active_tasks.clear()
         self._requested_thumbnail_paths.clear()
@@ -619,6 +624,168 @@ class JustifiedGallery(QWidget):
         if idx < 0 or idx >= len(items):
             return None
         return items[idx].get("file_path")
+
+    def _capture_scroll_anchor_state(self) -> Optional[dict]:
+        """Capture the upper-left visible thumbnail before layout rebuild."""
+        scroll = self._scroll_area_widget()
+        items = self._gallery_layout_items
+        if scroll is None or not items:
+            return None
+        sb = scroll.verticalScrollBar()
+        scroll_y = sb.value()
+        idx = self._get_upper_left_visible_image_index()
+        if idx < 0:
+            idx = self._get_first_visible_image_index()
+        if idx < 0 or idx >= len(items):
+            return None
+        item = items[idx]
+        file_path = item.get("file_path")
+        if not file_path:
+            return None
+        rect = item["rect"]
+        return {
+            "file_path": file_path,
+            "offset_px": int(rect.top() - scroll_y),
+        }
+
+    def _zoom_scroll_anchor_for_rebuild(self) -> Optional[dict]:
+        """Map the zoom-session anchor to build_gallery scroll-restore format."""
+        state = self._zoom_anchor_state
+        if not state or not state.get("file_path"):
+            return None
+        offset = state.get("offset_px")
+        if offset is None:
+            offset = state.get("offset_y_px", 0)
+        return {"file_path": state["file_path"], "offset_px": int(offset)}
+
+    def _restore_scroll_anchor_state(self, state: Optional[dict]) -> bool:
+        """Restore scroll so the topmost visible tile stays at the same viewport offset."""
+        if not state:
+            return False
+        path = state.get("file_path")
+        if not path:
+            return False
+        if not self._layout_image_sequence or len(self._layout_image_sequence) != len(self.images):
+            return False
+
+        resolved = self._resolve_gallery_path(path)
+        if not resolved:
+            return False
+        indices = self._path_to_indices.get(resolved)
+        if not indices:
+            return False
+        idx = indices[0]
+        if idx < 0 or idx >= len(self._gallery_layout_items):
+            return False
+
+        scroll = self._scroll_area_widget()
+        if scroll is None:
+            return False
+        sb = scroll.verticalScrollBar()
+        expected_max = self._total_content_height - scroll.viewport().height()
+        if expected_max > 0 and sb.maximum() < expected_max - 50:
+            return False
+
+        rect = self._gallery_layout_items[idx]["rect"]
+        if "offset_px" in state:
+            offset_px = int(state["offset_px"])
+        else:
+            # Legacy center-anchor payloads (pre top-item fix).
+            tile_h = max(1, rect.height())
+            offset_in_item = float(state.get("offset_in_item", 0.0))
+            viewport_fraction = float(state.get("viewport_fraction", 0.0))
+            viewport_h = max(1, scroll.viewport().height())
+            anchor_y = rect.top() + max(0.0, min(1.0, offset_in_item)) * tile_h
+            target = int(
+                anchor_y - max(0.0, min(1.0, viewport_fraction)) * viewport_h
+            )
+            sb.setValue(max(sb.minimum(), min(target, sb.maximum())))
+            return True
+
+        target = int(rect.top() - offset_px)
+        sb.setValue(max(sb.minimum(), min(target, sb.maximum())))
+        return True
+
+    def _get_upper_left_visible_image_index(self) -> int:
+        """Index of the top-left visible thumbnail (viewport anchor for zoom)."""
+        scroll = self._scroll_area_widget()
+        items = self._gallery_layout_items
+        if scroll is None or not items:
+            return -1
+        sb = scroll.verticalScrollBar()
+        scroll_y = sb.value()
+        viewport_bottom = scroll_y + max(1, scroll.viewport().height())
+
+        best_idx = -1
+        best_top: int | None = None
+        best_left: int | None = None
+        for i, item in enumerate(items):
+            rect = item.get("rect")
+            if rect is None or not item.get("file_path"):
+                continue
+            if rect.bottom() <= scroll_y or rect.top() >= viewport_bottom:
+                continue
+            top = int(rect.top())
+            left = int(rect.left())
+            if (
+                best_idx < 0
+                or top < best_top
+                or (top == best_top and left < best_left)
+            ):
+                best_idx = i
+                best_top = top
+                best_left = left
+        return best_idx
+
+    def begin_zoom_session(self) -> bool:
+        """Begin interactive zoom; capture upper-left anchor for scroll restore."""
+        if not self._gallery_layout_items:
+            return False
+        scroll = self._scroll_area_widget()
+        scroll_y = (
+            int(scroll.verticalScrollBar().value()) if scroll is not None else 0
+        )
+        idx = self._get_upper_left_visible_image_index()
+        if idx < 0:
+            idx = self._get_first_visible_image_index()
+
+        self._is_zooming = True
+        if 0 <= idx < len(self._gallery_layout_items):
+            item = self._gallery_layout_items[idx]
+            rect = item["rect"]
+            self._zoom_anchor_state = {
+                "file_path": item.get("file_path"),
+                "offset_y_px": int(rect.top() - scroll_y),
+            }
+        else:
+            self._zoom_anchor_state = self._capture_scroll_anchor_state()
+
+        self._stop_layout_rebuild_timers()
+        self.hide_loading_message()
+        return True
+
+    def apply_gallery_zoom(self, row_height: int) -> None:
+        """Justified relayout at the new row height; keep the zoom anchor fixed vertically."""
+        row_height = max(220, min(500, int(row_height)))
+        if not self._is_zooming:
+            self.begin_zoom_session()
+        self.TARGET_ROW_HEIGHT = row_height
+        self._gallery_zoom_rebuild = True
+        try:
+            self.build_gallery(force=True)
+        finally:
+            self._gallery_zoom_rebuild = False
+        self._request_load_visible_images(0)
+
+    def end_zoom_session(self) -> None:
+        """Commit zoom session; defer any missing thumbs until after slider release."""
+        if not self._is_zooming:
+            return
+        self._is_zooming = False
+        self._zoom_anchor_state = None
+        self._last_layout_content_height = self._total_content_height
+        self._last_build_ts = time.time()
+        self._request_load_visible_images(30)
 
     def _current_image_layout_index(self) -> Optional[int]:
         """Layout index for the viewer's current single-view / navigation file."""
@@ -985,6 +1152,10 @@ class JustifiedGallery(QWidget):
         if not file_path:
             return
         self._pending_scroll_to_path = file_path
+        self._pending_scroll_anchor_state = {
+            "file_path": file_path,
+            "offset_px": 0,
+        }
         self._scroll_to_file_attempts = 0
         self._schedule_scroll_to_file_retry(0)
 
@@ -992,8 +1163,9 @@ class JustifiedGallery(QWidget):
         QTimer.singleShot(max(0, int(delay_ms)), self._apply_pending_scroll_to_file)
 
     def _apply_pending_scroll_to_file(self):
+        anchor_state = getattr(self, "_pending_scroll_anchor_state", None)
         path = self._pending_scroll_to_path
-        if not path:
+        if not anchor_state and not path:
             return
 
         # Guard 1: Verify the justified layout is fully built/updated for the current images
@@ -1002,6 +1174,22 @@ class JustifiedGallery(QWidget):
             self._scroll_to_file_attempts = attempts
             if attempts < 40:
                 self._schedule_scroll_to_file_retry(50)
+            return
+
+        if anchor_state:
+            if self._restore_scroll_anchor_state(anchor_state):
+                self._pending_scroll_to_path = None
+                self._pending_scroll_anchor_state = None
+                self._scroll_to_file_attempts = 0
+                self._request_load_visible_images(20)
+                return
+            attempts = getattr(self, "_scroll_to_file_attempts", 0) + 1
+            self._scroll_to_file_attempts = attempts
+            if attempts < 40:
+                self._schedule_scroll_to_file_retry(50)
+            return
+
+        if not path:
             return
 
         resolved = self._resolve_gallery_path(path)
@@ -1059,6 +1247,7 @@ class JustifiedGallery(QWidget):
         target = max(sb.minimum(), min(rect.top(), sb.maximum()))
         sb.setValue(target)
         self._pending_scroll_to_path = None
+        self._pending_scroll_anchor_state = None
         self._scroll_to_file_attempts = 0
         self._request_load_visible_images(20)
 
@@ -1710,12 +1899,11 @@ class JustifiedGallery(QWidget):
             return
         self._gallery_width_defer_count = 0
 
-        # Find the first visible image path to anchor the viewport zoom
-        anchor_path = None
-        if self._gallery_layout_items:
-            first_idx = self._get_first_visible_image_index()
-            if 0 <= first_idx < len(self._gallery_layout_items):
-                anchor_path = self._gallery_layout_items[first_idx]["file_path"]
+        anchor_state = None
+        if getattr(self, "_is_zooming", False) and self._zoom_anchor_state:
+            anchor_state = self._zoom_scroll_anchor_for_rebuild()
+        elif self._gallery_layout_items:
+            anchor_state = self._capture_scroll_anchor_state()
 
         self._building = True
         if self._resize_timer is not None and self._resize_timer.isActive():
@@ -1815,9 +2003,13 @@ class JustifiedGallery(QWidget):
                     self._total_content_height,
                 )
             should_load_visible = True
-            if anchor_path:
-                self.scroll_to_file(anchor_path)
-            if len(self.images) > 100:
+            if anchor_state:
+                self._pending_scroll_anchor_state = anchor_state
+                self._pending_scroll_to_path = None
+            if len(self.images) > 100 and not (
+                getattr(self, "_is_zooming", False)
+                or getattr(self, "_gallery_zoom_rebuild", False)
+            ):
                 self._schedule_aspects_settle_rebuild()
             if len(self.images) > 1000:
                 self.hide_loading_message()
@@ -1837,7 +2029,7 @@ class JustifiedGallery(QWidget):
                 )
             elif should_load_visible and not self._gallery_folder_superseded():
                 # Run after _building is cleared, so load_visible_images won't early-return.
-                if self._pending_scroll_to_path:
+                if self._pending_scroll_to_path or self._pending_scroll_anchor_state:
                     QTimer.singleShot(0, self._apply_pending_scroll_to_file)
                 self._request_load_visible_images(20)
 
@@ -1867,6 +2059,9 @@ class JustifiedGallery(QWidget):
         return visible
 
     def _get_first_visible_image_index(self):
+        idx = self._get_upper_left_visible_image_index()
+        if idx >= 0:
+            return idx
         p = self._scroll_area
         if p is None:
             p = self.parent()
@@ -1874,10 +2069,10 @@ class JustifiedGallery(QWidget):
                 p = p.parent()
         if not isinstance(p, QScrollArea):
             return -1
-        
+
         sb = p.verticalScrollBar()
         scroll_y = sb.value()
-        
+
         # Find the first item whose bottom is below scroll_y
         for i, item in enumerate(self._gallery_layout_items):
             if item["rect"].bottom() > scroll_y:
@@ -2767,13 +2962,9 @@ class JustifiedGallery(QWidget):
         if self._is_scrolling_fast:
             self._schedule_aspects_settle_rebuild(1500)
             return
-        anchor = self.get_scroll_anchor_path()
         if _focus_gallery_switch_logs():
             logger.debug("[GALLERY] aspects settle rebuild")
         self.build_gallery(force=True)
-        if anchor:
-            self._pending_scroll_to_path = anchor
-            QTimer.singleShot(0, self._apply_pending_scroll_to_file)
 
     def _handle_metadata_rebuild(self):
         """Rebuild layout after metadata changes to settle aspect ratios."""
@@ -2791,15 +2982,11 @@ class JustifiedGallery(QWidget):
             self._metadata_rebuild_timer.start(400)
             return
 
-        anchor = self.get_scroll_anchor_path()
         self._metadata_changed_paths.clear()
         if _focus_gallery_switch_logs():
             logger.debug("[GALLERY] metadata rebuild triggered")
 
         self.build_gallery(bulk_metadata=None, force=True)
-        if anchor:
-            self._pending_scroll_to_path = anchor
-            QTimer.singleShot(0, self._apply_pending_scroll_to_file)
 
     def show_loading_message(self, message="Loading gallery..."):
         """Show loading message overlay - Simplified for better performance"""

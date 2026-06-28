@@ -5,8 +5,10 @@
 
 Major release introducing a custom gallery zoom slider, interactive GPS map display overlay, animated GIF/WebP playback, and gallery responsiveness fixes for large folders and folder switching.
 
-### Gallery Zoom Slider
-- **Gallery Zoom Slider** — Added a custom slanted wedge-shaped zoom track and a white circular thumb handle in the justified gallery view. Minimum row height is locked to 220px to support zoom-in only, and settings are preserved in `QSettings`. Zoom recalculations are debounced (100ms) for smooth layout transitions and buttery smooth performance.
+### Gallery Zoom Slider & scroll anchoring
+- **Gallery Zoom Slider** — Custom slanted wedge-shaped zoom track and circular thumb in the justified gallery (bottom bar; row height **220–380px**, step 20). The chosen size is saved in `QSettings` (`gallery_row_height`).
+- **Justified relayout on zoom** — Dragging the slider runs a full justified grid rebuild at the new target row height so each row still fills the viewport width and thumbnail sizes change visibly.
+- **Scroll anchoring** — When you press the slider, the **upper-left visible** thumbnail becomes the anchor for the whole drag. After each relayout, vertical scroll is restored so that photo stays at the same height on screen (horizontal position may shift slightly as rows regroup).
 
 ### Interactive GPS Map Display Overlay
 - **GPS Map Overlay** — Press **M** in single-image view to show/hide the interactive tile-based map card displaying the photo's GPS coordinates and location pin.
@@ -15,34 +17,12 @@ Major release introducing a custom gallery zoom slider, interactive GPS map disp
 ### Animated GIF & WebP Playback
 - **Animated Previews** — Enhanced the image viewer pipeline to support playing, scaling, and animating GIF and WebP files. Displays playback status messages and handles dynamic window scaling seamlessly.
 
-### Navigation Responsiveness & Performance
-The first image after launch opens fast, but moving to the **next** image could stall for several seconds before the preview updated — especially on external drives. This was caused by background warm-up work flooding the worker pool and main thread right after the first paint. This update keeps navigation snappy without changing what you see:
-
-- **Staggered thumbnail warm-up** — Filmstrip thumbnail prefetching now drip-feeds through a single chunked, throttled queue after a short grace period instead of dumping the whole prefetch radius at once. This prevents the worker pool and UI thread from being saturated immediately after the first image renders.
-- **Prefetch yields to navigation** — Starting a navigation now cancels in-flight low-priority prefetch/background loads and pauses warm-up during a brief quiet window, so your current image always wins the race for I/O and CPU.
-- **Off-thread sensor-dimension lookup** — Resolving true RAW sensor dimensions for the status bar (`rawpy.imread`) used to run synchronously on the UI thread and block every navigation on external drives. It now runs on a background thread and refreshes the HUD when ready, with each file probed at most once per session.
-- **Status bar dedup / debounce** — The status HUD is rebuilt many times per image (thumbnail ready, full image ready, EXIF ready, …). Identical updates are now skipped via a lightweight signature check, avoiding redundant EXIF re-parsing, HUD re-layout, and duplicate log output.
-
-**What you might notice:** navigating to the next photo updates immediately instead of stalling, and subsequent images stay responsive while thumbnails fill in smoothly in the background.
-
-### Gallery — folder switch & layout
-- **Layout cache invalidation** — Switching folders (or re-entering gallery after browsing another album) no longer reuses stale thumbnail positions from the previous folder. Widget geometry is rebuilt or repositioned when the file list changes, fixing scattered thumbnails and large blank gaps (especially when the gallery skipped a full layout rebuild because the file count looked unchanged).
-- **Folder-scoped load guards** — Gallery thumbnail scheduling checks the active folder generation token so in-flight loads from a previous folder are ignored instead of painting into the wrong slots.
-- **Scroll reset on folder change** — Entering a new folder clears stale scroll position and active in-flight thumbnail markers so visible tiles can load immediately.
-
-### Gallery button on huge folders (3000+ photos)
-- **Earlier Gallery button** — The bottom **Gallery** toggle (and **Esc → gallery** shortcut) now appears as soon as the **quick folder index** finishes (~0.1 s after opening the first file), not after the full EXIF capture-time sort completes (which could take 10–15 s on uncached libraries due to a deliberate fast-open delay plus metadata probing).
-- **Search button unchanged** — Gallery **Search** still waits for EXIF sort so metadata filters and counters stay stable; only the gallery view entry is unlocked early.
-- **Order may refine** — If you open gallery before EXIF sort finishes, thumbnails may briefly follow filename/mtime order, then resort automatically when capture-time refinement completes (same as v2.2+ background sort behavior).
-
-### Background indexing — folder scope
-- **Cancel stale work on folder change** — Opening a different folder aborts in-flight semantic/metadata indexing, cancels ImageLoadManager and preload tasks, stops the metadata-index defer timer, and clears gallery layout state from the previous scope.
-- **Indexing abort checkpoints** — Background metadata extraction and semantic thumbnail warm-up pools honor an abort flag and exit promptly instead of continuing to parse files from the previous folder (log: `[INDEX] Indexing aborted (folder scope changed)` when a pass is interrupted mid-flight).
-- **Gallery browsing** — Background indexing stays paused while you are in gallery view (search starts its own indexing pass when needed); single view resumes indexing after idle as before.
-
-### Developer log markers (optional)
-- `[FOLDER] Cancelling stale async work (load_folder_images -> …)` — folder scope change
-- `[GALLERY] load_visible_images scheduled=…` — gallery thumbnail scheduling (should not stay at `deferred` indefinitely on folder switch)
+### Performance & gallery
+- **Snappier navigation** — Thumbnail warm-up is throttled and yields to image navigation so the next photo updates promptly, including from external drives. Filmstrip refresh and prefetch wait for single-view first paint (TTFR) instead of a fixed delay.
+- **Gallery folder switching** — Layout and thumbnail loads reset per folder; fixes scattered tiles and blank gaps after changing albums.
+- **Huge folders** — Gallery opens in capture-time (EXIF) order; the Gallery button appears once that sort finishes (instant when metadata is fully cached).
+- **Background indexing** — Metadata and semantic indexing from the previous folder are cancelled when you open a different album.
+- **Fast-open deferrals** — Background folder scan, EXIF sort, and filmstrip prefetch use TTFR-or-fallback timing (~2.5s cap) instead of a hard 5s sleep after fast-open.
 
 ---
 
@@ -393,8 +373,9 @@ Includes fixes from **2.0.1** (Pixel DNG, gallery aspect ratio, DNG single-view 
 主要版本，引入了自訂藝廊縮放滑桿、捲動錨定、支援離線資料庫的互動式 GPS 地圖顯示覆蓋圖層，以及動畫 GIF/WebP 播放功能。
 
 ### 藝廊縮放滑桿與捲動錨定
-- **藝廊縮放滑桿** —— 在藝廊視圖中新增了自訂 slanted 楔形縮放軌道和白色圓形滑桿按鈕。最小列高鎖定為 220px，僅支援放大，且設定值會保留在 `QSettings` 中。拖曳時的重新計算具有 100 毫秒的防抖延遲，確保效能流暢。
-- **捲動錨定** —— 重新轉譯和調整大小的更新現在能完美錨定到視窗中顯示的第一張影像，防止在調整大小或縮放時視窗滾動位置被重設。
+- **藝廊縮放滑桿** —— 在藝廊視圖底部列新增自訂 slanted 楔形縮放軌道與圓形滑桿（列高 **220–380px**，步進 20）。設定儲存於 `QSettings`（`gallery_row_height`）。
+- **縮放時 justified 重排** —— 拖曳滑桿會以新的目標列高完整重建 justified 網格，每列仍填滿視窗寬度，縮圖大小明顯改變。
+- **捲動錨定** —— 按下滑桿時，以**左上角可見**縮圖為錨點；每次重排後還原垂直捲動，使該照片在畫面上的高度大致不變（列重新分組時水平位置可能略有偏移）。
 
 ### 互動式 GPS 地圖顯示覆蓋
 - **GPS 地圖覆蓋** —— 在單張影像檢視中按下 **M** 鍵，可顯示/隱藏互動式瓦片地圖卡片，顯示相片的 GPS 座標和位置大頭針。
@@ -402,3 +383,10 @@ Includes fixes from **2.0.1** (Pixel DNG, gallery aspect ratio, DNG single-view 
 
 ### 動畫 GIF 與 WebP 播放
 - **動畫預覽** —— 增強了影像檢視器管線，完整支援播放、縮放和播放動畫 GIF 及 WebP 檔案，顯示播放狀態訊息，並無縫處理動態視窗縮放。
+
+### 效能與藝廊
+- **更順暢的導覽** —— 縮圖預熱節流並讓路給影像切換；底片條刷新與預取改為等待單圖首次繪製（TTFR），不再使用固定延遲。
+- **藝廊切換資料夾** —— 每個資料夾重設版面與縮圖載入，修正切換相簿後縮圖散亂或大片空白。
+- **大型資料夾** —— 藝廊以拍攝時間（EXIF）排序；Gallery 按鈕在排序完成後出現（中繼資料已快取時幾乎即時）。
+- **背景索引** —— 開啟不同相簿時，取消上一資料夾的中繼資料與語意索引。
+- **快速開啟延遲** —— 背景掃描、EXIF 排序與底片條預取改為 TTFR 或約 2.5 秒上限，取代固定 5 秒睡眠。

@@ -188,12 +188,21 @@ Pass env vars as arguments: `./scripts/Launch/shell/launch_dev.sh RAWVIEWER_GPU_
 | `RAWVIEWER_SESSION_RESTORE_PRELOAD_DELAY_MS` | `800` | Wait after full decode before neighbor prefetch |
 | `RAWVIEWER_DISABLE_SESSION_RESTORE` | `0` | Skip restoring last folder (also set for one launch after `clear_cache.sh`) |
 
+**Fast-open deferrals (v2.5.0):** background folder scan and EXIF sort wait for single-view first paint (TTFR), with a fallback cap instead of a fixed 5s sleep.
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `RAWVIEWER_DEFER_UNTIL_PAINT_MS` | `2500` | Generic TTFR-or-fallback cap |
+| `RAWVIEWER_FAST_OPEN_FOLDER_LOAD_DEFER_MS` | `2500` | Full folder scan worker after fast-open |
+| `RAWVIEWER_FAST_OPEN_SORT_DEFER_MS` | `2500` | EXIF capture-time sort after fast-open |
+| `RAWVIEWER_FILMSTRIP_PREFETCH_DEFER_MS` | `800` | Filmstrip thumb refresh/prefetch before TTFR |
+
 **Folder / gallery diagnostics (v2.5.0, dev logs):**
 
 | Log prefix | Meaning |
 |------------|---------|
 | `[FOLDER] Cancelling stale async work` | Previous folder's indexing, loads, and gallery state cancelled |
-| `[FOLDER] Quick folder index ready` | Navigation list ready; Gallery button may appear (before EXIF sort) |
+| `[FOLDER] Quick folder index ready` | Navigation list ready; EXIF capture-time sort may still be running |
 | `[INDEX] Indexing aborted (folder scope changed)` | Background metadata/semantic pass stopped mid-flight |
 | `[GALLERY] load_visible_images scheduled=` | Gallery thumbnails scheduling (contrast with `deferred` stall) |
 
@@ -209,7 +218,8 @@ After `build_macos.sh` or `pixi run python build.py`:
 4. **Share:** Click share → Qt menu lists Mail / Messages / etc.; pick Mail and confirm attachment path (not an empty spinner).
 5. **Semantic (if models bundled):** Search field accepts a text query; index progress in status area.
 6. **GPU view:** Pan/zoom; toggle `RAWVIEWER_GPU_VIEW=0` if comparing share behavior.
-7. **Frozen vs dev:** Re-test share on the `.app` build; sandbox entitlements differ from `python src/main.py` (see sharing doc).
+7. **Gallery zoom:** Open gallery on a multi-row folder; drag the bottom-bar size slider — thumbnails resize, rows stay justified, scroll should stay roughly anchored to the upper-left visible photo.
+8. **Frozen vs dev:** Re-test share on the `.app` build; sandbox entitlements differ from `python src/main.py` (see sharing doc).
 
 Logs: dev console `[SHARE]`; packaged app under `~/Library/Logs/` or paths noted in app logging when `RAWVIEWER_FILE_LOG=1`.
 

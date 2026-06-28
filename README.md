@@ -23,7 +23,9 @@ Download: **[GitHub Releases](https://github.com/markyip/RAWviewer/releases/late
 
 Open a folder (menu, drag-and-drop, or double-click a photo). Scroll the **gallery**; click a thumbnail for full-screen view.
 
-On **large folders** (thousands of photos), the **Gallery** button appears as soon as the quick file index is ready — you do not need to wait for background capture-time (EXIF) sorting to finish. Thumbnail order may refine a few seconds later when sorting completes.
+On **large folders** (thousands of photos), the **Gallery** button appears once capture-time (EXIF) sorting finishes, so thumbnails are in shooting order as soon as you open gallery. If metadata is already cached, sort is instant.
+
+In **gallery view**, drag the **size slider** in the bottom bar to change thumbnail size. Rows reflow in a justified grid (full width); scroll stays anchored to the upper-left visible photo while you drag.
 
 | Key | Action |
 |-----|--------|
@@ -83,7 +85,7 @@ For a dedicated **cluster map** across an entire album and **geotagging photos m
 2. Choose **Full (CUDA)**, **Full (DirectML)**, or **Lite** in the wizard. **Full** also downloads AI models (~600 MB).
 3. Launch **`RAWviewer.exe`** or the Desktop shortcut (not the Setup file again).
 
-> **v2.5 new:** Gallery zoom slider, scroll anchoring, GPS map overlay (**M**), animated GIF/WebP playback, faster Gallery button on huge folders, reliable gallery layout when switching albums, and cleaner cancellation of background indexing from the previous folder.
+> **v2.5 new:** Gallery zoom slider, scroll anchoring, GPS map overlay (**M**), animated GIF/WebP playback, reliable gallery layout when switching albums, and cleaner cancellation of background indexing from the previous folder.
 
 Registers **Open with** for common photo formats. Uninstall: Settings → Apps, or **`uninstall.bat`** in `%LOCALAPPDATA%\RAWviewer`.
 
@@ -129,7 +131,7 @@ To clear thumbnails only: **`scripts\Launch\bat\clear_cache.bat`** (Windows) · 
 | AI search missing after install (**Full**) | Open gallery **Search** → accept the download prompt |
 | RAWviewer not in Open with | Re-run the installer (repair), or reinstall |
 | Gallery layout wrong after folder switch | **v2.5.0** — update; clears stale layout cache |
-| Gallery button missing ~15 s on huge folder | **v2.5.0** — Gallery unlocks after quick index, not EXIF sort |
+| Gallery zoom jumps or thumbnails do not resize | **v2.5.0** — use the bottom-bar size slider in gallery view |
 | Leftover cache after uninstall | Run **`uninstall.bat`** again, or delete `%USERPROFILE%\.rawviewer_cache` manually |
 | Out of memory during AI indexing | See [Automatic memory tuning](#automatic-memory-tuning); use **Lite** on 8 GB PCs or set `RAWVIEWER_MEMORY_TIER_AUTO=0` and lower workers manually |
 | App slow or exits after reopening last folder | **v2.4.1+** staggers full decode and prefetch on session restore. Still tight on 8 GB? Use **Lite**, or `RAWVIEWER_DISABLE_SESSION_RESTORE=1` |
@@ -152,7 +154,8 @@ To clear thumbnails only: **`scripts\Launch\bat\clear_cache.bat`** (Windows) · 
 | Killed on relaunch (`Killed: 9` / exit 137 in Terminal) | **v2.4.1+** fixes most session-restore bursts. Try **Lite**, `RAWVIEWER_DISABLE_SESSION_RESTORE=1`, or `RAWVIEWER_ENABLE_SEMANTIC_SEARCH=0` |
 | Gallery stutters on a huge folder | Update to **v2.4+**. If it persists, run **`clear_cache.sh`** and reopen the folder |
 | Gallery thumbnails scattered or large blank gaps after switching folders | Update to **v2.5.0**; layout cache is invalidated per folder |
-| Gallery button slow to appear (3000+ photos) | Update to **v2.5.0** — button shows after quick index (~instant), before EXIF sort finishes |
+| Gallery zoom jumps or thumbnails do not resize | Update to **v2.5.0**; use the bottom-bar size slider in gallery view |
+| Gallery button slow on huge folder (first open) | Normal — waits for EXIF capture-time sort so gallery order is correct; instant when metadata is cached |
 | Background indexing still touching old folder after switch | Update to **v2.5.0**; stale indexing/metadata workers are aborted on folder change |
 | Thumbnails sideways or wrong way up (portrait shots) | Update to **v2.4**. Run **`clear_cache.sh`** once if old thumbnails were cached before the fix |
 | GPS map not showing | Press **M** in single-image view; the map only appears when the photo has embedded GPS coordinates |
@@ -357,7 +360,7 @@ scripts\Launch\bat\build_windows_lite.bat
 - **UnifiedImageProcessor** — RAW/JPEG/TIFF via one path
 - **Cache** — memory-first; optional disk cache via env; **RAM-tier defaults** at startup (`rawviewer_profile.py`)
 - **Semantic index** — SQLite + local embeddings (Core ML on macOS, ONNX on Windows; Full builds only); background passes abort when folder scope changes (**v2.5.0**)
-- **Gallery (JustifiedGallery)** — layout cache keyed to folder generation; quick index unlocks Gallery UI before EXIF capture-time sort completes (**v2.5.0**)
+- **Gallery (JustifiedGallery)** — justified grid with zoom slider (relayout + upper-left scroll anchor); layout cache keyed to folder generation; gallery opens in capture-time order after EXIF sort (**v2.5.0**)
 
 ---
 

@@ -3938,17 +3938,20 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             bar.set_files(files, bulk_metadata=bulk, select_index=idx)
             self._refresh_filmstrip_bookmark_visuals()
 
-            # If the first single-view image hasn't finished its full-res
-            # upgrade yet, defer the visible-cell thumbnail refresh so that
-            # the burst of rawpy.extract_thumb calls doesn't compete with the
-            # main-thread QPixmap conversion for the GIL.
-            _first_render_done = getattr(self, "_single_view_first_render_logged", False)
-            _filmstrip_refresh_delay = 0 if _first_render_done else 1500
-            if _filmstrip_refresh_delay > 0:
-                QTimer.singleShot(_filmstrip_refresh_delay, lambda: self._sync_filmstrip_index(center=True))
-            else:
+            # Defer visible-cell refresh / prefetch until TTFR so rawpy.extract_thumb
+            # does not compete with the main-thread QPixmap conversion for the GIL.
+            def _refresh_filmstrip_after_paint() -> None:
                 self._sync_filmstrip_index(center=True)
-            QTimer.singleShot(1500, self._prefetch_filmstrip_thumbnails)
+                self._prefetch_filmstrip_thumbnails()
+
+            if getattr(self, "_single_view_first_render_logged", False):
+                _refresh_filmstrip_after_paint()
+            else:
+                self._defer_until_first_paint(
+                    _refresh_filmstrip_after_paint,
+                    fallback_ms=_env_int("RAWVIEWER_FILMSTRIP_PREFETCH_DEFER_MS", 800, minimum=0),
+                    label="filmstrip",
+                )
         finally:
             self._sync_filmstrip_in_progress = False
 
@@ -9212,7 +9215,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             self.size_slider.hide()
 
         if hasattr(self, 'view_mode_button'):
-            self.view_mode_button.setVisible(self._is_gallery_ui_ready())
+            self.view_mode_button.setVisible(self._is_exif_sort_ready())
         if hasattr(self, "search_bottom_button"):
             self.search_bottom_button.setVisible(bool(self.image_files) and self._is_exif_sort_ready())
         # Update icon if using qtawesome
@@ -9692,28 +9695,32 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         # here; they can trigger redundant scheduling and visible scroll lag.
 
     def _on_zoom_slider_pressed(self):
-        pass
+        if hasattr(self, "gallery_justified") and self.gallery_justified:
+            self.gallery_justified.begin_zoom_session()
 
     def _on_zoom_slider_changed(self, value):
-        if hasattr(self, 'gallery_justified') and self.gallery_justified:
-            self.gallery_justified.TARGET_ROW_HEIGHT = value
-            if not self.size_slider.isSliderDown():
-                self._zoom_debounce_timer.stop()
-                self._zoom_debounce_timer.start(100)
+        if hasattr(self, "gallery_justified") and self.gallery_justified:
+            gj = self.gallery_justified
+            gj.apply_gallery_zoom(value)
 
     def _on_zoom_slider_released(self):
-        if hasattr(self, 'gallery_justified') and self.gallery_justified:
+        if hasattr(self, "gallery_justified") and self.gallery_justified:
             value = self.size_slider.value()
             self.get_settings().setValue("gallery_row_height", value)
             if self._zoom_debounce_timer.isActive():
                 self._zoom_debounce_timer.stop()
-            self._rebuild_gallery_zoom()
+            gj = self.gallery_justified
+            gj.apply_gallery_zoom(value)
+            gj.end_zoom_session()
 
     def _rebuild_gallery_zoom(self):
-        if hasattr(self, 'gallery_justified') and self.gallery_justified:
+        if hasattr(self, "gallery_justified") and self.gallery_justified:
+            gj = self.gallery_justified
             value = self.size_slider.value()
-            self.gallery_justified.TARGET_ROW_HEIGHT = value
-            self.gallery_justified.build_gallery(force=True)
+            if not getattr(gj, "_is_zooming", False):
+                gj.begin_zoom_session()
+            gj.apply_gallery_zoom(value)
+            gj.end_zoom_session()
             try:
                 self.get_settings().setValue("gallery_row_height", value)
             except Exception:
@@ -17380,6 +17387,34 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         flag = os.environ.get("RAWVIEWER_SESSION_RESTORE_DEFER_PRELOAD", "1").strip().lower()
         return flag not in ("0", "false", "no", "off")
 
+    def _defer_until_first_paint(
+        self,
+        callback,
+        *,
+        fallback_ms: int | None = None,
+        poll_ms: int = 50,
+        label: str = "",
+    ) -> None:
+        """Run *callback* after single-view TTFR, or after *fallback_ms* if paint is never logged."""
+        if getattr(self, "_single_view_first_render_logged", False):
+            callback()
+            return
+        if fallback_ms is None:
+            fallback_ms = _env_int("RAWVIEWER_DEFER_UNTIL_PAINT_MS", 2500, minimum=0)
+        poll_ms = max(10, int(poll_ms))
+        deadline = time.monotonic() + (fallback_ms / 1000.0)
+
+        def _tick() -> None:
+            if getattr(self, "_single_view_first_render_logged", False):
+                callback()
+                return
+            if time.monotonic() >= deadline:
+                callback()
+                return
+            QTimer.singleShot(poll_ms, _tick)
+
+        QTimer.singleShot(poll_ms, _tick)
+
     def _schedule_post_session_restore_prefetch(self) -> None:
         """Staged heavy loads after session-restore TTFR: full decode, then nav preload."""
         if not self._should_defer_nav_preload():
@@ -18523,7 +18558,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 return
             if self._clear_gallery_bookmark_filter():
                 return
-        elif vm == "single" and self._is_gallery_ui_ready():
+        elif vm == "single" and self._is_exif_sort_ready():
             self.toggle_view_mode()
 
     def _shortcut_activate_gallery_up(self) -> None:
@@ -20574,7 +20609,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         # Gallery toggle only in single-image mode (in gallery you return by tapping a thumbnail)
         if hasattr(self, 'view_mode_button'):
             self.view_mode_button.setVisible(
-                bool(self.image_files) and self.view_mode == "single" and self._is_gallery_ui_ready()
+                bool(self.image_files) and self.view_mode == "single" and self._is_exif_sort_ready()
             )
         if hasattr(self, "share_bottom_button"):
             self._sync_share_button_visibility()
@@ -21672,7 +21707,6 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             self.current_file_index = start_idx
             self.current_file_path = image_files[start_idx]
 
-        self._folder_navigation_ready_token = token
         self._sync_filmstrip_to_folder()
         self.update_status_bar()
         self._refresh_image_counter()
@@ -21876,14 +21910,18 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 return
             QThreadPool.globalInstance().start(_FolderSortRefineWorker())
 
-        # If we are fast-opening a single file, delay the worker startup by 2.5 seconds to
-        # allow the initial image to load quickly without I/O contention.
         if getattr(self, "_folder_fast_open_token", None) == token:
             import logging
+
+            defer_ms = _env_int("RAWVIEWER_FAST_OPEN_SORT_DEFER_MS", 2500, minimum=0)
             logging.getLogger(__name__).info(
-                "[FOLDER] Delaying EXIF sort refinement background threads by 5.0s for fast-open load prioritization"
+                "[FOLDER] Deferring EXIF sort until first paint or %dms (fast-open)",
+                defer_ms,
             )
-            QTimer.singleShot(5000, _start_worker)
+            if defer_ms <= 0:
+                _start_worker()
+            else:
+                self._defer_until_first_paint(_start_worker, fallback_ms=defer_ms)
         else:
             _start_worker()
 
@@ -21894,20 +21932,6 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             getattr(self, "_folder_sort_refinement_applied_token", None) == current_gen
         )
         return refinement_applied or len(getattr(self, "image_files", [])) <= 1
-
-    def _is_gallery_ui_ready(self) -> bool:
-        """Gallery can open once navigation list exists; EXIF resort may still be pending."""
-        files = getattr(self, "image_files", None) or []
-        if len(files) <= 1:
-            return bool(files)
-        current_gen = getattr(self, "_folder_load_generation", None)
-        if current_gen is None:
-            return False
-        if getattr(self, "_folder_sort_refinement_applied_token", None) == current_gen:
-            return True
-        if getattr(self, "_folder_navigation_ready_token", None) == current_gen:
-            return True
-        return False
 
     def _apply_folder_sort_refinement(self, token: int, sorted_files: list, bulk_metadata: dict) -> None:
         if token != getattr(self, "_folder_load_generation", None):

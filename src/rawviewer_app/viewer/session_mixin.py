@@ -6,7 +6,7 @@ import traceback
 
 from PyQt6.QtCore import QRunnable, QThreadPool, QTimer
 
-from rawviewer_app.env import _norm_path
+from rawviewer_app.env import _env_int, _norm_path
 from rawviewer_app.signals import FolderLoadSignals
 
 
@@ -66,7 +66,6 @@ class SessionMixin:
                     f"load_folder_images -> {os.path.basename(folder_path)}"
                 )
             self._folder_sort_refinement_applied_token = None
-            self._folder_navigation_ready_token = None
             extensions = set(self.get_supported_extensions())
             newest_first = self.get_sort_preference()
 
@@ -237,13 +236,20 @@ class SessionMixin:
             worker = _FolderLoadWorker(token, folder_path, extensions, newest_first, start_file, start_view, signals)
             self._active_folder_load_worker = worker
             if fast_open:
-                # Delay folder scan thread pool start completely by 5 seconds to ensure
-                # the cold-cache RAW decode completes first without thread/IO contention.
+                defer_ms = _env_int("RAWVIEWER_FAST_OPEN_FOLDER_LOAD_DEFER_MS", 2500, minimum=0)
+
                 def _deferred_start(w=worker):
                     if token == getattr(viewer, "_folder_load_generation", None):
                         QThreadPool.globalInstance().start(w, priority=-1)
-                QTimer.singleShot(5000, _deferred_start)
-                logger.info("[FOLDER] Background folder load deferred by 5.0s to prioritize first image load")
+
+                logger.info(
+                    "[FOLDER] Background folder load deferred until first paint or %dms",
+                    defer_ms,
+                )
+                if defer_ms <= 0:
+                    _deferred_start()
+                else:
+                    viewer._defer_until_first_paint(_deferred_start, fallback_ms=defer_ms)
             else:
                 QThreadPool.globalInstance().start(worker)
                 logger.info("[FOLDER] Background folder load started for %s", folder_path)
