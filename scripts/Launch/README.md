@@ -164,6 +164,7 @@ RAWVIEWER_TEST_PYEXIV2=0 RAWVIEWER_TEST_SEMANTIC=0 ./scripts/Launch/shell/launch
 | Variable | Default | Notes |
 |----------|---------|--------|
 | `RAWVIEWER_GPU_VIEW` | `1` (release default) | OpenGL single-image viewport; set `0` for legacy scroll view |
+| `RAWVIEWER_DISABLE_EDR` | `0` | macOS: set `1` to disable EDR viewport and force SDR HDR tone mapping |
 | `RAWVIEWER_SHARE_MENU` | `1` | Qt menu of `NSSharingService` targets (reliable under Qt6) |
 | `RAWVIEWER_ENABLE_SEMANTIC_SEARCH` | `1` | Semantic search on |
 | `RAWVIEWER_DEBUG` | `1` | Verbose logging |
@@ -219,7 +220,8 @@ After `build_macos.sh` or `pixi run python build.py`:
 5. **Semantic (if models bundled):** Search field accepts a text query; index progress in status area.
 6. **GPU view:** Pan/zoom; toggle `RAWVIEWER_GPU_VIEW=0` if comparing share behavior.
 7. **Gallery zoom:** Open gallery on a multi-row folder; drag the bottom-bar size slider — thumbnails resize, rows stay justified, scroll should stay roughly anchored to the upper-left visible photo.
-8. **Frozen vs dev:** Re-test share on the `.app` build; sandbox entitlements differ from `python src/main.py` (see sharing doc).
+8. **HDR / EDR (macOS):** Open an HDR HEIC or 16-bit TIFF in single-image view on an EDR display; bright highlights should use headroom above SDR white. Compare with `RAWVIEWER_DISABLE_EDR=1` (SDR tone map).
+9. **Frozen vs dev:** Re-test share on the `.app` build; sandbox entitlements differ from `python src/main.py` (see sharing doc).
 
 Logs: dev console `[SHARE]`; packaged app under `~/Library/Logs/` or paths noted in app logging when `RAWVIEWER_FILE_LOG=1`.
 

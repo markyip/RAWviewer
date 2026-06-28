@@ -3,7 +3,7 @@
 ## 🚀 Version 2.5.0
 **Release Date: June 25, 2026**
 
-Major release introducing a custom gallery zoom slider, interactive GPS map display overlay, animated GIF/WebP playback, and gallery responsiveness fixes for large folders and folder switching.
+Major release introducing a custom gallery zoom slider, interactive GPS map display overlay, macOS HDR/EDR viewing, animated GIF/WebP playback, and gallery responsiveness fixes for large folders and folder switching.
 
 ### Gallery Zoom Slider & scroll anchoring
 - **Gallery Zoom Slider** — Custom slanted wedge-shaped zoom track and circular thumb in the justified gallery (bottom bar; row height **220–380px**, step 20). The chosen size is saved in `QSettings` (`gallery_row_height`).
@@ -11,18 +11,26 @@ Major release introducing a custom gallery zoom slider, interactive GPS map disp
 - **Scroll anchoring** — When you press the slider, the **upper-left visible** thumbnail becomes the anchor for the whole drag. After each relayout, vertical scroll is restored so that photo stays at the same height on screen (horizontal position may shift slightly as rows regroup).
 
 ### Interactive GPS Map Display Overlay
-- **GPS Map Overlay** — Press **M** in single-image view to show/hide the interactive tile-based map card displaying the photo's GPS coordinates and location pin.
+- **GPS Map Overlay** — Press **M** in single-image view to show/hide an interactive tile-based map card. The card appears immediately with a **Loading map…** placeholder while tiles fetch; non-geotagged photos do not pop up a map.
+- **Coordinate badge** — A clickable badge shows lat/lon on the map; click it to open the location in **Google Maps** (browser).
 - **Offline Reverse-Geocoding for Search** — Bundles preloaded worldwide cities (all cities with population > 500, covering over 100,000+ locations) and landmarks databases (`cities500.csv.gz` and `landmarks.csv.gz`). During background indexing, GPS coordinates are resolved to city, region, and country names and stored locally — enabling gallery search by location (e.g. `city:tokyo`, `country:jp`) with no internet required.
+
+### macOS HDR / EDR display
+- **Extended Dynamic Range viewport** — On macOS, the GPU single-image view (`RAWVIEWER_GPU_VIEW=1`, default in release builds) enables EDR on the viewport layer so bright HDR content can use headroom above SDR white on supported displays.
+- **HDR still-image decode** — HEIC / HEIF / AVIF and 16-bit HDR TIFF files load as 16-bit on macOS when EDR is enabled; Windows and other platforms tone-map to SDR (Reinhard). Standard JPEG and RAW previews are unchanged.
+- **Opt out** — Set `RAWVIEWER_DISABLE_EDR=1` to force the SDR tone-mapping path on macOS.
 
 ### Animated GIF & WebP Playback
 - **Animated Previews** — Enhanced the image viewer pipeline to support playing, scaling, and animating GIF and WebP files. Displays playback status messages and handles dynamic window scaling seamlessly.
 
 ### Performance & gallery
-- **Snappier navigation** — Thumbnail warm-up is throttled and yields to image navigation so the next photo updates promptly, including from external drives. Filmstrip refresh and prefetch wait for single-view first paint (TTFR) instead of a fixed delay.
+- **Snappier navigation** — Filmstrip warm-up is staggered and throttled; navigation cancels low-priority prefetch so the current photo wins I/O. RAW sensor dimensions for the status bar resolve off the UI thread. Identical status-bar updates are deduplicated. Filmstrip refresh and prefetch wait for single-view first paint (TTFR) instead of a fixed delay.
+- **External drives** — Volume read speed is probed once per mount to tune I/O throttling on slow disks.
 - **Gallery folder switching** — Layout and thumbnail loads reset per folder; fixes scattered tiles and blank gaps after changing albums.
 - **Huge folders** — Gallery opens in capture-time (EXIF) order; the Gallery button appears once that sort finishes (instant when metadata is fully cached).
 - **Background indexing** — Metadata and semantic indexing from the previous folder are cancelled when you open a different album.
 - **Fast-open deferrals** — Background folder scan, EXIF sort, and filmstrip prefetch use TTFR-or-fallback timing (~2.5s cap) instead of a hard 5s sleep after fast-open.
+- **Search & metadata** — Faster EXIF cache lookups, KD-tree reverse geocoding during indexing, and UI-thread sorting moved to background workers for large folders.
 
 ---
 
@@ -368,9 +376,9 @@ Includes fixes from **2.0.1** (Pixel DNG, gallery aspect ratio, DNG single-view 
 # RAWviewer 版本發布說明 (繁體中文)
 
 ## 🚀 版本 2.5.0
-**發布日期：2026 年 6 月 22 日**
+**發布日期：2026 年 6 月 25 日**
 
-主要版本，引入了自訂藝廊縮放滑桿、捲動錨定、支援離線資料庫的互動式 GPS 地圖顯示覆蓋圖層，以及動畫 GIF/WebP 播放功能。
+主要版本，引入了自訂藝廊縮放滑桿、捲動錨定、互動式 GPS 地圖覆蓋、macOS HDR/EDR 顯示，以及動畫 GIF/WebP 播放功能。
 
 ### 藝廊縮放滑桿與捲動錨定
 - **藝廊縮放滑桿** —— 在藝廊視圖底部列新增自訂 slanted 楔形縮放軌道與圓形滑桿（列高 **220–380px**，步進 20）。設定儲存於 `QSettings`（`gallery_row_height`）。
@@ -378,15 +386,23 @@ Includes fixes from **2.0.1** (Pixel DNG, gallery aspect ratio, DNG single-view 
 - **捲動錨定** —— 按下滑桿時，以**左上角可見**縮圖為錨點；每次重排後還原垂直捲動，使該照片在畫面上的高度大致不變（列重新分組時水平位置可能略有偏移）。
 
 ### 互動式 GPS 地圖顯示覆蓋
-- **GPS 地圖覆蓋** —— 在單張影像檢視中按下 **M** 鍵，可顯示/隱藏互動式瓦片地圖卡片，顯示相片的 GPS 座標和位置大頭針。
+- **GPS 地圖覆蓋** —— 在單張影像檢視中按下 **M** 鍵，可顯示/隱藏互動式瓦片地圖卡片。按下後立即顯示 **Loading map…** 占位符；無 GPS 的照片不會彈出地圖。
+- **座標徽章** —— 地圖上顯示可點擊的經緯度徽章；點擊可在瀏覽器中開啟 **Google Maps**。
 - **離線逆地理編碼（搜尋功能）** —— 隨附預載的全球城市（涵蓋所有人口大於 500 的 10 萬多個城市）與地標資料庫（`cities500.csv.gz` 與 `landmarks.csv.gz`）。在背景索引期間，GPS 座標將被解析為城市、地區和國家名稱並儲存於本機，讓您無需網路即可透過位置進行藝廊搜尋（例如 `city:tokyo`、`country:jp`）。
+
+### macOS HDR / EDR 顯示
+- **擴展動態範圍視埠** —— 在 macOS 上，GPU 單圖檢視（`RAWVIEWER_GPU_VIEW=1`，release 預設）於視埠圖層啟用 EDR，支援的顯示器可呈現高於 SDR 白位的 HDR 亮度。
+- **HDR 靜態影像解碼** —— HEIC / HEIF / AVIF 與 16-bit HDR TIFF 在 macOS 且 EDR 啟用時以 16-bit 載入；Windows 及其他平台以 Reinhard 壓成 SDR。一般 JPEG 與 RAW 預覽不變。
+- **關閉方式** —— 設定 `RAWVIEWER_DISABLE_EDR=1` 可在 macOS 強制走 SDR tone mapping。
 
 ### 動畫 GIF 與 WebP 播放
 - **動畫預覽** —— 增強了影像檢視器管線，完整支援播放、縮放和播放動畫 GIF 及 WebP 檔案，顯示播放狀態訊息，並無縫處理動態視窗縮放。
 
 ### 效能與藝廊
-- **更順暢的導覽** —— 縮圖預熱節流並讓路給影像切換；底片條刷新與預取改為等待單圖首次繪製（TTFR），不再使用固定延遲。
+- **更順暢的導覽** —— 底片條預熱分段節流；切換照片時取消低優先級預取。狀態列 RAW 感測器尺寸改在背景執行緒解析；相同狀態列更新會去重。底片條刷新與預取改為等待單圖首次繪製（TTFR）。
+- **外接磁碟** —— 每個掛載點探測一次讀取速度，以調整慢速磁碟的 I/O 節流。
 - **藝廊切換資料夾** —— 每個資料夾重設版面與縮圖載入，修正切換相簿後縮圖散亂或大片空白。
 - **大型資料夾** —— 藝廊以拍攝時間（EXIF）排序；Gallery 按鈕在排序完成後出現（中繼資料已快取時幾乎即時）。
 - **背景索引** —— 開啟不同相簿時，取消上一資料夾的中繼資料與語意索引。
 - **快速開啟延遲** —— 背景掃描、EXIF 排序與底片條預取改為 TTFR 或約 2.5 秒上限，取代固定 5 秒睡眠。
+- **搜尋與中繼資料** —— 更快的 EXIF 快取查詢、索引期間 KD-tree 逆地理編碼，以及大型資料夾的 UI 執行緒排序改至背景 worker。

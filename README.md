@@ -69,9 +69,9 @@ Pick **Lite** for a smaller install and browse-by-eye workflow. Pick **Full** to
 
 ## GPS map overlay & geotagging
 
-In **single-image view**, press **M** to toggle an interactive tile-based map card showing the photo's GPS coordinates and a location pin.
+In **single-image view**, press **M** to toggle an interactive tile-based map card. The card opens immediately with a **Loading map…** state while tiles fetch (no popup on photos without GPS). A **coordinate badge** on the map shows lat/lon; click it to open **Google Maps** in your browser.
 
-Bundled offline databases (`cities500.csv.gz` and `landmarks.csv.gz`, 100,000+ locations) are used during **background indexing** to resolve GPS coordinates into city, region, and country names. These power **gallery search** — search `city:tokyo`, `country:jp`, or similar — with no internet required. The map overlay itself shows the raw coordinates pin; it does not display a resolved place name.
+Bundled offline databases (`cities500.csv.gz` and `landmarks.csv.gz`, 100,000+ locations) are used during **background indexing** to resolve GPS coordinates into city, region, and country names. These power **gallery search** — search `city:tokyo`, `country:jp`, or similar — with no internet required.
 
 For a dedicated **cluster map** across an entire album and **geotagging photos missing GPS**, see **[LocateIt](https://github.com/markyip/LocateIt)**: open a folder, see where shots were taken on a map, drag-drop to assign coordinates, and save back to JPEG or RAW.
 
@@ -85,7 +85,7 @@ For a dedicated **cluster map** across an entire album and **geotagging photos m
 2. Choose **Full (CUDA)**, **Full (DirectML)**, or **Lite** in the wizard. **Full** also downloads AI models (~600 MB).
 3. Launch **`RAWviewer.exe`** or the Desktop shortcut (not the Setup file again).
 
-> **v2.5 new:** Gallery zoom slider, scroll anchoring, GPS map overlay (**M**), animated GIF/WebP playback, reliable gallery layout when switching albums, and cleaner cancellation of background indexing from the previous folder.
+> **v2.5 new:** Gallery zoom slider, scroll anchoring, GPS map overlay (**M**) with coordinate badge, **macOS HDR/EDR** for HDR stills, animated GIF/WebP playback, reliable gallery layout when switching albums, and cleaner cancellation of background indexing from the previous folder.
 
 Registers **Open with** for common photo formats. Uninstall: Settings → Apps, or **`uninstall.bat`** in `%LOCALAPPDATA%\RAWviewer`.
 
@@ -116,6 +116,8 @@ To clear thumbnails only: **`scripts\Launch\bat\clear_cache.bat`** (Windows) · 
 
 **RAW:** CR2, CR3, NEF, ARW, DNG, ORF, RW2, RAF, and other LibRaw types · **Standard:** JPEG, TIFF, HEIF, **GIF** (animated), **WebP** (animated)
 
+On **macOS**, HDR **HEIC / HEIF / AVIF** and 16-bit HDR **TIFF** can display with extended dynamic range in single-image view when EDR is enabled (default). Other platforms tone-map HDR stills to SDR.
+
 ---
 
 ## Troubleshooting
@@ -137,6 +139,7 @@ To clear thumbnails only: **`scripts\Launch\bat\clear_cache.bat`** (Windows) · 
 | App slow or exits after reopening last folder | **v2.4.1+** staggers full decode and prefetch on session restore. Still tight on 8 GB? Use **Lite**, or `RAWVIEWER_DISABLE_SESSION_RESTORE=1` |
 | GPS map not showing | Press **M** in single-image view; the map only appears when the photo has embedded GPS coordinates |
 | Animated GIF/WebP not playing | Update to **v2.5+**; check that the file is a valid animated GIF or WebP |
+| HDR HEIC/TIFF looks flat or too dark | Windows tone-maps HDR stills to SDR by design; for EDR viewing use macOS with an EDR display |
 | Crash | Enable file logging with `RAWVIEWER_FILE_LOG=1`, then check the install folder |
 
 ### macOS
@@ -160,6 +163,7 @@ To clear thumbnails only: **`scripts\Launch\bat\clear_cache.bat`** (Windows) · 
 | Thumbnails sideways or wrong way up (portrait shots) | Update to **v2.4**. Run **`clear_cache.sh`** once if old thumbnails were cached before the fix |
 | GPS map not showing | Press **M** in single-image view; the map only appears when the photo has embedded GPS coordinates |
 | Animated GIF/WebP not playing | Update to **v2.5+**; check that the file is a valid animated GIF or WebP |
+| HDR HEIC/TIFF looks flat or too dark | Needs GPU single-image view (default) and an EDR-capable display; `RAWVIEWER_DISABLE_EDR=1` forces SDR tone mapping |
 
 More detail: [`scripts/Launch/README.md`](scripts/Launch/README.md)
 
@@ -259,6 +263,7 @@ Requires **pyexiv2** for maker-note AF on RAW.
 | `RAWVIEWER_MOBILECLIP_VARIANT` | Windows ONNX model: `b` (default), `s0`, `s2`, `l14` |
 | `RAWVIEWER_GPU_VIEW=1` | GPU single-image viewport (OpenGL zoom/pan; on by default in release builds) |
 | `RAWVIEWER_GPU_VIEW=0` | Force legacy scroll-area single-image view |
+| `RAWVIEWER_DISABLE_EDR=1` | macOS: disable EDR viewport and HDR 16-bit display path; use SDR tone mapping |
 | `RAWVIEWER_LIBRAW_CONSISTENT_PREVIEW=1` | Same color pipeline for fit vs 100% zoom on RAW (default on) |
 | `RAWVIEWER_EXIF_BACKEND=auto` | `auto`, `pyexiv2`, or `exifread` |
 | `RAWVIEWER_SHARE_MENU=1` | macOS: Qt share menu (recommended) |
@@ -361,6 +366,7 @@ scripts\Launch\bat\build_windows_lite.bat
 - **Cache** — memory-first; optional disk cache via env; **RAM-tier defaults** at startup (`rawviewer_profile.py`)
 - **Semantic index** — SQLite + local embeddings (Core ML on macOS, ONNX on Windows; Full builds only); background passes abort when folder scope changes (**v2.5.0**)
 - **Gallery (JustifiedGallery)** — justified grid with zoom slider (relayout + upper-left scroll anchor); layout cache keyed to folder generation; gallery opens in capture-time order after EXIF sort (**v2.5.0**)
+- **HDR / EDR (macOS)** — GPU viewport EDR layer + 16-bit HDR still decode for HEIC/HEIF/AVIF/TIFF; SDR tone map elsewhere (**v2.5.0**)
 
 ---
 
