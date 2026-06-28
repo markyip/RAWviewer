@@ -2372,7 +2372,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         finally:
             self._orientation_already_applied = False
         self._restore_keyboard_focus()
-        self.save_session_state()
+        self.schedule_save_session_state()
         try:
             if self.image_files and file_path in self.image_files:
                 self.current_file_index = self.image_files.index(file_path)
@@ -3731,7 +3731,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         if hasattr(self, "loading_overlay"):
             self.loading_overlay.hide_loading()
         self.setFocus()
-        self.save_session_state()
+        self.schedule_save_session_state()
 
     def _paint_instant_preview_for_path(self, file_path: str, *, prefer_gallery: bool = False) -> bool:
         """Show the best available preview immediately (preview cache, gallery thumb, or pixmap)."""
@@ -4613,7 +4613,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self.update_status_bar(width=orig_w, height=orig_h)
         
         self.setFocus()
-        self.save_session_state()
+        self.schedule_save_session_state()
         self._start_preloading()
 
     def on_manager_pixmap_ready(self, file_path: str, pixmap):
@@ -4698,7 +4698,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self.update_status_bar()
         
         self.setFocus()
-        self.save_session_state()
+        self.schedule_save_session_state()
         self._start_preloading()
 
     def on_manager_exif_ready(self, file_path: str, exif_data: dict):
@@ -13535,7 +13535,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                         display_time = time.time() - display_start
                         logger.info(f"[LOAD] Cached pixmap displayed in {display_time:.3f}s")
                         self.setFocus()
-                        self.save_session_state()
+                        self.schedule_save_session_state()
                         # Update index for preloading
                         try:
                             if self.image_files and requested_file_path in self.image_files:
@@ -13740,7 +13740,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
 
             self.setFocus()
             # Save session state when image changes
-            self.save_session_state()
+            self.schedule_save_session_state()
             
             # Update index for preloading (but don't start yet - wait for image to display)
             # This matches RAWviewer-1.0 behavior and reduces resource competition
@@ -18374,7 +18374,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                     raise
                 
                 try:
-                    self.save_session_state()
+                    self.schedule_save_session_state()
                     logger.debug("Session state saved")
                 except Exception as save_error:
                     logger.warning(f"Error saving session state: {save_error}")
@@ -18497,7 +18497,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                     raise
                 
                 try:
-                    self.save_session_state()
+                    self.schedule_save_session_state()
                     logger.debug("[NAV_NEXT] Session state saved")
                 except Exception as save_error:
                     logger.warning(f"[NAV_NEXT] Error saving session state: {save_error}")
@@ -21666,7 +21666,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             self._stop_animations()
             if getattr(self, "_save_session_debounce_timer", None) is not None:
                 self._save_session_debounce_timer.stop()
-            # Save session state first
+            # Save session state first (flush debounce — must be synchronous on quit)
             self.save_session_state()
             logger.info("[CLOSE] Session state saved")
 
