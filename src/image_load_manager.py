@@ -612,17 +612,31 @@ class ImageLoadManager(QObject):
 
     def update_volume_throttling(self, folder_path: Optional[str]) -> None:
         """Dynamically update maximum threads and raw load limit for a new folder path."""
-        from common_image_loader import is_external_or_network_volume, raw_concurrent_load_limit
+        from common_image_loader import (
+            is_external_or_network_volume,
+            raw_concurrent_load_limit,
+            volume_speed_tier,
+        )
         core_count = os.cpu_count() or 4
         default_workers = max(16, core_count * 2)
-            
+
         env_workers = os.environ.get("RAWVIEWER_LOAD_MAX_WORKERS", "").strip()
         if env_workers:
             try:
                 default_workers = max(4, int(env_workers))
             except ValueError:
                 pass
-                
+        elif (
+            is_external_or_network_volume(folder_path)
+            and volume_speed_tier(folder_path) == "slow"
+        ):
+            # Confirmed-slow external/network volume: a large worker pool just
+            # thrashes the drive. Cap it (fast external drives keep full pool).
+            slow_workers = _env_int(
+                "RAWVIEWER_SLOW_VOLUME_MAX_WORKERS", 8, minimum=2
+            )
+            default_workers = min(default_workers, slow_workers)
+
         # If no throttle is currently active, apply directly
         is_throttled = (
             (getattr(self, "_io_pressure_throttle_depth", 0) or 0) > 0
@@ -638,6 +652,74 @@ class ImageLoadManager(QObject):
         self._indexing_saved_max_threads = default_workers
         
         self._raw_load_limit = raw_concurrent_load_limit(folder_path)
+
+    def prime_volume_speed_async(
+        self, folder_path: Optional[str], sample_path: Optional[str] = None
+    ) -> None:
+        """Run one lightweight read-speed probe for *folder_path*'s volume off the
+        main thread, then re-apply throttling from the measured speed.
+
+        Cheap and idempotent: only external/network volumes are probed, the probe
+        reads a few MB from a single file, and the result is cached per mount so
+        repeated folder opens on the same drive do no extra work.
+        """
+        from common_image_loader import is_external_or_network_volume
+
+        if not folder_path or not is_external_or_network_volume(folder_path):
+            return
+
+        def _worker() -> None:
+            from common_image_loader import probe_volume_speed, volume_speed_tier
+
+            probe_path = sample_path
+            if not probe_path or not os.path.isfile(probe_path):
+                probe_path = self._pick_probe_sample(folder_path)
+            if not probe_path:
+                return
+            mbps = probe_volume_speed(probe_path)
+            try:
+                self.update_volume_throttling(folder_path)
+            except Exception:
+                pass
+            try:
+                import logging
+
+                logging.getLogger(__name__).info(
+                    "[LOAD] Volume speed probe: %s -> %s MB/s (%s, raw_limit=%s)",
+                    folder_path,
+                    f"{mbps:.1f}" if mbps else "n/a",
+                    volume_speed_tier(probe_path),
+                    getattr(self, "_raw_load_limit", "?"),
+                )
+            except Exception:
+                pass
+
+        threading.Thread(
+            target=_worker, name="VolumeSpeedProbe", daemon=True
+        ).start()
+
+    @staticmethod
+    def _pick_probe_sample(folder_path: Optional[str]) -> Optional[str]:
+        """Pick a single representative file in *folder_path* to probe (cheap scandir)."""
+        if not folder_path or not os.path.isdir(folder_path):
+            return None
+        exts = {
+            ".arw", ".cr2", ".cr3", ".nef", ".dng", ".raf", ".orf", ".rw2",
+            ".jpg", ".jpeg", ".heic", ".png", ".tif", ".tiff",
+        }
+        try:
+            with os.scandir(folder_path) as it:
+                for entry in it:
+                    try:
+                        if not entry.is_file():
+                            continue
+                    except OSError:
+                        continue
+                    if os.path.splitext(entry.name)[1].lower() in exts:
+                        return entry.path
+        except Exception:
+            return None
+        return None
 
     def enter_io_pressure_throttle(self) -> None:
         """Cut worker/RAW concurrency after EMFILE so open fds can drain."""

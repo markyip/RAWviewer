@@ -6,11 +6,17 @@
 
 import io
 import os
+import threading
 import time
 from datetime import datetime
 from typing import Any, Dict, Optional, Tuple
 
 _io_pressure_until = 0.0
+
+# One-shot per-volume read-speed probe cache: {volume_root: mbps_or_-1.0}.
+# Populated lazily by probe_volume_speed() so we only measure each mount once.
+_volume_speed_cache: Dict[str, float] = {}
+_volume_speed_lock = threading.Lock()
 
 
 def raise_process_fd_limit(soft_target: int = 4096) -> None:
@@ -1184,12 +1190,125 @@ def index_metadata_worker_count(total_files: int, sample_path: Optional[str] = N
     return min(6, max(2, cpu - 1))
 
 
-def raw_concurrent_load_limit(sample_path: Optional[str] = None) -> int:
-    """Max concurrent LibRaw full/preview decodes in ImageLoadManager."""
-    cpu = os.cpu_count() or 4
+def _volume_root_for(path: Optional[str]) -> Optional[str]:
+    """Stable cache key for the volume/mount that contains *path*."""
+    if not path:
+        return None
+    try:
+        norm = os.path.abspath(path)
+    except Exception:
+        return None
+    import sys
 
+    if sys.platform == "darwin" and norm.startswith("/Volumes/"):
+        parts = norm.split(os.sep)
+        if len(parts) >= 3:
+            return os.sep.join(parts[:3])  # /Volumes/<name>
+        return norm
+    drive, _ = os.path.splitdrive(norm)
+    if drive:
+        return drive + os.sep
+    return os.sep
+
+
+def probe_volume_speed(
+    sample_path: Optional[str],
+    *,
+    sample_bytes: int = 4 * 1024 * 1024,
+    timeout_s: float = 1.5,
+) -> Optional[float]:
+    """Very lightweight one-shot read-speed probe for the volume holding *sample_path*.
+
+    Reads up to ``sample_bytes`` (default 4 MB) from a single file and estimates
+    throughput in MB/s. The result is cached per volume root and reused for the
+    whole session, so this measures each mount at most once. Designed to run off
+    the main thread (see ImageLoadManager.prime_volume_speed_async).
+
+    Returns the measured MB/s, or ``None`` if it could not be measured.
+    """
+    root = _volume_root_for(sample_path)
+    if not root:
+        return None
+    with _volume_speed_lock:
+        cached = _volume_speed_cache.get(root)
+    if cached is not None:
+        return cached if cached >= 0 else None
+
+    mbps: Optional[float] = None
+    try:
+        if sample_path and os.path.isfile(sample_path):
+            size = os.path.getsize(sample_path)
+            to_read = min(sample_bytes, size)
+            if to_read > 0:
+                read_total = 0
+                start = time.monotonic()
+                with open(sample_path, "rb", buffering=0) as fh:
+                    while read_total < to_read:
+                        chunk = fh.read(min(1024 * 1024, to_read - read_total))
+                        if not chunk:
+                            break
+                        read_total += len(chunk)
+                        if time.monotonic() - start > timeout_s:
+                            break
+                elapsed = max(1e-4, time.monotonic() - start)
+                # Require a meaningful sample (>=512 KB) before trusting the number.
+                if read_total >= 512 * 1024:
+                    mbps = (read_total / (1024 * 1024)) / elapsed
+    except Exception:
+        mbps = None
+
+    with _volume_speed_lock:
+        _volume_speed_cache[root] = mbps if mbps is not None else -1.0
+    return mbps
+
+
+def volume_speed_tier(sample_path: Optional[str]) -> str:
+    """Classify a probed volume as ``"fast"``, ``"slow"`` or ``"unknown"``.
+
+    A volume is only treated as ``"slow"`` once it has actually been probed and
+    measured below RAWVIEWER_VOLUME_SLOW_MBPS (default 120 MB/s) — fast external
+    interfaces (Thunderbolt 3/4, USB4, NVMe enclosures) stay ``"fast"`` and are
+    never throttled. Unprobed/local volumes return ``"unknown"`` (no throttle).
+    """
+    root = _volume_root_for(sample_path)
+    if not root:
+        return "unknown"
+    with _volume_speed_lock:
+        cached = _volume_speed_cache.get(root)
+    if cached is None or cached < 0:
+        return "unknown"
+    try:
+        slow_threshold = float(
+            os.environ.get("RAWVIEWER_VOLUME_SLOW_MBPS", "").strip() or 120.0
+        )
+    except ValueError:
+        slow_threshold = 120.0
+    return "slow" if cached < slow_threshold else "fast"
+
+
+def raw_concurrent_load_limit(sample_path: Optional[str] = None) -> int:
+    """Max concurrent LibRaw full/preview decodes in ImageLoadManager.
+
+    An explicit RAWVIEWER_RAW_LOAD_LIMIT always wins. Otherwise concurrency is
+    only reduced for external/network volumes that a lightweight probe has
+    confirmed to be slow; fast external drives keep the full limit.
+    """
+    cpu = os.cpu_count() or 4
     default = max(4, cpu)
-    return _env_int_bounded("RAWVIEWER_RAW_LOAD_LIMIT", default, minimum=1, maximum=32)
+    limit = _env_int_bounded(
+        "RAWVIEWER_RAW_LOAD_LIMIT", default, minimum=1, maximum=32
+    )
+
+    if not os.environ.get("RAWVIEWER_RAW_LOAD_LIMIT", "").strip():
+        if (
+            is_external_or_network_volume(sample_path)
+            and volume_speed_tier(sample_path) == "slow"
+        ):
+            slow_limit = _env_int_bounded(
+                "RAWVIEWER_SLOW_VOLUME_RAW_LIMIT", 3, minimum=1, maximum=8
+            )
+            limit = min(limit, slow_limit)
+    return limit
 
 
 def process_pool_worker_count() -> int:

@@ -26539,6 +26539,10 @@ class RAWImageViewer(QMainWindow):
         folder_path = os.path.abspath(folder_path)
         if hasattr(self, "image_manager") and self.image_manager is not None:
             self.image_manager.update_volume_throttling(folder_path)
+            # One-shot lightweight read-speed probe for this volume (off the main
+            # thread). Fast external drives (TB3/4, USB4, NVMe) keep full
+            # concurrency; only confirmed-slow drives get throttled.
+            self.image_manager.prime_volume_speed_async(folder_path, start_file)
         same_folder = bool(
             getattr(self, "current_folder", None)
             and _norm_path(getattr(self, "current_folder")) == _norm_path(folder_path)
