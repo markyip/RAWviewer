@@ -39,6 +39,10 @@ except Exception:
     pycountry = None
 
 
+class IndexAborted(Exception):
+    """Raised when background indexing is cancelled (e.g. folder scope changed)."""
+
+
 ProgressCallback = Optional[Callable[[int, int, str], None]]
 
 _YUNET_INFER_LOCK = threading.Lock()
@@ -2394,6 +2398,7 @@ class SemanticImageIndex:
         self._index_conn = None
         self._rg_lock = threading.Lock()
         self._paused = False
+        self._abort_requested = False
         self._pause_lock = threading.Lock()
         self._metadata_backfill_lock = threading.Lock()
         self._metadata_backfill_paths: set[str] = set()
@@ -2405,16 +2410,24 @@ class SemanticImageIndex:
         """Pause or resume the background indexing loops."""
         with self._pause_lock:
             self._paused = pause
+            if not pause:
+                self._abort_requested = False
+
+    def request_abort_indexing(self) -> None:
+        """Stop in-flight indexing from a previous folder scope."""
+        with self._pause_lock:
+            self._abort_requested = True
+            self._paused = True
 
     def _wait_if_paused(self) -> None:
-        """Helper to sleep/wait while the indexing process is paused."""
+        """Block while paused; raise IndexAborted when folder scope is invalidated."""
         flag = os.environ.get("RAWVIEWER_INDEX_PAUSE_IN_GALLERY", "1").strip().lower()
-        if flag not in ("1", "true", "yes", "on"):
-            return
         while True:
             with self._pause_lock:
-                if not self._paused:
-                    break
+                if self._abort_requested:
+                    raise IndexAborted()
+                if flag not in ("1", "true", "yes", "on") or not self._paused:
+                    return
             time.sleep(0.5)
 
     def _mark_metadata_ready_without_embedding(
@@ -3918,6 +3931,7 @@ class SemanticImageIndex:
 
         def _warm_one(path: str) -> bool:
             try:
+                self._wait_if_paused()
                 from enhanced_raw_processor import (
                     ThumbnailExtractor,
                     extract_embedded_jpeg_by_scan,
@@ -4010,20 +4024,30 @@ class SemanticImageIndex:
 
         if workers <= 1 or total < 4:
             for i, path in enumerate(pending, start=1):
+                self._wait_if_paused()
                 if _warm_one(path):
                     warmed += 1
                 if _should_emit_thumb_progress(i):
                     _emit_thumb_progress(i)
         else:
             completed = 0
-            with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
-                futures = {executor.submit(_warm_one, p): p for p in pending}
+            executor = concurrent.futures.ThreadPoolExecutor(max_workers=workers)
+            futures = {executor.submit(_warm_one, p): p for p in pending}
+            try:
                 for future in concurrent.futures.as_completed(futures):
+                    self._wait_if_paused()
                     completed += 1
                     if future.result():
                         warmed += 1
                     if _should_emit_thumb_progress(completed):
                         _emit_thumb_progress(completed)
+            except IndexAborted:
+                for pending_future in futures:
+                    pending_future.cancel()
+                executor.shutdown(wait=False, cancel_futures=True)
+                raise
+            else:
+                executor.shutdown(wait=True)
         logger.info(
             "[INDEX] %s thumbnail warm-up done: %d/%d in %.2fs",
             purpose,
@@ -4660,7 +4684,8 @@ class SemanticImageIndex:
                     max_workers,
                     total_extract,
                 )
-                with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
+                try:
                     def extract_task(item):
                         self._wait_if_paused()
                         cp, st = item
@@ -4683,38 +4708,51 @@ class SemanticImageIndex:
                             return cp, st, None
 
                     futures = [executor.submit(extract_task, item) for item in to_extract]
-                    
-                    for i, future in enumerate(concurrent.futures.as_completed(futures), start=1):
-                        cp, st, meta = future.result()
-                        if meta:
-                            try:
-                                self._upsert_metadata(cp, st, meta, conn=conn)
-                                pending_for_semantic.append((cp, st))
-                                batch_writes += 1
-                                # Do not increment 'indexed' here; it will be incremented in Phase 2
-                                # when the semantic embedding is actually ready.
-                                
-                                if batch_writes >= commit_every:
-                                    conn.commit()
-                                    batch_writes = 0
-                            except Exception as e:
-                                logger.error(f"[INDEX] Database upsert failed for {os.path.basename(cp)}: {e}")
-                                failed += 1
-                        else:
-                            failed += 1
-                        
-                        if i % 100 == 0:
-                            import gc
-                            gc.collect()
+                    try:
+                        for i, future in enumerate(concurrent.futures.as_completed(futures), start=1):
+                            self._wait_if_paused()
+                            cp, st, meta = future.result()
+                            if meta:
+                                try:
+                                    self._upsert_metadata(cp, st, meta, conn=conn)
+                                    pending_for_semantic.append((cp, st))
+                                    batch_writes += 1
+                                    # Do not increment 'indexed' here; it will be incremented in Phase 2
+                                    # when the semantic embedding is actually ready.
 
-                        if progress_callback and (i <= 2 or i >= total_extract or i % 10 == 0):
-                            progress_callback(
-                                progress_indexed_base,
-                                progress_album_total,
-                                format_index_progress(
-                                    "Metadata", progress_indexed_base + i, progress_album_total
-                                ),
-                            )
+                                    if batch_writes >= commit_every:
+                                        conn.commit()
+                                        batch_writes = 0
+                                except Exception as e:
+                                    logger.error(f"[INDEX] Database upsert failed for {os.path.basename(cp)}: {e}")
+                                    failed += 1
+                            else:
+                                failed += 1
+
+                            if i % 100 == 0:
+                                import gc
+                                gc.collect()
+
+                            if progress_callback and (i <= 2 or i >= total_extract or i % 10 == 0):
+                                progress_callback(
+                                    progress_indexed_base,
+                                    progress_album_total,
+                                    format_index_progress(
+                                        "Metadata", progress_indexed_base + i, progress_album_total
+                                    ),
+                                )
+                    except IndexAborted:
+                        for pending_future in futures:
+                            pending_future.cancel()
+                        executor.shutdown(wait=False, cancel_futures=True)
+                        raise
+                    else:
+                        executor.shutdown(wait=True)
+                except IndexAborted:
+                    raise
+                except Exception:
+                    executor.shutdown(wait=True)
+                    raise
 
                 if batch_writes > 0:
                     conn.commit()
@@ -5026,6 +5064,8 @@ class SemanticImageIndex:
                     progress_album_total=progress_album_total,
                     progress_indexed_base=progress_indexed_base,
                 )
+        except IndexAborted:
+            logger.info("[INDEX] Indexing aborted (folder scope changed)")
         finally:
             conn.close()
             

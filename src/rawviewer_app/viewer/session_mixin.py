@@ -61,6 +61,10 @@ class SessionMixin:
 
             self._folder_load_generation = getattr(self, "_folder_load_generation", 0) + 1
             token = self._folder_load_generation
+            if not preserve_folder_index and hasattr(self, "_cancel_stale_folder_async_work"):
+                self._cancel_stale_folder_async_work(
+                    f"load_folder_images -> {os.path.basename(folder_path)}"
+                )
             self._folder_sort_refinement_applied_token = None
             extensions = set(self.get_supported_extensions())
             newest_first = self.get_sort_preference()
