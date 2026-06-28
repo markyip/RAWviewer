@@ -66,6 +66,7 @@ class SessionMixin:
                     f"load_folder_images -> {os.path.basename(folder_path)}"
                 )
             self._folder_sort_refinement_applied_token = None
+            self._folder_navigation_ready_token = None
             extensions = set(self.get_supported_extensions())
             newest_first = self.get_sort_preference()
 

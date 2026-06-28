@@ -1,5 +1,31 @@
 # RAWviewer Release Notes
 
+## 🚀 Version 2.5.1
+**Release Date: June 28, 2026**
+
+Bug-fix and responsiveness release for **large-folder gallery workflow**, **folder switching**, and **background indexing scope**.
+
+### Gallery — folder switch & layout
+- **Layout cache invalidation** — Switching folders (or re-entering gallery after browsing another album) no longer reuses stale thumbnail positions from the previous folder. Widget geometry is rebuilt or repositioned when the file list changes, fixing scattered thumbnails and large blank gaps (especially when the gallery skipped a full layout rebuild because the file count looked unchanged).
+- **Folder-scoped load guards** — Gallery thumbnail scheduling checks the active folder generation token so in-flight loads from a previous folder are ignored instead of painting into the wrong slots.
+- **Scroll reset on folder change** — Entering a new folder clears stale scroll position and active in-flight thumbnail markers so visible tiles can load immediately.
+
+### Gallery button on huge folders (3000+ photos)
+- **Earlier Gallery button** — The bottom **Gallery** toggle (and **Esc → gallery** shortcut) now appears as soon as the **quick folder index** finishes (~0.1 s after opening the first file), not after the full EXIF capture-time sort completes (which could take 10–15 s on uncached libraries due to a deliberate fast-open delay plus metadata probing).
+- **Search button unchanged** — Gallery **Search** still waits for EXIF sort so metadata filters and counters stay stable; only the gallery view entry is unlocked early.
+- **Order may refine** — If you open gallery before EXIF sort finishes, thumbnails may briefly follow filename/mtime order, then resort automatically when capture-time refinement completes (same as v2.2+ background sort behavior).
+
+### Background indexing — folder scope
+- **Cancel stale work on folder change** — Opening a different folder aborts in-flight semantic/metadata indexing, cancels ImageLoadManager and preload tasks, stops the metadata-index defer timer, and clears gallery layout state from the previous scope.
+- **Indexing abort checkpoints** — Background metadata extraction and semantic thumbnail warm-up pools honor an abort flag and exit promptly instead of continuing to parse files from the previous folder (log: `[INDEX] Indexing aborted (folder scope changed)` when a pass is interrupted mid-flight).
+- **Gallery browsing** — Background indexing stays paused while you are in gallery view (search starts its own indexing pass when needed); single view resumes indexing after idle as before.
+
+### Developer log markers (optional)
+- `[FOLDER] Cancelling stale async work (load_folder_images -> …)` — folder scope change
+- `[GALLERY] load_visible_images scheduled=…` — gallery thumbnail scheduling (should not stay at `deferred` indefinitely on folder switch)
+
+---
+
 ## 🚀 Version 2.5.0
 **Release Date: June 25, 2026**
 

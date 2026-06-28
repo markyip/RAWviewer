@@ -9212,7 +9212,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             self.size_slider.hide()
 
         if hasattr(self, 'view_mode_button'):
-            self.view_mode_button.setVisible(self._is_exif_sort_ready())
+            self.view_mode_button.setVisible(self._is_gallery_ui_ready())
         if hasattr(self, "search_bottom_button"):
             self.search_bottom_button.setVisible(bool(self.image_files) and self._is_exif_sort_ready())
         # Update icon if using qtawesome
@@ -18523,7 +18523,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 return
             if self._clear_gallery_bookmark_filter():
                 return
-        elif vm == "single" and self._is_exif_sort_ready():
+        elif vm == "single" and self._is_gallery_ui_ready():
             self.toggle_view_mode()
 
     def _shortcut_activate_gallery_up(self) -> None:
@@ -20574,7 +20574,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         # Gallery toggle only in single-image mode (in gallery you return by tapping a thumbnail)
         if hasattr(self, 'view_mode_button'):
             self.view_mode_button.setVisible(
-                bool(self.image_files) and self.view_mode == "single" and self._is_exif_sort_ready()
+                bool(self.image_files) and self.view_mode == "single" and self._is_gallery_ui_ready()
             )
         if hasattr(self, "share_bottom_button"):
             self._sync_share_button_visibility()
@@ -21672,6 +21672,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             self.current_file_index = start_idx
             self.current_file_path = image_files[start_idx]
 
+        self._folder_navigation_ready_token = token
         self._sync_filmstrip_to_folder()
         self.update_status_bar()
         self._refresh_image_counter()
@@ -21893,6 +21894,20 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             getattr(self, "_folder_sort_refinement_applied_token", None) == current_gen
         )
         return refinement_applied or len(getattr(self, "image_files", [])) <= 1
+
+    def _is_gallery_ui_ready(self) -> bool:
+        """Gallery can open once navigation list exists; EXIF resort may still be pending."""
+        files = getattr(self, "image_files", None) or []
+        if len(files) <= 1:
+            return bool(files)
+        current_gen = getattr(self, "_folder_load_generation", None)
+        if current_gen is None:
+            return False
+        if getattr(self, "_folder_sort_refinement_applied_token", None) == current_gen:
+            return True
+        if getattr(self, "_folder_navigation_ready_token", None) == current_gen:
+            return True
+        return False
 
     def _apply_folder_sort_refinement(self, token: int, sorted_files: list, bulk_metadata: dict) -> None:
         if token != getattr(self, "_folder_load_generation", None):

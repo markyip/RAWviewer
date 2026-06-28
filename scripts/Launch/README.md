@@ -188,6 +188,15 @@ Pass env vars as arguments: `./scripts/Launch/shell/launch_dev.sh RAWVIEWER_GPU_
 | `RAWVIEWER_SESSION_RESTORE_PRELOAD_DELAY_MS` | `800` | Wait after full decode before neighbor prefetch |
 | `RAWVIEWER_DISABLE_SESSION_RESTORE` | `0` | Skip restoring last folder (also set for one launch after `clear_cache.sh`) |
 
+**Folder / gallery diagnostics (v2.5.1+, dev logs):**
+
+| Log prefix | Meaning |
+|------------|---------|
+| `[FOLDER] Cancelling stale async work` | Previous folder's indexing, loads, and gallery state cancelled |
+| `[FOLDER] Quick folder index ready` | Navigation list ready; Gallery button may appear (before EXIF sort) |
+| `[INDEX] Indexing aborted (folder scope changed)` | Background metadata/semantic pass stopped mid-flight |
+| `[GALLERY] load_visible_images scheduled=` | Gallery thumbnails scheduling (contrast with `deferred` stall) |
+
 On macOS, `launch_dev.sh` prints OOM hints when exit code is **137** or **9**.
 
 ### macOS — release smoke test (manual)
