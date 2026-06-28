@@ -21831,11 +21831,18 @@ def main():
         is_lite_build,
         memory_tier_startup_summary,
     )
+    from upgrade_compat import apply_upgrade_compat_defaults
 
     apply_profile_runtime_defaults()
     tier = apply_memory_tier_defaults()
+    compat = apply_upgrade_compat_defaults()
+    logger = logging.getLogger(__name__)
     if tier != "disabled":
-        safe_print(f"[PROFILE] {memory_tier_startup_summary()}", flush=True)
+        logger.info("[PROFILE] %s (compat=%s)", memory_tier_startup_summary(), compat)
+        safe_print(f"[PROFILE] {memory_tier_startup_summary()} (compat={compat})", flush=True)
+    else:
+        logger.info("[PROFILE] upgrade compat=%s", compat)
+        safe_print(f"[PROFILE] upgrade compat={compat}", flush=True)
 
     # On Windows, the installed app runs inside a Pixi virtual environment (so sys.frozen is False),
     # but we can detect it by checking if "_internal/pixi/pixi.exe" exists in the root directory.

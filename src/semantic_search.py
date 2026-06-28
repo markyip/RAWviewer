@@ -106,13 +106,39 @@ def semantic_batch_max() -> int:
 
 
 def semantic_batch_size() -> int:
-    """Semantic ONNX batch size. Default 1 keeps legacy behavior."""
-    raw = os.environ.get("RAWVIEWER_SEMANTIC_BATCH_SIZE", "1").strip()
+    """Semantic ONNX batch size when auto-tune is off (default 12, tier may override)."""
+    raw = os.environ.get("RAWVIEWER_SEMANTIC_BATCH_SIZE", "").strip()
+    if not raw:
+        return min(semantic_batch_max(), _default_semantic_batch_size())
     try:
         v = int(raw)
     except Exception:
-        v = 1
+        v = _default_semantic_batch_size()
     return max(1, min(v, semantic_batch_max()))
+
+
+def _default_semantic_batch_size() -> int:
+    """Platform/tier default batch (8–16) when env is unset and perf v2 is active."""
+    try:
+        from upgrade_compat import perf_v2_enabled
+
+        if not perf_v2_enabled():
+            return 1
+    except Exception:
+        return 1
+    try:
+        from rawviewer_profile import classify_memory_tier, system_total_ram_gb
+
+        tier = classify_memory_tier(system_total_ram_gb())
+        return {
+            "low": 8,
+            "medium": 12,
+            "balanced": 8,
+            "high": 16,
+            "ultra": 16,
+        }.get(tier, 12)
+    except Exception:
+        return 12
 
 
 def semantic_batch_size_forced() -> Optional[int]:
@@ -228,12 +254,50 @@ def semantic_encode_prep_workers(sample_path: Optional[str] = None) -> int:
     return max(2, min(8, cpu // 2))
 
 
-def semantic_coreml_chunk_size() -> int:
-    """Fallback chunk when auto-tune is off (default 8)."""
+def semantic_coreml_use_native_batch() -> bool:
+    """Use MLArrayBatchProvider batch predict (off by default on macOS — often slower than serial)."""
+    raw = os.environ.get("RAWVIEWER_SEMANTIC_COREML_BATCH", "").strip().lower()
+    if raw in ("1", "true", "yes", "on"):
+        return True
+    if raw in ("0", "false", "no", "off"):
+        return False
+    return False
+
+
+def semantic_coreml_prep_chunk_size() -> int:
+    """Parallel load/resize group for Core ML indexing (predict stays serial by default)."""
     forced = semantic_coreml_chunk_forced()
     if forced is not None:
         return forced
-    return 8
+    return max(1, min(8, semantic_encode_prep_workers()))
+
+
+def semantic_coreml_chunk_size() -> int:
+    """Core ML MLArrayBatchProvider chunk when native batch is enabled."""
+    forced = semantic_coreml_chunk_forced()
+    if forced is not None:
+        return forced
+    try:
+        from upgrade_compat import perf_v2_enabled
+
+        if not perf_v2_enabled():
+            return 8
+    except Exception:
+        return 8
+    try:
+        from rawviewer_profile import classify_memory_tier, system_total_ram_gb
+
+        tier = classify_memory_tier(system_total_ram_gb())
+        default = {
+            "low": 8,
+            "medium": 12,
+            "balanced": 8,
+            "high": 16,
+            "ultra": 16,
+        }.get(tier, 12)
+    except Exception:
+        default = 12
+    return min(semantic_batch_max(), default)
 
 
 def semantic_coreml_chunk_forced() -> Optional[int]:
@@ -283,7 +347,7 @@ def semantic_batch_candidates() -> List[int]:
 
 
 # Bump when auto-tune defaults/logic change so ~/.rawviewer_cache picks are refreshed.
-SEMANTIC_BATCH_TUNE_CACHE_VERSION = "v6"
+SEMANTIC_BATCH_TUNE_CACHE_VERSION = "v8"
 
 
 def _thumbnail_jpeg_bytes(arr: np.ndarray, quality: int = 85) -> bytes:
@@ -1399,7 +1463,7 @@ class MobileCLIPCoreMLBackend:
             return self._encode_pil_image(im)
 
     def encode_images(self, file_paths: Sequence[str]) -> List[np.ndarray]:
-        """Parallel load/resize, then batched Core ML inference (much faster, pushes loops to ANE/GPU)."""
+        """Parallel CPU prep; Core ML predict serial by default (batch opt-in via env)."""
         self._load_models()
         paths = [p for p in (file_paths or []) if p]
         if not paths:
@@ -1407,7 +1471,7 @@ class MobileCLIPCoreMLBackend:
         if len(paths) == 1:
             return [self.encode_image(paths[0])]
 
-        sample_path = paths[0] if paths else None
+        sample_path = paths[0]
         workers = semantic_encode_prep_workers(sample_path)
 
         def _prep(path: str) -> Image.Image:
@@ -1423,11 +1487,15 @@ class MobileCLIPCoreMLBackend:
             ) as executor:
                 images = list(executor.map(_prep, paths))
 
+        if not semantic_coreml_use_native_batch():
+            objc = self._objc
+            with objc.autorelease_pool():
+                return [self._encode_pil_image(im) for im in images]
+
         CoreML = self._CoreML
         Foundation = self._Foundation
         objc = self._objc
 
-        embeddings = []
         with objc.autorelease_pool():
             desc = self._image_model.modelDescription()
             input_name = self._native_feature_name(self._image_model, "input")
@@ -1466,25 +1534,51 @@ class MobileCLIPCoreMLBackend:
                     raise RuntimeError(f"Failed to create Core ML feature provider: {err}")
                 providers.append(provider)
 
-            # Create native batch provider
-            batch_provider = CoreML.MLArrayBatchProvider.alloc().initWithFeatureProviderArray_(providers)
+            return self._coreml_predict_batch(providers, output_name, paths)
 
-            # Execute predictions in one batch
+    def _coreml_predict_batch(
+        self,
+        providers: list,
+        output_name: str,
+        paths: Sequence[str],
+    ) -> List[np.ndarray]:
+        """Run Core ML batch inference; halve batch size on memory/ANE failures."""
+        CoreML = self._CoreML
+        if not providers:
+            return []
+        if len(providers) == 1:
+            return [self.encode_image(paths[0])]
+
+        batch_provider = CoreML.MLArrayBatchProvider.alloc().initWithFeatureProviderArray_(
+            providers
+        )
+        try:
             with _COREML_PREDICTION_LOCK:
-                predictions, err = self._image_model.predictionsFromBatch_error_(batch_provider, None)
-            
+                predictions, err = self._image_model.predictionsFromBatch_error_(
+                    batch_provider, None
+                )
             if err is not None or predictions is None:
                 raise RuntimeError(f"MobileCLIP Core ML batch prediction failed: {err}")
+        except Exception:
+            mid = len(providers) // 2
+            if mid <= 0:
+                return [self.encode_image(p) for p in paths]
+            left = self._coreml_predict_batch(
+                providers[:mid], output_name, paths[:mid]
+            )
+            right = self._coreml_predict_batch(
+                providers[mid:], output_name, paths[mid:]
+            )
+            return left + right
 
-            # Extract output features
-            count = int(predictions.count())
-            for i in range(count):
-                out_provider = predictions.featuresAtIndex_(i)
-                numpy_arr = self._multi_array_to_numpy(
-                    out_provider.featureValueForName_(output_name).multiArrayValue()
-                )
-                embeddings.append(self._normalize(numpy_arr))
-
+        embeddings: List[np.ndarray] = []
+        count = int(predictions.count())
+        for i in range(count):
+            out_provider = predictions.featuresAtIndex_(i)
+            numpy_arr = self._multi_array_to_numpy(
+                out_provider.featureValueForName_(output_name).multiArrayValue()
+            )
+            embeddings.append(self._normalize(numpy_arr))
         return embeddings
 
     def _encode_pil_image(self, im: Image.Image) -> np.ndarray:
@@ -2063,52 +2157,175 @@ def get_semantic_capture_times_for_folder(
     return result_map
 
 
+def _normalize_location_term(term: str) -> str:
+    return " ".join((term or "").strip().lower().split())
+
+
+# Quick O(1) checks before any geocoder CSV load (contradiction filter).
+KNOWN_LOCATION_NAMES: frozenset[str] = frozenset({
+    # Countries
+    "japan", "korea", "china", "taiwan", "usa", "uk", "canada", "france",
+    "germany", "italy", "spain", "russia", "australia", "india", "brazil",
+    "mexico", "thailand", "vietnam", "singapore", "malaysia", "indonesia",
+    "philippines", "switzerland", "austria", "netherlands", "greece", "turkey",
+    "egypt", "south africa", "new zealand", "united states", "united kingdom",
+    "south korea", "north korea",
+    # Major cities & capitals
+    "tokyo", "seoul", "london", "paris", "berlin", "new york", "los angeles",
+    "san francisco", "hong kong", "beijing", "shanghai", "bangkok", "singapore",
+    "sydney", "melbourne", "toronto", "vancouver", "rome", "milan", "madrid",
+    "barcelona", "amsterdam", "vienna", "zurich", "geneva", "mumbai", "delhi",
+    "bangalore", "jakarta", "manila", "ho chi minh", "hanoi", "taipei", "macao",
+    "moscow", "istanbul", "dubai", "abu dhabi", "riyadh", "cairo", "nairobi",
+    "chicago", "boston", "seattle", "miami", "munich", "frankfurt", "lyon",
+    "prague", "budapest", "warsaw", "stockholm", "oslo", "copenhagen", "helsinki",
+    "lisbon", "athens", "dublin", "tel aviv", "mexico city", "buenos aires",
+    "sao paulo", "rio de janeiro", "santiago", "lima", "bogota",
+    # Popular travel destinations
+    "santorini", "mykonos", "bali", "phuket", "kyoto", "osaka", "nara", "hokkaido",
+    "jeju", "busan", "boracay", "cebu", "nha trang", "da nang", "koh samui",
+    "krabi", "chiang mai", "luang prabang", "angkor wat", "siem reap", "halong bay",
+    "maldives", "fiji", "bora bora", "tahiti", "maui", "honolulu", "oahu", "kauai",
+    "ibiza", "mallorca", "tenerife", "capri", "amalfi", "positano", "venice",
+    "florence", "tuscany", "provence", "cannes", "nice", "monaco", "st moritz",
+    "zermatt", "interlaken", "hallstatt", "salzburg", "innsbruck", "banff",
+    "whistler", "yellowstone", "yosemite", "grand canyon", "sedona", "reykjavik",
+    "blue lagoon", "cappadocia", "petra", "machu picchu", "cusco", "uyuni",
+    "patagonia", "queenstown", "rotorua", "milford sound",
+})
+
+_PYCOUNTRY_NAME_INDEX: Optional[frozenset[str]] = None
+
+
+def _pycountry_name_index() -> frozenset[str]:
+    global _PYCOUNTRY_NAME_INDEX
+    if _PYCOUNTRY_NAME_INDEX is not None:
+        return _PYCOUNTRY_NAME_INDEX
+    names: set[str] = set()
+    if pycountry is not None:
+        try:
+            for c in pycountry.countries:
+                for attr in ("name", "common_name", "official_name"):
+                    raw = getattr(c, attr, None)
+                    if raw:
+                        tok = _normalize_location_term(str(raw))
+                        if len(tok) >= 3:
+                            names.add(tok)
+        except Exception:
+            pass
+    _PYCOUNTRY_NAME_INDEX = frozenset(names)
+    return _PYCOUNTRY_NAME_INDEX
+
+
 class CustomReverseGeocoder:
-    """Lightweight pure-Python drop-in replacement for reverse-geocoder that uses GeoNames and Wikidata databases."""
+    """GeoNames + Wikidata reverse geocoder with O(log n) nearest-neighbor lookup."""
+
+    _LANDMARK_DIST_SQ = 0.0182  # ~15 km squared degree distance
+
     def __init__(self, cities: list, landmarks: list = None):
         self.cities = cities
         self.landmarks = landmarks or []
+        self._city_coords = (
+            np.asarray([(float(c[0]), float(c[1])) for c in self.cities], dtype=np.float64)
+            if self.cities
+            else None
+        )
+        self._landmark_coords = (
+            np.asarray([(float(lm[0]), float(lm[1])) for lm in self.landmarks], dtype=np.float64)
+            if self.landmarks
+            else None
+        )
+        self._city_tree = self._make_kdtree(self._city_coords) if self._city_coords is not None else None
+        self._landmark_tree = (
+            self._make_kdtree(self._landmark_coords) if self._landmark_coords is not None else None
+        )
+        self._place_names = self._build_place_name_index()
+
+    @staticmethod
+    def _build_place_name_index_from_rows(
+        cities: list,
+        landmarks: list,
+    ) -> frozenset[str]:
+        names: set[str] = set()
+        for city in cities:
+            primary = _normalize_location_term(str(city[2]))
+            if len(primary) >= 3:
+                names.add(primary)
+            alternates = city[5] if len(city) > 5 else ""
+            if alternates:
+                for alt in str(alternates).split(","):
+                    tok = _normalize_location_term(alt)
+                    if len(tok) >= 3:
+                        names.add(tok)
+        for lm in landmarks:
+            tok = _normalize_location_term(str(lm[2]))
+            if len(tok) >= 3:
+                names.add(tok)
+        return frozenset(names)
+
+    def _build_place_name_index(self) -> frozenset[str]:
+        return self._build_place_name_index_from_rows(self.cities, self.landmarks)
+
+    def has_place_name(self, term: str) -> bool:
+        """O(1) exact match against indexed city / alternate / landmark names."""
+        needle = _normalize_location_term(term)
+        return len(needle) >= 3 and needle in self._place_names
+
+    @staticmethod
+    def _make_kdtree(coords: np.ndarray):
+        try:
+            from scipy.spatial import cKDTree
+
+            return cKDTree(coords)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _nearest_index(
+        tree,
+        coords: np.ndarray,
+        target_lat: float,
+        target_lon: float,
+    ) -> tuple[int, float]:
+        if tree is not None:
+            dist_sq, idx = tree.query([target_lat, target_lon], k=1)
+            return int(idx), float(dist_sq)
+        best_idx = 0
+        best_dist = float("inf")
+        for i, (lat, lon) in enumerate(coords):
+            dist = (lat - target_lat) ** 2 + (lon - target_lon) ** 2
+            if dist < best_dist:
+                best_dist = dist
+                best_idx = i
+        return best_idx, best_dist
 
     def search(self, coords: list[tuple[float, float]], mode: int = 1) -> list[dict]:
         if not coords or not self.cities:
             return []
-        target_lat, target_lon = coords[0]
-        
-        # 1. Search nearest city
-        best_city_dist = float('inf')
-        best_city = None
-        for item in self.cities:
-            lat, lon, name, admin1, cc = item[:5]
-            alternates = item[5] if len(item) > 5 else ""
-            dist = (lat - target_lat) ** 2 + (lon - target_lon) ** 2
-            if dist < best_city_dist:
-                best_city_dist = dist
-                best_city = {"name": name, "admin1": admin1, "cc": cc, "alternates": alternates}
-                
-        # 2. Search nearest landmark/tourist attraction
-        # A threshold of 15 km is approximately 0.135 degrees.
-        # Squared distance threshold: (15 / 111) ^ 2 ≈ 0.0182
-        best_landmark_dist = float('inf')
-        best_landmark = None
-        for lat, lon, name, cc in self.landmarks:
-            dist = (lat - target_lat) ** 2 + (lon - target_lon) ** 2
-            if dist < best_landmark_dist:
-                best_landmark_dist = dist
-                best_landmark = name
-                
-        landmark_name = ""
-        if best_landmark and best_landmark_dist < 0.0182:
-            landmark_name = best_landmark
+        target_lat, target_lon = float(coords[0][0]), float(coords[0][1])
 
-        if best_city:
-            return [{
-                "name": best_city["name"],
-                "admin1": best_city["admin1"],
-                "cc": best_city["cc"],
-                "alternates": best_city["alternates"],
-                "landmark": landmark_name
-            }]
-        return []
+        city_idx, _ = self._nearest_index(
+            self._city_tree, self._city_coords, target_lat, target_lon
+        )
+        lat, lon, name, admin1, cc = self.cities[city_idx][:5]
+        alternates = self.cities[city_idx][5] if len(self.cities[city_idx]) > 5 else ""
+        best_city = {"name": name, "admin1": admin1, "cc": cc, "alternates": alternates}
+
+        landmark_name = ""
+        if self.landmarks and self._landmark_coords is not None:
+            lm_idx, lm_dist_sq = self._nearest_index(
+                self._landmark_tree, self._landmark_coords, target_lat, target_lon
+            )
+            if lm_dist_sq < self._LANDMARK_DIST_SQ:
+                landmark_name = str(self.landmarks[lm_idx][2])
+
+        return [{
+            "name": best_city["name"],
+            "admin1": best_city["admin1"],
+            "cc": best_city["cc"],
+            "alternates": best_city["alternates"],
+            "landmark": landmark_name,
+        }]
 
 
 class SemanticImageIndex:
@@ -2178,6 +2395,10 @@ class SemanticImageIndex:
         self._rg_lock = threading.Lock()
         self._paused = False
         self._pause_lock = threading.Lock()
+        self._metadata_backfill_lock = threading.Lock()
+        self._metadata_backfill_paths: set[str] = set()
+        self._metadata_backfill_geocode: set[str] = set()
+        self._metadata_backfill_running = False
         self._init_db_if_needed()
 
     def pause_indexing(self, pause: bool) -> None:
@@ -2458,6 +2679,10 @@ class SemanticImageIndex:
                         logging.getLogger(__name__).warning("[VISION] Failed to parse landmarks file: %s", e)
                 
                 self._reverse_geocoder = CustomReverseGeocoder(cities, landmarks)
+                logging.getLogger(__name__).info(
+                    "[VISION] Place name index ready: %d exact tokens",
+                    len(self._reverse_geocoder._place_names),
+                )
             except Exception as e:
                 import logging
                 logging.getLogger(__name__).warning("[VISION] Failed to load custom reverse geocoder: %s", e)
@@ -2823,6 +3048,8 @@ class SemanticImageIndex:
         file_path: str,
         include_face: bool = False,
         file_stat: Optional[os.stat_result] = None,
+        *,
+        persist_exif: bool = True,
     ) -> Dict[str, object]:
         result = {
             "capture_time": "",
@@ -2999,47 +3226,51 @@ class SemanticImageIndex:
                 result["face_count"] = self._detect_face_count(file_path, preloaded_im=im)
             
             # Automatically backfill and populate the main gallery's PersistentEXIFCache/ImageCache!
-            try:
-                orientation = result.get("orientation") or 1
+            if persist_exif:
+                try:
+                    orientation = result.get("orientation") or 1
 
-                from image_cache import get_image_cache
-                from enhanced_raw_processor import RAW_EXIF_SENSOR_META_VER
+                    from image_cache import get_image_cache
+                    from enhanced_raw_processor import RAW_EXIF_SENSOR_META_VER
 
-                t_cache = time.time()
-                cache = get_image_cache()
-                cache_dict = {
-                    "orientation": int(orientation),
-                    "camera_make": str(tags.get("Image Make") or ""),
-                    "camera_model": str(result["camera_model"]),
-                    "capture_time": str(result["capture_time"]),
-                    "original_width": int(result["width"] or 0),
-                    "original_height": int(result["height"] or 0),
-                    "raw_exif_sensor_meta_ver": RAW_EXIF_SENSOR_META_VER,
-                    "exif_data": {
-                        "original_width": int(result["width"] or 0),
-                        "original_height": int(result["height"] or 0),
+                    t_cache = time.time()
+                    cache = get_image_cache()
+                    cache_dict = {
                         "orientation": int(orientation),
-                        "capture_time": str(result["capture_time"]),
                         "camera_make": str(tags.get("Image Make") or ""),
                         "camera_model": str(result["camera_model"]),
-                        "lens_model": str(result["lens_model"]),
-                        "iso": int(result["iso"] or 0),
+                        "capture_time": str(result["capture_time"]),
+                        "original_width": int(result["width"] or 0),
+                        "original_height": int(result["height"] or 0),
                         "raw_exif_sensor_meta_ver": RAW_EXIF_SENSOR_META_VER,
+                        "exif_data": {
+                            "original_width": int(result["width"] or 0),
+                            "original_height": int(result["height"] or 0),
+                            "orientation": int(orientation),
+                            "capture_time": str(result["capture_time"]),
+                            "camera_make": str(tags.get("Image Make") or ""),
+                            "camera_model": str(result["camera_model"]),
+                            "lens_model": str(result["lens_model"]),
+                            "iso": int(result["iso"] or 0),
+                            "raw_exif_sensor_meta_ver": RAW_EXIF_SENSOR_META_VER,
+                        }
                     }
-                }
-                if file_stat is not None:
-                    cache.put_exif(
-                        file_path,
-                        cache_dict,
-                        file_size=int(file_stat.st_size),
-                        file_mtime=float(file_stat.st_mtime),
-                    )
-                else:
-                    cache.put_exif(file_path, cache_dict)
-                dur_cache = time.time() - t_cache
-            except Exception as e:
-                import logging
-                logging.getLogger(__name__).warning(f"[INDEX] Could not populate ImageCache for {file_path}: {e}")
+                    if file_stat is not None:
+                        cache.put_exif(
+                            file_path,
+                            cache_dict,
+                            file_size=int(file_stat.st_size),
+                            file_mtime=float(file_stat.st_mtime),
+                        )
+                    else:
+                        cache.put_exif(file_path, cache_dict)
+                    dur_cache = time.time() - t_cache
+                except Exception as e:
+                    import logging
+                    logging.getLogger(__name__).warning(f"[INDEX] Could not populate ImageCache for {file_path}: {e}")
+                    dur_cache = 0.0
+            else:
+                dur_cache = 0.0
             total_dur = dur_exif + dur_dims + dur_geo + dur_cache
             if total_dur > 2.0:
                 import logging
@@ -3330,9 +3561,6 @@ class SemanticImageIndex:
         total = len(pending_for_semantic or [])
         if total <= 1:
             return 1
-        forced = semantic_batch_size_forced()
-        if forced is not None:
-            return forced
 
         is_coreml = False
         if self.model_name.startswith("mobileclip-"):
@@ -3347,25 +3575,41 @@ class SemanticImageIndex:
                         coreml_forced,
                     )
                     return min(total, coreml_forced)
-                # By default, do not auto-tune Core ML on macOS to save startup time
-                # and avoid memory spikes. Use the chunk size from config directly.
                 if not os.environ.get("RAWVIEWER_SEMANTIC_COREML_TUNE", "").strip().lower() in ("1", "true", "yes", "on"):
-                    chunk = semantic_coreml_chunk_size()
-                    logger.info(
-                        "[INDEX][SPEED] Core ML encode chunk size: %d (auto-tune off by default)",
-                        chunk,
-                    )
+                    if semantic_coreml_use_native_batch():
+                        chunk = semantic_coreml_chunk_size()
+                        logger.info(
+                            "[INDEX][SPEED] Core ML encode chunk size: %d (native batch)",
+                            chunk,
+                        )
+                    else:
+                        chunk = semantic_coreml_prep_chunk_size()
+                        logger.info(
+                            "[INDEX][SPEED] Core ML prep chunk: %d (serial predict)",
+                            chunk,
+                        )
                     return min(total, chunk)
             elif not isinstance(backend, MobileCLIPONNXBackend):
                 return 1
 
+        forced = semantic_batch_size_forced()
+        if forced is not None:
+            return forced
+
         if not semantic_batch_auto_enabled():
             if is_coreml:
-                chunk = semantic_coreml_chunk_size()
-                logger.info(
-                    "[INDEX][SPEED] Core ML encode chunk size: %d (auto-tune off)",
-                    chunk,
-                )
+                if semantic_coreml_use_native_batch():
+                    chunk = semantic_coreml_chunk_size()
+                    logger.info(
+                        "[INDEX][SPEED] Core ML encode chunk size: %d (auto-tune off, native batch)",
+                        chunk,
+                    )
+                else:
+                    chunk = semantic_coreml_prep_chunk_size()
+                    logger.info(
+                        "[INDEX][SPEED] Core ML prep chunk: %d (auto-tune off, serial predict)",
+                        chunk,
+                    )
                 return min(total, chunk)
             return semantic_batch_size()
 
@@ -3379,6 +3623,14 @@ class SemanticImageIndex:
         cache_key = self._semantic_batch_cache_key(accel_detail)
         cache = _load_semantic_batch_cache()
         cached = cache.get(cache_key)
+        if cached not in candidates and cache:
+            # Upgrades: reuse v6 auto-tune picks when v7 key is not cached yet.
+            legacy_key = cache_key.replace(
+                f"|{SEMANTIC_BATCH_TUNE_CACHE_VERSION}",
+                "|v6",
+            )
+            if legacy_key != cache_key:
+                cached = cache.get(legacy_key)
         if cached in candidates:
             logger.info(
                 "[INDEX][SPEED] %s auto cached: %d",
@@ -3832,6 +4084,174 @@ class SemanticImageIndex:
                 conn.close()
         except Exception:
             return 0
+
+    def _enqueue_metadata_backfill(
+        self,
+        file_paths: Sequence[str],
+        *,
+        geocode_paths: Optional[Sequence[str]] = None,
+    ) -> None:
+        """Queue missing metadata / geocode repair for a background worker."""
+        if not metadata_auto_index_enabled():
+            return
+        with self._metadata_backfill_lock:
+            for p in file_paths or []:
+                if p:
+                    self._metadata_backfill_paths.add(p)
+            for p in geocode_paths or []:
+                if p:
+                    self._metadata_backfill_geocode.add(p)
+            if self._metadata_backfill_running:
+                return
+            if not self._metadata_backfill_paths and not self._metadata_backfill_geocode:
+                return
+            self._metadata_backfill_running = True
+            thread = threading.Thread(
+                target=self._run_metadata_backfill_worker,
+                name="rawviewer-metadata-backfill",
+                daemon=True,
+            )
+            thread.start()
+
+    def _run_metadata_backfill_worker(self) -> None:
+        import logging
+
+        logger = logging.getLogger(__name__)
+        try:
+            while True:
+                with self._metadata_backfill_lock:
+                    extract_paths = list(self._metadata_backfill_paths)
+                    geocode_paths = list(self._metadata_backfill_geocode)
+                    self._metadata_backfill_paths.clear()
+                    self._metadata_backfill_geocode.clear()
+                    if not extract_paths and not geocode_paths:
+                        self._metadata_backfill_running = False
+                        return
+
+                conn = sqlite3.connect(self.db_path, timeout=60.0)
+                conn.execute("PRAGMA journal_mode=WAL")
+                conn.execute("PRAGMA busy_timeout=60000")
+                exif_batch: List[tuple] = []
+                commit_every = 40
+                batch_writes = 0
+                try:
+                    if geocode_paths:
+                        geo = self._ensure_reverse_geocoder()
+                        if geo:
+                            for fp in geocode_paths:
+                                try:
+                                    canonical = self._canonical_path(fp)
+                                    row = conn.execute(
+                                        "SELECT gps_lat, gps_lon, city FROM semantic_index WHERE file_path = ?",
+                                        (canonical,),
+                                    ).fetchone()
+                                    if not row or row[2]:
+                                        continue
+                                    lat, lon = row[0], row[1]
+                                    if lat is None or lon is None:
+                                        continue
+                                    with self._rg_lock:
+                                        recs = geo.search([(float(lat), float(lon))], mode=1)
+                                    if not recs:
+                                        continue
+                                    rec = recs[0] or {}
+                                    city_name = str(rec.get("name", "") or "")
+                                    alternates = str(rec.get("alternates", "") or "")
+                                    city = f"{city_name}, {alternates}" if alternates else city_name
+                                    landmark = str(rec.get("landmark", "") or "")
+                                    admin1 = str(rec.get("admin1", "") or "")
+                                    cc = str(rec.get("cc", "") or "").upper()
+                                    country = self._country_name_from_code(cc)
+                                    conn.execute(
+                                        "UPDATE semantic_index SET city=?, landmark=?, admin1=?, country=?, country_code=? WHERE file_path=?",
+                                        (city, landmark, admin1, country, cc, canonical),
+                                    )
+                                    batch_writes += 1
+                                    if batch_writes >= commit_every:
+                                        conn.commit()
+                                        batch_writes = 0
+                                except Exception:
+                                    continue
+
+                    for fp in extract_paths:
+                        try:
+                            canonical = self._canonical_path(fp)
+                            if not os.path.isfile(canonical):
+                                continue
+                            st = os.stat(canonical)
+                            meta = self._extract_exif_brief(
+                                canonical, include_face=False, file_stat=st, persist_exif=False
+                            )
+                            if meta:
+                                self._upsert_metadata(canonical, st, meta, conn=conn)
+                                batch_writes += 1
+                                exif_batch.append((canonical, meta, st))
+                            if batch_writes >= commit_every:
+                                conn.commit()
+                                batch_writes = 0
+                                self._flush_exif_backfill_batch(exif_batch)
+                                exif_batch.clear()
+                        except Exception:
+                            continue
+
+                    if batch_writes > 0:
+                        conn.commit()
+                    self._flush_exif_backfill_batch(exif_batch)
+                finally:
+                    conn.close()
+        except Exception as exc:
+            logger.warning("[INDEX] Metadata backfill worker failed: %s", exc)
+            with self._metadata_backfill_lock:
+                self._metadata_backfill_running = False
+
+    @staticmethod
+    def _flush_exif_backfill_batch(exif_batch: List[tuple]) -> None:
+        if not exif_batch:
+            return
+        try:
+            from enhanced_raw_processor import RAW_EXIF_SENSOR_META_VER
+            from image_cache import get_image_cache
+
+            cache = get_image_cache()
+            items = []
+            for canonical, meta, st in exif_batch:
+                items.append(
+                    (
+                        canonical,
+                        {
+                            "orientation": int(meta.get("orientation") or 1),
+                            "camera_make": "",
+                            "camera_model": str(meta.get("camera_model") or ""),
+                            "capture_time": str(meta.get("capture_time") or ""),
+                            "original_width": int(meta.get("width") or 0),
+                            "original_height": int(meta.get("height") or 0),
+                            "raw_exif_sensor_meta_ver": RAW_EXIF_SENSOR_META_VER,
+                            "exif_data": {
+                                "capture_time": str(meta.get("capture_time") or ""),
+                                "camera_model": str(meta.get("camera_model") or ""),
+                                "lens_model": str(meta.get("lens_model") or ""),
+                                "iso": int(meta.get("iso") or 0),
+                                "raw_exif_sensor_meta_ver": RAW_EXIF_SENSOR_META_VER,
+                            },
+                        },
+                        int(st.st_size),
+                        float(st.st_mtime),
+                    )
+                )
+            cache.exif_cache.put_many(items, commit=True)
+        except Exception:
+            pass
+
+    def backfill_search_metadata(
+        self,
+        file_paths: Sequence[str],
+        progress_callback: ProgressCallback = None,
+    ) -> int:
+        """Background metadata extraction + geocode repair (search/index gap fill)."""
+        if not file_paths:
+            return 0
+        self._enqueue_metadata_backfill(list(file_paths))
+        return len(file_paths)
 
     def backfill_face_counts(
         self,
@@ -4300,6 +4720,11 @@ class SemanticImageIndex:
                     conn.commit()
                     batch_writes = 0
                 logger.info(f"[INDEX] Completed metadata extraction for {total_extract} files in {time.time() - t_meta_start:.4f}s.")
+                try:
+                    from image_cache import get_image_cache
+                    get_image_cache().flush_exif_disk_cache()
+                except Exception:
+                    pass
 
             face_pending = self._face_pending_paths(conn, unique_canonical) if face_scan_enabled() else []
             total_face = len(face_pending)
@@ -5424,78 +5849,27 @@ class SemanticImageIndex:
         
         return text.strip()
 
-    @lru_cache(maxsize=128)
+    @lru_cache(maxsize=256)
     def _is_strictly_location_name(self, term: str) -> bool:
         """
         Check if a term is strictly a known country or major city name.
         This is used to prevent semantic search 'guessing' when metadata contradicts.
+        Uses O(1) exact lookups only — never scans the full city database per query.
         """
-        needle = term.strip().lower()
+        needle = _normalize_location_term(term)
         if len(needle) < 3:
             return False
-            
-        # Hardcoded set of common countries, cities, and travel destinations for quick check
-        _LOCATIONS = {
-            # Countries
-            "japan", "korea", "china", "taiwan", "usa", "uk", "canada", "france", 
-            "germany", "italy", "spain", "russia", "australia", "india", "brazil", 
-            "mexico", "thailand", "vietnam", "singapore", "malaysia", "indonesia",
-            "philippines", "switzerland", "austria", "netherlands", "greece", "turkey",
-            "egypt", "south africa", "new zealand", "united states", "united kingdom",
-            "south korea", "north korea",
-            
-            # Major Cities & Capitals
-            "tokyo", "seoul", "london", "paris", "berlin", "new york", "los angeles",
-            "san francisco", "hong kong", "beijing", "shanghai", "bangkok", "singapore",
-            "sydney", "melbourne", "toronto", "vancouver", "rome", "milan", "madrid",
-            "barcelona", "amsterdam", "vienna", "zurich", "geneva", "mumbai", "delhi",
-            "bangalore", "jakarta", "manila", "ho chi minh", "hanoi", "taipei", "macao",
-            "moscow", "istanbul", "dubai", "abu dhabi", "riyadh", "cairo", "nairobi",
-            "chicago", "boston", "seattle", "miami", "munich", "frankfurt", "lyon",
-            "prague", "budapest", "warsaw", "stockholm", "oslo", "copenhagen", "helsinki",
-            "lisbon", "athens", "dublin", "tel aviv", "mexico city", "buenos aires",
-            "sao paulo", "rio de janeiro", "santiago", "lima", "bogota",
-            
-            # Popular Travel Destinations (FB/IG Hotspots)
-            "santorini", "mykonos", "bali", "phuket", "kyoto", "osaka", "nara", "hokkaido",
-            "jeju", "busan", "boracay", "cebu", "nha trang", "da nang", "koh samui",
-            "krabi", "chiang mai", "luang prabang", "angkor wat", "siem reap", "halong bay",
-            "maldives", "fiji", "bora bora", "tahiti", "maui", "honolulu", "oahu", "kauai",
-            "ibiza", "mallorca", "tenerife", "capri", "amalfi", "positano", "venice",
-            "florence", "tuscany", "provence", "cannes", "nice", "monaco", "st moritz",
-            "zermatt", "interlaken", "hallstatt", "salzburg", "innsbruck", "banff",
-            "whistler", "yellowstone", "yosemite", "grand canyon", "sedona", "reykjavik",
-            "blue lagoon", "cappadocia", "petra", "machu picchu", "cusco", "uyuni",
-            "patagonia", "queenstown", "rotorua", "milford sound"
-        }
-        if needle in _LOCATIONS:
+
+        if needle in KNOWN_LOCATION_NAMES:
             return True
-            
-        # Check database names dynamically
-        geo = self._ensure_reverse_geocoder()
-        if geo and hasattr(geo, "cities"):
-            for lat, lon, name, admin1, cc in geo.cities:
-                n_lower = name.lower()
-                if len(n_lower) >= 4 and (n_lower == needle or n_lower in needle or needle in n_lower):
-                    return True
-            if hasattr(geo, "landmarks"):
-                for lat, lon, name, cc in geo.landmarks:
-                    n_lower = name.lower()
-                    if len(n_lower) >= 4 and (n_lower == needle or n_lower in needle or needle in n_lower):
-                        return True
-            
-        if pycountry is not None:
-            try:
-                # Check for country names
-                for c in pycountry.countries:
-                    if c.name.lower() == needle:
-                        return True
-                    if hasattr(c, 'common_name') and c.common_name.lower() == needle:
-                        return True
-                    if hasattr(c, 'official_name') and c.official_name.lower() == needle:
-                        return True
-            except Exception:
-                pass
+
+        if needle in _pycountry_name_index():
+            return True
+
+        geo = self._reverse_geocoder
+        if geo and geo is not False and hasattr(geo, "has_place_name"):
+            return geo.has_place_name(needle)
+
         return False
 
     def _auto_match_metadata_keywords(
@@ -5741,22 +6115,27 @@ class SemanticImageIndex:
             # indexed face_count only (NULL → 0). Live detection belongs in indexing.
             if face_count is None:
                 face_count = 0
-            
-            # Lazy metadata repair: If we have GPS but no location names (city/country),
-            # it might have been indexed when the geocoder was unavailable. 
-            # Try to fix it on the fly.
+
             city = str(row["city"] or "")
             landmark = str(row["landmark"] or "")
             admin1 = str(row["admin1"] or "")
             country = str(row["country"] or "")
             gps_lat = row["gps_lat"]
             gps_lon = row["gps_lon"]
-            
-            if not city and gps_lat is not None and gps_lon is not None:
+
+            try:
+                from upgrade_compat import legacy_search_metadata_sync
+
+                sync_search = legacy_search_metadata_sync()
+            except Exception:
+                sync_search = True
+
+            if sync_search and not city and gps_lat is not None and gps_lon is not None:
                 geo = self._ensure_reverse_geocoder()
                 if geo:
                     try:
-                        recs = geo.search([(float(gps_lat), float(gps_lon))], mode=1)
+                        with self._rg_lock:
+                            recs = geo.search([(float(gps_lat), float(gps_lon))], mode=1)
                         if recs:
                             rec = recs[0] or {}
                             city_name = str(rec.get("name", "") or "")
@@ -5766,14 +6145,15 @@ class SemanticImageIndex:
                             admin1 = str(rec.get("admin1", "") or "")
                             cc = str(rec.get("cc", "") or "").upper()
                             country = self._country_name_from_code(cc)
-                            # Update DB so we don't have to geocode this file again
                             self._conn.execute(
                                 "UPDATE semantic_index SET city=?, landmark=?, admin1=?, country=?, country_code=? WHERE file_path=?",
-                                (city, landmark, admin1, country, cc, original)
+                                (city, landmark, admin1, country, cc, original),
                             )
                             self._conn.commit()
                     except Exception:
                         pass
+            elif not sync_search and not city and gps_lat is not None and gps_lon is not None:
+                self._enqueue_metadata_backfill([], geocode_paths=[original])
 
             rows.append(
                 {
@@ -5795,36 +6175,100 @@ class SemanticImageIndex:
                     "face_count": int(face_count or 0),
                 }
             )
-        # Fallback for files not yet indexed: extract EXIF so metadata search can still
-        # cover the whole album while semantic indexing continues in background.
-        for p in candidate_paths:
-            if not p or not os.path.isfile(p):
+        try:
+            from upgrade_compat import legacy_search_metadata_sync
+
+            sync_search = legacy_search_metadata_sync()
+        except Exception:
+            sync_search = True
+
+        missing_paths = [
+            p
+            for p in candidate_paths
+            if p
+            and os.path.isfile(p)
+            and self._canonical_path(p) not in found_paths
+        ]
+
+        if sync_search:
+            for p in missing_paths:
+                meta = self._extract_exif_brief(p, include_face=False)
+                rows.append(
+                    {
+                        "file_path": p,
+                        "file_name": os.path.basename(p),
+                        "capture_time": str(meta.get("capture_time") or ""),
+                        "camera_model": str(meta.get("camera_model") or ""),
+                        "lens_model": str(meta.get("lens_model") or ""),
+                        "iso": int(meta.get("iso") or 0),
+                        "width": int(meta.get("width") or 0),
+                        "height": int(meta.get("height") or 0),
+                        "gps_lat": meta.get("gps_lat"),
+                        "gps_lon": meta.get("gps_lon"),
+                        "city": str(meta.get("city") or ""),
+                        "landmark": str(meta.get("landmark") or ""),
+                        "admin1": str(meta.get("admin1") or ""),
+                        "country": str(meta.get("country") or ""),
+                        "country_code": str(meta.get("country_code") or ""),
+                        "face_count": int(meta.get("face_count") or 0),
+                    }
+                )
+        else:
+            if missing_paths:
+                cached_rows = self._metadata_rows_from_exif_cache(missing_paths)
+                rows.extend(cached_rows)
+                cached_canonical = {
+                    self._canonical_path(str(r["file_path"])) for r in cached_rows
+                }
+                still_missing = [
+                    p
+                    for p in missing_paths
+                    if self._canonical_path(p) not in cached_canonical
+                ]
+                if still_missing:
+                    self._enqueue_metadata_backfill(still_missing)
+        return rows
+
+    def _metadata_rows_from_exif_cache(
+        self, file_paths: Sequence[str]
+    ) -> List[Dict[str, object]]:
+        """Read-only EXIF cache rows for search (no disk extract on UI thread)."""
+        out: List[Dict[str, object]] = []
+        if not file_paths:
+            return out
+        try:
+            from image_cache import get_image_cache
+
+            cache = get_image_cache()
+            cached = cache.get_multiple_exif(list(file_paths), fast_mode=True)
+        except Exception:
+            return out
+        for p in file_paths:
+            exif = cached.get(p)
+            if not exif:
                 continue
-            canonical = self._canonical_path(p)
-            if canonical in found_paths:
-                continue
-            meta = self._extract_exif_brief(p, include_face=False)
-            rows.append(
+            exif_data = exif.get("exif_data") if isinstance(exif.get("exif_data"), dict) else {}
+            out.append(
                 {
                     "file_path": p,
                     "file_name": os.path.basename(p),
-                    "capture_time": str(meta.get("capture_time") or ""),
-                    "camera_model": str(meta.get("camera_model") or ""),
-                    "lens_model": str(meta.get("lens_model") or ""),
-                    "iso": int(meta.get("iso") or 0),
-                    "width": int(meta.get("width") or 0),
-                    "height": int(meta.get("height") or 0),
-                    "gps_lat": meta.get("gps_lat"),
-                    "gps_lon": meta.get("gps_lon"),
-                    "city": str(meta.get("city") or ""),
-                    "landmark": str(meta.get("landmark") or ""),
-                    "admin1": str(meta.get("admin1") or ""),
-                    "country": str(meta.get("country") or ""),
-                    "country_code": str(meta.get("country_code") or ""),
-                    "face_count": int(meta.get("face_count") or 0),
+                    "capture_time": str(exif.get("capture_time") or exif_data.get("capture_time") or ""),
+                    "camera_model": str(exif.get("camera_model") or exif_data.get("camera_model") or ""),
+                    "lens_model": str(exif_data.get("lens_model") or ""),
+                    "iso": int(exif_data.get("iso") or 0),
+                    "width": int(exif.get("original_width") or exif_data.get("original_width") or 0),
+                    "height": int(exif.get("original_height") or exif_data.get("original_height") or 0),
+                    "gps_lat": exif_data.get("gps_lat"),
+                    "gps_lon": exif_data.get("gps_lon"),
+                    "city": str(exif_data.get("city") or ""),
+                    "landmark": str(exif_data.get("landmark") or ""),
+                    "admin1": str(exif_data.get("admin1") or ""),
+                    "country": str(exif_data.get("country") or ""),
+                    "country_code": str(exif_data.get("country_code") or ""),
+                    "face_count": 0,
                 }
             )
-        return rows
+        return out
 
     def _store_face_count(
         self,

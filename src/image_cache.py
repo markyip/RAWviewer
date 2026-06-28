@@ -17,7 +17,7 @@ import pickle
 import shutil
 import numpy as np
 from collections import OrderedDict
-from typing import Optional, Tuple, Dict, Any, Union, List
+from typing import Optional, Tuple, Dict, Any, Union, List, Sequence
 import psutil
 from PyQt6.QtGui import QPixmap, QImage
 from PyQt6.QtCore import QObject, pyqtSignal
@@ -89,7 +89,11 @@ def _darwin_memory_stats_from_vm_stat() -> Optional[Tuple[int, int, float]]:
 
 
 def system_memory_total_bytes() -> Optional[int]:
-    """Total installed RAM in bytes (psutil with sysctl fallback)."""
+    """Total installed RAM in bytes (sysctl on macOS, then psutil)."""
+    if platform.system() == "Darwin":
+        total = _sysctl_hw_memsize_bytes()
+        if total:
+            return int(total)
     try:
         return int(psutil.virtual_memory().total)
     except Exception:
@@ -97,14 +101,22 @@ def system_memory_total_bytes() -> Optional[int]:
 
 
 def _safe_virtual_memory():
-    """psutil.virtual_memory() with sysctl/vm_stat fallback for newer macOS kernels."""
+    """Memory stats with macOS sysctl/vm_stat first (avoids psutil HOST_VM_INFO64 issues)."""
     global _psutil_vm_fallback_logged
+    if platform.system() == "Darwin":
+        fallback = _darwin_memory_stats_from_vm_stat()
+        if fallback is not None:
+            from types import SimpleNamespace
+
+            total, available, percent = fallback
+            return SimpleNamespace(total=total, available=available, percent=percent)
+
     try:
         return psutil.virtual_memory()
     except Exception as exc:
         if not _psutil_vm_fallback_logged:
-            logger.warning(
-                "psutil.virtual_memory() failed (%s); using fallback memory stats",
+            logger.debug(
+                "psutil.virtual_memory() unavailable (%s); using fallback memory stats",
                 exc,
             )
             _psutil_vm_fallback_logged = True
@@ -390,13 +402,19 @@ class PersistentEXIFCache:
         self.db_path = os.path.join(cache_dir, "exif_cache.db")
         self.lock = threading.RLock()
         
-        # Use thread-local storage for database connections
+        # Reads: thread-local connections. Writes: single writer connection (WAL).
         self._local = threading.local()
+        self._writer_conn: Optional[sqlite3.Connection] = None
+        self._pending_writes: List[tuple] = []
+        self._commit_every = max(
+            1,
+            int(os.environ.get("RAWVIEWER_EXIF_CACHE_COMMIT_EVERY", "40")),
+        )
         
         self._init_db()
 
     def _get_connection(self):
-        """Get thread-local database connection."""
+        """Get thread-local database connection (read-optimized)."""
         if not hasattr(self._local, 'conn'):
             conn = sqlite3.connect(
                 self.db_path,
@@ -409,6 +427,90 @@ class PersistentEXIFCache:
             conn.execute("PRAGMA cache_size=1000")
             self._local.conn = conn
         return self._local.conn
+
+    def _get_writer_connection(self) -> sqlite3.Connection:
+        """Dedicated writer connection for index/backfill batches (separate from readers)."""
+        if self._writer_conn is None:
+            conn = sqlite3.connect(
+                self.db_path,
+                check_same_thread=False,
+                timeout=30.0,
+            )
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=NORMAL")
+            conn.execute("PRAGMA cache_size=1000")
+            self._writer_conn = conn
+        return self._writer_conn
+
+    def _prepare_put_row(
+        self,
+        file_path: str,
+        exif_info: Dict[str, Any],
+        *,
+        file_size: Optional[int] = None,
+        file_mtime: Optional[float] = None,
+    ) -> Optional[tuple]:
+        if file_size is None or file_mtime is None:
+            file_size, file_mtime = self._get_file_hash(file_path)
+        if file_size == 0:
+            return None
+
+        storage_path = _exif_cache_path_key(file_path)
+        exif_blob = pickle.dumps(exif_info.get('exif_data', {}))
+
+        capture_time = exif_info.get('capture_time')
+        if not capture_time:
+            exif_dict = exif_info.get('exif_data', {})
+            if isinstance(exif_dict, dict):
+                capture_time = exif_dict.get('capture_time')
+
+        width = exif_info.get('original_width')
+        height = exif_info.get('original_height')
+        if not width or not height:
+            exif_dict = exif_info.get('exif_data', {})
+            if isinstance(exif_dict, dict):
+                if not width:
+                    width = exif_dict.get('original_width')
+                if not height:
+                    height = exif_dict.get('original_height')
+
+        sensor_meta_ver = exif_info.get('raw_exif_sensor_meta_ver')
+        if sensor_meta_ver is None:
+            sensor_meta_ver = 0
+
+        return (
+            storage_path,
+            file_size,
+            file_mtime,
+            exif_info.get('orientation', 1),
+            exif_info.get('camera_make', ''),
+            exif_info.get('camera_model', ''),
+            exif_blob,
+            time.time(),
+            capture_time,
+            width,
+            height,
+            int(sensor_meta_ver),
+        )
+
+    def _flush_pending_writes(self) -> None:
+        if not self._pending_writes:
+            return
+        writer = self._get_writer_connection()
+        writer.executemany(
+            "INSERT OR REPLACE INTO exif_cache "
+            "(file_path, file_size, file_mtime, orientation, camera_make, camera_model, exif_data, "
+            "cached_time, capture_time, original_width, original_height, sensor_meta_ver) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            self._pending_writes,
+        )
+        writer.commit()
+        self._pending_writes.clear()
+
+    def flush(self) -> None:
+        """Commit any batched EXIF writes (call after indexing batches)."""
+        with self.lock:
+            self._flush_pending_writes()
 
     def _init_db(self):
         """Initialize the SQLite database."""
@@ -521,12 +623,13 @@ class PersistentEXIFCache:
         cache_key = _exif_cache_path_key(file_path)
         with self.lock:
             try:
-                conn = self._get_connection()
-                cursor = conn.execute(
+                self._flush_pending_writes()
+                writer = self._get_writer_connection()
+                cursor = writer.execute(
                     "DELETE FROM exif_cache WHERE lower(file_path) = lower(?)",
                     (cache_key,),
                 )
-                conn.commit()
+                writer.commit()
                 return cursor.rowcount > 0
             except Exception:
                 return False
@@ -538,62 +641,47 @@ class PersistentEXIFCache:
         *,
         file_size: Optional[int] = None,
         file_mtime: Optional[float] = None,
+        commit: bool = False,
     ) -> None:
         """Cache EXIF data. Pass file_size/file_mtime when already known (avoids stat under lock)."""
-        if file_size is None or file_mtime is None:
-            file_size, file_mtime = self._get_file_hash(file_path)
-        if file_size == 0:
+        row = self._prepare_put_row(
+            file_path, exif_info, file_size=file_size, file_mtime=file_mtime
+        )
+        if row is None:
             return
-
-        storage_path = _exif_cache_path_key(file_path)
 
         with self.lock:
             try:
-                conn = self._get_connection()
-                exif_blob = pickle.dumps(exif_info.get('exif_data', {}))
-                
-                # Extract capture_time for separate column
-                capture_time = exif_info.get('capture_time')
-                if not capture_time:
-                    # Try to extract from exif_data dict if not at top level
-                    exif_dict = exif_info.get('exif_data', {})
-                    if isinstance(exif_dict, dict):
-                         capture_time = exif_dict.get('capture_time')
-                
-                # Extract dimensions for separate columns
-                width = exif_info.get('original_width')
-                height = exif_info.get('original_height')
-                if not width or not height:
-                    exif_dict = exif_info.get('exif_data', {})
-                    if isinstance(exif_dict, dict):
-                         if not width: width = exif_dict.get('original_width')
-                         if not height: height = exif_dict.get('original_height')
+                self._pending_writes.append(row)
+                if commit or len(self._pending_writes) >= self._commit_every:
+                    self._flush_pending_writes()
+            except Exception:
+                pass
 
-                sensor_meta_ver = exif_info.get('raw_exif_sensor_meta_ver')
-                if sensor_meta_ver is None:
-                    sensor_meta_ver = 0
-                
-                conn.execute(
-                    "INSERT OR REPLACE INTO exif_cache "
-                    "(file_path, file_size, file_mtime, orientation, camera_make, camera_model, exif_data, "
-                    "cached_time, capture_time, original_width, original_height, sensor_meta_ver) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (
-                        storage_path,
-                        file_size,
-                        file_mtime,
-                        exif_info.get('orientation', 1),
-                        exif_info.get('camera_make', ''),
-                        exif_info.get('camera_model', ''),
-                        exif_blob,
-                        time.time(),
-                        capture_time,
-                        width,
-                        height,
-                        int(sensor_meta_ver),
-                    )
-                )
-                conn.commit()
+    def put_many(
+        self,
+        items: Sequence[tuple[str, Dict[str, Any], Optional[int], Optional[float]]],
+        *,
+        commit: bool = True,
+    ) -> None:
+        """Batch EXIF writes (file_path, exif_info, file_size, file_mtime)."""
+        rows: List[tuple] = []
+        for file_path, exif_info, file_size, file_mtime in items:
+            row = self._prepare_put_row(
+                file_path,
+                exif_info,
+                file_size=file_size,
+                file_mtime=file_mtime,
+            )
+            if row is not None:
+                rows.append(row)
+        if not rows:
+            return
+        with self.lock:
+            try:
+                self._pending_writes.extend(rows)
+                if commit or len(self._pending_writes) >= self._commit_every:
+                    self._flush_pending_writes()
             except Exception:
                 pass
 
@@ -603,10 +691,12 @@ class PersistentEXIFCache:
 
         with self.lock:
             try:
-                conn = self._get_connection()
-                conn.execute(
-                    "DELETE FROM exif_cache WHERE cached_time < ?", (cutoff_time,))
-                conn.commit()
+                self._flush_pending_writes()
+                writer = self._get_writer_connection()
+                writer.execute(
+                    "DELETE FROM exif_cache WHERE cached_time < ?", (cutoff_time,)
+                )
+                writer.commit()
             except Exception:
                 pass
 
@@ -614,9 +704,10 @@ class PersistentEXIFCache:
         """Remove all cached EXIF entries."""
         with self.lock:
             try:
-                conn = self._get_connection()
-                conn.execute("DELETE FROM exif_cache")
-                conn.commit()
+                self._pending_writes.clear()
+                writer = self._get_writer_connection()
+                writer.execute("DELETE FROM exif_cache")
+                writer.commit()
             except Exception:
                 pass
 
@@ -1922,6 +2013,11 @@ class ImageCache(QObject):
                     file_mtime=file_mtime,
                 )
 
+    def flush_exif_disk_cache(self) -> None:
+        """Commit batched EXIF disk writes (call after indexing batches)."""
+        if hasattr(self.exif_cache, "flush"):
+            self.exif_cache.flush()
+
     def get_capture_times_for_sort(self, file_paths: list) -> Dict[str, str]:
         """capture_time only, for folder sort (ignores stale mtime on network folders)."""
         return self.exif_cache.get_capture_times_bulk(file_paths)
@@ -2091,6 +2187,27 @@ def _cleanup_legacy_disk_cache_once() -> None:
             pass
 
 
+_exif_cache_atexit_registered = False
+
+
+def _register_exif_cache_atexit() -> None:
+    global _exif_cache_atexit_registered
+    if _exif_cache_atexit_registered:
+        return
+    _exif_cache_atexit_registered = True
+    import atexit
+
+    def _flush_exif_on_exit() -> None:
+        try:
+            global _global_cache
+            if _global_cache is not None and hasattr(_global_cache, "flush_exif_disk_cache"):
+                _global_cache.flush_exif_disk_cache()
+        except Exception:
+            pass
+
+    atexit.register(_flush_exif_on_exit)
+
+
 def get_image_cache() -> ImageCache:
     """Get the global image cache instance."""
     global _global_cache
@@ -2099,6 +2216,7 @@ def get_image_cache() -> ImageCache:
         if not persistent:
             _cleanup_legacy_disk_cache_once()
         _global_cache = ImageCache(persistent_cache_enabled=persistent)
+        _register_exif_cache_atexit()
     return _global_cache
 
 
