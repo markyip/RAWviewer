@@ -25,12 +25,12 @@ class FolderSortRefineSignals(QObject):
 
 class FolderResortSignals(QObject):
     """Signal carrier for background manual folder re-sort (sort button)."""
-    ready = pyqtSignal(list, dict)  # sorted_files, bulk_metadata
+    ready = pyqtSignal(int, list, dict)  # token, sorted_files, bulk_metadata
 
 
 class SemanticSearchResortSignals(QObject):
     """Signal carrier for background capture-time re-sort of search hits."""
-    ready = pyqtSignal(str, list, object, bool, dict)  # query, ranked_paths, hits, used_semantic, bulk_meta
+    ready = pyqtSignal(int, str, list, object, bool, dict)  # token, query, ranked_paths, hits, used_semantic, bulk_meta
 
 
 class WebpDecodeSignals(QObject):

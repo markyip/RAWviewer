@@ -1662,12 +1662,14 @@ from rawviewer_app.env import _env_int, _env_true, _norm_path, safe_print, safe_
 from rawviewer_app.processing import RAWProcessor, PixmapConverter
 from rawviewer_app.signals import (
     FolderLoadSignals,
+    FolderResortSignals,
     FolderSortRefineSignals,
     GalleryMetadataSignals,
     QuickFolderIndexSignals,
     ReleaseUpdateCheckSignals,
     SemanticIndexPrepSignals,
     SemanticIndexSignals,
+    SemanticSearchResortSignals,
 )
 from rawviewer_app.widgets import (
     CustomConfirmDialog,
@@ -4499,17 +4501,20 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             pass
         is_full_resolution = image_covers_sensor_resolution(width, height, exif_for_res)
 
-        # Skip redundant redraws only for non-full-resolution images (previews/thumbnails).
-        # A full-resolution decode must always be shown — the on-screen buffer may be a
-        # blurry preview with identical pixel dimensions (gallery → single view transition).
-        if (
-            not is_full_resolution
-            and not getattr(self, "_skip_resolution_downgrade_check", False)
+        # Skip redundant redraws when the same path is already on screen at the same max
+        # dimension. Gallery → single may still upgrade blur→sharp via _loading_from_gallery.
+        skip_redundant = (
+            not getattr(self, "_skip_resolution_downgrade_check", False)
             and self._already_displaying_buffer_for_path(file_path, image)
+        )
+        if skip_redundant and (
+            not is_full_resolution
+            or not getattr(self, "_loading_from_gallery", False)
         ):
             logger.info(
-                "[MANAGER] Skipping redundant image_ready for %s (already on screen)",
+                "[MANAGER] Skipping redundant image_ready for %s (already on screen%s)",
                 os.path.basename(file_path),
+                ", full-res" if is_full_resolution else "",
             )
             self._full_resolution_loading = False
             self._finish_pending_zoom_after_full_load(file_path)
@@ -7553,10 +7558,11 @@ class RAWImageViewer(SessionMixin, QMainWindow):
 
         from semantic_search import semantic_embeddings_enabled
 
-        if self._is_gallery_semantic_search_ready(corpus_files):
-            logger.info("[INDEX][USER] Skip semantic start: already ready")
-            self._finish_gallery_search_unlock(corpus_files)
-            return
+        if not getattr(self, "_defer_semantic_after_metadata", False):
+            if self._is_gallery_semantic_search_ready(corpus_files):
+                logger.info("[INDEX][USER] Skip semantic start: already ready")
+                self._finish_gallery_search_unlock(corpus_files)
+                return
 
         if getattr(self, "_semantic_indexing_in_progress", False):
             if getattr(self, "_semantic_index_pass_kind", None) == "silent_metadata":
@@ -7620,21 +7626,6 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         except Exception as e:
             self._set_gallery_search_status(f"Search error: {e}")
             return
-
-        try:
-            pending_emb = len(index.get_pending_embedding_paths(corpus_files) or [])
-            face_pending = int(index.get_face_pending_count(corpus_files) or 0)
-            if pending_emb == 0 and face_pending > 0:
-                logger.info(
-                    "[INDEX][USER] Embeddings complete; chaining face scan (pending=%d)",
-                    face_pending,
-                )
-                self._chain_face_index_after_semantic(
-                    corpus_files, face_pending=face_pending
-                )
-                return
-        except Exception:
-            pass
 
         self._run_semantic_index_prep_for_search(corpus_files)
 
@@ -7756,11 +7747,6 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             self._set_gallery_search_status("No images available for semantic search")
             return
 
-        if self._is_gallery_semantic_search_ready(corpus_files):
-            self._finish_gallery_search_unlock(corpus_files)
-            return
-
-        self._invalidate_semantic_coverage_cache()
         self._start_user_semantic_indexing(corpus_files)
 
     def _build_semantic_index_current_folder(self):
@@ -8003,14 +7989,16 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 return
 
             ranked_paths = [h.file_path for h in hits]
-            if used_semantic_backend and len(ranked_paths) > 1:
-                ranked_paths, bulk_meta = self.sort_files_by_capture_time(
+            pending_capture_sort = used_semantic_backend and len(ranked_paths) > 1
+            if pending_capture_sort:
+                self._last_semantic_query = query
+                self._schedule_semantic_search_resort(
+                    query,
                     ranked_paths,
-                    newest_first=sort_newest,
-                    folder_path=getattr(self, "current_folder", None),
+                    hits,
+                    used_semantic_backend,
+                    sort_newest,
                 )
-                if bulk_meta:
-                    self._gallery_bulk_metadata = bulk_meta
             if not ranked_paths:
                 self.image_files = []
                 self._semantic_search_result_paths = []
@@ -8070,6 +8058,123 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             self._last_semantic_query = query
         except Exception as e:
             QMessageBox.warning(self, "Semantic Search", str(e))
+
+    def _schedule_semantic_search_resort(
+        self,
+        query: str,
+        ranked_paths: list,
+        hits,
+        used_semantic_backend: bool,
+        sort_newest: bool,
+    ) -> None:
+        """Re-sort semantic search hits by capture time on a background worker."""
+        token = getattr(self, "_semantic_search_resort_generation", 0) + 1
+        self._semantic_search_resort_generation = token
+        paths = list(ranked_paths)
+
+        signals = getattr(self, "_semantic_search_resort_signals", None)
+        if signals is None:
+            signals = SemanticSearchResortSignals()
+            signals.ready.connect(self._apply_semantic_search_resort)
+            self._semantic_search_resort_signals = signals
+
+        viewer = self
+        folder_path = getattr(self, "current_folder", None)
+
+        class _SemanticSearchResortWorker(QRunnable):
+            def run(self_inner):
+                bulk_meta: dict = {}
+                sorted_paths = paths
+                try:
+                    sorted_paths, bulk_meta = viewer.sort_files_by_capture_time(
+                        paths,
+                        newest_first=sort_newest,
+                        folder_path=folder_path,
+                    )
+                except Exception as e:
+                    import logging
+                    import traceback
+
+                    logging.getLogger(__name__).error(
+                        "[SEARCH] Background capture-time resort failed: %s\n%s",
+                        e,
+                        traceback.format_exc(),
+                    )
+                try:
+                    from PyQt6 import sip
+
+                    if not sip.isdeleted(signals):
+                        signals.ready.emit(
+                            token,
+                            query,
+                            sorted_paths,
+                            hits,
+                            used_semantic_backend,
+                            bulk_meta,
+                        )
+                except Exception:
+                    pass
+
+        QThreadPool.globalInstance().start(_SemanticSearchResortWorker())
+
+    def _apply_semantic_search_resort(
+        self,
+        token: int,
+        query: str,
+        ranked_paths: list,
+        hits,
+        used_semantic_backend: bool,
+        bulk_meta: dict,
+    ) -> None:
+        """Apply background capture-time re-sort for semantic search on the UI thread."""
+        if token != getattr(self, "_semantic_search_resort_generation", None):
+            return
+        if (query or "").strip() != (getattr(self, "_last_semantic_query", "") or "").strip():
+            return
+        if not ranked_paths:
+            return
+
+        preserved = self.current_file_path
+        self.image_files = ranked_paths
+        self._semantic_search_result_paths = list(ranked_paths)
+        if bulk_meta:
+            self._gallery_bulk_metadata = bulk_meta
+
+        if preserved and preserved in self.image_files:
+            self.current_file_index = self.image_files.index(preserved)
+            self.current_file_path = preserved
+        elif self.image_files:
+            self.current_file_index = 0
+            self.current_file_path = self.image_files[0]
+
+        if getattr(self, "_gallery_bookmark_filter_active", False):
+            self._apply_gallery_bookmark_filter()
+        elif getattr(self, "view_mode", "single") == "gallery":
+            self._update_gallery_counter()
+            if hasattr(self, "gallery_justified") and self.gallery_justified:
+                self.gallery_justified.hide_empty_message()
+            self._sync_gallery_scrollbar_policy()
+            self._update_gallery_view()
+
+        top = max(hits, key=lambda h: h.score) if hits else None
+        effective_n = len(self._gallery_effective_files())
+        if used_semantic_backend and top is not None:
+            if getattr(self, "_gallery_bookmark_filter_active", False):
+                message = (
+                    f"Search: {effective_n} bookmarked match"
+                    f"{'es' if effective_n != 1 else ''}"
+                    f" | top score {top.score:.3f}"
+                )
+            else:
+                message = (
+                    f"Semantic search: {len(ranked_paths)} result(s) "
+                    f"| sorted by capture time | top score {top.score:.3f}"
+                )
+        elif getattr(self, "_gallery_bookmark_filter_active", False):
+            message = f"EXIF search: {effective_n} bookmarked match{'es' if effective_n != 1 else ''}"
+        else:
+            message = f"EXIF search: {len(ranked_paths)} result(s)"
+        self.status_bar.showMessage(message, 5000)
 
     def _clear_semantic_search_results(self, silent=False, exit_to_gallery=False):
         # Capture current gallery scroll anchor before clearing filter
@@ -11391,47 +11496,110 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self._schedule_search_expand_overlay_sync()
     
     def resort_current_folder(self):
-        """Resort the current folder with new sorting preference"""
-        if self.current_folder and self.image_files:
-            # Store current file path
-            current_file = self.current_file_path
-            old_index = self.current_file_index
-            
-            # Determine scroll anchor in gallery mode before sorting
-            anchor_file = None
-            in_gallery = (self.view_mode == 'gallery' and hasattr(self, 'gallery_widget') and self.gallery_widget.isVisible())
-            if in_gallery and hasattr(self, 'gallery_justified') and self.gallery_justified:
-                anchor_file = self.gallery_justified.get_scroll_anchor_path()
-            
-            # Resort the files
-            self.image_files, bulk_metadata = self.sort_image_files(self.image_files)
-            # Store bulk_metadata for use in gallery updates
-            self._gallery_bulk_metadata = bulk_metadata
-            
-            # Find the current file in the new order
-            if current_file in self.image_files:
-                self.current_file_index = self.image_files.index(current_file)
-                self.current_file_path = current_file
-                
-                # Debug logging
-                import logging
-                logger = logging.getLogger(__name__)
-                logger.debug(f"[SORT] Resorted folder: {os.path.basename(current_file)}")
-                logger.debug(f"[SORT] Old index: {old_index}, New index: {self.current_file_index}")
-                logger.debug(f"[SORT] Total files: {len(self.image_files)}")
-                
-                # Update status bar to reflect new position
-                self.update_status_bar()
-                
-                # Update gallery view if in gallery mode
-                if in_gallery:
-                    self._sync_gallery_to_folder_files(
-                        bulk_metadata=bulk_metadata,
-                        scroll_to_current=False,
-                        scroll_anchor_path=anchor_file or current_file,
-                        force=True
+        """Resort the current folder with new sorting preference (sort runs off UI thread)."""
+        if not self.current_folder or not self.image_files:
+            return
+
+        paths = list(self.image_files)
+        token = getattr(self, "_folder_resort_generation", 0) + 1
+        self._folder_resort_generation = token
+
+        in_gallery = (
+            self.view_mode == "gallery"
+            and hasattr(self, "gallery_widget")
+            and self.gallery_widget.isVisible()
+        )
+        anchor_file = None
+        if in_gallery and hasattr(self, "gallery_justified") and self.gallery_justified:
+            anchor_file = self.gallery_justified.get_scroll_anchor_path()
+
+        self._folder_resort_context = {
+            "token": token,
+            "current_file": self.current_file_path,
+            "old_index": self.current_file_index,
+            "in_gallery": in_gallery,
+            "anchor_file": anchor_file,
+        }
+
+        signals = getattr(self, "_folder_resort_signals", None)
+        if signals is None:
+            signals = FolderResortSignals()
+            signals.ready.connect(self._apply_folder_resort)
+            self._folder_resort_signals = signals
+
+        viewer = self
+        file_stats = getattr(self, "_quick_folder_file_stats", None)
+        newest_first = self.get_sort_preference()
+        folder_path = self.current_folder
+
+        class _FolderResortWorker(QRunnable):
+            def run(self_inner):
+                try:
+                    sorted_files, bulk_metadata = viewer.sort_files_by_capture_time(
+                        paths,
+                        newest_first=newest_first,
+                        file_stats=file_stats,
+                        folder_path=folder_path,
                     )
-    
+                except Exception as e:
+                    import logging
+                    import traceback
+
+                    logging.getLogger(__name__).error(
+                        "[SORT] Background folder resort failed: %s\n%s",
+                        e,
+                        traceback.format_exc(),
+                    )
+                    sorted_files, bulk_metadata = paths, {}
+                try:
+                    from PyQt6 import sip
+
+                    if not sip.isdeleted(signals):
+                        signals.ready.emit(token, sorted_files, bulk_metadata)
+                except Exception:
+                    pass
+
+        QThreadPool.globalInstance().start(_FolderResortWorker())
+
+    def _apply_folder_resort(self, token: int, sorted_files: list, bulk_metadata: dict) -> None:
+        """Apply background folder re-sort on the UI thread."""
+        if token != getattr(self, "_folder_resort_generation", None):
+            return
+        ctx = getattr(self, "_folder_resort_context", None) or {}
+        if ctx.get("token") != token:
+            return
+        if not self.current_folder or not sorted_files:
+            return
+
+        current_file = ctx.get("current_file")
+        old_index = ctx.get("old_index", 0)
+        in_gallery = ctx.get("in_gallery", False)
+        anchor_file = ctx.get("anchor_file")
+
+        self.image_files = sorted_files
+        self._gallery_bulk_metadata = bulk_metadata
+
+        if current_file in self.image_files:
+            self.current_file_index = self.image_files.index(current_file)
+            self.current_file_path = current_file
+
+            import logging
+
+            logger = logging.getLogger(__name__)
+            logger.debug(f"[SORT] Resorted folder: {os.path.basename(current_file)}")
+            logger.debug(f"[SORT] Old index: {old_index}, New index: {self.current_file_index}")
+            logger.debug(f"[SORT] Total files: {len(self.image_files)}")
+
+            self.update_status_bar()
+
+            if in_gallery:
+                self._sync_gallery_to_folder_files(
+                    bulk_metadata=bulk_metadata,
+                    scroll_to_current=False,
+                    scroll_anchor_path=anchor_file or current_file,
+                    force=True,
+                )
+
     def get_image_capture_time(self, file_path):
         """Extract image capture time from EXIF data (DateTimeOriginal)"""
         try:
