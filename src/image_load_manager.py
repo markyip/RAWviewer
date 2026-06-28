@@ -919,6 +919,7 @@ class ImageLoadManager(QObject):
                 if task is not None:
                     task.cancel()
             self._task_keys_by_path.pop(file_path, None)
+            self._compact_work_queue()
 
     def cancel_current_priority_tasks(self, file_path: str) -> None:
         """Cancel only CURRENT-priority work; keep PRELOAD/BACKGROUND prefetch for that path."""
@@ -935,6 +936,7 @@ class ImageLoadManager(QObject):
                 self._task_keys_by_path[file_path].discard(key)
             if not self._task_keys_by_path.get(file_path):
                 self._task_keys_by_path.pop(file_path, None)
+            self._compact_work_queue()
                 
     def cancel_tasks_by_priority(self, priority: Priority) -> None:
         """Cancel all tasks matching the specified priority."""
@@ -950,6 +952,7 @@ class ImageLoadManager(QObject):
                     self._task_keys_by_path[file_path].discard(key)
                     if not self._task_keys_by_path.get(file_path):
                         self._task_keys_by_path.pop(file_path, None)
+            self._compact_work_queue()
     
     def cancel_all_tasks(self):
         """取消所有任務"""
@@ -961,16 +964,22 @@ class ImageLoadManager(QObject):
             # Reset RAW slot counter when dropping all tracked tasks; otherwise old
             # running tasks can leak the counter and block future RAW scheduling.
             self._active_raw_tasks = 0
-        
-        # 清空工作隊列
+            self._compact_work_queue()
+
+    def _compact_work_queue(self) -> None:
+        """Re-enqueue only non-cancelled tasks still waiting in the priority queue."""
+        if self._work_queue.empty():
+            return
+        kept: list = []
         while not self._work_queue.empty():
             try:
-                self._work_queue.get_nowait()
+                task = self._work_queue.get_nowait()
             except queue.Empty:
                 break
-        
-        # NOTE: Do not shutdown pools here. This is used for folder switches and UI navigation.
-        # Use shutdown() only when the application is closing.
+            if not task.is_cancelled():
+                kept.append(task)
+        for task in kept:
+            self._work_queue.put(task)
 
     def flush_queue(self):
         """Aggressively drop pending tasks to prioritize new position (used for large scroll jumps)."""
