@@ -2028,6 +2028,9 @@ class JustifiedGallery(QWidget):
                     ),
                 )
             elif should_load_visible and not self._gallery_folder_superseded():
+                # Apply persisted visual rotations once layout indices exist (set_images()
+                # schedules build asynchronously; an earlier sync would no-op).
+                self.sync_visual_rotations()
                 # Run after _building is cleared, so load_visible_images won't early-return.
                 if self._pending_scroll_to_path or self._pending_scroll_anchor_state:
                     QTimer.singleShot(0, self._apply_pending_scroll_to_file)

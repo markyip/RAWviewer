@@ -42,7 +42,7 @@ In **gallery view**, drag the **size slider** in the bottom bar to change thumbn
 | **G** | Cycle composition guide |
 | **H** | Show / hide histogram (hidden by default on launch) |
 | **J** | Toggle highlight/shadow clipping overlay (RAW single view) |
-| **T** | Toggle RAW recovery preview — half-res shadow/highlight recovery (RAW/DNG, session only; fit-only) |
+| **P** | Toggle RAW recovery preview — half-res shadow/highlight recovery (RAW/DNG, session only; fit-only) |
 | **F** | Show / hide focus overlay (supported files) |
 | **M** | Show / hide GPS map overlay (single view, geotagged photos; hidden by default on launch) |
 
@@ -87,7 +87,7 @@ For a dedicated **cluster map** across an entire album and **geotagging photos m
 2. Choose **Full (CUDA)**, **Full (DirectML)**, or **Lite** in the wizard. **Full** also downloads AI models (~600 MB).
 3. Launch **`RAWviewer.exe`** or the Desktop shortcut (not the Setup file again).
 
-> **v2.5 new:** Gallery zoom slider, scroll anchoring, GPS map overlay (**M**), **macOS HDR/EDR** for HDR stills and **RAW (High Quality workflow)**, **T** recovery preview / **J** clipping overlay on RAW, animated GIF/WebP playback, histogram/map hidden on launch, reliable gallery layout when switching albums, and cleaner cancellation of background indexing from the previous folder.
+> **v2.5 new:** Gallery zoom slider, scroll anchoring, GPS map overlay (**M**), **macOS HDR/EDR** for HDR stills and **RAW (High Quality workflow)**, **P** recovery preview / **J** clipping overlay on RAW, animated GIF/WebP playback, histogram/map hidden on launch, reliable gallery layout when switching albums, and cleaner cancellation of background indexing from the previous folder.
 
 Registers **Open with** for common photo formats. Uninstall: Settings → Apps, or **`uninstall.bat`** in `%LOCALAPPDATA%\RAWviewer`.
 
@@ -122,7 +122,7 @@ On **macOS**, HDR **HEIC / HEIF / AVIF** and 16-bit HDR **TIFF** can display wit
 
 **Workflow toggle** (single view): switch between **Embedded JPEG (Fast)** and **RAW (High Quality)**. EDR applies only in RAW workflow.
 
-**Recovery preview (**T**):** half-res shadow/highlight recovery for judging extreme contrast — session only, does not replace full-res view.
+**Recovery preview (**P**):** half-res shadow/highlight recovery for judging extreme contrast — session only, does not replace full-res view.
 
 ---
 
@@ -163,7 +163,7 @@ On **macOS**, HDR **HEIC / HEIF / AVIF** and 16-bit HDR **TIFF** can display wit
 | Animated GIF/WebP not playing | Update to **v2.5+**; check that the file is a valid animated GIF or WebP |
 | HDR HEIC/TIFF looks flat or too dark | Windows tone-maps HDR stills to SDR by design; for EDR viewing use macOS with an EDR display |
 | RAW always shows demosaic, not embedded JPEG | Switch to **Embedded JPEG workflow**; RAW EDR re-decodes from LibRaw and overrides embedded preview when **RAW workflow** is on |
-| **T** recovery does nothing / fails | Requires scipy + rawpy; check logs. Recovery is half-res preview only |
+| **P** recovery does nothing / fails | Requires scipy + rawpy; check logs. Recovery is half-res preview only |
 | Crash | Enable file logging with `RAWVIEWER_FILE_LOG=1`, then check the install folder |
 
 ### macOS
@@ -189,7 +189,7 @@ On **macOS**, HDR **HEIC / HEIF / AVIF** and 16-bit HDR **TIFF** can display wit
 | Animated GIF/WebP not playing | Update to **v2.5+**; check that the file is a valid animated GIF or WebP |
 | HDR HEIC/TIFF looks flat or too dark | Needs GPU single-image view (default) and an EDR-capable display; `RAWVIEWER_DISABLE_EDR=1` forces SDR tone mapping |
 | RAW EDR but want embedded JPEG | Use **Embedded JPEG workflow** toggle, or `RAWVIEWER_RAW_EDR=0` |
-| **T** / **J** no effect | **T**/**J** are RAW/DNG single view only; **T** is fit-only half-res preview |
+| **P** / **J** no effect | **P**/**J** are RAW/DNG single view only; **P** is fit-only half-res preview |
 
 More detail: [`scripts/Launch/README.md`](scripts/Launch/README.md)
 
@@ -323,6 +323,10 @@ Full list and dev defaults: [`scripts/Launch/README.md`](scripts/Launch/README.m
 
 Not in a release yet — tracked on a separate development branch.
 
+**Windows HDR / EDR** — v2.5 added macOS EDR for HDR stills and RAW (High Quality workflow). Windows currently tone-maps HDR HEIC/TIFF and RAW to SDR. A future Windows path would use HDR-capable displays (10-bit / scRGB or HDR10 via Qt QRhi) so bright highlights can use extended headroom, similar to macOS.
+
+**Burst image grouping** — Automatically group burst sequences in the gallery (rapid-fire shots taken within a short window). Open a burst group to review its shots together; **Compare** mode shows candidates side by side so you can pick the best frame.
+
 **GPU-accelerated RAW decoding** — Early GPU decode works, but **correct color rendering** (matching the current LibRaw / embedded-JPEG pipeline) is still unresolved. We will only ship it if color accuracy and maintenance cost are acceptable.
 
 This is separate from the GPU **viewport** (OpenGL zoom/pan on decoded pixels, on by default in release builds; set `RAWVIEWER_GPU_VIEW=0` to disable); the upcoming work targets **RAW decode** itself.
@@ -394,7 +398,7 @@ scripts\Launch\bat\build_windows_lite.bat
 - **Semantic index** — SQLite + local embeddings (Core ML on macOS, ONNX on Windows; Full builds only); background passes abort when folder scope changes (**v2.5.0**)
 - **Gallery (JustifiedGallery)** — justified grid with zoom slider (relayout + upper-left scroll anchor); layout cache keyed to folder generation; gallery opens in capture-time order after EXIF sort (**v2.5.0**)
 - **HDR / EDR (macOS)** — GPU viewport EDR layer + 16-bit HDR still decode; RAW EDR via linear LibRaw when RAW workflow is active (**v2.5.0**)
-- **RAW recovery preview** — **T** key, half-res linear decode + local tone recovery (`raw_tone_recovery.py`; **v2.5.0**)
+- **RAW recovery preview** — **P** key, half-res linear decode + local tone recovery (`raw_tone_recovery.py`; **v2.5.0**)
 - **Clipping overlay** — **J** key on current pixmap (`exposure_clipping.py`; **v2.5.0**)
 
 ---

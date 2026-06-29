@@ -1914,7 +1914,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self._clipping_overlay_active = False
         self._clipping_overlay_pm = None
         self._clipping_overlay_cache_key = None
-        # RAW local shadow/highlight recovery (T — session-only, single-view RAW flow)
+        # RAW local shadow/highlight recovery (P — session-only, single-view RAW flow)
         self._raw_recovery_active = False
         self._raw_recovery_cache = {}
         self._raw_recovery_skip_display_cache = False
@@ -3174,7 +3174,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
 
     def _notify_raw_recovery_zoom_blocked(self) -> None:
         self.status_bar.showMessage(
-            "Recovery preview is fit-only (~half-res). Press T to return to full resolution.",
+            "Recovery preview is fit-only (~half-res). Press P to return to full resolution.",
             4000,
         )
 
@@ -3217,7 +3217,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self.update_status_bar()
         if active:
             self.status_bar.showMessage(
-                "Recovery preview ON — adjusted image, fit-only (not full resolution). Press T to exit.",
+                "Recovery preview ON — adjusted image, fit-only (not full resolution). Press P to exit.",
                 6000,
             )
 
@@ -3281,7 +3281,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             self._orientation_already_applied = False
         self._sync_raw_recovery_view_mode()
         self.status_bar.showMessage(
-            "RAW recovery preview ready (local shadows/highlights). T=off",
+            "RAW recovery preview ready (local shadows/highlights). P=off",
             3500,
         )
 
@@ -5090,15 +5090,10 @@ class RAWImageViewer(SessionMixin, QMainWindow):
 
         # Avoid duplicate repaint churn: thumbnail_ready path may have already displayed the same
         # full-size pixmap through display_numpy_image() cache fast-path just moments earlier.
-        displayed_for = getattr(self, "_displayed_content_path", None)
+        # Compare against the un-rotated base buffer — visual rotation swaps on-screen dimensions.
         if (
             not getattr(self, "_skip_resolution_downgrade_check", False)
-            and displayed_for is not None
-            and _norm_path(displayed_for) == _norm_path(file_path)
-            and self.current_pixmap is not None
-            and not self.current_pixmap.isNull()
-            and self.current_pixmap.width() == pixmap.width()
-            and self.current_pixmap.height() == pixmap.height()
+            and self._manager_pixmap_is_duplicate_display(file_path, pixmap)
         ):
             logger.debug(
                 f"[MANAGER] Skipping duplicate pixmap redraw for "
@@ -6308,7 +6303,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             self._toggle_clipping_overlay
         )
 
-        # T (RAW recovery) is handled only via _handle_app_shortcut / gpu_view keyPressEvent
+        # P (RAW recovery) is handled only via _handle_app_shortcut / gpu_view keyPressEvent
         # so it works when the OpenGL viewport has focus (no duplicate QShortcut toggle).
 
         # Arrow keys must work when the GPU OpenGL viewport (or other NoFocus
@@ -10230,6 +10225,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             """Update gallery view - using JustifiedGallery"""
             import logging
             import time
+            from PyQt6.QtCore import QTimer
             logger = logging.getLogger(__name__)
             if getattr(self, "view_mode", "") != "gallery":
                 logger.debug(
@@ -10307,7 +10303,13 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 # Only nudge visible-load passes after initial layout is expected ready.
                 self._warm_gallery_from_filmstrip_cache()
                 if hasattr(self.gallery_justified, "sync_visual_rotations"):
+                    # Fast path: layout already built (same folder/order). Full rebuild path
+                    # syncs at end of build_gallery() once _path_to_indices exists.
                     self.gallery_justified.sync_visual_rotations()
+                    QTimer.singleShot(
+                        450,
+                        self.gallery_justified.sync_visual_rotations,
+                    )
                 file_count = len(display_files or [])
                 first_load_ms = min(900, max(250, 200 + file_count // 40))
                 gj = self.gallery_justified
@@ -11639,6 +11641,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         if getattr(self, "_gallery_bookmark_filter_active", False):
             self._clear_gallery_bookmark_filter()
             return
+        if not self._gallery_has_bookmarks():
+            return
         self._gallery_bookmark_filter_active = True
         self._sync_bookmark_indicator()
         self._apply_gallery_bookmark_filter()
@@ -11743,9 +11747,14 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 btn.setIcon(getattr(self, "_bookmark_star_outline_icon", QIcon()))
                 btn.setToolTip("Bookmark for opening in another app — click star or ↑")
             return
+        filter_active = getattr(self, "_gallery_bookmark_filter_active", False)
+        if not self._gallery_has_bookmarks() and not filter_active and not self._gallery_has_selection():
+            btn.hide()
+            return
+        btn.show()
         btn.setEnabled(True)
         btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        if getattr(self, "_gallery_bookmark_filter_active", False):
+        if filter_active:
             btn.setIcon(getattr(self, "_bookmark_filter_star_icon", QIcon()))
             btn.setToolTip("Showing bookmarked images only (click star or Esc to show all)")
         else:
@@ -12737,7 +12746,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             "Gallery: Ctrl/Cmd+click — toggle selection; Shift+click two photos for range\n"
             "H — Show/hide histogram\n"
             "J — Show/hide highlight (red) and shadow (blue) clipping\n"
-            "T — RAW only: shadow/highlight recovery preview (fit only, half-res; session)\n"
+            "P — RAW only: shadow/highlight recovery preview (fit only, half-res; session)\n"
             "G — Cycle composition guide (off / 3×3 / diagonal / both / phi grid)\n"
             "F — Show/hide focus point\n"
             "M — Show/hide location map"
@@ -17088,6 +17097,10 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             prev_w, prev_h = cur_pm.width(), cur_pm.height()
         if base_pixmap is not None and not base_pixmap.isNull():
             self.display_pixmap(base_pixmap)
+            pm_max = max(base_pixmap.width(), base_pixmap.height())
+            self._manager_displayed_max_dim = max(
+                getattr(self, "_manager_displayed_max_dim", 0), pm_max
+            )
         else:
             self.load_raw_image(path)
         new_pm = getattr(self, "current_pixmap", None)
@@ -17137,6 +17150,36 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             self.status_bar.showMessage("Revealed in file manager", 2000)
         except Exception:
             self.status_bar.showMessage("Could not open file manager", 2000)
+
+    def _displayed_base_pixmap_size(self, file_path: str | None = None) -> tuple[int, int] | None:
+        """Un-rotated buffer size already on screen for ``file_path`` (if any)."""
+        path = file_path or getattr(self, "current_file_path", None)
+        if not path:
+            return None
+        cur = getattr(self, "current_file_path", None)
+        if cur is None or _norm_path(cur) != _norm_path(path):
+            return None
+        displayed_for = getattr(self, "_displayed_content_path", None)
+        if displayed_for is not None and _norm_path(displayed_for) != _norm_path(path):
+            return None
+        base = getattr(self, "_base_display_pixmap", None)
+        if base is not None and not base.isNull():
+            return base.width(), base.height()
+        if displayed_for is None:
+            return None
+        pm = getattr(self, "current_pixmap", None)
+        if pm is None or pm.isNull() or self._get_visual_rotation_degrees(path):
+            return None
+        return pm.width(), pm.height()
+
+    def _manager_pixmap_is_duplicate_display(self, file_path: str, pixmap) -> bool:
+        """True when manager delivered the same base buffer we already show."""
+        if pixmap is None or pixmap.isNull():
+            return False
+        base_size = self._displayed_base_pixmap_size(file_path)
+        if base_size is None:
+            return False
+        return base_size == (pixmap.width(), pixmap.height())
 
     def _resolve_display_pixmap_base(self, pixmap: QPixmap) -> QPixmap:
         """Ensure display_pixmap never treats an already rotated buffer as the base."""
@@ -19212,7 +19255,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 self._sync_location_map()
                 return True
 
-        if key == Qt.Key.Key_T:
+        if key == Qt.Key.Key_P:
             if vm == "single":
                 self._toggle_auto_tone_preview()
                 return True

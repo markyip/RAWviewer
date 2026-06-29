@@ -21,14 +21,10 @@ Major release introducing a custom gallery zoom slider, interactive GPS map disp
 - **RAW EDR (macOS, RAW workflow)** — Linear 16-bit LibRaw decode → extended tone map → `RGBX64` QPixmap. **On by default** (`RAWVIEWER_RAW_EDR=1`); set `RAWVIEWER_RAW_EDR=0` to disable. Respects the **Embedded JPEG / RAW workflow** toggle: embedded-JPEG workflow keeps camera preview pixels (SDR); RAW (High Quality) workflow uses EDR when enabled.
 - **EDR status** — Startup status bar and top metadata show `EDR · RAW`, `EDR · HDR`, or `EDR ready · embedded JPEG workflow` when applicable.
 - **Opt out** — Set `RAWVIEWER_DISABLE_EDR=1` to force the SDR tone-mapping path on macOS.
-- **Windows 10-bit HDR** — Not implemented in v2.5; Qt `RGB30` / QRhi swapchain would be required (see code comments in `common_image_loader.py`).
 
 ### RAW tone recovery & clipping (single view, RAW/DNG)
-- **T — Recovery preview** — Session-only local shadow/highlight recovery on a half-res linear LibRaw decode (`highlight_mode=Reconstruct`, Reinhard tone map, local polish). Fit-only (~2048 px); press **T** again to exit. Does not change the main full-res pipeline or persist settings.
-- **J — Clipping overlay** — Red = highlight clip (any channel ≥252); blue = shadow clip (all channels ≤3) on the current screen buffer. Diagnostic only; distinct from **T** soft recovery.
-
-### Single-view UI defaults
-- **Histogram and GPS map hidden on launch** — Press **H** / **M** to show; preference applies for the current session only.
+- **P — Recovery preview** — Session-only local shadow/highlight recovery on a half-res linear LibRaw decode (`highlight_mode=Reconstruct`, Reinhard tone map, local polish). Fit-only (~2048 px); press **P** again to exit. Does not change the main full-res pipeline or persist settings.
+- **J — Clipping overlay** — Red = highlight clip (any channel ≥252); blue = shadow clip (all channels ≤3) on the current screen buffer. Diagnostic only; distinct from **P** soft recovery.
 
 ### Animated GIF & WebP Playback
 - **Animated Previews** — Enhanced the image viewer pipeline to support playing, scaling, and animating GIF and WebP files. Displays playback status messages and handles dynamic window scaling seamlessly.

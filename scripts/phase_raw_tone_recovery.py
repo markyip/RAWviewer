@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Phase tests for RAW-only local shadow/highlight recovery (T key)."""
+"""Phase tests for RAW-only local shadow/highlight recovery (P key)."""
 
 from __future__ import annotations
 
