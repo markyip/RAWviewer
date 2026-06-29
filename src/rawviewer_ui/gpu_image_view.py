@@ -57,6 +57,24 @@ class GpuImageView(QGraphicsView):
     _FIT_SCALE_EPS = 1.002  # treat within ~0.2% of fit as fit-to-window
 
     def __init__(self, parent=None, background="#1E1E1E"):
+        # Attributes read from event()/viewportEvent() must exist before super().__init__()
+        # because Qt may deliver events during construction.
+        self._fit_mode = True
+        self._wheel_navigate_in_fit = True
+        self._zoom_intent_100 = False
+        self._zoom_locked = False
+        self._has_pixmap = False
+        self._img_w = 0
+        self._img_h = 0
+        self._overlay_item = None
+        self._clipping_item = None
+        self._grid_mode = "off"
+        self._shortcut_handler = None
+        self._edr_initialized = False
+        self.file_path = None
+        self._drag_start_pos = None
+        self._drag_started = False
+
         super().__init__(parent)
         self._scene = QGraphicsScene(self)
         self.setScene(self._scene)
@@ -483,8 +501,11 @@ class GpuImageView(QGraphicsView):
 
         # Plain wheel (no Control Modifier)
         if self._fit_mode:
-            # Fit-to-window: navigate images (Qt: delta > 0 = up, delta < 0 = down)
-            self.wheelNavigate.emit(-1 if delta > 0 else 1)
+            if getattr(self, "_wheel_navigate_in_fit", True):
+                # Fit-to-window: navigate images (Qt: delta > 0 = up, delta < 0 = down)
+                self.wheelNavigate.emit(-1 if delta > 0 else 1)
+            else:
+                self.zoom_by(1.25 if delta > 0 else 0.8)
             event.accept()
             return
 
@@ -507,3 +528,31 @@ class GpuImageView(QGraphicsView):
         if self._fit_mode and self._has_pixmap:
             self.fit_to_window()
         self._update_placeholder()
+
+    def viewport_scroll_state(self) -> tuple[float, int, int]:
+        return (
+            self.current_scale(),
+            self.horizontalScrollBar().value(),
+            self.verticalScrollBar().value(),
+        )
+
+    def apply_viewport_scroll_state(
+        self, scale: float, h_scroll: int, v_scroll: int
+    ) -> None:
+        if not self._has_pixmap:
+            return
+        fit = self.fit_scale()
+        self.resetTransform()
+        if scale > fit * self._FIT_SCALE_EPS:
+            self._fit_mode = False
+            self._zoom_intent_100 = scale >= 1.0 - 1e-4
+            self.scale(scale, scale)
+            self.horizontalScrollBar().setValue(int(h_scroll))
+            self.verticalScrollBar().setValue(int(v_scroll))
+            self.fitModeChanged.emit(False)
+        else:
+            self.fit_to_window()
+            return
+        self.zoomChanged.emit(self.current_scale())
+
+

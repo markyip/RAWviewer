@@ -1755,10 +1755,17 @@ class JustifiedGallery(QWidget):
                     w.setText("")
 
             w.show()
-            pv = self.parent_viewer
-            if pv is not None and hasattr(pv, "_is_gallery_path_selected"):
-                if hasattr(w, "set_gallery_selected"):
-                    w.set_gallery_selected(pv._is_gallery_path_selected(path))
+            if not actively_scrolling:
+                pv = self.parent_viewer
+                if pv is not None and hasattr(pv, "_is_gallery_path_selected"):
+                    if hasattr(w, "set_gallery_selected"):
+                        w.set_gallery_selected(pv._is_gallery_path_selected(path))
+                if pv is not None and hasattr(pv, "_is_gallery_path_bookmarked"):
+                    if hasattr(w, "set_gallery_bookmarked"):
+                        w.set_gallery_bookmarked(pv._is_gallery_path_bookmarked(path))
+                if pv is not None and hasattr(pv, "_burst_stack_count_for_path"):
+                    if hasattr(w, "set_burst_stack_count"):
+                        w.set_burst_stack_count(pv._burst_stack_count_for_path(path))
             thumb_missing = not cache_hit
             
             m = self._metadata_cache.get(path)
@@ -2556,6 +2563,16 @@ class JustifiedGallery(QWidget):
             event.accept()
             return
         super().mouseReleaseEvent(event)
+
+    def refresh_gallery_burst_visuals(self) -> None:
+        """Sync burst stack count badges on visible thumbnails."""
+        pv = self.parent_viewer
+        if pv is None or not hasattr(pv, "_burst_stack_count_for_path"):
+            return
+        for w in self._visible_widgets.values():
+            path = getattr(w, "file_path", None)
+            if path and hasattr(w, "set_burst_stack_count"):
+                w.set_burst_stack_count(pv._burst_stack_count_for_path(path))
 
     def _update_empty_label_geometry(self):
         """Lay out empty-state text across the justified gallery canvas (fills the frame when empty)."""

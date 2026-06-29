@@ -6661,6 +6661,24 @@ class RAWImageViewer(QMainWindow):
         self._loading_from_gallery = False  # Flag for gallery loading
         self._loading_from_filmstrip = False  # Flag for filmstrip loading
         self._gallery_selected_paths = set()  # normpath keys for multi-select in gallery
+        self._gallery_selection_anchor = None  # normpath key for Shift+click range
+        # Burst grouping + compare (H)
+        self._burst_groups = []
+        self._burst_path_to_group = {}
+        self._burst_group_covers = {}
+        self._burst_stack_covers = {}
+        self._burst_group_view_active = False
+        self._burst_group_view_members = []
+        self._burst_rejected_paths = set()
+        self._comparison_session = None
+        self._compare_sync_mode = "A"
+        self._compare_sync_paused = False
+        self._compare_sync_guard = False
+        self.compare_widget = None
+        self.compare_select_view = None
+        self.compare_candidate_view = None
+        self._gallery_bookmarked_paths = set()  # normpath keys for bookmarked share targets
+        self._gallery_bookmark_filter_active = False  # gallery-only: show bookmarked images only
         self._gallery_preview_pending_full = False  # Gallery thumb on screen; full-res pending
         self._gallery_instant_display_quality = False  # True when gallery→single already shows preview/full
         self._skip_resolution_crossfade_once = False
@@ -7157,7 +7175,7 @@ class RAWImageViewer(QMainWindow):
             self._on_single_view_content_displayed()
         finally:
             self._orientation_already_applied = False
-        self._restore_single_view_keyboard_focus()
+        self._restore_keyboard_focus()
         self.save_session_state()
         try:
             if self.image_files and file_path in self.image_files:
@@ -7808,6 +7826,16 @@ class RAWImageViewer(QMainWindow):
 
     def _toggle_focus_subject_outline(self) -> bool:
         """Return True if handled."""
+        if getattr(self, "view_mode", "") == "compare":
+            if getattr(self, "_compare_sync_mode", "A") == "B":
+                self._compare_sync_mode = "A"
+                self._compare_sync_paused = False
+                self.status_bar.showMessage("Compare sync: center / same point (A)", 2500)
+            else:
+                self._compare_sync_mode = "B"
+                self._compare_apply_focus_sync_mode()
+                self.status_bar.showMessage("Compare sync: focus points (B)", 2500)
+            return True
         if getattr(self, "view_mode", "single") != "single":
             return False
 
@@ -8305,6 +8333,619 @@ class RAWImageViewer(QMainWindow):
     def _is_semantic_search_filter_active(self) -> bool:
         query = (getattr(self, "_last_semantic_query", "") or "").strip()
         return bool(query and getattr(self, "_semantic_search_backup_files", None) is not None)
+
+    def _filter_paths_to_bookmarked(self, files: List[str]) -> List[str]:
+        bookmarked = getattr(self, "_gallery_bookmarked_paths", set()) or set()
+        if not bookmarked:
+            return []
+        return [p for p in files if p and _norm_path(p) in bookmarked]
+
+    # --- Burst grouping + compare (H) -----------------------------------------
+    def _init_compare_view(self, main_layout) -> None:
+        from PyQt6.QtWidgets import QHBoxLayout
+        from rawviewer_ui.gpu_image_view import GpuImageView
+
+        container = QWidget()
+        container.setObjectName("rawviewer_compare_container")
+        container.setStyleSheet("QWidget { background-color: #1E1E1E; }")
+        row = QHBoxLayout(container)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(0)
+
+        self.compare_select_view = GpuImageView(container)
+        self.compare_candidate_view = GpuImageView(container)
+        for view in (self.compare_select_view, self.compare_candidate_view):
+            view._shortcut_handler = self._handle_app_shortcut
+            view._wheel_navigate_in_fit = False
+            view.wheelNavigate.connect(lambda _d, v=view: None)
+            view.doubleClickedAt.connect(
+                lambda pt, v=view: self._on_compare_double_clicked(v, pt)
+            )
+            view.zoomChanged.connect(
+                lambda _s, v=view: self._on_compare_zoom_changed(v)
+            )
+            view.horizontalScrollBar().valueChanged.connect(
+                lambda _v, src=view: self._on_compare_scroll_changed(src)
+            )
+            view.verticalScrollBar().valueChanged.connect(
+                lambda _v, src=view: self._on_compare_scroll_changed(src)
+            )
+            row.addWidget(view, 1)
+
+        self._compare_complete_banner = QLabel("", container)
+        self._compare_complete_banner.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._compare_complete_banner.setStyleSheet(
+            "color: #E0E0E0; font-size: 15px; font-weight: 500; background: rgba(0,0,0,0.55);"
+            " padding: 12px 18px; border-radius: 8px;"
+        )
+        self._compare_complete_banner.hide()
+
+        anchor = getattr(self, "single_view_container", None) or self.scroll_area
+        scroll_index = main_layout.indexOf(anchor)
+        main_layout.insertWidget(scroll_index + 1, container)
+        self.compare_widget = container
+        container.hide()
+
+    def _burst_rejected_settings_key(self, folder: str) -> str:
+        return f"burst_rejected/{_norm_path(folder)}"
+
+    def _load_burst_rejected_paths(self, folder: str) -> None:
+        import json
+
+        self._burst_rejected_paths = set()
+        if not folder:
+            return
+        try:
+            raw = self.get_settings().value(self._burst_rejected_settings_key(folder), "")
+            if not raw:
+                return
+            if isinstance(raw, (bytes, bytearray)):
+                raw = raw.decode("utf-8", errors="ignore")
+            data = json.loads(raw)
+            if isinstance(data, list):
+                self._burst_rejected_paths = {
+                    _norm_path(str(item)) for item in data if item
+                }
+        except Exception:
+            self._burst_rejected_paths = set()
+
+    def _save_burst_rejected_paths(self) -> None:
+        import json
+
+        folder = getattr(self, "current_folder", None)
+        if not folder:
+            return
+        try:
+            payload = sorted(getattr(self, "_burst_rejected_paths", set()) or set())
+            self.get_settings().setValue(
+                self._burst_rejected_settings_key(folder),
+                json.dumps(payload),
+            )
+        except Exception:
+            pass
+
+    def _filter_burst_rejected_paths(self, files: List[str]) -> List[str]:
+        rejected = getattr(self, "_burst_rejected_paths", set()) or set()
+        if not rejected:
+            return list(files or [])
+        return [p for p in files if p and _norm_path(p) not in rejected]
+
+    def _capture_times_for_paths(self, paths: List[str]) -> dict:
+        capture_times = {}
+        try:
+            capture_times = self.image_cache.get_capture_times_for_sort(paths)
+        except Exception:
+            capture_times = {}
+        return capture_times or {}
+
+    def _rebuild_burst_groups(self) -> None:
+        from burst_grouping import burst_gap_seconds_from_settings, burst_groups_for_folder
+
+        files = list(getattr(self, "image_files", []) or [])
+        if not files:
+            self._burst_groups = []
+            self._burst_path_to_group = {}
+            self._burst_group_covers = {}
+            return
+        folder = getattr(self, "current_folder", None)
+        capture_times = {}
+        try:
+            if folder:
+                capture_times = self.image_cache.get_capture_times_for_folder_sort(folder)
+            if not capture_times:
+                capture_times = self._capture_times_for_paths(files[:1024])
+        except Exception:
+            capture_times = {}
+        gap = burst_gap_seconds_from_settings(self.get_settings())
+        rejected = set(getattr(self, "_burst_rejected_paths", set()) or set())
+        groups, path_to_group, group_covers = burst_groups_for_folder(
+            files,
+            capture_times,
+            gap_sec=gap,
+            rejected=rejected,
+        )
+        self._burst_groups = groups
+        self._burst_path_to_group = path_to_group
+        self._burst_group_covers = group_covers
+        stack_covers = dict(getattr(self, "_burst_stack_covers", {}) or {})
+        for group_id, default_cover in group_covers.items():
+            cover = stack_covers.get(group_id)
+            if not cover or _norm_path(cover) in rejected:
+                stack_covers[group_id] = default_cover
+        self._burst_stack_covers = stack_covers
+
+    def _burst_collapsed_gallery_paths(self, files: List[str]) -> List[str]:
+        from burst_grouping import build_collapsed_display_paths
+
+        if getattr(self, "_burst_group_view_active", False):
+            return list(getattr(self, "_burst_group_view_members", []) or [])
+        path_to_group = getattr(self, "_burst_path_to_group", {}) or {}
+        if not path_to_group:
+            return self._filter_burst_rejected_paths(files)
+        rejected = set(getattr(self, "_burst_rejected_paths", set()) or set())
+        covers = dict(getattr(self, "_burst_stack_covers", {}) or {})
+        covers.update(getattr(self, "_burst_group_covers", {}) or {})
+        return build_collapsed_display_paths(files, path_to_group, covers, rejected)
+
+    def _burst_stack_count_for_path(self, file_path: str) -> int:
+        from burst_grouping import stack_count_for_cover
+
+        if getattr(self, "_burst_group_view_active", False):
+            return 0
+        rejected = set(getattr(self, "_burst_rejected_paths", set()) or set())
+        return stack_count_for_cover(
+            file_path,
+            getattr(self, "_burst_path_to_group", {}) or {},
+            rejected,
+        )
+
+    def _burst_members_for_path(self, file_path: str) -> Optional[List[str]]:
+        members = (getattr(self, "_burst_path_to_group", {}) or {}).get(
+            _norm_path(file_path)
+        )
+        if not members:
+            return None
+        rejected = set(getattr(self, "_burst_rejected_paths", set()) or set())
+        visible = [p for p in members if _norm_path(p) not in rejected]
+        return visible if len(visible) >= 2 else None
+
+    def _burst_group_view_visible_members(self) -> List[str]:
+        rejected = set(getattr(self, "_burst_rejected_paths", set()) or set())
+        members = list(getattr(self, "_burst_group_view_members", []) or [])
+        return [p for p in members if _norm_path(p) not in rejected]
+
+    def _burst_group_view_status_label(self) -> str:
+        from burst_grouping import format_burst_group_status, sort_paths_by_capture_time
+
+        members = self._burst_group_view_visible_members()
+        if not members:
+            return ""
+        capture_times = self._capture_times_for_paths(members)
+        ordered = sort_paths_by_capture_time(members, capture_times)
+        return format_burst_group_status(ordered, capture_times)
+
+    def _enter_burst_group_view(self, members: List[str], *, cover: str | None = None) -> None:
+        self._burst_group_view_active = True
+        self._burst_group_view_members = list(members)
+        self._clear_gallery_selection()
+        if cover:
+            group_id = _norm_path(members[0]) if members else ""
+            if group_id:
+                self._burst_stack_covers[group_id] = cover
+        self._stop_slideshow()
+        self._sync_burst_group_bottom_chrome()
+        self._sync_compare_button_visibility()
+        self._update_gallery_view()
+        self.update_status_bar()
+
+    def _exit_burst_group_view(self, *, scroll_to: str | None = None) -> None:
+        self._burst_group_view_active = False
+        self._burst_group_view_members = []
+        self._stop_slideshow()
+        self._sync_burst_group_bottom_chrome()
+        self._sync_compare_button_visibility()
+        self._update_gallery_view()
+        self.update_status_bar()
+        if scroll_to and getattr(self, "gallery_justified", None):
+            try:
+                self.gallery_justified.scroll_to_file(scroll_to)
+            except Exception:
+                pass
+
+    def _sync_burst_group_bottom_chrome(self) -> None:
+        burst = bool(getattr(self, "_burst_group_view_active", False))
+        vm = getattr(self, "view_mode", "single")
+        if hasattr(self, "search_bottom_button"):
+            if burst:
+                self.search_bottom_button.hide()
+            else:
+                self.search_bottom_button.setVisible(
+                    bool(getattr(self, "image_files", None))
+                    and self._is_exif_sort_ready()
+                    and vm == "gallery"
+                )
+        if hasattr(self, "sort_toggle_button"):
+            if burst:
+                self.sort_toggle_button.hide()
+            else:
+                self.sort_toggle_button.setVisible(vm == "gallery")
+        if hasattr(self, "slideshow_bottom_button"):
+            if burst:
+                self.slideshow_bottom_button.hide()
+            else:
+                self._sync_slideshow_button_visibility()
+        if burst and hasattr(self, "search_expand_container"):
+            self._ensure_gallery_search_collapsed()
+            self.search_expand_container.hide()
+
+    def _compare_entry_available(self) -> bool:
+        if getattr(self, "view_mode", "") != "gallery":
+            return False
+        if not getattr(self, "_burst_group_view_active", False):
+            return False
+        return len(self._burst_group_view_visible_members()) >= 2
+
+    def _sync_compare_button_visibility(self) -> None:
+        btn = getattr(self, "compare_bottom_button", None)
+        if btn is None:
+            return
+        btn.setVisible(self._compare_entry_available())
+        btn.setEnabled(self._compare_entry_available())
+
+    def _reject_compare_path(self, path: str) -> None:
+        if not path:
+            return
+        key = _norm_path(path)
+        rejected = getattr(self, "_burst_rejected_paths", set()) or set()
+        rejected.add(key)
+        self._burst_rejected_paths = rejected
+        self._save_burst_rejected_paths()
+        try:
+            import metadata_backend
+
+            if metadata_backend.has_pyexiv2():
+                pass  # H4 sidecar write TBC when M X2 lands
+        except Exception:
+            pass
+        self._rebuild_burst_groups()
+
+    def _enter_compare_mode(self) -> None:
+        from comparison_mode import CompareEntry, ComparisonSession
+
+        if not self._compare_entry_available():
+            return
+        members = self._burst_group_view_visible_members()
+        entry = CompareEntry.BURST_GROUP
+        if len(members) < 2:
+            return
+        session = ComparisonSession(members=members, entry=entry)
+        session.restart_round()
+        self._comparison_session = session
+        self._compare_sync_mode = "A"
+        self._compare_sync_paused = False
+        self.view_mode = "compare"
+        self._show_compare_view()
+
+    def _show_compare_view(self) -> None:
+        session = getattr(self, "_comparison_session", None)
+        if session is None:
+            return
+        self._stop_slideshow()
+        bar = self._filmstrip_bar()
+        if bar is not None:
+            bar.hide()
+            bar.setEnabled(False)
+        self._hide_filmstrip_chrome()
+        if hasattr(self, "single_view_container") and self.single_view_container:
+            self.single_view_container.hide()
+        if hasattr(self, "gallery_widget") and self.gallery_widget:
+            self.gallery_widget.hide()
+        if hasattr(self, "compare_widget") and self.compare_widget:
+            self.compare_widget.show()
+            self.compare_widget.raise_()
+        if hasattr(self, "sort_toggle_button"):
+            self.sort_toggle_button.hide()
+        if hasattr(self, "size_slider"):
+            self.size_slider.hide()
+        if hasattr(self, "compare_bottom_button"):
+            self.compare_bottom_button.hide()
+        self._stop_slideshow()
+        self._sync_burst_group_bottom_chrome()
+        self._refresh_compare_panes()
+        self._update_compare_status_bar()
+        self._restore_keyboard_focus()
+
+    def _exit_compare_mode(self) -> None:
+        session = getattr(self, "_comparison_session", None)
+        entry = getattr(session, "entry", None) if session else None
+        select_path = getattr(session, "select", None) if session else None
+        remaining = session.visible_members() if session else []
+        self._comparison_session = None
+        self._compare_sync_mode = "A"
+        self._compare_sync_paused = False
+        if hasattr(self, "_compare_complete_banner") and self._compare_complete_banner:
+            self._compare_complete_banner.hide()
+        if hasattr(self, "compare_widget") and self.compare_widget:
+            self.compare_widget.hide()
+        self.view_mode = "gallery"
+        from comparison_mode import CompareEntry
+
+        if entry == CompareEntry.BURST_GROUP:
+            if len(remaining) > 1:
+                self._burst_group_view_active = True
+                self._burst_group_view_members = remaining
+                self._show_gallery_view()
+            else:
+                self._exit_burst_group_view(scroll_to=select_path or (remaining[0] if remaining else None))
+                self._show_gallery_view()
+        else:
+            self._exit_burst_group_view()
+            self._show_gallery_view()
+            if select_path:
+                gj = getattr(self, "gallery_justified", None)
+                if gj is not None and hasattr(gj, "scroll_to_file"):
+                    QTimer.singleShot(0, lambda: gj.scroll_to_file(select_path))
+        self._sync_compare_button_visibility()
+        self.update_status_bar()
+
+    def _refresh_compare_panes(self) -> None:
+        session = getattr(self, "_comparison_session", None)
+        if session is None:
+            return
+        if hasattr(self, "_compare_complete_banner") and self._compare_complete_banner:
+            if session.complete:
+                self._compare_complete_banner.setText(
+                    "Comparison complete. Press Esc to return."
+                )
+                self._compare_complete_banner.show()
+                self._compare_complete_banner.raise_()
+                self._position_compare_complete_banner()
+            else:
+                self._compare_complete_banner.hide()
+        self._load_compare_pane(session.select, self.compare_select_view)
+        self._load_compare_pane(session.candidate, self.compare_candidate_view)
+        self._update_compare_status_bar()
+
+    def _position_compare_complete_banner(self) -> None:
+        banner = getattr(self, "_compare_complete_banner", None)
+        container = getattr(self, "compare_widget", None)
+        if banner is None or container is None:
+            return
+        banner.adjustSize()
+        bw = banner.sizeHint().width()
+        bh = banner.sizeHint().height()
+        banner.setGeometry(
+            max(0, (container.width() - bw) // 2),
+            max(0, (container.height() - bh) // 2),
+            bw,
+            bh,
+        )
+
+    def _load_compare_pane(self, path: str, view) -> None:
+        if view is None:
+            return
+        if not path:
+            view.set_pixmap(QPixmap())
+            view.file_path = None
+            return
+        view.file_path = path
+        pm = self._gallery_preview_pixmap_for_path(path)
+        if pm is None or pm.isNull():
+            try:
+                pm = self.image_cache.get_pixmap(path)
+            except Exception:
+                pm = None
+        if pm is not None and not pm.isNull():
+            view.set_pixmap(pm)
+            return
+        view.set_pixmap(QPixmap())
+        view.set_placeholder_text(os.path.basename(path))
+
+    def _update_compare_status_bar(self) -> None:
+        session = getattr(self, "_comparison_session", None)
+        if session is None:
+            return
+        left = os.path.basename(session.select) if session.select else ""
+        right = os.path.basename(session.candidate) if session.candidate else ""
+        label = f"{left} / {right}".strip(" /")
+        if hasattr(self, "status_metadata_label"):
+            self._apply_top_metadata_text(label)
+        if platform.system() != "Darwin" and hasattr(self, "title_bar") and self.title_bar:
+            self.title_bar.set_title(f"RAWviewer - {label}")
+
+    def _on_compare_double_clicked(self, source_view, scene_pt) -> None:
+        if getattr(self, "view_mode", "") != "compare":
+            return
+        if getattr(self, "_compare_sync_mode", "A") != "A":
+            return
+        select_view = self.compare_select_view
+        candidate_view = self.compare_candidate_view
+        if select_view is None or candidate_view is None:
+            return
+        if not select_view.has_pixmap() or not candidate_view.has_pixmap():
+            return
+        w = max(1, source_view._img_w)
+        h = max(1, source_view._img_h)
+        u = max(0.0, min(1.0, float(scene_pt.x()) / w))
+        v = max(0.0, min(1.0, float(scene_pt.y()) / h))
+        self._compare_zoom_both_to_normalized(u, v)
+
+    def _compare_zoom_both_to_normalized(self, u: float, v: float) -> None:
+        for view in (self.compare_select_view, self.compare_candidate_view):
+            if view is None or not view.has_pixmap():
+                continue
+            x = u * max(0, view._img_w - 1)
+            y = v * max(0, view._img_h - 1)
+            if view.is_at_fit_scale() or view.is_fit_mode():
+                view.zoom_to_actual_at(x, y)
+            else:
+                view.fit_to_window()
+
+    def _compare_toggle_zoom_mode_a(self) -> None:
+        if getattr(self, "_compare_sync_mode", "A") != "A":
+            return
+        select_view = self.compare_select_view
+        candidate_view = self.compare_candidate_view
+        if select_view is None or candidate_view is None:
+            return
+        if select_view.is_at_fit_scale() and candidate_view.is_at_fit_scale():
+            u, v = 0.5, 0.5
+            self._compare_zoom_both_to_normalized(u, v)
+        else:
+            select_view.fit_to_window()
+            candidate_view.fit_to_window()
+
+    def _compare_focus_point_for_path(self, path: str, view) -> tuple[float, float]:
+        if not path or view is None or not view.has_pixmap():
+            return 0.5, 0.5
+        try:
+            from exif_subject_area import pixmap_ltwh_focus_hint
+
+            orientation = 1
+            cached_exif = self.image_cache.get_exif(path)
+            if cached_exif:
+                orientation = cached_exif.get("orientation", 1)
+            hint = pixmap_ltwh_focus_hint(path, view._img_w, view._img_h, orientation)
+            if hint is not None:
+                ltwh, _src = hint
+                cx = ltwh[0] + ltwh[2] * 0.5
+                cy = ltwh[1] + ltwh[3] * 0.5
+                return (
+                    max(0.0, min(1.0, cx / max(1, view._img_w))),
+                    max(0.0, min(1.0, cy / max(1, view._img_h))),
+                )
+        except Exception:
+            pass
+        return 0.5, 0.5
+
+    def _compare_apply_focus_sync_mode(self) -> None:
+        select_view = self.compare_select_view
+        candidate_view = self.compare_candidate_view
+        session = getattr(self, "_comparison_session", None)
+        if (
+            select_view is None
+            or candidate_view is None
+            or session is None
+            or getattr(self, "_compare_sync_mode", "A") != "B"
+        ):
+            return
+        u_l, v_l = self._compare_focus_point_for_path(session.select, select_view)
+        u_r, v_r = self._compare_focus_point_for_path(session.candidate, candidate_view)
+        self._compare_sync_guard = True
+        try:
+            select_view.zoom_to_actual_at(
+                u_l * max(0, select_view._img_w - 1),
+                v_l * max(0, select_view._img_h - 1),
+            )
+            candidate_view.zoom_to_actual_at(
+                u_r * max(0, candidate_view._img_w - 1),
+                v_r * max(0, candidate_view._img_h - 1),
+            )
+        finally:
+            self._compare_sync_guard = False
+        self._compare_sync_paused = False
+
+    def _on_compare_zoom_changed(self, source_view) -> None:
+        if getattr(self, "view_mode", "") != "compare":
+            return
+        if getattr(self, "_compare_sync_guard", False):
+            return
+        if getattr(self, "_compare_sync_mode", "A") == "B" and getattr(
+            self, "_compare_sync_paused", False
+        ):
+            self._compare_try_resync_focus_mode()
+            return
+        self._compare_mirror_transform(source_view)
+
+    def _on_compare_scroll_changed(self, source_view) -> None:
+        if getattr(self, "view_mode", "") != "compare":
+            return
+        if getattr(self, "_compare_sync_guard", False):
+            return
+        if getattr(self, "_compare_sync_mode", "A") == "B" and getattr(
+            self, "_compare_sync_paused", False
+        ):
+            self._compare_try_resync_focus_mode()
+            return
+        self._compare_mirror_transform(source_view)
+
+    def _compare_mirror_transform(self, source_view) -> None:
+        target = (
+            self.compare_candidate_view
+            if source_view is self.compare_select_view
+            else self.compare_select_view
+        )
+        if target is None or source_view is None:
+            return
+        if not hasattr(source_view, "viewport_scroll_state"):
+            return
+        scale, h_scroll, v_scroll = source_view.viewport_scroll_state()
+        self._compare_sync_guard = True
+        try:
+            target.apply_viewport_scroll_state(scale, h_scroll, v_scroll)
+        finally:
+            self._compare_sync_guard = False
+
+    def _compare_try_resync_focus_mode(self) -> None:
+        select_view = self.compare_select_view
+        candidate_view = self.compare_candidate_view
+        if select_view is None or candidate_view is None:
+            return
+        if not hasattr(select_view, "viewport_scroll_state"):
+            return
+        _, h1, v1 = select_view.viewport_scroll_state()
+        _, h2, v2 = candidate_view.viewport_scroll_state()
+        if abs(h1 - h2) + abs(v1 - v2) <= 8:
+            self._compare_sync_paused = False
+            self._compare_apply_focus_sync_mode()
+
+    def _compare_handle_promote(self) -> None:
+        session = getattr(self, "_comparison_session", None)
+        if session is None or session.complete:
+            return
+        select_path = session.promote_candidate()
+        group_id = _norm_path(session.members[0]) if session.members else ""
+        if group_id and select_path:
+            self._burst_stack_covers[group_id] = select_path
+        self._refresh_compare_panes()
+
+    def _compare_handle_reject_candidate(self) -> None:
+        session = getattr(self, "_comparison_session", None)
+        if session is None or session.complete:
+            return
+        path = session.candidate
+        session.reject_candidate()
+        self._reject_compare_path(path)
+        self._refresh_compare_panes()
+
+    def _compare_handle_reject_select(self) -> None:
+        session = getattr(self, "_comparison_session", None)
+        if session is None or session.complete:
+            return
+        path = session.select
+        session.reject_select()
+        self._reject_compare_path(path)
+        self._refresh_compare_panes()
+
+    def _gallery_effective_files(self) -> List[str]:
+        """Current gallery scope: folder/search results, optionally ∩ bookmarks."""
+        files = list(getattr(self, "image_files", []) or [])
+        if getattr(self, "_gallery_bookmark_filter_active", False):
+            files = self._filter_paths_to_bookmarked(files)
+        files = self._filter_burst_rejected_paths(files)
+        if getattr(self, "_burst_group_view_active", False):
+            return self._filter_burst_rejected_paths(
+                list(getattr(self, "_burst_group_view_members", []) or [])
+            )
+        if getattr(self, "view_mode", "") == "gallery":
+            return self._burst_collapsed_gallery_paths(files)
+        return files
+
+    def _gallery_search_base_files(self) -> List[str]:
+        """Files searched by the gallery bar (full folder/corpus; bookmark filter is display-only)."""
+        if self._semantic_search_corpus_files:
+            return list(self._semantic_search_corpus_files)
+        return list(getattr(self, "image_files", []) or [])
 
     def _navigation_files(self) -> list:
         """Files used for filmstrip and prev/next while browsing."""
@@ -9894,6 +10535,7 @@ class RAWImageViewer(QMainWindow):
             gpu_view=self.gpu_view)
         self._wire_filmstrip()
         main_layout.addWidget(self.single_view_container)
+        self._init_compare_view(main_layout)
         # --- Status bar with Material Design 3 styling ---
         # Material Design 3 color scheme:
         # - Surface: #1E1E1E (dark background)
@@ -10195,6 +10837,44 @@ class RAWImageViewer(QMainWindow):
         self.search_expand_container.hide()
         # Index progress in the search field only after the user opens search (not folder load).
         self._gallery_search_show_index_progress = False
+
+        self.compare_bottom_button = QPushButton("Compare")
+        self.compare_bottom_button.setFlat(True)
+        self.compare_bottom_button.setAutoDefault(False)
+        self.compare_bottom_button.setDefault(False)
+        self.compare_bottom_button.setFixedHeight(28)
+        self.compare_bottom_button.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.compare_bottom_button.setToolTip("Compare burst group (C)")
+        self.compare_bottom_button.clicked.connect(self._enter_compare_mode)
+        self.compare_bottom_button.hide()
+        self.compare_bottom_button.setStyleSheet("""
+            QPushButton {
+                color: #B0B0B0;
+                font-size: 13px;
+                font-weight: 500;
+                padding: 0px 12px;
+                margin: 0px;
+                border: none;
+                background: transparent;
+                text-align: center;
+                letter-spacing: 0.25px;
+                min-height: 28px;
+                max-height: 28px;
+            }
+            QPushButton:hover {
+                color: #E0E0E0;
+                background-color: rgba(255, 255, 255, 0.05);
+                border-radius: 4px;
+            }
+            QPushButton:pressed {
+                background-color: rgba(255, 255, 255, 0.1);
+            }
+        """)
+        self.compare_bottom_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        left_buttons_layout.addStretch(1)
+        left_buttons_layout.addWidget(
+            self.compare_bottom_button, 0, alignment=Qt.AlignmentFlag.AlignVCenter
+        )
         # User opened search: run/resume semantic indexing, then allow gallery queries.
         self._gallery_search_user_wants_semantic = False
         # Latch user intent when search is clicked before metadata pass completes.
@@ -10324,6 +11004,24 @@ class RAWImageViewer(QMainWindow):
         self._shortcut_nav_next = QShortcut(QKeySequence(Qt.Key.Key_Right), self)
         self._shortcut_nav_next.setContext(Qt.ShortcutContext.WindowShortcut)
         self._shortcut_nav_next.activated.connect(self._shortcut_activate_nav_next)
+
+        self._shortcut_escape = QShortcut(QKeySequence(Qt.Key.Key_Escape), self)
+        self._shortcut_escape.setContext(Qt.ShortcutContext.WindowShortcut)
+        self._shortcut_escape.setAutoRepeat(False)
+        self._shortcut_escape.activated.connect(self._shortcut_activate_escape)
+
+        self._shortcut_gallery_up = QShortcut(QKeySequence(Qt.Key.Key_Up), self)
+        self._shortcut_gallery_up.setContext(Qt.ShortcutContext.WindowShortcut)
+        self._shortcut_gallery_up.activated.connect(self._shortcut_activate_gallery_up)
+
+        self._shortcut_gallery_down = QShortcut(QKeySequence(Qt.Key.Key_Down), self)
+        self._shortcut_gallery_down.setContext(Qt.ShortcutContext.WindowShortcut)
+        self._shortcut_gallery_down.activated.connect(self._shortcut_activate_gallery_down)
+
+        self._shortcut_compare = QShortcut(QKeySequence(Qt.Key.Key_C), self)
+        self._shortcut_compare.setContext(Qt.ShortcutContext.WindowShortcut)
+        self._shortcut_compare.setAutoRepeat(False)
+        self._shortcut_compare.activated.connect(self._shortcut_activate_compare)
 
         self._sync_single_image_histogram()
 
@@ -13163,17 +13861,17 @@ class RAWImageViewer(QMainWindow):
             self, "gallery_search_panel"
         ):
             self.search_expand_layout.setCurrentWidget(self.gallery_search_panel)
-        # Show sort button in gallery mode
-        if hasattr(self, 'sort_toggle_button'):
-            self.sort_toggle_button.show()
-        if hasattr(self, "search_bottom_button"):
-            self.search_bottom_button.setVisible(self._is_exif_sort_ready())
+        # Show sort button and size slider in gallery mode
+        if hasattr(self, "size_slider"):
+            self.size_slider.show()
+        self._sync_burst_group_bottom_chrome()
         # Single-image actions stay in update_status_bar for single mode only; hide here
         # because we do not call update_status_bar() when entering gallery (counter text differs).
         if hasattr(self, "share_bottom_button"):
-            self._sync_gallery_selection_chrome()
-        if hasattr(self, "slideshow_bottom_button"):
-            self.slideshow_bottom_button.hide()
+            self._sync_share_button_visibility()
+        self._sync_bookmark_indicator()
+        self._sync_slideshow_button_visibility()
+        self._sync_compare_button_visibility()
         if hasattr(self, "rotate_bottom_button"):
             self.rotate_bottom_button.hide()
         if hasattr(self, "raw_toggle_button"):
@@ -13346,6 +14044,7 @@ class RAWImageViewer(QMainWindow):
                 return
             self._gallery_bulk_metadata = meta
             self._gallery_metadata_fetch_in_progress = False
+            self._rebuild_burst_groups()
             
             if hasattr(self, 'gallery_justified') and self.gallery_justified and self.image_files:
                 try:
@@ -13479,9 +14178,20 @@ class RAWImageViewer(QMainWindow):
                 except Exception as ex:
                     logger.warning(f"[GALLERY] Could not pre-seed semantic metadata: {ex}")
 
-                self.gallery_justified.set_images(
-                    self.image_files, bulk_metadata if bulk_metadata else None
-                )
+                self._maybe_clear_empty_bookmark_filter()
+                self._rebuild_burst_groups()
+                display_files = self._gallery_files_for_display()
+                if not display_files and getattr(self, "_gallery_bookmark_filter_active", False):
+                    self.gallery_justified.set_images(
+                        [], bulk_metadata if bulk_metadata else None
+                    )
+                    self.gallery_justified.show_empty_message("No bookmarked images")
+                else:
+                    if hasattr(self.gallery_justified, "hide_empty_message"):
+                        self.gallery_justified.hide_empty_message()
+                    self.gallery_justified.set_images(
+                        display_files, bulk_metadata if bulk_metadata else None
+                    )
                 current_file = getattr(self, "current_file_path", None)
                 if current_file and hasattr(self.gallery_justified, "scroll_to_file"):
                     self.gallery_justified.scroll_to_file(current_file)
@@ -14620,6 +15330,58 @@ class RAWImageViewer(QMainWindow):
             & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.MetaModifier)
         )
 
+    @staticmethod
+    def _gallery_has_shift_modifier(modifiers) -> bool:
+        return bool(modifiers & Qt.KeyboardModifier.ShiftModifier)
+
+    def _gallery_refresh_selection_ui(self) -> None:
+        gj = getattr(self, "gallery_justified", None)
+        if gj is not None and hasattr(gj, "refresh_gallery_selection_visuals"):
+            gj.refresh_gallery_selection_visuals()
+        self._sync_gallery_selection_chrome()
+        self._sync_share_button_visibility()
+        self._sync_compare_button_visibility()
+
+    def _gallery_set_selection_keys(self, keys: set) -> None:
+        self._gallery_selected_paths = set(keys)
+        self._gallery_refresh_selection_ui()
+
+    def _gallery_selection_ordered_paths(self) -> List[str]:
+        """Ordered paths used for Shift+click range selection (matches on-screen gallery)."""
+        if getattr(self, "view_mode", "") == "gallery":
+            gj = getattr(self, "gallery_justified", None)
+            if gj is not None:
+                visible = list(getattr(gj, "images", []) or [])
+                if visible:
+                    return visible
+            return self._gallery_files_for_display()
+        return list(getattr(self, "image_files", []) or [])
+
+    def _gallery_shift_click_selection(self, file_path: str) -> None:
+        """Shift+click: first click sets anchor; second selects the inclusive range."""
+        canonical = self._gallery_canonical_path(file_path)
+        if not canonical:
+            return
+        key = _norm_path(canonical)
+        paths = self._gallery_selection_ordered_paths()
+        norm_list = [_norm_path(p) for p in paths if p]
+        if key not in norm_list:
+            return
+        anchor = getattr(self, "_gallery_selection_anchor", None)
+        if not anchor or anchor not in norm_list:
+            self._gallery_selection_anchor = key
+            self._gallery_set_selection_keys({key})
+            return
+        try:
+            i0 = norm_list.index(anchor)
+            i1 = norm_list.index(key)
+        except ValueError:
+            self._gallery_selection_anchor = key
+            self._gallery_set_selection_keys({key})
+            return
+        lo, hi = (i0, i1) if i0 <= i1 else (i1, i0)
+        self._gallery_set_selection_keys({norm_list[i] for i in range(lo, hi + 1)})
+
     def _gallery_canonical_path(self, file_path: str) -> Optional[str]:
         if not file_path or not self.image_files:
             return None
@@ -14719,6 +15481,172 @@ class RAWImageViewer(QMainWindow):
         )
         indicator.setVisible(show)
 
+    def _should_show_slideshow_button(self) -> bool:
+        if getattr(self, "_burst_group_view_active", False):
+            return False
+        if not getattr(self, "image_files", None):
+            return False
+        if getattr(self, "view_mode", "single") == "single":
+            return True
+        return getattr(self, "view_mode", "") == "gallery"
+
+    def _sync_slideshow_button_visibility(self) -> None:
+        btn = getattr(self, "slideshow_bottom_button", None)
+        if btn is None:
+            return
+        vis = self._should_show_slideshow_button()
+        if btn.isVisible() != vis:
+            btn.setVisible(vis)
+
+    def _maybe_clear_empty_bookmark_filter(self) -> bool:
+        """Leave bookmark-only view when the folder has no bookmarks left."""
+        if not getattr(self, "_gallery_bookmark_filter_active", False):
+            return False
+        if getattr(self, "_gallery_bookmarked_paths", set()):
+            return False
+        self._gallery_bookmark_filter_active = False
+        self._sync_bookmark_indicator()
+        return True
+
+    def _clear_gallery_bookmark_filter(self) -> bool:
+        """Leave bookmark-only gallery view; keep active search results if any."""
+        if getattr(self, "view_mode", "") != "gallery":
+            return False
+        if not getattr(self, "_gallery_bookmark_filter_active", False):
+            return False
+        self._gallery_bookmark_filter_active = False
+        self._sync_bookmark_indicator()
+        self._apply_gallery_bookmark_filter()
+        return True
+
+    def _on_bookmark_slot_clicked(self) -> None:
+        vm = getattr(self, "view_mode", "")
+        if vm == "single":
+            path = getattr(self, "current_file_path", None)
+            if path:
+                self._gallery_toggle_path_bookmark(path)
+            return
+        if vm != "gallery":
+            return
+        if self._gallery_has_selection():
+            self._gallery_toggle_selected_bookmarks()
+            return
+        if getattr(self, "_gallery_bookmark_filter_active", False):
+            self._clear_gallery_bookmark_filter()
+            return
+        self._gallery_bookmark_filter_active = True
+        self._sync_bookmark_indicator()
+        self._apply_gallery_bookmark_filter()
+
+    def _apply_gallery_bookmark_filter(self) -> None:
+        if getattr(self, "view_mode", "") != "gallery":
+            return
+        self._maybe_clear_empty_bookmark_filter()
+        filter_active = bool(getattr(self, "_gallery_bookmark_filter_active", False))
+        display_files = self._gallery_files_for_display()
+        display_keys = {_norm_path(p) for p in display_files}
+        selected = set(getattr(self, "_gallery_selected_paths", set()) or set())
+        if selected - display_keys:
+            self._gallery_selected_paths = selected & display_keys
+            self._gallery_refresh_selection_ui()
+        gj = getattr(self, "gallery_justified", None)
+        if gj is not None:
+            meta = getattr(self, "_gallery_bulk_metadata", None) or {}
+            if filter_active:
+                if not display_files:
+                    empty_msg = (
+                        "No matching bookmarked images"
+                        if self._is_semantic_search_filter_active()
+                        else "No bookmarked images"
+                    )
+                    gj.set_images([], meta if meta else None)
+                    gj.show_empty_message(empty_msg)
+                else:
+                    if hasattr(gj, "hide_empty_message"):
+                        gj.hide_empty_message()
+                    gj.set_images(display_files, meta if meta else None)
+            else:
+                if hasattr(gj, "hide_empty_message"):
+                    gj.hide_empty_message()
+                anchor = None
+                if hasattr(gj, "get_scroll_anchor_path"):
+                    try:
+                        anchor = gj.get_scroll_anchor_path()
+                    except Exception:
+                        anchor = None
+                display_files = list(getattr(self, "image_files", []) or [])
+                if not display_files:
+                    gj.set_images([], meta if meta else None)
+                    empty_msg = (
+                        "No matching images"
+                        if self._is_semantic_search_filter_active()
+                        else "No images"
+                    )
+                    gj.show_empty_message(empty_msg)
+                else:
+                    self._sync_gallery_to_folder_files(
+                        meta if meta else None,
+                        scroll_anchor_path=anchor,
+                        force=True,
+                    )
+        self._sync_gallery_scrollbar_policy()
+        self._update_gallery_counter()
+        self._sync_share_button_visibility()
+        self._sync_slideshow_button_visibility()
+        if hasattr(self, "status_bar") and self.status_bar:
+            if filter_active:
+                n = len(display_files)
+                if self._is_semantic_search_filter_active():
+                    self.status_bar.showMessage(
+                        f"Showing {n} bookmarked search match{'es' if n != 1 else ''}",
+                        2500,
+                    )
+                else:
+                    self.status_bar.showMessage(
+                        f"Showing {n} bookmarked image{'s' if n != 1 else ''}",
+                        2500,
+                    )
+            elif self._is_semantic_search_filter_active():
+                n = len(getattr(self, "image_files", []) or [])
+                self.status_bar.showMessage(
+                    f"Showing {n} search result{'s' if n != 1 else ''}",
+                    2500,
+                )
+            else:
+                self.status_bar.showMessage("Showing all images", 2000)
+
+    def _sync_bookmark_indicator(self) -> None:
+        btn = getattr(self, "batch_mark_indicator", None)
+        if btn is None:
+            return
+        in_single = getattr(self, "view_mode", "single") == "single"
+        in_gallery = getattr(self, "view_mode", "") == "gallery"
+        has_files = bool(getattr(self, "image_files", None))
+        if not has_files or (not in_single and not in_gallery):
+            btn.hide()
+            return
+        btn.show()
+        btn.setFixedSize(28, 28)
+        btn.setIconSize(QSize(20, 20))
+        if in_single:
+            btn.setEnabled(True)
+            btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+            if self._current_image_bookmarked():
+                btn.setIcon(getattr(self, "_bookmark_star_bookmarked_icon", QIcon()))
+                btn.setToolTip("Bookmarked — click star or ↑ to remove")
+            else:
+                btn.setIcon(getattr(self, "_bookmark_star_outline_icon", QIcon()))
+                btn.setToolTip("Bookmark for opening in another app — click star or ↑")
+            return
+        btn.setEnabled(True)
+        btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        if getattr(self, "_gallery_bookmark_filter_active", False):
+            btn.setIcon(getattr(self, "_bookmark_filter_star_icon", QIcon()))
+            btn.setToolTip("Showing bookmarked images only (click star or Esc to show all)")
+        else:
+            btn.setIcon(getattr(self, "_bookmark_star_outline_icon", QIcon()))
+            btn.setToolTip("Show bookmarked images only")
+
     def _refresh_filmstrip_batch_selection_visuals(self) -> None:
         bar = self._filmstrip_bar()
         if bar is not None and hasattr(bar, "set_batch_selected_norm_paths"):
@@ -14737,6 +15665,36 @@ class RAWImageViewer(QMainWindow):
         if p and os.path.isfile(p):
             return [os.path.abspath(p)]
         return []
+
+    def _refresh_filmstrip_bookmark_visuals(self) -> None:
+        bar = self._filmstrip_bar()
+        if bar is not None and hasattr(bar, "set_bookmarked_norm_paths"):
+            bar.set_bookmarked_norm_paths(
+                getattr(self, "_gallery_bookmarked_paths", set()) or set()
+            )
+        self._sync_bookmark_indicator()
+
+    def _refresh_gallery_bookmark_visuals(self) -> None:
+        gj = getattr(self, "gallery_justified", None)
+        if gj is not None and hasattr(gj, "refresh_gallery_bookmark_visuals"):
+            gj.refresh_gallery_bookmark_visuals()
+        if gj is not None and hasattr(gj, "refresh_gallery_burst_visuals"):
+            gj.refresh_gallery_burst_visuals()
+
+    def _sync_share_button_visibility(self) -> None:
+        btn = getattr(self, "share_bottom_button", None)
+        if btn is None:
+            return
+        if not self._share_button_platform_enabled():
+            btn.hide()
+            return
+        vis = bool(self._gallery_share_target_paths())
+        if getattr(self, "view_mode", "single") == "single" and not getattr(
+            self, "image_files", None
+        ):
+            vis = False
+        if btn.isVisible() != vis:
+            btn.setVisible(vis)
 
     def _gallery_share_target_paths(self) -> List[str]:
         """Paths to share: gallery selection when active, else current single file."""
@@ -14935,7 +15893,15 @@ class RAWImageViewer(QMainWindow):
             self.schedule_save_session_state()
 
     def _gallery_item_clicked(self, file_path):
-        """Handle gallery item click - switch to single view and load image"""
+        """Handle gallery item click - burst stack, single view, or selection."""
+        if (
+            getattr(self, "view_mode", "") == "gallery"
+            and not getattr(self, "_burst_group_view_active", False)
+        ):
+            members = self._burst_members_for_path(file_path)
+            if members:
+                self._enter_burst_group_view(members, cover=file_path)
+                return
         self._clear_gallery_selection()
         # SYNC: Update current file index immediately to prevent navigation jumps
         target = _norm_path(file_path)
@@ -20989,9 +21955,23 @@ class RAWImageViewer(QMainWindow):
         if hasattr(self, "single_view_container") and self.single_view_container is not None:
             self.single_view_container.set_rating(rating)
 
-    def _restore_single_view_keyboard_focus(self) -> None:
-        """Return keyboard focus to the image surface (GPU view or main window)."""
-        if getattr(self, "view_mode", "single") != "single":
+    def _restore_keyboard_focus(self) -> None:
+        """Return keyboard focus to the active view surface (gallery or single image)."""
+        self.activateWindow()
+        vm = getattr(self, "view_mode", "single")
+        if vm == "compare":
+            gv = getattr(self, "compare_select_view", None)
+            if gv is not None and gv.isVisible():
+                gv.setFocus(Qt.FocusReason.OtherFocusReason)
+                return
+            self.setFocus(Qt.FocusReason.OtherFocusReason)
+            return
+        if vm == "gallery":
+            gs = getattr(self, "gallery_scroll", None)
+            if gs is not None and gs.isVisible():
+                gs.setFocus(Qt.FocusReason.OtherFocusReason)
+                gs.viewport().setFocus(Qt.FocusReason.OtherFocusReason)
+                return
             self.setFocus(Qt.FocusReason.OtherFocusReason)
             return
         gv = getattr(self, "gpu_view", None)
@@ -21008,6 +21988,12 @@ class RAWImageViewer(QMainWindow):
         )
 
     def _shortcut_activate_nav_prev(self) -> None:
+        if getattr(self, "view_mode", "") == "compare":
+            session = getattr(self, "_comparison_session", None)
+            if session is not None and not session.complete:
+                session.step_candidate(-1)
+                self._refresh_compare_panes()
+            return
         if getattr(self, "view_mode", "single") != "single":
             return
         if self._shortcut_blocked_by_text_input():
@@ -21015,11 +22001,88 @@ class RAWImageViewer(QMainWindow):
         self._navigate_single_view_step(-1)
 
     def _shortcut_activate_nav_next(self) -> None:
+        if getattr(self, "view_mode", "") == "compare":
+            session = getattr(self, "_comparison_session", None)
+            if session is not None and not session.complete:
+                session.step_candidate(1)
+                self._refresh_compare_panes()
+            return
         if getattr(self, "view_mode", "single") != "single":
             return
         if self._shortcut_blocked_by_text_input():
             return
         self._navigate_single_view_step(1)
+
+    def _shortcut_activate_escape(self) -> None:
+        if self._shortcut_blocked_by_text_input():
+            return
+        vm = getattr(self, "view_mode", "single")
+        if vm == "compare":
+            self._exit_compare_mode()
+            return
+        if vm == "gallery":
+            if getattr(self, "_burst_group_view_active", False):
+                session = getattr(self, "_comparison_session", None)
+                scroll_to = getattr(session, "select", None) if session else None
+                if not scroll_to:
+                    members = self._burst_group_view_visible_members()
+                    scroll_to = members[0] if members else getattr(self, "current_file_path", None)
+                self._exit_burst_group_view(scroll_to=scroll_to)
+                return
+            if self._gallery_has_selection():
+                self._clear_gallery_selection()
+                return
+            if self._clear_gallery_bookmark_filter():
+                return
+        elif vm == "single" and self._is_exif_sort_ready():
+            self.toggle_view_mode()
+
+    def _shortcut_activate_compare(self) -> None:
+        if self._shortcut_blocked_by_text_input():
+            return
+        if getattr(self, "view_mode", "") == "compare":
+            return
+        if getattr(self, "view_mode", "") == "gallery":
+            self._enter_compare_mode()
+
+    def _shortcut_activate_gallery_up(self) -> None:
+        if self._shortcut_blocked_by_text_input():
+            return
+        vm = getattr(self, "view_mode", "single")
+        if vm == "compare":
+            self._compare_handle_promote()
+            return
+        if vm == "single":
+            p = getattr(self, "current_file_path", None)
+            if p:
+                self._gallery_toggle_path_bookmark(p)
+            return
+        if vm != "gallery":
+            return
+        if self._gallery_has_selection():
+            self._gallery_toggle_selected_bookmarks()
+            return
+        self._scroll_gallery_vertical(-1)
+
+    def _shortcut_activate_gallery_down(self) -> None:
+        if self._shortcut_blocked_by_text_input():
+            return
+        vm = getattr(self, "view_mode", "single")
+        if vm == "compare":
+            mods = QApplication.keyboardModifiers()
+            if mods & Qt.KeyboardModifier.ShiftModifier:
+                self._compare_handle_reject_select()
+            else:
+                self._compare_handle_reject_candidate()
+            return
+        if vm == "gallery":
+            if self._gallery_has_selection():
+                self.discard_gallery_selection()
+                return
+            self._scroll_gallery_vertical(1)
+            return
+        if vm == "single":
+            self.move_current_image_to_discard()
 
     def _handle_app_shortcut(self, event):
         """Handle application-wide shortcuts for better consistency and focus-resilience."""
@@ -21039,6 +22102,9 @@ class RAWImageViewer(QMainWindow):
                 return True
         
         if key == Qt.Key.Key_Space:
+            if vm == "compare":
+                self._compare_toggle_zoom_mode_a()
+                return True
             if vm == "single":
                 import logging
                 logger = logging.getLogger(__name__)
@@ -22857,13 +23923,20 @@ class RAWImageViewer(QMainWindow):
         
         # Show metadata, counter, and sort button when there are files.
         if self.view_mode != "single":
-            self._apply_top_metadata_text(self._current_folder_label())
-        # Show/hide sort button based on view mode
-        if hasattr(self, 'sort_toggle_button'):
-            if self.view_mode == 'gallery':
-                self.sort_toggle_button.setVisible(True)  # Show in gallery mode
+            if (
+                self.view_mode == "gallery"
+                and getattr(self, "_burst_group_view_active", False)
+            ):
+                self._apply_top_metadata_text(self._burst_group_view_status_label())
             else:
-                self.sort_toggle_button.setVisible(False)  # Hide in single mode
+                self._apply_top_metadata_text(self._current_folder_label())
+        # Show/hide sort button based on view mode
+        self._sync_burst_group_bottom_chrome()
+        if hasattr(self, 'size_slider'):
+            if self.view_mode == 'gallery':
+                self.size_slider.setVisible(True)
+            else:
+                self.size_slider.setVisible(False)
         
         # Gallery toggle only in single-image mode (in gallery you return by tapping a thumbnail)
         if hasattr(self, 'view_mode_button'):
@@ -22885,15 +23958,20 @@ class RAWImageViewer(QMainWindow):
                 self.raw_toggle_button.setVisible(is_raw)
                 if is_raw:
                     self._update_raw_toggle_button_state()
-        if hasattr(self, "search_bottom_button"):
-            self.search_bottom_button.setVisible(bool(self.image_files) and self._is_exif_sort_ready())
+        self._sync_bookmark_indicator()
         if getattr(self, "_search_panel_expanded", False):
             self._schedule_search_expand_overlay_sync()
 
         # Gallery mode should stay lightweight: avoid expensive per-image EXIF/status
         # recomputation (fallback reads can block UI and delay gallery paint).
         if self.view_mode != 'single':
-            self._apply_top_metadata_text(self._current_folder_label())
+            if (
+                self.view_mode == "gallery"
+                and getattr(self, "_burst_group_view_active", False)
+            ):
+                self._apply_top_metadata_text(self._burst_group_view_status_label())
+            else:
+                self._apply_top_metadata_text(self._current_folder_label())
             if hasattr(self, 'status_counter_label'):
                 self._refresh_image_counter()
             return
@@ -25115,7 +26193,7 @@ def main():
             
             # Show main window and close splash screen
             viewer.show()
-            QTimer.singleShot(0, viewer._restore_single_view_keyboard_focus)
+            QTimer.singleShot(0, viewer._restore_keyboard_focus)
             _schedule_startup_splash_dismiss(app, viewer, splash)
             safe_print("Splash screen closed, main window displayed", flush=True)
 
