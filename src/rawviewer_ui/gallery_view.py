@@ -234,6 +234,9 @@ class JustifiedGallery(QWidget):
         self._requested_thumbnail_paths = set()
         self._pending_scroll_to_path = None
         self._pending_scroll_anchor_state = None
+        self._is_zooming = False
+        self._zoom_anchor_state = None
+        self._gallery_zoom_rebuild = False
         self._is_scrollbar_dragging = False
         self._last_scheduled_scroll_y = 0
         self._scroll_area = None
@@ -737,6 +740,19 @@ class JustifiedGallery(QWidget):
                 best_left = left
         return best_idx
 
+    def _get_first_visible_image_index(self) -> int:
+        idx = self._get_upper_left_visible_image_index()
+        if idx >= 0:
+            return idx
+        scroll = self._scroll_area_widget()
+        if scroll is None:
+            return -1
+        scroll_y = scroll.verticalScrollBar().value()
+        for i, item in enumerate(self._gallery_layout_items):
+            if item["rect"].bottom() > scroll_y:
+                return i
+        return -1
+
     def begin_zoom_session(self) -> bool:
         """Begin interactive zoom; capture upper-left anchor for scroll restore."""
         if not self._gallery_layout_items:
@@ -1195,6 +1211,15 @@ class JustifiedGallery(QWidget):
         resolved = self._resolve_gallery_path(path)
         if not resolved:
             pv = getattr(self, "parent_viewer", None)
+            if pv is not None and hasattr(pv, "_gallery_viewport_scroll_path"):
+                try:
+                    alt = pv._gallery_viewport_scroll_path()
+                    if alt:
+                        resolved = self._resolve_gallery_path(alt)
+                except Exception:
+                    pass
+        if not resolved:
+            pv = getattr(self, "parent_viewer", None)
             cfi = getattr(pv, "current_file_index", -1) if pv is not None else -1
             images = self.images or []
             if 0 <= cfi < len(images):
@@ -1252,15 +1277,29 @@ class JustifiedGallery(QWidget):
         self._request_load_visible_images(20)
 
     def _scaled_cache_key(self, file_path: str, target_size):
-        """Cache key for scaled thumbnails including width/height buckets."""
+        """Cache key for crop-to-fit thumbnails at exact tile physical size."""
         th = int(target_size.height())
         tw = int(target_size.width())
         rot = self._get_rotation_degrees_for_path(file_path)
         if th <= 0 or tw <= 0:
             return (file_path, self._thumb_base_key, rot)
-        h_bucket = min(self._row_height_buckets, key=lambda x: abs(x - th))
-        w_bucket = max(self._width_bucket_px, int(round(tw / self._width_bucket_px)) * self._width_bucket_px)
-        return (file_path, h_bucket, w_bucket, rot)
+        return (file_path, tw, th, rot)
+
+    @staticmethod
+    def _pixmap_logical_size(pixmap: QPixmap, dpr: float) -> QSize:
+        safe_dpr = dpr if dpr > 0 else 1.0
+        return QSize(
+            int(round(pixmap.width() / safe_dpr)),
+            int(round(pixmap.height() / safe_dpr)),
+        )
+
+    def _fit_tile_pixmap(
+        self, file_path: str, base: QPixmap, physical_size: QSize, dpr: float
+    ) -> QPixmap:
+        fitted = self._fit_rotated_thumbnail(file_path, base, physical_size)
+        fitted.setDevicePixelRatio(dpr)
+        self._thumbnail_cache.put(self._scaled_cache_key(file_path, physical_size), fitted)
+        return fitted
 
     def _get_rotation_degrees_for_path(self, file_path: str) -> int:
         """Read per-file visual rotation from parent viewer (0/90/180/270)."""
@@ -1364,11 +1403,12 @@ class JustifiedGallery(QWidget):
         """Immediately refresh visible widgets for a path after visual-rotation changes."""
         if not file_path:
             return
-        self._invalidate_scaled_thumbnails_for_path(file_path)
-        indices = self._path_to_indices.get(file_path, [])
+        resolved = self._resolve_gallery_path(file_path) or file_path
+        self._invalidate_scaled_thumbnails_for_path(resolved)
+        indices = self._path_to_indices.get(resolved, [])
         if not indices:
             return
-        base = self._thumbnail_cache.get((file_path, self._thumb_base_key))
+        base = self._thumbnail_cache.get((resolved, self._thumb_base_key))
         dpr = self.devicePixelRatio()
         for idx in indices:
             if idx not in self._visible_widgets:
@@ -1381,17 +1421,13 @@ class JustifiedGallery(QWidget):
                 int(logical_size.width() * dpr), int(logical_size.height() * dpr)
             )
             if base and not base.isNull():
-                fitted = self._fit_rotated_thumbnail(file_path, base, physical_size)
-                fitted.setDevicePixelRatio(dpr)
-                self._thumbnail_cache.put(
-                    self._scaled_cache_key(file_path, physical_size), fitted
-                )
+                fitted = self._fit_tile_pixmap(resolved, base, physical_size, dpr)
                 w.setPixmap(fitted)
                 w.setText("")
             elif self.load_manager is not None:
                 # No base thumbnail yet: schedule an immediate fetch for this visible tile.
                 self.load_manager.load_image(
-                    file_path,
+                    resolved,
                     priority=Priority.CURRENT,
                     cancel_existing=False,
                     stages={"thumbnail"},
@@ -1484,9 +1520,11 @@ class JustifiedGallery(QWidget):
         self._invalidate_scaled_thumbnails_for_path(file_path)
         if file_path not in self._path_to_indices:
             return False
-        display_aspect = self._display_aspect(file_path, self._base_aspect_for_path(file_path))
+        display_aspect = self._display_aspect(
+            resolved, self._base_aspect_for_path(resolved)
+        )
         changed = False
-        for idx in self._path_to_indices.get(file_path, []):
+        for idx in self._path_to_indices.get(resolved, []):
             if idx < len(self._gallery_layout_items):
                 old_aspect = self._gallery_layout_items[idx].get("aspect", 1.5)
                 if abs(old_aspect - display_aspect) > 0.05:
@@ -1495,12 +1533,12 @@ class JustifiedGallery(QWidget):
         if changed and self._gallery_layout_items:
             if defer_rebuild:
                 return True
-            self._add_metadata_changed_path(file_path)
+            self._add_metadata_changed_path(resolved)
             self.build_gallery(force=True)
         elif changed:
             return True
         else:
-            self.refresh_visible_tile_for_path(file_path)
+            self.refresh_visible_tile_for_path(resolved)
         return changed
 
     def _add_metadata_changed_path(self, file_path: str) -> None:
@@ -1521,7 +1559,9 @@ class JustifiedGallery(QWidget):
                 layout_changed = True
             self.refresh_visible_tile_for_path(path)
         if layout_changed and self._gallery_layout_items:
-            self._metadata_changed_paths.clear()
+            for path in paths:
+                self._add_metadata_changed_path(path)
+            self._last_metadata_change_time = time.time()
             if not self._metadata_rebuild_timer.isActive():
                 self._metadata_rebuild_timer.start(400)
 
@@ -1529,10 +1569,11 @@ class JustifiedGallery(QWidget):
         """Apply one file's stored visual rotation when returning to gallery."""
         if not file_path:
             return
-        layout_changed = self.on_visual_rotation_changed(file_path, defer_rebuild=True)
-        self.refresh_visible_tile_for_path(file_path)
+        resolved = self._resolve_gallery_path(file_path) or file_path
+        layout_changed = self.on_visual_rotation_changed(resolved, defer_rebuild=True)
+        self.refresh_visible_tile_for_path(resolved)
         if layout_changed and self._gallery_layout_items:
-            self._add_metadata_changed_path(file_path)
+            self._add_metadata_changed_path(resolved)
             if not self._metadata_rebuild_timer.isActive():
                 self._metadata_rebuild_timer.start(400)
 
@@ -1942,13 +1983,19 @@ class JustifiedGallery(QWidget):
                 if not r:
                     return
                 spacing = (len(r) - 1) * self.MIN_SPACING
-                row_h = self.TARGET_ROW_HEIGHT if is_last else (net_width - spacing) / a_sum
-                row_h = max(self.TARGET_ROW_HEIGHT * 0.4, min(self.TARGET_ROW_HEIGHT * 2.2, row_h))
+                if is_last and len(r) == 1:
+                    row_h = self.TARGET_ROW_HEIGHT
+                else:
+                    row_h = (net_width - spacing) / a_sum
+                    row_h = max(
+                        self.TARGET_ROW_HEIGHT * 0.75,
+                        min(self.TARGET_ROW_HEIGHT * 1.25, row_h),
+                    )
 
                 curr_x = left_margin
                 for i, (item, aspect) in enumerate(r):
                     w = int(row_h * aspect)
-                    if not is_last and i == len(r) - 1:
+                    if i == len(r) - 1 and (not is_last or len(r) > 1):
                         w = net_width - (curr_x - left_margin)
                     self._gallery_layout_items.append(
                         {
@@ -2117,6 +2164,7 @@ class JustifiedGallery(QWidget):
         scrollbar = p.verticalScrollBar()
         scroll_y = scrollbar.value()
         v_h = v_port.height()
+        actively_scrolling = self._is_actively_scrolling()
 
         actively_scrolling = self._is_actively_scrolling()
         buffer_screens = (
@@ -2247,11 +2295,34 @@ class JustifiedGallery(QWidget):
                 display_rect = self._content_rect_to_viewport(rect)
                 w.setGeometry(display_rect)
                 w.setFixedSize(display_rect.size())
-                try:
-                    w.clicked.disconnect()
-                except Exception:
-                    pass
-                w.clicked.connect(self._on_thumbnail_clicked)
+                def _on_thumb_press(e, _w=w):
+                    try:
+                        if e.button() == Qt.MouseButton.LeftButton:
+                            e.accept()
+                            target_path = getattr(_w, "file_path", None)
+                            pv = self.parent_viewer
+                            if target_path and pv is not None:
+                                if hasattr(pv, "_gallery_has_shift_modifier") and pv._gallery_has_shift_modifier(
+                                    e.modifiers()
+                                ):
+                                    pv._gallery_shift_click_selection(target_path)
+                                    return
+                                if hasattr(pv, "_gallery_has_extend_modifier") and pv._gallery_has_extend_modifier(
+                                    e.modifiers()
+                                ):
+                                    pt = _w.mapTo(self, e.position().toPoint())
+                                    self._begin_ctrl_drag_selection(pt)
+                                    self.grabMouse()
+                                    return
+                                pv._gallery_item_clicked(target_path)
+                            return
+                    except Exception:
+                        pass
+                    try:
+                        e.ignore()
+                    except Exception:
+                        pass
+                w.mousePressEvent = _on_thumb_press
                 created_widgets += 1
                 self._visible_widgets[idx] = w
             else:
@@ -2272,11 +2343,15 @@ class JustifiedGallery(QWidget):
             physical_size = QSize(int(rect.width() * dpr), int(rect.height() * dpr))
             scaled_key = self._scaled_cache_key(path, physical_size)
             cached_scaled = self._thumbnail_cache.get(scaled_key)
-            if cached_scaled:
-                self._apply_pixmap_if_changed(w, cached_scaled)
-                w.setText("")
-                cache_hit = True
-            else:
+            expected_logical = QSize(rect.width(), rect.height())
+            if cached_scaled and not cached_scaled.isNull():
+                if self._pixmap_logical_size(cached_scaled, dpr) == expected_logical:
+                    w.setPixmap(cached_scaled)
+                    w.setText("")
+                    cache_hit = True
+                else:
+                    cached_scaled = None
+            if not cache_hit:
                 base = self._thumbnail_cache.get((path, self._thumb_base_key))
                 if not base:
                     # Avoid main thread SQLite lock contention/stutter by skipping synchronous fetches during active scrolls
@@ -2322,11 +2397,9 @@ class JustifiedGallery(QWidget):
                         except Exception as e:
                             logger.debug(f"Sync adaptive mipmap fetch failed for {path}: {e}")
                 
-                if base and not base.isNull():
-                    scaled = self._fit_rotated_thumbnail(path, base, physical_size)
-                    scaled.setDevicePixelRatio(dpr)
-                    self._thumbnail_cache.put(scaled_key, scaled)
-                    self._apply_pixmap_if_changed(w, scaled)
+                if base:
+                    scaled = self._fit_tile_pixmap(path, base, physical_size, dpr)
+                    w.setPixmap(scaled)
                     w.setText("")
                     cache_hit = True
                 else:
@@ -2718,10 +2791,7 @@ class JustifiedGallery(QWidget):
                     continue
                 logical_size = w.size()
                 physical_size = QSize(int(logical_size.width() * dpr), int(logical_size.height() * dpr))
-                fitted = self._fit_rotated_thumbnail(file_path, pixmap, physical_size)
-                
-                fitted.setDevicePixelRatio(dpr)
-                self._thumbnail_cache.put(self._scaled_cache_key(file_path, physical_size), fitted)
+                fitted = self._fit_tile_pixmap(file_path, pixmap, physical_size, dpr)
                 w.setPixmap(fitted)
                 w.setText("")
 
@@ -2965,9 +3035,14 @@ class JustifiedGallery(QWidget):
         if self._is_scrolling_fast:
             self._schedule_aspects_settle_rebuild(1500)
             return
+        anchor = self._capture_scroll_anchor_state()
         if _focus_gallery_switch_logs():
             logger.debug("[GALLERY] aspects settle rebuild")
         self.build_gallery(force=True)
+        if anchor:
+            self._pending_scroll_anchor_state = anchor
+            self._pending_scroll_to_path = None
+            QTimer.singleShot(0, self._apply_pending_scroll_to_file)
 
     def _handle_metadata_rebuild(self):
         """Rebuild layout after metadata changes to settle aspect ratios."""
@@ -2985,11 +3060,16 @@ class JustifiedGallery(QWidget):
             self._metadata_rebuild_timer.start(400)
             return
 
+        anchor = self._capture_scroll_anchor_state()
         self._metadata_changed_paths.clear()
         if _focus_gallery_switch_logs():
             logger.debug("[GALLERY] metadata rebuild triggered")
 
         self.build_gallery(bulk_metadata=None, force=True)
+        if anchor:
+            self._pending_scroll_anchor_state = anchor
+            self._pending_scroll_to_path = None
+            QTimer.singleShot(0, self._apply_pending_scroll_to_file)
 
     def show_loading_message(self, message="Loading gallery..."):
         """Show loading message overlay - Simplified for better performance"""
