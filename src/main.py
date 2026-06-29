@@ -67,6 +67,27 @@ def resource_path(relative_path):
     return os.path.join(base_path, relative_path)
 
 
+def _branded_icon_resource_path() -> str | None:
+    """Bundled app icon for splash/window (platform format; PNG omitted from release bundles)."""
+    if platform.system() == "Windows":
+        candidates = (
+            os.path.join("icons", "appicon.ico"),
+            os.path.join("icons", "appicon.png"),
+        )
+    elif platform.system() == "Darwin":
+        candidates = (
+            os.path.join("icons", "appicon.icns"),
+            os.path.join("icons", "appicon.png"),
+        )
+    else:
+        candidates = (os.path.join("icons", "appicon.png"),)
+    for rel in candidates:
+        path = resource_path(rel)
+        if os.path.exists(path):
+            return path
+    return None
+
+
 # PyInstaller Splash Screen: Helper to close the boot-time splash
 def close_native_splash():
     try:
@@ -148,9 +169,9 @@ if _IS_GUI_MAIN_PROCESS:
         if not _temp_app:
             _temp_app = RAWApplication(sys.argv)
 
-        # Try to load appicon.png as splash
-        _icon_path = resource_path(os.path.join('icons', 'appicon.png'))
-        if os.path.exists(_icon_path):
+        # Try to load platform app icon as splash
+        _icon_path = _branded_icon_resource_path()
+        if _icon_path:
             _splash_pixmap = QPixmap(_icon_path)
             if _splash_pixmap.width() > 512:
                 _splash_pixmap = _splash_pixmap.scaled(
@@ -22557,8 +22578,8 @@ def main():
                 safe_print("Splash screen updated", flush=True)
             elif getattr(sys, 'frozen', False):
                 # Fallback splash if top-level creation failed
-                icon_path_fallback = resource_path(os.path.join('icons', 'appicon.png'))
-                if os.path.exists(icon_path_fallback):
+                icon_path_fallback = _branded_icon_resource_path()
+                if icon_path_fallback:
                     splash_pixmap = QPixmap(icon_path_fallback)
                     if splash_pixmap.width() > 512:
                         splash_pixmap = splash_pixmap.scaled(512, 512, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)

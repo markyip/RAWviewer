@@ -506,12 +506,22 @@ def _prune_built_app(exe_path: Path, profile: str) -> None:
             "QtWebEngineWidgets.framework",
             "QtWebSockets.framework",
             "QtXml.framework",
+            "QtSvg.framework",
+            "QtNetwork.framework",
         ]
         for fw in unused_frameworks:
             fw_path = qt_lib_dir / fw
             if fw_path.exists():
                 print(f"  Pruning unused Qt6 framework: {fw_path}")
                 shutil.rmtree(fw_path, ignore_errors=True)
+
+    # 3. Prune Qt6 translations (saves ~6.6 MB; app has no QTranslator)
+    qt_translations_dir = (
+        exe_path / "Contents" / "Resources" / "PyQt6" / "Qt6" / "translations"
+    )
+    if qt_translations_dir.exists():
+        print(f"  Pruning Qt6 translations from: {qt_translations_dir}")
+        shutil.rmtree(qt_translations_dir, ignore_errors=True)
 
 
 def main():
@@ -743,7 +753,6 @@ def main():
         add_data_args = [
             f'--add-data "{imageformats_src}{add_data_sep}imageformats"',
             f'--add-data "icons{os.sep}appicon.ico{add_data_sep}icons"',
-            f'--add-data "icons{os.sep}appicon.png{add_data_sep}icons"',
             f'--add-data "src{os.sep}icons{os.sep}folder_open_md3.svg{add_data_sep}icons"',
             f'--add-data "src{os.sep}icons{os.sep}cities500.csv.gz{add_data_sep}icons"',
             f'--add-data "src{os.sep}icons{os.sep}landmarks.csv.gz{add_data_sep}icons"',
@@ -752,7 +761,6 @@ def main():
         add_data_args = [
             f'--add-data "{imageformats_src}{add_data_sep}imageformats"',
             f'--add-data "icons{os.sep}appicon.icns{add_data_sep}icons"',
-            f'--add-data "icons{os.sep}appicon.png{add_data_sep}icons"',
             f'--add-data "src{os.sep}icons{os.sep}folder_open_md3.svg{add_data_sep}icons"',
             f'--add-data "src{os.sep}icons{os.sep}cities500.csv.gz{add_data_sep}icons"',
             f'--add-data "src{os.sep}icons{os.sep}landmarks.csv.gz{add_data_sep}icons"',
