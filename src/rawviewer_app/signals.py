@@ -53,3 +53,9 @@ class ReleaseUpdateCheckSignals(QObject):
     """Signal carrier for background GitHub release version check."""
     finished = pyqtSignal(dict)
 
+
+class RawRecoverySignals(QObject):
+    """Background RAW linear decode + local shadow/highlight recovery."""
+    ready = pyqtSignal(str, object)  # file_path, uint8 RGB ndarray
+    failed = pyqtSignal(str, str)  # file_path, error message
+

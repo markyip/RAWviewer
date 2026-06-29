@@ -3,7 +3,7 @@ import logging, os, sys, time, traceback
 import numpy as np
 from PyQt6.QtCore import QRunnable, QObject, pyqtSignal
 from PyQt6.QtGui import QImage
-from rawviewer_app.signals import ReleaseUpdateCheckSignals, SemanticIndexPrepSignals
+from rawviewer_app.signals import ReleaseUpdateCheckSignals, SemanticIndexPrepSignals, RawRecoverySignals
 
 class _ReleaseUpdateCheckWorker(QRunnable):
     """Fetch latest GitHub release tag and compare to the running app version."""
@@ -419,4 +419,63 @@ class ImageLoadTask(QRunnable):
         except Exception as e:
             logger.error(f"[IMAGE_LOAD_TASK] Error loading image {os.path.basename(self.file_path) if self.file_path else 'unknown'}: {e}", exc_info=True)
 
+
+class RawRecoveryWorker(QRunnable):
+    """Decode RAW linear preview off the UI thread and apply local tone recovery."""
+
+    def __init__(
+        self,
+        file_path: str,
+        signals: RawRecoverySignals,
+        *,
+        exif_data: dict | None = None,
+    ):
+        super().__init__()
+        self.file_path = file_path
+        self.signals = signals
+        self.exif_data = exif_data or {}
+
+    def run(self) -> None:
+        from raw_tone_recovery import decode_and_recover_raw
+
+        logger = logging.getLogger(__name__)
+        logger.info(
+            "RAW recovery worker started for %s",
+            os.path.basename(self.file_path),
+        )
+        try:
+            from unified_image_processor import UnifiedImageProcessor
+
+            processor = UnifiedImageProcessor()
+
+            def _orient(rgb, orientation, exif):
+                return processor._apply_orientation_correction(rgb, orientation, exif)
+
+            rgb = decode_and_recover_raw(
+                self.file_path,
+                apply_orientation=_orient,
+                exif_data=self.exif_data,
+            )
+            if rgb is None:
+                raise RuntimeError("decode returned empty buffer")
+            logger.info(
+                "RAW recovery worker finished for %s shape=%s",
+                os.path.basename(self.file_path),
+                getattr(rgb, "shape", None),
+            )
+            try:
+                from PyQt6 import sip
+
+                if not sip.isdeleted(self.signals):
+                    self.signals.ready.emit(self.file_path, rgb)
+            except Exception:
+                pass
+        except Exception as exc:
+            try:
+                from PyQt6 import sip
+
+                if not sip.isdeleted(self.signals):
+                    self.signals.failed.emit(self.file_path, str(exc))
+            except Exception:
+                pass
 

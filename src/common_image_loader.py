@@ -498,8 +498,21 @@ def _pil_file_to_qpixmap(file_path: str, max_edge: int = 0) -> QPixmap:
         return QPixmap()
 
 
+_last_load_used_edr = False
+
+
+def take_last_load_edr_flag() -> bool:
+    """True when the most recent load_pixmap_safe() used macOS HDR/EDR output."""
+    global _last_load_used_edr
+    used = bool(_last_load_used_edr)
+    _last_load_used_edr = False
+    return used
+
+
 def load_pixmap_safe(file_path: str, max_edge: int = 0) -> QPixmap:
     """安全載入 QPixmap，對 TIFF 文件使用 PIL 以避免 Qt 警告"""
+    global _last_load_used_edr
+    _last_load_used_edr = False
     cache = get_image_cache()
     
     # 檢查快取
@@ -514,10 +527,9 @@ def load_pixmap_safe(file_path: str, max_edge: int = 0) -> QPixmap:
     # Check if this is an HDR HEIF/AVIF or TIFF
     hdr_pixmap = try_load_hdr_image_pixmap(file_path, max_edge=max_edge)
     if hdr_pixmap is not None:
+        _last_load_used_edr = is_macos_edr_enabled()
         cache.put_pixmap(file_path, hdr_pixmap)
         return hdr_pixmap
-
-    
     # 對於 TIFF 文件，使用 PIL 避免 Qt 警告
     if is_tiff_file(file_path):
         try:
@@ -1324,6 +1336,146 @@ def is_macos_edr_enabled() -> bool:
     if platform.system() != "Darwin":
         return False
     return os.environ.get("RAWVIEWER_DISABLE_EDR", "0") not in ("1", "true", "yes", "on")
+
+
+def format_edr_status_label(
+    *,
+    display_mode: str | None = None,
+    gpu_view=None,
+) -> str | None:
+    """
+    Short label for metadata / status bar.
+
+    display_mode: "raw" | "hdr" when the current image uses extended range output.
+    """
+    import platform
+
+    if platform.system() != "Darwin":
+        return None
+    if not is_macos_edr_enabled():
+        return "SDR (EDR off)"
+    if display_mode == "raw":
+        return "EDR · RAW"
+    if display_mode == "hdr":
+        return "EDR · HDR"
+    viewport = bool(getattr(gpu_view, "_edr_initialized", False)) if gpu_view is not None else False
+    if viewport and use_raw_edr_for_display():
+        return "EDR ready · RAW on"
+    if viewport and use_raw_edr_display():
+        return "EDR ready · embedded JPEG workflow"
+    if viewport:
+        return "EDR ready"
+    return None
+
+
+def summarize_macos_edr_startup(*, gpu_view=None) -> str:
+    """One-line startup hint for logs / status bar."""
+    import platform
+
+    if platform.system() != "Darwin":
+        return "Display: SDR (not macOS)"
+    if not is_macos_edr_enabled():
+        return "Display: SDR (RAWVIEWER_DISABLE_EDR=1)"
+    parts = ["macOS EDR viewport enabled"]
+    if use_raw_edr_for_display():
+        parts.append("RAW EDR active")
+    elif use_raw_edr_display():
+        parts.append("RAW EDR on hold (embedded JPEG workflow)")
+    else:
+        parts.append("RAW EDR off (RAWVIEWER_RAW_EDR=0)")
+    if gpu_view is not None and not getattr(gpu_view, "_edr_initialized", False):
+        parts.append("viewport initializing…")
+    return " · ".join(parts)
+
+
+def use_raw_edr_display() -> bool:
+    """macOS RAW EDR single-view path (on by default; RAWVIEWER_RAW_EDR=0 to disable)."""
+    if not is_macos_edr_enabled():
+        return False
+    v = os.environ.get("RAWVIEWER_RAW_EDR", "1").strip().lower()
+    return v not in ("0", "false", "no", "off")
+
+
+def use_raw_edr_for_display() -> bool:
+    """True when macOS RAW EDR should replace the normal display path (RAW workflow only)."""
+    if not use_raw_edr_display():
+        return False
+    # Embedded-JPEG workflow must keep camera preview pixels (SDR); do not re-decode via LibRaw.
+    return use_libraw_consistent_preview_first()
+
+
+# Windows 10-bit / HDR display notes (Qt 6 / PyQt6, investigated 2025):
+# - QImage exposes Format_RGB30 / Format_BGR30 (x-10-10-10) but Qt docs warn against
+#   QPainter rendering to them; QGraphicsView / GpuImageView uses 8-bit or RGBX64 paths.
+# - Windows HDR output for custom content needs QRhi swapchain formats
+#   (HDRExtendedSrgbLinear scRGB or HDR10 PQ) on a QWindow — unlike macOS CALayer EDR
+#   (setWantsExtendedDynamicRangeContent_) there is no one-line widget hook.
+# - try_load_hdr_image_pixmap() tone-maps to SDR uint8 on non-macOS; RAW stays RGB888.
+# - A future Windows path would probe DXGI OUTPUT_DESC1 + optional QRhi viewport (large scope).
+def is_windows_hdr_display_available() -> bool:
+    """Best-effort HDR display probe for future Windows 10-bit work (not wired yet)."""
+    import sys
+
+    if sys.platform != "win32":
+        return False
+    return False
+
+
+def linear_edr_float_to_qpixmap(
+    rgb_edr: np.ndarray,
+    *,
+    peak_display: float = 4.0,
+    max_edge: int = 0,
+) -> QPixmap:
+    """Convert extended display-referred float RGB to macOS EDR RGBX64 QPixmap."""
+    from PyQt6.QtGui import QColorSpace
+    from PyQt6.QtCore import Qt, QSize
+
+    from raw_tone_recovery import encode_edr_rgbx64
+
+    if rgb_edr is None or rgb_edr.size == 0:
+        return QPixmap()
+    arr_64 = encode_edr_rgbx64(rgb_edr, peak_display=peak_display)
+    h, w = arr_64.shape[:2]
+    qimage = QImage(arr_64.data, w, h, w * 8, QImage.Format.Format_RGBX64)
+    qimage.setColorSpace(QColorSpace(QColorSpace.NamedColorSpace.SRgb))
+    if max_edge > 0 and max(w, h) > max_edge:
+        if w >= h:
+            sw = max_edge
+            sh = max(1, int(h * max_edge / max(w, 1)))
+        else:
+            sh = max_edge
+            sw = max(1, int(w * max_edge / max(h, 1)))
+        qimage = qimage.scaled(
+            QSize(sw, sh),
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+    return QPixmap.fromImage(qimage) if not qimage.isNull() else QPixmap()
+
+
+def decode_raw_edr_pixmap(
+    file_path: str,
+    *,
+    max_edge: int = 0,
+    exif_data: Optional[Dict[str, Any]] = None,
+) -> Optional[QPixmap]:
+    """Decode RAW with linear 16-bit pipeline and build macOS EDR QPixmap."""
+    if not use_raw_edr_for_display():
+        return None
+    from raw_tone_recovery import decode_raw_for_edr_rgb
+
+    apply_orientation = apply_container_orientation_to_array
+    rgb_edr = decode_raw_for_edr_rgb(
+        file_path,
+        max_edge=max_edge,
+        apply_orientation=apply_orientation,
+        exif_data=exif_data,
+    )
+    if rgb_edr is None:
+        return None
+    pixmap = linear_edr_float_to_qpixmap(rgb_edr, max_edge=max_edge)
+    return pixmap if not pixmap.isNull() else None
 
 
 def pq_to_linear(v: np.ndarray) -> np.ndarray:

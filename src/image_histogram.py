@@ -5,6 +5,8 @@ from __future__ import annotations
 from typing import Optional, Tuple
 
 import numpy as np
+
+from exposure_clipping import clipping_counts
 from PyQt6.QtCore import Qt, QRect, QRectF
 from PyQt6.QtGui import QColor, QCursor, QImage, QPainter, QPainterPath, QPen, QPixmap
 from PyQt6.QtWidgets import QSizePolicy, QWidget
@@ -72,6 +74,9 @@ class ImageHistogramWidget(QWidget):
         self._hg: Optional[np.ndarray] = None
         self._hb: Optional[np.ndarray] = None
         self._hl: Optional[np.ndarray] = None
+        self._hi_clip = 0
+        self._lo_clip = 0
+        self._clip_total = 0
         self.setFixedSize(self._CARD_W, self._CARD_H)
         self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
@@ -126,6 +131,7 @@ class ImageHistogramWidget(QWidget):
 
     def clear(self) -> None:
         self._hr = self._hg = self._hb = self._hl = None
+        self._hi_clip = self._lo_clip = self._clip_total = 0
         self.update()
 
     def set_pixmap(self, pixmap: QPixmap) -> None:
@@ -151,6 +157,7 @@ class ImageHistogramWidget(QWidget):
             self.clear()
             return
         self._hr, self._hg, self._hb, self._hl = _histograms_from_rgb(rgb)
+        self._hi_clip, self._lo_clip, self._clip_total = clipping_counts(rgb)
         self.update()
 
     def paintEvent(self, event):
@@ -189,3 +196,21 @@ class ImageHistogramWidget(QWidget):
         polyline(self._hg, QColor(90, 200, 110, 200), 1.0)
         polyline(self._hb, QColor(100, 160, 255, 200), 1.0)
         polyline(self._hl, QColor(230, 230, 230, 255), 1.35)
+
+        if self._clip_total > 0:
+            if self._lo_clip > 0:
+                painter.fillRect(
+                    chart.left(),
+                    chart.bottom() - 5,
+                    5,
+                    5,
+                    QColor(90, 150, 255, 240),
+                )
+            if self._hi_clip > 0:
+                painter.fillRect(
+                    chart.right() - 4,
+                    chart.bottom() - 5,
+                    5,
+                    5,
+                    QColor(255, 70, 70, 240),
+                )

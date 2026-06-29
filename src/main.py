@@ -1680,7 +1680,7 @@ def _share_windows_via_winrt(path: str, owner_hwnd: int) -> bool:
 
 # --- rawviewer_app modules (Phase 4 split) ---
 from rawviewer_app.env import _env_int, _env_true, _norm_path, safe_print, safe_print_err
-from rawviewer_app.processing import RAWProcessor, PixmapConverter
+from rawviewer_app.processing import RAWProcessor, PixmapConverter, RawEdrPixmapConverter
 from rawviewer_app.signals import (
     FolderLoadSignals,
     FolderResortSignals,
@@ -1728,9 +1728,12 @@ class RAWImageViewer(SessionMixin, QMainWindow):
 
     def _load_pixmap_safe(self, file_path):
         """Delegate to common_image_loader (RAW + TIFF + JPEG with shared orientation)."""
-        from common_image_loader import load_pixmap_safe
+        from common_image_loader import load_pixmap_safe, take_last_load_edr_flag
 
-        return load_pixmap_safe(file_path)
+        pixmap = load_pixmap_safe(file_path)
+        if take_last_load_edr_flag():
+            self._display_edr_mode = "hdr"
+        return pixmap
 
     def __init__(self):
         safe_print("  [RAWImageViewer] Starting initialization...", flush=True)
@@ -1821,7 +1824,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self._defer_full_exif_path = None
         self._full_exif_queued_norm = None
         self.thumbnail_cache = {}  # Cache for thumbnails
-        self._histogram_user_hidden = False
+        self._histogram_user_hidden = True
         self.thumbnail_threads = []  # Track running thumbnail threads
         
         # View mode: 'single' for single image view, 'gallery' for gallery view
@@ -1907,6 +1910,21 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 self._composition_grid_mode = "golden"
         except Exception:
             self._composition_grid_mode = "off"
+        # Highlight/shadow clipping overlay (toggle with J)
+        self._clipping_overlay_active = False
+        self._clipping_overlay_pm = None
+        self._clipping_overlay_cache_key = None
+        # RAW local shadow/highlight recovery (T — session-only, single-view RAW flow)
+        self._raw_recovery_active = False
+        self._raw_recovery_cache = {}
+        self._raw_recovery_skip_display_cache = False
+        self._raw_recovery_worker_path = None
+        from rawviewer_app.signals import RawRecoverySignals
+
+        self._raw_recovery_signals = RawRecoverySignals()
+        self._raw_recovery_signals.ready.connect(self._on_raw_recovery_ready)
+        self._raw_recovery_signals.failed.connect(self._on_raw_recovery_failed)
+        self._display_edr_mode = None  # None | "raw" | "hdr" when showing EDR content
         # EXIF SubjectArea / maker AF (pyexiv2/Exiv2) in current_pixmap coordinates
         self._focus_subject_rect_image: QRect | None = None
         # "makernote_af" (exifread Canon AF) vs "exif_subject" (SubjectArea/Location via Exiv2)
@@ -1945,8 +1963,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self._save_session_debounce_timer.setInterval(420)
         self._save_session_debounce_timer.timeout.connect(self.save_session_state)
         
-        self._map_overlay_visible = True
-        self._map_user_hidden = False
+        self._map_overlay_visible = False
+        self._map_user_hidden = True
         self._map_online = None
         self._map_gallery_title = None
         self._map_gallery_return_path = None
@@ -2071,7 +2089,15 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             and oh > 0
             and not base.isNull()
         )
-        if draw_exif_subj or draw_grid:
+        draw_clipping = (
+            getattr(self, "_clipping_overlay_active", False)
+            and self.current_pixmap is not None
+            and not self.current_pixmap.isNull()
+            and ow > 0
+            and oh > 0
+            and not base.isNull()
+        )
+        if draw_exif_subj or draw_grid or draw_clipping:
             blended = base.copy()
             p = QPainter(blended)
             if draw_exif_subj:
@@ -2080,6 +2106,11 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 from rawviewer_ui.composition_grid import draw_composition_grid
 
                 draw_composition_grid(p, ow, oh, grid_mode)
+            if draw_clipping:
+                self._ensure_clipping_overlay_cached()
+                clip_pm = getattr(self, "_clipping_overlay_pm", None)
+                if clip_pm is not None and not clip_pm.isNull():
+                    p.drawPixmap(0, 0, clip_pm)
             p.end()
         pending_size = blended.size()
 
@@ -2957,6 +2988,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
 
     def _upgrade_display_quality_on_fit_if_needed(self) -> None:
         """After zoom-out to fit, replace a soft buffer with cached or queued sensor full."""
+        if self._raw_recovery_preview_active():
+            return
         if getattr(self, "view_mode", "single") != "single":
             return
         if not self._needs_full_resolution_upgrade():
@@ -2979,6 +3012,9 @@ class RAWImageViewer(SessionMixin, QMainWindow):
 
     def _gpu_zoom_in_to_point_finish(self) -> None:
         """Apply 100% zoom centered on ``zoom_center_point`` in GPU view."""
+        if self._raw_recovery_preview_active():
+            self._notify_raw_recovery_zoom_blocked()
+            return
         gv = getattr(self, "gpu_view", None)
         if gv is None or not gv.has_pixmap():
             return
@@ -3004,6 +3040,16 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         import logging
 
         logger = logging.getLogger(__name__)
+        if self._raw_recovery_preview_active():
+            gv = getattr(self, "gpu_view", None)
+            if gv is not None and not gv.is_fit_mode():
+                gv.fit_to_window()
+                self.fit_to_window = True
+                self.zoom_center_point = None
+                self.update_status_bar()
+            else:
+                self._notify_raw_recovery_zoom_blocked()
+            return
         gv = getattr(self, "gpu_view", None)
         if gv is None:
             return
@@ -3050,6 +3096,9 @@ class RAWImageViewer(SessionMixin, QMainWindow):
 
     def _focus_jump_to_subject_center(self) -> bool:
         """With focus outline on: center zoom on EXIF / maker AF rectangle (fit-to-window)."""
+        if self._raw_recovery_preview_active():
+            self._notify_raw_recovery_zoom_blocked()
+            return True
         if not self.current_pixmap or self.current_pixmap.isNull():
             return False
         rect = getattr(self, "_focus_subject_rect_image", None)
@@ -3103,6 +3152,296 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             self._redraw_single_view_pixmap_without_relayout()
             self.status_bar.showMessage("Focus outline off", 2000)
         self.update_status_bar()
+        return True
+
+    def _clipping_overlay_cache_token(self, pm) -> tuple:
+        return (int(pm.cacheKey()), pm.width(), pm.height())
+
+    def _neutral_rgb_for_raw_display(self, file_path: str):
+        if not file_path:
+            return None
+        for getter in (self.image_cache.get_full_image, self.image_cache.get_preview):
+            try:
+                buf = getter(file_path)
+            except Exception:
+                buf = None
+            if buf is not None and hasattr(buf, "shape"):
+                return buf
+        return None
+
+    def _raw_recovery_preview_active(self) -> bool:
+        return bool(getattr(self, "_raw_recovery_active", False))
+
+    def _notify_raw_recovery_zoom_blocked(self) -> None:
+        self.status_bar.showMessage(
+            "Recovery preview is fit-only (~half-res). Press T to return to full resolution.",
+            4000,
+        )
+
+    def _show_edr_startup_status(self) -> None:
+        from common_image_loader import summarize_macos_edr_startup
+
+        msg = summarize_macos_edr_startup(gpu_view=getattr(self, "gpu_view", None))
+        logging.getLogger(__name__).info("[EDR] %s", msg)
+        if hasattr(self, "status_bar") and self.status_bar is not None:
+            self.status_bar.showMessage(msg, 8000)
+
+    def _edr_metadata_label(self) -> str | None:
+        from common_image_loader import format_edr_status_label
+
+        return format_edr_status_label(
+            display_mode=getattr(self, "_display_edr_mode", None),
+            gpu_view=getattr(self, "gpu_view", None),
+        )
+
+    def _sync_raw_recovery_view_mode(self) -> None:
+        active = self._raw_recovery_preview_active()
+        gv = getattr(self, "gpu_view", None)
+        if gv is not None:
+            gv.set_zoom_locked(active)
+            if active:
+                self._clear_all_zoom_state()
+                gv._zoom_intent_100 = False
+                if gv.has_pixmap():
+                    gv.fit_to_window()
+                self.fit_to_window = True
+                self.zoom_center_point = None
+        container = getattr(self, "single_view_container", None)
+        if container is not None and hasattr(container, "set_recovery_preview_badge"):
+            detail = ""
+            pm = getattr(self, "current_pixmap", None)
+            if pm is not None and not pm.isNull():
+                detail = f" ({pm.width()}×{pm.height()})"
+            container.set_recovery_preview_badge(active, detail=detail)
+        self._last_status_signature = None
+        self.update_status_bar()
+        if active:
+            self.status_bar.showMessage(
+                "Recovery preview ON — adjusted image, fit-only (not full resolution). Press T to exit.",
+                6000,
+            )
+
+    def _display_raw_recovery_buffer(self, file_path: str, rgb) -> None:
+        self._raw_recovery_skip_display_cache = True
+        self._skip_resolution_downgrade_check = True
+        try:
+            self.display_numpy_image(rgb)
+        finally:
+            self._raw_recovery_skip_display_cache = False
+            self._skip_resolution_downgrade_check = False
+
+    def _start_raw_recovery(self, file_path: str) -> None:
+        if not file_path or not is_raw_file(file_path):
+            return
+        if not getattr(self, "_raw_recovery_active", False):
+            return
+        norm = _norm_path(file_path)
+        if norm in self._raw_recovery_cache:
+            return
+        if getattr(self, "_raw_recovery_worker_path", None) == norm:
+            return
+        self._raw_recovery_worker_path = norm
+        exif_data = {}
+        try:
+            exif_data = self.image_cache.get_exif(file_path) or {}
+        except Exception:
+            pass
+        from rawviewer_app.workers import RawRecoveryWorker
+
+        QThreadPool.globalInstance().start(
+            RawRecoveryWorker(file_path, self._raw_recovery_signals, exif_data=exif_data)
+        )
+
+    def _on_raw_recovery_ready(self, file_path: str, rgb) -> None:
+        norm = _norm_path(file_path)
+        if getattr(self, "_raw_recovery_worker_path", None) == norm:
+            self._raw_recovery_worker_path = None
+        if rgb is not None:
+            self._raw_recovery_cache[norm] = rgb
+            if len(self._raw_recovery_cache) > 8:
+                for old_key in list(self._raw_recovery_cache.keys())[:-8]:
+                    self._raw_recovery_cache.pop(old_key, None)
+        if not getattr(self, "_raw_recovery_active", False):
+            return
+        if norm != _norm_path(getattr(self, "current_file_path", None)):
+            return
+        if rgb is None:
+            return
+        import logging
+
+        logging.getLogger(__name__).info(
+            "RAW recovery ready for %s shape=%s",
+            os.path.basename(file_path),
+            getattr(rgb, "shape", None),
+        )
+        self._orientation_already_applied = True
+        try:
+            self._display_raw_recovery_buffer(file_path, rgb)
+        finally:
+            self._orientation_already_applied = False
+        self._sync_raw_recovery_view_mode()
+        self.status_bar.showMessage(
+            "RAW recovery preview ready (local shadows/highlights). T=off",
+            3500,
+        )
+
+    def _on_raw_recovery_failed(self, file_path: str, message: str) -> None:
+        norm = _norm_path(file_path)
+        if getattr(self, "_raw_recovery_worker_path", None) == norm:
+            self._raw_recovery_worker_path = None
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "RAW recovery failed for %s: %s",
+            os.path.basename(file_path),
+            message,
+        )
+        if (
+            getattr(self, "_raw_recovery_active", False)
+            and _norm_path(file_path) == _norm_path(getattr(self, "current_file_path", None))
+        ):
+            self.status_bar.showMessage(
+                f"RAW recovery failed — showing standard preview ({message})",
+                5000,
+            )
+
+    def _refresh_neutral_raw_display(self) -> None:
+        path = getattr(self, "current_file_path", None)
+        if (
+            not path
+            or getattr(self, "view_mode", "single") != "single"
+            or not is_raw_file(path)
+        ):
+            return
+        neutral = self._neutral_rgb_for_raw_display(path)
+        if neutral is None:
+            return
+        self._orientation_already_applied = True
+        try:
+            self.display_numpy_image(neutral)
+        finally:
+            self._orientation_already_applied = False
+
+    def _disable_raw_recovery(self) -> None:
+        was_active = self._raw_recovery_preview_active()
+        self._raw_recovery_active = False
+        self._raw_recovery_worker_path = None
+        if was_active:
+            self._sync_raw_recovery_view_mode()
+
+    def _toggle_raw_recovery(self) -> bool:
+        if getattr(self, "view_mode", "single") != "single":
+            return False
+        path = getattr(self, "current_file_path", None)
+        if path and not is_raw_file(path):
+            self.status_bar.showMessage("RAW recovery is only available for RAW/DNG", 2500)
+            return True
+        self._raw_recovery_active = not getattr(self, "_raw_recovery_active", False)
+        if self._raw_recovery_active:
+            import logging
+
+            logging.getLogger(__name__).info(
+                "RAW recovery ON for %s",
+                os.path.basename(path or ""),
+            )
+            self._cancel_display_pixmap_converter()
+            self.status_bar.showMessage(
+                "Decoding RAW for local shadow/highlight recovery…",
+                4000,
+            )
+            if path:
+                cached = self._raw_recovery_cache.get(_norm_path(path))
+                if cached is not None:
+                    self._orientation_already_applied = True
+                    try:
+                        self._display_raw_recovery_buffer(path, cached)
+                    finally:
+                        self._orientation_already_applied = False
+                    self._sync_raw_recovery_view_mode()
+                else:
+                    self._start_raw_recovery(path)
+                    self._sync_raw_recovery_view_mode()
+        else:
+            import logging
+
+            logging.getLogger(__name__).info(
+                "RAW recovery OFF for %s",
+                os.path.basename(path or ""),
+            )
+            self.status_bar.showMessage("RAW recovery preview off", 2000)
+            self._refresh_neutral_raw_display()
+            self._sync_raw_recovery_view_mode()
+        return True
+
+    def _toggle_auto_tone_preview(self) -> bool:
+        return self._toggle_raw_recovery()
+
+    def _refresh_auto_tone_display(self) -> None:
+        self._refresh_neutral_raw_display()
+
+    def _build_clipping_overlay_pixmap(self, pm):
+        from exposure_clipping import clipping_overlay_pixmap, rgb_array_from_pixmap
+
+        rgb = rgb_array_from_pixmap(pm)
+        if rgb is None:
+            return None
+        return clipping_overlay_pixmap(rgb)
+
+    def _ensure_clipping_overlay_cached(self) -> None:
+        if not getattr(self, "_clipping_overlay_active", False):
+            self._clipping_overlay_pm = None
+            self._clipping_overlay_cache_key = None
+            return
+        pm = getattr(self, "current_pixmap", None)
+        if pm is None or pm.isNull():
+            self._clipping_overlay_pm = None
+            self._clipping_overlay_cache_key = None
+            return
+        token = self._clipping_overlay_cache_token(pm)
+        if token != getattr(self, "_clipping_overlay_cache_key", None):
+            self._clipping_overlay_pm = self._build_clipping_overlay_pixmap(pm)
+            self._clipping_overlay_cache_key = token
+
+    def _sync_clipping_overlay(self) -> None:
+        self._ensure_clipping_overlay_cached()
+        gv = getattr(self, "gpu_view", None)
+        if gv is not None:
+            if getattr(self, "_clipping_overlay_active", False):
+                gv.set_clipping_overlay(getattr(self, "_clipping_overlay_pm", None))
+            else:
+                gv.clear_clipping_overlay()
+            return
+        if getattr(self, "_clipping_overlay_active", False):
+            self._redraw_single_view_pixmap_without_relayout()
+
+    def _toggle_clipping_overlay(self) -> bool:
+        if getattr(self, "view_mode", "single") != "single":
+            return False
+        self._clipping_overlay_active = not getattr(
+            self, "_clipping_overlay_active", False
+        )
+        self._clipping_overlay_cache_key = None
+        if self._clipping_overlay_active:
+            from exposure_clipping import clipping_counts, rgb_array_from_pixmap
+
+            pm = getattr(self, "current_pixmap", None)
+            rgb = rgb_array_from_pixmap(pm) if pm is not None and not pm.isNull() else None
+            if rgb is not None:
+                hi, lo, total = clipping_counts(rgb)
+                hp = 100.0 * hi / total if total else 0.0
+                sp = 100.0 * lo / total if total else 0.0
+                self.status_bar.showMessage(
+                    f"Clipping ON — red=highlights ({hp:.1f}%), blue=shadows ({sp:.1f}%). J=off",
+                    5000,
+                )
+            else:
+                self.status_bar.showMessage(
+                    "Clipping ON — red=highlights, blue=shadows. J=off",
+                    4000,
+                )
+        else:
+            self.status_bar.showMessage("Clipping overlay off", 2000)
+        self._sync_clipping_overlay()
         return True
 
     def _toggle_composition_grid(self) -> bool:
@@ -3485,6 +3824,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             # onto the pixmap, so just refresh those without touching the transform.
             self._gpu_update_focus_overlay()
             self._gpu_update_composition_grid()
+            self._gpu_update_clipping_overlay()
             return
         if not self.current_pixmap:
             return
@@ -3513,6 +3853,16 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         if gv is None:
             return
         gv.set_composition_grid_mode(getattr(self, "_composition_grid_mode", "off"))
+
+    def _gpu_update_clipping_overlay(self) -> None:
+        gv = getattr(self, "gpu_view", None)
+        if gv is None:
+            return
+        if not getattr(self, "_clipping_overlay_active", False):
+            gv.clear_clipping_overlay()
+            return
+        self._ensure_clipping_overlay_cached()
+        gv.set_clipping_overlay(getattr(self, "_clipping_overlay_pm", None))
 
     def _maybe_refresh_focus_subject_outline_after_display(self) -> None:
         if (
@@ -4638,8 +4988,27 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             and not getattr(self, "_navigation_in_progress", False)
         ):
             self._mark_pending_resolution_crossfade()
-        
-        self.display_numpy_image(image)
+
+        norm_fp = _norm_path(file_path)
+        raw_recovery = (
+            getattr(self, "_raw_recovery_active", False) and is_raw_file(file_path)
+        )
+        if raw_recovery:
+            cached = self._raw_recovery_cache.get(norm_fp)
+            if cached is not None:
+                self._orientation_already_applied = True
+                try:
+                    self._display_raw_recovery_buffer(file_path, cached)
+                finally:
+                    self._orientation_already_applied = False
+            else:
+                self._start_raw_recovery(file_path)
+                self._orientation_already_applied = False
+                self._full_resolution_loading = False
+                self._finish_pending_zoom_after_full_load(file_path)
+                return
+        else:
+            self.display_numpy_image(image)
         self._skip_resolution_downgrade_check = False
         self._on_single_view_content_displayed()
         
@@ -5397,7 +5766,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
 
         self.single_image_histogram = ImageHistogramWidget()
         self.single_image_histogram.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self._histogram_overlay_visible = True
+        self._histogram_overlay_visible = False
+        self.single_image_histogram.hide()
 
         self.single_image_location_map = ImageLocationMapWidget()
         self.single_image_location_map.setFocusPolicy(Qt.FocusPolicy.NoFocus)
@@ -5429,6 +5799,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             gpu_view=self.gpu_view, map_widget=self.single_image_location_map)
         self._wire_filmstrip()
         main_layout.addWidget(self.single_view_container)
+        QTimer.singleShot(800, self._show_edr_startup_status)
         # --- Status bar with Material Design 3 styling ---
         # Material Design 3 color scheme:
         # - Surface: #1E1E1E (dark background)
@@ -5926,6 +6297,19 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self._shortcut_toggle_composition_grid.activated.connect(
             self._toggle_composition_grid
         )
+        self._shortcut_toggle_clipping_overlay = QShortcut(
+            QKeySequence(Qt.Key.Key_J), self
+        )
+        self._shortcut_toggle_clipping_overlay.setContext(
+            Qt.ShortcutContext.WindowShortcut
+        )
+        self._shortcut_toggle_clipping_overlay.setAutoRepeat(False)
+        self._shortcut_toggle_clipping_overlay.activated.connect(
+            self._toggle_clipping_overlay
+        )
+
+        # T (RAW recovery) is handled only via _handle_app_shortcut / gpu_view keyPressEvent
+        # so it works when the OpenGL viewport has focus (no duplicate QShortcut toggle).
 
         # Arrow keys must work when the GPU OpenGL viewport (or other NoFocus
         # children) holds focus; WindowShortcut matches the F-key pattern.
@@ -9101,6 +9485,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         
         if self.view_mode == 'single':
             logger.info(f"[VIEW_MODE] Switching from single to gallery mode")
+            self._disable_raw_recovery()
             self.view_mode = 'gallery'
             if getattr(self, "_focus_subject_outline_active", False):
                 self._focus_subject_outline_active = False
@@ -12351,6 +12736,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             "Esc — Gallery: clear selection / exit bookmark filter; single view: back to gallery\n"
             "Gallery: Ctrl/Cmd+click — toggle selection; Shift+click two photos for range\n"
             "H — Show/hide histogram\n"
+            "J — Show/hide highlight (red) and shadow (blue) clipping\n"
+            "T — RAW only: shadow/highlight recovery preview (fit only, half-res; session)\n"
             "G — Cycle composition guide (off / 3×3 / diagonal / both / phi grid)\n"
             "F — Show/hide focus point\n"
             "M — Show/hide location map"
@@ -12752,6 +13139,9 @@ class RAWImageViewer(SessionMixin, QMainWindow):
 
     def apply_zoom_and_pan(self):
         """Apply current zoom level and pan offset to the image"""
+        if self._raw_recovery_preview_active():
+            self._notify_raw_recovery_zoom_blocked()
+            return
         if not self.current_pixmap:
             return
 
@@ -13049,6 +13439,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
     def _flush_deferred_sensor_full_decode(
         self, file_path: str | None = None, *, force: bool = False
     ) -> None:
+        if self._raw_recovery_preview_active():
+            return
         if not force and self._should_defer_full_decode():
             return
         fp = file_path or getattr(self, "_defer_sensor_full_decode_path", None)
@@ -13108,6 +13500,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         import logging
 
         logger = logging.getLogger(__name__)
+        if self._raw_recovery_preview_active():
+            return True
         if not self._needs_full_resolution_upgrade():
             return True
         fp = getattr(self, "current_file_path", None)
@@ -13188,6 +13582,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         return True
 
     def _maybe_request_full_res_for_smooth_zoom(self) -> None:
+        if self._raw_recovery_preview_active():
+            return
         if not self._needs_full_resolution_upgrade():
             return
         if not getattr(self, "current_file_path", None):
@@ -14323,11 +14719,27 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             except Exception:
                 pass
             converter.quit()
-            converter.wait(80)
+            if not converter.wait(500):
+                converter.terminate()
+                converter.wait(500)
         except Exception:
             pass
         self._display_pixmap_converter = None
         self._pending_display_pixmap_context = None
+
+    def _should_use_raw_edr_display(self, file_path: str | None = None) -> bool:
+        path = file_path or getattr(self, "current_file_path", None)
+        if not path or not is_raw_file(path):
+            return False
+        if getattr(self, "_raw_recovery_skip_display_cache", False):
+            return False
+        if getattr(self, "_raw_recovery_active", False):
+            return False
+        if getattr(self, "_raw_edr_fallback_active", False):
+            return False
+        from common_image_loader import use_raw_edr_for_display
+
+        return use_raw_edr_for_display()
 
     def _start_display_numpy_pixmap_worker(
         self,
@@ -14337,11 +14749,26 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         width: int,
         height: int,
         is_half_size: bool,
+        fallback_rgb=None,
     ) -> None:
         """Convert a full-resolution numpy buffer to QPixmap off the UI thread."""
         import logging
 
         logger = logging.getLogger(__name__)
+        pending = getattr(self, "_pending_display_pixmap_context", None) or {}
+        if (
+            _norm_path(pending.get("file_path", "")) == _norm_path(file_path)
+            and int(pending.get("width") or 0) == int(width)
+            and int(pending.get("height") or 0) == int(height)
+            and getattr(self, "_display_pixmap_converter", None) is not None
+        ):
+            logger.debug(
+                "[DISPLAY] Skipping duplicate QPixmap conversion for %s (%dx%d)",
+                os.path.basename(file_path),
+                width,
+                height,
+            )
+            return
         self._cancel_display_pixmap_converter()
         self._pending_display_pixmap_context = {
             "file_path": file_path,
@@ -14351,12 +14778,31 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             "orientation_already_applied": getattr(
                 self, "_orientation_already_applied", False
             ),
+            "use_edr": self._should_use_raw_edr_display(file_path),
+            "fallback_rgb": fallback_rgb,
         }
-        converter = PixmapConverter(file_path, rgb_image, None)
+        ctx = self._pending_display_pixmap_context
+        if ctx.get("use_edr"):
+            exif_data = None
+            try:
+                exif_data = self.image_cache.get_exif(file_path)
+            except Exception:
+                pass
+            max_edge = max(width, height) if is_half_size else 0
+            converter = RawEdrPixmapConverter(
+                file_path,
+                max_edge=max_edge,
+                exif_data=exif_data,
+            )
+            log_label = "RAW EDR"
+        else:
+            converter = PixmapConverter(file_path, rgb_image, None)
+            log_label = "QPixmap"
         converter.pixmap_ready.connect(self._on_display_numpy_pixmap_ready)
         self._display_pixmap_converter = converter
         logger.info(
-            "[DISPLAY] Queued background QPixmap conversion for %s (%dx%d)",
+            "[DISPLAY] Queued background %s conversion for %s (%dx%d)",
+            log_label,
             os.path.basename(file_path),
             width,
             height,
@@ -14374,6 +14820,14 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             return
         if _norm_path(file_path) != _norm_path(getattr(self, "current_file_path", None)):
             return
+        if (
+            getattr(self, "_raw_recovery_active", False)
+            and is_raw_file(file_path)
+        ):
+            logger.info(
+                "[DISPLAY] Skipping background pixmap — RAW recovery preview active"
+            )
+            return
 
         width = int(ctx.get("width") or (pixmap.width() if pixmap else 0))
         height = int(ctx.get("height") or (pixmap.height() if pixmap else 0))
@@ -14383,7 +14837,24 @@ class RAWImageViewer(SessionMixin, QMainWindow):
 
         if pixmap is None or pixmap.isNull():
             logger.warning("[DISPLAY] Background QPixmap conversion returned empty pixmap")
+            if ctx.get("use_edr"):
+                logger.info("[DISPLAY] RAW EDR failed; falling back to SDR display path")
+                pending_rgb = ctx.get("fallback_rgb")
+                if pending_rgb is not None:
+                    self._pending_display_pixmap_context = None
+                    self._display_pixmap_converter = None
+                    self._raw_edr_fallback_active = True
+                    try:
+                        self.display_numpy_image(pending_rgb)
+                    finally:
+                        self._raw_edr_fallback_active = False
             return
+
+        if ctx.get("use_edr"):
+            self._display_edr_mode = "raw"
+            logger.info("[DISPLAY] RAW EDR pixmap ready (%dx%d)", width, height)
+        else:
+            self._display_edr_mode = None
 
         if hasattr(self, "current_file_path") and self.current_file_path:
             orientation_already_applied = bool(
@@ -14407,8 +14878,11 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             )
 
         if hasattr(self, "current_file_path") and self.current_file_path and not is_half_size:
-            logger.info("[DISPLAY] Caching FULL resolution pixmap")
-            self.image_cache.put_pixmap(self.current_file_path, pixmap)
+            if not getattr(self, "_raw_recovery_skip_display_cache", False):
+                logger.info("[DISPLAY] Caching FULL resolution pixmap")
+                self.image_cache.put_pixmap(self.current_file_path, pixmap)
+            else:
+                logger.info("[DISPLAY] Skipping cache (RAW recovery preview)")
         else:
             logger.info("[DISPLAY] Skipping cache for thumbnail/half_size image")
 
@@ -14469,13 +14943,17 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 logger.error(f"Invalid image type in display_numpy_image: {type(rgb_image)}")
                 return
 
+            path = getattr(self, "current_file_path", None)
+            recovery_preview = getattr(self, "_raw_recovery_skip_display_cache", False)
+
             max_dim = max(height, width)
 
             # Check for resolution downgrade for the CURRENT file
             if hasattr(self, 'current_file_path') and self.current_file_path:
                 norm_current = _norm_path(self.current_file_path)
                 if (
-                    not getattr(self, "_skip_resolution_downgrade_check", False)
+                    not recovery_preview
+                    and not getattr(self, "_skip_resolution_downgrade_check", False)
                     and hasattr(self, "_file_max_dim_map")
                     and norm_current in self._file_max_dim_map
                     and max_dim < self._file_max_dim_map[norm_current] * 0.9
@@ -14496,6 +14974,31 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             logger.info(f"[DISPLAY] ========== display_numpy_image() STARTED at {display_start:.3f} ==========")
             logger.info(f"[DISPLAY] Image dimensions: {width}x{height}, channels: {channels}")
 
+            if (
+                self._should_use_raw_edr_display(path)
+                and hasattr(self, "current_file_path")
+                and self.current_file_path
+            ):
+                exif_for_edr = None
+                try:
+                    exif_for_edr = self.image_cache.get_exif(self.current_file_path)
+                except Exception:
+                    pass
+                is_half_size_edr = not image_covers_sensor_resolution(
+                    width, height, exif_for_edr
+                )
+                self._start_display_numpy_pixmap_worker(
+                    self.current_file_path,
+                    rgb_image,
+                    width=width,
+                    height=height,
+                    is_half_size=is_half_size_edr,
+                    fallback_rgb=rgb_image,
+                )
+                return
+
+            self._display_edr_mode = None
+
             max_dimension = max(width, height)
             is_full_resolution = max_dimension >= 3000
             
@@ -14503,8 +15006,14 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             if hasattr(self, 'current_file_path') and self.current_file_path:
                 logger.info(f"[DISPLAY] Full resolution check: {is_full_resolution} (max dimension: {max_dimension}, {width}x{height})")
                 
-                if is_full_resolution:
+                if is_full_resolution and not recovery_preview:
                     logger.info(f"[DISPLAY] Full resolution image ({width}x{height}), converting and displaying")
+                elif recovery_preview:
+                    logger.info(
+                        "[DISPLAY] RAW recovery preview (%dx%d), bypassing cached pixmap",
+                        width,
+                        height,
+                    )
                 else:
                     logger.info(f"[DISPLAY] Checking for cached pixmap")
                     cached_pixmap = self.image_cache.get_pixmap(self.current_file_path)
@@ -14540,6 +15049,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
 
             if (
                 is_full_resolution
+                and not recovery_preview
                 and hasattr(self, "current_file_path")
                 and self.current_file_path
             ):
@@ -14610,9 +15120,12 @@ class RAWImageViewer(SessionMixin, QMainWindow):
 
             # Cache the pixmap for future use (after orientation correction)
             # ONLY cache if it's the full resolution image, NOT a thumbnail/half_size
-            if hasattr(self, 'current_file_path') and self.current_file_path and not is_half_size:
-                logger.info(f"[DISPLAY] Caching FULL resolution pixmap")
-                self.image_cache.put_pixmap(self.current_file_path, pixmap)
+            if hasattr(self, "current_file_path") and self.current_file_path and not is_half_size:
+                if not getattr(self, "_raw_recovery_skip_display_cache", False):
+                    logger.info(f"[DISPLAY] Caching FULL resolution pixmap")
+                    self.image_cache.put_pixmap(self.current_file_path, pixmap)
+                else:
+                    logger.info("[DISPLAY] Skipping cache (RAW recovery preview)")
             else:
                 logger.info(f"[DISPLAY] Skipping cache for thumbnail/half_size image")
             
@@ -14682,11 +15195,12 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 self._histogram_overlay_visible = False
             else:
                 self._histogram_overlay_visible = True
-            w.setVisible(getattr(self, "_histogram_overlay_visible", True))
+            w.setVisible(getattr(self, "_histogram_overlay_visible", False))
             w.set_pixmap(pm)
             c = getattr(self, "single_view_container", None)
             if c is not None and hasattr(c, "relayout_histogram"):
                 c.relayout_histogram()
+        self._sync_clipping_overlay()
         self._sync_location_map()
 
     def _clear_single_image_histogram(self):
@@ -14724,7 +15238,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             if c is not None and hasattr(c, "relayout_map"):
                 c.relayout_map()
             return
-        if self._map_user_hidden or not getattr(self, "_map_overlay_visible", True):
+        if self._map_user_hidden or not getattr(self, "_map_overlay_visible", False):
             w.hide()
             c = getattr(self, "single_view_container", None)
             if c is not None and hasattr(c, "relayout_map"):
@@ -17667,7 +18181,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
 
         if self._should_defer_nav_preload():
             self._schedule_post_session_restore_prefetch()
-        else:
+        elif not self._raw_recovery_preview_active():
             self._flush_deferred_sensor_full_decode()
             self._flush_deferred_full_exif_after_first_paint()
             
@@ -18674,7 +19188,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         if key == Qt.Key.Key_H:
             if vm == "single":
                 # Toggle histogram visibility and preference
-                self._histogram_overlay_visible = not getattr(self, "_histogram_overlay_visible", True)
+                self._histogram_overlay_visible = not getattr(self, "_histogram_overlay_visible", False)
                 self._histogram_user_hidden = not self._histogram_overlay_visible
                 
                 if hasattr(self, "single_image_histogram"):
@@ -18691,11 +19205,16 @@ class RAWImageViewer(SessionMixin, QMainWindow):
 
         if key == Qt.Key.Key_M:
             if vm == "single":
-                self._map_overlay_visible = not getattr(self, "_map_overlay_visible", True)
+                self._map_overlay_visible = not getattr(self, "_map_overlay_visible", False)
                 self._map_user_hidden = not self._map_overlay_visible
                 if self._map_overlay_visible and self._map_online is False:
                     self._map_online = None
                 self._sync_location_map()
+                return True
+
+        if key == Qt.Key.Key_T:
+            if vm == "single":
+                self._toggle_auto_tone_preview()
                 return True
 
         return False
@@ -19289,6 +19808,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
 
     def _gpu_request_full_resolution_if_needed(self):
         """When zooming in on the GPU view, request the full-res buffer if we only have a preview."""
+        if self._raw_recovery_preview_active():
+            return
         try:
             self._maybe_request_full_res_for_smooth_zoom()
         except Exception:
@@ -19340,6 +19861,10 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         """Toggle between fit-to-window and 100% zoom modes"""
         import logging
         logger = logging.getLogger(__name__)
+
+        if self._raw_recovery_preview_active():
+            self._notify_raw_recovery_zoom_blocked()
+            return
         
         # Animated GIF/WebP: fit-to-window only (no Space/double-click zoom).
         if hasattr(self, "current_file_path") and self.is_animated_image(self.current_file_path):
@@ -20817,16 +21342,19 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 is_displaying_thumbnail = True
 
         # Get zoom level
-        gv = getattr(self, "gpu_view", None)
-        if gv is not None and gv.has_pixmap():
-            if gv.is_fit_mode():
+        if self._raw_recovery_preview_active():
+            zoom_level = "Recovery preview (fit only)"
+        else:
+            gv = getattr(self, "gpu_view", None)
+            if gv is not None and gv.has_pixmap():
+                if gv.is_fit_mode():
+                    zoom_level = "Fit"
+                else:
+                    zoom_level = f"{int(round(gv.current_scale() * 100))}%"
+            elif self.fit_to_window:
                 zoom_level = "Fit"
             else:
-                zoom_level = f"{int(round(gv.current_scale() * 100))}%"
-        elif self.fit_to_window:
-            zoom_level = "Fit"
-        else:
-            zoom_level = f"{int(self.current_zoom_level * 100)}%"
+                zoom_level = f"{int(self.current_zoom_level * 100)}%"
 
         # --- Status bar dedup / debounce -----------------------------------
         # update_status_bar() is called many times per image (thumbnail ready,
@@ -20849,6 +21377,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 width, height,
                 display_width, display_height,
                 bool(getattr(self, '_is_half_size_displayed', False)),
+                bool(self._raw_recovery_preview_active()),
+                getattr(self, "_display_edr_mode", None),
                 _dedup_exif_len,
             )
             if (
@@ -21192,6 +21722,10 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         # Add zoom level
         metadata_parts.append(zoom_level)
 
+        edr_label = self._edr_metadata_label()
+        if edr_label:
+            metadata_parts.append(edr_label)
+
         # Add EXIF info if available
         if exif_info:
             metadata_parts.extend(exif_info)
@@ -21302,6 +21836,17 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         
         # Handle trackpad pinch-to-zoom on Mac
         if event.type() == QEvent.Type.NativeGesture:
+            if (
+                hasattr(self, "view_mode")
+                and self.view_mode == "single"
+                and self._raw_recovery_preview_active()
+            ):
+                if event.gestureType() in (
+                    Qt.NativeGestureType.ZoomNativeGesture,
+                    Qt.NativeGestureType.SmartZoomNativeGesture,
+                ):
+                    self._notify_raw_recovery_zoom_blocked()
+                    return True
             if hasattr(self, 'view_mode') and self.view_mode == 'single' and getattr(self, 'current_pixmap', None):
                 gpu_view = getattr(self, "gpu_view", None)
                 if gpu_view is not None and gpu_view.has_pixmap():

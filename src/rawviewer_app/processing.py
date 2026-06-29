@@ -1307,3 +1307,53 @@ class PixmapConverter(QThread):
             logger = logging.getLogger(__name__)
             logger.debug(f"Error in PixmapConverter for {self.file_path}: {e}")
 
+
+class RawEdrPixmapConverter(QThread):
+    """Background thread: linear RAW decode → macOS EDR RGBX64 QPixmap."""
+
+    pixmap_ready = pyqtSignal(str, QPixmap)
+
+    def __init__(
+        self,
+        file_path: str,
+        *,
+        max_edge: int = 0,
+        exif_data=None,
+    ):
+        super().__init__()
+        self.file_path = file_path
+        self.max_edge = int(max_edge or 0)
+        self.exif_data = exif_data
+        self._should_stop = False
+
+    def stop_processing(self):
+        self._should_stop = True
+
+    def run(self):
+        try:
+            if self._should_stop:
+                return
+            from common_image_loader import decode_raw_edr_pixmap
+
+            pixmap = decode_raw_edr_pixmap(
+                self.file_path,
+                max_edge=self.max_edge,
+                exif_data=self.exif_data,
+            )
+            if self._should_stop:
+                return
+            if pixmap is None or pixmap.isNull():
+                self.pixmap_ready.emit(self.file_path, QPixmap())
+                return
+            self.pixmap_ready.emit(self.file_path, pixmap)
+        except Exception as e:
+            import logging
+
+            logging.getLogger(__name__).debug(
+                "Error in RawEdrPixmapConverter for %s: %s",
+                self.file_path,
+                e,
+            )
+            if not self._should_stop:
+                self.pixmap_ready.emit(self.file_path, QPixmap())
+

@@ -40,9 +40,11 @@ In **gallery view**, drag the **size slider** in the bottom bar to change thumbn
 | **Ctrl/Cmd+click** | Gallery: toggle selection |
 | **Shift+click** | Gallery: select range (visible order) |
 | **G** | Cycle composition guide |
-| **H** | Show / hide histogram |
+| **H** | Show / hide histogram (hidden by default on launch) |
+| **J** | Toggle highlight/shadow clipping overlay (RAW single view) |
+| **T** | Toggle RAW recovery preview — half-res shadow/highlight recovery (RAW/DNG, session only; fit-only) |
 | **F** | Show / hide focus overlay (supported files) |
-| **M** | Show / hide GPS map overlay (single view, geotagged photos) |
+| **M** | Show / hide GPS map overlay (single view, geotagged photos; hidden by default on launch) |
 
 **Gallery bookmarks:** Click the outline **star** (nothing selected) to show bookmarked shots only; gold star = filter on. With photos selected, **↑** or the star toggles bookmarks on the selection.
 
@@ -85,7 +87,7 @@ For a dedicated **cluster map** across an entire album and **geotagging photos m
 2. Choose **Full (CUDA)**, **Full (DirectML)**, or **Lite** in the wizard. **Full** also downloads AI models (~600 MB).
 3. Launch **`RAWviewer.exe`** or the Desktop shortcut (not the Setup file again).
 
-> **v2.5 new:** Gallery zoom slider, scroll anchoring, GPS map overlay (**M**) with coordinate badge, **macOS HDR/EDR** for HDR stills, animated GIF/WebP playback, reliable gallery layout when switching albums, and cleaner cancellation of background indexing from the previous folder.
+> **v2.5 new:** Gallery zoom slider, scroll anchoring, GPS map overlay (**M**), **macOS HDR/EDR** for HDR stills and **RAW (High Quality workflow)**, **T** recovery preview / **J** clipping overlay on RAW, animated GIF/WebP playback, histogram/map hidden on launch, reliable gallery layout when switching albums, and cleaner cancellation of background indexing from the previous folder.
 
 Registers **Open with** for common photo formats. Uninstall: Settings → Apps, or **`uninstall.bat`** in `%LOCALAPPDATA%\RAWviewer`.
 
@@ -116,7 +118,27 @@ To clear thumbnails only: **`scripts\Launch\bat\clear_cache.bat`** (Windows) · 
 
 **RAW:** CR2, CR3, NEF, ARW, DNG, ORF, RW2, RAF, and other LibRaw types · **Standard:** JPEG, TIFF, HEIF, **GIF** (animated), **WebP** (animated)
 
-On **macOS**, HDR **HEIC / HEIF / AVIF** and 16-bit HDR **TIFF** can display with extended dynamic range in single-image view when EDR is enabled (default). Other platforms tone-map HDR stills to SDR.
+On **macOS**, HDR **HEIC / HEIF / AVIF** and 16-bit HDR **TIFF** can display with extended dynamic range in single-image view when EDR is enabled (default). With the **RAW (High Quality)** workflow toggle, **RAW / DNG** files also use the EDR path (linear 16-bit decode). **Embedded JPEG workflow** keeps the camera’s embedded preview (SDR). Other platforms tone-map HDR stills to SDR.
+
+**Workflow toggle** (single view): switch between **Embedded JPEG (Fast)** and **RAW (High Quality)**. EDR applies only in RAW workflow.
+
+**Recovery preview (**T**):** half-res shadow/highlight recovery for judging extreme contrast — session only, does not replace full-res view.
+
+---
+
+## macOS EDR quick reference
+
+| What you see | Meaning |
+|--------------|---------|
+| `EDR · RAW` in metadata | RAW file displayed with extended dynamic range |
+| `EDR · HDR` | HDR still (HEIC/TIFF) in EDR |
+| `EDR ready · embedded JPEG workflow` | EDR viewport on; showing embedded JPEG (SDR) |
+| Startup: `RAW EDR active` | RAW EDR enabled and RAW workflow selected |
+
+| Variable | Default | Effect |
+|----------|---------|--------|
+| `RAWVIEWER_RAW_EDR` | `1` | macOS: EDR decode for RAW when **RAW workflow** is active; set `0` to disable |
+| `RAWVIEWER_DISABLE_EDR` | off | Disable all macOS EDR (HDR stills + RAW) |
 
 ---
 
@@ -140,6 +162,8 @@ On **macOS**, HDR **HEIC / HEIF / AVIF** and 16-bit HDR **TIFF** can display wit
 | GPS map not showing | Press **M** in single-image view; the map only appears when the photo has embedded GPS coordinates |
 | Animated GIF/WebP not playing | Update to **v2.5+**; check that the file is a valid animated GIF or WebP |
 | HDR HEIC/TIFF looks flat or too dark | Windows tone-maps HDR stills to SDR by design; for EDR viewing use macOS with an EDR display |
+| RAW always shows demosaic, not embedded JPEG | Switch to **Embedded JPEG workflow**; RAW EDR re-decodes from LibRaw and overrides embedded preview when **RAW workflow** is on |
+| **T** recovery does nothing / fails | Requires scipy + rawpy; check logs. Recovery is half-res preview only |
 | Crash | Enable file logging with `RAWVIEWER_FILE_LOG=1`, then check the install folder |
 
 ### macOS
@@ -164,6 +188,8 @@ On **macOS**, HDR **HEIC / HEIF / AVIF** and 16-bit HDR **TIFF** can display wit
 | GPS map not showing | Press **M** in single-image view; the map only appears when the photo has embedded GPS coordinates |
 | Animated GIF/WebP not playing | Update to **v2.5+**; check that the file is a valid animated GIF or WebP |
 | HDR HEIC/TIFF looks flat or too dark | Needs GPU single-image view (default) and an EDR-capable display; `RAWVIEWER_DISABLE_EDR=1` forces SDR tone mapping |
+| RAW EDR but want embedded JPEG | Use **Embedded JPEG workflow** toggle, or `RAWVIEWER_RAW_EDR=0` |
+| **T** / **J** no effect | **T**/**J** are RAW/DNG single view only; **T** is fit-only half-res preview |
 
 More detail: [`scripts/Launch/README.md`](scripts/Launch/README.md)
 
@@ -263,7 +289,8 @@ Requires **pyexiv2** for maker-note AF on RAW.
 | `RAWVIEWER_MOBILECLIP_VARIANT` | Windows ONNX model: `b` (default), `s0`, `s2`, `l14` |
 | `RAWVIEWER_GPU_VIEW=1` | GPU single-image viewport (OpenGL zoom/pan; on by default in release builds) |
 | `RAWVIEWER_GPU_VIEW=0` | Force legacy scroll-area single-image view |
-| `RAWVIEWER_DISABLE_EDR=1` | macOS: disable EDR viewport and HDR 16-bit display path; use SDR tone mapping |
+| `RAWVIEWER_DISABLE_EDR=1` | macOS: disable EDR viewport and HDR/RAW 16-bit display path; use SDR tone mapping |
+| `RAWVIEWER_RAW_EDR=1` | **Default.** macOS: EDR for RAW when **RAW (High Quality)** workflow is selected; `0` to disable |
 | `RAWVIEWER_LIBRAW_CONSISTENT_PREVIEW=1` | Same color pipeline for fit vs 100% zoom on RAW (default on) |
 | `RAWVIEWER_EXIF_BACKEND=auto` | `auto`, `pyexiv2`, or `exifread` |
 | `RAWVIEWER_SHARE_MENU=1` | macOS: Qt share menu (recommended) |
@@ -366,7 +393,9 @@ scripts\Launch\bat\build_windows_lite.bat
 - **Cache** — memory-first; optional disk cache via env; **RAM-tier defaults** at startup (`rawviewer_profile.py`)
 - **Semantic index** — SQLite + local embeddings (Core ML on macOS, ONNX on Windows; Full builds only); background passes abort when folder scope changes (**v2.5.0**)
 - **Gallery (JustifiedGallery)** — justified grid with zoom slider (relayout + upper-left scroll anchor); layout cache keyed to folder generation; gallery opens in capture-time order after EXIF sort (**v2.5.0**)
-- **HDR / EDR (macOS)** — GPU viewport EDR layer + 16-bit HDR still decode for HEIC/HEIF/AVIF/TIFF; SDR tone map elsewhere (**v2.5.0**)
+- **HDR / EDR (macOS)** — GPU viewport EDR layer + 16-bit HDR still decode; RAW EDR via linear LibRaw when RAW workflow is active (**v2.5.0**)
+- **RAW recovery preview** — **T** key, half-res linear decode + local tone recovery (`raw_tone_recovery.py`; **v2.5.0**)
+- **Clipping overlay** — **J** key on current pixmap (`exposure_clipping.py`; **v2.5.0**)
 
 ---
 

@@ -1090,6 +1090,46 @@ class SingleImageViewOverlay(QWidget):
         """)
         self.rating_badge.hide()
 
+        self.recovery_badge = QLabel(self)
+        self.recovery_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.recovery_badge.setStyleSheet("""
+            QLabel {
+                background-color: rgba(24, 48, 72, 230);
+                color: #E8F4FF;
+                font-size: 12px;
+                font-weight: 600;
+                border-radius: 4px;
+                padding: 5px 10px;
+                border: 1px solid rgba(120, 180, 255, 120);
+            }
+        """)
+        self.recovery_badge.hide()
+
+    def set_recovery_preview_badge(self, visible: bool, *, detail: str = "") -> None:
+        badge = getattr(self, "recovery_badge", None)
+        if badge is None:
+            return
+        if visible:
+            text = "Recovery preview"
+            if detail:
+                text = f"{text}{detail}"
+            text = f"{text} · fit only · T to exit"
+            badge.setText(text)
+            badge.adjustSize()
+            badge.show()
+            self.relayout_recovery_badge()
+            badge.raise_()
+        else:
+            badge.hide()
+
+    def relayout_recovery_badge(self) -> None:
+        badge = getattr(self, "recovery_badge", None)
+        if badge is None or not badge.isVisible():
+            return
+        margin = 14
+        badge.move(max(margin, self.width() - badge.width() - margin), margin)
+        badge.raise_()
+
     def _filmstrip_layer_visible(self) -> bool:
         layer = getattr(self, "_filmstrip_layer", None)
         return layer is not None and layer.isVisible()
@@ -1415,6 +1455,7 @@ class SingleImageViewOverlay(QWidget):
         self._layout_histogram()
         self._layout_map()
         self.relayout_rating_badge()
+        self.relayout_recovery_badge()
         self._raise_single_view_layers()
 
     def set_gpu_view_active(self, active: bool) -> None:
@@ -1437,6 +1478,8 @@ class SingleImageViewOverlay(QWidget):
             self._gpu_view.raise_()
         if hasattr(self, "rating_badge") and self.rating_badge.isVisible():
             self.rating_badge.raise_()
+        if hasattr(self, "recovery_badge") and self.recovery_badge.isVisible():
+            self.recovery_badge.raise_()
         if self._map is not None and self._map.isVisible():
             self._map.raise_()
         if self._hist.isVisible():

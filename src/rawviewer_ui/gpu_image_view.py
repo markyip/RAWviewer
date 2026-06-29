@@ -65,10 +65,12 @@ class GpuImageView(QGraphicsView):
         # because Qt may deliver events during construction.
         self._fit_mode = True
         self._zoom_intent_100 = False
+        self._zoom_locked = False
         self._has_pixmap = False
         self._img_w = 0
         self._img_h = 0
         self._overlay_item = None
+        self._clipping_item = None
         self._grid_mode = "off"
         self._shortcut_handler = None
         self._edr_initialized = False
@@ -88,6 +90,12 @@ class GpuImageView(QGraphicsView):
         # cosmetic pen so the on-screen line width stays constant at any zoom level.
         self._grid_item = CompositionGridGraphicsItem()
         self._scene.addItem(self._grid_item)
+
+        self._clipping_item = QGraphicsPixmapItem()
+        self._clipping_item.setZValue(15)
+        self._clipping_item.setTransformationMode(Qt.TransformationMode.FastTransformation)
+        self._clipping_item.hide()
+        self._scene.addItem(self._clipping_item)
 
         self.setRenderHints(
             QPainter.RenderHint.SmoothPixmapTransform | QPainter.RenderHint.Antialiasing
@@ -256,6 +264,21 @@ class GpuImageView(QGraphicsView):
         if self._overlay_item is not None:
             self._overlay_item.hide()
 
+    def set_clipping_overlay(self, pixmap: QPixmap | None) -> None:
+        item = self._clipping_item
+        if item is None:
+            return
+        if pixmap is None or pixmap.isNull():
+            item.hide()
+            return
+        item.setPixmap(pixmap)
+        item.setOffset(0, 0)
+        item.show()
+
+    def clear_clipping_overlay(self) -> None:
+        if self._clipping_item is not None:
+            self._clipping_item.hide()
+
     def set_composition_grid_mode(self, mode: str) -> None:
         """Show composition guide lines in image (scene) coordinates."""
         self._grid_mode = mode if mode else "off"
@@ -273,6 +296,7 @@ class GpuImageView(QGraphicsView):
             self._has_pixmap = False
             self._img_w = self._img_h = 0
             self.clear_overlay()
+            self.clear_clipping_overlay()
             self._grid_item.set_grid(0, 0, self._grid_mode)
             self._update_placeholder()
             return
@@ -362,6 +386,16 @@ class GpuImageView(QGraphicsView):
             pass
         return None
 
+    def set_zoom_locked(self, locked: bool) -> None:
+        """When True, keep fit-to-window; block pinch/wheel/100% zoom."""
+        self._zoom_locked = bool(locked)
+
+    def zoom_locked(self) -> bool:
+        return bool(getattr(self, "_zoom_locked", False))
+
+    def _zoom_in_blocked(self) -> bool:
+        return self.zoom_locked()
+
     # ------------------------------------------------------------------ zoom
     def fit_to_window(self) -> None:
         self._fit_mode = True
@@ -382,7 +416,7 @@ class GpuImageView(QGraphicsView):
 
     def zoom_to_actual_at(self, scene_x: float, scene_y: float) -> None:
         """100% zoom with the given image pixel centered in the viewport."""
-        if not self._has_pixmap:
+        if not self._has_pixmap or self._zoom_in_blocked():
             return
         self._fit_mode = False
         self._zoom_intent_100 = True
@@ -458,6 +492,8 @@ class GpuImageView(QGraphicsView):
             return
         self._sync_fit_mode_flag()
         if self.wants_zoom_in_toggle():
+            if self._zoom_in_blocked():
+                return
             self.zoom_to_actual()
         else:
             self.fit_to_window()
@@ -467,6 +503,8 @@ class GpuImageView(QGraphicsView):
         scale = float(scale)
         if scale <= fit * self._FIT_SCALE_EPS:
             self.fit_to_window()
+            return
+        if self._zoom_in_blocked() and scale > fit * self._FIT_SCALE_EPS:
             return
         scale = max(fit, min(self.MAX_SCALE, scale))
         self.resetTransform()
@@ -483,6 +521,8 @@ class GpuImageView(QGraphicsView):
         new = cur * factor
         if factor < 1.0 and new <= fit * self._FIT_SCALE_EPS:
             self.fit_to_window()
+            return
+        if self._zoom_in_blocked() and new > fit * self._FIT_SCALE_EPS:
             return
         new = max(fit, min(self.MAX_SCALE, new))
         if abs(new - cur) < 1e-9:
@@ -550,6 +590,9 @@ class GpuImageView(QGraphicsView):
             return False
         gtype = event.gestureType()
         if gtype == Qt.NativeGestureType.ZoomNativeGesture:
+            if self._zoom_in_blocked():
+                event.accept()
+                return True
             self.zoom_by(1.0 + event.value() * 0.5)
             event.accept()
             return True
@@ -587,6 +630,9 @@ class GpuImageView(QGraphicsView):
             return
         ctrl = bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
         if ctrl:
+            if self._zoom_in_blocked():
+                event.accept()
+                return
             # Control + Scroll: Zoom smoothly
             self.zoom_by(1.25 if delta > 0 else 0.8)
             event.accept()

@@ -1,9 +1,9 @@
 # RAWviewer Release Notes
 
 ## 🚀 Version 2.5.0
-**Release Date: June 25, 2026**
+**Release Date: June 29, 2026**
 
-Major release introducing a custom gallery zoom slider, interactive GPS map display overlay, macOS HDR/EDR viewing, animated GIF/WebP playback, and gallery responsiveness fixes for large folders and folder switching.
+Major release introducing a custom gallery zoom slider, interactive GPS map display overlay, macOS HDR/EDR viewing (including RAW), animated GIF/WebP playback, RAW tone recovery preview, and gallery responsiveness fixes for large folders and folder switching.
 
 ### Gallery Zoom Slider & scroll anchoring
 - **Gallery Zoom Slider** — Custom slanted wedge-shaped zoom track and circular thumb in the justified gallery (bottom bar; row height **220–380px**, step 20). The chosen size is saved in `QSettings` (`gallery_row_height`).
@@ -17,8 +17,18 @@ Major release introducing a custom gallery zoom slider, interactive GPS map disp
 
 ### macOS HDR / EDR display
 - **Extended Dynamic Range viewport** — On macOS, the GPU single-image view (`RAWVIEWER_GPU_VIEW=1`, default in release builds) enables EDR on the viewport layer so bright HDR content can use headroom above SDR white on supported displays.
-- **HDR still-image decode** — HEIC / HEIF / AVIF and 16-bit HDR TIFF files load as 16-bit on macOS when EDR is enabled; Windows and other platforms tone-map to SDR (Reinhard). Standard JPEG and RAW previews are unchanged.
+- **HDR still-image decode** — HEIC / HEIF / AVIF and 16-bit HDR TIFF files load as 16-bit on macOS when EDR is enabled; Windows and other platforms tone-map to SDR (Reinhard). Standard JPEG previews are unchanged.
+- **RAW EDR (macOS, RAW workflow)** — Linear 16-bit LibRaw decode → extended tone map → `RGBX64` QPixmap. **On by default** (`RAWVIEWER_RAW_EDR=1`); set `RAWVIEWER_RAW_EDR=0` to disable. Respects the **Embedded JPEG / RAW workflow** toggle: embedded-JPEG workflow keeps camera preview pixels (SDR); RAW (High Quality) workflow uses EDR when enabled.
+- **EDR status** — Startup status bar and top metadata show `EDR · RAW`, `EDR · HDR`, or `EDR ready · embedded JPEG workflow` when applicable.
 - **Opt out** — Set `RAWVIEWER_DISABLE_EDR=1` to force the SDR tone-mapping path on macOS.
+- **Windows 10-bit HDR** — Not implemented in v2.5; Qt `RGB30` / QRhi swapchain would be required (see code comments in `common_image_loader.py`).
+
+### RAW tone recovery & clipping (single view, RAW/DNG)
+- **T — Recovery preview** — Session-only local shadow/highlight recovery on a half-res linear LibRaw decode (`highlight_mode=Reconstruct`, Reinhard tone map, local polish). Fit-only (~2048 px); press **T** again to exit. Does not change the main full-res pipeline or persist settings.
+- **J — Clipping overlay** — Red = highlight clip (any channel ≥252); blue = shadow clip (all channels ≤3) on the current screen buffer. Diagnostic only; distinct from **T** soft recovery.
+
+### Single-view UI defaults
+- **Histogram and GPS map hidden on launch** — Press **H** / **M** to show; preference applies for the current session only.
 
 ### Animated GIF & WebP Playback
 - **Animated Previews** — Enhanced the image viewer pipeline to support playing, scaling, and animating GIF and WebP files. Displays playback status messages and handles dynamic window scaling seamlessly.
