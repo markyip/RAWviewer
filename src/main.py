@@ -1846,6 +1846,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self._loading_from_filmstrip = False  # Flag for filmstrip loading
         self._gallery_selected_paths = set()  # normpath keys for multi-select in gallery
         self._gallery_selection_anchor = None  # normpath key for Shift+click range
+        self._gallery_last_select_action = None  # "toggle" | "shift": gate shift-range extension
         # Burst grouping + compare (H)
         self._burst_groups = []
         self._burst_path_to_group = {}
@@ -3155,7 +3156,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             if self._compare_focus_outline_active:
                 self._compare_update_focus_overlays()
                 self.status_bar.showMessage(
-                    "Focus outline ON — amber dashed = maker AF; lime = Subject / CIPA. F = off.",
+                    "Focus outline ON — amber dashed = maker AF; lime = Subject / CIPA. "
+                    "From fit: Space centers each pane on its focus box (frame center if none). F = off.",
                     6500,
                 )
             else:
@@ -4130,6 +4132,11 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         except Exception:
             self._burst_rejected_paths = set()
 
+    def _sync_burst_rejected_for_current_folder(self) -> None:
+        folder = getattr(self, "current_folder", None)
+        if folder:
+            self._load_burst_rejected_paths(folder)
+
     def _save_burst_rejected_paths(self) -> None:
         import json
 
@@ -4285,6 +4292,26 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self._restore_keyboard_focus()
         QTimer.singleShot(0, self._restore_keyboard_focus)
 
+    def _path_in_burst_group_view(self, file_path: str | None) -> bool:
+        if not file_path or not getattr(self, "_burst_group_view_active", False):
+            return False
+        key = _norm_path(file_path)
+        members = getattr(self, "_burst_group_view_members", []) or []
+        return any(_norm_path(m) == key for m in members)
+
+    def _maybe_leave_burst_group_view_for_path(self, file_path: str | None) -> None:
+        """Drop burst-group drill-down once single-view navigation leaves that set."""
+        if not getattr(self, "_burst_group_view_active", False):
+            return
+        if getattr(self, "_loading_from_gallery", False):
+            return
+        if self._path_in_burst_group_view(file_path):
+            return
+        self._burst_group_view_active = False
+        self._burst_group_view_members = []
+        self._sync_burst_group_bottom_chrome()
+        self._sync_compare_button_visibility()
+
     def _sync_burst_group_bottom_chrome(self) -> None:
         burst = bool(getattr(self, "_burst_group_view_active", False))
         vm = getattr(self, "view_mode", "single")
@@ -4372,16 +4399,6 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 return {_norm_path(m) for m in members}
         return {key}
 
-    def _gallery_expand_selection_cover_keys(self, cover_keys: set) -> set:
-        expanded: set = set()
-        for key in cover_keys:
-            path = self._gallery_path_for_norm_key(key)
-            if path:
-                expanded |= self._gallery_selection_keys_for_tile(path)
-            else:
-                expanded.add(key)
-        return expanded
-
     def _gallery_selected_expanded_norm_keys(self) -> set:
         raw = set(getattr(self, "_gallery_selected_paths", set()) or set())
         if not raw:
@@ -4389,12 +4406,19 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         if getattr(self, "_burst_group_view_active", False) or not self._is_burst_grouping_enabled():
             return raw
         expanded: set = set()
-        for key in raw:
+        processed_groups: set = set()
+        for key in sorted(raw):
             path = self._gallery_path_for_norm_key(key)
             if path is None:
                 expanded.add(key)
                 continue
-            expanded |= self._gallery_selection_keys_for_tile(path)
+            tile_keys = self._gallery_selection_keys_for_tile(path)
+            if len(tile_keys) > 1:
+                group_token = min(tile_keys)
+                if group_token in processed_groups:
+                    continue
+                processed_groups.add(group_token)
+            expanded |= tile_keys
         return expanded
 
     def _gallery_selected_canonical_paths_from_keys(self, keys: set) -> List[str]:
@@ -4433,6 +4457,9 @@ class RAWImageViewer(SessionMixin, QMainWindow):
     def _sync_compare_button_visibility(self) -> None:
         btn = getattr(self, "compare_bottom_button", None)
         if btn is None:
+            return
+        if getattr(self, "view_mode", "") == "compare":
+            btn.hide()
             return
         available = self._compare_entry_available()
         btn.setVisible(available)
@@ -4524,6 +4551,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 if view is not None:
                     view.clearFocus()
         self.view_mode = "gallery"
+        from PyQt6.QtCore import QTimer
         from comparison_mode import CompareEntry
 
         if entry == CompareEntry.BURST_GROUP:
@@ -4544,7 +4572,6 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                     QTimer.singleShot(0, lambda: gj.scroll_to_file(select_path))
         self._sync_compare_button_visibility()
         self.update_status_bar()
-        from PyQt6.QtCore import QTimer
 
         self._restore_keyboard_focus()
         QTimer.singleShot(0, self._restore_keyboard_focus)
@@ -4982,24 +5009,37 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         v = max(0.0, min(1.0, float(scene_pt.y()) / h))
         self._compare_zoom_both_to_normalized(u, v)
 
-    def _compare_zoom_both_to_normalized(self, u: float, v: float) -> None:
-        views = [
-            view
-            for view in (self.compare_select_view, self.compare_candidate_view)
-            if view is not None and view.has_pixmap()
-        ]
-        if not views:
+    def _compare_relative_zoom(self, view) -> float:
+        """Zoom level as a multiple of fit-to-window (1.0 == fit)."""
+        if view is None or not view.has_pixmap():
+            return 1.0
+        fit = view.fit_scale()
+        if fit <= 0:
+            return 1.0
+        return view.current_scale() / fit
+
+    def _compare_set_relative_zoom(self, view, relative: float) -> None:
+        """Apply zoom relative to this pane's own fit scale (handles mixed orientations)."""
+        if view is None or not view.has_pixmap():
             return
-        zoom_in = all(view.wants_zoom_in_toggle() for view in views)
+        fit = view.fit_scale()
+        eps = view._FIT_SCALE_EPS
+        if relative <= eps:
+            view.fit_to_window()
+        else:
+            view.set_scale(relative * fit)
+
+    def _compare_zoom_both_to_normalized(self, u: float, v: float) -> None:
         self._compare_sync_guard = True
         try:
-            if zoom_in:
-                for view in views:
-                    x = u * max(0, view._img_w - 1)
-                    y = v * max(0, view._img_h - 1)
+            for view in (self.compare_select_view, self.compare_candidate_view):
+                if view is None or not view.has_pixmap():
+                    continue
+                x = u * max(0, view._img_w - 1)
+                y = v * max(0, view._img_h - 1)
+                if view.is_at_fit_scale() or view.is_fit_mode():
                     view.zoom_to_actual_at(x, y)
-            else:
-                for view in views:
+                else:
                     view.fit_to_window()
         finally:
             self._compare_sync_guard = False
@@ -5011,43 +5051,66 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         candidate_view = self.compare_candidate_view
         if select_view is None or candidate_view is None:
             return
-        views = [
-            view
-            for view in (select_view, candidate_view)
-            if view.has_pixmap()
-        ]
-        if views and all(view.wants_zoom_in_toggle() for view in views):
-            self._compare_zoom_both_to_normalized(0.5, 0.5)
+        if (
+            select_view.has_pixmap()
+            and candidate_view.has_pixmap()
+            and select_view.is_at_fit_scale()
+            and candidate_view.is_at_fit_scale()
+        ):
+            if getattr(self, "_compare_focus_outline_active", False):
+                self._compare_zoom_panes_to_focus_points()
+            else:
+                self._compare_zoom_both_to_normalized(0.5, 0.5)
         else:
             self._compare_sync_guard = True
             try:
-                select_view.fit_to_window()
-                candidate_view.fit_to_window()
+                if select_view.has_pixmap():
+                    select_view.fit_to_window()
+                if candidate_view.has_pixmap():
+                    candidate_view.fit_to_window()
             finally:
                 self._compare_sync_guard = False
+            self._compare_sync_paused = False
 
     def _compare_focus_point_for_path(self, path: str, view) -> tuple[float, float]:
+        """Normalized (u, v) focus center in compare-pane coordinates; 0.5,0.5 if unknown."""
         if not path or view is None or not view.has_pixmap():
             return 0.5, 0.5
-        try:
-            from exif_subject_area import pixmap_ltwh_focus_hint
+        rect, _src = self._compare_focus_rect_for_path(path, view)
+        if rect is None or rect.isNull() or rect.width() < 1 or rect.height() < 1:
+            return 0.5, 0.5
+        cx = rect.left() + rect.width() * 0.5
+        cy = rect.top() + rect.height() * 0.5
+        return (
+            max(0.0, min(1.0, cx / max(1, view._img_w))),
+            max(0.0, min(1.0, cy / max(1, view._img_h))),
+        )
 
-            orientation = 1
-            cached_exif = self.image_cache.get_exif(path)
-            if cached_exif:
-                orientation = cached_exif.get("orientation", 1)
-            hint = pixmap_ltwh_focus_hint(path, view._img_w, view._img_h, orientation)
-            if hint is not None:
-                ltwh, _src = hint
-                cx = ltwh[0] + ltwh[2] * 0.5
-                cy = ltwh[1] + ltwh[3] * 0.5
-                return (
-                    max(0.0, min(1.0, cx / max(1, view._img_w))),
-                    max(0.0, min(1.0, cy / max(1, view._img_h))),
+    def _compare_zoom_panes_to_focus_points(self) -> None:
+        """Zoom each compare pane to its own EXIF focus center (frame center when missing)."""
+        session = getattr(self, "_comparison_session", None)
+        select_view = self.compare_select_view
+        candidate_view = self.compare_candidate_view
+        if select_view is None or candidate_view is None:
+            return
+        pane_specs = (
+            (getattr(session, "select", None), select_view),
+            (getattr(session, "candidate", None), candidate_view),
+        )
+        self._compare_sync_guard = True
+        try:
+            for path, view in pane_specs:
+                if view is None or not view.has_pixmap():
+                    continue
+                u, v = self._compare_focus_point_for_path(path, view)
+                view.zoom_to_actual_at(
+                    u * max(0, view._img_w - 1),
+                    v * max(0, view._img_h - 1),
                 )
-        except Exception:
-            pass
-        return 0.5, 0.5
+        finally:
+            self._compare_sync_guard = False
+        # Panes land on different centers; pause mirror sync until fit again.
+        self._compare_sync_paused = True
 
     def _compare_apply_focus_sync_mode(self) -> None:
         select_view = self.compare_select_view
@@ -5089,20 +5152,17 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             return 0.5, 0.5
 
     def _compare_apply_view_sync_from_source(self, source_view, target_view) -> None:
-        """Mode A: match scale and normalized viewport center (not raw scroll pixels)."""
+        """Mode A: match relative zoom and normalized viewport center (per-pane fit scale)."""
         if source_view is None or target_view is None:
             return
         if not source_view.has_pixmap() or not target_view.has_pixmap():
             return
-        scale = source_view.current_scale()
+        relative = self._compare_relative_zoom(source_view)
         u, v = self._compare_normalized_viewport_center(source_view)
-        fit = target_view.fit_scale()
         self._compare_sync_guard = True
         try:
-            if scale <= fit * target_view._FIT_SCALE_EPS:
-                target_view.fit_to_window()
-            else:
-                target_view.set_scale(scale)
+            self._compare_set_relative_zoom(target_view, relative)
+            if relative > target_view._FIT_SCALE_EPS:
                 target_view.center_on_image_point(
                     u * max(0, target_view._img_w - 1),
                     v * max(0, target_view._img_h - 1),
@@ -5119,6 +5179,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             # Mode B: independent pan/zoom after per-pane focus alignment.
             self._compare_sync_paused = True
             return
+        if getattr(self, "_compare_sync_paused", False):
+            return
         target = (
             self.compare_candidate_view
             if source_view is self.compare_select_view
@@ -5133,6 +5195,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             return
         if getattr(self, "_compare_sync_mode", "A") == "B":
             self._compare_sync_paused = True
+            return
+        if getattr(self, "_compare_sync_paused", False):
             return
         target = (
             self.compare_candidate_view
@@ -5174,6 +5238,13 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         files = list(getattr(self, "image_files", []) or [])
         if getattr(self, "_gallery_bookmark_filter_active", False):
             files = self._filter_paths_to_bookmarked(files)
+        files = self._filter_burst_rejected_paths(files)
+        if getattr(self, "_burst_group_view_active", False):
+            return self._filter_burst_rejected_paths(
+                list(getattr(self, "_burst_group_view_members", []) or [])
+            )
+        if getattr(self, "view_mode", "") == "gallery":
+            return self._burst_collapsed_gallery_paths(files)
         return files
 
     def _gallery_search_base_files(self) -> List[str]:
@@ -7009,6 +7080,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             gpu_view=self.gpu_view, map_widget=self.single_image_location_map)
         self._wire_filmstrip()
         main_layout.addWidget(self.single_view_container)
+        self._init_compare_view(main_layout)
         QTimer.singleShot(800, self._show_edr_startup_status)
         # --- Status bar with Material Design 3 styling ---
         # Material Design 3 color scheme:
@@ -7120,7 +7192,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         else:
             self.view_mode_button.setText("Gallery")
         self.view_mode_button.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        self.view_mode_button.clicked.connect(self.toggle_view_mode)
+        self.view_mode_button.clicked.connect(self._on_view_mode_button_clicked)
         _style_bottom_icon_button(self.view_mode_button)
         left_buttons_layout.addWidget(self.view_mode_button, 0, alignment=Qt.AlignmentFlag.AlignVCenter)
         self.view_mode_button.hide()  # Hidden by default until images are loaded
@@ -7360,50 +7432,28 @@ class RAWImageViewer(SessionMixin, QMainWindow):
 
         self.burst_grouping_button = QPushButton()
         self.burst_grouping_button.setCheckable(True)
-        self.burst_grouping_button.setFlat(True)
-        self.burst_grouping_button.setAutoDefault(False)
-        self.burst_grouping_button.setDefault(False)
         self.burst_grouping_button.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        self.burst_grouping_button.setIconSize(QSize(20, 20))
         self.burst_grouping_button.setToolTip(
             "Group burst sequences — stack rapid captures into one tile"
         )
-        self.burst_grouping_button.setStyleSheet("""
-            QPushButton {
-                color: #888888;
-                font-size: 13px;
-                font-weight: 500;
-                padding: 4px 8px;
-                border: none;
-                background: transparent;
-                text-align: center;
-                letter-spacing: 0.25px;
-                min-height: 28px;
-                max-height: 28px;
-            }
-            QPushButton:hover {
-                background-color: rgba(255, 255, 255, 0.05);
-                border-radius: 4px;
-            }
-            QPushButton:pressed {
-                background-color: rgba(255, 255, 255, 0.1);
-            }
-            QPushButton:checked {
+        _style_bottom_icon_button(self.burst_grouping_button)
+        self.burst_grouping_button.setStyleSheet(
+            bottom_icon_only_btn_style
+            + """
+            QPushButton:checked,
+            QPushButton:checked:flat {
                 color: #FFFFFF;
                 background: transparent;
             }
-        """)
+        """
+        )
         self.burst_grouping_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.burst_grouping_button.toggled.connect(self._on_burst_grouping_toggled)
         self._sync_burst_grouping_button_icon()
         self.burst_grouping_button.hide()
 
         self.compare_bottom_button = QPushButton()
-        self.compare_bottom_button.setFlat(True)
-        self.compare_bottom_button.setAutoDefault(False)
-        self.compare_bottom_button.setDefault(False)
         self.compare_bottom_button.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        self.compare_bottom_button.setIconSize(QSize(20, 20))
         self.compare_bottom_button.setToolTip(
             "Compare side by side (C) — one burst group or multi-selection"
         )
@@ -7416,9 +7466,9 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 self.compare_bottom_button.setText("Compare")
         else:
             self.compare_bottom_button.setText("Compare")
+        _style_bottom_icon_button(self.compare_bottom_button)
         self.compare_bottom_button.clicked.connect(self._enter_compare_mode)
         self.compare_bottom_button.hide()
-        self.compare_bottom_button.setStyleSheet(bottom_icon_btn_style)
         self.compare_bottom_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         # User opened search: run/resume semantic indexing, then allow gallery queries.
         self._gallery_search_user_wants_semantic = False
@@ -7485,8 +7535,6 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             self.burst_grouping_button, 0, alignment=Qt.AlignmentFlag.AlignVCenter)
         right_status_actions_layout.addWidget(
             self.compare_bottom_button, 0, alignment=Qt.AlignmentFlag.AlignVCenter)
-        right_status_actions_layout.addWidget(
-            self.bookmark_bottom_button, 0, alignment=Qt.AlignmentFlag.AlignVCenter)
         right_status_actions_layout.addWidget(
             self.batch_mark_indicator, 0, alignment=Qt.AlignmentFlag.AlignVCenter)
         right_status_actions_layout.addWidget(
@@ -7605,6 +7653,11 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self._shortcut_escape.setContext(Qt.ShortcutContext.WindowShortcut)
         self._shortcut_escape.setAutoRepeat(False)
         self._shortcut_escape.activated.connect(self._shortcut_activate_escape)
+
+        self._shortcut_compare = QShortcut(QKeySequence(Qt.Key.Key_C), self)
+        self._shortcut_compare.setContext(Qt.ShortcutContext.WindowShortcut)
+        self._shortcut_compare.setAutoRepeat(False)
+        self._shortcut_compare.activated.connect(self._shortcut_activate_compare)
 
         self._shortcut_gallery_up = QShortcut(QKeySequence(Qt.Key.Key_Up), self)
         self._shortcut_gallery_up.setContext(Qt.ShortcutContext.WindowShortcut)
@@ -10754,8 +10807,13 @@ class RAWImageViewer(SessionMixin, QMainWindow):
 
 
     def _on_view_mode_button_clicked(self) -> None:
+        if getattr(self, "view_mode", "") == "compare":
+            self._exit_compare_mode()
+            return
         if getattr(self, "_burst_group_view_active", False):
             if getattr(self, "view_mode", "") == "single":
+                if not self._path_in_burst_group_view(getattr(self, "current_file_path", None)):
+                    self._exit_burst_group_view()
                 self.view_mode = "gallery"
                 self._show_gallery_view()
                 return
@@ -10767,6 +10825,9 @@ class RAWImageViewer(SessionMixin, QMainWindow):
     def toggle_view_mode(self):
         """Toggle between single image view and gallery view"""
         if getattr(self, '_is_delete_dialog_open', False):
+            return
+        if getattr(self, "view_mode", "") == "compare":
+            self._exit_compare_mode()
             return
         import logging
         logger = logging.getLogger(__name__)
@@ -10881,6 +10942,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         if hasattr(self, 'gallery_widget') and self.gallery_widget:
             self.gallery_widget.hide()
             self._position_gallery_frame_grip()
+        if hasattr(self, "compare_widget") and self.compare_widget:
+            self.compare_widget.hide()
         hide_time = time.time() - hide_start
         logger.info(f"[VIEW_MODE] Step 1: Gallery widget hidden (elapsed: {hide_time:.3f}s)")
         
@@ -11173,16 +11236,16 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             self.single_view_container.hide()
         else:
             self.scroll_area.hide()
-        # Hide view mode button in gallery mode (users can click images to return to single view)
-        if hasattr(self, 'view_mode_button'):
-            self.view_mode_button.hide()
+        if hasattr(self, "compare_widget") and self.compare_widget:
+            self.compare_widget.hide()
+        # Bottom chrome (sort/search/slideshow vs burst back-to-gallery) handled below.
         
         # In gallery mode: hide per-image metadata, but keep total count visible.
         if hasattr(self, 'status_bar'):
             self.status_bar.show()  # Keep status_bar visible to show sort button
             self.status_bar.showMessage("")  # Clear message
         if hasattr(self, 'status_metadata_label'):
-            self._apply_top_metadata_text(self._current_folder_label())
+            self._apply_top_metadata_text(self._gallery_top_metadata_label())
         if hasattr(self, 'status_counter_label'):
             self._update_gallery_counter()
         self._ensure_gallery_search_collapsed()
@@ -11199,14 +11262,10 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             self, "gallery_search_panel"
         ):
             self.search_expand_layout.setCurrentWidget(self.gallery_search_panel)
-        # Show sort button and size slider in gallery mode
-        if hasattr(self, 'sort_toggle_button'):
-            self.sort_toggle_button.show()
+        # Show size slider in gallery mode; sort/search/slideshow vs burst back via chrome sync.
         if hasattr(self, 'size_slider'):
             self.size_slider.show()
-
-        if hasattr(self, "search_bottom_button"):
-            self.search_bottom_button.setVisible(self._is_exif_sort_ready())
+        self._sync_burst_group_bottom_chrome()
         # Single-image actions stay in update_status_bar for single mode only; hide here
         # because we do not call update_status_bar() when entering gallery (counter text differs).
         if hasattr(self, "share_bottom_button"):
@@ -11438,6 +11497,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 return
             self._gallery_bulk_metadata = meta
             self._gallery_metadata_fetch_in_progress = False
+            self._rebuild_burst_groups()
             
             if hasattr(self, 'gallery_justified') and self.gallery_justified and self.image_files:
                 try:
@@ -11583,6 +11643,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                     logger.warning(f"[GALLERY] Could not pre-seed semantic metadata: {ex}")
 
                 self._maybe_clear_empty_bookmark_filter()
+                self._rebuild_burst_groups()
                 display_files = self._gallery_files_for_display()
                 if not display_files and getattr(self, "_gallery_bookmark_filter_active", False):
                     self.gallery_justified.set_images(
@@ -12699,6 +12760,17 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         QTimer.singleShot(10, load_thumbnail)
     
     @staticmethod
+    def _gallery_event_modifiers(event=None):
+        """Reliable modifier read for gallery clicks (macOS press events often omit Cmd)."""
+        from PyQt6.QtWidgets import QApplication
+
+        mods = Qt.KeyboardModifier.NoModifier
+        if event is not None:
+            mods |= event.modifiers()
+        mods |= QApplication.keyboardModifiers()
+        return mods
+
+    @staticmethod
     def _gallery_has_extend_modifier(modifiers) -> bool:
         """Ctrl (Windows/Linux) or Cmd (macOS) for gallery extend-selection."""
         return bool(
@@ -12714,9 +12786,9 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         gj = getattr(self, "gallery_justified", None)
         if gj is not None and hasattr(gj, "refresh_gallery_selection_visuals"):
             gj.refresh_gallery_selection_visuals()
-        self._refresh_filmstrip_batch_selection_visuals()
         self._sync_gallery_selection_chrome()
         self._sync_share_button_visibility()
+        self._sync_compare_button_visibility()
 
     def _gallery_set_selection_keys(self, keys: set) -> None:
         self._gallery_selected_paths = set(keys)
@@ -12734,7 +12806,13 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         return list(getattr(self, "image_files", []) or [])
 
     def _gallery_shift_click_selection(self, file_path: str) -> None:
-        """Shift+click: first click sets anchor; second selects the inclusive range."""
+        """Shift+click range selection.
+
+        A Shift+click only extends an inclusive range when the previous action was
+        also a Shift+click. The first Shift+click after a Cmd/Ctrl+click (or any
+        non-shift action) just sets a fresh range anchor and selects that one tile,
+        so picking 4th→6th after Cmd+click 2nd won't pull in the 3rd.
+        """
         canonical = self._gallery_canonical_path(file_path)
         if not canonical:
             return
@@ -12743,27 +12821,28 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         norm_list = [_norm_path(p) for p in paths if p]
         if key not in norm_list:
             return
+        selected = set(getattr(self, "_gallery_selected_paths", set()) or set())
         anchor = getattr(self, "_gallery_selection_anchor", None)
-        if not anchor or anchor not in norm_list:
+        last_action = getattr(self, "_gallery_last_select_action", None)
+        if last_action != "shift" or not anchor or anchor not in norm_list:
             self._gallery_selection_anchor = key
-            self._gallery_set_selection_keys(
-                self._gallery_expand_selection_cover_keys({key})
-            )
+            self._gallery_last_select_action = "shift"
+            selected.add(key)
+            self._gallery_set_selection_keys(selected)
             return
         try:
             i0 = norm_list.index(anchor)
             i1 = norm_list.index(key)
         except ValueError:
             self._gallery_selection_anchor = key
-            self._gallery_set_selection_keys(
-                self._gallery_expand_selection_cover_keys({key})
-            )
+            self._gallery_last_select_action = "shift"
+            selected.add(key)
+            self._gallery_set_selection_keys(selected)
             return
         lo, hi = (i0, i1) if i0 <= i1 else (i1, i0)
-        range_keys = {norm_list[i] for i in range(lo, hi + 1)}
-        self._gallery_set_selection_keys(
-            self._gallery_expand_selection_cover_keys(range_keys)
-        )
+        selected |= {norm_list[i] for i in range(lo, hi + 1)}
+        self._gallery_last_select_action = "shift"
+        self._gallery_set_selection_keys(selected)
 
     def _gallery_canonical_path(self, file_path: str) -> Optional[str]:
         if not file_path or not self.image_files:
@@ -12775,24 +12854,15 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         return None
 
     def _is_gallery_path_selected(self, file_path: str) -> bool:
-        keys = self._gallery_selected_expanded_norm_keys()
-        if not keys:
+        raw = set(getattr(self, "_gallery_selected_paths", set()) or set())
+        if not raw:
             return False
         key = _norm_path(file_path)
-        if key in keys:
+        if key in raw:
             return True
-        if (
-            getattr(self, "view_mode", "") == "gallery"
-            and not getattr(self, "_burst_group_view_active", False)
-            and self._is_burst_grouping_enabled()
-        ):
-            from burst_grouping import BURST_MIN_COUNT
-
-            if self._burst_stack_count_for_path(file_path) >= BURST_MIN_COUNT:
-                members = self._burst_members_for_path(file_path)
-                if members:
-                    member_keys = {_norm_path(m) for m in members}
-                    return bool(member_keys) and member_keys <= keys
+        member_keys = self._gallery_selection_keys_for_tile(file_path)
+        if len(member_keys) > 1:
+            return member_keys <= raw
         return False
 
     def _gallery_has_selection(self) -> bool:
@@ -12800,10 +12870,10 @@ class RAWImageViewer(SessionMixin, QMainWindow):
 
     def _clear_gallery_selection(self) -> None:
         selected = getattr(self, "_gallery_selected_paths", None)
-        if not selected:
-            return
-        selected.clear()
+        if selected:
+            selected.clear()
         self._gallery_selection_anchor = None
+        self._gallery_last_select_action = None
         self._gallery_refresh_selection_ui()
 
     @staticmethod
@@ -12823,10 +12893,10 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                     if self._burst_group_compare_plan() is not None:
                         hint = (
                             "Compare burst group (C) · Share / bookmark "
-                            "(↑ or ★); Ctrl/Cmd+drag or Shift+click to select"
+                            "(↑ or ★); Ctrl/Cmd+click or Shift+click to select"
                         )
                     else:
-                        hint = "Share / bookmark (↑ or ★); Ctrl/Cmd+drag or Shift+click to select"
+                        hint = "Share / bookmark (↑ or ★); Ctrl/Cmd+click or Shift+click to select"
                 else:
                     from comparison_mode import CompareEntry
 
@@ -12838,9 +12908,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             else:
                 hint = "Share — open in editor, Delete/Down bulk actions (↑ toggles, ★ in bar)"
             self.status_bar.showMessage(
-                f"{n} image{'s' if n != 1 else ''} selected — "
-                "Delete to remove, Down to Discard "
-                "(Ctrl/Cmd+click toggles, Shift+click range)",
+                f"{n} image{'s' if n != 1 else ''} selected — {hint}",
                 5000,
             )
 
@@ -12937,6 +13005,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         return self._gallery_effective_files()
 
     def _should_show_slideshow_button(self) -> bool:
+        if getattr(self, "_burst_group_view_active", False):
+            return False
         if not getattr(self, "image_files", None):
             return False
         if getattr(self, "view_mode", "single") == "single":
@@ -12950,95 +13020,6 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         vis = self._should_show_slideshow_button()
         if btn.isVisible() != vis:
             btn.setVisible(vis)
-
-    def _gallery_has_bookmarks(self) -> bool:
-        return bool(getattr(self, "_gallery_bookmarked_paths", None))
-
-    def _is_gallery_path_bookmarked(self, file_path: str) -> bool:
-        return _norm_path(file_path) in getattr(self, "_gallery_bookmarked_paths", set())
-
-    def _gallery_toggle_path_bookmark(self, file_path: str) -> None:
-        canonical = self._gallery_canonical_path(file_path)
-        if not canonical:
-            return
-        key = _norm_path(canonical)
-        bookmarked = getattr(self, "_gallery_bookmarked_paths", set())
-        if key in bookmarked:
-            bookmarked.discard(key)
-            msg = "Bookmark removed"
-        else:
-            bookmarked.add(key)
-            msg = "Bookmarked for opening in another app"
-        self._gallery_bookmarked_paths = bookmarked
-        self._apply_gallery_bookmark_visual_updates()
-        if hasattr(self, "status_bar") and self.status_bar:
-            self.status_bar.showMessage(msg, 2000)
-
-    def _apply_gallery_bookmark_visual_updates(self) -> None:
-        self._refresh_filmstrip_bookmark_visuals()
-        self._refresh_gallery_bookmark_visuals()
-        self._sync_bookmark_indicator()
-        cleared_empty_filter = self._maybe_clear_empty_bookmark_filter()
-        if (
-            getattr(self, "view_mode", "") == "gallery"
-            and getattr(self, "_gallery_bookmark_filter_active", False)
-        ):
-            self._apply_gallery_bookmark_filter()
-        elif getattr(self, "view_mode", "") == "gallery":
-            self._sync_share_button_visibility()
-            if cleared_empty_filter:
-                self._apply_gallery_bookmark_filter()
-        if getattr(self, "view_mode", "single") == "single" and getattr(
-            self, "_gallery_bookmark_filter_active", False
-        ):
-            self._sync_filmstrip_to_folder()
-        self._save_persisted_gallery_bookmarks()
-
-    def _gallery_toggle_selected_bookmarks(self) -> None:
-        """Toggle bookmark state for each selected gallery image."""
-        paths = self._gallery_selected_canonical_paths()
-        if not paths:
-            return
-        bookmarked = getattr(self, "_gallery_bookmarked_paths", set())
-        added = 0
-        removed = 0
-        for p in paths:
-            canonical = self._gallery_canonical_path(p)
-            if not canonical:
-                continue
-            key = _norm_path(canonical)
-            if key in bookmarked:
-                bookmarked.discard(key)
-                removed += 1
-            else:
-                bookmarked.add(key)
-                added += 1
-        self._gallery_bookmarked_paths = bookmarked
-        self._apply_gallery_bookmark_visual_updates()
-        if hasattr(self, "status_bar") and self.status_bar:
-            if added and not removed:
-                msg = f"Bookmarked {added} image{'s' if added != 1 else ''}"
-            elif removed and not added:
-                msg = f"Removed bookmark from {removed} image{'s' if removed != 1 else ''}"
-            else:
-                msg = (
-                    f"Updated bookmarks ({added} added, {removed} removed)"
-                    if added or removed
-                    else "No bookmarks changed"
-                )
-            self.status_bar.showMessage(msg, 2500)
-
-    def _current_image_bookmarked(self) -> bool:
-        path = getattr(self, "current_file_path", None)
-        if not path:
-            return False
-        return _norm_path(path) in getattr(self, "_gallery_bookmarked_paths", set())
-
-    def _gallery_files_for_display(self) -> List[str]:
-        """Gallery file list, optionally narrowed to bookmarked images only."""
-        if getattr(self, "view_mode", "") != "gallery":
-            return list(getattr(self, "image_files", []) or [])
-        return self._gallery_effective_files()
 
     def _gallery_viewport_scroll_path(self) -> str | None:
         """Resolve the path shown in the gallery grid for scroll-to-current."""
@@ -13235,7 +13216,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 self.status_bar.showMessage("Showing all images", 2000)
 
     def _sync_bookmark_indicator(self) -> None:
-        btn = getattr(self, "bookmark_bottom_button", None)
+        btn = getattr(self, "batch_mark_indicator", None)
         if btn is None:
             return
         in_single = getattr(self, "view_mode", "single") == "single"
@@ -13283,6 +13264,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         gj = getattr(self, "gallery_justified", None)
         if gj is not None and hasattr(gj, "refresh_gallery_bookmark_visuals"):
             gj.refresh_gallery_bookmark_visuals()
+        if gj is not None and hasattr(gj, "refresh_gallery_burst_visuals"):
+            gj.refresh_gallery_burst_visuals()
 
     def _sync_share_button_visibility(self) -> None:
         btn = getattr(self, "share_bottom_button", None)
@@ -13319,16 +13302,27 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         ]
 
     def _gallery_toggle_path_selection(self, file_path: str) -> None:
-        toggle_keys = self._gallery_selection_keys_for_tile(file_path)
-        if not toggle_keys:
+        canonical = self._gallery_canonical_path(file_path)
+        if not canonical:
             return
-        key = _norm_path(canonical)
+        storage_key = _norm_path(canonical)
+        member_keys = self._gallery_selection_keys_for_tile(file_path)
         selected = set(getattr(self, "_gallery_selected_paths", set()) or set())
-        if key in selected:
-            selected.discard(key)
+        is_stack = len(member_keys) > 1
+        if is_stack:
+            is_on = storage_key in selected or member_keys <= selected
+            if is_on:
+                selected.discard(storage_key)
+                selected -= member_keys
+            else:
+                selected.add(storage_key)
+                selected |= member_keys
+        elif storage_key in selected:
+            selected.discard(storage_key)
         else:
-            selected.add(key)
-        self._gallery_selection_anchor = key
+            selected.add(storage_key)
+        self._gallery_selection_anchor = storage_key
+        self._gallery_last_select_action = "toggle"
         self._gallery_set_selection_keys(selected)
 
     def _gallery_selected_canonical_paths(self) -> List[str]:
@@ -13512,7 +13506,23 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             self.schedule_save_session_state()
 
     def _gallery_item_clicked(self, file_path):
-        """Handle gallery item click - switch to single view and load image"""
+        """Handle gallery item click - burst stack, single view, or selection."""
+        mods = self._gallery_event_modifiers()
+        if self._gallery_has_shift_modifier(mods) and not self._gallery_has_extend_modifier(mods):
+            self._gallery_shift_click_selection(file_path)
+            return
+        if self._gallery_has_extend_modifier(mods):
+            self._gallery_toggle_path_selection(file_path)
+            return
+        if (
+            getattr(self, "view_mode", "") == "gallery"
+            and not getattr(self, "_burst_group_view_active", False)
+            and self._is_burst_grouping_enabled()
+        ):
+            members = self._burst_members_for_path(file_path)
+            if members:
+                self._enter_burst_group_view(members, cover=file_path)
+                return
         self._clear_gallery_selection()
         # SYNC: Update current file index immediately to prevent navigation jumps
         target = _norm_path(file_path)
@@ -15441,6 +15451,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             if self.is_animated_image(file_path):
                 self.current_file_path = file_path
                 self._last_loaded_path = file_path
+                if getattr(self, "view_mode", "single") == "single":
+                    self._maybe_leave_burst_group_view_for_path(file_path)
                 if self.image_files and file_path in self.image_files:
                     self.current_file_index = self.image_files.index(file_path)
                 self._sync_filmstrip_index()
@@ -15633,6 +15645,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             #    (it's the old file), so the check would always cancel
             self.current_file_path = requested_file_path
             self._last_loaded_path = requested_file_path # Track for view switching optimizations
+            if getattr(self, "view_mode", "single") == "single":
+                self._maybe_leave_burst_group_view_for_path(requested_file_path)
             if self.image_files and requested_file_path in self.image_files:
                 self.current_file_index = self.image_files.index(requested_file_path)
             self._sync_filmstrip_index()
@@ -20667,7 +20681,18 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         if self._shortcut_blocked_by_text_input():
             return
         vm = getattr(self, "view_mode", "single")
+        if vm == "compare":
+            self._exit_compare_mode()
+            return
         if vm == "gallery":
+            if getattr(self, "_burst_group_view_active", False):
+                session = getattr(self, "_comparison_session", None)
+                scroll_to = getattr(session, "select", None) if session else None
+                if not scroll_to:
+                    members = self._burst_group_view_visible_members()
+                    scroll_to = members[0] if members else getattr(self, "current_file_path", None)
+                self._exit_burst_group_view(scroll_to=scroll_to)
+                return
             if self._gallery_has_selection():
                 self._clear_gallery_selection()
                 return
@@ -20675,6 +20700,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 return
         elif vm == "single":
             if getattr(self, "_burst_group_view_active", False):
+                if not self._path_in_burst_group_view(getattr(self, "current_file_path", None)):
+                    self._exit_burst_group_view()
                 self.view_mode = "gallery"
                 self._show_gallery_view()
                 return
@@ -20685,17 +20712,18 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         if self._shortcut_blocked_by_text_input():
             return
         if getattr(self, "view_mode", "") == "compare":
+            self._exit_compare_mode()
             return
-        if getattr(self, "view_mode", "") != "gallery":
-            return
-        if not self._compare_entry_available():
-            return
-        self._enter_compare_mode()
+        if self._compare_session_plan() is not None:
+            self._enter_compare_mode()
 
     def _shortcut_activate_gallery_up(self) -> None:
         if self._shortcut_blocked_by_text_input():
             return
         vm = getattr(self, "view_mode", "single")
+        if vm == "compare":
+            self._compare_handle_promote()
+            return
         if vm == "single":
             p = getattr(self, "current_file_path", None)
             if p:
@@ -20712,6 +20740,15 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         if self._shortcut_blocked_by_text_input():
             return
         vm = getattr(self, "view_mode", "single")
+        if vm == "compare":
+            from PyQt6.QtWidgets import QApplication
+
+            mods = QApplication.keyboardModifiers()
+            if mods & Qt.KeyboardModifier.ShiftModifier:
+                self._compare_handle_reject_select()
+            else:
+                self._compare_handle_reject_candidate()
+            return
         if vm == "gallery":
             if self._gallery_has_selection():
                 self.discard_gallery_selection()
@@ -20739,6 +20776,9 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 return True
         
         if key == Qt.Key.Key_Space:
+            if vm == "compare":
+                self._compare_toggle_zoom_mode_a()
+                return True
             if vm == "single":
                 if (
                     hasattr(self, "current_file_path")
@@ -22365,6 +22405,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 return
             
             self.current_folder = folder_path
+            self._sync_burst_rejected_for_current_folder()
 
             # Get supported extensions
             supported_extensions = self.get_supported_extensions()
@@ -22581,6 +22622,15 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         base = os.path.basename(norm)
         return base or norm
 
+    def _gallery_top_metadata_label(self) -> str:
+        """Top metadata in gallery mode: burst stack stats or folder name."""
+        if (
+            getattr(self, "view_mode", "") == "gallery"
+            and getattr(self, "_burst_group_view_active", False)
+        ):
+            return self._burst_group_view_status_label()
+        return self._current_folder_label()
+
     def _apply_preview_first_status_bar(self, cached_exif: dict) -> None:
         """Lightweight HUD after first paint while full exiftool metadata loads."""
         if not self.current_file_path or getattr(self, "view_mode", "single") != "single":
@@ -22741,10 +22791,17 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 return
             self.status_bar.showMessage("")
             return
+
+        if self.view_mode == "compare":
+            self._update_compare_status_bar()
+            self._sync_compare_button_visibility()
+            if hasattr(self, "status_counter_label"):
+                self._refresh_image_counter()
+            return
         
         # Show metadata, counter, and sort button when there are files.
         if self.view_mode != "single":
-            self._apply_top_metadata_text(self._current_folder_label())
+            self._apply_top_metadata_text(self._gallery_top_metadata_label())
         # Show/hide sort button based on view mode
         self._sync_burst_group_bottom_chrome()
         self._sync_compare_button_visibility()
@@ -22754,10 +22811,19 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             else:
                 self.size_slider.setVisible(False)
         
-        # Gallery toggle only in single-image mode (in gallery you return by tapping a thumbnail)
+        # Gallery toggle in single mode; burst group view shows it as back-to-main-gallery.
         if hasattr(self, 'view_mode_button'):
+            burst_back = (
+                getattr(self, "_burst_group_view_active", False)
+                and self.view_mode == "gallery"
+            )
             self.view_mode_button.setVisible(
-                bool(self.image_files) and self.view_mode == "single" and self._is_exif_sort_ready()
+                burst_back
+                or (
+                    bool(self.image_files)
+                    and self.view_mode == "single"
+                    and self._is_exif_sort_ready()
+                )
             )
         if hasattr(self, "share_bottom_button"):
             self._sync_share_button_visibility()
@@ -22777,17 +22843,22 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 if is_raw:
                     self._update_raw_toggle_button_state()
         self._sync_bookmark_indicator()
-        if hasattr(self, "search_bottom_button"):
-            self.search_bottom_button.setVisible(bool(self.image_files) and self._is_exif_sort_ready())
+        if hasattr(self, "search_bottom_button") and not getattr(
+            self, "_burst_group_view_active", False
+        ):
+            self.search_bottom_button.setVisible(
+                bool(self.image_files) and self._is_exif_sort_ready()
+            )
         if getattr(self, "_search_panel_expanded", False):
             self._schedule_search_expand_overlay_sync()
 
         # Gallery mode should stay lightweight: avoid expensive per-image EXIF/status
         # recomputation (fallback reads can block UI and delay gallery paint).
         if self.view_mode != 'single':
-            self._apply_top_metadata_text(self._current_folder_label())
+            self._apply_top_metadata_text(self._gallery_top_metadata_label())
             if hasattr(self, 'status_counter_label'):
                 self._refresh_image_counter()
+            self._sync_burst_group_bottom_chrome()
             return
 
         if not self.current_file_path:
@@ -23836,6 +23907,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self._semantic_search_corpus_files = list(image_files)
         self._gallery_search_index_session_key = None
         self._quick_folder_file_stats = file_stats
+        self._rebuild_burst_groups()
 
         # --- OPTIMIZATION: INSTANT EXIF SORT IF FULLY CACHED ---
         try:
@@ -23913,6 +23985,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self._folder_fast_open_token = token
         self._folder_fast_open_preserved_path = start_path
         self.current_folder = folder_path
+        self._sync_burst_rejected_for_current_folder()
         prev_path = getattr(self, "current_file_path", None)
         if preserve_folder_index and getattr(self, "image_files", None):
             start_norm = _norm_path(start_path)
@@ -24115,6 +24188,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self._gallery_search_index_session_key = None
         if bulk_metadata:
             self._gallery_bulk_metadata = bulk_metadata
+        self._rebuild_burst_groups()
         if preserved:
             preserved_norm = _norm_path(preserved)
             for i, fp in enumerate(sorted_files):
@@ -24237,6 +24311,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 return
 
             self.current_folder = folder_path
+            self._sync_burst_rejected_for_current_folder()
             self.image_files = image_files
             self._reconcile_gallery_bookmarks_with_folder()
             self._semantic_search_corpus_files = list(image_files)

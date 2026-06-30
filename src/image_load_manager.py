@@ -91,6 +91,22 @@ def _min_acceptable_preview_dim(file_path: str) -> int:
     return _display_preview_min_dim()
 
 
+def _gallery_grid_min_dim() -> int:
+    from image_cache import disk_preview_max_edge
+
+    return int(disk_preview_max_edge() * 0.85)
+
+
+def _gallery_memory_thumb_acceptable(thumb, *, gallery_thumbnail: bool) -> bool:
+    """Gallery tiles need grid-tier (~512px), not 256px thumbnail tier."""
+    if not gallery_thumbnail:
+        return True
+    dim = _buffer_max_dim(thumb)
+    if dim <= 0:
+        return False
+    return dim >= _gallery_grid_min_dim()
+
+
 def _skip_low_res_memory_thumb_for_display_tier(
     thumb,
     wanted: set,
@@ -1061,6 +1077,10 @@ class ImageLoadManager(QObject):
             def _try_emit_display_thumb(buf) -> bool:
                 if buf is None:
                     return False
+                if not _gallery_memory_thumb_acceptable(
+                    buf, gallery_thumbnail=gallery_thumbnail
+                ):
+                    return False
                 if _skip_low_res_memory_thumb_for_display_tier(
                     buf,
                     wanted,
@@ -1079,6 +1099,12 @@ class ImageLoadManager(QObject):
                     if exif_data is not None:
                         emit(self.exif_data_ready, file_path, exif_data)
                 return True
+
+            if gallery_thumbnail:
+                grid_buf = cache.grid_cache.get(file_path)
+                if _try_emit_display_thumb(grid_buf):
+                    if preview_only:
+                        return True
 
             preview_buf = cache.preview_cache.get(file_path)
             if _try_emit_display_thumb(preview_buf):
@@ -1144,8 +1170,16 @@ class ImageLoadManager(QObject):
         def _memory_thumb_ok() -> bool:
             if "thumbnail" not in wanted:
                 return True
+            if gallery_thumbnail:
+                grid_buf = cache.grid_cache.get(file_path)
+                if _gallery_memory_thumb_acceptable(
+                    grid_buf, gallery_thumbnail=True
+                ):
+                    return True
             preview_buf = cache.preview_cache.get(file_path)
-            if preview_buf is not None and not _skip_low_res_memory_thumb_for_display_tier(
+            if preview_buf is not None and _gallery_memory_thumb_acceptable(
+                preview_buf, gallery_thumbnail=gallery_thumbnail
+            ) and not _skip_low_res_memory_thumb_for_display_tier(
                 preview_buf,
                 wanted,
                 use_full_resolution,
@@ -1153,7 +1187,9 @@ class ImageLoadManager(QObject):
             ):
                 return True
             thumb = cache.thumbnail_cache.get(file_path)
-            return thumb is not None and not _skip_low_res_memory_thumb_for_display_tier(
+            return thumb is not None and _gallery_memory_thumb_acceptable(
+                thumb, gallery_thumbnail=gallery_thumbnail
+            ) and not _skip_low_res_memory_thumb_for_display_tier(
                 thumb,
                 wanted,
                 use_full_resolution,

@@ -407,6 +407,11 @@ class UnifiedImageProcessor:
             target_size, allow_heavy_fallback
         )
 
+        if not single_view_preview:
+            grid = self.cache.get_grid(file_path)
+            if grid is not None:
+                return grid
+
         # 檢查快取
         cached = self.cache.get_thumbnail(file_path)
         if cached is not None:
@@ -445,9 +450,17 @@ class UnifiedImageProcessor:
                             cached = None
                     except Exception:
                         pass
+                elif hasattr(cached, "shape"):
+                    try:
+                        if max(int(cached.shape[0]), int(cached.shape[1])) < int(
+                            disk_preview_max_edge() * 0.85
+                        ):
+                            cached = None
+                    except Exception:
+                        pass
                 if cached is not None:
                     return cached
-        
+
         # Gallery grid: disk tier (~512px). Single-view CURRENT: memory preview tier (~1920px).
         is_raw = self._is_raw_file(file_path)
         skip_key = os.path.normcase(os.path.abspath(file_path))

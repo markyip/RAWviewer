@@ -1293,6 +1293,21 @@ class JustifiedGallery(QWidget):
             int(round(pixmap.height() / safe_dpr)),
         )
 
+    def _gallery_base_meets_tile(self, base: QPixmap, physical_size: QSize) -> bool:
+        """True when cached base pixmap is sharp enough for this tile."""
+        if base is None or base.isNull():
+            return False
+        try:
+            from image_cache import disk_preview_max_edge
+
+            dpr = float(base.devicePixelRatio() or 1.0)
+            effective = max(int(base.width() * dpr), int(base.height() * dpr))
+            need = max(int(physical_size.width()), int(physical_size.height()))
+            floor = min(int(disk_preview_max_edge() * 0.85), max(256, int(need * 0.85)))
+            return effective >= floor
+        except Exception:
+            return True
+
     def _fit_tile_pixmap(
         self, file_path: str, base: QPixmap, physical_size: QSize, dpr: float
     ) -> QPixmap:
@@ -1983,19 +1998,17 @@ class JustifiedGallery(QWidget):
                 if not r:
                     return
                 spacing = (len(r) - 1) * self.MIN_SPACING
-                if is_last and len(r) == 1:
-                    row_h = self.TARGET_ROW_HEIGHT
-                else:
-                    row_h = (net_width - spacing) / a_sum
-                    row_h = max(
-                        self.TARGET_ROW_HEIGHT * 0.75,
-                        min(self.TARGET_ROW_HEIGHT * 1.25, row_h),
-                    )
+                row_h = self.TARGET_ROW_HEIGHT if is_last else (net_width - spacing) / a_sum
+                row_h = max(
+                    self.TARGET_ROW_HEIGHT * 0.4,
+                    min(self.TARGET_ROW_HEIGHT * 2.2, row_h),
+                )
 
                 curr_x = left_margin
                 for i, (item, aspect) in enumerate(r):
                     w = int(row_h * aspect)
-                    if i == len(r) - 1 and (not is_last or len(r) > 1):
+                    # Only justify (stretch) the last tile on full rows; last row keeps natural aspects.
+                    if not is_last and i == len(r) - 1:
                         w = net_width - (curr_x - left_margin)
                     self._gallery_layout_items.append(
                         {
@@ -2302,17 +2315,24 @@ class JustifiedGallery(QWidget):
                             target_path = getattr(_w, "file_path", None)
                             pv = self.parent_viewer
                             if target_path and pv is not None:
+                                mods = (
+                                    pv._gallery_event_modifiers(e)
+                                    if hasattr(pv, "_gallery_event_modifiers")
+                                    else e.modifiers()
+                                )
                                 if hasattr(pv, "_gallery_has_shift_modifier") and pv._gallery_has_shift_modifier(
-                                    e.modifiers()
+                                    mods
+                                ) and not (
+                                    hasattr(pv, "_gallery_has_extend_modifier")
+                                    and pv._gallery_has_extend_modifier(mods)
                                 ):
                                     pv._gallery_shift_click_selection(target_path)
                                     return
                                 if hasattr(pv, "_gallery_has_extend_modifier") and pv._gallery_has_extend_modifier(
-                                    e.modifiers()
+                                    mods
                                 ):
-                                    pt = _w.mapTo(self, e.position().toPoint())
-                                    self._begin_ctrl_drag_selection(pt)
-                                    self.grabMouse()
+                                    if hasattr(pv, "_gallery_toggle_path_selection"):
+                                        pv._gallery_toggle_path_selection(target_path)
                                     return
                                 pv._gallery_item_clicked(target_path)
                             return
@@ -2322,7 +2342,35 @@ class JustifiedGallery(QWidget):
                         e.ignore()
                     except Exception:
                         pass
+
+                def _on_thumb_release(e, _w=w):
+                    if e.button() != Qt.MouseButton.LeftButton:
+                        ThumbnailLabel.mouseReleaseEvent(_w, e)
+                        return
+                    pv = self.parent_viewer
+                    mods = (
+                        pv._gallery_event_modifiers(e)
+                        if pv is not None and hasattr(pv, "_gallery_event_modifiers")
+                        else e.modifiers()
+                    )
+                    if pv is not None and (
+                        (
+                            hasattr(pv, "_gallery_has_extend_modifier")
+                            and pv._gallery_has_extend_modifier(mods)
+                        )
+                        or (
+                            hasattr(pv, "_gallery_has_shift_modifier")
+                            and pv._gallery_has_shift_modifier(mods)
+                        )
+                    ):
+                        _w._drag_start_pos = None
+                        _w._drag_started = False
+                        e.accept()
+                        return
+                    ThumbnailLabel.mouseReleaseEvent(_w, e)
+
                 w.mousePressEvent = _on_thumb_press
+                w.mouseReleaseEvent = _on_thumb_release
                 created_widgets += 1
                 self._visible_widgets[idx] = w
             else:
@@ -2362,20 +2410,17 @@ class JustifiedGallery(QWidget):
                         try:
                             from image_cache import get_image_cache
                             global_cache = get_image_cache()
-                            # Level-Adaptive Mipmap Loading based on screen tile physical size
                             max_dim = max(physical_size.width(), physical_size.height())
-                            
-                            if max_dim > 256:
-                                global_thumb = global_cache.get_grid(path)
-                            else:
-                                global_thumb = global_cache.get_thumbnail(path)
-                                
-                            # Double-fallback logic:
+
+                            global_thumb = global_cache.get_grid(path)
                             if global_thumb is None:
                                 global_thumb = global_cache.get_thumbnail(path)
-                            if global_thumb is None:
-                                global_thumb = global_cache.get_grid(path)
-                                
+
+                            if global_thumb is not None:
+                                src_dim = max(global_thumb.shape[:2])
+                                if src_dim < int(max_dim * 0.85):
+                                    global_thumb = None
+
                             if global_thumb is not None:
                                 arr = np.ascontiguousarray(global_thumb)
                                 h_img, w_img = arr.shape[:2]
@@ -2401,7 +2446,7 @@ class JustifiedGallery(QWidget):
                     scaled = self._fit_tile_pixmap(path, base, physical_size, dpr)
                     w.setPixmap(scaled)
                     w.setText("")
-                    cache_hit = True
+                    cache_hit = self._gallery_base_meets_tile(base, physical_size)
                 else:
                     self._apply_pixmap_if_changed(w, QPixmap())
                     w.setText("")
@@ -2415,6 +2460,9 @@ class JustifiedGallery(QWidget):
                 if pv is not None and hasattr(pv, "_is_gallery_path_bookmarked"):
                     if hasattr(w, "set_gallery_bookmarked"):
                         w.set_gallery_bookmarked(pv._is_gallery_path_bookmarked(path))
+                if pv is not None and hasattr(pv, "_burst_stack_count_for_path"):
+                    if hasattr(w, "set_burst_stack_count"):
+                        w.set_burst_stack_count(pv._burst_stack_count_for_path(path))
             thumb_missing = not cache_hit
             
             m = self._metadata_cache.get(path)
@@ -2427,7 +2475,8 @@ class JustifiedGallery(QWidget):
                 stages.add("exif")
                 
             if stages and path not in self._active_tasks:
-                load_tasks.append((path, Priority.CURRENT, stages))
+                target = QSize(physical_size.width(), physical_size.height())
+                load_tasks.append((path, Priority.CURRENT, stages, target))
 
         if actively_scrolling and not load_tasks and not self._active_tasks:
             viewport_rect = QRect(0, scroll_y, v_port.width(), v_h)
@@ -2477,7 +2526,9 @@ class JustifiedGallery(QWidget):
 
         current_reserve = _gallery_current_active_reserve(active_cap)
         prefetch_active_cap = max(0, active_cap - current_reserve)
-        has_pending_current = any(pri == Priority.CURRENT for _, pri, _ in load_tasks)
+        has_pending_current = any(
+            pri == Priority.CURRENT for _, pri, *_ in load_tasks
+        )
 
         # Schedule with budget and target-sized thumbnails for visible tiles.
         scheduled = 0
@@ -2487,7 +2538,7 @@ class JustifiedGallery(QWidget):
             elif self._evict_stale_active_tasks(max_age_s=2.0) == 0:
                 self._evict_stale_active_tasks(drop_prefetch=True)
             has_pending_current = any(
-                pri == Priority.CURRENT for _, pri, _ in load_tasks
+                pri == Priority.CURRENT for _, pri, *_ in load_tasks
             )
         if len(self._active_tasks) >= active_cap and not has_pending_current:
             logger.info(
@@ -2502,7 +2553,7 @@ class JustifiedGallery(QWidget):
                     len(self._active_tasks),
                 )
             return
-        for path, priority, stages in load_tasks:
+        for path, priority, stages, *rest in load_tasks:
             if scheduled >= max_tasks:
                 if not self._load_timer.isActive():
                     self._load_timer.start(16)
@@ -2514,12 +2565,14 @@ class JustifiedGallery(QWidget):
                 if priority != Priority.CURRENT:
                     continue
                 break
+            target_size = rest[0] if rest else None
             self.load_manager.load_image(
                 path,
                 priority=priority,
                 cancel_existing=False,
                 stages=stages,
                 gallery_thumbnail=True,
+                thumbnail_target_size=target_size if priority == Priority.CURRENT else None,
             )
             self._mark_active_task(path, priority)
             scheduled += 1
@@ -2736,6 +2789,13 @@ class JustifiedGallery(QWidget):
         if not pixmap or pixmap.isNull():
             self.on_thumbnail_error(file_path, "Null pixmap in on_thumbnail_ready")
             return
+
+        existing = self._thumbnail_cache.get((file_path, self._thumb_base_key))
+        if existing and not existing.isNull():
+            old_dim = max(existing.width(), existing.height())
+            new_dim = max(pixmap.width(), pixmap.height())
+            if old_dim > new_dim:
+                pixmap = existing
 
         # Cache full preview thumbnail (not tile-sized crops). EXIF rotation is applied at extract time.
         meta_ar = self._metadata_display_aspect(file_path)
@@ -3249,6 +3309,16 @@ class JustifiedGallery(QWidget):
             if path and hasattr(w, "set_gallery_bookmarked"):
                 w.set_gallery_bookmarked(pv._is_gallery_path_bookmarked(path))
 
+    def refresh_gallery_burst_visuals(self) -> None:
+        """Sync burst stack count badges on visible thumbnails."""
+        pv = self.parent_viewer
+        if pv is None or not hasattr(pv, "_burst_stack_count_for_path"):
+            return
+        for w in self._visible_widgets.values():
+            path = getattr(w, "file_path", None)
+            if path and hasattr(w, "set_burst_stack_count"):
+                w.set_burst_stack_count(pv._burst_stack_count_for_path(path))
+
     def _update_empty_label_geometry(self):
         """Lay out empty-state text across the justified gallery canvas (fills the frame when empty)."""
         if not getattr(self, "_empty_label", None):
@@ -3273,13 +3343,18 @@ class JustifiedGallery(QWidget):
         try:
             pv = self.parent_viewer
             if target_path and pv is not None:
+                mods = (
+                    pv._gallery_event_modifiers(e)
+                    if hasattr(pv, "_gallery_event_modifiers")
+                    else e.modifiers()
+                )
                 shift = (
                     hasattr(pv, "_gallery_has_shift_modifier")
-                    and pv._gallery_has_shift_modifier(e.modifiers())
+                    and pv._gallery_has_shift_modifier(mods)
                 )
                 extend = (
                     hasattr(pv, "_gallery_has_extend_modifier")
-                    and pv._gallery_has_extend_modifier(e.modifiers())
+                    and pv._gallery_has_extend_modifier(mods)
                 )
                 if shift and not extend:
                     if hasattr(pv, "_gallery_shift_click_selection"):

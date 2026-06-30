@@ -19,15 +19,19 @@ Environment toggles:
 
 import os
 
-from PyQt6.QtCore import Qt, QRect, QRectF, QPointF, pyqtSignal, QEvent
-from PyQt6.QtGui import QKeyEvent, QPixmap, QPainter, QColor, QPen
+from PyQt6.QtCore import Qt, QRect, QRectF, QPoint, QPointF, pyqtSignal, QEvent, QMimeData, QUrl, QEventLoop
+from PyQt6.QtGui import QKeyEvent, QPixmap, QPainter, QColor, QPen, QDrag
 from PyQt6.QtWidgets import (
     QGraphicsView,
     QGraphicsScene,
     QGraphicsPixmapItem,
     QGraphicsRectItem,
     QLabel,
+    QApplication,
 )
+
+from rawviewer_ui.composition_grid import CompositionGridGraphicsItem
+from rawviewer_ui.widgets import stamp_rawviewer_export_drag
 
 
 def _env_true(name: str) -> bool:
@@ -85,13 +89,14 @@ class GpuImageView(QGraphicsView):
 
         # Dashed focus / subject overlay rectangle (scene coords == image pixels). Uses a
         # cosmetic pen so the on-screen line width stays constant at any zoom level.
-        self._overlay_item = None
+        self._grid_item = CompositionGridGraphicsItem()
+        self._scene.addItem(self._grid_item)
 
-        self._fit_mode = True
-        self._zoom_intent_100 = False
-        self._has_pixmap = False
-        self._img_w = 0
-        self._img_h = 0
+        self._clipping_item = QGraphicsPixmapItem()
+        self._clipping_item.setZValue(15)
+        self._clipping_item.setTransformationMode(Qt.TransformationMode.FastTransformation)
+        self._clipping_item.hide()
+        self._scene.addItem(self._clipping_item)
 
         self.setRenderHints(
             QPainter.RenderHint.SmoothPixmapTransform | QPainter.RenderHint.Antialiasing
@@ -108,11 +113,14 @@ class GpuImageView(QGraphicsView):
             QGraphicsView.OptimizationFlag.DontAdjustForAntialiasing, True
         )
         self.viewport().setMouseTracking(True)
+        self.viewport().setAttribute(Qt.WidgetAttribute.WA_Hover, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_AcceptTouchEvents, True)
+        self.viewport().setAttribute(Qt.WidgetAttribute.WA_AcceptTouchEvents, True)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-        # Set by RAWImageViewer: callable(QKeyEvent) -> bool
-        self._shortcut_handler = None
 
         self._maybe_enable_opengl()
+        from PyQt6.QtCore import QTimer
+        QTimer.singleShot(500, self._enable_macos_edr)
 
         # Centered placeholder text shown when no image is loaded (parity with the
         # legacy QLabel instruction screen, which the GPU view would otherwise cover).
@@ -125,6 +133,9 @@ class GpuImageView(QGraphicsView):
         self._placeholder.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         self._placeholder.hide()
 
+    def set_file_path(self, file_path: str) -> None:
+        self.file_path = file_path
+
     # ------------------------------------------------------------------ setup
     def _maybe_enable_opengl(self) -> None:
         if _env_true("RAWVIEWER_GPU_VIEW_NO_GL"):
@@ -135,12 +146,41 @@ class GpuImageView(QGraphicsView):
             gl = QOpenGLWidget()
             gl.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
             self.setViewport(gl)
-            # Re-enable tracking on the new viewport.
+            # Re-enable tracking on the new viewport (HoverMove works before first click).
             self.viewport().setMouseTracking(True)
+            self.viewport().setAttribute(Qt.WidgetAttribute.WA_Hover, True)
+            self.viewport().setAttribute(Qt.WidgetAttribute.WA_AcceptTouchEvents, True)
             self.viewport().setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         except Exception:
             # Raster fallback keeps the feature working without a GL context.
             pass
+
+
+    def _enable_macos_edr(self) -> None:
+        """Enable macOS EDR (Extended Dynamic Range) support on the viewport's CALayer."""
+        if getattr(self, "_edr_initialized", False):
+            return
+        import platform
+        if platform.system() == "Darwin":
+            try:
+                import objc
+                vp = self.viewport()
+                if vp is None:
+                    return
+                ptr = int(vp.winId())
+                if not ptr:
+                    return
+                view = objc.objc_object(c_void_p=ptr)
+                view.setWantsLayer_(True)
+                layer = view.layer()
+                if layer is not None:
+                    layer.setWantsExtendedDynamicRangeContent_(True)
+                    self._edr_initialized = True
+            except Exception as e:
+                import logging
+                logging.getLogger(__name__).debug(f"Failed to enable EDR on CALayer: {e}")
+
+
 
     # ------------------------------------------------------------------ state
     def has_pixmap(self) -> bool:
@@ -225,6 +265,26 @@ class GpuImageView(QGraphicsView):
         if self._overlay_item is not None:
             self._overlay_item.hide()
 
+    def set_clipping_overlay(self, pixmap: QPixmap | None) -> None:
+        item = self._clipping_item
+        if item is None:
+            return
+        if pixmap is None or pixmap.isNull():
+            item.hide()
+            return
+        item.setPixmap(pixmap)
+        item.setOffset(0, 0)
+        item.show()
+
+    def clear_clipping_overlay(self) -> None:
+        if self._clipping_item is not None:
+            self._clipping_item.hide()
+
+    def set_composition_grid_mode(self, mode: str) -> None:
+        """Show composition guide lines in image (scene) coordinates."""
+        self._grid_mode = mode if mode else "off"
+        self._grid_item.set_grid(self._img_w, self._img_h, self._grid_mode)
+
     # ------------------------------------------------------------------ image
     def set_pixmap(self, pixmap: QPixmap, preserve_view=None) -> None:
         """Set the displayed image.
@@ -237,6 +297,8 @@ class GpuImageView(QGraphicsView):
             self._has_pixmap = False
             self._img_w = self._img_h = 0
             self.clear_overlay()
+            self.clear_clipping_overlay()
+            self._grid_item.set_grid(0, 0, self._grid_mode)
             self._update_placeholder()
             return
 
@@ -260,6 +322,7 @@ class GpuImageView(QGraphicsView):
         self._scene.setSceneRect(QRectF(0, 0, new_w, new_h))
         self._img_w, self._img_h = new_w, new_h
         self._has_pixmap = True
+        self._grid_item.set_grid(new_w, new_h, self._grid_mode)
         self._update_placeholder()
 
         if self._fit_mode or not capture:
@@ -324,6 +387,16 @@ class GpuImageView(QGraphicsView):
             pass
         return None
 
+    def set_zoom_locked(self, locked: bool) -> None:
+        """When True, keep fit-to-window; block pinch/wheel/100% zoom."""
+        self._zoom_locked = bool(locked)
+
+    def zoom_locked(self) -> bool:
+        return bool(getattr(self, "_zoom_locked", False))
+
+    def _zoom_in_blocked(self) -> bool:
+        return self.zoom_locked()
+
     # ------------------------------------------------------------------ zoom
     def fit_to_window(self) -> None:
         self._fit_mode = True
@@ -344,7 +417,7 @@ class GpuImageView(QGraphicsView):
 
     def zoom_to_actual_at(self, scene_x: float, scene_y: float) -> None:
         """100% zoom with the given image pixel centered in the viewport."""
-        if not self._has_pixmap:
+        if not self._has_pixmap or self._zoom_in_blocked():
             return
         self._fit_mode = False
         self._zoom_intent_100 = True
@@ -354,9 +427,6 @@ class GpuImageView(QGraphicsView):
         self.scale(1.0, 1.0)
         
         # Ensure scrollbars are updated based on the new scale
-        from PyQt6.QtCore import QEventLoop
-        from PyQt6.QtWidgets import QApplication
-
         QApplication.processEvents(
             QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents
         )
@@ -387,6 +457,7 @@ class GpuImageView(QGraphicsView):
         self._fit_mode = False
         intent_100 = float(scale) >= 1.0 - 1e-4
         self._zoom_intent_100 = intent_100
+        self._grid_item.set_grid(new_w, new_h, self._grid_mode)
         self._update_placeholder()
         fit = self.fit_scale()
         s = float(scale)
@@ -400,9 +471,6 @@ class GpuImageView(QGraphicsView):
         self.scale(s, s)
         
         # Ensure scrollbars are updated based on the new scale
-        from PyQt6.QtCore import QEventLoop
-        from PyQt6.QtWidgets import QApplication
-
         QApplication.processEvents(
             QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents
         )
@@ -425,6 +493,8 @@ class GpuImageView(QGraphicsView):
             return
         self._sync_fit_mode_flag()
         if self.wants_zoom_in_toggle():
+            if self._zoom_in_blocked():
+                return
             self.zoom_to_actual()
         else:
             self.fit_to_window()
@@ -434,6 +504,8 @@ class GpuImageView(QGraphicsView):
         scale = float(scale)
         if scale <= fit * self._FIT_SCALE_EPS:
             self.fit_to_window()
+            return
+        if self._zoom_in_blocked() and scale > fit * self._FIT_SCALE_EPS:
             return
         scale = max(fit, min(self.MAX_SCALE, scale))
         self.resetTransform()
@@ -451,6 +523,8 @@ class GpuImageView(QGraphicsView):
         if factor < 1.0 and new <= fit * self._FIT_SCALE_EPS:
             self.fit_to_window()
             return
+        if self._zoom_in_blocked() and new > fit * self._FIT_SCALE_EPS:
+            return
         new = max(fit, min(self.MAX_SCALE, new))
         if abs(new - cur) < 1e-9:
             return
@@ -460,24 +534,87 @@ class GpuImageView(QGraphicsView):
         self.zoomChanged.emit(self.current_scale())
 
     # ------------------------------------------------------------------ events
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton and self._fit_mode and self.file_path:
+            self._drag_start_pos = event.position().toPoint()
+            self._drag_started = False
+        super().mousePressEvent(event)
+
     def mouseMoveEvent(self, event) -> None:
         host = self.parentWidget()
-        if host is not None and hasattr(host, "handle_pointer_for_filmstrip"):
-            host.handle_pointer_for_filmstrip(event.globalPosition())
-        super().mouseMoveEvent(event)
+        if host is not None:
+            if hasattr(host, "_ensure_filmstrip_enabled"):
+                host._ensure_filmstrip_enabled()
+            if hasattr(host, "handle_pointer_for_filmstrip"):
+                host.handle_pointer_for_filmstrip(event.globalPosition())
+
+        if (event.buttons() & Qt.MouseButton.LeftButton) and self._fit_mode and self.file_path and self._drag_start_pos is not None:
+            if not self._drag_started:
+                dist = (event.position().toPoint() - self._drag_start_pos).manhattanLength()
+                if dist >= QApplication.startDragDistance():
+                    self._drag_started = True
+                    self._start_drag()
+            event.accept()
+        else:
+            super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton and self._fit_mode:
+            self._drag_start_pos = None
+            self._drag_started = False
+        super().mouseReleaseEvent(event)
+
+    def _start_drag(self) -> None:
+        if not self.file_path or not os.path.exists(self.file_path):
+            return
+        drag = QDrag(self)
+        mime_data = QMimeData()
+        mime_data.setUrls([QUrl.fromLocalFile(self.file_path)])
+        stamp_rawviewer_export_drag(mime_data)
+        drag.setMimeData(mime_data)
+
+        # Try to capture the current viewport pixmap to use as the drag thumbnail
+        try:
+            drag_px = self.capture_viewport_pixmap()
+            if drag_px and not drag_px.isNull():
+                drag_px = drag_px.scaled(140, 140, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+                drag.setPixmap(drag_px)
+                drag.setHotSpot(QPoint(drag_px.width() // 2, drag_px.height() // 2))
+        except Exception:
+            pass
+
+        drag.exec(Qt.DropAction.CopyAction)
+
+    def _handle_native_gesture(self, event) -> bool:
+        """Trackpad pinch (macOS) and smart-zoom gestures."""
+        if not self._has_pixmap or event.type() != QEvent.Type.NativeGesture:
+            return False
+        gtype = event.gestureType()
+        if gtype == Qt.NativeGestureType.ZoomNativeGesture:
+            if self._zoom_in_blocked():
+                event.accept()
+                return True
+            self.zoom_by(1.0 + event.value() * 0.5)
+            event.accept()
+            return True
+        if gtype == Qt.NativeGestureType.SmartZoomNativeGesture:
+            self.toggle_fit()
+            event.accept()
+            return True
+        return False
+
+    def viewportEvent(self, event) -> bool:
+        # macOS delivers pinch/double-click to the OpenGL viewport, not the view's event().
+        if self._handle_native_gesture(event):
+            return True
+        if event.type() == QEvent.Type.MouseButtonDblClick:
+            self.mouseDoubleClickEvent(event)
+            return True
+        return super().viewportEvent(event)
 
     def event(self, event) -> bool:
-        """Trackpad pinch (macOS) and smart-zoom gestures."""
-        if event.type() == QEvent.Type.NativeGesture and self._has_pixmap:
-            gtype = event.gestureType()
-            if gtype == Qt.NativeGestureType.ZoomNativeGesture:
-                self.zoom_by(1.0 + event.value() * 0.5)
-                event.accept()
-                return True
-            if gtype == Qt.NativeGestureType.SmartZoomNativeGesture:
-                self.toggle_fit()
-                event.accept()
-                return True
+        if self._handle_native_gesture(event):
+            return True
         return super().event(event)
 
     def keyPressEvent(self, event: QKeyEvent) -> None:
@@ -494,6 +631,9 @@ class GpuImageView(QGraphicsView):
             return
         ctrl = bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
         if ctrl:
+            if self._zoom_in_blocked():
+                event.accept()
+                return
             # Control + Scroll: Zoom smoothly
             self.zoom_by(1.25 if delta > 0 else 0.8)
             event.accept()
@@ -513,14 +653,16 @@ class GpuImageView(QGraphicsView):
         super().wheelEvent(event)
 
     def mouseDoubleClickEvent(self, event) -> None:
-        if event.button() == Qt.MouseButton.LeftButton and self._has_pixmap:
-            scene_pt = self.mapToScene(event.position().toPoint())
-            self.doubleClickedAt.emit(
-                QPointF(
+        if event.button() == Qt.MouseButton.LeftButton:
+            if self._has_pixmap:
+                scene_pt = self.mapToScene(event.position().toPoint())
+                pt = QPointF(
                     max(0.0, min(scene_pt.x(), max(0, self._img_w - 1))),
                     max(0.0, min(scene_pt.y(), max(0, self._img_h - 1))),
                 )
-            )
+            else:
+                pt = QPointF(0.0, 0.0)
+            self.doubleClickedAt.emit(pt)
         event.accept()
 
     def resizeEvent(self, event) -> None:
@@ -552,7 +694,3 @@ class GpuImageView(QGraphicsView):
             self.fitModeChanged.emit(False)
         else:
             self.fit_to_window()
-            return
-        self.zoomChanged.emit(self.current_scale())
-
-

@@ -44,15 +44,9 @@ class ComparisonSession:
         return [path for path in self.visible_members() if path != self.select]
 
     def step_candidate(self, delta: int) -> None:
-        """Step the candidate pane among images other than the current select."""
-        if delta == 0:
-            return
         others = self._others()
-        if not others:
-            self.complete = True
-            return
-        if len(others) == 1:
-            self.candidate = others[0]
+        if len(others) <= 1:
+            self._handle_end_of_round()
             return
         try:
             index = others.index(self.candidate)
@@ -60,9 +54,14 @@ class ComparisonSession:
             self.candidate = others[0]
             return
         if delta > 0:
-            self.candidate = others[(index + 1) % len(others)]
+            if index >= len(others) - 1:
+                self._handle_end_of_round()
+                return
+            self.candidate = others[index + 1]
+        elif index <= 0:
+            self.candidate = others[-1]
         else:
-            self.candidate = others[(index - 1) % len(others)]
+            self.candidate = others[index - 1]
 
     def promote_candidate(self) -> str:
         """Promote Candidate to Select; returns new Select path."""
