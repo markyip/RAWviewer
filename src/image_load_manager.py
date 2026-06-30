@@ -587,6 +587,9 @@ class ImageLoadManager(QObject):
         self._gallery_warmup_throttle_depth = 0
         self._io_pressure_throttle_depth = 0
         self._indexing_throttle_depth = 0
+        # Semantic indexing throttle is toggled from the background index worker
+        # thread as well as the UI thread (face scan), so guard the depth counter.
+        self._indexing_throttle_lock = threading.Lock()
         
         # Throttled workers on macOS external drives to prevent IO overload crashes
         self.update_volume_throttling(os.getcwd())
@@ -642,16 +645,23 @@ class ImageLoadManager(QObject):
                 default_workers = max(4, int(env_workers))
             except ValueError:
                 pass
-        elif (
-            is_external_or_network_volume(folder_path)
-            and volume_speed_tier(folder_path) == "slow"
-        ):
-            # Confirmed-slow external/network volume: a large worker pool just
-            # thrashes the drive. Cap it (fast external drives keep full pool).
-            slow_workers = _env_int(
-                "RAWVIEWER_SLOW_VOLUME_MAX_WORKERS", 8, minimum=2
-            )
-            default_workers = min(default_workers, slow_workers)
+        elif is_external_or_network_volume(folder_path):
+            # Gallery thumbnail decodes are NOT gated by raw_load_limit (only heavy
+            # full-res decodes are), so the worker pool size is the real lever for
+            # how many simultaneous reads hit an external/USB/network drive. A full
+            # cpu*2 pool (~40 on a many-core box) saturates the drive and the LibRaw
+            # process pool, which can crash the app on Windows. Confirmed-slow drives
+            # are capped on every platform; the moderate cap for fast external drives
+            # is Windows-only (macOS handled them at full speed without crashing).
+            from common_image_loader import moderate_external_cap_enabled
+
+            cap = None
+            if volume_speed_tier(folder_path) == "slow":
+                cap = _env_int("RAWVIEWER_SLOW_VOLUME_MAX_WORKERS", 8, minimum=2)
+            elif moderate_external_cap_enabled():
+                cap = _env_int("RAWVIEWER_EXTERNAL_VOLUME_MAX_WORKERS", 16, minimum=2)
+            if cap is not None:
+                default_workers = min(default_workers, cap)
 
         # If no throttle is currently active, apply directly
         is_throttled = (
@@ -687,12 +697,26 @@ class ImageLoadManager(QObject):
         def _worker() -> None:
             from common_image_loader import probe_volume_speed, volume_speed_tier
 
-            probe_path = sample_path
-            if not probe_path or not os.path.isfile(probe_path):
-                probe_path = self._pick_probe_sample(folder_path)
-            if not probe_path:
+            # Probe files OTHER than the one just opened: its bytes are already in
+            # the OS page cache (fast-open decode), so probing it reports bogus
+            # GB/s speeds and a slow drive gets misclassified as "fast".
+            candidates = self._pick_probe_samples(
+                folder_path, exclude=sample_path, limit=5
+            )
+            if not candidates and sample_path and os.path.isfile(sample_path):
+                candidates = [sample_path]
+
+            mbps = None
+            probe_path = None
+            for cand in candidates:
+                probe_path = cand
+                mbps = probe_volume_speed(cand)
+                # probe returns None for page-cache hits (not cached); try a
+                # colder file until we get a trustworthy disk reading.
+                if mbps is not None:
+                    break
+            if probe_path is None:
                 return
-            mbps = probe_volume_speed(probe_path)
             try:
                 self.update_volume_throttling(folder_path)
             except Exception:
@@ -715,14 +739,30 @@ class ImageLoadManager(QObject):
         ).start()
 
     @staticmethod
-    def _pick_probe_sample(folder_path: Optional[str]) -> Optional[str]:
-        """Pick a single representative file in *folder_path* to probe (cheap scandir)."""
+    def _pick_probe_samples(
+        folder_path: Optional[str],
+        *,
+        exclude: Optional[str] = None,
+        limit: int = 5,
+    ) -> list:
+        """Pick representative files in *folder_path* to probe (cheap scandir).
+
+        Excludes *exclude* (e.g. the just-opened file whose bytes are already
+        cached) and prefers RAW files, which are large enough for a meaningful
+        random-offset read. Returns up to *limit* paths.
+        """
         if not folder_path or not os.path.isdir(folder_path):
-            return None
-        exts = {
-            ".arw", ".cr2", ".cr3", ".nef", ".dng", ".raf", ".orf", ".rw2",
-            ".jpg", ".jpeg", ".heic", ".png", ".tif", ".tiff",
-        }
+            return []
+        raw_exts = {".arw", ".cr2", ".cr3", ".nef", ".dng", ".raf", ".orf", ".rw2"}
+        other_exts = {".jpg", ".jpeg", ".heic", ".png", ".tif", ".tiff"}
+        exclude_norm = None
+        if exclude:
+            try:
+                exclude_norm = os.path.normcase(os.path.normpath(os.path.abspath(exclude)))
+            except Exception:
+                exclude_norm = None
+        raw_hits: list = []
+        other_hits: list = []
         try:
             with os.scandir(folder_path) as it:
                 for entry in it:
@@ -731,11 +771,27 @@ class ImageLoadManager(QObject):
                             continue
                     except OSError:
                         continue
-                    if os.path.splitext(entry.name)[1].lower() in exts:
-                        return entry.path
+                    ext = os.path.splitext(entry.name)[1].lower()
+                    if ext not in raw_exts and ext not in other_exts:
+                        continue
+                    if exclude_norm is not None:
+                        try:
+                            if os.path.normcase(os.path.normpath(entry.path)) == exclude_norm:
+                                continue
+                        except Exception:
+                            pass
+                    (raw_hits if ext in raw_exts else other_hits).append(entry.path)
+                    if len(raw_hits) >= limit:
+                        break
         except Exception:
-            return None
-        return None
+            return []
+        return (raw_hits + other_hits)[:limit]
+
+    @classmethod
+    def _pick_probe_sample(cls, folder_path: Optional[str]) -> Optional[str]:
+        """Single representative file in *folder_path* (legacy helper)."""
+        picks = cls._pick_probe_samples(folder_path, limit=1)
+        return picks[0] if picks else None
 
     def enter_io_pressure_throttle(self) -> None:
         """Cut worker/RAW concurrency after EMFILE so open fds can drain."""
@@ -774,12 +830,12 @@ class ImageLoadManager(QObject):
         if self._gallery_warmup_throttle_depth != 1:
             return
         self._warmup_saved_max_threads = self._thread_pool.maxThreadCount()
-        warmed_max = _env_int("RAWVIEWER_GALLERY_WARMUP_MAX_WORKERS", 8, minimum=2)
+        warmed_max = _env_int("RAWVIEWER_GALLERY_WARMUP_MAX_WORKERS", 24, minimum=2)
         self._thread_pool.setMaxThreadCount(
             min(warmed_max, self._warmup_saved_max_threads)
         )
         self._warmup_saved_raw_limit = self._raw_load_limit
-        self._raw_load_limit = min(2, int(self._raw_load_limit or 2))
+        self._raw_load_limit = min(6, int(self._raw_load_limit or 6))
 
     def exit_gallery_warmup_throttle(self) -> None:
         depth = int(getattr(self, "_gallery_warmup_throttle_depth", 0) or 0)
@@ -797,43 +853,79 @@ class ImageLoadManager(QObject):
 
     def enter_semantic_indexing_throttle(self) -> None:
         """Lower gallery/preload concurrency while semantic or face indexing runs."""
-        self._indexing_throttle_depth = (
-            int(getattr(self, "_indexing_throttle_depth", 0) or 0) + 1
-        )
-        if self._indexing_throttle_depth != 1:
-            return
-        self._indexing_saved_max_threads = self._thread_pool.maxThreadCount()
-        indexing_max = _env_int("RAWVIEWER_INDEXING_MAX_WORKERS", 6, minimum=2)
-        self._thread_pool.setMaxThreadCount(
-            min(indexing_max, self._indexing_saved_max_threads)
-        )
-        self._indexing_saved_raw_limit = self._raw_load_limit
-        self._raw_load_limit = min(1, int(self._raw_load_limit or 1))
-        import logging
+        lock = getattr(self, "_indexing_throttle_lock", None)
+        if lock is not None:
+            lock.acquire()
+        try:
+            self._indexing_throttle_depth = (
+                int(getattr(self, "_indexing_throttle_depth", 0) or 0) + 1
+            )
+            if self._indexing_throttle_depth != 1:
+                return
+            self._indexing_saved_max_threads = self._thread_pool.maxThreadCount()
+            indexing_max = _env_int("RAWVIEWER_INDEXING_MAX_WORKERS", 6, minimum=2)
+            self._thread_pool.setMaxThreadCount(
+                min(indexing_max, self._indexing_saved_max_threads)
+            )
+            self._indexing_saved_raw_limit = self._raw_load_limit
+            self._raw_load_limit = min(1, int(self._raw_load_limit or 1))
+            import logging
 
-        logging.getLogger(__name__).info(
-            "[LOAD] Semantic indexing throttle ON (max_workers=%d raw_limit=%d)",
-            self._thread_pool.maxThreadCount(),
-            self._raw_load_limit,
-        )
+            logging.getLogger(__name__).info(
+                "[LOAD] Semantic indexing throttle ON (max_workers=%d raw_limit=%d)",
+                self._thread_pool.maxThreadCount(),
+                self._raw_load_limit,
+            )
+        finally:
+            if lock is not None:
+                lock.release()
 
     def exit_semantic_indexing_throttle(self) -> None:
-        depth = int(getattr(self, "_indexing_throttle_depth", 0) or 0)
-        if depth <= 0:
-            return
-        self._indexing_throttle_depth = depth - 1
-        if self._indexing_throttle_depth > 0:
-            return
-        saved_threads = getattr(self, "_indexing_saved_max_threads", None)
-        if saved_threads is not None:
-            self._thread_pool.setMaxThreadCount(saved_threads)
-        saved_raw = getattr(self, "_indexing_saved_raw_limit", None)
-        if saved_raw is not None:
-            self._raw_load_limit = saved_raw
-        import logging
+        lock = getattr(self, "_indexing_throttle_lock", None)
+        if lock is not None:
+            lock.acquire()
+        try:
+            depth = int(getattr(self, "_indexing_throttle_depth", 0) or 0)
+            if depth <= 0:
+                return
+            self._indexing_throttle_depth = depth - 1
+            if self._indexing_throttle_depth > 0:
+                return
+            saved_threads = getattr(self, "_indexing_saved_max_threads", None)
+            if saved_threads is not None:
+                self._thread_pool.setMaxThreadCount(saved_threads)
+            saved_raw = getattr(self, "_indexing_saved_raw_limit", None)
+            if saved_raw is not None:
+                self._raw_load_limit = saved_raw
+            import logging
 
-        logging.getLogger(__name__).info("[LOAD] Semantic indexing throttle OFF")
+            logging.getLogger(__name__).info("[LOAD] Semantic indexing throttle OFF")
+        finally:
+            if lock is not None:
+                lock.release()
     
+    def force_exit_semantic_indexing_throttle(self) -> None:
+        lock = getattr(self, "_indexing_throttle_lock", None)
+        if lock is not None:
+            lock.acquire()
+        try:
+            depth = int(getattr(self, "_indexing_throttle_depth", 0) or 0)
+            if depth <= 0:
+                return
+            self._indexing_throttle_depth = 0
+            saved_threads = getattr(self, "_indexing_saved_max_threads", None)
+            if saved_threads is not None:
+                self._thread_pool.setMaxThreadCount(saved_threads)
+            saved_raw = getattr(self, "_indexing_saved_raw_limit", None)
+            if saved_raw is not None:
+                self._raw_load_limit = saved_raw
+            import logging
+
+            logging.getLogger(__name__).info("[LOAD] Semantic indexing throttle FORCE OFF")
+        finally:
+            if lock is not None:
+                lock.release()
+
     def load_image(self, file_path: str, priority: Priority = Priority.CURRENT,
                    cancel_existing: bool = True, use_full_resolution: bool = False,
                    stages: Optional[set] = None,
@@ -954,6 +1046,57 @@ class ImageLoadManager(QObject):
                 self._task_keys_by_path.pop(file_path, None)
             self._compact_work_queue()
                 
+    def cancel_non_gallery_tasks(self) -> None:
+        """Cancel queued/active work that is not a gallery grid thumbnail decode."""
+        with self._queue_lock:
+            for key, task in list(self._active_tasks.items()):
+                if getattr(task, "gallery_thumbnail", False):
+                    continue
+                task.cancel()
+                fp = getattr(task, "file_path", None)
+                self._active_tasks.pop(key, None)
+                if fp and fp in self._task_keys_by_path:
+                    self._task_keys_by_path[fp].discard(key)
+                    if not self._task_keys_by_path[fp]:
+                        self._task_keys_by_path.pop(fp, None)
+            self._active_raw_tasks = sum(
+                1
+                for t in self._active_tasks.values()
+                if getattr(t, "_counted_raw_slot", False)
+            )
+            self._compact_work_queue()
+
+    def cancel_queued_non_gallery_tasks(self) -> None:
+        """Drop queued (not yet running) work that is not a gallery thumbnail decode."""
+        with self._queue_lock:
+            if self._work_queue.empty():
+                return
+            kept: list = []
+            while not self._work_queue.empty():
+                try:
+                    task = self._work_queue.get_nowait()
+                except queue.Empty:
+                    break
+                if getattr(task, "gallery_thumbnail", False):
+                    kept.append(task)
+                    continue
+                task.cancel()
+                key = getattr(task, "task_key", None)
+                if key in self._active_tasks and self._active_tasks[key] is task:
+                    del self._active_tasks[key]
+                    fp = getattr(task, "file_path", None)
+                    if fp and fp in self._task_keys_by_path:
+                        self._task_keys_by_path[fp].discard(key)
+                        if not self._task_keys_by_path[fp]:
+                            self._task_keys_by_path.pop(fp, None)
+            for task in kept:
+                self._work_queue.put(task)
+            self._active_raw_tasks = sum(
+                1
+                for t in self._active_tasks.values()
+                if getattr(t, "_counted_raw_slot", False)
+            )
+
     def cancel_tasks_by_priority(self, priority: Priority) -> None:
         """Cancel all tasks matching the specified priority."""
         with self._queue_lock:
@@ -980,6 +1123,36 @@ class ImageLoadManager(QObject):
             # Reset RAW slot counter when dropping all tracked tasks; otherwise old
             # running tasks can leak the counter and block future RAW scheduling.
             self._active_raw_tasks = 0
+            self._compact_work_queue()
+
+    def cancel_all_tasks_except(self, keep_path: Optional[str]) -> None:
+        """Cancel every queued/active task except those for ``keep_path``.
+
+        Used when switching gallery -> single view: dozens of gallery thumbnail
+        decodes (all CURRENT priority) otherwise sit ahead of the foreground
+        image in the queue and saturate the worker pool, delaying its first
+        render. Dropping them frees worker slots for the image being opened.
+        """
+        with self._queue_lock:
+            keep_keys = set()
+            if keep_path:
+                keep_keys = set(self._task_keys_by_path.get(keep_path, ()))
+            for key, task in list(self._active_tasks.items()):
+                if key in keep_keys:
+                    continue
+                task.cancel()
+                fp = getattr(task, "file_path", None)
+                self._active_tasks.pop(key, None)
+                if fp and fp in self._task_keys_by_path:
+                    self._task_keys_by_path[fp].discard(key)
+                    if not self._task_keys_by_path[fp]:
+                        self._task_keys_by_path.pop(fp, None)
+            # In-flight RAW slots for kept tasks stay counted; everything else is gone.
+            self._active_raw_tasks = sum(
+                1
+                for t in self._active_tasks.values()
+                if getattr(t, "_counted_raw_slot", False)
+            )
             self._compact_work_queue()
 
     def _compact_work_queue(self) -> None:

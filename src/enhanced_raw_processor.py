@@ -46,6 +46,7 @@ RAW_EXIF_SENSOR_META_VER = 9
 from image_load_manager import yield_if_current_task_active
 
 _rawpy_global_lock = threading.Lock()
+_heavy_fallback_semaphore = threading.Semaphore(8)
 
 
 def _qimage_to_rgb_array(image: QImage) -> Optional[np.ndarray]:
@@ -472,6 +473,7 @@ class ThumbnailExtractor(QObject):
             else:
                 yield_if_current_task_active()
                 with _rawpy_global_lock:
+                    yield_if_current_task_active()
                     with rawpy.imread(file_path) as raw:
                         thumb = self._extract_from_raw_obj(raw, file_path, max_size)
         except Exception as e:
@@ -493,13 +495,16 @@ class ThumbnailExtractor(QObject):
         # If rawpy fails entirely (e.g. unsupported DNG) or returns None, use non-LibRaw fallbacks.
         is_slow = is_slow_storage_path(file_path)
         if thumb is None and allow_scan_fallback and not is_slow:
+            yield_if_current_task_active()
             scan_max = max_size if max_size > 0 else 8192
             thumb = extract_embedded_jpeg_by_scan(file_path, scan_max)
             if thumb is not None:
                 from common_image_loader import finalize_index_thumbnail_array
 
                 return finalize_index_thumbnail_array(file_path, thumb)
-        if thumb is None and allow_scan_fallback:
+        if thumb is None and allow_scan_fallback and not is_slow:
+            yield_if_current_task_active()
+            # Fallback 2: OS decode via Qt (handles DNGs without LibRaw JPEG previews, or weird TIFFs)
             thumb = _thumbnail_via_qimage_reader(file_path, max_size, auto_transform=False)
         if thumb is None and allow_scan_fallback and sys.platform == "darwin":
                 try:
@@ -1121,11 +1126,10 @@ class OptimizedRAWProcessor(QObject):
         try:
             yield_if_current_task_active()
             with _rawpy_global_lock:
-                with rawpy.imread(file_path) as raw:
-                    params = self.get_optimized_processing_params(
-                        file_path, exif_data)
-
-                    # Process with optimized parameters
+                raw_ctx = rawpy.imread(file_path)
+            with raw_ctx as raw:
+                params = self.get_optimized_processing_params(file_path, exif_data)
+                with _heavy_fallback_semaphore:
                     rgb_image = raw.postprocess(**params)
 
                     return rgb_image
@@ -1141,15 +1145,16 @@ class OptimizedRAWProcessor(QObject):
         try:
             yield_if_current_task_active()
             with _rawpy_global_lock:
-                with rawpy.imread(file_path) as raw:
-                    # Quality processing parameters
-                    params = {
-                        'use_camera_wb': True,
-                        'output_bps': 16,  # 16-bit for quality
-                        'gamma': (1, 1),   # Linear gamma for better quality
-                        'no_auto_bright': True,
-                        'bright': 1.0
-                    }
+                raw_ctx = rawpy.imread(file_path)
+            with raw_ctx as raw:
+                # Quality processing parameters
+                params = {
+                    'use_camera_wb': True,
+                    'output_bps': 16,  # 16-bit for quality
+                    'gamma': (1, 1),   # Linear gamma for better quality
+                    'no_auto_bright': True,
+                    'bright': 1.0
+                }
 
                 # Camera-specific quality adjustments
                 if self.is_canon_camera(file_path, exif_data):
@@ -1163,7 +1168,8 @@ class OptimizedRAWProcessor(QObject):
                         'fbdd_noise_reduction': rawpy.FBDDNoiseReductionMode.Full
                     })
 
-                rgb_image = raw.postprocess(**params)
+                with _heavy_fallback_semaphore:
+                    rgb_image = raw.postprocess(**params)
 
                 # Convert 16-bit to 8-bit for display
                 if rgb_image is not None and hasattr(rgb_image, 'dtype') and rgb_image.dtype == np.uint16:

@@ -2,9 +2,9 @@
 REM Run from repo root (scripts\Launch\bat -> ..\..\..)
 cd /d "%~dp0..\..\.."
 
-if exist ".rawviewer_cold_start" (
+if exist "%~dp0..\..\..\.rawviewer_cold_start" (
     set RAWVIEWER_DISABLE_SESSION_RESTORE=1
-    del /f /q ".rawviewer_cold_start" >nul 2>&1
+    del /f /q "%~dp0..\..\..\.rawviewer_cold_start" >nul 2>&1
     echo [run_debug] Cold start: session restore disabled for this launch ^(after clear_cache.bat^).
 )
 
@@ -18,7 +18,6 @@ echo Press Ctrl+C to stop the application.
 echo.
 
 set RAWVIEWER_USE_PROCESS_POOL=1
-REM Full [LOAD]/[MANAGER]/[DISPLAY] timeline on console (focus filter still allows [TTFR]/[LOAD])
 set RAWVIEWER_VERBOSE_INFO_LOGS=1
 set RAWVIEWER_VERBOSE_CONSOLE=0
 set RAWVIEWER_FOCUS_GALLERY_SWITCH=1
@@ -31,22 +30,24 @@ set RAWVIEWER_ENABLE_SEMANTIC_SEARCH=1
 set RAWVIEWER_MOBILECLIP_VARIANT=b
 set RAWVIEWER_INDEX_PAUSE_IN_GALLERY=1
 set RAWVIEWER_ORT_PROVIDERS=CUDAExecutionProvider,DmlExecutionProvider,CPUExecutionProvider
-REM GPU-accelerated single-image view (QGraphicsView + OpenGL). Set =0 to test legacy scroll area.
 set RAWVIEWER_GPU_VIEW=1
 
 where pixi >nul 2>nul
 if %ERRORLEVEL% EQU 0 (
     echo Using Pixi environment...
-    call pixi run python -u src/main.py %*
+    if exist "%~dp0..\..\..\.pixi\envs\default\python.exe" (
+        "%~dp0..\..\..\.pixi\envs\default\python.exe" -u "%~dp0..\..\..\src\main.py" %*
+    ) else (
+        call pixi run python -u "%~dp0..\..\..\src\main.py" %*
+    )
 ) else (
-    REM Activate virtual environment if it exists
-    if exist "rawviewer_env\Scripts\activate.bat" (
+    if exist "%~dp0..\..\..\rawviewer_env\Scripts\activate.bat" (
         echo Using virtual environment rawviewer_env...
-        call rawviewer_env\Scripts\activate.bat
+        call "%~dp0..\..\..\rawviewer_env\Scripts\activate.bat"
     ) else (
         echo Using system Python...
     )
-    call python -u src/main.py %*
+    call python -u "%~dp0..\..\..\src\main.py" %*
 )
 set EXIT_CODE=%ERRORLEVEL%
 

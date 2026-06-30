@@ -18,6 +18,11 @@ _io_pressure_until = 0.0
 _volume_speed_cache: Dict[str, float] = {}
 _volume_speed_lock = threading.Lock()
 
+# Readings above this are the OS page cache (RAM), not a real disk read, e.g. when
+# probing a file that was just opened/decoded. They must not classify a slow drive
+# as "fast". Real external interfaces (USB3/SATA/USB4/TB NVMe) stay well below this.
+_VOLUME_SPEED_CACHE_CEILING_MBPS = 3000.0
+
 
 def raise_process_fd_limit(soft_target: int = 4096) -> None:
     """Raise the soft RLIMIT_NOFILE cap (macOS default 256 is too low for gallery prefetch)."""
@@ -1103,6 +1108,21 @@ def _env_int_bounded(name: str, default: int, *, minimum: int = 1, maximum: int 
         return default
 
 
+def _windows_drive_type(path: str) -> Optional[int]:
+    """Windows GetDriveTypeW for the volume containing *path* (None if unavailable)."""
+    if os.name != "nt":
+        return None
+    norm = os.path.normpath(path or "")
+    if len(norm) < 2 or norm[1] != ":":
+        return None
+    try:
+        import ctypes
+
+        return int(ctypes.windll.kernel32.GetDriveTypeW(norm[:2] + "\\"))
+    except Exception:
+        return None
+
+
 def is_slow_storage_path(path: str) -> bool:
     """
     Heuristic for paths where aggressive parallel reads hurt more than help
@@ -1120,30 +1140,53 @@ def is_slow_storage_path(path: str) -> bool:
             if p and norm.lower().startswith(os.path.normpath(p).lower()):
                 return True
     if os.name == "nt" and len(norm) >= 2 and norm[1] == ":":
-        try:
-            import ctypes
-
-            root = norm[:2] + "\\"
-            # DRIVE_REMOTE=4, DRIVE_CDROM=5 — prefer scan-first embedded JPEG extraction
-            if ctypes.windll.kernel32.GetDriveTypeW(root) in (4, 5):
-                return True
-        except Exception:
-            pass
+        drive_type = _windows_drive_type(norm)
+        # DRIVE_REMOTE=4, DRIVE_CDROM=5 — prefer scan-first embedded JPEG extraction
+        if drive_type in (4, 5):
+            return True
     return False
 
 
+def _windows_system_drive() -> str:
+    """Boot/system volume letter (e.g. ``C:``) for probe heuristics."""
+    drive = os.environ.get("SystemDrive", "C:").strip()
+    if len(drive) >= 2 and drive[1] == ":":
+        return drive[:2].upper()
+    return "C:"
+
+
 def is_external_or_network_volume(path: Optional[str] = None) -> bool:
-    """True if path (or the current working directory if path is not given) is on a macOS external or network mount under /Volumes/."""
+    """True when *path* is on an external or network volume (not the boot fixed disk).
+
+    macOS: paths under ``/Volumes/`` (the boot volume is ``/``, not under Volumes).
+    Windows: UNC shares; removable USB/SD; mapped network drives; and any
+    **non-system** fixed volume (``D:\\``, ``I:\\``, …). USB HDD enclosures often
+    report as DRIVE_FIXED, so we probe every letter except ``%SystemDrive%`` once
+    per session — fast secondary SSDs stay unthrottled after the probe.
+    """
     import sys
-    if sys.platform != "darwin":
-        return False
+
     if path:
         norm = os.path.normpath(path)
+    else:
+        try:
+            norm = os.path.normpath(os.getcwd())
+        except Exception:
+            return False
+
+    if sys.platform == "darwin":
         return norm.startswith("/Volumes/")
-    try:
-        return os.getcwd().startswith("/Volumes/")
-    except Exception:
-        pass
+
+    if norm.startswith("\\\\"):
+        return True
+
+    if os.name == "nt" and len(norm) >= 2 and norm[1] == ":":
+        letter = norm[:2].upper()
+        drive_type = _windows_drive_type(norm)
+        if drive_type in (2, 4, 5):
+            return True
+        if drive_type == 3 and letter != _windows_system_drive():
+            return True
     return False
 
 
@@ -1190,6 +1233,9 @@ def index_metadata_worker_count(total_files: int, sample_path: Optional[str] = N
 
     Override: RAWVIEWER_INDEX_METADATA_WORKERS.
     Large folders (>2000) use a lower default to reduce SQLite EXIF cache lock contention.
+    External/USB/network volumes — and any confirmed-slow volume — use a smaller
+    pool so background indexing does not saturate the disk that gallery thumbnail
+    decodes are also reading from.
     """
     override = os.environ.get("RAWVIEWER_INDEX_METADATA_WORKERS", "").strip()
     if override:
@@ -1198,8 +1244,23 @@ def index_metadata_worker_count(total_files: int, sample_path: Optional[str] = N
     cpu = os.cpu_count() or 4
 
     if total_files > 2000:
-        return min(3, max(2, cpu // 2))
-    return min(6, max(2, cpu - 1))
+        count = min(3, max(2, cpu // 2))
+    else:
+        count = min(6, max(2, cpu - 1))
+
+    if sample_path is not None:
+        try:
+            if volume_speed_tier(sample_path) == "slow":
+                count = min(count, _env_int_bounded(
+                    "RAWVIEWER_SLOW_VOLUME_INDEX_WORKERS", 2, minimum=1, maximum=8
+                ))
+            elif is_external_or_network_volume(sample_path):
+                count = min(count, _env_int_bounded(
+                    "RAWVIEWER_EXTERNAL_VOLUME_INDEX_WORKERS", 4, minimum=1, maximum=8
+                ))
+        except Exception:
+            pass
+    return count
 
 
 def _volume_root_for(path: Optional[str]) -> Optional[str]:
@@ -1223,6 +1284,53 @@ def _volume_root_for(path: Optional[str]) -> Optional[str]:
     return os.sep
 
 
+def _measure_read_mbps(
+    path: Optional[str],
+    sample_bytes: int,
+    timeout_s: float,
+) -> Optional[float]:
+    """One cold-ish read-throughput measurement (MB/s) for *path*; no caching.
+
+    Reads ``sample_bytes`` starting from a pseudo-random offset rather than the
+    file head. Thumbnail/preview extraction (and a prior fast-open) caches the
+    head/embedded-JPEG region, so reading the head would report RAM speed; a
+    random mid-file offset is far more likely to hit the disk.
+    """
+    try:
+        if not (path and os.path.isfile(path)):
+            return None
+        size = os.path.getsize(path)
+        to_read = min(sample_bytes, size)
+        if to_read <= 0:
+            return None
+        max_offset = max(0, size - to_read)
+        offset = 0
+        if max_offset > 0:
+            try:
+                offset = (os.getpid() * 2654435761 + time.monotonic_ns()) % (max_offset + 1)
+            except Exception:
+                offset = max_offset // 2
+        read_total = 0
+        start = time.monotonic()
+        with open(path, "rb", buffering=0) as fh:
+            if offset:
+                fh.seek(offset)
+            while read_total < to_read:
+                chunk = fh.read(min(1024 * 1024, to_read - read_total))
+                if not chunk:
+                    break
+                read_total += len(chunk)
+                if time.monotonic() - start > timeout_s:
+                    break
+        elapsed = max(1e-4, time.monotonic() - start)
+        # Require a meaningful sample (>=512 KB) before trusting the number.
+        if read_total >= 512 * 1024:
+            return (read_total / (1024 * 1024)) / elapsed
+    except Exception:
+        return None
+    return None
+
+
 def probe_volume_speed(
     sample_path: Optional[str],
     *,
@@ -1236,7 +1344,10 @@ def probe_volume_speed(
     whole session, so this measures each mount at most once. Designed to run off
     the main thread (see ImageLoadManager.prime_volume_speed_async).
 
-    Returns the measured MB/s, or ``None`` if it could not be measured.
+    Page-cache hits (implausibly high readings, e.g. probing a just-opened file)
+    are rejected and NOT cached, so the caller can retry with a colder file.
+
+    Returns the measured MB/s, or ``None`` if it could not be measured/trusted.
     """
     root = _volume_root_for(sample_path)
     if not root:
@@ -1246,28 +1357,12 @@ def probe_volume_speed(
     if cached is not None:
         return cached if cached >= 0 else None
 
-    mbps: Optional[float] = None
-    try:
-        if sample_path and os.path.isfile(sample_path):
-            size = os.path.getsize(sample_path)
-            to_read = min(sample_bytes, size)
-            if to_read > 0:
-                read_total = 0
-                start = time.monotonic()
-                with open(sample_path, "rb", buffering=0) as fh:
-                    while read_total < to_read:
-                        chunk = fh.read(min(1024 * 1024, to_read - read_total))
-                        if not chunk:
-                            break
-                        read_total += len(chunk)
-                        if time.monotonic() - start > timeout_s:
-                            break
-                elapsed = max(1e-4, time.monotonic() - start)
-                # Require a meaningful sample (>=512 KB) before trusting the number.
-                if read_total >= 512 * 1024:
-                    mbps = (read_total / (1024 * 1024)) / elapsed
-    except Exception:
-        mbps = None
+    mbps = _measure_read_mbps(sample_path, sample_bytes, timeout_s)
+
+    if mbps is not None and mbps > _VOLUME_SPEED_CACHE_CEILING_MBPS:
+        # RAM/page-cache read, not the disk. Do not trust or cache it — leave the
+        # volume unprobed so prime_volume_speed_async can try a colder file.
+        return None
 
     with _volume_speed_lock:
         _volume_speed_cache[root] = mbps if mbps is not None else -1.0
@@ -1298,12 +1393,33 @@ def volume_speed_tier(sample_path: Optional[str]) -> str:
     return "slow" if cached < slow_threshold else "fast"
 
 
+def moderate_external_cap_enabled() -> bool:
+    """Whether fast (not just confirmed-slow) external volumes get a moderate cap.
+
+    Windows-only by default: the native gallery crash (high concurrent LibRaw +
+    GDI/handle pressure) only reproduces on Windows. macOS handled fast external
+    (Thunderbolt/USB4) drives at full concurrency without crashing, so we keep its
+    original behaviour — only confirmed-slow volumes are throttled there.
+    Override with RAWVIEWER_MODERATE_EXTERNAL_CAP=1/0.
+    """
+    import sys
+
+    raw = os.environ.get("RAWVIEWER_MODERATE_EXTERNAL_CAP", "").strip().lower()
+    if raw in ("1", "true", "yes", "on"):
+        return True
+    if raw in ("0", "false", "no", "off"):
+        return False
+    return sys.platform == "win32"
+
+
 def raw_concurrent_load_limit(sample_path: Optional[str] = None) -> int:
     """Max concurrent LibRaw full/preview decodes in ImageLoadManager.
 
     An explicit RAWVIEWER_RAW_LOAD_LIMIT always wins. Otherwise concurrency is
-    only reduced for external/network volumes that a lightweight probe has
-    confirmed to be slow; fast external drives keep the full limit.
+    reduced for confirmed-slow external/network volumes (all platforms). On
+    Windows, every external volume also gets a moderate cap (see
+    moderate_external_cap_enabled) to avoid the native gallery crash; macOS keeps
+    full concurrency on fast external drives.
     """
     cpu = os.cpu_count() or 4
     default = max(4, cpu)
@@ -1312,14 +1428,21 @@ def raw_concurrent_load_limit(sample_path: Optional[str] = None) -> int:
     )
 
     if not os.environ.get("RAWVIEWER_RAW_LOAD_LIMIT", "").strip():
-        if (
-            is_external_or_network_volume(sample_path)
-            and volume_speed_tier(sample_path) == "slow"
-        ):
-            slow_limit = _env_int_bounded(
-                "RAWVIEWER_SLOW_VOLUME_RAW_LIMIT", 3, minimum=1, maximum=8
-            )
-            limit = min(limit, slow_limit)
+        if is_external_or_network_volume(sample_path):
+            if volume_speed_tier(sample_path) == "slow":
+                limit = min(
+                    limit,
+                    _env_int_bounded(
+                        "RAWVIEWER_SLOW_VOLUME_RAW_LIMIT", 3, minimum=1, maximum=8
+                    ),
+                )
+            elif moderate_external_cap_enabled():
+                limit = min(
+                    limit,
+                    _env_int_bounded(
+                        "RAWVIEWER_EXTERNAL_VOLUME_RAW_LIMIT", 8, minimum=1, maximum=32
+                    ),
+                )
     return limit
 
 

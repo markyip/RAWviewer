@@ -17,14 +17,13 @@ import hashlib
 import json
 import sys
 import gzip
-import urllib.request
 import tempfile
 import threading
 import concurrent.futures
 from io import BytesIO
 from functools import lru_cache
 from dataclasses import dataclass
-from typing import Callable, Dict, Iterable, List, Optional, Sequence
+from typing import Callable, Dict, List, Optional, Sequence
 
 import numpy as np
 from PIL import Image, ImageOps
@@ -355,7 +354,6 @@ SEMANTIC_BATCH_TUNE_CACHE_VERSION = "v8"
 
 
 def _thumbnail_jpeg_bytes(arr: np.ndarray, quality: int = 85) -> bytes:
-    from io import BytesIO
 
     pil = Image.fromarray(np.asarray(arr, dtype=np.uint8)).convert("RGB")
     buf = BytesIO()
@@ -590,7 +588,6 @@ def _yunet_warmup() -> None:
     """Initialize YuNet once on the calling thread before any worker pool starts."""
     import logging
 
-    import cv2
     import numpy as np
 
     try:
@@ -869,15 +866,8 @@ def _index_source_thumbnail_present(cache, file_path: str) -> bool:
 
 
 def _index_thumbnail_needs_warm(cache, file_path: str) -> bool:
-    """True when index tiers are missing or thumbnail pixels have wrong orientation."""
-    if not _index_source_thumbnail_present(cache, file_path):
-        return True
-    arr = _cached_index_source_array(cache, file_path)
-    if arr is None:
-        return True
-    from common_image_loader import index_thumbnail_needs_orient_fix
-
-    return index_thumbnail_needs_orient_fix(file_path, arr, cache=cache)
+    """True when index tiers are missing."""
+    return not _index_source_thumbnail_present(cache, file_path)
 
 
 def _load_face_scan_image(file_path: str, max_size: int) -> Optional[Image.Image]:
@@ -2404,7 +2394,50 @@ class SemanticImageIndex:
         self._metadata_backfill_paths: set[str] = set()
         self._metadata_backfill_geocode: set[str] = set()
         self._metadata_backfill_running = False
+        # ImageLoadManager throttle hooks. Acquired only around heavy work (neural
+        # pass / thumbnail warm / face scan) and released while paused, so that a
+        # background index sitting idle in the gallery never starves thumbnail decode.
+        self._load_throttle_enter = None
+        self._load_throttle_exit = None
+        self._load_throttle_held = False
+        self._load_throttle_lock = threading.Lock()
         self._init_db_if_needed()
+
+    def set_load_throttle_hooks(self, enter, exit_) -> None:
+        """Wire callables that raise/lower ImageLoadManager concurrency.
+
+        Called by the UI before a background index run. ``enter``/``exit_`` are the
+        ImageLoadManager throttle toggles; they are thread-safe and depth-counted.
+        """
+        with self._load_throttle_lock:
+            self._load_throttle_enter = enter
+            self._load_throttle_exit = exit_
+
+    def _acquire_load_throttle(self) -> None:
+        """Engage the ILM indexing throttle for the duration of heavy work."""
+        with self._load_throttle_lock:
+            if self._load_throttle_held:
+                return
+            fn = self._load_throttle_enter
+            self._load_throttle_held = True
+        if fn is not None:
+            try:
+                fn()
+            except Exception:
+                pass
+
+    def _release_load_throttle(self) -> None:
+        """Release the ILM indexing throttle (idempotent)."""
+        with self._load_throttle_lock:
+            if not self._load_throttle_held:
+                return
+            fn = self._load_throttle_exit
+            self._load_throttle_held = False
+        if fn is not None:
+            try:
+                fn()
+            except Exception:
+                pass
 
     def pause_indexing(self, pause: bool) -> None:
         """Pause or resume the background indexing loops."""
@@ -2420,14 +2453,26 @@ class SemanticImageIndex:
             self._paused = True
 
     def _wait_if_paused(self) -> None:
-        """Block while paused; raise IndexAborted when folder scope is invalidated."""
+        """Block while paused; raise IndexAborted when folder scope is invalidated.
+
+        While blocked we drop any ImageLoadManager throttle we are holding so a
+        paused index never serializes gallery thumbnail decode, then re-acquire it
+        on resume only if it was held when the pause began.
+        """
         flag = os.environ.get("RAWVIEWER_INDEX_PAUSE_IN_GALLERY", "1").strip().lower()
+        throttle_dropped = False
         while True:
             with self._pause_lock:
                 if self._abort_requested:
+                    # Tearing down this run; leave the throttle released.
                     raise IndexAborted()
                 if flag not in ("1", "true", "yes", "on") or not self._paused:
+                    if throttle_dropped:
+                        self._acquire_load_throttle()
                     return
+            if self._load_throttle_held and not throttle_dropped:
+                self._release_load_throttle()
+                throttle_dropped = True
             time.sleep(0.5)
 
     def _mark_metadata_ready_without_embedding(
@@ -3347,7 +3392,6 @@ class SemanticImageIndex:
                     import cv2
                     import numpy as np
                     import os
-                    import urllib.request
                     import threading
                     
                     global _FACE_DETECTOR_NET
@@ -3588,7 +3632,7 @@ class SemanticImageIndex:
                         coreml_forced,
                     )
                     return min(total, coreml_forced)
-                if not os.environ.get("RAWVIEWER_SEMANTIC_COREML_TUNE", "").strip().lower() in ("1", "true", "yes", "on"):
+                if os.environ.get("RAWVIEWER_SEMANTIC_COREML_TUNE", "").strip().lower() not in ("1", "true", "yes", "on"):
                     if semantic_coreml_use_native_batch():
                         chunk = semantic_coreml_chunk_size()
                         logger.info(
@@ -4551,10 +4595,11 @@ class SemanticImageIndex:
         import sqlite3
         logger = logging.getLogger(__name__)
         t_start = time.time()
-        log_inference_acceleration_profile()
         if run_semantic_embeddings is None:
             run_semantic_embeddings = semantic_embeddings_enabled()
         logger.info(f"[INDEX] Starting indexing of {len(file_paths)} file paths.")
+        if run_semantic_embeddings:
+            log_inference_acceleration_profile()
         if sys.platform != "darwin":
             logger.info("[VISION] Using OpenCV offline face scanner on Windows.")
 
@@ -4781,6 +4826,9 @@ class SemanticImageIndex:
             if total_sem > 0:
                 self._wait_if_paused()
                 if run_semantic_embeddings:
+                    # Heavy GPU/RAM + thumbnail decode work: throttle ILM now (not
+                    # at index start) so light/paused phases never starve the gallery.
+                    self._acquire_load_throttle()
                     logger.info(f"[INDEX] Starting AI features neural pass (MobileCLIP) for {total_sem} files...")
                     if progress_callback:
                         progress_callback(
@@ -5024,16 +5072,9 @@ class SemanticImageIndex:
                     if semantic_embeddings_enabled():
                         pass
                     else:
-                        warm_paths = [cp for cp, _ in pending_for_semantic]
-                        try:
-                            self._warm_thumbnail_cache_for_semantic_index(
-                                warm_paths,
-                                progress_callback,
-                                progress_album_total=progress_album_total,
-                                progress_indexed_base=progress_indexed_base,
-                            )
-                        except Exception as e:
-                            logger.warning(f"[INDEX] Background thumbnail warming failed: {e}")
+                        # Skip background thumbnail warming for metadata-only index to avoid
+                        # disk/CPU contention and locking up the gallery image loader.
+                        pass
 
                     for canonical_fp, st in pending_for_semantic:
                         self._wait_if_paused()
@@ -5043,6 +5084,8 @@ class SemanticImageIndex:
 
             # Phase 3: face scan (optional; skipped when deferred to a follow-up worker).
             if run_face_inline:
+                # Face detection decodes images at scale — heavy, so throttle here.
+                self._acquire_load_throttle()
                 self.release_mobileclip_gpu_memory()
                 logger.info(
                     "[INDEX] Face scanning %d files (semantic pending was %d)",
@@ -5067,6 +5110,8 @@ class SemanticImageIndex:
         except IndexAborted:
             logger.info("[INDEX] Indexing aborted (folder scope changed)")
         finally:
+            # Always drop the ILM throttle so concurrency is restored for the gallery.
+            self._release_load_throttle()
             conn.close()
             
         duration = time.time() - t_start
@@ -5189,6 +5234,59 @@ class SemanticImageIndex:
             len(file_paths),
             time.time() - t0
         )
+        return pending
+
+    def get_metadata_extraction_pending_paths(self, file_paths: Sequence[str]) -> List[str]:
+        """Paths that need on-disk EXIF/metadata extraction (no row or file changed).
+
+        Narrower than :meth:`get_pending_paths`, which also lists files awaiting
+        semantic embeddings. Use this to skip ``build_index`` when the silent
+        metadata pass has nothing to read from disk.
+        """
+        if not file_paths:
+            return []
+
+        indexable_paths, _ = self._filter_duplicate_raw_companions(file_paths)
+        if not indexable_paths:
+            return []
+
+        rows = self._fetch_rows_for_paths(indexable_paths)
+        row_map = {}
+        for r in rows:
+            row_map[self._canonical_path(r["file_path"])] = r
+
+        pending: List[str] = []
+        canonical_map = {self._canonical_path(p): p for p in indexable_paths if p}
+        for cp, original in canonical_map.items():
+            try:
+                st = os.stat(cp)
+            except OSError:
+                pending.append(original)
+                continue
+
+            row = row_map.get(cp)
+            if not row:
+                pending.append(original)
+                continue
+
+            row_size = self._row_value(row, "file_size", None)
+            if row_size is None or int(row_size) != int(st.st_size):
+                pending.append(original)
+                continue
+
+            row_mtime_ns = self._row_value(row, "mtime_ns", None)
+            if row_mtime_ns is not None:
+                try:
+                    if int(row_mtime_ns) != self._mtime_ns_from_stat(st):
+                        pending.append(original)
+                except Exception:
+                    pending.append(original)
+                continue
+
+            row_mtime = self._row_value(row, "file_mtime", None)
+            if row_mtime is None or not self._mtime_matches(float(row_mtime), st):
+                pending.append(original)
+
         return pending
 
     def get_pending_embedding_paths(self, file_paths: Sequence[str]) -> List[str]:

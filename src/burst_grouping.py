@@ -36,7 +36,11 @@ def burst_gap_seconds_from_settings(settings) -> float:
 def _norm(path: str) -> str:
     if not path:
         return ""
-    return os.path.normpath(os.path.abspath(path))
+    # normcase keeps these keys consistent with image_cache._exif_cache_path_key
+    # and main._norm_path so capture-time lookups, the rejected set, and
+    # path_to_group all match on Windows (case-insensitive paths). Without it,
+    # capture_times keys (lowercased) never matched and no bursts grouped.
+    return os.path.normcase(os.path.normpath(os.path.abspath(path)))
 
 
 def _capture_times_lookup(

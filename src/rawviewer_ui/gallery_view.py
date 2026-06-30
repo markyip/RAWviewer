@@ -1,19 +1,18 @@
 import sys
 import time
 import os
-import threading
 import logging
 import numpy as np
 from typing import List, Dict, Any, Optional
 
-from PyQt6.QtWidgets import QWidget, QScrollArea, QLabel, QApplication
-from PyQt6.QtCore import Qt, QTimer, QRect, QEvent, QSize, QUrl, QMimeData, QPoint
-from PyQt6.QtGui import QPixmap, QImage, QPainter, QBrush, QColor, QFont, QTransform, QDrag
+from PyQt6.QtWidgets import QWidget, QScrollArea, QLabel
+from PyQt6.QtCore import Qt, QTimer, QRect, QEvent, QSize
+from PyQt6.QtGui import QPixmap, QImage, QFont, QTransform
 
-from rawviewer_ui.widgets import ThumbnailLabel, ImageLoaded
+from rawviewer_ui.widgets import ThumbnailLabel
 from image_cache import LRUCache
 from image_load_manager import get_image_load_manager, Priority
-from common_image_loader import get_image_aspect_ratio, is_raw_file
+from common_image_loader import is_raw_file
 
 logger = logging.getLogger(__name__)
 
@@ -76,21 +75,72 @@ def _gallery_scheduling_budgets(fast: bool) -> tuple[int, int, int]:
             _env_int("RAWVIEWER_GALLERY_ACTIVE_CAP_FAST", 24, minimum=4),
         )
     return (
-        _env_int("RAWVIEWER_GALLERY_MAX_WIDGETS", 28, minimum=1),
-        _env_int("RAWVIEWER_GALLERY_MAX_TASKS", 44, minimum=1),
-        _env_int("RAWVIEWER_GALLERY_ACTIVE_CAP", 44, minimum=4),
+        _env_int("RAWVIEWER_GALLERY_MAX_WIDGETS", 48, minimum=1),
+        _env_int("RAWVIEWER_GALLERY_MAX_TASKS", 64, minimum=1),
+        _env_int("RAWVIEWER_GALLERY_ACTIVE_CAP", 64, minimum=4),
+    )
+
+
+def _apply_external_gallery_caps(
+    max_widgets: int,
+    max_tasks: int,
+    active_cap: int,
+    folder_path: Optional[str],
+) -> tuple[int, int, int]:
+    """Lower gallery scheduling on external/USB/network volumes (post-warmup too).
+
+    Applies when the volume is confirmed-slow (all platforms) or, on Windows,
+    for any external volume (moderate_external_cap_enabled). macOS fast external
+    drives keep the full gallery budget — they never showed the native crash.
+    """
+    if not folder_path:
+        return max_widgets, max_tasks, active_cap
+    try:
+        from common_image_loader import (
+            is_external_or_network_volume,
+            moderate_external_cap_enabled,
+            volume_speed_tier,
+        )
+
+        if not is_external_or_network_volume(folder_path):
+            return max_widgets, max_tasks, active_cap
+        is_slow = volume_speed_tier(folder_path) == "slow"
+        if is_slow:
+            cap = _env_int("RAWVIEWER_SLOW_GALLERY_ACTIVE_CAP", 24, minimum=2)
+            tasks = _env_int("RAWVIEWER_SLOW_GALLERY_MAX_TASKS", 16, minimum=2)
+            widgets = _env_int("RAWVIEWER_SLOW_GALLERY_MAX_WIDGETS", 32, minimum=4)
+            return (
+                min(max_widgets, widgets),
+                min(max_tasks, tasks),
+                min(active_cap, cap),
+            )
+        if not moderate_external_cap_enabled():
+            # Stability without throttling: cap fast external on Windows only (GL crash
+            # was mode-switch teardown, not this concurrency). macOS keeps full budget.
+            if sys.platform != "win32":
+                return max_widgets, max_tasks, active_cap
+    except Exception:
+        return max_widgets, max_tasks, active_cap
+    # Fast external (e.g. USB3/TB probing >120 MB/s).
+    cap = _env_int("RAWVIEWER_EXTERNAL_GALLERY_ACTIVE_CAP", 32, minimum=2)
+    tasks = _env_int("RAWVIEWER_EXTERNAL_GALLERY_MAX_TASKS", 24, minimum=2)
+    widgets = _env_int("RAWVIEWER_EXTERNAL_GALLERY_MAX_WIDGETS", 40, minimum=4)
+    return (
+        min(max_widgets, widgets),
+        min(max_tasks, tasks),
+        min(active_cap, cap),
     )
 
 
 def _gallery_warmup_scheduling_budgets(file_count: int) -> tuple[int, int, int]:
-    """Tight budgets during gallery entry to avoid native crashes on huge folders."""
+    """Brief soft cap during gallery entry (GL teardown is the real crash fix)."""
     if file_count >= 2500:
-        return (6, 4, 8)
+        return (12, 8, 16)
     if file_count >= 1200:
-        return (10, 6, 12)
+        return (20, 14, 28)
     if file_count >= 500:
-        return (14, 10, 18)
-    return (18, 14, 24)
+        return (24, 18, 32)
+    return (28, 20, 36)
 
 
 def _gallery_idle_preload_batch() -> int:
@@ -234,6 +284,9 @@ class JustifiedGallery(QWidget):
         self._requested_thumbnail_paths = set()
         self._pending_scroll_to_path = None
         self._pending_scroll_anchor_state = None
+        # True once the user has jumped far from the entry-point image (see
+        # load_visible_images' big-jump handling); reset on each fresh set_images().
+        self._entry_prefetch_abandoned = False
         self._is_zooming = False
         self._zoom_anchor_state = None
         self._gallery_zoom_rebuild = False
@@ -474,6 +527,10 @@ class JustifiedGallery(QWidget):
     def prepare_gallery_display(self) -> None:
         """Ensure layout and widget geometry are valid when gallery becomes visible."""
         if not self.images:
+            return
+        # _update_gallery_view -> set_images() runs a few ms later on mode switch;
+        # skip a duplicate forced build here (same viewport width, double layout).
+        if time.time() < float(getattr(self, "_gallery_entry_coalesce_until", 0.0) or 0.0):
             return
         if not self._layout_matches_current_images():
             self.build_gallery(force=True)
@@ -845,7 +902,11 @@ class JustifiedGallery(QWidget):
         if getattr(self, "_pending_scroll_to_path", None):
             return current_idx
         pending = self._entry_anchor_path()
-        if pending and self._entry_prefetch_active(current_idx, scroll_y, viewport_h):
+        if (
+            pending
+            and not getattr(self, "_entry_prefetch_abandoned", False)
+            and self._entry_prefetch_active(current_idx, scroll_y, viewport_h)
+        ):
             return current_idx
         if viewport_idx is None:
             return current_idx
@@ -1113,6 +1174,8 @@ class JustifiedGallery(QWidget):
                     return
                 if build_done["gen"] == build_gen:
                     return
+                if self._building:
+                    return
                 if not need_force and self._layout_matches_current_images():
                     build_done["gen"] = build_gen
                     self._reposition_thumbnail_widgets()
@@ -1303,7 +1366,7 @@ class JustifiedGallery(QWidget):
             dpr = float(base.devicePixelRatio() or 1.0)
             effective = max(int(base.width() * dpr), int(base.height() * dpr))
             need = max(int(physical_size.width()), int(physical_size.height()))
-            floor = min(int(disk_preview_max_edge() * 0.85), max(256, int(need * 0.85)))
+            floor = min(int(disk_preview_max_edge() * 0.85), int(need * 0.85))
             return effective >= floor
         except Exception:
             return True
@@ -1487,13 +1550,42 @@ class JustifiedGallery(QWidget):
         self._active_tasks[path] = (time.time(), priority)
 
     def begin_gallery_warmup(self, file_count: int = 0) -> None:
-        """Soften thumbnail/Qt work while switching into gallery on large folders."""
+        """Brief soft cap while switching into gallery on large folders."""
+        # Fresh gallery entry: re-arm entry-point anchoring (see
+        # _gallery_prefetch_center_index / _entry_prefetch_abandoned).
+        self._entry_prefetch_abandoned = False
         duration = min(
-            10.0,
-            2.0 + max(0, int(file_count or 0)) / 1000.0,
+            4.0,
+            1.5 + max(0, int(file_count or 0)) / 2000.0,
         )
+        try:
+            pv = getattr(self, "parent_viewer", None)
+            folder_path = getattr(pv, "current_folder", None) if pv is not None else None
+            if folder_path:
+                from common_image_loader import (
+                    is_external_or_network_volume,
+                    moderate_external_cap_enabled,
+                    volume_speed_tier,
+                )
+
+                if (
+                    moderate_external_cap_enabled()
+                    and is_external_or_network_volume(folder_path)
+                ):
+                    duration = max(
+                        duration,
+                        min(6.0, 2.5 + max(0, int(file_count or 0)) / 1000.0),
+                    )
+        except Exception:
+            pass
         self._gallery_warmup_until = time.time() + duration
         self._building = False
+        # Coalesce prepare_gallery_display + set_images builds during mode switch.
+        self._gallery_entry_coalesce_until = time.time() + 0.8
+        QTimer.singleShot(
+            int(duration * 1000) + 100,
+            self._end_gallery_load_warmup_throttle,
+        )
         self._pending_gallery_build = False
         self._pending_build_metadata = None
         self._pending_build_force = False
@@ -1507,6 +1599,18 @@ class JustifiedGallery(QWidget):
 
     def _gallery_warmup_active(self) -> bool:
         return time.time() < float(getattr(self, "_gallery_warmup_until", 0.0) or 0.0)
+
+    def _end_gallery_load_warmup_throttle(self) -> None:
+        """Restore ImageLoadManager concurrency after gallery entry warmup."""
+        pv = self.parent_viewer
+        if pv is None or getattr(pv, "view_mode", "") != "gallery":
+            return
+        try:
+            mgr = getattr(pv, "image_manager", None)
+            if mgr is not None and hasattr(mgr, "exit_gallery_warmup_throttle"):
+                mgr.exit_gallery_warmup_throttle()
+        except Exception:
+            pass
 
     def _stop_layout_rebuild_timers(self) -> None:
         """Cancel pending gallery layout rebuilds (e.g. when leaving gallery mode)."""
@@ -1595,6 +1699,10 @@ class JustifiedGallery(QWidget):
     def _schedule_viewport_width_rebuild(self, *, debounce_ms: int = 120) -> None:
         """Rebuild justified rows when the scroll viewport width changes."""
         if getattr(self, "_ignore_resize_events", False):
+            return
+        if time.time() < float(getattr(self, "_gallery_entry_coalesce_until", 0.0) or 0.0):
+            return
+        if self._gallery_warmup_active():
             return
         # Rebuilding rows during scroll jumps content height and causes visible glitches.
         if self._is_scrolling_fast or (time.time() - self._last_scroll_event_t) < 0.12:
@@ -2070,7 +2178,10 @@ class JustifiedGallery(QWidget):
                 getattr(self, "_is_zooming", False)
                 or getattr(self, "_gallery_zoom_rebuild", False)
             ):
-                self._schedule_aspects_settle_rebuild()
+                # Only schedule a deferred settle when aspects are still drifting;
+                # otherwise large folders rebuild every few seconds for no gain.
+                if self._metadata_changed_paths:
+                    self._schedule_aspects_settle_rebuild()
             if len(self.images) > 1000:
                 self.hide_loading_message()
         finally:
@@ -2081,12 +2192,18 @@ class JustifiedGallery(QWidget):
                 pending_force = self._pending_build_force
                 self._pending_build_metadata = None
                 self._pending_build_force = False
-                QTimer.singleShot(
-                    0,
-                    lambda m=pending_meta, f=pending_force: self.build_gallery(
-                        bulk_metadata=m, force=f
-                    ),
-                )
+                if self._gallery_warmup_active() or time.time() < float(
+                    getattr(self, "_gallery_entry_coalesce_until", 0.0) or 0.0
+                ):
+                    self._reposition_thumbnail_widgets()
+                    self._request_load_visible_images(20)
+                else:
+                    QTimer.singleShot(
+                        0,
+                        lambda m=pending_meta, f=pending_force: self.build_gallery(
+                            bulk_metadata=m, force=f
+                        ),
+                    )
             elif should_load_visible and not self._gallery_folder_superseded():
                 # Apply persisted visual rotations once layout indices exist (set_images()
                 # schedules build asynchronously; an earlier sync would no-op).
@@ -2177,6 +2294,9 @@ class JustifiedGallery(QWidget):
         scrollbar = p.verticalScrollBar()
         scroll_y = scrollbar.value()
         v_h = v_port.height()
+        if v_h <= 0:
+            self._request_load_visible_images(50)
+            return
         actively_scrolling = self._is_actively_scrolling()
 
         actively_scrolling = self._is_actively_scrolling()
@@ -2236,7 +2356,15 @@ class JustifiedGallery(QWidget):
         )
 
         # If the user jumped far (typical when dragging scrollbar), flush stale queue so new
-        # position thumbnails start quickly.
+        # position thumbnails start quickly. Do NOT clear _requested_thumbnail_paths here:
+        # flush_queue() only drops the load manager's own queue/active-task bookkeeping, not
+        # this gallery's separate self._active_tasks dict (used for the active_cap check
+        # below). Clearing _requested_thumbnail_paths would skip the to_cancel diff right
+        # after this block, which is what actually pops stale paths out of self._active_tasks
+        # -- leaving old, now-offscreen CURRENT-priority entries stuck "active" (they survive
+        # the drop_prefetch eviction since it only targets non-CURRENT priority) until the
+        # blanket 4s sweep at the top of this function catches them, stalling the new
+        # viewport's thumbnails behind a still-counted-active backlog it can no longer see.
         if abs(scroll_y - self._last_scheduled_scroll_y) > (v_h * 3):
             try:
                 if hasattr(self.load_manager, "flush_queue"):
@@ -2245,7 +2373,13 @@ class JustifiedGallery(QWidget):
                     self.load_manager.cancel_all_tasks()
             except Exception:
                 pass
-            self._requested_thumbnail_paths.clear()
+            # A deliberate jump away means the user is no longer following the entry
+            # point -- stop anchoring center_paths/prefetch to it (see
+            # _entry_prefetch_active, which is otherwise purely spatial and would
+            # keep reserving active_cap slots around the entry file forever once
+            # it's offscreen, since "offscreen" never resolves on its own after a
+            # jump the way it does during incremental scrolling).
+            self._entry_prefetch_abandoned = True
         self._last_scheduled_scroll_y = scroll_y
         # Determine what we want around current thumb position - paths for prefetch
         visible_paths = {item["file_path"] for idx, item in visible_indices_items if item.get("file_path")}
@@ -2285,9 +2419,16 @@ class JustifiedGallery(QWidget):
             )
         else:
             max_widgets, max_tasks, active_cap = _gallery_scheduling_budgets(is_fast)
+        folder_path = None
+        pv = self.parent_viewer
+        if pv is not None:
+            folder_path = getattr(pv, "current_folder", None)
+        max_widgets, max_tasks, active_cap = _apply_external_gallery_caps(
+            max_widgets, max_tasks, active_cap, folder_path
+        )
         active_cap = min(
             active_cap,
-            _env_int("RAWVIEWER_GALLERY_ACTIVE_CAP_HARD", 48, minimum=8),
+            _env_int("RAWVIEWER_GALLERY_ACTIVE_CAP_HARD", 80, minimum=8),
         )
         for idx, item in visible_indices_items:
             path = item.get("file_path")
@@ -2464,6 +2605,8 @@ class JustifiedGallery(QWidget):
                     if hasattr(w, "set_burst_stack_count"):
                         w.set_burst_stack_count(pv._burst_stack_count_for_path(path))
             thumb_missing = not cache_hit
+            if thumb_missing and self._thumb_fail_counts.get(path, 0) >= 3:
+                thumb_missing = False
             
             m = self._metadata_cache.get(path)
             exif_missing = not m or m.get("original_width") is None or m.get("original_height") is None
@@ -3084,6 +3227,20 @@ class JustifiedGallery(QWidget):
         """One deferred full rebuild so justified rows match final EXIF/thumbnail aspects."""
         if len(self.images) < 50:
             return
+        if not self._metadata_changed_paths:
+            return
+        n = len(self.images)
+        if n >= 1000:
+            delay_ms = max(delay_ms, 12000)
+        elif n >= 500:
+            delay_ms = max(delay_ms, 8000)
+        elif n >= 200:
+            delay_ms = max(delay_ms, 5000)
+        if self._gallery_warmup_active():
+            warmup_left_ms = int(
+                max(0.0, float(self._gallery_warmup_until) - time.time()) * 1000
+            )
+            delay_ms = max(delay_ms, warmup_left_ms + 2000)
         if self._aspects_settle_timer.isActive():
             return
         self._aspects_settle_timer.start(max(500, int(delay_ms)))
@@ -3095,9 +3252,18 @@ class JustifiedGallery(QWidget):
         if self._is_scrolling_fast:
             self._schedule_aspects_settle_rebuild(1500)
             return
+        if self._gallery_warmup_active():
+            self._schedule_aspects_settle_rebuild(2000)
+            return
+        if not self._metadata_changed_paths:
+            return
         anchor = self._capture_scroll_anchor_state()
         if _focus_gallery_switch_logs():
-            logger.debug("[GALLERY] aspects settle rebuild")
+            logger.debug(
+                "[GALLERY] aspects settle rebuild (%d aspect drift)",
+                len(self._metadata_changed_paths),
+            )
+        self._metadata_changed_paths.clear()
         self.build_gallery(force=True)
         if anchor:
             self._pending_scroll_anchor_state = anchor

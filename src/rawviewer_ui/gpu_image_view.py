@@ -18,6 +18,7 @@ Environment toggles:
 """
 
 import os
+import sys
 
 from PyQt6.QtCore import Qt, QRect, QRectF, QPoint, QPointF, pyqtSignal, QEvent, QMimeData, QUrl, QEventLoop
 from PyQt6.QtGui import QKeyEvent, QPixmap, QPainter, QColor, QPen, QDrag
@@ -280,9 +281,6 @@ class GpuImageView(QGraphicsView):
         if self._clipping_item is not None:
             self._clipping_item.hide()
 
-    def has_pixmap(self) -> bool:
-        return getattr(self, "_has_pixmap", False)
-
     def pixmap(self) -> QPixmap:
         return self._item.pixmap() if getattr(self, "_has_pixmap", False) else QPixmap()
 
@@ -358,22 +356,124 @@ class GpuImageView(QGraphicsView):
     def clear(self) -> None:
         self.set_pixmap(QPixmap())
 
+    def has_heavy_pixmap(self) -> bool:
+        return bool(getattr(self, "_has_pixmap", False)) and max(
+            int(getattr(self, "_img_w", 0) or 0),
+            int(getattr(self, "_img_h", 0) or 0),
+        ) >= 2048
+
+    def is_opengl_viewport(self) -> bool:
+        try:
+            from PyQt6.QtOpenGLWidgets import QOpenGLWidget
+
+            return isinstance(self.viewport(), QOpenGLWidget)
+        except Exception:
+            return False
+
+    def release_for_gallery_entry(self) -> None:
+        """Drop single-view image resources when switching to gallery.
+
+        On Windows with an OpenGL viewport, clearing a large GL-backed pixmap
+        while the widget is still *visible* can abort the process. Once the
+        single-view container is hidden, clearing is safe and needed — otherwise
+        a 30+ MP texture stays on the GPU while gallery tiles decode.
+        """
+        self.file_path = None
+        if sys.platform == "win32" and self.is_opengl_viewport():
+            if self._viewport_hidden_for_teardown():
+                self._safe_clear_opengl_pixmap()
+            else:
+                from PyQt6.QtCore import QTimer
+
+                QTimer.singleShot(0, self._clear_for_gallery_if_hidden)
+                QTimer.singleShot(50, self._clear_for_gallery_if_hidden)
+                QTimer.singleShot(150, self._clear_for_gallery_if_hidden)
+            return
+        self.clear()
+
+    def _viewport_hidden_for_teardown(self) -> bool:
+        """True when this view (or an ancestor) is hidden — safe for GL pixmap drop."""
+        w = self
+        while w is not None:
+            try:
+                if not w.isVisible():
+                    return True
+            except Exception:
+                return True
+            w = w.parentWidget()
+        return False
+
+    def _safe_clear_opengl_pixmap(self) -> None:
+        """Release GL texture backing the pixmap item (Windows gallery entry)."""
+        vp = self.viewport()
+        gl_widget = None
+        try:
+            from PyQt6.QtOpenGLWidgets import QOpenGLWidget
+
+            if isinstance(vp, QOpenGLWidget):
+                gl_widget = vp
+                gl_widget.makeCurrent()
+        except Exception:
+            gl_widget = None
+        try:
+            self.clear()
+        except Exception:
+            pass
+        finally:
+            if gl_widget is not None:
+                try:
+                    gl_widget.doneCurrent()
+                except Exception:
+                    pass
+
+    def _clear_for_gallery_if_hidden(self) -> None:
+        if not self.has_heavy_pixmap():
+            return
+        if not self._viewport_hidden_for_teardown():
+            return
+        import logging
+
+        logging.getLogger(__name__).info(
+            "[GPU_VIEW] Clearing hidden OpenGL pixmap (%dx%d) for gallery entry",
+            int(getattr(self, "_img_w", 0) or 0),
+            int(getattr(self, "_img_h", 0) or 0),
+        )
+        self._safe_clear_opengl_pixmap()
+
     def capture_viewport_pixmap(self) -> QPixmap | None:
-        """Capture the visible view for resolution cross-fade (OpenGL-safe)."""
+        """Capture the visible view for resolution cross-fade (OpenGL-safe).
+
+        On Windows, ANY snapshot of a live QOpenGLWidget surface — grabFramebuffer(),
+        QGraphicsView.render() over a GL viewport, or viewport.grab() — can abort the
+        process (SIGABRT / exit 3) on several GL drivers when gallery decodes are in
+        flight. Return None there so the caller falls back to the cached on-screen
+        pixmap for the crossfade instead of touching the GL surface.
+        """
         if not self._has_pixmap:
             return None
         vp = self.viewport()
         w = max(1, vp.width())
         h = max(1, vp.height())
+        is_gl_viewport = False
         try:
             from PyQt6.QtOpenGLWidgets import QOpenGLWidget
 
-            if isinstance(vp, QOpenGLWidget):
-                fb = vp.grabFramebuffer()
-                if fb is not None and not fb.isNull():
-                    return fb
+            is_gl_viewport = isinstance(vp, QOpenGLWidget)
         except Exception:
-            pass
+            is_gl_viewport = False
+
+        if sys.platform == "win32":
+            # Never snapshot a live GL surface on Windows. Raster viewports are safe.
+            if is_gl_viewport:
+                return None
+        else:
+            if is_gl_viewport:
+                try:
+                    fb = vp.grabFramebuffer()
+                    if fb is not None and not fb.isNull():
+                        return fb
+                except Exception:
+                    pass
         try:
             target = QRect(0, 0, w, h)
             pix = QPixmap(w, h)

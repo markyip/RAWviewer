@@ -29,10 +29,8 @@ from enhanced_raw_processor import (
 )
 from common_image_loader import (
     array_matches_exif_display,
-    exif_display_dimensions,
     image_covers_sensor_resolution,
     is_raw_file,
-    is_tiff_file,
     load_pixmap_safe,
     use_full_embedded_raw_preview,
     use_libraw_consistent_preview_first,
@@ -58,8 +56,13 @@ def decode_raw_file(file_path: str, params: Dict[str, Any]) -> np.ndarray:
     Must be at top level for pickling.
     """
     import rawpy
-    with rawpy.imread(file_path) as raw:
-        return raw.postprocess(**params)
+    from enhanced_raw_processor import _rawpy_global_lock
+    from enhanced_raw_processor import _rawpy_global_lock, _heavy_fallback_semaphore
+    with _rawpy_global_lock:
+        raw_ctx = rawpy.imread(file_path)
+    with raw_ctx as raw:
+        with _heavy_fallback_semaphore:
+            return raw.postprocess(**params)
 
 
 class UnifiedImageProcessor:
@@ -245,28 +248,30 @@ class UnifiedImageProcessor:
         import rawpy
 
         try:
-            with rawpy.imread(file_path) as raw:
-                max_size_val = self._raw_thumbnail_extract_max_size(
-                    None, allow_heavy_fallback=True
-                )
-                thumb = cached_thumb
-                if not self._cached_preview_meets_display_tier(thumb):
-                    thumb = self.thumbnail_extractor.extract_thumbnail_from_raw(
-                        file_path,
-                        max_size=max_size_val,
-                        allow_scan_fallback=True,
-                        raw_object=raw,
+            from enhanced_raw_processor import _rawpy_global_lock
+            with _rawpy_global_lock:
+                with rawpy.imread(file_path) as raw:
+                    max_size_val = self._raw_thumbnail_extract_max_size(
+                        None, allow_heavy_fallback=True
                     )
-                if thumb is None:
-                    return None
-                exif = cached_exif
-                if exif is None or exif.get("minimal_preview_exif"):
-                    exif = self.exif_extractor.build_minimal_raw_exif(file_path, raw)
-                if exif and exif.get("orientation", 1) != 1:
-                    thumb = self._apply_orientation_correction(
-                        thumb, exif["orientation"], exif
-                    )
-                return exif, thumb
+                    thumb = cached_thumb
+                    if not self._cached_preview_meets_display_tier(thumb):
+                        thumb = self.thumbnail_extractor.extract_thumbnail_from_raw(
+                            file_path,
+                            max_size=max_size_val,
+                            allow_scan_fallback=True,
+                            raw_object=raw,
+                        )
+                    if thumb is None:
+                        return None
+                    exif = cached_exif
+                    if exif is None or exif.get("minimal_preview_exif"):
+                        exif = self.exif_extractor.build_minimal_raw_exif(file_path, raw)
+                    if exif and exif.get("orientation", 1) != 1:
+                        thumb = self._apply_orientation_correction(
+                            thumb, exif["orientation"], exif
+                        )
+                    return exif, thumb
         except Exception:
             return None
 
@@ -371,13 +376,15 @@ class UnifiedImageProcessor:
         try:
             import rawpy
 
-            with rawpy.imread(file_path) as raw:
-                rgb = raw.postprocess(
-                    half_size=True,
-                    use_camera_wb=True,
-                    no_auto_bright=False,
-                    output_bps=8,
-                )
+            from enhanced_raw_processor import _rawpy_global_lock
+            with _rawpy_global_lock:
+                with rawpy.imread(file_path) as raw:
+                    rgb = raw.postprocess(
+                        half_size=True,
+                        use_camera_wb=True,
+                        no_auto_bright=False,
+                        output_bps=8,
+                    )
             if rgb is None or rgb.size == 0:
                 return None
             from PIL import Image
@@ -497,8 +504,12 @@ class UnifiedImageProcessor:
                     params['user_flip'] = 0 # Handle orientation manually
                     
                     import rawpy
-                    with rawpy.imread(file_path) as raw:
-                        thumbnail = raw.postprocess(**params)
+                    from enhanced_raw_processor import _rawpy_global_lock, _heavy_fallback_semaphore
+                    with _rawpy_global_lock:
+                        raw_ctx = rawpy.imread(file_path)
+                    with raw_ctx as raw:
+                        with _heavy_fallback_semaphore:
+                            thumbnail = raw.postprocess(**params)
                 except Exception as e:
                     import logging
                     logger = logging.getLogger(__name__)
@@ -525,10 +536,12 @@ class UnifiedImageProcessor:
                 try:
                     import rawpy
 
-                    with rawpy.imread(file_path) as raw:
-                        exif_data = self.exif_extractor.build_minimal_raw_exif(
-                            file_path, raw
-                        )
+                    from enhanced_raw_processor import _rawpy_global_lock
+                    with _rawpy_global_lock:
+                        with rawpy.imread(file_path) as raw:
+                            exif_data = self.exif_extractor.build_minimal_raw_exif(
+                                file_path, raw
+                            )
                 except Exception:
                     exif_data = None
             else:
@@ -912,7 +925,7 @@ class UnifiedImageProcessor:
                
                # Fallback to RAW processing if preview extraction fails
                if _verbose_orientation_logs():
-                   print(f"[PREVIEW] Preview extraction failed, falling back to RAW processing")
+                   print("[PREVIEW] Preview extraction failed, falling back to RAW processing")
 
             # 獲取處理器參數
             params = self.raw_processor.get_optimized_processing_params(
@@ -952,8 +965,13 @@ class UnifiedImageProcessor:
             
             if rgb_image is None:
                 import rawpy
-                with rawpy.imread(file_path) as raw:
-                    rgb_image = raw.postprocess(**params)
+                from enhanced_raw_processor import _rawpy_global_lock
+                from enhanced_raw_processor import _rawpy_global_lock, _heavy_fallback_semaphore
+                with _rawpy_global_lock:
+                    raw_ctx = rawpy.imread(file_path)
+                with raw_ctx as raw:
+                    with _heavy_fallback_semaphore:
+                        rgb_image = raw.postprocess(**params)
             
             # 應用方向校正 - 確保使用最新的 EXIFExtractor 邏輯
             if not exif_data or exif_data.get('orientation', 1) == 1:
@@ -1125,28 +1143,30 @@ class UnifiedImageProcessor:
         # RAW Path: Open once, extract both
         import rawpy
         try:
-            with rawpy.imread(file_path) as raw:
-                # 1. Extract EXIF (verified with rawpy sensor sizes)
-                exif = self.exif_extractor.extract_exif_data(file_path, raw_object=raw)
+            from enhanced_raw_processor import _rawpy_global_lock
+            with _rawpy_global_lock:
+                with rawpy.imread(file_path) as raw:
+                    # 1. Extract EXIF (verified with rawpy sensor sizes)
+                    exif = self.exif_extractor.extract_exif_data(file_path, raw_object=raw)
                 
-                # 2. Extract Thumbnail
-                max_size_val = self._raw_thumbnail_extract_max_size(
-                    target_size, allow_heavy_fallback=allow_heavy_fallback
-                )
-                thumb = self.thumbnail_extractor.extract_thumbnail_from_raw(
-                    file_path,
-                    max_size=max_size_val,
-                    allow_scan_fallback=allow_heavy_fallback,
-                    raw_object=raw
-                )
+                    # 2. Extract Thumbnail
+                    max_size_val = self._raw_thumbnail_extract_max_size(
+                        target_size, allow_heavy_fallback=allow_heavy_fallback
+                    )
+                    thumb = self.thumbnail_extractor.extract_thumbnail_from_raw(
+                        file_path,
+                        max_size=max_size_val,
+                        allow_scan_fallback=allow_heavy_fallback,
+                        raw_object=raw
+                    )
                 
-                # Apply orientation to thumbnail if needed
-                if thumb is not None and exif:
-                    orientation = exif.get('orientation', 1)
-                    if orientation != 1:
-                        thumb = self._apply_orientation_correction(thumb, orientation, exif)
+                    # Apply orientation to thumbnail if needed
+                    if thumb is not None and exif:
+                        orientation = exif.get('orientation', 1)
+                        if orientation != 1:
+                            thumb = self._apply_orientation_correction(thumb, orientation, exif)
                 
-                return exif, thumb
+                    return exif, thumb
         except Exception:
             # Fallback to sequential if single-pass fails
             exif = self.process_exif(file_path)

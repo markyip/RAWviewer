@@ -2096,6 +2096,13 @@ class ImageCache(QObject):
                 
         return results
 
+    def release_full_image_memory(self, file_path: Optional[str]) -> None:
+        """Drop in-memory full-res / pixmap tiers; keep preview/grid/thumbnail on disk."""
+        if not file_path:
+            return
+        self.full_image_cache.remove(file_path)
+        self.pixmap_cache.remove(file_path)
+
     def invalidate_file(self, file_path: str) -> None:
         """Remove all cached data for a specific file."""
         key = self._path_key(file_path)

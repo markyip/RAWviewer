@@ -6,10 +6,9 @@ import time
 import logging
 import traceback
 import threading
-import warnings
 import weakref
 from datetime import datetime
-from typing import List, Optional, Tuple, Union
+from typing import List, Optional, Tuple
 
 from PIL import Image
 Image.MAX_IMAGE_PIXELS = None
@@ -157,6 +156,8 @@ if _IS_GUI_MAIN_PROCESS:
 
             def _load_file(self, path):
                 """Load a file into the viewer"""
+                if self.viewer is None:
+                    return
                 if os.path.isfile(path):
                     self.viewer.load_folder_images(
                         os.path.dirname(path), start_file=os.path.basename(path)
@@ -831,15 +832,11 @@ logging.getLogger('rawpy').setLevel(logging.ERROR)
 safe_print("Basic imports done, importing PyQt6...", flush=True)
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QLabel, QFileDialog,
-                             QMessageBox, QScrollArea, QSizePolicy, QPushButton, QFrame,
-                             QGridLayout, QScrollBar, QDialog, QSplashScreen, QInputDialog,
-                             QLineEdit, QStackedLayout, QGraphicsOpacityEffect, QStyleOptionButton,
-                             QMenu)
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, pyqtSlot, QPoint, QEvent, QSettings, QSize, QRect, QObject, QRunnable, QThreadPool, QTimer, QPropertyAnimation, QEasingCurve, QAbstractAnimation, QUrl
-from PyQt6.QtGui import (QPixmap, QImage, QAction, QKeySequence, QShortcut, QGuiApplication,
-                         QDragEnterEvent, QDropEvent, QCursor, QIcon,
-                         QTransform, QRegion, QPainterPath, QPainter, QColor, QPen, QBrush, QPalette,
-                         QDesktopServices)
+                             QMessageBox, QScrollArea, QSizePolicy, QPushButton, QDialog, QSplashScreen, QInputDialog,
+                             QLineEdit, QStackedLayout, QGraphicsOpacityEffect, QMenu)
+from PyQt6.QtCore import Qt, pyqtSignal, pyqtSlot, QPoint, QEvent, QSettings, QSize, QRect, QObject, QRunnable, QThreadPool, QTimer, QPropertyAnimation, QEasingCurve, QUrl
+from PyQt6.QtGui import (QPixmap, QImage, QAction, QKeySequence, QShortcut, QDragEnterEvent, QDropEvent, QCursor, QIcon,
+                         QTransform, QRegion, QPainter, QColor, QPen, QDesktopServices)
 safe_print("PyQt6 imported successfully", flush=True)
 
 
@@ -1037,7 +1034,6 @@ def _dismiss_startup_splash(app, main_window=None, splash=None) -> None:
     if sys.platform == "darwin" and main_window is not None:
         try:
             import objc
-            from ctypes import c_void_p
 
             ns_app = objc.lookUpClass("NSApplication").sharedApplication()
             if ns_app is not None:
@@ -1386,7 +1382,6 @@ def _windows_shell_verb_suggests_share(verb_name: object) -> bool:
 def _open_windows_open_with_dialog(path: str, owner_hwnd: int = 0) -> bool:
     """Show the native Windows 'Open with' dialog for a file."""
     import subprocess
-    import ctypes
     from ctypes import Structure, byref, c_long, wintypes
 
     abs_path = os.path.abspath(path)
@@ -1682,7 +1677,6 @@ def _share_windows_via_winrt(path: str, owner_hwnd: int) -> bool:
 from rawviewer_app.env import _env_int, _env_true, _norm_path, safe_print, safe_print_err
 from rawviewer_app.processing import RAWProcessor, PixmapConverter, RawEdrPixmapConverter
 from rawviewer_app.signals import (
-    FolderLoadSignals,
     FolderResortSignals,
     FolderSortRefineSignals,
     GalleryMetadataSignals,
@@ -2026,7 +2020,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         try:
             cache_stats = self.image_cache.get_cache_stats()
             memory_info = cache_stats["memory_info"]
-            safe_print(f"✓ Enhanced image cache initialized", flush=True)
+            safe_print("✓ Enhanced image cache initialized", flush=True)
             safe_print(f"  Cache budget: {cache_stats['cache_budget_mb']}MB", flush=True)
             safe_print(
                 f"  Max full images: {cache_stats['full_image_cache']['max_size']}", flush=True)
@@ -2537,6 +2531,17 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 target = scroll.viewport()
         if target is None:
             return None
+        # On Windows, grabbing a live QOpenGLWidget surface can abort the process
+        # (SIGABRT / exit 3). Skip the grab() fallback for GL viewports and let the
+        # caller crossfade from the cached previous pixmap instead.
+        if sys.platform == "win32":
+            try:
+                from PyQt6.QtOpenGLWidgets import QOpenGLWidget
+
+                if isinstance(target, QOpenGLWidget):
+                    return None
+            except Exception:
+                pass
         try:
             snap = target.grab()
             if snap is not None and not snap.isNull():
@@ -4193,6 +4198,12 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         return capture_times or {}
 
     def _rebuild_burst_groups(self) -> None:
+        if not self._is_burst_grouping_enabled():
+            self._burst_groups = []
+            self._burst_path_to_group = {}
+            self._burst_group_covers = {}
+            return
+
         from burst_grouping import burst_gap_seconds_from_settings, burst_groups_for_folder
 
         files = list(getattr(self, "image_files", []) or [])
@@ -6604,7 +6615,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         # safe_print(f"[ORIENTATION] on_manager_pixmap_ready: _orientation_already_applied = {self._orientation_already_applied}")
         # Pixmap from manager is always full resolution for non-RAW files
         self._is_half_size_displayed = False
-        logger.debug(f"[MANAGER] Setting _is_half_size_displayed=False for full resolution pixmap")
+        logger.debug("[MANAGER] Setting _is_half_size_displayed=False for full resolution pixmap")
 
         # Avoid duplicate repaint churn: thumbnail_ready path may have already displayed the same
         # full-size pixmap through display_numpy_image() cache fast-path just moments earlier.
@@ -6634,7 +6645,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         
         # CRITICAL: Ensure metadata is updated after pixmap is displayed
         # This ensures metadata is shown even if EXIF was ready before pixmap
-        logger.info(f"[MANAGER] Updating status bar after pixmap display to ensure metadata is shown")
+        logger.info("[MANAGER] Updating status bar after pixmap display to ensure metadata is shown")
         self.update_status_bar()
         
         self.setFocus()
@@ -8075,6 +8086,26 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             self._pending_abort_semantic_index = True
             self._pending_pause_semantic_index = True
 
+    def _wire_index_load_throttle(self, index) -> None:
+        """Give the background index worker thread-safe ILM throttle toggles.
+
+        The worker engages the throttle only around heavy work and releases it
+        while paused, so an idle/metadata-only index never starves the gallery.
+        """
+        mgr = getattr(self, "image_manager", None)
+        if mgr is None or index is None:
+            return
+        enter = getattr(mgr, "enter_semantic_indexing_throttle", None)
+        exit_ = getattr(mgr, "exit_semantic_indexing_throttle", None)
+        if not callable(enter) or not callable(exit_):
+            return
+        setter = getattr(index, "set_load_throttle_hooks", None)
+        if callable(setter):
+            try:
+                setter(enter, exit_)
+            except Exception:
+                pass
+
     def _begin_indexing_load_throttle(self) -> None:
         """Cut ILM concurrency while semantic or face indexing holds large RAM."""
         depth = int(getattr(self, "_indexing_load_throttle_depth", 0) or 0) + 1
@@ -8107,9 +8138,9 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         """Force-release semantic indexing I/O throttle (e.g. on folder change or gallery entry)."""
         self._indexing_load_throttle_depth = 0
         mgr = getattr(self, "image_manager", None)
-        if mgr is not None and hasattr(mgr, "exit_semantic_indexing_throttle"):
+        if mgr is not None and hasattr(mgr, "force_exit_semantic_indexing_throttle"):
             try:
-                mgr.exit_semantic_indexing_throttle()
+                mgr.force_exit_semantic_indexing_throttle()
             except Exception:
                 pass
 
@@ -8146,6 +8177,13 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         except Exception:
             pass
 
+    def _arm_gallery_warmup(self) -> None:
+        """Start gallery tile warmup once the justified gallery widget exists."""
+        file_count = len(getattr(self, "image_files", []) or [])
+        gj = getattr(self, "gallery_justified", None)
+        if gj is not None and hasattr(gj, "begin_gallery_warmup"):
+            gj.begin_gallery_warmup(file_count)
+
     def _defer_background_indexing_for_gallery(self) -> None:
         """Pause semantic/face background work while gallery thumbnails first paint."""
         import logging
@@ -8153,8 +8191,12 @@ class RAWImageViewer(SessionMixin, QMainWindow):
 
         logger = logging.getLogger(__name__)
         file_count = len(getattr(self, "image_files", []) or [])
-        warmup_s = min(10.0, 2.0 + file_count / 1000.0)
+        warmup_s = min(4.0, 1.5 + file_count / 2000.0)
         self._gallery_indexing_deferred_until = time.time() + warmup_s
+        # Anchor for the metadata-index deferral ceiling (see
+        # _should_defer_metadata_index_for_gallery) so continuous scrolling cannot
+        # starve indexing forever.
+        self._gallery_deferral_opened_ts = time.time()
         self._pause_semantic_indexing_deferred()
         if getattr(self, "_face_indexing_in_progress", False):
             self._face_index_active_token = None
@@ -8162,9 +8204,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 "[VIEW_MODE] Face indexing deferred during gallery warmup (%d files)",
                 file_count,
             )
-        gj = getattr(self, "gallery_justified", None)
-        if gj is not None and hasattr(gj, "begin_gallery_warmup"):
-            gj.begin_gallery_warmup(file_count)
+        # begin_gallery_warmup needs gallery_justified; _arm_gallery_warmup() runs
+        # after _ensure_gallery_widget() in _show_gallery_view().
         try:
             if hasattr(self, "image_manager") and self.image_manager is not None:
                 mgr = self.image_manager
@@ -8280,6 +8321,9 @@ class RAWImageViewer(SessionMixin, QMainWindow):
 
     def _gallery_search_needs_index_work(self, corpus_files) -> tuple[bool, bool]:
         """Return (needs_semantic, needs_face) for the given corpus."""
+        if getattr(self, "view_mode", "") == "gallery" and self._gallery_has_thumbnail_load_pressure():
+            # Avoid a 1k+ path DB scan on the UI thread during gallery first paint.
+            return True, False
         try:
             index = self._get_semantic_index()
             if not index.semantic_backend_available():
@@ -8944,6 +8988,24 @@ class RAWImageViewer(SessionMixin, QMainWindow):
     ):
         if self._semantic_indexing_in_progress:
             return
+
+        if self._gallery_has_thumbnail_load_pressure():
+            import logging
+
+            logging.getLogger(__name__).info(
+                "[INDEX] Deferring semantic index build (gallery thumbnail load in progress)"
+            )
+            QTimer.singleShot(
+                _env_int("RAWVIEWER_SEMANTIC_INDEX_GALLERY_RETRY_MS", 3000, minimum=500),
+                lambda: self._start_semantic_index_build_background(
+                    corpus_files,
+                    coverage=coverage,
+                    pending_files=pending_files,
+                    run_semantic_embeddings=run_semantic_embeddings,
+                    show_search_progress=show_search_progress,
+                ),
+            )
+            return
             
         if coverage is None or pending_files is None:
             self._run_semantic_index_prep(corpus_files)
@@ -8969,6 +9031,26 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         except Exception:
             fallback_total = len(corpus_files)
         total_files = int(coverage.get("total", fallback_total))
+
+        if not run_semantic_embeddings and pending_files:
+            import logging
+
+            _log = logging.getLogger(__name__)
+            extract_pending = index.get_metadata_extraction_pending_paths(pending_files)
+            if len(extract_pending) != len(pending_files):
+                _log.info(
+                    "[INDEX] Metadata-only pass: %d of %d pending paths need on-disk EXIF extract",
+                    len(extract_pending),
+                    len(pending_files),
+                )
+            if not extract_pending:
+                _log.info(
+                    "[INDEX] Metadata-only pass: nothing to extract; skipping index worker (no ONNX probe)"
+                )
+                self._finish_silent_metadata_without_worker(corpus_files)
+                return
+            pending_files = extract_pending
+
         indexed_files = max(0, total_files - len(pending_files))
         if not pending_files:
             self._clear_stale_gallery_search_index_progress()
@@ -8995,7 +9077,11 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         token = time.time_ns()
         self._semantic_index_active_token = token
         self._semantic_indexing_in_progress = True
-        self._begin_indexing_load_throttle()
+        # The throttle is no longer engaged for the whole run. Instead the worker
+        # acquires it only around heavy work (neural pass / thumbnail warm / face
+        # scan) and drops it while paused, so a metadata-only or gallery-paused
+        # index never serializes thumbnail decode. See SemanticImageIndex.
+        self._wire_index_load_throttle(index)
         self._semantic_index_progress_total = total_files
         self._semantic_index_progress_base = 0
         self._semantic_index_run_semantic_embeddings = run_semantic_embeddings
@@ -9172,6 +9258,46 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             self._format_index_progress(label, done, total)
         )
 
+    def _finish_silent_metadata_without_worker(self, corpus_files=None, *, skipped: bool = True) -> None:
+        """Complete silent metadata pass without further index work.
+
+        When *skipped* is True, the DB was already current and no worker ran.
+        When False, a metadata-only worker just finished normally.
+        """
+        import logging
+
+        logger = logging.getLogger(__name__)
+        folder = getattr(self, "current_folder", None)
+        if folder:
+            self._set_semantic_index_incomplete(folder, False)
+        self._invalidate_semantic_coverage_cache()
+        corpus = corpus_files or self._gallery_search_index_corpus()
+        wants_semantic = bool(getattr(self, "_gallery_search_user_wants_semantic", False))
+        deferred_semantic = bool(getattr(self, "_defer_semantic_after_metadata", False))
+        if skipped:
+            logger.info(
+                "[INDEX][CHAIN] silent_metadata skipped (DB current): wants_semantic=%s deferred_semantic=%s corpus=%d",
+                wants_semantic,
+                deferred_semantic,
+                len(corpus or []),
+            )
+        else:
+            logger.info(
+                "[INDEX][CHAIN] silent_metadata done: wants_semantic=%s deferred_semantic=%s corpus=%d",
+                wants_semantic,
+                deferred_semantic,
+                len(corpus or []),
+            )
+        if wants_semantic or deferred_semantic:
+            logger.info(
+                "[INDEX][CHAIN] Triggering deferred semantic start after silent metadata."
+            )
+            self._gallery_search_index_session_key = None
+            self._invalidate_semantic_coverage_cache()
+            self._gallery_search_user_wants_semantic = True
+            self._gallery_search_show_index_progress = True
+            self._start_user_semantic_indexing(corpus)
+
     def _on_semantic_index_done(self, token, result):
         if token != self._semantic_index_active_token:
             return
@@ -9189,25 +9315,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self._invalidate_semantic_coverage_cache()
 
         if pass_kind == "silent_metadata":
-            if folder:
-                self._set_semantic_index_incomplete(folder, False)
-            wants_semantic = bool(getattr(self, "_gallery_search_user_wants_semantic", False))
-            deferred_semantic = bool(getattr(self, "_defer_semantic_after_metadata", False))
-            logging.getLogger(__name__).info(
-                "[INDEX][CHAIN] silent_metadata done: wants_semantic=%s deferred_semantic=%s corpus=%d",
-                wants_semantic,
-                deferred_semantic,
-                len(corpus or []),
-            )
-            if wants_semantic or deferred_semantic:
-                logging.getLogger(__name__).info(
-                    "[INDEX][CHAIN] Triggering deferred semantic start immediately after silent metadata."
-                )
-                self._gallery_search_index_session_key = None
-                self._invalidate_semantic_coverage_cache()
-                self._gallery_search_user_wants_semantic = True
-                self._gallery_search_show_index_progress = True
-                self._start_user_semantic_indexing(corpus)
+            self._finish_silent_metadata_without_worker(corpus_files=None, skipped=False)
             return
 
         if pass_kind == "user_semantic":
@@ -10723,7 +10831,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         if not hasattr(self, "raw_toggle_button"):
             return
 
-        from PyQt6.QtGui import QFont, QIcon
+        from PyQt6.QtGui import QIcon
 
         self.raw_toggle_button.setIcon(QIcon())
         self.raw_toggle_button.setText("RAW")
@@ -11068,23 +11176,29 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         import logging
         logger = logging.getLogger(__name__)
         logger.debug("[MODESWITCH] toggle_view_mode called; current=%s", self.view_mode)
-        logger.info(f"[VIEW_MODE] ========== toggle_view_mode() STARTED ==========")
+        logger.info("[VIEW_MODE] ========== toggle_view_mode() STARTED ==========")
         
         if self.view_mode == 'single':
-            logger.info(f"[VIEW_MODE] Switching from single to gallery mode")
+            logger.info("[VIEW_MODE] Switching from single to gallery mode")
             self._disable_raw_recovery()
             self.view_mode = 'gallery'
+            try:
+                if hasattr(self, "_resume_indexing_timer") and self._resume_indexing_timer:
+                    self._resume_indexing_timer.stop()
+                self._pause_semantic_indexing_deferred()
+            except Exception:
+                pass
             if getattr(self, "_focus_subject_outline_active", False):
                 self._focus_subject_outline_active = False
                 self._focus_subject_rect_image = None
                 self._focus_rect_source = None
         else:
-            logger.info(f"[VIEW_MODE] Switching from gallery to single mode")
+            logger.info("[VIEW_MODE] Switching from gallery to single mode")
             self.view_mode = 'single'
             self._adopt_gallery_navigation_path()
             self._loading_from_gallery = True
         
-        logger.info(f"[VIEW_MODE] Mode changed, calling view method (elapsed: 0.000s)")
+        logger.info("[VIEW_MODE] Mode changed, calling view method (elapsed: 0.000s)")
         if self.view_mode == 'gallery':
             self._stop_slideshow()
             self._show_gallery_view()
@@ -11092,7 +11206,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             self._show_single_view()
         logger.debug("[MODESWITCH] toggle_view_mode finished; current=%s", self.view_mode)
         
-        logger.info(f"[VIEW_MODE] ========== toggle_view_mode() COMPLETED in 0.004s ==========")
+        logger.info("[VIEW_MODE] ========== toggle_view_mode() COMPLETED in 0.004s ==========")
     
     def _resume_indexing_if_single_view(self):
         """Resume background indexing only if the user has settled in single view mode."""
@@ -11168,7 +11282,22 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             # Clear load queue
             if hasattr(self.gallery_justified, '_load_queue'):
                 self.gallery_justified._load_queue.clear()
-            logger.debug(f"[VIEW_MODE] Stopped all gallery background loading")
+            # Drop queued gallery thumbnail decodes (all CURRENT priority) so the
+            # image being opened is not stuck behind dozens of them in the worker
+            # pool. Protect the foreground file, whose decode may already be in
+            # flight (fast-open) or about to be requested in Step 4.
+            try:
+                mgr = getattr(self, "image_manager", None)
+                if mgr is not None and hasattr(mgr, "cancel_all_tasks_except"):
+                    mgr.cancel_all_tasks_except(getattr(self, "current_file_path", None))
+                if hasattr(self.gallery_justified, "_active_tasks"):
+                    keep = getattr(self, "current_file_path", None)
+                    for p in list(self.gallery_justified._active_tasks.keys()):
+                        if p != keep:
+                            self.gallery_justified._active_tasks.pop(p, None)
+            except Exception:
+                pass
+            logger.debug("[VIEW_MODE] Stopped all gallery background loading")
         
         if hasattr(self, "loading_overlay"):
             self.loading_overlay.hide_loading()
@@ -11289,7 +11418,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 )
 
                 if is_already_loaded:
-                    logger.info(f"[VIEW_MODE] Image already in memory, skipping reload")
+                    logger.info("[VIEW_MODE] Image already in memory, skipping reload")
                     base = getattr(self, "_base_display_pixmap", None)
                     if base is not None and not base.isNull():
                         self.display_pixmap(base)
@@ -11366,13 +11495,13 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         else:
             # Update status bar to show metadata even if no image is loaded
             self.update_status_bar()
-            logger.info(f"[VIEW_MODE] Step 4: No image to reload, status bar updated")
+            logger.info("[VIEW_MODE] Step 4: No image to reload, status bar updated")
 
         self._sync_single_image_histogram()
         self._sync_filmstrip_to_folder()
         
         total_time = time.time() - start_time
-        logger.info(f"[VIEW_MODE] ========== TIMING BREAKDOWN ==========")
+        logger.info("[VIEW_MODE] ========== TIMING BREAKDOWN ==========")
         # GALLERY FUNCTIONALITY COMMENTED OUT
         # if self.gallery_widget:
         #     logger.info(f"[VIEW_MODE] Hide gallery widget: {hide_time:.3f}s")
@@ -11385,11 +11514,90 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         logger.info(f"[VIEW_MODE] ========== SINGLE VIEW RENDERING COMPLETED in {total_time:.3f}s ==========")
     
     # GALLERY FUNCTIONALITY COMMENTED OUT
+    def _cancel_filmstrip_prefetch_for_gallery(self) -> None:
+        """Stop filmstrip/neighbor prefetch before gallery thumbnail loads."""
+        self._filmstrip_prefetch_pending = []
+        self._filmstrip_prefetch_draining = False
+        if hasattr(self, "_deferred_filmstrip_paths") and self._deferred_filmstrip_paths:
+            self._deferred_filmstrip_paths.clear()
+        self._pause_prefetch_for_navigation()
+
+    def _release_single_view_heavy_buffers_for_gallery(self) -> None:
+        """Free GPU/RAM held by the open single-view full-res decode before gallery tiles load."""
+        import logging
+        import sys
+
+        from PyQt6.QtGui import QPixmap
+
+        logger = logging.getLogger(__name__)
+        cur = getattr(self, "current_file_path", None)
+
+        self._cancel_content_crossfade()
+        self._full_resolution_loading = False
+
+        gv = getattr(self, "gpu_view", None)
+        gl_cleared = False
+        gl_deferred = False
+        gl_pending = False
+        if gv is not None:
+            try:
+                if hasattr(gv, "release_for_gallery_entry"):
+                    hidden = (
+                        hasattr(gv, "_viewport_hidden_for_teardown")
+                        and gv._viewport_hidden_for_teardown()
+                    )
+                    had_heavy = (
+                        hasattr(gv, "has_heavy_pixmap") and gv.has_heavy_pixmap()
+                    )
+                    gv.release_for_gallery_entry()
+                    if sys.platform == "win32" and gv.is_opengl_viewport():
+                        if hidden and not had_heavy:
+                            gl_cleared = True
+                        elif hidden and had_heavy:
+                            gl_cleared = not gv.has_heavy_pixmap()
+                            gl_pending = gv.has_heavy_pixmap()
+                        else:
+                            gl_deferred = True
+                            gl_pending = had_heavy
+                    else:
+                        gl_cleared = True
+                else:
+                    gv.clear()
+                    gl_cleared = True
+            except Exception:
+                pass
+
+        label = getattr(self, "image_label", None)
+        if label is not None:
+            try:
+                label.setPixmap(QPixmap())
+            except Exception:
+                pass
+        self.current_pixmap = None
+        self._manager_displayed_max_dim = 0
+        self._gpu_last_path = None
+
+        cache = getattr(self, "image_cache", None)
+        if cur and cache is not None and hasattr(cache, "release_full_image_memory"):
+            try:
+                cache.release_full_image_memory(cur)
+            except Exception:
+                pass
+
+        logger.info(
+            "[GALLERY] Released single-view full-res buffers for gallery entry (%s, gl_cleared=%s gl_deferred=%s gl_pending=%s)",
+            os.path.basename(cur) if cur else "none",
+            gl_cleared,
+            gl_deferred,
+            gl_pending,
+        )
+
     def _show_gallery_view(self):
         """Show gallery view - based on reference code"""
         self._stop_animations()
         import logging
         import os
+        import sys
         import time
         from PyQt6.QtCore import QTimer
         logger = logging.getLogger(__name__)
@@ -11412,7 +11620,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             bar.setEnabled(False)
         self._hide_filmstrip_chrome()
         logger.debug("[MODESWITCH] _show_gallery_view entered; files=%d", len(self.image_files))
-        logger.info(f"[GALLERY] Showing gallery view")
+        logger.info("[GALLERY] Showing gallery view")
         if getattr(self, "current_file_path", None):
             self._gallery_scroll_target_path = self.current_file_path
         if getattr(self, "gallery_justified", None) is not None:
@@ -11423,14 +11631,21 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         if hasattr(self, "_idle_display_prefetch_timer") and self._idle_display_prefetch_timer:
             self._idle_display_prefetch_timer.stop()
 
+        self._cancel_filmstrip_prefetch_for_gallery()
+
         # Entering gallery: drop leftover single-view decode/preload work so scrolling
         # thumbnails doesn't compete with stale full-image tasks.
         try:
             if hasattr(self, "image_manager") and self.image_manager is not None:
-                if hasattr(self.image_manager, "flush_queue"):
-                    self.image_manager.flush_queue()
+                mgr = self.image_manager
+                if hasattr(mgr, "cancel_non_gallery_tasks"):
+                    mgr.cancel_non_gallery_tasks()
+                if hasattr(mgr, "cancel_queued_non_gallery_tasks"):
+                    mgr.cancel_queued_non_gallery_tasks()
+                elif hasattr(mgr, "flush_queue"):
+                    mgr.flush_queue()
                 else:
-                    self.image_manager.cancel_all_tasks()
+                    mgr.cancel_all_tasks()
             if hasattr(self, "preload_manager") and self.preload_manager is not None:
                 self.preload_manager.cancel_all_preloads()
         except Exception:
@@ -11466,14 +11681,22 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         # Create gallery widget if needed (at most one container in the layout)
         if not self._ensure_gallery_widget():
             return
+        # Warmup caps (active_cap=12–18 for 1k+ folders) only apply after the widget
+        # exists; calling begin_gallery_warmup earlier is a no-op on first gallery entry.
+        self._arm_gallery_warmup()
         
-        # Hide single view elements (image + histogram strip)
+        # Hide single view before touching GPU/full-res buffers (Windows GL abort otherwise).
         if hasattr(self, 'single_view_container') and self.single_view_container:
             self.single_view_container.hide()
         else:
             self.scroll_area.hide()
         if hasattr(self, "compare_widget") and self.compare_widget:
             self.compare_widget.hide()
+        # Let Qt finish hiding the single-view GL surface before teardown (Windows).
+        release_delay_ms = 50 if sys.platform == "win32" else 0
+        QTimer.singleShot(
+            release_delay_ms, self._release_single_view_heavy_buffers_for_gallery
+        )
         # Bottom chrome (sort/search/slideshow vs burst back-to-gallery) handled below.
         
         # In gallery mode: hide per-image metadata, but keep total count visible.
@@ -11780,7 +12003,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
 
                     self._sync_gallery_to_folder_files(
                         meta,
-                        scroll_to_current=True,
+                        scroll_to_current=getattr(self, "view_mode", "") != "gallery",
                         force=not refinement_pending,
                     )
                     logger.info(f"[GALLERY] Background metadata ready: {len(meta)} items, gallery refreshed")
@@ -11831,15 +12054,15 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             logger.debug("[MODESWITCH] _update_gallery_view called; widget=%s justified=%s files=%d",
                            bool(self.gallery_widget), bool(self.gallery_justified), len(self.image_files))
             start_time = time.time()
-            logger.info(f"[GALLERY] ========== _update_gallery_view() STARTED ==========")
+            logger.info("[GALLERY] ========== _update_gallery_view() STARTED ==========")
             self._update_gallery_counter()
             
             if not self.gallery_widget or not self.gallery_justified:
-                logger.info(f"[GALLERY] Gallery widget not available, returning")
+                logger.info("[GALLERY] Gallery widget not available, returning")
                 return
             self._sync_gallery_scrollbar_policy()
             if not self.image_files:
-                logger.info(f"[GALLERY] No image files for gallery update, returning")
+                logger.info("[GALLERY] No image files for gallery update, returning")
                 query = getattr(self, "_last_semantic_query", "") or ""
                 if query.strip():
                     bulk_meta = getattr(self, "_gallery_bulk_metadata", None)
@@ -11889,11 +12112,28 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 else:
                     if hasattr(self.gallery_justified, "hide_empty_message"):
                         self.gallery_justified.hide_empty_message()
-                    self._scroll_gallery_to_current_file(backup=False)
+                    gj = self.gallery_justified
+                    display_files = self._gallery_files_for_display()
+                    preserve_viewport = bool(
+                        gj
+                        and gj._layout_matches_current_images(display_files)
+                        and getattr(gj, "_gallery_layout_items", None)
+                    )
+                    viewport_anchor = None
+                    if preserve_viewport and hasattr(gj, "get_scroll_anchor_path"):
+                        try:
+                            viewport_anchor = gj.get_scroll_anchor_path()
+                        except Exception:
+                            viewport_anchor = None
+                    if not preserve_viewport:
+                        self._scroll_gallery_to_current_file(backup=False)
                     self.gallery_justified.set_images(
                         display_files, bulk_metadata if bulk_metadata else None
                     )
-                self._scroll_gallery_to_current_file()
+                    if preserve_viewport and viewport_anchor:
+                        gj.scroll_to_file(viewport_anchor)
+                    elif not preserve_viewport:
+                        self._scroll_gallery_to_current_file()
                 # Avoid forced rebuild loops; set_images() already schedules build/layout.
                 # Only nudge visible-load passes after initial layout is expected ready.
                 self._warm_gallery_from_filmstrip_cache()
@@ -11949,8 +12189,6 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                         
                     def run(self_inner):
                         try:
-                            import os
-                            from datetime import datetime
                             from image_cache import get_image_cache
                             cache = get_image_cache()
                             # OPTIMIZATION: In large folders, avoid hitting the disk for every file
@@ -12044,7 +12282,6 @@ class RAWImageViewer(SessionMixin, QMainWindow):
     
     def _load_gallery_thumbnail_simple(self, file_path, thumb_label):
             """Load thumbnail simply - based on reference code"""
-            from PyQt6.QtCore import QTimer
             
             pixmap = self._get_gallery_pixmap(file_path)
             if not pixmap or pixmap.isNull():
@@ -12288,7 +12525,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             pixmap = QPixmap.fromImage(qimage)
             
             if pixmap.isNull():
-                logger.warning(f"[GALLERY] Failed to create QPixmap from QImage")
+                logger.warning("[GALLERY] Failed to create QPixmap from QImage")
                 return None
             
             return pixmap
@@ -14120,7 +14357,6 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         """Sort files by capture time according to user preference (Newest/Oldest)"""
         import time
         import logging
-        from datetime import datetime
         logger = logging.getLogger(__name__)
         
         if not file_paths:
@@ -15537,7 +15773,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         # Prevent multiple cleanup operations from running simultaneously
         with self._cleanup_lock:
             if self._cleanup_in_progress:
-                logger.debug(f"[CLEANUP] Cleanup already in progress, skipping duplicate call")
+                logger.debug("[CLEANUP] Cleanup already in progress, skipping duplicate call")
                 return
             
             self._cleanup_in_progress = True
@@ -15554,7 +15790,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 
                 try:
                     # Disconnect signals first to prevent access violations
-                    logger.info(f"[CLEANUP] Disconnecting processor signals")
+                    logger.info("[CLEANUP] Disconnecting processor signals")
                     try:
                         if hasattr(self.current_processor, 'image_processed'):
                             self.current_processor.image_processed.disconnect()
@@ -15566,7 +15802,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                             self.current_processor.processing_progress.disconnect()
                         if hasattr(self.current_processor, 'exif_data_ready'):
                             self.current_processor.exif_data_ready.disconnect()
-                        logger.info(f"[CLEANUP] Processor signals disconnected")
+                        logger.info("[CLEANUP] Processor signals disconnected")
                     except Exception as disconnect_error:
                         logger.warning(f"[CLEANUP] Error disconnecting signals (may be normal if already disconnected): {disconnect_error}")
                     
@@ -15584,21 +15820,21 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                         
                         if hasattr(self.current_processor, 'isRunning'):
                             if self.current_processor.isRunning():
-                                logger.info(f"[CLEANUP] Processor still running, calling quit() and wait()")
+                                logger.info("[CLEANUP] Processor still running, calling quit() and wait()")
                                 self.current_processor.quit()
                                 wait_result = self.current_processor.wait(100)  # Wait up to 100ms
                                 logger.info(f"[CLEANUP] wait() returned: {wait_result}, is_running: {self.current_processor.isRunning()}")
                                 if not wait_result:
-                                    logger.info(f"[CLEANUP] Processor did not stop gracefully, calling terminate()")
+                                    logger.info("[CLEANUP] Processor did not stop gracefully, calling terminate()")
                                     self.current_processor.terminate()
                                     terminate_wait = self.current_processor.wait(50)  # Wait up to 50ms after terminate
                                     logger.info(f"[CLEANUP] After terminate(), wait() returned: {terminate_wait}, is_running: {self.current_processor.isRunning()}")
                             else:
-                                logger.info(f"[CLEANUP] Processor not running, skip quit/wait")
+                                logger.info("[CLEANUP] Processor not running, skip quit/wait")
                     
                     # Clear processor reference after cleanup
                     self.current_processor = None
-                    logger.info(f"[CLEANUP] Processor reference cleared")
+                    logger.info("[CLEANUP] Processor reference cleared")
                 except Exception as cleanup_error:
                     logger.error(f"Error during processor cleanup: {cleanup_error}", exc_info=True)
                     logger.debug(f"Cleanup error traceback: {traceback.format_exc()}")
@@ -15634,7 +15870,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             # Always reset cleanup flag, even if an error occurred
             with self._cleanup_lock:
                 self._cleanup_in_progress = False
-                logger.debug(f"[CLEANUP] Cleanup flag reset, cleanup_in_progress=False")
+                logger.debug("[CLEANUP] Cleanup flag reset, cleanup_in_progress=False")
 
     def load_raw_image(self, file_path, force_reload=False):
         import time
@@ -15741,7 +15977,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                     self._on_single_view_content_displayed()
                     return
 
-            logger.info(f"[LOAD] File exists, proceeding with load")
+            logger.info("[LOAD] File exists, proceeding with load")
             safe_print(f"[PERF] Loading image: {os.path.basename(requested_file_path)}")
 
             if (
@@ -15854,7 +16090,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
 
             # Clean up current processing (simplified with new architecture)
             cleanup_start = time.time()
-            logger.info(f"[LOAD] Starting cleanup of current processing (if any)")
+            logger.info("[LOAD] Starting cleanup of current processing (if any)")
             # Cancel in-flight loads only when switching files — same-path reload must not cancel
             # the active task (e.g. duplicate load_raw_image after folder change).
             _prev_fp = getattr(self, "current_file_path", None)
@@ -15909,9 +16145,9 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             if self.current_processor is not None:
                 logger.warning(f"[LOAD] WARNING: current_processor still exists after cleanup: {type(self.current_processor).__name__}")
                 if hasattr(self.current_processor, 'isRunning') and self.current_processor.isRunning():
-                    logger.warning(f"[LOAD] WARNING: current_processor is still running after cleanup!")
+                    logger.warning("[LOAD] WARNING: current_processor is still running after cleanup!")
             else:
-                logger.info(f"[LOAD] Cleanup verified: current_processor is None")
+                logger.info("[LOAD] Cleanup verified: current_processor is None")
 
             # Note: current_file_path is now set above (after cleanup check)
             # to prevent false cancellations during normal navigation
@@ -15963,7 +16199,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             self._update_single_view_rating_display(rating)
 
             # Prefer display-quality preview before full image (faster first paint on warm cache).
-            logger.info(f"[LOAD] Checking for cached preview/full image")
+            logger.info("[LOAD] Checking for cached preview/full image")
             cache_check_start = time.time()
             cache_check_time = 0.0
 
@@ -16077,7 +16313,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             
             if not is_raw_ext:
                 # Only check pixmap cache for non-RAW files (JPEG, PNG, etc.)
-                logger.info(f"[LOAD] Checking for cached pixmap (non-RAW file)")
+                logger.info("[LOAD] Checking for cached pixmap (non-RAW file)")
                 cache_check_start = time.time()
                 cached_pixmap = self.image_cache.get_pixmap(requested_file_path)
                 cache_check_time = time.time() - cache_check_start
@@ -16099,7 +16335,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                             # Orientation is 1 (normal), no correction needed
                             self._orientation_already_applied = True
                         
-                        logger.info(f"[LOAD] Displaying cached pixmap")
+                        logger.info("[LOAD] Displaying cached pixmap")
                         display_start = time.time()
                         self.display_pixmap(cached_pixmap)
                         self._on_single_view_content_displayed()
@@ -16117,7 +16353,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                         
                         # Ensure EXIF is loaded even on cache hit
                         if not self.image_cache.get_exif(requested_file_path):
-                            logger.info(f"[LOAD] Cache hit for pixmap, but missing EXIF. Requesting EXIF load.")
+                            logger.info("[LOAD] Cache hit for pixmap, but missing EXIF. Requesting EXIF load.")
                             self.image_manager.load_image(
                                 requested_file_path,
                                 priority=Priority.BACKGROUND,
@@ -16278,14 +16514,14 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                     self._schedule_deferred_full_exif_after_first_paint(
                         requested_file_path
                     )
-                logger.info(f"[LOAD] Image load requested via ImageLoadManager")
+                logger.info("[LOAD] Image load requested via ImageLoadManager")
             except Exception as manager_error:
                 logger.error(f"[LOAD] Failed to request image load: {manager_error}", exc_info=True)
                 logger.error(f"[LOAD] Manager error traceback:\n{traceback.format_exc()}")
                 if hasattr(self, "loading_overlay"):
                     self.loading_overlay.hide_loading()
                 # Fallback to legacy processor if manager fails
-                logger.warning(f"[LOAD] Falling back to legacy RAWProcessor")
+                logger.warning("[LOAD] Falling back to legacy RAWProcessor")
                 try:
                     file_ext = os.path.splitext(requested_file_path)[1].lower()
                     is_raw = is_raw_file(requested_file_path)
@@ -16441,7 +16677,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             # This ensures original resolution is shown immediately
             logger.info(f"[EXIF] EXIF data ready, updating status bar for {os.path.basename(self.current_file_path)}")
             self.update_status_bar()
-            logger.info(f"[EXIF] Status bar updated")
+            logger.info("[EXIF] Status bar updated")
 
     def on_cache_hit(self, file_path, cache_type):
         """Handle cache hit events for performance monitoring."""
@@ -16790,7 +17026,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                         height,
                     )
                 else:
-                    logger.info(f"[DISPLAY] Checking for cached pixmap")
+                    logger.info("[DISPLAY] Checking for cached pixmap")
                     cached_pixmap = self.image_cache.get_pixmap(self.current_file_path)
                     if cached_pixmap is not None:
                         input_aspect = width / height
@@ -16842,14 +17078,14 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             logger.info(f"[DISPLAY] Converting numpy array to QPixmap - bytes_per_line: {bytes_per_line}")
 
             if not rgb_image.flags['C_CONTIGUOUS']:
-                logger.info(f"[DISPLAY] Making array contiguous")
+                logger.info("[DISPLAY] Making array contiguous")
                 rgb_image = np.ascontiguousarray(rgb_image)
 
             conversion_start = time.time()
-            logger.info(f"[DISPLAY] Converting to bytes")
+            logger.info("[DISPLAY] Converting to bytes")
             image_data = rgb_image.data.tobytes() if hasattr(
                 rgb_image.data, 'tobytes') else bytes(rgb_image.data)
-            logger.info(f"[DISPLAY] Bytes conversion completed, creating QImage")
+            logger.info("[DISPLAY] Bytes conversion completed, creating QImage")
 
             q_format = QImage.Format.Format_RGB888
             if channels == 1:
@@ -16859,7 +17095,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
 
             q_image = QImage(image_data, width, height,
                              bytes_per_line, q_format)
-            logger.info(f"[DISPLAY] QImage created, creating QPixmap")
+            logger.info("[DISPLAY] QImage created, creating QPixmap")
             pixmap = QPixmap.fromImage(q_image)
             conversion_time = time.time() - conversion_start
             logger.info(f"[DISPLAY] QImage/QPixmap conversion completed in {conversion_time:.3f}s")
@@ -16878,9 +17114,9 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                         logger.info(f"[DISPLAY] Applying orientation correction: {orientation}")
                         pixmap = self.apply_orientation_to_pixmap(pixmap, orientation)
                     else:
-                        logger.debug(f"[DISPLAY] Orientation is 1 (normal), no correction needed")
+                        logger.debug("[DISPLAY] Orientation is 1 (normal), no correction needed")
                 else:
-                    logger.debug(f"[DISPLAY] Orientation already applied by processor, skipping")
+                    logger.debug("[DISPLAY] Orientation already applied by processor, skipping")
                     # safe_print(f"[ORIENTATION] display_numpy_image: Skipping orientation correction (already applied)")
             self._is_half_size_displayed = is_half_size
             if is_half_size:
@@ -16897,26 +17133,26 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             # ONLY cache if it's the full resolution image, NOT a thumbnail/half_size
             if hasattr(self, "current_file_path") and self.current_file_path and not is_half_size:
                 if not getattr(self, "_raw_recovery_skip_display_cache", False):
-                    logger.info(f"[DISPLAY] Caching FULL resolution pixmap")
+                    logger.info("[DISPLAY] Caching FULL resolution pixmap")
                     self.image_cache.put_pixmap(self.current_file_path, pixmap)
                 else:
                     logger.info("[DISPLAY] Skipping cache (RAW recovery preview)")
             else:
-                logger.info(f"[DISPLAY] Skipping cache for thumbnail/half_size image")
+                logger.info("[DISPLAY] Skipping cache for thumbnail/half_size image")
             
             # Check if we need to restore zoom after displaying full resolution
             # This handles the case when navigating from a zoomed image
             if not is_half_size and hasattr(self, '_pending_zoom_restore') and self._pending_zoom_restore:
-                logger.info(f"[DISPLAY] Full resolution loaded, will restore zoom after display")
+                logger.info("[DISPLAY] Full resolution loaded, will restore zoom after display")
             
             pixmap_display_start = time.time()
-            logger.info(f"[DISPLAY] Calling display_pixmap()")
+            logger.info("[DISPLAY] Calling display_pixmap()")
             self.display_pixmap(pixmap)
             pixmap_display_time = time.time() - pixmap_display_start
             
             # After displaying full resolution, check if we need to restore zoom
             if not is_half_size and hasattr(self, '_pending_zoom_restore') and self._pending_zoom_restore:
-                logger.info(f"[DISPLAY] Full resolution displayed, restoring zoom state")
+                logger.info("[DISPLAY] Full resolution displayed, restoring zoom state")
                 self._pending_zoom_restore = False
                 self.fit_to_window = False
                 # Use getattr to safely get pending zoom parameters
@@ -16936,7 +17172,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                     delattr(self, '_pending_zoom_center')
                 if hasattr(self, '_pending_zoom_level'):
                     delattr(self, '_pending_zoom_level')
-                logger.info(f"[DISPLAY] Zoom state restored after full resolution display")
+                logger.info("[DISPLAY] Zoom state restored after full resolution display")
                 self._finish_nav_zoom_preserve()
             total_time = time.time() - display_start
             logger.info(f"[DISPLAY] RAW image displayed successfully: {width}x{height} (pixmap display: {pixmap_display_time:.3f}s, total: {total_time:.3f}s)")
@@ -18311,7 +18547,6 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         """Anchor on NSWindow contentView (Qt status-bar button winId breaks picker populate)."""
         import objc
         from AppKit import NSMakeRect
-        from ctypes import c_void_p
 
         btn = getattr(self, "share_bottom_button", None)
         if btn is None:
@@ -18375,7 +18610,6 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         """v2.1-style anchor on the window contentView or button (stable for popover content)."""
         import objc
         from AppKit import NSMakeRect
-        from ctypes import c_void_p
 
         if _env_true("RAWVIEWER_SHARE_ANCHOR_BUTTON"):
             btn = getattr(self, "share_bottom_button", None)
@@ -18531,8 +18765,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
     def _share_macos_minimal_v21(self, paths: List[str]) -> bool:
         """v2.1 picker: window contentView anchor, no event-filter pause, no picker delegate."""
         try:
-            from AppKit import NSMakeRect, NSSharingServicePicker
-            import objc
+            from AppKit import NSSharingServicePicker
 
             self._macos_share_log_thread("NSSharingServicePicker minimal v2.1")
             if not self._macos_share_on_main_thread():
@@ -18610,7 +18843,6 @@ class RAWImageViewer(SessionMixin, QMainWindow):
     def _macos_share_ns_window(self):
         """NSWindow for the Qt main window (for NSSharingServiceDelegate)."""
         import objc
-        from ctypes import c_void_p
 
         for label, ptr in (
             ("qt.windowHandle", int(self.windowHandle().winId()) if self.windowHandle() else 0),
@@ -19323,7 +19555,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             # This prevents zoom state from being lost when navigating from a zoomed image
             if self.fit_to_window:
                 # User is in fit-to-window mode, safe to reset
-                logger.debug(f"display_pixmap: fit_to_window=True, resetting to fit-to-window")
+                logger.debug("display_pixmap: fit_to_window=True, resetting to fit-to-window")
                 self.current_zoom_level = 1.0
                 self.zoom_center_point = None
                 self.scale_image_to_fit()
@@ -19354,7 +19586,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                     self.scale_image_to_fit()
                 else:
                     # Full resolution image - apply zoom now
-                    logger.info(f"[DISPLAY_PIXMAP] Full resolution image, applying zoom immediately")
+                    logger.info("[DISPLAY_PIXMAP] Full resolution image, applying zoom immediately")
                     self.apply_zoom_and_pan()
         else:
             if self.fit_to_window:
@@ -20061,6 +20293,22 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         except Exception:
             pass
 
+        # Hold metadata indexing while the gallery is still warming up or actively
+        # painting tiles: the parallel EXIF/thumbnail extraction competes with
+        # gallery thumbnail decodes for the same worker pool and (on external/USB
+        # drives) the same slow disk, which stalls first paint and — on Windows —
+        # can drive concurrency high enough to crash. Reschedule instead of start.
+        if self._should_defer_metadata_index_for_gallery():
+            import logging
+
+            logging.getLogger(__name__).info(
+                "[INDEX] Deferring background metadata indexing (gallery warming/loading)"
+            )
+            t = getattr(self, "_metadata_index_defer_timer", None)
+            if t is not None:
+                t.start(_env_int("RAWVIEWER_METADATA_INDEX_GALLERY_RETRY_MS", 2000, minimum=250))
+            return
+
         folder = getattr(self, "current_folder", None)
         corpus = getattr(self, "_semantic_search_corpus_files", None) or getattr(
             self, "image_files", None
@@ -20073,6 +20321,43 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         logger.info(f"[INDEX] Starting background metadata indexing for folder: {folder}")
 
         self._run_metadata_index_prep(folder, corpus)
+
+    def _gallery_has_thumbnail_load_pressure(self) -> bool:
+        """True when gallery thumbnail decodes are still in flight (defer heavy background work)."""
+        if getattr(self, "view_mode", "") != "gallery":
+            return False
+        gj = getattr(self, "gallery_justified", None)
+        if gj is None:
+            return False
+        if hasattr(gj, "_gallery_warmup_active") and gj._gallery_warmup_active():
+            return True
+        active = len(getattr(gj, "_active_tasks", {}) or {})
+        threshold = _env_int("RAWVIEWER_GALLERY_INDEX_DEFER_ACTIVE", 16, minimum=1)
+        return active >= threshold
+
+    def _should_defer_metadata_index_for_gallery(self) -> bool:
+        """True while gallery first-paint/warmup is in progress (avoid I/O contention).
+
+        Only applies in gallery mode. The deferral self-limits: a hard ceiling
+        (default 20s after the gallery deferral window opened) guarantees indexing
+        eventually runs even if the user keeps scrolling, so search never stalls.
+        """
+        if getattr(self, "view_mode", "") != "gallery":
+            return False
+        import time
+
+        if self._gallery_has_thumbnail_load_pressure():
+            return True
+
+        deferred_until = float(getattr(self, "_gallery_indexing_deferred_until", 0.0) or 0.0)
+        # Absolute ceiling so indexing is never starved by continuous scrolling.
+        ceiling_s = _env_int("RAWVIEWER_METADATA_INDEX_DEFER_MAX_MS", 12000, minimum=2000) / 1000.0
+        opened = float(getattr(self, "_gallery_deferral_opened_ts", 0.0) or 0.0)
+        if opened and (time.time() - opened) > ceiling_s:
+            return False
+        if time.time() < deferred_until:
+            return True
+        return False
 
     def _run_metadata_index_prep(self, folder, corpus_files):
         if getattr(self, "_semantic_index_prep_in_progress", False):
@@ -20102,7 +20387,18 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             
         import logging
         logger = logging.getLogger(__name__)
-        logger.info(f"[INDEX] Background metadata prep done. Pending metadata extraction: {len(pending)} files.")
+        index = self._get_semantic_index()
+        try:
+            extract_pending = (
+                index.get_metadata_extraction_pending_paths(pending) if pending else []
+            )
+        except Exception:
+            extract_pending = list(pending or [])
+        logger.info(
+            "[INDEX] Background metadata prep done. Broad pending=%d, need EXIF extract=%d",
+            len(pending or []),
+            len(extract_pending),
+        )
         
         self._metadata_index_run_done = True
         
@@ -20114,7 +20410,12 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 )
             return
 
-        from semantic_search import semantic_embeddings_enabled
+        if not extract_pending:
+            logger.info(
+                "[INDEX] Metadata-only pass: nothing to extract; skipping index worker (no ONNX probe)"
+            )
+            self._finish_silent_metadata_without_worker(corpus_files)
+            return
 
         self._start_semantic_index_build_background(
             corpus_files=corpus_files,
@@ -20363,10 +20664,10 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         try:
             # Check if object is still valid
             if not hasattr(self, 'current_file_path'):
-                logger.warning(f"[PROCESS] on_image_processed called but object may be invalid")
+                logger.warning("[PROCESS] on_image_processed called but object may be invalid")
                 return
         except:
-            logger.error(f"[PROCESS] on_image_processed called but object is invalid (access violation risk)")
+            logger.error("[PROCESS] on_image_processed called but object is invalid (access violation risk)")
             return
         
         # Get current file info for logging
@@ -20382,7 +20683,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             image_dtype = rgb_image.dtype if hasattr(rgb_image, 'dtype') else 'unknown'
             logger.info(f"[PROCESS] Image data - shape: {image_shape}, dtype: {image_dtype}")
         else:
-            logger.info(f"[PROCESS] Image data is None")
+            logger.info("[PROCESS] Image data is None")
         
         # Check if this signal is for the current file (important for rapid navigation)
         if current_file:
@@ -20423,12 +20724,12 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 # and ImageOps.exif_transpose for TIFF/RAW JPEG thumbnails, which automatically applies EXIF orientation.
                 # Orientation is already applied, so set flag so display_pixmap doesn't apply it again
                 self._orientation_already_applied = True
-                logger.debug(f"[PROCESS] Orientation already applied by _load_pixmap_safe (QImageReader/PIL)")
+                logger.debug("[PROCESS] Orientation already applied by _load_pixmap_safe (QImageReader/PIL)")
 
                 self.current_pixmap = pixmap
                 # Pixmap loaded from disk is full resolution for non-RAW files
                 self._is_half_size_displayed = False
-                logger.debug(f"[PROCESS] Setting _is_half_size_displayed=False for loaded pixmap")
+                logger.debug("[PROCESS] Setting _is_half_size_displayed=False for loaded pixmap")
                 
                 # CRITICAL: Check for zoom restoration FIRST before resetting fit_to_window
                 # Preserve-nav / pinch paths may set level + anchor without a prior zoom_center_point.
@@ -20468,7 +20769,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                     self._finish_nav_zoom_preserve()
                 elif not has_maintain_zoom:
                     # No zoom restoration needed and not maintaining zoom - reset to fit-to-window
-                    logger.debug(f"on_image_processed (QPixmap): No zoom state to restore, resetting to fit-to-window")
+                    logger.debug("on_image_processed (QPixmap): No zoom state to restore, resetting to fit-to-window")
                     self.fit_to_window = True
                     self.current_zoom_level = 1.0
                     self.zoom_center_point = None
@@ -20638,7 +20939,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                     )
                     if navigate_zoom_restore:
                         if is_half_size:
-                            logger.debug(f"Zoom restoration needed: skipping half_size display (converted from numpy)")
+                            logger.debug("Zoom restoration needed: skipping half_size display (converted from numpy)")
                             if not hasattr(self, '_full_resolution_loading') or not self._full_resolution_loading:
                                 # Check if full resolution is already cached
                                 cached_full = self.image_cache.get_full_image(self.current_file_path)
@@ -21156,11 +21457,11 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         # 2. The rate limiting was causing navigation to be blocked unnecessarily
         # 3. Users should be able to navigate quickly if the previous navigation completed
         if nav_in_progress:
-            logger.warning(f"[NAV_CHECK] Navigation BLOCKED: navigation already in progress")
-            safe_print(f"[PERF] 🚫 NAVIGATION BLOCKED: Already in progress")
+            logger.warning("[NAV_CHECK] Navigation BLOCKED: navigation already in progress")
+            safe_print("[PERF] 🚫 NAVIGATION BLOCKED: Already in progress")
             return False
         
-        logger.debug(f"[NAV_CHECK] Navigation ALLOWED")
+        logger.debug("[NAV_CHECK] Navigation ALLOWED")
         return True
     
     def _debounced_navigate(self, direction, from_slideshow=False):
@@ -21336,7 +21637,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         
         # Check if navigation is allowed BEFORE starting navigation
         if not self.can_navigate():
-            logger.warning(f"[NAV_PREV] Navigation BLOCKED by can_navigate() check")
+            logger.warning("[NAV_PREV] Navigation BLOCKED by can_navigate() check")
             return
         
         # Mark navigation as started - must be done before any return statements
@@ -21411,7 +21712,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             logger.debug(f"[NAV_PREV] Outer finally block reached at {outer_finally_time:.3f} "
                        f"(total duration: {outer_finally_time - nav_start_time:.3f}s)")
             if hasattr(self, '_navigation_in_progress') and self._navigation_in_progress:
-                logger.warning(f"[NAV_PREV] Navigation flag still True in outer finally, clearing it")
+                logger.warning("[NAV_PREV] Navigation flag still True in outer finally, clearing it")
                 self.finish_navigation()
             logger.info(f"[NAV_PREV] ========== navigate_to_previous_image() COMPLETED "
                        f"(total duration: {outer_finally_time - nav_start_time:.3f}s) ==========")
@@ -21448,7 +21749,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         
         # Check if navigation is allowed BEFORE starting navigation
         if not self.can_navigate():
-            logger.warning(f"[NAV_NEXT] Navigation BLOCKED by can_navigate() check")
+            logger.warning("[NAV_NEXT] Navigation BLOCKED by can_navigate() check")
             return
         
         # Mark navigation as started - must be done before any return statements
@@ -21534,7 +21835,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             logger.debug(f"[NAV_NEXT] Outer finally block reached at {outer_finally_time:.3f} "
                        f"(total duration: {outer_finally_time - nav_start_time:.3f}s)")
             if hasattr(self, '_navigation_in_progress') and self._navigation_in_progress:
-                logger.warning(f"[NAV_NEXT] Navigation flag still True in outer finally, clearing it")
+                logger.warning("[NAV_NEXT] Navigation flag still True in outer finally, clearing it")
                 self.finish_navigation()
             logger.info(f"[NAV_NEXT] ========== navigate_to_next_image() COMPLETED "
                        f"(total duration: {outer_finally_time - nav_start_time:.3f}s) ==========")
@@ -22720,7 +23021,6 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             self.update_status_bar()
 
         except Exception as e:
-            import traceback
             logger.error(f"Error scanning folder: {e}", exc_info=True)
             error_msg = f"Error scanning folder:\n{str(e)}"
             self.show_error("Folder Scan Error", error_msg)
@@ -23478,7 +23778,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             
             # Check if we successfully extracted any metadata from cached tags
             if not exif_info:
-                logger.warning(f"[STATUS] No metadata extracted from cached EXIF tags. Attempting direct EXIF extraction as fallback.")
+                logger.warning("[STATUS] No metadata extracted from cached EXIF tags. Attempting direct EXIF extraction as fallback.")
                 metadata_extracted_from_cache = False
         
         # Fallback: If no exif_tags OR if we didn't extract any metadata from cache, try direct extraction
@@ -23509,7 +23809,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                     # If we got new data, try to update cache for future use
                     if exif_data and any([exif_data.get('focal_length'), exif_data.get('aperture'), 
                                          exif_data.get('iso'), exif_data.get('capture_time')]):
-                        logger.info(f"[STATUS] Fallback extraction found metadata, updating cache")
+                        logger.info("[STATUS] Fallback extraction found metadata, updating cache")
                         # Try to merge with existing cache or create new entry
                         if not cached_exif:
                             cached_exif = {}
@@ -23825,7 +24125,6 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                             steps = delta // 120 if abs(delta) >= 120 else (1 if delta > 0 else -1)
                             bar.scroll_by_steps(steps)
                             return True
-                from PyQt6.QtGui import QWheelEvent
                 wheel_event = event
                 
                 # Check vertical wheel (up/down scroll)
@@ -24440,7 +24739,19 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         if hasattr(self, "status_bar") and self.status_bar:
             self.status_bar.showMessage("Folder sorted by capture time (EXIF)", 3000)
         if getattr(self, "view_mode", "single") == "gallery":
-            self._update_gallery_view()
+            anchor = None
+            gj = getattr(self, "gallery_justified", None)
+            if gj is not None and hasattr(gj, "get_scroll_anchor_path"):
+                try:
+                    anchor = gj.get_scroll_anchor_path()
+                except Exception:
+                    anchor = None
+            self._sync_gallery_to_folder_files(
+                bulk_metadata,
+                scroll_to_current=False,
+                scroll_anchor_path=anchor,
+                force=True,
+            )
 
     def _sync_gallery_to_folder_files(
         self,
@@ -24475,10 +24786,23 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         order_mismatch = gallery_order != files or layout_seq != tuple(files)
         if not force and not order_mismatch:
             return
+        # A forced rebuild with no actual order change (e.g. a passive metadata-ready
+        # re-sort) would tear down and rebuild every tile mid-load, interrupting
+        # thumbnail decodes and causing scattered/blank tiles. Skip it while the
+        # gallery is still warming up; the warmup/aspects-settle pass rebuilds anyway.
+        if (
+            force
+            and not order_mismatch
+            and getattr(self, "view_mode", "") == "gallery"
+            and hasattr(gj, "_gallery_warmup_active")
+            and gj._gallery_warmup_active()
+        ):
+            return
         # Prefer explicit anchor / saved anchor / current file — never infer from scroll=0
         # (get_scroll_anchor_path() would return the first thumbnail, not the open image).
         # In gallery mode, prefer the open file / explicit anchor — not scroll=0
         # (get_scroll_anchor_path() at y=0 is the first thumbnail, not the current image).
+        anchor_state = None
         anchor = (
             scroll_anchor_path
             or getattr(self, "_gallery_scroll_anchor_path", None)
@@ -24493,6 +24817,17 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             and not force
         ):
             anchor = gj.get_scroll_anchor_path()
+        if gj is not None and hasattr(gj, "_capture_scroll_anchor_state"):
+            try:
+                if scroll_anchor_path:
+                    anchor_state = {
+                        "file_path": scroll_anchor_path,
+                        "offset_px": 0,
+                    }
+                elif not scroll_to_current:
+                    anchor_state = gj._capture_scroll_anchor_state()
+            except Exception:
+                anchor_state = None
         try:
             gj.set_images(
                 files,
@@ -24501,7 +24836,12 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             )
         except TypeError:
             gj.set_images(files, meta if meta else None)
-        if anchor and hasattr(gj, "scroll_to_file"):
+        if anchor_state and hasattr(gj, "_schedule_scroll_to_file_retry"):
+            gj._pending_scroll_anchor_state = anchor_state
+            gj._pending_scroll_to_path = anchor_state.get("file_path")
+            gj._scroll_to_file_attempts = 0
+            gj._schedule_scroll_to_file_retry(0)
+        elif anchor and hasattr(gj, "scroll_to_file"):
             gj.scroll_to_file(anchor)
             self._gallery_scroll_anchor_path = None
         if hasattr(gj, "_sync_content_geometry"):
@@ -24927,11 +25267,15 @@ def main():
     logger = logging.getLogger(__name__)
     if not logger.handlers and not logging.getLogger().handlers:
         try:
+            import platform as _platform_mod
+
+            platform_system = _platform_mod.system()
+            platform_release = _platform_mod.release()
             log_file = setup_logging()
             logger.info("=" * 80)
             logger.info("Application startup started")
             logger.info(f"Python version: {sys.version}")
-            logger.info(f"Platform: {platform.system()} {platform.release()}")
+            logger.info(f"Platform: {platform_system} {platform_release}")
             logger.info(f"Working directory: {os.getcwd()}")
             logger.info("=" * 80)
         except Exception as log_error:
@@ -24992,7 +25336,6 @@ def main():
         import ctypes
         safe_print("  [Windows] ctypes imported", flush=True)
         safe_print("  [Windows] Importing wintypes...", flush=True)
-        from ctypes import wintypes
         safe_print("  [Windows] wintypes imported", flush=True)
         
         # Define exception handler function
@@ -25005,9 +25348,9 @@ def main():
             if exception_code == 0xC0000005:
                 error_msg = f"Access Violation (0xC0000005) at address {exception_address}"
                 logger.critical(f"Windows Access Violation: {error_msg}")
-                logger.critical(f"This usually indicates accessing invalid memory (null pointer, freed object, etc.)")
+                logger.critical("This usually indicates accessing invalid memory (null pointer, freed object, etc.)")
                 safe_print_err(f"\n{'='*80}")
-                safe_print_err(f"WINDOWS ACCESS VIOLATION")
+                safe_print_err("WINDOWS ACCESS VIOLATION")
                 safe_print_err(f"{'='*80}")
                 safe_print_err(f"{error_msg}")
                 safe_print_err(f"{'='*80}\n")
@@ -25111,27 +25454,27 @@ def main():
             safe_print("Splash screen closed, main window displayed", flush=True)
 
         # Run application
-        logger.info(f"[MAIN] Starting Qt event loop")
+        logger.info("[MAIN] Starting Qt event loop")
         exit_code = app.exec()
         
         # Check exit code for access violations
         if exit_code == -1073741819:  # 0xC0000005 - Access Violation
-            logger.critical(f"[MAIN] Application crashed with Access Violation (0xC0000005)")
-            logger.critical(f"[MAIN] This usually indicates:")
-            logger.critical(f"[MAIN]   1. Accessing invalid memory (null pointer, freed object)")
-            logger.critical(f"[MAIN]   2. Qt object accessed from wrong thread")
-            logger.critical(f"[MAIN]   3. Memory corruption in rawpy/Qt")
-            logger.critical(f"[MAIN]   4. Signal/slot connection to deleted object")
+            logger.critical("[MAIN] Application crashed with Access Violation (0xC0000005)")
+            logger.critical("[MAIN] This usually indicates:")
+            logger.critical("[MAIN]   1. Accessing invalid memory (null pointer, freed object)")
+            logger.critical("[MAIN]   2. Qt object accessed from wrong thread")
+            logger.critical("[MAIN]   3. Memory corruption in rawpy/Qt")
+            logger.critical("[MAIN]   4. Signal/slot connection to deleted object")
             safe_print_err(f"\n{'='*80}")
-            safe_print_err(f"ACCESS VIOLATION DETECTED (0xC0000005)")
+            safe_print_err("ACCESS VIOLATION DETECTED (0xC0000005)")
             safe_print_err(f"{'='*80}")
-            safe_print_err(f"This error indicates the application tried to access invalid memory.")
-            safe_print_err(f"Possible causes:")
-            safe_print_err(f"  - Qt object accessed from wrong thread")
-            safe_print_err(f"  - Accessing deleted/freed object")
-            safe_print_err(f"  - Memory corruption in rawpy or Qt library")
-            safe_print_err(f"  - Signal connected to deleted slot")
-            safe_print_err(f"\nCheck the log file for detailed information.")
+            safe_print_err("This error indicates the application tried to access invalid memory.")
+            safe_print_err("Possible causes:")
+            safe_print_err("  - Qt object accessed from wrong thread")
+            safe_print_err("  - Accessing deleted/freed object")
+            safe_print_err("  - Memory corruption in rawpy or Qt library")
+            safe_print_err("  - Signal connected to deleted slot")
+            safe_print_err("\nCheck the log file for detailed information.")
             safe_print_err(f"{'='*80}\n")
         
         logger.info(f"[MAIN] Application exited with code: {exit_code}")
@@ -25158,10 +25501,10 @@ def main():
         
         # Also print to console/stderr so it's visible even if logging fails
         safe_print_err(f"\n{'='*80}")
-        safe_print_err(f"FATAL ERROR")
+        safe_print_err("FATAL ERROR")
         safe_print_err(f"{'='*80}")
         safe_print_err(f"{error_msg}")
-        safe_print_err(f"\nFull traceback:")
+        safe_print_err("\nFull traceback:")
         safe_print_err(f"{error_traceback}")
         safe_print_err(f"{'='*80}\n")
         
