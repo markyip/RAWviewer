@@ -3,7 +3,7 @@
 ## 🚀 Version 2.5.0
 **Release Date: June 29, 2026**
 
-Major release introducing a custom gallery zoom slider, interactive GPS map display overlay, macOS HDR/EDR viewing (including RAW), animated GIF/WebP playback, RAW tone recovery preview, and gallery responsiveness fixes for large folders and folder switching.
+Major release introducing a custom gallery zoom slider, interactive GPS map display overlay, macOS HDR/EDR viewing (including RAW), animated GIF/WebP playback, RAW tone recovery preview, burst image grouping, a side-by-side comparison pane, and gallery responsiveness fixes for large folders and folder switching.
 
 ### Gallery Zoom Slider & scroll anchoring
 - **Gallery Zoom Slider** — Custom slanted wedge-shaped zoom track and circular thumb in the justified gallery (bottom bar; row height **220–380px**, step 20). The chosen size is saved in `QSettings` (`gallery_row_height`).
