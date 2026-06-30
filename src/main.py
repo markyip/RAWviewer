@@ -14390,11 +14390,11 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         return (
             "No image loaded\n\n"
             "Click 📁 or drag and drop a folder or image to load it\n"
-            f"{self._keyboard_shortcuts_help_text()}\n"
+            "← / → — Previous / next image\n"
+            "Space / Double-click — Toggle fit-to-window / 100% zoom\n"
             "Click and drag to pan when zoomed\n"
-            "Scroll wheel (fit-to-window): Scroll down = next image, Scroll up = previous image\n"
-            "Horizontal wheel (zoom mode): Scroll left/right to pan the image\n"
-            "Bottom bar: Share/Open and other controls when images are loaded"
+            "Scroll wheel (fit-to-window): Scroll down = next image, Scroll up = previous image\n\n"
+            "For all other shortcuts, click or hover the 'i' button in the bottom right."
         )
 
     def _keyboard_shortcuts_tooltip(self) -> str:
