@@ -4571,6 +4571,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 if view is not None:
                     view.clearFocus()
                     view.clear_clipping_overlay()
+                    self._compare_stop_animation(view)
         self.view_mode = "gallery"
         from PyQt6.QtCore import QTimer
         from comparison_mode import CompareEntry
@@ -4967,7 +4968,12 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         if not path:
             view.set_pixmap(QPixmap())
             view.file_path = None
+            self._compare_stop_animation(view)
             return
+
+        # Stop existing animation before switching/loading path
+        self._compare_stop_animation(view)
+
         norm_path = _norm_path(path)
         same_path = _norm_path(getattr(view, "file_path", "") or "") == norm_path
         if same_path and view.has_pixmap() and not force:
@@ -4983,8 +4989,10 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                         preserve = not view.is_fit_mode()
                         view.set_pixmap(correct, preserve_view=preserve)
                     else:
+                        self._compare_start_animation(view, path)
                         return
             else:
+                self._compare_start_animation(view, path)
                 return
         view.file_path = path
         self._ensure_compare_exif_ready(path)
@@ -5001,6 +5009,123 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self._queue_compare_pane_decode(path)
         if getattr(self, "_compare_focus_outline_active", False):
             self._compare_update_focus_overlay_for_view(view)
+        
+        # Start animation for the newly set path
+        self._compare_start_animation(view, path)
+
+    def _compare_stop_animation(self, view) -> None:
+        anims = getattr(self, "_compare_view_animations", {})
+        if view in anims:
+            anim = anims[view]
+            if anim["type"] == "gif":
+                movie = anim["movie"]
+                movie.stop()
+                try:
+                    movie.frameChanged.disconnect(anim["handler"])
+                except Exception:
+                    pass
+            elif anim["type"] == "webp":
+                timer = anim["timer"]
+                timer.stop()
+            del anims[view]
+
+    def _compare_start_animation(self, view, path: str) -> None:
+        if not path or not os.path.exists(path):
+            return
+        ext = os.path.splitext(path)[1].lower()
+        if ext not in (".gif", ".webp"):
+            return
+        
+        if not hasattr(self, "_compare_view_animations"):
+            self._compare_view_animations = {}
+
+        if ext == ".gif":
+            from PyQt6.QtGui import QMovie
+            movie = QMovie(path)
+            # Create a safe closure/handler that checks if this view is still displaying this path
+            def handler():
+                if getattr(view, "file_path", "") == path:
+                    pm = movie.currentPixmap()
+                    if pm is not None and not pm.isNull():
+                        view.set_pixmap(pm, preserve_view=True)
+                        if getattr(self, "_clipping_overlay_active", False):
+                            mask = self._build_clipping_overlay_pixmap(pm)
+                            view.set_clipping_overlay(mask)
+            movie.frameChanged.connect(handler)
+            movie.start()
+            self._compare_view_animations[view] = {
+                "type": "gif",
+                "movie": movie,
+                "handler": handler
+            }
+        elif ext == ".webp":
+            from PyQt6.QtCore import QRunnable, QThreadPool, pyqtSignal, QObject
+            
+            class WebpCompareSignals(QObject):
+                ready = pyqtSignal(list, list) # frames (QImage), durations
+            
+            class WebpCompareWorker(QRunnable):
+                def __init__(self_inner):
+                    super().__init__()
+                    self_inner.signals = WebpCompareSignals()
+                def run(self_inner):
+                    try:
+                        from PIL import Image
+                        frames = []
+                        durations = []
+                        with Image.open(path) as img:
+                            n_frames = getattr(img, "n_frames", 1)
+                            if n_frames <= 1:
+                                return # Static webp
+                            for frame_idx in range(n_frames):
+                                img.seek(frame_idx)
+                                from PIL.ImageQt import ImageQt
+                                qim = ImageQt(img.convert("RGBA"))
+                                frames.append(qim.copy())
+                                durations.append(img.info.get("duration", 100) or 100)
+                        self_inner.signals.ready.emit(frames, durations)
+                    except Exception:
+                        pass
+            
+            worker = WebpCompareWorker()
+            def on_ready(qimages, durations):
+                if getattr(view, "file_path", "") != path:
+                    return
+                pixmaps = [QPixmap.fromImage(qim) for qim in qimages]
+                timer = QTimer(self)
+                timer.setSingleShot(True)
+                
+                state = {
+                    "frames": pixmaps,
+                    "durations": durations,
+                    "idx": 0
+                }
+                
+                def play_frame():
+                    if getattr(view, "file_path", "") != path:
+                        timer.stop()
+                        return
+                    idx = state["idx"]
+                    pm = state["frames"][idx]
+                    view.set_pixmap(pm, preserve_view=True)
+                    if getattr(self, "_clipping_overlay_active", False):
+                        mask = self._build_clipping_overlay_pixmap(pm)
+                        view.set_clipping_overlay(mask)
+                    
+                    duration = state["durations"][idx]
+                    state["idx"] = (idx + 1) % len(state["frames"])
+                    timer.start(duration)
+                
+                timer.timeout.connect(play_frame)
+                play_frame()
+                
+                self._compare_view_animations[view] = {
+                    "type": "webp",
+                    "timer": timer
+                }
+                
+            worker.signals.ready.connect(on_ready)
+            QThreadPool.globalInstance().start(worker)
 
     def _update_compare_status_bar(self) -> None:
         session = getattr(self, "_comparison_session", None)
