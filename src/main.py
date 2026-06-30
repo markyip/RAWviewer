@@ -14252,9 +14252,9 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         return (
             "Space / Double-click — Toggle fit-to-window / 100% zoom\n"
             "Trackpad Pinch / Ctrl+Scroll — Smooth zoom in/out\n"
-            "Left / Right Arrow — Previous / next image\n"
-            "Up Arrow — Bookmark / unbookmark image(s)\n"
-            "Down Arrow — Move image(s) to Discard folder\n"
+            "← / → — Previous / next image\n"
+            "↑ — Bookmark / unbookmark image(s)\n"
+            "↓ — Move image(s) to Discard folder\n"
             "Delete — Delete image(s)\n"
             "Esc — Gallery: clear selection / exit bookmark filter; single view: back to gallery\n"
             "Gallery: Ctrl/Cmd+click — toggle selection; Shift+click two photos for range\n"
