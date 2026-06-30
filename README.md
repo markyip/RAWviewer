@@ -47,6 +47,16 @@ In **gallery view**, drag the **size slider** in the bottom bar to change thumbn
 | **F** | Show / hide focus overlay (supported files) |
 | **M** | Show / hide GPS map overlay (single view, geotagged photos; hidden by default on launch) |
 
+**Compare mode shortcuts:**
+* **← / →** — Previous / next candidate image
+* **↑** — Promote candidate (right pane) to selected (left pane)
+* **↓** — Reject candidate and move it to Discard folder (Shift+↓ to reject select)
+* **Delete** — Delete candidate image to Recycle Bin/Trash (Shift+Delete to delete select)
+* **Space** — Toggle synchronized zoom across both panes
+* **J** — Toggle exposure clipping overlay on both panes
+* **G** — Cycle composition grid guide on both panes
+* **C** / **Esc** — Exit Compare mode
+
 **Gallery bookmarks:** Click the outline **star** (nothing selected) to show bookmarked shots only; gold star = filter on. With photos selected, **↑** or the star toggles bookmarks on the selection.
 
 **Search:** gallery search icon — `camera:sony`, `iso<800`, … (**Full** also accepts `sunset on beach`). **Share:** bottom **Share / Open** button, or drag gallery / film-strip thumbnails out.

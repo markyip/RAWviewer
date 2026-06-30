@@ -35,7 +35,7 @@ Major release introducing a custom gallery zoom slider, interactive GPS map disp
 ### Dual-Pane Compare View
 - **Dual-pane Compare Mode** — Compare multiple selected images side-by-side (left panel is the selected anchor, right panel displays candidate files).
 - **Direct Compare Toggle (C)** — Press **C** to enter Compare mode immediately when multiple images are selected (works from both gallery and single view). Press **C** again while in Compare mode to exit back to the gallery.
-- **Compare navigation & culling** — Promote candidate to select, reject candidates, and step through files using keyboard shortcuts. Unselecting all items automatically hides the compare bottom button.
+- **Compare navigation & culling** — Promote candidate to select (↑), reject candidate to Discard folder (↓), or delete candidate to Recycle Bin/Trash (Delete). Use **Shift + ↓** or **Shift + Delete** to reject or delete the selected (left pane) anchor instead, which automatically promotes the current candidate to the select slot and loads the next image. Supports synchronizing composition guides (G) and clipping overlays (J) on both panes. Unselecting all items automatically hides the compare bottom button.
 
 ### Performance & gallery
 - **Snappier navigation** — Filmstrip warm-up is staggered and throttled; navigation cancels low-priority prefetch so the current photo wins I/O. RAW sensor dimensions for the status bar resolve off the UI thread. Identical status-bar updates are deduplicated. Filmstrip refresh and prefetch wait for single-view first paint (TTFR) instead of a fixed delay.
