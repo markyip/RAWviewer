@@ -280,6 +280,12 @@ class GpuImageView(QGraphicsView):
         if self._clipping_item is not None:
             self._clipping_item.hide()
 
+    def has_pixmap(self) -> bool:
+        return getattr(self, "_has_pixmap", False)
+
+    def pixmap(self) -> QPixmap:
+        return self._item.pixmap() if getattr(self, "_has_pixmap", False) else QPixmap()
+
     def set_composition_grid_mode(self, mode: str) -> None:
         """Show composition guide lines in image (scene) coordinates."""
         self._grid_mode = mode if mode else "off"

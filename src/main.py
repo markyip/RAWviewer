@@ -3436,42 +3436,46 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             self._clipping_overlay_cache_key = token
 
     def _sync_clipping_overlay(self) -> None:
+        vm = getattr(self, "view_mode", "single")
+        active = getattr(self, "_clipping_overlay_active", False)
+        
+        if vm == "compare":
+            for view in (
+                getattr(self, "compare_select_view", None),
+                getattr(self, "compare_candidate_view", None),
+            ):
+                if view is not None:
+                    if active and view.has_pixmap():
+                        pm = view.pixmap()
+                        if pm is not None and not pm.isNull():
+                            mask = self._build_clipping_overlay_pixmap(pm)
+                            view.set_clipping_overlay(mask)
+                    else:
+                        view.clear_clipping_overlay()
+                    view.update()
+            return
+
         self._ensure_clipping_overlay_cached()
         gv = getattr(self, "gpu_view", None)
         if gv is not None:
-            if getattr(self, "_clipping_overlay_active", False):
+            if active:
                 gv.set_clipping_overlay(getattr(self, "_clipping_overlay_pm", None))
             else:
                 gv.clear_clipping_overlay()
             return
-        if getattr(self, "_clipping_overlay_active", False):
+        if active:
             self._redraw_single_view_pixmap_without_relayout()
 
     def _toggle_clipping_overlay(self) -> bool:
-        if getattr(self, "view_mode", "single") != "single":
+        vm = getattr(self, "view_mode", "single")
+        if vm not in ("single", "compare"):
             return False
         self._clipping_overlay_active = not getattr(
             self, "_clipping_overlay_active", False
         )
         self._clipping_overlay_cache_key = None
         if self._clipping_overlay_active:
-            from exposure_clipping import clipping_counts, rgb_array_from_pixmap
-
-            pm = getattr(self, "current_pixmap", None)
-            rgb = rgb_array_from_pixmap(pm) if pm is not None and not pm.isNull() else None
-            if rgb is not None:
-                hi, lo, total = clipping_counts(rgb)
-                hp = 100.0 * hi / total if total else 0.0
-                sp = 100.0 * lo / total if total else 0.0
-                self.status_bar.showMessage(
-                    f"Clipping ON — red=highlights ({hp:.1f}%), blue=shadows ({sp:.1f}%). J=off",
-                    5000,
-                )
-            else:
-                self.status_bar.showMessage(
-                    "Clipping ON — red=highlights, blue=shadows. J=off",
-                    4000,
-                )
+            self.status_bar.showMessage("Clipping ON — red=highlights, blue=shadows. J=off", 4000)
         else:
             self.status_bar.showMessage("Clipping overlay off", 2000)
         self._sync_clipping_overlay()
@@ -3479,7 +3483,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
 
     def _toggle_composition_grid(self) -> bool:
         """Cycle composition guides: off → 3×3 → diagonal → 3×3+diagonal → phi grid."""
-        if getattr(self, "view_mode", "single") != "single":
+        vm = getattr(self, "view_mode", "single")
+        if vm not in ("single", "compare"):
             return False
         from rawviewer_ui.composition_grid import grid_mode_label, next_grid_mode
 
@@ -3496,10 +3501,21 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         return True
 
     def _sync_composition_grid_display(self) -> None:
-        gv = getattr(self, "gpu_view", None)
-        if gv is not None:
-            gv.set_composition_grid_mode(getattr(self, "_composition_grid_mode", "off"))
-        self._redraw_single_view_pixmap_without_relayout()
+        vm = getattr(self, "view_mode", "single")
+        mode = getattr(self, "_composition_grid_mode", "off")
+        if vm == "compare":
+            for view in (
+                getattr(self, "compare_select_view", None),
+                getattr(self, "compare_candidate_view", None),
+            ):
+                if view is not None:
+                    view.set_composition_grid_mode(mode)
+                    view.update()
+        else:
+            gv = getattr(self, "gpu_view", None)
+            if gv is not None:
+                gv.set_composition_grid_mode(mode)
+            self._redraw_single_view_pixmap_without_relayout()
 
     def _refresh_focus_subject_rect_from_exif(self) -> None:
         """Populate _focus_subject_rect_image from pyexiv2, then exifread Subject*, then Canon AF.
@@ -4529,6 +4545,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self._sync_burst_group_bottom_chrome()
         self._queue_compare_session_decodes()
         self._refresh_compare_panes()
+        self._sync_composition_grid_display()
+        self._sync_clipping_overlay()
         self._update_compare_status_bar()
         self._restore_keyboard_focus()
 
@@ -4552,6 +4570,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             ):
                 if view is not None:
                     view.clearFocus()
+                    view.clear_clipping_overlay()
         self.view_mode = "gallery"
         from PyQt6.QtCore import QTimer
         from comparison_mode import CompareEntry
@@ -4606,6 +4625,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 force=(changed == "both"),
             )
         self._update_compare_status_bar()
+        self._sync_clipping_overlay()
 
     def _position_compare_complete_banner(self) -> None:
         banner = getattr(self, "_compare_complete_banner", None)
@@ -5231,9 +5251,88 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         if session is None or session.complete:
             return
         path = session.select
-        session.reject_select()
+        self._handle_compare_select_rejected_transition(path)
         self._reject_compare_path(path)
         self._refresh_compare_panes()
+
+    def _handle_compare_select_rejected_transition(self, rejected_path: str) -> None:
+        session = getattr(self, "_comparison_session", None)
+        if session is None:
+            return
+        # Reject the select path
+        session.rejected.add(rejected_path)
+        
+        # Move the current Candidate to the Selected slot
+        prev_candidate = session.candidate
+        session.select = prev_candidate
+        
+        # Retrieve the next candidate
+        visible = session.visible_members()
+        if len(visible) < 2:
+            session.candidate = ""
+            session.complete = True
+        else:
+            next_path = session._pop_queue()
+            if next_path and next_path != session.select and next_path not in session.rejected:
+                session.candidate = next_path
+            else:
+                others = [p for p in visible if p != session.select]
+                session.candidate = others[0] if others else ""
+            if not session.candidate:
+                session.complete = True
+
+    def _delete_path_to_trash(self, file_to_delete: str) -> None:
+        if not file_to_delete or not os.path.exists(file_to_delete):
+            return
+        filename = os.path.basename(file_to_delete)
+        normalized_path = os.path.normpath(file_to_delete)
+
+        self._cancel_load_and_preload_for_path(file_to_delete)
+        from image_cache import get_image_cache
+        cache = get_image_cache()
+        cache.invalidate_file(file_to_delete)
+
+        from send2trash import send2trash
+        send2trash(normalized_path)
+
+        self._drop_discarded_from_semantic_corpus(file_to_delete)
+        self._remove_file_from_active_image_list(file_to_delete)
+        self.status_bar.showMessage(f"Deleted: {filename}")
+
+    def _compare_handle_delete(self, shift_pressed: bool) -> None:
+        session = getattr(self, "_comparison_session", None)
+        if session is None or session.complete:
+            return
+        
+        path_to_delete = session.select if shift_pressed else session.candidate
+        if not path_to_delete:
+            return
+
+        # Confirm deletion (custom MD3 confirmation dialog)
+        filename = os.path.basename(path_to_delete)
+        dialog = CustomConfirmDialog(
+            parent=self,
+            title="Delete Image",
+            message=f"Are you sure you want to move '{filename}' to the Recycle Bin/Trash?",
+            confirm_label="Delete",
+            cancel_label="Cancel",
+        )
+        if not dialog.exec():
+            return
+
+        try:
+            self._delete_path_to_trash(path_to_delete)
+            # Now trigger the session discard/reject transition logic on the deleted path
+            if shift_pressed:
+                self._handle_compare_select_rejected_transition(path_to_delete)
+                self._reject_compare_path(path_to_delete)
+                self._refresh_compare_panes()
+            else:
+                session.reject_candidate()
+                self._reject_compare_path(path_to_delete)
+                self._refresh_compare_panes()
+        except Exception as e:
+            self.show_error("Delete Error", f"Could not delete file:\n{str(e)}")
 
     def _gallery_effective_files(self) -> List[str]:
         """Current gallery scope: folder/search results, optionally ∩ bookmarks."""
@@ -20781,6 +20880,10 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         modifiers = event.modifiers()
         vm = getattr(self, "view_mode", "single")
         
+        if key in (Qt.Key.Key_H, Qt.Key.Key_P, Qt.Key.Key_M):
+            if vm == "compare":
+                return True
+        
         if Qt.Key.Key_0 <= key <= Qt.Key.Key_5:
             if vm == "single":
                 rating = key - Qt.Key.Key_0
@@ -20825,6 +20928,10 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             sys.platform == "darwin" and key == Qt.Key.Key_Backspace
         ):
             # Mac: Backspace key is labeled "delete"; fn+Delete is Key_Delete (forward delete).
+            if vm == "compare":
+                shift_pressed = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+                self._compare_handle_delete(shift_pressed)
+                return True
             if vm == "gallery" and self._gallery_has_selection():
                 self.delete_gallery_selection()
                 return True
@@ -21364,34 +21471,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         """Perform the actual file deletion"""
         try:
             file_to_delete = self.current_file_path
-            filename = os.path.basename(file_to_delete)
-
-            # Normalize the file path to handle UNC paths and other issues
-            normalized_path = os.path.normpath(file_to_delete)
-
-            # Before deleting, cancel any preload tasks for this file and clear cache
-            self._cancel_load_and_preload_for_path(file_to_delete)
-
-            # Clear cache for this file
-            from image_cache import get_image_cache
-            cache = get_image_cache()
-            cache.invalidate_file(file_to_delete)
-
-            # Move file to trash using send2trash
-            # Lazy import send2trash to avoid import delays
-            from send2trash import send2trash
-            send2trash(normalized_path)
-
-            self._drop_discarded_from_semantic_corpus(file_to_delete)
-            # Remove from image files list
-            self._remove_file_from_active_image_list(file_to_delete)
-
-            # Update status
-            self.status_bar.showMessage(f"Deleted: {filename}")
-
-            # Handle navigation after deletion
+            self._delete_path_to_trash(file_to_delete)
             self.handle_post_deletion_navigation()
-
         except Exception as e:
             error_msg = f"Could not delete file:\n{str(e)}"
             self.show_error("Delete Error", error_msg)
