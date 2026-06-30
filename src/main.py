@@ -4480,6 +4480,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 pass  # H4 sidecar write TBC when M X2 lands
         except Exception:
             pass
+        # Physically move the file to the Discard folder
+        self._move_path_to_discard(path)
         self._rebuild_burst_groups()
 
     def _enter_compare_mode(self) -> None:
@@ -7666,6 +7668,10 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self._shortcut_gallery_down = QShortcut(QKeySequence(Qt.Key.Key_Down), self)
         self._shortcut_gallery_down.setContext(Qt.ShortcutContext.WindowShortcut)
         self._shortcut_gallery_down.activated.connect(self._shortcut_activate_gallery_down)
+
+        self._shortcut_gallery_down_shift = QShortcut(QKeySequence(Qt.Key.Key_Down | Qt.KeyboardModifier.ShiftModifier), self)
+        self._shortcut_gallery_down_shift.setContext(Qt.ShortcutContext.WindowShortcut)
+        self._shortcut_gallery_down_shift.activated.connect(self._shortcut_activate_gallery_down)
 
         self._sync_single_image_histogram()
 
@@ -23686,14 +23692,10 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         
         return super().eventFilter(obj, event)
 
-    def move_current_image_to_discard(self):
-        """Move the current image to a 'Discard' folder in the same directory"""
-        if not self.current_file_path or not os.path.exists(self.current_file_path):
-            self.show_error("Discard Error", "No image file to move.")
+    def _move_path_to_discard(self, file_to_move: str) -> None:
+        if not file_to_move or not os.path.exists(file_to_move):
             return
-        self._stop_slideshow()
         try:
-            file_to_move = self.current_file_path
             folder_path = os.path.dirname(file_to_move)
             discard_folder = os.path.join(folder_path, "Discard")
             os.makedirs(discard_folder, exist_ok=True)
@@ -23723,30 +23725,39 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             # Remove from image files list
             self._remove_file_from_active_image_list(file_to_move)
             self.status_bar.showMessage(f"Moved to Discard: {filename}")
-            # --- Preserve zoom/pan state for next image (like navigation/discard) ---
-            if not self.fit_to_window:
-                self._preserve_nav_zoom_active = True
-                self._maintain_zoom_on_navigation = True
-                self._restore_zoom_center = self._zoom_anchor_for_navigation_restore()
-                self._restore_zoom_level = self.current_zoom_level
-                if getattr(self, "current_pixmap", None):
-                    self._restore_pixmap_size = self.current_pixmap.size()
-                # Save current scroll position instead of start_scroll_x/y
-                self._restore_start_scroll_x = self.scroll_area.horizontalScrollBar().value()
-                self._restore_start_scroll_y = self.scroll_area.verticalScrollBar().value()
-            else:
-                self._preserve_nav_zoom_active = False
-                if hasattr(self, "_maintain_zoom_on_navigation"):
-                    delattr(self, "_maintain_zoom_on_navigation")
-                self._restore_zoom_center = None
-                self._restore_zoom_level = None
-                self._restore_start_scroll_x = None
-                self._restore_start_scroll_y = None
-            self.handle_post_deletion_navigation()
             self.schedule_save_session_state()
         except Exception as e:
             error_msg = f"Could not move file to Discard folder:\n{str(e)}"
             self.show_error("Discard Error", error_msg)
+
+    def move_current_image_to_discard(self):
+        """Move the current image to a 'Discard' folder in the same directory"""
+        if not self.current_file_path or not os.path.exists(self.current_file_path):
+            self.show_error("Discard Error", "No image file to move.")
+            return
+        self._stop_slideshow()
+        file_to_move = self.current_file_path
+        self._move_path_to_discard(file_to_move)
+        # --- Preserve zoom/pan state for next image (like navigation/discard) ---
+        if not self.fit_to_window:
+            self._preserve_nav_zoom_active = True
+            self._maintain_zoom_on_navigation = True
+            self._restore_zoom_center = self._zoom_anchor_for_navigation_restore()
+            self._restore_zoom_level = self.current_zoom_level
+            if getattr(self, "current_pixmap", None):
+                self._restore_pixmap_size = self.current_pixmap.size()
+            # Save current scroll position instead of start_scroll_x/y
+            self._restore_start_scroll_x = self.scroll_area.horizontalScrollBar().value()
+            self._restore_start_scroll_y = self.scroll_area.verticalScrollBar().value()
+        else:
+            self._preserve_nav_zoom_active = False
+            if hasattr(self, "_maintain_zoom_on_navigation"):
+                delattr(self, "_maintain_zoom_on_navigation")
+            self._restore_zoom_center = None
+            self._restore_zoom_level = None
+            self._restore_start_scroll_x = None
+            self._restore_start_scroll_y = None
+        self.handle_post_deletion_navigation()
 
     def _scan_folder_generator(self, folder_path, extensions, discard_folder='Discard'):
         """Yield (path, stat) for supported images in folder_path only (no subfolders)."""
