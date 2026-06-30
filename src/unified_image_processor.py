@@ -843,9 +843,28 @@ class UnifiedImageProcessor:
             # 獲取 EXIF 數據（用於處理參數）
             exif_data = self.exif_extractor.extract_exif_data(file_path)
             
-            full_embedded = self._try_full_embedded_raw_preview(file_path, exif_data)
-            if full_embedded is not None:
-                return full_embedded
+            # Check if there is an XMP sidecar file next to the RAW image
+            xmp_exists = False
+            xmp_path = file_path + ".xmp"
+            if not os.path.exists(xmp_path):
+                base_path_no_ext = os.path.splitext(file_path)[0]
+                if os.path.exists(base_path_no_ext + ".xmp"):
+                    xmp_path = base_path_no_ext + ".xmp"
+            if os.path.exists(xmp_path):
+                try:
+                    from raw_adjustments import parse_xmp_adjustments
+                    xmp_adj = parse_xmp_adjustments(xmp_path)
+                    if xmp_adj:
+                        xmp_exists = True
+                except Exception:
+                    xmp_adj = {}
+            else:
+                xmp_adj = {}
+
+            if not xmp_exists:
+                full_embedded = self._try_full_embedded_raw_preview(file_path, exif_data)
+                if full_embedded is not None:
+                    return full_embedded
             
             # 檢查文件大小以決定處理策略
             file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
@@ -853,7 +872,7 @@ class UnifiedImageProcessor:
             
             # 處理 RAW 文件
             # Check if we should use Preview (embedded JPEG) instead of processing RAW
-            if not use_full_resolution and not libraw_first:
+            if not use_full_resolution and not libraw_first and not xmp_exists:
                if skip_key in _LIBRAW_UNSUPPORTED_PATHS:
                    return self.cache.get_preview(file_path)
                # OPTIMIZATION: Try embedded / cached preview instead of full RAW demosaic.
@@ -948,6 +967,15 @@ class UnifiedImageProcessor:
                 
             if orientation != 1 and rgb_image is not None:
                 rgb_image = self._apply_orientation_correction(rgb_image, orientation, exif_data)
+            
+            # Apply XMP adjustments if they exist
+            if xmp_adj and rgb_image is not None:
+                try:
+                    from raw_adjustments import apply_adjustments_to_rgb
+                    rgb_image = apply_adjustments_to_rgb(rgb_image, xmp_adj)
+                except Exception as adj_e:
+                    import logging
+                    logging.getLogger(__name__).warning(f"Failed to apply XMP adjustments: {adj_e}")
             
             # 快取完整圖像
             if rgb_image is not None:
