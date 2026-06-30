@@ -3445,7 +3445,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 getattr(self, "compare_candidate_view", None),
             ):
                 if view is not None:
-                    if active and view.has_pixmap():
+                    is_anim = getattr(view, "file_path", "") and self.is_animated_image(view.file_path)
+                    if active and view.has_pixmap() and not is_anim:
                         pm = view.pixmap()
                         if pm is not None and not pm.isNull():
                             mask = self._build_clipping_overlay_pixmap(pm)
@@ -3457,13 +3458,15 @@ class RAWImageViewer(SessionMixin, QMainWindow):
 
         self._ensure_clipping_overlay_cached()
         gv = getattr(self, "gpu_view", None)
+        path = getattr(self, "current_file_path", None)
+        is_anim = path and self.is_animated_image(path)
         if gv is not None:
-            if active:
+            if active and not is_anim:
                 gv.set_clipping_overlay(getattr(self, "_clipping_overlay_pm", None))
             else:
                 gv.clear_clipping_overlay()
             return
-        if active:
+        if active and not is_anim:
             self._redraw_single_view_pixmap_without_relayout()
 
     def _toggle_clipping_overlay(self) -> bool:
@@ -3488,16 +3491,15 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             return False
         from rawviewer_ui.composition_grid import grid_mode_label, next_grid_mode
 
-        self._composition_grid_mode = next_grid_mode(self._composition_grid_mode)
+        current = getattr(self, "_composition_grid_mode", "off")
+        new_mode = next_grid_mode(current)
+        self._composition_grid_mode = new_mode
         try:
-            self.get_settings().setValue("composition_grid_mode", self._composition_grid_mode)
+            self.get_settings().setValue("composition_grid_mode", new_mode)
         except Exception:
             pass
+        self.status_bar.showMessage(f"Composition guide: {grid_mode_label(new_mode)}", 2000)
         self._sync_composition_grid_display()
-        self.status_bar.showMessage(
-            f"Composition guide: {grid_mode_label(self._composition_grid_mode)}",
-            2500,
-        )
         return True
 
     def _sync_composition_grid_display(self) -> None:
@@ -3509,12 +3511,20 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 getattr(self, "compare_candidate_view", None),
             ):
                 if view is not None:
-                    view.set_composition_grid_mode(mode)
+                    if getattr(view, "file_path", "") and self.is_animated_image(view.file_path):
+                        view.set_composition_grid_mode("off")
+                    else:
+                        view.set_composition_grid_mode(mode)
                     view.update()
         else:
+            path = getattr(self, "current_file_path", None)
+            is_anim = path and self.is_animated_image(path)
             gv = getattr(self, "gpu_view", None)
             if gv is not None:
-                gv.set_composition_grid_mode(mode)
+                if is_anim:
+                    gv.set_composition_grid_mode("off")
+                else:
+                    gv.set_composition_grid_mode(mode)
             self._redraw_single_view_pixmap_without_relayout()
 
     def _refresh_focus_subject_rect_from_exif(self) -> None:
@@ -5048,9 +5058,6 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                     pm = movie.currentPixmap()
                     if pm is not None and not pm.isNull():
                         view.set_pixmap(pm, preserve_view=True)
-                        if getattr(self, "_clipping_overlay_active", False):
-                            mask = self._build_clipping_overlay_pixmap(pm)
-                            view.set_clipping_overlay(mask)
             movie.frameChanged.connect(handler)
             movie.start()
             self._compare_view_animations[view] = {
@@ -5108,9 +5115,6 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                     idx = state["idx"]
                     pm = state["frames"][idx]
                     view.set_pixmap(pm, preserve_view=True)
-                    if getattr(self, "_clipping_overlay_active", False):
-                        mask = self._build_clipping_overlay_pixmap(pm)
-                        view.set_clipping_overlay(mask)
                     
                     duration = state["durations"][idx]
                     state["idx"] = (idx + 1) % len(state["frames"])
