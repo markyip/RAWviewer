@@ -39,6 +39,7 @@ In **gallery view**, drag the **size slider** in the bottom bar to change thumbn
 | **Esc** | Gallery: clear selection → exit bookmark filter · Single view: back to gallery |
 | **Ctrl/Cmd+click** | Gallery: toggle selection |
 | **Shift+click** | Gallery: select range (visible order) |
+| **C** | Toggle Compare mode on/off (requires multiple images selected) |
 | **G** | Cycle composition guide |
 | **H** | Show / hide histogram (hidden by default on launch) |
 | **J** | Toggle highlight/shadow clipping overlay (RAW single view) |
@@ -87,7 +88,7 @@ For a dedicated **cluster map** across an entire album and **geotagging photos m
 2. Choose **Full (CUDA)**, **Full (DirectML)**, or **Lite** in the wizard. **Full** also downloads AI models (~600 MB).
 3. Launch **`RAWviewer.exe`** or the Desktop shortcut (not the Setup file again).
 
-> **v2.5 new:** Gallery zoom slider, scroll anchoring, GPS map overlay (**M**), **macOS HDR/EDR** for HDR stills and **RAW (High Quality workflow)**, **P** recovery preview / **J** clipping overlay on RAW, animated GIF/WebP playback, histogram/map hidden on launch, reliable gallery layout when switching albums, and cleaner cancellation of background indexing from the previous folder.
+> **v2.5 new:** Gallery zoom slider, scroll anchoring, GPS map overlay (**M**), **macOS HDR/EDR** for HDR stills and **RAW (High Quality workflow)**, **P** recovery preview / **J** clipping overlay on RAW, animated GIF/WebP playback, histogram/map hidden on launch, reliable gallery layout when switching albums, cleaner cancellation of background indexing, burst image grouping, and side-by-side Compare view with C-key toggle.
 
 Registers **Open with** for common photo formats. Uninstall: Settings → Apps, or **`uninstall.bat`** in `%LOCALAPPDATA%\RAWviewer`.
 
