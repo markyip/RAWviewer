@@ -5013,6 +5013,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             self._apply_top_metadata_text(label)
         if platform.system() != "Darwin" and hasattr(self, "title_bar") and self.title_bar:
             self.title_bar.set_title(f"RAWviewer - {label}")
+        if hasattr(self, "shortcuts_hint_button"):
+            self.shortcuts_hint_button.setToolTip(self._keyboard_shortcuts_tooltip())
 
     def _on_compare_double_clicked(self, source_view, scene_pt) -> None:
         if getattr(self, "view_mode", "") != "compare":
@@ -14354,6 +14356,17 @@ class RAWImageViewer(SessionMixin, QMainWindow):
 
     def _keyboard_shortcuts_help_text(self):
         """Plain-text shortcuts list for tooltips and the shortcuts dialog."""
+        if getattr(self, "view_mode", "single") == "compare":
+            return (
+                "Space — Toggle synchronized zoom\n"
+                "← / → — Previous / next candidate image\n"
+                "↑ — Promote candidate to selected\n"
+                "↓ — Reject candidate (Shift + ↓ to reject selected)\n"
+                "Delete — Delete candidate image (Shift + Delete to delete selected)\n"
+                "J — Toggle clipping overlay on both panes\n"
+                "G — Cycle composition guide on both panes\n"
+                "C / Esc — Exit Compare mode"
+            )
         return (
             "Space / Double-click — Toggle fit-to-window / 100% zoom\n"
             "Trackpad Pinch / Ctrl+Scroll — Smooth zoom in/out\n"
@@ -14364,14 +14377,6 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             "Esc — Gallery: clear selection / exit bookmark filter; single view: back to gallery\n"
             "Gallery: Ctrl/Cmd+click — toggle selection; Shift+click two photos for range\n"
             "C — Toggle Compare mode (requires multiple images selected)\n"
-            "Compare: ← / → — Previous / next candidate\n"
-            "Compare: ↑ — Promote candidate to select\n"
-            "Compare: ↓ — Reject candidate (Shift + ↓ to reject select)\n"
-            "Compare: Delete — Delete candidate (Shift + Delete to delete select)\n"
-            "Compare: Space — Toggle sync zoom\n"
-            "Compare: J — Toggle clipping overlay on both panes\n"
-            "Compare: G — Cycle composition guide on both panes\n"
-            "Compare: Esc — Exit compare mode\n"
             "H — Show/hide histogram\n"
             "J — Show/hide highlight (red) and shadow (blue) clipping\n"
             "P — RAW only: shadow/highlight recovery preview (fit only, half-res; session)\n"
@@ -22894,6 +22899,9 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             if hasattr(self, "status_counter_label"):
                 self._refresh_image_counter()
             return
+        
+        if hasattr(self, "shortcuts_hint_button"):
+            self.shortcuts_hint_button.setToolTip(self._keyboard_shortcuts_tooltip())
         
         # Show metadata, counter, and sort button when there are files.
         if self.view_mode != "single":
