@@ -5,15 +5,27 @@
 
 Major release introducing a custom gallery zoom slider, interactive GPS map display overlay, macOS HDR/EDR viewing (including RAW), animated GIF/WebP playback, RAW tone recovery preview, burst image grouping, a side-by-side comparison pane, and gallery responsiveness fixes for large folders and folder switching.
 
-### Gallery Zoom Slider & scroll anchoring
-- **Gallery Zoom Slider** — Custom slanted wedge-shaped zoom track and circular thumb in the justified gallery (bottom bar; row height **220–380px**, step 20). The chosen size is saved in `QSettings` (`gallery_row_height`).
-- **Justified relayout on zoom** — Dragging the slider runs a full justified grid rebuild at the new target row height so each row still fills the viewport width and thumbnail sizes change visibly.
-- **Scroll anchoring** — When you press the slider, the **upper-left visible** thumbnail becomes the anchor for the whole drag. After each relayout, vertical scroll is restored so that photo stays at the same height on screen (horizontal position may shift slightly as rows regroup).
+### Burst Image Grouping
+- **Burst image grouping** — Automatically group rapid-fire burst sequences in the gallery (based on capture time intervals). Double-click a collapsed stack cover to enter the burst group view and inspect individual frames.
+
+### Dual-Pane Compare View
+- **Dual-pane Compare Mode** — Compare multiple selected images side-by-side (left panel is the selected anchor, right panel displays candidate files).
+- **Direct Compare Toggle (C)** — Press **C** to enter Compare mode immediately when multiple images are selected (works from both gallery and single view). Press **C** again while in Compare mode to exit back to the gallery.
+- **Compare navigation & culling** — Promote candidate to select (↑), reject candidate to Discard folder (↓), or delete candidate to Recycle Bin/Trash (Delete). Use **Shift + ↓** or **Shift + Delete** to reject or delete the selected (left pane) anchor instead, which automatically promotes the current candidate to the select slot and loads the next image. Supports synchronizing composition guides (G) and clipping overlays (J) on both panes. Unselecting all items automatically hides the compare bottom button.
+
+### RAW tone recovery & clipping (single view, RAW/DNG)
+- **P — Recovery preview** — Session-only local shadow/highlight recovery on a half-res linear LibRaw decode (`highlight_mode=Reconstruct`, Reinhard tone map, local polish). Fit-only (~2048 px); press **P** again to exit. Does not change the main full-res pipeline or persist settings.
+- **J — Clipping overlay** — Red = highlight clip (any channel ≥252); blue = shadow clip (all channels ≤3) on the current screen buffer. Diagnostic only; distinct from **P** soft recovery.
 
 ### Interactive GPS Map Display Overlay
 - **GPS Map Overlay** — Press **M** in single-image view to show/hide an interactive tile-based map card. The card appears immediately with a **Loading map…** placeholder while tiles fetch; non-geotagged photos do not pop up a map.
 - **Coordinate badge** — A clickable badge shows lat/lon on the map; click it to open the location in **Google Maps** (browser).
 - **Offline Reverse-Geocoding for Search** — Bundles preloaded worldwide cities (all cities with population > 500, covering over 100,000+ locations) and landmarks databases (`cities500.csv.gz` and `landmarks.csv.gz`). During background indexing, GPS coordinates are resolved to city, region, and country names and stored locally — enabling gallery search by location (e.g. `city:tokyo`, `country:jp`) with no internet required.
+
+### Gallery Zoom Slider & scroll anchoring
+- **Gallery Zoom Slider** — Custom slanted wedge-shaped zoom track and circular thumb in the justified gallery (bottom bar; row height **220–380px**, step 20). The chosen size is saved in `QSettings` (`gallery_row_height`).
+- **Justified relayout on zoom** — Dragging the slider runs a full justified grid rebuild at the new target row height so each row still fills the viewport width and thumbnail sizes change visibly.
+- **Scroll anchoring** — When you press the slider, the **upper-left visible** thumbnail becomes the anchor for the whole drag. After each relayout, vertical scroll is restored so that photo stays at the same height on screen (horizontal position may shift slightly as rows regroup).
 
 ### macOS HDR / EDR display
 - **Extended Dynamic Range viewport** — On macOS, the GPU single-image view (`RAWVIEWER_GPU_VIEW=1`, default in release builds) enables EDR on the viewport layer so bright HDR content can use headroom above SDR white on supported displays.
@@ -22,20 +34,8 @@ Major release introducing a custom gallery zoom slider, interactive GPS map disp
 - **EDR status** — Startup status bar and top metadata show `EDR · RAW`, `EDR · HDR`, or `EDR ready · embedded JPEG workflow` when applicable.
 - **Opt out** — Set `RAWVIEWER_DISABLE_EDR=1` to force the SDR tone-mapping path on macOS.
 
-### RAW tone recovery & clipping (single view, RAW/DNG)
-- **P — Recovery preview** — Session-only local shadow/highlight recovery on a half-res linear LibRaw decode (`highlight_mode=Reconstruct`, Reinhard tone map, local polish). Fit-only (~2048 px); press **P** again to exit. Does not change the main full-res pipeline or persist settings.
-- **J — Clipping overlay** — Red = highlight clip (any channel ≥252); blue = shadow clip (all channels ≤3) on the current screen buffer. Diagnostic only; distinct from **P** soft recovery.
-
 ### Animated GIF & WebP Playback
 - **Animated Previews** — Enhanced the image viewer pipeline to support playing, scaling, and animating GIF and WebP files. Displays playback status messages and handles dynamic window scaling seamlessly.
-
-### Burst Image Grouping
-- **Burst image grouping** — Automatically group rapid-fire burst sequences in the gallery (based on capture time intervals). Double-click a collapsed stack cover to enter the burst group view and inspect individual frames.
-
-### Dual-Pane Compare View
-- **Dual-pane Compare Mode** — Compare multiple selected images side-by-side (left panel is the selected anchor, right panel displays candidate files).
-- **Direct Compare Toggle (C)** — Press **C** to enter Compare mode immediately when multiple images are selected (works from both gallery and single view). Press **C** again while in Compare mode to exit back to the gallery.
-- **Compare navigation & culling** — Promote candidate to select (↑), reject candidate to Discard folder (↓), or delete candidate to Recycle Bin/Trash (Delete). Use **Shift + ↓** or **Shift + Delete** to reject or delete the selected (left pane) anchor instead, which automatically promotes the current candidate to the select slot and loads the next image. Supports synchronizing composition guides (G) and clipping overlays (J) on both panes. Unselecting all items automatically hides the compare bottom button.
 
 ### Performance & gallery
 - **Snappier navigation** — Filmstrip warm-up is staggered and throttled; navigation cancels low-priority prefetch so the current photo wins I/O. RAW sensor dimensions for the status bar resolve off the UI thread. Identical status-bar updates are deduplicated. Filmstrip refresh and prefetch wait for single-view first paint (TTFR) instead of a fixed delay.
