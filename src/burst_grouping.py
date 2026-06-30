@@ -13,14 +13,14 @@ BURST_GROUPING_SETTINGS_KEY = "gallery/burst_grouping_enabled"
 
 
 def burst_grouping_enabled_from_settings(settings) -> bool:
-    """Whether burst stacks are shown in the gallery (default on)."""
+    """Whether burst stacks are shown in the gallery (default off)."""
     try:
-        raw = settings.value(BURST_GROUPING_SETTINGS_KEY, True)
+        raw = settings.value(BURST_GROUPING_SETTINGS_KEY, False)
         if isinstance(raw, str):
             return raw.strip().lower() not in ("0", "false", "no", "off")
         return bool(raw)
     except Exception:
-        return True
+        return False
 
 
 def burst_gap_seconds_from_settings(settings) -> float:

@@ -1855,7 +1855,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self._burst_group_view_active = False
         self._burst_group_view_members = []
         self._burst_rejected_paths = set()
-        self._burst_grouping_enabled = True
+        self._burst_grouping_enabled = False
         self._comparison_session = None
         self._compare_sync_mode = "A"
         self._compare_sync_paused = False
@@ -4060,7 +4060,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         container.hide()
 
     def _is_burst_grouping_enabled(self) -> bool:
-        return bool(getattr(self, "_burst_grouping_enabled", True))
+        return bool(getattr(self, "_burst_grouping_enabled", False))
 
     def _load_burst_grouping_preference(self) -> None:
         try:
@@ -4070,7 +4070,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 self.get_settings()
             )
         except Exception:
-            self._burst_grouping_enabled = True
+            self._burst_grouping_enabled = False
 
     def _sync_burst_grouping_button_icon(self) -> None:
         btn = getattr(self, "burst_grouping_button", None)
