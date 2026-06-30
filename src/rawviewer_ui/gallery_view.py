@@ -70,9 +70,9 @@ def _gallery_scheduling_budgets(fast: bool) -> tuple[int, int, int]:
     """Return (max_widgets, max_tasks, active_cap) for the current scroll mode."""
     if fast:
         return (
-            _env_int("RAWVIEWER_GALLERY_MAX_WIDGETS_FAST", 12, minimum=1),
-            _env_int("RAWVIEWER_GALLERY_MAX_TASKS_FAST", 16, minimum=1),
-            _env_int("RAWVIEWER_GALLERY_ACTIVE_CAP_FAST", 24, minimum=4),
+            _env_int("RAWVIEWER_GALLERY_MAX_WIDGETS_FAST", 16, minimum=1),
+            _env_int("RAWVIEWER_GALLERY_MAX_TASKS_FAST", 24, minimum=1),
+            _env_int("RAWVIEWER_GALLERY_ACTIVE_CAP_FAST", 32, minimum=4),
         )
     return (
         _env_int("RAWVIEWER_GALLERY_MAX_WIDGETS", 48, minimum=1),
@@ -106,9 +106,9 @@ def _apply_external_gallery_caps(
             return max_widgets, max_tasks, active_cap
         is_slow = volume_speed_tier(folder_path) == "slow"
         if is_slow:
-            cap = _env_int("RAWVIEWER_SLOW_GALLERY_ACTIVE_CAP", 24, minimum=2)
-            tasks = _env_int("RAWVIEWER_SLOW_GALLERY_MAX_TASKS", 16, minimum=2)
-            widgets = _env_int("RAWVIEWER_SLOW_GALLERY_MAX_WIDGETS", 32, minimum=4)
+            cap = _env_int("RAWVIEWER_SLOW_GALLERY_ACTIVE_CAP", 32, minimum=2)
+            tasks = _env_int("RAWVIEWER_SLOW_GALLERY_MAX_TASKS", 24, minimum=2)
+            widgets = _env_int("RAWVIEWER_SLOW_GALLERY_MAX_WIDGETS", 40, minimum=4)
             return (
                 min(max_widgets, widgets),
                 min(max_tasks, tasks),
