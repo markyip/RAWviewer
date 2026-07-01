@@ -473,7 +473,13 @@ class ThumbnailExtractor(QObject):
             else:
                 yield_if_current_task_active()
                 with _rawpy_global_lock:
-                    yield_if_current_task_active()
+                    # NEVER call yield_if_current_task_active() while holding
+                    # _rawpy_global_lock: it sleep-loops until no CURRENT task is
+                    # active, so a background (non-CURRENT) worker would sleep here
+                    # forever holding the global lock, blocking every CURRENT gallery
+                    # tile / single-view decode -> total decode-pipeline deadlock.
+                    # The outer yield above (before the lock) is the safe place to
+                    # defer background work to the foreground.
                     with rawpy.imread(file_path) as raw:
                         thumb = self._extract_from_raw_obj(raw, file_path, max_size)
         except Exception as e:
