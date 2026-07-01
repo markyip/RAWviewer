@@ -49,7 +49,7 @@ Major release introducing a custom gallery zoom slider, interactive GPS map disp
 ### Windows gallery crash & scroll-jump fixes
 - **Fixed a native crash on gallery entry (Windows)** — Switching from single image to gallery right after viewing a large photo could abort the app on some Windows GPU drivers. The single-image view now finishes hiding before its GPU memory is released, avoiding the driver-level conflict.
 - **Fixed a scrollbar-jump stall** — Dragging the gallery scrollbar to a distant position could leave the newly visible area stuck behind stale loading requests for the position you scrolled away from, sometimes for several seconds. It now loads immediately.
-- **Fixed a Windows file-dialog crash** — Opening the file/folder picker could abort the app via the native Windows dialog (shell preview handlers over the OpenGL view). The picker now uses a stable cross-platform dialog on Windows.
+- **File-picker fallback for rare native-dialog crashes** — On some Windows setups the native file/folder picker can abort the app (shell preview handlers / cloud overlays over the OpenGL view). The standard native picker remains the default; set `RAWVIEWER_QT_FILE_DIALOG=1` to switch to a stable cross-platform picker if you hit this.
 
 ---
 
