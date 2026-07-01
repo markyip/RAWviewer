@@ -34,7 +34,6 @@ from common_image_loader import (
     normalize_capture_time_string,
     orientation_from_embedded_jpeg_bytes,
     is_slow_storage_path,
-    is_external_or_network_volume,
 )
 import metadata_backend
 from raw_file_extensions import RAW_FILE_EXTENSIONS
@@ -483,24 +482,22 @@ class ThumbnailExtractor(QObject):
         """Extract embedded thumbnail from RAW file and resize to max_size."""
         thumb = None
 
-        # Gallery grid-tier extraction (max_size <= 1024) for verified formats on slow
-        # storage: try the lock-free byte-scan (TIFF-parse) FIRST so we skip
-        # _rawpy_global_lock. That lock serializes ALL RAW thumbnail decodes app-wide,
-        # which caps cold gallery-scroll throughput at ~1/4 of the drive's bandwidth on
-        # a slow external drive (measured ~7.8 vs ~29 tiles/sec). Byte-scan returns None
-        # for files it cannot handle, so this cleanly falls through to LibRaw below.
-        # Single-view high-res preview (larger max_size) is untouched — it keeps LibRaw
-        # first for maximum quality. Byte-scan also avoids LibRaw entirely here, reducing
-        # the concurrent-LibRaw pressure implicated in the Windows gallery crash.
+        # Gallery grid-tier extraction (max_size <= 1024) for verified formats: try the
+        # lock-free byte-scan (TIFF-parse) FIRST so we skip _rawpy_global_lock. That lock
+        # serializes ALL RAW thumbnail decodes app-wide, so under gallery concurrency it
+        # caps throughput regardless of drive — measured ~7.8 vs ~29 tiles/sec on a slow
+        # external drive, and it also lets one slow-format file stall the whole queue.
+        # Applies on any drive (the lock hurts everywhere); byte-scan is verified correct
+        # + slightly faster than LibRaw for these formats. Byte-scan returns None for
+        # files it cannot handle, so this cleanly falls through to LibRaw below. Single-
+        # view high-res preview (larger max_size) is untouched — keeps LibRaw first for
+        # quality. Avoiding LibRaw here also reduces the concurrent-LibRaw pressure
+        # implicated in the Windows gallery crash.
         if (
             raw_object is None
             and 0 < max_size <= 1024
             and _bytescan_first_enabled()
             and os.path.splitext(file_path)[1].lower() in _BYTESCAN_FIRST_EXTS
-            and (
-                is_external_or_network_volume(file_path)
-                or is_slow_storage_path(file_path)
-            )
         ):
             try:
                 scanned = extract_embedded_jpeg_by_scan(file_path, max_size)
