@@ -50,7 +50,6 @@ Major release introducing a custom gallery zoom slider, interactive GPS map disp
 - **Fixed a native crash on gallery entry (Windows)** — Switching from single image to gallery right after viewing a large photo could abort the app on some Windows GPU drivers. The single-image view now finishes hiding before its GPU memory is released, avoiding the driver-level conflict.
 - **Fixed a scrollbar-jump stall** — Dragging the gallery scrollbar to a distant position could leave the newly visible area stuck behind stale loading requests for the position you scrolled away from, sometimes for several seconds. It now loads immediately.
 - **Smoother scrolling** — Raised gallery thumbnail loading concurrency during active scrolling, including on slower external/network drives, so more thumbnails decode in parallel while you scroll.
-- **Much faster gallery loading for Sony & Nikon RAW on external drives** — Sony (ARW) and Nikon (NEF) gallery thumbnails now use a lock-free preview extractor that lets many images decode in parallel instead of one at a time, roughly **3.4× faster** cold gallery loading on a slow external drive in testing. Other RAW formats are unaffected. Set `RAWVIEWER_GALLERY_BYTESCAN_FIRST=0` to revert to the previous behaviour.
 
 ---
 

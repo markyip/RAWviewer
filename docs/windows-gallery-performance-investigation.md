@@ -359,27 +359,6 @@ pixi run python src/main.py I:\Photos\London\DSC00734.ARW
 
 ---
 
-## 9. RAW gallery thumbnail 被 `_rawpy_global_lock` 序列化 → byte-scan-first 修復（**2026-07-01，commit `7cbd816`，3.4x**）
-
-**發現（用 headless offline benchmark 實測，非臆測）：** 提高並發（第 8 節）後仍不夠流暢。實測外接碟 K=12 並發的 aggregate throughput 只有 **7.8 tiles/sec**，跟單執行緒幾乎一樣 —— 代表 worker 數量根本沒用，某處在序列化。根因：`enhanced_raw_processor.py` 的 `_rawpy_global_lock` 在 `extract_thumbnail_from_raw` 內**整段包住 `rawpy.imread` + embedded-JPEG extract**，把全 app 的 RAW 縮圖解碼序列化。（注意：`process_raw_fast`/`process_raw_quality` 的全解路徑只用 lock 包住便宜的 `imread` open，那部分沒問題；有問題的是縮圖 extract 路徑。）
-
-**關鍵數據（disjoint cold 檔案、同一外接碟、K=12）：**
-
-| 路徑 | Throughput | per-file p50 |
-|------|-----------|--------------|
-| Locked LibRaw（現行） | 7.8 tiles/sec | 1525 ms（12-way lock 爭用下膨脹） |
-| Lock-free byte-scan（TIFF-parse） | 29.4 tiles/sec | 396 ms |
-
-7.8 tiles/sec ≈ 只用到外接碟 ~1/4 頻寬；byte-scan 的 29.4 ≈ 貼近 63 MB/s 頻寬上限（bandwidth-bound，好的那種）。
-
-**格式支援（用 `D:\Development\RAW_Sample` 多格式實測）：** byte-scan（TIFF-parse）只對 **Sony ARW（15/15）與 Nikon NEF（11/11）** 成功且方位正確；Canon CR3、DNG、Olympus ORF、Fuji RAF、Panasonic RW2、Hasselblad 3FR 全部回傳 None → 自動 fallback 到 LibRaw（不變）。因此 allowlist 刻意只放 `.arw`/`.nef`（Canon CR2 未測，其 byte-scan preview 可能缺方位 tag）。
-
-**修復：** `extract_thumbnail_from_raw` 對 gallery grid-tier（`max_size<=1024`）、allowlist 格式、external/slow storage 的請求，**先試 lock-free byte-scan**，成功就 `finalize_index_thumbnail_array` 套方位後回傳；None 則 fall through 到原本的 LibRaw。single-view 高解 preview（較大 max_size）不受影響。env kill-switch：`RAWVIEWER_GALLERY_BYTESCAN_FIRST=0`。
-
-**驗證：** 真實 `process_thumbnail` 路徑端到端 **7.2 → 24.2 tiles/sec（3.4x）**；方位正確性 offline 比對 LibRaw 全數一致；full GUI cold-cache stress（外接碟）1192 次 byte-scan、無 crash、GL teardown 正常、exit 0。副作用是**避開 LibRaw → 降低並發 LibRaw 壓力**（正好是本調查 Windows crash 的其中一個疑慮），屬穩定性加分。**待辦：** 手動肉眼確認 gallery 縮圖方位正確（自動化只比對陣列，未看畫面）。
-
----
-
 ## 已 commit / 已 push 的變更檔案清單
 
 `d8a35c4` fix + `10afee6` docs/scripts（rebase 前 hash：`7ea6af2`/`e6936cc`）：
