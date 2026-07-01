@@ -34,6 +34,7 @@ from common_image_loader import (
     normalize_capture_time_string,
     orientation_from_embedded_jpeg_bytes,
     is_slow_storage_path,
+    is_external_or_network_volume,
 )
 import metadata_backend
 from raw_file_extensions import RAW_FILE_EXTENSIONS
@@ -47,6 +48,23 @@ from image_load_manager import yield_if_current_task_active
 
 _rawpy_global_lock = threading.Lock()
 _heavy_fallback_semaphore = threading.Semaphore(8)
+
+# RAW formats where the lock-free byte-scan (TIFF-parse) extractor reliably yields
+# a correctly oriented embedded preview. Verified on real files (Sony ARW: 15/15,
+# Nikon NEF: 11/11 orientation+aspect match vs LibRaw; 0 failures). Other formats
+# (Canon CR3, DNG, Olympus ORF, Fuji RAF, Panasonic RW2, Hasselblad 3FR) return
+# None from byte-scan, so routing them here would just fall back to LibRaw anyway
+# — but we keep the allowlist tight to avoid any orientation surprises on formats
+# we have not verified (e.g. Canon CR2, whose byte-scan previews can lack the
+# orientation tag). LibRaw stays first for everything not listed here.
+_BYTESCAN_FIRST_EXTS = frozenset({".arw", ".nef"})
+
+
+def _bytescan_first_enabled() -> bool:
+    """Default ON. Set RAWVIEWER_GALLERY_BYTESCAN_FIRST=0 to force the old LibRaw-first path."""
+    return os.environ.get(
+        "RAWVIEWER_GALLERY_BYTESCAN_FIRST", "1"
+    ).strip().lower() not in {"0", "false", "no", "off"}
 
 
 def _qimage_to_rgb_array(image: QImage) -> Optional[np.ndarray]:
@@ -464,6 +482,34 @@ class ThumbnailExtractor(QObject):
                                    raw_object: Optional[rawpy.RawPy] = None) -> Optional[np.ndarray]:
         """Extract embedded thumbnail from RAW file and resize to max_size."""
         thumb = None
+
+        # Gallery grid-tier extraction (max_size <= 1024) for verified formats on slow
+        # storage: try the lock-free byte-scan (TIFF-parse) FIRST so we skip
+        # _rawpy_global_lock. That lock serializes ALL RAW thumbnail decodes app-wide,
+        # which caps cold gallery-scroll throughput at ~1/4 of the drive's bandwidth on
+        # a slow external drive (measured ~7.8 vs ~29 tiles/sec). Byte-scan returns None
+        # for files it cannot handle, so this cleanly falls through to LibRaw below.
+        # Single-view high-res preview (larger max_size) is untouched — it keeps LibRaw
+        # first for maximum quality. Byte-scan also avoids LibRaw entirely here, reducing
+        # the concurrent-LibRaw pressure implicated in the Windows gallery crash.
+        if (
+            raw_object is None
+            and 0 < max_size <= 1024
+            and _bytescan_first_enabled()
+            and os.path.splitext(file_path)[1].lower() in _BYTESCAN_FIRST_EXTS
+            and (
+                is_external_or_network_volume(file_path)
+                or is_slow_storage_path(file_path)
+            )
+        ):
+            try:
+                scanned = extract_embedded_jpeg_by_scan(file_path, max_size)
+            except Exception:
+                scanned = None
+            if scanned is not None:
+                from common_image_loader import finalize_index_thumbnail_array
+
+                return finalize_index_thumbnail_array(file_path, scanned)
 
         # Prefer LibRaw's embedded JPEG segment (keeps preview EXIF orientation). Byte-scan
         # previews are faster but often lack orientation tags (Canon CR2/CR3).
