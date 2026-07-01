@@ -5,7 +5,7 @@
 > 主要測試資料：`I:\Photos\London`（1136 張 ARW，33MP）、`K:\Photos\Canada`（3237 張）、`K:\Photos\Japan Trip`（6886 張）  
 > 對照基準：macOS（commit `eb7f762` 一帶），M1 Air 16GB，同類外接/網路資料夾 gallery 正常
 
-**狀態：** 已 commit 並 push（`d8a35c4` GL teardown + scroll-jump fix、`10afee6` docs/scripts、`16b6788` 並發調高，截至 2026-07-01）。手動驗證（TODO 項目 1）仍建議在合併/發布前執行一次。
+**狀態（2026-07-01 更新）：** 保留的修復 = `d8a35c4`（GL teardown + scroll-jump fix）、Windows 檔案對話框 crash fix（native dialog → Qt picker）。**效能優化已於 2026-07-01 revert**（`16b6788` 並發調高、`7cbd816`/`dbb9b94` byte-scan-first）—— 見下方第 8 節；決定先聚焦穩定性，之後再重新評估效能。手動驗證（TODO 項目 1）仍建議在發布前執行一次。
 
 ---
 
@@ -335,7 +335,9 @@ pixi run python src/main.py I:\Photos\London\DSC00734.ARW
 
 ---
 
-## 8. 提高 gallery 並發以改善捲動流暢度（**2026-07-01，commit `16b6788`**）
+## 8. 提高 gallery 並發以改善捲動流暢度（**2026-07-01，commit `16b6788` — 已 REVERT**）
+
+> **已 revert（2026-07-01）：** 此並發調高與後續 byte-scan-first（原第 9 節）效能優化皆已回退，決定先聚焦穩定性。以下為當時的調查記錄，保留供日後重新評估。byte-scan-first 的關鍵發現（`_rawpy_global_lock` 序列化 RAW 縮圖解碼；byte-scan 對 Sony ARW / Nikon NEF 有效、其他格式 fallback 到 LibRaw；實測 ~3.4x）記錄於 session memory，未來若重做可參考。
 
 **動機：** 使用者反映即使 GL crash 與 scroll-jump 修復後，`I:\Photos\London`（slow tier 外接碟）上的 gallery 捲動仍不夠流暢。
 

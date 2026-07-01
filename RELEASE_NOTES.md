@@ -46,10 +46,10 @@ Major release introducing a custom gallery zoom slider, interactive GPS map disp
 - **Fast-open deferrals** — Background folder scan, EXIF sort, and filmstrip prefetch use TTFR-or-fallback timing (~2.5s cap) instead of a hard 5s sleep after fast-open.
 - **Search & metadata** — Faster EXIF cache lookups, KD-tree reverse geocoding during indexing, and UI-thread sorting moved to background workers for large folders.
 
-### Windows gallery crash fix & scrolling smoothness
+### Windows gallery crash & scroll-jump fixes
 - **Fixed a native crash on gallery entry (Windows)** — Switching from single image to gallery right after viewing a large photo could abort the app on some Windows GPU drivers. The single-image view now finishes hiding before its GPU memory is released, avoiding the driver-level conflict.
 - **Fixed a scrollbar-jump stall** — Dragging the gallery scrollbar to a distant position could leave the newly visible area stuck behind stale loading requests for the position you scrolled away from, sometimes for several seconds. It now loads immediately.
-- **Smoother scrolling** — Raised gallery thumbnail loading concurrency during active scrolling, including on slower external/network drives, so more thumbnails decode in parallel while you scroll.
+- **Fixed a Windows file-dialog crash** — Opening the file/folder picker could abort the app via the native Windows dialog (shell preview handlers over the OpenGL view). The picker now uses a stable cross-platform dialog on Windows.
 
 ---
 
