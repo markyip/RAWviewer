@@ -5,7 +5,7 @@
 > 主要測試資料：`I:\Photos\London`（1136 張 ARW，33MP）、`K:\Photos\Canada`（3237 張）、`K:\Photos\Japan Trip`（6886 張）  
 > 對照基準：macOS（commit `eb7f762` 一帶），M1 Air 16GB，同類外接/網路資料夾 gallery 正常
 
-**狀態：** 修復已實作於工作區，**尚未 commit**（截至 2026-06-30）。
+**狀態：** 已 commit 並 push（`d8a35c4` GL teardown + scroll-jump fix、`10afee6` docs/scripts、`16b6788` 並發調高，截至 2026-07-01）。手動驗證（TODO 項目 1）仍建議在合併/發布前執行一次。
 
 ---
 
@@ -304,11 +304,11 @@ pixi run python src/main.py I:\Photos\London\DSC00734.ARW
 
 ## 待辦與建議
 
-1. **手動確認**：Mac-like env + `I:\London` 全解 → gallery → 捲動 3–5 分鐘，確認無 crash 且 log 有 `gl_cleared=True`。
-2. **Slow 碟並發**：若要在 `I:\` 使用 24 active，需設定 `RAWVIEWER_SLOW_GALLERY_ACTIVE_CAP=24` 或改善 volume speed probe。
-3. **Commit 時機**：工作區變更尚未 commit；穩定後可拆成「GL teardown」「gallery warmup」「metadata defer」「scroll-jump 修復」等 PR。
-4. **Profile 分離**：考慮「穩定 profile」（低並發、無 pool）與「效能 profile」（高並發）分開，避免 dev 預設影響所有 Windows 使用者。
-5. **自動化 stress 凍結**：`stress_main_auto.py` 約 30s 後 UI 無輸出，可能與自動捲動實作有關，不影響 GL 修復驗證結論。
+1. **手動確認**（仍待辦）：Mac-like env + `I:\London` 全解 → gallery → 捲動 3–5 分鐘，確認無 crash 且 log 有 `gl_cleared=True`。自動化 stress（cold cache、預設 Windows 設定、Mac-like 設定）已通過，但尚未有人手動互動驗證。
+2. **Slow 碟並發**：`RAWVIEWER_SLOW_GALLERY_ACTIVE_CAP` 預設已從 8 提高到 32（見第 8 節），`I:\` 上的並發已對齊 fast-scroll 預算，不再需要手動覆寫。
+3. ~~**Commit 時機**~~：已完成 — `d8a35c4`（GL teardown + scroll-jump 修復）、`10afee6`（docs/scripts）、`16b6788`（並發調高），rebase 到 `eb7f762`（XMP sidecar）之上後 push 至 `origin/main`。
+4. **Profile 分離**：考慮「穩定 profile」（低並發、無 pool）與「效能 profile」（高並發）分開，避免 dev 預設影響所有 Windows 使用者。尚未實作。
+5. **自動化 stress 凍結**：`stress_main_auto.py` 約 30s 後 UI 無輸出，可能與自動捲動實作有關，不影響 GL 修復驗證結論。尚未調查根因。
 
 ---
 
@@ -335,18 +335,54 @@ pixi run python src/main.py I:\Photos\London\DSC00734.ARW
 
 ---
 
-## 變更檔案清單（工作區，未 commit）
+## 8. 提高 gallery 並發以改善捲動流暢度（**2026-07-01，commit `16b6788`**）
+
+**動機：** 使用者反映即使 GL crash 與 scroll-jump 修復後，`I:\Photos\London`（slow tier 外接碟）上的 gallery 捲動仍不夠流暢。
+
+**發現：** fast-scroll 排程預算（`_gallery_scheduling_budgets(fast=True)`）在快速捲動時才是真正的瓶頸 —— 即使是 slow-tier 外接碟，`_apply_external_gallery_caps()` 用 `min()` 取 fast-scroll 預算與 slow-tier 預算兩者較小值；當時 slow-tier 的 `SLOW_GALLERY_MAX_TASKS=16` 比 fast-scroll 預算還低，變成隱性的真正上限。gallery 縮圖不受 `_raw_load_limit`（只限制 `full` stage 的重解）影響，所以真正的並發上限是 `_thread_pool.maxThreadCount()` 與 gallery 自己的 `active_cap`。
+
+**變更：**
+
+| 設定 | 舊值 | 新值 | 位置 |
+|------|------|------|------|
+| `RAWVIEWER_GALLERY_ACTIVE_CAP_FAST` | 24 | 32 | `gallery_view.py` |
+| `RAWVIEWER_GALLERY_MAX_TASKS_FAST` | 16 | 24 | `gallery_view.py` |
+| `RAWVIEWER_GALLERY_MAX_WIDGETS_FAST` | 12 | 16 | `gallery_view.py` |
+| `RAWVIEWER_SLOW_GALLERY_ACTIVE_CAP` | 24 | 32 | `gallery_view.py`（提高以免蓋過上面的 fast-scroll 預算） |
+| `RAWVIEWER_SLOW_GALLERY_MAX_TASKS` | 16 | 24 | `gallery_view.py` |
+| `RAWVIEWER_SLOW_GALLERY_MAX_WIDGETS` | 32 | 40 | `gallery_view.py` |
+| `RAWVIEWER_SLOW_VOLUME_MAX_WORKERS` | 8 | 12 | `image_load_manager.py`（實際 QThreadPool 執行緒數上限） |
+
+**安全性：** 這些變更完全不涉及 `_raw_load_limit`（重解限流）或 GL 相關程式碼，所以不會重新引入本文件第 1 節的 Windows GL crash。已用 120s cold-cache stress 驗證（預設 Windows 設定、Mac-like 設定皆通過），並重新跑過第 7 節的 scroll-jump 合成測試確認兩個修復疊加無衝突（`active_count` 穩定維持在新的 32 上限）。
+
+**跨平台影響：** 這些 cap 沒有 platform gate（`moderate_external_cap_enabled()` 只影響「快速」外接碟，不影響「confirmed-slow」層級的 cap，後者本來就是全平台適用）。因為不涉及 GL/RAW 解碼限流，對 macOS 沒有已知風險，且 macOS 從未出現過本調查的 GL crash，理論上安全邊際更大。
+
+---
+
+## 已 commit / 已 push 的變更檔案清單
+
+`d8a35c4` fix + `10afee6` docs/scripts（rebase 前 hash：`7ea6af2`/`e6936cc`）：
 
 - `src/main.py`
 - `src/rawviewer_ui/gallery_view.py`
 - `src/rawviewer_ui/gpu_image_view.py`
 - `src/image_load_manager.py`
 - `src/image_cache.py`
+- `src/burst_grouping.py`
+- `src/common_image_loader.py`
+- `src/enhanced_raw_processor.py`
 - `src/semantic_search.py`
 - `src/unified_image_processor.py`
-- `pixi.toml`
 - `scripts/Launch/bat/run_debug.bat`
-- `scripts/stress_main_auto.py` / `stress_main_worker.py` / `stress_gallery_*.py`（本地測試用）
+- `scripts/stress_main_auto.py` / `stress_main_worker.py` / `stress_gallery_*.py`（本地測試用，已納入版控）
+- `pyrightconfig.json`, `typings/objc.pyi`（開發期型別檢查用）
+
+`16b6788` perf（第 8 節，並發調高）：
+
+- `src/rawviewer_ui/gallery_view.py`
+- `src/image_load_manager.py`
+
+未變更：`pixi.toml`（原計畫的 Mac-like env 覆寫已不需要，見待辦事項 2）。
 
 ---
 
@@ -355,3 +391,4 @@ pixi run python src/main.py I:\Photos\London\DSC00734.ARW
 | 日期 | 說明 |
 |------|------|
 | 2026-06-30 | 初版：彙整 Windows 外接碟 gallery crash、GL teardown、索引競爭、Mac-like env 與測試結果 |
+| 2026-07-01 | 新增第 7 節（scroll-jump 修復）、第 8 節（並發調高）；commit `d8a35c4`/`10afee6`/`16b6788` 並 push 至 `origin/main`；更新待辦狀態與跨平台影響評估 |

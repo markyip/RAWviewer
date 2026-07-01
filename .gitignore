@@ -85,6 +85,7 @@ C:*/
 
 # Local agent / IDE scratch (not part of the app)
 .agent/
+.claude/
 
 # Local planning / agent docs (not for release)
 docs/local/
