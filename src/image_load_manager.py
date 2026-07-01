@@ -657,7 +657,7 @@ class ImageLoadManager(QObject):
 
             cap = None
             if volume_speed_tier(folder_path) == "slow":
-                cap = _env_int("RAWVIEWER_SLOW_VOLUME_MAX_WORKERS", 12, minimum=2)
+                cap = _env_int("RAWVIEWER_SLOW_VOLUME_MAX_WORKERS", 8, minimum=2)
             elif moderate_external_cap_enabled():
                 cap = _env_int("RAWVIEWER_EXTERNAL_VOLUME_MAX_WORKERS", 16, minimum=2)
             if cap is not None:
