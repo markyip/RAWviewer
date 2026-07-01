@@ -14434,8 +14434,22 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         return ""
 
     def _use_qt_file_dialog(self) -> bool:
-        """Opt-in cross-platform Qt picker (RAWVIEWER_QT_FILE_DIALOG=1). Default: system native."""
-        return os.environ.get("RAWVIEWER_QT_FILE_DIALOG", "").strip() == "1"
+        """Cross-platform Qt picker. Default ON on Windows, native elsewhere.
+
+        The native Windows file dialog can abort the whole process
+        (0xE0000001 / exit -805306369) — it invokes shell preview/thumbnail
+        handlers (RAW codecs, cloud-storage providers, AV hooks) and runs a
+        separate native modal loop over the live QOpenGLWidget view, both of
+        which are fragile on Windows GL drivers. The Qt (DontUseNativeDialog)
+        picker avoids all of that. macOS keeps its native NSOpenPanel path.
+        Override with RAWVIEWER_QT_FILE_DIALOG=1/0.
+        """
+        raw = os.environ.get("RAWVIEWER_QT_FILE_DIALOG", "").strip().lower()
+        if raw in {"1", "true", "yes", "on"}:
+            return True
+        if raw in {"0", "false", "no", "off"}:
+            return False
+        return sys.platform == "win32"
 
     def _prepare_for_modal_dialog(self) -> None:
         """Bring the main window forward so native file dialogs are not hidden behind it."""
