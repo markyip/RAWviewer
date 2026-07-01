@@ -108,7 +108,6 @@ def decode_embedded_jpeg_bytes(
         ImageFile.LOAD_TRUNCATED_IMAGES = True
 
         im = Image.open(io.BytesIO(jpeg_bytes))
-        im = ImageOps.exif_transpose(im)
         if im.mode != "RGB":
             im = im.convert("RGB")
         w, h = im.size
@@ -707,20 +706,24 @@ def apply_container_orientation_to_array(
     h, w = image_array.shape[:2]
     
     # Safety guard: Determine expected vs actual display orientation to avoid double rotation.
-    # If original dimensions are not available, we assume the camera sensor is landscape (e.g. 3x2).
-    ow = int((exif_data or {}).get("original_width") or 0)
-    oh = int((exif_data or {}).get("original_height") or 0)
-    if ow <= 0 or oh <= 0:
-        ow, oh = 3, 2  # Default to landscape sensor aspect ratio
+    # Cameras like Sony and Leica pre-rotate their RAW sensor data, but leave EXIF orientation unchanged.
+    make = str((exif_data or {}).get("make", "")).lower()
+    is_pre_rotated_make = any(m in make for m in ["sony", "leica", "hasselblad"])
     
-    dw, dh = exif_display_dimensions(ow, oh, o)
-    if (dh > dw) == (h > w):
-        import logging
-        logging.getLogger(__name__).debug(
-            f"apply_container_orientation_to_array: skipping orientation {o} "
-            f"because array shape {w}x{h} already matches expected display orientation."
-        )
-        return image_array
+    if is_pre_rotated_make:
+        ow = int((exif_data or {}).get("original_width") or 0)
+        oh = int((exif_data or {}).get("original_height") or 0)
+        if ow <= 0 or oh <= 0:
+            ow, oh = 3, 2  # Default to landscape sensor aspect ratio
+        
+        dw, dh = exif_display_dimensions(ow, oh, o)
+        if (dh > dw) == (h > w):
+            import logging
+            logging.getLogger(__name__).debug(
+                f"apply_container_orientation_to_array: skipping orientation {o} "
+                f"because array shape {w}x{h} already matches expected display orientation."
+            )
+            return image_array
 
     if o == 2:
         return np.fliplr(image_array)

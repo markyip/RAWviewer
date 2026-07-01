@@ -7020,15 +7020,14 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             transform.rotate(-90)
         elif orientation == 6:
             # Rotate 90° CW (k=3 CCW)
-            transform.rotate(-90)
+            transform.rotate(90)
         elif orientation == 7:
             # Mirror LR + rotate 90° CW
             transform.scale(-1, 1)
-            transform.rotate(-90)
-        elif orientation == 8:
-            # Rotate 270° CW (90° CCW) - need to rotate 90° CW to correct
-            # k=1 rotates 90° CCW
             transform.rotate(90)
+        elif orientation == 8:
+            # Rotate 270° CW (90° CCW) - need to rotate 90° CCW to correct
+            transform.rotate(-90)
 
         return pixmap.transformed(transform)
 
@@ -11170,6 +11169,10 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         """Toggle between single image view and gallery view"""
         if getattr(self, '_is_delete_dialog_open', False):
             return
+        if not self._is_exif_sort_ready():
+            import logging
+            logging.getLogger(__name__).info("[VIEW_MODE] Sorting not complete. Blocked toggle.")
+            return
         if getattr(self, "view_mode", "") == "compare":
             self._exit_compare_mode()
             return
@@ -11447,14 +11450,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                                         "[VIEW_MODE] Using cached pixmap from image cache "
                                         "for instant display"
                                     )
-                                    orientation = self.get_orientation_from_exif(path)
-                                    if orientation != 1:
-                                        cached_pixmap = self.apply_orientation_to_pixmap(
-                                            cached_pixmap, orientation
-                                        )
-                                        self._orientation_already_applied = True
-                                    else:
-                                        self._orientation_already_applied = True
+                                    # Cached pixmaps already have orientation applied, do not re-apply
+                                    self._orientation_already_applied = True
                                     self.display_pixmap(cached_pixmap)
                                     if hasattr(self, "loading_overlay"):
                                         self.loading_overlay.hide_loading()
@@ -16329,18 +16326,9 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                     safe_print(f"[PERF] ✅ CACHE HIT: Pixmap loaded from cache in {cache_check_time*1000:.1f}ms")
                     self.status_bar.showMessage(f"Loaded {filename} from cache")
                     try:
-                        # CRITICAL: Apply orientation correction to cached pixmap
-                        # Cached pixmaps should already have orientation applied, but we apply it again
-                        # to ensure consistency, especially if orientation was cached incorrectly
-                        orientation = self.get_orientation_from_exif(requested_file_path)
-                        if orientation != 1:
-                            cached_pixmap = self.apply_orientation_to_pixmap(cached_pixmap, orientation)
-                            logger.info(f"[LOAD] Applied orientation correction to cached pixmap: {orientation}")
-                            # Set flag so display_pixmap doesn't apply it again
-                            self._orientation_already_applied = True
-                        else:
-                            # Orientation is 1 (normal), no correction needed
-                            self._orientation_already_applied = True
+                        # Cached pixmaps from load_pixmap_safe / load_raw_preview_pixmap already have orientation applied
+                        # Set flag so display_pixmap doesn't apply it again
+                        self._orientation_already_applied = True
                         
                         logger.info("[LOAD] Displaying cached pixmap")
                         display_start = time.time()
@@ -17044,13 +17032,10 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                             logger.warning(f"[DISPLAY] Aspect ratio mismatch (input={input_aspect:.2f}, cached={cached_aspect:.2f}), ignoring cache")
                             cached_pixmap = None
                         
-                        if cached_pixmap is not None:
                             logger.info(f"[DISPLAY] Using cached pixmap for {width}x{height} image")
-                            if not getattr(self, '_orientation_already_applied', False):
-                                orientation = self.get_orientation_from_exif(self.current_file_path)
-                                if orientation != 1:
-                                    logger.info(f"[DISPLAY] Applying orientation {orientation} to cached pixmap")
-                                    cached_pixmap = self.apply_orientation_to_pixmap(cached_pixmap, orientation)
+                            
+                            # Cached pixmaps are already oriented
+                            self._orientation_already_applied = True
                             
                             self.display_pixmap(cached_pixmap)
                             return

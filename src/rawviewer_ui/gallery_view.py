@@ -143,6 +143,18 @@ def _gallery_warmup_scheduling_budgets(file_count: int) -> tuple[int, int, int]:
     return (28, 20, 36)
 
 
+def _batch_tile_apply_enabled() -> bool:
+    """Default ON. Set RAWVIEWER_GALLERY_BATCH_TILE_APPLY=0 to apply tile pixmaps inline."""
+    return os.environ.get(
+        "RAWVIEWER_GALLERY_BATCH_TILE_APPLY", "1"
+    ).strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _tile_apply_batch_size() -> int:
+    """Max tile pixmaps applied to the UI per event-loop tick when batching is on."""
+    return _env_int("RAWVIEWER_GALLERY_TILE_APPLY_BATCH", 8, minimum=1)
+
+
 def _gallery_idle_preload_batch() -> int:
     return _env_int("RAWVIEWER_GALLERY_IDLE_PRELOAD_BATCH", 72, minimum=4)
 
@@ -258,6 +270,10 @@ class JustifiedGallery(QWidget):
 
         # Virtualization Data
         self._gallery_layout_items = []  # List of {rect, file_path, aspect}
+        # Decoded-thumbnail raw aspect per path (filmstrip-style ground truth). Prefer this
+        # over EXIF for tile geometry so a portrait image can't be crop-fit into a landscape
+        # tile from stale metadata / an evicted pixmap. Applied through _display_aspect.
+        self._measured_raw_aspects: "dict[str, float]" = {}
         self._visible_widgets = {}  # {index: ThumbnailLabel}
         self._widget_pool = []
         self._total_content_height = 0
@@ -331,6 +347,17 @@ class JustifiedGallery(QWidget):
         self._retry_timer.setSingleShot(True)
         self._retry_timer.timeout.connect(self._on_retry_timer_timeout)
         self._max_retry_attempt = 1
+
+        # Batched tile pixmap application: when a burst of thumbnails completes at once,
+        # applying each (scale/crop/rotate + setPixmap) inline on the main thread can
+        # hitch the scroll frame. Instead, coalesce completed paths and drain a bounded
+        # number per event-loop tick so per-frame main-thread work stays smooth. Disable
+        # with RAWVIEWER_GALLERY_BATCH_TILE_APPLY=0; tune batch size with
+        # RAWVIEWER_GALLERY_TILE_APPLY_BATCH (default 8).
+        self._pending_tile_applies: "dict[str, bool]" = {}
+        self._tile_apply_timer = QTimer(self)
+        self._tile_apply_timer.setSingleShot(True)
+        self._tile_apply_timer.timeout.connect(self._drain_tile_applies)
 
         # Work budget per tick for smooth scrolling (embedded-JPEG thumbnails are cheap).
         self._max_widgets_per_tick = _env_int("RAWVIEWER_GALLERY_MAX_WIDGETS", 20, minimum=1)
@@ -551,6 +578,7 @@ class JustifiedGallery(QWidget):
         self._idle_preload_timer.stop()
         self._reset_gallery_scroll_position()
         self._invalidate_gallery_layout()
+        self._measured_raw_aspects.clear()
         self.clear_thumbnail_widgets()
 
     def _evict_stale_active_tasks(
@@ -1422,18 +1450,35 @@ class JustifiedGallery(QWidget):
     def _layout_aspect_for_path(
         self, file_path: str, pixmap: Optional[QPixmap] = None
     ) -> float:
-        """Width/height for justified rows — EXIF when available; pixels if orientation disagrees."""
-        meta_ar = self._metadata_display_aspect(file_path)
+        """Width/height for justified rows — measured pixels are ground truth once known.
+
+        Like the filmstrip's _measured_widths, we remember the decoded thumbnail's raw
+        aspect per path (self._measured_raw_aspects) and prefer it over EXIF. This makes
+        tile geometry immune to stale/miscomputed metadata AND to the pixmap being evicted
+        from _thumbnail_cache before build_gallery recomputes the aspect — which was how a
+        portrait image could end up crop-fit into a landscape tile. User rotation is applied
+        at read time via _display_aspect, so a stored raw aspect stays correct across rotates.
+        """
+        # PIXELS-FIRST (restores the pre-3dcf820 _base_aspect_for_path behaviour). The
+        # decoded thumbnail's own dimensions are the ground truth — exactly what the
+        # filmstrip still does. EXIF is used ONLY as a placeholder before the thumbnail is
+        # decoded; once we've ever measured a pixmap we keep using that (remembered in
+        # _measured_raw_aspects) so a rebuild / cache eviction can't fall back to stale
+        # metadata and crop-fit a portrait image into a landscape tile. 3dcf820 had
+        # inverted this to prefer EXIF, which is the regression behind that bug.
+        raw_ar = None
         base = pixmap
         if base is None:
             base = self._thumbnail_cache.get((file_path, self._thumb_base_key))
         if base and not base.isNull() and base.height() > 0:
-            px_ar = self._display_aspect(file_path, base.width() / base.height())
-            if meta_ar is None:
-                return px_ar
-            if (meta_ar >= 1.0) != (px_ar >= 1.0):
-                return px_ar
-            return meta_ar
+            raw_ar = base.width() / base.height()
+            self._measured_raw_aspects[file_path] = raw_ar
+        else:
+            raw_ar = self._measured_raw_aspects.get(file_path)
+
+        if raw_ar and raw_ar > 0:
+            return self._display_aspect(file_path, raw_ar)
+        meta_ar = self._metadata_display_aspect(file_path)
         if meta_ar is not None:
             return meta_ar
         return 1.5
@@ -1445,6 +1490,34 @@ class JustifiedGallery(QWidget):
 
     def _base_aspect_for_path(self, file_path: str) -> float:
         return self._layout_aspect_for_path(file_path)
+
+    def _reconcile_tile_aspect(self, file_path: str, pixmap: Optional[QPixmap]) -> bool:
+        """Make tile geometry follow the oriented thumbnail pixels (like the filmstrip).
+
+        Any code path that materializes a decoded base pixmap for a tile must call this,
+        not just the on_thumbnail_ready signal: load_visible_images can pull an already-
+        oriented thumbnail straight from the global cache (filmstrip/semantic/prior-visit
+        warmed it) and crop-fit it into the rect built from stale metadata, leaving a
+        portrait image in a landscape frame. Updates the layout-item aspect and arms the
+        debounced rebuild (which self-defers while fast-scrolling). Returns True if a
+        rebuild was scheduled.
+        """
+        if pixmap is None or pixmap.isNull() or pixmap.width() <= 0 or pixmap.height() <= 0:
+            return False
+        aspect = self._layout_aspect_for_path(file_path, pixmap)
+        needs_layout_rebuild = False
+        for idx in self._path_to_indices.get(file_path, []):
+            if idx < len(self._gallery_layout_items):
+                old_aspect = self._gallery_layout_items[idx].get("aspect", 1.5)
+                if abs(old_aspect - aspect) > 0.05:
+                    if self._layout_aspect_needs_rebuild(old_aspect, aspect):
+                        needs_layout_rebuild = True
+                    self._gallery_layout_items[idx]["aspect"] = aspect
+        if needs_layout_rebuild:
+            self._add_metadata_changed_path(file_path)
+            if not self._metadata_rebuild_timer.isActive():
+                self._metadata_rebuild_timer.start(500)
+        return needs_layout_rebuild
 
     def _fit_rotated_thumbnail(self, file_path: str, base: QPixmap, target_size):
         """Apply user rotation then crop-to-fit (tile aspect matches after layout rebuild)."""
@@ -1461,6 +1534,8 @@ class JustifiedGallery(QWidget):
             self._thumbnail_cache.remove_keys_for_file_path(file_path)
         except Exception:
             pass
+        # Drop the remembered aspect so a re-decode (e.g. after on-disk rotation) re-measures.
+        self._measured_raw_aspects.pop(file_path, None)
 
     def _invalidate_scaled_thumbnails_for_path(self, file_path: str) -> None:
         """Drop only scaled variants for a path; keep base thumbnail to speed immediate redraw."""
@@ -2584,6 +2659,13 @@ class JustifiedGallery(QWidget):
                             logger.debug(f"Sync adaptive mipmap fetch failed for {path}: {e}")
                 
                 if base:
+                    # Tile geometry must follow the oriented pixels, exactly like the
+                    # filmstrip. This base may have been pulled straight from the global
+                    # cache above (bypassing on_thumbnail_ready), so a portrait thumbnail
+                    # would otherwise be crop-fit into a landscape rect built from stale
+                    # metadata. Reconcile before fitting so the debounced rebuild corrects
+                    # the frame.
+                    self._reconcile_tile_aspect(path, base)
                     scaled = self._fit_tile_pixmap(path, base, physical_size, dpr)
                     w.setPixmap(scaled)
                     w.setText("")
@@ -2961,31 +3043,42 @@ class JustifiedGallery(QWidget):
         if self._thumb_first_after_settle_t is not None and self._last_scroll_settle_t > 0:
             self._thumb_first_after_settle_t = None
 
-        # Avoid heavy UI updates only during very fast scrolling.
+        # Record tile geometry from the oriented thumbnail pixels — ground truth, like the
+        # filmstrip. This MUST run before the fast-scroll early-return: with fast byte-scan
+        # decode many thumbnails complete mid-fast-scroll, and skipping it leaves a portrait
+        # image in a landscape frame (the initial metadata/default aspect) after the tile is
+        # later filled on settle. Recording the aspect + arming the (debounced) rebuild timer
+        # is cheap; _handle_metadata_rebuild defers itself while fast-scrolling, so the actual
+        # relayout still waits for scroll to settle.
+        self._reconcile_tile_aspect(file_path, pixmap)
+
+        # Avoid heavy per-widget pixmap work during very fast scrolling; visible tiles are
+        # filled on settle via load_visible_images. Tile geometry is already recorded above.
         if self._is_scrolling_fast:
             return
 
-        # Update ANY widget displaying this path that is currently visible
+        # Apply the pixmap to visible tiles. Under batching, defer the (scale/crop +
+        # setPixmap) work to the drain timer so a burst of completions can't stall a
+        # scroll frame; the base pixmap is already cached above, so drain re-reads it.
+        if _batch_tile_apply_enabled():
+            self._pending_tile_applies[file_path] = True
+            if not self._tile_apply_timer.isActive():
+                self._tile_apply_timer.start(0)
+        else:
+            self._apply_tile_pixmap_now(file_path)
+
+        # Continue scheduling when new thumbnails arrive so visible blanks are filled quickly.
+        if not self._is_scrolling_fast:
+            self._request_load_visible_images(25)
+
+    def _apply_tile_pixmap_now(self, file_path):
+        """Scale/crop the cached base pixmap onto every visible tile showing file_path."""
+        base = self._thumbnail_cache.get((file_path, self._thumb_base_key))
+        if not base or base.isNull():
+            return
         indices = self._path_to_indices.get(file_path, [])
-        
-        # Layout aspect: oriented thumbnail pixels are ground truth for tile geometry.
-        if pixmap.width() > 0 and pixmap.height() > 0:
-            aspect = self._layout_aspect_for_path(file_path, pixmap)
-            needs_layout_rebuild = False
-            for idx in indices:
-                if idx < len(self._gallery_layout_items):
-                    old_aspect = self._gallery_layout_items[idx].get("aspect", 1.5)
-                    if abs(old_aspect - aspect) > 0.05:
-                        if self._layout_aspect_needs_rebuild(old_aspect, aspect):
-                            needs_layout_rebuild = True
-                        self._gallery_layout_items[idx]["aspect"] = aspect
-
-            if needs_layout_rebuild:
-                self._add_metadata_changed_path(file_path)
-                logger.debug(f"[GALLERY_DEBUG] Timer started by on_thumbnail_ready for {file_path}")
-                if not self._metadata_rebuild_timer.isActive():
-                    self._metadata_rebuild_timer.start(500)
-
+        if not indices:
+            return
         dpr = self.devicePixelRatio()
         for idx in indices:
             if idx in self._visible_widgets:
@@ -2994,13 +3087,27 @@ class JustifiedGallery(QWidget):
                     continue
                 logical_size = w.size()
                 physical_size = QSize(int(logical_size.width() * dpr), int(logical_size.height() * dpr))
-                fitted = self._fit_tile_pixmap(file_path, pixmap, physical_size, dpr)
+                fitted = self._fit_tile_pixmap(file_path, base, physical_size, dpr)
                 w.setPixmap(fitted)
                 w.setText("")
 
-        # Continue scheduling when new thumbnails arrive so visible blanks are filled quickly.
-        if not self._is_scrolling_fast:
-            self._request_load_visible_images(25)
+    def _drain_tile_applies(self):
+        """Apply a bounded batch of pending tile pixmaps per event-loop tick."""
+        if self._gallery_folder_superseded():
+            self._pending_tile_applies.clear()
+            return
+        batch = _tile_apply_batch_size()
+        count = 0
+        while self._pending_tile_applies and count < batch:
+            file_path = next(iter(self._pending_tile_applies))
+            del self._pending_tile_applies[file_path]
+            # Skip while fast-scrolling: tiles are filled on settle via load_visible_images.
+            if self._is_scrolling_fast:
+                continue
+            self._apply_tile_pixmap_now(file_path)
+            count += 1
+        if self._pending_tile_applies and not self._is_scrolling_fast:
+            self._tile_apply_timer.start(0)
 
     def on_task_completed(self, file_path):
         """Always clear active tasks when the background worker finishes."""
