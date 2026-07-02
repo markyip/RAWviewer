@@ -98,7 +98,7 @@ For a dedicated **cluster map** across an entire album and **geotagging photos m
 2. Choose **Full (CUDA)**, **Full (DirectML)**, or **Lite** in the wizard. **Full** also downloads AI models (~600 MB).
 3. Launch **`RAWviewer.exe`** or the Desktop shortcut (not the Setup file again).
 
-> **v2.5 new:** Gallery zoom slider, scroll anchoring, GPS map overlay (**M**), **macOS HDR/EDR** for HDR stills and **RAW (High Quality workflow)**, **P** recovery preview / **J** clipping overlay on RAW, animated GIF/WebP playback, histogram/map hidden on launch, reliable gallery layout when switching albums, cleaner cancellation of background indexing, burst image grouping, and side-by-side Compare view with C-key toggle.
+> **v2.5 new:** Gallery zoom slider, scroll anchoring, GPS map overlay (**M**), **macOS HDR/EDR** for HDR stills and **RAW (High Quality workflow)**, **P** recovery preview / **J** clipping overlay on RAW, animated GIF/WebP playback, histogram/map hidden on launch, reliable gallery layout when switching albums, portrait/landscape tile aspect fixes when entering gallery or jumping scroll, cleaner cancellation of background indexing, burst image grouping, and side-by-side Compare view with C-key toggle.
 
 Registers **Open with** for common photo formats. Uninstall: Settings → Apps, or **`uninstall.bat`** in `%LOCALAPPDATA%\RAWviewer`.
 
@@ -196,6 +196,7 @@ On **macOS**, HDR **HEIC / HEIF / AVIF** and 16-bit HDR **TIFF** can display wit
 | Gallery button slow on huge folder (first open) | Normal — waits for EXIF capture-time sort so gallery order is correct; instant when metadata is cached |
 | Background indexing still touching old folder after switch | Update to **v2.5.0**; stale indexing/metadata workers are aborted on folder change |
 | Thumbnails sideways or wrong way up (portrait shots) | Update to **v2.4**. Run **`clear_cache.sh`** once if old thumbnails were cached before the fix |
+| Portrait photo crop-fit inside a landscape tile (upright but wrong frame) | Update to **v2.5.0** (latest). If it persists on one file, run **`clear_cache.bat`** / **`clear_cache.sh`** once — mixed old/new oriented cache entries can cause this |
 | GPS map not showing | Press **M** in single-image view; the map only appears when the photo has embedded GPS coordinates |
 | Animated GIF/WebP not playing | Update to **v2.5+**; check that the file is a valid animated GIF or WebP |
 | HDR HEIC/TIFF looks flat or too dark | Needs GPU single-image view (default) and an EDR-capable display; `RAWVIEWER_DISABLE_EDR=1` forces SDR tone mapping |
@@ -407,7 +408,7 @@ scripts\Launch\bat\build_windows_lite.bat
 - **UnifiedImageProcessor** — RAW/JPEG/TIFF via one path
 - **Cache** — memory-first; optional disk cache via env; **RAM-tier defaults** at startup (`rawviewer_profile.py`)
 - **Semantic index** — SQLite + local embeddings (Core ML on macOS, ONNX on Windows; Full builds only); background passes abort when folder scope changes (**v2.5.0**)
-- **Gallery (JustifiedGallery)** — justified grid with zoom slider (relayout + upper-left scroll anchor); layout cache keyed to folder generation; gallery opens in capture-time order after EXIF sort (**v2.5.0**)
+- **Gallery (JustifiedGallery)** — justified grid with zoom slider (relayout + upper-left scroll anchor); layout cache keyed to folder generation; gallery opens in capture-time order after EXIF sort; tile aspect reconciles decoded thumbnails with container EXIF before justified-row geometry is locked (**v2.5.0**)
 - **HDR / EDR (macOS)** — GPU viewport EDR layer + 16-bit HDR still decode; RAW EDR via linear LibRaw when RAW workflow is active (**v2.5.0**)
 - **RAW recovery preview** — **P** key, half-res linear decode + local tone recovery (`raw_tone_recovery.py`; **v2.5.0**)
 - **Clipping overlay** — **J** key on current pixmap (`exposure_clipping.py`; **v2.5.0**)

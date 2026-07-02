@@ -19,6 +19,7 @@ Environment toggles:
 
 import os
 import sys
+from typing import Any
 
 from PyQt6.QtCore import Qt, QRect, QRectF, QPoint, QPointF, pyqtSignal, QEvent, QMimeData, QUrl, QEventLoop
 from PyQt6.QtGui import QKeyEvent, QPixmap, QPainter, QColor, QPen, QDrag
@@ -60,6 +61,7 @@ class GpuImageView(QGraphicsView):
     # Pinch / wheel cap (400%). Space and double-click use zoom_to_actual() at 100%.
     MAX_SCALE = 4.0
     _FIT_SCALE_EPS = 1.002  # treat within ~0.2% of fit as fit-to-window
+    _shortcut_handler: Any
 
     def __init__(self, parent=None, background="#1E1E1E"):
         # Attributes read from event()/viewportEvent() must exist before super().__init__()

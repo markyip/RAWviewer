@@ -23,10 +23,11 @@ import concurrent.futures
 from io import BytesIO
 from functools import lru_cache
 from dataclasses import dataclass
-from typing import Callable, Dict, List, Optional, Sequence
+from typing import Any, Callable, Dict, List, Literal, Optional, Sequence, TypeAlias, cast
 
 import numpy as np
 from PIL import Image, ImageOps
+from PIL.Image import Image as PilImage
 
 import metadata_backend
 
@@ -43,6 +44,36 @@ class IndexAborted(Exception):
 
 
 ProgressCallback = Optional[Callable[[int, int, str], None]]
+
+MetadataRow: TypeAlias = sqlite3.Row | Dict[str, object]
+
+
+def _coerce_int(value: object, default: int = 0) -> int:
+    if value is None:
+        return default
+    try:
+        return int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return default
+
+
+def _coerce_float(value: object) -> Optional[float]:
+    if value is None:
+        return None
+    try:
+        return float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+
+
+def _dnn_get_backend_name(cv2_module, backend_id: int) -> str:
+    getter = getattr(cv2_module.dnn, "getBackendName", None)
+    if callable(getter):
+        try:
+            return str(getter(backend_id))
+        except Exception:
+            pass
+    return str(backend_id)
 
 _YUNET_INFER_LOCK = threading.Lock()
 _COREML_PREDICTION_LOCK = threading.Lock()
@@ -361,7 +392,7 @@ def _thumbnail_jpeg_bytes(arr: np.ndarray, quality: int = 85) -> bytes:
     return buf.getvalue()
 
 
-def _maybe_persist_index_thumbnail(file_path: str, im: Image.Image) -> None:
+def _maybe_persist_index_thumbnail(file_path: str, im: PilImage) -> None:
     """Disk-back index thumbnails so deferred face scan can reuse semantic loads."""
     try:
         from image_cache import get_image_cache
@@ -457,7 +488,7 @@ def _ort_get_available_providers(ort=None) -> List[str]:
     getter = getattr(ort, "get_available_providers", None)
     if callable(getter):
         try:
-            return list(getter())
+            return list(cast(Sequence[str], getter()))
         except Exception:
             pass
     return ["CPUExecutionProvider"]
@@ -673,7 +704,7 @@ def _log_opencl_runtime_details_once(cv2_module=None) -> None:
             return
 
         try:
-            dev = cv2.ocl.Device_getDefault()
+            dev = cv2.ocl.Device.getDefault()
         except Exception:
             dev = None
 
@@ -722,11 +753,7 @@ def _log_face_backend_once(backend_id: int, target_id: int, cv2_module=None) -> 
             import cv2 as _cv2
             cv2 = _cv2
 
-        backend_name = str(backend_id)
-        try:
-            backend_name = cv2.dnn.getBackendName(backend_id)
-        except Exception:
-            pass
+        backend_name = _dnn_get_backend_name(cv2, backend_id)
 
         target_name = "CPU"
         if target_id == cv2.dnn.DNN_TARGET_OPENCL:
@@ -748,7 +775,7 @@ def _log_face_backend_once(backend_id: int, target_id: int, cv2_module=None) -> 
 
 def _coreml_compute_units():
     """Core ML compute-unit preference for MobileCLIP on macOS."""
-    import CoreML
+    import CoreML  # type: ignore[import-not-found]
 
     raw = os.environ.get("RAWVIEWER_COREML_COMPUTE_UNITS", "all").strip().lower()
     mapping = {
@@ -792,10 +819,7 @@ def log_inference_acceleration_profile(force: bool = False) -> None:
             import cv2
 
             b, t = resolve_opencv_dnn_backend_target()
-            try:
-                bname = cv2.dnn.getBackendName(b)
-            except Exception:
-                bname = str(b)
+            bname = _dnn_get_backend_name(cv2, b)
             parts.append(f"face=OpenCV YuNet backend={bname} target={t}")
         except Exception:
             parts.append("face=OpenCV YuNet (CPU)")
@@ -870,7 +894,7 @@ def _index_thumbnail_needs_warm(cache, file_path: str) -> bool:
     return not _index_source_thumbnail_present(cache, file_path)
 
 
-def _load_face_scan_image(file_path: str, max_size: int) -> Optional[Image.Image]:
+def _load_face_scan_image(file_path: str, max_size: int) -> Optional[PilImage]:
     """Face detection input from ImageCache only (semantic / gallery warm-up).
 
     YuNet only needs a downscaled RGB image; reusing warmed thumbnails avoids
@@ -890,7 +914,7 @@ def _load_face_scan_image(file_path: str, max_size: int) -> Optional[Image.Image
     return im
 
 
-def _apply_exif_rotation_to_pil(file_path: str, im: Image.Image, cache) -> Image.Image:
+def _apply_exif_rotation_to_pil(file_path: str, im: PilImage, cache) -> PilImage:
     try:
         from common_image_loader import exif_display_dimensions
         from PIL import ImageOps
@@ -918,7 +942,7 @@ def _apply_exif_rotation_to_pil(file_path: str, im: Image.Image, cache) -> Image
 
 def _load_index_source_image(
     file_path: str, max_size: int = 1024, *, qt_decode: bool = True
-) -> Image.Image:
+) -> PilImage:
     """Load a small RGB image suitable for indexing/detection, preferring app caches.
 
     When ``qt_decode`` is False, skip QImageReader / Qt-based decoders so face scan
@@ -1211,9 +1235,9 @@ class MobileCLIPCoreMLBackend:
         if not os.path.exists(self.tokenizer_path):
             return f"Missing MobileCLIP tokenizer in {self.model_dir}"
         try:
-            import CoreML  # noqa: F401
-            import Foundation  # noqa: F401
-            import Quartz  # noqa: F401
+            import CoreML  # type: ignore[import-not-found]
+            import Foundation  # type: ignore[import-not-found]
+            import Quartz  # type: ignore[import-not-found]
         except Exception as exc:
             return f"Missing native Core ML runtime: {exc}"
         return ""
@@ -1259,12 +1283,13 @@ class MobileCLIPCoreMLBackend:
         except Exception:
             pass
         try:
-            from huggingface_hub import hf_hub_download
+            from huggingface_hub import hf_hub_download as _hf_hub_download
         except Exception as exc:
             raise RuntimeError(
                 "MobileCLIP auto-download requires 'huggingface_hub'. "
                 "Install dependencies with: pip install -r requirements.txt"
             ) from exc
+        hf_hub_download = cast(Any, _hf_hub_download)
 
         from mobileclip_download_progress import make_byte_progress_tqdm
 
@@ -1322,10 +1347,10 @@ class MobileCLIPCoreMLBackend:
     def _load_models(self):
         if self._image_model is not None and self._text_model is not None:
             return
-        import CoreML
-        import Foundation
-        import Quartz
-        import objc
+        import CoreML  # type: ignore[import-not-found]
+        import Foundation  # type: ignore[import-not-found]
+        import Quartz  # type: ignore[import-not-found]
+        import objc  # type: ignore[import-not-found]
 
         self._CoreML = CoreML
         self._Foundation = Foundation
@@ -1410,16 +1435,13 @@ class MobileCLIPCoreMLBackend:
         return self._tokenizer
 
     def encode_text(self, text: str) -> np.ndarray:
-        self._load_models()
-        CoreML = self._CoreML
-        Foundation = self._Foundation
-        objc = self._objc
+        CoreML, Foundation, Quartz, objc, image_model, text_model = self._require_coreml_runtime()
         with objc.autorelease_pool():
             tokenizer = self._ensure_tokenizer()
             tokens = np.asarray([tokenizer.encode_for_clip(text)], dtype=np.int32)
-            input_name = self._native_feature_name(self._text_model, "input")
-            output_name = self._native_feature_name(self._text_model, "output")
-            multi_array = self._int32_multi_array(tokens.reshape(-1))
+            input_name = self._native_feature_name(text_model, "input")
+            output_name = self._native_feature_name(text_model, "output")
+            multi_array = self._int32_multi_array(tokens.reshape(-1), CoreML)
             feature = CoreML.MLFeatureValue.featureValueWithMultiArray_(multi_array)
             provider, err = CoreML.MLDictionaryFeatureProvider.alloc().initWithDictionary_error_(
                 {input_name: feature}, None
@@ -1427,14 +1449,13 @@ class MobileCLIPCoreMLBackend:
             if err is not None or provider is None:
                 raise RuntimeError(f"Failed to create Core ML text input: {err}")
             with _COREML_PREDICTION_LOCK:
-                out, err = self._text_model.predictionFromFeatures_error_(provider, None)
+                out, err = text_model.predictionFromFeatures_error_(provider, None)
             if err is not None or out is None:
                 raise RuntimeError(f"MobileCLIP text prediction failed: {err}")
             numpy_arr = self._multi_array_to_numpy(out.featureValueForName_(output_name).multiArrayValue())
         return self._normalize(numpy_arr)
 
-    def _float32_multi_array_nchw(self, tensor_nchw: np.ndarray):
-        CoreML = self._CoreML
+    def _float32_multi_array_nchw(self, tensor_nchw: np.ndarray, CoreML):
         t = np.asarray(tensor_nchw, dtype=np.float32).reshape(1, 3, 256, 256)
         flat = np.ascontiguousarray(t).ravel(order="C")
         arr, err = CoreML.MLMultiArray.alloc().initWithShape_dataType_error_(
@@ -1447,18 +1468,16 @@ class MobileCLIPCoreMLBackend:
         return arr
 
     def encode_image(self, file_path: str) -> np.ndarray:
-        self._load_models()
-        Foundation = self._Foundation
-        objc = self._objc
+        CoreML, Foundation, Quartz, objc, image_model, text_model = self._require_coreml_runtime()
         with objc.autorelease_pool():
             im = _load_index_source_image(file_path, max_size=1024, qt_decode=False).resize(
                 (256, 256), Image.Resampling.BICUBIC
             )
-            return self._encode_pil_image(im)
+            return self._encode_pil_image(im, CoreML, objc, image_model)
 
     def encode_images(self, file_paths: Sequence[str]) -> List[np.ndarray]:
         """Parallel CPU prep; Core ML predict serial by default (batch opt-in via env)."""
-        self._load_models()
+        CoreML, Foundation, Quartz, objc, image_model, text_model = self._require_coreml_runtime()
         paths = [p for p in (file_paths or []) if p]
         if not paths:
             return []
@@ -1468,7 +1487,7 @@ class MobileCLIPCoreMLBackend:
         sample_path = paths[0]
         workers = semantic_encode_prep_workers(sample_path)
 
-        def _prep(path: str) -> Image.Image:
+        def _prep(path: str) -> PilImage:
             return _load_index_source_image(path, max_size=1024, qt_decode=False).resize(
                 (256, 256), Image.Resampling.BICUBIC
             )
@@ -1482,18 +1501,13 @@ class MobileCLIPCoreMLBackend:
                 images = list(executor.map(_prep, paths))
 
         if not semantic_coreml_use_native_batch():
-            objc = self._objc
             with objc.autorelease_pool():
-                return [self._encode_pil_image(im) for im in images]
-
-        CoreML = self._CoreML
-        Foundation = self._Foundation
-        objc = self._objc
+                return [self._encode_pil_image(im, CoreML, objc, image_model) for im in images]
 
         with objc.autorelease_pool():
-            desc = self._image_model.modelDescription()
-            input_name = self._native_feature_name(self._image_model, "input")
-            output_name = self._native_feature_name(self._image_model, "output")
+            desc = image_model.modelDescription()
+            input_name = self._native_feature_name(image_model, "input")
+            output_name = self._native_feature_name(image_model, "output")
             by_name = desc.inputDescriptionsByName()
             feature_desc = by_name.objectForKey_(input_name) if by_name is not None else None
             if feature_desc is None and by_name is not None:
@@ -1511,10 +1525,10 @@ class MobileCLIPCoreMLBackend:
                 if in_type == CoreML.MLFeatureTypeMultiArray:
                     rgb = np.asarray(im.convert("RGB"), dtype=np.float32) / 255.0
                     nchw = np.transpose(rgb, (2, 0, 1))[np.newaxis, ...]
-                    multi = self._float32_multi_array_nchw(nchw)
+                    multi = self._float32_multi_array_nchw(nchw, CoreML)
                     feature = CoreML.MLFeatureValue.featureValueWithMultiArray_(multi)
                 elif in_type == CoreML.MLFeatureTypeImage:
-                    pixel_buffer = self._image_to_pixel_buffer(im)
+                    pixel_buffer = self._image_to_pixel_buffer(im, Quartz)
                     feature = CoreML.MLFeatureValue.alloc().initWithValue_type_(
                         pixel_buffer, CoreML.MLFeatureTypeImage
                     )
@@ -1528,16 +1542,19 @@ class MobileCLIPCoreMLBackend:
                     raise RuntimeError(f"Failed to create Core ML feature provider: {err}")
                 providers.append(provider)
 
-            return self._coreml_predict_batch(providers, output_name, paths)
+            return self._coreml_predict_batch(
+                providers, output_name, paths, CoreML, image_model
+            )
 
     def _coreml_predict_batch(
         self,
         providers: list,
         output_name: str,
         paths: Sequence[str],
+        CoreML,
+        image_model,
     ) -> List[np.ndarray]:
         """Run Core ML batch inference; halve batch size on memory/ANE failures."""
-        CoreML = self._CoreML
         if not providers:
             return []
         if len(providers) == 1:
@@ -1548,7 +1565,7 @@ class MobileCLIPCoreMLBackend:
         )
         try:
             with _COREML_PREDICTION_LOCK:
-                predictions, err = self._image_model.predictionsFromBatch_error_(
+                predictions, err = image_model.predictionsFromBatch_error_(
                     batch_provider, None
                 )
             if err is not None or predictions is None:
@@ -1558,10 +1575,10 @@ class MobileCLIPCoreMLBackend:
             if mid <= 0:
                 return [self.encode_image(p) for p in paths]
             left = self._coreml_predict_batch(
-                providers[:mid], output_name, paths[:mid]
+                providers[:mid], output_name, paths[:mid], CoreML, image_model
             )
             right = self._coreml_predict_batch(
-                providers[mid:], output_name, paths[mid:]
+                providers[mid:], output_name, paths[mid:], CoreML, image_model
             )
             return left + right
 
@@ -1575,14 +1592,11 @@ class MobileCLIPCoreMLBackend:
             embeddings.append(self._normalize(numpy_arr))
         return embeddings
 
-    def _encode_pil_image(self, im: Image.Image) -> np.ndarray:
-        CoreML = self._CoreML
-        Foundation = self._Foundation
-        objc = self._objc
+    def _encode_pil_image(self, im: PilImage, CoreML, objc, image_model) -> np.ndarray:
         with objc.autorelease_pool():
-            desc = self._image_model.modelDescription()
-            input_name = self._native_feature_name(self._image_model, "input")
-            output_name = self._native_feature_name(self._image_model, "output")
+            desc = image_model.modelDescription()
+            input_name = self._native_feature_name(image_model, "input")
+            output_name = self._native_feature_name(image_model, "output")
             by_name = desc.inputDescriptionsByName()
             feature_desc = by_name.objectForKey_(input_name) if by_name is not None else None
             if feature_desc is None and by_name is not None:
@@ -1598,10 +1612,11 @@ class MobileCLIPCoreMLBackend:
             if in_type == CoreML.MLFeatureTypeMultiArray:
                 rgb = np.asarray(im.convert("RGB"), dtype=np.float32) / 255.0
                 nchw = np.transpose(rgb, (2, 0, 1))[np.newaxis, ...]
-                multi = self._float32_multi_array_nchw(nchw)
+                multi = self._float32_multi_array_nchw(nchw, CoreML)
                 feature = CoreML.MLFeatureValue.featureValueWithMultiArray_(multi)
             elif in_type == CoreML.MLFeatureTypeImage:
-                pixel_buffer = self._image_to_pixel_buffer(im)
+                _, _, Quartz, _, _, _ = self._require_coreml_runtime()
+                pixel_buffer = self._image_to_pixel_buffer(im, Quartz)
                 feature = CoreML.MLFeatureValue.alloc().initWithValue_type_(
                     pixel_buffer, CoreML.MLFeatureTypeImage
                 )
@@ -1614,14 +1629,13 @@ class MobileCLIPCoreMLBackend:
             if err is not None or provider is None:
                 raise RuntimeError(f"Failed to create Core ML image input: {err}")
             with _COREML_PREDICTION_LOCK:
-                out, err = self._image_model.predictionFromFeatures_error_(provider, None)
+                out, err = image_model.predictionFromFeatures_error_(provider, None)
             if err is not None or out is None:
                 raise RuntimeError(f"MobileCLIP image prediction failed: {err}")
             numpy_arr = self._multi_array_to_numpy(out.featureValueForName_(output_name).multiArrayValue())
         return self._normalize(numpy_arr)
 
-    def _int32_multi_array(self, values: np.ndarray):
-        CoreML = self._CoreML
+    def _int32_multi_array(self, values: np.ndarray, CoreML):
         arr, err = CoreML.MLMultiArray.alloc().initWithShape_dataType_error_(
             [1, int(values.size)], CoreML.MLMultiArrayDataTypeInt32, None
         )
@@ -1637,8 +1651,7 @@ class MobileCLIPCoreMLBackend:
         values = multi_array.numberArray()
         return np.asarray([float(values[i]) for i in range(len(values))], dtype=np.float32)
 
-    def _image_to_pixel_buffer(self, im: Image.Image):
-        Quartz = self._Quartz
+    def _image_to_pixel_buffer(self, im: PilImage, Quartz):
         im = im.convert("RGB").resize((256, 256), Image.Resampling.BICUBIC)
         status, pixel_buffer = Quartz.CVPixelBufferCreate(
             None,
@@ -1671,6 +1684,26 @@ class MobileCLIPCoreMLBackend:
         finally:
             Quartz.CVPixelBufferUnlockBaseAddress(pixel_buffer, 0)
         return pixel_buffer
+
+    def _require_coreml_runtime(self):
+        """Return loaded Core ML modules; raises if unavailable."""
+        self._load_models()
+        coreml = self._CoreML
+        foundation = self._Foundation
+        quartz = self._Quartz
+        objc = self._objc
+        image_model = self._image_model
+        text_model = self._text_model
+        if (
+            coreml is None
+            or foundation is None
+            or quartz is None
+            or objc is None
+            or image_model is None
+            or text_model is None
+        ):
+            raise RuntimeError("Core ML models not loaded")
+        return coreml, foundation, quartz, objc, image_model, text_model
 
     def release_gpu_sessions(self) -> None:
         """Drop Core ML models and sessions to free VRAM/system memory."""
@@ -1728,8 +1761,9 @@ class MobileCLIPONNXBackend:
             dirs.append(os.path.join(exe_dir, f"mobileclip_onnx{suffix}"))
             
             # Fallback to PyInstaller temporary extract directory (_MEIPASS)
-            if hasattr(sys, "_MEIPASS"):
-                dirs.append(os.path.join(sys._MEIPASS, "models", f"mobileclip_onnx{suffix}"))
+            meipass = getattr(sys, "_MEIPASS", None)
+            if meipass is not None:
+                dirs.append(os.path.join(meipass, "models", f"mobileclip_onnx{suffix}"))
             
         dirs.append(os.path.expanduser(f"~/.rawviewer_cache/mobileclip_onnx{suffix}"))
         
@@ -1772,9 +1806,10 @@ class MobileCLIPONNXBackend:
         _report(0)
 
         try:
-            from huggingface_hub import hf_hub_download
+            from huggingface_hub import hf_hub_download as _hf_hub_download
         except ImportError:
             raise RuntimeError("MobileCLIP download requires 'huggingface_hub' (pip install huggingface_hub)")
+        hf_hub_download = cast(Any, _hf_hub_download)
 
         files_to_download = [
             (f"onnx/{self.variant}/vision_model.onnx", self.IMAGE_MODEL_FILE, 0, 58),
@@ -1840,6 +1875,14 @@ class MobileCLIPONNXBackend:
             self.text_model_path, providers=selected_providers
         )
 
+    def _require_sessions(self):
+        self._ensure_sessions()
+        image_session = self._image_session
+        text_session = self._text_session
+        if image_session is None or text_session is None:
+            raise RuntimeError("ONNX sessions not loaded")
+        return image_session, text_session
+
     def _ensure_tokenizer(self):
         if self._tokenizer is None:
             self._tokenizer = _ClipBPETokenizer(self.tokenizer_path)
@@ -1847,7 +1890,8 @@ class MobileCLIPONNXBackend:
 
     def _get_input_size(self) -> tuple[int, int]:
         try:
-            shape = self._image_session.get_inputs()[0].shape
+            image_session, _ = self._require_sessions()
+            shape = image_session.get_inputs()[0].shape
             h = shape[2] if isinstance(shape[2], int) else 256
             w = shape[3] if isinstance(shape[3], int) else 256
             return (w, h)
@@ -1855,26 +1899,26 @@ class MobileCLIPONNXBackend:
             return (256, 256)
 
     def encode_text(self, text: str) -> np.ndarray:
-        self._ensure_sessions()
+        _, text_session = self._require_sessions()
         tokenizer = self._ensure_tokenizer()
         # MobileCLIP2 ONNX text encoder expects int64 token IDs (ORT rejects int32).
         tokens = np.asarray([tokenizer.encode_for_clip(text)], dtype=np.int64)
-        
-        inputs = {self._text_session.get_inputs()[0].name: tokens}
-        outputs = self._text_session.run(None, inputs)
-        return self._normalize(outputs[0])
+
+        inputs = {text_session.get_inputs()[0].name: tokens}
+        outputs = text_session.run(None, inputs)
+        return self._normalize(np.asarray(outputs[0], dtype=np.float32))
 
     def encode_image(self, file_path: str) -> np.ndarray:
-        self._ensure_sessions()
+        image_session, _ = self._require_sessions()
         size = self._get_input_size()
         nchw = _prep_mobileclip_image_chw_resized(file_path, size)[np.newaxis, ...]
-        inputs = {self._image_session.get_inputs()[0].name: nchw}
-        outputs = self._image_session.run(None, inputs)
-        return self._normalize(outputs[0])
+        inputs = {image_session.get_inputs()[0].name: nchw}
+        outputs = image_session.run(None, inputs)
+        return self._normalize(np.asarray(outputs[0], dtype=np.float32))
 
     def encode_images(self, file_paths: Sequence[str]) -> List[np.ndarray]:
         """Best-effort batched image encoding for ONNX backend."""
-        self._ensure_sessions()
+        image_session, _ = self._require_sessions()
         paths = [p for p in (file_paths or []) if p]
         if not paths:
             return []
@@ -1889,8 +1933,8 @@ class MobileCLIPONNXBackend:
             ) as executor:
                 tensors = list(executor.map(lambda p: _prep_mobileclip_image_chw_resized(p, size), paths))
         nchw = np.stack(tensors, axis=0)
-        inputs = {self._image_session.get_inputs()[0].name: nchw}
-        outputs = self._image_session.run(None, inputs)
+        inputs = {image_session.get_inputs()[0].name: nchw}
+        outputs = image_session.run(None, inputs)
         out = np.asarray(outputs[0], dtype=np.float32)
         return [self._normalize(out[i]) for i in range(out.shape[0])]
 
@@ -2216,7 +2260,7 @@ class CustomReverseGeocoder:
 
     _LANDMARK_DIST_SQ = 0.0182  # ~15 km squared degree distance
 
-    def __init__(self, cities: list, landmarks: list = None):
+    def __init__(self, cities: list, landmarks: Optional[list] = None):
         self.cities = cities
         self.landmarks = landmarks or []
         self._city_coords = (
@@ -2268,7 +2312,7 @@ class CustomReverseGeocoder:
     @staticmethod
     def _make_kdtree(coords: np.ndarray):
         try:
-            from scipy.spatial import cKDTree
+            from scipy.spatial import cKDTree  # type: ignore[attr-defined]
 
             return cKDTree(coords)
         except Exception:
@@ -2299,7 +2343,10 @@ class CustomReverseGeocoder:
         target_lat, target_lon = float(coords[0][0]), float(coords[0][1])
 
         city_idx, _ = self._nearest_index(
-            self._city_tree, self._city_coords, target_lat, target_lon
+            self._city_tree,
+            self._city_coords if self._city_coords is not None else np.empty((0, 2)),
+            target_lat,
+            target_lon,
         )
         lat, lon, name, admin1, cc = self.cities[city_idx][:5]
         alternates = self.cities[city_idx][5] if len(self.cities[city_idx]) > 5 else ""
@@ -2534,7 +2581,7 @@ class SemanticImageIndex:
 
     def _init_db_if_needed(self):
         self._model = None
-        self._reverse_geocoder = None
+        self._reverse_geocoder: CustomReverseGeocoder | Literal[False] | None = None
         self._conn = sqlite3.connect(
             self.db_path, check_same_thread=False, timeout=60.0
         )
@@ -2685,7 +2732,7 @@ class SemanticImageIndex:
             return path
         raise RuntimeError("This semantic backend has no downloadable assets")
 
-    def _ensure_reverse_geocoder(self):
+    def _ensure_reverse_geocoder(self) -> CustomReverseGeocoder | Literal[False]:
         if self._reverse_geocoder is not None:
             return self._reverse_geocoder
         with self._rg_lock:
@@ -2983,8 +3030,8 @@ class SemanticImageIndex:
                 int(meta.get("iso") or 0),
                 int(meta.get("width") or 0),
                 int(meta.get("height") or 0),
-                float(meta["gps_lat"]) if meta.get("gps_lat") is not None else None,
-                float(meta["gps_lon"]) if meta.get("gps_lon") is not None else None,
+                _coerce_float(meta.get("gps_lat")),
+                _coerce_float(meta.get("gps_lon")),
                 str(meta.get("gps_raw") or ""),
                 str(meta.get("city") or ""),
                 str(meta.get("landmark") or ""),
@@ -3258,13 +3305,16 @@ class SemanticImageIndex:
                 # Skip (0,0) as it's often a placeholder for no-fix
                 if abs(result["gps_lat"]) > 0.001 or abs(result["gps_lon"]) > 0.001:
                     geo = self._ensure_reverse_geocoder()
-                    if geo:
+                    if isinstance(geo, CustomReverseGeocoder):
                         try:
                             t_geo = time.time()
                             # reverse_geocoder is not thread-safe; serialize lookups.
                             with self._rg_lock:
                                 recs = geo.search(
-                                    [(float(result["gps_lat"]), float(result["gps_lon"]))],
+                                    [(
+                                        _coerce_float(result["gps_lat"]) or 0.0,
+                                        _coerce_float(result["gps_lon"]) or 0.0,
+                                    )],
                                     mode=1,
                                 )
                             dur_geo = time.time() - t_geo
@@ -3346,11 +3396,11 @@ class SemanticImageIndex:
         return result
 
     @staticmethod
-    def _detect_face_count(file_path: str, preloaded_im: Optional[Image.Image] = None) -> int:
+    def _detect_face_count(file_path: str, preloaded_im: Optional[PilImage] = None) -> int:
         if sys.platform == "darwin":
             try:
-                import Foundation
-                import Vision
+                import Foundation  # type: ignore[import-not-found]
+                import Vision  # type: ignore[import-not-found]
             except Exception:
                 pass
 
@@ -3495,11 +3545,11 @@ class SemanticImageIndex:
                 return int(row_mtime_ns) == self._mtime_ns_from_stat(st)
             except Exception:
                 pass
-        return self._mtime_matches(float(row["file_mtime"]), st)
+        return self._mtime_matches(_coerce_float(row["file_mtime"]) or 0.0, st)
 
-    def _row_semantic_ready(self, row: sqlite3.Row) -> bool:
+    def _row_semantic_ready(self, row: MetadataRow) -> bool:
         try:
-            return int(row["semantic_ready"] or 0) == 1
+            return _coerce_int(row["semantic_ready"]) == 1
         except Exception:
             # Backward compatibility for rows loaded before migration.
             return True
@@ -3508,7 +3558,7 @@ class SemanticImageIndex:
     def _row_semantic_skipped(row: sqlite3.Row) -> bool:
         """Permanent skip for this file revision (decode failed); do not block index completion."""
         try:
-            return int(row["semantic_ready"] or 0) == -1
+            return _coerce_int(row["semantic_ready"]) == -1
         except Exception:
             return False
 
@@ -4021,7 +4071,7 @@ class SemanticImageIndex:
                         jpeg = _thumbnail_jpeg_bytes(arr)
                     except Exception:
                         pass
-                    cache.put_thumbnail(path, arr, jpeg)
+                    cache.put_thumbnail(path, arr, jpeg if jpeg is not None else b"")
                     return True
             except Exception:
                 pass
@@ -4205,7 +4255,7 @@ class SemanticImageIndex:
                 try:
                     if geocode_paths:
                         geo = self._ensure_reverse_geocoder()
-                        if geo:
+                        if isinstance(geo, CustomReverseGeocoder):
                             for fp in geocode_paths:
                                 try:
                                     canonical = self._canonical_path(fp)
@@ -4219,7 +4269,10 @@ class SemanticImageIndex:
                                     if lat is None or lon is None:
                                         continue
                                     with self._rg_lock:
-                                        recs = geo.search([(float(lat), float(lon))], mode=1)
+                                        recs = geo.search(
+                                            [(_coerce_float(lat) or 0.0, _coerce_float(lon) or 0.0)],
+                                            mode=1,
+                                        )
                                     if not recs:
                                         continue
                                     rec = recs[0] or {}
@@ -4306,7 +4359,9 @@ class SemanticImageIndex:
                         float(st.st_mtime),
                     )
                 )
-            cache.exif_cache.put_many(items, commit=True)
+            put_many = getattr(cache.exif_cache, "put_many", None)
+            if callable(put_many):
+                put_many(items, commit=True)
         except Exception:
             pass
 
@@ -4439,10 +4494,7 @@ class SemanticImageIndex:
             import cv2
 
             backend_id, target_id = resolve_opencv_dnn_backend_target()
-            try:
-                backend_name = cv2.dnn.getBackendName(backend_id)
-            except Exception:
-                backend_name = str(backend_id)
+            backend_name = _dnn_get_backend_name(cv2, backend_id)
             logger.info(
                 "[INDEX] Face scan config: backend=%s target=%s workers=%d chunk=%d parallel=%s",
                 backend_name,
@@ -4692,7 +4744,7 @@ class SemanticImageIndex:
                     else:
                         row = existing_meta[canonical_fp]
                         sr = int(row["semantic_ready"] or 0)
-                        dim = int(self._row_value(row, "dim", 0) or 0)
+                        dim = _coerce_int(self._row_value(row, "dim"))
                         needs_semantic = (sr == 0) or (
                             bool(run_semantic_embeddings) and sr == 1 and dim == 0
                         )
@@ -4713,6 +4765,7 @@ class SemanticImageIndex:
             
             if total_extract > 0:
                 logger.info(f"[INDEX] Starting parallel metadata extraction for {total_extract} files using ThreadPoolExecutor...")
+                self._acquire_load_throttle()
                 if progress_callback:
                     progress_callback(
                         progress_indexed_base,
@@ -4875,9 +4928,9 @@ class SemanticImageIndex:
                             backend = self._mobileclip_backend or resolve_mobileclip_backend()
                             self._mobileclip_backend = backend
                             if isinstance(backend, MobileCLIPONNXBackend):
-                                backend._ensure_sessions()
-                                img_providers = backend._image_session.get_providers()
-                                txt_providers = backend._text_session.get_providers()
+                                img_session, txt_session = backend._require_sessions()
+                                img_providers = img_session.get_providers()
+                                txt_providers = txt_session.get_providers()
                                 logger.info(
                                     "[INDEX][ACCEL] ONNX active session providers: image=%s text=%s",
                                     img_providers,
@@ -5200,29 +5253,30 @@ class SemanticImageIndex:
                 continue
 
             row = row_map.get(cp)
-            sr = int(self._row_value(row, 'semantic_ready', 0) or 0) if row else 0
-            dim = int(self._row_value(row, 'dim', 0) or 0) if row else 0
+            sr = _coerce_int(self._row_value(row, 'semantic_ready')) if row else 0
+            dim = _coerce_int(self._row_value(row, 'dim')) if row else 0
             if (not row) or sr == 0 or (sr == 1 and dim == 0):
                 pending.append(original)
                 continue
 
             # Check if file changed on disk (mtime or size mismatch)
             row_size = self._row_value(row, 'file_size', None)
-            if row_size is None or int(row_size) != int(st.st_size):
+            if row_size is None or _coerce_int(row_size) != int(st.st_size):
                 pending.append(original)
                 continue
 
             row_mtime_ns = self._row_value(row, 'mtime_ns', None)
             if row_mtime_ns is not None:
                 try:
-                    if int(row_mtime_ns) != self._mtime_ns_from_stat(st):
+                    if _coerce_int(row_mtime_ns) != self._mtime_ns_from_stat(st):
                         pending.append(original)
                         continue
                 except Exception:
                     pass
             else:
                 row_mtime = self._row_value(row, 'file_mtime', None)
-                if row_mtime is None or not self._mtime_matches(float(row_mtime), st):
+                mtime = _coerce_float(row_mtime)
+                if mtime is None or not self._mtime_matches(mtime, st):
                     pending.append(original)
                     continue
 
@@ -5270,21 +5324,21 @@ class SemanticImageIndex:
                 continue
 
             row_size = self._row_value(row, "file_size", None)
-            if row_size is None or int(row_size) != int(st.st_size):
+            if row_size is None or _coerce_int(row_size) != int(st.st_size):
                 pending.append(original)
                 continue
 
             row_mtime_ns = self._row_value(row, "mtime_ns", None)
             if row_mtime_ns is not None:
                 try:
-                    if int(row_mtime_ns) != self._mtime_ns_from_stat(st):
+                    if _coerce_int(row_mtime_ns) != self._mtime_ns_from_stat(st):
                         pending.append(original)
                 except Exception:
                     pending.append(original)
                 continue
 
             row_mtime = self._row_value(row, "file_mtime", None)
-            if row_mtime is None or not self._mtime_matches(float(row_mtime), st):
+            if row_mtime is None or not self._mtime_matches(_coerce_float(row_mtime) or 0.0, st):
                 pending.append(original)
 
         return pending
@@ -5310,8 +5364,8 @@ class SemanticImageIndex:
         canonical_map = {self._canonical_path(p): p for p in indexable_paths if p}
         for cp, original in canonical_map.items():
             row = row_map.get(cp)
-            sr = int(self._row_value(row, "semantic_ready", 0) or 0) if row else 0
-            dim = int(self._row_value(row, "dim", 0) or 0) if row else 0
+            sr = _coerce_int(self._row_value(row, "semantic_ready")) if row else 0
+            dim = _coerce_int(self._row_value(row, "dim")) if row else 0
             # Match get_pending_paths: missing row, metadata-only (sr=0), or no embedding yet.
             if (not row) or sr == 0 or (sr == 1 and dim == 0):
                 pending.append(original)
@@ -5319,7 +5373,7 @@ class SemanticImageIndex:
         return pending
 
 
-    def _fetch_rows_for_paths(self, paths: Sequence[str]) -> List[sqlite3.Row]:
+    def _fetch_rows_for_paths(self, paths: Sequence[str]) -> List[MetadataRow]:
         """Bulk fetch rows for a list of paths using optimized batch queries."""
         if not paths:
             return []
@@ -5458,17 +5512,14 @@ class SemanticImageIndex:
             for r in rows:
                 fp = r['file_path']
                 if fp not in result_map:
-                    from common_image_loader import exif_display_dimensions
-
                     orig_path = canonical_to_original[fp]
-                    w = int(r["width"] or 0)
-                    h = int(r["height"] or 0)
-                    o = int(r["orientation"] or 1)
-                    dw, dh = exif_display_dimensions(w, h, o)
+                    w = _coerce_int(r["width"])
+                    h = _coerce_int(r["height"])
+                    o = _coerce_int(r["orientation"], 1)
                     result_map[orig_path] = {
-                        "width": dw,
-                        "height": dh,
-                        "orientation": 1,
+                        "original_width": w,
+                        "original_height": h,
+                        "orientation": o,
                         "capture_time": r["capture_time"] or "",
                     }
                     
@@ -5490,14 +5541,26 @@ class SemanticImageIndex:
             return 0
 
     @staticmethod
-    def _row_value(row, key: str, default=""):
+    def _row_value(row: MetadataRow | None, key: str, default: object = "") -> object:
+        if row is None:
+            return default
         try:
             return row[key]
         except Exception:
             try:
-                return row.get(key, default)
+                if isinstance(row, dict):
+                    return row.get(key, default)
             except Exception:
-                return default
+                pass
+            return default
+
+    @staticmethod
+    def _to_int(value: object, default: int = 0) -> int:
+        return _coerce_int(value, default)
+
+    @staticmethod
+    def _to_float(value: object) -> Optional[float]:
+        return _coerce_float(value)
 
     @staticmethod
     def _normalize_date_value(value: str) -> str:
@@ -5570,8 +5633,8 @@ class SemanticImageIndex:
         return False
 
     def _apply_filters(
-        self, rows: Sequence[sqlite3.Row], query_text: str
-    ) -> tuple[List[sqlite3.Row], str]:
+        self, rows: Sequence[MetadataRow], query_text: str
+    ) -> tuple[List[MetadataRow], str]:
         """
         Parse a mixed query and filter rows.
 
@@ -5690,7 +5753,7 @@ class SemanticImageIndex:
                     filtered = [
                         r for r in filtered 
                         if self._contains_loose(str(r["city"] or ""), needle)
-                        or self._contains_loose(str(r.get("landmark") or ""), needle)
+                        or self._contains_loose(str(self._row_value(r, "landmark") or ""), needle)
                     ]
                 continue
 
@@ -5735,12 +5798,12 @@ class SemanticImageIndex:
 
             if low in self._FACE_COUNT_POSITIVE_TOKENS:
                 matched = True
-                filtered = [r for r in filtered if int(r["face_count"] or 0) > 0]
+                filtered = [r for r in filtered if _coerce_int(r["face_count"]) > 0]
                 continue
 
             if low in self._FACE_COUNT_NEGATIVE_TOKENS:
                 matched = True
-                filtered = [r for r in filtered if int(r["face_count"] or 0) <= 0]
+                filtered = [r for r in filtered if _coerce_int(r["face_count"]) <= 0]
                 continue
 
             if low == "has:gps":
@@ -5764,8 +5827,8 @@ class SemanticImageIndex:
                         filtered = [
                             r for r in filtered 
                             if r["gps_lat"] is not None and 
-                            abs(float(r["gps_lat"]) - target_lat) < 0.5 and 
-                            abs(float(r["gps_lon"]) - target_lon) < 0.5
+                            abs((_coerce_float(r["gps_lat"]) or 0.0) - target_lat) < 0.5 and 
+                            abs((_coerce_float(r["gps_lon"]) or 0.0) - target_lon) < 0.5
                         ]
                 except Exception:
                     pass
@@ -5795,15 +5858,15 @@ class SemanticImageIndex:
                     return x > val
 
                 if key == "iso":
-                    filtered = [r for r in filtered if _ok(int(self._row_value(r, "iso", 0) or 0))]
+                    filtered = [r for r in filtered if _ok(_coerce_int(self._row_value(r, "iso")))]
                 elif key == "year":
                     filtered = [r for r in filtered if _ok(self._parse_capture_year(str(self._row_value(r, "capture_time") or "")))]
                 elif key == "month":
                     filtered = [r for r in filtered if _ok(self._parse_capture_month(str(self._row_value(r, "capture_time") or "")))]
                 elif key == "width":
-                    filtered = [r for r in filtered if _ok(int(self._row_value(r, "width", 0) or 0))]
+                    filtered = [r for r in filtered if _ok(_coerce_int(self._row_value(r, "width")))]
                 elif key == "height":
-                    filtered = [r for r in filtered if _ok(int(self._row_value(r, "height", 0) or 0))]
+                    filtered = [r for r in filtered if _ok(_coerce_int(self._row_value(r, "height")))]
                 continue
 
             if date_like_pat.match(low):
@@ -6005,14 +6068,14 @@ class SemanticImageIndex:
             return True
 
         geo = self._reverse_geocoder
-        if geo and geo is not False and hasattr(geo, "has_place_name"):
+        if isinstance(geo, CustomReverseGeocoder):
             return geo.has_place_name(needle)
 
         return False
 
     def _auto_match_metadata_keywords(
-        self, rows: Sequence[sqlite3.Row], semantic_terms: Sequence[str]
-    ) -> tuple[List[sqlite3.Row], List[str]]:
+        self, rows: Sequence[MetadataRow], semantic_terms: Sequence[str]
+    ) -> tuple[List[MetadataRow], List[str]]:
         """
         If a free-text token appears in metadata fields, use it as a metadata filter
         and remove it from the semantic text query.
@@ -6122,15 +6185,15 @@ class SemanticImageIndex:
                     capture_time=str(r["capture_time"] or ""),
                     camera_model=str(r["camera_model"] or ""),
                     lens_model=str(r["lens_model"] or ""),
-                    iso=int(r["iso"] or 0),
-                    gps_lat=float(r["gps_lat"]) if r["gps_lat"] is not None else None,
-                    gps_lon=float(r["gps_lon"]) if r["gps_lon"] is not None else None,
+                    iso=_coerce_int(r["iso"]),
+                    gps_lat=_coerce_float(r["gps_lat"]),
+                    gps_lon=_coerce_float(r["gps_lon"]),
                     city=str(r["city"] or ""),
                     landmark=str(r["landmark"] or ""),
                     admin1=str(r["admin1"] or ""),
                     country=str(r["country"] or ""),
                     country_code=str(r["country_code"] or ""),
-                    face_count=int(r["face_count"] or 0),
+                    face_count=_coerce_int(r["face_count"]),
                 )
                 for r in rows
             ]
@@ -6143,7 +6206,7 @@ class SemanticImageIndex:
         for r in rows:
             if not self._row_semantic_ready(r):
                 continue
-            vec = self._from_blob(r["embedding"], int(r["dim"]))
+            vec = self._from_blob(cast(bytes, r["embedding"]), _coerce_int(r["dim"]))
             if vec.size == 0:
                 continue
             score = float(np.dot(query_vec, vec))
@@ -6163,15 +6226,15 @@ class SemanticImageIndex:
                     capture_time=str(r["capture_time"] or ""),
                     camera_model=str(r["camera_model"] or ""),
                     lens_model=str(r["lens_model"] or ""),
-                    iso=int(r["iso"] or 0),
-                    gps_lat=float(r["gps_lat"]) if r["gps_lat"] is not None else None,
-                    gps_lon=float(r["gps_lon"]) if r["gps_lon"] is not None else None,
+                    iso=_coerce_int(r["iso"]),
+                    gps_lat=_coerce_float(r["gps_lat"]),
+                    gps_lon=_coerce_float(r["gps_lon"]),
                     city=str(r["city"] or ""),
                     landmark=str(r["landmark"] or ""),
                     admin1=str(r["admin1"] or ""),
                     country=str(r["country"] or ""),
                     country_code=str(r["country_code"] or ""),
-                    face_count=int(r["face_count"] or 0),
+                    face_count=_coerce_int(r["face_count"]),
                 )
             )
         scores.sort(key=lambda x: x.score, reverse=True)
@@ -6198,19 +6261,19 @@ class SemanticImageIndex:
             SearchHit(
                 file_path=str(r["file_path"]),
                 score=1.0,
-                file_name=str(r.get("file_name") or os.path.basename(str(r["file_path"]))),
+                file_name=str(self._row_value(r, "file_name") or os.path.basename(str(r["file_path"]))),
                 capture_time=str(r["capture_time"] or ""),
                 camera_model=str(r["camera_model"] or ""),
                 lens_model=str(r["lens_model"] or ""),
-                iso=int(r["iso"] or 0),
-                gps_lat=float(r["gps_lat"]) if r["gps_lat"] is not None else None,
-                gps_lon=float(r["gps_lon"]) if r["gps_lon"] is not None else None,
+                iso=_coerce_int(r["iso"]),
+                gps_lat=_coerce_float(r["gps_lat"]),
+                gps_lon=_coerce_float(r["gps_lon"]),
                 city=str(r["city"] or ""),
                 landmark=str(r["landmark"] or ""),
                 admin1=str(r["admin1"] or ""),
                 country=str(r["country"] or ""),
                 country_code=str(r["country_code"] or ""),
-                face_count=int(r["face_count"] or 0),
+                face_count=_coerce_int(r["face_count"]),
             )
             for r in filtered
         ]
@@ -6270,10 +6333,18 @@ class SemanticImageIndex:
 
             if sync_search and not city and gps_lat is not None and gps_lon is not None:
                 geo = self._ensure_reverse_geocoder()
-                if geo:
+                if isinstance(geo, CustomReverseGeocoder):
                     try:
                         with self._rg_lock:
-                            recs = geo.search([(float(gps_lat), float(gps_lon))], mode=1)
+                            recs = geo.search(
+                                [
+                                    (
+                                        _coerce_float(gps_lat) or 0.0,
+                                        _coerce_float(gps_lon) or 0.0,
+                                    )
+                                ],
+                                mode=1,
+                            )
                         if recs:
                             rec = recs[0] or {}
                             city_name = str(rec.get("name", "") or "")
@@ -6300,9 +6371,9 @@ class SemanticImageIndex:
                     "capture_time": str(row["capture_time"] or ""),
                     "camera_model": str(row["camera_model"] or ""),
                     "lens_model": str(row["lens_model"] or ""),
-                    "iso": int(row["iso"] or 0),
-                    "width": int(row["width"] or 0),
-                    "height": int(row["height"] or 0),
+                    "iso": _coerce_int(row["iso"]),
+                    "width": _coerce_int(row["width"]),
+                    "height": _coerce_int(row["height"]),
                     "gps_lat": gps_lat,
                     "gps_lon": gps_lon,
                     "city": city,
@@ -6310,7 +6381,7 @@ class SemanticImageIndex:
                     "admin1": admin1,
                     "country": country,
                     "country_code": str(row["country_code"] or ""),
-                    "face_count": int(face_count or 0),
+                    "face_count": _coerce_int(face_count),
                 }
             )
         try:
@@ -6338,9 +6409,9 @@ class SemanticImageIndex:
                         "capture_time": str(meta.get("capture_time") or ""),
                         "camera_model": str(meta.get("camera_model") or ""),
                         "lens_model": str(meta.get("lens_model") or ""),
-                        "iso": int(meta.get("iso") or 0),
-                        "width": int(meta.get("width") or 0),
-                        "height": int(meta.get("height") or 0),
+                        "iso": self._to_int(meta.get("iso")),
+                        "width": self._to_int(meta.get("width")),
+                        "height": self._to_int(meta.get("height")),
                         "gps_lat": meta.get("gps_lat"),
                         "gps_lon": meta.get("gps_lon"),
                         "city": str(meta.get("city") or ""),
@@ -6348,7 +6419,7 @@ class SemanticImageIndex:
                         "admin1": str(meta.get("admin1") or ""),
                         "country": str(meta.get("country") or ""),
                         "country_code": str(meta.get("country_code") or ""),
-                        "face_count": int(meta.get("face_count") or 0),
+                        "face_count": self._to_int(meta.get("face_count")),
                     }
                 )
         else:
@@ -6383,9 +6454,12 @@ class SemanticImageIndex:
             return out
         for p in file_paths:
             exif = cached.get(p)
-            if not exif:
+            if not isinstance(exif, dict):
                 continue
-            exif_data = exif.get("exif_data") if isinstance(exif.get("exif_data"), dict) else {}
+            raw_exif_data = exif.get("exif_data")
+            exif_data: Dict[str, object] = (
+                raw_exif_data if isinstance(raw_exif_data, dict) else {}
+            )
             out.append(
                 {
                     "file_path": p,
@@ -6393,9 +6467,9 @@ class SemanticImageIndex:
                     "capture_time": str(exif.get("capture_time") or exif_data.get("capture_time") or ""),
                     "camera_model": str(exif.get("camera_model") or exif_data.get("camera_model") or ""),
                     "lens_model": str(exif_data.get("lens_model") or ""),
-                    "iso": int(exif_data.get("iso") or 0),
-                    "width": int(exif.get("original_width") or exif_data.get("original_width") or 0),
-                    "height": int(exif.get("original_height") or exif_data.get("original_height") or 0),
+                    "iso": self._to_int(exif_data.get("iso")),
+                    "width": self._to_int(exif.get("original_width") or exif_data.get("original_width")),
+                    "height": self._to_int(exif.get("original_height") or exif_data.get("original_height")),
                     "gps_lat": exif_data.get("gps_lat"),
                     "gps_lon": exif_data.get("gps_lon"),
                     "city": str(exif_data.get("city") or ""),

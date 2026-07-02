@@ -55,14 +55,15 @@ def safe_print_err(*args, **kwargs):
             pass
 
 
-def _norm_path(p: str) -> str:
+def _norm_path(p: object) -> str:
     """Normalize paths for reliable equality checks on Windows."""
     try:
         if not p:
             return ""
-        return os.path.normcase(os.path.normpath(p))
+        path = str(p)
+        return os.path.normcase(os.path.normpath(path))
     except Exception:
-        return p or ""
+        return str(p) if p else ""
 
 
 def _find_file_index_in_list(files, file_path, *, default: int = -1) -> int:

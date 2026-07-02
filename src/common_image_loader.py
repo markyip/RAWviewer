@@ -108,6 +108,23 @@ def decode_embedded_jpeg_bytes(
         ImageFile.LOAD_TRUNCATED_IMAGES = True
 
         im = Image.open(io.BytesIO(jpeg_bytes))
+        # Grid-tier fast path: JPEG DCT-domain scaled decode (1/2, 1/4, 1/8). Decoding a
+        # 30MP+ embedded preview at 1/8 scale instead of full size then downsizing is
+        # ~3.4x faster per gallery tile and dominates tile cost. draft() never upsizes
+        # and keeps pixel orientation identical to a full decode, so the downstream
+        # orientation authority is unaffected. Quality loss is irrelevant at <=1024px.
+        # Kill-switch: RAWVIEWER_JPEG_DRAFT_DECODE=0.
+        if (
+            0 < max_size <= 1024
+            and im.format == "JPEG"
+            and max(im.size) > max_size * 2
+            and os.environ.get("RAWVIEWER_JPEG_DRAFT_DECODE", "1").strip().lower()
+            not in {"0", "false", "no", "off"}
+        ):
+            try:
+                im.draft("RGB", (max_size, max_size))
+            except Exception:
+                pass
         if im.mode != "RGB":
             im = im.convert("RGB")
         w, h = im.size
@@ -704,26 +721,29 @@ def apply_container_orientation_to_array(
         return image_array
 
     h, w = image_array.shape[:2]
-    
-    # Safety guard: Determine expected vs actual display orientation to avoid double rotation.
-    # Cameras like Sony and Leica pre-rotate their RAW sensor data, but leave EXIF orientation unchanged.
-    make = str((exif_data or {}).get("make", "")).lower()
-    is_pre_rotated_make = any(m in make for m in ["sony", "leica", "hasselblad"])
-    
-    if is_pre_rotated_make:
-        ow = int((exif_data or {}).get("original_width") or 0)
-        oh = int((exif_data or {}).get("original_height") or 0)
-        if ow <= 0 or oh <= 0:
-            ow, oh = 3, 2  # Default to landscape sensor aspect ratio
-        
-        dw, dh = exif_display_dimensions(ow, oh, o)
-        if (dh > dw) == (h > w):
-            import logging
-            logging.getLogger(__name__).debug(
-                f"apply_container_orientation_to_array: skipping orientation {o} "
-                f"because array shape {w}x{h} already matches expected display orientation."
-            )
-            return image_array
+
+    # Make-independent double-rotation guard (single source of truth for orientation):
+    # MEASURE the pixels' actual portrait/landscape against the EXIF display orientation
+    # and rotate only if they disagree. This is idempotent — calling it twice, or on an
+    # embedded preview that is already display-oriented (Sony/Leica pre-rotate; many other
+    # cameras' JPEG previews are display-oriented too), never double-rotates. We deliberately
+    # do NOT branch on camera make: make allowlists are wrong for the many cameras that
+    # pre-rotate their preview, which is what produced the "portrait shown sideways" bug.
+    # exif_display_dimensions only ever swaps landscape->portrait, so this stays correct
+    # whether original_width/height were stored as sensor dims or already-display dims.
+    ow = int((exif_data or {}).get("original_width") or 0)
+    oh = int((exif_data or {}).get("original_height") or 0)
+    if ow <= 0 or oh <= 0:
+        ow, oh = 3, 2  # Default to landscape sensor aspect ratio (matches most cameras)
+
+    dw, dh = exif_display_dimensions(ow, oh, o)
+    if (dh > dw) == (h > w):
+        import logging
+        logging.getLogger(__name__).debug(
+            f"apply_container_orientation_to_array: skipping orientation {o} "
+            f"because array shape {w}x{h} already matches expected display orientation."
+        )
+        return image_array
 
     if o == 2:
         return np.fliplr(image_array)
@@ -857,6 +877,20 @@ def finalize_index_thumbnail_array(
     if not is_raw_file(file_path):
         return arr
     exif_data, orientation = resolve_container_exif_for_file(file_path, cache=cache)
+    if os.environ.get("RAWVIEWER_ORIENT_DEBUG", "0").strip().lower() in {"1", "true", "yes", "on"}:
+        try:
+            import logging as _lg
+            _h, _w = arr.shape[:2]
+            _ow = int((exif_data or {}).get("original_width") or 0)
+            _oh = int((exif_data or {}).get("original_height") or 0)
+            _src = "cache" if (cache is not None and cache.get_exif(file_path)) else "file"
+            _lg.getLogger(__name__).info(
+                "[ORIENT] finalize file=%s in=%dx%d(%s) resolved(o=%s ow=%d oh=%d src=%s)",
+                os.path.basename(file_path), _w, _h,
+                "P" if _h > _w else "L", orientation, _ow, _oh, _src,
+            )
+        except Exception:
+            pass
     if orientation != 1:
         oriented = apply_container_orientation_to_array(arr, orientation, exif_data)
         if oriented is not None:
@@ -909,8 +943,11 @@ def exif_rotation_degrees_for_pixmap(
             return 90
         if o == 8:
             return 270
-        if o <= 1 and oh > ow:
-            return 90
+        if o <= 1:
+            if dh > dw and not act_portrait:
+                return 90
+            if dw > dh and act_portrait:
+                return 270
         return 0
 
     if act_portrait and o in (6, 8):

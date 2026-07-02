@@ -1,0 +1,3 @@
+from .Image import Image
+
+def exif_transpose(image: Image) -> Image: ...

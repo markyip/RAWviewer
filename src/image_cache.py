@@ -1466,6 +1466,7 @@ class ImageCache(QObject):
             self.disk_thumbnail_cache = PersistentThumbnailCache(cache_dir)
             self.disk_grid_cache = PersistentGridCache(cache_dir)
             self.disk_preview_cache = PersistentPreviewCache(cache_dir)
+            self._purge_stale_oriented_pixel_caches(cache_dir)
         else:
             # Trial mode: keep all acceleration in RAM and never create/write local cache files.
             self.exif_cache = MemoryOnlyPersistentCache()
@@ -1492,6 +1493,46 @@ class ImageCache(QObject):
         self.last_memory_check = 0
         self.last_aggressive_purge = 0.0
         self.last_reduce_cache = 0.0
+
+    def _purge_stale_oriented_pixel_caches(self, cache_dir: str) -> None:
+        """One-time purge of persisted PIXEL caches when the orientation logic version bumps.
+
+        RAW_EXIF_SENSOR_META_VER invalidates cached EXIF ROWS, but the disk
+        thumbnail/grid/preview JPEGs persist the decoded PIXELS. A version with buggy
+        rotation can write content-rotated pixels at plausible dimensions — invisible to
+        every dimension-based self-heal (they compare width/height, not content). Stamp
+        the orientation version in the cache dir and drop all persisted pixel tiers when
+        it changes, so upgraded users never see stale sideways thumbnails.
+        """
+        try:
+            from enhanced_raw_processor import RAW_EXIF_SENSOR_META_VER
+
+            marker = os.path.join(cache_dir, "orient_pixel_ver.txt")
+            stored = None
+            try:
+                with open(marker, "r", encoding="utf-8") as fh:
+                    stored = int(fh.read().strip() or 0)
+            except Exception:
+                stored = None
+            if stored == int(RAW_EXIF_SENSOR_META_VER):
+                return
+            print(
+                "[CACHE] Orientation version changed "
+                f"({stored} -> {RAW_EXIF_SENSOR_META_VER}); purging persisted pixel caches"
+            )
+            for cache in (
+                self.disk_thumbnail_cache,
+                self.disk_grid_cache,
+                self.disk_preview_cache,
+            ):
+                try:
+                    cache.clear()
+                except Exception:
+                    pass
+            with open(marker, "w", encoding="utf-8") as fh:
+                fh.write(str(int(RAW_EXIF_SENSOR_META_VER)))
+        except Exception:
+            pass
 
     @staticmethod
     def _path_key(file_path: str) -> str:
@@ -1585,6 +1626,32 @@ class ImageCache(QObject):
         self.grid_cache.shrink_to_size(new_grid_size)
         self.preview_cache.shrink_to_size(new_preview_size)
 
+    def _heal_raw_orientation(self, file_path: str, arr: Optional[np.ndarray]) -> Optional[np.ndarray]:
+        """Self-heal: return arr already in EXIF display orientation, re-orienting if not.
+
+        Every cache tier (thumbnail, grid, preview) must return display-oriented pixels so
+        the gallery/single-view never render a stale, wrongly-rotated buffer. Uses the same
+        make-independent authority as extraction (finalize_index_thumbnail_array), which is
+        idempotent, so calling this on already-correct pixels is a no-op.
+        """
+        if arr is None:
+            return None
+        try:
+            from common_image_loader import (
+                finalize_index_thumbnail_array,
+                index_thumbnail_needs_orient_fix,
+                is_raw_file,
+            )
+
+            if not is_raw_file(file_path):
+                return arr
+            if not index_thumbnail_needs_orient_fix(file_path, arr, cache=self):
+                return arr
+            repaired = finalize_index_thumbnail_array(file_path, arr, cache=self)
+            return repaired if repaired is not None else arr
+        except Exception:
+            return arr
+
     def get_thumbnail(self, file_path: str) -> Optional[np.ndarray]:
         """Get cached thumbnail or return None if not cached."""
         self.stats['thumbnail_requests'] += 1
@@ -1593,23 +1660,7 @@ class ImageCache(QObject):
         key = self._path_key(file_path)
 
         def _validate_raw_thumbnail(arr: Optional[np.ndarray]) -> Optional[np.ndarray]:
-            if arr is None:
-                return None
-            try:
-                from common_image_loader import (
-                    finalize_index_thumbnail_array,
-                    index_thumbnail_needs_orient_fix,
-                    is_raw_file,
-                )
-
-                if not is_raw_file(file_path):
-                    return arr
-                if not index_thumbnail_needs_orient_fix(file_path, arr, cache=self):
-                    return arr
-                repaired = finalize_index_thumbnail_array(file_path, arr, cache=self)
-                return repaired if repaired is not None else arr
-            except Exception:
-                return arr
+            return self._heal_raw_orientation(file_path, arr)
 
         # Check in-memory cache first
         thumbnail = self.thumbnail_cache.get(key)
@@ -1749,8 +1800,12 @@ class ImageCache(QObject):
         # 1. Check in-memory grid cache
         grid = self.grid_cache.get(key)
         if grid is not None:
+            healed = self._heal_raw_orientation(file_path, grid)
+            if healed is not grid:
+                self.grid_cache.put(key, healed.copy())
+                self.disk_grid_cache.remove(file_path)
             self.cache_hit.emit(file_path, 'grid')
-            return grid
+            return healed
 
         # 2. Check disk grid cache
         jpeg_data = self.disk_grid_cache.get(file_path)
@@ -1763,6 +1818,7 @@ class ImageCache(QObject):
                 if pil_image.mode != 'RGB':
                     pil_image = pil_image.convert('RGB')
                 grid = np.array(pil_image)
+                grid = self._heal_raw_orientation(file_path, grid)
                 self.grid_cache.put(key, grid.copy())
                 self.cache_hit.emit(file_path, 'grid')
                 return grid

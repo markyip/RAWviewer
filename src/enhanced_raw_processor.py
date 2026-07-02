@@ -41,7 +41,10 @@ from raw_file_extensions import RAW_FILE_EXTENSIONS
 # Cached EXIF rows without this version used embedded-JPEG dimensions as "original" (e.g. 1920×1080).
 # Cached EXIF rows without this version used buggy orientation logic (e.g. LibRaw 5 mis-mapped, Sony MakerNote missing, or Silent Failures).
 # v9: invalidate rows that stored orientation=1 for Canon CR2/CR3 while LibRaw flip / embedded JPEG said otherwise.
-RAW_EXIF_SENSOR_META_VER = 9
+# v10: unified make-independent orientation authority (removed make-gated skips that left
+#      non-Sony pre-rotated cameras sideways); force re-extraction so cache self-heal has
+#      correct sensor dims/orientation to re-orient any stale wrongly-rotated thumbnails.
+RAW_EXIF_SENSOR_META_VER = 10
 
 from image_load_manager import yield_if_current_task_active
 
@@ -606,29 +609,44 @@ class ThumbnailExtractor(QObject):
                     pass
         return thumb
 
+    def _orient_thumb_array_by_flip(self, arr, raw):
+        """Orient a decoded thumb to display orientation using LibRaw's own flip.
+
+        Single orientation step for BOTH JPEG and BITMAP thumbs. raw.sizes.flip is the
+        authoritative, always-fresh orientation (no stale-cache dependency), and the
+        make-independent guard in apply_container_orientation_to_array makes this a no-op
+        when the embedded preview is already display-oriented (so pre-rotated cameras are
+        never double-rotated). This is what keeps the LibRaw path consistent with the
+        byte-scan path, which orients via finalize_index_thumbnail_array.
+        """
+        if arr is None or not hasattr(arr, "shape"):
+            return arr
+        flip = int(getattr(raw.sizes, "flip", 0) or 0)
+        if flip == 0:
+            return arr
+        flip_map = {0: 1, 3: 3, 5: 8, 6: 6}
+        orientation = int(flip_map.get(flip, flip))
+        from common_image_loader import apply_container_orientation_to_array
+
+        oriented = apply_container_orientation_to_array(arr, orientation)
+        return oriented if oriented is not None else arr
+
     def _extract_from_raw_obj(self, raw, file_path, max_size):
         """Internal helper to extract thumb from an open rawpy object."""
         try:
             thumb = raw.extract_thumb()
-            
+
             if thumb.format == rawpy.ThumbFormat.JPEG:
-                return decode_embedded_jpeg_bytes(thumb.data, max_size)
-                
+                arr = decode_embedded_jpeg_bytes(thumb.data, max_size)
+                return self._orient_thumb_array_by_flip(arr, raw)
+
             elif thumb.format == rawpy.ThumbFormat.BITMAP:
                 thumb_array = thumb.data.copy()
                 if thumb_array is None or not hasattr(thumb_array, 'shape'):
                     return None
 
-                flip = int(getattr(raw.sizes, "flip", 0) or 0)
-                if flip != 0:
-                    flip_map = {0: 1, 3: 3, 5: 8, 6: 6}
-                    orientation = int(flip_map.get(flip, flip))
-                    from common_image_loader import apply_container_orientation_to_array
+                thumb_array = self._orient_thumb_array_by_flip(thumb_array, raw)
 
-                    thumb_array = apply_container_orientation_to_array(
-                        thumb_array, orientation
-                    )
-                
                 h, w = thumb_array.shape[:2]
                 if max_size > 0 and (w > max_size or h > max_size):
                      from PIL import Image
@@ -636,7 +654,7 @@ class ThumbnailExtractor(QObject):
                      pil_thumb.thumbnail((max_size, max_size), Image.Resampling.HAMMING)
                      return np.array(pil_thumb)
                 return thumb_array
-            
+
             return None
         except Exception:
             return None
@@ -1424,10 +1442,11 @@ class EnhancedRAWProcessor(QThread):
         """Apply orientation correction to image array."""
         if image_array is None:
             return None
-        if self._is_camera_pre_rotated(exif_data):
-            return image_array
         from common_image_loader import apply_container_orientation_to_array
 
+        # Make-independent: apply_container_orientation_to_array measures the pixels
+        # against the expected display orientation and no-ops when they already match,
+        # so pre-rotated cameras (Sony/Leica/etc.) need no special-case skip here.
         return apply_container_orientation_to_array(
             image_array, orientation, exif_data
         )

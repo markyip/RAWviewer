@@ -24,7 +24,7 @@ pip = "*"
 
 [pypi-dependencies]
 PyQt6 = ">=6.6.0"
-rawpy = ">=0.25.0"
+rawpy = ">=0.27.0"
 numpy = ">=2.0.0"
 Pillow = ">=10.0.0"
 send2trash = ">=1.8.0"

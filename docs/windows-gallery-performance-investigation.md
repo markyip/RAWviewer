@@ -388,9 +388,36 @@ pixi run python src/main.py I:\Photos\London\DSC00734.ARW
 
 ---
 
+## 9. Gallery 直向照片被 crop-fit 進橫向 tile（**2026-06-01**）
+
+**症狀：** 部分**直向**照片在相簿 justified tile 中以**橫向外框**顯示（內容是正的，但被 center-crop 填滿橫向矩形）。常見於**剛進相簿**或**scrollbar 大跳**到新區域時。與 v2.4.1「整張圖 sideways」不同 — 這裡是 **tile 幾何 aspect 錯**，不是縮圖旋轉錯。
+
+**根因（`gallery_view.py`）：**
+
+1. **`_layout_aspect_for_path`** 曾把 global cache 解出的**未 orient** embedded JPEG 寬高當 ground truth，寫入 `_measured_raw_aspects`，後續 rebuild 一直用橫向 aspect（Sony ARW 等 RAW 常見）。
+2. **`load_visible_images`** 從 `get_grid` / `get_thumbnail` 取圖時可**繞過** `on_thumbnail_ready` 的 orientation 修正，直接 `_fit_tile_pixmap` crop-fit。
+3. **`_reconcile_tile_aspect`** 只更新 layout item 的 `aspect` 欄位；widget 的 `rect` 要等 `build_gallery` rebuild。rebuild 預設 debounce 500ms+，fast scroll 時再延後，跳轉後短時間內可見錯誤 frame。
+
+**修復要點：**
+
+| 機制 | 說明 |
+|------|------|
+| `_raw_aspect_from_pixmap` | 像素 aspect 與 EXIF display aspect 直/橫不一致時，以 EXIF 為 layout 依據 |
+| `_orient_gallery_thumbnail_array` / `_orient_gallery_base_pixmap` | global cache → gallery base pixmap 一律套用 container orientation |
+| `_global_cache_to_base_pixmap` | 統一 cache 取圖 + orient 路徑 |
+| portrait ↔ landscape flip | `_reconcile_tile_aspect` 偵測到方向翻轉時縮短 rebuild debounce（idle 0ms / scroll 250ms） |
+| `on_exif_ready` | EXIF 晚到時清除衝突的 `_measured_raw_aspects` 並 re-orient 已快取 base |
+
+**驗證：** 含直向 ARW 的大資料夾 — 按 **G** 進相簿、scrollbar 跳到後段 — tile 外框應與直/橫一致。若個別檔仍錯，跑一次 `clear_cache.bat` 清除混有舊版未 orient cache 的項目。
+
+**相關檔案：** `src/rawviewer_ui/gallery_view.py`（`_layout_aspect_for_path`、`_reconcile_tile_aspect`、`load_visible_images`、`warm_thumbnails_from_global_cache`）
+
+---
+
 ## 修訂紀錄
 
 | 日期 | 說明 |
 |------|------|
 | 2026-06-30 | 初版：彙整 Windows 外接碟 gallery crash、GL teardown、索引競爭、Mac-like env 與測試結果 |
 | 2026-07-01 | 新增第 7 節（scroll-jump 修復）、第 8 節（並發調高）；commit `d8a35c4`/`10afee6`/`16b6788` 並 push 至 `origin/main`；更新待辦狀態與跨平台影響評估 |
+| 2026-06-01 | 新增第 9 節：Gallery 直向/橫向 tile aspect 與 global cache orientation 時序 |

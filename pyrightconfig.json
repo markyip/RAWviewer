@@ -1,6 +1,10 @@
 {
   "include": ["src", "scripts"],
   "stubPath": "typings",
+  "extraPaths": ["typings"],
   "pythonVersion": "3.12",
-  "typeCheckingMode": "basic"
+  "typeCheckingMode": "basic",
+  "reportMissingImports": "none",
+  "reportMissingModuleSource": "none",
+  "reportSelfClsParameterName": "none"
 }

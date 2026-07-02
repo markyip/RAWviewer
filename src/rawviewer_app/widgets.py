@@ -433,6 +433,8 @@ class CustomConfirmDialog(QDialog):
         informative_text="",
         *,
         confirm_action: str = "Delete",
+        confirm_label: str | None = None,
+        cancel_label: str | None = None,
     ):
         super().__init__(parent)
         flags = Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint
@@ -443,6 +445,8 @@ class CustomConfirmDialog(QDialog):
         self.setModal(True)
         self._app_state_connected = False
         self._ignore_app_inactive_until = 0.0
+        if confirm_label:
+            confirm_action = confirm_label
 
         self.container = QWidget(self)
         self.container.setObjectName("confirmDialogContainer")
@@ -518,7 +522,7 @@ class CustomConfirmDialog(QDialog):
         button_layout.setSpacing(12)
         button_layout.addStretch(1)
 
-        self.cancel_btn = _ConfirmDialogButton("Cancel")
+        self.cancel_btn = _ConfirmDialogButton(cancel_label or "Cancel")
         self.cancel_btn.setObjectName("confirmCancelBtn")
         self.cancel_btn.setFixedHeight(40)
         self.cancel_btn.setMinimumWidth(108)

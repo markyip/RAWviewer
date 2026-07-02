@@ -155,6 +155,13 @@ def _tile_apply_batch_size() -> int:
     return _env_int("RAWVIEWER_GALLERY_TILE_APPLY_BATCH", 8, minimum=1)
 
 
+def _orient_debug_enabled() -> bool:
+    """Diagnostic only: RAWVIEWER_ORIENT_DEBUG=1 logs per-tile orientation decisions."""
+    return os.environ.get("RAWVIEWER_ORIENT_DEBUG", "0").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+
+
 def _gallery_idle_preload_batch() -> int:
     return _env_int("RAWVIEWER_GALLERY_IDLE_PRELOAD_BATCH", 72, minimum=4)
 
@@ -260,6 +267,13 @@ class JustifiedGallery(QWidget):
     # Never bulk-read EXIF for entire huge folders on the UI thread during layout build.
     BUILD_EXIF_PREFETCH_MAX = 128
 
+    _background_loading_active: bool = False
+    _load_queue: list[Any] = []
+    _priority_queue: list[Any] = []
+    _gallery_load_start_time: float = 0.0
+    _visible_images_to_load: int = 0
+    _visible_images_loaded: int = 0
+
     def __init__(self, images, parent=None):
         super().__init__(parent)
         self.parent_viewer = parent
@@ -274,6 +288,7 @@ class JustifiedGallery(QWidget):
         # over EXIF for tile geometry so a portrait image can't be crop-fit into a landscape
         # tile from stale metadata / an evicted pixmap. Applied through _display_aspect.
         self._measured_raw_aspects: "dict[str, float]" = {}
+        self._orientation_flip_paths: set[str] = set()
         self._visible_widgets = {}  # {index: ThumbnailLabel}
         self._widget_pool = []
         self._total_content_height = 0
@@ -579,6 +594,7 @@ class JustifiedGallery(QWidget):
         self._reset_gallery_scroll_position()
         self._invalidate_gallery_layout()
         self._measured_raw_aspects.clear()
+        self._orientation_flip_paths.clear()
         self.clear_thumbnail_widgets()
 
     def _evict_stale_active_tasks(
@@ -1430,7 +1446,7 @@ class JustifiedGallery(QWidget):
 
     def _metadata_display_aspect(self, file_path: str) -> Optional[float]:
         """Layout aspect from EXIF display dimensions (matches index thumbnail pixels)."""
-        m = self._metadata_cache.get(file_path)
+        m = self._metadata_exif_for_path(file_path)
         if not m or not m.get("original_width") or not m.get("original_height"):
             return None
         from common_image_loader import exif_display_dimensions
@@ -1438,14 +1454,136 @@ class JustifiedGallery(QWidget):
         w, h = int(m["original_width"]), int(m["original_height"])
         o = int(m.get("orientation", 1) or 1)
         dw, dh = exif_display_dimensions(w, h, o)
-        if o <= 1 and dw > dh:
-            # Container EXIF often has orientation=1 but embedded JPEG is portrait.
-            base = self._thumbnail_cache.get((file_path, self._thumb_base_key))
-            if base and not base.isNull() and base.height() > base.width():
-                dw, dh = dh, dw
         if dh <= 0:
             return None
         return self._display_aspect(file_path, dw / dh)
+
+    @staticmethod
+    def _aspect_orientation_flag(ar: float) -> int:
+        """-1 portrait, 0 near-square, 1 landscape."""
+        if ar <= 0:
+            return 0
+        if ar < 0.92:
+            return -1
+        if ar > 1.08:
+            return 1
+        return 0
+
+    def _raw_aspect_undo_user_rotation(self, file_path: str, display_ar: float) -> float:
+        if display_ar <= 0:
+            return display_ar
+        if self._get_rotation_degrees_for_path(file_path) in (90, 270):
+            return 1.0 / display_ar
+        return display_ar
+
+    def _raw_aspect_from_pixmap(self, file_path: str, pixmap: QPixmap) -> Optional[float]:
+        """Measured width/height for layout, reconciled with EXIF when orientation disagrees."""
+        if pixmap is None or pixmap.isNull() or pixmap.height() <= 0:
+            return None
+        px_ar = pixmap.width() / pixmap.height()
+        meta_ar = self._metadata_display_aspect(file_path)
+        if meta_ar is not None and meta_ar > 0:
+            px_o = self._aspect_orientation_flag(px_ar)
+            meta_o = self._aspect_orientation_flag(meta_ar)
+            if px_o != 0 and meta_o != 0 and px_o != meta_o:
+                return self._raw_aspect_undo_user_rotation(file_path, meta_ar)
+            if abs(px_ar - meta_ar) / max(meta_ar, 0.01) > 0.35:
+                return self._raw_aspect_undo_user_rotation(file_path, meta_ar)
+        return px_ar
+
+    def _orient_gallery_thumbnail_array(self, file_path: str, arr: np.ndarray) -> np.ndarray:
+        try:
+            from common_image_loader import finalize_index_thumbnail_array
+            from image_cache import get_image_cache
+
+            fixed = finalize_index_thumbnail_array(file_path, arr, cache=get_image_cache())
+            return fixed if fixed is not None else arr
+        except Exception:
+            return arr
+
+    def _metadata_exif_for_path(self, file_path: str) -> dict:
+        """EXIF dict for layout/orientation — fall back to global cache when local cache is cold."""
+        m = self._metadata_cache.get(file_path)
+        if m and m.get("original_width") and m.get("original_height"):
+            return m
+        try:
+            from image_cache import get_image_cache
+
+            cached = get_image_cache().get_exif(file_path)
+            if cached:
+                return cached
+        except Exception:
+            pass
+        return m or {}
+
+    def _orient_gallery_base_pixmap(self, file_path: str, pixmap: QPixmap) -> QPixmap:
+        """Rotate base thumbnail to match container EXIF display orientation."""
+        if pixmap is None or pixmap.isNull():
+            return pixmap
+        m = self._metadata_exif_for_path(file_path)
+        if not m:
+            if _orient_debug_enabled():
+                logger.info(
+                    "[ORIENT] base file=%s pix=%dx%d(%s) EXIF=MISSING -> no rotation",
+                    os.path.basename(file_path), pixmap.width(), pixmap.height(),
+                    "P" if pixmap.height() > pixmap.width() else "L",
+                )
+            return pixmap
+        from common_image_loader import (
+            exif_rotation_degrees_for_pixmap,
+            pixmap_matches_exif_display,
+        )
+
+        ow = int(m.get("original_width") or 0)
+        oh = int(m.get("original_height") or 0)
+        o = int(m.get("orientation", 1) or 1)
+        if _orient_debug_enabled():
+            _deg = exif_rotation_degrees_for_pixmap(pixmap.width(), pixmap.height(), ow, oh, o)
+            _match = pixmap_matches_exif_display(pixmap.width(), pixmap.height(), ow, oh, o)
+            logger.info(
+                "[ORIENT] base file=%s pix=%dx%d(%s) exif(o=%s ow=%d oh=%d) match=%s deg=%s",
+                os.path.basename(file_path), pixmap.width(), pixmap.height(),
+                "P" if pixmap.height() > pixmap.width() else "L", o, ow, oh, _match, _deg,
+            )
+        if pixmap_matches_exif_display(
+            pixmap.width(), pixmap.height(), ow, oh, o
+        ):
+            return pixmap
+        deg = exif_rotation_degrees_for_pixmap(
+            pixmap.width(),
+            pixmap.height(),
+            ow,
+            oh,
+            o,
+        )
+        if deg:
+            return _rotate_pixmap_cw(pixmap, deg)
+        return pixmap
+
+    def _store_oriented_base_pixmap(self, file_path: str, pixmap: QPixmap) -> QPixmap:
+        """Orient, cache base thumbnail, and drop stale scaled variants."""
+        oriented = self._orient_gallery_base_pixmap(file_path, pixmap)
+        if oriented is None or oriented.isNull():
+            return pixmap
+        self._thumbnail_cache.put((file_path, self._thumb_base_key), oriented)
+        self._invalidate_scaled_thumbnails_for_path(file_path)
+        return oriented
+
+    def _global_cache_to_base_pixmap(self, path: str) -> Optional[QPixmap]:
+        """Pull an oriented base pixmap from the global ImageCache for gallery tiles."""
+        try:
+            from image_cache import get_image_cache
+
+            global_cache = get_image_cache()
+            global_thumb = global_cache.get_grid(path)
+            if global_thumb is None:
+                global_thumb = global_cache.get_thumbnail(path)
+            if global_thumb is None:
+                return None
+            arr = self._orient_gallery_thumbnail_array(path, np.ascontiguousarray(global_thumb))
+            return _thumbnail_data_to_base_pixmap(arr)
+        except Exception:
+            return None
 
     def _layout_aspect_for_path(
         self, file_path: str, pixmap: Optional[QPixmap] = None
@@ -1471,12 +1609,19 @@ class JustifiedGallery(QWidget):
         if base is None:
             base = self._thumbnail_cache.get((file_path, self._thumb_base_key))
         if base and not base.isNull() and base.height() > 0:
-            raw_ar = base.width() / base.height()
-            self._measured_raw_aspects[file_path] = raw_ar
+            raw_ar = self._raw_aspect_from_pixmap(file_path, base)
+            if raw_ar and raw_ar > 0:
+                self._measured_raw_aspects[file_path] = raw_ar
         else:
             raw_ar = self._measured_raw_aspects.get(file_path)
 
         if raw_ar and raw_ar > 0:
+            meta_ar = self._metadata_display_aspect(file_path)
+            if meta_ar is not None and meta_ar > 0:
+                raw_o = self._aspect_orientation_flag(raw_ar)
+                meta_o = self._aspect_orientation_flag(meta_ar)
+                if raw_o != 0 and meta_o != 0 and raw_o != meta_o:
+                    raw_ar = self._raw_aspect_undo_user_rotation(file_path, meta_ar)
             return self._display_aspect(file_path, raw_ar)
         meta_ar = self._metadata_display_aspect(file_path)
         if meta_ar is not None:
@@ -1485,8 +1630,41 @@ class JustifiedGallery(QWidget):
 
     @staticmethod
     def _layout_aspect_needs_rebuild(old_aspect: float, new_aspect: float) -> bool:
-        """True when tile geometry must change."""
+        """True when tile geometry must change (including portrait ↔ landscape flip)."""
+        old_o = JustifiedGallery._aspect_orientation_flag(old_aspect)
+        new_o = JustifiedGallery._aspect_orientation_flag(new_aspect)
+        if old_o != 0 and new_o != 0 and old_o != new_o:
+            return True
         return abs(old_aspect - new_aspect) > 0.05
+
+    def _frame_matches_pixmap_orientation(
+        self, rect, pixmap: QPixmap
+    ) -> bool:
+        """True when layout rect and pixmap agree on portrait vs landscape."""
+        if rect is None or pixmap is None or pixmap.isNull():
+            return True
+        if rect.width() <= 0 or rect.height() <= 0 or pixmap.width() <= 0 or pixmap.height() <= 0:
+            return True
+        r_ar = rect.width() / rect.height()
+        p_ar = pixmap.width() / pixmap.height()
+        r_o = self._aspect_orientation_flag(r_ar)
+        p_o = self._aspect_orientation_flag(p_ar)
+        if r_o == 0 or p_o == 0:
+            return True
+        return r_o == p_o
+
+    def _any_visible_tile_frame_mismatch(
+        self, file_path: str, pixmap: QPixmap
+    ) -> bool:
+        for idx in self._path_to_indices.get(file_path, []):
+            if idx not in self._visible_widgets:
+                continue
+            if idx >= len(self._gallery_layout_items):
+                continue
+            rect = self._gallery_layout_items[idx].get("rect")
+            if not self._frame_matches_pixmap_orientation(rect, pixmap):
+                return True
+        return False
 
     def _base_aspect_for_path(self, file_path: str) -> float:
         return self._layout_aspect_for_path(file_path)
@@ -1506,17 +1684,31 @@ class JustifiedGallery(QWidget):
             return False
         aspect = self._layout_aspect_for_path(file_path, pixmap)
         needs_layout_rebuild = False
+        orientation_flipped = False
+        pre_aspects: dict[int, float] = {}
         for idx in self._path_to_indices.get(file_path, []):
             if idx < len(self._gallery_layout_items):
-                old_aspect = self._gallery_layout_items[idx].get("aspect", 1.5)
-                if abs(old_aspect - aspect) > 0.05:
-                    if self._layout_aspect_needs_rebuild(old_aspect, aspect):
-                        needs_layout_rebuild = True
-                    self._gallery_layout_items[idx]["aspect"] = aspect
+                pre_aspects[idx] = self._gallery_layout_items[idx].get("aspect", 1.5)
+        for idx, old_aspect in pre_aspects.items():
+            if abs(old_aspect - aspect) > 0.05:
+                if self._layout_aspect_needs_rebuild(old_aspect, aspect):
+                    needs_layout_rebuild = True
+                    old_o = self._aspect_orientation_flag(old_aspect)
+                    new_o = self._aspect_orientation_flag(aspect)
+                    if old_o != 0 and new_o != 0 and old_o != new_o:
+                        orientation_flipped = True
+                self._gallery_layout_items[idx]["aspect"] = aspect
         if needs_layout_rebuild:
             self._add_metadata_changed_path(file_path)
+            if orientation_flipped:
+                self._orientation_flip_paths.add(file_path)
             if not self._metadata_rebuild_timer.isActive():
-                self._metadata_rebuild_timer.start(500)
+                if orientation_flipped and not self._is_scrolling_fast:
+                    self._metadata_rebuild_timer.start(0)
+                elif orientation_flipped:
+                    self._metadata_rebuild_timer.start(250)
+                else:
+                    self._metadata_rebuild_timer.start(500)
         return needs_layout_rebuild
 
     def _fit_rotated_thumbnail(self, file_path: str, base: QPixmap, target_size):
@@ -1684,8 +1876,16 @@ class JustifiedGallery(QWidget):
             mgr = getattr(pv, "image_manager", None)
             if mgr is not None and hasattr(mgr, "exit_gallery_warmup_throttle"):
                 mgr.exit_gallery_warmup_throttle()
+                # Pump the queue: restoring maxThreadCount does not by itself start
+                # queued tasks, and if nothing is active there is no completion event
+                # to trigger a dispatch — the queue can sit frozen (observed as a
+                # 20s+ gallery-entry stall with pending>0 and zero decodes).
+                if hasattr(mgr, "_schedule_next_task"):
+                    mgr._schedule_next_task()
         except Exception:
             pass
+        # Also re-request visible tiles now that full concurrency is available.
+        self._request_load_visible_images(0)
 
     def _stop_layout_rebuild_timers(self) -> None:
         """Cancel pending gallery layout rebuilds (e.g. when leaving gallery mode)."""
@@ -2025,7 +2225,18 @@ class JustifiedGallery(QWidget):
         self._last_scroll_settle_t = time.time()
         self._thumb_first_after_settle_t = self._last_scroll_settle_t
         self._last_scroll_event_t = 0.0  # Reset scroll event timestamp so we enable DB loading
-        self.load_visible_images()
+        pending_layout = bool(self._metadata_changed_paths) or bool(
+            self._orientation_flip_paths
+        )
+        if pending_layout and not self._building:
+            if _orient_debug_enabled() and self._orientation_flip_paths:
+                logger.info(
+                    "[ORIENT] scroll settled — scheduling layout rebuild for %d orientation flip(s)",
+                    len(self._orientation_flip_paths),
+                )
+            self._metadata_rebuild_timer.start(0)
+        else:
+            self.load_visible_images()
         
         # Defer resuming indexing for 5 seconds of idle gallery time
         if self.parent_viewer is not None:
@@ -2609,7 +2820,25 @@ class JustifiedGallery(QWidget):
             cached_scaled = self._thumbnail_cache.get(scaled_key)
             expected_logical = QSize(rect.width(), rect.height())
             if cached_scaled and not cached_scaled.isNull():
-                if self._pixmap_logical_size(cached_scaled, dpr) == expected_logical:
+                # A scaled entry is rect-shaped by construction, so its orientation is the
+                # rect's — if the measured pixels say the image is portrait but this scaled
+                # crop (and rect) are landscape, it's a stale crop from before the layout
+                # flip. Painting it is exactly the "portrait shown in a landscape frame"
+                # artifact; drop it and fall through to the guarded base path instead.
+                stale_crop = False
+                measured_ar = self._measured_raw_aspects.get(path)
+                if measured_ar and measured_ar > 0 and cached_scaled.height() > 0:
+                    px_o = self._aspect_orientation_flag(
+                        cached_scaled.width() / cached_scaled.height()
+                    )
+                    m_o = self._aspect_orientation_flag(
+                        self._display_aspect(path, measured_ar)
+                    )
+                    stale_crop = px_o != 0 and m_o != 0 and px_o != m_o
+                if stale_crop:
+                    self._thumbnail_cache.remove(scaled_key)
+                    cached_scaled = None
+                elif self._pixmap_logical_size(cached_scaled, dpr) == expected_logical:
                     w.setPixmap(cached_scaled)
                     w.setText("")
                     cache_hit = True
@@ -2624,32 +2853,16 @@ class JustifiedGallery(QWidget):
                         pass
                     else:
                         try:
-                            from image_cache import get_image_cache
-                            global_cache = get_image_cache()
                             max_dim = max(physical_size.width(), physical_size.height())
 
-                            global_thumb = global_cache.get_grid(path)
-                            if global_thumb is None:
-                                global_thumb = global_cache.get_thumbnail(path)
-
-                            if global_thumb is not None:
-                                src_dim = max(global_thumb.shape[:2])
+                            base = self._global_cache_to_base_pixmap(path)
+                            if base is not None and not base.isNull():
+                                src_dim = max(base.width(), base.height())
                                 if src_dim < int(max_dim * 0.85):
-                                    global_thumb = None
+                                    base = None
 
-                            if global_thumb is not None:
-                                arr = np.ascontiguousarray(global_thumb)
-                                h_img, w_img = arr.shape[:2]
-                                bytes_per_line = arr.strides[0]
-                                qimg = QImage(arr.data, w_img, h_img, bytes_per_line, QImage.Format.Format_RGB888).copy()
-                                base = QPixmap.fromImage(qimg)
-                                if base and not base.isNull():
-                                    self._thumbnail_cache.put((path, self._thumb_base_key), base)
-                                else:
-                                    # Cache empty pixmap so we do not attempt synchronous DB queries repeatedly
-                                    null_px = QPixmap()
-                                    self._thumbnail_cache.put((path, self._thumb_base_key), null_px)
-                                    base = null_px
+                            if base is not None and not base.isNull():
+                                base = self._store_oriented_base_pixmap(path, base)
                             else:
                                 # Cache empty pixmap so we do not attempt synchronous DB queries repeatedly
                                 null_px = QPixmap()
@@ -2666,6 +2879,13 @@ class JustifiedGallery(QWidget):
                     # metadata. Reconcile before fitting so the debounced rebuild corrects
                     # the frame.
                     self._reconcile_tile_aspect(path, base)
+                    if not self._frame_matches_pixmap_orientation(
+                        self._gallery_layout_items[idx].get("rect")
+                        if idx < len(self._gallery_layout_items)
+                        else None,
+                        base,
+                    ):
+                        continue
                     scaled = self._fit_tile_pixmap(path, base, physical_size, dpr)
                     w.setPixmap(scaled)
                     w.setText("")
@@ -2790,14 +3010,23 @@ class JustifiedGallery(QWidget):
                 if priority != Priority.CURRENT:
                     continue
                 break
-            target_size = rest[0] if rest else None
+            # NEVER pass thumbnail_target_size for gallery tiles. The worker would
+            # crop-fit the already display-oriented thumbnail to the tile rect
+            # (_handle_thumbnail_result, fit="crop"); when the rect is still the
+            # pre-metadata landscape default, that turns an upright portrait into an
+            # upright-content LANDSCAPE crop — and since tiles are ~3:2, its aspect is
+            # indistinguishable from a genuine sideways full preview, so
+            # _orient_gallery_base_pixmap "corrects" it by rotating again -> sideways
+            # content inside a correct portrait frame. The gallery caches the payload
+            # as its BASE and crop-fits per tile itself (_fit_tile_pixmap), so the
+            # worker-side crop was redundant as well as destructive.
             self.load_manager.load_image(
                 path,
                 priority=priority,
                 cancel_existing=False,
                 stages=stages,
                 gallery_thumbnail=True,
-                thumbnail_target_size=target_size if priority == Priority.CURRENT else None,
+                thumbnail_target_size=None,
             )
             self._mark_active_task(path, priority)
             scheduled += 1
@@ -2953,11 +3182,15 @@ class JustifiedGallery(QWidget):
                 continue
             thumb = global_cache.get_thumbnail(path)
             if thumb is None:
+                thumb = global_cache.get_grid(path)
+            if thumb is None:
                 continue
+            thumb = self._orient_gallery_thumbnail_array(path, thumb)
             pixmap = _thumbnail_data_to_base_pixmap(thumb)
             if pixmap is None or pixmap.isNull():
                 continue
-            self._thumbnail_cache.put((path, self._thumb_base_key), pixmap)
+            pixmap = self._store_oriented_base_pixmap(path, pixmap)
+            self._reconcile_tile_aspect(path, pixmap)
             warmed += 1
         if warmed and _focus_gallery_switch_logs():
             logger.debug(
@@ -3015,6 +3248,8 @@ class JustifiedGallery(QWidget):
             self.on_thumbnail_error(file_path, "Null pixmap in on_thumbnail_ready")
             return
 
+        pixmap = self._orient_gallery_base_pixmap(file_path, pixmap)
+
         existing = self._thumbnail_cache.get((file_path, self._thumb_base_key))
         if existing and not existing.isNull():
             old_dim = max(existing.width(), existing.height())
@@ -3022,7 +3257,6 @@ class JustifiedGallery(QWidget):
             if old_dim > new_dim:
                 pixmap = existing
 
-        # Cache full preview thumbnail (not tile-sized crops). EXIF rotation is applied at extract time.
         meta_ar = self._metadata_display_aspect(file_path)
         if meta_ar is not None and pixmap.height() > 0:
             px_ar = pixmap.width() / pixmap.height()
@@ -3032,7 +3266,7 @@ class JustifiedGallery(QWidget):
                     ex_ar = existing.width() / existing.height()
                     if abs(ex_ar - meta_ar) < abs(px_ar - meta_ar):
                         pixmap = existing
-        self._thumbnail_cache.put((file_path, self._thumb_base_key), pixmap)
+        pixmap = self._store_oriented_base_pixmap(file_path, pixmap)
         self._thumb_fail_counts.pop(file_path, None)
         if not self._first_thumb_ready_after_set:
             self._first_thumb_ready_after_set = True
@@ -3052,9 +3286,21 @@ class JustifiedGallery(QWidget):
         # relayout still waits for scroll to settle.
         self._reconcile_tile_aspect(file_path, pixmap)
 
+        frame_mismatch = self._any_visible_tile_frame_mismatch(file_path, pixmap)
+
         # Avoid heavy per-widget pixmap work during very fast scrolling; visible tiles are
         # filled on settle via load_visible_images. Tile geometry is already recorded above.
         if self._is_scrolling_fast:
+            return
+
+        if frame_mismatch:
+            if _orient_debug_enabled():
+                logger.info(
+                    "[ORIENT] defer paint file=%s until layout rebuild (frame mismatch)",
+                    os.path.basename(file_path),
+                )
+            if not self._metadata_rebuild_timer.isActive():
+                self._metadata_rebuild_timer.start(0 if not self._is_scrolling_fast else 250)
             return
 
         # Apply the pixmap to visible tiles. Under batching, defer the (scale/crop +
@@ -3087,7 +3333,37 @@ class JustifiedGallery(QWidget):
                     continue
                 logical_size = w.size()
                 physical_size = QSize(int(logical_size.width() * dpr), int(logical_size.height() * dpr))
+                if not self._frame_matches_pixmap_orientation(
+                    self._gallery_layout_items[idx].get("rect")
+                    if idx < len(self._gallery_layout_items)
+                    else None,
+                    base,
+                ):
+                    if _orient_debug_enabled():
+                        logger.info(
+                            "[ORIENT] skip paint file=%s idx=%d (frame mismatch, awaiting rebuild)",
+                            os.path.basename(file_path),
+                            idx,
+                        )
+                    continue
                 fitted = self._fit_tile_pixmap(file_path, base, physical_size, dpr)
+                if _orient_debug_enabled():
+                    try:
+                        rect = None
+                        if idx < len(self._gallery_layout_items):
+                            rect = self._gallery_layout_items[idx].get("rect")
+                        b_o = "P" if base.height() > base.width() else "L"
+                        r_o = "?" if rect is None else ("P" if rect.height() > rect.width() else "L")
+                        f_o = "P" if fitted.height() > fitted.width() else "L"
+                        flag = " FRAME_MISMATCH" if (rect is not None and r_o != b_o) else ""
+                        logger.info(
+                            "[ORIENT] paint file=%s base=%dx%d(%s) rect=%s(%s) fitted=%dx%d(%s)%s",
+                            os.path.basename(file_path), base.width(), base.height(), b_o,
+                            "None" if rect is None else f"{rect.width()}x{rect.height()}", r_o,
+                            fitted.width(), fitted.height(), f_o, flag,
+                        )
+                    except Exception:
+                        pass
                 w.setPixmap(fitted)
                 w.setText("")
 
@@ -3244,31 +3520,8 @@ class JustifiedGallery(QWidget):
             # Save dummy data so we don't infinitely request it
             self._metadata_cache[resolved] = {"original_width": 0, "original_height": 0}
             return
-            
-        # Merge: if we already have display-corrected metadata from the semantic
-        # index (orientation=1, dimensions already swapped), keep those dimensions
-        # when the incoming EXIF has a non-trivial orientation that would cause
-        # the gallery to re-interpret them.
-        existing = self._metadata_cache.get(resolved)
-        if (
-            existing
-            and existing.get("orientation") == 1
-            and existing.get("original_width")
-            and existing.get("original_height")
-        ):
-            try:
-                incoming_o = int(exif_data.get("orientation", 1) or 1)
-            except (ValueError, TypeError):
-                incoming_o = 1
-            if incoming_o in (5, 6, 7, 8):
-                # The existing metadata was pre-corrected; keep its display
-                # dimensions and normalise orientation to 1 in the merged result.
-                exif_data = dict(exif_data)
-                exif_data["original_width"] = existing["original_width"]
-                exif_data["original_height"] = existing["original_height"]
-                exif_data["orientation"] = 1
 
-        # Store in local metadata cache
+        # Store in local metadata cache (keep container orientation + sensor dimensions).
         self._metadata_cache[resolved] = exif_data
         try:
             from image_cache import get_image_cache
@@ -3286,6 +3539,19 @@ class JustifiedGallery(QWidget):
         aspect = self._metadata_display_aspect(file_path)
         if aspect is None:
             return
+
+        raw_meta = self._raw_aspect_undo_user_rotation(file_path, aspect)
+        stored_raw = self._measured_raw_aspects.get(resolved)
+        if stored_raw is None or (
+            self._aspect_orientation_flag(stored_raw) != 0
+            and self._aspect_orientation_flag(raw_meta) != 0
+            and self._aspect_orientation_flag(stored_raw)
+            != self._aspect_orientation_flag(raw_meta)
+        ):
+            self._measured_raw_aspects[resolved] = raw_meta
+            base = self._thumbnail_cache.get((resolved, self._thumb_base_key))
+            if base and not base.isNull():
+                self._store_oriented_base_pixmap(resolved, base)
         
         # Check if we need to update layout (if it differs from default 1.333 or previous cache)
         # Find all occurrences of this path in layout
@@ -3380,21 +3646,37 @@ class JustifiedGallery(QWidget):
     def _handle_metadata_rebuild(self):
         """Rebuild layout after metadata changes to settle aspect ratios."""
         large = len(self.images) > 800
-        if not self._metadata_changed_paths or self._building or self._is_scrolling_fast:
+        flip_count = len(getattr(self, "_orientation_flip_paths", None) or ())
+        flip_pending = flip_count > 0
+        if not self._metadata_changed_paths or self._building:
+            return
+        if self._is_scrolling_fast and not flip_pending:
             # Don't rebuild while scrolling as it blocks the UI thread
-            if self._is_scrolling_fast and not self._metadata_rebuild_timer.isActive():
+            if not self._metadata_rebuild_timer.isActive():
                 self._metadata_rebuild_timer.start(1000)
             return
         time_since_last_change = time.time() - getattr(self, "_last_metadata_change_time", 0.0)
-        if large and len(self._metadata_changed_paths) < 8 and time_since_last_change < 1.5:
+        if (
+            large
+            and not flip_pending
+            and len(self._metadata_changed_paths) < 8
+            and time_since_last_change < 1.5
+        ):
             self._metadata_rebuild_timer.start(1200)
             return
-        if (time.time() - self._last_force_build_ts) < 0.8:
+        if not flip_pending and (time.time() - self._last_force_build_ts) < 0.8:
             self._metadata_rebuild_timer.start(400)
             return
 
         anchor = self._capture_scroll_anchor_state()
         self._metadata_changed_paths.clear()
+        if hasattr(self, "_orientation_flip_paths"):
+            if _orient_debug_enabled() and flip_count:
+                logger.info(
+                    "[ORIENT] metadata rebuild starting (%d orientation flip(s))",
+                    flip_count,
+                )
+            self._orientation_flip_paths.clear()
         if _focus_gallery_switch_logs():
             logger.debug("[GALLERY] metadata rebuild triggered")
 

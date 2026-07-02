@@ -25,19 +25,36 @@ from image_cache import get_image_cache
 worker_thread_local = threading.local()
 
 def yield_if_current_task_active() -> None:
-    """Yield execution if another thread is running a high priority task."""
+    """Yield execution if another thread is running a high priority task.
+
+    BOUNDED: this must never sleep indefinitely. _active_tasks includes CURRENT
+    tasks that are merely QUEUED (registered at enqueue, before dispatch), and
+    _schedule_next_task only starts tasks while activeThreadCount < maxThreadCount.
+    So if the pool is full of non-CURRENT workers all sleeping here, the queued
+    CURRENT tasks can never start and the sleepers never wake — a livelock that
+    froze gallery entry for ~20s (pending>0, zero decodes) until an unrelated event
+    kicked the pool. A bounded yield keeps the intent (give CURRENT work a head
+    start at yield points) while guaranteeing pool threads are eventually released
+    so the queued CURRENT work can actually run. The worker's own task is also
+    checked so cancelled workers exit immediately instead of sleeping.
+    """
     import time
     if threading.current_thread() is threading.main_thread():
         return
     current_priority = getattr(worker_thread_local, 'priority', None)
     if current_priority == Priority.CURRENT:
         return
-        
+
     manager = _global_manager
     if not manager:
         return
-        
-    while True:
+
+    own_task = getattr(worker_thread_local, 'task', None)
+    max_wait_s = _env_int("RAWVIEWER_YIELD_MAX_MS", 1500, minimum=100) / 1000.0
+    deadline = time.time() + max_wait_s
+    while time.time() < deadline:
+        if own_task is not None and own_task.is_cancelled():
+            return
         has_current = False
         with manager._queue_lock:
             for t in manager._active_tasks.values():
@@ -263,6 +280,7 @@ class ImageLoadWorker(QRunnable):
     def run(self):
         """執行任務"""
         worker_thread_local.priority = getattr(self.task, 'priority', None)
+        worker_thread_local.task = self.task
         try:
             if self.task.is_cancelled():
                 if self._safe_emit():
@@ -464,6 +482,7 @@ class ImageLoadWorker(QRunnable):
             if self._safe_emit():
                 self.manager._task_finished(self.task)
             worker_thread_local.priority = None
+            worker_thread_local.task = None
 
     def _handle_thumbnail_result(self, file_path, thumbnail):
         """Internal helper to process and emit thumbnail results."""

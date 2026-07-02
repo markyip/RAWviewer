@@ -51,6 +51,31 @@ Major release introducing a custom gallery zoom slider, interactive GPS map disp
 - **Fixed a scrollbar-jump stall** — Dragging the gallery scrollbar to a distant position could leave the newly visible area stuck behind stale loading requests for the position you scrolled away from, sometimes for several seconds. It now loads immediately.
 - **File-picker fallback for rare native-dialog crashes** — On some Windows setups the native file/folder picker can abort the app (shell preview handlers / cloud overlays over the OpenGL view). The standard native picker remains the default; set `RAWVIEWER_QT_FILE_DIALOG=1` to switch to a stable cross-platform picker if you hit this.
 
+### Gallery — portrait photos crop-fit into landscape tiles
+Some users saw **vertical shots displayed inside a horizontal tile frame** (portrait content center-cropped to fill a landscape rectangle) when **entering the gallery** or **jumping to a distant scroll position**. This is different from v2.4.1’s *sideways* thumbnails — here the image was upright but the **justified tile geometry** was wrong.
+
+**Cause:** The gallery could measure tile aspect from **unoriented embedded-JPEG pixels** pulled straight from the global thumbnail cache (common on Sony ARW and similar RAW) before container EXIF display orientation was applied. That wrong aspect was stored and reused for layout. Additionally, semantic-index pre-seed and `on_exif_ready` merge logic **normalized `orientation` to 1** while baking display dimensions into `original_width`/`original_height`, which gave correct portrait **tile geometry** but left thumbnails **unrotated** (sideways in a portrait frame). The visible tile `rect` only updates after a full `build_gallery` rebuild, which was debounced during fast scroll.
+
+**What's fixed:**
+- **Preserve container orientation** — Gallery layout metadata now keeps sensor dimensions + real EXIF orientation tag (not `orientation=1` with pre-swapped dims).
+- **EXIF-aware aspect measurement** — When decoded thumbnail pixels disagree with container EXIF on portrait vs landscape, layout trusts EXIF display dimensions instead of locking the wrong pixel aspect.
+- **Orient on every gallery cache path** — Global cache → gallery tile conversion applies container rotation; stale scaled variants are invalidated after re-orient.
+- **Faster relayout on orientation flip** — Portrait ↔ landscape aspect changes trigger a shorter debounced `build_gallery` rebuild.
+- **Late EXIF arrival** — When metadata arrives after the first paint, stored measured aspects and cached base pixmaps are corrected if they conflict with the new EXIF.
+
+**If a portrait tile still looks wrong once:** Run **`scripts/Launch/shell/clear_cache.sh`** (macOS) or **`scripts/Launch/bat/clear_cache.bat`** (Windows), then reopen the folder — stale unoriented grid/thumbnail cache entries from before this fix can otherwise sit beside freshly oriented ones.
+
+### Single view — crash during background metadata indexing (Windows)
+On **very large folders** (6000+ RAW), background metadata indexing could start while you were still **navigating in single-image view** (arrow keys, full-resolution decode, LibRaw prefetch). That stacked indexing I/O on top of display loads and could abort the process with exit code **`-805306369`** (`0xCFFFFFFF`) — the same native-abort class as the gallery GL crash, but triggered by **resource contention**, not gallery entry.
+
+**What's fixed:**
+- **Defer indexing during single-view load pressure** — navigation in progress, recent navigation, **RAW recovery (P)**, **zoomed view** (wheel / Space / double-click), or an active ImageLoadManager queue delays the metadata index worker (same pattern as gallery warmup deferral).
+- **Defer after prep completes** — the worker no longer starts immediately after the 6882-file prep scan if single-view is still busy; it retries on a timer instead of marking the pass complete.
+- **Huge folders in single view** — folders with 1000+ pending EXIF extracts wait for ~45s of idle time (or switch to gallery) before launching the parallel metadata worker.
+- **ILM throttle at index worker start** — background metadata indexing now engages the semantic indexing throttle immediately, not only during the later AI embedding phase.
+- **Idle display prefetch paused** — neighbor full-res prefetch stops while the metadata worker runs.
+- **Metadata extraction throttling** — parallel EXIF extraction during `build_index` acquires the load throttle before spawning workers.
+
 ---
 
 ## 🚀 Version 2.4.1
