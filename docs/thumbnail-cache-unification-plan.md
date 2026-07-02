@@ -114,7 +114,7 @@ flowchart LR
 | **PR-3** | P2 | Semantic 索引嚴格等 Gallery 首屏 | PR-1 | 2 天 | 已完成（Phase A/B 分階段索引，`RAWVIEWER_GALLERY_INDEX_CACHE_ONLY`） |
 | **PR-4** | P3 | 排序與索引共用 EXIF DB | 可與 PR-3 並行 | 2–3 天 | 已完成（排序 capture_time 持久化 + semantic 索引跳過重複 EXIF 寫入；GPS 仍需逐檔讀取，讀側省略未做） |
 | **PR-8** | — | 儲存空間優化（磁碟快取 LRU eviction + WebP 編碼） | 無 | 1 天 | 已完成 |
-| **PR-5** | P5 | 按需 full 解析 | PR-1 建議先合 | 1–2 天 | 待實作 |
+| **PR-5** | P5 | 按需 full 解析 | PR-1 建議先合 | 1–2 天 | 已完成（移除鄰居預取的 eager full；idle-timer 機制原已存在） |
 | **PR-6a** | P4a | Gallery 讀路徑統一（write-through 至 ImageCache） | PR-1, PR-2 | 1–2 天 | 待實作 |
 | **PR-6b** | P4b | **完全移除 `gallery_view._thumbnail_cache`** | PR-6a, PR-7 建議先合 | 2–3 天 | 待實作 |
 | **PR-7** | P7 | **Embedded JPEG raw bytes 磁碟快取** | PR-1～PR-3 穩定 | 3–5 天 | 待實作 |
@@ -359,12 +359,14 @@ Prefetch / 箭頭導航預設停在 preview（~1920px）；感應器解析度 fu
 | Gallery → 單張 | preview 進場，full 背景升級 |
 | BACKGROUND prefetch | 禁止 `full` |
 
-**環境變數**：`RAWVIEWER_FULL_DECODE_IDLE_MS`（預設 800）
+**環境變數**：`RAWVIEWER_FULL_DECODE_IDLE_MS`（預設 800）— 實作沿用既有的 `RAWVIEWER_NAV_IDLE_FULL_MS`（預設 1200），機制在本 PR 之前已存在，只是命名不同，未新增變數。
 
 ### 9.4 驗收
 
 - 快速連按箭頭：無大量 `Full-resolution pixels loaded (7008×4672)`。
 - 100% zoom 仍能在 preview 已暖時快速升級 full。
+
+**實作發現與修正（2026-07-02）**：透過使用者提供的 debug log 精確定位問題根源 —— `_schedule_idle_full_decode_after_nav_preview`（目前顯示圖片的 idle-timer full 升級）與 `_maybe_queue_background_full_decode` 皆已正確存在且運作正常。真正的違規來源是 `_nav_prefetch_stages_for_path()`：只要 `use_libraw_consistent_preview_first()` 為真（預設值）且未 zoom，每次導航都會為鄰近 2 張圖片的**預取**（非目前顯示圖片）立即請求 `stages={"full"}`，完全繞過 idle-timer，導致連續按方向鍵時每一步都觸發一次感應器解析度 LibRaw 解碼 —— 這正是驗收條件描述的症狀。修正：移除該 eager full 分支，非 zoom 情況一律 fallback 至輕量 `{"thumbnail"}`（+ `exif` 若缺）預取，與目前顯示圖片首次導航時使用的同一 tier 一致；zoom 情況維持 eager full（使用者已表達要看細節的意圖）。已審查 `main.py` 內其餘所有 `stages={"full"}` 呼叫點，確認皆為 `Priority.CURRENT`（使用者主動要求）或已正確限定於目前顯示檔案，僅此一處違規。驗證：headless 呼叫 `_nav_prefetch_stages_for_path` 確認 non-zoom 不再含 `full`，zoom 仍含 `full`，缺 EXIF 時仍補上。
 
 ---
 

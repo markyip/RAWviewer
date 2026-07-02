@@ -20123,18 +20123,29 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         return cached_item is None
 
     def _nav_prefetch_stages_for_path(self, file_path: str, *, zoomed: bool) -> tuple[set[str], bool]:
-        """Stages for warming the next/prev image before navigation."""
+        """Stages for warming the next/prev image before navigation.
+
+        Non-zoomed (fit-to-window) neighbors only get the light nav-preview
+        tier -- the same tier the current image already shows on first
+        display. Sensor-resolution full decode is deferred to
+        _schedule_idle_full_decode_after_nav_preview once the user actually
+        lands on and pauses on that image, exactly like the currently
+        displayed image already works. This used to eagerly request
+        stages={"full"} whenever use_libraw_consistent_preview_first() was on
+        (the default), meaning every arrow-key press queued full-sensor
+        LibRaw decodes for the next 2 neighbors regardless of whether the
+        user paused anywhere -- measured as a "Full-resolution pixels loaded"
+        line after nearly every navigation in a real browsing session, the
+        exact waste PR-5 (thumbnail-cache-unification-plan.md) targets.
+        Zoomed navigation keeps eager full: a user already at 100% zoom
+        expects each new image at full resolution immediately.
+        """
         if zoomed:
             return {"exif", "full"}, True
-        try:
-            if use_libraw_consistent_preview_first() and is_raw_file(file_path):
-                stages = {"full"}
-                if not self.image_cache.get_exif(file_path):
-                    stages = {"exif", "full"}
-                return stages, False
-        except Exception:
-            pass
-        return {"thumbnail"}, False
+        stages = {"thumbnail"}
+        if not self.image_cache.get_exif(file_path):
+            stages = {"thumbnail", "exif"}
+        return stages, False
 
     def _request_display_buffer_prefetch(
         self,
