@@ -4334,8 +4334,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         if not path_to_group:
             return self._filter_burst_rejected_paths(files)
         rejected = set(getattr(self, "_burst_rejected_paths", set()) or set())
-        covers = dict(getattr(self, "_burst_stack_covers", {}) or {})
-        covers.update(getattr(self, "_burst_group_covers", {}) or {})
+        covers = dict(getattr(self, "_burst_group_covers", {}) or {})
+        covers.update(getattr(self, "_burst_stack_covers", {}) or {})
         return build_collapsed_display_paths(files, path_to_group, covers, rejected)
 
     def _burst_stack_count_for_path(self, file_path: str) -> int:
@@ -9271,6 +9271,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         # index never serializes thumbnail decode. See SemanticImageIndex.
         self._wire_index_load_throttle(index)
         self._semantic_index_progress_total = total_files
+        self._semantic_index_last_progress = None
         self._semantic_index_progress_base = 0
         self._semantic_index_run_semantic_embeddings = run_semantic_embeddings
         signals = SemanticIndexSignals()
@@ -9380,6 +9381,32 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 return stage
             return f"{stage}: {done_i}/{total_i}"
 
+    def _show_live_metadata_progress_in_search(self, fallback: str) -> None:
+        """Switch an already-running background metadata pass to visible progress.
+
+        Background passes keep "Metadata: X/Y" out of the search field by design
+        (_set_gallery_search_status suppresses those prefixes when
+        _gallery_search_show_index_progress is False). Once the user opens the
+        search panel they are actively waiting, so flip the flag — subsequent
+        progress events (every ~10 files) update the field live — and seed it
+        immediately with the last known counts rather than a static message the
+        user can't estimate completion from.
+        """
+        self._gallery_search_show_index_progress = True
+        last = getattr(self, "_semantic_index_last_progress", None)
+        total = int(getattr(self, "_semantic_index_progress_total", 0) or 0)
+        if last and last[1] > 0:
+            self._set_gallery_search_status(
+                self._format_index_progress("Metadata", last[0], last[1])
+            )
+        elif total > 0:
+            # Pass started but extraction hasn't begun (prep/DB-scan phase).
+            self._set_gallery_search_status(
+                self._format_index_progress("Metadata", 0, total)
+            )
+        else:
+            self._set_gallery_search_status(fallback)
+
     def _should_show_search_index_progress(self, message: str) -> bool:
         msg = (message or "").strip()
         if not msg:
@@ -9412,6 +9439,13 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         msg = str(message or "").strip()
         pass_kind = getattr(self, "_semantic_index_pass_kind", None)
         show_progress = getattr(self, "_gallery_search_show_index_progress", False)
+
+        # Remember the latest counts so opening the search panel mid-pass can
+        # immediately show "Metadata: 1234/6881" instead of a static message.
+        try:
+            self._semantic_index_last_progress = (max(0, int(i)), max(0, int(n)))
+        except Exception:
+            pass
 
         if not show_progress:
             # If search UI doesn't want progress, route standard indexing/thumbnail messages to status bar only
@@ -9928,7 +9962,9 @@ class RAWImageViewer(SessionMixin, QMainWindow):
 
         if getattr(self, "_semantic_indexing_in_progress", False):
             if getattr(self, "_semantic_index_pass_kind", None) == "silent_metadata":
-                self._set_gallery_search_status("Preparing metadata in background…")
+                self._show_live_metadata_progress_in_search(
+                    "Preparing metadata in background…"
+                )
             logger.info("[INDEX][USER] Skip semantic start: semantic indexing already in progress")
             self._sync_gallery_search_input_editable()
             return
@@ -9966,7 +10002,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 else:
                     self._finish_gallery_search_unlock(corpus_files)
             else:
-                self._set_gallery_search_status("Indexing metadata…")
+                self._show_live_metadata_progress_in_search("Indexing metadata…")
                 self._schedule_silent_metadata_index()
             self._sync_gallery_search_input_editable()
             return
@@ -13747,8 +13783,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         for group_id, members in path_to_group.items():
             if not any(_norm_path(m) == norm for m in members):
                 continue
-            covers = dict(getattr(self, "_burst_stack_covers", {}) or {})
-            covers.update(getattr(self, "_burst_group_covers", {}) or {})
+            covers = dict(getattr(self, "_burst_group_covers", {}) or {})
+            covers.update(getattr(self, "_burst_stack_covers", {}) or {})
             cover = covers.get(group_id) or (members[0] if members else None)
             if cover:
                 resolved = gj._resolve_gallery_path(cover)
