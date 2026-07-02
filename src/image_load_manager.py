@@ -8,6 +8,7 @@
 import os
 import threading
 import queue
+import time
 from collections import defaultdict
 from enum import Enum
 from typing import Optional, Dict, Any, Tuple
@@ -646,7 +647,31 @@ class ImageLoadManager(QObject):
         
         # RAW throttling: Limit concurrent heavy RAW decodes (set by update_volume_throttling)
         self._active_raw_tasks = 0
+
+        # Watchdog pump: dispatch is normally triggered by enqueues and completions, but
+        # several stall variants have been observed where the queue sits non-empty with
+        # idle workers (yield livelock, throttle transitions, missed completion events)
+        # until some unrelated event kicks the pool — seen as multi-second gallery
+        # freezes. This periodic pump guarantees any queued work is (re)dispatched
+        # within one tick regardless of the trigger. It is a cheap no-op when the
+        # queue is empty.
+        self._dispatch_watchdog = QTimer(self)
+        self._dispatch_watchdog.setInterval(
+            _env_int("RAWVIEWER_DISPATCH_WATCHDOG_MS", 750, minimum=100)
+        )
+        self._dispatch_watchdog.timeout.connect(self._watchdog_pump)
+        self._dispatch_watchdog.start()
+
         self._initialized = True
+
+    def _watchdog_pump(self) -> None:
+        if self._stopped:
+            return
+        try:
+            if not self._work_queue.empty():
+                self._schedule_next_task()
+        except Exception:
+            pass
 
     def update_volume_throttling(self, folder_path: Optional[str]) -> None:
         """Dynamically update maximum threads and raw load limit for a new folder path."""
@@ -714,28 +739,55 @@ class ImageLoadManager(QObject):
             return
 
         def _worker() -> None:
-            from common_image_loader import probe_volume_speed, volume_speed_tier
+            from common_image_loader import (
+                invalidate_volume_speed_cache,
+                probe_volume_speed,
+                record_volume_speed,
+                volume_speed_tier,
+                _windows_drive_is_fixed_local,
+            )
 
-            # Probe files OTHER than the one just opened: its bytes are already in
-            # the OS page cache (fast-open decode), so probing it reports bogus
-            # GB/s speeds and a slow drive gets misclassified as "fast".
+            # Let fast-open / sort probes finish so we measure disk not page cache.
+            time.sleep(2.0)
+
             candidates = self._pick_probe_samples(
-                folder_path, exclude=sample_path, limit=5
+                folder_path, exclude=sample_path, limit=8
             )
             if not candidates and sample_path and os.path.isfile(sample_path):
                 candidates = [sample_path]
 
-            mbps = None
+            best_mbps: Optional[float] = None
             probe_path = None
             for cand in candidates:
-                probe_path = cand
                 mbps = probe_volume_speed(cand)
-                # probe returns None for page-cache hits (not cached); try a
-                # colder file until we get a trustworthy disk reading.
-                if mbps is not None:
-                    break
+                if mbps is None:
+                    continue
+                probe_path = cand
+                if best_mbps is None or mbps > best_mbps:
+                    best_mbps = mbps
+
+            # Contended first probe on a fixed secondary SSD can read artificially low.
+            if (
+                best_mbps is not None
+                and best_mbps < 120.0
+                and _windows_drive_is_fixed_local(folder_path or probe_path)
+            ):
+                time.sleep(3.0)
+                invalidate_volume_speed_cache(probe_path or folder_path)
+                for cand in candidates[:3]:
+                    mbps = probe_volume_speed(
+                        cand, sample_bytes=12 * 1024 * 1024, timeout_s=4.0
+                    )
+                    if mbps is None:
+                        continue
+                    probe_path = cand
+                    if best_mbps is None or mbps > best_mbps:
+                        best_mbps = mbps
+
             if probe_path is None:
                 return
+            if best_mbps is not None:
+                record_volume_speed(probe_path, best_mbps)
             try:
                 self.update_volume_throttling(folder_path)
             except Exception:
@@ -746,7 +798,7 @@ class ImageLoadManager(QObject):
                 logging.getLogger(__name__).info(
                     "[LOAD] Volume speed probe: %s -> %s MB/s (%s, raw_limit=%s)",
                     folder_path,
-                    f"{mbps:.1f}" if mbps else "n/a",
+                    f"{best_mbps:.1f}" if best_mbps else "n/a",
                     volume_speed_tier(probe_path),
                     getattr(self, "_raw_load_limit", "?"),
                 )
@@ -1116,6 +1168,42 @@ class ImageLoadManager(QObject):
                 if getattr(t, "_counted_raw_slot", False)
             )
 
+    def cancel_gallery_tasks(self) -> None:
+        """Cancel queued/active gallery thumbnail decodes (leaving single-view work)."""
+        with self._queue_lock:
+            for key, task in list(self._active_tasks.items()):
+                if not getattr(task, "gallery_thumbnail", False):
+                    continue
+                task.cancel()
+                fp = getattr(task, "file_path", None)
+                self._active_tasks.pop(key, None)
+                if fp and fp in self._task_keys_by_path:
+                    self._task_keys_by_path[fp].discard(key)
+                    if not self._task_keys_by_path[fp]:
+                        self._task_keys_by_path.pop(fp, None)
+            if not self._work_queue.empty():
+                kept: list = []
+                while not self._work_queue.empty():
+                    try:
+                        task = self._work_queue.get_nowait()
+                    except queue.Empty:
+                        break
+                    if getattr(task, "gallery_thumbnail", False):
+                        task.cancel()
+                        key = getattr(task, "task_key", None)
+                        if key in self._active_tasks and self._active_tasks[key] is task:
+                            del self._active_tasks[key]
+                        continue
+                    kept.append(task)
+                for task in kept:
+                    self._work_queue.put(task)
+            self._active_raw_tasks = sum(
+                1
+                for t in self._active_tasks.values()
+                if getattr(t, "_counted_raw_slot", False)
+            )
+            self._compact_work_queue()
+
     def cancel_tasks_by_priority(self, priority: Priority) -> None:
         """Cancel all tasks matching the specified priority."""
         with self._queue_lock:
@@ -1202,6 +1290,12 @@ class ImageLoadManager(QObject):
     def shutdown(self):
         """關閉管理器並清理資源"""
         self._stopped = True
+        watchdog = getattr(self, '_dispatch_watchdog', None)
+        if watchdog is not None:
+            try:
+                watchdog.stop()
+            except Exception:
+                pass
         if hasattr(self, '_process_pool') and self._process_pool:
             self._process_pool.shutdown(wait=False)
 

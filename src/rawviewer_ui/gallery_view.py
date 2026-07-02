@@ -170,6 +170,11 @@ def _gallery_idle_preload_ms() -> int:
     return _env_int("RAWVIEWER_GALLERY_IDLE_PRELOAD_MS", 250, minimum=50)
 
 
+def _min_layout_pixmap_dim() -> int:
+    """Nav/filmstrip previews below this size must not drive justified layout aspect."""
+    return _env_int("RAWVIEWER_GALLERY_MIN_LAYOUT_PIXMAP_DIM", 384, minimum=128)
+
+
 def _indexing_loads_compete() -> bool:
     """True when semantic/face indexing may flood the load queue at BACKGROUND priority."""
     sem = os.environ.get("RAWVIEWER_ENABLE_SEMANTIC_SEARCH", "0").strip().lower() in (
@@ -288,6 +293,9 @@ class JustifiedGallery(QWidget):
         # over EXIF for tile geometry so a portrait image can't be crop-fit into a landscape
         # tile from stale metadata / an evicted pixmap. Applied through _display_aspect.
         self._measured_raw_aspects: "dict[str, float]" = {}
+        # Paths whose EXIF was already looked up from the DB this folder (hit or miss);
+        # build_gallery must not repeat main-thread bulk SQL for them on every rebuild.
+        self._metadata_fetch_attempted: "set[str]" = set()
         self._orientation_flip_paths: set[str] = set()
         self._visible_widgets = {}  # {index: ThumbnailLabel}
         self._widget_pool = []
@@ -566,6 +574,32 @@ class JustifiedGallery(QWidget):
             except Exception:
                 pass
 
+    def cancel_background_loading(self) -> None:
+        """Stop gallery thumbnail scheduling and in-flight decodes (mode switch to single view)."""
+        self._background_loading_active = False
+        for timer_name in (
+            "_load_timer",
+            "_resize_timer",
+            "_scroll_settle_timer",
+            "_metadata_rebuild_timer",
+            "_aspects_settle_timer",
+            "_idle_preload_timer",
+        ):
+            timer = getattr(self, timer_name, None)
+            if timer is not None and hasattr(timer, "stop"):
+                try:
+                    timer.stop()
+                except Exception:
+                    pass
+        mgr = getattr(self, "load_manager", None)
+        if mgr is not None and hasattr(mgr, "cancel_gallery_tasks"):
+            try:
+                mgr.cancel_gallery_tasks()
+            except Exception:
+                pass
+        self._active_tasks.clear()
+        self._requested_thumbnail_paths.clear()
+
     def prepare_gallery_display(self) -> None:
         """Ensure layout and widget geometry are valid when gallery becomes visible."""
         if not self.images:
@@ -595,6 +629,7 @@ class JustifiedGallery(QWidget):
         self._invalidate_gallery_layout()
         self._measured_raw_aspects.clear()
         self._orientation_flip_paths.clear()
+        self._metadata_fetch_attempted.clear()
         self.clear_thumbnail_widgets()
 
     def _evict_stale_active_tasks(
@@ -1405,12 +1440,12 @@ class JustifiedGallery(QWidget):
         if base is None or base.isNull():
             return False
         try:
-            from image_cache import disk_preview_max_edge
+            from image_load_manager import _gallery_grid_min_dim
 
             dpr = float(base.devicePixelRatio() or 1.0)
             effective = max(int(base.width() * dpr), int(base.height() * dpr))
             need = max(int(physical_size.width()), int(physical_size.height()))
-            floor = min(int(disk_preview_max_edge() * 0.85), int(need * 0.85))
+            floor = min(_gallery_grid_min_dim(), int(need * 0.85))
             return effective >= floor
         except Exception:
             return True
@@ -1506,6 +1541,16 @@ class JustifiedGallery(QWidget):
         m = self._metadata_cache.get(file_path)
         if m and m.get("original_width") and m.get("original_height"):
             return m
+        if file_path in self._metadata_fetch_attempted:
+            # build_gallery() already bulk-fetched this folder's EXIF once via
+            # get_multiple_exif(); if it's still missing here there's nothing new
+            # in the global cache to find. Falling through to get_exif() below would
+            # re-run a per-path SQLite SELECT for every still-missing file on every
+            # rebuild — with thousands of paths on a large folder, and the background
+            # indexer concurrently writing the same DB, that turned build_gallery's
+            # per-item layout loop into multi-second stalls (measured 7-13s for 6881
+            # items). Wait for the metadata-ready event to populate _metadata_cache.
+            return m or {}
         try:
             from image_cache import get_image_cache
 
@@ -1608,12 +1653,16 @@ class JustifiedGallery(QWidget):
         base = pixmap
         if base is None:
             base = self._thumbnail_cache.get((file_path, self._thumb_base_key))
+        min_layout_px = _min_layout_pixmap_dim()
         if base and not base.isNull() and base.height() > 0:
-            raw_ar = self._raw_aspect_from_pixmap(file_path, base)
-            if raw_ar and raw_ar > 0:
-                self._measured_raw_aspects[file_path] = raw_ar
+            if max(base.width(), base.height()) >= min_layout_px:
+                raw_ar = self._raw_aspect_from_pixmap(file_path, base)
+                if raw_ar and raw_ar > 0:
+                    self._measured_raw_aspects[file_path] = raw_ar
         else:
-            raw_ar = self._measured_raw_aspects.get(file_path)
+            stored = self._measured_raw_aspects.get(file_path)
+            if stored and stored > 0:
+                raw_ar = stored
 
         if raw_ar and raw_ar > 0:
             meta_ar = self._metadata_display_aspect(file_path)
@@ -1817,51 +1866,21 @@ class JustifiedGallery(QWidget):
         self._active_tasks[path] = (time.time(), priority)
 
     def begin_gallery_warmup(self, file_count: int = 0) -> None:
-        """Brief soft cap while switching into gallery on large folders."""
-        # Fresh gallery entry: re-arm entry-point anchoring (see
-        # _gallery_prefetch_center_index / _entry_prefetch_abandoned).
+        """Coalesce duplicate layout builds on gallery entry (no long load delay)."""
         self._entry_prefetch_abandoned = False
-        duration = min(
-            4.0,
-            1.5 + max(0, int(file_count or 0)) / 2000.0,
-        )
-        try:
-            pv = getattr(self, "parent_viewer", None)
-            folder_path = getattr(pv, "current_folder", None) if pv is not None else None
-            if folder_path:
-                from common_image_loader import (
-                    is_external_or_network_volume,
-                    moderate_external_cap_enabled,
-                    volume_speed_tier,
-                )
-
-                if (
-                    moderate_external_cap_enabled()
-                    and is_external_or_network_volume(folder_path)
-                ):
-                    duration = max(
-                        duration,
-                        min(6.0, 2.5 + max(0, int(file_count or 0)) / 1000.0),
-                    )
-        except Exception:
-            pass
-        self._gallery_warmup_until = time.time() + duration
+        # GL teardown is the real Windows crash fix; avoid multi-second warmup caps that
+        # block first tile paint on large external folders.
+        self._gallery_warmup_until = 0.0
         self._building = False
-        # Coalesce prepare_gallery_display + set_images builds during mode switch.
-        self._gallery_entry_coalesce_until = time.time() + 0.8
-        QTimer.singleShot(
-            int(duration * 1000) + 100,
-            self._end_gallery_load_warmup_throttle,
-        )
+        self._gallery_entry_coalesce_until = time.time() + 0.5
         self._pending_gallery_build = False
         self._pending_build_metadata = None
         self._pending_build_force = False
         self._idle_preload_timer.stop()
         if _focus_gallery_switch_logs():
             logger.debug(
-                "[MODESWITCH] gallery warmup started; files=%d duration=%.1fs",
+                "[MODESWITCH] gallery entry coalesce; files=%d",
                 int(file_count or 0),
-                duration,
             )
 
     def _gallery_warmup_active(self) -> bool:
@@ -2370,7 +2389,19 @@ class JustifiedGallery(QWidget):
                 self._metadata_cache.update(bulk_metadata)
             if self.parent_viewer and hasattr(self.parent_viewer, "image_cache"):
                 paths = [img for img in self.images if isinstance(img, str)]
-                missing_paths = [p for p in paths if p not in self._metadata_cache]
+                # Fetch each path's EXIF from the DB at most ONCE per folder. Rebuilds
+                # (orientation flips, metadata refresh) fire repeatedly on large folders;
+                # re-running a 6000+-row SQLite read on the MAIN THREAD every rebuild —
+                # while the background indexer may be writing the same DB — blocks paints,
+                # signal delivery, and task scheduling (observed as periodic multi-second
+                # gallery stalls with idle workers). Paths that were missing stay missing
+                # until the metadata-ready event injects fresh rows via bulk_metadata.
+                missing_paths = [
+                    p
+                    for p in paths
+                    if p not in self._metadata_cache
+                    and p not in self._metadata_fetch_attempted
+                ]
                 if missing_paths and self.parent_viewer and hasattr(
                     self.parent_viewer, "image_cache"
                 ):
@@ -2379,6 +2410,7 @@ class JustifiedGallery(QWidget):
                     bulk_fetched = self.parent_viewer.image_cache.get_multiple_exif(
                         fetch_paths
                     )
+                    self._metadata_fetch_attempted.update(fetch_paths)
                     if bulk_fetched:
                         self._metadata_cache.update(bulk_fetched)
 
@@ -2841,6 +2873,8 @@ class JustifiedGallery(QWidget):
                 elif self._pixmap_logical_size(cached_scaled, dpr) == expected_logical:
                     w.setPixmap(cached_scaled)
                     w.setText("")
+                    if not cached_scaled.isNull() and not self._first_thumb_ready_after_set:
+                        self._first_thumb_ready_after_set = True
                     cache_hit = True
                 else:
                     cached_scaled = None
@@ -2858,7 +2892,10 @@ class JustifiedGallery(QWidget):
                             base = self._global_cache_to_base_pixmap(path)
                             if base is not None and not base.isNull():
                                 src_dim = max(base.width(), base.height())
-                                if src_dim < int(max_dim * 0.85):
+                                # Grid/nav previews are smaller than tile rects but still
+                                # usable for instant first paint; sharper tiers load async.
+                                min_factor = 0.45 if not self._first_thumb_ready_after_set else 0.85
+                                if src_dim < int(max_dim * min_factor):
                                     base = None
 
                             if base is not None and not base.isNull():
@@ -2889,6 +2926,8 @@ class JustifiedGallery(QWidget):
                     scaled = self._fit_tile_pixmap(path, base, physical_size, dpr)
                     w.setPixmap(scaled)
                     w.setText("")
+                    if not scaled.isNull() and not self._first_thumb_ready_after_set:
+                        self._first_thumb_ready_after_set = True
                     cache_hit = self._gallery_base_meets_tile(base, physical_size)
                 else:
                     self._apply_pixmap_if_changed(w, QPixmap())
@@ -3047,6 +3086,24 @@ class JustifiedGallery(QWidget):
                 len(visible_indices_items),
                 len(self._active_tasks),
             )
+
+        # While gallery tiles are actively being scheduled, pause background metadata/
+        # semantic indexing (same mechanism as the scroll-burst pause): the indexer
+        # competes for the same slow drive and writes the EXIF DB the rebuild path
+        # reads. Each scheduling burst re-arms the resume timer, so indexing resumes
+        # ~5s after tile loading quiets down.
+        if scheduled_tasks > 0 and self.parent_viewer is not None:
+            try:
+                pause = getattr(
+                    self.parent_viewer, "_pause_semantic_indexing_deferred", None
+                )
+                if pause is not None:
+                    pause()
+                timer = getattr(self.parent_viewer, "_resume_indexing_timer", None)
+                if timer is not None:
+                    timer.start(5000)
+            except Exception:
+                pass
 
         # If everything visible/prefetched is already loaded, schedule idle background preloading
         if scheduled_tasks == 0 and len(self._active_tasks) == 0:
@@ -3643,6 +3700,145 @@ class JustifiedGallery(QWidget):
             self._pending_scroll_to_path = None
             QTimer.singleShot(0, self._apply_pending_scroll_to_file)
 
+    def _image_index_for_path(self, file_path: str) -> int:
+        for i, item in enumerate(self.images):
+            if item == file_path:
+                return i
+        return -1
+
+    def _layout_row_start_index(self, layout_idx: int) -> int:
+        """First layout-item index in the same justified row as *layout_idx*."""
+        if layout_idx <= 0 or layout_idx >= len(self._gallery_layout_items):
+            return max(0, layout_idx)
+        row_top = self._gallery_layout_items[layout_idx]["rect"].top()
+        start = layout_idx
+        for i in range(layout_idx - 1, -1, -1):
+            if self._gallery_layout_items[i]["rect"].top() < row_top:
+                break
+            start = i
+        return start
+
+    def _partial_rebuild_start_image_index(self, changed_paths: set[str]) -> Optional[int]:
+        """Earliest image index whose justified row must be recomputed."""
+        if not changed_paths:
+            return None
+        min_image_idx = len(self.images)
+        for path in changed_paths:
+            idx = self._image_index_for_path(path)
+            if idx < 0:
+                continue
+            layout_indices = self._path_to_indices.get(path) or []
+            if not layout_indices:
+                min_image_idx = min(min_image_idx, idx)
+                continue
+            row_start = self._layout_row_start_index(min(layout_indices))
+            row_path = self._gallery_layout_items[row_start].get("file_path")
+            if isinstance(row_path, str):
+                row_idx = self._image_index_for_path(row_path)
+                if row_idx >= 0:
+                    min_image_idx = min(min_image_idx, row_idx)
+        if min_image_idx >= len(self.images):
+            return None
+        return min_image_idx
+
+    def _rebuild_layout_from_image_index(self, start_image_idx: int) -> bool:
+        """Recompute justified rows from *start_image_idx* onward (partial layout update)."""
+        if (
+            start_image_idx <= 0
+            or not self.images
+            or not self._gallery_layout_items
+            or self._building
+        ):
+            return False
+
+        viewport_width = self._get_viewport_width()
+        left_margin = 24
+        right_margin = 0
+        net_width = viewport_width - left_margin - right_margin
+        if net_width <= 0:
+            return False
+
+        start_path = self.images[start_image_idx]
+        if not isinstance(start_path, str):
+            return False
+        layout_indices = self._path_to_indices.get(start_path) or []
+        if not layout_indices:
+            return False
+        row_start_layout = self._layout_row_start_index(min(layout_indices))
+        row_path = self._gallery_layout_items[row_start_layout].get("file_path")
+        rebuild_from = start_image_idx
+        if isinstance(row_path, str):
+            row_image_idx = self._image_index_for_path(row_path)
+            if row_image_idx >= 0:
+                rebuild_from = row_image_idx
+
+        current_y = self._gallery_layout_items[row_start_layout]["rect"].top()
+        self._gallery_layout_items = self._gallery_layout_items[:row_start_layout]
+
+        row: list = []
+        aspect_sum = 0.0
+
+        def commit_row(r, a_sum, is_last):
+            nonlocal current_y
+            if not r:
+                return
+            spacing = (len(r) - 1) * self.MIN_SPACING
+            row_h = self.TARGET_ROW_HEIGHT if is_last else (net_width - spacing) / a_sum
+            row_h = max(
+                self.TARGET_ROW_HEIGHT * 0.4,
+                min(self.TARGET_ROW_HEIGHT * 2.2, row_h),
+            )
+
+            curr_x = left_margin
+            for i, (item, aspect) in enumerate(r):
+                w = int(row_h * aspect)
+                if not is_last and i == len(r) - 1:
+                    w = net_width - (curr_x - left_margin)
+                self._gallery_layout_items.append(
+                    {
+                        "rect": QRect(curr_x, int(current_y), int(w), int(row_h)),
+                        "file_path": item if isinstance(item, str) else None,
+                        "aspect": aspect,
+                    }
+                )
+                curr_x += w + self.MIN_SPACING
+            current_y += row_h + self.MIN_SPACING
+
+        for item in self.images[rebuild_from:]:
+            aspect = 1.5
+            if isinstance(item, str):
+                aspect = self._layout_aspect_for_path(item)
+            row.append((item, aspect))
+            aspect_sum += aspect
+            if (aspect_sum * self.TARGET_ROW_HEIGHT + (len(row) - 1) * self.MIN_SPACING) >= net_width:
+                commit_row(row, aspect_sum, False)
+                row, aspect_sum = [], 0.0
+
+        if row:
+            commit_row(row, aspect_sum, True)
+
+        self._path_to_indices = {}
+        for i, layout_item in enumerate(self._gallery_layout_items):
+            p = layout_item["file_path"]
+            if p not in self._path_to_indices:
+                self._path_to_indices[p] = []
+            self._path_to_indices[p].append(i)
+
+        self._total_content_height = int(current_y + 20)
+        self._sync_content_geometry()
+        scroll = self._scroll_area_widget()
+        if scroll is not None:
+            sb = scroll.verticalScrollBar()
+            if sb.value() > sb.maximum():
+                sb.setValue(max(sb.minimum(), sb.maximum()))
+        self.update()
+        self._last_build_ts = time.time()
+        self._last_layout_content_height = self._total_content_height
+        self._layout_image_sequence = tuple(self.images)
+        self._last_force_build_ts = self._last_build_ts
+        self._reposition_thumbnail_widgets()
+        return True
+
     def _handle_metadata_rebuild(self):
         """Rebuild layout after metadata changes to settle aspect ratios."""
         large = len(self.images) > 800
@@ -3669,6 +3865,8 @@ class JustifiedGallery(QWidget):
             return
 
         anchor = self._capture_scroll_anchor_state()
+        changed_paths = set(self._metadata_changed_paths)
+        flip_paths = set(getattr(self, "_orientation_flip_paths", None) or ())
         self._metadata_changed_paths.clear()
         if hasattr(self, "_orientation_flip_paths"):
             if _orient_debug_enabled() and flip_count:
@@ -3680,7 +3878,28 @@ class JustifiedGallery(QWidget):
         if _focus_gallery_switch_logs():
             logger.debug("[GALLERY] metadata rebuild triggered")
 
-        self.build_gallery(bulk_metadata=None, force=True)
+        rebuild_t0 = time.time()
+        partial_paths = flip_paths or changed_paths
+        partial_start = self._partial_rebuild_start_image_index(partial_paths)
+        use_partial = (
+            partial_start is not None
+            and partial_start > 0
+            and len(partial_paths) <= max(64, len(self.images) // 50)
+        )
+        if use_partial:
+            if not self._rebuild_layout_from_image_index(partial_start):
+                self.build_gallery(bulk_metadata=None, force=True)
+        else:
+            self.build_gallery(bulk_metadata=None, force=True)
+        rebuild_ms = (time.time() - rebuild_t0) * 1000.0
+        if rebuild_ms > 250:
+            # Main-thread rebuild cost is the prime suspect for periodic gallery stalls
+            # on large folders — surface it so slow rebuilds are visible in logs.
+            logger.info(
+                "[GALLERY] metadata rebuild took %.0f ms (%d items)",
+                rebuild_ms,
+                len(self._gallery_layout_items),
+            )
         if anchor:
             self._pending_scroll_anchor_state = anchor
             self._pending_scroll_to_path = None

@@ -1316,6 +1316,16 @@ def _env_int(name: str, default: int, *, minimum: int, maximum: int) -> int:
     return max(minimum, min(default, maximum))
 
 
+def _env_float(name: str, default: float, *, minimum: float, maximum: float) -> float:
+    raw = os.environ.get(name, "").strip()
+    if raw:
+        try:
+            return max(minimum, min(float(raw), maximum))
+        except ValueError:
+            pass
+    return max(minimum, min(default, maximum))
+
+
 def _preview_cache_adaptive_enabled() -> bool:
     raw = os.environ.get("RAWVIEWER_PREVIEW_CACHE_ADAPTIVE", "1").strip().lower()
     return raw in ("1", "true", "yes", "on")
@@ -1398,6 +1408,39 @@ class MemoryMonitor:
             'process_rss_mb': process_memory.rss / (1024**2),
             'process_vms_mb': process_memory.vms / (1024**2)
         }
+
+    def system_memory_pressure_level(
+        self, memory_info: Dict[str, float] | None = None
+    ) -> str:
+        """Classify system RAM pressure ('critical', 'elevated', 'ok').
+
+        Uses system-wide percent used and available GB only — not process RSS.
+        Large semantic-model footprints are normal on high-RAM machines and must
+        not trigger cache purges while the OS still has headroom.
+        """
+        if memory_info is None:
+            memory_info = self.get_memory_info()
+        percent_used = memory_info['system_percent_used']
+        available_gb = memory_info['system_available_gb']
+
+        crit_pct = _env_float(
+            "RAWVIEWER_MEMORY_PRESSURE_PERCENT_CRITICAL", 90.0, minimum=50.0, maximum=99.0
+        )
+        crit_avail_gb = _env_float(
+            "RAWVIEWER_MEMORY_PRESSURE_AVAILABLE_GB_CRITICAL", 2.0, minimum=0.25, maximum=32.0
+        )
+        elev_pct = _env_float(
+            "RAWVIEWER_MEMORY_PRESSURE_PERCENT_ELEVATED", 85.0, minimum=50.0, maximum=98.0
+        )
+        elev_avail_gb = _env_float(
+            "RAWVIEWER_MEMORY_PRESSURE_AVAILABLE_GB_ELEVATED", 4.0, minimum=0.5, maximum=64.0
+        )
+
+        if percent_used >= crit_pct or available_gb <= crit_avail_gb:
+            return 'critical'
+        if percent_used >= elev_pct or available_gb <= elev_avail_gb:
+            return 'elevated'
+        return 'ok'
 
     def get_recommended_cache_sizes(self) -> Dict[str, int]:
         """Get recommended cache sizes based on available memory."""
@@ -1547,32 +1590,34 @@ class ImageCache(QObject):
         self.last_memory_check = current_time
         memory_info = self.memory_monitor.get_memory_info()
         percent_used = memory_info['system_percent_used']
+        available_gb = memory_info['system_available_gb']
         rss_mb = memory_info['process_rss_mb']
+        pressure_level = self.memory_monitor.system_memory_pressure_level(memory_info)
 
-        # Critical pressure check (raise threshold to 4000 MB as semantic models occupy ~3GB)
-        if percent_used > 90 or rss_mb > 4000:
+        if pressure_level == 'critical':
             if current_time - getattr(self, 'last_aggressive_purge', 0.0) < 60.0:
                 # Under cooldown to prevent app freeze / infinite loop of purging
                 return False
             self.last_aggressive_purge = current_time
             logger.warning(
-                "CRITICAL memory pressure detected (system: %.1f%% used, process RSS: %.1f MB). Aggressively purging caches.",
+                "CRITICAL system memory pressure (system: %.1f%% used, %.1f GB free, process RSS: %.1f MB). Aggressively purging caches.",
                 percent_used,
+                available_gb,
                 rss_mb,
             )
             self.memory_warning.emit(percent_used)
             self._aggressive_purge()
             return True
 
-        # Normal memory pressure warning / reduction
-        if percent_used > 85:
+        if pressure_level == 'elevated':
             if current_time - getattr(self, 'last_reduce_cache', 0.0) < 20.0:
                 # Under cooldown
                 return False
             self.last_reduce_cache = current_time
             logger.warning(
-                "Memory pressure detected (system: %.1f%% used, process RSS: %.1f MB). Reducing cache sizes.",
+                "Elevated system memory pressure (system: %.1f%% used, %.1f GB free, process RSS: %.1f MB). Reducing cache sizes.",
                 percent_used,
+                available_gb,
                 rss_mb,
             )
             self.memory_warning.emit(percent_used)

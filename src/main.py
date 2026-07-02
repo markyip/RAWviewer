@@ -5964,6 +5964,15 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         if path:
             self._filmstrip_warmed_paths.add(path)
 
+    def _filmstrip_cached_thumbnail(self, path: str):
+        """Grid tier (~512px) is the film strip's authoritative source now that it
+        requests the same tier as gallery tiles; the 256px thumbnail tier is only a
+        fallback for files that haven't been decoded at grid resolution yet."""
+        cached = self.image_cache.get_grid(path)
+        if cached is not None:
+            return cached
+        return self.image_cache.get_thumbnail(path)
+
     def _collect_filmstrip_warm_paths(self):
         paths = set(getattr(self, "_filmstrip_warmed_paths", None) or ())
         bar = self._filmstrip_bar()
@@ -5999,7 +6008,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         to_load = []
         for path in paths:
             if bar is not None:
-                cached = self.image_cache.get_thumbnail(path)
+                cached = self._filmstrip_cached_thumbnail(path)
                 if cached is not None:
                     bar.apply_thumbnail(path, cached)
                     self._note_filmstrip_thumbnail_warmed(path)
@@ -6051,7 +6060,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             path = files[i]
             if current and _norm_path(path) == _norm_path(current):
                 continue
-            if self.image_cache.get_thumbnail(path) is not None:
+            if self._filmstrip_cached_thumbnail(path) is not None:
                 continue
             pending.append(path)
         self._enqueue_filmstrip_thumbnails_chunked(pending)
@@ -6161,15 +6170,19 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             path = pending.pop(0)
             if current and _norm_path(path) == _norm_path(current):
                 continue
-            if self.image_cache.get_thumbnail(path) is not None:
+            if self._filmstrip_cached_thumbnail(path) is not None:
                 continue
             # BACKGROUND priority so neighbor display prefetch (PRELOAD_NEXT) wins.
+            # gallery_thumbnail=True: film strip now targets the same grid tier
+            # (~512px) as gallery tiles, so the two share decodes instead of one
+            # producing a 256px thumbnail-tier image the other can't reuse.
             self.image_manager.load_image(
                 file_path=path,
                 priority=Priority.BACKGROUND,
                 cancel_existing=False,
                 use_full_resolution=False,
                 stages={"thumbnail"},
+                gallery_thumbnail=True,
             )
             sent += 1
         if pending:
@@ -8277,30 +8290,17 @@ class RAWImageViewer(SessionMixin, QMainWindow):
 
         logger = logging.getLogger(__name__)
         file_count = len(getattr(self, "image_files", []) or [])
-        warmup_s = min(4.0, 1.5 + file_count / 2000.0)
+        # Short deferral only — long warmup windows starve first paint on big folders.
+        warmup_s = min(2.0, 0.5 + file_count / 4000.0)
         self._gallery_indexing_deferred_until = time.time() + warmup_s
-        # Anchor for the metadata-index deferral ceiling (see
-        # _should_defer_metadata_index_for_gallery) so continuous scrolling cannot
-        # starve indexing forever.
         self._gallery_deferral_opened_ts = time.time()
         self._pause_semantic_indexing_deferred()
         if getattr(self, "_face_indexing_in_progress", False):
             self._face_index_active_token = None
             logger.info(
-                "[VIEW_MODE] Face indexing deferred during gallery warmup (%d files)",
+                "[VIEW_MODE] Face indexing deferred during gallery entry (%d files)",
                 file_count,
             )
-        # begin_gallery_warmup needs gallery_justified; _arm_gallery_warmup() runs
-        # after _ensure_gallery_widget() in _show_gallery_view().
-        try:
-            if hasattr(self, "image_manager") and self.image_manager is not None:
-                mgr = self.image_manager
-                if hasattr(mgr, "exit_semantic_indexing_throttle"):
-                    mgr.exit_semantic_indexing_throttle()
-                if hasattr(mgr, "enter_gallery_warmup_throttle"):
-                    mgr.enter_gallery_warmup_throttle()
-        except Exception:
-            pass
 
     def _end_gallery_indexing_deferral(self) -> None:
         """Restore background indexing / load concurrency after gallery warmup."""
@@ -9081,7 +9081,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         if self._semantic_indexing_in_progress:
             return
 
-        if self._gallery_has_thumbnail_load_pressure():
+        if self._gallery_blocks_background_indexing():
             import logging
 
             logging.getLogger(__name__).info(
@@ -11390,20 +11390,20 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             pass
         
         self._end_gallery_indexing_deferral()
+        if hasattr(self, "_idle_display_prefetch_timer") and self._idle_display_prefetch_timer:
+            self._idle_display_prefetch_timer.stop()
+        self._pause_prefetch_for_navigation()
         # Stop all gallery background loading when switching to single view
         if hasattr(self, 'gallery_justified') and self.gallery_justified:
             gj = self.gallery_justified
             gj._background_loading_active = False
             if hasattr(gj, "_stop_layout_rebuild_timers"):
                 gj._stop_layout_rebuild_timers()
-            if hasattr(gj, "suspend_thumbnail_display"):
+            if hasattr(gj, "cancel_background_loading"):
+                gj.cancel_background_loading()
+            elif hasattr(gj, "suspend_thumbnail_display"):
                 gj.suspend_thumbnail_display()
             # Cancel any pending background loads
-            if hasattr(self.gallery_justified, '_load_timer') and self.gallery_justified._load_timer:
-                self.gallery_justified._load_timer.stop()
-            if hasattr(self.gallery_justified, '_resize_timer') and self.gallery_justified._resize_timer:
-                self.gallery_justified._resize_timer.stop()
-            # Clear load queue
             if hasattr(self.gallery_justified, '_load_queue'):
                 self.gallery_justified._load_queue.clear()
             # Drop queued gallery thumbnail decodes (all CURRENT priority) so the
@@ -11412,8 +11412,11 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             # flight (fast-open) or about to be requested in Step 4.
             try:
                 mgr = getattr(self, "image_manager", None)
-                if mgr is not None and hasattr(mgr, "cancel_all_tasks_except"):
-                    mgr.cancel_all_tasks_except(getattr(self, "current_file_path", None))
+                if mgr is not None:
+                    if hasattr(mgr, "cancel_gallery_tasks"):
+                        mgr.cancel_gallery_tasks()
+                    elif hasattr(mgr, "cancel_all_tasks_except"):
+                        mgr.cancel_all_tasks_except(getattr(self, "current_file_path", None))
                 if hasattr(self.gallery_justified, "_active_tasks"):
                     keep = getattr(self, "current_file_path", None)
                     for p in list(self.gallery_justified._active_tasks.keys()):
@@ -11722,6 +11725,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self._suppress_single_manager_callbacks = True
         try:
             self._defer_background_indexing_for_gallery()
+            self._release_indexing_load_throttle()
             if hasattr(self, "_resume_indexing_timer") and self._resume_indexing_timer:
                 self._resume_indexing_timer.stop()
             self._resume_indexing_timer = QTimer(self)
@@ -11750,6 +11754,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             self._idle_display_prefetch_timer.stop()
 
         self._cancel_filmstrip_prefetch_for_gallery()
+        if hasattr(self, "_idle_display_prefetch_timer") and self._idle_display_prefetch_timer:
+            self._idle_display_prefetch_timer.stop()
 
         # Entering gallery: drop leftover single-view decode/preload work so scrolling
         # thumbnails doesn't compete with stale full-image tasks.
@@ -11760,6 +11766,15 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                     mgr.cancel_non_gallery_tasks()
                 if hasattr(mgr, "cancel_queued_non_gallery_tasks"):
                     mgr.cancel_queued_non_gallery_tasks()
+                if hasattr(mgr, "cancel_tasks_by_priority"):
+                    from image_load_manager import Priority as _GalleryCancelPriority
+
+                    for prio in (
+                        _GalleryCancelPriority.PRELOAD_NEXT,
+                        _GalleryCancelPriority.PRELOAD_PREV,
+                        _GalleryCancelPriority.BACKGROUND,
+                    ):
+                        mgr.cancel_tasks_by_priority(prio)
                 elif hasattr(mgr, "flush_queue"):
                     mgr.flush_queue()
                 else:
@@ -11774,6 +11789,11 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             gj = self.gallery_justified
             gj._is_scrolling_fast = False
             gj._current_scroll_speed = 0.0
+            gj._first_thumb_ready_after_set = False
+            if hasattr(gj, "_active_tasks"):
+                gj._active_tasks.clear()
+            if hasattr(gj, "_requested_thumbnail_paths"):
+                gj._requested_thumbnail_paths.clear()
             if hasattr(gj, "_stop_layout_rebuild_timers"):
                 gj._stop_layout_rebuild_timers()
             gj._gallery_load_start_time = time.time()
@@ -12278,9 +12298,10 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 ):
                     self.gallery_justified.apply_visual_rotation_for_path(current_file)
                 file_count = len(self.image_files or [])
-                first_load_ms = min(900, max(250, 200 + file_count // 40))
+                first_load_ms = min(200, max(80, 80 + file_count // 120))
                 gj = self.gallery_justified
                 if hasattr(gj, "_request_load_visible_images"):
+                    gj._request_load_visible_images(0)
                     gj._request_load_visible_images(first_load_ms)
                     gj._request_load_visible_images(first_load_ms + 500)
                 else:
@@ -20412,7 +20433,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         # gallery thumbnail decodes for the same worker pool and (on external/USB
         # drives) the same slow disk, which stalls first paint and — on Windows —
         # can drive concurrency high enough to crash. Reschedule instead of start.
-        if self._should_defer_metadata_index_for_gallery():
+        if self._gallery_blocks_background_indexing():
             import logging
 
             logging.getLogger(__name__).info(
@@ -20458,6 +20479,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             return False
         if hasattr(gj, "_gallery_warmup_active") and gj._gallery_warmup_active():
             return True
+        if not getattr(gj, "_first_thumb_ready_after_set", False):
+            return True
         active = len(getattr(gj, "_active_tasks", {}) or {})
         threshold = _env_int("RAWVIEWER_GALLERY_INDEX_DEFER_ACTIVE", 16, minimum=1)
         return active >= threshold
@@ -20465,26 +20488,48 @@ class RAWImageViewer(SessionMixin, QMainWindow):
     def _should_defer_metadata_index_for_gallery(self) -> bool:
         """True while gallery first-paint/warmup is in progress (avoid I/O contention).
 
-        Only applies in gallery mode. The deferral self-limits: a hard ceiling
-        (default 20s after the gallery deferral window opened) guarantees indexing
-        eventually runs even if the user keeps scrolling, so search never stalls.
+        Only applies in gallery mode. Indexing must not start on a fixed timer while
+        visible tiles are still blank — that starves first paint on large folders.
+        A long absolute ceiling still guarantees indexing eventually runs for search.
         """
         if getattr(self, "view_mode", "") != "gallery":
             return False
         import time
 
+        gj = getattr(self, "gallery_justified", None)
+        opened = float(getattr(self, "_gallery_deferral_opened_ts", 0.0) or 0.0)
+        abs_ceiling_s = _env_int(
+            "RAWVIEWER_GALLERY_INDEX_FORCE_AFTER_MS", 60000, minimum=10000
+        ) / 1000.0
+        if (
+            gj is not None
+            and not getattr(gj, "_first_thumb_ready_after_set", False)
+            and opened
+            and (time.time() - opened) < abs_ceiling_s
+        ):
+            return True
+
         if self._gallery_has_thumbnail_load_pressure():
             return True
 
         deferred_until = float(getattr(self, "_gallery_indexing_deferred_until", 0.0) or 0.0)
-        # Absolute ceiling so indexing is never starved by continuous scrolling.
-        ceiling_s = _env_int("RAWVIEWER_METADATA_INDEX_DEFER_MAX_MS", 12000, minimum=2000) / 1000.0
-        opened = float(getattr(self, "_gallery_deferral_opened_ts", 0.0) or 0.0)
-        if opened and (time.time() - opened) > ceiling_s:
-            return False
         if time.time() < deferred_until:
             return True
+
+        # After first paint: soft ceiling so continuous scrolling does not defer forever.
+        scroll_ceiling_s = _env_int(
+            "RAWVIEWER_METADATA_INDEX_DEFER_MAX_MS", 30000, minimum=5000
+        ) / 1000.0
+        if opened and (time.time() - opened) > scroll_ceiling_s:
+            return False
         return False
+
+    def _gallery_blocks_background_indexing(self) -> bool:
+        """Single gate shared by every background-indexing entry point (metadata scan,
+        semantic index build, and their deferred retries) so they can't drift out of
+        sync on what "gallery first paint still in progress" means.
+        """
+        return self._should_defer_metadata_index_for_gallery()
 
     def _touch_single_view_interactivity(self) -> None:
         """Mark recent single-view interaction (nav/zoom/recovery) for index deferral."""
@@ -20512,6 +20557,22 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         pending_extract = int(
             getattr(self, "_metadata_index_extract_pending_count", 0) or 0
         )
+        if getattr(self, "view_mode", "") == "gallery":
+            if self._gallery_blocks_background_indexing():
+                import logging
+
+                logging.getLogger(__name__).info(
+                    "[INDEX] Deferring metadata worker after prep (gallery first-paint, pending=%d)",
+                    pending_extract,
+                )
+                t = getattr(self, "_metadata_index_defer_timer", None)
+                if t is not None:
+                    t.start(
+                        _env_int(
+                            "RAWVIEWER_METADATA_INDEX_GALLERY_RETRY_MS", 1500, minimum=250
+                        )
+                    )
+                return
         if self._should_defer_metadata_index_for_single_view(
             pending_extract=pending_extract
         ):

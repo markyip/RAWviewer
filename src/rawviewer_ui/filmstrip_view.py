@@ -497,7 +497,11 @@ class FilmStripBar(QFrame):
             return None
         try:
             # FAST IN-MEMORY CHECK ONLY to avoid blocking UI thread on thousands of files!
-            thumb = viewer.image_cache.thumbnail_cache.get(path)
+            # Grid tier (~512px) is now the film strip's authoritative source, same as
+            # gallery tiles; 256px thumbnail tier is only a fallback.
+            thumb = viewer.image_cache.grid_cache.get(path)
+            if thumb is None:
+                thumb = viewer.image_cache.thumbnail_cache.get(path)
             if thumb is None:
                 return None
         except Exception:
@@ -601,7 +605,9 @@ class FilmStripBar(QFrame):
         if viewer is None or not hasattr(viewer, "image_cache"):
             return False
         try:
-            thumb = viewer.image_cache.get_thumbnail(path)
+            thumb = viewer.image_cache.get_grid(path)
+            if thumb is None:
+                thumb = viewer.image_cache.get_thumbnail(path)
         except Exception:
             return False
         if thumb is None:

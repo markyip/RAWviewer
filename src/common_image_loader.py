@@ -1403,6 +1403,37 @@ def _windows_system_drive() -> str:
     return "C:"
 
 
+def invalidate_volume_speed_cache(path: Optional[str]) -> None:
+    """Drop cached probe result for the volume containing *path* (e.g. before retry)."""
+    root = _volume_root_for(path)
+    if not root:
+        return
+    with _volume_speed_lock:
+        _volume_speed_cache.pop(root, None)
+
+
+def record_volume_speed(path: Optional[str], mbps: float) -> None:
+    """Store a probed throughput for the volume containing *path*."""
+    root = _volume_root_for(path)
+    if not root or mbps <= 0:
+        return
+    with _volume_speed_lock:
+        _volume_speed_cache[root] = float(mbps)
+
+
+def _windows_drive_is_fixed_local(path: Optional[str]) -> bool:
+    """True for non-system fixed volumes (secondary SSD/NVMe) on Windows."""
+    if not path or os.name != "nt":
+        return False
+    norm = os.path.normpath(path)
+    if len(norm) < 2 or norm[1] != ":":
+        return False
+    letter = norm[:2].upper()
+    if letter == _windows_system_drive():
+        return False
+    return _windows_drive_type(norm) == 3
+
+
 def is_external_or_network_volume(path: Optional[str] = None) -> bool:
     """True when *path* is on an external or network volume (not the boot fixed disk).
 
@@ -1582,8 +1613,8 @@ def _measure_read_mbps(
 def probe_volume_speed(
     sample_path: Optional[str],
     *,
-    sample_bytes: int = 4 * 1024 * 1024,
-    timeout_s: float = 1.5,
+    sample_bytes: int = 8 * 1024 * 1024,
+    timeout_s: float = 3.0,
 ) -> Optional[float]:
     """Very lightweight one-shot read-speed probe for the volume holding *sample_path*.
 
