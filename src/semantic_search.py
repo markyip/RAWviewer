@@ -2641,9 +2641,6 @@ class SemanticImageIndex:
         self._conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_semantic_camera_model ON semantic_index(camera_model)"
         )
-        self._conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_semantic_gps_latlon ON semantic_index(gps_lat, gps_lon)"
-        )
         # Backward-compatible migration for existing DBs created before GPS fields.
         cols = {
             r[1]
@@ -2688,6 +2685,13 @@ class SemanticImageIndex:
         )
         self._conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_semantic_ready_model ON semantic_index(semantic_ready, model_name)"
+        )
+        # Must run after the migration block above adds gps_lat/gps_lon -- creating
+        # this index earlier crashes _init_db() on any pre-GPS-feature (pre-2.5.0)
+        # database with "no such column: gps_lat" (found while verifying upgrade
+        # compatibility from older versions).
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_semantic_gps_latlon ON semantic_index(gps_lat, gps_lon)"
         )
         self._conn.commit()
         self._backfill_file_signatures()
