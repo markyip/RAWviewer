@@ -150,91 +150,22 @@ class UnifiedImageProcessor:
         *,
         exif_data: Optional[Dict[str, Any]] = None,
     ) -> None:
-        """Write preview/grid/thumbnail tiers so semantic indexing reuses gallery extractions."""
-        if thumbnail is None:
-            return
-        try:
-            if (
-                self.cache.get_preview(file_path) is not None
-                or self.cache.get_grid(file_path) is not None
-                or self.cache.get_thumbnail(file_path) is not None
-            ):
-                return
-        except Exception:
-            pass
+        """Backfill preview/grid/thumbnail tiers so gallery/film strip/semantic share one decode.
 
-        from PyQt6.QtGui import QImage
+        Thin wrapper over the shared ``publish_mipmap_tiers`` (common_image_loader.py) —
+        kept as a method for call-site compatibility (image_load_manager.py). Unlike the
+        old skip-if-any-tier-exists version, missing tiers are now backfilled
+        independently (thumbnail-quality-tier PR-1: see docs/thumbnail-cache-unification-plan.md).
+        """
+        from common_image_loader import publish_mipmap_tiers
 
-        if isinstance(thumbnail, QImage):
-            from enhanced_raw_processor import _qimage_to_rgb_array
-
-            thumbnail = _qimage_to_rgb_array(thumbnail)
-        if thumbnail is None or not isinstance(thumbnail, np.ndarray):
-            return
-
-        try:
-            from PIL import Image
-            import io
-
-            arr = thumbnail.astype(np.uint8) if thumbnail.dtype != np.uint8 else thumbnail
-            if len(arr.shape) == 2:
-                pil_img = Image.fromarray(arr, "L").convert("RGB")
-            elif len(arr.shape) == 3:
-                pil_img = Image.fromarray(arr, "RGB")
-            else:
-                return
-
-            w, h = pil_img.size
-            pv_max = disk_preview_max_edge()
-            if w <= pv_max and h <= pv_max:
-                preview_pil = pil_img
-            else:
-                scale_1 = min(pv_max / w, pv_max / h)
-                preview_pil = pil_img.resize(
-                    (max(1, int(w * scale_1)), max(1, int(h * scale_1))),
-                    Image.Resampling.HAMMING,
-                )
-            self.cache.put_preview(file_path, np.array(preview_pil))
-
-            grid_max = disk_preview_max_edge()
-            if w <= grid_max and h <= grid_max:
-                grid_pil = pil_img
-            else:
-                scale_2 = min(grid_max / w, grid_max / h)
-                grid_pil = pil_img.resize(
-                    (max(1, int(w * scale_2)), max(1, int(h * scale_2))),
-                    Image.Resampling.HAMMING,
-                )
-            buffer_g = io.BytesIO()
-            grid_pil.save(buffer_g, format="JPEG", quality=85)
-            self.cache.put_grid(file_path, np.array(grid_pil), buffer_g.getvalue())
-
-            if w <= 256 and h <= 256:
-                thumb_pil = pil_img
-            else:
-                scale_3 = min(256 / w, 256 / h)
-                thumb_pil = pil_img.resize(
-                    (max(1, int(w * scale_3)), max(1, int(h * scale_3))),
-                    Image.Resampling.HAMMING,
-                )
-            buffer_t = io.BytesIO()
-            thumb_pil.save(buffer_t, format="JPEG", quality=85)
-            self.cache.put_thumbnail(file_path, np.array(thumb_pil), buffer_t.getvalue())
-        except Exception:
-            pass
-
-        if exif_data:
-            try:
-                cur = self.cache.get_exif(file_path)
-                if cur is not None and not cur.get("minimal_preview_exif"):
-                    return
-                self.cache.put_exif(
-                    file_path,
-                    exif_data,
-                    persist_disk=not bool(exif_data.get("minimal_preview_exif")),
-                )
-            except Exception:
-                pass
+        publish_mipmap_tiers(
+            file_path,
+            thumbnail,
+            exif_data=exif_data,
+            cache=self.cache,
+            source="gallery_or_single",
+        )
 
     def _extract_raw_preview_before_full_exiftool(
         self,

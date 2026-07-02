@@ -1012,9 +1012,17 @@ def _load_index_source_image(
                     if thumb is not None:
                         arr = np.asarray(thumb, dtype=np.uint8)
                 if arr is not None:
-                    from common_image_loader import finalize_index_thumbnail_array
+                    from common_image_loader import (
+                        finalize_index_thumbnail_array,
+                        publish_mipmap_tiers,
+                    )
 
                     arr = finalize_index_thumbnail_array(file_path, arr, cache=cache)
+                    # Semantic/face indexing sometimes decodes a RAW before gallery or
+                    # single-view ever touches it (background indexing racing ahead).
+                    # Publish here too so that first decode isn't wasted -- gallery/
+                    # film strip can reuse these tiers instead of re-extracting.
+                    publish_mipmap_tiers(file_path, arr, cache=cache, source="semantic")
                     im = Image.fromarray(arr).convert("RGB")
                     _INDEX_THREAD_LOCAL.last_original_sizes = (im.width, im.height)
                     im.thumbnail((max_size, max_size), Image.Resampling.BICUBIC)
@@ -1043,9 +1051,13 @@ def _load_index_source_image(
                         raise ValueError("QImage conversion failed")
                 else:
                     arr = np.asarray(thumb, dtype=np.uint8)
-                from common_image_loader import finalize_index_thumbnail_array
+                from common_image_loader import (
+                    finalize_index_thumbnail_array,
+                    publish_mipmap_tiers,
+                )
 
                 arr = finalize_index_thumbnail_array(file_path, arr, cache=cache)
+                publish_mipmap_tiers(file_path, arr, cache=cache, source="semantic")
                 im = Image.fromarray(arr).convert("RGB")
                 _INDEX_THREAD_LOCAL.last_original_sizes = (im.width, im.height)
                 im.thumbnail((max_size, max_size), Image.Resampling.BICUBIC)
