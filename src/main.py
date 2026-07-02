@@ -3307,7 +3307,17 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             pm = getattr(self, "current_pixmap", None)
             if pm is not None and not pm.isNull():
                 detail = f" ({pm.width()}×{pm.height()})"
-            container.set_recovery_preview_badge(active, detail=detail)
+            
+            # Check if currently loading recovery preview
+            current_path = getattr(self, "current_file_path", None)
+            is_loading = False
+            if current_path:
+                norm_current = _norm_path(current_path)
+                worker_path = getattr(self, "_raw_recovery_worker_path", None)
+                if worker_path == norm_current:
+                    is_loading = True
+
+            container.set_recovery_preview_badge(active, detail=detail, loading=is_loading)
         self._last_status_signature = None
         self.update_status_bar()
         if active:
@@ -3399,6 +3409,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 f"RAW recovery failed — showing standard preview ({message})",
                 5000,
             )
+            self._sync_raw_recovery_view_mode()
 
     def _refresh_neutral_raw_display(self) -> None:
         path = getattr(self, "current_file_path", None)
@@ -3416,6 +3427,9 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             self.display_numpy_image(neutral)
         finally:
             self._orientation_already_applied = False
+
+        if self._needs_full_resolution_upgrade(path):
+            self._queue_sensor_full_decode(path, priority_current=True)
 
     def _disable_raw_recovery(self) -> None:
         was_active = self._raw_recovery_preview_active()
@@ -4334,8 +4348,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         if not path_to_group:
             return self._filter_burst_rejected_paths(files)
         rejected = set(getattr(self, "_burst_rejected_paths", set()) or set())
-        covers = dict(getattr(self, "_burst_stack_covers", {}) or {})
-        covers.update(getattr(self, "_burst_group_covers", {}) or {})
+        covers = dict(getattr(self, "_burst_group_covers", {}) or {})
+        covers.update(getattr(self, "_burst_stack_covers", {}) or {})
         return build_collapsed_display_paths(files, path_to_group, covers, rejected)
 
     def _burst_stack_count_for_path(self, file_path: str) -> int:
@@ -6297,6 +6311,35 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         if _norm_path(file_path) != _norm_path(getattr(self, "current_file_path", None)):
             logger.debug(f"[MANAGER] Thumbnail for different file: {os.path.basename(file_path)}")
             return
+
+        norm_fp = _norm_path(file_path)
+        raw_recovery = (
+            getattr(self, "_raw_recovery_active", False) and is_raw_file(file_path)
+        )
+        if raw_recovery:
+            cached = self._raw_recovery_cache.get(norm_fp)
+            if cached is not None:
+                self._orientation_already_applied = True
+                try:
+                    self._display_raw_recovery_buffer(file_path, cached)
+                finally:
+                    self._orientation_already_applied = False
+                self._full_resolution_loading = False
+                self._finish_pending_zoom_after_full_load(file_path)
+                self._on_single_view_content_displayed()
+                self._skip_resolution_downgrade_check = False
+                return
+            else:
+                if isinstance(thumbnail, QImage):
+                    self.display_pixmap(QPixmap.fromImage(thumbnail))
+                else:
+                    self.display_numpy_image(thumbnail)
+                self._start_raw_recovery(file_path)
+                self._sync_raw_recovery_view_mode()
+                self._orientation_already_applied = False
+                self._full_resolution_loading = False
+                self._finish_pending_zoom_after_full_load(file_path)
+                return
         
         # Speed gate: avoid rendering large thumbnails (double work) when a proper preview is imminent.
         # Also protect UI from accidental oversized "thumbnails" (e.g. RAW BITMAP thumbs).
@@ -6630,7 +6673,9 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 finally:
                     self._orientation_already_applied = False
             else:
+                self.display_numpy_image(image)
                 self._start_raw_recovery(file_path)
+                self._sync_raw_recovery_view_mode()
                 self._orientation_already_applied = False
                 self._full_resolution_loading = False
                 self._finish_pending_zoom_after_full_load(file_path)
@@ -9271,6 +9316,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         # index never serializes thumbnail decode. See SemanticImageIndex.
         self._wire_index_load_throttle(index)
         self._semantic_index_progress_total = total_files
+        self._semantic_index_last_progress = None
         self._semantic_index_progress_base = 0
         self._semantic_index_run_semantic_embeddings = run_semantic_embeddings
         signals = SemanticIndexSignals()
@@ -9380,6 +9426,32 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 return stage
             return f"{stage}: {done_i}/{total_i}"
 
+    def _show_live_metadata_progress_in_search(self, fallback: str) -> None:
+        """Switch an already-running background metadata pass to visible progress.
+
+        Background passes keep "Metadata: X/Y" out of the search field by design
+        (_set_gallery_search_status suppresses those prefixes when
+        _gallery_search_show_index_progress is False). Once the user opens the
+        search panel they are actively waiting, so flip the flag — subsequent
+        progress events (every ~10 files) update the field live — and seed it
+        immediately with the last known counts rather than a static message the
+        user can't estimate completion from.
+        """
+        self._gallery_search_show_index_progress = True
+        last = getattr(self, "_semantic_index_last_progress", None)
+        total = int(getattr(self, "_semantic_index_progress_total", 0) or 0)
+        if last and last[1] > 0:
+            self._set_gallery_search_status(
+                self._format_index_progress("Metadata", last[0], last[1])
+            )
+        elif total > 0:
+            # Pass started but extraction hasn't begun (prep/DB-scan phase).
+            self._set_gallery_search_status(
+                self._format_index_progress("Metadata", 0, total)
+            )
+        else:
+            self._set_gallery_search_status(fallback)
+
     def _should_show_search_index_progress(self, message: str) -> bool:
         msg = (message or "").strip()
         if not msg:
@@ -9412,6 +9484,13 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         msg = str(message or "").strip()
         pass_kind = getattr(self, "_semantic_index_pass_kind", None)
         show_progress = getattr(self, "_gallery_search_show_index_progress", False)
+
+        # Remember the latest counts so opening the search panel mid-pass can
+        # immediately show "Metadata: 1234/6881" instead of a static message.
+        try:
+            self._semantic_index_last_progress = (max(0, int(i)), max(0, int(n)))
+        except Exception:
+            pass
 
         if not show_progress:
             # If search UI doesn't want progress, route standard indexing/thumbnail messages to status bar only
@@ -9928,7 +10007,9 @@ class RAWImageViewer(SessionMixin, QMainWindow):
 
         if getattr(self, "_semantic_indexing_in_progress", False):
             if getattr(self, "_semantic_index_pass_kind", None) == "silent_metadata":
-                self._set_gallery_search_status("Preparing metadata in background…")
+                self._show_live_metadata_progress_in_search(
+                    "Preparing metadata in background…"
+                )
             logger.info("[INDEX][USER] Skip semantic start: semantic indexing already in progress")
             self._sync_gallery_search_input_editable()
             return
@@ -9966,7 +10047,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 else:
                     self._finish_gallery_search_unlock(corpus_files)
             else:
-                self._set_gallery_search_status("Indexing metadata…")
+                self._show_live_metadata_progress_in_search("Indexing metadata…")
                 self._schedule_silent_metadata_index()
             self._sync_gallery_search_input_editable()
             return
@@ -11427,14 +11508,38 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             pass
 
     def _resume_indexing_if_gallery_idle(self):
-        """Gallery browsing keeps background indexing paused (search starts its own pass)."""
+        """Gallery browsing keeps background indexing paused; resume only when idle/settled."""
         if getattr(self, "view_mode", "") != "gallery":
             return
         import logging
+        logger = logging.getLogger(__name__)
 
-        logging.getLogger(__name__).debug(
-            "[VIEW_MODE] Background indexing remains paused while gallery is active"
-        )
+        # Check if there are active high-priority (CURRENT) tasks in the image manager
+        if hasattr(self, "image_manager") and self.image_manager is not None:
+            try:
+                from image_load_manager import Priority
+                with self.image_manager._queue_lock:
+                    for task in self.image_manager._active_tasks.values():
+                        if (
+                            getattr(task, "priority", None) == Priority.CURRENT
+                            and not task.is_cancelled()
+                        ):
+                            logger.debug(
+                                "[VIEW_MODE] Deferring background indexing: high-priority gallery task active"
+                            )
+                            if hasattr(self, "_resume_indexing_timer") and self._resume_indexing_timer:
+                                self._resume_indexing_timer.start(3000)
+                            return
+            except Exception as e:
+                logger.error(f"Error checking active image manager tasks: {e}")
+
+        try:
+            self._get_semantic_index().pause_indexing(False)
+            logger.info(
+                "[VIEW_MODE] Background indexing resumed after idle period in gallery view"
+            )
+        except Exception as e:
+            logger.error(f"Error resuming background indexing in gallery view: {e}")
 
     def _show_single_view(self):
         """Show single image view"""
@@ -13747,8 +13852,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         for group_id, members in path_to_group.items():
             if not any(_norm_path(m) == norm for m in members):
                 continue
-            covers = dict(getattr(self, "_burst_stack_covers", {}) or {})
-            covers.update(getattr(self, "_burst_group_covers", {}) or {})
+            covers = dict(getattr(self, "_burst_group_covers", {}) or {})
+            covers.update(getattr(self, "_burst_stack_covers", {}) or {})
             cover = covers.get(group_id) or (members[0] if members else None)
             if cover:
                 resolved = gj._resolve_gallery_path(cover)
@@ -17067,6 +17172,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             logger.info(
                 "[DISPLAY] Skipping background pixmap — RAW recovery preview active"
             )
+            self._pending_display_pixmap_context = None
+            self._display_pixmap_converter = None
             return
 
         width = int(ctx.get("width") or (pixmap.width() if pixmap else 0))

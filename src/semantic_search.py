@@ -2596,6 +2596,7 @@ class SemanticImageIndex:
         self._conn = sqlite3.connect(
             self.db_path, check_same_thread=False, timeout=60.0
         )
+        self._conn.isolation_level = None
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA synchronous=NORMAL")
         self._conn.execute("PRAGMA busy_timeout=60000")

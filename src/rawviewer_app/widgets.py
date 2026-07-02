@@ -1125,15 +1125,18 @@ class SingleImageViewOverlay(QWidget):
         """)
         self.recovery_badge.hide()
 
-    def set_recovery_preview_badge(self, visible: bool, *, detail: str = "") -> None:
+    def set_recovery_preview_badge(self, visible: bool, *, detail: str = "", loading: bool = False) -> None:
         badge = getattr(self, "recovery_badge", None)
         if badge is None:
             return
         if visible:
-            text = "Recovery preview"
-            if detail:
-                text = f"{text}{detail}"
-            text = f"{text} · fit only · P to exit"
+            if loading:
+                text = "Loading recovery preview…"
+            else:
+                text = "Recovery preview"
+                if detail:
+                    text = f"{text}{detail}"
+                text = f"{text} · fit only · P to exit"
             badge.setText(text)
             badge.adjustSize()
             badge.show()
