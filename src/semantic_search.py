@@ -3375,15 +3375,39 @@ class SemanticImageIndex:
                             "raw_exif_sensor_meta_ver": RAW_EXIF_SENSOR_META_VER,
                         }
                     }
-                    if file_stat is not None:
-                        cache.put_exif(
-                            file_path,
-                            cache_dict,
-                            file_size=int(file_stat.st_size),
-                            file_mtime=float(file_stat.st_mtime),
-                        )
-                    else:
-                        cache.put_exif(file_path, cache_dict)
+                    # Skip the write when the shared cache already holds an
+                    # equivalent, version-fresh row (e.g. populated moments earlier
+                    # by gallery's bulk EXIF fetch or a prior sort/prefetch pass).
+                    # A redundant INSERT OR REPLACE here holds the EXIF DB's single
+                    # writer connection just as pointlessly as the per-item SQLite
+                    # reads that turned out to be the real cause of gallery's
+                    # multi-second metadata-rebuild stalls (see gallery_view.py's
+                    # _metadata_exif_for_path) -- this is the write-side twin of
+                    # that same contention, worth avoiding for the same reason.
+                    existing = None
+                    try:
+                        existing = cache.get_exif(file_path)
+                    except Exception:
+                        existing = None
+                    already_fresh = (
+                        existing is not None
+                        and not existing.get("minimal_preview_exif")
+                        and existing.get("orientation") == cache_dict["orientation"]
+                        and existing.get("camera_model") == cache_dict["camera_model"]
+                        and existing.get("capture_time") == cache_dict["capture_time"]
+                        and int(existing.get("original_width") or 0) == cache_dict["original_width"]
+                        and int(existing.get("original_height") or 0) == cache_dict["original_height"]
+                    )
+                    if not already_fresh:
+                        if file_stat is not None:
+                            cache.put_exif(
+                                file_path,
+                                cache_dict,
+                                file_size=int(file_stat.st_size),
+                                file_mtime=float(file_stat.st_mtime),
+                            )
+                        else:
+                            cache.put_exif(file_path, cache_dict)
                     dur_cache = time.time() - t_cache
                 except Exception as e:
                     import logging

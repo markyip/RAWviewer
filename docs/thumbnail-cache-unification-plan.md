@@ -111,8 +111,8 @@ flowchart LR
 |----|------|------|------|------|------|
 | **PR-1** | P0 | 所有解碼路徑寫滿 preview/grid/thumbnail | 無 | 2–3 天 | 已完成 |
 | **PR-2** | P1 | 統一 Gallery 與 Film strip 目標層（grid） | PR-1 | 1–2 天 | 已完成 |
-| **PR-3** | P2 | Semantic 索引嚴格等 Gallery 首屏 | PR-1 | 2 天 | 部分完成（閘門已統一；兩階段索引未實作） |
-| **PR-4** | P3 | 排序與索引共用 EXIF DB | 可與 PR-3 並行 | 2–3 天 | 部分完成（排序 capture_time 持久化已完成；semantic metadata 共用未實作） |
+| **PR-3** | P2 | Semantic 索引嚴格等 Gallery 首屏 | PR-1 | 2 天 | 已完成（Phase A/B 分階段索引，`RAWVIEWER_GALLERY_INDEX_CACHE_ONLY`） |
+| **PR-4** | P3 | 排序與索引共用 EXIF DB | 可與 PR-3 並行 | 2–3 天 | 已完成（排序 capture_time 持久化 + semantic 索引跳過重複 EXIF 寫入；GPS 仍需逐檔讀取，讀側省略未做） |
 | **PR-5** | P5 | 按需 full 解析 | PR-1 建議先合 | 1–2 天 | 待實作 |
 | **PR-6a** | P4a | Gallery 讀路徑統一（write-through 至 ImageCache） | PR-1, PR-2 | 1–2 天 | 待實作 |
 | **PR-6b** | P4b | **完全移除 `gallery_view._thumbnail_cache`** | PR-6a, PR-7 建議先合 | 2–3 天 | 待實作 |

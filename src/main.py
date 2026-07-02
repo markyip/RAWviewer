@@ -9120,7 +9120,53 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 ),
             )
             return
-            
+
+        # Phase A/B split (plan PR-3 step 3): even once the hard gate above clears,
+        # a background (non-user-initiated) pass still downgrades to metadata-only
+        # while gallery tiles are actively decoding, or when
+        # RAWVIEWER_GALLERY_INDEX_CACHE_ONLY forces it. Metadata-only is cheap
+        # (exifread, no RAW decode) and marks files semantic_ready=1,dim=0 via
+        # _mark_metadata_ready_without_embedding, so the scheduled Phase B retry
+        # below correctly re-picks them up for the heavy MobileCLIP/decode pass.
+        # Skipped for user-initiated searches (show_search_progress=True) — a user
+        # actively waiting on the search progress bar shouldn't be silently delayed.
+        # Bounded by the same absolute ceiling as the hard gate above (opened_ts +
+        # RAWVIEWER_GALLERY_INDEX_FORCE_AFTER_MS) so continuous scrolling cannot
+        # starve embeddings — and thus search — forever.
+        gallery_deferral_opened = float(
+            getattr(self, "_gallery_deferral_opened_ts", 0.0) or 0.0
+        )
+        within_force_ceiling = (
+            not gallery_deferral_opened
+            or (time.time() - gallery_deferral_opened)
+            < _env_int("RAWVIEWER_GALLERY_INDEX_FORCE_AFTER_MS", 60000, minimum=10000) / 1000.0
+        )
+        if (
+            run_semantic_embeddings
+            and not show_search_progress
+            and (
+                _env_true("RAWVIEWER_GALLERY_INDEX_CACHE_ONLY")
+                or (within_force_ceiling and self._gallery_has_thumbnail_load_pressure())
+            )
+        ):
+            import logging
+
+            logging.getLogger(__name__).info(
+                "[INDEX] Phase A (metadata-only): gallery thumbnail load pressure; "
+                "deferring semantic embeddings to a Phase B retry"
+            )
+            QTimer.singleShot(
+                _env_int("RAWVIEWER_GALLERY_INDEX_PHASE_B_RETRY_MS", 4000, minimum=500),
+                lambda: self._start_semantic_index_build_background(
+                    corpus_files,
+                    coverage=coverage,
+                    pending_files=pending_files,
+                    run_semantic_embeddings=True,
+                    show_search_progress=show_search_progress,
+                ),
+            )
+            run_semantic_embeddings = False
+
         if coverage is None or pending_files is None:
             self._run_semantic_index_prep(corpus_files)
             return
