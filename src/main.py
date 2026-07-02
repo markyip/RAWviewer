@@ -4003,6 +4003,32 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             logging.getLogger(__name__).debug(
                 "Old image cache cleanup failed: %s", e, exc_info=True
             )
+        self._enforce_disk_cache_budget_background()
+
+    def _enforce_disk_cache_budget_background(self) -> None:
+        """Evict oldest disk-cache entries over budget, off the main thread.
+
+        Unlike cleanup_old_cache() (a handful of cheap SQL DELETEs),
+        enforce_disk_cache_budget() stats every cached file to total disk usage --
+        potentially thousands of os.path.getsize() calls -- so it runs on a
+        QThreadPool worker instead of blocking the Qt event loop.
+        """
+        cache = getattr(self, "image_cache", None)
+        if cache is None:
+            return
+
+        class _DiskBudgetWorker(QRunnable):
+            def run(self_inner):
+                try:
+                    cache.enforce_disk_cache_budget()
+                except Exception as exc:
+                    import logging
+
+                    logging.getLogger(__name__).debug(
+                        "Disk cache budget enforcement failed: %s", exc, exc_info=True
+                    )
+
+        QThreadPool.globalInstance().start(_DiskBudgetWorker())
 
     def _connect_image_manager_signals(self):
         """連接 ImageLoadManager 的永久信號（事件驅動架構）"""

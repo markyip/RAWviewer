@@ -1238,6 +1238,62 @@ class PersistentThumbnailCache:
             except Exception:
                 pass
 
+    def get_disk_usage_bytes(self) -> int:
+        """Best-effort total bytes of on-disk cache files. Stat-based (no size column
+        is tracked in the DB), so only call from a background/startup pass, never a
+        per-request hot path."""
+        total = 0
+        with self.lock:
+            try:
+                conn = self._get_connection()
+                cursor = conn.execute("SELECT cache_file FROM thumbnail_cache")
+                for (cache_file,) in cursor.fetchall():
+                    try:
+                        total += os.path.getsize(cache_file)
+                    except OSError:
+                        pass
+            except Exception:
+                pass
+        return total
+
+    def evict_lru(self, bytes_to_free: int) -> int:
+        """Evict oldest-cached entries (by cached_time) until bytes_to_free is freed
+        or the cache is exhausted. Returns bytes actually freed."""
+        if bytes_to_free <= 0:
+            return 0
+        freed = 0
+        with self.lock:
+            try:
+                conn = self._get_connection()
+                cursor = conn.execute(
+                    "SELECT file_path, cache_file FROM thumbnail_cache ORDER BY cached_time ASC"
+                )
+                rows = cursor.fetchall()
+                evicted_paths: List[str] = []
+                for file_path, cache_file in rows:
+                    if freed >= bytes_to_free:
+                        break
+                    try:
+                        freed += os.path.getsize(cache_file)
+                    except OSError:
+                        pass
+                    try:
+                        if os.path.exists(cache_file):
+                            os.remove(cache_file)
+                    except Exception:
+                        pass
+                    evicted_paths.append(file_path)
+                if evicted_paths:
+                    placeholders = ",".join(["?"] * len(evicted_paths))
+                    conn.execute(
+                        f"DELETE FROM thumbnail_cache WHERE file_path IN ({placeholders})",
+                        evicted_paths,
+                    )
+                    conn.commit()
+            except Exception:
+                pass
+        return freed
+
     def clear(self) -> None:
         """Remove all disk thumbnail cache files and database rows."""
         with self.lock:
@@ -2326,6 +2382,69 @@ class ImageCache(QObject):
         self.disk_thumbnail_cache.cleanup_old_entries()
         self.disk_grid_cache.cleanup_old_entries()
         self.disk_preview_cache.cleanup_old_entries()
+
+    def enforce_disk_cache_budget(self, max_mb: Optional[int] = None) -> Dict[str, float]:
+        """Evict oldest-cached thumbnail/grid/preview disk entries when total usage
+        exceeds a budget (RAWVIEWER_DISK_CACHE_MAX_MB, default 4096 MB).
+
+        Age-based cleanup_old_cache() only removes entries older than 30 days --
+        nothing previously capped total disk usage, so a long-lived install could
+        grow unbounded across every folder ever browsed. This is stat-based (no
+        size column is tracked in the DB) and evicts down to 90% of budget
+        (hysteresis) so it doesn't re-trigger on every startup right at the
+        boundary -- call from a background/startup pass only, never a hot path.
+        """
+        import logging
+
+        logger = logging.getLogger(__name__)
+        if max_mb is None:
+            max_mb = _env_int(
+                "RAWVIEWER_DISK_CACHE_MAX_MB", 4096, minimum=256, maximum=1024 * 1024
+            )
+        max_bytes = max_mb * 1024 * 1024
+        target_bytes = int(max_bytes * 0.9)
+
+        tiers = {
+            "thumbnail": self.disk_thumbnail_cache,
+            "grid": self.disk_grid_cache,
+            "preview": self.disk_preview_cache,
+        }
+        usage: Dict[str, int] = {}
+        for name, cache in tiers.items():
+            try:
+                usage[name] = cache.get_disk_usage_bytes()
+            except Exception:
+                usage[name] = 0
+
+        total = sum(usage.values())
+        usage_mb = {f"{k}_mb": v / (1024 * 1024) for k, v in usage.items()}
+        if total <= max_bytes:
+            return usage_mb
+
+        to_free = total - target_bytes
+        freed_total = 0
+        for name, cache in tiers.items():
+            tier_usage = usage.get(name, 0)
+            if tier_usage <= 0 or total <= 0:
+                continue
+            # Evict proportionally to this tier's share of total usage.
+            share = int(to_free * (tier_usage / total))
+            try:
+                freed_total += cache.evict_lru(share)
+            except Exception:
+                pass
+
+        logger.info(
+            "[CACHE] Disk cache budget exceeded (%.1f MB > %d MB); evicted %.1f MB "
+            "(thumbnail=%.1fMB grid=%.1fMB preview=%.1fMB before eviction)",
+            total / (1024 * 1024),
+            max_mb,
+            freed_total / (1024 * 1024),
+            usage_mb.get("thumbnail_mb", 0.0),
+            usage_mb.get("grid_mb", 0.0),
+            usage_mb.get("preview_mb", 0.0),
+        )
+        return usage_mb
 
     def close(self):
         """Close all persistent cache connections."""
