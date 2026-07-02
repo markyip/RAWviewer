@@ -89,6 +89,9 @@ C:*/
 
 # Local planning / agent docs (not for release)
 docs/local/
+docs/macos-sharing-v21-v22.md
+docs/thumbnail-cache-unification-plan.md
+docs/windows-gallery-performance-investigation.md
 
 # Local MobileCLIP2 / OpenCLIP Core ML export trees (not part of the app bundle)
 .build/
