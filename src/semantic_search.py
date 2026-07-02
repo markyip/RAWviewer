@@ -385,11 +385,10 @@ SEMANTIC_BATCH_TUNE_CACHE_VERSION = "v8"
 
 
 def _thumbnail_jpeg_bytes(arr: np.ndarray, quality: int = 85) -> bytes:
+    from common_image_loader import encode_tile_bytes
 
     pil = Image.fromarray(np.asarray(arr, dtype=np.uint8)).convert("RGB")
-    buf = BytesIO()
-    pil.save(buf, format="JPEG", quality=quality)
-    return buf.getvalue()
+    return encode_tile_bytes(pil, quality=quality)
 
 
 def _maybe_persist_index_thumbnail(file_path: str, im: PilImage) -> None:

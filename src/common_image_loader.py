@@ -914,6 +914,39 @@ _TIER_CACHE_ATTRS = {
 }
 
 
+def _tile_cache_encode_format() -> str:
+    """Output format for grid/thumbnail/preview disk-cache tiles.
+
+    WebP by default (~25-35% smaller than JPEG at equivalent quality, same
+    encode cost since these tiles are already being resized+re-encoded
+    regardless of output format). RAWVIEWER_TILE_CACHE_FORMAT=jpeg reverts to
+    JPEG. Deliberately NOT used for PR-7's raw embedded-JPEG-bytes cache (a
+    verbatim byte-slice from the RAW file, not a re-encode -- converting that
+    would force a decode+encode pass the whole point of that cache is to
+    avoid). Read side is format-agnostic: PIL.Image.open() sniffs format from
+    content, so existing JPEG entries keep working and this can be toggled
+    freely without a migration.
+    """
+    raw = os.environ.get("RAWVIEWER_TILE_CACHE_FORMAT", "webp").strip().lower()
+    return "JPEG" if raw == "jpeg" else "WEBP"
+
+
+def encode_tile_bytes(pil_image, *, quality: int = 85) -> bytes:
+    """Encode a PIL image for a grid/thumbnail/preview disk-cache tile."""
+    import io
+
+    if pil_image.mode != "RGB":
+        pil_image = pil_image.convert("RGB")
+    fmt = _tile_cache_encode_format()
+    buf = io.BytesIO()
+    try:
+        pil_image.save(buf, format=fmt, quality=quality)
+    except Exception:
+        buf = io.BytesIO()
+        pil_image.save(buf, format="JPEG", quality=quality)
+    return buf.getvalue()
+
+
 def _bump_mipmap_stat(cache, key: str) -> None:
     """Debug-only counters surfaced via ImageCache.get_cache_stats()['request_stats']."""
     try:
@@ -1049,9 +1082,7 @@ def publish_mipmap_tiers(
             img = _as_pil()
             if img is not None:
                 grid_pil = _resized(img, grid_max)
-                buf = _io.BytesIO()
-                grid_pil.save(buf, format="JPEG", quality=85)
-                cache.put_grid(file_path, np.array(grid_pil), buf.getvalue())
+                cache.put_grid(file_path, np.array(grid_pil), encode_tile_bytes(grid_pil))
                 _bump_mipmap_stat(cache, "tier_backfill_count")
                 if highest == "":
                     highest = "grid"
@@ -1063,9 +1094,7 @@ def publish_mipmap_tiers(
             img = _as_pil()
             if img is not None:
                 thumb_pil = _resized(img, 256)
-                buf2 = _io.BytesIO()
-                thumb_pil.save(buf2, format="JPEG", quality=85)
-                cache.put_thumbnail(file_path, np.array(thumb_pil), buf2.getvalue())
+                cache.put_thumbnail(file_path, np.array(thumb_pil), encode_tile_bytes(thumb_pil))
                 _bump_mipmap_stat(cache, "tier_backfill_count")
                 if highest == "":
                     highest = "thumbnail"

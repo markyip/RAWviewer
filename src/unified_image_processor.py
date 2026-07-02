@@ -528,9 +528,9 @@ class UnifiedImageProcessor:
                 new_h2 = max(1, int(h * scale_2))
                 grid_pil = pil_img.resize((new_w2, new_h2), Image.Resampling.HAMMING)
 
-            buffer_g = io.BytesIO()
-            grid_pil.save(buffer_g, format='JPEG', quality=85)
-            self.cache.put_grid(file_path, np.array(grid_pil), buffer_g.getvalue())
+            from common_image_loader import encode_tile_bytes
+
+            self.cache.put_grid(file_path, np.array(grid_pil), encode_tile_bytes(grid_pil))
 
             if w <= 256 and h <= 256:
                 thumb_pil = pil_img
@@ -540,10 +540,8 @@ class UnifiedImageProcessor:
                 new_h3 = max(1, int(h * scale_3))
                 thumb_pil = pil_img.resize((new_w3, new_h3), Image.Resampling.HAMMING)
 
-            buffer_t = io.BytesIO()
-            thumb_pil.save(buffer_t, format='JPEG', quality=85)
             thumb_np = np.array(thumb_pil)
-            self.cache.put_thumbnail(file_path, thumb_np, buffer_t.getvalue())
+            self.cache.put_thumbnail(file_path, thumb_np, encode_tile_bytes(thumb_pil))
 
             # Single-view: return screen-preview tier; gallery/preload: return grid tier.
             if single_view_preview:

@@ -1875,16 +1875,16 @@ class ImageCache(QObject):
                 new_h = max(1, int(h * scale))
                 thumb_pil = pil_img.resize((new_w, new_h), Image.Resampling.HAMMING)
                 thumbnail = np.array(thumb_pil)
-                
+
                 # Compress and store in disk/memory caches
-                buffer = io.BytesIO()
-                thumb_pil.save(buffer, format='JPEG', quality=85)
-                t_jpeg = buffer.getvalue()
+                from common_image_loader import encode_tile_bytes
+
+                t_jpeg = encode_tile_bytes(thumb_pil)
                 self.put_thumbnail(file_path, thumbnail, t_jpeg)
                 return thumbnail
             except Exception:
                 pass
-                
+
         # 2. Downsample from preview cache (memory or disk, up to ~512px) if available
         preview = self.preview_cache.get(key)
         if preview is None:
@@ -1914,11 +1914,11 @@ class ImageCache(QObject):
                 new_h = max(1, int(h * scale))
                 thumb_pil = pil_img.resize((new_w, new_h), Image.Resampling.HAMMING)
                 thumbnail = np.array(thumb_pil)
-                
+
                 # Compress and store in disk/memory caches
-                buffer = io.BytesIO()
-                thumb_pil.save(buffer, format='JPEG', quality=85)
-                t_jpeg = buffer.getvalue()
+                from common_image_loader import encode_tile_bytes
+
+                t_jpeg = encode_tile_bytes(thumb_pil)
                 self.put_thumbnail(file_path, thumbnail, t_jpeg)
                 return thumbnail
             except Exception:
@@ -2007,11 +2007,11 @@ class ImageCache(QObject):
                 new_h = max(1, int(h * scale))
                 grid_pil = pil_img.resize((new_w, new_h), Image.Resampling.HAMMING)
                 grid = np.array(grid_pil)
-                
+
                 # Compress and store in disk/memory caches
-                buffer = io.BytesIO()
-                grid_pil.save(buffer, format='JPEG', quality=85)
-                g_jpeg = buffer.getvalue()
+                from common_image_loader import encode_tile_bytes
+
+                g_jpeg = encode_tile_bytes(grid_pil)
                 self.put_grid(file_path, grid, g_jpeg)
                 return grid
             except Exception:
@@ -2070,13 +2070,12 @@ class ImageCache(QObject):
                 else:
                     try:
                         from PIL import Image
-                        import io
+                        from common_image_loader import encode_tile_bytes
+
                         if grid.dtype != np.uint8:
                             grid = grid.astype(np.uint8)
                         pil_image = Image.fromarray(grid)
-                        buffer = io.BytesIO()
-                        pil_image.save(buffer, format='JPEG', quality=85)
-                        self.disk_grid_cache.put(file_path, buffer.getvalue())
+                        self.disk_grid_cache.put(file_path, encode_tile_bytes(pil_image))
                     except Exception:
                         pass
 
