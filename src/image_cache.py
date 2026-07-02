@@ -887,6 +887,58 @@ class PersistentEXIFCache:
             pass
         return out
 
+    def update_capture_time_bulk(self, timestamps: Dict[str, str]) -> None:
+        """Persist probed capture_time values without touching any other cached
+        EXIF field. UPDATE-only for rows that already have one (never overwrites
+        an existing value); a bare row is INSERTed only for paths with no row at
+        all yet, so a later full EXIF extraction's INSERT OR REPLACE still wins.
+        This lets the sort-time capture-time probe (main.py's
+        _parallel_probe_capture_times, which uses a cheap exifread-only read, not
+        a RAW decode) survive to the next folder open instead of re-probing every
+        uncached file every time — without any risk of clobbering width/height/
+        orientation data a row might hold under a stale sensor_meta_ver.
+        """
+        if not timestamps:
+            return
+        rows = [
+            (str(ct), _exif_cache_path_key(p)) for p, ct in timestamps.items() if ct
+        ]
+        if not rows:
+            return
+        try:
+            writer = self._get_writer_connection()
+            with self.lock:
+                for i in range(0, len(rows), 450):
+                    chunk = rows[i : i + 450]
+                    writer.executemany(
+                        "UPDATE exif_cache SET capture_time = ? "
+                        "WHERE file_path = ? AND (capture_time IS NULL OR capture_time = '')",
+                        chunk,
+                    )
+                    path_keys = [pk for _, pk in chunk]
+                    placeholders = ",".join(["?"] * len(path_keys))
+                    cursor = writer.execute(
+                        f"SELECT file_path FROM exif_cache WHERE file_path IN ({placeholders})",
+                        path_keys,
+                    )
+                    existing = {row[0] for row in cursor.fetchall()}
+                    insert_rows = [
+                        (pk, None, None, 1, "", "", pickle.dumps({}), time.time(), ct, None, None, 0)
+                        for ct, pk in chunk
+                        if pk not in existing
+                    ]
+                    if insert_rows:
+                        writer.executemany(
+                            "INSERT OR IGNORE INTO exif_cache "
+                            "(file_path, file_size, file_mtime, orientation, camera_make, camera_model, "
+                            "exif_data, cached_time, capture_time, original_width, original_height, sensor_meta_ver) "
+                            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                            insert_rows,
+                        )
+                writer.commit()
+        except Exception:
+            pass
+
     def get_capture_times_for_folder(self, folder_path: str) -> Dict[str, str]:
         """All cached capture_time entries under folder_path (slash-agnostic LIKE)."""
         if not folder_path:
@@ -2143,6 +2195,28 @@ class ImageCache(QObject):
     def get_capture_times_for_sort(self, file_paths: list) -> Dict[str, str]:
         """capture_time only, for folder sort (ignores stale mtime on network folders)."""
         return self.exif_cache.get_capture_times_bulk(file_paths)
+
+    def record_probed_capture_times(self, timestamps: Dict[str, float]) -> None:
+        """Persist sort-probe capture times so the next folder open skips re-probing.
+
+        timestamps values are epoch floats (from probe_capture_timestamp_from_file);
+        stored as ISO strings to match the capture_time column's existing format.
+        """
+        if not timestamps or not hasattr(self.exif_cache, "update_capture_time_bulk"):
+            return
+        import datetime
+
+        iso_times: Dict[str, str] = {}
+        for path, ts in timestamps.items():
+            if not ts or ts <= 0:
+                continue
+            try:
+                iso_times[path] = datetime.datetime.fromtimestamp(ts).strftime(
+                    "%Y:%m:%d %H:%M:%S"
+                )
+            except Exception:
+                continue
+        self.exif_cache.update_capture_time_bulk(iso_times)
 
     def get_capture_times_for_folder_sort(self, folder_path: str) -> Dict[str, str]:
         """All capture_time rows under folder_path (normalized path keys)."""

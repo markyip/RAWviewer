@@ -14475,6 +14475,14 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             for p, ts in pool.map(_probe_one, missing_paths, chunksize=chunksize):
                 if ts > 0:
                     probed_timestamps[p] = ts
+
+        if probed_timestamps:
+            try:
+                from image_cache import get_image_cache
+
+                get_image_cache().record_probed_capture_times(probed_timestamps)
+            except Exception:
+                pass
         return probed_timestamps
 
     def sort_files_by_capture_time(
@@ -14502,6 +14510,21 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         cache = get_image_cache()
         # Pass the pre-collected file stats to avoid redundant os.stat calls
         bulk_metadata = cache.get_multiple_exif(file_paths, file_stats)
+
+        # capture_time doesn't depend on RAW_EXIF_SENSOR_META_VER / orientation-trust
+        # checks that get_multiple_exif gates the rest of a row on, so a previously
+        # probed-and-persisted capture_time (record_probed_capture_times) can still
+        # satisfy sorting even when the row it's stored alongside fails those
+        # unrelated freshness checks and gets excluded from bulk_metadata above.
+        # Without this, every folder re-open would re-probe the same files forever.
+        needs_capture_time = [
+            fp for fp in file_paths if not (bulk_metadata.get(fp) or {}).get("capture_time")
+        ]
+        if needs_capture_time:
+            extra_capture_times = cache.get_capture_times_for_sort(needs_capture_time)
+            for fp, ct in extra_capture_times.items():
+                if ct:
+                    bulk_metadata[fp] = {**(bulk_metadata.get(fp) or {}), "capture_time": ct}
 
         # 2. Parallel probe for any uncached files (skip when caller only wants cache hits)
         probed_timestamps: dict = {}
