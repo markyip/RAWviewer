@@ -11797,7 +11797,10 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self._suppress_single_manager_callbacks = True
         try:
             self._defer_background_indexing_for_gallery()
-            self._release_indexing_load_throttle()
+            if hasattr(self, "image_manager") and self.image_manager is not None:
+                mgr = self.image_manager
+                if hasattr(mgr, "enter_gallery_warmup_throttle"):
+                    mgr.enter_gallery_warmup_throttle()
             if hasattr(self, "_resume_indexing_timer") and self._resume_indexing_timer:
                 self._resume_indexing_timer.stop()
             self._resume_indexing_timer = QTimer(self)

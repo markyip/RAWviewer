@@ -697,9 +697,23 @@ class JustifiedGallery(QWidget):
         for path in paths:
             if not path:
                 continue
-            if self._thumbnail_cache.get((path, self._thumb_base_key)) is None:
+            base = self._thumbnail_cache.get((path, self._thumb_base_key))
+            if base is None or base.isNull():
                 return False
-        return True
+        return bool(paths)
+
+    def _visible_viewport_needs_thumbnails(self) -> bool:
+        """True when any on-screen tile still has no painted pixmap."""
+        for w in (self._visible_widgets or {}).values():
+            path = getattr(w, "file_path", None)
+            if not path:
+                continue
+            if self._thumb_fail_counts.get(path, 0) >= 3:
+                continue
+            pm = w.pixmap() if hasattr(w, "pixmap") else None
+            if pm is None or pm.isNull():
+                return True
+        return False
 
     def _apply_pixmap_if_changed(self, widget, pixmap: Optional[QPixmap]) -> None:
         if self._pixmap_matches(widget, pixmap):
@@ -2875,6 +2889,7 @@ class JustifiedGallery(QWidget):
                     w.setText("")
                     if not cached_scaled.isNull() and not self._first_thumb_ready_after_set:
                         self._first_thumb_ready_after_set = True
+                        self._end_gallery_load_warmup_throttle()
                     cache_hit = True
                 else:
                     cached_scaled = None
@@ -2901,14 +2916,11 @@ class JustifiedGallery(QWidget):
                             if base is not None and not base.isNull():
                                 base = self._store_oriented_base_pixmap(path, base)
                             else:
-                                # Cache empty pixmap so we do not attempt synchronous DB queries repeatedly
-                                null_px = QPixmap()
-                                self._thumbnail_cache.put((path, self._thumb_base_key), null_px)
-                                base = null_px
+                                base = None
                         except Exception as e:
                             logger.debug(f"Sync adaptive mipmap fetch failed for {path}: {e}")
                 
-                if base:
+                if base is not None and not base.isNull():
                     # Tile geometry must follow the oriented pixels, exactly like the
                     # filmstrip. This base may have been pulled straight from the global
                     # cache above (bypassing on_thumbnail_ready), so a portrait thumbnail
@@ -2922,13 +2934,28 @@ class JustifiedGallery(QWidget):
                         else None,
                         base,
                     ):
-                        continue
-                    scaled = self._fit_tile_pixmap(path, base, physical_size, dpr)
-                    w.setPixmap(scaled)
-                    w.setText("")
-                    if not scaled.isNull() and not self._first_thumb_ready_after_set:
-                        self._first_thumb_ready_after_set = True
-                    cache_hit = self._gallery_base_meets_tile(base, physical_size)
+                        # Do not `continue` — that skipped w.show() and never queued a
+                        # thumbnail load, leaving a permanent blank tile until scroll.
+                        if _orient_debug_enabled():
+                            logger.info(
+                                "[ORIENT] frame mismatch visible tile %s; queue reload",
+                                os.path.basename(path),
+                            )
+                        self._thumbnail_cache.remove((path, self._thumb_base_key))
+                        self._apply_pixmap_if_changed(w, QPixmap())
+                        w.setText("")
+                        if not self._metadata_rebuild_timer.isActive():
+                            self._metadata_rebuild_timer.start(
+                                0 if not self._is_scrolling_fast else 250
+                            )
+                    else:
+                        scaled = self._fit_tile_pixmap(path, base, physical_size, dpr)
+                        w.setPixmap(scaled)
+                        w.setText("")
+                        if not scaled.isNull() and not self._first_thumb_ready_after_set:
+                            self._first_thumb_ready_after_set = True
+                            self._end_gallery_load_warmup_throttle()
+                        cache_hit = self._gallery_base_meets_tile(base, physical_size)
                 else:
                     self._apply_pixmap_if_changed(w, QPixmap())
                     w.setText("")
@@ -3036,6 +3063,7 @@ class JustifiedGallery(QWidget):
                     "[MODESWITCH] gallery.load_visible_images skipped scheduling; active cap reached (%d)",
                     len(self._active_tasks),
                 )
+            self._request_load_visible_images(150)
             return
         for path, priority, stages, *rest in load_tasks:
             if scheduled >= max_tasks:
@@ -3107,7 +3135,14 @@ class JustifiedGallery(QWidget):
 
         # If everything visible/prefetched is already loaded, schedule idle background preloading
         if scheduled_tasks == 0 and len(self._active_tasks) == 0:
-            self._idle_preload_timer.start(1000)  # 1 second of sustained idle
+            if self._visible_viewport_needs_thumbnails():
+                self._request_load_visible_images(300)
+            else:
+                self._idle_preload_timer.start(1000)  # 1 second of sustained idle
+        elif scheduled_tasks == 0 and len(self._active_tasks) > 0:
+            self._idle_preload_timer.stop()
+            if not self._load_timer.isActive():
+                self._request_load_visible_images(200)
         else:
             self._idle_preload_timer.stop()
 
@@ -3327,6 +3362,7 @@ class JustifiedGallery(QWidget):
         self._thumb_fail_counts.pop(file_path, None)
         if not self._first_thumb_ready_after_set:
             self._first_thumb_ready_after_set = True
+            self._end_gallery_load_warmup_throttle()
 
         now = time.time()
         if self._thumb_first_after_scroll_t is not None:
@@ -3449,6 +3485,8 @@ class JustifiedGallery(QWidget):
             file_path = resolved
         if file_path in self._active_tasks:
             del self._active_tasks[file_path]
+        if not self._building and not self._is_scrolling_fast:
+            self._request_load_visible_images(40)
 
     def _on_retry_timer_timeout(self):
         self._max_retry_attempt = 1
