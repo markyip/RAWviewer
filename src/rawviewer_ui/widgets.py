@@ -1,5 +1,5 @@
 import os
-from PyQt6.QtWidgets import QLabel, QApplication, QSlider, QStyle, QStyleOptionSlider
+from PyQt6.QtWidgets import QLabel, QApplication, QSlider
 from PyQt6.QtCore import pyqtSignal, Qt, QObject, QPoint, QUrl, QMimeData, QPointF
 from PyQt6.QtGui import QPixmap, QDrag, QPainter, QColor, QPolygonF
 
@@ -219,6 +219,7 @@ class GalleryZoomSlider(QSlider):
     Represents thumbnail sizes scaling from smaller to larger.
     """
     ZOOM_STEP = 20
+    THUMB_RADIUS = 9.0
 
     def __init__(self, orientation=Qt.Orientation.Horizontal, parent=None):
         super().__init__(orientation, parent)
@@ -230,6 +231,31 @@ class GalleryZoomSlider(QSlider):
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setSingleStep(self.ZOOM_STEP)
         self.setPageStep(self.ZOOM_STEP)
+
+    def _track_bounds(self):
+        """Horizontal track inset so the thumb circle is never clipped at the edges."""
+        margin = self.THUMB_RADIUS
+        x_start = margin
+        x_end = max(x_start + 1.0, float(self.width()) - margin)
+        y_center = self.height() / 2.0
+        return x_start, x_end, y_center
+
+    def _value_to_x(self, value):
+        x_start, x_end, _ = self._track_bounds()
+        span = self.maximum() - self.minimum()
+        if span <= 0:
+            return x_start
+        fraction = (value - self.minimum()) / span
+        return x_start + fraction * (x_end - x_start)
+
+    def _x_to_value(self, x):
+        x_start, x_end, _ = self._track_bounds()
+        span = x_end - x_start
+        if span <= 0:
+            return self.minimum()
+        fraction = (x - x_start) / span
+        fraction = max(0.0, min(1.0, fraction))
+        return int(self.minimum() + fraction * (self.maximum() - self.minimum()))
 
     def setValue(self, val):
         min_val = self.minimum()
@@ -274,58 +300,14 @@ class GalleryZoomSlider(QSlider):
             super().mouseReleaseEvent(event)
 
     def _value_for_pos(self, pos):
-        opt = QStyleOptionSlider()
-        self.initStyleOption(opt)
-        groove_rect = self.style().subControlRect(
-            QStyle.ComplexControl.CC_Slider, opt, QStyle.SubControl.SC_SliderGroove, self
-        )
-        handle_rect = self.style().subControlRect(
-            QStyle.ComplexControl.CC_Slider, opt, QStyle.SubControl.SC_SliderHandle, self
-        )
-        
-        hw = handle_rect.width()
-        x_start = groove_rect.left() + hw // 2
-        x_end = groove_rect.right() - hw // 2
-        
-        if x_end <= x_start:
-            return self.minimum()
-            
-        fraction = (pos.x() - x_start) / (x_end - x_start)
-        fraction = max(0.0, min(1.0, fraction))
-        
-        return int(self.minimum() + fraction * (self.maximum() - self.minimum()))
+        return self._x_to_value(float(pos.x()))
 
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
-        opt = QStyleOptionSlider()
-        self.initStyleOption(opt)
-
-        # Get subcontrol rects
-        groove_rect = self.style().subControlRect(
-            QStyle.ComplexControl.CC_Slider, opt, QStyle.SubControl.SC_SliderGroove, self
-        )
-        handle_rect = self.style().subControlRect(
-            QStyle.ComplexControl.CC_Slider, opt, QStyle.SubControl.SC_SliderHandle, self
-        )
-
-        # Use widget mid-point for y_center: the native Windows style engine may
-        # report a groove_rect centre that is offset from the actual widget
-        # centre, causing the track and thumb to appear visually off-centre.
-        y_center = self.height() // 2
-        
-        # Calculate horizontal range for the wedge (center of handle at min to center of handle at max)
-        hw = handle_rect.width()
-        x_start = groove_rect.left() + hw // 2
-        x_end = groove_rect.right() - hw // 2
-        current_x = handle_rect.center().x()
-
-        # Clamp current_x to [x_start, x_end] to prevent division by zero or out of bounds
-        if x_end <= x_start:
-            x_start = 10
-            x_end = self.width() - 10
-        current_x = max(x_start, min(current_x, x_end))
+        x_start, x_end, y_center = self._track_bounds()
+        current_x = self._value_to_x(self.value())
 
         # Wedge thickness configurations
         min_thick = 3.0
@@ -370,6 +352,6 @@ class GalleryZoomSlider(QSlider):
 
         # Draw thumb handle (solid white circle)
         painter.setBrush(QColor("#FFFFFF"))
-        thumb_radius = 9.0
+        thumb_radius = self.THUMB_RADIUS
         painter.drawEllipse(QPointF(current_x, y_center), thumb_radius, thumb_radius)
 
