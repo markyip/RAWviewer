@@ -4664,6 +4664,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self._sync_burst_group_bottom_chrome()
         self._queue_compare_session_decodes()
         self._refresh_compare_panes()
+        self._sync_share_button_visibility()
         self._sync_composition_grid_display()
         self._sync_clipping_overlay()
         self._update_compare_status_bar()
@@ -14151,6 +14152,9 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         if not self._share_button_platform_enabled():
             btn.hide()
             return
+        if getattr(self, "view_mode", "single") == "compare":
+            btn.hide()
+            return
         vis = bool(self._gallery_share_target_paths())
         if getattr(self, "view_mode", "single") == "single" and not getattr(
             self, "image_files", None
@@ -17891,6 +17895,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
 
     def _on_share_bottom_button_clicked(self):
         """Open/share gallery multi-selection, filtered bookmarks, or the current file in single view."""
+        if getattr(self, "view_mode", "") == "compare":
+            return
         try:
             paths = self._gallery_share_target_paths()
             _share_log(
@@ -23967,6 +23973,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         if self.view_mode == "compare":
             self._update_compare_status_bar()
             self._sync_compare_button_visibility()
+            self._sync_share_button_visibility()
             if hasattr(self, "status_counter_label"):
                 self._refresh_image_counter()
             return
