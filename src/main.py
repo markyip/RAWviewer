@@ -8493,9 +8493,11 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             # Avoid a 1k+ path DB scan on the UI thread during gallery first paint.
             return True, False
         try:
+            from semantic_search import semantic_embeddings_enabled
+
             index = self._get_semantic_index()
-            if not index.semantic_backend_available():
-                return False, False
+            if semantic_embeddings_enabled() and not index.semantic_backend_available():
+                return True, False
             if index.get_pending_paths(corpus_files):
                 return True, False
             return False, index.get_face_pending_count(corpus_files) > 0
@@ -8624,6 +8626,10 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 if index.semantic_backend_available():
                     # Metadata-only rows (semantic_ready=1, dim=0) must still block search.
                     ready = self._is_gallery_search_fully_indexed(corpus)
+                    if ready:
+                        cov = index.get_semantic_embedding_coverage(corpus)
+                        if cov["total"] > 0 and cov["embeddable"] == 0:
+                            ready = False
             except Exception:
                 ready = False
 
@@ -10480,6 +10486,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 # EXIF/GPS/loose metadata terms are hard filters. Only the files
                 # that survived those filters are eligible for semantic ranking.
                 metadata_candidate_paths = [h.file_path for h in metadata_hits]
+                if semantic_query and not metadata_candidate_paths:
+                    metadata_candidate_paths = list(base_files)
                 hits = index.search_text(
                     semantic_query,
                     metadata_candidate_paths,

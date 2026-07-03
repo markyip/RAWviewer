@@ -29,6 +29,14 @@ import numpy as np
 from PIL import Image, ImageOps
 from PIL.Image import Image as PilImage
 
+
+def _bundled_resource_path(relative_path: str) -> str:
+    """Absolute path to bundled data (dev tree or PyInstaller _MEIPASS)."""
+    base = getattr(sys, "_MEIPASS", None)
+    if not base:
+        base = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+    return os.path.join(base, relative_path)
+
 import metadata_backend
 
 from raw_file_extensions import RAW_FILE_EXTENSIONS
@@ -2210,6 +2218,44 @@ def _normalize_location_term(term: str) -> str:
     return " ".join((term or "").strip().lower().split())
 
 
+def _semantic_text_variants(text: str) -> List[str]:
+    """CLIP query variants for a semantic term (singular/plural + short prompt)."""
+    raw = (text or "").strip()
+    if not raw:
+        return []
+    seen: set[str] = set()
+    out: List[str] = []
+
+    def add(s: str) -> None:
+        s = (s or "").strip()
+        if not s:
+            return
+        key = s.casefold()
+        if key in seen:
+            return
+        seen.add(key)
+        out.append(s)
+
+    add(raw)
+    tokens = raw.split()
+    if len(tokens) != 1:
+        return out
+    word = tokens[0]
+    low = word.lower()
+    if len(low) < 3 or not low.isalpha():
+        return out
+    if low.endswith("s") and len(low) > 3 and not low.endswith("ss"):
+        add(word[:-1])
+    elif not low.endswith("s"):
+        add(word + "s")
+    add(f"a photo of {word}")
+    if low.endswith("s") and len(low) > 3 and not low.endswith("ss"):
+        add(f"a photo of {word[:-1]}")
+    elif not low.endswith("s"):
+        add(f"a photo of {word}s")
+    return out
+
+
 # Quick O(1) checks before any geocoder CSV load (contradiction filter).
 KNOWN_LOCATION_NAMES: frozenset[str] = frozenset({
     # Countries
@@ -2761,8 +2807,10 @@ class SemanticImageIndex:
                 import csv
                 import logging
                 
-                base_dir = os.path.dirname(os.path.abspath(__file__))
-                db_path = os.path.join(base_dir, "icons", "cities500.csv.gz")
+                db_path = _bundled_resource_path(os.path.join("icons", "cities500.csv.gz"))
+                if not os.path.isfile(db_path):
+                    base_dir = os.path.dirname(os.path.abspath(__file__))
+                    db_path = os.path.join(base_dir, "icons", "cities500.csv.gz")
                 if not os.path.isfile(db_path):
                     db_path = os.path.join("src", "icons", "cities500.csv.gz")
                 
@@ -2781,7 +2829,10 @@ class SemanticImageIndex:
                         ))
                 
                 # Load landmarks
-                landmarks_path = os.path.join(base_dir, "icons", "landmarks.csv.gz")
+                landmarks_path = _bundled_resource_path(os.path.join("icons", "landmarks.csv.gz"))
+                if not os.path.isfile(landmarks_path):
+                    base_dir = os.path.dirname(os.path.abspath(__file__))
+                    landmarks_path = os.path.join(base_dir, "icons", "landmarks.csv.gz")
                 if not os.path.isfile(landmarks_path):
                     landmarks_path = os.path.join("src", "icons", "landmarks.csv.gz")
                 
@@ -3906,6 +3957,19 @@ class SemanticImageIndex:
             return backend.encode_text(text)
         model = self._ensure_model()
         return np.asarray(model.encode(text, normalize_embeddings=True), dtype=np.float32)
+
+    def _encode_semantic_query(self, text: str) -> List[np.ndarray]:
+        """Encode semantic query with singular/plural and CLIP-style prompt variants."""
+        variants = _semantic_text_variants(text)
+        if not variants:
+            return []
+        return [self._encode_text(v) for v in variants]
+
+    @staticmethod
+    def _semantic_similarity(query_vecs: Sequence[np.ndarray], image_vec: np.ndarray) -> float:
+        if not query_vecs:
+            return 0.0
+        return max(float(np.dot(qv, image_vec)) for qv in query_vecs)
 
     @staticmethod
     def _face_scan_worker_count(sample_path: Optional[str] = None) -> int:
@@ -5260,6 +5324,36 @@ class SemanticImageIndex:
             "ready": 1 if missing == 0 else 0,
         }
 
+    def get_semantic_embedding_coverage(self, file_paths: Sequence[str]) -> Dict[str, int]:
+        """Count corpus rows with real CLIP embeddings (semantic_ready=1, dim>0)."""
+        indexable_paths, _ = self._filter_duplicate_raw_companions(file_paths)
+        total = len(indexable_paths)
+        if not total:
+            return {"total": 0, "embeddable": 0, "skipped": 0, "pending": 0}
+
+        rows = self._fetch_rows_for_paths(indexable_paths)
+        row_map = {self._canonical_path(str(r["file_path"])): r for r in rows}
+        embeddable = skipped = pending = 0
+        for p in indexable_paths:
+            row = row_map.get(self._canonical_path(p))
+            if not row:
+                pending += 1
+                continue
+            sr = _coerce_int(self._row_value(row, "semantic_ready"))
+            dim = _coerce_int(self._row_value(row, "dim"))
+            if sr == 1 and dim > 0:
+                embeddable += 1
+            elif sr == -1:
+                skipped += 1
+            else:
+                pending += 1
+        return {
+            "total": total,
+            "embeddable": embeddable,
+            "skipped": skipped,
+            "pending": pending,
+        }
+
     def get_pending_paths(self, file_paths: Sequence[str]) -> List[str]:
         """
         Return paths that need indexing (missing row, semantic_ready=0, or file changed on disk).
@@ -5959,12 +6053,6 @@ class SemanticImageIndex:
                     filtered = [r for r in filtered if self._row_matches_format_specs(r, [bare])]
                     continue
                 bare_place = bare.replace("_", " ")
-                if self._is_strictly_location_name(bare_place):
-                    matched = True
-                    filtered = [
-                        r for r in filtered if self._row_matches_location_place(r, bare_place)
-                    ]
-                    continue
                 semantic_terms.append(t)
 
         filtered, semantic_terms = self._auto_match_metadata_keywords(filtered, semantic_terms)
@@ -6222,7 +6310,7 @@ class SemanticImageIndex:
                 # doesn't match any image in the folder, check if any images HAVE 
                 # verified location metadata. If an image says "Japan", and we search 
                 # "Korea", we should exclude it rather than letting AI "guess".
-                if is_location:
+                if is_location and not semantic_embeddings_enabled():
                     new_filtered = []
                     contradiction_count = 0
                     for r in filtered:
@@ -6232,13 +6320,18 @@ class SemanticImageIndex:
                             else:
                                 # Contradiction! (Has location, but it's different)
                                 contradiction_count += 1
-                        elif semantic_embeddings_enabled():
-                            # No resolved location — only keep for semantic AI guessing
-                            new_filtered.append(r)
-                    
                     if contradiction_count > 0:
                         logger.warning(f"[SEARCH] Contradiction Filter: Excluded {contradiction_count} image(s) from '{needle}' due to conflicting GPS metadata")
                     filtered = new_filtered
+                elif is_location and semantic_embeddings_enabled():
+                    # Ambiguous bare token that is also a GeoNames place (e.g. "train"
+                    # the town in Germany vs trains the vehicle). With no GPS hits in this
+                    # folder, prefer semantic CLIP rather than returning zero results.
+                    logger.debug(
+                        "[SEARCH] No GPS match for place name '%s'; passing to semantic AI",
+                        needle,
+                    )
+                    remaining.append(term)
                 else:
                     if semantic_embeddings_enabled():
                         logger.debug(f"[SEARCH] No metadata match for '{needle}', passing to semantic AI")
@@ -6305,7 +6398,9 @@ class SemanticImageIndex:
             hits.sort(key=lambda h: h.capture_time, reverse=True)
             return hits[: max(1, int(top_k))]
 
-        query_vec = self._encode_text(semantic_query)
+        query_vecs = self._encode_semantic_query(semantic_query)
+        if not query_vecs:
+            return []
 
         scores: List[SearchHit] = []
         for r in rows:
@@ -6314,7 +6409,7 @@ class SemanticImageIndex:
             vec = self._from_blob(cast(bytes, r["embedding"]), _coerce_int(r["dim"]))
             if vec.size == 0:
                 continue
-            score = float(np.dot(query_vec, vec))
+            score = self._semantic_similarity(query_vecs, vec)
             # Semantic query should filter out clearly non-matching images.
             # Keep strict filtering (not just ranking) by removing sub-threshold scores.
             if score <= float(min_score):
