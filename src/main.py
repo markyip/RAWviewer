@@ -8689,11 +8689,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 # EXIF-only unlock: keep the limitation visible so AI-style
                 # queries returning nothing isn't a mystery.
                 inp.setPlaceholderText("Search gallery (EXIF only — AI search off)")
-                inp.setToolTip(
-                    "AI (semantic) search is disabled in this build/launch — "
-                    "queries match EXIF metadata and filenames only.\n"
-                    "Enable with RAWVIEWER_ENABLE_SEMANTIC_SEARCH=1."
-                )
+                inp.setToolTip(self._semantic_disabled_hint_texts()[1])
         self._reset_gallery_search_panel_width()
         self._sync_gallery_search_input_editable()
         if (
@@ -9992,6 +9988,35 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             self.status_bar.showMessage(f"Asset download failed: {error}", 7000)
         self._gallery_search_user_collapsed_while_busy = False
 
+    def _semantic_disabled_hint_texts(self) -> tuple[str, str]:
+        """(status-bar notice, tooltip) for the EXIF-only search state.
+
+        Lite intentionally ships without AI search (no bundled models, no
+        indexing overhead) — never suggest the enable flag there. The env-var
+        hint is only for Full builds / dev runs where the flag is simply off.
+        """
+        try:
+            from rawviewer_profile import is_lite_build
+
+            lite = is_lite_build()
+        except Exception:
+            lite = False
+        if lite:
+            return (
+                "AI search is not included in the Lite version — "
+                "search matches EXIF/filenames only",
+                "AI (semantic) search is not included in the Lite version — "
+                "queries match EXIF metadata and filenames only.\n"
+                "Install the Full version for AI search.",
+            )
+        return (
+            "AI search is disabled (RAWVIEWER_ENABLE_SEMANTIC_SEARCH=0) — "
+            "search matches EXIF/filenames only",
+            "AI (semantic) search is disabled in this launch — "
+            "queries match EXIF metadata and filenames only.\n"
+            "Enable with RAWVIEWER_ENABLE_SEMANTIC_SEARCH=1.",
+        )
+
     def _notify_semantic_embeddings_disabled(self) -> None:
         """Tell the user (once per session) that search is EXIF-only.
 
@@ -10008,23 +10033,16 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         if getattr(self, "_semantic_disabled_notice_shown", False):
             return
         self._semantic_disabled_notice_shown = True
+        notice, tooltip = self._semantic_disabled_hint_texts()
         if hasattr(self, "status_bar"):
             try:
-                self.status_bar.showMessage(
-                    "AI search is disabled (RAWVIEWER_ENABLE_SEMANTIC_SEARCH=0) — "
-                    "search matches EXIF/filenames only",
-                    10000,
-                )
+                self.status_bar.showMessage(notice, 10000)
             except Exception:
                 pass
         inp = getattr(self, "gallery_search_input", None)
         if inp is not None:
             try:
-                inp.setToolTip(
-                    "AI (semantic) search is disabled in this build/launch — "
-                    "queries match EXIF metadata and filenames only.\n"
-                    "Enable with RAWVIEWER_ENABLE_SEMANTIC_SEARCH=1."
-                )
+                inp.setToolTip(tooltip)
             except Exception:
                 pass
 
