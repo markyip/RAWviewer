@@ -451,9 +451,11 @@ class UnifiedImageProcessor:
                 return None
 
         # Non-RAW reader path can return QImage directly.
+        from_qimage_autotransform = False
         if isinstance(thumbnail, QImage):
             from enhanced_raw_processor import _qimage_to_rgb_array
 
+            from_qimage_autotransform = True
             rgb = _qimage_to_rgb_array(thumbnail)
             if rgb is None:
                 return None
@@ -479,8 +481,16 @@ class UnifiedImageProcessor:
                 exif_data = None
         if exif_data is None:
             exif_data = self.exif_extractor.extract_exif_data(file_path)
+        decoder_baked_exif = from_qimage_autotransform or (
+            not is_raw and thumbnail is not None
+        )
+        if decoder_baked_exif and exif_data:
+            from common_image_loader import mark_exif_pixels_display_oriented
+
+            exif_data = mark_exif_pixels_display_oriented(exif_data)
+            self.cache.put_exif(file_path, exif_data, persist_disk=False)
         orientation = exif_data.get('orientation', 1) if exif_data else 1
-        if orientation != 1:
+        if orientation != 1 and not decoder_baked_exif:
             thumbnail = self._apply_orientation_correction(thumbnail, orientation, exif_data)
         if exif_data and exif_data.get("minimal_preview_exif"):
             self.cache.put_exif(file_path, exif_data, persist_disk=False)

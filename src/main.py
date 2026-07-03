@@ -7152,12 +7152,17 @@ class RAWImageViewer(SessionMixin, QMainWindow):
 
         # Skip when the pixmap already matches the expected display orientation.
         try:
-            from common_image_loader import pixmap_matches_exif_display
+            from common_image_loader import (
+                exif_pixels_display_oriented,
+                pixmap_matches_exif_display,
+            )
 
             exif = None
             fp = getattr(self, "current_file_path", None)
             if fp and hasattr(self, "image_cache") and self.image_cache is not None:
                 exif = self.image_cache.get_exif(fp)
+            if exif_pixels_display_oriented(exif):
+                return pixmap
             if exif:
                 ow = int(exif.get("original_width") or 0)
                 oh = int(exif.get("original_height") or 0)
@@ -8503,6 +8508,17 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         needs_semantic, needs_face = self._gallery_search_needs_index_work(corpus_files)
         return not needs_semantic and not needs_face
 
+    def _gallery_search_idle_tooltip(self) -> str:
+        """Default search-field tooltip when no indexing progress is in the placeholder."""
+        try:
+            from semantic_search import semantic_embeddings_enabled
+
+            if semantic_embeddings_enabled():
+                return ""
+        except Exception:
+            pass
+        return self._semantic_disabled_hint_texts()[1]
+
     def _reset_gallery_search_to_idle(self) -> None:
         """Restore the search field to the normal idle placeholder (no index progress)."""
         # Keep user intent while semantic is still pending (defer survives stale-progress cleanup).
@@ -8522,7 +8538,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         inp = getattr(self, "gallery_search_input", None)
         if inp is not None:
             inp.setPlaceholderText("Search gallery")
-            inp.setToolTip("")
+            inp.setToolTip(self._gallery_search_idle_tooltip())
             self._reset_gallery_search_panel_width()
         self._sync_gallery_search_input_editable()
 
@@ -8684,11 +8700,10 @@ class RAWImageViewer(SessionMixin, QMainWindow):
 
             if semantic_embeddings_enabled():
                 inp.setPlaceholderText("Search gallery")
-                inp.setToolTip("")
             else:
                 # EXIF/location unlock: short placeholder; AI limitation is in the tooltip.
                 inp.setPlaceholderText("Search EXIF, name, place")
-                inp.setToolTip(self._semantic_disabled_hint_texts()[1])
+            inp.setToolTip(self._gallery_search_idle_tooltip())
         self._reset_gallery_search_panel_width()
         self._sync_gallery_search_input_editable()
         if (
@@ -8746,9 +8761,9 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             inp.setPlaceholderText(full)
             cap = int(getattr(self, "_search_input_width_max", 500) or 500)
             w = self._gallery_search_input_width_for_text(full)
-            inp.setToolTip(full if w >= cap else "")
+            inp.setToolTip(full if w >= cap else self._gallery_search_idle_tooltip())
             return
-        inp.setToolTip("")
+        inp.setToolTip(self._gallery_search_idle_tooltip())
         if not indexing:
             ph = getattr(self, "_gallery_search_placeholder_saved", "") or "Search gallery"
             if self._should_show_search_index_progress(ph):
@@ -8842,7 +8857,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         if inp is not None:
             input_idle = int(getattr(self, "_search_input_width_idle", 300) or 300)
             self._apply_gallery_search_input_width(input_idle, progress=False)
-            inp.setToolTip("")
+            inp.setToolTip(self._gallery_search_idle_tooltip())
 
     def _set_gallery_search_status(
         self, message: str, animate: bool = False, *, relayout: bool = True

@@ -234,7 +234,7 @@ Separate words with spaces. Use `key:value` filters:
 
 **Face vs semantic search:** `face`, `people`, `person`, etc. use stored face counts (`has:face`), not the neural search.
 
-**Indexing:** On **Full** builds, semantic search and face counts run in the background on large folders (metadata + AI first, faces after). The gallery becomes searchable before face tagging finishes. When you **open a different folder**, indexing and prefetch from the previous folder are cancelled so work does not continue in the background for the old album (**v2.5.0**).
+**Indexing:** On **Full** builds, semantic search and face counts run in the background on large folders (metadata + AI first, faces after). The **search field stays read-only** until indexing completes for your profile (**Lite:** metadata; **Full:** metadata, embeddings, and face scan when enabled). When you **open a different folder**, indexing and prefetch from the previous folder are cancelled so work does not continue in the background for the old album (**v2.5.0**).
 
 ### Automatic memory tuning
 

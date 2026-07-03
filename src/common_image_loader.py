@@ -601,6 +601,12 @@ def load_pixmap_safe(file_path: str, max_edge: int = 0) -> QPixmap:
                     reader.setScaledSize(QSize(sw, sh))
         pixmap = QPixmap.fromImageReader(reader)
         if not pixmap.isNull():
+            try:
+                cached_exif = cache.get_exif(file_path)
+                if cached_exif and int(cached_exif.get("orientation", 1) or 1) != 1:
+                    cache.put_exif(file_path, mark_exif_pixels_display_oriented(cached_exif))
+            except Exception:
+                pass
             cache.put_pixmap(file_path, pixmap)
             return pixmap
     except Exception as e:
@@ -658,6 +664,19 @@ def exif_display_aspect_ratio(
     return dw / dh
 
 
+def exif_pixels_display_oriented(exif_data: Optional[Dict[str, Any]]) -> bool:
+    """True when decode already baked EXIF orientation into pixel data."""
+    return bool((exif_data or {}).get("pixels_display_oriented"))
+
+
+def mark_exif_pixels_display_oriented(exif_data: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Record that container orientation is already applied to cached pixels."""
+    data = dict(exif_data or {})
+    data["orientation"] = 1
+    data["pixels_display_oriented"] = True
+    return data
+
+
 def pixmap_matches_exif_display(
     pixmap_width: int,
     pixmap_height: int,
@@ -666,10 +685,17 @@ def pixmap_matches_exif_display(
     orientation: int,
     *,
     tolerance: float = 0.14,
+    pixels_display_oriented: bool = False,
 ) -> bool:
     """True when pixmap pixels already match EXIF display orientation (no extra rotation)."""
+    if pixels_display_oriented:
+        return True
     pw, ph = int(pixmap_width or 0), int(pixmap_height or 0)
     if pw <= 0 or ph <= 0:
+        return False
+    o = int(orientation or 1)
+    # 180° / mirror tags do not change aspect ratio — never infer correctness from AR alone.
+    if o in (2, 3, 4):
         return False
     dw, dh = exif_display_dimensions(original_width, original_height, orientation)
     if dw <= 0 or dh <= 0:
@@ -698,12 +724,17 @@ def array_matches_exif_display(
     oh = int(exif_data.get("original_height") or 0)
     if ow <= 0 or oh <= 0:
         return True
+    if exif_pixels_display_oriented(exif_data):
+        return True
+    o = int(exif_data.get("orientation", 1) or 1)
+    if o in (2, 3, 4):
+        return False
     return pixmap_matches_exif_display(
         pixel_width,
         pixel_height,
         ow,
         oh,
-        int(exif_data.get("orientation", 1) or 1),
+        o,
         tolerance=tolerance,
     )
 
@@ -738,12 +769,13 @@ def apply_container_orientation_to_array(
 
     dw, dh = exif_display_dimensions(ow, oh, o)
     if (dh > dw) == (h > w):
-        import logging
-        logging.getLogger(__name__).debug(
-            f"apply_container_orientation_to_array: skipping orientation {o} "
-            f"because array shape {w}x{h} already matches expected display orientation."
-        )
-        return image_array
+        if o not in (2, 3, 4) or exif_pixels_display_oriented(exif_data):
+            import logging
+            logging.getLogger(__name__).debug(
+                f"apply_container_orientation_to_array: skipping orientation {o} "
+                f"because array shape {w}x{h} already matches expected display orientation."
+            )
+            return image_array
 
     if o == 2:
         return np.fliplr(image_array)
@@ -788,6 +820,55 @@ def rgb_array_to_qpixmap(rgb_image: np.ndarray) -> QPixmap:
     else:
         return QPixmap()
     return QPixmap.fromImage(qimg) if not qimg.isNull() else QPixmap()
+
+
+def apply_container_orientation_to_pixmap(
+    pixmap: QPixmap,
+    exif_data: Optional[Dict[str, Any]],
+) -> QPixmap:
+    """Apply container EXIF orientation to a QPixmap (idempotent with display-oriented pixels)."""
+    from PyQt6.QtGui import QTransform
+
+    if pixmap is None or pixmap.isNull() or not exif_data:
+        return pixmap
+    if exif_pixels_display_oriented(exif_data):
+        return pixmap
+    orientation = int(exif_data.get("orientation", 1) or 1)
+    if orientation == 1:
+        return pixmap
+
+    ow = int(exif_data.get("original_width") or 0)
+    oh = int(exif_data.get("original_height") or 0)
+    if ow > 0 and oh > 0 and pixmap_matches_exif_display(
+        pixmap.width(),
+        pixmap.height(),
+        ow,
+        oh,
+        orientation,
+        pixels_display_oriented=exif_pixels_display_oriented(exif_data),
+    ):
+        return pixmap
+
+    transform = QTransform()
+    if orientation == 2:
+        transform.scale(-1, 1)
+    elif orientation == 3:
+        transform.rotate(180)
+    elif orientation == 4:
+        transform.scale(1, -1)
+    elif orientation == 5:
+        transform.scale(-1, 1)
+        transform.rotate(-90)
+    elif orientation == 6:
+        transform.rotate(90)
+    elif orientation == 7:
+        transform.scale(-1, 1)
+        transform.rotate(90)
+    elif orientation == 8:
+        transform.rotate(-90)
+    else:
+        return pixmap
+    return pixmap.transformed(transform)
 
 
 def load_raw_preview_array(
@@ -873,8 +954,6 @@ def finalize_index_thumbnail_array(
 ) -> np.ndarray:
     """Apply container EXIF orientation so semantic warm-up matches gallery thumbnails."""
     if arr is None:
-        return arr
-    if not is_raw_file(file_path):
         return arr
     exif_data, orientation = resolve_container_exif_for_file(file_path, cache=cache)
     if os.environ.get("RAWVIEWER_ORIENT_DEBUG", "0").strip().lower() in {"1", "true", "yes", "on"}:
@@ -1170,6 +1249,10 @@ def exif_rotation_degrees_for_pixmap(
         dw, dh = exif_display_dimensions(ow, oh, o)
         exp_portrait = dh > dw
         if exp_portrait == act_portrait:
+            if o in (2, 3, 4):
+                if o == 3:
+                    return 180
+                return 0
             return 0
         if not exp_portrait and act_portrait:
             # Thumbnail already portrait; metadata still landscape — trust pixels.

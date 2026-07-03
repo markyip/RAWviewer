@@ -1589,36 +1589,28 @@ class JustifiedGallery(QWidget):
                     "P" if pixmap.height() > pixmap.width() else "L",
                 )
             return pixmap
-        from common_image_loader import (
-            exif_rotation_degrees_for_pixmap,
-            pixmap_matches_exif_display,
-        )
+        from common_image_loader import apply_container_orientation_to_pixmap
 
-        ow = int(m.get("original_width") or 0)
-        oh = int(m.get("original_height") or 0)
-        o = int(m.get("orientation", 1) or 1)
         if _orient_debug_enabled():
+            from common_image_loader import (
+                exif_rotation_degrees_for_pixmap,
+                exif_pixels_display_oriented,
+                pixmap_matches_exif_display,
+            )
+            ow = int(m.get("original_width") or 0)
+            oh = int(m.get("original_height") or 0)
+            o = int(m.get("orientation", 1) or 1)
             _deg = exif_rotation_degrees_for_pixmap(pixmap.width(), pixmap.height(), ow, oh, o)
-            _match = pixmap_matches_exif_display(pixmap.width(), pixmap.height(), ow, oh, o)
+            _match = pixmap_matches_exif_display(
+                pixmap.width(), pixmap.height(), ow, oh, o,
+                pixels_display_oriented=exif_pixels_display_oriented(m),
+            )
             logger.info(
                 "[ORIENT] base file=%s pix=%dx%d(%s) exif(o=%s ow=%d oh=%d) match=%s deg=%s",
                 os.path.basename(file_path), pixmap.width(), pixmap.height(),
                 "P" if pixmap.height() > pixmap.width() else "L", o, ow, oh, _match, _deg,
             )
-        if pixmap_matches_exif_display(
-            pixmap.width(), pixmap.height(), ow, oh, o
-        ):
-            return pixmap
-        deg = exif_rotation_degrees_for_pixmap(
-            pixmap.width(),
-            pixmap.height(),
-            ow,
-            oh,
-            o,
-        )
-        if deg:
-            return _rotate_pixmap_cw(pixmap, deg)
-        return pixmap
+        return apply_container_orientation_to_pixmap(pixmap, m)
 
     def _store_oriented_base_pixmap(self, file_path: str, pixmap: QPixmap) -> QPixmap:
         """Orient, cache base thumbnail, and drop stale scaled variants."""

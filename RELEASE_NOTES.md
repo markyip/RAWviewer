@@ -3,7 +3,7 @@
 ## 🚀 Version 2.5.0
 **Release Date: June 29, 2026**
 
-Major release introducing a custom gallery zoom slider, interactive GPS map display overlay, macOS HDR/EDR viewing (including RAW), animated GIF/WebP playback, RAW tone recovery preview, burst image grouping, a side-by-side comparison pane, and gallery responsiveness fixes for large folders and folder switching.
+Major release focused on **performance at scale** — faster navigation, leaner disk cache, smarter background indexing — plus a custom gallery zoom slider, interactive GPS map overlay, macOS HDR/EDR viewing (including RAW), animated GIF/WebP playback, RAW tone recovery preview, burst image grouping, and a side-by-side Compare pane.
 
 ### Burst Image Grouping
 - **Burst image grouping** — Automatically group rapid-fire burst sequences in the gallery (based on capture time intervals). Double-click a collapsed stack cover to enter the burst group view and inspect individual frames.
@@ -37,53 +37,42 @@ Major release introducing a custom gallery zoom slider, interactive GPS map disp
 ### Animated GIF & WebP Playback
 - **Animated Previews** — Enhanced the image viewer pipeline to support playing, scaling, and animating GIF and WebP files. Displays playback status messages and handles dynamic window scaling seamlessly.
 
-### Performance & gallery
-- **Snappier navigation** — Filmstrip warm-up is staggered and throttled; navigation cancels low-priority prefetch so the current photo wins I/O. RAW sensor dimensions for the status bar resolve off the UI thread. Identical status-bar updates are deduplicated. Filmstrip refresh and prefetch wait for single-view first paint (TTFR) instead of a fixed delay.
-- **External drives** — Volume read speed is probed once per mount to tune I/O throttling on slow disks.
-- **Gallery folder switching** — Layout and thumbnail loads reset per folder; fixes scattered tiles and blank gaps after changing albums.
+### Performance & responsiveness
+
+2.5.0 treats **large libraries and everyday navigation** as first-class goals. Work spans the thumbnail cache, indexing pipeline, gallery layout, and single-image loading so the UI stays usable on fast internal SSDs and on slow external drives alike.
+
+**Thumbnail cache & disk I/O**
+
+Gallery tiles, filmstrip thumbs, and indexing warm-up now share a **unified decode path** that backfills preview, grid, and thumbnail tiers from a single pass instead of re-opening files for each consumer. On-disk grid and thumbnail tiles use **WebP** (smaller and faster to read than the old JPEG cache entries), with **size-based LRU eviction** so `~/.rawviewer_cache` does not grow without bound. **Volume read speed** is probed once per mount and used to tune I/O throttling on USB disks and network volumes.
+
+**Upgrading from older versions (JPEG → WebP):**
+- **Existing JPEG cache is reused** — there is no bulk migration at upgrade; the read path is format-agnostic (`PIL.Image.open()` sniffs content), so upgrading does not change how already-cached folders behave.
+- **Legacy JPEG tiles stay until invalidated** — entries from previous versions are kept until the source file changes, LRU eviction removes them, orientation repair clears them, or they age out; only **new** writes use WebP.
+- **Optional disk savings** — to move to WebP sooner and shrink `~/.rawviewer_cache`, delete the cache manually (`scripts/Launch/shell/clear_cache.sh` on macOS, `scripts\Launch\bat\clear_cache.bat` on Windows); thumbnails will rebuild as WebP on the next visit.
+
+**Background indexing**
+
+Metadata extraction and semantic embedding run as **two coordinated phases** in the background (EXIF/metadata first, then the MobileCLIP neural pass on **Full** builds). The **search field stays read-only** until indexing finishes for your profile — **Lite:** metadata only; **Full:** metadata, embeddings, and face scan when enabled — so queries always run against a complete index rather than partial results. **Capture-time sort probes** are persisted in the EXIF database — reopening a folder you have browsed before skips re-statting thousands of files just to sort by date. GPS coordinates resolve through a **KD-tree** over the bundled city database (O(log n) nearest-neighbor lookup instead of scanning 100k+ rows per coordinate). Semantic indexing **reuses EXIF rows** already in `ImageCache` rather than parsing files again on the UI thread. When you **open a different album**, workers and prefetch from the previous folder are **cancelled immediately**. On very large libraries, metadata extraction **waits for idle single-view time** (navigation, zoom, or an active decode queue) before saturating disk — keeping arrow-key browsing smooth while indexing continues in the background.
+
+**Single-image navigation**
+
+Filmstrip warm-up is **staggered and throttled**; changing the current photo **cancels low-priority prefetch** so the image you are looking at wins bandwidth. **Full-resolution neighbor prefetch** no longer starts eagerly on every arrow press — only after the current frame has painted. **Sensor dimensions** for the status bar resolve off the UI thread. **Identical status-bar updates are deduplicated** so repeated renders do not re-parse EXIF. **Session state writes are debounced** (~400 ms) during rapid browsing; quit still flushes immediately. Very large numpy→QPixmap conversions for embedded-JPEG upgrades run on a **background worker** so the main thread does not stall mid-navigation.
+
+**Gallery & search UI**
+
+Resorting a huge folder or ranking semantic-search hits no longer blocks the UI — work moves to **background workers** with a short status message. **Fast-open** defers folder scan, EXIF sort, and filmstrip prefetch until **first paint (TTFR)** with a ~2.5 s fallback cap instead of a fixed multi-second sleep. Gallery **pauses indexing while you scroll** and resumes after idle. **Folder switches** reset layout and in-flight thumbnail work cleanly. **Partial row rebuilds** update justified geometry when late EXIF or decoded aspects arrive, without rebuilding the entire grid on every thumbnail. EXIF SQLite uses a **larger page cache** and **batched commits** for faster metadata reads during search and sort.
+
+**What you should feel:** snappier arrow-key browsing even while indexing runs, faster repeat visits to the same folder, less cache bloat on disk, and a gallery that keeps scrolling smoothly on 5k–10k+ image libraries.
+
+### Gallery reliability (large folders)
+- **Folder switching** — Layout and thumbnail loads reset per folder; scattered tiles and blank gaps after changing albums are gone.
 - **Huge folders** — Gallery opens in capture-time (EXIF) order; the Gallery button appears once that sort finishes (instant when metadata is fully cached).
-- **Background indexing** — Metadata and semantic indexing from the previous folder are cancelled when you open a different album.
-- **Fast-open deferrals** — Background folder scan, EXIF sort, and filmstrip prefetch use TTFR-or-fallback timing (~2.5s cap) instead of a hard 5s sleep after fast-open.
-- **Search & metadata** — Faster EXIF cache lookups, KD-tree reverse geocoding during indexing, and UI-thread sorting moved to background workers for large folders.
+- **Orientation-aware tiles** — EXIF display orientation is applied consistently when thumbnails enter the gallery grid, so portrait shots keep correct framing when you jump scroll position or enter the gallery from single view.
 
-### Lite gallery location search
-- **City / place filters respect GPS metadata** — Lite builds (`RAWVIEWER_ENABLE_SEMANTIC_SEARCH=0`) no longer treat unresolved free-text place names as “show everything.” Searching `manchester`, `city:tokyo`, or `in paris` only returns photos whose indexed city/landmark/country fields match.
-- **Bundled `cities500.csv.gz` lookup at search time** — Place-name detection now lazy-loads the same GeoNames index used for reverse geocoding, so cities beyond the small static shortcut list (e.g. Manchester, Birmingham) are recognized without enabling semantic AI.
-- **Stricter place matching** — Location filters use word-boundary matching so partial names (e.g. Chester inside Manchester) no longer false-match; filename-only hits are ignored for place queries.
-
-### Gallery — viewport stays put while thumbnails load
-- **Scroll anchoring on aspect relayout** — When decoded thumbnails correct tile aspect and trigger a justified-grid rebuild, vertical scroll is restored synchronously from the upper-left visible thumbnail instead of waiting for the next UI tick (which could jump the viewport).
-- **Partial row rebuilds** — Metadata-driven partial layout updates preserve the same anchor when only lower rows change height.
-
-### Windows gallery crash & scroll-jump fixes
-- **Fixed a native crash on gallery entry (Windows)** — Switching from single image to gallery right after viewing a large photo could abort the app on some Windows GPU drivers. The single-image view now finishes hiding before its GPU memory is released, avoiding the driver-level conflict.
-- **Fixed a scrollbar-jump stall** — Dragging the gallery scrollbar to a distant position could leave the newly visible area stuck behind stale loading requests for the position you scrolled away from, sometimes for several seconds. It now loads immediately.
-- **File-picker fallback for rare native-dialog crashes** — On some Windows setups the native file/folder picker can abort the app (shell preview handlers / cloud overlays over the OpenGL view). The standard native picker remains the default; set `RAWVIEWER_QT_FILE_DIALOG=1` to switch to a stable cross-platform picker if you hit this.
-
-### Gallery — portrait photos crop-fit into landscape tiles
-Some users saw **vertical shots displayed inside a horizontal tile frame** (portrait content center-cropped to fill a landscape rectangle) when **entering the gallery** or **jumping to a distant scroll position**. This is different from v2.4.1’s *sideways* thumbnails — here the image was upright but the **justified tile geometry** was wrong.
-
-**Cause:** The gallery could measure tile aspect from **unoriented embedded-JPEG pixels** pulled straight from the global thumbnail cache (common on Sony ARW and similar RAW) before container EXIF display orientation was applied. That wrong aspect was stored and reused for layout. Additionally, semantic-index pre-seed and `on_exif_ready` merge logic **normalized `orientation` to 1** while baking display dimensions into `original_width`/`original_height`, which gave correct portrait **tile geometry** but left thumbnails **unrotated** (sideways in a portrait frame). The visible tile `rect` only updates after a full `build_gallery` rebuild, which was debounced during fast scroll.
-
-**What's fixed:**
-- **Preserve container orientation** — Gallery layout metadata now keeps sensor dimensions + real EXIF orientation tag (not `orientation=1` with pre-swapped dims).
-- **EXIF-aware aspect measurement** — When decoded thumbnail pixels disagree with container EXIF on portrait vs landscape, layout trusts EXIF display dimensions instead of locking the wrong pixel aspect.
-- **Orient on every gallery cache path** — Global cache → gallery tile conversion applies container rotation; stale scaled variants are invalidated after re-orient.
-- **Faster relayout on orientation flip** — Portrait ↔ landscape aspect changes trigger a shorter debounced `build_gallery` rebuild.
-- **Late EXIF arrival** — When metadata arrives after the first paint, stored measured aspects and cached base pixmaps are corrected if they conflict with the new EXIF.
-
-**If a portrait tile still looks wrong once:** Run **`scripts/Launch/shell/clear_cache.sh`** (macOS) or **`scripts/Launch/bat/clear_cache.bat`** (Windows), then reopen the folder — stale unoriented grid/thumbnail cache entries from before this fix can otherwise sit beside freshly oriented ones.
-
-### Single view — crash during background metadata indexing (Windows)
-On **very large folders** (6000+ RAW), background metadata indexing could start while you were still **navigating in single-image view** (arrow keys, full-resolution decode, LibRaw prefetch). That stacked indexing I/O on top of display loads and could abort the process with exit code **`-805306369`** (`0xCFFFFFFF`) — the same native-abort class as the gallery GL crash, but triggered by **resource contention**, not gallery entry.
-
-**What's fixed:**
-- **Defer indexing during single-view load pressure** — navigation in progress, recent navigation, **RAW recovery (P)**, **zoomed view** (wheel / Space / double-click), or an active ImageLoadManager queue delays the metadata index worker (same pattern as gallery warmup deferral).
-- **Defer after prep completes** — the worker no longer starts immediately after the 6882-file prep scan if single-view is still busy; it retries on a timer instead of marking the pass complete.
-- **Huge folders in single view** — folders with 1000+ pending EXIF extracts wait for ~45s of idle time (or switch to gallery) before launching the parallel metadata worker.
-- **ILM throttle at index worker start** — background metadata indexing now engages the semantic indexing throttle immediately, not only during the later AI embedding phase.
-- **Idle display prefetch paused** — neighbor full-res prefetch stops while the metadata worker runs.
-- **Metadata extraction throttling** — parallel EXIF extraction during `build_index` acquires the load throttle before spawning workers.
+### Windows stability
+- **Gallery GPU hand-off** — Switching from single image to gallery after viewing a large photo no longer races GPU teardown on some Windows drivers.
+- **Scrollbar responsiveness** — Dragging the gallery scrollbar to a distant position loads the newly visible tiles immediately instead of waiting on stale requests from the previous scroll position.
+- **File-picker fallback** — On some Windows setups the native file/folder picker can abort the app (shell preview handlers / cloud overlays). The standard native picker remains the default; set `RAWVIEWER_QT_FILE_DIALOG=1` for a stable cross-platform picker if needed.
 
 ---
 
@@ -431,7 +420,7 @@ Includes fixes from **2.0.1** (Pixel DNG, gallery aspect ratio, DNG single-view 
 ## 🚀 版本 2.5.0
 **發布日期：2026 年 6 月 25 日**
 
-主要版本，引入了自訂藝廊縮放滑桿、捲動錨定、互動式 GPS 地圖覆蓋、macOS HDR/EDR 顯示，以及動畫 GIF/WebP 播放功能。
+主要版本，以**大資料夾效能**為重點 — 更快的導覽、更精簡的磁碟快取、更聰明的背景索引 — 並新增自訂藝廊縮放滑桿、捲動錨定、互動式 GPS 地圖覆蓋、macOS HDR/EDR 顯示，以及動畫 GIF/WebP 播放功能。
 
 ### 藝廊縮放滑桿與捲動錨定
 - **藝廊縮放滑桿** —— 在藝廊視圖底部列新增自訂 slanted 楔形縮放軌道與圓形滑桿（列高 **220–380px**，步進 20）。設定儲存於 `QSettings`（`gallery_row_height`）。
@@ -451,11 +440,31 @@ Includes fixes from **2.0.1** (Pixel DNG, gallery aspect ratio, DNG single-view 
 ### 動畫 GIF 與 WebP 播放
 - **動畫預覽** —— 增強了影像檢視器管線，完整支援播放、縮放和播放動畫 GIF 及 WebP 檔案，顯示播放狀態訊息，並無縫處理動態視窗縮放。
 
-### 效能與藝廊
-- **更順暢的導覽** —— 底片條預熱分段節流；切換照片時取消低優先級預取。狀態列 RAW 感測器尺寸改在背景執行緒解析；相同狀態列更新會去重。底片條刷新與預取改為等待單圖首次繪製（TTFR）。
-- **外接磁碟** —— 每個掛載點探測一次讀取速度，以調整慢速磁碟的 I/O 節流。
-- **藝廊切換資料夾** —— 每個資料夾重設版面與縮圖載入，修正切換相簿後縮圖散亂或大片空白。
-- **大型資料夾** —— 藝廊以拍攝時間（EXIF）排序；Gallery 按鈕在排序完成後出現（中繼資料已快取時幾乎即時）。
-- **背景索引** —— 開啟不同相簿時，取消上一資料夾的中繼資料與語意索引。
-- **快速開啟延遲** —— 背景掃描、EXIF 排序與底片條預取改為 TTFR 或約 2.5 秒上限，取代固定 5 秒睡眠。
-- **搜尋與中繼資料** —— 更快的 EXIF 快取查詢、索引期間 KD-tree 逆地理編碼，以及大型資料夾的 UI 執行緒排序改至背景 worker。
+### 效能與回應性
+
+2.5.0 將**大型圖庫與日常導覽**視為核心目標，涵蓋縮圖快取、索引管線、藝廊版面與單圖載入，在內建 SSD 與外接慢速磁碟上皆能維持流暢。
+
+**縮圖快取與磁碟 I/O** — 藝廊、底片條與索引預熱共用**統一解碼路徑**，一次解碼即可填滿 preview / grid / thumbnail 各層級。磁碟上的 grid 與 thumbnail 改為 **WebP**（較小、讀取更快），並以**依大小的 LRU 驅逐**控制 `~/.rawviewer_cache` 成長。每個掛載點**探測讀取速度**以調整外接碟 I/O 節流。
+
+**從舊版升級（JPEG → WebP）：**
+- **繼續使用現有的 JPEG 快取** — 升級時不會整批轉檔；讀取端依檔案內容自動辨識格式，因此不影響既有快取資料夾的使用體驗。
+- **舊版留下的 JPEG 快取會一直用到失效或被清掉** — 僅在來源檔變更、LRU 驅逐、方向校正清除或過期後才會以 WebP 重新寫入。
+- **若想提早改用 WebP 以節省空間** — 可手動刪除快取（macOS：`scripts/Launch/shell/clear_cache.sh`；Windows：`scripts\Launch\bat\clear_cache.bat`），下次開啟資料夾時會以 WebP 重建。
+
+**背景索引** — 中繼資料與語意嵌入分**兩階段**協調執行；**拍攝時間排序探測**寫入 EXIF 資料庫，重開同一資料夾可跳過大量重複 stat。GPS 以 **KD-tree** 做逆地理編碼；語意索引**重用 ImageCache 中的 EXIF**，避免 UI 執行緒重複解析。切換相簿時**立即取消**上一資料夾的 worker 與預取；超大資料夾在單圖導覽忙碌時**延後**中繼資料擷取。
+
+**單圖導覽** — 底片條預熱分段節流；切換照片時**取消低優先級預取**。**全解析度鄰近預取**不再在每次方向鍵時搶先啟動。狀態列感測器尺寸於背景執行緒解析；**狀態列更新去重**；**工作階段寫入 debounce**（約 400 ms）。超大 numpy→QPixmap 轉換於背景 worker 完成。
+
+**藝廊與搜尋 UI** — 大型資料夾重排序與語意搜尋排序改由**背景 worker** 處理。**快速開啟**延遲至**首次繪製（TTFR）**；捲動時**暫停索引**；**局部列重建**更新長寬比；EXIF SQLite **加大快取頁**與**批次 commit**。
+
+**預期感受：** 索引進行中仍順暢瀏覽、重訪資料夾更快、磁碟快取更精簡、5k–10k+ 張圖庫捲動更穩定。
+
+### 藝廊可靠性（大型資料夾）
+- **切換資料夾** — 每個資料夾重設版面與縮圖載入。
+- **大型資料夾** — 以 EXIF 拍攝時間排序；中繼資料已快取時 Gallery 按鈕幾乎即時出現。
+- **方向感知縮圖** — 縮圖進入藝廊時一致套用 EXIF 顯示方向。
+
+### Windows 穩定性
+- **藝廊 GPU 切換** — 在 Windows 部分顯示卡驅動上，從單圖切回藝廊時不再與 GPU 釋放競爭。
+- **捲軸回應** — 將藝廊捲軸拖到遠處時，新可見區域會立即載入，不再被舊捲動位置的請求卡住。
+- **檔案選擇器備援** — 原生檔案/資料夾選擇器在部分 Windows 環境可能導致當機；預設仍使用原生選擇器，必要時可設定 `RAWVIEWER_QT_FILE_DIALOG=1` 改用跨平台選擇器。

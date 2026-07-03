@@ -726,7 +726,9 @@ class ThumbnailExtractor(QObject):
             pass
 
         try:
+            from PIL import Image, ImageOps
             with Image.open(file_path) as img:
+                img = ImageOps.exif_transpose(img)
                 if target_size is not None and isinstance(target_size, QSize):
                     img.thumbnail((target_size.width(), target_size.height()), Image.Resampling.HAMMING)
                 else:
