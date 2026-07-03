@@ -6,6 +6,7 @@ Applies Exposure, Contrast, Highlights, Shadows, Whites, Blacks, Temp, Tint, Sat
 from __future__ import annotations
 
 import os
+import tempfile
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from typing import Callable, Dict
@@ -503,7 +504,25 @@ def write_xmp_adjustments(xmp_path: str, adj: Dict[str, float]) -> None:
     parent = os.path.dirname(os.path.abspath(xmp_path))
     if parent:
         os.makedirs(parent, exist_ok=True)
-    tree.write(xmp_path, encoding="utf-8", xml_declaration=True)
+
+    # Atomic write: write to a temp file in the same directory, then os.replace()
+    # (atomic on POSIX and Windows). A direct tree.write(xmp_path, ...) could leave
+    # a truncated/corrupted sidecar if interrupted (crash, force-quit, disk full)
+    # mid-write, or if two writers race on the same path (e.g. the export worker
+    # and a slider release firing concurrently).
+    fd, tmp_path = tempfile.mkstemp(
+        dir=parent or None, prefix=os.path.basename(xmp_path) + ".", suffix=".tmp"
+    )
+    try:
+        with os.fdopen(fd, "wb") as f:
+            tree.write(f, encoding="utf-8", xml_declaration=True)
+        os.replace(tmp_path, xmp_path)
+    except BaseException:
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+        raise
 
 
 def write_xmp_adjustments_for_file(image_path: str, adj: Dict[str, float]) -> None:

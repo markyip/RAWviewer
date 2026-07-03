@@ -224,7 +224,25 @@ Constants: `RECOVERY_BASELINE_SHADOWS2012`, `RECOVERY_BASELINE_HIGHLIGHTS2012` i
 | DNG — copy RAW + XMP settings | Original file copy + sidecar | Lightroom / Camera Raw round-trip |
 | DNG — baked 16-bit RGB | Display-referred RGB in DNG container | Editors that open RGB DNG |
 
-Export writes XMP to the **source** file before baking (except settings-only DNG copies to destination + new sidecar).
+16-bit TIFF and baked-DNG both write via **`tifffile`** (`_write_16bit_rgb_tiff`
+in `raw_edit_pipeline.py`), not Pillow — Pillow's `"RGB"` mode is defined as
+8-bit-per-channel with no 16-bit 3-channel mode at all, so
+`Image.fromarray(uint16_array, mode="RGB")` has no valid type-lookup entry
+(crashes on newer Pillow; silently truncates to 8-bit via any raw-mode
+workaround on older Pillow — see Performance review #13). Compression is
+`deflate` (not LZW): LZW requires the separate `imagecodecs` package, which
+isn't a project dependency. XMP (tag 700) and the DNG-only `DNGVersion`
+(50706) / `UniqueCameraModel` (50741) tags are written via `extratags`.
+
+Export always writes XMP to the **source** file first (best-effort, for every
+format including settings-only DNG — this was previously documented as an
+exception for DNG-settings, which didn't match the code; keeping the source's
+sidecar in sync regardless of export format is also what the gallery's
+"edited" badge relies on). "DNG — copy RAW + XMP settings" additionally writes
+a **second**, independent sidecar next to the copied destination file. The
+source-sidecar write cannot fail the export: if it can't be written (e.g. the
+source is on read-only media), the requested export to `output_path` still
+proceeds, and no (potentially stale) XMP is embedded in baked TIFF/DNG output.
 
 ---
 
@@ -252,7 +270,7 @@ Written on slider / curve release and before export:
 | `raw_hsl.py` | 8-color HSL in HSV space |
 | `raw_detail_enhance.py` | Sharpness, Clarity, Defringe |
 | `raw_chroma_denoise.py` | Chroma (Cb/Cr) + luma (Y) bilateral denoise (OpenCV) |
-| `raw_edit_pipeline.py` | Shared pipeline + export dispatch |
+| `raw_edit_pipeline.py` | Shared pipeline + export dispatch; 16-bit TIFF/DNG-RGB via `tifffile` |
 | `raw_adjustments.py` | XMP I/O, defaults, `apply_adjustments_to_linear` |
 | `rawviewer_ui/adjust_panel.py` | Adjust panel UI |
 | `rawviewer_ui/tone_curve_widget.py` | Draggable point curve editor (optional UI) |
@@ -266,7 +284,7 @@ Written on slider / curve release and before export:
 
 | Variable | Default | Effect |
 |----------|---------|--------|
-| `RAWVIEWER_EDIT_CHROMA_DENOISE` | `1` | Chroma NLM on export when panel NR off |
+| `RAWVIEWER_EDIT_CHROMA_DENOISE` | `1` | Chroma denoise (bilateral) on export when panel NR off |
 
 ---
 
@@ -307,7 +325,10 @@ Written on slider / curve release and before export:
     sky) — no green tint after toggling on
 14. **Luma NR** slider on a noisy high-ISO shot — grain visibly reduces; hard edges
     (e.g. a horizon line) stay sharp, no smearing
-15. `PYTHONPATH=src python3 scripts/phase_develop_adjust_linear.py`
+15. **Export…** — every format (TIFF16, JPEG, WebP, DNG-settings, DNG-RGB)
+    completes without error; open the 16-bit TIFF/DNG in another app and confirm
+    it's genuinely 16-bit (not silently 8-bit)
+16. `PYTHONPATH=src python3 scripts/phase_develop_adjust_linear.py`
 
 To re-enable tone curve UI: set `_SHOW_TONE_CURVE_UI = True` in `adjust_panel.py`.
 To re-enable HSL UI: set `_SHOW_HSL_UI = True` in `adjust_panel.py` (fix the `raw_hsl.py`
@@ -318,11 +339,17 @@ colorspace-scale bug first — see Performance review #6).
 ## Known limitations / future work
 
 - Tone curve + parametric PV sliders hidden in UI (pipeline still present)
+- HSL 分色 hidden in UI; `raw_hsl.py` has an open colorspace-scale bug — fix before
+  re-enabling (see Performance review #6)
 - No per-channel (R/G/B) tone curves
 - No mask / brush / gradient local edits
 - Recovery baseline is preview-session UI state, not persisted in XMP
 - Baked DNG is RGB container DNG, not a re-encoded sensor RAW
 - Point curve uses linear interpolation between knots (not LR cubic spline)
+- No incremental/staged recompute — every slider tick reruns the full pipeline
+  (see Performance review #2/#3)
+- `decode_raw_edit_base`'s `executor` parameter is accepted but unused; decode
+  always runs in-process (see Performance review #4)
 
 ---
 
@@ -433,6 +460,8 @@ recompute.
 
 | 11 | `raw_chroma_denoise.apply_chroma_nlm` (superseded by `apply_chroma_denoise`, see #12) converted Cb/Cr from float to uint8 via a bare `.astype(np.uint8)`, which **truncates toward zero** rather than rounding. Cb/Cr fractional parts are effectively uniformly distributed, so truncation biases both channels ~-0.5 LSB (≈-0.00196 in [0,1]) low on average -- not randomly, systematically, every pixel, every call. The YCbCr→RGB inverse (`R = Y + 1.5748·Cr0`, `G = Y - 0.1873·Cb0 - 0.4681·Cr0`, `B = Y + 1.8556·Cb0`) turns a uniform negative bias in *both* Cb and Cr into less R, less B, and **more G** — a systematic green cast on every image that goes through Chroma NR, reported by a user as "casts a green shade" | Reproduced the bias in isolation (quantize/dequantize Cb+Cr with **zero** actual NLM denoising applied): mean RGB delta on a neutral-gray test image = `[-0.00308, +0.00128, -0.00363]`, reproducible to 4 decimal places across 15 random-noise seeds (not noise-dependent). Matches the predicted truncation bias (`-0.5/255 = -0.00196`) driven through the same inverse-transform coefficients almost exactly | **Fixed** (then superseded) — added `+ 0.5` before both `.astype(np.uint8)` casts (round-to-nearest, matching the pattern already used in the sRGB encode LUTs from finding #1). Re-verified: residual mean RGB delta dropped to ~1e-5–2e-4. Superseded by #12, which removes the uint8 round-trip entirely |
 | 12 | Follow-up to a "is there a better NR than chroma NR" question: (a) chroma NR used NLM (`cv2.fastNlMeansDenoising`), one of the more expensive denoise algorithms, on a full preview/export buffer; (b) there was no luminance noise reduction at all — only Cb/Cr were ever touched, so grainy high-ISO detail noise went untreated | Benchmarked NLM vs. bilateral filter (`cv2.bilateralFilter`, applied directly on float32, no uint8 step) at realistic sizes: **19-22× faster** (1200×1800: 232ms→12ms; 2500×3750: 1105ms→50ms per channel). Bilateral also verified edge-preserving: a hard color-edge transition stays 0px wide even at max strength, while a flat noisy region's std-dev drops 71-81% depending on sigmaColor | **Implemented** — `apply_chroma_nlm` replaced with `apply_chroma_denoise` (bilateral, sigmaColor 0.03-0.15, no uint8 round-trip — also eliminates the whole bug class from #11 structurally, not just patched). Added `apply_luma_denoise` (bilateral on Y only, gentler sigmaColor 0.015-0.065 since luminance carries real detail unlike chroma) with a new **Luma NR** slider (`LuminanceNoiseReduction`, 0-100, `adjust_panel.py`/XMP) sitting above the existing Chroma NR toggle under a new "Noise" section. 6 new smoke tests added covering noise reduction, edge preservation, and pipeline wiring for both filters |
+
+| 13 | Both 16-bit TIFF and baked-DNG-RGB export crashed outright: `Image.fromarray(out, mode="RGB")` with a uint16 3-channel array has no valid entry in Pillow's `fromarray` type-lookup table, because Pillow's `"RGB"` mode is *defined* as 8-bit-per-channel -- there is no Pillow mode for 16-bit 3-channel data at all, on any version. `pixi.toml` pinned `Pillow = ">=10.0.0"` with no upper bound, so whichever Pillow version an environment resolves determines whether this crashes (newer Pillow, confirmed on 12.2.0) or "succeeds" while silently discarding the low byte on every channel (older Pillow / any raw-mode workaround) -- reported by a user as "export failed" | Reproduced with `export_adjusted_tiff16`/`export_adjusted_dng_rgb` on synthetic data: `TypeError: Cannot handle this data type: (1, 1, 3), <u2` (that shape is Pillow's internal lookup-key shorthand, not the actual array shape -- verified the real array was a normal `(200, 300, 3)` right up to the failing call by tracing into Pillow's own `fromarray` source). Separately, JPEG export crashed too: `subsampling=0` + `optimize=True` together triggered a libjpeg "Suspension not allowed here" encoder error, reproduced with a plain synthetic uint8 array and zero RAWViewer-specific code -- either flag alone works | **Fixed** -- 16-bit TIFF/DNG-RGB now write via `tifffile` (`_write_16bit_rgb_tiff`), bypassing Pillow's Image model entirely for this path; `tifffile` added as a project dependency (`pixi.toml`/`pixi.lock`). Compression is `deflate`, not LZW (LZW needs the separate `imagecodecs` package, not a project dependency). XMP (tag 700) and the DNG-only `DNGVersion`/`UniqueCameraModel` tags move to `extratags`. Verified true 16-bit output (values >255 present, not silently 8-bit) and correct XMP/DNG-tag round-trip. JPEG export drops `optimize=True` (pure file-size optimization, no visible quality loss) and keeps `subsampling=0` (matters for color fidelity). 4 new smoke tests added covering all of the above |
 
 Numbers were captured with `raw_edit_pipeline.process_linear_edit_buffer` +
 `linear_to_display_uint8` directly (no Qt/GUI thread involved); see the

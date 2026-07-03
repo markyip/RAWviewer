@@ -390,6 +390,149 @@ def test_recovery_tone_map_preserves_resolution() -> None:
     assert out.shape == (h, w, 3)
 
 
+def test_write_xmp_adjustments_atomic_no_temp_leftovers() -> None:
+    """Atomic write (temp file + os.replace) must leave no stray .tmp files."""
+    import tempfile
+
+    from raw_adjustments import parse_xmp_adjustments, write_xmp_adjustments
+
+    adj = dict(DEFAULT_ADJUSTMENTS)
+    adj["Exposure2012"] = 0.75
+    adj["LuminanceNoiseReduction"] = 40.0
+    with tempfile.TemporaryDirectory() as d:
+        xmp_path = os.path.join(d, "test.xmp")
+        write_xmp_adjustments(xmp_path, adj)
+        assert os.path.isfile(xmp_path)
+        assert os.listdir(d) == ["test.xmp"], f"leftover temp files: {os.listdir(d)}"
+        parsed = parse_xmp_adjustments(xmp_path)
+        assert abs(parsed.get("Exposure2012", 0.0) - 0.75) < 1e-6
+        assert abs(parsed.get("LuminanceNoiseReduction", 0.0) - 40.0) < 1e-6
+
+        write_xmp_adjustments(xmp_path, dict(DEFAULT_ADJUSTMENTS))
+        assert not os.path.isfile(xmp_path), "reset-to-default must remove the sidecar"
+        assert os.listdir(d) == []
+
+
+def test_export_source_xmp_failure_does_not_block_export() -> None:
+    """A source-sidecar write failure must not prevent exporting to output_path
+    (regression guard for the export-flow review's Finding 1)."""
+    import tempfile
+
+    import raw_adjustments
+
+    def failing_write(image_path, adj):
+        raise PermissionError("simulated read-only source")
+
+    original = raw_adjustments.write_xmp_adjustments_for_file
+    raw_adjustments.write_xmp_adjustments_for_file = failing_write
+    try:
+        xmp_warning = None
+        embed_xmp = None
+        try:
+            raw_adjustments.write_xmp_adjustments_for_file("/fake/source.dng", {})
+        except Exception as exc:
+            xmp_warning = exc
+        else:
+            embed_xmp = "unexpected-should-not-happen"
+
+        from raw_edit_pipeline import export_adjusted_jpeg
+
+        rng = np.random.default_rng(7)
+        linear = rng.integers(1000, 20000, (16, 16, 3), dtype=np.uint16)
+        with tempfile.TemporaryDirectory() as d:
+            out_path = os.path.join(d, "out.jpg")
+            export_adjusted_jpeg(linear, dict(DEFAULT_ADJUSTMENTS), out_path)
+            assert os.path.isfile(out_path)
+        assert xmp_warning is not None
+        assert embed_xmp is None
+    finally:
+        raw_adjustments.write_xmp_adjustments_for_file = original
+
+
+def test_export_tiff16_true_16bit_precision() -> None:
+    """Pillow's "RGB" mode is 8-bit-only; Image.fromarray(uint16_arr, mode="RGB")
+    has no valid typemap entry on newer Pillow (crashes) and silently truncates
+    to 8-bit via any raw-mode workaround. tifffile must produce genuine 16-bit
+    output, not just avoid crashing."""
+    import tempfile
+
+    import tifffile as _tifffile
+
+    from raw_edit_pipeline import export_adjusted_tiff16
+
+    rng = np.random.default_rng(1)
+    linear = rng.integers(1000, 60000, (48, 64, 3), dtype=np.uint16)
+    with tempfile.TemporaryDirectory() as d:
+        out_path = os.path.join(d, "out.tif")
+        export_adjusted_tiff16(linear, dict(DEFAULT_ADJUSTMENTS), out_path)
+        assert os.path.isfile(out_path)
+        with _tifffile.TiffFile(out_path) as tf:
+            arr = tf.pages[0].asarray()
+            assert arr.dtype == np.uint16
+            assert arr.shape == (48, 64, 3)
+            assert int((arr > 255).sum()) > 0, "output collapsed to 8-bit range"
+
+
+def test_export_tiff16_embeds_xmp() -> None:
+    import tempfile
+
+    import tifffile as _tifffile
+
+    from raw_edit_pipeline import export_adjusted_tiff16
+
+    rng = np.random.default_rng(2)
+    linear = rng.integers(1000, 60000, (32, 32, 3), dtype=np.uint16)
+    with tempfile.TemporaryDirectory() as d:
+        xmp_path = os.path.join(d, "src.xmp")
+        xmp_bytes = b'<x:xmpmeta xmlns:x="adobe:ns:meta/"></x:xmpmeta>'
+        with open(xmp_path, "wb") as f:
+            f.write(xmp_bytes)
+        out_path = os.path.join(d, "out.tif")
+        export_adjusted_tiff16(
+            linear, dict(DEFAULT_ADJUSTMENTS), out_path, embed_xmp_path=xmp_path
+        )
+        with _tifffile.TiffFile(out_path) as tf:
+            xmp_tag = next((t for t in tf.pages[0].tags if t.code == 700), None)
+            assert xmp_tag is not None
+            assert bytes(xmp_tag.value) == xmp_bytes
+
+
+def test_export_dng_rgb_writes_and_has_dng_tags() -> None:
+    import tempfile
+
+    import tifffile as _tifffile
+
+    from raw_edit_pipeline import export_adjusted_dng_rgb
+
+    rng = np.random.default_rng(4)
+    linear = rng.integers(1000, 60000, (32, 32, 3), dtype=np.uint16)
+    with tempfile.TemporaryDirectory() as d:
+        out_path = os.path.join(d, "out.dng")
+        export_adjusted_dng_rgb(linear, dict(DEFAULT_ADJUSTMENTS), out_path)
+        assert os.path.isfile(out_path)
+        with _tifffile.TiffFile(out_path) as tf:
+            tags = {t.code: t.value for t in tf.pages[0].tags}
+            assert tags.get(50706) == b"\x01\x04\x00\x00"
+
+
+def test_export_jpeg_no_libjpeg_suspension_crash() -> None:
+    """subsampling=0 + optimize=True together triggered a libjpeg 'Suspension
+    not allowed here' encoder crash on some Pillow/libjpeg builds -- reproduced
+    with a plain synthetic array, unrelated to any RAWViewer-specific data.
+    Regression guard at the same size that reproduced it."""
+    import tempfile
+
+    from raw_edit_pipeline import export_adjusted_jpeg
+
+    rng = np.random.default_rng(0)
+    linear = rng.integers(1000, 60000, (200, 300, 3), dtype=np.uint16)
+    with tempfile.TemporaryDirectory() as d:
+        out_path = os.path.join(d, "out.jpg")
+        export_adjusted_jpeg(linear, dict(DEFAULT_ADJUSTMENTS), out_path)
+        assert os.path.isfile(out_path)
+        assert os.path.getsize(out_path) > 100
+
+
 def test_export_jpeg_roundtrip() -> None:
     import tempfile
 
@@ -490,6 +633,12 @@ def main() -> int:
     test_recovery_baseline_with_slider_hints()
     test_recovery_baseline_differs_from_default()
     test_recovery_tone_map_preserves_resolution()
+    test_write_xmp_adjustments_atomic_no_temp_leftovers()
+    test_export_source_xmp_failure_does_not_block_export()
+    test_export_tiff16_true_16bit_precision()
+    test_export_tiff16_embeds_xmp()
+    test_export_dng_rgb_writes_and_has_dng_tags()
+    test_export_jpeg_no_libjpeg_suspension_crash()
     test_export_jpeg_roundtrip()
     test_tone_curve_point_helpers()
     test_wb_dropper_solve_neutralizes_sample()

@@ -241,6 +241,54 @@ def _process_for_export(rgb_linear: np.ndarray, adj: dict[str, float]) -> np.nda
     )
 
 
+def _xmp_extratags(embed_xmp_path: Optional[str]) -> list:
+    if not embed_xmp_path or not os.path.isfile(embed_xmp_path):
+        return []
+    with open(embed_xmp_path, "rb") as f:
+        xmp_bytes = f.read()
+    return [(700, "B", len(xmp_bytes), xmp_bytes, False)]
+
+
+def _write_16bit_rgb_tiff(
+    output_path: str,
+    rgb_uint16: np.ndarray,
+    *,
+    embed_xmp_path: Optional[str] = None,
+    dng_tags: bool = False,
+) -> None:
+    """
+    Write a genuine 16-bit-per-channel, 3-sample RGB TIFF via ``tifffile``.
+
+    Pillow's ``"RGB"`` mode is defined as 8-bit-per-channel -- there is no
+    Pillow mode for 16-bit 3-channel data, so ``Image.fromarray(arr,
+    mode="RGB")`` with a uint16 array has no valid type-lookup entry. On
+    Pillow >=~10 (this project pins ">=10.0.0" with no upper bound) that
+    raises outright; workarounds via ``Image.frombuffer`` with a "RGB;16*"
+    raw mode "succeed" but silently discard the low byte, since the
+    underlying storage is 8-bit regardless. Both are unacceptable for a
+    "16-bit TIFF" export, so this path bypasses Pillow's Image model
+    entirely for 16-bit RGB. ``compression="deflate"`` (not the previous
+    LZW) needs no extra codec package; ``lzw`` requires ``imagecodecs``,
+    which isn't a project dependency.
+    """
+    import tifffile
+
+    extratags = _xmp_extratags(embed_xmp_path)
+    if dng_tags:
+        extratags = extratags + [
+            (50706, "B", 4, (1, 4, 0, 0), False),  # DNGVersion
+            (50741, "s", 4, b"RGB ", False),  # UniqueCameraModel
+        ]
+    _ensure_parent_dir(output_path)
+    tifffile.imwrite(
+        output_path,
+        rgb_uint16,
+        photometric="rgb",
+        compression="deflate",
+        extratags=extratags or None,
+    )
+
+
 def export_adjusted_tiff16(
     rgb_linear: np.ndarray,
     adj: dict[str, float],
@@ -251,16 +299,7 @@ def export_adjusted_tiff16(
     """Bake adjustments to 16-bit sRGB TIFF; optionally embed XMP packet."""
     processed = _process_for_export(rgb_linear, adj)
     out = linear_to_export_uint16_srgb(processed, adj)
-    from PIL import Image
-
-    im = Image.fromarray(out, mode="RGB")
-    save_kwargs: dict = {"format": "TIFF", "compression": "tiff_lzw"}
-    if embed_xmp_path and os.path.isfile(embed_xmp_path):
-        with open(embed_xmp_path, "rb") as f:
-            xmp_bytes = f.read()
-        save_kwargs["xmp"] = xmp_bytes
-    _ensure_parent_dir(output_path)
-    im.save(output_path, **save_kwargs)
+    _write_16bit_rgb_tiff(output_path, out, embed_xmp_path=embed_xmp_path)
 
 
 def export_adjusted_jpeg(
@@ -282,7 +321,13 @@ def export_adjusted_jpeg(
         format="JPEG",
         quality=max(1, min(100, int(quality))),
         subsampling=0,
-        optimize=True,
+        # Deliberately no optimize=True: that flag combined with
+        # subsampling=0 triggers a libjpeg "Suspension not allowed here"
+        # encoder crash on some Pillow/libjpeg builds -- reproduced with a
+        # plain synthetic array, unrelated to any RAWViewer-specific data.
+        # subsampling=0 (no chroma subsampling) matters for color fidelity;
+        # optimize is a pure file-size optimization with no visible quality
+        # difference, not worth the crash risk.
     )
 
 
@@ -308,16 +353,6 @@ def export_adjusted_webp(
     )
 
 
-def _dng_tiffinfo():
-    """Minimal DNGVersion tag so Lightroom / ACR can open baked RGB exports."""
-    from PIL.TiffImagePlugin import ImageFileDirectory_v2
-
-    info = ImageFileDirectory_v2()
-    info[50706] = (1, 4, 0, 0)  # DNGVersion
-    info[50741] = "RGB "  # UniqueCameraModel (padded to 4 chars)
-    return info
-
-
 def export_adjusted_dng_rgb(
     rgb_linear: np.ndarray,
     adj: dict[str, float],
@@ -328,19 +363,9 @@ def export_adjusted_dng_rgb(
     """Bake adjustments to 16-bit linear RGB DNG (display-referred sRGB, DNG container)."""
     processed = _process_for_export(rgb_linear, adj)
     out = linear_to_export_uint16_srgb(processed, adj)
-    from PIL import Image
-
-    im = Image.fromarray(out, mode="RGB")
-    save_kwargs: dict = {
-        "format": "TIFF",
-        "compression": "tiff_lzw",
-        "tiffinfo": _dng_tiffinfo(),
-    }
-    if embed_xmp_path and os.path.isfile(embed_xmp_path):
-        with open(embed_xmp_path, "rb") as f:
-            save_kwargs["xmp"] = f.read()
-    _ensure_parent_dir(output_path)
-    im.save(output_path, **save_kwargs)
+    _write_16bit_rgb_tiff(
+        output_path, out, embed_xmp_path=embed_xmp_path, dng_tags=True
+    )
 
 
 def export_raw_with_xmp_settings(

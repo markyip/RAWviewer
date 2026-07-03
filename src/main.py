@@ -1829,7 +1829,8 @@ class _AdjustEditBaseWorker(QRunnable):
 
 
 class _AdjustExportSignals(QObject):
-    finished = pyqtSignal(str, str, str, object)  # source, output, format, error|None
+    # source, output, format, error|None, xmp_warning|None
+    finished = pyqtSignal(str, str, str, object, object)
 
 
 class _AdjustExportWorker(QRunnable):
@@ -1854,6 +1855,7 @@ class _AdjustExportWorker(QRunnable):
 
     def run(self) -> None:
         err = None
+        xmp_warning = None
         try:
             from raw_adjustments import resolve_xmp_path, write_xmp_adjustments_for_file
             from raw_edit_pipeline import (
@@ -1862,11 +1864,23 @@ class _AdjustExportWorker(QRunnable):
             )
             from unified_image_processor import UnifiedImageProcessor
 
-            write_xmp_adjustments_for_file(self.file_path, self.adj)
-            xmp_path = resolve_xmp_path(self.file_path)
-            embed_xmp = (
-                xmp_path if xmp_path and os.path.isfile(xmp_path) else None
-            )
+            # Best-effort: keep the source file's sidecar in sync with what's
+            # being baked/copied. This must NOT block the export itself -- the
+            # destination the user picked (output_path) can be perfectly
+            # writable even when the source isn't (e.g. browsing a read-only
+            # volume or SD card). If the write fails, don't embed a sidecar
+            # that may now be stale relative to this export.
+            embed_xmp = None
+            try:
+                write_xmp_adjustments_for_file(self.file_path, self.adj)
+            except Exception as xmp_exc:
+                xmp_warning = xmp_exc
+            else:
+                xmp_path = resolve_xmp_path(self.file_path)
+                embed_xmp = (
+                    xmp_path if xmp_path and os.path.isfile(xmp_path) else None
+                )
+
             base = None
             if self.export_format != EXPORT_FORMAT_DNG_SETTINGS:
                 processor = UnifiedImageProcessor()
@@ -1886,7 +1900,7 @@ class _AdjustExportWorker(QRunnable):
         except Exception as exc:
             err = exc
         self.signals.finished.emit(
-            self.file_path, self.output_path, self.export_format, err
+            self.file_path, self.output_path, self.export_format, err, xmp_warning
         )
 
 
@@ -18433,7 +18447,12 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         QThreadPool.globalInstance().start(worker)
 
     def _on_adjust_export_finished(
-        self, source_path: str, output_path: str, export_format: str, err: object
+        self,
+        source_path: str,
+        output_path: str,
+        export_format: str,
+        err: object,
+        xmp_warning: object = None,
     ) -> None:
         self._adjust_export_in_progress = False
         panel = getattr(self, "single_image_adjust_panel", None)
@@ -18457,9 +18476,16 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         }
         label = labels.get(fmt, "image")
         if hasattr(self, "status_bar"):
-            self.status_bar.showMessage(
-                f"Exported {label}: {os.path.basename(output_path)}", 5000
-            )
+            if xmp_warning is not None:
+                self.status_bar.showMessage(
+                    f"Exported {label}: {os.path.basename(output_path)}"
+                    f" (source XMP not updated: {xmp_warning})",
+                    7000,
+                )
+            else:
+                self.status_bar.showMessage(
+                    f"Exported {label}: {os.path.basename(output_path)}", 5000
+                )
 
     def _sync_adjust_panel(self) -> None:
         panel = getattr(self, "single_image_adjust_panel", None)
