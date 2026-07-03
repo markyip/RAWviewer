@@ -82,15 +82,92 @@ def test_pv2012_process_version_in_xmp() -> None:
 
 
 def test_chroma_nlm_preserves_luminance_shape() -> None:
-    from raw_chroma_denoise import apply_chroma_nlm
+    from raw_chroma_denoise import apply_chroma_denoise
 
     rng = np.random.default_rng(0)
     rgb = np.clip(rng.random((16, 16, 3), dtype=np.float32) * 0.4 + 0.1, 0, 1)
-    out = apply_chroma_nlm(rgb, strength=1.0, preview=True)
+    out = apply_chroma_denoise(rgb, strength=1.0, preview=True)
     assert out.shape == rgb.shape
     lum_in = 0.2126 * rgb[:, :, 0] + 0.7152 * rgb[:, :, 1] + 0.0722 * rgb[:, :, 2]
     lum_out = 0.2126 * out[:, :, 0] + 0.7152 * out[:, :, 1] + 0.0722 * out[:, :, 2]
     assert abs(float(lum_out.mean()) - float(lum_in.mean())) < 0.05
+
+
+def test_chroma_nlm_no_green_cast_on_neutral_gray() -> None:
+    """Regression guard for the old NLM path's uint8-truncation green cast;
+    the bilateral replacement never round-trips through uint8 at all."""
+    from raw_chroma_denoise import apply_chroma_denoise
+
+    h, w = 64, 64
+    base = 0.4
+    rng = np.random.default_rng(0)
+    img = np.stack(
+        [base + rng.normal(0, 0.03, (h, w)) for _ in range(3)], axis=-1
+    ).astype(np.float32)
+    img = np.clip(img, 0.0, 1.0)
+    out = apply_chroma_denoise(img.copy(), strength=0.625, preview=False)
+    delta = out.mean(axis=(0, 1)) - img.mean(axis=(0, 1))
+    assert np.all(np.abs(delta) < 0.001), f"chroma NR shifted mean RGB by {delta} (green-cast regression)"
+
+
+def test_chroma_denoise_reduces_noise_and_preserves_edge() -> None:
+    """Bilateral replacement must still denoise flat regions and keep hard edges sharp."""
+    from raw_chroma_denoise import apply_chroma_denoise
+
+    rng = np.random.default_rng(2)
+    h, w = 80, 80
+    flat = np.full((h, w, 3), 0.4, dtype=np.float32)
+    flat += rng.normal(0, 0.05, (h, w, 3)).astype(np.float32)
+    flat = np.clip(flat, 0.0, 1.0)
+    out = apply_chroma_denoise(flat.copy(), strength=1.0, preview=False)
+    from raw_chroma_denoise import _rgb_to_ycbcr
+
+    _, cb_in, cr_in = _rgb_to_ycbcr(flat)
+    _, cb_out, cr_out = _rgb_to_ycbcr(out)
+    assert cb_out.std() < cb_in.std() * 0.6
+    assert cr_out.std() < cr_in.std() * 0.6
+
+    # A sharp color edge (red|blue) must not bleed noticeably across the boundary.
+    edge = np.zeros((h, w, 3), dtype=np.float32)
+    edge[:, : w // 2] = [0.9, 0.1, 0.1]
+    edge[:, w // 2 :] = [0.1, 0.1, 0.9]
+    out_edge = apply_chroma_denoise(edge.copy(), strength=1.0, preview=False)
+    assert np.allclose(out_edge[h // 2, 2], edge[h // 2, 2], atol=0.05)
+    assert np.allclose(out_edge[h // 2, -3], edge[h // 2, -3], atol=0.05)
+
+
+def test_luma_denoise_reduces_noise_and_preserves_edge() -> None:
+    from raw_chroma_denoise import _rgb_to_ycbcr, apply_luma_denoise
+
+    rng = np.random.default_rng(3)
+    h, w = 80, 80
+    flat = np.full((h, w, 3), 0.4, dtype=np.float32)
+    flat += rng.normal(0, 0.05, (h, w, 3)).astype(np.float32)
+    flat = np.clip(flat, 0.0, 1.0)
+    out = apply_luma_denoise(flat.copy(), strength=1.0, preview=False)
+    y_in, cb_in, cr_in = _rgb_to_ycbcr(flat)
+    y_out, cb_out, cr_out = _rgb_to_ycbcr(out)
+    assert y_out.std() < y_in.std() * 0.8
+    assert np.allclose(cb_out, cb_in, atol=1e-4)
+    assert np.allclose(cr_out, cr_in, atol=1e-4)
+
+    edge = np.zeros((h, w, 3), dtype=np.float32)
+    edge[:, w // 2 :] = 0.9
+    out_edge = apply_luma_denoise(edge.copy(), strength=1.0, preview=False)
+    assert np.allclose(out_edge[h // 2, 2], edge[h // 2, 2], atol=0.05)
+    assert np.allclose(out_edge[h // 2, -3], edge[h // 2, -3], atol=0.05)
+
+
+def test_luma_nr_slider_registered_and_applies_in_pipeline() -> None:
+    from raw_adjustments import apply_adjustments_to_linear
+
+    rng = np.random.default_rng(4)
+    img = rng.integers(500, 60000, (48, 48, 3), dtype=np.uint16)
+    adj = dict(DEFAULT_ADJUSTMENTS)
+    adj["LuminanceNoiseReduction"] = 80.0
+    out = apply_adjustments_to_linear(img, adj)
+    base = apply_adjustments_to_linear(img, dict(DEFAULT_ADJUSTMENTS))
+    assert not np.array_equal(out, base)
 
 
 def test_shadow_lift_no_extreme_green_shift() -> None:
@@ -131,6 +208,127 @@ def test_sharpness_changes_display_output() -> None:
     assert not np.array_equal(out, base)
 
 
+def test_sharpness_float32_base_not_black() -> None:
+    rng = np.random.default_rng(5)
+    scene = rng.random((64, 64, 3), dtype=np.float32) * 0.35 + 0.02
+    adj = dict(DEFAULT_ADJUSTMENTS)
+    adj["Sharpness"] = 100.0
+    from raw_adjustments import apply_adjustments_to_rgb
+
+    out = apply_adjustments_to_rgb(scene, adj)
+    assert out.dtype == np.uint8
+    assert out.mean() > 10.0
+    assert not (out == 0).all()
+
+
+def test_defringe_preserves_uniform_colored_region() -> None:
+    """A flat purple/green patch with no edge is not fringing -- must be left alone."""
+    from raw_detail_enhance import apply_defringe
+
+    petal = np.tile(np.array([[[0.55, 0.15, 0.60]]], dtype=np.float32), (20, 20, 1))
+    out = apply_defringe(petal, 100.0)
+    assert np.allclose(out, petal, atol=1e-4)
+
+    leaf = np.tile(np.array([[[0.15, 0.55, 0.15]]], dtype=np.float32), (20, 20, 1))
+    out_leaf = apply_defringe(leaf, 100.0)
+    assert np.allclose(out_leaf, leaf, atol=1e-4)
+
+
+def test_defringe_suppresses_fringe_at_edge() -> None:
+    """A purple/green halo sitting right at a real luminance edge is suppressed."""
+    from raw_detail_enhance import apply_defringe
+
+    h, w = 40, 40
+    img = np.zeros((h, w, 3), dtype=np.float32)
+    img[:, : w // 2] = [0.05, 0.05, 0.05]
+    img[:, w // 2 :] = [0.9, 0.9, 0.9]
+    img[:, w // 2 - 1 : w // 2 + 1] = [0.55, 0.15, 0.60]
+    out = apply_defringe(img, 100.0)
+    before = img[20, w // 2]
+    after = out[20, w // 2]
+    span_before = float(before.max() - before.min())
+    span_after = float(after.max() - after.min())
+    assert span_after < span_before * 0.5
+
+
+def test_defringe_purple_green_symmetric() -> None:
+    """Equal-magnitude purple/green casts must be treated with equal strength."""
+    from raw_detail_enhance import apply_defringe
+
+    d = 0.05
+    purple_px = np.tile(np.array([[[0.5 + d, 0.5, 0.5 + d]]], dtype=np.float32), (20, 20, 1))
+    green_px = np.tile(np.array([[[0.5 - d / 2, 0.5 + d, 0.5 - d / 2]]], dtype=np.float32), (20, 20, 1))
+    out_p = apply_defringe(purple_px, 100.0)
+    out_g = apply_defringe(green_px, 100.0)
+    assert np.allclose(out_p, purple_px, atol=1e-3)
+    assert np.allclose(out_g, green_px, atol=1e-3)
+
+
+def _assert_monotonic(y1: np.ndarray, label: str) -> None:
+    d = np.diff(y1)
+    bad = int(np.sum(d < -1e-6))
+    assert bad == 0, f"{label}: {bad} non-monotonic steps (worst={float(d.min()):.6f})"
+
+
+def test_pv2012_shadows_lift_stays_monotonic() -> None:
+    """Shadows>=~45 previously made the perceptual tone curve locally decreasing."""
+    from raw_pv2012 import _apply_pv2012_perceptual, _scene_to_perceptual
+
+    lum_ramp = np.linspace(0.0001, 3.0, 4000).astype(np.float32)
+    y0 = _scene_to_perceptual(lum_ramp)
+    for sh in (40, 60, 80, 100):
+        _assert_monotonic(_apply_pv2012_perceptual(y0, shadows=sh), f"PV2012 Shadows={sh}")
+    _assert_monotonic(
+        _apply_pv2012_perceptual(
+            y0, contrast=100, highlights=100, shadows=100, whites=100, blacks=-100
+        ),
+        "PV2012 all sliders maxed",
+    )
+
+
+def test_pv2012_whites_blacks_sign_direction() -> None:
+    """Blacks>0 must lift shadows (lighter); Whites>0 must push highlights brighter."""
+    from raw_pv2012 import apply_pv2012_tone_rgb
+
+    img = np.array([[[0.02, 0.02, 0.02], [0.9, 0.9, 0.9]]], dtype=np.float32)
+    base = {"Contrast2012": 0, "Highlights2012": 0, "Shadows2012": 0, "Whites2012": 0, "Blacks2012": 0}
+    baseline = apply_pv2012_tone_rgb(img.copy(), base)
+    blacks_up = apply_pv2012_tone_rgb(img.copy(), {**base, "Blacks2012": 100})
+    blacks_down = apply_pv2012_tone_rgb(img.copy(), {**base, "Blacks2012": -100})
+    whites_up = apply_pv2012_tone_rgb(img.copy(), {**base, "Whites2012": 100})
+    whites_down = apply_pv2012_tone_rgb(img.copy(), {**base, "Whites2012": -100})
+
+    assert blacks_up[0, 0, 0] > baseline[0, 0, 0], "Blacks=+100 must lift the shadow pixel"
+    assert blacks_down[0, 0, 0] < baseline[0, 0, 0], "Blacks=-100 must darken the shadow pixel"
+    assert whites_up[0, 1, 0] > baseline[0, 1, 0], "Whites=+100 must brighten the highlight pixel"
+    assert whites_down[0, 1, 0] < baseline[0, 1, 0], "Whites=-100 must darken the highlight pixel"
+
+
+def test_legacy_gamma_highlights_shadows_stays_monotonic() -> None:
+    """Legacy gamma-space path broke as early as Shadows=15 before the coefficient fix."""
+    from raw_adjustments import _apply_highlights_shadows, _channel_luminance
+
+    ramp = np.linspace(0.0001, 1.0, 4000).astype(np.float32)
+    img = np.stack([ramp, ramp, ramp], axis=-1)[np.newaxis, :, :]
+    for sh in (15, 20, 40, 100):
+        out = _apply_highlights_shadows(img.copy(), 0.0, sh)
+        _assert_monotonic(_channel_luminance(out)[0], f"legacy Shadows={sh}")
+
+
+def test_legacy_gamma_blacks_stays_monotonic() -> None:
+    from raw_adjustments import _apply_masked_luminance_adjust, _black_region_weight, _channel_luminance
+
+    ramp = np.linspace(0.0001, 1.0, 4000).astype(np.float32)
+    img = np.stack([ramp, ramp, ramp], axis=-1)[np.newaxis, :, :]
+    lum = ramp[np.newaxis, :]
+    for amt in (40, 70, 100):
+        out = _apply_masked_luminance_adjust(
+            img.copy(), lum, _black_region_weight(ramp)[np.newaxis, :], amt / 100.0,
+            lift=True, lift_up_strength=0.03,
+        )
+        _assert_monotonic(_channel_luminance(out)[0], f"legacy Blacks={amt}")
+
+
 def test_hsl_red_saturation_changes_output() -> None:
     img = np.zeros((32, 32, 3), dtype=np.uint16)
     img[:, :, 0] = 40000
@@ -154,6 +352,19 @@ def test_parametric_tone_curve_changes_output() -> None:
     assert not np.allclose(out, base, atol=1e-5)
 
 
+def test_recovery_baseline_with_slider_hints() -> None:
+    from raw_adjustments import (
+        RECOVERY_BASELINE_KEY,
+        recovery_baseline_slider_hints,
+        uses_recovery_tone_map,
+    )
+
+    adj = dict(DEFAULT_ADJUSTMENTS)
+    adj[RECOVERY_BASELINE_KEY] = 1.0
+    adj.update(recovery_baseline_slider_hints())
+    assert uses_recovery_tone_map(adj)
+
+
 def test_recovery_baseline_differs_from_default() -> None:
     rng = np.random.default_rng(2)
     img = rng.integers(500, 12000, (40, 40, 3), dtype=np.uint16)
@@ -165,6 +376,18 @@ def test_recovery_baseline_differs_from_default() -> None:
     base = apply_adjustments_to_linear(img, dict(DEFAULT_ADJUSTMENTS))
     out = apply_adjustments_to_linear(img, adj)
     assert not np.array_equal(out, base)
+    assert out.shape == img.shape[:2] + (3,)
+    assert out.dtype == np.uint8
+
+
+def test_recovery_tone_map_preserves_resolution() -> None:
+    from raw_edit_pipeline import _tone_map_recovery_display
+
+    rng = np.random.default_rng(9)
+    h, w = 120, 180
+    linear = rng.integers(2000, 18000, (h, w, 3), dtype=np.uint16).astype(np.float32) / 65535.0
+    out = _tone_map_recovery_display(linear)
+    assert out.shape == (h, w, 3)
 
 
 def test_export_jpeg_roundtrip() -> None:
@@ -214,6 +437,32 @@ def test_tone_curve_point_helpers() -> None:
     assert serialize_tone_curve_points(pts) == ""
 
 
+def test_wb_dropper_solve_neutralizes_sample() -> None:
+    from raw_adjustments import solve_white_balance_from_sample
+    from raw_edit_pipeline import _apply_wb_tint
+
+    ref_temp = 5500.0
+    for r, g, b in [(0.35, 0.45, 0.60), (0.50, 0.52, 0.48), (0.45, 0.50, 0.55)]:
+        temperature, tint = solve_white_balance_from_sample(r, g, b, ref_temp)
+        assert 2000.0 <= temperature <= 12000.0
+        assert -150.0 <= tint <= 150.0
+        img = np.array([[[r, g, b]]], dtype=np.float32)
+        neutralized = _apply_wb_tint(
+            img.copy(), {"Temperature": temperature, "Tint": tint, "AsShotTemperature": ref_temp}
+        )
+        px = neutralized[0, 0]
+        assert abs(float(px[0]) - float(px[1])) < 1e-3
+        assert abs(float(px[2]) - float(px[1])) < 1e-3
+
+
+def test_wb_dropper_solve_clamps_extreme_sample() -> None:
+    from raw_adjustments import solve_white_balance_from_sample
+
+    temperature, tint = solve_white_balance_from_sample(0.95, 0.40, 0.05, 5500.0)
+    assert temperature in (2000.0, 12000.0)
+    assert -150.0 <= tint <= 150.0
+
+
 def main() -> int:
     test_uint16_linear_exposure_changes_pixels()
     test_uint8_legacy_path()
@@ -221,14 +470,30 @@ def main() -> int:
     test_shadow_lift_mostly_affects_dark_tones()
     test_pv2012_process_version_in_xmp()
     test_chroma_nlm_preserves_luminance_shape()
+    test_chroma_nlm_no_green_cast_on_neutral_gray()
+    test_chroma_denoise_reduces_noise_and_preserves_edge()
+    test_luma_denoise_reduces_noise_and_preserves_edge()
+    test_luma_nr_slider_registered_and_applies_in_pipeline()
     test_shadow_lift_no_extreme_green_shift()
     test_positive_saturation_visible_after_tone_map()
     test_sharpness_changes_display_output()
+    test_sharpness_float32_base_not_black()
+    test_defringe_preserves_uniform_colored_region()
+    test_defringe_suppresses_fringe_at_edge()
+    test_defringe_purple_green_symmetric()
+    test_pv2012_shadows_lift_stays_monotonic()
+    test_pv2012_whites_blacks_sign_direction()
+    test_legacy_gamma_highlights_shadows_stays_monotonic()
+    test_legacy_gamma_blacks_stays_monotonic()
     test_hsl_red_saturation_changes_output()
     test_parametric_tone_curve_changes_output()
+    test_recovery_baseline_with_slider_hints()
     test_recovery_baseline_differs_from_default()
+    test_recovery_tone_map_preserves_resolution()
     test_export_jpeg_roundtrip()
     test_tone_curve_point_helpers()
+    test_wb_dropper_solve_neutralizes_sample()
+    test_wb_dropper_solve_clamps_extreme_sample()
     print("adjust linear pipeline: OK")
     return 0
 

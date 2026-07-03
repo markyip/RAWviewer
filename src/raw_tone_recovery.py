@@ -208,11 +208,61 @@ def _hard_clip_mask(rgb_f: np.ndarray, lum: np.ndarray) -> np.ndarray:
     return (lum >= _HARD_CLIP_LUM) & (spread < _HARD_CLIP_SPREAD)
 
 
+def _build_srgb_encode_lut(size: int, out_max: float, dtype) -> np.ndarray:
+    x = np.linspace(0.0, 1.0, size, dtype=np.float32)
+    srgb = np.where(x <= 0.0031308, x * 12.92, 1.055 * np.power(x, 1.0 / 2.4) - 0.055)
+    return np.clip(srgb * out_max + 0.5, 0, out_max).astype(dtype)
+
+
+# Nearest-index LUTs for the sRGB OETF (np.power over a full frame is the single
+# most expensive step in the preview/export path — see docs/ADJUST_LINEAR_PIPELINE.md
+# "Bottleneck #1"). 4096/65536 entries keep quantization error under ~1 output LSB.
+_SRGB8_LUT_SIZE = 4096
+_SRGB8_LUT = _build_srgb_encode_lut(_SRGB8_LUT_SIZE, 255.0, np.uint8)
+_SRGB16_LUT_SIZE = 65536
+_SRGB16_LUT = _build_srgb_encode_lut(_SRGB16_LUT_SIZE, 65535.0, np.uint16)
+
+
 def _encode_srgb8(rgb_f: np.ndarray) -> np.ndarray:
-    x = np.clip(rgb_f.astype(np.float32), 0.0, 1.0)
-    linear_part = x <= 0.0031308
-    srgb = np.where(linear_part, x * 12.92, 1.055 * np.power(x, 1.0 / 2.4) - 0.055)
-    return np.ascontiguousarray((np.clip(srgb, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8))
+    x = np.clip(rgb_f, 0.0, 1.0)
+    idx = (x * (_SRGB8_LUT_SIZE - 1) + 0.5).astype(np.int32)
+    return np.ascontiguousarray(_SRGB8_LUT[idx])
+
+
+def _encode_srgb16(rgb_f: np.ndarray) -> np.ndarray:
+    x = np.clip(rgb_f, 0.0, 1.0)
+    idx = (x * (_SRGB16_LUT_SIZE - 1) + 0.5).astype(np.int32)
+    return np.ascontiguousarray(_SRGB16_LUT[idx])
+
+
+# Float-in/float-out LUT pair (linear [0,1] <-> gamma-encoded [0,1]), 65536 entries —
+# for pipeline stages that need the perceptual domain internally (e.g. saturation)
+# but must hand a linear buffer back to the next stage. Nearest-index lookup keeps
+# round-trip error ~2e-5 (sub-8-bit-LSB) with no visible banding, at LUT speed.
+_SRGB_ROUNDTRIP_LUT_SIZE = 65536
+_x_roundtrip = np.linspace(0.0, 1.0, _SRGB_ROUNDTRIP_LUT_SIZE, dtype=np.float32)
+_SRGB_ENCODE_FLOAT_LUT = np.where(
+    _x_roundtrip <= 0.0031308,
+    _x_roundtrip * 12.92,
+    1.055 * np.power(_x_roundtrip, 1.0 / 2.4) - 0.055,
+).astype(np.float32)
+_SRGB_DECODE_FLOAT_LUT = np.where(
+    _x_roundtrip <= 0.04045,
+    _x_roundtrip / 12.92,
+    np.power((_x_roundtrip + 0.055) / 1.055, 2.4),
+).astype(np.float32)
+
+
+def _encode_srgb_float01(rgb_f: np.ndarray) -> np.ndarray:
+    """Linear [0, 1] -> gamma-encoded [0, 1] float (same precision as uint16 LUT)."""
+    idx = (np.clip(rgb_f, 0.0, 1.0) * (_SRGB_ROUNDTRIP_LUT_SIZE - 1) + 0.5).astype(np.int32)
+    return _SRGB_ENCODE_FLOAT_LUT[idx]
+
+
+def _decode_srgb_float01(rgb_f: np.ndarray) -> np.ndarray:
+    """Gamma-encoded [0, 1] -> linear [0, 1] float; inverse of ``_encode_srgb_float01``."""
+    idx = (np.clip(rgb_f, 0.0, 1.0) * (_SRGB_ROUNDTRIP_LUT_SIZE - 1) + 0.5).astype(np.int32)
+    return _SRGB_DECODE_FLOAT_LUT[idx]
 
 
 def apply_local_shadow_highlight_recovery_display(rgb_disp: np.ndarray) -> np.ndarray:

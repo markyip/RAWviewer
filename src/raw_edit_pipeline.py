@@ -8,7 +8,7 @@ from typing import Optional
 import numpy as np
 
 from raw_adjustments import DEFAULT_ADJUSTMENTS, is_default_adjustments, uses_recovery_tone_map
-from raw_chroma_denoise import apply_chroma_nlm, chroma_denoise_enabled
+from raw_chroma_denoise import apply_chroma_denoise, apply_luma_denoise, chroma_denoise_enabled
 from raw_pv2012 import apply_pv2012_tone_rgb
 
 
@@ -48,23 +48,42 @@ def _apply_wb_tint(img: np.ndarray, merged: dict[str, float]) -> np.ndarray:
 
 
 def _apply_saturation_vibrance(img: np.ndarray, merged: dict[str, float]) -> np.ndarray:
-    from raw_tone_recovery import _luminance
+    """
+    Saturation / vibrance via HSV S-channel scale in gamma-encoded (perceptual) space.
+
+    Scaling chroma (img - luma) directly on scene-linear RGB made the result wildly
+    hue-dependent: hues with large linear-light channel spread (green, yellow) blew
+    past the gamut boundary and clipped to a flat, fully-saturated block, while hues
+    with small linear spread (skin tones, blue sky) barely moved — the "colors look
+    off / no pop" symptom. Round-tripping through the sRGB OETF (nearest-index LUT,
+    not np.power — see docs/ADJUST_LINEAR_PIPELINE.md) and scaling HSV S there matches
+    how a "Saturation" slider is perceived, and S is bounded to [0, 1] by construction
+    so it can't overshoot the gamut the way additive chroma scaling did.
+    """
+    import cv2
+
+    from raw_tone_recovery import _decode_srgb_float01, _encode_srgb_float01
 
     sat_val = float(merged.get("Saturation", 0.0))
     vib_val = float(merged.get("Vibrance", 0.0))
     if abs(sat_val) < 1e-4 and abs(vib_val) < 1e-4:
         return img
-    luma = _luminance(img)[..., np.newaxis]
-    chroma = img - luma
-    scale = np.ones_like(luma, dtype=np.float32)
+
+    rgb_lin = np.clip(img.astype(np.float32), 0.0, 1.0)
+    rgb_enc = _encode_srgb_float01(rgb_lin)
+    bgr = np.ascontiguousarray(rgb_enc[..., ::-1])
+    h, s, v = cv2.split(cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV))
+
+    scale = np.ones_like(s)
     if abs(sat_val) > 1e-4:
         scale = scale + sat_val / 100.0
     if abs(vib_val) > 1e-4:
-        max_val = np.max(img, axis=-1, keepdims=True)
-        min_val = np.min(img, axis=-1, keepdims=True)
-        s = (max_val - min_val) / (max_val + 1e-5)
         scale = scale + (vib_val / 100.0) * (1.0 - s)
-    return np.clip(luma + chroma * scale, 0.0, None)
+    s = np.clip(s * scale, 0.0, 1.0)
+
+    bgr_out = cv2.cvtColor(cv2.merge([h, s, v]), cv2.COLOR_HSV2BGR)
+    rgb_enc_out = np.clip(bgr_out[..., ::-1], 0.0, 1.0)
+    return _decode_srgb_float01(rgb_enc_out)
 
 
 def _tone_map_reinhard_display(img: np.ndarray) -> np.ndarray:
@@ -78,14 +97,41 @@ def _tone_map_reinhard_display(img: np.ndarray) -> np.ndarray:
 
 
 def _tone_map_recovery_display(img: np.ndarray) -> np.ndarray:
-    """Recovery preview tone path: exposure anchor + local shadow/highlight polish."""
+    """Recovery preview tone path (matches P-key recovery, including edge cap)."""
     from raw_tone_recovery import (
+        RECOVERY_MAX_EDGE,
+        _cap_max_edge_linear,
         apply_local_shadow_highlight_recovery_display,
         linear_tone_map_to_display,
     )
 
-    display = linear_tone_map_to_display(img)
-    return apply_local_shadow_highlight_recovery_display(display)
+    h, w = img.shape[:2]
+    rgb_f = img.astype(np.float32)
+    if max(h, w) <= RECOVERY_MAX_EDGE:
+        display = linear_tone_map_to_display(rgb_f)
+        return apply_local_shadow_highlight_recovery_display(display)
+
+    small = _cap_max_edge_linear(rgb_f, RECOVERY_MAX_EDGE)
+    polished = apply_local_shadow_highlight_recovery_display(
+        linear_tone_map_to_display(small)
+    )
+    try:
+        from scipy.ndimage import zoom
+
+        sy = h / polished.shape[0]
+        sx = w / polished.shape[1]
+        return np.clip(
+            zoom(polished, (sy, sx, 1.0), order=1),
+            0.0,
+            1.0,
+        ).astype(np.float32)
+    except ImportError:
+        from PIL import Image
+
+        resample = getattr(getattr(Image, "Resampling", Image), "BILINEAR", Image.BILINEAR)
+        out8 = (np.clip(polished, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8)
+        up = np.asarray(Image.fromarray(out8, mode="RGB").resize((w, h), resample))
+        return up.astype(np.float32) / 255.0
 
 
 def _tone_map_for_display(img: np.ndarray, merged: dict[str, float]) -> np.ndarray:
@@ -117,7 +163,7 @@ def process_linear_edit_buffer(
     """
     Scene-linear uint16/float → adjusted scene-linear float32.
 
-    Order: WB → exposure → chroma NLM → PV2012 tone → saturation.
+    Order: WB → exposure → chroma/luma denoise (bilateral) → PV2012 tone → saturation.
     """
     if rgb_image is None:
         return rgb_image
@@ -137,11 +183,15 @@ def process_linear_edit_buffer(
     do_denoise = chroma_denoise if chroma_denoise is not None else chroma_denoise_enabled()
     nr_amount = float(merged.get("ColorNoiseReduction", 0.0))
     if nr_amount > 1e-4:
-        img = apply_chroma_nlm(
+        img = apply_chroma_denoise(
             img, strength=min(1.5, nr_amount / 100.0 * 1.25), preview=preview
         )
     elif do_denoise and not preview:
-        img = apply_chroma_nlm(img, preview=False)
+        img = apply_chroma_denoise(img, preview=False)
+
+    luma_nr_amount = float(merged.get("LuminanceNoiseReduction", 0.0))
+    if luma_nr_amount > 1e-4:
+        img = apply_luma_denoise(img, strength=luma_nr_amount / 100.0, preview=preview)
 
     if not uses_recovery_tone_map(merged):
         img = apply_pv2012_tone_rgb(img, merged)
@@ -165,15 +215,11 @@ def linear_to_display_uint8(img: np.ndarray, adj: dict[str, float] | None = None
 
 def linear_to_export_uint16_srgb(img: np.ndarray, adj: dict[str, float] | None = None) -> np.ndarray:
     """Display-referred 16-bit sRGB for TIFF / DNG export."""
+    from raw_tone_recovery import _encode_srgb16
+
     merged = dict(adj or {})
     display = _apply_display_stage(img, merged)
-    a = 0.055
-    display = np.where(
-        display <= 0.0031308,
-        display * 12.92,
-        (1.0 + a) * np.power(np.maximum(display, 0.0), 1.0 / 2.4) - a,
-    )
-    return (np.clip(display, 0.0, 1.0) * 65535.0 + 0.5).astype(np.uint16)
+    return _encode_srgb16(display.astype(np.float32))
 
 
 def _ensure_parent_dir(output_path: str) -> None:

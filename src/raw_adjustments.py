@@ -27,6 +27,7 @@ DEFAULT_ADJUSTMENTS: Dict[str, float] = {
     "Clarity2012": 0.0,
     "Defringe": 0.0,
     "ColorNoiseReduction": 0.0,
+    "LuminanceNoiseReduction": 0.0,
     "ParametricShadows": 0.0,
     "ParametricDarks": 0.0,
     "ParametricLights": 0.0,
@@ -44,6 +45,9 @@ RELEVANT_ADJUSTMENT_KEYS = frozenset(DEFAULT_ADJUSTMENTS.keys())
 AS_SHOT_TEMP_KEY = "AsShotTemperature"
 CHROMA_NR_ON_VALUE = 50.0
 RECOVERY_BASELINE_KEY = "_recovery_baseline"
+# UI hints when recovery look is on (local S/H recovery ≈ these PV2012 readouts).
+RECOVERY_BASELINE_SHADOWS2012 = 40.0
+RECOVERY_BASELINE_HIGHLIGHTS2012 = -35.0
 
 _PV2012_TONE_SLIDER_KEYS = frozenset(
     {
@@ -59,6 +63,12 @@ _PV2012_TONE_SLIDER_KEYS = frozenset(
     }
 )
 
+# Sliders that disable recovery tone when moved (Highlights/Shadows are hint-only while recovery on).
+_PV2012_RECOVERY_EXCLUSIVE_KEYS = _PV2012_TONE_SLIDER_KEYS - {
+    "Highlights2012",
+    "Shadows2012",
+}
+
 
 def uses_recovery_tone_map(adj: dict[str, float] | None) -> bool:
     """True when adjust should use P-key recovery tone instead of Reinhard + PV2012."""
@@ -70,11 +80,19 @@ def uses_recovery_tone_map(adj: dict[str, float] | None) -> bool:
 
     if str(adj.get(TONE_CURVE_SERIAL_KEY, "") or "").strip():
         return False
-    for key in _PV2012_TONE_SLIDER_KEYS:
+    for key in _PV2012_RECOVERY_EXCLUSIVE_KEYS:
         default = float(DEFAULT_ADJUSTMENTS.get(key, 0.0))
         if abs(float(adj.get(key, default)) - default) > 1e-4:
             return False
     return True
+
+
+def recovery_baseline_slider_hints() -> dict[str, float]:
+    """PV2012 Highlights/Shadows readouts shown when recovery look is enabled."""
+    return {
+        "Shadows2012": RECOVERY_BASELINE_SHADOWS2012,
+        "Highlights2012": RECOVERY_BASELINE_HIGHLIGHTS2012,
+    }
 
 
 def is_pv2012_tone_slider(key: str) -> bool:
@@ -155,6 +173,7 @@ SLIDER_SPECS: tuple[SliderSpec, ...] = (
     _slider_linear("Sharpness", "Sharpness", 0, 150, 0.0, fmt=lambda x: f"{x:.0f}"),
     _slider_linear("Clarity2012", "Clarity", -100, 100, 0.0),
     _slider_linear("Defringe", "Defringe", 0, 100, 0.0),
+    _slider_linear("LuminanceNoiseReduction", "Luma NR", 0, 100, 0.0, fmt=lambda x: f"{x:.0f}"),
 )
 
 
@@ -277,6 +296,56 @@ def is_neutral_wb(adj: Dict[str, float] | None) -> bool:
     temp = float(adj.get("Temperature", ref))
     tint = float(adj.get("Tint", 0.0))
     return abs(temp - ref) <= 0.5 and abs(tint) <= 1e-4
+
+
+def solve_white_balance_from_sample(
+    r: float, g: float, b: float, ref_temp: float
+) -> tuple[float, float]:
+    """
+    White-balance dropper: solve Temperature/Tint so a sampled scene-linear RGB
+    pixel (as-shot camera WB, pre Temperature/Tint) becomes neutral gray.
+
+    Exact inverse of ``_apply_wb_tint`` rather than a new color model: Temperature
+    scales R/B oppositely relative to G, so the R/B ratio depends only on
+    Temperature (bisection, monotonic over the 2000-12000K slider range); Tint then
+    scales G alone, solved algebraically once Temperature is fixed. Samples outside
+    what the slider range / Tint's +/-10% G scaling can correct are clamped to the
+    nearest achievable value rather than raising an error.
+    """
+    r = max(float(r), 1e-6)
+    g = max(float(g), 1e-6)
+    b = max(float(b), 1e-6)
+    ref_temp = float(ref_temp) if ref_temp and ref_temp > 0 else DEFAULT_ADJUSTMENTS["Temperature"]
+    r_ref, g_ref, b_ref = _kelvin_to_rgb(ref_temp)
+
+    def rb_scale_ratio(t: float) -> float:
+        r_t, g_t, b_t = _kelvin_to_rgb(t)
+        scale_r = (r_t / r_ref) / (g_t / g_ref)
+        scale_b = (b_t / b_ref) / (g_t / g_ref)
+        return scale_r / scale_b
+
+    target = b / r
+    lo, hi = 2000.0, 12000.0
+    ratio_lo, ratio_hi = rb_scale_ratio(lo), rb_scale_ratio(hi)  # monotonically decreasing
+    if target >= ratio_lo:
+        temperature = lo
+    elif target <= ratio_hi:
+        temperature = hi
+    else:
+        for _ in range(40):
+            mid = (lo + hi) / 2.0
+            if rb_scale_ratio(mid) > target:
+                lo = mid
+            else:
+                hi = mid
+        temperature = (lo + hi) / 2.0
+
+    r_t, g_t, b_t = _kelvin_to_rgb(temperature)
+    scale_r = (r_t / r_ref) / (g_t / g_ref)
+    final_r = r * scale_r
+    tint = ((1.0 - final_r / g) / 0.1) * 150.0 if g > 1e-6 else 0.0
+    tint = max(-150.0, min(150.0, tint))
+    return temperature, tint
 
 
 def is_default_adjustments(adj: Dict[str, float] | None) -> bool:
@@ -455,11 +524,21 @@ def _format_xmp_value(key: str, value: float) -> str:
 
 
 def apply_adjustments_to_rgb(rgb_image: np.ndarray, adj: dict[str, float]) -> np.ndarray:
-    """Apply adjustments; uint16 buffers use the linear edit pipeline."""
-    if rgb_image is None or not adj:
+    """Apply adjustments; scene-linear uint16/float32 use the linear edit pipeline."""
+    if rgb_image is None:
         return rgb_image
-    if rgb_image.dtype == np.uint16:
-        return apply_adjustments_to_linear(rgb_image, adj)
+    if adj is None:
+        return rgb_image
+    if rgb_image.dtype in (np.uint16, np.float32):
+        out = apply_adjustments_to_linear(rgb_image, adj)
+        if out is not None and out.dtype in (np.uint16, np.float32):
+            from raw_edit_pipeline import linear_to_display_uint8, process_linear_edit_buffer
+
+            merged = dict(DEFAULT_ADJUSTMENTS)
+            merged.update(adj or {})
+            processed = process_linear_edit_buffer(rgb_image, merged, preview=True)
+            out = linear_to_display_uint8(processed, merged)
+        return out
     return _apply_adjustments_to_srgb(rgb_image, adj)
 
 
@@ -546,7 +625,8 @@ def _apply_adjustments_to_srgb(rgb_image: np.ndarray, adj: dict[str, float]) -> 
         lum = _channel_luminance(img)
         if abs(black_val) > 1e-4:
             img = _apply_masked_luminance_adjust(
-                img, lum, _black_region_weight(lum), black_val / 100.0, lift=True
+                img, lum, _black_region_weight(lum), black_val / 100.0, lift=True,
+                lift_up_strength=0.03,
             )
             lum = _channel_luminance(img)
         if abs(white_val) > 1e-4:
@@ -574,8 +654,11 @@ def _apply_adjustments_to_srgb(rgb_image: np.ndarray, adj: dict[str, float]) -> 
 
         img = luma + (img - luma) * sat_scale
 
+    from raw_detail_enhance import apply_detail_enhancements
+
     img = np.clip(img, 0.0, 1.0)
-    return (img * 255.0).astype(np.uint8)
+    img = apply_detail_enhancements(img, merged)
+    return (np.clip(img, 0.0, 1.0) * 255.0).astype(np.uint8)
 
 
 def _linear_float_from_buffer(rgb_image: np.ndarray) -> np.ndarray:
@@ -638,15 +721,25 @@ def _apply_masked_luminance_adjust(
     amount: float,
     *,
     lift: bool,
+    lift_up_strength: float = 0.55,
 ) -> np.ndarray:
     """
     Hue-preserving tone tweak: scale RGB by a luminance ratio inside ``mask`` only.
     Positive amount lifts; negative amount darkens the masked region.
+
+    ``lift_up_strength`` (the ``lift and amount > 0`` branch) is the only branch
+    whose safe coefficient depends on how steep ``mask`` is: the shared 0.55
+    default is safe for ``_highlight_region_weight`` (worst slope -1.0) but not
+    for ``_shadow_region_weight`` (-12.36) or ``_black_region_weight`` (-29.57,
+    a narrower 0.07-wide region) -- both produced verified tone-curve reversals
+    (banding) well within slider range. Callers using those masks must pass a
+    safe override (see call sites below); the other three branches are safe
+    for every mask used in this module at their existing fixed coefficients.
     """
     if abs(amount) < 1e-6:
         return img
     if lift and amount > 0:
-        lum_new = lum + mask * amount * (1.0 - lum) * 0.55
+        lum_new = lum + mask * amount * (1.0 - lum) * lift_up_strength
     elif lift and amount < 0:
         lum_new = lum + mask * amount * lum * 0.45
     elif not lift and amount < 0:
@@ -667,7 +760,8 @@ def _apply_highlights_shadows_linear(
     lum = _luminance(img)
     if abs(sh_val) > 1e-4:
         img = _apply_masked_luminance_adjust(
-            img, lum, _shadow_region_weight(lum), sh_val / 100.0, lift=True
+            img, lum, _shadow_region_weight(lum), sh_val / 100.0, lift=True,
+            lift_up_strength=0.07,
         )
         lum = _luminance(img)
     if abs(hi_val) > 1e-4:
@@ -688,7 +782,8 @@ def _apply_highlights_shadows(img: np.ndarray, hi_val: float, sh_val: float) -> 
     lum = _channel_luminance(img)
     if abs(sh_val) > 1e-4:
         img = _apply_masked_luminance_adjust(
-            img, lum, _shadow_region_weight(lum), sh_val / 100.0, lift=True
+            img, lum, _shadow_region_weight(lum), sh_val / 100.0, lift=True,
+            lift_up_strength=0.07,
         )
         lum = _channel_luminance(img)
     if abs(hi_val) > 1e-4:

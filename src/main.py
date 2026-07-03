@@ -1772,6 +1772,24 @@ class _AdjustPreviewWorker(QRunnable):
             from raw_adjustments import apply_adjustments_to_rgb
 
             out = apply_adjustments_to_rgb(self.base_rgb, self.adj)
+            if out is not None and str(getattr(out, "dtype", "")) in {
+                "uint16",
+                "float32",
+                "float64",
+            }:
+                import logging
+
+                logging.getLogger(__name__).warning(
+                    "Adjust preview returned non-display buffer (%s); forcing encode",
+                    getattr(out, "dtype", None),
+                )
+                from raw_adjustments import apply_adjustments_to_linear
+
+                out = apply_adjustments_to_linear(self.base_rgb, self.adj)
+            if out is not None and str(getattr(out, "dtype", "")) != "uint8":
+                from raw_tone_recovery import _encode_srgb8
+
+                out = _encode_srgb8(np.clip(out.astype(np.float32), 0.0, None))
         except Exception:
             out = None
         self.signals.finished.emit(self.generation, self.file_path, out)
@@ -3476,6 +3494,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             )
 
     def _display_raw_recovery_buffer(self, file_path: str, rgb) -> None:
+        if self._adjust_panel_active():
+            return
         self._raw_recovery_skip_display_cache = True
         self._skip_resolution_downgrade_check = True
         try:
@@ -3593,6 +3613,12 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         path = getattr(self, "current_file_path", None)
         if path and not is_raw_file(path):
             self.status_bar.showMessage("RAW recovery is only available for RAW/DNG", 2500)
+            return True
+        if self._adjust_panel_active():
+            self.status_bar.showMessage(
+                "Adjust panel is open — use «Use recovery look» for recovery tone",
+                5000,
+            )
             return True
         self._raw_recovery_active = not getattr(self, "_raw_recovery_active", False)
         if self._raw_recovery_active:
@@ -7637,6 +7663,9 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self.single_image_adjust_panel.recovery_baseline_requested.connect(
             self._on_adjust_recovery_baseline_requested
         )
+        self.single_image_adjust_panel.wb_picker_toggled.connect(
+            self._on_adjust_wb_picker_toggled
+        )
         self._pending_adjust_preview: dict | None = None
         self._adjust_edit_base_signals = _AdjustEditBaseSignals()
         self._adjust_edit_base_signals.finished.connect(self._on_adjust_edit_base_ready)
@@ -7668,6 +7697,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 self.gpu_view.fitModeChanged.connect(self._on_gpu_fit_mode_changed)
                 self.gpu_view.zoomChanged.connect(self._on_gpu_zoom_changed)
                 self.gpu_view.doubleClickedAt.connect(self._on_gpu_double_clicked)
+                self.gpu_view.colorPickRequested.connect(self._on_wb_color_picked)
                 self.gpu_view._shortcut_handler = self._handle_app_shortcut
                 self._sync_composition_grid_display()
             except Exception as _gpu_exc:
@@ -13163,8 +13193,16 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             if not numpy_array.flags['C_CONTIGUOUS']:
                 numpy_array = np.ascontiguousarray(numpy_array)
             
-            if numpy_array.dtype != np.uint8:
-                numpy_array = numpy_array.astype(np.uint8)
+            if numpy_array.dtype == np.uint16:
+                numpy_array = (numpy_array / 257.0).astype(np.uint8)
+            elif np.issubdtype(numpy_array.dtype, np.floating):
+                from raw_tone_recovery import _encode_srgb8
+
+                numpy_array = _encode_srgb8(
+                    np.clip(numpy_array.astype(np.float32), 0.0, None)
+                )
+            elif numpy_array.dtype != np.uint8:
+                numpy_array = np.clip(numpy_array, 0, 255).astype(np.uint8)
             
             # Calculate bytes per line (must be exact, no padding)
             bytes_per_line = channels * width
@@ -14377,6 +14415,26 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             gj.refresh_gallery_bookmark_visuals()
         if gj is not None and hasattr(gj, "refresh_gallery_burst_visuals"):
             gj.refresh_gallery_burst_visuals()
+        if gj is not None and hasattr(gj, "refresh_gallery_edited_visuals"):
+            gj.refresh_gallery_edited_visuals()
+
+    def _is_gallery_path_edited(self, file_path: str) -> bool:
+        """Cheap "has saved RAW adjustments" signal for the gallery badge.
+
+        ``write_xmp_adjustments`` (raw_adjustments.py) deletes the sidecar file
+        when settings return to default, so the sidecar's mere existence is an
+        accurate, filesystem-cheap proxy for "non-default adjustments saved" —
+        no XMP parsing or pixel re-render needed for this hint-only badge.
+        """
+        if not file_path:
+            return False
+        try:
+            from raw_adjustments import resolve_xmp_path
+
+            xmp_path = resolve_xmp_path(file_path)
+            return bool(xmp_path) and os.path.isfile(xmp_path)
+        except Exception:
+            return False
 
     def _sync_share_button_visibility(self) -> None:
         btn = getattr(self, "share_bottom_button", None)
@@ -17908,6 +17966,9 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         panel = getattr(self, "single_image_adjust_panel", None)
         if panel is None:
             return
+        if self._adjust_overlay_visible:
+            if self._raw_recovery_preview_active():
+                self._disable_raw_recovery()
         if self._adjust_overlay_visible and self._single_view_has_display_image():
             panel.setVisible(True)
             self._sync_adjust_panel_for_current_file()
@@ -17915,6 +17976,9 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             if path:
                 self._begin_adjust_editing_session(path)
         else:
+            gv = getattr(self, "gpu_view", None)
+            if gv is not None and gv.is_color_pick_mode():
+                self._cancel_wb_picker()
             panel.setVisible(False)
             if not self._adjust_overlay_visible:
                 self._adjust_preview_base_rgb = None
@@ -18003,6 +18067,9 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         """Paint adjust live-preview without navigation cross-fades or loader races."""
         if pixmap is None or pixmap.isNull():
             return
+        if getattr(self, "_raw_recovery_active", False):
+            self._raw_recovery_active = False
+            self._sync_raw_recovery_view_mode()
         pixmap = pixmap.copy()
         self._adjust_preview_painting = True
         try:
@@ -18180,6 +18247,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             return
         if hasattr(self, "status_bar"):
             self.status_bar.showMessage("Adjustments saved to XMP sidecar", 2500)
+        self._refresh_gallery_bookmark_visuals()
+        QTimer.singleShot(0, self._restore_keyboard_focus)
 
     def _on_adjust_recovery_baseline_requested(self) -> None:
         path = getattr(self, "current_file_path", None)
@@ -18194,14 +18263,90 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                     "Recovery baseline is only available for RAW/DNG files", 3500
                 )
             return
+        if getattr(self, "_raw_recovery_active", False):
+            self._raw_recovery_active = False
+            self._sync_raw_recovery_view_mode()
         panel.set_recovery_baseline(True)
         self._apply_adjust_panel_preview()
         if hasattr(self, "status_bar"):
             self.status_bar.showMessage(
-                "Adjust starting from recovery look — tweak Exposure / Sat / HSL; "
-                "PV tone sliders return to standard tone",
+                "Recovery look on — Shadows/Highlights readouts updated; "
+                "tweak Exposure / Sat / HSL from here",
                 6000,
             )
+        QTimer.singleShot(0, self._restore_keyboard_focus)
+
+    def _on_adjust_wb_picker_toggled(self, checked: bool) -> None:
+        """Arm/cancel the WB dropper (GPU single-image view only, RAW files only)."""
+        panel = getattr(self, "single_image_adjust_panel", None)
+        gv = getattr(self, "gpu_view", None)
+        if panel is None or gv is None:
+            return
+        if not checked:
+            gv.set_color_pick_mode(False)
+            return
+        path = getattr(self, "current_file_path", None)
+        from common_image_loader import is_raw_file
+
+        base = getattr(self, "_adjust_preview_base_rgb", None)
+        if not path or not is_raw_file(path) or base is None or not hasattr(base, "shape"):
+            panel.set_wb_picker_active(False)
+            if hasattr(self, "status_bar"):
+                self.status_bar.showMessage(
+                    "White balance dropper needs a decoded RAW edit base — try again in a moment",
+                    3500,
+                )
+            return
+        gv.set_color_pick_mode(True)
+        if hasattr(self, "status_bar"):
+            self.status_bar.showMessage(
+                "Click a neutral gray/white area in the image to set white balance"
+                " — Esc to cancel",
+                0,
+            )
+
+    def _cancel_wb_picker(self) -> None:
+        panel = getattr(self, "single_image_adjust_panel", None)
+        gv = getattr(self, "gpu_view", None)
+        if gv is not None:
+            gv.set_color_pick_mode(False)
+        if panel is not None:
+            panel.set_wb_picker_active(False)
+        if hasattr(self, "status_bar"):
+            self.status_bar.clearMessage()
+
+    def _on_wb_color_picked(self, scene_pt) -> None:
+        """Sample the RAW edit base at the clicked point and solve Temperature/Tint."""
+        panel = getattr(self, "single_image_adjust_panel", None)
+        base = getattr(self, "_adjust_preview_base_rgb", None)
+        if panel is not None:
+            panel.set_wb_picker_active(False)
+        if panel is None or base is None or not hasattr(base, "shape"):
+            return
+        h, w = int(base.shape[0]), int(base.shape[1])
+        cx = int(round(float(scene_pt.x())))
+        cy = int(round(float(scene_pt.y())))
+        if not (0 <= cx < w and 0 <= cy < h):
+            return
+
+        from raw_adjustments import solve_white_balance_from_sample, wb_reference_temperature
+        from raw_edit_pipeline import _linear_float_from_buffer
+
+        radius = 3
+        y0, y1 = max(0, cy - radius), min(h, cy + radius + 1)
+        x0, x1 = max(0, cx - radius), min(w, cx + radius + 1)
+        patch = _linear_float_from_buffer(base[y0:y1, x0:x1])
+        r, g, b = (float(patch[:, :, i].mean()) for i in range(3))
+
+        adj = panel.get_adjustments()
+        ref_temp = wb_reference_temperature(adj)
+        temperature, tint = solve_white_balance_from_sample(r, g, b, ref_temp)
+        panel.apply_picked_white_balance(temperature, tint)
+        if hasattr(self, "status_bar"):
+            self.status_bar.showMessage(
+                f"White balance set from picked pixel ({int(round(temperature))}K)", 3000
+            )
+        QTimer.singleShot(0, self._restore_keyboard_focus)
 
     def _on_adjust_panel_export_requested(self, export_format: str, adj: dict) -> None:
         path = getattr(self, "current_file_path", None)
@@ -22560,9 +22705,29 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         return False
 
     def _should_route_global_shortcut(self, obj) -> bool:
-        if not self.isActiveWindow():
+        """True when app shortcuts should run via the event filter (before child widgets)."""
+        if self._shortcut_blocked_by_text_input():
             return False
-        return self._is_widget_in_main_window(obj)
+        if not self.isVisible():
+            return False
+        app = QApplication.instance()
+        active = app.activeWindow() if app is not None else None
+        if active is not self:
+            return False
+        if obj is self:
+            return True
+        if self._is_widget_in_main_window(obj):
+            return True
+        try:
+            from PyQt6.QtGui import QWindow
+
+            wh = self.windowHandle()
+            if isinstance(obj, QWindow) and wh is not None and obj is wh:
+                return True
+        except Exception:
+            pass
+        # App-level filter: receiver may be QApplication while our window is active.
+        return active is self and app is not None and obj is app
 
     def _shortcut_activate_histogram(self) -> None:
         if getattr(self, "view_mode", "") != "single":
@@ -22728,7 +22893,13 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         key = event.key()
         modifiers = event.modifiers()
         vm = getattr(self, "view_mode", "single")
-        
+
+        if key == Qt.Key.Key_Escape:
+            gv = getattr(self, "gpu_view", None)
+            if gv is not None and gv.is_color_pick_mode():
+                self._cancel_wb_picker()
+                return True
+
         if key in (Qt.Key.Key_H, Qt.Key.Key_P, Qt.Key.Key_M):
             if vm == "compare":
                 return True
@@ -24020,9 +24191,11 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         return True
 
     def _is_status_bar_chrome_widget(self, obj) -> bool:
+        from PyQt6.QtWidgets import QWidget
+
         sb = getattr(self, "status_bar", None)
         host = getattr(self, "status_bar_widget", None)
-        w = obj
+        w = obj if isinstance(obj, QWidget) else None
         while w is not None:
             if w is sb or w is host:
                 return True
@@ -24030,10 +24203,12 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         return False
 
     def _is_title_bar_chrome_widget(self, obj) -> bool:
+        from PyQt6.QtWidgets import QWidget
+
         tb = getattr(self, "title_bar", None)
         if tb is None:
             return False
-        w = obj
+        w = obj if isinstance(obj, QWidget) else None
         while w is not None:
             if w is tb:
                 return True
@@ -25452,6 +25627,12 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             if self._should_route_global_shortcut(obj):
                 if self._handle_app_shortcut(event):
                     return True
+            # Fallback: active main window but receiver not matched above (e.g. QOpenGLWidget).
+            elif not self._shortcut_blocked_by_text_input():
+                app = QApplication.instance()
+                if app is not None and app.activeWindow() is self:
+                    if self._handle_app_shortcut(event):
+                        return True
 
         # Film strip hot zone: pointer events hit child widgets, not the overlay itself.
         if event.type() in (

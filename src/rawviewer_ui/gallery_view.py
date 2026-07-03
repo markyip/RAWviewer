@@ -2984,6 +2984,9 @@ class JustifiedGallery(QWidget):
                 if pv is not None and hasattr(pv, "_burst_stack_count_for_path"):
                     if hasattr(w, "set_burst_stack_count"):
                         w.set_burst_stack_count(pv._burst_stack_count_for_path(path))
+                if pv is not None and hasattr(pv, "_is_gallery_path_edited"):
+                    if hasattr(w, "set_gallery_edited"):
+                        w.set_gallery_edited(pv._is_gallery_path_edited(path))
             thumb_missing = not cache_hit
             if thumb_missing and self._thumb_fail_counts.get(path, 0) >= 3:
                 thumb_missing = False
@@ -4137,6 +4140,16 @@ class JustifiedGallery(QWidget):
             path = getattr(w, "file_path", None)
             if path and hasattr(w, "set_burst_stack_count"):
                 w.set_burst_stack_count(pv._burst_stack_count_for_path(path))
+
+    def refresh_gallery_edited_visuals(self) -> None:
+        """Sync 'has saved RAW adjustments' badge on visible pooled thumbnails."""
+        pv = self.parent_viewer
+        if pv is None or not hasattr(pv, "_is_gallery_path_edited"):
+            return
+        for w in self._visible_widgets.values():
+            path = getattr(w, "file_path", None)
+            if path and hasattr(w, "set_gallery_edited"):
+                w.set_gallery_edited(pv._is_gallery_path_edited(path))
 
     def _update_empty_label_geometry(self):
         """Lay out empty-state text across the justified gallery canvas (fills the frame when empty)."""

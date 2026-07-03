@@ -55,6 +55,9 @@ class GpuImageView(QGraphicsView):
     wheelNavigate = pyqtSignal(int)
     # Image pixel coordinates (scene space) where the user double-clicked.
     doubleClickedAt = pyqtSignal(QPointF)
+    # Image pixel coordinates (scene space) where the user clicked while color-pick
+    # mode was armed (see set_color_pick_mode). One-shot: mode disarms after firing.
+    colorPickRequested = pyqtSignal(QPointF)
 
     # Absolute floor for set_scale; wheel zoom cannot go below fit_scale() (fit-to-window).
     MIN_SCALE = 0.01
@@ -81,6 +84,7 @@ class GpuImageView(QGraphicsView):
         self.file_path = None
         self._drag_start_pos = None
         self._drag_started = False
+        self._color_pick_mode = False
 
         super().__init__(parent)
         self._scene = QGraphicsScene(self)
@@ -641,8 +645,36 @@ class GpuImageView(QGraphicsView):
         self.fitModeChanged.emit(False)
         self.zoomChanged.emit(self.current_scale())
 
+    # ------------------------------------------------------------- color pick
+    def set_color_pick_mode(self, enabled: bool) -> None:
+        """Arm/disarm one-shot pixel picking (e.g. white-balance dropper).
+
+        While armed, the next left click samples an image-pixel coordinate via
+        ``colorPickRequested`` instead of starting a pan drag or export drag, then
+        disarms itself. Call again with ``enabled=False`` to cancel without picking.
+        """
+        self._color_pick_mode = bool(enabled)
+        if self._color_pick_mode:
+            self.viewport().setCursor(Qt.CursorShape.CrossCursor)
+        else:
+            self.viewport().unsetCursor()
+
+    def is_color_pick_mode(self) -> bool:
+        return bool(getattr(self, "_color_pick_mode", False))
+
     # ------------------------------------------------------------------ events
     def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton and self._color_pick_mode:
+            if self._has_pixmap:
+                scene_pt = self.mapToScene(event.position().toPoint())
+                pt = QPointF(
+                    max(0.0, min(scene_pt.x(), max(0, self._img_w - 1))),
+                    max(0.0, min(scene_pt.y(), max(0, self._img_h - 1))),
+                )
+                self.set_color_pick_mode(False)
+                self.colorPickRequested.emit(pt)
+            event.accept()
+            return
         if event.button() == Qt.MouseButton.LeftButton and self._fit_mode and self.file_path:
             self._drag_start_pos = event.position().toPoint()
             self._drag_started = False
@@ -726,6 +758,10 @@ class GpuImageView(QGraphicsView):
         return super().event(event)
 
     def keyPressEvent(self, event: QKeyEvent) -> None:
+        handler = getattr(self, "_shortcut_handler", None)
+        if callable(handler) and handler(event):
+            event.accept()
+            return
         super().keyPressEvent(event)
 
     def wheelEvent(self, event) -> None:

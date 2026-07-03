@@ -37,6 +37,7 @@ class ThumbnailLabel(QLabel):
         self.original_pixmap = None
         self._gallery_selected = False
         self._gallery_bookmarked = False
+        self._gallery_edited = False
         self._burst_stack_count = 0
         self.file_path = None
         self._drag_start_pos = None
@@ -139,6 +140,10 @@ class ThumbnailLabel(QLabel):
         self._gallery_bookmarked = bool(bookmarked)
         self._update_bookmark_badge()
 
+    def set_gallery_edited(self, edited: bool) -> None:
+        self._gallery_edited = bool(edited)
+        self._update_edited_badge()
+
     def set_burst_stack_count(self, count: int) -> None:
         self._burst_stack_count = max(0, int(count))
         self._update_burst_stack_badge()
@@ -200,10 +205,41 @@ class ThumbnailLabel(QLabel):
         )
         badge.raise_()
 
+    def _update_edited_badge(self) -> None:
+        """Lightweight 'has saved RAW adjustments' hint (pencil dot) — does not
+        change the thumbnail pixels; see docs/ADJUST_LINEAR_PIPELINE.md for why
+        (gallery thumbnails are not re-rendered through the adjust pipeline)."""
+        badge = getattr(self, "_edited_badge", None)
+        if self._gallery_edited:
+            if badge is None:
+                badge = QLabel("✎", self)
+                badge.setStyleSheet(
+                    "color: #90CAF9; font-size: 12px; font-weight: 700;"
+                    " background: rgba(0, 0, 0, 0.55); border-radius: 8px;"
+                )
+                badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                badge.setToolTip("Has saved adjustments (Adjust panel / XMP sidecar)")
+                self._edited_badge = badge
+            badge.show()
+            self._position_edited_badge()
+        elif badge is not None:
+            badge.hide()
+
+    def _position_edited_badge(self) -> None:
+        badge = getattr(self, "_edited_badge", None)
+        if badge is None or not badge.isVisible():
+            return
+        size = 16
+        margin = 2
+        badge.setFixedSize(size, size)
+        badge.move(max(0, self.width() - size - margin), max(0, margin))
+        badge.raise_()
+
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self._position_bookmark_badge()
         self._position_burst_stack_badge()
+        self._position_edited_badge()
 
 
 class ImageLoaded(QObject):

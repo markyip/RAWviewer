@@ -11,16 +11,30 @@ def _luma(img: np.ndarray) -> np.ndarray:
     return _luminance(img)
 
 
+def _gaussian_blur_luma(y: np.ndarray, sigma: float) -> np.ndarray:
+    y = np.ascontiguousarray(y.astype(np.float32))
+    try:
+        import cv2
+
+        return cv2.GaussianBlur(y, (0, 0), float(sigma))
+    except Exception:
+        try:
+            from scipy.ndimage import gaussian_filter
+
+            return gaussian_filter(y, sigma=float(sigma)).astype(np.float32)
+        except Exception:
+            return y
+
+
 def _unsharp_luma(img: np.ndarray, sigma: float, amount: float) -> np.ndarray:
     if abs(amount) < 1e-5:
         return img
-    import cv2
-
-    y = _luma(img).astype(np.float32)
-    blurred = cv2.GaussianBlur(y, (0, 0), float(sigma))
-    y2 = np.clip(y + (y - blurred) * float(amount), 0.0, None)
-    scale = y2 / np.maximum(y, 1e-6)
-    return np.clip(img * scale[..., np.newaxis], 0.0, None)
+    work = np.ascontiguousarray(np.clip(img.astype(np.float32), 0.0, 1.0))
+    y = _luma(work)
+    blurred = _gaussian_blur_luma(y, sigma)
+    y2 = np.clip(y + (y - blurred) * float(amount), 0.0, 1.0)
+    scale = y2 / np.maximum(y, 1e-4)
+    return np.clip(work * scale[..., np.newaxis], 0.0, 1.0)
 
 
 def apply_sharpness(display_linear: np.ndarray, amount: float) -> np.ndarray:
@@ -42,18 +56,44 @@ def apply_clarity2012(display_linear: np.ndarray, amount: float) -> np.ndarray:
 
 
 def apply_defringe(display_linear: np.ndarray, amount: float) -> np.ndarray:
-    """Suppress purple/green fringing on high-chroma edge regions."""
+    """
+    Suppress purple/green fringing at high-contrast edges (display-linear RGB).
+
+    Two fixes over the previous version:
+    - ``green`` used a 1x gain (``g - 0.5*(r+b)``) vs. ``purple``'s 2x gain
+      (``r+b - 2*g``) for the same absolute color imbalance, so green fringing
+      was flagged as half as severe as equally-strong purple fringing. Both are
+      now ``2*g`` vs. ``r+b`` scale, i.e. exact negations of each other
+      (``fringe == |r + b - 2*g|``).
+    - There was no edge/locality gate at all: any pixel whose hue leaned
+      purple/green relative to its own chroma got desaturated, including
+      uniform, unfringed regions (e.g. a purple flower lost ~90% saturation at
+      Defringe=100 with no edge anywhere nearby) -- because ``fringe / span``
+      is scale-invariant along the purple/green hue axis, not proportional to
+      how strong the cast is. ``edge_weight`` gates the effect to pixels near
+      an actual luminance transition (same Gaussian-blur local-contrast trick
+      as clarity/sharpness, at a tight sigma matching typical fringe width),
+      so flat colored regions are left alone.
+    """
     val = float(amount)
     if val <= 0.0:
         return display_linear
     s = val / 100.0
-    img = display_linear.astype(np.float32)
-    lum = _luma(img)[..., np.newaxis]
-    purple = np.clip(img[:, :, 0:1] + img[:, :, 2:3] - 2.0 * img[:, :, 1:2], 0.0, None)
-    green = np.clip(img[:, :, 1:2] - 0.5 * (img[:, :, 0:1] + img[:, :, 2:3]), 0.0, None)
+    img = np.clip(display_linear.astype(np.float32), 0.0, 1.0)
+    lum2d = _luma(img)
+    lum = lum2d[..., np.newaxis]
+
+    r, g, b = img[:, :, 0:1], img[:, :, 1:2], img[:, :, 2:3]
+    purple = np.clip(r + b - 2.0 * g, 0.0, None)
+    green = np.clip(2.0 * g - r - b, 0.0, None)
     fringe = np.maximum(purple, green)
     span = np.max(img, axis=-1, keepdims=True) - np.min(img, axis=-1, keepdims=True)
-    mask = np.clip(fringe / (span + 1e-4), 0.0, 1.0) * s
+    color_mask = np.clip(fringe / (span + 1e-4), 0.0, 1.0)
+
+    edge = np.abs(lum2d - _gaussian_blur_luma(lum2d, 1.5))[..., np.newaxis]
+    edge_weight = edge / (edge + 0.04)  # soft knee: ~0 in flat regions, -> 1 at real edges
+
+    mask = color_mask * edge_weight * s
     return np.clip(lum + (img - lum) * (1.0 - mask * 0.9), 0.0, None)
 
 

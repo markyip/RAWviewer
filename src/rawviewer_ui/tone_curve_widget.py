@@ -6,7 +6,7 @@ from typing import List, Optional, Tuple
 
 from PyQt6.QtCore import QPoint, QPointF, Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QCursor, QMouseEvent, QPainter, QPen
-from PyQt6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QSizePolicy, QWidget
+from PyQt6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QSizePolicy, QVBoxLayout, QWidget
 
 from raw_tone_curve import (
     default_tone_curve_points,
