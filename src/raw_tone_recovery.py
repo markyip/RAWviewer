@@ -53,7 +53,7 @@ def _highlight_reconstruct_mode():
         return rawpy.HighlightMode.ReconstructDefault
 
 
-def recovery_decode_params(*, half_size: bool = True):
+def recovery_decode_params(*, half_size: bool = True, demosaic: str | None = None):
     """Linear 16-bit decode with LibRaw highlight reconstruction."""
     import rawpy
 
@@ -71,6 +71,11 @@ def recovery_decode_params(*, half_size: bool = True):
     )
     # exp_preser is not accepted by Params.__init__ on all rawpy builds.
     params.exp_preser = 0.45
+    if demosaic:
+        try:
+            params.demosaic_algorithm = getattr(rawpy.DemosaicAlgorithm, demosaic)
+        except (AttributeError, TypeError):
+            pass
     return params
 
 
@@ -210,22 +215,20 @@ def _encode_srgb8(rgb_f: np.ndarray) -> np.ndarray:
     return np.ascontiguousarray((np.clip(srgb, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8))
 
 
-def apply_local_shadow_highlight_recovery(rgb: np.ndarray) -> np.ndarray:
+def apply_local_shadow_highlight_recovery_display(rgb_disp: np.ndarray) -> np.ndarray:
     """
     Local shadow / highlight polish on display-referred float RGB [0, 1].
-
-    Expects input after linear_tone_map_to_display(); skips highlight roll on
-    hard-clipped whites to avoid flat gray disks in sensor-saturated areas.
+    Returns float display RGB (same space as ``linear_tone_map_to_display`` output).
     """
-    if rgb is None or rgb.ndim != 3 or rgb.shape[2] < 3:
-        return rgb
+    if rgb_disp is None or rgb_disp.ndim != 3 or rgb_disp.shape[2] < 3:
+        return rgb_disp
     try:
         from scipy.ndimage import gaussian_filter
     except ImportError:
         logger.warning("scipy unavailable; skipping local RAW recovery")
-        return _encode_srgb8(_to_float01(rgb))
+        return np.clip(_to_float01(rgb_disp), 0.0, 1.0).astype(np.float32)
 
-    rgb_f = _to_float01(rgb)
+    rgb_f = _to_float01(rgb_disp)
     lum = _luminance(rgb_f)
     base = gaussian_filter(lum, sigma=_BLUR_SIGMA)
     hard_clip = _hard_clip_mask(rgb_f, lum)
@@ -258,7 +261,19 @@ def apply_local_shadow_highlight_recovery(rgb: np.ndarray) -> np.ndarray:
     ratio = 1.0 + (ratio - 1.0) * active
     ratio = np.where(hard_clip, 1.0, ratio)
 
-    out = np.clip(rgb_f * ratio[..., np.newaxis], 0.0, 1.0)
+    return np.clip(rgb_f * ratio[..., np.newaxis], 0.0, 1.0).astype(np.float32)
+
+
+def apply_local_shadow_highlight_recovery(rgb: np.ndarray) -> np.ndarray:
+    """
+    Local shadow / highlight polish on display-referred float RGB [0, 1].
+
+    Expects input after linear_tone_map_to_display(); skips highlight roll on
+    hard-clipped whites to avoid flat gray disks in sensor-saturated areas.
+    """
+    if rgb is None or rgb.ndim != 3 or rgb.shape[2] < 3:
+        return rgb
+    out = apply_local_shadow_highlight_recovery_display(rgb)
     return _encode_srgb8(out)
 
 

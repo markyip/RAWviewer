@@ -241,6 +241,7 @@ ImageHistogramWidget: Any = None
 ThumbnailLabel: Any = None
 ExternalJustifiedGallery: Any = None
 ImageLocationMapWidget: Any = None
+ImageAdjustPanelWidget: Any = None
 
 # metadata_backend symbols
 exif_backend_mode: Any = None
@@ -1102,7 +1103,8 @@ def _lazy_import_heavy_modules(splash=None):
            Priority, is_raw_file, load_pixmap_safe, check_memory_cache_for_image, \
            use_libraw_consistent_preview_first, image_covers_sensor_resolution, \
            use_progressive_raw_loading, metadata_index_idle_delay_ms, ImageHistogramWidget, ThumbnailLabel, ExternalJustifiedGallery, \
-           exif_backend_mode, exif_orientation_after_cw90, has_pyexiv2, process_file_from_path, ImageLocationMapWidget
+           exif_backend_mode, exif_orientation_after_cw90, has_pyexiv2, process_file_from_path, ImageLocationMapWidget, \
+           ImageAdjustPanelWidget
     
     def _update_splash(msg):
         if splash:
@@ -1193,9 +1195,11 @@ def _lazy_import_heavy_modules(splash=None):
     from rawviewer_ui.widgets import ThumbnailLabel as _ThumbnailLabel
     from rawviewer_ui.gallery_view import JustifiedGallery as _ExternalJustifiedGallery
     from rawviewer_ui.location_map_overlay import ImageLocationMapWidget as _ImageLocationMapWidget
+    from rawviewer_ui.adjust_panel import ImageAdjustPanelWidget as _ImageAdjustPanelWidget
     ThumbnailLabel = _ThumbnailLabel
     ExternalJustifiedGallery = _ExternalJustifiedGallery
     ImageLocationMapWidget = _ImageLocationMapWidget
+    ImageAdjustPanelWidget = _ImageAdjustPanelWidget
     
     _update_splash("Startup complete")
 
@@ -1735,6 +1739,139 @@ from rawviewer_app.workers import (
 
 from rawviewer_app.viewer.session_mixin import SessionMixin
 
+
+class _AdjustEditBaseSignals(QObject):
+    finished = pyqtSignal(str, object)
+
+
+class _AdjustPreviewSignals(QObject):
+    finished = pyqtSignal(int, str, object)  # generation, file_path, ndarray|None
+
+
+class _AdjustPreviewWorker(QRunnable):
+    """Apply slider adjustments off the GUI thread during live preview."""
+
+    def __init__(
+        self,
+        generation: int,
+        file_path: str,
+        base_rgb: Any,
+        adj: dict,
+        signals: _AdjustPreviewSignals,
+    ):
+        super().__init__()
+        self.generation = int(generation)
+        self.file_path = file_path
+        self.base_rgb = base_rgb
+        self.adj = dict(adj or {})
+        self.signals = signals
+
+    def run(self) -> None:
+        out = None
+        try:
+            from raw_adjustments import apply_adjustments_to_rgb
+
+            out = apply_adjustments_to_rgb(self.base_rgb, self.adj)
+        except Exception:
+            out = None
+        self.signals.finished.emit(self.generation, self.file_path, out)
+
+
+class _AdjustEditBaseWorker(QRunnable):
+    """Background LibRaw demosaic for the adjust panel (never embedded JPEG)."""
+
+    def __init__(
+        self,
+        file_path: str,
+        process_pool: Any,
+        signals: _AdjustEditBaseSignals,
+        *,
+        use_full_resolution: bool = False,
+    ):
+        super().__init__()
+        self.file_path = file_path
+        self.process_pool = process_pool
+        self.signals = signals
+        self.use_full_resolution = use_full_resolution
+
+    def run(self) -> None:
+        base = None
+        try:
+            from unified_image_processor import UnifiedImageProcessor
+
+            processor = UnifiedImageProcessor()
+            base = processor.decode_raw_edit_base(
+                self.file_path,
+                executor=self.process_pool,
+                use_full_resolution=self.use_full_resolution,
+            )
+        except Exception:
+            base = None
+        self.signals.finished.emit(self.file_path, base)
+
+
+class _AdjustExportSignals(QObject):
+    finished = pyqtSignal(str, str, str, object)  # source, output, format, error|None
+
+
+class _AdjustExportWorker(QRunnable):
+    """Full-res export: baked TIFF/JPEG/WebP/DNG or RAW copy + XMP settings."""
+
+    def __init__(
+        self,
+        file_path: str,
+        output_path: str,
+        adj: dict,
+        export_format: str,
+        process_pool: Any,
+        signals: _AdjustExportSignals,
+    ):
+        super().__init__()
+        self.file_path = file_path
+        self.output_path = output_path
+        self.adj = dict(adj or {})
+        self.export_format = export_format
+        self.process_pool = process_pool
+        self.signals = signals
+
+    def run(self) -> None:
+        err = None
+        try:
+            from raw_adjustments import resolve_xmp_path, write_xmp_adjustments_for_file
+            from raw_edit_pipeline import (
+                EXPORT_FORMAT_DNG_SETTINGS,
+                export_adjusted_image,
+            )
+            from unified_image_processor import UnifiedImageProcessor
+
+            write_xmp_adjustments_for_file(self.file_path, self.adj)
+            xmp_path = resolve_xmp_path(self.file_path)
+            embed_xmp = (
+                xmp_path if xmp_path and os.path.isfile(xmp_path) else None
+            )
+            base = None
+            if self.export_format != EXPORT_FORMAT_DNG_SETTINGS:
+                processor = UnifiedImageProcessor()
+                base = processor.decode_raw_edit_base(
+                    self.file_path,
+                    executor=self.process_pool,
+                    use_full_resolution=True,
+                )
+            export_adjusted_image(
+                self.export_format,
+                source_path=self.file_path,
+                output_path=self.output_path,
+                rgb_linear=base,
+                adj=self.adj,
+                embed_xmp_path=embed_xmp,
+            )
+        except Exception as exc:
+            err = exc
+        self.signals.finished.emit(
+            self.file_path, self.output_path, self.export_format, err
+        )
+
+
 class RAWImageViewer(SessionMixin, QMainWindow):
     # Emitted from a background worker once true sensor dimensions for a RAW file have
     # been resolved (off the main thread). Carries the file path; the slot refreshes the
@@ -1863,6 +2000,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self._full_exif_queued_norm = None
         self.thumbnail_cache = {}  # Cache for thumbnails
         self._histogram_user_hidden = True
+        self._adjust_user_hidden = True
+        self._adjust_overlay_visible = False
         self.thumbnail_threads = []  # Track running thumbnail threads
         
         # View mode: 'single' for single image view, 'gallery' for gallery view
@@ -3281,7 +3420,17 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         if hasattr(self, "status_bar") and self.status_bar is not None:
             self.status_bar.showMessage(msg, 8000)
 
+    def _adjust_panel_active(self) -> bool:
+        if getattr(self, "view_mode", "") != "single":
+            return False
+        if not getattr(self, "_adjust_overlay_visible", False):
+            return False
+        panel = getattr(self, "single_image_adjust_panel", None)
+        return panel is not None and panel.isVisible()
+
     def _edr_metadata_label(self) -> str | None:
+        if self._adjust_panel_active():
+            return "RAW edit"
         from common_image_loader import format_edr_status_label
 
         return format_edr_status_label(
@@ -6297,6 +6446,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         # Ignore single-view manager callbacks to prevent cross-mode repaint churn.
         if getattr(self, "_suppress_single_manager_callbacks", False):
             return
+        if self._adjust_panel_blocks_display_refresh():
+            return
         if getattr(self, "view_mode", "single") == "single":
             bar = self._filmstrip_bar()
             if bar is not None:
@@ -6526,6 +6677,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             return
         if getattr(self, "_suppress_single_manager_callbacks", False):
             return
+        if self._adjust_panel_blocks_display_refresh():
+            return
         if getattr(self, "view_mode", "single") != "single":
             return
         if hasattr(self, 'loading_overlay'):
@@ -6726,6 +6879,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             self._compare_upgrade_view_image(file_path, pixmap)
             return
         if getattr(self, "_suppress_single_manager_callbacks", False):
+            return
+        if self._adjust_panel_blocks_display_refresh():
             return
         if getattr(self, "view_mode", "single") != "single":
             return
@@ -7467,6 +7622,39 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self.single_image_location_map.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.single_image_location_map.hide()
 
+        self.single_image_adjust_panel = ImageAdjustPanelWidget()
+        self.single_image_adjust_panel.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.single_image_adjust_panel.hide()
+        self.single_image_adjust_panel.editing_finished.connect(
+            self._on_adjust_panel_editing_finished
+        )
+        self.single_image_adjust_panel.preview_changed.connect(
+            self._on_adjust_panel_preview_changed
+        )
+        self.single_image_adjust_panel.export_requested.connect(
+            self._on_adjust_panel_export_requested
+        )
+        self.single_image_adjust_panel.recovery_baseline_requested.connect(
+            self._on_adjust_recovery_baseline_requested
+        )
+        self._pending_adjust_preview: dict | None = None
+        self._adjust_edit_base_signals = _AdjustEditBaseSignals()
+        self._adjust_edit_base_signals.finished.connect(self._on_adjust_edit_base_ready)
+        self._adjust_preview_gen = 0
+        self._adjust_preview_busy = False
+        self._adjust_preview_dirty = False
+        self._adjust_preview_signals = _AdjustPreviewSignals()
+        self._adjust_preview_signals.finished.connect(self._on_adjust_preview_ready)
+        self._adjust_edit_base_path: str | None = None
+        self._adjust_edit_base_loading_norm: str | None = None
+        self._adjust_export_in_progress = False
+        self._adjust_export_signals = _AdjustExportSignals()
+        self._adjust_export_signals.finished.connect(self._on_adjust_export_finished)
+        self._adjust_preview_painting = False
+        self._adjust_hist_sync_timer = QTimer(self)
+        self._adjust_hist_sync_timer.setSingleShot(True)
+        self._adjust_hist_sync_timer.timeout.connect(self._sync_single_image_histogram)
+
         # Route B: GPU-accelerated single-image view (QGraphicsView + OpenGL).
         # On by default; set RAWVIEWER_GPU_VIEW=0 for the legacy QScrollArea/QLabel path.
         self.gpu_view = None
@@ -7490,7 +7678,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
 
         self.single_view_container = SingleImageViewOverlay(
             self.scroll_area, self.single_image_histogram, viewer=self,
-            gpu_view=self.gpu_view, map_widget=self.single_image_location_map)
+            gpu_view=self.gpu_view, map_widget=self.single_image_location_map,
+            adjust_widget=self.single_image_adjust_panel)
         self._wire_filmstrip()
         main_layout.addWidget(self.single_view_container)
         self._init_compare_view(main_layout)
@@ -8020,6 +8209,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self.single_image_histogram.installEventFilter(self)
         if self.single_image_location_map is not None:
             self.single_image_location_map.installEventFilter(self)
+        if self.single_image_adjust_panel is not None:
+            self.single_image_adjust_panel.installEventFilter(self)
 
         # F must work even when no child widget accepts keyboard focus (QLabel default
         # is NoFocus). WindowShortcut fires while this window is active.
@@ -8027,7 +8218,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             QKeySequence(Qt.Key.Key_F), self
         )
         self._shortcut_toggle_focus_subject_outline.setContext(
-            Qt.ShortcutContext.WindowShortcut
+            Qt.ShortcutContext.ApplicationShortcut
         )
         self._shortcut_toggle_focus_subject_outline.setAutoRepeat(False)
         self._shortcut_toggle_focus_subject_outline.activated.connect(
@@ -8037,7 +8228,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             QKeySequence(Qt.Key.Key_G), self
         )
         self._shortcut_toggle_composition_grid.setContext(
-            Qt.ShortcutContext.WindowShortcut
+            Qt.ShortcutContext.ApplicationShortcut
         )
         self._shortcut_toggle_composition_grid.setAutoRepeat(False)
         self._shortcut_toggle_composition_grid.activated.connect(
@@ -8047,46 +8238,88 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             QKeySequence(Qt.Key.Key_J), self
         )
         self._shortcut_toggle_clipping_overlay.setContext(
-            Qt.ShortcutContext.WindowShortcut
+            Qt.ShortcutContext.ApplicationShortcut
         )
         self._shortcut_toggle_clipping_overlay.setAutoRepeat(False)
         self._shortcut_toggle_clipping_overlay.activated.connect(
             self._toggle_clipping_overlay
         )
 
-        # P (RAW recovery) is handled only via _handle_app_shortcut / gpu_view keyPressEvent
-        # so it works when the OpenGL viewport has focus (no duplicate QShortcut toggle).
+        self._shortcut_toggle_adjust_panel = QShortcut(QKeySequence(Qt.Key.Key_E), self)
+        self._shortcut_toggle_adjust_panel.setContext(
+            Qt.ShortcutContext.ApplicationShortcut
+        )
+        self._shortcut_toggle_adjust_panel.setAutoRepeat(False)
+        self._shortcut_toggle_adjust_panel.activated.connect(
+            self._shortcut_activate_adjust_panel
+        )
+
+        # H/M/P also use ApplicationShortcut; _handle_app_shortcut is the fallback when
+        # focus is on overlay chrome or the OpenGL viewport swallows key delivery.
+        self._shortcut_toggle_histogram = QShortcut(QKeySequence(Qt.Key.Key_H), self)
+        self._shortcut_toggle_histogram.setContext(
+            Qt.ShortcutContext.ApplicationShortcut
+        )
+        self._shortcut_toggle_histogram.setAutoRepeat(False)
+        self._shortcut_toggle_histogram.activated.connect(
+            self._shortcut_activate_histogram
+        )
+
+        self._shortcut_toggle_location_map = QShortcut(QKeySequence(Qt.Key.Key_M), self)
+        self._shortcut_toggle_location_map.setContext(
+            Qt.ShortcutContext.ApplicationShortcut
+        )
+        self._shortcut_toggle_location_map.setAutoRepeat(False)
+        self._shortcut_toggle_location_map.activated.connect(
+            self._shortcut_activate_location_map
+        )
+
+        self._shortcut_toggle_raw_recovery = QShortcut(QKeySequence(Qt.Key.Key_P), self)
+        self._shortcut_toggle_raw_recovery.setContext(
+            Qt.ShortcutContext.ApplicationShortcut
+        )
+        self._shortcut_toggle_raw_recovery.setAutoRepeat(False)
+        self._shortcut_toggle_raw_recovery.activated.connect(
+            self._shortcut_activate_raw_recovery
+        )
 
         # Arrow keys must work when the GPU OpenGL viewport (or other NoFocus
-        # children) holds focus; WindowShortcut matches the F-key pattern.
+        # children) holds focus; ApplicationShortcut matches the F-key pattern.
         self._shortcut_nav_prev = QShortcut(QKeySequence(Qt.Key.Key_Left), self)
-        self._shortcut_nav_prev.setContext(Qt.ShortcutContext.WindowShortcut)
+        self._shortcut_nav_prev.setContext(Qt.ShortcutContext.ApplicationShortcut)
         self._shortcut_nav_prev.activated.connect(self._shortcut_activate_nav_prev)
         self._shortcut_nav_next = QShortcut(QKeySequence(Qt.Key.Key_Right), self)
-        self._shortcut_nav_next.setContext(Qt.ShortcutContext.WindowShortcut)
+        self._shortcut_nav_next.setContext(Qt.ShortcutContext.ApplicationShortcut)
         self._shortcut_nav_next.activated.connect(self._shortcut_activate_nav_next)
 
         self._shortcut_escape = QShortcut(QKeySequence(Qt.Key.Key_Escape), self)
-        self._shortcut_escape.setContext(Qt.ShortcutContext.WindowShortcut)
+        self._shortcut_escape.setContext(Qt.ShortcutContext.ApplicationShortcut)
         self._shortcut_escape.setAutoRepeat(False)
         self._shortcut_escape.activated.connect(self._shortcut_activate_escape)
 
         self._shortcut_compare = QShortcut(QKeySequence(Qt.Key.Key_C), self)
-        self._shortcut_compare.setContext(Qt.ShortcutContext.WindowShortcut)
+        self._shortcut_compare.setContext(Qt.ShortcutContext.ApplicationShortcut)
         self._shortcut_compare.setAutoRepeat(False)
         self._shortcut_compare.activated.connect(self._shortcut_activate_compare)
 
         self._shortcut_gallery_up = QShortcut(QKeySequence(Qt.Key.Key_Up), self)
-        self._shortcut_gallery_up.setContext(Qt.ShortcutContext.WindowShortcut)
+        self._shortcut_gallery_up.setContext(Qt.ShortcutContext.ApplicationShortcut)
         self._shortcut_gallery_up.activated.connect(self._shortcut_activate_gallery_up)
 
         self._shortcut_gallery_down = QShortcut(QKeySequence(Qt.Key.Key_Down), self)
-        self._shortcut_gallery_down.setContext(Qt.ShortcutContext.WindowShortcut)
+        self._shortcut_gallery_down.setContext(Qt.ShortcutContext.ApplicationShortcut)
         self._shortcut_gallery_down.activated.connect(self._shortcut_activate_gallery_down)
 
         self._shortcut_gallery_down_shift = QShortcut(QKeySequence("Shift+Down"), self)
-        self._shortcut_gallery_down_shift.setContext(Qt.ShortcutContext.WindowShortcut)
+        self._shortcut_gallery_down_shift.setContext(
+            Qt.ShortcutContext.ApplicationShortcut
+        )
         self._shortcut_gallery_down_shift.activated.connect(self._shortcut_activate_gallery_down)
+
+        app = QApplication.instance()
+        if app is not None and not getattr(self, "_app_key_filter_installed", False):
+            app.installEventFilter(self)
+            self._app_key_filter_installed = True
 
         self._sync_single_image_histogram()
 
@@ -15187,7 +15420,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             "P — RAW only: shadow/highlight recovery preview (fit only, half-res; session)\n"
             "G — Cycle composition guide (off / 3×3 / diagonal / both / phi grid)\n"
             "F — Show/hide focus point\n"
-            "M — Show/hide location map"
+            "M — Show/hide location map\n"
+            "E — Show/hide adjustment panel (XMP sidecar)"
         )
 
     def _no_image_loaded_help_text(self) -> str:
@@ -15886,6 +16120,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
     def _flush_deferred_sensor_full_decode(
         self, file_path: str | None = None, *, force: bool = False
     ) -> None:
+        if self._adjust_panel_blocks_display_refresh():
+            return
         if self._raw_recovery_preview_active():
             return
         if not force and self._should_defer_full_decode():
@@ -15915,6 +16151,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self, file_path: str, *, priority_current: bool = True, force: bool = False
     ) -> None:
         """Decode sensor-resolution buffer (e.g. after showing a cached preview tier)."""
+        if self._adjust_panel_blocks_display_refresh():
+            return
         if not force and self._should_defer_full_decode():
             return
         if not file_path:
@@ -16355,6 +16593,10 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             self._full_exif_queued_norm = None
             self._last_manager_exif_was_minimal = False
             self._schedule_ttfr_watchdog(file_path, load_start)
+            self._adjust_preview_base_rgb = None
+            self._adjust_edit_base_path = None
+            self._adjust_edit_base_loading_norm = None
+            self._adjust_panel_loaded_norm = None
         except Exception:
             pass
         
@@ -16574,6 +16816,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             if self.image_files and requested_file_path in self.image_files:
                 self.current_file_index = self.image_files.index(requested_file_path)
             self._sync_filmstrip_index()
+            if self._adjust_panel_active():
+                self._refresh_adjust_panel_for_navigation(requested_file_path)
             np_req = _norm_path(requested_file_path)
             if getattr(self, "_manager_display_track_path", None) != np_req:
                 self._manager_display_track_path = np_req
@@ -17367,6 +17611,10 @@ class RAWImageViewer(SessionMixin, QMainWindow):
 
     def display_numpy_image(self, rgb_image):
         """Display a numpy image array."""
+        if self._adjust_panel_blocks_display_refresh() and not getattr(
+            self, "_adjust_preview_painting", False
+        ):
+            return
         if hasattr(self, 'current_file_path') and self.is_animated_image(_require_str_path(self.current_file_path)):
             return
             
@@ -17643,6 +17891,451 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 c.relayout_histogram()
         self._sync_clipping_overlay()
         self._sync_location_map()
+        self._sync_adjust_panel()
+
+    def _single_view_has_display_image(self) -> bool:
+        pm = getattr(self, "current_pixmap", None)
+        if pm is not None and not pm.isNull():
+            return True
+        gv = getattr(self, "gpu_view", None)
+        if gv is not None and gv.has_pixmap():
+            return True
+        return False
+
+    def _set_adjust_panel_visible(self, visible: bool) -> None:
+        self._adjust_overlay_visible = bool(visible)
+        self._adjust_user_hidden = not self._adjust_overlay_visible
+        panel = getattr(self, "single_image_adjust_panel", None)
+        if panel is None:
+            return
+        if self._adjust_overlay_visible and self._single_view_has_display_image():
+            panel.setVisible(True)
+            self._sync_adjust_panel_for_current_file()
+            path = getattr(self, "current_file_path", None)
+            if path:
+                self._begin_adjust_editing_session(path)
+        else:
+            panel.setVisible(False)
+            if not self._adjust_overlay_visible:
+                self._adjust_preview_base_rgb = None
+                self._adjust_edit_base_path = None
+        container = getattr(self, "single_view_container", None)
+        if container is not None and hasattr(container, "relayout_adjust"):
+            container.relayout_adjust()
+            if hasattr(container, "_raise_single_view_layers"):
+                container._raise_single_view_layers()
+        self._last_status_signature = None
+        self.update_status_bar()
+        QTimer.singleShot(0, self._restore_keyboard_focus)
+
+    def _toggle_adjust_panel(self) -> None:
+        self._set_adjust_panel_visible(
+            not getattr(self, "_adjust_overlay_visible", False)
+        )
+
+    def _sync_adjust_panel_for_current_file(self, *, force: bool = False) -> None:
+        panel = getattr(self, "single_image_adjust_panel", None)
+        path = getattr(self, "current_file_path", None)
+        if panel is None or not path:
+            return
+        norm = _norm_path(path)
+        if not force and norm == getattr(self, "_adjust_panel_loaded_norm", None):
+            return
+        try:
+            from raw_adjustments import load_adjustments_for_file
+
+            panel.set_adjustments(load_adjustments_for_file(path))
+            self._adjust_panel_loaded_norm = norm
+            self._pending_adjust_preview = dict(panel.get_adjustments())
+        except Exception:
+            pass
+        if panel.isVisible():
+            self._request_adjust_edit_base(path)
+            if (
+                getattr(self, "_adjust_preview_base_rgb", None) is not None
+                and norm == getattr(self, "_adjust_edit_base_path", None)
+            ):
+                self._apply_adjust_panel_preview()
+
+    def _refresh_adjust_panel_for_navigation(self, file_path: str | None = None) -> None:
+        """Reload XMP sliders and edit base when the current file changes with panel open."""
+        if not self._adjust_panel_active():
+            return
+        path = file_path or getattr(self, "current_file_path", None)
+        if not path:
+            return
+        self._pending_adjust_preview = None
+        self._sync_adjust_panel_for_current_file(force=True)
+        self._begin_adjust_editing_session(path)
+
+    def _begin_adjust_editing_session(self, file_path: str) -> None:
+        """Cancel competing decodes and load a fresh LibRaw half-res edit base."""
+        if not file_path:
+            return
+        try:
+            self.image_manager.cancel_task(file_path)
+        except Exception:
+            pass
+        self._defer_sensor_full_decode_path = None
+        self._sensor_full_decode_queued_norm = None
+        self._adjust_preview_base_rgb = None
+        self._adjust_edit_base_path = None
+        self._adjust_edit_base_loading_norm = None
+        self._request_adjust_edit_base(file_path)
+
+    def _uses_gpu_single_view(self) -> bool:
+        gv = getattr(self, "gpu_view", None)
+        if gv is None:
+            return False
+        path = getattr(self, "current_file_path", None)
+        if path and self.is_animated_image(_require_str_path(path)):
+            return False
+        return True
+
+    def _adjust_panel_blocks_display_refresh(self) -> bool:
+        """While the adjust panel is open, block async loader repaints of the current file."""
+        if not getattr(self, "_adjust_overlay_visible", False):
+            return False
+        panel = getattr(self, "single_image_adjust_panel", None)
+        return panel is not None and panel.isVisible()
+
+    def _display_adjust_preview_pixmap(self, pixmap: QPixmap) -> None:
+        """Paint adjust live-preview without navigation cross-fades or loader races."""
+        if pixmap is None or pixmap.isNull():
+            return
+        pixmap = pixmap.copy()
+        self._adjust_preview_painting = True
+        try:
+            self._orientation_already_applied = True
+            self._base_display_pixmap = pixmap
+            pixmap = self._apply_visual_rotation_for_current(pixmap)
+            self.current_pixmap = pixmap
+            path = getattr(self, "current_file_path", None)
+            if path:
+                self._displayed_content_path = path
+            if self._uses_gpu_single_view():
+                gv = getattr(self, "gpu_view", None)
+                if gv is not None:
+                    preserve = not self._single_view_is_fit_mode()
+                    gv.set_pixmap(pixmap, preserve_view=preserve)
+                    gv.viewport().update()
+            else:
+                self.image_label.setPixmap(pixmap)
+                self.image_label.resize(pixmap.size())
+            timer = getattr(self, "_adjust_hist_sync_timer", None)
+            if timer is not None:
+                timer.start(120)
+            else:
+                self._sync_single_image_histogram()
+        finally:
+            self._adjust_preview_painting = False
+
+    def _request_adjust_edit_base(self, file_path: str) -> None:
+        """Load LibRaw demosaic buffer for adjust preview (not embedded JPEG)."""
+        from common_image_loader import is_raw_file
+
+        if not file_path:
+            self._adjust_preview_base_rgb = None
+            self._adjust_edit_base_path = None
+            return
+        norm = _norm_path(file_path)
+        if (
+            norm == getattr(self, "_adjust_edit_base_path", None)
+            and getattr(self, "_adjust_preview_base_rgb", None) is not None
+        ):
+            return
+        if getattr(self, "_adjust_edit_base_loading_norm", None) == norm:
+            return
+        if not is_raw_file(file_path):
+            base = self.image_cache.get_full_image(file_path)
+            if base is not None and hasattr(base, "shape"):
+                self._adjust_preview_base_rgb = base
+                self._adjust_edit_base_path = norm
+                self._apply_adjust_panel_preview()
+            return
+        self._adjust_edit_base_loading_norm = norm
+        self._adjust_preview_base_rgb = None
+        self._adjust_edit_base_path = None
+        if hasattr(self, "status_bar"):
+            self.status_bar.showMessage(
+                f"Loading RAW for editing: {os.path.basename(file_path)}…", 0
+            )
+        pool = getattr(getattr(self, "image_manager", None), "_process_pool", None)
+        worker = _AdjustEditBaseWorker(
+            file_path,
+            pool,
+            self._adjust_edit_base_signals,
+            use_full_resolution=False,
+        )
+        QThreadPool.globalInstance().start(worker)
+
+    def _on_adjust_edit_base_ready(self, file_path: str, base) -> None:
+        norm = _norm_path(file_path)
+        self._adjust_edit_base_loading_norm = None
+        if norm != _norm_path(getattr(self, "current_file_path", "") or ""):
+            return
+        if base is None or not hasattr(base, "shape"):
+            if hasattr(self, "status_bar"):
+                self.status_bar.showMessage(
+                    "Could not decode RAW for editing", 5000
+                )
+            return
+        self._adjust_preview_base_rgb = base
+        self._adjust_edit_base_path = norm
+        panel = getattr(self, "single_image_adjust_panel", None)
+        if panel is not None and panel.isVisible():
+            self._pending_adjust_preview = dict(panel.get_adjustments())
+            self._apply_adjust_panel_preview()
+        if hasattr(self, "status_bar"):
+            h, w = base.shape[0], base.shape[1]
+            self.status_bar.showMessage(
+                f"Linear RAW edit base ready ({w}×{h})", 2500
+            )
+
+    def _capture_adjust_preview_base(self, file_path: str | None) -> None:
+        """Edit base comes from LibRaw decode when the adjust panel opens."""
+        return
+
+    def _ensure_adjust_preview_base(self, file_path: str | None):
+        if (
+            file_path
+            and _norm_path(file_path) == getattr(self, "_adjust_edit_base_path", None)
+            and getattr(self, "_adjust_preview_base_rgb", None) is not None
+        ):
+            return self._adjust_preview_base_rgb
+        if file_path:
+            self._request_adjust_edit_base(file_path)
+        return getattr(self, "_adjust_preview_base_rgb", None)
+
+    def _on_adjust_panel_preview_changed(self, adj: dict) -> None:
+        self._pending_adjust_preview = dict(adj or {})
+        self._apply_adjust_panel_preview()
+
+    def _on_adjust_preview_ready(self, generation: int, file_path: str, array) -> None:
+        self._adjust_preview_busy = False
+        if int(generation) != int(getattr(self, "_adjust_preview_gen", 0)):
+            if getattr(self, "_adjust_preview_dirty", False):
+                self._apply_adjust_panel_preview()
+            return
+        if _norm_path(file_path) != _norm_path(getattr(self, "current_file_path", "") or ""):
+            if getattr(self, "_adjust_preview_dirty", False):
+                self._apply_adjust_panel_preview()
+            return
+        if array is not None:
+            try:
+                pixmap = self._numpy_to_qpixmap(array)
+            except Exception:
+                pixmap = None
+            if pixmap is not None and not pixmap.isNull():
+                self._display_adjust_preview_pixmap(pixmap)
+        if getattr(self, "_adjust_preview_dirty", False):
+            self._apply_adjust_panel_preview()
+
+    def _apply_adjust_panel_preview(self) -> None:
+        panel = getattr(self, "single_image_adjust_panel", None)
+        path = getattr(self, "current_file_path", None)
+        if not path:
+            return
+        if panel is not None:
+            adj = panel.get_adjustments()
+        else:
+            adj = getattr(self, "_pending_adjust_preview", None)
+        if adj is None:
+            return
+        self._pending_adjust_preview = dict(adj)
+        norm = _norm_path(path)
+        base = getattr(self, "_adjust_preview_base_rgb", None)
+        if base is None or norm != getattr(self, "_adjust_edit_base_path", None):
+            self._request_adjust_edit_base(path)
+            return
+        if getattr(self, "_adjust_preview_busy", False):
+            self._adjust_preview_dirty = True
+            return
+        self._adjust_preview_dirty = False
+        self._adjust_preview_busy = True
+        self._adjust_preview_gen = int(getattr(self, "_adjust_preview_gen", 0)) + 1
+        gen = self._adjust_preview_gen
+        worker = _AdjustPreviewWorker(
+            gen,
+            path,
+            base,
+            dict(adj),
+            self._adjust_preview_signals,
+        )
+        QThreadPool.globalInstance().start(worker)
+
+    def _on_adjust_panel_editing_finished(self, adj: dict) -> None:
+        path = getattr(self, "current_file_path", None)
+        if not path:
+            return
+        try:
+            from raw_adjustments import write_xmp_adjustments_for_file
+
+            write_xmp_adjustments_for_file(path, adj)
+        except Exception as exc:
+            if hasattr(self, "status_bar"):
+                self.status_bar.showMessage(
+                    f"Could not save adjustments: {exc}", 5000
+                )
+            return
+        if hasattr(self, "status_bar"):
+            self.status_bar.showMessage("Adjustments saved to XMP sidecar", 2500)
+
+    def _on_adjust_recovery_baseline_requested(self) -> None:
+        path = getattr(self, "current_file_path", None)
+        panel = getattr(self, "single_image_adjust_panel", None)
+        if not path or panel is None:
+            return
+        from common_image_loader import is_raw_file
+
+        if not is_raw_file(path):
+            if hasattr(self, "status_bar"):
+                self.status_bar.showMessage(
+                    "Recovery baseline is only available for RAW/DNG files", 3500
+                )
+            return
+        panel.set_recovery_baseline(True)
+        self._apply_adjust_panel_preview()
+        if hasattr(self, "status_bar"):
+            self.status_bar.showMessage(
+                "Adjust starting from recovery look — tweak Exposure / Sat / HSL; "
+                "PV tone sliders return to standard tone",
+                6000,
+            )
+
+    def _on_adjust_panel_export_requested(self, export_format: str, adj: dict) -> None:
+        path = getattr(self, "current_file_path", None)
+        if not path or getattr(self, "_adjust_export_in_progress", False):
+            return
+        from PyQt6.QtWidgets import QFileDialog
+
+        from raw_edit_pipeline import (
+            EXPORT_FORMAT_DNG_RGB,
+            EXPORT_FORMAT_DNG_SETTINGS,
+            EXPORT_FORMAT_JPEG,
+            EXPORT_FORMAT_TIFF16,
+            EXPORT_FORMAT_WEBP,
+        )
+
+        fmt = (export_format or EXPORT_FORMAT_TIFF16).strip().lower()
+        base = os.path.splitext(os.path.basename(path))[0]
+        src_ext = os.path.splitext(path)[1].lower()
+        start_dir = os.path.dirname(os.path.abspath(path))
+
+        if fmt == EXPORT_FORMAT_DNG_SETTINGS:
+            default_ext = src_ext if src_ext else ".dng"
+            default_name = f"{base}_edited{default_ext}"
+            dialog_title = "Export RAW/DNG with XMP settings"
+            file_filter = (
+                "RAW / DNG with XMP (*.dng *.cr2 *.cr3 *.nef *.arw *.orf *.raf *.rw2);;"
+                "All files (*)"
+            )
+        elif fmt == EXPORT_FORMAT_JPEG:
+            default_name = f"{base}_edited.jpg"
+            dialog_title = "Export JPEG"
+            file_filter = "JPEG (*.jpg *.jpeg)"
+        elif fmt == EXPORT_FORMAT_WEBP:
+            default_name = f"{base}_edited.webp"
+            dialog_title = "Export WebP"
+            file_filter = "WebP (*.webp)"
+        elif fmt == EXPORT_FORMAT_DNG_RGB:
+            default_name = f"{base}_edited.dng"
+            dialog_title = "Export baked DNG"
+            file_filter = "DNG (*.dng)"
+        else:
+            default_name = f"{base}_edited.tif"
+            dialog_title = "Export 16-bit TIFF"
+            file_filter = "TIFF (*.tif *.tiff)"
+
+        output_path, _ = QFileDialog.getSaveFileName(
+            self,
+            dialog_title,
+            os.path.join(start_dir, default_name),
+            file_filter,
+        )
+        if not output_path:
+            return
+        low = output_path.lower()
+        if fmt == EXPORT_FORMAT_JPEG and not low.endswith((".jpg", ".jpeg")):
+            output_path += ".jpg"
+        elif fmt == EXPORT_FORMAT_WEBP and not low.endswith(".webp"):
+            output_path += ".webp"
+        elif fmt == EXPORT_FORMAT_DNG_RGB and not low.endswith(".dng"):
+            output_path += ".dng"
+        elif fmt == EXPORT_FORMAT_TIFF16 and not low.endswith((".tif", ".tiff")):
+            output_path += ".tif"
+        elif fmt == EXPORT_FORMAT_DNG_SETTINGS and not os.path.splitext(output_path)[1]:
+            output_path += default_ext
+
+        self._adjust_export_in_progress = True
+        self._adjust_export_format = fmt
+        panel = getattr(self, "single_image_adjust_panel", None)
+        if panel is not None and hasattr(panel, "set_export_enabled"):
+            panel.set_export_enabled(False)
+        if hasattr(self, "status_bar"):
+            self.status_bar.showMessage(
+                f"Exporting {os.path.basename(output_path)}…", 0
+            )
+        pool = getattr(getattr(self, "image_manager", None), "_process_pool", None)
+        worker = _AdjustExportWorker(
+            path,
+            output_path,
+            adj,
+            fmt,
+            pool,
+            self._adjust_export_signals,
+        )
+        QThreadPool.globalInstance().start(worker)
+
+    def _on_adjust_export_finished(
+        self, source_path: str, output_path: str, export_format: str, err: object
+    ) -> None:
+        self._adjust_export_in_progress = False
+        panel = getattr(self, "single_image_adjust_panel", None)
+        if panel is not None and hasattr(panel, "set_export_enabled"):
+            panel.set_export_enabled(True)
+        if _norm_path(source_path) != _norm_path(
+            getattr(self, "current_file_path", "") or ""
+        ):
+            return
+        if err is not None:
+            if hasattr(self, "status_bar"):
+                self.status_bar.showMessage(f"Export failed: {err}", 7000)
+            return
+        fmt = (export_format or "tiff16").strip().lower()
+        labels = {
+            "tiff16": "16-bit TIFF",
+            "jpeg": "JPEG",
+            "webp": "WebP",
+            "dng_rgb": "baked DNG",
+            "dng_settings": "RAW/DNG + XMP",
+        }
+        label = labels.get(fmt, "image")
+        if hasattr(self, "status_bar"):
+            self.status_bar.showMessage(
+                f"Exported {label}: {os.path.basename(output_path)}", 5000
+            )
+
+    def _sync_adjust_panel(self) -> None:
+        panel = getattr(self, "single_image_adjust_panel", None)
+        if panel is None:
+            return
+        if getattr(self, "view_mode", "") != "single":
+            panel.hide()
+            return
+        pm = getattr(self, "current_pixmap", None)
+        if pm is None or pm.isNull():
+            if not self._single_view_has_display_image():
+                panel.hide()
+                return
+        if getattr(self, "_adjust_user_hidden", True):
+            self._adjust_overlay_visible = False
+            panel.hide()
+            return
+        panel.setVisible(bool(getattr(self, "_adjust_overlay_visible", False)))
+        container = getattr(self, "single_view_container", None)
+        if container is not None and hasattr(container, "relayout_adjust"):
+            container.relayout_adjust()
 
     def _clear_single_image_histogram(self):
         w = getattr(self, "single_image_histogram", None)
@@ -17654,6 +18347,9 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             if c is not None and hasattr(c, "relayout_histogram"):
                 c.relayout_histogram()
         self._clear_location_map()
+        panel = getattr(self, "single_image_adjust_panel", None)
+        if panel is not None:
+            panel.hide()
 
     def _sync_location_map(self) -> None:
         """Debounced refresh — avoids canceling map load on every histogram tick."""
@@ -19636,6 +20332,10 @@ class RAWImageViewer(SessionMixin, QMainWindow):
 
     def display_pixmap(self, pixmap):
         """Display a QPixmap."""
+        if self._adjust_panel_blocks_display_refresh() and not getattr(
+            self, "_adjust_preview_painting", False
+        ):
+            return
         if hasattr(self, 'current_file_path') and self.is_animated_image(_require_str_path(self.current_file_path)):
             return
             
@@ -21291,6 +21991,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             logger.debug(f"Error in _on_preloaded_image_ready: {e}")
 
     def on_image_processed(self, rgb_image):
+        if self._adjust_panel_blocks_display_refresh():
+            return
         if hasattr(self, 'loading_overlay'):
             self.loading_overlay.hide_loading()
             
@@ -21841,6 +22543,71 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             focused and isinstance(focused, (QLineEdit, QTextEdit, QPlainTextEdit))
         )
 
+    def _is_widget_in_main_window(self, obj) -> bool:
+        from PyQt6.QtWidgets import QWidget
+
+        if obj is self:
+            return True
+        w = obj if isinstance(obj, QWidget) else None
+        if w is None:
+            return False
+        while w is not None:
+            if w is self:
+                return True
+            if w.isWindow() and w is not self:
+                return False
+            w = w.parentWidget()
+        return False
+
+    def _should_route_global_shortcut(self, obj) -> bool:
+        if not self.isActiveWindow():
+            return False
+        return self._is_widget_in_main_window(obj)
+
+    def _shortcut_activate_histogram(self) -> None:
+        if getattr(self, "view_mode", "") != "single":
+            return
+        if self._shortcut_blocked_by_text_input():
+            return
+        self._histogram_overlay_visible = not getattr(
+            self, "_histogram_overlay_visible", False
+        )
+        self._histogram_user_hidden = not self._histogram_overlay_visible
+        if hasattr(self, "single_image_histogram"):
+            pm = getattr(self, "current_pixmap", None)
+            if pm is not None and not pm.isNull():
+                self.single_image_histogram.setVisible(self._histogram_overlay_visible)
+            else:
+                self.single_image_histogram.setVisible(False)
+        container = getattr(self, "single_view_container", None)
+        if container is not None and hasattr(container, "relayout_histogram"):
+            container.relayout_histogram()
+
+    def _shortcut_activate_location_map(self) -> None:
+        if getattr(self, "view_mode", "") != "single":
+            return
+        if self._shortcut_blocked_by_text_input():
+            return
+        self._map_overlay_visible = not getattr(self, "_map_overlay_visible", False)
+        self._map_user_hidden = not self._map_overlay_visible
+        if self._map_overlay_visible and self._map_online is False:
+            self._map_online = None
+        self._sync_location_map()
+
+    def _shortcut_activate_raw_recovery(self) -> None:
+        if getattr(self, "view_mode", "") != "single":
+            return
+        if self._shortcut_blocked_by_text_input():
+            return
+        self._toggle_auto_tone_preview()
+
+    def _shortcut_activate_adjust_panel(self) -> None:
+        if getattr(self, "view_mode", "") != "single":
+            return
+        if self._shortcut_blocked_by_text_input():
+            return
+        self._toggle_adjust_panel()
+
     def _shortcut_activate_nav_prev(self) -> None:
         if getattr(self, "view_mode", "") == "compare":
             session = getattr(self, "_comparison_session", None)
@@ -21889,6 +22656,9 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             if self._clear_gallery_bookmark_filter():
                 return
         elif vm == "single":
+            if getattr(self, "_adjust_overlay_visible", False):
+                self._set_adjust_panel_visible(False)
+                return
             if getattr(self, "_burst_group_view_active", False):
                 if not self._path_in_burst_group_view(getattr(self, "current_file_path", None)):
                     self._exit_burst_group_view()
@@ -22026,38 +22796,52 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 return True
             self._shortcut_activate_escape()
             return True
+        elif key == Qt.Key.Key_F:
+            if vm == "single":
+                self._toggle_focus_subject_outline()
+                return True
+        elif key == Qt.Key.Key_G:
+            if vm == "single":
+                self._toggle_composition_grid()
+                return True
+        elif key == Qt.Key.Key_J:
+            if vm == "single":
+                self._toggle_clipping_overlay()
+                return True
+        elif key == Qt.Key.Key_E:
+            if vm == "single":
+                self._shortcut_activate_adjust_panel()
+                return True
+        elif key == Qt.Key.Key_Left:
+            self._shortcut_activate_nav_prev()
+            return True
+        elif key == Qt.Key.Key_Right:
+            self._shortcut_activate_nav_next()
+            return True
+        elif key == Qt.Key.Key_C:
+            self._shortcut_activate_compare()
+            return True
+        elif key == Qt.Key.Key_Up:
+            self._shortcut_activate_gallery_up()
+            return True
+        elif key == Qt.Key.Key_Down:
+            self._shortcut_activate_gallery_down()
+            return True
         # Handle H (Histogram) separately to ensure it works even when no image is loaded
         # but only in single view mode.
         if key == Qt.Key.Key_H:
             if vm == "single":
-                # Toggle histogram visibility and preference
-                self._histogram_overlay_visible = not getattr(self, "_histogram_overlay_visible", False)
-                self._histogram_user_hidden = not self._histogram_overlay_visible
-                
-                if hasattr(self, "single_image_histogram"):
-                    pm = getattr(self, "current_pixmap", None)
-                    if pm is not None and not pm.isNull():
-                        self.single_image_histogram.setVisible(self._histogram_overlay_visible)
-                    else:
-                        self.single_image_histogram.setVisible(False)
-                        
-                c = getattr(self, "single_view_container", None)
-                if c is not None and hasattr(c, "relayout_histogram"):
-                    c.relayout_histogram()
+                self._shortcut_activate_histogram()
                 return True
 
         if key == Qt.Key.Key_M:
             if vm == "single":
-                self._map_overlay_visible = not getattr(self, "_map_overlay_visible", False)
-                self._map_user_hidden = not self._map_overlay_visible
-                if self._map_overlay_visible and self._map_online is False:
-                    self._map_online = None
-                self._sync_location_map()
+                self._shortcut_activate_location_map()
                 return True
 
         if key == Qt.Key.Key_P:
             if vm == "single":
-                self._toggle_auto_tone_preview()
+                self._shortcut_activate_raw_recovery()
                 return True
 
         return False
@@ -24664,9 +25448,10 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 self.unsetCursor()
 
         if event.type() == QEvent.Type.KeyPress:
-            # Handle application-wide shortcuts even when sub-widgets (like viewport) have focus
-            if self._handle_app_shortcut(event):
-                return True
+            # Route shortcuts before overlay / OpenGL children consume the event.
+            if self._should_route_global_shortcut(obj):
+                if self._handle_app_shortcut(event):
+                    return True
 
         # Film strip hot zone: pointer events hit child widgets, not the overlay itself.
         if event.type() in (

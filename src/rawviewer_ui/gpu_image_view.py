@@ -726,10 +726,6 @@ class GpuImageView(QGraphicsView):
         return super().event(event)
 
     def keyPressEvent(self, event: QKeyEvent) -> None:
-        handler = getattr(self, "_shortcut_handler", None)
-        if callable(handler) and handler(event):
-            event.accept()
-            return
         super().keyPressEvent(event)
 
     def wheelEvent(self, event) -> None:

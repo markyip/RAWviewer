@@ -73,6 +73,134 @@ class UnifiedImageProcessor:
         self.thumbnail_extractor = ThumbnailExtractor()
         self.exif_extractor = EXIFExtractor()
         self.raw_processor = OptimizedRAWProcessor()
+
+    def _apply_sidecar_if_needed(
+        self, file_path: str, rgb_image: Optional[np.ndarray]
+    ) -> Optional[np.ndarray]:
+        """Apply XMP sidecar adjustments on top of a base (unadjusted) RGB buffer."""
+        if rgb_image is None:
+            return None
+        try:
+            from raw_adjustments import (
+                apply_adjustments_to_rgb,
+                is_default_adjustments,
+                load_adjustments_for_file,
+            )
+
+            adj = load_adjustments_for_file(file_path)
+            if is_default_adjustments(adj):
+                return rgb_image
+            return apply_adjustments_to_rgb(rgb_image, adj)
+        except Exception:
+            return rgb_image
+
+    def decode_raw_edit_base(
+        self,
+        file_path: str,
+        executor: Optional[Any] = None,
+        use_full_resolution: bool = False,
+    ) -> Optional[np.ndarray]:
+        """
+        Demosaic from RAW sensor data for the adjust panel.
+        Returns 16-bit scene-linear RGB (never embedded JPEG; not cached for browse).
+        Defaults to LibRaw half-size for responsive live editing.
+        """
+        skip_key = os.path.normcase(os.path.abspath(file_path))
+        from common_image_loader import dng_prefers_embedded_preview_first
+        from raw_tone_recovery import recovery_decode_params
+
+        try:
+            exif_data = self.exif_extractor.extract_exif_data(file_path)
+            half_size = not use_full_resolution
+            edit_params = recovery_decode_params(half_size=half_size, demosaic="AHD")
+
+            rgb_image: Optional[np.ndarray] = None
+            if skip_key not in _LIBRAW_UNSUPPORTED_PATHS:
+                try:
+                    import rawpy
+                    from enhanced_raw_processor import (
+                        _heavy_fallback_semaphore,
+                        _rawpy_global_lock,
+                    )
+
+                    with _rawpy_global_lock:
+                        raw_ctx = rawpy.imread(file_path)
+                    with raw_ctx as raw:
+                        with _heavy_fallback_semaphore:
+                            rgb_image = raw.postprocess(edit_params)
+                except Exception as libraw_err:
+                    is_unsupported = (
+                        "unsupported" in str(libraw_err).lower()
+                        or "not recognized" in str(libraw_err).lower()
+                    )
+                    if is_unsupported:
+                        _LIBRAW_UNSUPPORTED_PATHS.add(skip_key)
+                    logging.getLogger(__name__).warning(
+                        "[EDIT] LibRaw linear decode failed for %s: %s",
+                        os.path.basename(file_path),
+                        libraw_err,
+                    )
+                    rgb_image = None
+
+            if rgb_image is not None:
+                if not exif_data or exif_data.get("orientation", 1) == 1:
+                    exif_data = self.exif_extractor.extract_exif_data(file_path)
+                orientation = exif_data.get("orientation", 1) if exif_data else 1
+                if orientation != 1:
+                    rgb_image = self._apply_orientation_correction(
+                        rgb_image, orientation, exif_data
+                    )
+                logging.getLogger(__name__).info(
+                    "[EDIT] Linear edit base for %s (%dx%d, uint16=%s, half_size=%s)",
+                    os.path.basename(file_path),
+                    rgb_image.shape[1],
+                    rgb_image.shape[0],
+                    rgb_image.dtype == np.uint16,
+                    half_size,
+                )
+                return rgb_image
+
+            if dng_prefers_embedded_preview_first(file_path):
+                try:
+                    from PIL import Image
+
+                    with Image.open(file_path) as im:
+                        best_w = best_h = 0
+                        best_idx = -1
+                        n_frames = getattr(im, "n_frames", 1)
+                        for idx in range(n_frames):
+                            im.seek(idx)
+                            w, h = im.size
+                            if w * h > best_w * best_h:
+                                best_w, best_h = w, h
+                                best_idx = idx
+                        if best_idx >= 0 and best_w >= 1024:
+                            im.seek(best_idx)
+                            rgb_im = im.convert("RGB")
+                            full_pixels = np.array(rgb_im)
+                            orientation = exif_data.get("orientation", 1) if exif_data else 1
+                            if orientation != 1:
+                                full_pixels = self._apply_orientation_correction(
+                                    full_pixels, orientation, exif_data
+                                )
+                            return full_pixels
+                except Exception:
+                    pass
+                logging.getLogger(__name__).warning(
+                    "[EDIT] LibRaw unsupported for %s; no RAW demosaic base available",
+                    os.path.basename(file_path),
+                )
+                return None
+
+            return None
+        except Exception as e:
+            logging.getLogger(__name__).error(
+                "[EDIT] RAW edit base decode failed for %s: %s",
+                os.path.basename(file_path),
+                e,
+                exc_info=True,
+            )
+            return None
     
     def _is_raw_file(self, file_path: str) -> bool:
         """檢查是否為 RAW 文件"""
@@ -568,7 +696,8 @@ class UnifiedImageProcessor:
     
     def process_full_image(self, file_path: str, 
                           use_full_resolution: bool = False,
-                          executor: Optional[Any] = None) -> Optional[Union[np.ndarray, QPixmap]]:
+                          executor: Optional[Any] = None,
+                          apply_sidecar_adjustments: bool = True) -> Optional[Union[np.ndarray, QPixmap]]:
         """處理完整圖像（統一接口）"""
         # 檢查快取
         # CRITICAL: For RAW files, only check full_image cache, not pixmap cache
@@ -596,6 +725,8 @@ class UnifiedImageProcessor:
                         if _verbose_orientation_logs():
                             # print(f"[ORIENTATION] Using VALID cached full_image for {os.path.basename(file_path)}. Shape: {w}x{h}")
                             pass
+                        if apply_sidecar_adjustments:
+                            return self._apply_sidecar_if_needed(file_path, cached_image)
                         return cached_image
                 else:
                     return cached_image
@@ -617,7 +748,10 @@ class UnifiedImageProcessor:
         
         # 處理圖像
         if is_raw:
-            return self._process_raw_image(file_path, use_full_resolution, executor=executor)
+            base = self._process_raw_image(file_path, use_full_resolution, executor=executor)
+            if apply_sidecar_adjustments:
+                return self._apply_sidecar_if_needed(file_path, base)
+            return base
         else:
             return self._process_regular_image(
                 file_path, use_full_resolution=use_full_resolution
@@ -794,37 +928,18 @@ class UnifiedImageProcessor:
         try:
             # 獲取 EXIF 數據（用於處理參數）
             exif_data = self.exif_extractor.extract_exif_data(file_path)
-            
-            # Check if there is an XMP sidecar file next to the RAW image
-            xmp_exists = False
-            xmp_path = file_path + ".xmp"
-            if not os.path.exists(xmp_path):
-                base_path_no_ext = os.path.splitext(file_path)[0]
-                if os.path.exists(base_path_no_ext + ".xmp"):
-                    xmp_path = base_path_no_ext + ".xmp"
-            if os.path.exists(xmp_path):
-                try:
-                    from raw_adjustments import parse_xmp_adjustments
-                    xmp_adj = parse_xmp_adjustments(xmp_path)
-                    if xmp_adj:
-                        xmp_exists = True
-                except Exception:
-                    xmp_adj = {}
-            else:
-                xmp_adj = {}
 
-            if not xmp_exists:
-                full_embedded = self._try_full_embedded_raw_preview(file_path, exif_data)
-                if full_embedded is not None:
-                    return full_embedded
-            
+            full_embedded = self._try_full_embedded_raw_preview(file_path, exif_data)
+            if full_embedded is not None:
+                return full_embedded
+
             # 檢查文件大小以決定處理策略
             file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
             use_fast_processing = file_size_mb > 20 and not use_full_resolution
             
             # 處理 RAW 文件
             # Check if we should use Preview (embedded JPEG) instead of processing RAW
-            if not use_full_resolution and not libraw_first and not xmp_exists:
+            if not use_full_resolution and not libraw_first:
                if skip_key in _LIBRAW_UNSUPPORTED_PATHS:
                    return self.cache.get_preview(file_path)
                # OPTIMIZATION: Try embedded / cached preview instead of full RAW demosaic.
@@ -924,20 +1039,11 @@ class UnifiedImageProcessor:
                 
             if orientation != 1 and rgb_image is not None:
                 rgb_image = self._apply_orientation_correction(rgb_image, orientation, exif_data)
-            
-            # Apply XMP adjustments if they exist
-            if xmp_adj and rgb_image is not None:
-                try:
-                    from raw_adjustments import apply_adjustments_to_rgb
-                    rgb_image = apply_adjustments_to_rgb(rgb_image, xmp_adj)
-                except Exception as adj_e:
-                    import logging
-                    logging.getLogger(__name__).warning(f"Failed to apply XMP adjustments: {adj_e}")
-            
-            # 快取完整圖像
+
+            # Cache unadjusted base; sidecar is applied in process_full_image().
             if rgb_image is not None:
                 self.cache.put_full_image(file_path, rgb_image)
-            
+
             return rgb_image
                 
         except Exception as e:

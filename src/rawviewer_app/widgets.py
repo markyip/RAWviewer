@@ -1042,15 +1042,17 @@ class SingleImageViewOverlay(QWidget):
     )
 
     def __init__(self, scroll_area, histogram_widget, viewer=None, parent=None,
-                 gpu_view=None, map_widget=None):
+                 gpu_view=None, map_widget=None, adjust_widget=None):
         super().__init__(parent)
         self._viewer = viewer
         self._scroll = scroll_area
         self._gpu_view = gpu_view
         self._hist = histogram_widget
         self._map = map_widget
+        self._adj = adjust_widget
         self._hist_user_placed = False
         self._map_user_placed = False
+        self._adj_user_placed = False
         self._filmstrip_pointer_active = False
         self._filmstrip_reveal = False
         scroll_area.setParent(self)
@@ -1065,10 +1067,14 @@ class SingleImageViewOverlay(QWidget):
         if map_widget is not None:
             map_widget.setParent(self)
             map_widget.hide()
+        if adjust_widget is not None:
+            adjust_widget.setParent(self)
+            adjust_widget.hide()
         self.setObjectName("single_view_container")
         self.setStyleSheet("#single_view_container { background-color: #1E1E1E; }")
         self.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.setMouseTracking(True)
 
         from rawviewer_ui.filmstrip_view import FilmStripBar
@@ -1477,6 +1483,7 @@ class SingleImageViewOverlay(QWidget):
         self._layout_filmstrip()
         self._layout_histogram()
         self._layout_map()
+        self._layout_adjust()
         self.relayout_rating_badge()
         self.relayout_recovery_badge()
         self._raise_single_view_layers()
@@ -1507,6 +1514,40 @@ class SingleImageViewOverlay(QWidget):
             self._map.raise_()
         if self._hist.isVisible():
             self._hist.raise_()
+        if self._adj is not None and self._adj.isVisible():
+            self._adj.raise_()
+        viewer = getattr(self, "_viewer", None)
+        if viewer is not None and hasattr(viewer, "_restore_keyboard_focus"):
+            QTimer.singleShot(0, viewer._restore_keyboard_focus)
+
+    def _layout_adjust(self):
+        panel = self._adj
+        if panel is None or not panel.isVisible():
+            return
+        pw, ph = self.width(), self.height()
+        aw, ah = panel.width(), panel.height()
+        if pw < 1 or ph < 1:
+            return
+        if not self._adj_user_placed:
+            x = max(self._HIST_MARGIN, pw - aw - self._HIST_MARGIN)
+            y = max(self._HIST_MARGIN, (ph - ah) // 2)
+            x = min(max(0, x), max(0, pw - aw))
+            y = min(max(0, y), max(0, ph - ah))
+            panel.move(x, y)
+        else:
+            x = min(max(0, panel.x()), max(0, pw - aw))
+            y = min(max(0, panel.y()), max(0, ph - ah))
+            panel.move(x, y)
+        panel.raise_()
+
+    def mark_adjust_user_moved(self):
+        self._adj_user_placed = True
+        viewer = getattr(self, "_viewer", None)
+        if viewer is not None and hasattr(viewer, "schedule_save_session_state"):
+            viewer.schedule_save_session_state()
+
+    def relayout_adjust(self):
+        self._layout_adjust()
 
     def _layout_map(self):
         m = self._map
@@ -1545,6 +1586,8 @@ class SingleImageViewOverlay(QWidget):
             out["histogram"] = {"x": self._hist.x() / pw, "y": self._hist.y() / ph}
         if self._map is not None and self._map.isVisible() and self._map_user_placed:
             out["map"] = {"x": self._map.x() / pw, "y": self._map.y() / ph}
+        if self._adj is not None and self._adj.isVisible() and self._adj_user_placed:
+            out["adjust"] = {"x": self._adj.x() / pw, "y": self._adj.y() / ph}
         return out
 
     def apply_overlay_session_positions(self, data: dict) -> None:
@@ -1575,6 +1618,19 @@ class SingleImageViewOverlay(QWidget):
                     min(max(0, y), max(0, ph - mh)),
                 )
                 self._map_user_placed = True
+            except (KeyError, TypeError, ValueError):
+                pass
+        adjust_pos = data.get("adjust")
+        if adjust_pos and self._adj is not None:
+            try:
+                x = int(float(adjust_pos["x"]) * pw)
+                y = int(float(adjust_pos["y"]) * ph)
+                aw, ah = self._adj.width(), self._adj.height()
+                self._adj.move(
+                    min(max(0, x), max(0, pw - aw)),
+                    min(max(0, y), max(0, ph - ah)),
+                )
+                self._adj_user_placed = True
             except (KeyError, TypeError, ValueError):
                 pass
 
@@ -1670,6 +1726,7 @@ class LoadingOverlay(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.setVisible(False)
         self._message = "Loading Image..."
         
