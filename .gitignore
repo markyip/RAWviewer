@@ -150,6 +150,10 @@ scripts/output/
 scripts/profile_*.py
 scripts/check_folder_cache.py
 
+# Local gallery crash repro / stress automation (keep locally; not for release)
+scripts/run_gallery_stress_tests.ps1
+scripts/stress_*.py
+
 # .NET build output (Windows share helper)
 src/windows_share_helper/bin/
 src/windows_share_helper/obj/

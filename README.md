@@ -13,6 +13,8 @@
   </a>
 </p>
 
+**Language / 語言：** [English](README.md) · [繁體中文](README.zh-TW.md)
+
 **RAWviewer** is a fast photo viewer for **Windows and macOS**. Browse folders of RAW and JPEG files, check sharpness, cull rejects, and search your library — **on your computer, no cloud upload.**
 
 Download: **[GitHub Releases](https://github.com/markyip/RAWviewer/releases/latest)**
@@ -155,6 +157,14 @@ On **macOS**, HDR **HEIC / HEIF / AVIF** and 16-bit HDR **TIFF** can display wit
 
 ## Troubleshooting
 
+### All platforms
+
+| Problem | What to do |
+|---------|------------|
+| GPS map not showing | Press **M** in single-image view; the map only appears when the photo has embedded GPS coordinates |
+| HDR HEIC/TIFF looks flat or too dark | **Windows:** HDR stills are tone-mapped to SDR by design. **macOS:** Needs an EDR-capable display (GPU single-image view is on by default); `RAWVIEWER_DISABLE_EDR=1` forces SDR tone mapping |
+| **P** / **J** no effect | **P**/**J** are RAW/DNG single view only; **P** is fit-only half-res preview. **P** recovery also requires scipy + rawpy — check logs if it fails |
+
 ### Windows
 
 | Problem | What to do |
@@ -165,18 +175,10 @@ On **macOS**, HDR **HEIC / HEIF / AVIF** and 16-bit HDR **TIFF** can display wit
 | Opened Setup again instead of the app | Launch **`RAWviewer.exe`** or the Desktop shortcut — not **`RAWviewer_Setup.exe`** |
 | AI search missing after install (**Full**) | Open gallery **Search** → accept the download prompt |
 | RAWviewer not in Open with | Re-run the installer (repair), or reinstall |
-| Gallery layout wrong after folder switch | **v2.5.0** — update; clears stale layout cache |
-| Gallery zoom jumps or thumbnails do not resize | **v2.5.0** — use the bottom-bar size slider in gallery view |
-| Gallery scroll jumps while thumbnails load | **v2.5.0** (latest) — aspect relayout restores scroll anchor; update if scrolling drifts as images appear |
-| Lite: searching a city shows non-geotagged photos | **v2.5.0** (latest) — place search requires GPS-resolved city/country metadata |
 | Leftover cache after uninstall | Run **`uninstall.bat`** again, or delete `%USERPROFILE%\.rawviewer_cache` manually |
 | Out of memory during AI indexing | See [Automatic memory tuning](#automatic-memory-tuning); use **Lite** on 8 GB PCs or set `RAWVIEWER_MEMORY_TIER_AUTO=0` and lower workers manually |
-| App slow or exits after reopening last folder | **v2.4.1+** staggers full decode and prefetch on session restore. Still tight on 8 GB? Use **Lite**, or `RAWVIEWER_DISABLE_SESSION_RESTORE=1` |
-| GPS map not showing | Press **M** in single-image view; the map only appears when the photo has embedded GPS coordinates |
-| Animated GIF/WebP not playing | Update to **v2.5+**; check that the file is a valid animated GIF or WebP |
-| HDR HEIC/TIFF looks flat or too dark | Windows tone-maps HDR stills to SDR by design; for EDR viewing use macOS with an EDR display |
+| App slow or exits after reopening last folder | On 8 GB PCs, use **Lite** or set `RAWVIEWER_DISABLE_SESSION_RESTORE=1` |
 | RAW always shows demosaic, not embedded JPEG | Switch to **Embedded JPEG workflow**; RAW EDR re-decodes from LibRaw and overrides embedded preview when **RAW workflow** is on |
-| **P** recovery does nothing / fails | Requires scipy + rawpy; check logs. Recovery is half-res preview only |
 | Crash | Enable file logging with `RAWVIEWER_FILE_LOG=1`, then check the install folder |
 
 ### macOS
@@ -187,25 +189,14 @@ On **macOS**, HDR **HEIC / HEIF / AVIF** and 16-bit HDR **TIFF** can display wit
 | `bash: command not found` | Type `cd `, drag the extracted folder onto Terminal, press Return, then run the command again |
 | Can’t read Desktop/Documents | System Settings → Privacy → **Full Disk Access** → add RAWviewer |
 | Search says models missing (**Full**) | Open gallery search and click **Download** when prompted (needs internet once) |
-| Download failed (SSL / certificate error) | Update to **v2.4** or newer (bundles certifi). On a corporate VPN or proxy, add your organization’s root certificate to **Keychain Access** and set it to **Always Trust** |
+| Download failed (SSL / certificate error) | On a corporate VPN or proxy, add your organization’s root certificate to **Keychain Access** and set it to **Always Trust** |
 | Need to uninstall completely | Use **`uninstall_macos_app.sh`** or **`Uninstall RAWviewer.command`** from the release zip — not Trash alone |
 | Uninstall scripts missing | Re-download the release zip from [Releases](https://github.com/markyip/RAWviewer/releases/latest); scripts are inside the extracted folder |
 | macOS “out of memory” / heavy swap during indexing | See [Automatic memory tuning](#automatic-memory-tuning). On 8 GB Macs, prefer **Lite** or wait for indexing to finish before opening gallery on huge folders |
-| Killed on relaunch (`Killed: 9` / exit 137 in Terminal) | **v2.4.1+** fixes most session-restore bursts. Try **Lite**, `RAWVIEWER_DISABLE_SESSION_RESTORE=1`, or `RAWVIEWER_ENABLE_SEMANTIC_SEARCH=0` |
-| Gallery stutters on a huge folder | Update to **v2.4+**. If it persists, run **`clear_cache.sh`** and reopen the folder |
-| Gallery thumbnails scattered or large blank gaps after switching folders | Update to **v2.5.0**; layout cache is invalidated per folder |
-| Gallery zoom jumps or thumbnails do not resize | Update to **v2.5.0**; use the bottom-bar size slider in gallery view |
-| Gallery scroll jumps while thumbnails load | Update to latest **v2.5.0** build — aspect relayout restores scroll anchor |
-| Lite: city search shows non-geotagged photos | Update to latest **v2.5.0** build — place filters require GPS-resolved metadata |
+| Killed on relaunch (`Killed: 9` / exit 137 in Terminal) | Try **Lite**, `RAWVIEWER_DISABLE_SESSION_RESTORE=1`, or `RAWVIEWER_ENABLE_SEMANTIC_SEARCH=0` |
+| Gallery still stutters on a huge folder | Run **`clear_cache.sh`** and reopen the folder |
 | Gallery button slow on huge folder (first open) | Normal — waits for EXIF capture-time sort so gallery order is correct; instant when metadata is cached |
-| Background indexing still touching old folder after switch | Update to **v2.5.0**; stale indexing/metadata workers are aborted on folder change |
-| Thumbnails sideways or wrong way up (portrait shots) | Update to **v2.4**. Run **`clear_cache.sh`** once if old thumbnails were cached before the fix |
-| Portrait photo crop-fit inside a landscape tile (upright but wrong frame) | Update to **v2.5.0** (latest). If it persists on one file, run **`clear_cache.bat`** / **`clear_cache.sh`** once — mixed old/new oriented cache entries can cause this |
-| GPS map not showing | Press **M** in single-image view; the map only appears when the photo has embedded GPS coordinates |
-| Animated GIF/WebP not playing | Update to **v2.5+**; check that the file is a valid animated GIF or WebP |
-| HDR HEIC/TIFF looks flat or too dark | Needs GPU single-image view (default) and an EDR-capable display; `RAWVIEWER_DISABLE_EDR=1` forces SDR tone mapping |
 | RAW EDR but want embedded JPEG | Use **Embedded JPEG workflow** toggle, or `RAWVIEWER_RAW_EDR=0` |
-| **P** / **J** no effect | **P**/**J** are RAW/DNG single view only; **P** is fit-only half-res preview |
 
 More detail: [`scripts/Launch/README.md`](scripts/Launch/README.md)
 
