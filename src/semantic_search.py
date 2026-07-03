@@ -2230,6 +2230,8 @@ KNOWN_LOCATION_NAMES: frozenset[str] = frozenset({
     "prague", "budapest", "warsaw", "stockholm", "oslo", "copenhagen", "helsinki",
     "lisbon", "athens", "dublin", "tel aviv", "mexico city", "buenos aires",
     "sao paulo", "rio de janeiro", "santiago", "lima", "bogota",
+    "manchester", "birmingham", "liverpool", "edinburgh", "glasgow", "leeds",
+    "bristol", "cardiff", "belfast", "nottingham", "sheffield", "newcastle",
     # Popular travel destinations
     "santorini", "mykonos", "bali", "phuket", "kyoto", "osaka", "nara", "hokkaido",
     "jeju", "busan", "boracay", "cebu", "nha trang", "da nang", "koh samui",
@@ -5672,6 +5674,32 @@ class SemanticImageIndex:
                     return True
         return False
 
+    @staticmethod
+    def _contains_location_place(haystack: str, needle: str) -> bool:
+        """Location field match — forward substring with word boundaries only."""
+        h = str(haystack or "").strip().lower()
+        n = str(needle or "").strip().lower()
+        if not n or not h:
+            return False
+        variants = {n, n.replace("_", " "), n.replace(" ", "_")}
+        for v in variants:
+            if not v:
+                continue
+            if h == v:
+                return True
+            start = 0
+            while True:
+                idx = h.find(v, start)
+                if idx < 0:
+                    break
+                before_ok = idx == 0 or not h[idx - 1].isalnum()
+                end = idx + len(v)
+                after_ok = end == len(h) or not h[end].isalnum()
+                if before_ok and after_ok:
+                    return True
+                start = idx + 1
+        return False
+
     def _apply_filters(
         self, rows: Sequence[MetadataRow], query_text: str
     ) -> tuple[List[MetadataRow], str]:
@@ -5792,8 +5820,8 @@ class SemanticImageIndex:
                 if needle:
                     filtered = [
                         r for r in filtered 
-                        if self._contains_loose(str(r["city"] or ""), needle)
-                        or self._contains_loose(str(self._row_value(r, "landmark") or ""), needle)
+                        if self._contains_location_place(str(r["city"] or ""), needle)
+                        or self._contains_location_place(str(self._row_value(r, "landmark") or ""), needle)
                     ]
                 continue
 
@@ -5801,7 +5829,10 @@ class SemanticImageIndex:
                 matched = True
                 needle = t.split(":", 1)[1].strip().lower()
                 if needle:
-                    filtered = [r for r in filtered if self._contains_loose(str(r["admin1"] or ""), needle)]
+                    filtered = [
+                        r for r in filtered
+                        if self._contains_location_place(str(r["admin1"] or ""), needle)
+                    ]
                 continue
 
             if low.startswith("country:"):
@@ -5812,8 +5843,8 @@ class SemanticImageIndex:
                         r
                         for r in filtered
                         if (
-                            self._contains_loose(str(r["country"] or ""), needle)
-                            or self._contains_loose(str(r["country_code"] or ""), needle)
+                            self._contains_location_place(str(r["country"] or ""), needle)
+                            or self._contains_location_place(str(r["country_code"] or ""), needle)
                         )
                     ]
                 continue
@@ -5926,6 +5957,13 @@ class SemanticImageIndex:
                 ):
                     matched = True
                     filtered = [r for r in filtered if self._row_matches_format_specs(r, [bare])]
+                    continue
+                bare_place = bare.replace("_", " ")
+                if self._is_strictly_location_name(bare_place):
+                    matched = True
+                    filtered = [
+                        r for r in filtered if self._row_matches_location_place(r, bare_place)
+                    ]
                     continue
                 semantic_terms.append(t)
 
@@ -6090,12 +6128,10 @@ class SemanticImageIndex:
         
         return text.strip()
 
-    @lru_cache(maxsize=256)
     def _is_strictly_location_name(self, term: str) -> bool:
         """
-        Check if a term is strictly a known country or major city name.
-        This is used to prevent semantic search 'guessing' when metadata contradicts.
-        Uses O(1) exact lookups only — never scans the full city database per query.
+        Check if a term is a known country or city/place name.
+        Uses static lists plus the bundled GeoNames place index (O(1) lookup).
         """
         needle = _normalize_location_term(term)
         if len(needle) < 3:
@@ -6108,10 +6144,33 @@ class SemanticImageIndex:
             return True
 
         geo = self._reverse_geocoder
+        if not isinstance(geo, CustomReverseGeocoder):
+            ensured = self._ensure_reverse_geocoder()
+            if isinstance(ensured, CustomReverseGeocoder):
+                geo = ensured
         if isinstance(geo, CustomReverseGeocoder):
             return geo.has_place_name(needle)
 
         return False
+
+    def _row_matches_location_place(self, row: MetadataRow, needle: str) -> bool:
+        place = (needle or "").strip().lower()
+        if not place:
+            return False
+        return (
+            self._contains_location_place(str(row["city"] or ""), place)
+            or self._contains_location_place(str(self._row_value(row, "landmark") or ""), place)
+            or self._contains_location_place(str(row["admin1"] or ""), place)
+            or self._contains_location_place(str(row["country"] or ""), place)
+            or self._contains_location_place(str(row["country_code"] or ""), place)
+        )
+
+    def _row_has_resolved_location(self, row: MetadataRow) -> bool:
+        return bool(
+            str(row["city"] or "").strip()
+            or str(self._row_value(row, "landmark") or "").strip()
+            or str(row["country"] or "").strip()
+        )
 
     def _auto_match_metadata_keywords(
         self, rows: Sequence[MetadataRow], semantic_terms: Sequence[str]
@@ -6141,11 +6200,20 @@ class SemanticImageIndex:
                 if matched_rows:
                     filtered = matched_rows
                     continue
-            matched_rows = [
-                r
-                for r in filtered
-                if any(self._contains_loose(str(self._row_value(r, field) or ""), needle) for field in metadata_fields)
-            ]
+            is_location = self._is_strictly_location_name(needle)
+            if is_location:
+                matched_rows = [
+                    r for r in filtered if self._row_matches_location_place(r, needle)
+                ]
+            else:
+                matched_rows = [
+                    r
+                    for r in filtered
+                    if any(
+                        self._contains_loose(str(self._row_value(r, field) or ""), needle)
+                        for field in metadata_fields
+                    )
+                ]
             if matched_rows:
                 logger.info(f"[SEARCH] Metadata match for '{needle}' found in {len(matched_rows)} image(s)")
                 filtered = matched_rows
@@ -6154,33 +6222,30 @@ class SemanticImageIndex:
                 # doesn't match any image in the folder, check if any images HAVE 
                 # verified location metadata. If an image says "Japan", and we search 
                 # "Korea", we should exclude it rather than letting AI "guess".
-                if self._is_strictly_location_name(needle):
+                if is_location:
                     new_filtered = []
                     contradiction_count = 0
                     for r in filtered:
-                        city = str(self._row_value(r, "city") or "").lower()
-                        landmark = str(self._row_value(r, "landmark") or "").lower()
-                        country = str(self._row_value(r, "country") or "").lower()
-                        # If the image HAS location metadata, it must match the term
-                        if city or landmark or country:
-                            if (self._contains_loose(city, needle) or 
-                                self._contains_loose(landmark, needle) or 
-                                self._contains_loose(country, needle)):
+                        if self._row_has_resolved_location(r):
+                            if self._row_matches_location_place(r, needle):
                                 new_filtered.append(r)
                             else:
                                 # Contradiction! (Has location, but it's different)
                                 contradiction_count += 1
-                                pass
-                        else:
-                            # No location metadata - keep it for semantic guessing
+                        elif semantic_embeddings_enabled():
+                            # No resolved location — only keep for semantic AI guessing
                             new_filtered.append(r)
                     
                     if contradiction_count > 0:
                         logger.warning(f"[SEARCH] Contradiction Filter: Excluded {contradiction_count} image(s) from '{needle}' due to conflicting GPS metadata")
                     filtered = new_filtered
                 else:
-                    logger.debug(f"[SEARCH] No metadata match for '{needle}', passing to semantic AI")
-                    remaining.append(term)
+                    if semantic_embeddings_enabled():
+                        logger.debug(f"[SEARCH] No metadata match for '{needle}', passing to semantic AI")
+                        remaining.append(term)
+                    else:
+                        # Metadata-only build: unresolved free-text is not a match.
+                        filtered = []
 
         return filtered, remaining
 

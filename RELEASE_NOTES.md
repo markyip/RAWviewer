@@ -46,6 +46,15 @@ Major release introducing a custom gallery zoom slider, interactive GPS map disp
 - **Fast-open deferrals** — Background folder scan, EXIF sort, and filmstrip prefetch use TTFR-or-fallback timing (~2.5s cap) instead of a hard 5s sleep after fast-open.
 - **Search & metadata** — Faster EXIF cache lookups, KD-tree reverse geocoding during indexing, and UI-thread sorting moved to background workers for large folders.
 
+### Lite gallery location search
+- **City / place filters respect GPS metadata** — Lite builds (`RAWVIEWER_ENABLE_SEMANTIC_SEARCH=0`) no longer treat unresolved free-text place names as “show everything.” Searching `manchester`, `city:tokyo`, or `in paris` only returns photos whose indexed city/landmark/country fields match.
+- **Bundled `cities500.csv.gz` lookup at search time** — Place-name detection now lazy-loads the same GeoNames index used for reverse geocoding, so cities beyond the small static shortcut list (e.g. Manchester, Birmingham) are recognized without enabling semantic AI.
+- **Stricter place matching** — Location filters use word-boundary matching so partial names (e.g. Chester inside Manchester) no longer false-match; filename-only hits are ignored for place queries.
+
+### Gallery — viewport stays put while thumbnails load
+- **Scroll anchoring on aspect relayout** — When decoded thumbnails correct tile aspect and trigger a justified-grid rebuild, vertical scroll is restored synchronously from the upper-left visible thumbnail instead of waiting for the next UI tick (which could jump the viewport).
+- **Partial row rebuilds** — Metadata-driven partial layout updates preserve the same anchor when only lower rows change height.
+
 ### Windows gallery crash & scroll-jump fixes
 - **Fixed a native crash on gallery entry (Windows)** — Switching from single image to gallery right after viewing a large photo could abort the app on some Windows GPU drivers. The single-image view now finishes hiding before its GPU memory is released, avoiding the driver-level conflict.
 - **Fixed a scrollbar-jump stall** — Dragging the gallery scrollbar to a distant position could leave the newly visible area stuck behind stale loading requests for the position you scrolled away from, sometimes for several seconds. It now loads immediately.

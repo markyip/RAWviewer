@@ -834,10 +834,9 @@ class JustifiedGallery(QWidget):
         scroll = self._scroll_area_widget()
         if scroll is None:
             return False
+        self._refresh_gallery_scroll_range()
         sb = scroll.verticalScrollBar()
-        expected_max = self._total_content_height - scroll.viewport().height()
-        if expected_max > 0 and sb.maximum() < expected_max - 50:
-            return False
+        expected_max = max(0, int(self._total_content_height - scroll.viewport().height()))
 
         rect = self._gallery_layout_items[idx]["rect"]
         if "offset_px" in state:
@@ -852,11 +851,13 @@ class JustifiedGallery(QWidget):
             target = int(
                 anchor_y - max(0.0, min(1.0, viewport_fraction)) * viewport_h
             )
-            sb.setValue(max(sb.minimum(), min(target, sb.maximum())))
+            upper = max(sb.maximum(), expected_max)
+            sb.setValue(max(sb.minimum(), min(target, upper)))
             return True
 
         target = int(rect.top() - offset_px)
-        sb.setValue(max(sb.minimum(), min(target, sb.maximum())))
+        upper = max(sb.maximum(), expected_max)
+        sb.setValue(max(sb.minimum(), min(target, upper)))
         return True
 
     def _get_upper_left_visible_image_index(self) -> int:
@@ -2307,10 +2308,10 @@ class JustifiedGallery(QWidget):
         """
         return rect
 
-    def _sync_content_geometry(self) -> None:
-        """Sizes the gallery widget to the actual content height to let QScrollArea drive scrolling natively."""
-        vp_w = max(300, self._get_viewport_width())
+    def _refresh_gallery_scroll_range(self) -> None:
+        """Resize gallery content and nudge QScrollArea so scrollbar range matches layout height."""
         scroll = self._scroll_area_widget()
+        vp_w = max(300, self._get_viewport_width())
         viewport_h = 600
         if scroll is not None:
             viewport_h = max(1, int(scroll.viewport().height()))
@@ -2327,6 +2328,26 @@ class JustifiedGallery(QWidget):
 
         if scroll is not None:
             scroll.updateGeometry()
+
+    def _apply_scroll_anchor_state(self, state: Optional[dict]) -> bool:
+        """Restore viewport scroll; retry on next tick if the scrollbar range is still settling."""
+        if not state:
+            return False
+        self._refresh_gallery_scroll_range()
+        if self._restore_scroll_anchor_state(state):
+            self._pending_scroll_anchor_state = None
+            self._pending_scroll_to_path = None
+            self._scroll_to_file_attempts = 0
+            return True
+        self._pending_scroll_anchor_state = state
+        self._pending_scroll_to_path = None
+        self._scroll_to_file_attempts = 0
+        self._schedule_scroll_to_file_retry(0)
+        return False
+
+    def _sync_content_geometry(self) -> None:
+        """Sizes the gallery widget to the actual content height to let QScrollArea drive scrolling natively."""
+        self._refresh_gallery_scroll_range()
 
     def build_gallery(self, bulk_metadata=None, force=False):
         """
@@ -2496,6 +2517,8 @@ class JustifiedGallery(QWidget):
             if force:
                 self._last_force_build_ts = self._last_build_ts
             self._reposition_thumbnail_widgets()
+            if anchor_state:
+                self._apply_scroll_anchor_state(anchor_state)
             if _focus_gallery_switch_logs():
                 logger.debug(
                     "[MODESWITCH] gallery.build_gallery done; items=%d content_h=%d",
@@ -2503,9 +2526,6 @@ class JustifiedGallery(QWidget):
                     self._total_content_height,
                 )
             should_load_visible = True
-            if anchor_state:
-                self._pending_scroll_anchor_state = anchor_state
-                self._pending_scroll_to_path = None
             if len(self.images) > 100 and not (
                 getattr(self, "_is_zooming", False)
                 or getattr(self, "_gallery_zoom_rebuild", False)
@@ -3725,7 +3745,6 @@ class JustifiedGallery(QWidget):
             return
         if not self._metadata_changed_paths:
             return
-        anchor = self._capture_scroll_anchor_state()
         if _focus_gallery_switch_logs():
             logger.debug(
                 "[GALLERY] aspects settle rebuild (%d aspect drift)",
@@ -3733,10 +3752,6 @@ class JustifiedGallery(QWidget):
             )
         self._metadata_changed_paths.clear()
         self.build_gallery(force=True)
-        if anchor:
-            self._pending_scroll_anchor_state = anchor
-            self._pending_scroll_to_path = None
-            QTimer.singleShot(0, self._apply_pending_scroll_to_file)
 
     def _image_index_for_path(self, file_path: str) -> int:
         for i, item in enumerate(self.images):
@@ -3779,7 +3794,9 @@ class JustifiedGallery(QWidget):
             return None
         return min_image_idx
 
-    def _rebuild_layout_from_image_index(self, start_image_idx: int) -> bool:
+    def _rebuild_layout_from_image_index(
+        self, start_image_idx: int, anchor_state: Optional[dict] = None
+    ) -> bool:
         """Recompute justified rows from *start_image_idx* onward (partial layout update)."""
         if (
             start_image_idx <= 0
@@ -3875,6 +3892,8 @@ class JustifiedGallery(QWidget):
         self._layout_image_sequence = tuple(self.images)
         self._last_force_build_ts = self._last_build_ts
         self._reposition_thumbnail_widgets()
+        if anchor_state:
+            self._apply_scroll_anchor_state(anchor_state)
         return True
 
     def _handle_metadata_rebuild(self):
@@ -3925,7 +3944,7 @@ class JustifiedGallery(QWidget):
             and len(partial_paths) <= max(64, len(self.images) // 50)
         )
         if use_partial:
-            if not self._rebuild_layout_from_image_index(partial_start):
+            if not self._rebuild_layout_from_image_index(partial_start, anchor_state=anchor):
                 self.build_gallery(bulk_metadata=None, force=True)
         else:
             self.build_gallery(bulk_metadata=None, force=True)
@@ -3938,10 +3957,6 @@ class JustifiedGallery(QWidget):
                 rebuild_ms,
                 len(self._gallery_layout_items),
             )
-        if anchor:
-            self._pending_scroll_anchor_state = anchor
-            self._pending_scroll_to_path = None
-            QTimer.singleShot(0, self._apply_pending_scroll_to_file)
 
     def show_loading_message(self, message="Loading gallery..."):
         """Show loading message overlay - Simplified for better performance"""

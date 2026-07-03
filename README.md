@@ -167,6 +167,8 @@ On **macOS**, HDR **HEIC / HEIF / AVIF** and 16-bit HDR **TIFF** can display wit
 | RAWviewer not in Open with | Re-run the installer (repair), or reinstall |
 | Gallery layout wrong after folder switch | **v2.5.0** — update; clears stale layout cache |
 | Gallery zoom jumps or thumbnails do not resize | **v2.5.0** — use the bottom-bar size slider in gallery view |
+| Gallery scroll jumps while thumbnails load | **v2.5.0** (latest) — aspect relayout restores scroll anchor; update if scrolling drifts as images appear |
+| Lite: searching a city shows non-geotagged photos | **v2.5.0** (latest) — place search requires GPS-resolved city/country metadata |
 | Leftover cache after uninstall | Run **`uninstall.bat`** again, or delete `%USERPROFILE%\.rawviewer_cache` manually |
 | Out of memory during AI indexing | See [Automatic memory tuning](#automatic-memory-tuning); use **Lite** on 8 GB PCs or set `RAWVIEWER_MEMORY_TIER_AUTO=0` and lower workers manually |
 | App slow or exits after reopening last folder | **v2.4.1+** staggers full decode and prefetch on session restore. Still tight on 8 GB? Use **Lite**, or `RAWVIEWER_DISABLE_SESSION_RESTORE=1` |
@@ -193,6 +195,8 @@ On **macOS**, HDR **HEIC / HEIF / AVIF** and 16-bit HDR **TIFF** can display wit
 | Gallery stutters on a huge folder | Update to **v2.4+**. If it persists, run **`clear_cache.sh`** and reopen the folder |
 | Gallery thumbnails scattered or large blank gaps after switching folders | Update to **v2.5.0**; layout cache is invalidated per folder |
 | Gallery zoom jumps or thumbnails do not resize | Update to **v2.5.0**; use the bottom-bar size slider in gallery view |
+| Gallery scroll jumps while thumbnails load | Update to latest **v2.5.0** build — aspect relayout restores scroll anchor |
+| Lite: city search shows non-geotagged photos | Update to latest **v2.5.0** build — place filters require GPS-resolved metadata |
 | Gallery button slow on huge folder (first open) | Normal — waits for EXIF capture-time sort so gallery order is correct; instant when metadata is cached |
 | Background indexing still touching old folder after switch | Update to **v2.5.0**; stale indexing/metadata workers are aborted on folder change |
 | Thumbnails sideways or wrong way up (portrait shots) | Update to **v2.4**. Run **`clear_cache.sh`** once if old thumbnails were cached before the fix |
