@@ -8680,8 +8680,20 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self._gallery_search_status_full = ""
         inp = getattr(self, "gallery_search_input", None)
         if inp is not None:
-            inp.setPlaceholderText("Search gallery")
-            inp.setToolTip("")
+            from semantic_search import semantic_embeddings_enabled
+
+            if semantic_embeddings_enabled():
+                inp.setPlaceholderText("Search gallery")
+                inp.setToolTip("")
+            else:
+                # EXIF-only unlock: keep the limitation visible so AI-style
+                # queries returning nothing isn't a mystery.
+                inp.setPlaceholderText("Search gallery (EXIF only — AI search off)")
+                inp.setToolTip(
+                    "AI (semantic) search is disabled in this build/launch — "
+                    "queries match EXIF metadata and filenames only.\n"
+                    "Enable with RAWVIEWER_ENABLE_SEMANTIC_SEARCH=1."
+                )
         self._reset_gallery_search_panel_width()
         self._sync_gallery_search_input_editable()
         if (
@@ -9980,6 +9992,42 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             self.status_bar.showMessage(f"Asset download failed: {error}", 7000)
         self._gallery_search_user_collapsed_while_busy = False
 
+    def _notify_semantic_embeddings_disabled(self) -> None:
+        """Tell the user (once per session) that search is EXIF-only.
+
+        Fires when the user explicitly opens semantic search while
+        RAWVIEWER_ENABLE_SEMANTIC_SEARCH is off. Without this, the search field
+        unlocks looking fully functional and AI queries just return nothing.
+        """
+        import logging
+
+        logging.getLogger(__name__).info(
+            "[INDEX][USER] Semantic (AI) search disabled "
+            "(RAWVIEWER_ENABLE_SEMANTIC_SEARCH is off); search is EXIF/filename-only"
+        )
+        if getattr(self, "_semantic_disabled_notice_shown", False):
+            return
+        self._semantic_disabled_notice_shown = True
+        if hasattr(self, "status_bar"):
+            try:
+                self.status_bar.showMessage(
+                    "AI search is disabled (RAWVIEWER_ENABLE_SEMANTIC_SEARCH=0) — "
+                    "search matches EXIF/filenames only",
+                    10000,
+                )
+            except Exception:
+                pass
+        inp = getattr(self, "gallery_search_input", None)
+        if inp is not None:
+            try:
+                inp.setToolTip(
+                    "AI (semantic) search is disabled in this build/launch — "
+                    "queries match EXIF metadata and filenames only.\n"
+                    "Enable with RAWVIEWER_ENABLE_SEMANTIC_SEARCH=1."
+                )
+            except Exception:
+                pass
+
     def _start_user_semantic_indexing(self, corpus_files) -> None:
         """Run or resume semantic embeddings after the user opens search (metadata may already be silent)."""
         logger = logging.getLogger(__name__)
@@ -10030,6 +10078,13 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             return
 
         if not semantic_embeddings_enabled():
+            # The user explicitly asked for semantic search but embeddings are
+            # disabled (RAWVIEWER_ENABLE_SEMANTIC_SEARCH unset/0 — the default for
+            # dev runs; only frozen/installed Full builds default it on). Say so
+            # instead of silently unlocking an EXIF-only field: this exact silence
+            # cost a debugging session when run_debug_full.bat lacked the flag and
+            # 'lion'/'plane' queries just returned nothing with no explanation.
+            self._notify_semantic_embeddings_disabled()
             if self._is_gallery_semantic_search_ready(corpus_files):
                 self._finish_gallery_search_unlock(corpus_files)
             elif getattr(self, "_metadata_index_run_done", False):
@@ -10115,6 +10170,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         from semantic_search import semantic_embeddings_enabled
 
         if not semantic_embeddings_enabled():
+            self._notify_semantic_embeddings_disabled()
             if self._is_gallery_semantic_search_ready(corpus_files):
                 self._finish_gallery_search_unlock(corpus_files)
                 return
