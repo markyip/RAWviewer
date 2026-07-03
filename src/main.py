@@ -8686,9 +8686,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 inp.setPlaceholderText("Search gallery")
                 inp.setToolTip("")
             else:
-                # EXIF-only unlock: keep the limitation visible so AI-style
-                # queries returning nothing isn't a mystery.
-                inp.setPlaceholderText("Search gallery (EXIF only — AI search off)")
+                # EXIF/location unlock: short placeholder; AI limitation is in the tooltip.
+                inp.setPlaceholderText("Search EXIF, name, place")
                 inp.setToolTip(self._semantic_disabled_hint_texts()[1])
         self._reset_gallery_search_panel_width()
         self._sync_gallery_search_input_editable()
@@ -10003,18 +10002,14 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             lite = False
         if lite:
             return (
-                "AI search is not included in the Lite version — "
-                "search matches EXIF/filenames only",
-                "AI (semantic) search is not included in the Lite version — "
-                "queries match EXIF metadata and filenames only.\n"
-                "Install the Full version for AI search.",
+                "Lite: EXIF, filename & place search — no AI",
+                "Lite searches EXIF metadata, filenames, and GPS places.\n"
+                "Install the Full version for AI semantic search.",
             )
         return (
-            "AI search is disabled (RAWVIEWER_ENABLE_SEMANTIC_SEARCH=0) — "
-            "search matches EXIF/filenames only",
-            "AI (semantic) search is disabled in this launch — "
-            "queries match EXIF metadata and filenames only.\n"
-            "Enable with RAWVIEWER_ENABLE_SEMANTIC_SEARCH=1.",
+            "EXIF, filename & place search — AI off",
+            "Queries match EXIF metadata, filenames, and GPS places.\n"
+            "Enable RAWVIEWER_ENABLE_SEMANTIC_SEARCH=1 for AI search.",
         )
 
     def _notify_semantic_embeddings_disabled(self) -> None:
