@@ -15158,7 +15158,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         """Plain-text shortcuts list for tooltips and the shortcuts dialog."""
         if getattr(self, "view_mode", "single") == "compare":
             return (
-                "Space — Toggle synchronized zoom\n"
+                "Space — Toggle synchronized zoom (F on: zoom each pane to its focus point)\n"
+                "F — Toggle focus overlays on both panes\n"
                 "← / → — Previous / next candidate image\n"
                 "↑ — Promote candidate to selected\n"
                 "↓ — Reject candidate (Shift + ↓ to reject selected)\n"

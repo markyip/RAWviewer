@@ -54,7 +54,8 @@ In **gallery view**, drag the **size slider** in the bottom bar to change thumbn
 * **↑** — Promote candidate (right pane) to selected (left pane)
 * **↓** — Reject candidate and move it to Discard folder (Shift+↓ to reject select)
 * **Delete** — Delete candidate image to Recycle Bin/Trash (Shift+Delete to delete select)
-* **Space** — Toggle synchronized zoom across both panes
+* **Space** — Toggle synchronized zoom across both panes (with **F** focus overlays on: zoom each pane to its own focus point)
+* **F** — Show / hide focus overlays on both panes (compare mode)
 * **J** — Toggle exposure clipping overlay on both panes
 * **G** — Cycle composition grid guide on both panes
 * **C** / **Esc** — Exit Compare mode

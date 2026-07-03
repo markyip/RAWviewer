@@ -1,78 +1,52 @@
 # RAWviewer Release Notes
 
 ## 🚀 Version 2.5.0
-**Release Date: June 29, 2026**
+**Release Date: July 3, 2026**
 
-Major release focused on **performance at scale** — faster navigation, leaner disk cache, smarter background indexing — plus a custom gallery zoom slider, interactive GPS map overlay, macOS HDR/EDR viewing (including RAW), animated GIF/WebP playback, RAW tone recovery preview, burst image grouping, and a side-by-side Compare pane.
+RAWviewer 2.5 is built for **serious libraries** — faster culling, smarter search, and a viewer that stays responsive from the first folder open to the ten-thousandth frame.
 
-### Burst Image Grouping
-- **Burst image grouping** — Automatically group rapid-fire burst sequences in the gallery (based on capture time intervals). Double-click a collapsed stack cover to enter the burst group view and inspect individual frames.
+### 🚀 Key Feature Highlights
 
-### Dual-Pane Compare View
-- **Dual-pane Compare Mode** — Compare multiple selected images side-by-side (left panel is the selected anchor, right panel displays candidate files).
-- **Direct Compare Toggle (C)** — Press **C** to enter Compare mode immediately when multiple images are selected (works from both gallery and single view). Press **C** again while in Compare mode to exit back to the gallery.
-- **Compare navigation & culling** — Promote candidate to select (↑), reject candidate to Discard folder (↓), or delete candidate to Recycle Bin/Trash (Delete). Use **Shift + ↓** or **Shift + Delete** to reject or delete the selected (left pane) anchor instead, which automatically promotes the current candidate to the select slot and loads the next image. Supports synchronizing composition guides (G) and clipping overlays (J) on both panes. Unselecting all items automatically hides the compare bottom button.
+#### 🎨 Gallery & View
+- **Gallery Zoom Slider** — A sleek wedge-shaped zoom track with **scroll anchoring**: the top-left thumbnail stays locked on screen while you resize the grid.
+- **macOS HDR / EDR** — See HDR stills and RAW the way they were meant to look on supported Mac displays (HEIC, AVIF, 16-bit TIFF, and **RAW High Quality** workflow). Embedded JPEG preview stays SDR when you want speed.
+- **Animated GIF & WebP** — Play, scale, and browse animated files natively in single-image view.
+- **RAW recovery preview (P)** — Press **P** for an instant shadow/highlight recovery preview on RAW/DNG — judge extreme contrast without waiting for a full export. Session-only, fit view.
+- **Clipping overlay (J)** — Press **J** to see exactly what's clipping — red for blown highlights, blue for crushed shadows — on both RAW and in Compare mode.
 
-### RAW tone recovery & clipping (single view, RAW/DNG)
-- **P — Recovery preview** — Session-only local shadow/highlight recovery on a half-res linear LibRaw decode (`highlight_mode=Reconstruct`, Reinhard tone map, local polish). Fit-only (~2048 px); press **P** again to exit. Does not change the main full-res pipeline or persist settings.
-- **J — Clipping overlay** — Red = highlight clip (any channel ≥252); blue = shadow clip (all channels ≤3) on the current screen buffer. Diagnostic only; distinct from **P** soft recovery.
+#### 👥 Culling & Comparison
+- **Burst Image Grouping** — Rapid-fire sequences stack automatically by capture time. Double-click to expand and pick the keeper.
+- **Dual-Pane Compare (C)** — Anchor vs. candidate, side by side. Promote (↑), reject to Discard (↓), or delete — with synced composition guides (**G**) and clipping overlays (**J**) on both panes. **Space** toggles synchronized zoom and pan across both panes; press **F** for focus overlays, then **Space** zooms each pane to its own AF/subject point for side-by-side sharpness checks.
 
-### Interactive GPS Map Display Overlay
-- **GPS Map Overlay** — Press **M** in single-image view to show/hide an interactive tile-based map card. The card appears immediately with a **Loading map…** placeholder while tiles fetch; non-geotagged photos do not pop up a map.
-- **Coordinate badge** — A clickable badge shows lat/lon on the map; click it to open the location in **Google Maps** (browser).
-- **Offline Reverse-Geocoding for Search** — Bundles preloaded worldwide cities (all cities with population > 500, covering over 100,000+ locations) and landmarks databases (`cities500.csv.gz` and `landmarks.csv.gz`). During background indexing, GPS coordinates are resolved to city, region, and country names and stored locally — enabling gallery search by location (e.g. `city:tokyo`, `country:jp`) with no internet required.
+#### 🗺️ Maps & Location Search
+- **Interactive GPS Overlay (M)** — A live map card for geotagged shots, with one-click **Google Maps** from the coordinate badge.
+- **Offline place search** — 100,000+ cities and landmarks resolved locally during indexing. Search `city:tokyo` or `country:jp` with **no internet** — ever.
 
-### Gallery Zoom Slider & scroll anchoring
-- **Gallery Zoom Slider** — Custom slanted wedge-shaped zoom track and circular thumb in the justified gallery (bottom bar; row height **220–380px**, step 20). The chosen size is saved in `QSettings` (`gallery_row_height`).
-- **Justified relayout on zoom** — Dragging the slider runs a full justified grid rebuild at the new target row height so each row still fills the viewport width and thumbnail sizes change visibly.
-- **Scroll anchoring** — When you press the slider, the **upper-left visible** thumbnail becomes the anchor for the whole drag. After each relayout, vertical scroll is restored so that photo stays at the same height on screen (horizontal position may shift slightly as rows regroup).
+#### ⚡ Performance at Scale
+Built to stay fluid on **5k–10k+ image libraries**, whether you're on a fast internal SSD or a slow external drive.
 
-### macOS HDR / EDR display
-- **Extended Dynamic Range viewport** — On macOS, the GPU single-image view (`RAWVIEWER_GPU_VIEW=1`, default in release builds) enables EDR on the viewport layer so bright HDR content can use headroom above SDR white on supported displays.
-- **HDR still-image decode** — HEIC / HEIF / AVIF and 16-bit HDR TIFF files load as 16-bit on macOS when EDR is enabled; Windows and other platforms tone-map to SDR (Reinhard). Standard JPEG previews are unchanged.
-- **RAW EDR (macOS, RAW workflow)** — Linear 16-bit LibRaw decode → extended tone map → `RGBX64` QPixmap. **On by default** (`RAWVIEWER_RAW_EDR=1`); set `RAWVIEWER_RAW_EDR=0` to disable. Respects the **Embedded JPEG / RAW workflow** toggle: embedded-JPEG workflow keeps camera preview pixels (SDR); RAW (High Quality) workflow uses EDR when enabled.
-- **EDR status** — Startup status bar and top metadata show `EDR · RAW`, `EDR · HDR`, or `EDR ready · embedded JPEG workflow` when applicable.
-- **Opt out** — Set `RAWVIEWER_DISABLE_EDR=1` to force the SDR tone-mapping path on macOS.
+**📦 Smarter cache**
+- **WebP tiles** — New cache writes are smaller and faster to read; size-based LRU keeps disk use in check.
+- **Your existing JPEG cache still works** — no forced migration. Clear cache manually only if you want immediate WebP savings.
+- **One decode, many uses** — Preview, grid, and thumbnail tiers fill from a single pass instead of reopening every file.
 
-### Animated GIF & WebP Playback
-- **Animated Previews** — Enhanced the image viewer pipeline to support playing, scaling, and animating GIF and WebP files. Displays playback status messages and handles dynamic window scaling seamlessly.
+**🤖 Background indexing that gets out of your way**
+- **Two-phase indexing** — Metadata first, then AI embeddings (Full). Search unlocks when indexing is ready for your edition (metadata on Lite; metadata + AI on Full).
+- **Scroll-aware** — Indexing pauses while you scroll the gallery and yields to foreground navigation so arrow keys stay smooth.
 
-### Performance & responsiveness
+**⏱️ Snappier navigation**
+- **Staggered prefetch** — Switching photos cancels low-priority loads; full-res neighbors wait until the current frame paints.
+- **Off the UI thread** — Sorting, heavy conversions, and metadata work move to background workers — fewer micro-stutters.
 
-2.5.0 treats **large libraries and everyday navigation** as first-class goals. Work spans the thumbnail cache, indexing pipeline, gallery layout, and single-image loading so the UI stays usable on fast internal SSDs and on slow external drives alike.
-
-**Thumbnail cache & disk I/O**
-
-Gallery tiles, filmstrip thumbs, and indexing warm-up now share a **unified decode path** that backfills preview, grid, and thumbnail tiers from a single pass instead of re-opening files for each consumer. On-disk grid and thumbnail tiles use **WebP** (smaller and faster to read than the old JPEG cache entries), with **size-based LRU eviction** so `~/.rawviewer_cache` does not grow without bound. **Volume read speed** is probed once per mount and used to tune I/O throttling on USB disks and network volumes.
-
-**Upgrading from older versions (JPEG → WebP):**
-- **Existing JPEG cache is reused** — there is no bulk migration at upgrade; the read path is format-agnostic (`PIL.Image.open()` sniffs content), so upgrading does not change how already-cached folders behave.
-- **Legacy JPEG tiles stay until invalidated** — entries from previous versions are kept until the source file changes, LRU eviction removes them, orientation repair clears them, or they age out; only **new** writes use WebP.
-- **Optional disk savings** — to move to WebP sooner and shrink `~/.rawviewer_cache`, delete the cache manually (`scripts/Launch/shell/clear_cache.sh` on macOS, `scripts\Launch\bat\clear_cache.bat` on Windows); thumbnails will rebuild as WebP on the next visit.
-
-**Background indexing**
-
-Metadata extraction and semantic embedding run as **two coordinated phases** in the background (EXIF/metadata first, then the MobileCLIP neural pass on **Full** builds). The **search field stays read-only** until indexing finishes for your profile — **Lite:** metadata only; **Full:** metadata, embeddings, and face scan when enabled — so queries always run against a complete index rather than partial results. **Capture-time sort probes** are persisted in the EXIF database — reopening a folder you have browsed before skips re-statting thousands of files just to sort by date. GPS coordinates resolve through a **KD-tree** over the bundled city database (O(log n) nearest-neighbor lookup instead of scanning 100k+ rows per coordinate). Semantic indexing **reuses EXIF rows** already in `ImageCache` rather than parsing files again on the UI thread. When you **open a different album**, workers and prefetch from the previous folder are **cancelled immediately**. On very large libraries, metadata extraction **waits for idle single-view time** (navigation, zoom, or an active decode queue) before saturating disk — keeping arrow-key browsing smooth while indexing continues in the background.
-
-**Single-image navigation**
-
-Filmstrip warm-up is **staggered and throttled**; changing the current photo **cancels low-priority prefetch** so the image you are looking at wins bandwidth. **Full-resolution neighbor prefetch** no longer starts eagerly on every arrow press — only after the current frame has painted. **Sensor dimensions** for the status bar resolve off the UI thread. **Identical status-bar updates are deduplicated** so repeated renders do not re-parse EXIF. **Session state writes are debounced** (~400 ms) during rapid browsing; quit still flushes immediately. Very large numpy→QPixmap conversions for embedded-JPEG upgrades run on a **background worker** so the main thread does not stall mid-navigation.
-
-**Gallery & search UI**
-
-Resorting a huge folder or ranking semantic-search hits no longer blocks the UI — work moves to **background workers** with a short status message. **Fast-open** defers folder scan, EXIF sort, and filmstrip prefetch until **first paint (TTFR)** with a ~2.5 s fallback cap instead of a fixed multi-second sleep. Gallery **pauses indexing while you scroll** and resumes after idle. **Folder switches** reset layout and in-flight thumbnail work cleanly. **Partial row rebuilds** update justified geometry when late EXIF or decoded aspects arrive, without rebuilding the entire grid on every thumbnail. EXIF SQLite uses a **larger page cache** and **batched commits** for faster metadata reads during search and sort.
-
-**What you should feel:** snappier arrow-key browsing even while indexing runs, faster repeat visits to the same folder, less cache bloat on disk, and a gallery that keeps scrolling smoothly on 5k–10k+ image libraries.
+**🪟 Windows polish**
+- Fixed a GPU hand-off race when returning to the gallery after large single-image views.
+- Gallery scrollbar jumps load visible tiles immediately.
+- Optional stable file picker: `RAWVIEWER_QT_FILE_DIALOG=1`.
 
 ### Gallery reliability (large folders)
 - **Folder switching** — Layout and thumbnail loads reset per folder; scattered tiles and blank gaps after changing albums are gone.
 - **Huge folders** — Gallery opens in capture-time (EXIF) order; the Gallery button appears once that sort finishes (instant when metadata is fully cached).
 - **Orientation-aware tiles** — EXIF display orientation is applied consistently when thumbnails enter the gallery grid, so portrait shots keep correct framing when you jump scroll position or enter the gallery from single view.
-
-### Windows stability
-- **Gallery GPU hand-off** — Switching from single image to gallery after viewing a large photo no longer races GPU teardown on some Windows drivers.
-- **Scrollbar responsiveness** — Dragging the gallery scrollbar to a distant position loads the newly visible tiles immediately instead of waiting on stale requests from the previous scroll position.
-- **File-picker fallback** — On some Windows setups the native file/folder picker can abort the app (shell preview handlers / cloud overlays). The standard native picker remains the default; set `RAWVIEWER_QT_FILE_DIALOG=1` for a stable cross-platform picker if needed.
 
 ---
 
@@ -415,56 +389,42 @@ Includes fixes from **2.0.1** (Pixel DNG, gallery aspect ratio, DNG single-view 
 
 ---
 
-# RAWviewer 版本發布說明 (繁體中文)
+# RAWviewer 版本發布說明
 
 ## 🚀 版本 2.5.0
-**發布日期：2026 年 6 月 25 日**
+**發布日期：2026 年 7 月 3 日**
 
-主要版本，以**大資料夾效能**為重點 — 更快的導覽、更精簡的磁碟快取、更聰明的背景索引 — 並新增自訂藝廊縮放滑桿、捲動錨定、互動式 GPS 地圖覆蓋、macOS HDR/EDR 顯示，以及動畫 GIF/WebP 播放功能。
+RAWviewer 2.5 為**大型圖庫**而生——更快的篩選、更聰明的搜尋，從第一個資料夾到第上萬張相片都保持流暢。
 
-### 藝廊縮放滑桿與捲動錨定
-- **藝廊縮放滑桿** —— 在藝廊視圖底部列新增自訂 slanted 楔形縮放軌道與圓形滑桿（列高 **220–380px**，步進 20）。設定儲存於 `QSettings`（`gallery_row_height`）。
-- **縮放時 justified 重排** —— 拖曳滑桿會以新的目標列高完整重建 justified 網格，每列仍填滿視窗寬度，縮圖大小明顯改變。
-- **捲動錨定** —— 按下滑桿時，以**左上角可見**縮圖為錨點；每次重排後還原垂直捲動，使該照片在畫面上的高度大致不變（列重新分組時水平位置可能略有偏移）。
+### 🚀 重點功能
 
-### 互動式 GPS 地圖顯示覆蓋
-- **GPS 地圖覆蓋** —— 在單張影像檢視中按下 **M** 鍵，可顯示/隱藏互動式瓦片地圖卡片。按下後立即顯示 **Loading map…** 占位符；無 GPS 的照片不會彈出地圖。
-- **座標徽章** —— 地圖上顯示可點擊的經緯度徽章；點擊可在瀏覽器中開啟 **Google Maps**。
-- **離線逆地理編碼（搜尋功能）** —— 隨附預載的全球城市（涵蓋所有人口大於 500 的 10 萬多個城市）與地標資料庫（`cities500.csv.gz` 與 `landmarks.csv.gz`）。在背景索引期間，GPS 座標將被解析為城市、地區和國家名稱並儲存於本機，讓您無需網路即可透過位置進行藝廊搜尋（例如 `city:tokyo`、`country:jp`）。
+#### 🎨 圖庫與檢視
+- **圖庫縮放滑桿** — 楔形縮放軌道搭配**捲動錨定**：拖曳時左上角縮圖固定在畫面上。
+- **macOS HDR / EDR** — 在支援的 Mac 上以延伸動態範圍檢視 HDR 靜態與 **RAW 高品質工作流程**（HEIC、AVIF、16-bit TIFF）。內嵌 JPEG 工作流程仍為快速 SDR 預覽。
+- **GIF / WebP 動畫** — 單張檢視原生播放、縮放與瀏覽動畫檔。
+- **RAW 復原預覽（P）** — 在 RAW/DNG 上按 **P** 即時預覽陰影/高光復原，無需等待完整匯出。僅本工作階段、符合模式。
+- **裁切疊圖（J）** — 按 **J** 標示過曝（紅）與死黑（藍）；比較模式兩側皆可同步顯示。
 
-### macOS HDR / EDR 顯示
-- **擴展動態範圍視埠** —— 在 macOS 上，GPU 單圖檢視（`RAWVIEWER_GPU_VIEW=1`，release 預設）於視埠圖層啟用 EDR，支援的顯示器可呈現高於 SDR 白位的 HDR 亮度。
-- **HDR 靜態影像解碼** —— HEIC / HEIF / AVIF 與 16-bit HDR TIFF 在 macOS 且 EDR 啟用時以 16-bit 載入；Windows 及其他平台以 Reinhard 壓成 SDR。一般 JPEG 與 RAW 預覽不變。
-- **關閉方式** —— 設定 `RAWVIEWER_DISABLE_EDR=1` 可在 macOS 強制走 SDR tone mapping。
+#### 👥 篩選與比較
+- **連拍分組** — 依拍攝時間自動堆疊連拍；雙擊展開挑選最佳張。
+- **雙欄比較（C）** — 錨點 vs 候選並排；提升（↑）、拒絕至 Discard（↓）、刪除；可同步構圖輔助線（**G**）與裁切疊圖（**J**）。**空白鍵**切換兩側同步縮放與平移；按 **F** 顯示對焦框後，**空白鍵**可將左右各自縮放至該張的 AF/主體對焦點，方便比對銳利度。
 
-### 動畫 GIF 與 WebP 播放
-- **動畫預覽** —— 增強了影像檢視器管線，完整支援播放、縮放和播放動畫 GIF 及 WebP 檔案，顯示播放狀態訊息，並無縫處理動態視窗縮放。
+#### 🗺️ 地圖與地點搜尋
+- **GPS 地圖疊圖（M）** — 含 GPS 相片的互動地圖；座標徽章一鍵開啟 **Google Maps**。
+- **離線地點搜尋** — 背景索引解析 10 萬+ 城市與地標；可搜尋 `city:tokyo`、`country:jp`，**完全離線**。
 
-### 效能與回應性
+#### ⚡ 大資料夾效能
+針對 **5k–10k+ 張**圖庫優化，內建 SSD 與外接慢碟皆適用。
 
-2.5.0 將**大型圖庫與日常導覽**視為核心目標，涵蓋縮圖快取、索引管線、藝廊版面與單圖載入，在內建 SSD 與外接慢速磁碟上皆能維持流暢。
+**📦 更聰明的快取** — 新寫入採 **WebP**、依大小 LRU；舊 **JPEG 快取仍可用**；單次解碼填滿多層縮圖。
 
-**縮圖快取與磁碟 I/O** — 藝廊、底片條與索引預熱共用**統一解碼路徑**，一次解碼即可填滿 preview / grid / thumbnail 各層級。磁碟上的 grid 與 thumbnail 改為 **WebP**（較小、讀取更快），並以**依大小的 LRU 驅逐**控制 `~/.rawviewer_cache` 成長。每個掛載點**探測讀取速度**以調整外接碟 I/O 節流。
+**🤖 背景索引** — 先中繼資料、再 AI 嵌入（Full）；搜尋欄在對應版本索引就緒後解鎖；捲動圖庫時暫停索引、讓路給前景導覽。
 
-**從舊版升級（JPEG → WebP）：**
-- **繼續使用現有的 JPEG 快取** — 升級時不會整批轉檔；讀取端依檔案內容自動辨識格式，因此不影響既有快取資料夾的使用體驗。
-- **舊版留下的 JPEG 快取會一直用到失效或被清掉** — 僅在來源檔變更、LRU 驅逐、方向校正清除或過期後才會以 WebP 重新寫入。
-- **若想提早改用 WebP 以節省空間** — 可手動刪除快取（macOS：`scripts/Launch/shell/clear_cache.sh`；Windows：`scripts\Launch\bat\clear_cache.bat`），下次開啟資料夾時會以 WebP 重建。
+**⏱️ 更順的導覽** — 分段預載、切換相片取消低優先級載入；排序與重轉換移至背景執行緒。
 
-**背景索引** — 中繼資料與語意嵌入分**兩階段**協調執行；**拍攝時間排序探測**寫入 EXIF 資料庫，重開同一資料夾可跳過大量重複 stat。GPS 以 **KD-tree** 做逆地理編碼；語意索引**重用 ImageCache 中的 EXIF**，避免 UI 執行緒重複解析。切換相簿時**立即取消**上一資料夾的 worker 與預取；超大資料夾在單圖導覽忙碌時**延後**中繼資料擷取。
-
-**單圖導覽** — 底片條預熱分段節流；切換照片時**取消低優先級預取**。**全解析度鄰近預取**不再在每次方向鍵時搶先啟動。狀態列感測器尺寸於背景執行緒解析；**狀態列更新去重**；**工作階段寫入 debounce**（約 400 ms）。超大 numpy→QPixmap 轉換於背景 worker 完成。
-
-**藝廊與搜尋 UI** — 大型資料夾重排序與語意搜尋排序改由**背景 worker** 處理。**快速開啟**延遲至**首次繪製（TTFR）**；捲動時**暫停索引**；**局部列重建**更新長寬比；EXIF SQLite **加大快取頁**與**批次 commit**。
-
-**預期感受：** 索引進行中仍順暢瀏覽、重訪資料夾更快、磁碟快取更精簡、5k–10k+ 張圖庫捲動更穩定。
+**🪟 Windows** — 修正大圖單張後切回圖庫的 GPU 競爭；捲軸跳轉即時載入；可選 `RAWVIEWER_QT_FILE_DIALOG=1` 穩定檔案選擇器。
 
 ### 藝廊可靠性（大型資料夾）
 - **切換資料夾** — 每個資料夾重設版面與縮圖載入。
 - **大型資料夾** — 以 EXIF 拍攝時間排序；中繼資料已快取時 Gallery 按鈕幾乎即時出現。
 - **方向感知縮圖** — 縮圖進入藝廊時一致套用 EXIF 顯示方向。
-
-### Windows 穩定性
-- **藝廊 GPU 切換** — 在 Windows 部分顯示卡驅動上，從單圖切回藝廊時不再與 GPU 釋放競爭。
-- **捲軸回應** — 將藝廊捲軸拖到遠處時，新可見區域會立即載入，不再被舊捲動位置的請求卡住。
-- **檔案選擇器備援** — 原生檔案/資料夾選擇器在部分 Windows 環境可能導致當機；預設仍使用原生選擇器，必要時可設定 `RAWVIEWER_QT_FILE_DIALOG=1` 改用跨平台選擇器。
