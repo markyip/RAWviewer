@@ -14233,6 +14233,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             return False
         if not getattr(self, "image_files", None):
             return False
+        if self._adjust_panel_active():
+            return False
         if getattr(self, "view_mode", "single") == "single":
             return True
         return getattr(self, "view_mode", "") == "gallery"
@@ -14492,6 +14494,9 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             btn.hide()
             return
         if getattr(self, "view_mode", "single") == "compare":
+            btn.hide()
+            return
+        if self._adjust_panel_active():
             btn.hide()
             return
         vis = bool(self._gallery_share_target_paths())
@@ -18101,6 +18106,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         if self._adjust_overlay_visible:
             if self._raw_recovery_preview_active():
                 self._disable_raw_recovery()
+            if getattr(self, "_search_panel_expanded", False):
+                self._set_search_panel_expanded(False, animate=False)
         if self._adjust_overlay_visible and self._single_view_has_display_image():
             panel.setVisible(True)
             self._sync_adjust_panel_for_current_file()
@@ -25185,6 +25192,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 and self.view_mode == "single"
                 and cp
                 and os.path.isfile(cp)
+                and not self._adjust_panel_active()
             )
             if hasattr(self, "rotate_bottom_button"):
                 self.rotate_bottom_button.setVisible(show_rotate)
@@ -25198,7 +25206,9 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             self, "_burst_group_view_active", False
         ):
             self.search_bottom_button.setVisible(
-                bool(self.image_files) and self._is_exif_sort_ready()
+                bool(self.image_files)
+                and self._is_exif_sort_ready()
+                and not self._adjust_panel_active()
             )
         if getattr(self, "_search_panel_expanded", False):
             self._schedule_search_expand_overlay_sync()

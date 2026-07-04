@@ -63,7 +63,7 @@ def _apply_saturation_vibrance(img: np.ndarray, merged: dict[str, float]) -> np.
     past the gamut boundary and clipped to a flat, fully-saturated block, while hues
     with small linear spread (skin tones, blue sky) barely moved — the "colors look
     off / no pop" symptom. Round-tripping through the sRGB OETF (nearest-index LUT,
-    not np.power — see docs/ADJUST_LINEAR_PIPELINE.md) and scaling HSV S there matches
+    not np.power — see docs/EDIT_PIPELINE.md) and scaling HSV S there matches
     how a "Saturation" slider is perceived, and S is bounded to [0, 1] by construction
     so it can't overshoot the gamut the way additive chroma scaling did.
     """
@@ -212,7 +212,7 @@ class PreviewStageCache:
     Every slider tick used to rerun the entire WB -> exposure -> denoise ->
     PV2012 tone -> tonemap -> sat/vibrance -> HSL -> detail chain from
     scratch, even when only one late-stage control (e.g. Sharpness) changed
-    since the previous tick -- see docs/ADJUST_LINEAR_PIPELINE.md Performance
+    since the previous tick -- see docs/EDIT_PIPELINE.md Performance
     review #2, the root cause of "sluggish/laggy while dragging". This cache
     chains a cheap key comparison per stage: if a stage's own inputs (plus
     whatever stage feeds it) haven't changed since the last call, its cached

@@ -4,7 +4,7 @@ Both filters operate on a YCbCr split (chroma denoise touches Cb/Cr only;
 luma denoise touches Y only) and use an edge-aware bilateral filter directly
 on float32 -- no uint8 round-trip, no per-channel patch search. This replaced
 an NLM (non-local means) chroma filter that was both slower (see
-docs/ADJUST_LINEAR_PIPELINE.md Performance review) and required an intermediate
+docs/EDIT_PIPELINE.md Performance review) and required an intermediate
 uint8 quantization step that had its own rounding bug (green-cast regression,
 same doc). Benchmarked ~19-22x faster than the old NLM path at preview/export
 sizes, with comparable noise reduction and negligible edge bleed (bilateral
@@ -56,7 +56,7 @@ def _downsample_blur_upsample(channel: np.ndarray, factor: int, blur_sigma: floa
     -- spatially correlated over several pixels from Bayer demosaic
     interpolation -- which a kernel that size barely touches (measured ~7%
     std reduction on noise with a several-pixel correlation length, vs ~77%
-    on pixel-independent noise; see docs/ADJUST_LINEAR_PIPELINE.md). Shrinking
+    on pixel-independent noise; see docs/EDIT_PIPELINE.md). Shrinking
     first makes a much larger effective blur radius nearly free, and is
     perceptually safe for chroma specifically because human vision resolves
     color at far lower spatial resolution than luminance (the same premise

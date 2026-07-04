@@ -215,7 +215,7 @@ def _build_srgb_encode_lut(size: int, out_max: float, dtype) -> np.ndarray:
 
 
 # Nearest-index LUTs for the sRGB OETF (np.power over a full frame is the single
-# most expensive step in the preview/export path — see docs/ADJUST_LINEAR_PIPELINE.md
+# most expensive step in the preview/export path — see docs/EDIT_PIPELINE.md
 # "Bottleneck #1"). 4096/65536 entries keep quantization error under ~1 output LSB.
 _SRGB8_LUT_SIZE = 4096
 _SRGB8_LUT = _build_srgb_encode_lut(_SRGB8_LUT_SIZE, 255.0, np.uint8)

@@ -207,7 +207,7 @@ class ThumbnailLabel(QLabel):
 
     def _update_edited_badge(self) -> None:
         """Lightweight 'has saved RAW adjustments' hint (pencil dot) — does not
-        change the thumbnail pixels; see docs/ADJUST_LINEAR_PIPELINE.md for why
+        change the thumbnail pixels; see docs/EDIT_PIPELINE.md for why
         (gallery thumbnails are not re-rendered through the adjust pipeline)."""
         badge = getattr(self, "_edited_badge", None)
         if self._gallery_edited:

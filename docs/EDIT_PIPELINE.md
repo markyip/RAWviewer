@@ -1,8 +1,15 @@
-# Adjust Panel — Linear Edit Pipeline (Implementation Plan)
+# Edit Pipeline — Adjust Panel, Metadata & Roadmap
 
 **Status:** Implemented (v2.5+ dev branch)  
 **Toggle:** **E** in single-image view (RAW/DNG)  
 **Tests:** `PYTHONPATH=src python3 scripts/phase_develop_adjust_linear.py`
+
+> Renamed from `ADJUST_LINEAR_PIPELINE.md` (2026-07-04) — the scene-linear
+> tone/color pipeline below is still the core of this doc, but it now also
+> tracks feasibility investigations for adjacent editor features (rating/XMP
+> compatibility, geometry/perspective tools, local/masked adjustments) that
+> don't belong in the pipeline itself. See the **Roadmap investigations**
+> section near the end for those.
 
 ## Goal
 
@@ -18,7 +25,7 @@ Replace **8-bit sRGB / gamma-space** adjust preview with a **scene-linear** pipe
 | PV2012 tone (ProcessVersion 11.0) | Done | Base curve + HS/W/B in perceptual space |
 | Point tone curve UI | Done | `tone_curve_widget.py`; `_SHOW_TONE_CURVE_UI = True` in panel (re-enabled 2026-07-04) |
 | Parametric tone regions | Done | PV Shad / Dark / Light / High (same flag); monotonicity bug fixed before re-enabling (see Performance review #14) |
-| HSL 分色 (8 colors) | **Hidden** | Code in `raw_hsl.py`; `_SHOW_HSL_UI = False` in panel — also has an open cv2 HSV-scale bug (see below) |
+| HSL (8 colors) | **Hidden** | Code in `raw_hsl.py`; `_SHOW_HSL_UI = False` in panel — also has an open cv2 HSV-scale bug (see below) |
 | Detail (Sharpness / Clarity / Defringe) | Done | Display-linear, after tone map |
 | Chroma / Luma NR | Done | Both bilateral filter, no NLM/uint8 quantization; Luma NR is new (see Performance review #11/#12). Chroma NR also gets a downsample/blur/upsample coarse pass for blotchy noise a bilateral kernel can't reach (see Performance review #20) |
 | Recovery baseline | Done | “Use recovery look” = P-key tone as adjust start |
@@ -503,3 +510,237 @@ Numbers were captured with `raw_edit_pipeline.process_linear_edit_buffer` +
 `linear_to_display_uint8` directly (no Qt/GUI thread involved); see the
 conversation history or re-run the benchmark snippet against
 `scripts/phase_develop_adjust_linear.py`'s helpers for a repeatable check.
+
+---
+
+## Roadmap investigations (2026-07-04)
+
+Three feasibility investigations, requested as research only (no code changes
+in this pass). Each follows Finding → Feasibility → Suggestion.
+
+### A. Lightroom-compatible rating / label system
+
+**Finding.** Ratings exist today (0-5 stars, number keys `0`-`5` in single
+view via `rate_current_image()`, `main.py:22779`), but they are
+**not written to the file or an XMP sidecar at all**. A rating lives only
+inside the `exif_data` blob of the app's local SQLite cache
+(`image_cache.py`'s `exif_cache` table — `file_path, file_size, file_mtime,
+orientation, camera_make, camera_model, exif_data (BLOB), ...` — no dedicated
+`rating` column; it's a key inside the pickled blob, `main.py:22804-22807`
+sets `exif_data['rating'] = rating`, `main.py:17069-17073` reads it back).
+Rebuilding or deleting that cache silently loses every rating, and ratings
+never travel with the file (no round-trip to Lightroom, no round-trip even
+to a copy of the file on another machine). There is **no pick/reject flag**
+and **no color-label system** anywhere in the codebase — the closest hits are
+an unrelated "bookmark for sharing" star icon in the toolbar
+(`main.py:7903-7909`) and a "move to Discard subfolder" feature
+(`main.py:4839`), neither of which is a metadata flag.
+
+`raw_adjustments.py` already has a working XMP sidecar read/write path
+(`write_xmp_adjustments`, `parse_xmp_adjustments`, `resolve_xmp_path`) using
+`xml.etree.ElementTree`, but it only ever touches the Camera-Raw-Settings
+namespace:
+```python
+CRS_NS = "http://adobe.com/camera-raw-settings/1.0/"
+RDF_NS = "http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+X_NS = "adobe:ns:meta/"
+```
+Lightroom's own rating/label/keyword fields live in namespaces this app
+never touches: `xmp:Rating` (`http://ns.adobe.com/xap/1.0/`), `xmp:Label`,
+and `dc:subject` (`http://purl.org/dc/elements/1.1/`) for keywords. Because
+the develop-settings parser already reads/writes the same `crs:` namespace
+Lightroom itself uses, **this app is already develop-setting-compatible with
+Lightroom XMP** (a sidecar written by either app is readable by the other for
+tone/color adjustments) — the gap is specifically rating/label/keywords,
+which live in namespaces never touched.
+
+One sharp edge: `write_xmp_adjustments` **deletes the whole sidecar file**
+when adjustments equal defaults (so an unedited image has no leftover XMP
+clutter). If rating/label moved into the same sidecar file, that delete-on-
+default logic would need to change first — a photo with 5 stars and no
+develop edits would otherwise have its rating silently deleted the moment
+adjustments reset to default.
+
+**Feasibility.** Moderate, well-scoped. Three independent pieces:
+1. Add `xmp:Rating` (int, -1 to 5, where -1 = rejected per Lightroom
+   convention) and `xmp:Label` (string) read/write to the existing
+   `ET`-based sidecar code, namespaced separately from `crs:`.
+2. Stop treating "adjustments are default" as "delete the sidecar" — instead
+   delete only the `crs:` elements/attributes when they reset to default,
+   and keep the file (or the `xmp:`/`dc:` elements within it) if a
+   rating/label/keyword is still present.
+3. Migrate existing SQLite-cached ratings into XMP sidecars once (a one-time
+   background pass, non-destructive — cache stays as a fast read-through
+   layer, XMP becomes the source of truth), plus point the gallery/filmstrip
+   at a star-rating UI (there's currently no rating UI outside single view
+   at all — gallery/filmstrip would need one built).
+
+Risk is concentrated in item 2 (sidecar lifecycle change touches a path
+several other features now depend on — export's XMP embedding, the gallery
+"edited" badge's existence-check) more than in the XMP schema itself, which
+is a small, well-documented addition.
+
+**Suggestion.** Do the sidecar-lifecycle change first, in isolation, with a
+regression test asserting current develop-settings behavior is unaffected
+(reset-to-default still cleans up `crs:` content; a sidecar with only a
+rating survives). Then add `xmp:Rating`/`xmp:Label` read/write. Defer the
+SQLite-to-XMP migration and any new gallery/filmstrip rating UI to a
+follow-up — they're additive and don't block XMP compatibility itself.
+
+---
+
+### B. Aspect / perspective correction, rotation, straighten
+
+**Finding.** The existing rotate button (`main.py:7924-7930`,
+`_rotate_current_image_clockwise_persist`) is **90°-step-only** and purely
+cosmetic: it applies a `QTransform.rotate(degrees)` to the displayed
+`QPixmap` at render time (`_apply_visual_rotation_for_current`,
+`main.py:20479-20490`) and persists the chosen angle per-file in `QSettings`
+— it never touches RAW pixel data, never writes XMP, and isn't a continuous
+angle. A separate, unrelated code path
+(`metadata_backend.rotate_exif_orientation_meta_cw90`) rewrites the EXIF
+orientation tag for on-disk rotation, again in 90° steps only. There is
+**no crop tool, no straighten tool, and no perspective/lens-correction code
+anywhere** in the codebase — a full-repo search for
+`perspective|straighten|warp|homography|lens correction` returns zero hits.
+`DEFAULT_ADJUSTMENTS`/`SLIDER_SPECS` (`raw_adjustments.py`) have no geometry
+keys at all, and `write_xmp_adjustments` writes none of Lightroom's
+`crs:CropTop/Left/Bottom/Right`, `crs:StraightenAngle`, or
+`crs:PerspectiveVertical/Horizontal` fields. This is confirmed as an
+intentional gap, not an oversight — the "Not supported" line earlier in this
+doc already lists it.
+
+The building blocks for adding this are already present, though: `cv2` is a
+real dependency (`raw_chroma_denoise.py`, `raw_detail_enhance.py`,
+`raw_hsl.py` all already import it), so `cv2.warpAffine`/
+`cv2.warpPerspective`/`cv2.getPerspectiveTransform` are available with zero
+new dependencies. `scipy.ndimage` (used for `zoom`/`gaussian_filter`
+elsewhere) is present too, though `cv2`'s warp functions are the more direct
+fit. The display path, `gpu_image_view.py`'s `GpuImageView`, is a
+`QGraphicsView`/`QGraphicsPixmapItem` with an optional `QOpenGLWidget`
+*viewport* for GPU-accelerated compositing of an already-CPU-computed
+`QPixmap` — **not** a shader/compute pipeline. That distinction matters for
+scope: a **straighten** control (continuous-angle rotation, which is affine)
+could get a cheap live-preview path via a `QTransform` applied to the scene
+item directly, no pixel resampling needed until the user commits. **True
+perspective correction is a projective transform**, which `QTransform`-on-a-
+pixmap-item cannot represent correctly for anything beyond a coarse preview
+— it needs real pixel resampling (`cv2.warpPerspective`) baked into
+`raw_edit_pipeline.py`'s scene-linear buffer, both for preview and for
+full-resolution export.
+
+**Feasibility.** Substantial — this is a new subsystem, not an extension of
+existing sliders, roughly comparable in size to adding the tone-curve UI was.
+Concretely it needs: (1) new adjustment keys (`CropTop/Left/Bottom/Right`,
+`StraightenAngle`, `PerspectiveVertical/Horizontal`) in
+`DEFAULT_ADJUSTMENTS`; (2) a geometry stage in `raw_edit_pipeline.py` that
+runs *before* the tone/color stages (crop/rotate/warp changes the buffer's
+shape and pixel positions, so everything downstream — denoise, tone,
+detail — must operate on the already-geometry-corrected buffer, not the
+other way around); (3) `PreviewStageCache` would need a new, earliest
+checkpoint for this stage, since a geometry change invalidates literally
+everything downstream (the existing 4-stage chain already handles "upstream
+change invalidates downstream" — this just adds one more link at the front);
+(4) UI: a crop-rectangle overlay with draggable handles and a straighten
+slider/dial on the image canvas itself (`gpu_image_view.py`), which is a
+different interaction model than any control this app has today (closest
+precedent is the WB dropper's click-to-sample mode, `set_color_pick_mode`);
+(5) XMP read/write for the new fields; (6) export-path integration so a
+baked TIFF/JPEG/WebP actually reflects the crop/straighten/perspective, not
+just the preview.
+
+**Suggestion.** Split into two independent phases rather than one project:
+- **Phase 1 — straighten + basic rotate/crop.** Affine-only (no
+  perspective), which is both the most commonly used of these tools in
+  practice and the cheaper build (no projective math, `QTransform` covers
+  live preview). This alone would address "rotation" and "straighten" from
+  the request.
+- **Phase 2 — perspective/aspect correction.** Projective transform, real
+  pixel resampling required even for preview, and meaningfully more UI
+  complexity (4 independent corner/edge handles or vertical+horizontal
+  sliders with a live keystone preview). Worth gating on whether Phase 1
+  proves out the geometry-stage architecture (the "runs before
+  everything else + gets its own cache checkpoint" design) cleanly first.
+
+---
+
+### C. Mask / brush / gradient local edits
+
+**Finding.** Confirmed: the entire pipeline is global-only today. Every
+stage in `raw_edit_pipeline.py` (`process_linear_edit_buffer`,
+`_apply_display_stage`) takes the full frame and one flat
+`dict[str, float]` of scalar adjustments — there is no mask, region, ROI, or
+per-pixel weight concept anywhere in `raw_edit_pipeline.py`,
+`raw_adjustments.py`, `raw_pv2012.py`, `raw_hsl.py`,
+`raw_detail_enhance.py`, or `raw_chroma_denoise.py`. This doc's own "Not
+supported" line already says so. `gpu_image_view.py` is, as in section B,
+GPU-accelerated *display* of a CPU-computed bitmap (`QGraphicsView` +
+optional `QOpenGLWidget` viewport), not a shader pipeline — there's no cheap
+GPU path to evaluate a mask; it would be rasterized and composited on the
+CPU like everything else already is.
+
+Two existing precedents are useful building blocks even though neither is a
+mask tool: `tone_curve_widget.py`'s `ToneCurveWidget` has a full drag
+lifecycle (press → hit-test → drag with live repaint → release commits,
+`editing_finished` signal) that's a reasonable template for "drag a handle,
+see it live, commit on release" — just on an abstract curve-graph, not image
+pixels. `gpu_image_view.py` already does real image-canvas mouse handling
+and scene-to-image-pixel coordinate mapping for the WB dropper's
+click-to-sample mode (`set_color_pick_mode`/`colorPickRequested`) — the
+coordinate-mapping plumbing a brush/gradient tool needs already exists, but
+continuous drag-paint stroke accumulation (brush) or two-point gradient
+handles (linear/radial gradient) would be new interaction code built on top
+of it.
+
+XMP serialization is the deepest structural gap. `write_xmp_adjustments`
+writes almost everything as **flat attributes on a single
+`rdf:Description`** — one `dict[str, float]` per image, full stop. The one
+exception (`ToneCurvePV2012`, a nested `rdf:Seq` of points) proves nested
+XML is usable in principle, but there's exactly one such element, not a
+repeatable collection. Lightroom's real local-adjustment XMP
+(`crs:MaskGroupBasedCorrections`) is an **indexed array of correction
+groups**, each with its own nested mask geometry (brush stroke points +
+radii, or gradient endpoints) *and* its own scalar adjustment sub-dict.
+Supporting this means the in-memory adjustment model — currently one flat
+dict, threaded through `process_linear_edit_buffer`, `PreviewStageCache`,
+`adjust_panel.py`, and the XMP read/write functions — would need to become
+something like `{"global": {...flat dict...}, "local": [{"mask": ...,
+"adjustments": {...}}, ...]}`, which touches essentially every call site
+that currently assumes "the adjustments are a flat dict."
+
+The recently-added `PreviewStageCache` (Performance review #18) is not
+naturally extensible to per-mask recompute — its whole design is "memoize
+whole-frame stage outputs keyed by scalar adjustment tuples," and mask
+geometry/values have no representation as a scalar key. The pipeline shape
+does suggest a workable approach, though: keep the existing global cache
+exactly as-is for the base/global look, and treat each local-adjustment
+layer as an **additional final compositing stage** — compute a layer's
+effect on a (possibly bbox-cropped-to-the-mask) copy of the cached global
+output, blend by the mask's alpha, and stack layers in order. This adds cost
+roughly proportional to affected pixels/active masks rather than forcing a
+full-frame recompute per mask edit, but it's new architecture layered on top
+of the existing cache, not a natural extension of it.
+
+**Feasibility.** Large. Rough size comparison: the core pipeline files
+(`raw_edit_pipeline.py`, `raw_adjustments.py`, `adjust_panel.py`,
+`gpu_image_view.py`, `tone_curve_widget.py`) total ~3,400 lines today. Full
+local-adjustment support — mask rasterization engine, brush stroke math,
+linear/radial gradient math, a new XMP schema and parser for indexed
+correction groups, a per-layer management UI (add/select/delete/reorder
+layers, each with its own scalar sliders), and compositing integration into
+both the live preview and full-resolution export paths — is plausibly
+**1,500-3,000+ new lines**, i.e. on the order of doubling this subsystem
+rather than an incremental addition on top of it.
+
+**Suggestion.** This is the largest of the three asks by a wide margin and
+has the least existing infrastructure to build on. If pursued, sequence it
+as: (1) radial + linear gradient tools first (two-point/two-circle
+parametric masks — no rasterized stroke data, no incremental brush storage,
+much simpler math and a much smaller XMP footprint: just endpoint
+coordinates + feather, not a point cloud) with the "composite as a final
+stage on top of the cached global result" architecture; (2) only build the
+adjustment brush (arbitrary rasterized mask, incremental stroke
+accumulation, by far the most implementation work of the three tools) once
+the gradient tools have validated the compositing/XMP-schema approach
+end-to-end. Given the size, this likely warrants being scoped and planned as
+its own multi-session project rather than a single follow-up task.
