@@ -88,19 +88,11 @@ def _cap_max_edge_linear(rgb_f: np.ndarray, max_edge: int) -> np.ndarray:
     if max_dim <= max_edge:
         return rgb_f
     scale = max_edge / max_dim
-    try:
-        from scipy.ndimage import zoom
+    import cv2
 
-        rgb_small = zoom(rgb_f, (scale, scale, 1.0), order=1)
-        return np.clip(rgb_small.astype(np.float32), 0.0, None)
-    except ImportError:
-        from PIL import Image
-
-        resample = getattr(getattr(Image, "Resampling", Image), "BILINEAR", Image.BILINEAR)
-        rgb16 = (np.clip(rgb_f, 0.0, 1.0) * 65535.0 + 0.5).astype(np.uint16)
-        nw, nh = max(1, int(w * scale)), max(1, int(h * scale))
-        small = np.asarray(Image.fromarray(rgb16, mode="RGB").resize((nw, nh), resample))
-        return small.astype(np.float32) / 65535.0
+    nw, nh = max(1, int(round(w * scale))), max(1, int(round(h * scale)))
+    rgb_small = cv2.resize(rgb_f, (nw, nh), interpolation=cv2.INTER_LINEAR)
+    return np.clip(rgb_small.astype(np.float32), 0.0, None)
 
 
 def _exposure_anchor_scale(lum: np.ndarray, *, percentile: float, target: float) -> float:
@@ -272,15 +264,11 @@ def apply_local_shadow_highlight_recovery_display(rgb_disp: np.ndarray) -> np.nd
     """
     if rgb_disp is None or rgb_disp.ndim != 3 or rgb_disp.shape[2] < 3:
         return rgb_disp
-    try:
-        from scipy.ndimage import gaussian_filter
-    except ImportError:
-        logger.warning("scipy unavailable; skipping local RAW recovery")
-        return np.clip(_to_float01(rgb_disp), 0.0, 1.0).astype(np.float32)
+    import cv2
 
     rgb_f = _to_float01(rgb_disp)
     lum = _luminance(rgb_f)
-    base = gaussian_filter(lum, sigma=_BLUR_SIGMA)
+    base = cv2.GaussianBlur(np.ascontiguousarray(lum, dtype=np.float32), (0, 0), _BLUR_SIGMA)
     hard_clip = _hard_clip_mask(rgb_f, lum)
 
     shadow_w = np.clip((_SHADOW_LUM_MAX - lum) / _SHADOW_LUM_MAX, 0.0, 1.0) ** 1.5

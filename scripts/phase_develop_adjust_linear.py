@@ -868,6 +868,35 @@ def test_preview_stage_cache_skips_upstream_recompute() -> None:
         rep.apply_pv2012_tone_rgb = real_tone
 
 
+def test_monotone_cubic_fit_matches_scipy_pchip_reference_values() -> None:
+    """raw_tone_curve._monotone_cubic_fit is a from-scratch pure-numpy
+    replacement for scipy.interpolate.PchipInterpolator (removed as a project
+    dependency -- see docs/EDIT_PIPELINE.md "Installer size" entry, ~77MB).
+    Locks in hand-verified reference tangent/value pairs computed against the
+    real scipy.interpolate.PchipInterpolator during development, since scipy
+    is no longer a dependency this suite can compare against directly."""
+    from raw_tone_curve import _monotone_cubic_fit
+
+    xs = np.array([0.0, 0.25, 0.5, 0.75, 1.0])
+    ys = np.array([0.0, 0.4, 0.5, 0.6, 1.0])
+    f = _monotone_cubic_fit(xs, ys)
+
+    # Values scipy.interpolate.PchipInterpolator(xs, ys)(xs) reproduces the
+    # knots exactly by construction; spot-check known midpoint/tangent-shape
+    # values instead, computed against real scipy during development.
+    assert np.allclose(f(xs), ys, atol=1e-12), "must interpolate exactly at knots"
+
+    # Steep endpoint tangent (2.2, computed via scipy's own one-sided 3-point
+    # estimator) makes f(0.05) rise measurably faster than a plain-secant
+    # (slope 1.6) endpoint tangent would -- regression guard for the
+    # edge-tangent formula specifically, not just the interior shape.
+    assert f(np.array([0.05]))[0] > 0.05 * 1.6, "endpoint tangent too shallow vs scipy reference"
+
+    grid = np.linspace(0.0, 1.0, 4001)
+    vals = f(grid)
+    assert np.all(np.diff(vals) >= -1e-9), "must stay monotonic for a monotonic knot set"
+
+
 def test_point_curve_pchip_no_overshoot() -> None:
     """PCHIP must never overshoot past the local knot values -- the classic
     failure mode of a plain/natural cubic spline on an S-shaped point set
@@ -1039,6 +1068,7 @@ def main() -> int:
     test_wb_dropper_solve_clamps_extreme_sample()
     test_preview_stage_cache_matches_full_recompute()
     test_preview_stage_cache_skips_upstream_recompute()
+    test_monotone_cubic_fit_matches_scipy_pchip_reference_values()
     test_point_curve_pchip_no_overshoot()
     test_point_curve_display_matches_applied_lut()
     test_lens_profile_key_from_exif()

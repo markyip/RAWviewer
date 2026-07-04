@@ -122,23 +122,10 @@ def _tone_map_recovery_display(img: np.ndarray) -> np.ndarray:
     polished = apply_local_shadow_highlight_recovery_display(
         linear_tone_map_to_display(small)
     )
-    try:
-        from scipy.ndimage import zoom
+    import cv2
 
-        sy = h / polished.shape[0]
-        sx = w / polished.shape[1]
-        return np.clip(
-            zoom(polished, (sy, sx, 1.0), order=1),
-            0.0,
-            1.0,
-        ).astype(np.float32)
-    except ImportError:
-        from PIL import Image
-
-        resample = getattr(getattr(Image, "Resampling", Image), "BILINEAR", Image.BILINEAR)
-        out8 = (np.clip(polished, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8)
-        up = np.asarray(Image.fromarray(out8, mode="RGB").resize((w, h), resample))
-        return up.astype(np.float32) / 255.0
+    up = cv2.resize(polished, (w, h), interpolation=cv2.INTER_LINEAR)
+    return np.clip(up, 0.0, 1.0).astype(np.float32)
 
 
 def _tone_map_for_display(img: np.ndarray, merged: dict[str, float]) -> np.ndarray:

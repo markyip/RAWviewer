@@ -18,12 +18,7 @@ def _gaussian_blur_luma(y: np.ndarray, sigma: float) -> np.ndarray:
 
         return cv2.GaussianBlur(y, (0, 0), float(sigma))
     except Exception:
-        try:
-            from scipy.ndimage import gaussian_filter
-
-            return gaussian_filter(y, sigma=float(sigma)).astype(np.float32)
-        except Exception:
-            return y
+        return y
 
 
 def _unsharp_luma(img: np.ndarray, sigma: float, amount: float) -> np.ndarray:

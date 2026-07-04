@@ -2332,10 +2332,6 @@ class CustomReverseGeocoder:
             if self.landmarks
             else None
         )
-        self._city_tree = self._make_kdtree(self._city_coords) if self._city_coords is not None else None
-        self._landmark_tree = (
-            self._make_kdtree(self._landmark_coords) if self._landmark_coords is not None else None
-        )
         self._place_names = self._build_place_name_index()
 
     @staticmethod
@@ -2369,32 +2365,20 @@ class CustomReverseGeocoder:
         return len(needle) >= 3 and needle in self._place_names
 
     @staticmethod
-    def _make_kdtree(coords: np.ndarray):
-        try:
-            from scipy.spatial import cKDTree  # type: ignore[attr-defined]
-
-            return cKDTree(coords)
-        except Exception:
-            return None
-
-    @staticmethod
     def _nearest_index(
-        tree,
         coords: np.ndarray,
         target_lat: float,
         target_lon: float,
     ) -> tuple[int, float]:
-        if tree is not None:
-            dist_sq, idx = tree.query([target_lat, target_lon], k=1)
-            return int(idx), float(dist_sq)
-        best_idx = 0
-        best_dist = float("inf")
-        for i, (lat, lon) in enumerate(coords):
-            dist = (lat - target_lat) ** 2 + (lon - target_lon) ** 2
-            if dist < best_dist:
-                best_dist = dist
-                best_idx = i
-        return best_idx, best_dist
+        """Nearest-neighbor by squared degree distance, vectorized over numpy
+        rather than a scipy.spatial.cKDTree -- avoids a ~77MB scipy dependency
+        for a lookup against a few hundred thousand rows at most (cities500 +
+        landmarks), called once per GPS-tagged photo, not in a hot loop."""
+        if coords.size == 0:
+            return 0, float("inf")
+        dist_sq = (coords[:, 0] - target_lat) ** 2 + (coords[:, 1] - target_lon) ** 2
+        idx = int(np.argmin(dist_sq))
+        return idx, float(dist_sq[idx])
 
     def search(self, coords: list[tuple[float, float]], mode: int = 1) -> list[dict]:
         if not coords or not self.cities:
@@ -2402,7 +2386,6 @@ class CustomReverseGeocoder:
         target_lat, target_lon = float(coords[0][0]), float(coords[0][1])
 
         city_idx, _ = self._nearest_index(
-            self._city_tree,
             self._city_coords if self._city_coords is not None else np.empty((0, 2)),
             target_lat,
             target_lon,
@@ -2414,7 +2397,7 @@ class CustomReverseGeocoder:
         landmark_name = ""
         if self.landmarks and self._landmark_coords is not None:
             lm_idx, lm_dist_sq = self._nearest_index(
-                self._landmark_tree, self._landmark_coords, target_lat, target_lon
+                self._landmark_coords, target_lat, target_lon
             )
             if lm_dist_sq < self._LANDMARK_DIST_SQ:
                 landmark_name = str(self.landmarks[lm_idx][2])
