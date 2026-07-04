@@ -37,6 +37,7 @@ Replace **8-bit sRGB / gamma-space** adjust preview with a **scene-linear** pipe
 | sRGB encode LUT | Done | `_encode_srgb8`/`_encode_srgb16` use a precomputed LUT instead of per-pixel `np.power`; ~2.7× faster (see Performance review) |
 | Saturation / Vibrance color fix | Done | Now scales HSV S in gamma-encoded space via a LUT round-trip, not additive chroma in scene-linear space (see Performance review) |
 | White balance dropper | Done | Small icon-only button inline in Temperature row; click a neutral area to solve Temperature/Tint (GPU single-view only) |
+| Compare with original (split view) | Done | Icon-only toggle in panel header; draggable divider shows original (left) vs live edited (right) over the same `GpuImageView` — see Compare with original section (2026-07-05) |
 | Gallery "edited" badge | Done | Lightweight pencil badge on tiles with a saved XMP sidecar; thumbnail pixels unchanged (see Gallery integration) |
 | Keyboard / focus fixes | Done | Shortcuts work with panel open |
 | Value readout styling | Done | Blue `#90CAF9` (was low-contrast gray on dark card) |
@@ -155,6 +156,53 @@ sampling.
   legacy `QScrollArea`/`QLabel` fallback (`RAWVIEWER_GPU_VIEW=0`) or the Compare
   view, neither of which have the same scene-point click machinery.
 
+### Compare with original (2026-07-05)
+
+Icon-only toggle in the panel header (`fa5s.columns`, same muted-icon-button
+language as the WB dropper). When armed, shows a draggable-divider split view
+over the current image: the unedited (all-default-adjustments) render on the
+left of the divider, the live edited preview on the right. Drag the divider
+(or click near it) to move the split; toggle the button again to exit.
+
+- **Architecture**: purely an overlay on `GpuImageView`, no change to the
+  existing zoom/pan/fit/pixmap machinery. `self._item` (the always-current
+  edited pixmap) is left completely alone — a new `_compare_overlay_item`
+  (`QGraphicsPixmapItem`, zValue above `_item`) holds the *original* render
+  cropped to the region left of the divider, plus a `QGraphicsLineItem`
+  divider and a small `QGraphicsEllipseItem` handle. Because these are normal
+  scene items, they zoom/pan with the image for free, and the edited side
+  keeps live-updating from ordinary slider drags without any special-casing
+  (the overlay just sits on top of whatever `_item` currently shows).
+- **Getting the "original"**: `_AdjustCompareOriginalWorker` (`main.py`) runs
+  `apply_adjustments_to_rgb(base_rgb, DEFAULT_ADJUSTMENTS)` off the GUI
+  thread — this hits `process_linear_edit_buffer`'s existing "adjustments are
+  all default" fast path (decode + sRGB encode only, no WB/denoise/tone math),
+  so it's cheap without needing its own preview-stage cache. Cached per file
+  (`_adjust_compare_original_pixmap`/`_path`) so re-toggling compare on/off
+  doesn't recompute; invalidated in `_reset_adjust_compare_state()`, called
+  from both `_begin_adjust_editing_session` (new file / fresh editing
+  session) and the Adjust-panel-close path in `_set_adjust_panel_visible` —
+  the same two places that already reset `_adjust_preview_base_rgb`.
+- **Divider interaction**: hit-tested in view-space pixels (`±8px`, mapped
+  through `mapFromScene`) so the grab target stays a constant on-screen size
+  regardless of zoom, the same cosmetic-pen pattern used for the composition
+  grid overlay. Drag handling is intercepted in `mousePressEvent`/
+  `mouseMoveEvent`/`mouseReleaseEvent` ahead of the existing pan/export-drag
+  logic, mirroring how `_color_pick_mode` already takes priority there for
+  the WB dropper.
+- **Verified**: headless-Qt tests (`QTest.mousePress/mouseMove/mouseRelease`)
+  confirming compare mode refuses to arm without an original pixmap, the
+  overlay crop width tracks the split fraction exactly, dragging the divider
+  moves the split monotonically in the dragged direction, and toggling off
+  hides the overlay/divider/handle; a direct test that
+  `_AdjustCompareOriginalWorker`'s output is byte-identical to
+  `apply_adjustments_to_linear(base, DEFAULT_ADJUSTMENTS)` and differs from
+  an edited render. Not added to `phase_develop_adjust_linear.py` (that suite
+  is pixel-math-only and PyQt6-free by design) — this is GUI wiring around
+  already-tested pipeline functions, verified the same ad hoc headless-Qt way
+  the tone curve widget's drag lifecycle was.
+- **Scope**: GPU single-image view only, same as the WB dropper.
+
 ### HSL (UI hidden)
 
 Eight colors: **Red, Orange, Yellow, Green, Aqua, Blue, Purple, Magenta**.
@@ -224,6 +272,7 @@ Constants: `RECOVERY_BASELINE_SHADOWS2012`, `RECOVERY_BASELINE_HIGHLIGHTS2012` i
 - **HSL** section — **hidden** (`_SHOW_HSL_UI = False`); pipeline/XMP I/O still present
 - **Chroma NR** toggle
 - **Use recovery look** button
+- **Compare** toggle (header, split-view icon) — see Compare with original
 - **Export…** menu (see below)
 - Sliders / buttons use `NoFocus` so app shortcuts keep working
 
@@ -352,6 +401,10 @@ Written on slider / curve release and before export:
     past ~50 in either direction — no banding/reversed local contrast anywhere
     on the curve
 17. `PYTHONPATH=src python3 scripts/phase_develop_adjust_linear.py`
+18. **Compare** toggle (panel header, split-view icon) — split view appears with
+    original on the left, edited on the right; drag the divider anywhere across
+    the image and it tracks the cursor; adjust a slider while comparing — only
+    the edited (right) side updates; toggle off — split view disappears cleanly
 
 To re-enable HSL UI: set `_SHOW_HSL_UI = True` in `adjust_panel.py` (fix the `raw_hsl.py`
 colorspace-scale bug first — see Performance review #6).
@@ -868,3 +921,77 @@ is picked up, prototype the Cocoa bridge in isolation first (e.g. log
 pressure values to the console while dragging on a Force Touch trackpad)
 before wiring it into any real intensity control, to validate the
 main-thread event-forwarding assumption above cheaply.
+
+---
+
+### F. Lens profile automatic aspect/distortion correction
+
+**Finding.** This is distinct from section B's manual straighten/perspective
+tools — it's *automatic* correction driven by a lens-profile database keyed
+on camera + lens + focal length + aperture, the way Lightroom's "Enable
+Profile Corrections" or DxO/PTLens work. The raw ingredients for the lookup
+key are already extracted, just not assembled into one: lens model
+(`semantic_search.py:3275-3283`, tries `EXIF LensModel`/`LensMake`/
+`MakerNote LensType`/`Lens`/`Image LensModel`/`Composite LensID` in order),
+focal length and aperture (`enhanced_raw_processor.py:1008,1021`,
+`main.py:25464,25507-25546`), and camera model
+(`semantic_search.py:3272-3274`) — today each is read independently for
+display/search text, never combined into a "camera+lens+focal+aperture"
+profile key.
+
+The much bigger gap is the profile database itself: **no lens calibration
+data exists in this project at all.** `lensfun`/`lensfunpy` — the open-source
+lens-correction database and library that darktable, RawTherapee, and
+digiKam all use for exactly this feature — is not vendored, not in
+`pixi.toml`/`pixi.lock`, and doesn't import (`ModuleNotFoundError` in both
+the pixi env and the venv). This is the crux of the whole feature: without
+either lensfun or an equivalent database, there is no source for the
+distortion polynomial (k1/k2/k3/p1/p2), vignetting curve, or per-lens
+chromatic-aberration coefficients a profile-based correction needs — none of
+that data can be derived from the RAW file or its EXIF alone. `rawpy` (0.27,
+already a dependency) exposes exactly one relevant hook,
+`Params.chromatic_aberration: (red_scale, blue_scale)` — LibRaw's simple
+uniform-scale lateral-CA fix — but it's unused today and, being a uniform
+scale rather than a radial model, it's a much cruder correction than
+lensfun's per-lens polynomial; it still needs the scale factors supplied
+from *somewhere* (a profile, or a heuristic auto-CA estimator), which
+doesn't exist either. Adobe's own embedded lens-profile XMP fields
+(`crs:LensProfileEnable`, `LensProfileName`, `PerspectiveVerticalScale`,
+etc.) are confirmed absent from `write_xmp_adjustments` — the only
+optics-adjacent fields present are the existing manual
+`DefringePurpleAmount`/`DefringeGreenAmount` sliders, unrelated to
+profile-based auto-correction.
+
+`cv2` (already a dependency, 4.13.0 installed) has everything needed for the
+*application* step once coefficients exist — `cv2.undistort`/
+`initUndistortRectifyMap` for standard (Brown-Conrady) distortion and
+`cv2.fisheye.undistortImage` for wide-angle lenses — so the remap math
+itself is not a gap. Separately, there are **no RAW test files anywhere in
+this repository** (no `.cr2/.nef/.arw/.dng/...` files, no `tests/` or
+`fixtures/` directory) — validating this feature during development would
+require sourcing sample RAW files from outside the project, for a range of
+lenses with known distortion characteristics.
+
+**Feasibility.** Low, not because the correction math is hard (`cv2` covers
+it, and lens-profile-key assembly from existing EXIF fields is simple glue
+code) but because the foundational data source is entirely missing and
+non-trivial to add: `lensfun`'s database is LGPL-licensed C code with its
+own XML lens-profile format, a new dependency with real licensing and
+maintenance implications, not a pure-Python pip install; building a custom
+profile database from scratch (calibrating distortion/vignetting/CA per
+lens) is its own large research project, well outside a coding task. Even
+adopting `lensfun` doesn't fully solve it — its profile coverage skews
+toward popular consumer lenses; less common or newer lenses may have no
+profile at all, so any implementation needs a defined fallback (no
+correction, or an estimated/generic correction) for an unmatched lens.
+
+**Suggestion.** Do not build this from scratch. If pursued, the only
+realistic path is adopting `lensfun`/`lensfunpy` as a new dependency rather
+than authoring a profile database in-house — evaluate its packaging
+(license terms, whether a prebuilt wheel exists for this project's
+platforms, database update/maintenance story) as a standalone spike before
+committing to the feature, since that adoption decision (not the
+image-processing code) is what actually determines feasibility here. Until
+that's resolved, this should stay out of scope — it's a fundamentally
+different kind of investment (an external data dependency) than every other
+item in this roadmap, which are all buildable with what's already vendored.

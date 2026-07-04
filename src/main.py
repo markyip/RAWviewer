@@ -1809,6 +1809,45 @@ class _AdjustPreviewWorker(QRunnable):
         self.signals.finished.emit(self.generation, self.file_path, out)
 
 
+class _AdjustCompareOriginalSignals(QObject):
+    finished = pyqtSignal(str, object)  # file_path, ndarray|None
+
+
+class _AdjustCompareOriginalWorker(QRunnable):
+    """Render the unedited (all-default adjustments) look for the compare-with-original split view.
+
+    Uses the same encode path as the live preview, just with DEFAULT_ADJUSTMENTS
+    instead of the panel's current values -- this hits process_linear_edit_buffer's
+    existing "adjustments are all default" fast path (no WB/denoise/tone math at
+    all, just decode + sRGB encode), so it's cheap even without its own stage cache.
+    """
+
+    def __init__(
+        self,
+        file_path: str,
+        base_rgb: Any,
+        signals: _AdjustCompareOriginalSignals,
+    ):
+        super().__init__()
+        self.file_path = file_path
+        self.base_rgb = base_rgb
+        self.signals = signals
+
+    def run(self) -> None:
+        out = None
+        try:
+            from raw_adjustments import DEFAULT_ADJUSTMENTS, apply_adjustments_to_rgb
+
+            out = apply_adjustments_to_rgb(self.base_rgb, dict(DEFAULT_ADJUSTMENTS))
+            if out is not None and str(getattr(out, "dtype", "")) != "uint8":
+                from raw_tone_recovery import _encode_srgb8
+
+                out = _encode_srgb8(np.clip(out.astype(np.float32), 0.0, None))
+        except Exception:
+            out = None
+        self.signals.finished.emit(self.file_path, out)
+
+
 class _AdjustEditBaseWorker(QRunnable):
     """Background LibRaw demosaic for the adjust panel (never embedded JPEG)."""
 
@@ -7711,6 +7750,9 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self.single_image_adjust_panel.wb_picker_toggled.connect(
             self._on_adjust_wb_picker_toggled
         )
+        self.single_image_adjust_panel.compare_toggled.connect(
+            self._on_adjust_compare_toggled
+        )
         self._pending_adjust_preview: dict | None = None
         self._adjust_edit_base_signals = _AdjustEditBaseSignals()
         self._adjust_edit_base_signals.finished.connect(self._on_adjust_edit_base_ready)
@@ -7722,6 +7764,12 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         from raw_edit_pipeline import PreviewStageCache
 
         self._adjust_preview_stage_cache = PreviewStageCache()
+        self._adjust_compare_original_pixmap: Any = None
+        self._adjust_compare_original_path: str | None = None
+        self._adjust_compare_original_signals = _AdjustCompareOriginalSignals()
+        self._adjust_compare_original_signals.finished.connect(
+            self._on_adjust_compare_original_ready
+        )
         self._adjust_edit_base_path: str | None = None
         self._adjust_edit_base_loading_norm: str | None = None
         self._adjust_export_in_progress = False
@@ -18122,6 +18170,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             if not self._adjust_overlay_visible:
                 self._adjust_preview_base_rgb = None
                 self._adjust_edit_base_path = None
+                self._reset_adjust_compare_state()
         container = getattr(self, "single_view_container", None)
         if container is not None and hasattr(container, "relayout_adjust"):
             container.relayout_adjust()
@@ -18184,6 +18233,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self._adjust_preview_base_rgb = None
         self._adjust_edit_base_path = None
         self._adjust_edit_base_loading_norm = None
+        self._reset_adjust_compare_state()
         self._request_adjust_edit_base(file_path)
 
     def _uses_gpu_single_view(self) -> bool:
@@ -18452,6 +18502,77 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             gv.set_color_pick_mode(False)
         if panel is not None:
             panel.set_wb_picker_active(False)
+        if hasattr(self, "status_bar"):
+            self.status_bar.clearMessage()
+
+    def _reset_adjust_compare_state(self) -> None:
+        """Drop the cached compare-with-original render and exit split view.
+
+        Called whenever the edit base changes (new file, or a fresh editing
+        session) since a cached "original" render for the previous base would
+        otherwise silently show the wrong image's before/after split.
+        """
+        self._adjust_compare_original_pixmap = None
+        self._adjust_compare_original_path = None
+        panel = getattr(self, "single_image_adjust_panel", None)
+        if panel is not None:
+            panel.set_compare_active(False)
+        gv = getattr(self, "gpu_view", None)
+        if gv is not None:
+            gv.set_compare_mode(False)
+
+    def _on_adjust_compare_toggled(self, checked: bool) -> None:
+        """Arm/disarm the compare-with-original split view (GPU single view only)."""
+        panel = getattr(self, "single_image_adjust_panel", None)
+        gv = getattr(self, "gpu_view", None)
+        if panel is None or gv is None:
+            return
+        if not checked:
+            gv.set_compare_mode(False)
+            return
+        path = getattr(self, "current_file_path", None)
+        base = getattr(self, "_adjust_preview_base_rgb", None)
+        if not path or base is None or not hasattr(base, "shape"):
+            panel.set_compare_active(False)
+            if hasattr(self, "status_bar"):
+                self.status_bar.showMessage(
+                    "Compare needs a decoded RAW edit base — try again in a moment",
+                    3500,
+                )
+            return
+        norm = _norm_path(path)
+        cached = getattr(self, "_adjust_compare_original_pixmap", None)
+        if cached is not None and getattr(self, "_adjust_compare_original_path", None) == norm:
+            gv.set_compare_original_pixmap(cached)
+            gv.set_compare_mode(True)
+            return
+        if hasattr(self, "status_bar"):
+            self.status_bar.showMessage("Rendering original for comparison…", 0)
+        worker = _AdjustCompareOriginalWorker(
+            path, base, self._adjust_compare_original_signals
+        )
+        QThreadPool.globalInstance().start(worker)
+
+    def _on_adjust_compare_original_ready(self, file_path: str, array) -> None:
+        panel = getattr(self, "single_image_adjust_panel", None)
+        gv = getattr(self, "gpu_view", None)
+        if gv is None:
+            return
+        if _norm_path(file_path) != _norm_path(getattr(self, "current_file_path", "") or ""):
+            return
+        if array is None:
+            if panel is not None:
+                panel.set_compare_active(False)
+            if hasattr(self, "status_bar"):
+                self.status_bar.showMessage("Could not render original for comparison", 3500)
+            return
+        pixmap = self._numpy_to_qpixmap(array)
+        if pixmap is None or pixmap.isNull():
+            return
+        self._adjust_compare_original_pixmap = pixmap
+        self._adjust_compare_original_path = _norm_path(file_path)
+        gv.set_compare_original_pixmap(pixmap)
+        gv.set_compare_mode(True)
         if hasattr(self, "status_bar"):
             self.status_bar.clearMessage()
 

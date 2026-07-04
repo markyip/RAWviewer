@@ -28,6 +28,8 @@ from PyQt6.QtWidgets import (
     QGraphicsScene,
     QGraphicsPixmapItem,
     QGraphicsRectItem,
+    QGraphicsLineItem,
+    QGraphicsEllipseItem,
     QLabel,
     QApplication,
 )
@@ -85,6 +87,8 @@ class GpuImageView(QGraphicsView):
         self._drag_start_pos = None
         self._drag_started = False
         self._color_pick_mode = False
+        self._compare_active = False
+        self._compare_dragging_divider = False
 
         super().__init__(parent)
         self._scene = QGraphicsScene(self)
@@ -104,6 +108,35 @@ class GpuImageView(QGraphicsView):
         self._clipping_item.setTransformationMode(Qt.TransformationMode.FastTransformation)
         self._clipping_item.hide()
         self._scene.addItem(self._clipping_item)
+
+        # Compare-with-original split view (Adjust panel only). The original
+        # (unedited) render sits in an overlay item above the always-current
+        # edited pixmap in self._item, cropped to only the region left of a
+        # draggable divider -- so the main item/zoom/pan/fit machinery needs
+        # no changes at all; this is purely an additional overlay.
+        self._compare_split_frac = 0.5
+        self._compare_original_pixmap = QPixmap()
+        self._compare_overlay_item = QGraphicsPixmapItem()
+        self._compare_overlay_item.setZValue(12)
+        self._compare_overlay_item.setTransformationMode(Qt.TransformationMode.SmoothTransformation)
+        self._compare_overlay_item.hide()
+        self._scene.addItem(self._compare_overlay_item)
+
+        self._compare_divider_line = QGraphicsLineItem()
+        self._compare_divider_line.setZValue(13)
+        pen = QPen(QColor(255, 255, 255, 220))
+        pen.setCosmetic(True)
+        pen.setWidth(2)
+        self._compare_divider_line.setPen(pen)
+        self._compare_divider_line.hide()
+        self._scene.addItem(self._compare_divider_line)
+
+        self._compare_divider_handle = QGraphicsEllipseItem()
+        self._compare_divider_handle.setZValue(14)
+        self._compare_divider_handle.setPen(QPen(QColor(255, 255, 255, 220), 1.5))
+        self._compare_divider_handle.setBrush(QColor(0, 0, 0, 140))
+        self._compare_divider_handle.hide()
+        self._scene.addItem(self._compare_divider_handle)
 
         self.setRenderHints(
             QPainter.RenderHint.SmoothPixmapTransform | QPainter.RenderHint.Antialiasing
@@ -308,6 +341,7 @@ class GpuImageView(QGraphicsView):
             self._img_w = self._img_h = 0
             self.clear_overlay()
             self.clear_clipping_overlay()
+            self.set_compare_mode(False)
             self._grid_item.set_grid(0, 0, self._grid_mode)
             self._update_placeholder()
             return
@@ -662,6 +696,71 @@ class GpuImageView(QGraphicsView):
     def is_color_pick_mode(self) -> bool:
         return bool(getattr(self, "_color_pick_mode", False))
 
+    # --------------------------------------------------------- compare split
+    def set_compare_original_pixmap(self, pixmap: QPixmap | None) -> None:
+        """Provide the unedited render to show on the left of the divider."""
+        self._compare_original_pixmap = pixmap if pixmap is not None else QPixmap()
+        if self._compare_active:
+            self._update_compare_overlay()
+
+    def set_compare_mode(self, enabled: bool) -> None:
+        """Show/hide the before/after split view over the current edited pixmap."""
+        enabled = bool(enabled) and self._has_pixmap and not self._compare_original_pixmap.isNull()
+        self._compare_active = enabled
+        if not enabled:
+            self._compare_dragging_divider = False
+            self._compare_overlay_item.hide()
+            self._compare_divider_line.hide()
+            self._compare_divider_handle.hide()
+            self.viewport().unsetCursor()
+            return
+        self._update_compare_overlay()
+
+    def is_compare_mode(self) -> bool:
+        return bool(getattr(self, "_compare_active", False))
+
+    def _compare_divider_scene_x(self) -> float:
+        return max(0.0, min(1.0, self._compare_split_frac)) * self._img_w
+
+    def _update_compare_overlay(self) -> None:
+        if not self._compare_active or self._img_w <= 0 or self._img_h <= 0:
+            return
+        src = self._compare_original_pixmap
+        if src.isNull():
+            return
+        split_x = int(round(self._compare_divider_scene_x()))
+        split_x = max(0, min(self._img_w, split_x))
+        if split_x <= 0:
+            self._compare_overlay_item.hide()
+        else:
+            crop_w = min(split_x, src.width())
+            crop_h = min(self._img_h, src.height())
+            cropped = src.copy(0, 0, crop_w, crop_h)
+            self._compare_overlay_item.setPixmap(cropped)
+            self._compare_overlay_item.setOffset(0, 0)
+            self._compare_overlay_item.show()
+        self._compare_divider_line.setLine(split_x, 0, split_x, self._img_h)
+        self._compare_divider_line.show()
+        handle_r = 7.0
+        self._compare_divider_handle.setRect(
+            split_x - handle_r, self._img_h / 2.0 - handle_r, handle_r * 2, handle_r * 2
+        )
+        self._compare_divider_handle.show()
+
+    def _compare_divider_hit(self, view_pos: QPoint) -> bool:
+        """Hit-test the divider with a generous on-screen tolerance (cosmetic pen width)."""
+        if not self._compare_active:
+            return False
+        scene_x = self._compare_divider_scene_x()
+        divider_view_x = self.mapFromScene(QPointF(scene_x, 0)).x()
+        return abs(view_pos.x() - divider_view_x) <= 8
+
+    def _set_compare_split_from_view_x(self, view_x: int) -> None:
+        scene_pt = self.mapToScene(QPoint(view_x, 0))
+        frac = 0.0 if self._img_w <= 0 else scene_pt.x() / self._img_w
+        self._compare_split_frac = max(0.0, min(1.0, frac))
+        self._update_compare_overlay()
+
     # ------------------------------------------------------------------ events
     def mousePressEvent(self, event) -> None:
         if event.button() == Qt.MouseButton.LeftButton and self._color_pick_mode:
@@ -675,6 +774,13 @@ class GpuImageView(QGraphicsView):
                 self.colorPickRequested.emit(pt)
             event.accept()
             return
+        if event.button() == Qt.MouseButton.LeftButton and self._compare_active:
+            pos = event.position().toPoint()
+            if self._compare_divider_hit(pos):
+                self._compare_dragging_divider = True
+                self._set_compare_split_from_view_x(pos.x())
+                event.accept()
+                return
         if event.button() == Qt.MouseButton.LeftButton and self._fit_mode and self.file_path:
             self._drag_start_pos = event.position().toPoint()
             self._drag_started = False
@@ -688,6 +794,19 @@ class GpuImageView(QGraphicsView):
             if hasattr(host, "handle_pointer_for_filmstrip"):
                 host.handle_pointer_for_filmstrip(event.globalPosition())
 
+        if self._compare_active:
+            pos = event.position().toPoint()
+            if self._compare_dragging_divider:
+                if event.buttons() & Qt.MouseButton.LeftButton:
+                    self._set_compare_split_from_view_x(pos.x())
+                    event.accept()
+                    return
+                self._compare_dragging_divider = False
+            if self._compare_divider_hit(pos):
+                self.viewport().setCursor(Qt.CursorShape.SplitHCursor)
+            elif not (event.buttons() & Qt.MouseButton.LeftButton):
+                self.viewport().unsetCursor()
+
         if (event.buttons() & Qt.MouseButton.LeftButton) and self._fit_mode and self.file_path and self._drag_start_pos is not None:
             if not self._drag_started:
                 dist = (event.position().toPoint() - self._drag_start_pos).manhattanLength()
@@ -699,6 +818,10 @@ class GpuImageView(QGraphicsView):
             super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton and self._compare_dragging_divider:
+            self._compare_dragging_divider = False
+            event.accept()
+            return
         if event.button() == Qt.MouseButton.LeftButton and self._fit_mode:
             self._drag_start_pos = None
             self._drag_started = False

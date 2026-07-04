@@ -35,7 +35,7 @@ from raw_tone_curve import TONE_CURVE_SERIAL_KEY
 
 # Point-curve + parametric PV rows.
 _SHOW_TONE_CURVE_UI = True
-# HSL 分色 section — hidden pending a saturation/vibrance review (see docs).
+# HSL section — hidden pending a saturation/vibrance review (see docs).
 _SHOW_HSL_UI = False
 
 if _SHOW_TONE_CURVE_UI:
@@ -105,6 +105,7 @@ class ImageAdjustPanelWidget(QWidget):
     export_requested = pyqtSignal(str, dict)  # format id, adjustments
     recovery_baseline_requested = pyqtSignal()
     wb_picker_toggled = pyqtSignal(bool)  # True: arm the WB dropper; False: cancel
+    compare_toggled = pyqtSignal(bool)  # True: show compare-with-original split view
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -218,6 +219,19 @@ class ImageAdjustPanelWidget(QWidget):
             QPushButton#adjust_wb_picker_btn:hover {
                 background: rgba(255, 255, 255, 24);
             }
+            QPushButton#adjust_compare_btn {
+                border: 1px solid rgba(255, 255, 255, 35);
+                border-radius: 4px;
+                background: rgba(255, 255, 255, 12);
+                padding: 0px;
+            }
+            QPushButton#adjust_compare_btn:checked {
+                border-color: rgba(144, 202, 249, 90);
+                background: rgba(144, 202, 249, 30);
+            }
+            QPushButton#adjust_compare_btn:hover {
+                background: rgba(255, 255, 255, 24);
+            }
             QSlider::groove:horizontal {
                 height: 4px;
                 background: #3A3A3A;
@@ -261,6 +275,7 @@ class ImageAdjustPanelWidget(QWidget):
         title.setObjectName("adjust_panel_title")
         header.addWidget(title)
         header.addStretch(1)
+        self._build_compare_button(header)
         reset_btn = QPushButton("Reset")
         reset_btn.setObjectName("adjust_reset_btn")
         reset_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
@@ -386,6 +401,54 @@ class ImageAdjustPanelWidget(QWidget):
 
         layout.addStretch(1)
         self.set_adjustments(dict(DEFAULT_ADJUSTMENTS))
+
+    def _build_compare_button(self, row: QHBoxLayout) -> None:
+        """Small icon-only toggle in the header: split-view compare with the original."""
+        btn = QPushButton()
+        btn.setObjectName("adjust_compare_btn")
+        btn.setCheckable(True)
+        btn.setFixedSize(22, 22)
+        btn.setIconSize(QSize(13, 13))
+        btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        btn.setToolTip(
+            "Compare with original — split view; drag the divider."
+            " Click again to exit."
+        )
+        self._compare_icon_default = _qta_icon_safe("fa5s.columns", color="#B0B0B0")
+        self._compare_icon_active = _qta_icon_safe("fa5s.columns", color="#90CAF9")
+        btn.setIcon(self._compare_icon_default)
+        btn.toggled.connect(self._on_compare_toggled)
+        row.addWidget(btn)
+        self._compare_btn = btn
+
+    def _on_compare_toggled(self, checked: bool) -> None:
+        self._sync_compare_icon(checked)
+        self.compare_toggled.emit(bool(checked))
+
+    def set_compare_active(self, active: bool) -> None:
+        """Programmatically arm/disarm the compare toggle (e.g. on navigation)."""
+        btn = getattr(self, "_compare_btn", None)
+        if btn is None:
+            return
+        btn.blockSignals(True)
+        try:
+            btn.setChecked(bool(active))
+        finally:
+            btn.blockSignals(False)
+        self._sync_compare_icon(active)
+
+    def _sync_compare_icon(self, active: bool) -> None:
+        btn = getattr(self, "_compare_btn", None)
+        if btn is None:
+            return
+        icon = (
+            getattr(self, "_compare_icon_active", None)
+            if active
+            else getattr(self, "_compare_icon_default", None)
+        )
+        if icon is not None:
+            btn.setIcon(icon)
 
     def _build_wb_picker_button(self, row: QHBoxLayout) -> None:
         """Small icon-only dropper button, inline at the end of the Temperature row."""
