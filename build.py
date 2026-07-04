@@ -22,9 +22,15 @@ _WINDOWS_LITE_PIXI_SKIP = (
     "huggingface_hub",
     "onnxruntime-gpu",
     "onnxruntime-directml",
-    "opencv-python-headless",
     "requests",
 )
+# opencv-python-headless was in this skip list -- correct while cv2 was only
+# used by the (Lite-excluded) semantic search preprocessing, but the
+# scene-linear Adjust panel added since (raw_edit_pipeline.py,
+# raw_chroma_denoise.py, raw_detail_enhance.py, raw_hsl.py,
+# raw_lens_correction.py) imports cv2 unconditionally -- stripping it from
+# the Lite pixi manifest would make every Adjust panel control crash with
+# ModuleNotFoundError on first use. See docs/EDIT_PIPELINE.md "Installer size".
 
 
 def write_app_version() -> None:
@@ -270,6 +276,16 @@ def install_dependencies(windows_accel: str = "cuda", *, profile: str = "full"):
         'qtawesome', # Required for icons in main.py
         'pycountry',  # ISO country code -> full country name
         'pillow-heif',
+        # Required unconditionally by the Adjust panel (raw_edit_pipeline.py,
+        # raw_chroma_denoise.py, raw_detail_enhance.py, raw_hsl.py,
+        # raw_lens_correction.py / raw_tone_curve.py / raw_tone_recovery.py),
+        # not just the AI/semantic-search features -- must be present in
+        # every profile (lite and full) and every platform, or Adjust panel
+        # controls crash on first use once packaged. See
+        # docs/EDIT_PIPELINE.md "Installer size".
+        'opencv-python-headless',
+        'tifffile',
+        'lensfunpy',
     ]
 
     if system_name in ("Darwin", "Windows"):
@@ -287,7 +303,6 @@ def install_dependencies(windows_accel: str = "cuda", *, profile: str = "full"):
             else:
                 print(f"[ERROR] Unsupported Windows acceleration backend: {windows_accel}")
                 return False
-            dependencies.append('opencv-python-headless')
             dependencies.append('huggingface-hub')
     elif system_name == "Darwin":
         if not lite:
@@ -845,8 +860,14 @@ def main():
             "--exclude-module", "sklearn",
             "--exclude-module", "tokenizers",
             "--exclude-module", "safetensors",
-            # Exclude unused native extensions & optional/future packages
-            "--exclude-module", "cv2",
+            # cv2 was excluded here (true at the time -- "unused native
+            # extensions & optional/future packages") but the scene-linear
+            # Adjust panel added since imports cv2 unconditionally
+            # (raw_edit_pipeline.py, raw_chroma_denoise.py,
+            # raw_detail_enhance.py, raw_hsl.py, raw_lens_correction.py) --
+            # excluding it here made every macOS build (Full and Lite) crash
+            # with ModuleNotFoundError the moment any Adjust panel control
+            # ran. Must stay bundled. See docs/EDIT_PIPELINE.md "Installer size".
             "--exclude-module", "pyqtgraph",
             "--exclude-module", "hf_xet",
         ])
