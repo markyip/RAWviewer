@@ -67,7 +67,7 @@ RAW file
       • Default: luminance-preserving Reinhard
       • Recovery baseline: linear_tone_map_to_display + local shadow/highlight polish
   → saturation / vibrance (HSV S-scale, round-tripped through sRGB OETF LUT — see below)
-  → HSL 分色 (8 colors, UI hidden)
+  → HSL (8 colors, UI hidden)
   → sharpness / clarity / defringe
   → sRGB OETF → uint8 (preview) or uint16 (TIFF16 export)
 ```
@@ -155,7 +155,7 @@ sampling.
   legacy `QScrollArea`/`QLabel` fallback (`RAWVIEWER_GPU_VIEW=0`) or the Compare
   view, neither of which have the same scene-point click machinery.
 
-### HSL 分色 (UI hidden)
+### HSL (UI hidden)
 
 Eight colors: **Red, Orange, Yellow, Green, Aqua, Blue, Purple, Magenta**.
 
@@ -363,20 +363,11 @@ colorspace-scale bug first — see Performance review #6).
 - HSL section hidden in UI; `raw_hsl.py` has an open colorspace-scale bug — fix
   before re-enabling (see Performance review #6)
 - No per-channel (R/G/B) tone curves
-- No mask / brush / gradient local edits
+- No mask / brush / gradient / dodge-burn local edits (see Roadmap
+  investigations C and D)
 - Recovery baseline is preview-session UI state, not persisted in XMP
 - No DNG export (removed 2026-07-04; see Export formats) — no non-destructive
   RAW+XMP round-trip or RGB-DNG output until a real DNG writer is built
-- Point curve uses PCHIP (monotonic cubic Hermite) interpolation between
-  knots (see Performance review #19) — visually and numerically close to
-  Lightroom's spline but not byte-identical to it
-- Incremental/staged preview recompute implemented for the live preview path
-  only (see Performance review #18). As a side effect, the recovery-baseline
-  tone map's expensive gaussian-filter pass (#3) is now skipped too when only
-  a later-stage slider (sat/vibrance/HSL/detail) changes while recovery stays
-  on, since it lives in the cached tonemap stage — but it still reruns
-  whenever a pre-tone or PV2012-tone key changes, same as the non-recovery
-  path. Full-res export always does a full uncached recompute, by design
 - `decode_raw_edit_base`'s `executor` parameter is accepted but unused; decode
   always runs in-process (see Performance review #4)
 
@@ -744,3 +735,136 @@ accumulation, by far the most implementation work of the three tools) once
 the gradient tools have validated the compositing/XMP-schema approach
 end-to-end. Given the size, this likely warrants being scoped and planned as
 its own multi-session project rather than a single follow-up task.
+
+---
+
+### D. Dodge & burn
+
+**Finding.** No existing infrastructure — same zero-mask starting point as
+section C (there is no code to build on beyond what C already found).
+Classic dodge/burn is functionally a **narrower** special case of a full
+adjustment brush, not a separate feature: a single luminance-only intensity
+delta (dodge = brighten, burn = darken), applied through an accumulated
+grayscale stroke mask, with no color/HSL/detail sliders per stroke the way a
+general adjustment brush would need. That narrower scope helps on the
+*adjustment* side (one scalar instead of an arbitrary slider set to store
+per mask) but does **not** avoid the hard part identified in section C: it
+still needs real stroke rasterization and incremental accumulation (repeated
+brush passes building up strength, brush hardness/falloff, feathering) —
+the same "arbitrary rasterized mask" work section C flagged as the most
+expensive of the three tools there, not the gradient tools' cheap parametric
+math.
+
+Two things in this codebase are a genuinely good fit for the *adjustment*
+side specifically, though: (1) luminance-only math already exists and is
+proven — `_luminance()` (`raw_pv2012.py`, `raw_chroma_denoise.py`'s
+`_rgb_to_ycbcr`) is exactly the "touch only lightness, preserve hue/chroma"
+operation dodge/burn needs, no new color science required; (2) real
+dodge/burn tools (Photoshop, Lightroom's Adjustment Brush "Exposure") almost
+always protect/target a luminosity range (shadows, midtones, or highlights)
+rather than applying a flat delta everywhere a stroke lands, to avoid
+blowing out highlights or crushing shadows that are already extreme — and
+this exact "smooth region-weight targeting a tonal range" pattern already
+exists, twice, in this codebase: `_region_weight_shadows`/
+`_region_weight_highlights` in `raw_pv2012.py` and the equivalent
+`_region_masks` in `raw_tone_curve.py`, both using the same
+`_smooth_weight`/`_SPLIT_SHADOWS` smoothstep shape this doc's monotonicity
+fixes (#10, #14) were tuned against. A dodge/burn "range" selector (shadows/
+midtones/highlights, matching Photoshop's own tool) could reuse this math
+directly instead of inventing new region logic.
+
+The other real design question dodge/burn shares with the general brush: a
+rasterized per-pixel stroke mask is a full-resolution single-channel array,
+and section C's XMP-schema discussion (moving from a flat scalar dict to
+Lightroom's indexed `MaskGroupBasedCorrections`) didn't fully address *how*
+such a mask gets serialized. Storing a full-resolution raster as text inside
+an XMP sidecar would bloat file sizes considerably; Lightroom's own solution
+compresses/encodes mask data compactly within the correction group. This
+codebase already has a directly-applicable precedent for "shrink an
+auxiliary channel that doesn't need full resolution" — the chroma-denoise
+downsample/blur/upsample pass added in Performance review #20 — the same
+idea (store the stroke mask at reduced resolution, upsample on the fly) is
+a reasonable starting point rather than storing it at full pixel resolution.
+
+**Feasibility.** Same order of magnitude as section C's adjustment brush
+(large), because it needs the identical stroke-rasterization/accumulation
+architecture — narrowing the adjustment to one luminance scalar plus a
+range selector reduces the UI/slider surface area but not the masking
+engine work, which is the dominant cost.
+
+**Suggestion.** If a brush tool gets built at all, dodge/burn is the
+smallest *useful* version of it — grayscale-only mask, one adjustment
+value, one range selector, directly reusing existing luminance and
+region-weight code — so it's a reasonable first concrete target for
+validating the stroke/mask engine, rather than building a full multi-slider
+adjustment brush from the start. This refines, rather than replaces, section
+C's suggested order: gradient tools first (cheapest, purely parametric, no
+rasterized mask at all), then dodge/burn as the first brush-based tool
+(validates stroke rasterization + a compact storage format with the
+smallest possible adjustment surface), then the general adjustment brush
+once both the mask engine and its storage format are proven.
+
+---
+
+### E. Trackpad pressure controlling brush intensity
+
+**Finding.** The key enabling fact is already true of this codebase: PyObjC
+is a real, actively-used dependency, not just an AppleScript shim.
+`pixi.toml`/`pixi.lock` pin `pyobjc-framework-Cocoa` and
+`pyobjc-framework-Quartz` (both already resolved in the environment), and
+`main.py`'s native file-dialog code (`_create_macos_open_panel`,
+`_create_macos_save_panel`) does genuine Objective-C bridging today —
+`import objc; objc.lookUpClass("NSOpenPanel")`, `from AppKit import NSURL`,
+calling `panel.runModal()` directly — with AppleScript (`osascript` via
+`subprocess.run`) only as a fallback when the PyObjC path raises. So the
+low-level capability needed here (talking to Cocoa classes directly, not
+just shelling out to a script) is proven and already shipping.
+
+Qt itself is not the path in, though. PyQt6's installed bindings do have a
+pressure API (`QTabletEvent.pressure()`, `QEventPoint.pressure()` — both
+confirmed present in the installed `QtGui.pyi` stubs), but it's designed for
+stylus/tablet devices reported by the platform plugin (a Wacom tablet, for
+example) — a macOS Force Touch trackpad's "deep press" does not arrive
+through `QTabletEvent` at all. Trackpad pressure is a Cocoa-level concept
+(`NSEvent.pressure`, `NSPressureConfiguration`, and the
+`pressureChangeWithEvent:` `NSResponder` method that fires continuously
+during a physical press) that Qt's cross-platform event system doesn't
+surface. Confirmed no existing code in this app reads pressure anywhere
+today (`gpu_image_view.py`'s and `tone_curve_widget.py`'s mouse handlers use
+only `button()`/`buttons()`/`position()`/`modifiers()`).
+
+An important hardware/API limitation, independent of implementation effort:
+continuous pressure is **only** available on Force Touch trackpads (all
+modern MacBook trackpads, Magic Trackpad 2) with the responder opted into
+continuous reporting — a plain click, an external mouse, a Magic Mouse, an
+older Magic Trackpad 1, and every non-macOS platform report no continuous
+pressure signal at all, only a binary click. Any pressure-driven intensity
+control therefore cannot be the *only* way to set brush intensity; it has
+to be an optional modulation on top of a baseline control (a slider, a
+fixed per-stroke opacity, or drag-speed) that works everywhere else.
+
+**Feasibility.** Good for the native-bridge part specifically (this
+codebase already proves PyObjC/Cocoa integration works here, for a
+different but analogous purpose), but this is a small, platform-specific
+addition on top of whatever brush/dodge-burn tool exists — not something to
+build before there's a brush to modulate. Concretely it needs: a custom
+`NSView`/`NSResponder` override (likely reachable by wrapping the native
+view underneath `GpuImageView`'s window via PyObjC, similar in spirit to how
+the save/open panel code already reaches into AppKit) overriding
+`pressureChangeWithEvent:`, forwarding the continuous pressure float into
+Qt (macOS integrates the Cocoa run loop with Qt's event loop on the main
+thread, so this shouldn't need complex cross-thread marshaling, but that
+needs to be verified in practice, not assumed), and a fallback path (no-op,
+or a fixed default intensity) for every device/platform that can't supply
+pressure.
+
+**Suggestion.** Treat this strictly as a follow-on refinement, scoped and
+built only after a baseline (non-pressure-sensitive) brush/dodge-burn tool
+exists and ships — bundling "build the local-adjustment masking engine" and
+"also get low-level Cocoa pressure events flowing into Qt" into one project
+multiplies risk (two largely-unrelated hard problems) for a payoff (pressure
+modulation) that's meaningless without the brush already working. When it
+is picked up, prototype the Cocoa bridge in isolation first (e.g. log
+pressure values to the console while dragging on a Force Touch trackpad)
+before wiring it into any real intensity control, to validate the
+main-thread event-forwarding assumption above cheaply.
