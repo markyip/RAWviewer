@@ -16,15 +16,15 @@ Replace **8-bit sRGB / gamma-space** adjust preview with a **scene-linear** pipe
 |------|--------|-------|
 | Scene-linear decode (AHD, 16-bit) | Done | Half-res preview; full-res export |
 | PV2012 tone (ProcessVersion 11.0) | Done | Base curve + HS/W/B in perceptual space |
-| Point tone curve UI | **Hidden** | Code in `tone_curve_widget.py`; `_SHOW_TONE_CURVE_UI = False` in panel |
-| Parametric tone regions | **Hidden** | PV Shad / Dark / Light / High (same flag) |
+| Point tone curve UI | Done | `tone_curve_widget.py`; `_SHOW_TONE_CURVE_UI = True` in panel (re-enabled 2026-07-04) |
+| Parametric tone regions | Done | PV Shad / Dark / Light / High (same flag); monotonicity bug fixed before re-enabling (see Performance review #14) |
 | HSL 分色 (8 colors) | **Hidden** | Code in `raw_hsl.py`; `_SHOW_HSL_UI = False` in panel — also has an open cv2 HSV-scale bug (see below) |
 | Detail (Sharpness / Clarity / Defringe) | Done | Display-linear, after tone map |
-| Chroma / Luma NR | Done | Both bilateral filter, no NLM/uint8 quantization; Luma NR is new (see Performance review #11/#12) |
+| Chroma / Luma NR | Done | Both bilateral filter, no NLM/uint8 quantization; Luma NR is new (see Performance review #11/#12). Chroma NR also gets a downsample/blur/upsample coarse pass for blotchy noise a bilateral kernel can't reach (see Performance review #20) |
 | Recovery baseline | Done | “Use recovery look” = P-key tone as adjust start |
 | Recovery ↔ Adjust UX | Done | P blocked while Adjust open; opening Adjust disables P preview |
 | Recovery slider hints | Done | Shadows +40 / Highlights −35 readouts when recovery on |
-| Multi-format export | Done | TIFF / JPEG / WebP / DNG (settings or baked) |
+| Multi-format export | Done | TIFF16 / JPEG / WebP baked only — DNG options removed (see Export formats) |
 | XMP sidecar I/O | Done | Basic + tone curve + HSL; as-shot Temp |
 | Background preview worker | Done | 80 ms throttle; generation merge; uint8 encode guard |
 | sRGB encode LUT | Done | `_encode_srgb8`/`_encode_srgb16` use a precomputed LUT instead of per-pixel `np.power`; ~2.7× faster (see Performance review) |
@@ -62,7 +62,7 @@ RAW file
   → saturation / vibrance (HSV S-scale, round-tripped through sRGB OETF LUT — see below)
   → HSL 分色 (8 colors, UI hidden)
   → sharpness / clarity / defringe
-  → sRGB OETF → uint8 (preview) or uint16 (TIFF / baked DNG export)
+  → sRGB OETF → uint8 (preview) or uint16 (TIFF16 export)
 ```
 
 Browse / gallery / non-edit paths **unchanged** (embedded JPEG + fast 8-bit LibRaw).
@@ -82,17 +82,25 @@ Browse / gallery / non-edit paths **unchanged** (embedded JPEG + fast 8-bit LibR
 | Whites | `Whites2012` | −100 … +100 | PV2012 perceptual |
 | Blacks | `Blacks2012` | −100 … +100 | PV2012 perceptual |
 
-### Tone curve (UI hidden — core validation phase)
+### Tone curve
 
 | Control | XMP / internal | Notes |
 |---------|----------------|-------|
-| Point curve | `crs:ToneCurvePV2012` / `_tone_curve_pv2012` | Set `_SHOW_TONE_CURVE_UI = True` in `adjust_panel.py` to re-enable |
-| PV Shadows | `ParametricShadows` | Hidden with tone curve flag |
+| Point curve | `crs:ToneCurvePV2012` / `_tone_curve_pv2012` | Draggable graph (`ToneCurveWidget`); non-monotonic shapes are a valid user choice, not a bug |
+| PV Shadows | `ParametricShadows` | |
 | PV Darks | `ParametricDarks` | |
 | PV Lights | `ParametricLights` | |
 | PV Highlights | `ParametricHighlights` | |
 
-Pipeline and XMP I/O for point/parametric curves remain in code; only the panel widgets are omitted for now.
+Re-enabled 2026-07-04 (`_SHOW_TONE_CURVE_UI = True` in `adjust_panel.py`) after
+fixing a monotonicity bug in `apply_parametric_tone_curve`
+(`raw_tone_curve.py`) found during the re-enable review: `ParametricShadows`
++100 and `ParametricHighlights` -100 both made the combined tone curve
+locally decreasing (banding), for the exact same reason as the
+`raw_pv2012.py` shadow-lift bug fixed earlier (same `_smooth_weight`/
+`_SPLIT_SHADOWS=0.25` region shape, worst slope ~5.89-5.90, needing
+coefficient ≤~0.17). Fixed the same way: coefficient reduced 0.35→0.15. See
+Performance review #14.
 
 ### Basic — Color
 
@@ -205,7 +213,7 @@ Constants: `RECOVERY_BASELINE_SHADOWS2012`, `RECOVERY_BASELINE_HIGHLIGHTS2012` i
 - Floating panel (**E**), draggable card, scrollable content
 - Sliders: immediate value readout in **blue** (`#90CAF9`); **80 ms** throttled preview; XMP on release
 - Click value label → reset single slider; **Reset** → all defaults + as-shot Temp
-- **Tone curve** graph — **hidden** (`_SHOW_TONE_CURVE_UI = False`) during core-function validation
+- **Tone curve** graph + PV Shad/Dark/Light/High sliders (`_SHOW_TONE_CURVE_UI = True`)
 - **HSL** section — **hidden** (`_SHOW_HSL_UI = False`); pipeline/XMP I/O still present
 - **Chroma NR** toggle
 - **Use recovery look** button
@@ -221,28 +229,33 @@ Constants: `RECOVERY_BASELINE_SHADOWS2012`, `RECOVERY_BASELINE_HIGHLIGHTS2012` i
 | 16-bit TIFF (baked) | Full-res AHD + pipeline + optional embedded XMP | Archival / print |
 | JPEG (baked) | 8-bit sRGB, Q=92 | Sharing |
 | WebP (baked) | 8-bit sRGB, Q=88 | Sharing |
-| DNG — copy RAW + XMP settings | Original file copy + sidecar | Lightroom / Camera Raw round-trip |
-| DNG — baked 16-bit RGB | Display-referred RGB in DNG container | Editors that open RGB DNG |
 
-16-bit TIFF and baked-DNG both write via **`tifffile`** (`_write_16bit_rgb_tiff`
-in `raw_edit_pipeline.py`), not Pillow — Pillow's `"RGB"` mode is defined as
+**Removed (2026-07-04):** "DNG — copy RAW + XMP settings" and "DNG — baked
+16-bit RGB" were both removed from the export menu — a user reported the
+baked-RGB DNG file could not be opened at all. The RGB-container-DNG approach
+(a plain RGB TIFF with `DNGVersion`/`UniqueCameraModel` tags bolted on, no
+real sensor mosaic/CFA data) was never a real DNG as far as most DNG readers
+are concerned; fixing the Pillow crash that blocked it (Performance review
+#13) made it *write* successfully but did not make the result *openable*.
+Rather than ship a format that produces unopenable files, both DNG options
+were dropped. `export_adjusted_dng_rgb`, `export_raw_with_xmp_settings`,
+`EXPORT_FORMAT_DNG_RGB`, and `EXPORT_FORMAT_DNG_SETTINGS` no longer exist in
+`raw_edit_pipeline.py`. If DNG output is revisited later, it needs a real DNG
+writer (e.g. a proper CFA/mosaic + DNG tag set), not this shortcut.
+
+16-bit TIFF writes via **`tifffile`** (`_write_16bit_rgb_tiff` in
+`raw_edit_pipeline.py`), not Pillow — Pillow's `"RGB"` mode is defined as
 8-bit-per-channel with no 16-bit 3-channel mode at all, so
 `Image.fromarray(uint16_array, mode="RGB")` has no valid type-lookup entry
 (crashes on newer Pillow; silently truncates to 8-bit via any raw-mode
 workaround on older Pillow — see Performance review #13). Compression is
 `deflate` (not LZW): LZW requires the separate `imagecodecs` package, which
-isn't a project dependency. XMP (tag 700) and the DNG-only `DNGVersion`
-(50706) / `UniqueCameraModel` (50741) tags are written via `extratags`.
+isn't a project dependency. XMP (tag 700) is written via `extratags`.
 
-Export always writes XMP to the **source** file first (best-effort, for every
-format including settings-only DNG — this was previously documented as an
-exception for DNG-settings, which didn't match the code; keeping the source's
-sidecar in sync regardless of export format is also what the gallery's
-"edited" badge relies on). "DNG — copy RAW + XMP settings" additionally writes
-a **second**, independent sidecar next to the copied destination file. The
+Export always writes XMP to the **source** file first (best-effort). The
 source-sidecar write cannot fail the export: if it can't be written (e.g. the
 source is on read-only media), the requested export to `output_path` still
-proceeds, and no (potentially stale) XMP is embedded in baked TIFF/DNG output.
+proceeds, and no (potentially stale) XMP is embedded in the baked TIFF output.
 
 ---
 
@@ -270,10 +283,10 @@ Written on slider / curve release and before export:
 | `raw_hsl.py` | 8-color HSL in HSV space |
 | `raw_detail_enhance.py` | Sharpness, Clarity, Defringe |
 | `raw_chroma_denoise.py` | Chroma (Cb/Cr) + luma (Y) bilateral denoise (OpenCV) |
-| `raw_edit_pipeline.py` | Shared pipeline + export dispatch; 16-bit TIFF/DNG-RGB via `tifffile` |
+| `raw_edit_pipeline.py` | Shared pipeline + export dispatch (TIFF16 / JPEG / WebP); 16-bit TIFF via `tifffile` |
 | `raw_adjustments.py` | XMP I/O, defaults, `apply_adjustments_to_linear` |
 | `rawviewer_ui/adjust_panel.py` | Adjust panel UI |
-| `rawviewer_ui/tone_curve_widget.py` | Draggable point curve editor (optional UI) |
+| `rawviewer_ui/tone_curve_widget.py` | Draggable point curve editor |
 | `unified_image_processor.py` | `decode_raw_edit_base()` |
 | `main.py` | Edit-base worker, preview worker, export worker, **E** shortcut |
 | `scripts/phase_develop_adjust_linear.py` | Smoke tests |
@@ -308,7 +321,7 @@ Written on slider / curve release and before export:
 3. **Use recovery look** — Shadows/Highlights readouts jump to +40/−35; preview matches recovery tone
 4. **Saturation** / **Vibrance** — consistent "pop" across hues (red, green, blue, skin tones); no hard clipping to a flat fully-saturated color on any one hue
 5. **Sharpness** / **Clarity** — no black frame; image stays visible
-6. **Export…** — TIFF / JPEG / WebP / DNG options
+6. **Export…** — TIFF / JPEG / WebP options
 7. Shortcuts (**P**, **J**, arrows, etc.) work with Adjust panel open
 8. **WB dropper icon** (end of Temperature row) — click, click a neutral gray/white
    area — Temperature/Tint update and the area turns neutral; Esc cancels an armed
@@ -325,12 +338,14 @@ Written on slider / curve release and before export:
     sky) — no green tint after toggling on
 14. **Luma NR** slider on a noisy high-ISO shot — grain visibly reduces; hard edges
     (e.g. a horizon line) stay sharp, no smearing
-15. **Export…** — every format (TIFF16, JPEG, WebP, DNG-settings, DNG-RGB)
-    completes without error; open the 16-bit TIFF/DNG in another app and confirm
-    it's genuinely 16-bit (not silently 8-bit)
-16. `PYTHONPATH=src python3 scripts/phase_develop_adjust_linear.py`
+15. **Export…** — every remaining format (TIFF16, JPEG, WebP) completes without
+    error; open the 16-bit TIFF in another app and confirm it's genuinely
+    16-bit (not silently 8-bit)
+16. **Tone curve** — drag a point on the graph, and PV Shad/Dark/Light/High
+    past ~50 in either direction — no banding/reversed local contrast anywhere
+    on the curve
+17. `PYTHONPATH=src python3 scripts/phase_develop_adjust_linear.py`
 
-To re-enable tone curve UI: set `_SHOW_TONE_CURVE_UI = True` in `adjust_panel.py`.
 To re-enable HSL UI: set `_SHOW_HSL_UI = True` in `adjust_panel.py` (fix the `raw_hsl.py`
 colorspace-scale bug first — see Performance review #6).
 
@@ -338,16 +353,23 @@ colorspace-scale bug first — see Performance review #6).
 
 ## Known limitations / future work
 
-- Tone curve + parametric PV sliders hidden in UI (pipeline still present)
-- HSL 分色 hidden in UI; `raw_hsl.py` has an open colorspace-scale bug — fix before
-  re-enabling (see Performance review #6)
+- HSL section hidden in UI; `raw_hsl.py` has an open colorspace-scale bug — fix
+  before re-enabling (see Performance review #6)
 - No per-channel (R/G/B) tone curves
 - No mask / brush / gradient local edits
 - Recovery baseline is preview-session UI state, not persisted in XMP
-- Baked DNG is RGB container DNG, not a re-encoded sensor RAW
-- Point curve uses linear interpolation between knots (not LR cubic spline)
-- No incremental/staged recompute — every slider tick reruns the full pipeline
-  (see Performance review #2/#3)
+- No DNG export (removed 2026-07-04; see Export formats) — no non-destructive
+  RAW+XMP round-trip or RGB-DNG output until a real DNG writer is built
+- Point curve uses PCHIP (monotonic cubic Hermite) interpolation between
+  knots (see Performance review #19) — visually and numerically close to
+  Lightroom's spline but not byte-identical to it
+- Incremental/staged preview recompute implemented for the live preview path
+  only (see Performance review #18). As a side effect, the recovery-baseline
+  tone map's expensive gaussian-filter pass (#3) is now skipped too when only
+  a later-stage slider (sat/vibrance/HSL/detail) changes while recovery stays
+  on, since it lives in the cached tonemap stage — but it still reruns
+  whenever a pre-tone or PV2012-tone key changes, same as the non-recovery
+  path. Full-res export always does a full uncached recompute, by design
 - `decode_raw_edit_base`'s `executor` parameter is accepted but unused; decode
   always runs in-process (see Performance review #4)
 
@@ -448,8 +470,8 @@ recompute.
 | # | Finding | Measured | Status |
 |---|---------|----------|--------|
 | 1 | `_encode_srgb8` / `linear_to_export_uint16_srgb` used `np.where(...,  np.power(x, 1/2.4), ...)` over the whole frame — `np.power` dominated cost even though `raw_pv2012.py` already proved the LUT pattern works for the base curve | Encode alone: **~170–190ms**, ~70% of total no-op preview time | **Fixed** — nearest-index LUT (4096 entries, 8-bit; 65536, 16-bit) in `raw_tone_recovery.py` (`_encode_srgb8` / `_encode_srgb16`); ~65–70ms, 2.6–2.8× faster, <1 LSB error |
-| 2 | No incremental recompute — every slider tick reruns the entire WB→exposure→NLM→PV2012→tonemap→sat→HSL→detail chain even when only one late-stage control changed | All-default preview ~150–270ms; typical multi-slider edit ~1.7–1.9s; far past the 80ms throttle window | Open — needs a staged cache (e.g. cache post-tonemap buffer, only rerun sat/HSL/detail when only those move) |
-| 3 | Recovery baseline (`_tone_map_recovery_display`) reruns a `scipy.ndimage.gaussian_filter(sigma=22)` + downsample/upsample round-trip on every tick, even though Exposure/Sat/Vibrance/HSL/Detail are layered "on top of" recovery tone and don't need it recomputed | ~2.0–2.3s per tick with recovery on, the slowest path measured | Open — same staged-cache fix as #2, cache the recovery-tone-mapped base once per edit-base load |
+| 2 | No incremental recompute — every slider tick reruns the entire WB→exposure→NLM→PV2012→tonemap→sat→HSL→detail chain even when only one late-stage control changed | All-default preview ~150–270ms; typical multi-slider edit ~1.7–1.9s; far past the 80ms throttle window | **Fixed** — see Performance review #18 (`PreviewStageCache`, live preview path only) |
+| 3 | Recovery baseline (`_tone_map_recovery_display`) reruns a `scipy.ndimage.gaussian_filter(sigma=22)` + downsample/upsample round-trip on every tick, even though Exposure/Sat/Vibrance/HSL/Detail are layered "on top of" recovery tone and don't need it recomputed | ~2.0–2.3s per tick with recovery on, the slowest path measured | **Partially fixed** — see Performance review #18; the gaussian-filter pass is now skipped when only a sat/vibrance/HSL/detail slider changes with recovery held on, since it lives in the cached tonemap stage, but still reruns on any pre-tone or PV2012-tone-slider change |
 | 4 | `UnifiedImageProcessor.decode_raw_edit_base(..., executor=self.process_pool)` accepts `executor` but never uses it — decode always runs in-process on the calling `QRunnable` thread, not offloaded to the process pool | N/A (code review) | Open — wire up or drop the parameter |
 | 5 | `phase_develop_adjust_linear.py` only checks correctness on tiny (16×16–64×64) synthetic arrays; no benchmark at realistic preview resolution | N/A | Open — a perf regression (like #1) would not be caught by the existing suite |
 | 6 | `raw_hsl.py`'s `_rgb_to_hsv` treats cv2's **float32** `COLOR_BGR2HSV` output (already H:0–360, S/V:0–1) as if it were the **uint8** convention (H:0–179, S/V:0–255) — `h * 2.0` doubles an already-0–360 hue (wraps/misassigns color bands), and `s / 255.0`, `v / 255.0` crush saturation/value to ~1/255 of true scale. `_hsv_to_rgb`'s uint8 packing then largely undoes the S/V crush on the way back out, but the per-color slider deltas (`ds`/`dv`, order ±1.0) are added *before* that undo, so they dominate the crushed (~0.004) true value — HSL Hue/Sat/Lum sliders would behave close to on/off rather than proportional, and hue-band assignment is wrong. Not visible while `_SHOW_HSL_UI = False`, but still runs for any file with pre-existing non-zero `HueAdjustment*`/`SaturationAdjustment*`/`LuminanceAdjustment*` XMP values (browse view, export) | Confirmed via direct `cv2.cvtColor` test; not benchmarked (no user-visible path while hidden) | **Open, not fixed** — out of scope for this pass (user asked to hide HSL, not fix it); fix before setting `_SHOW_HSL_UI = True` again |
@@ -461,7 +483,21 @@ recompute.
 | 11 | `raw_chroma_denoise.apply_chroma_nlm` (superseded by `apply_chroma_denoise`, see #12) converted Cb/Cr from float to uint8 via a bare `.astype(np.uint8)`, which **truncates toward zero** rather than rounding. Cb/Cr fractional parts are effectively uniformly distributed, so truncation biases both channels ~-0.5 LSB (≈-0.00196 in [0,1]) low on average -- not randomly, systematically, every pixel, every call. The YCbCr→RGB inverse (`R = Y + 1.5748·Cr0`, `G = Y - 0.1873·Cb0 - 0.4681·Cr0`, `B = Y + 1.8556·Cb0`) turns a uniform negative bias in *both* Cb and Cr into less R, less B, and **more G** — a systematic green cast on every image that goes through Chroma NR, reported by a user as "casts a green shade" | Reproduced the bias in isolation (quantize/dequantize Cb+Cr with **zero** actual NLM denoising applied): mean RGB delta on a neutral-gray test image = `[-0.00308, +0.00128, -0.00363]`, reproducible to 4 decimal places across 15 random-noise seeds (not noise-dependent). Matches the predicted truncation bias (`-0.5/255 = -0.00196`) driven through the same inverse-transform coefficients almost exactly | **Fixed** (then superseded) — added `+ 0.5` before both `.astype(np.uint8)` casts (round-to-nearest, matching the pattern already used in the sRGB encode LUTs from finding #1). Re-verified: residual mean RGB delta dropped to ~1e-5–2e-4. Superseded by #12, which removes the uint8 round-trip entirely |
 | 12 | Follow-up to a "is there a better NR than chroma NR" question: (a) chroma NR used NLM (`cv2.fastNlMeansDenoising`), one of the more expensive denoise algorithms, on a full preview/export buffer; (b) there was no luminance noise reduction at all — only Cb/Cr were ever touched, so grainy high-ISO detail noise went untreated | Benchmarked NLM vs. bilateral filter (`cv2.bilateralFilter`, applied directly on float32, no uint8 step) at realistic sizes: **19-22× faster** (1200×1800: 232ms→12ms; 2500×3750: 1105ms→50ms per channel). Bilateral also verified edge-preserving: a hard color-edge transition stays 0px wide even at max strength, while a flat noisy region's std-dev drops 71-81% depending on sigmaColor | **Implemented** — `apply_chroma_nlm` replaced with `apply_chroma_denoise` (bilateral, sigmaColor 0.03-0.15, no uint8 round-trip — also eliminates the whole bug class from #11 structurally, not just patched). Added `apply_luma_denoise` (bilateral on Y only, gentler sigmaColor 0.015-0.065 since luminance carries real detail unlike chroma) with a new **Luma NR** slider (`LuminanceNoiseReduction`, 0-100, `adjust_panel.py`/XMP) sitting above the existing Chroma NR toggle under a new "Noise" section. 6 new smoke tests added covering noise reduction, edge preservation, and pipeline wiring for both filters |
 
-| 13 | Both 16-bit TIFF and baked-DNG-RGB export crashed outright: `Image.fromarray(out, mode="RGB")` with a uint16 3-channel array has no valid entry in Pillow's `fromarray` type-lookup table, because Pillow's `"RGB"` mode is *defined* as 8-bit-per-channel -- there is no Pillow mode for 16-bit 3-channel data at all, on any version. `pixi.toml` pinned `Pillow = ">=10.0.0"` with no upper bound, so whichever Pillow version an environment resolves determines whether this crashes (newer Pillow, confirmed on 12.2.0) or "succeeds" while silently discarding the low byte on every channel (older Pillow / any raw-mode workaround) -- reported by a user as "export failed" | Reproduced with `export_adjusted_tiff16`/`export_adjusted_dng_rgb` on synthetic data: `TypeError: Cannot handle this data type: (1, 1, 3), <u2` (that shape is Pillow's internal lookup-key shorthand, not the actual array shape -- verified the real array was a normal `(200, 300, 3)` right up to the failing call by tracing into Pillow's own `fromarray` source). Separately, JPEG export crashed too: `subsampling=0` + `optimize=True` together triggered a libjpeg "Suspension not allowed here" encoder error, reproduced with a plain synthetic uint8 array and zero RAWViewer-specific code -- either flag alone works | **Fixed** -- 16-bit TIFF/DNG-RGB now write via `tifffile` (`_write_16bit_rgb_tiff`), bypassing Pillow's Image model entirely for this path; `tifffile` added as a project dependency (`pixi.toml`/`pixi.lock`). Compression is `deflate`, not LZW (LZW needs the separate `imagecodecs` package, not a project dependency). XMP (tag 700) and the DNG-only `DNGVersion`/`UniqueCameraModel` tags move to `extratags`. Verified true 16-bit output (values >255 present, not silently 8-bit) and correct XMP/DNG-tag round-trip. JPEG export drops `optimize=True` (pure file-size optimization, no visible quality loss) and keeps `subsampling=0` (matters for color fidelity). 4 new smoke tests added covering all of the above |
+| 13 | Both 16-bit TIFF and baked-DNG-RGB export crashed outright: `Image.fromarray(out, mode="RGB")` with a uint16 3-channel array has no valid entry in Pillow's `fromarray` type-lookup table, because Pillow's `"RGB"` mode is *defined* as 8-bit-per-channel -- there is no Pillow mode for 16-bit 3-channel data at all, on any version. `pixi.toml` pinned `Pillow = ">=10.0.0"` with no upper bound, so whichever Pillow version an environment resolves determines whether this crashes (newer Pillow, confirmed on 12.2.0) or "succeeds" while silently discarding the low byte on every channel (older Pillow / any raw-mode workaround) -- reported by a user as "export failed" | Reproduced with `export_adjusted_tiff16`/`export_adjusted_dng_rgb` on synthetic data: `TypeError: Cannot handle this data type: (1, 1, 3), <u2` (that shape is Pillow's internal lookup-key shorthand, not the actual array shape -- verified the real array was a normal `(200, 300, 3)` right up to the failing call by tracing into Pillow's own `fromarray` source). Separately, JPEG export crashed too: `subsampling=0` + `optimize=True` together triggered a libjpeg "Suspension not allowed here" encoder error, reproduced with a plain synthetic uint8 array and zero RAWViewer-specific code -- either flag alone works | **Fixed, then DNG-RGB removed entirely (2026-07-04)** -- 16-bit TIFF now writes via `tifffile` (`_write_16bit_rgb_tiff`), bypassing Pillow's Image model entirely; `tifffile` added as a project dependency (`pixi.toml`/`pixi.lock`). Compression is `deflate`, not LZW (LZW needs the separate `imagecodecs` package, not a project dependency). XMP (tag 700) moves to `extratags`. Verified true 16-bit output (values >255 present, not silently 8-bit). JPEG export drops `optimize=True` (pure file-size optimization, no visible quality loss) and keeps `subsampling=0` (matters for color fidelity). Baked-DNG-RGB got the same tifffile fix and stopped crashing, but a user then reported the resulting file couldn't be opened at all -- the RGB-container-DNG approach (plain RGB TIFF + `DNGVersion`/`UniqueCameraModel` tags, no real CFA/mosaic data) was never a real DNG to begin with, fixing the crash didn't fix that. Both DNG export options ("copy RAW + XMP settings" and "baked 16-bit RGB") were removed rather than shipping an unopenable format -- see Export formats. 4 new smoke tests added for the surviving formats |
+
+| 14 | Re-enabling the hidden tone curve UI surfaced a monotonicity bug in `apply_parametric_tone_curve` (`raw_tone_curve.py`) before it ever shipped visibly: `ParametricShadows` +100 and `ParametricHighlights` -100 both made the combined curve locally decreasing (banding), for the identical reason as the `raw_pv2012.py` shadow-lift bug fixed earlier in this doc -- the shadows/highlights region masks use the same `_smooth_weight`/`_SPLIT_SHADOWS=0.25` shape, so the same steep-slope-at-the-domain-boundary problem applies, just in a different function that happened to also use an unsafe coefficient (0.35) | Confirmed via the same derivative analysis as the earlier PV2012 fix: shadows-lift and highlights-darken brackets both reach worst slope ~5.89-5.90, requiring coefficient ≤~0.17; 0.35 produced real backward steps (worst -0.000052 at 20k-sample resolution, confirmed non-float32-noise via a 400k-sample float64 re-check showing `d(out)/dy` actually goes to -1.06 at the worst point) | **Fixed** -- coefficient reduced 0.35→0.15 (same value used for the analogous `raw_pv2012.py` fix), matching the identical safety margin. Re-verified monotonic for all 4 regions × both directions × combinations, standalone and composed with the rest of the PV2012 pipeline (Contrast/Highlights/Shadows/Whites/Blacks all maxed simultaneously). `_SHOW_TONE_CURVE_UI` then flipped to `True`. 1 new smoke test added (`test_parametric_tone_curve_stays_monotonic`) |
+
+| 15 | User-reported "the tone curve is unresponsive" right after re-enabling it. Traced the whole chain (widget mouse events -> `get_adjustments()` -> XMP -> pipeline) and every step worked correctly in isolation -- the actual bug was a math error in `apply_pv2012_tone_rgb` (`raw_pv2012.py`): `y0` (meant to be the true pre-curve baseline) got reassigned to the curve-adjusted value (`y0 = apply_tone_curve_perceptual(y0, adj)`), and the final hue-preserving ratio then divided by that *same already-curved* value (`ratio = y1 / y0`). With no PV2012 sliders active, `y1` and the reassigned `y0` end up numerically identical, so `ratio` is exactly 1.0 regardless of what the point curve or PV parametric sliders (Shad/Dark/Light/High) do -- the curve was fully wired end-to-end but its effect was mathematically cancelled out of the image. Note this bug could only manifest once the tone curve UI was reachable (today), and doesn't affect the main Shadows2012/Highlights2012/Whites2012/Blacks2012 sliders, which don't go through `apply_tone_curve_perceptual` at all | Confirmed step by step: `apply_tone_curve_perceptual` alone responded correctly to a test curve; `apply_pv2012_tone_rgb` (the real entry point) called with the identical curve produced byte-identical output to the default curve, both with `ParametricShadows` and with the point-curve serial | **Fixed** -- kept the true baseline in `y0`, moved the curve-adjusted value to a new `y_curve` variable used only to feed `_apply_pv2012_perceptual` and the shadow-lift chroma-damp region test; the ratio's denominator now correctly stays `y0`. Re-verified: point curve and `ParametricShadows` now visibly change `apply_pv2012_tone_rgb` output; existing Shadows2012 behavior unaffected (no regression, as expected since this path never touched it); monotonicity re-confirmed with a curve active, standalone and combined with maxed sliders. 1 new smoke test added (`test_tone_curve_affects_pv2012_tone_rgb_output`) exercising the real entry point, closing the gap that let this ship silently broken |
+
+| 16 | Follow-up user report after the tone curve fix: "shadow/black/white/highlight performance is still questionable... when lifting the black/shadow, the light part also be affected... cannot recover as much highlight/shadow [as] other editing application[s]." Root cause was much bigger than any single slider: `apply_pv2012_tone_rgb`'s `ratio = y1 / np.maximum(y0, _PERCEPTUAL_LUM_FLOOR)` floored *only the denominator*. With every slider at default, `y1 == y0` exactly, so this should be a pure identity operation -- but for any pixel with true perceptual luminance below the 0.03 floor (real deep-shadow/black detail), the floored denominator no longer equals the numerator, silently darkening that pixel up to 50% with **zero user adjustment**, before any slider was ever touched. The same floor then fought against genuine Shadows2012/Blacks2012 recovery attempts in that exact tonal range (the floor doesn't move when a slider tries to lift the pixel out of it, capping how much recovery could show through), and made Highlights2012 incorrectly touch the deepest shadows too (any ratio computed through this formula for a sub-floor pixel was wrong, regardless of which slider produced `y1`) | Confirmed the baseline-identity violation directly: with all 5 PV2012 sliders at default, `scene-linear=0.005` (well within real shadow detail) produced ratio=0.5 (max darkening) and `scene-linear=0.01` produced ratio=0.88 -- not 1.0, despite zero user adjustment. `Highlights2012=-100` also produced ratio=0.5 at `scene-linear=0.005` before the fix, confirming the region leak; after the fix, ratio=1.0 there (correctly untouched) | **Fixed** -- floored both numerator and denominator (`np.maximum(y1, floor) / np.maximum(y0, floor)`), so the floor still prevents a near-zero-denominator blowup but no longer breaks the identity case. Re-verified: baseline is now exact identity (ratio=1.0) at every tested luminance from 0.0001 to 4.0; `Highlights2012=-100` no longer touches deep shadows; `Shadows2012`/`Blacks2012` recovery is now visibly stronger and reaches the full `_MIN_TONE_RATIO`/`_MAX_TONE_RATIO` range in deep shadows instead of being capped short by the floor mismatch; monotonicity re-confirmed for all sliders and combinations. 2 new smoke tests added (`test_pv2012_default_adjustments_are_true_identity`, `test_pv2012_highlights_slider_does_not_touch_deep_shadows`) |
+
+| 17 | Follow-up to the #16 fix: with the baseline-identity bug gone, the user asked whether Whites/Blacks range could be strengthened further -- `_apply_whites_blacks`'s `white_pt = 1.0 - w*0.12` / `black_pt = -b*0.12` meant even `Whites=+100`/`Blacks=-100` (the sliders' hard extremes) only moved the white/black point by 12%, nowhere near enough to visibly clip highlights or crush shadows the way the equivalent controls do in other editing tools | Tested candidate coefficients (0.12/0.2/0.25/0.3/0.35) via the real `apply_pv2012_tone_rgb` entry point; 0.25 gives a worst-case combined span (`Whites=+100` and `Blacks=-100` together) of 0.5 -- still comfortably clear of a degenerate near-zero span -- while producing a clearly stronger, visibly-clipping effect at the extremes | **Fixed** -- coefficient increased 0.12→0.25 in both `white_pt`/`black_pt`. Re-verified: still a pure affine remap + clip, so monotonicity holds unconditionally (confirmed via full derivative sweep at `Whites=+100`, `Blacks=-100`, and the combined worst case, all `bad_steps=0`); through the real pipeline entry point, `Whites=+100` now boosts a bright pixel's ratio to ~1.33× (was ~1.03×) and `Blacks=-100` drops a dark pixel's ratio to the `_MIN_TONE_RATIO` floor (0.5×, was ~0.85×). 1 new smoke test added (`test_pv2012_whites_blacks_strength`) asserting the strengthened magnitude, guarding against silent regression back toward the old weak coefficient |
+
+| 18 | Follow-up to the user's "sluggish/laggy while dragging" report (see #16's investigation): finding #2 above, still open at that point -- every preview tick reran the entire WB -> exposure -> denoise -> PV2012 tone -> tonemap -> sat/vibrance -> HSL -> detail chain from scratch, even when dragging a single late-stage slider (e.g. Sharpness) with everything upstream unchanged | Benchmarked at the documented 2000x3000 preview size: dragging **Sharpness** (last stage) with Exposure/Shadows/Saturation already set, uncached **933ms/tick** vs staged **170ms/tick** (**5.5x**). Dragging an upstream slider (Shadows2012 or Exposure2012, which invalidate everything downstream anyway) showed **0.99-1.00x** -- i.e. no caching overhead penalty when caching can't help | **Implemented** -- `PreviewStageCache` (`raw_edit_pipeline.py`) memoizes 4 checkpoints: pre-tone (WB/Tint/Exposure/denoise), PV2012 tone, tonemap-for-display, and color (sat/vibrance/HSL), with detail (sharpen/clarity/defringe) computed last from the cached color output. Each stage's cache key is `(upstream_stage_key, this_stage's_own_adjustment_keys)` -- chaining to the upstream key is what makes a change to, say, Exposure2012 correctly invalidate every stage after it even though Exposure2012 isn't one of that stage's own keys. Only wired into the live preview path (`_AdjustPreviewWorker` in `main.py`, via `render_adjust_preview_uint8`) -- export always calls the plain uncached functions directly, so a cache bug here could never corrupt a baked export. Cache lives on the main window (`self._adjust_preview_stage_cache`) and self-invalidates on file navigation via base-image identity (`cache.base_ref is not rgb_image`), needing no explicit reset wiring at each of the existing `_adjust_preview_base_rgb = None` call sites. Guarded by a `threading.Lock` since the cache is mutated from the `QThreadPool` worker thread. Two real bugs were caught by property tests before shipping: (1) the tone stage's key initially included only its own PV2012/curve keys, not the upstream pre-tone key, so changing Exposure2012 alone (no PV2012 slider touched) incorrectly reused a tone-stage output computed from the *old* pre-tone buffer; (2) the "adjustments are all default" fast path (which bypasses pre-tone/tone entirely and returns the raw linear buffer) never stamped a tone-stage cache key, so transitioning into or out of all-default state left a stale key in place and the downstream tonemap stage wrongly reused output computed from different pixel data. Both fixed and re-verified. 2 new smoke tests added: `test_preview_stage_cache_matches_full_recompute` (staged output byte-identical to the uncached reference across a 20-step sequence covering single-key drags, multi-key combinations, recovery-baseline toggling, HSL, a fully-loaded combination, repeated returns to default, and a mid-sequence base-image swap) and `test_preview_stage_cache_skips_upstream_recompute` (instruments `apply_pv2012_tone_rgb` with a call counter to directly confirm the tone stage is skipped when only Sharpness changes, and does recompute when Shadows2012 changes) |
+
+| 19 | User asked "should [the point tone curve] be a curve?" — it wasn't: both the widget's rendering and `build_point_curve_lut`'s actual pixel math connected knots with straight line segments (`np.interp`), so the point curve looked and behaved like a polyline rather than the smooth spline every reference tool (Lightroom, Capture One) shows for the same control | N/A (visual/design gap, not a numeric bug) | **Fixed** — switched to `scipy.interpolate.PchipInterpolator` (monotonic piecewise cubic Hermite), not a plain/natural cubic spline: PCHIP is shape-preserving and provably cannot overshoot past the local trend of the input knots, so it can't introduce the ringing/banding artifact a natural spline risks on a steep-then-flat knot layout — the same overshoot failure mode this doc's earlier tone-curve/PV2012 coefficient fixes (#10, #14) were about, just from a different cause (spline math instead of an unsafe linear coefficient). `raw_tone_curve.py` gained `_fit_point_curve` (shared PCHIP fit, deduplicating near-identical x knots since PCHIP requires strictly increasing x) used by both `build_point_curve_lut` (the real 65536-entry LUT) and a new `sample_point_curve_for_display` (a cheap ~96-point sample of the *same* fit, used only for drawing) — so the widget's rendered curve is guaranteed to match what's actually applied to the image, not a separate approximation of it. `tone_curve_widget.py`'s `paintEvent` now draws the sampled spline instead of straight segments between control points. Verified via a headless-Qt screenshot (curve now visibly smooth through the control points) and 2 new smoke tests: `test_point_curve_pchip_no_overshoot` (a steep-rise-then-plateau knot layout stays within `[min(y_i, y_{i+1}), max(y_i, y_{i+1})]` on every segment, catching the exact overshoot a natural spline would produce there) and `test_point_curve_display_matches_applied_lut` (widget-drawn samples match the real LUT to within 0.5/255 at the same x) |
+
+| 20 | User report: "the color noise cannot be removed" — the bilateral filter added in #12 (5-7px kernel diameter) only ever sees noise narrower than itself. Real high-ISO sensor color noise is typically **blotchy**: spatially correlated over several pixels from Bayer demosaic interpolation and sensor readout patterns, not pixel-independent. Confirmed by synthesizing noise with increasing spatial correlation length and measuring the existing bilateral filter's std-dev reduction on each | Pixel-independent noise: 77.4% reduction (bilateral doing its job). Noise blurred with a Gaussian sigma=4 (a representative "blotch" correlation length): only **6.6%** reduction. Sigma=8 (larger blotches): only **1.7%** — the kernel essentially can't see it at all | **Implemented** — added a second, coarser pass in `apply_chroma_denoise`: downsample Cb/Cr (factor 3, 2 in preview), Gaussian-blur at the reduced resolution, upsample back (same principle as JPEG/video 4:2:0 chroma subsampling — human vision resolves color at far lower spatial resolution than luminance, so a softer chroma channel isn't perceptible the way a softer luma channel would be). Blended back with the bilateral (fine) result in proportion to a luma-Sobel-gradient edge mask (`_luma_edge_weight`), so real color edges stay protected while flat/blotchy regions get the much stronger coarse pass. Re-measured with the actual tuned parameters at the strongest reachable slider setting (`strength=1.25`, `ColorNoiseReduction=100`): sigma=4 blotchy noise reduction improved 6.6%→10.9%, sigma=8 improved 1.7%→3.7%, sigma=1.5 (milder, more common) improved 29.5%→37.1%, pixel-independent improved 77.4%→82.9%. Tradeoff: the coarse pass isn't edge-aware on its own, so there is now measurable bleed very close to a hard color edge, bounded by construction (tuned against a synthetic red\|blue edge test) to **~0.04 max channel error at 4px, ~0.004 at 6px, ~0 at 8px+** even at max strength — no user-visible halo beyond a few pixels. Added cost: ~3.7x over the bilateral-only pass at the documented 2000×3000 preview size (63ms → 233ms), but this only matters for slider drags that actually touch `ColorNoiseReduction`/`Temperature`/`Tint`/`Exposure2012` — the `PreviewStageCache` from #18 already skips this stage entirely for any other slider drag (Sharpness, Saturation, PV2012 tone, etc.), and it's still far cheaper than the NLM approach it replaced in #12 (~1100ms+ at a similar size). 2 new smoke tests added: `test_chroma_denoise_removes_blotchy_correlated_noise` (reduction on sigma=4 correlated noise must exceed 8%, guarding against this regressing back toward the ~7% pre-fix baseline) and `test_chroma_denoise_edge_bleed_bounded_near_hard_edge` (bleed at 4/6/8px from a hard edge stays under 0.08/0.03/0.01 respectively at max strength) |
 
 Numbers were captured with `raw_edit_pipeline.process_linear_edit_buffer` +
 `linear_to_display_uint8` directly (no Qt/GUI thread involved); see the

@@ -97,8 +97,14 @@ def _apply_whites_blacks(y: np.ndarray, whites: float, blacks: float) -> np.ndar
     """
     w = whites / 100.0
     b = blacks / 100.0
-    white_pt = 1.0 - w * 0.12
-    black_pt = -b * 0.12
+    # 0.25, not the original 0.12: at +-12% max shift, Whites/Blacks barely
+    # moved the black/white point at all -- nowhere near strong enough to
+    # visibly clip highlights/crush shadows the way real Whites/Blacks
+    # sliders do at their extremes. 0.25 gives genuine clipping at +-100
+    # (worst-case combined span, both maxed toward each other, is 0.5 --
+    # still comfortably away from a degenerate/near-zero span).
+    white_pt = 1.0 - w * 0.25
+    black_pt = -b * 0.25
     span = max(white_pt - black_pt, 1e-6)
     return np.clip((y - black_pt) / span, 0.0, 1.0)
 
@@ -154,9 +160,16 @@ def apply_pv2012_tone_rgb(img: np.ndarray, adj: dict[str, float]) -> np.ndarray:
     """Hue-preserving PV2012 tone; ratio capped in perceptual space."""
     lum = _luminance(img)
     y0 = _scene_to_perceptual(lum)
-    y0 = apply_tone_curve_perceptual(y0, adj)
+    # y0 must stay the true pre-curve, pre-PV2012 baseline: it's the ratio's
+    # denominator below. Reassigning it to the curve-adjusted value here (as
+    # this used to do) makes the point tone curve's effect appear in *both*
+    # the numerator (y1, computed from the curved value) and the denominator,
+    # so it exactly cancels out of the ratio -- the point curve UI was fully
+    # wired end-to-end (widget -> XMP -> pipeline) but had zero visible
+    # effect on the image, reported as "the tone curve is unresponsive".
+    y_curve = apply_tone_curve_perceptual(y0, adj)
     y1 = _apply_pv2012_perceptual(
-        y0,
+        y_curve,
         contrast=float(adj.get("Contrast2012", 0.0)),
         highlights=float(adj.get("Highlights2012", 0.0)),
         shadows=float(adj.get("Shadows2012", 0.0)),
@@ -164,14 +177,22 @@ def apply_pv2012_tone_rgb(img: np.ndarray, adj: dict[str, float]) -> np.ndarray:
         blacks=float(adj.get("Blacks2012", 0.0)),
     )
 
-    ratio = y1 / np.maximum(y0, _PERCEPTUAL_LUM_FLOOR)
+    # Floor applies to *both* numerator and denominator: it exists only to
+    # avoid a near-zero-denominator blowup, not to bias the ratio itself. A
+    # floor on the denominator alone made "no sliders touched" (y1 == y0)
+    # into a non-identity operation for any pixel below the floor -- e.g.
+    # y0=0.005 produced ratio=0.5 (max darkening) with every slider at
+    # default, silently crushing deep shadows/blacks before any user
+    # adjustment, and fighting against genuine shadow/black recovery
+    # attempts in exactly the tonal range users reach for it.
+    ratio = np.maximum(y1, _PERCEPTUAL_LUM_FLOOR) / np.maximum(y0, _PERCEPTUAL_LUM_FLOOR)
     ratio = np.clip(ratio, _MIN_TONE_RATIO, _MAX_TONE_RATIO)
     out = img * ratio[..., np.newaxis]
 
     # Shadow lift amplifies demosaic chroma noise — pull chroma toward luma.
     sh = float(adj.get("Shadows2012", 0.0))
     if sh > 1e-4:
-        sw = _region_weight_shadows(y0)
+        sw = _region_weight_shadows(y_curve)
         damp = 1.0 - sw[..., np.newaxis] * min(sh / 100.0, 1.0) * 0.55
         luma = lum[..., np.newaxis]
         chroma = out - luma

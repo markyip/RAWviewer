@@ -1758,6 +1758,7 @@ class _AdjustPreviewWorker(QRunnable):
         base_rgb: Any,
         adj: dict,
         signals: _AdjustPreviewSignals,
+        stage_cache: Any = None,
     ):
         super().__init__()
         self.generation = int(generation)
@@ -1765,27 +1766,40 @@ class _AdjustPreviewWorker(QRunnable):
         self.base_rgb = base_rgb
         self.adj = dict(adj or {})
         self.signals = signals
+        self.stage_cache = stage_cache
 
     def run(self) -> None:
         out = None
         try:
-            from raw_adjustments import apply_adjustments_to_rgb
+            dtype_name = str(getattr(self.base_rgb, "dtype", ""))
+            if dtype_name in ("uint16", "float32") and self.stage_cache is not None:
+                # Staged/cached recompute: reuses cached intermediate buffers
+                # across ticks when only later-stage slider keys changed
+                # since the last call (see PreviewStageCache in
+                # raw_edit_pipeline.py) -- this is what makes dragging a
+                # single slider (e.g. Sharpness) skip re-running WB/exposure/
+                # denoise/PV2012 tone/tonemap on every tick.
+                from raw_edit_pipeline import render_adjust_preview_uint8
 
-            out = apply_adjustments_to_rgb(self.base_rgb, self.adj)
-            if out is not None and str(getattr(out, "dtype", "")) in {
-                "uint16",
-                "float32",
-                "float64",
-            }:
-                import logging
+                out = render_adjust_preview_uint8(self.base_rgb, self.adj, self.stage_cache)
+            else:
+                from raw_adjustments import apply_adjustments_to_rgb
 
-                logging.getLogger(__name__).warning(
-                    "Adjust preview returned non-display buffer (%s); forcing encode",
-                    getattr(out, "dtype", None),
-                )
-                from raw_adjustments import apply_adjustments_to_linear
+                out = apply_adjustments_to_rgb(self.base_rgb, self.adj)
+                if out is not None and str(getattr(out, "dtype", "")) in {
+                    "uint16",
+                    "float32",
+                    "float64",
+                }:
+                    import logging
 
-                out = apply_adjustments_to_linear(self.base_rgb, self.adj)
+                    logging.getLogger(__name__).warning(
+                        "Adjust preview returned non-display buffer (%s); forcing encode",
+                        getattr(out, "dtype", None),
+                    )
+                    from raw_adjustments import apply_adjustments_to_linear
+
+                    out = apply_adjustments_to_linear(self.base_rgb, self.adj)
             if out is not None and str(getattr(out, "dtype", "")) != "uint8":
                 from raw_tone_recovery import _encode_srgb8
 
@@ -1854,14 +1868,18 @@ class _AdjustExportWorker(QRunnable):
         self.signals = signals
 
     def run(self) -> None:
+        logger = logging.getLogger(__name__)
+        logger.info(
+            "[EXPORT] Worker started: format=%s source=%s output=%s",
+            self.export_format,
+            os.path.basename(self.file_path),
+            self.output_path,
+        )
         err = None
         xmp_warning = None
         try:
             from raw_adjustments import resolve_xmp_path, write_xmp_adjustments_for_file
-            from raw_edit_pipeline import (
-                EXPORT_FORMAT_DNG_SETTINGS,
-                export_adjusted_image,
-            )
+            from raw_edit_pipeline import export_adjusted_image
             from unified_image_processor import UnifiedImageProcessor
 
             # Best-effort: keep the source file's sidecar in sync with what's
@@ -1875,30 +1893,43 @@ class _AdjustExportWorker(QRunnable):
                 write_xmp_adjustments_for_file(self.file_path, self.adj)
             except Exception as xmp_exc:
                 xmp_warning = xmp_exc
+                logger.warning(
+                    "[EXPORT] Source XMP sidecar update failed (export continues): %s",
+                    xmp_exc,
+                )
             else:
                 xmp_path = resolve_xmp_path(self.file_path)
                 embed_xmp = (
                     xmp_path if xmp_path and os.path.isfile(xmp_path) else None
                 )
 
-            base = None
-            if self.export_format != EXPORT_FORMAT_DNG_SETTINGS:
-                processor = UnifiedImageProcessor()
-                base = processor.decode_raw_edit_base(
-                    self.file_path,
-                    executor=self.process_pool,
-                    use_full_resolution=True,
-                )
+            logger.info("[EXPORT] Decoding full-resolution edit base…")
+            processor = UnifiedImageProcessor()
+            base = processor.decode_raw_edit_base(
+                self.file_path,
+                executor=self.process_pool,
+                use_full_resolution=True,
+            )
+            logger.info(
+                "[EXPORT] Full-resolution decode %s",
+                "OK, shape=%s" % (base.shape,) if base is not None else "FAILED (returned None)",
+            )
             export_adjusted_image(
                 self.export_format,
-                source_path=self.file_path,
                 output_path=self.output_path,
                 rgb_linear=base,
                 adj=self.adj,
                 embed_xmp_path=embed_xmp,
             )
+            logger.info("[EXPORT] export_adjusted_image() completed without raising")
         except Exception as exc:
             err = exc
+            logger.error("[EXPORT] Worker failed", exc_info=True)
+        logger.info(
+            "[EXPORT] Worker finished: err=%s xmp_warning=%s — emitting finished signal",
+            err,
+            xmp_warning,
+        )
         self.signals.finished.emit(
             self.file_path, self.output_path, self.export_format, err, xmp_warning
         )
@@ -7688,6 +7719,9 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self._adjust_preview_dirty = False
         self._adjust_preview_signals = _AdjustPreviewSignals()
         self._adjust_preview_signals.finished.connect(self._on_adjust_preview_ready)
+        from raw_edit_pipeline import PreviewStageCache
+
+        self._adjust_preview_stage_cache = PreviewStageCache()
         self._adjust_edit_base_path: str | None = None
         self._adjust_edit_base_loading_norm: str | None = None
         self._adjust_export_in_progress = False
@@ -15315,6 +15349,90 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         url = panel.URL()
         return url.path() if url is not None else ""
 
+    def _create_macos_save_panel(self):
+        """Return an NSSavePanel instance (can fail when Qt owns NSApplication)."""
+        import objc
+
+        ns_save_panel = objc.lookUpClass("NSSavePanel")
+        panel = ns_save_panel.alloc().init()
+        if panel is None:
+            panel = ns_save_panel.savePanel()
+        if panel is None:
+            raise RuntimeError("NSSavePanel could not be created")
+        return panel
+
+    def _save_file_dialog_macos_applescript(
+        self, default_dir: str, default_name: str, prompt: str
+    ) -> str:
+        """Native macOS Finder save picker via AppleScript (works with Qt + Terminal)."""
+        start = self._sanitize_dialog_start_dir(default_dir)
+        location_clause = ""
+        if start:
+            location_clause = (
+                f' default location (POSIX file "{_applescript_escape(start)}")'
+            )
+        name_clause = ""
+        if default_name:
+            name_clause = f' default name "{_applescript_escape(default_name)}"'
+        script = (
+            f'choose file name with prompt "{_applescript_escape(prompt)}"'
+            f"{name_clause}{location_clause}\n"
+            "return POSIX path of result"
+        )
+        return _run_applescript(script)
+
+    def _save_file_dialog_macos_nssavepanel(
+        self,
+        default_dir: str,
+        default_name: str,
+        prompt: str,
+        file_types: list,
+    ) -> str:
+        """macOS Finder save panel via AppKit (Qt native QFileDialog fails when run from Terminal)."""
+        from AppKit import NSURL
+
+        panel = self._create_macos_save_panel()
+        panel.setTitle_(prompt)
+        panel.setPrompt_("Export")
+        if default_name:
+            panel.setNameFieldStringValue_(default_name)
+        if file_types:
+            try:
+                panel.setAllowedFileTypes_(file_types)
+            except Exception:
+                pass
+
+        start = self._sanitize_dialog_start_dir(default_dir)
+        if start:
+            panel.setDirectoryURL_(NSURL.fileURLWithPath_(start))
+
+        if panel.runModal() != 1:  # NSModalResponseOK
+            return ""
+        url = panel.URL()
+        return url.path() if url is not None else ""
+
+    def _save_file_dialog_macos_native(
+        self,
+        default_dir: str,
+        default_name: str,
+        prompt: str,
+        file_types: list,
+    ) -> str:
+        """Prefer NSSavePanel; fall back to AppleScript (true Finder UI under Qt)."""
+        import logging
+
+        logger = logging.getLogger(__name__)
+        try:
+            return self._save_file_dialog_macos_nssavepanel(
+                default_dir, default_name, prompt, file_types
+            )
+        except Exception as exc:
+            logger.warning(
+                "NSSavePanel unavailable (%s), using AppleScript choose file name",
+                exc,
+            )
+        return self._save_file_dialog_macos_applescript(default_dir, default_name, prompt)
+
     def _choose_macos_editing_app_applescript(self, start_dir: str) -> str:
         """Native app picker via AppleScript (works when Qt owns NSApplication)."""
         start = self._sanitize_dialog_start_dir(start_dir) or "/Applications"
@@ -18242,6 +18360,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             base,
             dict(adj),
             self._adjust_preview_signals,
+            stage_cache=getattr(self, "_adjust_preview_stage_cache", None),
         )
         QThreadPool.globalInstance().start(worker)
 
@@ -18363,14 +18482,24 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         QTimer.singleShot(0, self._restore_keyboard_focus)
 
     def _on_adjust_panel_export_requested(self, export_format: str, adj: dict) -> None:
+        logger = logging.getLogger(__name__)
         path = getattr(self, "current_file_path", None)
-        if not path or getattr(self, "_adjust_export_in_progress", False):
+        if not path:
+            logger.info("[EXPORT] Requested but no current_file_path — ignoring")
             return
+        if getattr(self, "_adjust_export_in_progress", False):
+            logger.warning(
+                "[EXPORT] Requested (%s) while another export is still in progress"
+                " for %s — ignoring. If this persists across attempts, the previous"
+                " export's worker never signalled completion.",
+                export_format,
+                os.path.basename(path),
+            )
+            return
+        logger.info("[EXPORT] Requested format=%s for %s", export_format, os.path.basename(path))
         from PyQt6.QtWidgets import QFileDialog
 
         from raw_edit_pipeline import (
-            EXPORT_FORMAT_DNG_RGB,
-            EXPORT_FORMAT_DNG_SETTINGS,
             EXPORT_FORMAT_JPEG,
             EXPORT_FORMAT_TIFF16,
             EXPORT_FORMAT_WEBP,
@@ -18378,18 +18507,9 @@ class RAWImageViewer(SessionMixin, QMainWindow):
 
         fmt = (export_format or EXPORT_FORMAT_TIFF16).strip().lower()
         base = os.path.splitext(os.path.basename(path))[0]
-        src_ext = os.path.splitext(path)[1].lower()
         start_dir = os.path.dirname(os.path.abspath(path))
 
-        if fmt == EXPORT_FORMAT_DNG_SETTINGS:
-            default_ext = src_ext if src_ext else ".dng"
-            default_name = f"{base}_edited{default_ext}"
-            dialog_title = "Export RAW/DNG with XMP settings"
-            file_filter = (
-                "RAW / DNG with XMP (*.dng *.cr2 *.cr3 *.nef *.arw *.orf *.raf *.rw2);;"
-                "All files (*)"
-            )
-        elif fmt == EXPORT_FORMAT_JPEG:
+        if fmt == EXPORT_FORMAT_JPEG:
             default_name = f"{base}_edited.jpg"
             dialog_title = "Export JPEG"
             file_filter = "JPEG (*.jpg *.jpeg)"
@@ -18397,34 +18517,67 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             default_name = f"{base}_edited.webp"
             dialog_title = "Export WebP"
             file_filter = "WebP (*.webp)"
-        elif fmt == EXPORT_FORMAT_DNG_RGB:
-            default_name = f"{base}_edited.dng"
-            dialog_title = "Export baked DNG"
-            file_filter = "DNG (*.dng)"
         else:
             default_name = f"{base}_edited.tif"
             dialog_title = "Export 16-bit TIFF"
             file_filter = "TIFF (*.tif *.tiff)"
 
-        output_path, _ = QFileDialog.getSaveFileName(
-            self,
-            dialog_title,
-            os.path.join(start_dir, default_name),
-            file_filter,
-        )
-        if not output_path:
+        if fmt == EXPORT_FORMAT_JPEG:
+            file_types = ["jpg", "jpeg"]
+        elif fmt == EXPORT_FORMAT_WEBP:
+            file_types = ["webp"]
+        else:
+            file_types = ["tif", "tiff"]
+
+        # Plain QFileDialog.getSaveFileName() can silently return "" with no
+        # dialog ever appearing when the app is launched from a Terminal shell
+        # script (Qt's native macOS panel creation fails in that process
+        # context) -- the same failure mode already worked around for the
+        # Open dialog (_open_file_dialog_macos_native). Apply the identical
+        # NSSavePanel-with-AppleScript-fallback treatment here.
+        try:
+            if self._use_qt_file_dialog():
+                output_path, _ = QFileDialog.getSaveFileName(
+                    self,
+                    dialog_title,
+                    os.path.join(start_dir, default_name),
+                    file_filter,
+                    options=QFileDialog.Option.DontUseNativeDialog,
+                )
+            elif sys.platform == "darwin":
+                output_path = self._save_file_dialog_macos_native(
+                    start_dir, default_name, dialog_title, file_types
+                )
+            else:
+                self._prepare_for_modal_dialog()
+                output_path, _ = QFileDialog.getSaveFileName(
+                    self,
+                    dialog_title,
+                    os.path.join(start_dir, default_name),
+                    file_filter,
+                )
+        except Exception as e:
+            logger.error("[EXPORT] Save dialog failed: %s", e, exc_info=True)
+            self.show_error("Export", f"Could not open save dialog:\n{e}")
             return
+
+        if os.environ.get("RAWVIEWER_DEBUG", "").strip() == "1":
+            backend = "qt" if self._use_qt_file_dialog() else (
+                "macos-native" if sys.platform == "darwin" else "qfiledialog"
+            )
+            logger.info("[EXPORT] Save dialog done (backend=%s, selected=%r)", backend, output_path or "")
+
+        if not output_path:
+            logger.info("[EXPORT] Save dialog cancelled by user")
+            return
+        logger.info("[EXPORT] Save target chosen: %s", output_path)
         low = output_path.lower()
         if fmt == EXPORT_FORMAT_JPEG and not low.endswith((".jpg", ".jpeg")):
             output_path += ".jpg"
         elif fmt == EXPORT_FORMAT_WEBP and not low.endswith(".webp"):
             output_path += ".webp"
-        elif fmt == EXPORT_FORMAT_DNG_RGB and not low.endswith(".dng"):
-            output_path += ".dng"
         elif fmt == EXPORT_FORMAT_TIFF16 and not low.endswith((".tif", ".tiff")):
             output_path += ".tif"
-        elif fmt == EXPORT_FORMAT_DNG_SETTINGS and not os.path.splitext(output_path)[1]:
-            output_path += default_ext
 
         self._adjust_export_in_progress = True
         self._adjust_export_format = fmt
@@ -18444,6 +18597,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             pool,
             self._adjust_export_signals,
         )
+        logger.info("[EXPORT] Handing off to background worker (format=%s)", fmt)
         QThreadPool.globalInstance().start(worker)
 
     def _on_adjust_export_finished(
@@ -18454,6 +18608,13 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         err: object,
         xmp_warning: object = None,
     ) -> None:
+        logger = logging.getLogger(__name__)
+        logger.info(
+            "[EXPORT] _on_adjust_export_finished: source=%s output=%s err=%s",
+            os.path.basename(source_path),
+            output_path,
+            err,
+        )
         self._adjust_export_in_progress = False
         panel = getattr(self, "single_image_adjust_panel", None)
         if panel is not None and hasattr(panel, "set_export_enabled"):
@@ -18461,6 +18622,31 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         if _norm_path(source_path) != _norm_path(
             getattr(self, "current_file_path", "") or ""
         ):
+            # User navigated to a different image while this export was still
+            # running in the background. The status bar now belongs to that
+            # other image, so we don't overwrite it -- but the user who
+            # requested this export still deserves to know whether it
+            # succeeded, otherwise a slow export that finishes after they've
+            # moved on looks exactly like nothing happened at all.
+            logger.info(
+                "[EXPORT] Current file changed since export was requested"
+                " (now viewing %s) — showing a transient notification instead"
+                " of the per-file status bar",
+                os.path.basename(getattr(self, "current_file_path", "") or "?"),
+            )
+            if hasattr(self, "status_bar"):
+                name = os.path.basename(source_path)
+                if err is not None:
+                    self.status_bar.showMessage(
+                        f"Export of {name} failed (while viewing another image): {err}",
+                        7000,
+                    )
+                else:
+                    self.status_bar.showMessage(
+                        f"Exported {name} to {os.path.basename(output_path)}"
+                        " (while viewing another image)",
+                        7000,
+                    )
             return
         if err is not None:
             if hasattr(self, "status_bar"):
@@ -18471,8 +18657,6 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             "tiff16": "16-bit TIFF",
             "jpeg": "JPEG",
             "webp": "WebP",
-            "dng_rgb": "baked DNG",
-            "dng_settings": "RAW/DNG + XMP",
         }
         label = labels.get(fmt, "image")
         if hasattr(self, "status_bar"):

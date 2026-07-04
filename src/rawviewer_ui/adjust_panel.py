@@ -33,8 +33,8 @@ from raw_adjustments import (
 from raw_hsl import HSL_COLOR_NAMES
 from raw_tone_curve import TONE_CURVE_SERIAL_KEY
 
-# Point-curve + parametric PV rows — hidden while core adjust is validated (see docs).
-_SHOW_TONE_CURVE_UI = False
+# Point-curve + parametric PV rows.
+_SHOW_TONE_CURVE_UI = True
 # HSL 分色 section — hidden pending a saturation/vibrance review (see docs).
 _SHOW_HSL_UI = False
 
@@ -379,17 +379,8 @@ class ImageAdjustPanelWidget(QWidget):
             "WebP (baked)",
             lambda: self._request_export("webp"),
         )
-        export_menu.addSeparator()
-        export_menu.addAction(
-            "DNG — copy RAW + XMP settings",
-            lambda: self._request_export("dng_settings"),
-        )
-        export_menu.addAction(
-            "DNG — baked 16-bit RGB",
-            lambda: self._request_export("dng_rgb"),
-        )
         export_btn.setMenu(export_menu)
-        export_btn.setToolTip("Export baked image or non-destructive RAW + XMP for other editors")
+        export_btn.setToolTip("Export baked image (TIFF / JPEG / WebP)")
         layout.addWidget(export_btn)
         self._export_btn = export_btn
 

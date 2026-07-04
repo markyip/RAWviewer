@@ -15,6 +15,7 @@ from raw_tone_curve import (
     move_tone_curve_point,
     normalize_tone_curve_points,
     remove_tone_curve_point,
+    sample_point_curve_for_display,
     serialize_tone_curve_points,
 )
 
@@ -112,14 +113,18 @@ class ToneCurveWidget(QWidget):
         p1 = self._to_widget(255.0, 255.0)
         painter.drawLine(p0, p1)
 
-        # Curve polyline
+        # Smooth monotonic-cubic curve -- sampled from the same PCHIP fit
+        # actually applied to the image (sample_point_curve_for_display),
+        # not a straight connect-the-dots polyline between knots.
         painter.setPen(QPen(QColor(144, 202, 249), 2))
-        prev: Optional[QPointF] = None
-        for pt in self._points:
-            wp = self._to_widget(*pt)
-            if prev is not None:
-                painter.drawLine(prev, wp)
-            prev = wp
+        samples = sample_point_curve_for_display(self._points, n_samples=96)
+        if samples:
+            prev: Optional[QPointF] = None
+            for x, y in samples:
+                wp = self._to_widget(x, y)
+                if prev is not None:
+                    painter.drawLine(prev, wp)
+                prev = wp
 
         # Control points
         for i, pt in enumerate(self._points):

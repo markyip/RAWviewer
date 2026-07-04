@@ -136,6 +136,62 @@ def test_chroma_denoise_reduces_noise_and_preserves_edge() -> None:
     assert np.allclose(out_edge[h // 2, -3], edge[h // 2, -3], atol=0.05)
 
 
+def test_chroma_denoise_removes_blotchy_correlated_noise() -> None:
+    """The plain bilateral filter (5-7px kernel) barely touches noise with a
+    several-pixel spatial correlation length -- real high-ISO sensor color
+    noise, from Bayer demosaic interpolation, is typically blotchy like this,
+    not pixel-independent. Regression guard for the downsample/blur/upsample
+    coarse pass added to reach it (user report: "the color noise cannot be
+    removed")."""
+    import cv2
+
+    from raw_chroma_denoise import _rgb_to_ycbcr, apply_chroma_denoise
+
+    rng = np.random.default_rng(0)
+    h, w = 300, 300
+
+    def blotchy_noise(sigma_blur: float, amp: float) -> np.ndarray:
+        n = rng.normal(0, 1, (h, w)).astype(np.float32)
+        n = cv2.GaussianBlur(n, (0, 0), sigma_blur)
+        return n / (n.std() + 1e-6) * amp
+
+    base = np.full((h, w, 3), 0.4, dtype=np.float32)
+    noise_cb = blotchy_noise(4.0, 0.04)
+    noise_cr = blotchy_noise(4.0, 0.04)
+    img = base.copy()
+    img[:, :, 0] += noise_cr * 1.5
+    img[:, :, 2] += noise_cb * 1.8
+    img = np.clip(img, 0.0, 1.0)
+
+    _, cb_in, cr_in = _rgb_to_ycbcr(img)
+    out = apply_chroma_denoise(img.copy(), strength=1.25, preview=False)
+    _, cb_out, cr_out = _rgb_to_ycbcr(out)
+
+    before = cb_in.std() + cr_in.std()
+    after = cb_out.std() + cr_out.std()
+    reduction = 1.0 - after / before
+    assert reduction > 0.08, f"blotchy noise reduction too weak: {reduction * 100:.1f}%"
+
+
+def test_chroma_denoise_edge_bleed_bounded_near_hard_edge() -> None:
+    """The coarse pass added for blotchy noise (previous test) trades some
+    bleed near real edges for a much larger effective denoise radius -- guard
+    that the bleed stays small and localized (within ~6px) even at the
+    strongest reachable slider setting, not the wide halo an unguided blur
+    would produce."""
+    from raw_chroma_denoise import apply_chroma_denoise
+
+    edge = np.zeros((200, 200, 3), dtype=np.float32)
+    edge[:, :100] = [0.9, 0.1, 0.1]
+    edge[:, 100:] = [0.1, 0.1, 0.9]
+    out_edge = apply_chroma_denoise(edge.copy(), strength=1.25, preview=False)
+    row = 100
+    target = np.array([0.9, 0.1, 0.1])
+    assert np.abs(out_edge[row, 100 - 8] - target).max() < 0.01
+    assert np.abs(out_edge[row, 100 - 6] - target).max() < 0.03
+    assert np.abs(out_edge[row, 100 - 4] - target).max() < 0.08
+
+
 def test_luma_denoise_reduces_noise_and_preserves_edge() -> None:
     from raw_chroma_denoise import _rgb_to_ycbcr, apply_luma_denoise
 
@@ -270,6 +326,41 @@ def _assert_monotonic(y1: np.ndarray, label: str) -> None:
     assert bad == 0, f"{label}: {bad} non-monotonic steps (worst={float(d.min()):.6f})"
 
 
+def test_pv2012_default_adjustments_are_true_identity() -> None:
+    """apply_pv2012_tone_rgb's ratio = y1 / max(y0, _PERCEPTUAL_LUM_FLOOR)
+    floored only the denominator, so with every slider at default (y1==y0)
+    any pixel below the floor (perceptual luminance < 0.03, i.e. real deep
+    shadow/black detail) got darkened up to 50% with zero user adjustment --
+    and fought against genuine Shadows/Blacks recovery in that same range
+    (reported as "cannot recover as much highlight/shadow, weak compared to
+    other editing applications")."""
+    from raw_pv2012 import apply_pv2012_tone_rgb
+
+    lum = np.array([0.0001, 0.001, 0.005, 0.01, 0.02, 0.03, 0.08], dtype=np.float32)
+    img = np.stack([lum] * 3, axis=-1)[:, np.newaxis, :]
+    base = {
+        "Contrast2012": 0, "Highlights2012": 0, "Shadows2012": 0,
+        "Whites2012": 0, "Blacks2012": 0,
+    }
+    out = apply_pv2012_tone_rgb(img.copy(), base)
+    assert np.allclose(out, img, atol=1e-5), "default adjustments must be a true no-op"
+
+
+def test_pv2012_highlights_slider_does_not_touch_deep_shadows() -> None:
+    from raw_pv2012 import apply_pv2012_tone_rgb
+
+    lum = np.array([0.0001, 0.001, 0.005, 4.0], dtype=np.float32)
+    img = np.stack([lum] * 3, axis=-1)[:, np.newaxis, :]
+    adj = {
+        "Contrast2012": 0, "Highlights2012": -100, "Shadows2012": 0,
+        "Whites2012": 0, "Blacks2012": 0,
+    }
+    out = apply_pv2012_tone_rgb(img.copy(), adj)
+    ratio = out[:, 0, 0] / img[:, 0, 0]
+    assert np.allclose(ratio[:3], 1.0, atol=1e-4), "Highlights2012 must not affect deep shadows"
+    assert ratio[3] < 0.95, "Highlights2012=-100 must still reduce actual highlights"
+
+
 def test_pv2012_shadows_lift_stays_monotonic() -> None:
     """Shadows>=~45 previously made the perceptual tone curve locally decreasing."""
     from raw_pv2012 import _apply_pv2012_perceptual, _scene_to_perceptual
@@ -302,6 +393,24 @@ def test_pv2012_whites_blacks_sign_direction() -> None:
     assert blacks_down[0, 0, 0] < baseline[0, 0, 0], "Blacks=-100 must darken the shadow pixel"
     assert whites_up[0, 1, 0] > baseline[0, 1, 0], "Whites=+100 must brighten the highlight pixel"
     assert whites_down[0, 1, 0] < baseline[0, 1, 0], "Whites=-100 must darken the highlight pixel"
+
+
+def test_pv2012_whites_blacks_strength() -> None:
+    """0.12 max shift barely moved the black/white point -- too weak to
+    visibly clip, unlike real Whites/Blacks sliders at their extremes."""
+    from raw_pv2012 import apply_pv2012_tone_rgb
+
+    lum = np.array([0.08, 0.9], dtype=np.float32)
+    img = np.stack([lum] * 3, axis=-1)[:, np.newaxis, :]
+    base = {"Contrast2012": 0, "Highlights2012": 0, "Shadows2012": 0, "Whites2012": 0, "Blacks2012": 0}
+
+    out_whites = apply_pv2012_tone_rgb(img.copy(), {**base, "Whites2012": 100})
+    ratio_whites = out_whites[1, 0, 0] / img[1, 0, 0]
+    assert ratio_whites > 1.2, f"Whites=+100 too weak: ratio={ratio_whites:.3f}"
+
+    out_blacks = apply_pv2012_tone_rgb(img.copy(), {**base, "Blacks2012": -100})
+    ratio_blacks = out_blacks[0, 0, 0] / img[0, 0, 0]
+    assert ratio_blacks < 0.7, f"Blacks=-100 too weak: ratio={ratio_blacks:.3f}"
 
 
 def test_legacy_gamma_highlights_shadows_stays_monotonic() -> None:
@@ -350,6 +459,68 @@ def test_parametric_tone_curve_changes_output() -> None:
     adj["ParametricShadows"] = 80.0
     out = apply_parametric_tone_curve(y, adj)
     assert not np.allclose(out, base, atol=1e-5)
+
+
+def test_tone_curve_affects_pv2012_tone_rgb_output() -> None:
+    """apply_parametric_tone_curve/apply_tone_curve_perceptual worked fine in
+    isolation, but apply_pv2012_tone_rgb (the actual production entry point)
+    reassigned y0 to the curve-adjusted value and then divided the final
+    ratio by that *same* value, exactly cancelling the curve's effect out of
+    the image -- reported as "the tone curve is unresponsive". Regression
+    guard through the real entry point, not the isolated curve function."""
+    from raw_pv2012 import apply_pv2012_tone_rgb
+
+    img = np.tile(
+        np.linspace(0.05, 0.5, 8).astype(np.float32)[:, None, None], (1, 1, 3)
+    )
+    base = dict(DEFAULT_ADJUSTMENTS)
+
+    point_curve_adj = dict(base)
+    point_curve_adj["_tone_curve_pv2012"] = "0,0;128,214;255,255"
+    out_default = apply_pv2012_tone_rgb(img.copy(), base)
+    out_curved = apply_pv2012_tone_rgb(img.copy(), point_curve_adj)
+    assert not np.allclose(out_default, out_curved), "point tone curve has no effect"
+
+    parametric_adj = dict(base)
+    parametric_adj["ParametricShadows"] = 80.0
+    out_parametric = apply_pv2012_tone_rgb(img.copy(), parametric_adj)
+    assert not np.allclose(out_default, out_parametric), "PV parametric sliders have no effect"
+
+    # Main Shadows2012 slider must still work correctly on its own (no regression).
+    shadows_adj = dict(base)
+    shadows_adj["Shadows2012"] = 50.0
+    out_shadows = apply_pv2012_tone_rgb(img.copy(), shadows_adj)
+    assert not np.allclose(out_default, out_shadows)
+
+
+def test_parametric_tone_curve_stays_monotonic() -> None:
+    """ParametricShadows=+100 and ParametricHighlights=-100 both made the
+    curve locally decreasing before the coefficient was reduced (same
+    _smooth_weight/_SPLIT_SHADOWS=0.25 shape as raw_pv2012's shadow-lift bug)."""
+    from raw_tone_curve import apply_parametric_tone_curve
+
+    y = np.linspace(0.0, 1.0, 4000).astype(np.float32)
+    base = {
+        "ParametricShadows": 0, "ParametricDarks": 0,
+        "ParametricLights": 0, "ParametricHighlights": 0,
+    }
+    combos = [
+        {**base, "ParametricShadows": 100},
+        {**base, "ParametricShadows": -100},
+        {**base, "ParametricDarks": 100},
+        {**base, "ParametricDarks": -100},
+        {**base, "ParametricLights": 100},
+        {**base, "ParametricLights": -100},
+        {**base, "ParametricHighlights": 100},
+        {**base, "ParametricHighlights": -100},
+        {"ParametricShadows": 100, "ParametricDarks": 100, "ParametricLights": 100, "ParametricHighlights": 100},
+        {"ParametricShadows": -100, "ParametricDarks": -100, "ParametricLights": -100, "ParametricHighlights": -100},
+    ]
+    for adj in combos:
+        out = apply_parametric_tone_curve(y, adj)
+        d = np.diff(out)
+        bad = int(np.sum(d < -1e-6))
+        assert bad == 0, f"{adj}: {bad} non-monotonic steps (worst={float(d.min()):.6f})"
 
 
 def test_recovery_baseline_with_slider_hints() -> None:
@@ -497,24 +668,6 @@ def test_export_tiff16_embeds_xmp() -> None:
             assert bytes(xmp_tag.value) == xmp_bytes
 
 
-def test_export_dng_rgb_writes_and_has_dng_tags() -> None:
-    import tempfile
-
-    import tifffile as _tifffile
-
-    from raw_edit_pipeline import export_adjusted_dng_rgb
-
-    rng = np.random.default_rng(4)
-    linear = rng.integers(1000, 60000, (32, 32, 3), dtype=np.uint16)
-    with tempfile.TemporaryDirectory() as d:
-        out_path = os.path.join(d, "out.dng")
-        export_adjusted_dng_rgb(linear, dict(DEFAULT_ADJUSTMENTS), out_path)
-        assert os.path.isfile(out_path)
-        with _tifffile.TiffFile(out_path) as tf:
-            tags = {t.code: t.value for t in tf.pages[0].tags}
-            assert tags.get(50706) == b"\x01\x04\x00\x00"
-
-
 def test_export_jpeg_no_libjpeg_suspension_crash() -> None:
     """subsampling=0 + optimize=True together triggered a libjpeg 'Suspension
     not allowed here' encoder crash on some Pillow/libjpeg builds -- reproduced
@@ -606,6 +759,157 @@ def test_wb_dropper_solve_clamps_extreme_sample() -> None:
     assert -150.0 <= tint <= 150.0
 
 
+def test_preview_stage_cache_matches_full_recompute() -> None:
+    """PreviewStageCache must produce byte-identical output to the uncached
+    full pipeline recompute at every step of a slider "drag" sequence that
+    changes one stage's keys at a time, combined multi-stage changes, a
+    reset back to defaults, and a mid-sequence base-image swap."""
+    from raw_adjustments import apply_adjustments_to_linear
+    from raw_edit_pipeline import PreviewStageCache, render_adjust_preview_uint8
+
+    rng = np.random.default_rng(7)
+    img = (rng.random((48, 64, 3)).astype(np.float32) * 0.6 + 0.05)
+    img2 = (rng.random((40, 56, 3)).astype(np.float32) * 0.6 + 0.05)
+
+    cache = PreviewStageCache()
+    base = dict(DEFAULT_ADJUSTMENTS)
+
+    sequence = [
+        dict(base),
+        {**base, "Exposure2012": 0.3},
+        {**base, "Exposure2012": 0.6},
+        {**base, "Exposure2012": 0.6, "Shadows2012": 40.0},
+        {**base, "Exposure2012": 0.6, "Shadows2012": 70.0},
+        {**base, "Exposure2012": 0.6, "Shadows2012": 70.0, "Saturation": 30.0},
+        {**base, "Exposure2012": 0.6, "Shadows2012": 70.0, "Saturation": 60.0},
+        {**base, "Exposure2012": 0.6, "Shadows2012": 70.0, "Saturation": 60.0, "Sharpness": 50.0},
+        {**base, "Exposure2012": 0.6, "Shadows2012": 70.0, "Saturation": 60.0, "Sharpness": 80.0},
+        {**base, "Whites2012": 100.0, "Blacks2012": -100.0},
+        dict(base),
+        # Non-default with everything downstream but PV2012/curve at default:
+        # exercises uses_recovery_tone_map's exclusive-key gate directly.
+        {**base, "_recovery_baseline": 1.0},
+        {**base, "_recovery_baseline": 1.0, "Saturation": 40.0},
+        {**base, "_recovery_baseline": 1.0, "Saturation": 40.0, "Sharpness": 30.0},
+        # Turning recovery back off with the same downstream sliders held.
+        {**base, "Saturation": 40.0, "Sharpness": 30.0},
+        dict(base),
+        # HSL-only change, then WB-only change on top, then revert WB only.
+        {**base, "HueAdjustmentRed": 30.0, "SaturationAdjustmentBlue": -40.0},
+        {**base, "HueAdjustmentRed": 30.0, "SaturationAdjustmentBlue": -40.0, "Temperature": 6500.0},
+        {**base, "HueAdjustmentRed": 30.0, "SaturationAdjustmentBlue": -40.0, "Temperature": 5500.0},
+        # Back to default, then straight to a fully-loaded combination.
+        dict(base),
+        {
+            **base,
+            "Exposure2012": -0.4,
+            "Contrast2012": 20.0,
+            "Highlights2012": -30.0,
+            "Shadows2012": 50.0,
+            "Whites2012": 40.0,
+            "Blacks2012": -40.0,
+            "Temperature": 4500.0,
+            "Tint": 15.0,
+            "Saturation": -20.0,
+            "Vibrance": 25.0,
+            "Sharpness": 40.0,
+            "Clarity2012": 30.0,
+            "Defringe": 20.0,
+            "ColorNoiseReduction": 30.0,
+            "LuminanceNoiseReduction": 20.0,
+            "HueAdjustmentGreen": -25.0,
+        },
+        dict(base),
+    ]
+
+    for adj in sequence:
+        expected = apply_adjustments_to_linear(img, adj)
+        got = render_adjust_preview_uint8(img, adj, cache)
+        assert np.array_equal(expected, got), f"staged mismatch for {adj}"
+
+    # A mid-drag base-image swap (new file navigation) must invalidate the
+    # whole cache rather than reuse buffers computed for the old image.
+    adj = {**base, "Exposure2012": 0.4, "Sharpness": 40.0}
+    expected2 = apply_adjustments_to_linear(img2, adj)
+    got2 = render_adjust_preview_uint8(img2, adj, cache)
+    assert np.array_equal(expected2, got2), "staged cache did not invalidate on base image change"
+
+
+def test_preview_stage_cache_skips_upstream_recompute() -> None:
+    """Changing only a late-stage key (Sharpness) must not re-run PV2012 tone."""
+    import raw_edit_pipeline as rep
+
+    rng = np.random.default_rng(3)
+    img = (rng.random((32, 40, 3)).astype(np.float32) * 0.5 + 0.05)
+    cache = rep.PreviewStageCache()
+
+    call_count = {"n": 0}
+    real_tone = rep.apply_pv2012_tone_rgb
+
+    def counting_tone(*args, **kwargs):
+        call_count["n"] += 1
+        return real_tone(*args, **kwargs)
+
+    rep.apply_pv2012_tone_rgb = counting_tone
+    try:
+        base = dict(DEFAULT_ADJUSTMENTS)
+        adj1 = {**base, "Shadows2012": 30.0, "Sharpness": 10.0}
+        adj2 = {**base, "Shadows2012": 30.0, "Sharpness": 60.0}
+        rep.render_adjust_preview_uint8(img, adj1, cache)
+        assert call_count["n"] == 1
+        rep.render_adjust_preview_uint8(img, adj2, cache)
+        assert call_count["n"] == 1, "tone stage recomputed even though only Sharpness changed"
+
+        # Confirm it's not just "never recomputes": a Shadows2012 change must recompute.
+        adj3 = {**base, "Shadows2012": 65.0, "Sharpness": 60.0}
+        rep.render_adjust_preview_uint8(img, adj3, cache)
+        assert call_count["n"] == 2, "tone stage did not recompute when Shadows2012 changed"
+    finally:
+        rep.apply_pv2012_tone_rgb = real_tone
+
+
+def test_point_curve_pchip_no_overshoot() -> None:
+    """PCHIP must never overshoot past the local knot values -- the classic
+    failure mode of a plain/natural cubic spline on an S-shaped point set
+    (steep rise then a near-flat plateau), which would ring above/below the
+    neighboring knots and show up as a visible halo/banding artifact."""
+    from raw_tone_curve import build_point_curve_lut
+
+    points = [(0.0, 0.0), (64.0, 40.0), (128.0, 220.0), (192.0, 230.0), (255.0, 255.0)]
+    lut = build_point_curve_lut(points)
+    assert lut is not None
+
+    xs_knots = [p[0] / 255.0 for p in points]
+    ys_knots = [p[1] / 255.0 for p in points]
+    grid = np.linspace(0.0, 1.0, len(lut))
+    for i in range(len(points) - 1):
+        lo_x, hi_x = xs_knots[i], xs_knots[i + 1]
+        lo_y, hi_y = ys_knots[i], ys_knots[i + 1]
+        seg = (grid >= lo_x) & (grid <= hi_x)
+        seg_vals = lut[seg]
+        y_min, y_max = min(lo_y, hi_y), max(lo_y, hi_y)
+        assert seg_vals.min() >= y_min - 1e-4, f"undershoot in segment {i}: {seg_vals.min()} < {y_min}"
+        assert seg_vals.max() <= y_max + 1e-4, f"overshoot in segment {i}: {seg_vals.max()} > {y_max}"
+
+
+def test_point_curve_display_matches_applied_lut() -> None:
+    """The curve drawn in the widget (sample_point_curve_for_display) must be
+    sampled from the exact same fit as what's actually applied to the image
+    (build_point_curve_lut) -- otherwise the UI would show a curve shape that
+    doesn't match what the pipeline does to the pixels."""
+    from raw_tone_curve import build_point_curve_lut, sample_point_curve_for_display
+
+    points = [(0.0, 0.0), (90.0, 60.0), (180.0, 210.0), (255.0, 255.0)]
+    lut = build_point_curve_lut(points)
+    samples = sample_point_curve_for_display(points, n_samples=64)
+    assert lut is not None and samples is not None
+
+    for x255, y255 in samples:
+        idx = int(round((x255 / 255.0) * (len(lut) - 1)))
+        lut_y255 = float(lut[idx]) * 255.0
+        assert abs(lut_y255 - y255) < 0.5, f"display sample {y255} vs LUT {lut_y255} at x={x255}"
+
+
 def main() -> int:
     test_uint16_linear_exposure_changes_pixels()
     test_uint8_legacy_path()
@@ -615,6 +919,8 @@ def main() -> int:
     test_chroma_nlm_preserves_luminance_shape()
     test_chroma_nlm_no_green_cast_on_neutral_gray()
     test_chroma_denoise_reduces_noise_and_preserves_edge()
+    test_chroma_denoise_removes_blotchy_correlated_noise()
+    test_chroma_denoise_edge_bleed_bounded_near_hard_edge()
     test_luma_denoise_reduces_noise_and_preserves_edge()
     test_luma_nr_slider_registered_and_applies_in_pipeline()
     test_shadow_lift_no_extreme_green_shift()
@@ -624,12 +930,17 @@ def main() -> int:
     test_defringe_preserves_uniform_colored_region()
     test_defringe_suppresses_fringe_at_edge()
     test_defringe_purple_green_symmetric()
+    test_pv2012_default_adjustments_are_true_identity()
+    test_pv2012_highlights_slider_does_not_touch_deep_shadows()
     test_pv2012_shadows_lift_stays_monotonic()
     test_pv2012_whites_blacks_sign_direction()
+    test_pv2012_whites_blacks_strength()
     test_legacy_gamma_highlights_shadows_stays_monotonic()
     test_legacy_gamma_blacks_stays_monotonic()
     test_hsl_red_saturation_changes_output()
     test_parametric_tone_curve_changes_output()
+    test_tone_curve_affects_pv2012_tone_rgb_output()
+    test_parametric_tone_curve_stays_monotonic()
     test_recovery_baseline_with_slider_hints()
     test_recovery_baseline_differs_from_default()
     test_recovery_tone_map_preserves_resolution()
@@ -637,12 +948,15 @@ def main() -> int:
     test_export_source_xmp_failure_does_not_block_export()
     test_export_tiff16_true_16bit_precision()
     test_export_tiff16_embeds_xmp()
-    test_export_dng_rgb_writes_and_has_dng_tags()
     test_export_jpeg_no_libjpeg_suspension_crash()
     test_export_jpeg_roundtrip()
     test_tone_curve_point_helpers()
     test_wb_dropper_solve_neutralizes_sample()
     test_wb_dropper_solve_clamps_extreme_sample()
+    test_preview_stage_cache_matches_full_recompute()
+    test_preview_stage_cache_skips_upstream_recompute()
+    test_point_curve_pchip_no_overshoot()
+    test_point_curve_display_matches_applied_lut()
     print("adjust linear pipeline: OK")
     return 0
 

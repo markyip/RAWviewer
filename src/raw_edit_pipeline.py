@@ -3,13 +3,20 @@
 from __future__ import annotations
 
 import os
+import threading
 from typing import Optional
 
 import numpy as np
 
-from raw_adjustments import DEFAULT_ADJUSTMENTS, is_default_adjustments, uses_recovery_tone_map
+from raw_adjustments import (
+    DEFAULT_ADJUSTMENTS,
+    RECOVERY_BASELINE_KEY,
+    is_default_adjustments,
+    uses_recovery_tone_map,
+)
 from raw_chroma_denoise import apply_chroma_denoise, apply_luma_denoise, chroma_denoise_enabled
 from raw_pv2012 import apply_pv2012_tone_rgb
+from raw_tone_curve import TONE_CURVE_SERIAL_KEY
 
 
 def _linear_float_from_buffer(rgb_image: np.ndarray) -> np.ndarray:
@@ -198,6 +205,206 @@ def process_linear_edit_buffer(
     return np.clip(img, 0.0, None)
 
 
+class PreviewStageCache:
+    """
+    Per-open-file memoization for live Adjust-panel preview recompute.
+
+    Every slider tick used to rerun the entire WB -> exposure -> denoise ->
+    PV2012 tone -> tonemap -> sat/vibrance -> HSL -> detail chain from
+    scratch, even when only one late-stage control (e.g. Sharpness) changed
+    since the previous tick -- see docs/ADJUST_LINEAR_PIPELINE.md Performance
+    review #2, the root cause of "sluggish/laggy while dragging". This cache
+    chains a cheap key comparison per stage: if a stage's own inputs (plus
+    whatever stage feeds it) haven't changed since the last call, its cached
+    output is reused and every stage after it in the chain is skipped too.
+
+    Only the interactive preview path (_AdjustPreviewWorker) uses this. Export
+    always calls process_linear_edit_buffer / _apply_display_stage directly
+    with no cache, so a bug here cannot corrupt a baked export.
+    """
+
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.reset()
+
+    def reset(self) -> None:
+        self.base_ref = None
+        self.stage_keys: dict[str, tuple] = {}
+        self.stage_out: dict[str, np.ndarray] = {}
+
+
+_PRE_TONE_KEYS = (
+    "Temperature",
+    "Tint",
+    "Exposure2012",
+    "ColorNoiseReduction",
+    "LuminanceNoiseReduction",
+)
+
+# Every key uses_recovery_tone_map() and apply_pv2012_tone_rgb() read, so the
+# "tone" stage key alone is enough to detect any change that would flip the
+# recovery-vs-PV2012 branch or alter the PV2012 tone result.
+_TONE_KEYS = (
+    "Contrast2012",
+    "Highlights2012",
+    "Shadows2012",
+    "Whites2012",
+    "Blacks2012",
+    "ParametricShadows",
+    "ParametricDarks",
+    "ParametricLights",
+    "ParametricHighlights",
+    RECOVERY_BASELINE_KEY,
+    TONE_CURVE_SERIAL_KEY,
+)
+
+def _hsl_color_keys() -> tuple[str, ...]:
+    from raw_hsl import HSL_COLOR_NAMES
+
+    return tuple(
+        f"{prefix}Adjustment{color}"
+        for color in HSL_COLOR_NAMES
+        for prefix in ("Hue", "Saturation", "Luminance")
+    )
+
+
+_COLOR_KEYS = ("Saturation", "Vibrance") + _hsl_color_keys()
+
+_DETAIL_KEYS = ("Sharpness", "Clarity2012", "Defringe")
+
+
+def _stage_key(merged: dict, keys: tuple) -> tuple:
+    parts = []
+    for k in keys:
+        v = merged.get(k, 0.0)
+        parts.append(v if isinstance(v, str) else round(float(v), 6))
+    return tuple(parts)
+
+
+def process_linear_edit_buffer_staged(
+    rgb_image: np.ndarray,
+    adj: dict[str, float],
+    cache: "PreviewStageCache",
+    *,
+    preview: bool = True,
+    chroma_denoise: Optional[bool] = None,
+) -> np.ndarray:
+    """Cached equivalent of process_linear_edit_buffer for the preview path."""
+    if rgb_image is None:
+        return rgb_image
+    merged = dict(DEFAULT_ADJUSTMENTS)
+    merged.update(adj or {})
+
+    with cache.lock:
+        if cache.base_ref is not rgb_image:
+            cache.reset()
+            cache.base_ref = rgb_image
+
+        if is_default_adjustments(merged) and not uses_recovery_tone_map(merged):
+            # Fast path bypasses pre_tone/tone entirely, so it must still
+            # stamp a distinct "tone" key -- otherwise a later call landing
+            # back on this fast path (or the transition into it) would leave
+            # the stale key from the last *real* computation in place, and
+            # _apply_display_stage_staged's tonemap stage (keyed only off
+            # this metadata, not off buffer identity) would wrongly reuse a
+            # tonemap output computed from different pixel data.
+            processed = _linear_float_from_buffer(rgb_image)
+            cache.stage_keys["tone"] = ("__default_fastpath__",)
+            cache.stage_out["tone"] = processed
+            return processed
+
+        pre_key = _stage_key(merged, _PRE_TONE_KEYS)
+        if cache.stage_keys.get("pre_tone") != pre_key or "pre_tone" not in cache.stage_out:
+            img = _linear_float_from_buffer(rgb_image)
+            img = _apply_wb_tint(img, merged)
+
+            exp_val = float(merged.get("Exposure2012", 0.0))
+            if abs(exp_val) > 1e-4:
+                img *= 2.0 ** exp_val
+
+            do_denoise = chroma_denoise if chroma_denoise is not None else chroma_denoise_enabled()
+            nr_amount = float(merged.get("ColorNoiseReduction", 0.0))
+            if nr_amount > 1e-4:
+                img = apply_chroma_denoise(
+                    img, strength=min(1.5, nr_amount / 100.0 * 1.25), preview=preview
+                )
+            elif do_denoise and not preview:
+                img = apply_chroma_denoise(img, preview=False)
+
+            luma_nr_amount = float(merged.get("LuminanceNoiseReduction", 0.0))
+            if luma_nr_amount > 1e-4:
+                img = apply_luma_denoise(img, strength=luma_nr_amount / 100.0, preview=preview)
+
+            cache.stage_out["pre_tone"] = img
+            cache.stage_keys["pre_tone"] = pre_key
+        pre_tone_out = cache.stage_out["pre_tone"]
+
+        # Chained to pre_key: the tone stage's *input* is pre_tone_out, so a
+        # change to a pre-tone-only key (e.g. Exposure2012) must invalidate
+        # the tone stage too, even though no _TONE_KEYS value moved.
+        tone_key = (pre_key, _stage_key(merged, _TONE_KEYS))
+        if cache.stage_keys.get("tone") != tone_key or "tone" not in cache.stage_out:
+            if uses_recovery_tone_map(merged):
+                toned = pre_tone_out
+            else:
+                toned = apply_pv2012_tone_rgb(pre_tone_out, merged)
+            cache.stage_out["tone"] = np.clip(toned, 0.0, None)
+            cache.stage_keys["tone"] = tone_key
+        return cache.stage_out["tone"]
+
+
+def _apply_display_stage_staged(
+    img: np.ndarray, merged: dict[str, float], cache: "PreviewStageCache"
+) -> np.ndarray:
+    """Cached equivalent of _apply_display_stage for the preview path."""
+    from raw_detail_enhance import apply_detail_enhancements
+    from raw_hsl import apply_hsl_adjustments
+
+    with cache.lock:
+        tone_key = cache.stage_keys.get("tone")
+
+        tonemap_key = (tone_key,)
+        if cache.stage_keys.get("tonemap") != tonemap_key or "tonemap" not in cache.stage_out:
+            cache.stage_out["tonemap"] = _tone_map_for_display(img, merged)
+            cache.stage_keys["tonemap"] = tonemap_key
+        display = cache.stage_out["tonemap"]
+
+        color_key = (cache.stage_keys.get("tonemap"), _stage_key(merged, _COLOR_KEYS))
+        if cache.stage_keys.get("color") != color_key or "color" not in cache.stage_out:
+            out = _apply_display_color_adjustments(display, merged)
+            out = apply_hsl_adjustments(out, merged)
+            cache.stage_out["color"] = out
+            cache.stage_keys["color"] = color_key
+        colored = cache.stage_out["color"]
+
+        detail_key = (cache.stage_keys.get("color"), _stage_key(merged, _DETAIL_KEYS))
+        if cache.stage_keys.get("detail") != detail_key or "detail" not in cache.stage_out:
+            cache.stage_out["detail"] = apply_detail_enhancements(colored, merged)
+            cache.stage_keys["detail"] = detail_key
+        return cache.stage_out["detail"]
+
+
+def render_adjust_preview_uint8(
+    rgb_image: np.ndarray,
+    adj: dict[str, float],
+    cache: "PreviewStageCache",
+) -> np.ndarray:
+    """
+    Staged/cached equivalent of process_linear_edit_buffer(preview=True) +
+    linear_to_display_uint8, reusing intermediate buffers across calls on the
+    same base image when only later-stage adjustment keys changed since the
+    previous call. Used exclusively by the interactive Adjust-panel preview
+    path (_AdjustPreviewWorker in main.py).
+    """
+    from raw_tone_recovery import _encode_srgb8
+
+    merged = dict(DEFAULT_ADJUSTMENTS)
+    merged.update(adj or {})
+    processed = process_linear_edit_buffer_staged(rgb_image, merged, cache, preview=True)
+    display = _apply_display_stage_staged(processed, merged, cache)
+    return _encode_srgb8(display)
+
+
 def _apply_display_color_adjustments(
     display_linear: np.ndarray, merged: dict[str, float]
 ) -> np.ndarray:
@@ -254,7 +461,6 @@ def _write_16bit_rgb_tiff(
     rgb_uint16: np.ndarray,
     *,
     embed_xmp_path: Optional[str] = None,
-    dng_tags: bool = False,
 ) -> None:
     """
     Write a genuine 16-bit-per-channel, 3-sample RGB TIFF via ``tifffile``.
@@ -274,11 +480,6 @@ def _write_16bit_rgb_tiff(
     import tifffile
 
     extratags = _xmp_extratags(embed_xmp_path)
-    if dng_tags:
-        extratags = extratags + [
-            (50706, "B", 4, (1, 4, 0, 0), False),  # DNGVersion
-            (50741, "s", 4, b"RGB ", False),  # UniqueCameraModel
-        ]
     _ensure_parent_dir(output_path)
     tifffile.imwrite(
         output_path,
@@ -353,73 +554,27 @@ def export_adjusted_webp(
     )
 
 
-def export_adjusted_dng_rgb(
-    rgb_linear: np.ndarray,
-    adj: dict[str, float],
-    output_path: str,
-    *,
-    embed_xmp_path: Optional[str] = None,
-) -> None:
-    """Bake adjustments to 16-bit linear RGB DNG (display-referred sRGB, DNG container)."""
-    processed = _process_for_export(rgb_linear, adj)
-    out = linear_to_export_uint16_srgb(processed, adj)
-    _write_16bit_rgb_tiff(
-        output_path, out, embed_xmp_path=embed_xmp_path, dng_tags=True
-    )
-
-
-def export_raw_with_xmp_settings(
-    source_path: str,
-    output_path: str,
-    adj: dict[str, float],
-) -> None:
-    """
-    Copy the original RAW/DNG and write a Lightroom-compatible XMP sidecar.
-
-    Non-destructive round-trip for Lightroom / Camera Raw (settings only).
-    """
-    import shutil
-
-    from raw_adjustments import write_xmp_adjustments_for_file
-
-    if not source_path or not os.path.isfile(source_path):
-        raise FileNotFoundError("Source RAW file not found")
-    _ensure_parent_dir(output_path)
-    shutil.copy2(source_path, output_path)
-    write_xmp_adjustments_for_file(output_path, adj)
-
-
 EXPORT_FORMAT_TIFF16 = "tiff16"
 EXPORT_FORMAT_JPEG = "jpeg"
 EXPORT_FORMAT_WEBP = "webp"
-EXPORT_FORMAT_DNG_RGB = "dng_rgb"
-EXPORT_FORMAT_DNG_SETTINGS = "dng_settings"
 
 
 def export_adjusted_image(
     export_format: str,
     *,
-    source_path: str,
     output_path: str,
     rgb_linear: Optional[np.ndarray],
     adj: dict[str, float],
     embed_xmp_path: Optional[str] = None,
 ) -> None:
-    """Dispatch baked or settings-only export."""
+    """Dispatch baked export (TIFF16 / JPEG / WebP)."""
     fmt = (export_format or EXPORT_FORMAT_TIFF16).strip().lower()
-    if fmt == EXPORT_FORMAT_DNG_SETTINGS:
-        export_raw_with_xmp_settings(source_path, output_path, adj)
-        return
     if rgb_linear is None:
         raise RuntimeError("Full-resolution RAW decode failed")
     if fmt == EXPORT_FORMAT_JPEG:
         export_adjusted_jpeg(rgb_linear, adj, output_path)
     elif fmt == EXPORT_FORMAT_WEBP:
         export_adjusted_webp(rgb_linear, adj, output_path)
-    elif fmt == EXPORT_FORMAT_DNG_RGB:
-        export_adjusted_dng_rgb(
-            rgb_linear, adj, output_path, embed_xmp_path=embed_xmp_path
-        )
     else:
         export_adjusted_tiff16(
             rgb_linear, adj, output_path, embed_xmp_path=embed_xmp_path

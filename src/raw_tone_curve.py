@@ -142,24 +142,82 @@ def _lookup_lut(y: np.ndarray, lut: np.ndarray) -> np.ndarray:
     return lut[lo] * (1.0 - frac) + lut[hi] * frac
 
 
-def build_point_curve_lut(points: list[tuple[float, float]]) -> np.ndarray | None:
+def _fit_point_curve(points: list[tuple[float, float]]):
+    """
+    Fit a monotonic (PCHIP) cubic through the curve's knots and return a
+    callable f(grid in [0,1]) -> y in [0,1], or None if there aren't enough
+    distinct knots to fit.
+
+    PCHIP (piecewise cubic Hermite), not a plain/natural cubic spline: a
+    natural spline can overshoot well past neighboring knot values between
+    two closely-spaced points -- exactly the ringing/banding failure mode
+    this module's parametric-region coefficients were tuned to avoid
+    elsewhere. PCHIP is shape-preserving -- it never overshoots the local
+    trend of the input knots -- while still giving the smooth curve users
+    expect from Lightroom/Capture One-style tone curve editors, instead of
+    the straight connect-the-dots polyline this used to render/apply.
+    """
     if len(points) < 2:
         return None
-    xs = np.array([max(0.0, min(255.0, p[0])) / 255.0 for p in points], dtype=np.float32)
-    ys = np.array([max(0.0, min(255.0, p[1])) / 255.0 for p in points], dtype=np.float32)
+    xs = np.array([max(0.0, min(255.0, p[0])) / 255.0 for p in points], dtype=np.float64)
+    ys = np.array([max(0.0, min(255.0, p[1])) / 255.0 for p in points], dtype=np.float64)
     order = np.argsort(xs)
     xs = xs[order]
     ys = ys[order]
-    xs = np.clip(xs, 0.0, 1.0)
-    ys = np.clip(ys, 0.0, 1.0)
+
+    # PCHIP requires strictly increasing x; collapse near-duplicate knots
+    # (can appear in malformed/legacy serialized data) keeping the later one.
+    dedup_x = [xs[0]]
+    dedup_y = [ys[0]]
+    for x, y in zip(xs[1:], ys[1:]):
+        if x - dedup_x[-1] < 1e-6:
+            dedup_y[-1] = y
+        else:
+            dedup_x.append(x)
+            dedup_y.append(y)
+    xs = np.array(dedup_x)
+    ys = np.array(dedup_y)
+
     if xs[0] > 0.0:
         xs = np.concatenate(([0.0], xs))
         ys = np.concatenate(([ys[0]], ys))
     if xs[-1] < 1.0:
         xs = np.concatenate((xs, [1.0]))
         ys = np.concatenate((ys, [ys[-1]]))
-    grid = np.linspace(0.0, 1.0, _LUT_SIZE, dtype=np.float32)
-    return np.interp(grid, xs, ys).astype(np.float32)
+    if len(xs) < 2:
+        return None
+
+    from scipy.interpolate import PchipInterpolator
+
+    pchip = PchipInterpolator(xs, ys, extrapolate=True)
+    return lambda grid: np.clip(pchip(grid), 0.0, 1.0)
+
+
+def build_point_curve_lut(points: list[tuple[float, float]]) -> np.ndarray | None:
+    fit = _fit_point_curve(points)
+    if fit is None:
+        return None
+    grid = np.linspace(0.0, 1.0, _LUT_SIZE)
+    return fit(grid).astype(np.float32)
+
+
+def sample_point_curve_for_display(
+    points: list[tuple[float, float]], n_samples: int = 128
+) -> list[tuple[float, float]] | None:
+    """
+    Smooth (x, y) samples in 0-255 coordinates for drawing the curve widget.
+
+    Uses the identical monotonic-cubic fit as build_point_curve_lut (just
+    evaluated at a display-friendly point count instead of the full LUT), so
+    the drawn curve is exactly what gets applied to the image, not an
+    approximation of it.
+    """
+    fit = _fit_point_curve(points)
+    if fit is None:
+        return None
+    grid = np.linspace(0.0, 1.0, max(2, n_samples))
+    ys = fit(grid)
+    return [(float(x) * 255.0, float(y) * 255.0) for x, y in zip(grid, ys)]
 
 
 def _smooth_weight(t: np.ndarray) -> np.ndarray:
@@ -204,10 +262,16 @@ def apply_parametric_tone_curve(y: np.ndarray, adj: dict[str, float]) -> np.ndar
             continue
         w = masks[key]
         amt = val / 100.0
+        # 0.15, not the more intuitive-looking 0.35: the shadows-lift and
+        # highlights-darken brackets reach slope ~5.89/5.90 at their steepest
+        # (same _smooth_weight/_SPLIT_SHADOWS=0.25 shape as raw_pv2012.py's
+        # shadow-lift, which needed the identical fix) -- any coefficient
+        # above ~0.17 makes the combined curve locally decreasing there. 0.15
+        # keeps a monotonic curve at +/-100 with margin, for all four regions.
         if amt > 0:
-            out = out + w * amt * (1.0 - out) * 0.35
+            out = out + w * amt * (1.0 - out) * 0.15
         else:
-            out = out + w * amt * out * 0.35
+            out = out + w * amt * out * 0.15
     return np.clip(out, 0.0, 1.0)
 
 
