@@ -910,6 +910,90 @@ def test_point_curve_display_matches_applied_lut() -> None:
         assert abs(lut_y255 - y255) < 0.5, f"display sample {y255} vs LUT {lut_y255} at x={x255}"
 
 
+def _lensfunpy_available() -> bool:
+    import importlib.util
+
+    return importlib.util.find_spec("lensfunpy") is not None
+
+
+def test_lens_profile_key_from_exif() -> None:
+    from raw_lens_correction import lens_profile_key_from_exif
+
+    exif = {
+        "camera_make": "Canon",
+        "camera_model": "Canon EOS 5D Mark IV",
+        "focal_length": "16mm",
+        "aperture": "f/2.8",
+        "exif_data": {"EXIF LensModel": "EF16-35mm f/2.8L II USM"},
+    }
+    key = lens_profile_key_from_exif(exif)
+    assert key == {
+        "camera_make": "Canon",
+        "camera_model": "Canon EOS 5D Mark IV",
+        "lens_make": "Canon",
+        "lens_model": "EF16-35mm f/2.8L II USM",
+        "focal_length": 16.0,
+        "aperture": 2.8,
+    }, key
+
+    # Missing any required field -> None, not a partial/guessed key.
+    assert lens_profile_key_from_exif(None) is None
+    assert lens_profile_key_from_exif({}) is None
+    assert lens_profile_key_from_exif({**exif, "camera_model": ""}) is None
+    assert lens_profile_key_from_exif({**exif, "exif_data": {}}) is None
+    assert lens_profile_key_from_exif({**exif, "focal_length": ""}) is None
+    assert lens_profile_key_from_exif({**exif, "aperture": ""}) is None
+
+
+def test_lens_correction_gates_and_corrects_only_known_profiles() -> None:
+    """Requires lensfunpy (a real pypi-dependency in pixi.toml, but this repo's
+    ad hoc `python3 scripts/...` runs in this session use a different, older
+    env without it) -- skips cleanly rather than failing outside the pixi env."""
+    if not _lensfunpy_available():
+        print("  (skipping lens correction test: lensfunpy not installed in this env)")
+        return
+
+    from raw_lens_correction import apply_lens_correction, has_lens_profile
+
+    exif_known = {
+        "camera_make": "Canon",
+        "camera_model": "Canon EOS 5D Mark IV",
+        "focal_length": "16mm",
+        "aperture": "f/2.8",
+        "exif_data": {"EXIF LensModel": "EF16-35mm f/2.8L II USM"},
+    }
+    assert has_lens_profile(exif_known)
+
+    # An unmatched lens must NOT silently fall back to *some* lens profile on
+    # the same mount -- lensfunpy's loose_search=True does exactly that (was
+    # caught during development: it returned every Canon EF lens for a made-up
+    # name), which would apply a wrong lens's distortion to the image.
+    exif_unknown_lens = {**exif_known, "exif_data": {"EXIF LensModel": "Totally Fake Lens 9000mm"}}
+    assert not has_lens_profile(exif_unknown_lens)
+
+    exif_missing = {"camera_make": "Canon", "camera_model": "", "exif_data": {}}
+    assert not has_lens_profile(exif_missing)
+    assert not has_lens_profile(None)
+
+    rng = np.random.default_rng(0)
+    img16 = (rng.random((200, 300, 3)) * 60000).astype(np.uint16)
+
+    out = apply_lens_correction(img16, exif_known)
+    assert out.dtype == np.uint16 and out.shape == img16.shape
+    assert not np.array_equal(out, img16), "known profile must actually change pixels"
+
+    out_unknown = apply_lens_correction(img16, exif_unknown_lens)
+    assert np.array_equal(out_unknown, img16), "no profile match must return input unchanged"
+
+    assert apply_lens_correction(None, exif_known) is None
+
+    # dtype preservation matters -- this app's edit base is float32/uint16, not uint8.
+    imgf = rng.random((150, 220, 3)).astype(np.float32)
+    outf = apply_lens_correction(imgf, exif_known)
+    assert outf.dtype == np.float32
+    assert not np.array_equal(outf, imgf)
+
+
 def main() -> int:
     test_uint16_linear_exposure_changes_pixels()
     test_uint8_legacy_path()
@@ -957,6 +1041,8 @@ def main() -> int:
     test_preview_stage_cache_skips_upstream_recompute()
     test_point_curve_pchip_no_overshoot()
     test_point_curve_display_matches_applied_lut()
+    test_lens_profile_key_from_exif()
+    test_lens_correction_gates_and_corrects_only_known_profiles()
     print("adjust linear pipeline: OK")
     return 0
 

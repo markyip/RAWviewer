@@ -106,6 +106,10 @@ class ImageAdjustPanelWidget(QWidget):
     recovery_baseline_requested = pyqtSignal()
     wb_picker_toggled = pyqtSignal(bool)  # True: arm the WB dropper; False: cancel
     compare_toggled = pyqtSignal(bool)  # True: show compare-with-original split view
+    # True/False: re-decode the edit base with/without lens-profile correction
+    # baked in (see main.py._on_adjust_lens_correction_toggled) -- unlike other
+    # toggles, this needs a full re-decode, not just a preview-pipeline rerun.
+    lens_correction_toggled = pyqtSignal(bool)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -365,6 +369,27 @@ class ImageAdjustPanelWidget(QWidget):
         self._nr_btn.toggled.connect(self._on_nr_toggled)
         nr_row.addWidget(self._nr_btn, 1)
         layout.addLayout(nr_row)
+
+        self._lens_correction_row = QHBoxLayout()
+        self._lens_correction_row.setSpacing(6)
+        lens_label = QLabel("Lens correction")
+        lens_label.setStyleSheet("color: #B0B0B0; font-size: 11px;")
+        lens_label.setMinimumWidth(72)
+        self._lens_correction_row.addWidget(lens_label)
+        self._lens_correction_btn = QPushButton("Off")
+        self._lens_correction_btn.setObjectName("adjust_nr_btn")
+        self._lens_correction_btn.setCheckable(True)
+        self._lens_correction_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._lens_correction_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self._lens_correction_btn.setToolTip(
+            "Automatic distortion correction from a matched lens profile"
+        )
+        self._lens_correction_btn.toggled.connect(self._on_lens_correction_toggled)
+        self._lens_correction_row.addWidget(self._lens_correction_btn, 1)
+        self._lens_correction_row_widget = QWidget()
+        self._lens_correction_row_widget.setLayout(self._lens_correction_row)
+        self._lens_correction_row_widget.hide()  # shown only once a profile match is confirmed
+        layout.addWidget(self._lens_correction_row_widget)
 
         self._recovery_btn = QPushButton("Use recovery look")
         self._recovery_btn.setObjectName("adjust_recovery_btn")
@@ -637,6 +662,9 @@ class ImageAdjustPanelWidget(QWidget):
                 if val_lbl is not None:
                     val_lbl.setText(spec.format_value(value))
             self._set_nr_checked(float(merged.get("ColorNoiseReduction", 0.0)) > 0.0)
+            self._set_lens_correction_checked(
+                float(merged.get("LensCorrectionEnabled", 0.0)) > 0.5
+            )
             if self._tone_curve_row is not None:
                 self._tone_curve_row.load_serial(
                     str(merged.get(TONE_CURVE_SERIAL_KEY, "") or "")
@@ -660,6 +688,33 @@ class ImageAdjustPanelWidget(QWidget):
         btn.setText("On" if on else "Off")
         btn.blockSignals(False)
 
+    def _set_lens_correction_checked(self, on: bool) -> None:
+        btn = getattr(self, "_lens_correction_btn", None)
+        if btn is None:
+            return
+        btn.blockSignals(True)
+        btn.setChecked(bool(on))
+        btn.setText("On" if on else "Off")
+        btn.blockSignals(False)
+
+    def set_lens_correction_available(self, available: bool) -> None:
+        """Show/hide the toggle -- called once a lensfun profile match (or
+        lack of one) is confirmed for the current file's camera+lens."""
+        row = getattr(self, "_lens_correction_row_widget", None)
+        if row is not None:
+            row.setVisible(bool(available))
+        if not available:
+            self._set_lens_correction_checked(False)
+
+    def _on_lens_correction_toggled(self, checked: bool) -> None:
+        if self._block_emit:
+            return
+        btn = getattr(self, "_lens_correction_btn", None)
+        if btn is not None:
+            btn.setText("On" if checked else "Off")
+        self.lens_correction_toggled.emit(bool(checked))
+        self.editing_finished.emit(self.get_adjustments())
+
     def get_adjustments(self) -> Dict[str, float]:
         out = dict(DEFAULT_ADJUSTMENTS)
         out[AS_SHOT_TEMP_KEY] = float(
@@ -673,6 +728,10 @@ class ImageAdjustPanelWidget(QWidget):
         btn = getattr(self, "_nr_btn", None)
         out["ColorNoiseReduction"] = (
             CHROMA_NR_ON_VALUE if btn is not None and btn.isChecked() else 0.0
+        )
+        lens_btn = getattr(self, "_lens_correction_btn", None)
+        out["LensCorrectionEnabled"] = (
+            1.0 if lens_btn is not None and lens_btn.isChecked() else 0.0
         )
         if self._tone_curve_row is not None:
             serial = self._tone_curve_row.serialized_points()

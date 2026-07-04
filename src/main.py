@@ -1741,7 +1741,7 @@ from rawviewer_app.viewer.session_mixin import SessionMixin
 
 
 class _AdjustEditBaseSignals(QObject):
-    finished = pyqtSignal(str, object)
+    finished = pyqtSignal(str, object, bool)  # file_path, ndarray|None, lens_profile_available
 
 
 class _AdjustPreviewSignals(QObject):
@@ -1858,15 +1858,18 @@ class _AdjustEditBaseWorker(QRunnable):
         signals: _AdjustEditBaseSignals,
         *,
         use_full_resolution: bool = False,
+        apply_lens_correction: bool = False,
     ):
         super().__init__()
         self.file_path = file_path
         self.process_pool = process_pool
         self.signals = signals
         self.use_full_resolution = use_full_resolution
+        self.apply_lens_correction = apply_lens_correction
 
     def run(self) -> None:
         base = None
+        has_lens_profile = False
         try:
             from unified_image_processor import UnifiedImageProcessor
 
@@ -1875,10 +1878,12 @@ class _AdjustEditBaseWorker(QRunnable):
                 self.file_path,
                 executor=self.process_pool,
                 use_full_resolution=self.use_full_resolution,
+                apply_lens_correction=self.apply_lens_correction,
             )
+            has_lens_profile = processor.lens_profile_available(self.file_path)
         except Exception:
             base = None
-        self.signals.finished.emit(self.file_path, base)
+        self.signals.finished.emit(self.file_path, base, has_lens_profile)
 
 
 class _AdjustExportSignals(QObject):
@@ -1948,6 +1953,7 @@ class _AdjustExportWorker(QRunnable):
                 self.file_path,
                 executor=self.process_pool,
                 use_full_resolution=True,
+                apply_lens_correction=float(self.adj.get("LensCorrectionEnabled", 0.0) or 0.0) > 0.5,
             )
             logger.info(
                 "[EXPORT] Full-resolution decode %s",
@@ -7752,6 +7758,9 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         )
         self.single_image_adjust_panel.compare_toggled.connect(
             self._on_adjust_compare_toggled
+        )
+        self.single_image_adjust_panel.lens_correction_toggled.connect(
+            self._on_adjust_lens_correction_toggled
         )
         self._pending_adjust_preview: dict | None = None
         self._adjust_edit_base_signals = _AdjustEditBaseSignals()
@@ -18317,19 +18326,29 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 f"Loading RAW for editing: {os.path.basename(file_path)}…", 0
             )
         pool = getattr(getattr(self, "image_manager", None), "_process_pool", None)
+        panel = getattr(self, "single_image_adjust_panel", None)
+        lens_correction_on = False
+        if panel is not None:
+            lens_correction_on = (
+                float(panel.get_adjustments().get("LensCorrectionEnabled", 0.0) or 0.0) > 0.5
+            )
         worker = _AdjustEditBaseWorker(
             file_path,
             pool,
             self._adjust_edit_base_signals,
             use_full_resolution=False,
+            apply_lens_correction=lens_correction_on,
         )
         QThreadPool.globalInstance().start(worker)
 
-    def _on_adjust_edit_base_ready(self, file_path: str, base) -> None:
+    def _on_adjust_edit_base_ready(self, file_path: str, base, has_lens_profile: bool) -> None:
         norm = _norm_path(file_path)
         self._adjust_edit_base_loading_norm = None
         if norm != _norm_path(getattr(self, "current_file_path", "") or ""):
             return
+        panel = getattr(self, "single_image_adjust_panel", None)
+        if panel is not None:
+            panel.set_lens_correction_available(has_lens_profile)
         if base is None or not hasattr(base, "shape"):
             if hasattr(self, "status_bar"):
                 self.status_bar.showMessage(
@@ -18338,7 +18357,6 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             return
         self._adjust_preview_base_rgb = base
         self._adjust_edit_base_path = norm
-        panel = getattr(self, "single_image_adjust_panel", None)
         if panel is not None and panel.isVisible():
             self._pending_adjust_preview = dict(panel.get_adjustments())
             self._apply_adjust_panel_preview()
@@ -18575,6 +18593,29 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         gv.set_compare_mode(True)
         if hasattr(self, "status_bar"):
             self.status_bar.clearMessage()
+
+    def _on_adjust_lens_correction_toggled(self, checked: bool) -> None:
+        """Re-decode the edit base with/without lens-profile correction baked in.
+
+        Unlike every other Adjust toggle, this can't just re-run the preview
+        pipeline on the existing _adjust_preview_base_rgb -- the correction is
+        applied once at decode time (see raw_lens_correction.py /
+        UnifiedImageProcessor.decode_raw_edit_base), so the base itself has to
+        be rebuilt. _begin_adjust_editing_session already does exactly that
+        (reset base -> _request_adjust_edit_base, which reads the panel's
+        current LensCorrectionEnabled value), also invalidating the compare
+        cache and PreviewStageCache correctly via the existing base-identity
+        reset points.
+        """
+        path = getattr(self, "current_file_path", None)
+        if not path:
+            return
+        if hasattr(self, "status_bar"):
+            self.status_bar.showMessage(
+                "Re-decoding RAW with lens correction…" if checked else "Re-decoding RAW…",
+                0,
+            )
+        self._begin_adjust_editing_session(path)
 
     def _on_wb_color_picked(self, scene_pt) -> None:
         """Sample the RAW edit base at the clicked point and solve Temperature/Tint."""

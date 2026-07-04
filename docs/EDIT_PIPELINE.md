@@ -38,6 +38,7 @@ Replace **8-bit sRGB / gamma-space** adjust preview with a **scene-linear** pipe
 | Saturation / Vibrance color fix | Done | Now scales HSV S in gamma-encoded space via a LUT round-trip, not additive chroma in scene-linear space (see Performance review) |
 | White balance dropper | Done | Small icon-only button inline in Temperature row; click a neutral area to solve Temperature/Tint (GPU single-view only) |
 | Compare with original (split view) | Done | Icon-only toggle in panel header; draggable divider shows original (left) vs live edited (right) over the same `GpuImageView` — see Compare with original section (2026-07-05) |
+| Lens profile correction | Done | `lensfunpy` geometric distortion correction; toggle only shown when a profile matches the file's camera+lens; baked in at decode time, not per-tick (see Lens profile correction section, 2026-07-05) |
 | Gallery "edited" badge | Done | Lightweight pencil badge on tiles with a saved XMP sidecar; thumbnail pixels unchanged (see Gallery integration) |
 | Keyboard / focus fixes | Done | Shortcuts work with panel open |
 | Value readout styling | Done | Blue `#90CAF9` (was low-contrast gray on dark card) |
@@ -203,6 +204,101 @@ left of the divider, the live edited preview on the right. Drag the divider
   the tone curve widget's drag lifecycle was.
 - **Scope**: GPU single-image view only, same as the WB dropper.
 
+### Lens profile correction (2026-07-05)
+
+Automatic geometric distortion correction driven by a `lensfunpy` profile
+lookup keyed on camera make/model + lens make/model + focal length +
+aperture. New module: `raw_lens_correction.py`. Toggle in the panel (styled
+identically to the Chroma NR on/off button) is **hidden by default and only
+shown once a matching profile is confirmed** for the current file — no
+profile, no button, per the original ask.
+
+- **Dependency**: `lensfunpy` added to `pixi.toml` `[pypi-dependencies]`
+  (cross-platform, no per-target section needed — prebuilt wheels bundle
+  the lensfun C library + database for Linux/macOS/Windows). `pixi install`
+  resolves cleanly; `lensfunpy.Database()` loads 948 cameras / 1304 lenses
+  with no separate download step.
+- **Lookup key**: `raw_lens_correction.lens_profile_key_from_exif()` builds
+  `(camera_make, camera_model, lens_make, lens_model, focal_length,
+  aperture)` from the dict `EXIFExtractor.extract_exif_data()` already
+  returns — camera fields and formatted focal/aperture strings were already
+  parsed there for display; lens model is pulled from the raw EXIF tag dict
+  using the same `EXIF LensModel` / `MakerNote LensType` / `Lens` /
+  `Image LensModel` / `Composite LensID` fallback chain already used for
+  search indexing (`semantic_search.py`). Returns `None` (no lookup
+  attempted) if any of the five fields is missing.
+- **Matching is strict-only, never `loose_search=True`**: caught during
+  development — `lensfunpy`'s `loose_search=True` is not a tighter fuzzy
+  match, it's a "return every lens on this camera's mount" fallback when
+  nothing matches (confirmed: a made-up lens name returned all ~80 Canon EF
+  lenses in the database). Using it would silently apply a *wrong* lens's
+  distortion correction to the image — actively corrupting geometry while
+  claiming success. `lensfunpy`'s strict mode already normalizes case and
+  whitespace on its own (confirmed: `"canon"`/`"Canon"` and
+  `"EF16-35mm..."`/`"EF 16-35mm..."` both match), so strict-only is not
+  overly brittle.
+- **Applied once at decode time, not per-tick**: unlike every tone/color
+  slider, this has no continuous "amount" -- it's either the exact profile
+  match or nothing. `UnifiedImageProcessor.decode_raw_edit_base()` gained an
+  `apply_lens_correction: bool` parameter; when true, the decoded (and
+  already orientation-corrected) buffer is undistorted via
+  `raw_lens_correction.apply_lens_correction()` before being returned as the
+  edit base. This means toggling it triggers a full re-decode
+  (`_begin_adjust_editing_session`, which already resets
+  `_adjust_preview_base_rgb`/the compare-original cache/`PreviewStageCache`
+  correctly via existing base-identity invalidation) rather than a
+  pipeline-stage recompute — simpler than threading a new stage through
+  `PreviewStageCache`, and correct, since geometry has to be settled before
+  any of WB/denoise/tone/detail run on the buffer.
+- **Correction math**: `lensfunpy.Modifier(lens, cam.crop_factor, w, h)` +
+  `.initialize(focal, aperture, pixel_format=...)` +
+  `.apply_geometry_distortion()` returns an `(h, w, 2)` float32 coordinate
+  map, fed directly to `cv2.remap()` (already a dependency). Confirmed the
+  map is independent of the `pixel_format` argument passed to `initialize()`
+  (only affects vignetting, unused here) and that `cv2.remap` preserves
+  dtype for both `uint16` (the edit base's actual dtype) and `float32`.
+- **Availability check**: `UnifiedImageProcessor.lens_profile_available()`
+  does the same EXIF-based lookup (cheap on repeat calls — EXIF is
+  SQLite-cached) and is called from `_AdjustEditBaseWorker` alongside the
+  decode itself, so there's no extra I/O round-trip just to decide whether
+  to show the toggle. Result flows back through `_AdjustEditBaseSignals`
+  (gained a third `bool` field) to `_on_adjust_edit_base_ready`, which calls
+  `panel.set_lens_correction_available(...)`.
+- **Persistence**: `LensCorrectionEnabled` (0.0/1.0) added to
+  `DEFAULT_ADJUSTMENTS` — this alone gets it full XMP read/write for free
+  via the existing flat-dict `crs:` sidecar mechanism, no new XMP code
+  needed. Off by default: an automatic geometry change must never apply
+  silently to a file that didn't have it enabled before.
+- **Export**: `_AdjustExportWorker` reads `LensCorrectionEnabled` from the
+  adjustments dict being exported and passes it to the full-resolution
+  `decode_raw_edit_base()` call, so a baked export matches whatever the
+  preview showed.
+- **Verified**: `raw_lens_correction.py` has real smoke tests in
+  `phase_develop_adjust_linear.py` (`test_lens_profile_key_from_exif`,
+  `test_lens_correction_gates_and_corrects_only_known_profiles`) — a known
+  camera+lens combo actually changes pixel positions (and preserves
+  dtype/shape for both `uint16` and `float32`), an unmatched lens returns
+  the input completely unchanged (the strict-only-matching regression
+  guard), and missing/`None` EXIF is handled without raising. These tests
+  skip cleanly (not fail) when run outside the pixi env, since this
+  session's ad hoc `python3 scripts/...` invocations use a different,
+  older environment than pixi's that doesn't have `lensfunpy` installed —
+  run via `pixi run python3 scripts/phase_develop_adjust_linear.py` to
+  actually exercise them. Also verified the full signal chain headlessly
+  (Qt): toggle hidden by default, shown/hidden correctly as
+  `set_lens_correction_available()` is called, toggling emits the dedicated
+  `lens_correction_toggled` signal (not the generic preview-refresh path),
+  and `_AdjustEditBaseWorker` threads `apply_lens_correction` through to
+  `decode_raw_edit_base` correctly.
+- **Not implemented**: vignetting and TCA (chromatic aberration) correction
+  — `lensfunpy` supports both (`apply_color_modification`,
+  `apply_subpixel_distortion`), but "aspect correction" was the ask; a
+  reasonable future extension, not a gap in this pass. Auto-crop-to-remove-
+  empty-borders is also not implemented — `lensfunpy`'s automatic scale
+  (`scale=0.0`, the default) already minimizes empty edges from the geometry
+  correction itself, and no border cropping was observed in testing, so this
+  wasn't pursued further.
+
 ### HSL (UI hidden)
 
 Eight colors: **Red, Orange, Yellow, Green, Aqua, Blue, Purple, Magenta**.
@@ -271,6 +367,7 @@ Constants: `RECOVERY_BASELINE_SHADOWS2012`, `RECOVERY_BASELINE_HIGHLIGHTS2012` i
 - **Tone curve** graph + PV Shad/Dark/Light/High sliders (`_SHOW_TONE_CURVE_UI = True`)
 - **HSL** section — **hidden** (`_SHOW_HSL_UI = False`); pipeline/XMP I/O still present
 - **Chroma NR** toggle
+- **Lens correction** toggle — hidden unless a matching profile is found for the current file
 - **Use recovery look** button
 - **Compare** toggle (header, split-view icon) — see Compare with original
 - **Export…** menu (see below)
@@ -339,6 +436,7 @@ Written on slider / curve release and before export:
 | `raw_hsl.py` | 8-color HSL in HSV space |
 | `raw_detail_enhance.py` | Sharpness, Clarity, Defringe |
 | `raw_chroma_denoise.py` | Chroma (Cb/Cr) + luma (Y) bilateral denoise (OpenCV) |
+| `raw_lens_correction.py` | Lensfun profile lookup + geometric distortion correction |
 | `raw_edit_pipeline.py` | Shared pipeline + export dispatch (TIFF16 / JPEG / WebP); 16-bit TIFF via `tifffile` |
 | `raw_adjustments.py` | XMP I/O, defaults, `apply_adjustments_to_linear` |
 | `rawviewer_ui/adjust_panel.py` | Adjust panel UI |
@@ -405,6 +503,13 @@ Written on slider / curve release and before export:
     original on the left, edited on the right; drag the divider anywhere across
     the image and it tracks the cursor; adjust a slider while comparing — only
     the edited (right) side updates; toggle off — split view disappears cleanly
+19. **Lens correction** toggle — hidden on a file with no matching lens profile
+    (check with an unusual/manual lens); shown on a file with a recognized
+    camera+lens; toggling on visibly corrects barrel/pincushion distortion and
+    re-decodes (brief status message); exported file reflects the same toggle
+    state as the preview
+20. `PYTHONPATH=src pixi run python3 scripts/phase_develop_adjust_linear.py`
+    (run via pixi specifically — the lens-correction tests need `lensfunpy`)
 
 To re-enable HSL UI: set `_SHOW_HSL_UI = True` in `adjust_panel.py` (fix the `raw_hsl.py`
 colorspace-scale bug first — see Performance review #6).
@@ -924,74 +1029,19 @@ main-thread event-forwarding assumption above cheaply.
 
 ---
 
-### F. Lens profile automatic aspect/distortion correction
+### F. Lens profile automatic aspect/distortion correction — Implemented (2026-07-05)
 
-**Finding.** This is distinct from section B's manual straighten/perspective
-tools — it's *automatic* correction driven by a lens-profile database keyed
-on camera + lens + focal length + aperture, the way Lightroom's "Enable
-Profile Corrections" or DxO/PTLens work. The raw ingredients for the lookup
-key are already extracted, just not assembled into one: lens model
-(`semantic_search.py:3275-3283`, tries `EXIF LensModel`/`LensMake`/
-`MakerNote LensType`/`Lens`/`Image LensModel`/`Composite LensID` in order),
-focal length and aperture (`enhanced_raw_processor.py:1008,1021`,
-`main.py:25464,25507-25546`), and camera model
-(`semantic_search.py:3272-3274`) — today each is read independently for
-display/search text, never combined into a "camera+lens+focal+aperture"
-profile key.
+Originally scoped out here as low-feasibility because no lens-calibration
+database existed in the project (`lensfun`/`lensfunpy` unvendored). Re-scoped
+and implemented after further research corrected two things: (1) `lensfunpy`
+ships **prebuilt wheels bundling the lensfun C library and its full lens
+database** for Linux/macOS/Windows (948 cameras / 1304 lenses out of the box,
+confirmed by loading `lensfunpy.Database()` directly) — not a from-source
+build as first assumed; (2) the lens database itself is CC BY-SA 3.0 (the C
+library is LGPLv3, fine to link from closed-source code) — a real license
+term to be aware of when bundling, but not a blocker. See the "Lens profile
+correction" section below for the implementation. Geometric distortion only
+(the "aspect correction" originally asked about) — vignetting/TCA correction
+(lensfunpy supports both) are not wired up, a possible future extension.
 
-The much bigger gap is the profile database itself: **no lens calibration
-data exists in this project at all.** `lensfun`/`lensfunpy` — the open-source
-lens-correction database and library that darktable, RawTherapee, and
-digiKam all use for exactly this feature — is not vendored, not in
-`pixi.toml`/`pixi.lock`, and doesn't import (`ModuleNotFoundError` in both
-the pixi env and the venv). This is the crux of the whole feature: without
-either lensfun or an equivalent database, there is no source for the
-distortion polynomial (k1/k2/k3/p1/p2), vignetting curve, or per-lens
-chromatic-aberration coefficients a profile-based correction needs — none of
-that data can be derived from the RAW file or its EXIF alone. `rawpy` (0.27,
-already a dependency) exposes exactly one relevant hook,
-`Params.chromatic_aberration: (red_scale, blue_scale)` — LibRaw's simple
-uniform-scale lateral-CA fix — but it's unused today and, being a uniform
-scale rather than a radial model, it's a much cruder correction than
-lensfun's per-lens polynomial; it still needs the scale factors supplied
-from *somewhere* (a profile, or a heuristic auto-CA estimator), which
-doesn't exist either. Adobe's own embedded lens-profile XMP fields
-(`crs:LensProfileEnable`, `LensProfileName`, `PerspectiveVerticalScale`,
-etc.) are confirmed absent from `write_xmp_adjustments` — the only
-optics-adjacent fields present are the existing manual
-`DefringePurpleAmount`/`DefringeGreenAmount` sliders, unrelated to
-profile-based auto-correction.
-
-`cv2` (already a dependency, 4.13.0 installed) has everything needed for the
-*application* step once coefficients exist — `cv2.undistort`/
-`initUndistortRectifyMap` for standard (Brown-Conrady) distortion and
-`cv2.fisheye.undistortImage` for wide-angle lenses — so the remap math
-itself is not a gap. Separately, there are **no RAW test files anywhere in
-this repository** (no `.cr2/.nef/.arw/.dng/...` files, no `tests/` or
-`fixtures/` directory) — validating this feature during development would
-require sourcing sample RAW files from outside the project, for a range of
-lenses with known distortion characteristics.
-
-**Feasibility.** Low, not because the correction math is hard (`cv2` covers
-it, and lens-profile-key assembly from existing EXIF fields is simple glue
-code) but because the foundational data source is entirely missing and
-non-trivial to add: `lensfun`'s database is LGPL-licensed C code with its
-own XML lens-profile format, a new dependency with real licensing and
-maintenance implications, not a pure-Python pip install; building a custom
-profile database from scratch (calibrating distortion/vignetting/CA per
-lens) is its own large research project, well outside a coding task. Even
-adopting `lensfun` doesn't fully solve it — its profile coverage skews
-toward popular consumer lenses; less common or newer lenses may have no
-profile at all, so any implementation needs a defined fallback (no
-correction, or an estimated/generic correction) for an unmatched lens.
-
-**Suggestion.** Do not build this from scratch. If pursued, the only
-realistic path is adopting `lensfun`/`lensfunpy` as a new dependency rather
-than authoring a profile database in-house — evaluate its packaging
-(license terms, whether a prebuilt wheel exists for this project's
-platforms, database update/maintenance story) as a standalone spike before
-committing to the feature, since that adoption decision (not the
-image-processing code) is what actually determines feasibility here. Until
-that's resolved, this should stay out of scope — it's a fundamentally
-different kind of investment (an external data dependency) than every other
-item in this roadmap, which are all buildable with what's already vendored.
+---

@@ -99,11 +99,17 @@ class UnifiedImageProcessor:
         file_path: str,
         executor: Optional[Any] = None,
         use_full_resolution: bool = False,
+        apply_lens_correction: bool = False,
     ) -> Optional[np.ndarray]:
         """
         Demosaic from RAW sensor data for the adjust panel.
         Returns 16-bit scene-linear RGB (never embedded JPEG; not cached for browse).
         Defaults to LibRaw half-size for responsive live editing.
+
+        ``apply_lens_correction``: if True, undistort using a lensfun profile
+        matched from this file's EXIF (see raw_lens_correction.py) -- applied
+        once here, after orientation correction (so the Modifier sees the
+        buffer's final width/height), not as a per-tick pipeline adjustment.
         """
         skip_key = os.path.normcase(os.path.abspath(file_path))
         from common_image_loader import dng_prefers_embedded_preview_first
@@ -150,6 +156,10 @@ class UnifiedImageProcessor:
                     rgb_image = self._apply_orientation_correction(
                         rgb_image, orientation, exif_data
                     )
+                if apply_lens_correction:
+                    from raw_lens_correction import apply_lens_correction as _apply_lens_correction
+
+                    rgb_image = _apply_lens_correction(rgb_image, exif_data)
                 logging.getLogger(__name__).info(
                     "[EDIT] Linear edit base for %s (%dx%d, uint16=%s, half_size=%s)",
                     os.path.basename(file_path),
@@ -201,7 +211,21 @@ class UnifiedImageProcessor:
                 exc_info=True,
             )
             return None
-    
+
+    def lens_profile_available(self, file_path: str) -> bool:
+        """
+        Whether a lensfun profile matches this file's camera+lens -- gates
+        whether the Adjust panel's lens-correction toggle is shown at all.
+        Cheap on repeat calls: EXIF is SQLite-cached in extract_exif_data.
+        """
+        try:
+            exif_data = self.exif_extractor.extract_exif_data(file_path)
+            from raw_lens_correction import has_lens_profile
+
+            return has_lens_profile(exif_data)
+        except Exception:
+            return False
+
     def _is_raw_file(self, file_path: str) -> bool:
         """檢查是否為 RAW 文件"""
         return is_raw_file(file_path)
