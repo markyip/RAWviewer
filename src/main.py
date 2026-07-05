@@ -1848,6 +1848,35 @@ class _AdjustCompareOriginalWorker(QRunnable):
         self.signals.finished.emit(self.file_path, out)
 
 
+_ADJUST_FAST_PREVIEW_MAX_EDGE = 1000
+
+
+def _make_fast_preview_base(base: Any) -> Any:
+    """
+    Downsample a decoded RAW edit base for the continuous live-drag preview
+    (see PreviewStageCache_fast in __init__). Keeps the base's own dtype
+    (uint16 stays uint16) so it flows through the exact same
+    render_adjust_preview_uint8 code path as the full-res base -- just with
+    far fewer pixels. Returns the original array unchanged if it's already
+    at or under the target size, or on any failure (never block the normal
+    full-quality path over this).
+    """
+    try:
+        if base is None or not hasattr(base, "shape"):
+            return base
+        import cv2
+
+        h, w = int(base.shape[0]), int(base.shape[1])
+        max_dim = max(h, w)
+        if max_dim <= _ADJUST_FAST_PREVIEW_MAX_EDGE:
+            return base
+        scale = _ADJUST_FAST_PREVIEW_MAX_EDGE / max_dim
+        nw, nh = max(1, int(round(w * scale))), max(1, int(round(h * scale)))
+        return cv2.resize(base, (nw, nh), interpolation=cv2.INTER_AREA)
+    except Exception:
+        return base
+
+
 class _AdjustEditBaseWorker(QRunnable):
     """Background LibRaw demosaic for the adjust panel (never embedded JPEG)."""
 
@@ -7768,11 +7797,26 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self._adjust_preview_gen = 0
         self._adjust_preview_busy = False
         self._adjust_preview_dirty = False
+        self._adjust_preview_dirty_full_quality = False
         self._adjust_preview_signals = _AdjustPreviewSignals()
         self._adjust_preview_signals.finished.connect(self._on_adjust_preview_ready)
         from raw_edit_pipeline import PreviewStageCache
 
         self._adjust_preview_stage_cache = PreviewStageCache()
+        # Downsampled edit base + its own independent staged cache, used only
+        # for the continuous/throttled live-drag preview (see
+        # _apply_adjust_panel_preview's full_quality param) -- dragging an
+        # "upstream" control (Contrast, Highlights, tone curve, ...) forces a
+        # full WB/denoise/PV2012-tone recompute every tick regardless of
+        # PreviewStageCache (it can only skip stages that didn't change, not
+        # speed up the one that did), which measured ~550-700ms/tick at the
+        # documented 2000x3000 preview size -- far past the 80ms throttle.
+        # Rendering that same tick on a ~1000px-longest-edge copy instead
+        # measured ~56ms, comfortably inside the throttle window; the
+        # editing_finished handler then requests one full_quality=True render
+        # on release to snap back to full detail. See docs/EDIT_PIPELINE.md.
+        self._adjust_preview_base_rgb_fast: Any = None
+        self._adjust_preview_stage_cache_fast = PreviewStageCache()
         self._adjust_compare_original_pixmap: Any = None
         self._adjust_compare_original_path: str | None = None
         self._adjust_compare_original_signals = _AdjustCompareOriginalSignals()
@@ -16846,6 +16890,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             self._last_manager_exif_was_minimal = False
             self._schedule_ttfr_watchdog(file_path, load_start)
             self._adjust_preview_base_rgb = None
+            self._adjust_preview_base_rgb_fast = None
             self._adjust_edit_base_path = None
             self._adjust_edit_base_loading_norm = None
             self._adjust_panel_loaded_norm = None
@@ -18178,6 +18223,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             panel.setVisible(False)
             if not self._adjust_overlay_visible:
                 self._adjust_preview_base_rgb = None
+                self._adjust_preview_base_rgb_fast = None
                 self._adjust_edit_base_path = None
                 self._reset_adjust_compare_state()
         container = getattr(self, "single_view_container", None)
@@ -18216,7 +18262,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 getattr(self, "_adjust_preview_base_rgb", None) is not None
                 and norm == getattr(self, "_adjust_edit_base_path", None)
             ):
-                self._apply_adjust_panel_preview()
+                self._apply_adjust_panel_preview(full_quality=True)
 
     def _refresh_adjust_panel_for_navigation(self, file_path: str | None = None) -> None:
         """Reload XMP sliders and edit base when the current file changes with panel open."""
@@ -18240,6 +18286,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self._defer_sensor_full_decode_path = None
         self._sensor_full_decode_queued_norm = None
         self._adjust_preview_base_rgb = None
+        self._adjust_preview_base_rgb_fast = None
         self._adjust_edit_base_path = None
         self._adjust_edit_base_loading_norm = None
         self._reset_adjust_compare_state()
@@ -18301,6 +18348,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
 
         if not file_path:
             self._adjust_preview_base_rgb = None
+            self._adjust_preview_base_rgb_fast = None
             self._adjust_edit_base_path = None
             return
         norm = _norm_path(file_path)
@@ -18316,10 +18364,11 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             if base is not None and hasattr(base, "shape"):
                 self._adjust_preview_base_rgb = base
                 self._adjust_edit_base_path = norm
-                self._apply_adjust_panel_preview()
+                self._apply_adjust_panel_preview(full_quality=True)
             return
         self._adjust_edit_base_loading_norm = norm
         self._adjust_preview_base_rgb = None
+        self._adjust_preview_base_rgb_fast = None
         self._adjust_edit_base_path = None
         if hasattr(self, "status_bar"):
             self.status_bar.showMessage(
@@ -18357,9 +18406,10 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             return
         self._adjust_preview_base_rgb = base
         self._adjust_edit_base_path = norm
+        self._adjust_preview_base_rgb_fast = _make_fast_preview_base(base)
         if panel is not None and panel.isVisible():
             self._pending_adjust_preview = dict(panel.get_adjustments())
-            self._apply_adjust_panel_preview()
+            self._apply_adjust_panel_preview(full_quality=True)
         if hasattr(self, "status_bar"):
             h, w = base.shape[0], base.shape[1]
             self.status_bar.showMessage(
@@ -18382,18 +18432,40 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         return getattr(self, "_adjust_preview_base_rgb", None)
 
     def _on_adjust_panel_preview_changed(self, adj: dict) -> None:
+        # Continuous/throttled live-drag path -- the one caller that can use
+        # the default full_quality=False (downsampled fast base). Every other
+        # caller of _apply_adjust_panel_preview is a discrete, one-shot action
+        # (file load, recovery-baseline click, post-drag settle) and passes
+        # full_quality=True explicitly.
+        #
+        # Exception: Compare mode must always use full_quality here too.
+        # GpuImageView._img_w/_img_h (used to crop the *original* comparison
+        # pixmap to the correct width) are updated from whatever pixmap
+        # set_pixmap() last received -- if a live-drag tick delivers a
+        # downsampled fast-preview pixmap, _img_w/_img_h shrink to match it,
+        # and the next _update_compare_overlay() crops the full-resolution
+        # original using coordinates sized for that *much smaller* frame,
+        # showing a tiny corner of it stretched across the divider (reported
+        # as the original side appearing "zoomed in" while dragging the tone
+        # curve with Compare on). The fast/full pixmap sizes only ever match
+        # by construction when full_quality is used, so Compare mode simply
+        # always gets the full-res path -- see docs/EDIT_PIPELINE.md.
+        gv = getattr(self, "gpu_view", None)
+        comparing = bool(gv is not None and gv.is_compare_mode())
         self._pending_adjust_preview = dict(adj or {})
-        self._apply_adjust_panel_preview()
+        self._apply_adjust_panel_preview(full_quality=comparing)
 
     def _on_adjust_preview_ready(self, generation: int, file_path: str, array) -> None:
         self._adjust_preview_busy = False
+        dirty_full_quality = bool(getattr(self, "_adjust_preview_dirty_full_quality", False))
+        self._adjust_preview_dirty_full_quality = False
         if int(generation) != int(getattr(self, "_adjust_preview_gen", 0)):
             if getattr(self, "_adjust_preview_dirty", False):
-                self._apply_adjust_panel_preview()
+                self._apply_adjust_panel_preview(full_quality=dirty_full_quality)
             return
         if _norm_path(file_path) != _norm_path(getattr(self, "current_file_path", "") or ""):
             if getattr(self, "_adjust_preview_dirty", False):
-                self._apply_adjust_panel_preview()
+                self._apply_adjust_panel_preview(full_quality=dirty_full_quality)
             return
         if array is not None:
             try:
@@ -18403,9 +18475,9 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             if pixmap is not None and not pixmap.isNull():
                 self._display_adjust_preview_pixmap(pixmap)
         if getattr(self, "_adjust_preview_dirty", False):
-            self._apply_adjust_panel_preview()
+            self._apply_adjust_panel_preview(full_quality=dirty_full_quality)
 
-    def _apply_adjust_panel_preview(self) -> None:
+    def _apply_adjust_panel_preview(self, *, full_quality: bool = False) -> None:
         panel = getattr(self, "single_image_adjust_panel", None)
         path = getattr(self, "current_file_path", None)
         if not path:
@@ -18418,24 +18490,37 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             return
         self._pending_adjust_preview = dict(adj)
         norm = _norm_path(path)
-        base = getattr(self, "_adjust_preview_base_rgb", None)
-        if base is None or norm != getattr(self, "_adjust_edit_base_path", None):
+        base_full = getattr(self, "_adjust_preview_base_rgb", None)
+        if base_full is None or norm != getattr(self, "_adjust_edit_base_path", None):
             self._request_adjust_edit_base(path)
             return
         if getattr(self, "_adjust_preview_busy", False):
             self._adjust_preview_dirty = True
+            # A pending full_quality request must not be downgraded by a
+            # subsequent fast one arriving while still queued -- OR-combine.
+            self._adjust_preview_dirty_full_quality = (
+                full_quality or getattr(self, "_adjust_preview_dirty_full_quality", False)
+            )
             return
         self._adjust_preview_dirty = False
+        self._adjust_preview_dirty_full_quality = False
         self._adjust_preview_busy = True
         self._adjust_preview_gen = int(getattr(self, "_adjust_preview_gen", 0)) + 1
         gen = self._adjust_preview_gen
+        base_fast = getattr(self, "_adjust_preview_base_rgb_fast", None)
+        if full_quality or base_fast is None:
+            base = base_full
+            stage_cache = getattr(self, "_adjust_preview_stage_cache", None)
+        else:
+            base = base_fast
+            stage_cache = getattr(self, "_adjust_preview_stage_cache_fast", None)
         worker = _AdjustPreviewWorker(
             gen,
             path,
             base,
             dict(adj),
             self._adjust_preview_signals,
-            stage_cache=getattr(self, "_adjust_preview_stage_cache", None),
+            stage_cache=stage_cache,
         )
         QThreadPool.globalInstance().start(worker)
 
@@ -18443,6 +18528,11 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         path = getattr(self, "current_file_path", None)
         if not path:
             return
+        # The drag/click gesture just settled -- snap the preview to full
+        # quality (undoes the fast/downsampled base used while it was still
+        # live-dragging). Runs in the background same as any other preview
+        # request; the (comparatively slow) XMP write below doesn't block it.
+        self._apply_adjust_panel_preview(full_quality=True)
         try:
             from raw_adjustments import write_xmp_adjustments_for_file
 
@@ -18475,7 +18565,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             self._raw_recovery_active = False
             self._sync_raw_recovery_view_mode()
         panel.set_recovery_baseline(True)
-        self._apply_adjust_panel_preview()
+        self._apply_adjust_panel_preview(full_quality=True)
         if hasattr(self, "status_bar"):
             self.status_bar.showMessage(
                 "Recovery look on — Shadows/Highlights readouts updated; "
@@ -18497,7 +18587,9 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         from common_image_loader import is_raw_file
 
         base = getattr(self, "_adjust_preview_base_rgb", None)
-        if not path or not is_raw_file(path) or base is None or not hasattr(base, "shape"):
+        is_raw = bool(path and is_raw_file(path))
+        has_base = base is not None and hasattr(base, "shape")
+        if not path or not is_raw or not has_base:
             panel.set_wb_picker_active(False)
             if hasattr(self, "status_bar"):
                 self.status_bar.showMessage(

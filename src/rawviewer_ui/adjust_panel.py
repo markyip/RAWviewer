@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from typing import Callable, Dict
 
-from PyQt6.QtCore import Qt, QSize, QTimer, pyqtSignal
-from PyQt6.QtGui import QCursor, QIcon
+from PyQt6.QtCore import QRectF, Qt, QSize, QTimer, pyqtSignal
+from PyQt6.QtGui import QColor, QCursor, QIcon, QLinearGradient, QPainter, QPen
 from PyQt6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -17,6 +17,8 @@ from PyQt6.QtWidgets import (
     QScrollArea,
     QSlider,
     QSizePolicy,
+    QStyle,
+    QStyleOptionSlider,
     QVBoxLayout,
     QWidget,
 )
@@ -50,6 +52,14 @@ _PARAMETRIC_TONE_KEYS = frozenset(
     }
 )
 
+# Dim background hint of what direction a slider pushes -- kept muted (not
+# the saturated hues a web mockup can get away with) so it reads as a subtle
+# cue under the solid accent fill, not a second, competing signal.
+_SLIDER_TRACK_GRADIENTS: dict[str, list[tuple[float, str]]] = {
+    "Temperature": [(0.0, "#4A73B5"), (0.5, "#3A3A3A"), (1.0, "#C98A46")],
+    "Tint": [(0.0, "#4A9B5E"), (0.5, "#3A3A3A"), (1.0, "#B457A0")],
+}
+
 
 def _qta_icon_safe(name: str, *, color: str) -> QIcon:
     """qtawesome icon that degrades to an empty (invisible) QIcon if unavailable."""
@@ -79,11 +89,107 @@ class AdjustValueLabel(QLabel):
 
 
 class AdjustSlider(QSlider):
-    """Horizontal slider with a taller hit target (Qt handles track click-to-set)."""
+    """
+    Custom-painted slider: fill grows from a center reference point (0 for a
+    bipolar -X..+X range) rather than from the left edge, plus a compact
+    rectangular thumb -- the Lightroom-style visual language a stock
+    QSlider/QSS combination can't express (QSS's sub-page/add-page can only
+    fill from one edge, never an interior point). An optional background
+    gradient hints at a slider's effect (warm/cool for Temperature, etc.).
+
+    Hit-testing/dragging is untouched -- this only overrides paintEvent, and
+    positions everything from the *same* QStyle rects
+    (subControlRect/sliderPositionFromValue) Qt's own default mouse handling
+    already uses internally, so the painted thumb and the actual click/drag
+    target stay pixel-exact without reimplementing any mouse logic.
+    """
+
+    _TRACK_HEIGHT = 4
+    _THUMB_W = 10
+    _THUMB_H = 14
 
     def __init__(self, orientation=Qt.Orientation.Horizontal, parent=None):
         super().__init__(orientation, parent)
         self.setMinimumHeight(22)
+        self.setMouseTracking(True)
+        self._center_value: float | None = None  # None -> auto (0 if bipolar, else minimum)
+        self._track_gradient: list[tuple[float, str]] | None = None
+        self._accent = QColor("#90CAF9")
+
+    def set_center_value(self, value: float | None) -> None:
+        """Override the fill's zero/reference point (e.g. as-shot Temperature
+        instead of a literal 0, which isn't in-range for an absolute-Kelvin
+        slider). None restores the automatic bipolar/left-edge default."""
+        self._center_value = value
+        self.update()
+
+    def set_track_gradient(self, stops: list[tuple[float, str]] | None) -> None:
+        """stops: [(0.0, '#4080ff'), (0.5, '#3a3a3a'), (1.0, '#ffb040')] --
+        a dim always-visible hint of what direction does what, independent
+        of the solid accent fill drawn on top for the actual value."""
+        self._track_gradient = stops
+        self.update()
+
+    def _effective_center(self) -> float:
+        if self._center_value is not None:
+            return max(float(self.minimum()), min(float(self.maximum()), self._center_value))
+        if self.minimum() < 0 < self.maximum():
+            return 0.0
+        return float(self.minimum())
+
+    def _handle_center_x(self, value: float, groove: QRectF, handle_w: float, upside_down: bool) -> float:
+        span = max(1, int(round(groove.width() - handle_w)))
+        pos = QStyle.sliderPositionFromValue(
+            self.minimum(), self.maximum(), int(round(value)), span, upside_down
+        )
+        return groove.x() + pos + handle_w / 2.0
+
+    def paintEvent(self, _event) -> None:
+        opt = QStyleOptionSlider()
+        self.initStyleOption(opt)
+        groove = self.style().subControlRect(
+            QStyle.ComplexControl.CC_Slider, opt, QStyle.SubControl.SC_SliderGroove, self
+        )
+        handle = self.style().subControlRect(
+            QStyle.ComplexControl.CC_Slider, opt, QStyle.SubControl.SC_SliderHandle, self
+        )
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+
+        track_y = groove.center().y() - self._TRACK_HEIGHT / 2.0
+        track_rect = QRectF(groove.x(), track_y, groove.width(), self._TRACK_HEIGHT)
+
+        painter.setPen(Qt.PenStyle.NoPen)
+        if self._track_gradient:
+            grad = QLinearGradient(track_rect.left(), 0, track_rect.right(), 0)
+            for pos, color_str in self._track_gradient:
+                grad.setColorAt(pos, QColor(color_str))
+            painter.setBrush(grad)
+        else:
+            painter.setBrush(QColor("#3A3A3A"))
+        painter.drawRoundedRect(track_rect, 2, 2)
+
+        value_x = self._handle_center_x(self.value(), QRectF(groove), handle.width(), opt.upsideDown)
+        center_x = self._handle_center_x(
+            self._effective_center(), QRectF(groove), handle.width(), opt.upsideDown
+        )
+        fill_left, fill_right = (value_x, center_x) if value_x < center_x else (center_x, value_x)
+        if fill_right - fill_left > 0.5:
+            fill_rect = QRectF(fill_left, track_y, fill_right - fill_left, self._TRACK_HEIGHT)
+            painter.setBrush(self._accent)
+            painter.drawRoundedRect(fill_rect, 2, 2)
+
+        thumb_rect = QRectF(
+            value_x - self._THUMB_W / 2.0,
+            groove.center().y() - self._THUMB_H / 2.0,
+            self._THUMB_W,
+            self._THUMB_H,
+        )
+        painter.setPen(QPen(QColor(50, 50, 50), 1))
+        painter.setBrush(self._accent if self.underMouse() else QColor("#FFFFFF"))
+        painter.drawRoundedRect(thumb_rect, 1.5, 1.5)
+        painter.end()
 
 
 class ImageAdjustPanelWidget(QWidget):
@@ -236,23 +342,12 @@ class ImageAdjustPanelWidget(QWidget):
             QPushButton#adjust_compare_btn:hover {
                 background: rgba(255, 255, 255, 24);
             }
-            QSlider::groove:horizontal {
-                height: 4px;
-                background: #3A3A3A;
-                border-radius: 2px;
-            }
-            QSlider::handle:horizontal {
-                width: 12px;
-                margin: -5px 0;
-                background: #90CAF9;
-                border-radius: 6px;
-            }
-            QSlider::sub-page:horizontal {
-                background: #5C9FD4;
-                border-radius: 2px;
-            }
             """
         )
+        # AdjustSlider paints its own groove/fill/handle (paintEvent override,
+        # not QSS) so its center-out fill can start from an interior point --
+        # QSS's sub-page/add-page can only fill from one edge. See its
+        # docstring / docs/EDIT_PIPELINE.md "Slider visual language".
         outer.addWidget(card)
 
         card_layout = QVBoxLayout(card)
@@ -327,6 +422,16 @@ class ImageAdjustPanelWidget(QWidget):
             slider.setSingleStep(spec.single_step)
             slider.setPageStep(max(spec.single_step, (spec.maximum - spec.minimum) // 20))
             slider.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            gradient = _SLIDER_TRACK_GRADIENTS.get(spec.key)
+            if gradient is not None:
+                slider.set_track_gradient(gradient)
+            if spec.key == "Temperature":
+                # Absolute Kelvin, not a -X..+X offset -- 0 isn't in range, so
+                # the fill's reference point has to be the as-shot value
+                # (this file's own neutral), not a literal zero. Kept in sync
+                # in set_adjustments() as as-shot temperature is per-file.
+                slider.set_center_value(self._as_shot_temperature)
+                self._temperature_slider = slider
             slider.sliderMoved.connect(
                 lambda _v, k=spec.key, fmt=spec.format_value: self._update_slider_label(
                     k, fmt
@@ -652,6 +757,9 @@ class ImageAdjustPanelWidget(QWidget):
             self._as_shot_temperature = float(
                 merged.get(AS_SHOT_TEMP_KEY, DEFAULT_ADJUSTMENTS["Temperature"])
             )
+            temp_slider = getattr(self, "_temperature_slider", None)
+            if temp_slider is not None:
+                temp_slider.set_center_value(self._as_shot_temperature)
             for spec in SLIDER_SPECS:
                 slider = self._sliders.get(spec.key)
                 val_lbl = self._value_labels.get(spec.key)
@@ -909,8 +1017,19 @@ class ImageAdjustPanelWidget(QWidget):
             btn.setEnabled(bool(enabled))
 
     def _pointer_on_interactive_child(self, global_pos) -> bool:
-        """True when the cursor is over a slider, button, or value label."""
-        w = QApplication.widgetAt(global_pos.toPoint())
+        """True when the cursor is over a slider, button, or value label.
+
+        Uses ``self.childAt()`` (local widget-tree hit-testing) rather than
+        ``QApplication.widgetAt()`` (global OS-level screen-coordinate
+        hit-testing) -- the latter is resolved against actual window/compositor
+        state and is unreliable for a translucent, borderless overlay panel
+        like this one (confirmed: it can return ``None`` at a position a
+        visible child widget genuinely occupies). ``childAt()`` only asks
+        "which of *my own* children is at this local point", which is exactly
+        what this check needs and can't be thrown off by window compositing.
+        """
+        local_pos = self.mapFromGlobal(global_pos.toPoint())
+        w = self.childAt(local_pos)
         interactive_types: tuple = (
             QSlider,
             AdjustSlider,

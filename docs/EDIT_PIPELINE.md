@@ -42,6 +42,7 @@ Replace **8-bit sRGB / gamma-space** adjust preview with a **scene-linear** pipe
 | Gallery "edited" badge | Done | Lightweight pencil badge on tiles with a saved XMP sidecar; thumbnail pixels unchanged (see Gallery integration) |
 | Keyboard / focus fixes | Done | Shortcuts work with panel open |
 | Value readout styling | Done | Blue `#90CAF9` (was low-contrast gray on dark card) |
+| Slider visual language | Done | Custom-painted center-out bipolar fill, rectangular thumb, Temp/Tint gradient hints — see Slider visual language section (2026-07-06) |
 
 **Not supported:** Lightroom masks, local adjustments, layers, per-channel RGB tone curves.
 
@@ -154,8 +155,43 @@ sampling.
   dropper introduces. Samples requiring a Temperature outside 2000-12000K clamp
   the same way.
 - **Scope**: GPU single-image view only (`self.gpu_view`); not wired into the
-  legacy `QScrollArea`/`QLabel` fallback (`RAWVIEWER_GPU_VIEW=0`) or the Compare
-  view, neither of which have the same scene-point click machinery.
+  legacy `QScrollArea`/`QLabel` fallback (`RAWVIEWER_GPU_VIEW=0`).
+- **Fix (2026-07-06)**: user reported the dropper button "doesn't respond at
+  all". `ImageAdjustPanelWidget._pointer_on_interactive_child` (the check
+  that decides whether a click starts dragging the floating panel or should
+  reach a child slider/button/combo) used `QApplication.widgetAt(global_pos)`
+  — global, OS/compositor-level hit-testing. Confirmed directly: this can
+  return `None` at a screen position a child widget genuinely, visibly
+  occupies (reproduced with the WB button specifically), which is a known
+  class of unreliability for translucent, borderless overlay widgets like
+  this panel — the OS-level compositor doesn't necessarily agree with Qt's
+  own widget tree about what's "on top" at a given global pixel. Replaced
+  with `self.childAt(local_pos)` (pure local widget-tree hit-testing —
+  "which of *my own* children is here", immune to compositor/global-coordinate
+  ambiguity). Re-verified: the check now correctly identifies the button at
+  its real position, the button's own click handling is unaffected, and
+  panel drag-to-move (the other half of the same gating logic, for clicks on
+  the panel's empty background) still works. This same gating function
+  covers every other button/slider in the panel too, so the fix isn't
+  dropper-specific even though that's the control the bug was reported on.
+- **Misdiagnosed as still-broken, actually a Compare-mode bug (2026-07-06)**:
+  user re-tested and reported the button still "doesn't respond" — but only
+  while the Compare-with-original split view (below) was active. Real-app
+  repro with temporary step-by-step logging (`adjust_panel._on_wb_picker_toggled`
+  → `main._on_adjust_wb_picker_toggled`'s gating → `GpuImageView.
+  set_color_pick_mode` → `GpuImageView.mousePressEvent`'s color-pick branch →
+  `colorPickRequested` → `main._on_wb_color_picked`) showed the *entire chain
+  fires correctly every time*, including while comparing — the dropper was
+  never actually broken. What the user was seeing was two separate Compare
+  bugs (see that section's "Divider stuck full-frame on first toggle" and
+  "Crosshair cursor clobbered while comparing" entries) that made a
+  successful pick look like nothing had happened: the mis-cropped divider
+  hid the edited (post-pick) side entirely, and the picker's crosshair
+  cursor was being reset to the arrow on every mouse move, making the
+  armed state look inactive. Once those two were fixed, the dropper's own
+  code needed no changes at all. The temporary `[WB]`-tagged logging added
+  during this investigation was removed once the real root cause was found
+  elsewhere.
 
 ### Compare with original (2026-07-05)
 
@@ -203,6 +239,43 @@ left of the divider, the live edited preview on the right. Drag the divider
   already-tested pipeline functions, verified the same ad hoc headless-Qt way
   the tone curve widget's drag lifecycle was.
 - **Scope**: GPU single-image view only, same as the WB dropper.
+- **Bug: divider stuck full-frame on first toggle (2026-07-06)**: user
+  reported that the *first* time Compare is toggled on, the original render
+  fills far more of the frame than the split fraction implies and the
+  divider doesn't visibly track drags — but toggling off and back on "fixes"
+  it. Root cause: `GpuImageView.set_pixmap()` updates `_img_w`/`_img_h` (the
+  values `_update_compare_overlay()` uses to convert the `0..1` split
+  fraction into a pixel crop/divider position) but never re-ran the overlay
+  math itself. On a fresh file, Compare can be armed before the Adjust
+  panel's own (smaller, edit-base-resolution) preview pixmap has replaced
+  whatever was on screen first (e.g. a native-resolution embedded-JPEG
+  preview) — confirmed directly by logging `_update_compare_overlay`'s
+  inputs on a real repro: first call saw `img_w=7008` against
+  `src_w=3514` (the "original" render, always sized to the edit base), a
+  ~2x mismatch that put the crop and divider well off from where the split
+  fraction intended. By the second toggle, the Adjust preview pixmap had
+  already landed (`img_w` now `3514`, matching `src_w`), so it looked
+  "fixed" purely by timing luck, not because anything was actually
+  resolved. **Fix**: `set_pixmap()` now calls `self._update_compare_overlay()`
+  whenever it changes `_img_w`/`_img_h` while `_compare_active` is true, so
+  the crop/divider can never go stale relative to whatever's currently
+  displayed, regardless of which render (native preview vs. edit-base
+  preview vs. a later resolution change) arrives first. Verified on a real
+  repro: first-ever toggle now centers correctly immediately, no re-toggle
+  needed.
+- **Bug: WB crosshair cursor clobbered while comparing (2026-07-06)**: found
+  while investigating the "WB dropper doesn't respond" report above — the
+  pick itself worked the whole time, but `GpuImageView.mouseMoveEvent`'s
+  divider-hover cursor logic (`if self._compare_active: ... setCursor(SplitHCursor)
+  / unsetCursor()`) ran unconditionally whenever Compare was active, with no
+  check for `_color_pick_mode`. Moving the mouse away from the divider while
+  the WB picker was armed (crosshair set by `set_color_pick_mode`) hit the
+  `unsetCursor()` branch on every move, immediately reverting to the arrow
+  cursor — making the armed dropper look inactive even though clicking still
+  correctly sampled and applied white balance. **Fix**: guarded the whole
+  divider-hover-cursor block with `and not self._color_pick_mode`, so the
+  crosshair now persists for the entire time the picker is armed, matching
+  its behavior outside Compare mode. Verified on a real repro.
 
 ### Lens profile correction (2026-07-05)
 
@@ -298,6 +371,77 @@ profile, no button, per the original ask.
   (`scale=0.0`, the default) already minimizes empty edges from the geometry
   correction itself, and no border cropping was observed in testing, so this
   wasn't pursued further.
+
+### Slider visual language (2026-07-06)
+
+Referenced a Lightroom-style HTML/CSS mockup the user shared
+(`pyqt-lightroom-panel.html`) for the panel's slider look. Adopted the
+mockup's *structural* signature — center-out bipolar fill, a compact
+rectangular thumb, dim gradient hints for Temperature/Tint — but kept
+RAWviewer's own existing accent color (`#90CAF9`, already used by the WB
+dropper/Compare button/tone curve line) rather than the mockup's cyan, and
+muted the gradient hues rather than lifting its saturated hex values
+verbatim, so the result reads as consistent with the rest of the app's
+established chrome instead of a second, competing accent.
+
+- **The problem being fixed**: `QSlider`'s Qt Style Sheets (`sub-page`/
+  `add-page`) can only fill from one *edge* of the groove — there's no QSS
+  way to fill from an interior point. For a bipolar `-100..+100` slider,
+  the old QSS-only styling filled from the left edge regardless of sign, so
+  a slider sitting at `0` (no adjustment) still showed roughly half the
+  track solid blue, which reads as "already adjusted" when it isn't.
+- **Implementation**: `AdjustSlider` (`adjust_panel.py`) now fully overrides
+  `paintEvent` (no QSS groove/handle/sub-page rules left — dead code
+  removed) and draws its own track, fill, and thumb. Deliberately does
+  **not** touch `mousePressEvent`/`mouseMoveEvent` at all — click/drag
+  hit-testing stays exactly Qt's own default `QSlider` behavior. The paint
+  code positions everything using the *same* `QStyle.subControlRect`/
+  `QStyle.sliderPositionFromValue` calls Qt's own mouse handling uses
+  internally, so the painted thumb and the actual click/drag target are
+  pixel-exact by construction — no risk of the classic "visual thumb is
+  slightly off from where clicking actually registers" bug a hand-rolled
+  coordinate system could introduce.
+- **Center point is configurable, not just "0"**: `set_center_value()`
+  overrides the fill's reference point. Auto-detected as `0` for a bipolar
+  range (`minimum < 0 < maximum`) or the slider's own minimum for a
+  unipolar one (Sharpness, Defringe, Luminance NR — these already start at
+  their "no effect" value, so a left-anchored fill is correct there, not
+  center-out). Temperature is neither: it's absolute Kelvin (2000-12000),
+  so `0` isn't in range and isn't meaningful — its center is set to the
+  **as-shot temperature** instead (`_as_shot_temperature`, already tracked
+  per-file) and re-synced every time `set_adjustments()` loads a new file.
+  This is a genuine improvement over the reference mockup, whose Temp
+  slider is a simplified `-100..+100` relative offset rather than RAWviewer's
+  real absolute-Kelvin-with-per-file-reference model.
+- **Gradient hints**: `set_track_gradient()` draws a 3-stop `QLinearGradient`
+  as the track background, underneath the solid accent fill — a dim,
+  always-visible cue for direction (Temperature: muted blue → orange;
+  Tint: muted green → magenta), verified against `_apply_wb_tint`'s actual
+  sign convention (positive Temperature = warmer/more red, positive Tint =
+  more magenta) so the gradient direction matches what the slider actually
+  does, not just what looks plausible. HSL's 8 sliders would be a natural
+  next candidate for per-color gradients, deferred since that section is
+  still hidden behind `_SHOW_HSL_UI = False` (see below) — no point styling
+  controls nobody can see yet.
+- **Verified**: headless-Qt screenshots at each step (isolated slider
+  gallery covering bipolar-positive/negative/zero, unipolar, and the
+  Temperature center+gradient case; then the full panel in context) confirm
+  the fill direction, magnitude, and gradient all render correctly. A
+  direct `QTest` press/move/release drag test confirms hit-testing is
+  unaffected — dragging to the same on-screen position yields the same
+  value as before (cross-checked against a plain, unmodified `QSlider` to
+  confirm the single-click "page-step, not jump-to-position" behavior is
+  pre-existing native Qt/style behavior, not something this change
+  introduced). Value-label click-to-reset, Reset-all, and
+  `get_adjustments()`/`set_adjustments()` round-tripping (including the
+  dynamic Temperature center) all re-verified working.
+- **Deliberately not pulled from the reference**: floating pill buttons
+  (Before/After, Reset All, Export) over the canvas instead of inside the
+  panel — the user's call was to keep Reset/Export in the panel (where they
+  already are) and consider a keyboard shortcut for compare instead of a
+  floating toggle, rather than adopting the mockup's canvas-overlay layout,
+  which would also compete with the Compare toggle already built into the
+  panel header this session.
 
 ### HSL (UI hidden)
 
@@ -510,6 +654,21 @@ Written on slider / curve release and before export:
     state as the preview
 20. `PYTHONPATH=src pixi run python3 scripts/phase_develop_adjust_linear.py`
     (run via pixi specifically — the lens-correction tests need `lensfunpy`)
+21. Drag a bipolar slider (e.g. **Exposure**) both directions — fill grows
+    from the center, not the left edge; at exactly the default value, no
+    fill shows at all. Drag a unipolar slider (**Sharpness**) — fill grows
+    from the left edge as usual. Drag **Temp** — background shows a dim
+    blue→orange gradient, fill starts from the as-shot value (not the
+    slider's numeric midpoint), and the reference point moves if you switch
+    to a file with a different as-shot temperature
+22. **WB dropper button** — click it while the panel is scrolled to any
+    position; it should toggle (icon highlights, status bar shows the
+    "click a neutral area" message, cursor becomes a crosshair) every time,
+    not just when the button happens to be positioned somewhere specific
+23. Drag **Contrast** (or **Highlights**/**Shadows**/**Whites**/**Blacks**/the
+    tone curve) on a large RAW file — the preview should visibly track the
+    cursor smoothly while dragging (briefly softer detail is expected), then
+    snap to full sharpness within roughly a second of releasing
 
 To re-enable HSL UI: set `_SHOW_HSL_UI = True` in `adjust_panel.py` (fix the `raw_hsl.py`
 colorspace-scale bug first — see Performance review #6).
@@ -658,6 +817,10 @@ recompute.
 | 21 | User asked to audit and minimize installer size growth since v2.5 (commit `b61fc86`). Diffing `pixi.toml`/`pixi.lock` against that commit showed exactly 4 new top-level packages, no removals: `tifffile` (2.1MB, #13's 16-bit TIFF fix), `pillow-heif` (11MB, unrelated HEIC support added between v2.5 and this work), `lensfunpy` (7.3MB, #F's lens correction), and **`scipy` (77MB)** — by far the largest of the four, and nearly 4x the other three combined. Traced every `scipy` import in the codebase (6 call sites, 5 files) before assuming it was load-bearing everywhere | 4 of the 6 call sites **already had a working non-scipy fallback that was just never exercised**: `raw_tone_recovery.py`'s `_cap_max_edge_linear`/`apply_local_shadow_highlight_recovery_display` had `except ImportError` branches (PIL, or a "skip the feature" warning) that only existed because scipy was never guaranteed present in some earlier era of this codebase; `raw_detail_enhance.py`'s `_gaussian_blur_luma` already tried `cv2.GaussianBlur` *first*, falling back to `scipy.ndimage.gaussian_filter` only on an exception that never fires (cv2 is unconditionally available) -- the scipy branch was already dead code. `semantic_search.py`'s reverse-geocoder had a real, working brute-force fallback for when `scipy.spatial.cKDTree` isn't available, just implemented as a slow Python `for` loop. Only `raw_tone_curve.py`'s `scipy.interpolate.PchipInterpolator` (added in #19, this session) had no existing alternative | **Fixed — scipy dependency removed entirely.** (1) `raw_tone_recovery.py` (`_cap_max_edge_linear`, `apply_local_shadow_highlight_recovery_display`) and `raw_edit_pipeline.py` (`_tone_map_recovery_display`): `scipy.ndimage.zoom`/`gaussian_filter` replaced with `cv2.resize`/`cv2.GaussianBlur` as the sole path, no fallback branch needed since cv2 is a hard dependency already. Verified numerically against real scipy on synthetic data: `gaussian_filter` vs `cv2.GaussianBlur` differ by ~1e-7 in the interior (border-handling-only difference, confirmed by masking out a 10px edge); **`zoom` vs `cv2.resize` uncovered a real latent bug** in the old code -- `scipy.ndimage.zoom` with a non-integer scale factor zero-bled the last row/column of the upsampled recovery-preview image (confirmed: `zoom(...)[-1,-1]` returned `[0,0,0]` where the source's actual last-pixel value was `[0.327, 0.254, 0.399]`), while `cv2.resize` reproduces the true edge pixel exactly -- so this swap is a correctness fix, not just a dependency removal, for large images going through the recovery-tone-map downsample/upsample path. (2) `raw_detail_enhance.py`: deleted the unreachable scipy fallback branch, cv2 stays the only path (no behavior change, it was dead code). (3) `semantic_search.py`: replaced `cKDTree`-or-Python-loop with a single vectorized numpy nearest-neighbor (`(coords[:,0]-lat)**2 + (coords[:,1]-lon)**2` + `argmin`) -- measured **0.54ms** for a 200k-row synthetic city dataset, no hot loop, so the tree structure was solving a problem numpy already handles fast enough for a once-per-GPS-photo lookup. (4) `raw_tone_curve.py`: **`scipy.interpolate.PchipInterpolator` replaced with a from-scratch pure-numpy monotone cubic Hermite fit** (`_monotone_cubic_fit`, Fritsch-Carlson method) -- the one case with no existing alternative to fall back on. Verified against real scipy across 500+ random knot configurations plus this doc's own steep-then-plateau overshoot test case: max deviation **~1e-15** (float64 noise floor) once the endpoint tangent formula was corrected from a naive secant slope to scipy's actual one-sided 3-point estimator (caught during verification: the naive version diverged from scipy by up to 0.21 on some configurations -- confirmed the *interior* tangents already matched exactly, isolating the bug to the endpoint formula specifically). `pixi install` after removing `scipy` from `pixi.toml` resolves cleanly with no other package requiring it as a transitive dependency. **Net result**: site-packages dropped 635MB → 558MB (**-77MB**), and total growth since v2.5 across all 4 new packages is now ~20.4MB (tifffile 2.1 + pillow-heif 11 + lensfunpy 7.3) instead of ~97.4MB -- an ~79% reduction in this work's net contribution to installer size. 2 new/updated smoke tests: `test_monotone_cubic_fit_matches_scipy_pchip_reference_values` (hand-verified reference values and tangents locked in, since scipy is no longer present in this suite's environment to compare against directly) and the existing point-curve tests (unchanged, now exercising `_monotone_cubic_fit` transparently through `_fit_point_curve`) all still pass |
 
 | 22 | Follow-up: "how about the lite version?" -- checking whether the Lite build profile (`build.py --profile lite`, no AI/semantic search) was affected the same way surfaced a much more serious, currently-shipping bug, found by actually inspecting the built `.app` bundles rather than trusting `pixi.toml`: `dist/RAWviewer.app` and `dist/RAWviewer_Lite.app` (built before this fix) contained **zero cv2 files**. `build.py`'s PyInstaller command line has `--exclude-module cv2` for every macOS build (Full and Lite, unconditional -- not gated by profile), added in a pre-v2.5 commit (`4826883`, "remove unused pyqtgraph and exclude unused modules") when cv2 genuinely was unused. The scene-linear Adjust panel added after v2.5 (`raw_edit_pipeline.py`, `raw_chroma_denoise.py`, `raw_detail_enhance.py`, `raw_hsl.py`, `raw_lens_correction.py`) imports cv2 unconditionally, but nobody updated this exclude when that landed. Separately, Windows Lite's bundled pixi manifest (`_WINDOWS_LITE_PIXI_SKIP`) explicitly stripped `opencv-python-headless` from the Lite install, for the same stale reason (correct when cv2 was AI-search-only, wrong now that it's core). On top of that, `build.py`'s `install_dependencies()` (which populates `rawviewer_env` before a macOS PyInstaller run) never listed `opencv-python-headless`, `tifffile`, or `lensfunpy` at all in its base package list -- confirmed by checking the actual `rawviewer_env` on this machine, which was missing both `tifffile` and `lensfunpy` | Direct, load-bearing evidence, not inference: `find dist/RAWviewer.app -iname "cv2*"` and the Lite equivalent both returned nothing before the fix. This means **opening the Adjust panel in any macOS build (Full or Lite), or using it after a Windows Lite install, would crash with `ModuleNotFoundError: No module named 'cv2'`** the instant any control that touches cv2 runs -- Saturation/Vibrance, Chroma/Luma NR, Sharpness/Clarity, Defringe, HSL, and the new lens correction all qualify, so in practice nearly every Adjust panel action. Entirely invisible from this session's dev-mode testing (`pixi run python3 ...` / plain `python3 ...`), since it's a PyInstaller-packaging-only defect | **Fixed and verified with two real, from-scratch PyInstaller builds** (not just a code review): removed `--exclude-module cv2` from the macOS build command, removed `opencv-python-headless` from `_WINDOWS_LITE_PIXI_SKIP`, and added `opencv-python-headless`/`tifffile`/`lensfunpy` to `install_dependencies()`'s base package list (also removing the now-redundant Windows-only `opencv-python-headless` append, folded into the base list). Ran `python3 build.py --profile lite` and `--profile full` end-to-end on this machine: both completed, both bundles were confirmed to actually contain `cv2.abi3.so`, `lensfunpy` (including its full `db_files/` lens-profile database -- checked specifically, since a missing database would make `has_lens_profile()` always return `False` and silently disable the feature) and `tifffile` (verified via `pyi-archive_viewer` since pure-Python modules live inside the compressed `PYZ` archive, not as loose files), and correctly did **not** contain scipy. Both `.app` bundles were then actually launched (`Contents/MacOS/RAWviewer[_Lite]`, backgrounded, killed after 6s) and stayed up through full startup logging with no import crash. Final verified sizes: **`RAWviewer_Lite.app` 242MB, `RAWviewer.app` 250MB** (both up from a stale, incorrectly-built ~157-166MB baseline that was silently missing cv2 the whole time -- not a valid comparison point). Size breakdown of the Lite build's `Frameworks/` shows **cv2 alone is 116MB, by far the single largest component** (more than 2.5x PyQt6's 40MB) -- this is a real, necessary, unavoidable cost of correctly bundling a dependency the app has needed since just after v2.5, not new bloat to trim; `opencv-python-headless` (already the slimmer no-GUI variant) doesn't have a meaningfully smaller equivalent for the cv2 API surface this app actually uses (bilateral/Gaussian filtering, resize/remap, HSV conversion, Sobel, warp). No smoke tests apply here (this is a packaging/build-script fix, not pixel math); verification was the two real builds themselves, which is a stronger check for this class of bug than a unit test would be |
+
+| 23 | User report: "the tone curve update is slow." Benchmarked at the documented 2000x3000 preview size and found the tone curve isn't uniquely slow -- dragging **Contrast2012 alone, no curve at all**, already costs ~567ms/tick through the real `PreviewStageCache` path; the curve only adds ~120ms on top of that. This is the same pre-existing limitation as #18/#3: `PreviewStageCache` can only skip stages that *didn't* change, it can't make the stage that *did* change (WB/denoise/PV2012-tone, for any "upstream" control: Contrast, Highlights, Shadows, Whites, Blacks, tone curve, recovery baseline) cheaper -- that compute is genuinely necessary, not a caching gap. At ~550-700ms/tick, every one of those controls sits far past the 80ms throttle, so the displayed preview visibly lags behind the cursor while dragging | Direct comparison at 2000x3000 via `render_adjust_preview_uint8` + `PreviewStageCache`: Contrast2012 alone ~567ms/tick, Contrast2012+tone-curve ~691ms/tick. Downsampling the same tick's input to a ~1000px-longest-edge copy (`cv2.resize`, `INTER_AREA`) dropped it to ~56ms/tick -- comfortably inside the throttle window, a ~10x reduction | **Implemented** -- a second, independent "fast" edit base + `PreviewStageCache` (`_adjust_preview_base_rgb_fast`, `_adjust_preview_stage_cache_fast`, `_make_fast_preview_base()` in `main.py`), built once per file alongside the existing full-res base (same reset points, no extra invalidation logic needed). `_apply_adjust_panel_preview()` gained a `full_quality` parameter: the one caller that represents continuous/throttled live dragging (`_on_adjust_panel_preview_changed`) stays at the default `full_quality=False` (uses the fast base+cache); every other caller -- initial file load, the "Use recovery look" button, and a new call added to `_on_adjust_panel_editing_finished` that fires once the drag/click gesture settles -- explicitly passes `full_quality=True` (full base+cache), so the displayed image snaps back to full detail the moment the user stops adjusting. The busy/dirty request-coalescing logic already used for throttling (`_adjust_preview_busy`/`_adjust_preview_dirty`) gained a paired `_adjust_preview_dirty_full_quality` flag, OR-combined across queued requests, so a full-quality settle request arriving while a fast tick is still in flight can't get silently downgraded back to fast quality when the queue drains. Verified end-to-end with a tracking stand-in for `_AdjustPreviewWorker`: a live-drag tick is confirmed to use the fast base+cache, a settle request queued behind a busy fast tick is confirmed to still resolve to the full base+cache once that tick finishes, and the real `_make_fast_preview_base` produces a 667x1000 uint16 array from a 2000x3000 uint16 input (dtype preserved, so it flows through the identical `render_adjust_preview_uint8` code path as the full-res base -- no special-casing needed) while leaving already-small images untouched. Re-ran the same 2000x3000 benchmark through the actual production function and confirmed ~55ms/tick for the fast path. Full existing smoke suite re-verified passing (this change touches only `main.py`'s preview-request plumbing, not pipeline math, so `scripts/phase_develop_adjust_linear.py` itself needed no new tests) |
+
+| 24 | User report: toggling Compare on, then moving the tone curve, makes the *original* (left) side of the split view appear to "zoom in". Root cause was a direct regression from #23's fast-preview path, found the same day: `GpuImageView.set_pixmap()` updates `self._img_w`/`_img_h` from whatever pixmap it's just been given, and `_update_compare_overlay()` crops the *original* comparison pixmap using coordinates computed from those same `_img_w`/`_img_h`. While dragging with Compare on, #23's fast/downsampled preview pixmap (e.g. 667x1000) would arrive and shrink `_img_w`/`_img_h` to match it -- but the stored *original* pixmap was still full-resolution (e.g. 2000x3000), so the crop then took only the small fraction of the full-res original that the shrunk coordinates pointed at, stretching that corner across the divider -- exactly the "zoomed in" symptom | Reproduced the mechanism by inspection (not just theory): with a 2000x3000 original and a 667x1000 live pixmap arriving, `split_x = split_frac * _img_w` computes a pixel count sized for the *small* frame (e.g. 333 at a 0.5 split), then `src.copy(0, 0, 333, ...)` crops only the leftmost 333 of the original's 2000 columns -- 16.6% of its true width -- and displays that as if it were half the comparison, i.e. zoomed in | **Fixed** -- `_on_adjust_panel_preview_changed` now checks `gv.is_compare_mode()` and forces `full_quality=True` whenever Compare is active, so the live-drag pixmap is always full-resolution while comparing and `_img_w`/`_img_h` can never diverge from the stored original's actual size. Trades away the #23 speedup specifically for the Compare-mode combination (accepted: Compare is a deliberate "check my work" mode, not continuous editing, and showing a resolution-mismatched comparison would be actively misleading, worse than being temporarily slower). Verified with a tracking stand-in for `_AdjustPreviewWorker`: the same live-drag call now resolves to the full base+cache when `is_compare_mode()` is true and the fast base+cache when it's false, confirming the two states are correctly distinguished |
 
 Numbers were captured with `raw_edit_pipeline.process_linear_edit_buffer` +
 `linear_to_display_uint8` directly (no Qt/GUI thread involved); see the
@@ -1048,5 +1211,56 @@ term to be aware of when bundling, but not a blocker. See the "Lens profile
 correction" section below for the implementation. Geometric distortion only
 (the "aspect correction" originally asked about) — vignetting/TCA correction
 (lensfunpy supports both) are not wired up, a possible future extension.
+
+---
+
+### G. Per-channel R/G/B tone curves
+
+**Finding.** Deferred (2026-07-05): user asked to keep the single RGB tone
+curve for now rather than add separate R/G/B channel curves. Worth
+recording why this isn't a small variation on the existing curve, for
+whoever picks it up later.
+
+The current point tone curve and all PV2012 sliders are deliberately
+**hue-preserving**: `apply_pv2012_tone_rgb` computes one scalar ratio per
+pixel from luminance alone and multiplies all three channels by that same
+ratio (`out = img * ratio[..., newaxis]`) — this is exactly what keeps tone
+edits from shifting color, and was the property this doc's PV2012 bug hunts
+(#9, #10, #16) were protecting.
+
+A per-channel curve (`R' = curveR(R)`, `G' = curveG(G)`, `B' = curveB(B)`
+applied independently) is a fundamentally different operation: once the
+three curves diverge, the ratio *between* channels changes per-pixel in a
+curve-shaped way, which does shift hue/saturation — usually on purpose
+(this is how "teal shadows, orange highlights" film-look grades are built).
+It sits between what the existing tone curve does and what HSL
+(`raw_hsl.py`) does: HSL shifts hue/saturation directly in HSV space for
+8 selected hue bands; a per-channel curve shifts hue/saturation as a
+side-effect of independent per-channel tone shaping. Different mechanism,
+different creative purpose, not a superset/subset of either existing tool.
+
+**Feasibility.** Moderate-to-large, not because the curve math is hard —
+the PCHIP fitting machinery already built (`_monotone_cubic_fit`,
+`sample_point_curve_for_display` in `raw_tone_curve.py`) is generic over
+any point list and directly reusable per channel with no new correctness
+risk — but because of everything around it: (1) where it composes in the
+pipeline (before or after the existing hue-preserving ratio stage — after,
+as a final grade on top of tone-corrected output, is the sane choice, but
+that's a new stage at a specific point, not a reused slot); (2) UI — 3 more
+curve graphs or a channel-switcher on the existing widget (color-coded
+R/G/B tabs); (3) XMP — 3 new point-array fields (Lightroom's own schema has
+separate `ToneCurveRed`/`Green`/`Blue` sequences alongside the master
+curve, so the shape is known, just needs replicating ×3, not invented from
+scratch).
+
+**Suggestion.** If picked up later: reuse `_monotone_cubic_fit`/
+`sample_point_curve_for_display` as-is per channel (no new math), compose
+the per-channel stage *after* the existing hue-preserving ratio (so it
+reads as an intentional grading step on top of corrected tone, not tangled
+into the ratio math itself), and mirror Lightroom's `ToneCurveRed`/`Green`/
+`Blue` XMP field naming for compatibility with sidecars written by either
+app. Scope this as its own task — it touches pipeline placement, UI, and
+XMP simultaneously, so it doesn't fit as a quick add-on to the existing
+curve.
 
 ---

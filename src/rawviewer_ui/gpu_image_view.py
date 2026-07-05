@@ -368,6 +368,14 @@ class GpuImageView(QGraphicsView):
         self._has_pixmap = True
         self._grid_item.set_grid(new_w, new_h, self._grid_mode)
         self._update_placeholder()
+        if self._compare_active and (new_w, new_h) != (old_w, old_h):
+            # The compare-with-original crop/divider are computed from _img_w/_img_h
+            # (see _update_compare_overlay); resync them whenever the displayed edited
+            # pixmap's size changes while comparing, so a resolution swap (e.g. the
+            # native-resolution preview being replaced by the Adjust panel's own,
+            # differently-sized render) can never leave the overlay cropped against a
+            # stale size until the user happens to toggle Compare off and back on.
+            self._update_compare_overlay()
 
         if self._fit_mode or not capture:
             if self._fit_mode and not getattr(self, "_zoom_intent_100", False):
@@ -794,7 +802,7 @@ class GpuImageView(QGraphicsView):
             if hasattr(host, "handle_pointer_for_filmstrip"):
                 host.handle_pointer_for_filmstrip(event.globalPosition())
 
-        if self._compare_active:
+        if self._compare_active and not self._color_pick_mode:
             pos = event.position().toPoint()
             if self._compare_dragging_divider:
                 if event.buttons() & Qt.MouseButton.LeftButton:
