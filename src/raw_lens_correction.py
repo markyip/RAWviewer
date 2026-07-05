@@ -136,6 +136,22 @@ def has_lens_profile(exif_data: Optional[dict]) -> bool:
         return False
 
 
+def get_lens_profile_name(exif_data: Optional[dict]) -> str:
+    """Return the matched lens model name if a lensfun profile exists, otherwise empty string."""
+    try:
+        key = lens_profile_key_from_exif(exif_data)
+        if key is None:
+            return ""
+        cam, lens = _find_camera_and_lens(
+            key["camera_make"], key["camera_model"], key["lens_make"], key["lens_model"]
+        )
+        if cam is not None and lens is not None:
+            return str(lens.model)
+    except Exception:
+        pass
+    return ""
+
+
 def _pixel_format_for(dtype) -> type:
     if dtype == np.uint16:
         return np.uint16

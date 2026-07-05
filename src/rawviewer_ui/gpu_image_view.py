@@ -22,7 +22,7 @@ import sys
 from typing import Any
 
 from PyQt6.QtCore import Qt, QRect, QRectF, QPoint, QPointF, pyqtSignal, QEvent, QMimeData, QUrl, QEventLoop
-from PyQt6.QtGui import QKeyEvent, QPixmap, QPainter, QColor, QPen, QDrag
+from PyQt6.QtGui import QKeyEvent, QPixmap, QPainter, QColor, QPen, QDrag, QBrush
 from PyQt6.QtWidgets import (
     QGraphicsView,
     QGraphicsScene,
@@ -36,6 +36,32 @@ from PyQt6.QtWidgets import (
 
 from rawviewer_ui.composition_grid import CompositionGridGraphicsItem
 from rawviewer_ui.widgets import stamp_rawviewer_export_drag
+
+
+class CompareHandleItem(QGraphicsEllipseItem):
+    """A custom comparison view split divider handle.
+    It renders a prominent white circle with a dark border, and draws two vertical
+    grip lines in the center to clearly convey that it can be dragged.
+    """
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAcceptHoverEvents(True)
+
+    def paint(self, painter: QPainter, option, widget=None) -> None:
+        super().paint(painter, option, widget)
+        rect = self.rect()
+        cx = rect.center().x()
+        cy = rect.center().y()
+        h = rect.height()
+        
+        # Pen for white vertical grip lines
+        pen = QPen(QColor(255, 255, 255, 200), 1.2)
+        painter.setPen(pen)
+        
+        offset = 2.0
+        line_h = h * 0.4
+        painter.drawLine(QPointF(cx - offset, cy - line_h / 2.0), QPointF(cx - offset, cy + line_h / 2.0))
+        painter.drawLine(QPointF(cx + offset, cy - line_h / 2.0), QPointF(cx + offset, cy + line_h / 2.0))
 
 
 def _env_true(name: str) -> bool:
@@ -131,7 +157,7 @@ class GpuImageView(QGraphicsView):
         self._compare_divider_line.hide()
         self._scene.addItem(self._compare_divider_line)
 
-        self._compare_divider_handle = QGraphicsEllipseItem()
+        self._compare_divider_handle = CompareHandleItem()
         self._compare_divider_handle.setZValue(14)
         self._compare_divider_handle.setPen(QPen(QColor(255, 255, 255, 220), 1.5))
         self._compare_divider_handle.setBrush(QColor(0, 0, 0, 140))
@@ -736,6 +762,13 @@ class GpuImageView(QGraphicsView):
         src = self._compare_original_pixmap
         if src.isNull():
             return
+        if src.width() != self._img_w or src.height() != self._img_h:
+            src = src.scaled(
+                self._img_w,
+                self._img_h,
+                Qt.AspectRatioMode.IgnoreAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
         split_x = int(round(self._compare_divider_scene_x()))
         split_x = max(0, min(self._img_w, split_x))
         if split_x <= 0:
@@ -749,7 +782,7 @@ class GpuImageView(QGraphicsView):
             self._compare_overlay_item.show()
         self._compare_divider_line.setLine(split_x, 0, split_x, self._img_h)
         self._compare_divider_line.show()
-        handle_r = 7.0
+        handle_r = 12.0
         self._compare_divider_handle.setRect(
             split_x - handle_r, self._img_h / 2.0 - handle_r, handle_r * 2, handle_r * 2
         )
@@ -761,7 +794,7 @@ class GpuImageView(QGraphicsView):
             return False
         scene_x = self._compare_divider_scene_x()
         divider_view_x = self.mapFromScene(QPointF(scene_x, 0)).x()
-        return abs(view_pos.x() - divider_view_x) <= 8
+        return abs(view_pos.x() - divider_view_x) <= 16
 
     def _set_compare_split_from_view_x(self, view_x: int) -> None:
         scene_pt = self.mapToScene(QPoint(view_x, 0))

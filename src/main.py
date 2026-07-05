@@ -1741,7 +1741,7 @@ from rawviewer_app.viewer.session_mixin import SessionMixin
 
 
 class _AdjustEditBaseSignals(QObject):
-    finished = pyqtSignal(str, object, bool)  # file_path, ndarray|None, lens_profile_available
+    finished = pyqtSignal(str, object, bool, str)  # file_path, ndarray|None, lens_profile_available, lens_profile_name
 
 
 class _AdjustPreviewSignals(QObject):
@@ -1899,6 +1899,7 @@ class _AdjustEditBaseWorker(QRunnable):
     def run(self) -> None:
         base = None
         has_lens_profile = False
+        lens_profile_name = ""
         try:
             from unified_image_processor import UnifiedImageProcessor
 
@@ -1910,9 +1911,13 @@ class _AdjustEditBaseWorker(QRunnable):
                 apply_lens_correction=self.apply_lens_correction,
             )
             has_lens_profile = processor.lens_profile_available(self.file_path)
+            if has_lens_profile:
+                from raw_lens_correction import get_lens_profile_name
+                exif_data = processor.exif_extractor.extract_exif_data(self.file_path)
+                lens_profile_name = get_lens_profile_name(exif_data)
         except Exception:
             base = None
-        self.signals.finished.emit(self.file_path, base, has_lens_profile)
+        self.signals.finished.emit(self.file_path, base, has_lens_profile, lens_profile_name)
 
 
 class _AdjustExportSignals(QObject):
@@ -4397,6 +4402,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
 
     def _filmstrip_handles_input(self) -> bool:
         if getattr(self, "view_mode", "single") != "single":
+            return False
+        if getattr(self, "_adjust_overlay_visible", False):
             return False
         bar = self._filmstrip_bar()
         if bar is None or not bar.isVisible() or not bar.isEnabled():
@@ -18210,12 +18217,18 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 self._disable_raw_recovery()
             if getattr(self, "_search_panel_expanded", False):
                 self._set_search_panel_expanded(False, animate=False)
+        bar = self._filmstrip_bar()
         if self._adjust_overlay_visible and self._single_view_has_display_image():
             panel.setVisible(True)
             self._sync_adjust_panel_for_current_file()
             path = getattr(self, "current_file_path", None)
             if path:
                 self._begin_adjust_editing_session(path)
+            if bar is not None:
+                bar.setEnabled(False)
+                container = getattr(self, "single_view_container", None)
+                if container is not None and hasattr(container, "set_filmstrip_pointer_active"):
+                    container.set_filmstrip_pointer_active(False)
         else:
             gv = getattr(self, "gpu_view", None)
             if gv is not None and gv.is_color_pick_mode():
@@ -18226,6 +18239,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 self._adjust_preview_base_rgb_fast = None
                 self._adjust_edit_base_path = None
                 self._reset_adjust_compare_state()
+            if bar is not None:
+                bar.setEnabled(True)
         container = getattr(self, "single_view_container", None)
         if container is not None and hasattr(container, "relayout_adjust"):
             container.relayout_adjust()
@@ -18262,6 +18277,19 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 getattr(self, "_adjust_preview_base_rgb", None) is not None
                 and norm == getattr(self, "_adjust_edit_base_path", None)
             ):
+                # Cached base: immediately fetch and display lens status
+                try:
+                    from unified_image_processor import UnifiedImageProcessor
+                    processor = UnifiedImageProcessor()
+                    has_profile = processor.lens_profile_available(path)
+                    profile_name = ""
+                    if has_profile:
+                        from raw_lens_correction import get_lens_profile_name
+                        exif_data = processor.exif_extractor.extract_exif_data(path)
+                        profile_name = get_lens_profile_name(exif_data)
+                    panel.set_lens_correction_available(has_profile, profile_name)
+                except Exception:
+                    pass
                 self._apply_adjust_panel_preview(full_quality=True)
 
     def _refresh_adjust_panel_for_navigation(self, file_path: str | None = None) -> None:
@@ -18390,14 +18418,14 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         )
         QThreadPool.globalInstance().start(worker)
 
-    def _on_adjust_edit_base_ready(self, file_path: str, base, has_lens_profile: bool) -> None:
+    def _on_adjust_edit_base_ready(self, file_path: str, base, has_lens_profile: bool, lens_profile_name: str) -> None:
         norm = _norm_path(file_path)
         self._adjust_edit_base_loading_norm = None
         if norm != _norm_path(getattr(self, "current_file_path", "") or ""):
             return
         panel = getattr(self, "single_image_adjust_panel", None)
         if panel is not None:
-            panel.set_lens_correction_available(has_lens_profile)
+            panel.set_lens_correction_available(has_lens_profile, lens_profile_name)
         if base is None or not hasattr(base, "shape"):
             if hasattr(self, "status_bar"):
                 self.status_bar.showMessage(
@@ -18410,6 +18438,12 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         if panel is not None and panel.isVisible():
             self._pending_adjust_preview = dict(panel.get_adjustments())
             self._apply_adjust_panel_preview(full_quality=True)
+            
+            # Kick off compare pre-render asynchronously
+            worker = _AdjustCompareOriginalWorker(
+                file_path, base, self._adjust_compare_original_signals
+            )
+            QThreadPool.globalInstance().start(worker)
         if hasattr(self, "status_bar"):
             h, w = base.shape[0], base.shape[1]
             self.status_bar.showMessage(
@@ -18682,9 +18716,12 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self._adjust_compare_original_pixmap = pixmap
         self._adjust_compare_original_path = _norm_path(file_path)
         gv.set_compare_original_pixmap(pixmap)
-        gv.set_compare_mode(True)
-        if hasattr(self, "status_bar"):
-            self.status_bar.clearMessage()
+        
+        is_compare_active = panel is not None and getattr(panel, "_compare_btn", None) is not None and panel._compare_btn.isChecked()
+        if is_compare_active:
+            gv.set_compare_mode(True)
+            if hasattr(self, "status_bar"):
+                self.status_bar.clearMessage()
 
     def _on_adjust_lens_correction_toggled(self, checked: bool) -> None:
         """Re-decode the edit base with/without lens-profile correction baked in.
@@ -26113,7 +26150,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             QEvent.Type.MouseMove,
             QEvent.Type.HoverMove,
             QEvent.Type.Enter,
-        ) and getattr(self, "view_mode", "single") == "single":
+        ) and getattr(self, "view_mode", "single") == "single" and not getattr(self, "_adjust_overlay_visible", False):
             container = getattr(self, "single_view_container", None)
             gpu_view = getattr(self, "gpu_view", None)
             filmstrip_targets = (

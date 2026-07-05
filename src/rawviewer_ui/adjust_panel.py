@@ -38,7 +38,7 @@ from raw_tone_curve import TONE_CURVE_SERIAL_KEY
 # Point-curve + parametric PV rows.
 _SHOW_TONE_CURVE_UI = True
 # HSL section — hidden pending a saturation/vibrance review (see docs).
-_SHOW_HSL_UI = False
+_SHOW_HSL_UI = True
 
 if _SHOW_TONE_CURVE_UI:
     from rawviewer_ui.tone_curve_widget import ToneCurveEditorRow, ToneCurveWidget
@@ -86,6 +86,75 @@ class AdjustValueLabel(QLabel):
             event.accept()
             return
         super().mousePressEvent(event)
+
+
+class CollapsibleSection(QWidget):
+    """A clean, Lightroom-style collapsible accordion section for PyQt6."""
+    def __init__(self, title: str, parent=None):
+        super().__init__(parent)
+        self._expanded = True
+        
+        main_layout = QVBoxLayout()
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
+        self.setLayout(main_layout)
+        
+        # Header button/panel
+        self.header = QWidget()
+        self.header.setObjectName("accordion_header")
+        self.header.setStyleSheet("""
+            QWidget#accordion_header {
+                background-color: #242424;
+                border-top: 1px solid #2e2e2e;
+                border-bottom: 1px solid #2e2e2e;
+            }
+        """)
+        header_layout = QHBoxLayout(self.header)
+        header_layout.setContentsMargins(12, 8, 12, 8)
+        header_layout.setSpacing(8)
+        
+        # Arrow label
+        self.arrow = QLabel("▼")
+        self.arrow.setStyleSheet("color: #888888; font-size: 10px; font-weight: bold;")
+        header_layout.addWidget(self.arrow)
+        
+        # Title label
+        self.title_lbl = QLabel(title.upper())
+        self.title_lbl.setStyleSheet("""
+            color: #A0A0A0; 
+            font-size: 10px; 
+            font-weight: 700; 
+            letter-spacing: 1px;
+        """)
+        header_layout.addWidget(self.title_lbl, 1)
+        
+        # Enable clicking on header
+        self.header.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.header.mousePressEvent = self._on_header_pressed
+        
+        main_layout.addWidget(self.header)
+        
+        # Content container
+        self.content = QWidget()
+        self.content_layout = QVBoxLayout(self.content)
+        self.content_layout.setContentsMargins(12, 8, 12, 8)
+        self.content_layout.setSpacing(10)
+        main_layout.addWidget(self.content)
+        
+    def _on_header_pressed(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.set_expanded(not self._expanded)
+            
+    def set_expanded(self, expanded: bool) -> None:
+        self._expanded = bool(expanded)
+        self.content.setVisible(self._expanded)
+        self.arrow.setText("▼" if self._expanded else "▶")
+        
+    def add_widget(self, widget: QWidget) -> None:
+        self.content_layout.addWidget(widget)
+
+    def add_layout(self, layout: QHBoxLayout | QVBoxLayout) -> None:
+        self.content_layout.addLayout(layout)
 
 
 class AdjustSlider(QSlider):
@@ -226,6 +295,7 @@ class ImageAdjustPanelWidget(QWidget):
         self._block_emit = False
         self._as_shot_temperature = float(DEFAULT_ADJUSTMENTS["Temperature"])
         self._recovery_baseline = False
+        self._current_hsl_color = HSL_COLOR_NAMES[0]
         self._hsl_cache: Dict[str, float] = {
             k: float(v)
             for k, v in DEFAULT_ADJUSTMENTS.items()
@@ -389,25 +459,59 @@ class ImageAdjustPanelWidget(QWidget):
         layout.addWidget(hint)
 
         self._tone_curve_row = None
-        _SECTION_KEYS = {
-            "ParametricShadows": "Tone curve",
-            "LuminanceNoiseReduction": "Noise",
-        }
 
+        # Build Collapsible Sections
+        self.sect_light = CollapsibleSection("Light")
+        self.sect_color = CollapsibleSection("Color / WB")
+        
+        self.sect_curve = CollapsibleSection("Tone Curve")
+        if not _SHOW_TONE_CURVE_UI:
+            self.sect_curve.hide()
+            
+        self.sect_hsl = CollapsibleSection("HSL / Color Mixer")
+        if not _SHOW_HSL_UI:
+            self.sect_hsl.hide()
+            
+        self.sect_detail = CollapsibleSection("Detail / Correction")
+
+        # Add Collapsible Sections to main scroll layout
+        layout.addWidget(self.sect_light)
+        layout.addWidget(self.sect_color)
+        layout.addWidget(self.sect_curve)
+        layout.addWidget(self.sect_hsl)
+        layout.addWidget(self.sect_detail)
+
+        # Build tone curve editor row inside the curve section first
+        if _SHOW_TONE_CURVE_UI:
+            self._tone_curve_row = ToneCurveEditorRow()
+            self._tone_curve_row.points_changed.connect(self._on_tone_curve_changed)
+            self._tone_curve_row.editing_finished.connect(self._on_tone_curve_finished)
+            self.sect_curve.add_widget(self._tone_curve_row)
+
+        # Build HSL mixer inside the HSL section
+        if _SHOW_HSL_UI:
+            self._build_hsl_section(self.sect_hsl.content_layout)
+
+        # Loop through sliders and assign to sections
         for spec in SLIDER_SPECS:
             if not _SHOW_TONE_CURVE_UI and spec.key in _PARAMETRIC_TONE_KEYS:
                 continue
-            if spec.key in _SECTION_KEYS:
-                sec = QLabel(_SECTION_KEYS[spec.key])
-                sec.setStyleSheet("color: #909090; font-size: 10px; font-weight: 600; margin-top: 4px;")
-                layout.addWidget(sec)
-            if _SHOW_TONE_CURVE_UI and spec.key == "ParametricShadows":
-                self._tone_curve_row = ToneCurveEditorRow()
-                self._tone_curve_row.points_changed.connect(self._on_tone_curve_changed)
-                self._tone_curve_row.editing_finished.connect(self._on_tone_curve_finished)
-                layout.addWidget(self._tone_curve_row)
-            if _SHOW_HSL_UI and spec.key == "Sharpness":
-                self._build_hsl_section(layout)
+                
+            # Determine target section
+            if spec.key in {"Exposure2012", "Contrast2012", "Highlights2012", "Shadows2012", "Whites2012", "Blacks2012"}:
+                target_sect = self.sect_light
+            elif spec.key in {"Temperature", "Tint", "Saturation", "Vibrance"}:
+                target_sect = self.sect_color
+            elif spec.key in {"ParametricShadows", "ParametricDarks", "ParametricLights", "ParametricHighlights"}:
+                target_sect = self.sect_curve
+            elif spec.key in {"Sharpness", "Clarity2012", "Defringe", "LuminanceNoiseReduction"}:
+                target_sect = self.sect_detail
+            else:
+                target_sect = None
+                
+            if target_sect is None:
+                continue
+
             row = QHBoxLayout()
             row.setSpacing(6)
             name_lbl = QLabel(spec.label)
@@ -426,10 +530,6 @@ class ImageAdjustPanelWidget(QWidget):
             if gradient is not None:
                 slider.set_track_gradient(gradient)
             if spec.key == "Temperature":
-                # Absolute Kelvin, not a -X..+X offset -- 0 isn't in range, so
-                # the fill's reference point has to be the as-shot value
-                # (this file's own neutral), not a literal zero. Kept in sync
-                # in set_adjustments() as as-shot temperature is per-file.
                 slider.set_center_value(self._as_shot_temperature)
                 self._temperature_slider = slider
             slider.sliderMoved.connect(
@@ -447,6 +547,8 @@ class ImageAdjustPanelWidget(QWidget):
 
             val_lbl = AdjustValueLabel()
             val_lbl.setProperty("class", "adjust_slider_value")
+            val_lbl.setStyleSheet("color: #B0B0B0; font-size: 11px;")
+            val_lbl.setMinimumWidth(32)
             val_lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             val_lbl.setToolTip("Click to reset")
             val_lbl.clicked.connect(lambda k=spec.key: self._reset_slider(k))
@@ -455,10 +557,11 @@ class ImageAdjustPanelWidget(QWidget):
             if spec.key == "Temperature":
                 self._build_wb_picker_button(row)
 
-            layout.addLayout(row)
+            target_sect.add_layout(row)
             self._sliders[spec.key] = slider
             self._value_labels[spec.key] = val_lbl
 
+        # Chroma NR
         nr_row = QHBoxLayout()
         nr_row.setSpacing(6)
         nr_label = QLabel("Chroma NR")
@@ -473,14 +576,30 @@ class ImageAdjustPanelWidget(QWidget):
         self._nr_btn.setToolTip("Chroma-only bilateral denoise (luminance preserved)")
         self._nr_btn.toggled.connect(self._on_nr_toggled)
         nr_row.addWidget(self._nr_btn, 1)
-        layout.addLayout(nr_row)
+        self.sect_detail.add_layout(nr_row)
 
+        # Lens correction
         self._lens_correction_row = QHBoxLayout()
         self._lens_correction_row.setSpacing(6)
+        
+        lbl_vbox = QVBoxLayout()
+        lbl_vbox.setSpacing(1)
+        lbl_vbox.setContentsMargins(0, 0, 0, 0)
+        
         lens_label = QLabel("Lens correction")
         lens_label.setStyleSheet("color: #B0B0B0; font-size: 11px;")
-        lens_label.setMinimumWidth(72)
-        self._lens_correction_row.addWidget(lens_label)
+        lbl_vbox.addWidget(lens_label)
+        
+        self._lens_profile_lbl = QLabel("")
+        self._lens_profile_lbl.setStyleSheet("color: #808080; font-size: 10px;")
+        self._lens_profile_lbl.setWordWrap(True)
+        lbl_vbox.addWidget(self._lens_profile_lbl)
+        
+        lbl_container = QWidget()
+        lbl_container.setLayout(lbl_vbox)
+        lbl_container.setMinimumWidth(72)
+        
+        self._lens_correction_row.addWidget(lbl_container)
         self._lens_correction_btn = QPushButton("Off")
         self._lens_correction_btn.setObjectName("adjust_nr_btn")
         self._lens_correction_btn.setCheckable(True)
@@ -494,8 +613,9 @@ class ImageAdjustPanelWidget(QWidget):
         self._lens_correction_row_widget = QWidget()
         self._lens_correction_row_widget.setLayout(self._lens_correction_row)
         self._lens_correction_row_widget.hide()  # shown only once a profile match is confirmed
-        layout.addWidget(self._lens_correction_row_widget)
+        self.sect_detail.add_widget(self._lens_correction_row_widget)
 
+        # Recovery look button
         self._recovery_btn = QPushButton("Use recovery look")
         self._recovery_btn.setObjectName("adjust_recovery_btn")
         self._recovery_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
@@ -505,7 +625,7 @@ class ImageAdjustPanelWidget(QWidget):
             "Turns off P recovery preview if active."
         )
         self._recovery_btn.clicked.connect(self._on_recovery_baseline_clicked)
-        layout.addWidget(self._recovery_btn)
+        self.sect_detail.add_widget(self._recovery_btn)
 
         export_btn = QPushButton("Export…")
         export_btn.setObjectName("adjust_export_btn")
@@ -637,10 +757,6 @@ class ImageAdjustPanelWidget(QWidget):
         self._emit_preview_and_save()
 
     def _build_hsl_section(self, layout: QVBoxLayout) -> None:
-        sec = QLabel("HSL")
-        sec.setStyleSheet("color: #909090; font-size: 10px; font-weight: 600; margin-top: 4px;")
-        layout.addWidget(sec)
-
         color_row = QHBoxLayout()
         color_row.setSpacing(6)
         color_lbl = QLabel("Color")
@@ -707,23 +823,28 @@ class ImageAdjustPanelWidget(QWidget):
             if val_lbl is not None:
                 val_lbl.setText(f"{int(round(val)):+.0f}")
 
-    def _flush_hsl_cache_from_sliders(self) -> None:
+    def _flush_hsl_cache_from_sliders(self, color: str | None = None) -> None:
         if not hasattr(self, "_hsl_sliders"):
             return
-        color = self._hsl_color_name()
+        c = color or getattr(self, "_current_hsl_color", self._hsl_color_name())
         for channel in ("Hue", "Saturation", "Luminance"):
             slider = self._hsl_sliders.get(channel)
             if slider is None:
                 continue
-            self._hsl_cache[self._hsl_key(channel, color)] = float(slider.value())
+            self._hsl_cache[self._hsl_key(channel, c)] = float(slider.value())
 
     def _on_hsl_color_changed(self, _index: int) -> None:
         if self._block_emit:
             return
-        self._flush_hsl_cache_from_sliders()
+        prev_color = getattr(self, "_current_hsl_color", HSL_COLOR_NAMES[0])
+        self._flush_hsl_cache_from_sliders(prev_color)
+        
+        new_color = self._hsl_color_name()
+        self._current_hsl_color = new_color
+        
         self._block_emit = True
         try:
-            self._load_hsl_sliders_from_adj(self._hsl_cache)
+            self._load_hsl_sliders_from_adj(self._hsl_cache, new_color)
         finally:
             self._block_emit = False
 
@@ -780,6 +901,7 @@ class ImageAdjustPanelWidget(QWidget):
             for key in self._hsl_cache:
                 self._hsl_cache[key] = float(merged.get(key, 0.0))
             if hasattr(self, "_hsl_sliders"):
+                self._current_hsl_color = self._hsl_color_name()
                 self._load_hsl_sliders_from_adj(self._hsl_cache)
             self.set_recovery_baseline(
                 float(merged.get(RECOVERY_BASELINE_KEY, 0.0)) > 0.5
@@ -804,22 +926,36 @@ class ImageAdjustPanelWidget(QWidget):
         btn.setChecked(bool(on))
         btn.setText("On" if on else "Off")
         btn.blockSignals(False)
+        
+        lbl = getattr(self, "_lens_profile_lbl", None)
+        if lbl is not None:
+            name = lbl.text().replace(" (Applied)", "").strip()
+            if name:
+                if on:
+                    lbl.setText(f"{name} (Applied)")
+                    lbl.setStyleSheet("color: #90CAF9; font-size: 10px; font-weight: 500;")
+                else:
+                    lbl.setText(name)
+                    lbl.setStyleSheet("color: #808080; font-size: 10px;")
 
-    def set_lens_correction_available(self, available: bool) -> None:
-        """Show/hide the toggle -- called once a lensfun profile match (or
-        lack of one) is confirmed for the current file's camera+lens."""
+    def set_lens_correction_available(self, available: bool, profile_name: str = "") -> None:
+        """Show/hide the toggle and display the matched lens profile name."""
         row = getattr(self, "_lens_correction_row_widget", None)
         if row is not None:
             row.setVisible(bool(available))
+        lbl = getattr(self, "_lens_profile_lbl", None)
+        if lbl is not None:
+            lbl.setText(profile_name if available else "")
         if not available:
             self._set_lens_correction_checked(False)
+        else:
+            btn = getattr(self, "_lens_correction_btn", None)
+            self._set_lens_correction_checked(btn is not None and btn.isChecked())
 
     def _on_lens_correction_toggled(self, checked: bool) -> None:
         if self._block_emit:
             return
-        btn = getattr(self, "_lens_correction_btn", None)
-        if btn is not None:
-            btn.setText("On" if checked else "Off")
+        self._set_lens_correction_checked(checked)
         self.lens_correction_toggled.emit(bool(checked))
         self.editing_finished.emit(self.get_adjustments())
 
@@ -879,7 +1015,8 @@ class ImageAdjustPanelWidget(QWidget):
     def _schedule_live_preview(self) -> None:
         if self._block_emit:
             return
-        self._preview_timer.start(self._PREVIEW_THROTTLE_MS)
+        if not self._preview_timer.isActive():
+            self._preview_timer.start(self._PREVIEW_THROTTLE_MS)
 
     def _on_tone_curve_changed(self) -> None:
         if self._block_emit:
@@ -1002,6 +1139,11 @@ class ImageAdjustPanelWidget(QWidget):
             or k.startswith("LuminanceAdjustment")
         }
         self._set_nr_checked(False)
+        self._current_hsl_color = HSL_COLOR_NAMES[0]
+        if hasattr(self, "_hsl_color_combo"):
+            self._hsl_color_combo.blockSignals(True)
+            self._hsl_color_combo.setCurrentIndex(0)
+            self._hsl_color_combo.blockSignals(False)
         if self._tone_curve_row is not None:
             self._tone_curve_row.reset_linear()
         self._clear_recovery_baseline()

@@ -33,21 +33,18 @@ def _rgb_to_hsv(rgb: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
 
     bgr = np.clip(rgb[..., ::-1], 0.0, 1.0).astype(np.float32)
     hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
-    h = hsv[:, :, 0].astype(np.float32) * 2.0  # 0–360
-    s = hsv[:, :, 1].astype(np.float32) / 255.0
-    v = hsv[:, :, 2].astype(np.float32) / 255.0
+    h = hsv[:, :, 0].copy()
+    s = hsv[:, :, 1].copy()
+    v = hsv[:, :, 2].copy()
     return h, s, v
 
 
 def _hsv_to_rgb(h: np.ndarray, s: np.ndarray, v: np.ndarray) -> np.ndarray:
     import cv2
 
-    h8 = np.clip(h / 2.0, 0.0, 179.0).astype(np.uint8)
-    s8 = np.clip(s * 255.0, 0.0, 255.0).astype(np.uint8)
-    v8 = np.clip(v * 255.0, 0.0, 255.0).astype(np.uint8)
-    hsv = np.stack([h8, s8, v8], axis=-1)
+    hsv = np.stack([np.clip(h, 0.0, 360.0), np.clip(s, 0.0, 1.0), np.clip(v, 0.0, 1.0)], axis=-1)
     bgr = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
-    return np.clip(bgr[..., ::-1].astype(np.float32), 0.0, 1.0)
+    return np.clip(bgr[..., ::-1], 0.0, 1.0)
 
 
 def _hue_distance(h: np.ndarray, center: float) -> np.ndarray:
