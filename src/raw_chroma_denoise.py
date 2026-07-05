@@ -47,6 +47,49 @@ def _bilateral_channel(channel: np.ndarray, sigma_color: float, *, preview: bool
     )
 
 
+def apply_guided_filter(guide: np.ndarray, src: np.ndarray, r: int, eps: float) -> np.ndarray:
+    """
+    Fast O(N) Guided Filter using float32 cv2.boxFilter.
+    """
+    import cv2
+    
+    r = int(round(r))
+    if r < 1:
+        return src
+        
+    g_f32 = guide.astype(np.float32)
+    s_f32 = src.astype(np.float32)
+    
+    ksize = (2 * r + 1, 2 * r + 1)
+    mean_I = cv2.boxFilter(g_f32, -1, ksize)
+    mean_p = cv2.boxFilter(s_f32, -1, ksize)
+    mean_Ip = cv2.boxFilter(g_f32 * s_f32, -1, ksize)
+    cov_Ip = mean_Ip - mean_I * mean_p
+    
+    mean_II = cv2.boxFilter(g_f32 * g_f32, -1, ksize)
+    var_I = mean_II - mean_I * mean_I
+    
+    a = cov_Ip / (var_I + eps)
+    b = mean_p - a * mean_I
+    
+    mean_a = cv2.boxFilter(a, -1, ksize)
+    mean_b = cv2.boxFilter(b, -1, ksize)
+    
+    return mean_a * g_f32 + mean_b
+
+
+def _denoise_channel(channel: np.ndarray, sigma_color: float, *, method: int = 0, preview: bool) -> np.ndarray:
+    """Filter a single channel using bilateral (0) or guided filter (1)."""
+    if method == 1:
+        r = 2 + int(round(sigma_color * 50.0))
+        if preview:
+            r = max(1, r // 2)
+        eps = float(sigma_color ** 2)
+        return apply_guided_filter(channel, channel, r, eps)
+    else:
+        return _bilateral_channel(channel, sigma_color, preview=preview)
+
+
 def _downsample_blur_upsample(channel: np.ndarray, factor: int, blur_sigma: float) -> np.ndarray:
     """
     Chroma-subsampling-style noise reduction: shrink, blur, grow back.
@@ -89,6 +132,7 @@ def apply_chroma_denoise(
     rgb_linear: np.ndarray,
     *,
     strength: float = 1.0,
+    method: int = 0,
     preview: bool = False,
 ) -> np.ndarray:
     """
@@ -112,8 +156,8 @@ def apply_chroma_denoise(
     s = min(strength, 1.5)
 
     sigma_color = 0.03 + s * 0.08
-    cb_fine = _bilateral_channel(cb, sigma_color, preview=preview)
-    cr_fine = _bilateral_channel(cr, sigma_color, preview=preview)
+    cb_fine = _denoise_channel(cb, sigma_color, method=method, preview=preview)
+    cr_fine = _denoise_channel(cr, sigma_color, method=method, preview=preview)
 
     # factor/blur_sigma/coarse_mix were tuned against a synthetic edge test
     # (a hard red|blue boundary) to keep bleed within ~4px of a real edge at
@@ -140,6 +184,7 @@ def apply_luma_denoise(
     rgb_linear: np.ndarray,
     *,
     strength: float = 1.0,
+    method: int = 0,
     preview: bool = False,
 ) -> np.ndarray:
     """
@@ -159,7 +204,7 @@ def apply_luma_denoise(
     if preview:
         strength *= 0.55
     sigma_color = 0.015 + min(strength, 1.0) * 0.05
-    y_d = _bilateral_channel(y, sigma_color, preview=preview)
+    y_d = _denoise_channel(y, sigma_color, method=method, preview=preview)
     return np.clip(_ycbcr_to_rgb(y_d, cb, cr), 0.0, None)
 
 

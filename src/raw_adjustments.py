@@ -38,6 +38,7 @@ DEFAULT_ADJUSTMENTS: Dict[str, float] = {
     # unified_image_processor.decode_raw_edit_base), not a per-tick pipeline
     # adjustment -- see raw_lens_correction.py.
     "LensCorrectionEnabled": 0.0,
+    "DenoiseMethod": 0.0,
 }
 
 from raw_hsl import HSL_COLOR_NAMES  # noqa: E402

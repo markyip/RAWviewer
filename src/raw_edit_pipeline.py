@@ -176,16 +176,17 @@ def process_linear_edit_buffer(
 
     do_denoise = chroma_denoise if chroma_denoise is not None else chroma_denoise_enabled()
     nr_amount = float(merged.get("ColorNoiseReduction", 0.0))
+    method = int(float(merged.get("DenoiseMethod", 0.0)))
     if nr_amount > 1e-4:
         img = apply_chroma_denoise(
-            img, strength=min(1.5, nr_amount / 100.0 * 1.25), preview=preview
+            img, strength=min(1.5, nr_amount / 100.0 * 1.25), method=method, preview=preview
         )
     elif do_denoise and not preview:
-        img = apply_chroma_denoise(img, preview=False)
+        img = apply_chroma_denoise(img, method=method, preview=False)
 
     luma_nr_amount = float(merged.get("LuminanceNoiseReduction", 0.0))
     if luma_nr_amount > 1e-4:
-        img = apply_luma_denoise(img, strength=luma_nr_amount / 100.0, preview=preview)
+        img = apply_luma_denoise(img, strength=luma_nr_amount / 100.0, method=method, preview=preview)
 
     if not uses_recovery_tone_map(merged):
         img = apply_pv2012_tone_rgb(img, merged)
@@ -226,6 +227,7 @@ _PRE_TONE_KEYS = (
     "Exposure2012",
     "ColorNoiseReduction",
     "LuminanceNoiseReduction",
+    "DenoiseMethod",
 )
 
 # Every key uses_recovery_tone_map() and apply_pv2012_tone_rgb() read, so the
@@ -311,16 +313,17 @@ def process_linear_edit_buffer_staged(
 
             do_denoise = chroma_denoise if chroma_denoise is not None else chroma_denoise_enabled()
             nr_amount = float(merged.get("ColorNoiseReduction", 0.0))
+            method = int(float(merged.get("DenoiseMethod", 0.0)))
             if nr_amount > 1e-4:
                 img = apply_chroma_denoise(
-                    img, strength=min(1.5, nr_amount / 100.0 * 1.25), preview=preview
+                    img, strength=min(1.5, nr_amount / 100.0 * 1.25), method=method, preview=preview
                 )
             elif do_denoise and not preview:
-                img = apply_chroma_denoise(img, preview=False)
+                img = apply_chroma_denoise(img, method=method, preview=False)
 
             luma_nr_amount = float(merged.get("LuminanceNoiseReduction", 0.0))
             if luma_nr_amount > 1e-4:
-                img = apply_luma_denoise(img, strength=luma_nr_amount / 100.0, preview=preview)
+                img = apply_luma_denoise(img, strength=luma_nr_amount / 100.0, method=method, preview=preview)
 
             cache.stage_out["pre_tone"] = img
             cache.stage_keys["pre_tone"] = pre_key

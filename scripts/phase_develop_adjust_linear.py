@@ -226,6 +226,26 @@ def test_luma_nr_slider_registered_and_applies_in_pipeline() -> None:
     assert not np.array_equal(out, base)
 
 
+def test_guided_filter_denoise() -> None:
+    from raw_chroma_denoise import apply_chroma_denoise, apply_luma_denoise, _rgb_to_ycbcr
+
+    rng = np.random.default_rng(7)
+    flat = rng.normal(0.5, 0.05, (32, 32, 3)).astype(np.float32)
+    
+    # Test Chroma Guided Filter
+    out_chroma = apply_chroma_denoise(flat.copy(), strength=1.0, method=1, preview=False)
+    _, cb_noisy, cr_noisy = _rgb_to_ycbcr(flat)
+    _, cb_clean, cr_clean = _rgb_to_ycbcr(out_chroma)
+    assert np.std(cb_clean) < np.std(cb_noisy)
+    assert np.std(cr_clean) < np.std(cr_noisy)
+    
+    # Test Luma Guided Filter
+    out_luma = apply_luma_denoise(flat.copy(), strength=1.0, method=1, preview=False)
+    y_noisy, _, _ = _rgb_to_ycbcr(flat)
+    y_clean, _, _ = _rgb_to_ycbcr(out_luma)
+    assert np.std(y_clean) < np.std(y_noisy)
+
+
 def test_shadow_lift_no_extreme_green_shift() -> None:
     dark = np.zeros((32, 32, 3), dtype=np.uint16)
     dark[:, :, 0] = 200
@@ -1073,6 +1093,7 @@ def main() -> int:
     test_point_curve_display_matches_applied_lut()
     test_lens_profile_key_from_exif()
     test_lens_correction_gates_and_corrects_only_known_profiles()
+    test_guided_filter_denoise()
     print("adjust linear pipeline: OK")
     return 0
 

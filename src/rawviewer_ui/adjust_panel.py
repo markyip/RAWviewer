@@ -578,6 +578,35 @@ class ImageAdjustPanelWidget(QWidget):
         nr_row.addWidget(self._nr_btn, 1)
         self.sect_detail.add_layout(nr_row)
 
+        # Denoise Method Row
+        method_row = QHBoxLayout()
+        method_row.setSpacing(6)
+        method_lbl = QLabel("NR Method")
+        method_lbl.setStyleSheet("color: #B0B0B0; font-size: 11px;")
+        method_lbl.setMinimumWidth(72)
+        method_row.addWidget(method_lbl)
+        
+        self._denoise_method_combo = QComboBox()
+        self._denoise_method_combo.addItems(["Bilateral", "Guided Filter"])
+        self._denoise_method_combo.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._denoise_method_combo.currentIndexChanged.connect(self._on_denoise_method_changed)
+        self._denoise_method_combo.setStyleSheet("""
+            QComboBox {
+                background-color: #2D2D2D;
+                border: 1px solid #444;
+                border-radius: 3px;
+                color: #DDD;
+                font-size: 11px;
+                padding: 2px 6px;
+            }
+            QComboBox::drop-down {
+                border: none;
+                width: 14px;
+            }
+        """)
+        method_row.addWidget(self._denoise_method_combo, 1)
+        self.sect_detail.add_layout(method_row)
+
         # Lens correction
         self._lens_correction_row = QHBoxLayout()
         self._lens_correction_row.setSpacing(6)
@@ -906,6 +935,12 @@ class ImageAdjustPanelWidget(QWidget):
             self.set_recovery_baseline(
                 float(merged.get(RECOVERY_BASELINE_KEY, 0.0)) > 0.5
             )
+            # Load denoise method combo index
+            method_idx = int(float(merged.get("DenoiseMethod", 0.0)))
+            if hasattr(self, "_denoise_method_combo"):
+                self._denoise_method_combo.blockSignals(True)
+                self._denoise_method_combo.setCurrentIndex(min(1, max(0, method_idx)))
+                self._denoise_method_combo.blockSignals(False)
         finally:
             self._block_emit = False
 
@@ -987,6 +1022,8 @@ class ImageAdjustPanelWidget(QWidget):
                 out[key] = float(val)
         if self._recovery_baseline:
             out[RECOVERY_BASELINE_KEY] = 1.0
+        if hasattr(self, "_denoise_method_combo"):
+            out["DenoiseMethod"] = float(self._denoise_method_combo.currentIndex())
         return out
 
     def _on_nr_toggled(self, checked: bool) -> None:
@@ -1102,6 +1139,11 @@ class ImageAdjustPanelWidget(QWidget):
             return
         self._emit_preview_and_save()
 
+    def _on_denoise_method_changed(self, index: int) -> None:
+        if self._block_emit:
+            return
+        self._emit_preview_and_save()
+
     def _reset_slider(self, key: str) -> None:
         spec = next((s for s in SLIDER_SPECS if s.key == key), None)
         if spec is None:
@@ -1146,6 +1188,10 @@ class ImageAdjustPanelWidget(QWidget):
             self._hsl_color_combo.blockSignals(False)
         if self._tone_curve_row is not None:
             self._tone_curve_row.reset_linear()
+        if hasattr(self, "_denoise_method_combo"):
+            self._denoise_method_combo.blockSignals(True)
+            self._denoise_method_combo.setCurrentIndex(0)
+            self._denoise_method_combo.blockSignals(False)
         self._clear_recovery_baseline()
         self.reset_requested.emit()
         self._emit_preview_and_save()
