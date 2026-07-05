@@ -593,15 +593,47 @@ class ImageAdjustPanelWidget(QWidget):
         self._denoise_method_combo.setStyleSheet("""
             QComboBox {
                 background-color: #2D2D2D;
-                border: 1px solid #444;
+                border: 1px solid #555;
                 border-radius: 3px;
                 color: #DDD;
                 font-size: 11px;
-                padding: 2px 6px;
+                padding: 2px 22px 2px 6px;
+                selection-background-color: #4A4A4A;
             }
             QComboBox::drop-down {
-                border: none;
-                width: 14px;
+                subcontrol-origin: padding;
+                subcontrol-position: top right;
+                width: 18px;
+                border-left: 1px solid #555;
+                border-top-right-radius: 3px;
+                border-bottom-right-radius: 3px;
+                background-color: #383838;
+            }
+            QComboBox::down-arrow {
+                image: none;
+                width: 0;
+                height: 0;
+                border-left: 4px solid transparent;
+                border-right: 4px solid transparent;
+                border-top: 5px solid #AAA;
+            }
+            QComboBox QAbstractItemView {
+                background-color: #2D2D2D;
+                border: 1px solid #555;
+                color: #DDD;
+                selection-background-color: #4A6080;
+                selection-color: #FFF;
+                outline: none;
+                font-size: 11px;
+                padding: 2px;
+            }
+            QComboBox QAbstractItemView::item {
+                min-height: 22px;
+                padding: 2px 6px;
+            }
+            QComboBox QAbstractItemView::item:hover {
+                background-color: #3A4A5A;
+                color: #FFF;
             }
         """)
         method_row.addWidget(self._denoise_method_combo, 1)
