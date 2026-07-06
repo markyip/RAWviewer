@@ -79,9 +79,6 @@ def gpu_demosaic_pytorch_unpacked(unpacked, device_str: str = "cuda", cancel_che
     # Apply dcraw scale_colors exactly: (raw - black) * (scale_mul / 65535.0), clipped to [0, 1]
     # We iterate over the 2x2 CFA pattern offsets to apply per-channel scaling
     for (dy, dx), ci in np.ndenumerate(unpacked.pattern):
-        if cancel_check is not None and cancel_check():
-            raise Exception("DecodeCancelled")
-            
         slc = (slice(dy, None, 2), slice(dx, None, 2))
         black_val = float(unpacked.black[ci])
         scale_val = float(unpacked.scale_mul[ci] / 65535.0)
@@ -89,9 +86,6 @@ def gpu_demosaic_pytorch_unpacked(unpacked, device_str: str = "cuda", cancel_che
         # Clamp after scale guarantees [0.0, 1.0] and handles highlights properly
         raw_norm[slc] = torch.clamp((raw_tensor[slc] - black_val) * scale_val, 0.0, 1.0)
         
-    if cancel_check is not None and cancel_check():
-        raise Exception("DecodeCancelled")
-
     # Map the CFA string to Kornia's enum. 
     # Note: Kornia's naming expects the 2x2 block starting at the origin.
     cfa_map = {
@@ -111,9 +105,6 @@ def gpu_demosaic_pytorch_unpacked(unpacked, device_str: str = "cuda", cancel_che
     # Squeeze and permute to (H, W, 3)
     rgb_tensor = rgb_tensor.squeeze(0).permute(1, 2, 0)
     
-    if cancel_check is not None and cancel_check():
-        raise Exception("DecodeCancelled")
-
     # 4. Apply Color Matrix Multiplication (maps sensor RGB directly to sRGB space)
     m_color_tensor = torch.from_numpy(unpacked.rgb_cam).to(device)
     rgb_srgb = torch.matmul(rgb_tensor, m_color_tensor.t())
@@ -164,18 +155,12 @@ def gpu_demosaic_cupy_unpacked(unpacked, cancel_check: Optional[Callable[[], boo
     raw_norm = cp.empty_like(raw_gpu)
     
     for (dy, dx), ci in np.ndenumerate(unpacked.pattern):
-        if cancel_check is not None and cancel_check():
-            raise Exception("DecodeCancelled")
-            
         slc = (slice(dy, None, 2), slice(dx, None, 2))
         black_val = float(unpacked.black[ci])
         scale_val = float(unpacked.scale_mul[ci] / 65535.0)
         
         # Clamp to [0, 1]
         raw_norm[slc] = cp.clip((raw_gpu[slc] - black_val) * scale_val, 0.0, 1.0)
-
-    if cancel_check is not None and cancel_check():
-        raise Exception("DecodeCancelled")
 
     if unpacked.pat_str != "RGGB":
         raise ValueError(f"CuPy demosaic currently only supports RGGB, got {unpacked.pat_str}")
@@ -230,9 +215,6 @@ def gpu_demosaic_cupy_unpacked(unpacked, cancel_check: Optional[Callable[[], boo
     
     demosaic_kernel(raw_norm, h, w, rgb_gpu)
     
-    if cancel_check is not None and cancel_check():
-        raise Exception("DecodeCancelled")
-
     # Apply Color Matrix Multiplication
     m_color_gpu = cp.array(unpacked.rgb_cam, dtype=cp.float32)
     rgb_srgb = cp.dot(rgb_gpu, m_color_gpu.T)
@@ -282,6 +264,10 @@ def try_gpu_decode_from_unpacked(
         
     global _GPU_LOCK
     with _GPU_LOCK:
+        if cancel_check is not None and cancel_check():
+            from fast_raw_decode import DecodeCancelled
+            raise DecodeCancelled(unpacked.file_path)
+            
         t_start = time.time()
         try:
             if backend == "cupy" and unpacked.pat_str != "RGGB":
