@@ -100,7 +100,7 @@ class GpuImageView(QGraphicsView):
     _FIT_SCALE_EPS = 1.002  # treat within ~0.2% of fit as fit-to-window
     _shortcut_handler: Any
 
-    def __init__(self, parent=None, background="#1E1E1E"):
+    def __init__(self, parent=None, background="#14120F"):
         # Attributes read from event()/viewportEvent() must exist before super().__init__()
         # because Qt may deliver events during construction.
         self._fit_mode = True

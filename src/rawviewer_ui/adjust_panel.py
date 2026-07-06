@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Callable, Dict
 
-from PyQt6.QtCore import QRectF, Qt, QSize, QTimer, pyqtSignal
+from PyQt6.QtCore import QRectF, Qt, QSettings, QSize, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QCursor, QIcon, QLinearGradient, QPainter, QPen
 from PyQt6.QtWidgets import (
     QApplication,
@@ -57,8 +57,8 @@ _PARAMETRIC_TONE_KEYS = frozenset(
 # the saturated hues a web mockup can get away with) so it reads as a subtle
 # cue under the solid accent fill, not a second, competing signal.
 _SLIDER_TRACK_GRADIENTS: dict[str, list[tuple[float, str]]] = {
-    "Temperature": [(0.0, "#4A73B5"), (0.5, "#3A3A3A"), (1.0, "#C98A46")],
-    "Tint": [(0.0, "#4A9B5E"), (0.5, "#3A3A3A"), (1.0, "#B457A0")],
+    "Temperature": [(0.0, "#4A73B5"), (0.5, "#3A332A"), (1.0, "#C98A46")],
+    "Tint": [(0.0, "#4A9B5E"), (0.5, "#3A332A"), (1.0, "#B457A0")],
 }
 
 
@@ -89,25 +89,37 @@ class AdjustValueLabel(QLabel):
         super().mousePressEvent(event)
 
 
+_SECTION_EXPANDED_SETTINGS_PREFIX = "adjust_panel/section_expanded/"
+
+
 class CollapsibleSection(QWidget):
-    """A clean, Lightroom-style collapsible accordion section for PyQt6."""
-    def __init__(self, title: str, parent=None):
+    """A clean, Lightroom-style collapsible accordion section for PyQt6.
+
+    When constructed with a ``settings_key``, the expanded/collapsed state
+    persists across sessions (QSettings) -- so a user who never touches HSL
+    doesn't have to keep collapsing it every time they open the editor.
+    """
+    def __init__(self, title: str, parent=None, *, settings_key: str | None = None):
         super().__init__(parent)
-        self._expanded = True
-        
+        self._settings_key = settings_key
+        self._expanded = self._load_expanded_default()
+
         main_layout = QVBoxLayout()
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(0)
         self.setLayout(main_layout)
-        
+
         # Header button/panel
         self.header = QWidget()
         self.header.setObjectName("accordion_header")
         self.header.setStyleSheet("""
             QWidget#accordion_header {
-                background-color: #242424;
-                border-top: 1px solid #2e2e2e;
-                border-bottom: 1px solid #2e2e2e;
+                background-color: #272219;
+                border-top: 1px solid #3A332A;
+                border-bottom: 1px solid #3A332A;
+            }
+            QWidget#accordion_header:hover {
+                background-color: #302A1F;
             }
         """)
         header_layout = QHBoxLayout(self.header)
@@ -116,13 +128,13 @@ class CollapsibleSection(QWidget):
         
         # Arrow label
         self.arrow = QLabel("▼")
-        self.arrow.setStyleSheet("color: #888888; font-size: 10px; font-weight: bold;")
+        self.arrow.setStyleSheet("color: #665D50; font-size: 10px; font-weight: bold;")
         header_layout.addWidget(self.arrow)
         
         # Title label
         self.title_lbl = QLabel(title.upper())
         self.title_lbl.setStyleSheet("""
-            color: #A0A0A0; 
+            color: #96897A; 
             font-size: 10px; 
             font-weight: 700; 
             letter-spacing: 1px;
@@ -134,23 +146,41 @@ class CollapsibleSection(QWidget):
         self.header.mousePressEvent = self._on_header_pressed
         
         main_layout.addWidget(self.header)
-        
+
         # Content container
         self.content = QWidget()
         self.content_layout = QVBoxLayout(self.content)
         self.content_layout.setContentsMargins(12, 8, 12, 8)
         self.content_layout.setSpacing(10)
         main_layout.addWidget(self.content)
-        
+
+        self.content.setVisible(self._expanded)
+        self.arrow.setText("▼" if self._expanded else "▶")
+
+    def _load_expanded_default(self) -> bool:
+        if not self._settings_key:
+            return True
+        return bool(
+            QSettings("RAWviewer", "RAWviewer").value(
+                _SECTION_EXPANDED_SETTINGS_PREFIX + self._settings_key,
+                True,
+                type=bool,
+            )
+        )
+
     def _on_header_pressed(self, event) -> None:
         if event.button() == Qt.MouseButton.LeftButton:
             self.set_expanded(not self._expanded)
-            
+
     def set_expanded(self, expanded: bool) -> None:
         self._expanded = bool(expanded)
         self.content.setVisible(self._expanded)
         self.arrow.setText("▼" if self._expanded else "▶")
-        
+        if self._settings_key:
+            QSettings("RAWviewer", "RAWviewer").setValue(
+                _SECTION_EXPANDED_SETTINGS_PREFIX + self._settings_key, self._expanded
+            )
+
     def add_widget(self, widget: QWidget) -> None:
         self.content_layout.addWidget(widget)
 
@@ -184,7 +214,7 @@ class AdjustSlider(QSlider):
         self.setMouseTracking(True)
         self._center_value: float | None = None  # None -> auto (0 if bipolar, else minimum)
         self._track_gradient: list[tuple[float, str]] | None = None
-        self._accent = QColor("#90CAF9")
+        self._accent = QColor("#D9691E")
 
     def set_center_value(self, value: float | None) -> None:
         """Override the fill's zero/reference point (e.g. as-shot Temperature
@@ -194,7 +224,7 @@ class AdjustSlider(QSlider):
         self.update()
 
     def set_track_gradient(self, stops: list[tuple[float, str]] | None) -> None:
-        """stops: [(0.0, '#4080ff'), (0.5, '#3a3a3a'), (1.0, '#ffb040')] --
+        """stops: [(0.0, '#4080ff'), (0.5, '#3A332A'), (1.0, '#ffb040')] --
         a dim always-visible hint of what direction does what, independent
         of the solid accent fill drawn on top for the actual value."""
         self._track_gradient = stops
@@ -249,7 +279,7 @@ class AdjustSlider(QSlider):
                 grad.setColorAt(pos, QColor(color_str))
             painter.setBrush(grad)
         else:
-            painter.setBrush(QColor("#3A3A3A"))
+            painter.setBrush(QColor("#3A332A"))
         painter.drawRoundedRect(track_rect, 2, 2)
 
         value_x = self._handle_center_x(self.value(), QRectF(groove), handle.width(), opt.upsideDown)
@@ -339,16 +369,16 @@ class ImageAdjustPanelWidget(QWidget):
                 border-left: 1px solid #333333;
             }
             QLabel#adjust_panel_title {
-                color: #E0E0E0;
+                color: #EDE7DD;
                 font-size: 13px;
                 font-weight: 600;
             }
             QLabel.adjust_slider_label {
-                color: #888888;
+                color: #665D50;
                 font-size: 11px;
             }
             QLabel.adjust_slider_value {
-                color: #E0E0E0;
+                color: #EDE7DD;
                 font-size: 11px;
                 min-width: 44px;
             }
@@ -356,7 +386,7 @@ class ImageAdjustPanelWidget(QWidget):
                 color: #3a8ac8;
             }
             QPushButton#adjust_reset_btn {
-                color: #B0B0B0;
+                color: #96897A;
                 font-size: 11px;
                 border: none;
                 background: transparent;
@@ -366,7 +396,7 @@ class ImageAdjustPanelWidget(QWidget):
                 color: #FFFFFF;
             }
             QPushButton#adjust_export_btn {
-                color: #90CAF9;
+                color: #D9691E;
                 font-size: 11px;
                 border: 1px solid rgba(144, 202, 249, 80);
                 border-radius: 4px;
@@ -378,12 +408,12 @@ class ImageAdjustPanelWidget(QWidget):
                 color: #FFFFFF;
             }
             QPushButton#adjust_export_btn:disabled {
-                color: #606060;
+                color: #665D50;
                 border-color: rgba(255, 255, 255, 20);
                 background: transparent;
             }
             QPushButton#adjust_nr_btn {
-                color: #B0B0B0;
+                color: #96897A;
                 font-size: 11px;
                 border: 1px solid rgba(255, 255, 255, 35);
                 border-radius: 4px;
@@ -391,7 +421,7 @@ class ImageAdjustPanelWidget(QWidget):
                 padding: 4px 8px;
             }
             QPushButton#adjust_nr_btn:checked {
-                color: #90CAF9;
+                color: #D9691E;
                 border-color: rgba(144, 202, 249, 90);
                 background: rgba(144, 202, 249, 30);
             }
@@ -475,7 +505,7 @@ class ImageAdjustPanelWidget(QWidget):
 
         # Build Collapsible Sections
         self.histogram_widget = histogram_widget
-        self.sect_histogram = CollapsibleSection("Histogram")
+        self.sect_histogram = CollapsibleSection("Histogram", settings_key="histogram")
         if self.histogram_widget:
             # Add some styling wrapper or just add it directly
             # Set minimum height for the histogram
@@ -484,18 +514,18 @@ class ImageAdjustPanelWidget(QWidget):
         else:
             self.sect_histogram.hide()
 
-        self.sect_light = CollapsibleSection("Light")
-        self.sect_color = CollapsibleSection("Color / WB")
-        
-        self.sect_curve = CollapsibleSection("Tone Curve")
+        self.sect_light = CollapsibleSection("Light", settings_key="light")
+        self.sect_color = CollapsibleSection("Color / WB", settings_key="color")
+
+        self.sect_curve = CollapsibleSection("Tone Curve", settings_key="curve")
         if not _SHOW_TONE_CURVE_UI:
             self.sect_curve.hide()
-            
-        self.sect_hsl = CollapsibleSection("HSL / Color Mixer")
+
+        self.sect_hsl = CollapsibleSection("HSL / Color Mixer", settings_key="hsl")
         if not _SHOW_HSL_UI:
             self.sect_hsl.hide()
-            
-        self.sect_detail = CollapsibleSection("Detail / Correction")
+
+        self.sect_detail = CollapsibleSection("Detail / Correction", settings_key="detail")
 
         # Add Collapsible Sections to main scroll layout
         layout.addWidget(self.sect_histogram)
@@ -522,8 +552,8 @@ class ImageAdjustPanelWidget(QWidget):
             
             seg_style = """
                 QPushButton {
-                    background: #2A2A2A;
-                    color: #B0B0B0;
+                    background: #272219;
+                    color: #96897A;
                     border: 1px solid #404040;
                     padding: 6px 12px;
                     font-size: 11px;
@@ -613,7 +643,7 @@ class ImageAdjustPanelWidget(QWidget):
             row.setSpacing(6)
             name_lbl = QLabel(spec.label)
             name_lbl.setProperty("class", "adjust_slider_label")
-            name_lbl.setStyleSheet("color: #B0B0B0; font-size: 11px;")
+            name_lbl.setStyleSheet("color: #96897A; font-size: 11px;")
             name_lbl.setMinimumWidth(72)
             row.addWidget(name_lbl)
 
@@ -644,7 +674,7 @@ class ImageAdjustPanelWidget(QWidget):
 
             val_lbl = AdjustValueLabel()
             val_lbl.setProperty("class", "adjust_slider_value")
-            val_lbl.setStyleSheet("color: #B0B0B0; font-size: 11px;")
+            val_lbl.setStyleSheet("color: #96897A; font-size: 11px;")
             val_lbl.setMinimumWidth(32)
             val_lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             val_lbl.setToolTip("Click to reset")
@@ -665,7 +695,7 @@ class ImageAdjustPanelWidget(QWidget):
         nr_row = QHBoxLayout()
         nr_row.setSpacing(6)
         nr_label = QLabel("Chroma NR")
-        nr_label.setStyleSheet("color: #B0B0B0; font-size: 11px;")
+        nr_label.setStyleSheet("color: #96897A; font-size: 11px;")
         nr_label.setMinimumWidth(72)
         nr_row.addWidget(nr_label)
         self._nr_btn = QPushButton("Off")
@@ -682,7 +712,7 @@ class ImageAdjustPanelWidget(QWidget):
         method_row = QHBoxLayout()
         method_row.setSpacing(6)
         method_lbl = QLabel("NR Method")
-        method_lbl.setStyleSheet("color: #B0B0B0; font-size: 11px;")
+        method_lbl.setStyleSheet("color: #96897A; font-size: 11px;")
         method_lbl.setMinimumWidth(72)
         method_row.addWidget(method_lbl)
         
@@ -721,7 +751,7 @@ class ImageAdjustPanelWidget(QWidget):
                 background-color: #2D2D2D;
                 border: 1px solid #555;
                 color: #DDD;
-                selection-background-color: #4A6080;
+                selection-background-color: #4A3826;
                 selection-color: #FFF;
                 outline: none;
                 font-size: 11px;
@@ -732,7 +762,7 @@ class ImageAdjustPanelWidget(QWidget):
                 padding: 2px 6px;
             }
             QComboBox QAbstractItemView::item:hover {
-                background-color: #3A4A5A;
+                background-color: #3A2E20;
                 color: #FFF;
             }
         """)
@@ -748,7 +778,7 @@ class ImageAdjustPanelWidget(QWidget):
         lbl_vbox.setContentsMargins(0, 0, 0, 0)
         
         lens_label = QLabel("Lens correction")
-        lens_label.setStyleSheet("color: #B0B0B0; font-size: 11px;")
+        lens_label.setStyleSheet("color: #96897A; font-size: 11px;")
         lbl_vbox.addWidget(lens_label)
         
         self._lens_profile_lbl = QLabel("")
@@ -791,7 +821,7 @@ class ImageAdjustPanelWidget(QWidget):
         db_row = QHBoxLayout()
         db_row.setSpacing(6)
         db_label = QLabel("Dodge/Burn")
-        db_label.setStyleSheet("color: #B0B0B0; font-size: 11px;")
+        db_label.setStyleSheet("color: #96897A; font-size: 11px;")
         db_label.setMinimumWidth(72)
         db_row.addWidget(db_label)
         self._dodge_btn = QPushButton("Dodge")
@@ -831,7 +861,7 @@ class ImageAdjustPanelWidget(QWidget):
         db_size_row = QHBoxLayout()
         db_size_row.setSpacing(6)
         db_size_lbl = QLabel("Brush Size")
-        db_size_lbl.setStyleSheet("color: #B0B0B0; font-size: 11px;")
+        db_size_lbl.setStyleSheet("color: #96897A; font-size: 11px;")
         db_size_lbl.setMinimumWidth(72)
         db_size_row.addWidget(db_size_lbl)
         self._db_size_slider = AdjustSlider(Qt.Orientation.Horizontal)
@@ -844,7 +874,7 @@ class ImageAdjustPanelWidget(QWidget):
         db_strength_row = QHBoxLayout()
         db_strength_row.setSpacing(6)
         db_strength_lbl = QLabel("Brush Strength")
-        db_strength_lbl.setStyleSheet("color: #B0B0B0; font-size: 11px;")
+        db_strength_lbl.setStyleSheet("color: #96897A; font-size: 11px;")
         db_strength_lbl.setMinimumWidth(72)
         db_strength_row.addWidget(db_strength_lbl)
         self._db_strength_slider = AdjustSlider(Qt.Orientation.Horizontal)
@@ -892,8 +922,8 @@ class ImageAdjustPanelWidget(QWidget):
             "Compare with original — split view; drag the divider."
             " Click again to exit."
         )
-        self._compare_icon_default = _qta_icon_safe("fa5s.columns", color="#B0B0B0")
-        self._compare_icon_active = _qta_icon_safe("fa5s.columns", color="#90CAF9")
+        self._compare_icon_default = _qta_icon_safe("fa5s.columns", color="#96897A")
+        self._compare_icon_active = _qta_icon_safe("fa5s.columns", color="#D9691E")
         btn.setIcon(self._compare_icon_default)
         btn.toggled.connect(self._on_compare_toggled)
         row.addWidget(btn)
@@ -940,8 +970,8 @@ class ImageAdjustPanelWidget(QWidget):
             "Pick white balance — click, then click a neutral gray/white area"
             " in the image. Esc cancels."
         )
-        self._wb_picker_icon_default = _qta_icon_safe("fa5s.eye-dropper", color="#B0B0B0")
-        self._wb_picker_icon_active = _qta_icon_safe("fa5s.eye-dropper", color="#90CAF9")
+        self._wb_picker_icon_default = _qta_icon_safe("fa5s.eye-dropper", color="#96897A")
+        self._wb_picker_icon_active = _qta_icon_safe("fa5s.eye-dropper", color="#D9691E")
         btn.setIcon(self._wb_picker_icon_default)
         btn.toggled.connect(self._on_wb_picker_toggled)
         row.addWidget(btn)
@@ -987,14 +1017,14 @@ class ImageAdjustPanelWidget(QWidget):
         color_row = QHBoxLayout()
         color_row.setSpacing(6)
         color_lbl = QLabel("Color")
-        color_lbl.setStyleSheet("color: #B0B0B0; font-size: 11px;")
+        color_lbl.setStyleSheet("color: #96897A; font-size: 11px;")
         color_lbl.setMinimumWidth(72)
         color_row.addWidget(color_lbl)
         self._hsl_color_combo = QComboBox()
         self._hsl_color_combo.setStyleSheet("""
             QComboBox {
-                color: #E0E0E0;
-                background-color: #2A2A2A;
+                color: #EDE7DD;
+                background-color: #272219;
                 border: 1px solid #404040;
                 border-radius: 4px;
                 padding: 2px 8px;
@@ -1015,7 +1045,7 @@ class ImageAdjustPanelWidget(QWidget):
             row = QHBoxLayout()
             row.setSpacing(6)
             name_lbl = QLabel(label)
-            name_lbl.setStyleSheet("color: #B0B0B0; font-size: 11px;")
+            name_lbl.setStyleSheet("color: #96897A; font-size: 11px;")
             name_lbl.setMinimumWidth(72)
             row.addWidget(name_lbl)
             slider = AdjustSlider(Qt.Orientation.Horizontal)
@@ -1182,7 +1212,7 @@ class ImageAdjustPanelWidget(QWidget):
             if name:
                 if on:
                     lbl.setText(f"{name} (Applied)")
-                    lbl.setStyleSheet("color: #90CAF9; font-size: 10px; font-weight: 500;")
+                    lbl.setStyleSheet("color: #D9691E; font-size: 10px; font-weight: 500;")
                 else:
                     lbl.setText(name)
                     lbl.setStyleSheet("color: #808080; font-size: 10px;")

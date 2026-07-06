@@ -862,7 +862,7 @@ from PyQt6.QtGui import (QPixmap, QImage, QAction, QKeySequence, QShortcut, QDra
 safe_print("PyQt6 imported successfully", flush=True)
 
 
-def _qta_icon(name: str, *, color: str = "#B0B0B0") -> QIcon:
+def _qta_icon(name: str, *, color: str = "#96897A") -> QIcon:
     """qtawesome icon with a stable PyQt6 QIcon type for the type checker."""
     if qta is None:
         return QIcon()
@@ -1743,6 +1743,7 @@ from rawviewer_app.signals import (
     WebpDecodeSignals,
 )
 from rawviewer_app.widgets import (
+    BottomRatingWidget,
     CustomConfirmDialog,
     CustomTitleBar,
     CustomWarningDialog,
@@ -4548,7 +4549,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
 
         container = QWidget()
         container.setObjectName("rawviewer_compare_container")
-        container.setStyleSheet("QWidget { background-color: #1E1E1E; }")
+        container.setStyleSheet("QWidget { background-color: #14120F; }")
         row = QHBoxLayout(container)
         row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(0)
@@ -4576,7 +4577,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self._compare_complete_banner = QLabel("", container)
         self._compare_complete_banner.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._compare_complete_banner.setStyleSheet(
-            "color: #E0E0E0; font-size: 15px; font-weight: 500; background: rgba(0,0,0,0.55);"
+            "color: #EDE7DD; font-size: 15px; font-weight: 500; background: rgba(0,0,0,0.55);"
             " padding: 12px 18px; border-radius: 8px;"
         )
         self._compare_complete_banner.hide()
@@ -4608,7 +4609,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         try:
             import qtawesome as qta
 
-            color = "#FFFFFF" if enabled else "#888888"
+            color = "#FFFFFF" if enabled else "#665D50"
             btn.blockSignals(True)
             btn.setChecked(enabled)
             btn.setIcon(_qta_icon("fa5s.layer-group", color=color))
@@ -4895,7 +4896,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 self.view_mode_button.setToolTip("Back to main gallery")
                 if qta is not None:
                     try:
-                        self.view_mode_button.setIcon(_qta_icon("fa5s.th", color="#B0B0B0"))
+                        self.view_mode_button.setIcon(_qta_icon("fa5s.th", color="#96897A"))
                         self.view_mode_button.setIconSize(QSize(20, 20))
                         self.view_mode_button.setText("")
                     except Exception:
@@ -7718,14 +7719,14 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         # Set simple background style (no rounded corners - simplifies window resizing)
         self.setStyleSheet("""
             QMainWindow {
-                background-color: #1E1E1E;
+                background-color: #14120F;
             }
             QToolTip {
-                color: #E0E0E0;
-                background-color: #2A2A2A;
-                border: 1px solid #444444;
+                color: #EDE7DD;
+                background-color: #302A1F;
+                border: 1px solid #3A332A;
                 border-radius: 4px;
-                padding: 0px;
+                padding: 4px 8px;
                 font-size: 12px;
             }
         """)
@@ -7841,11 +7842,11 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self.scroll_area.setStyleSheet("""
             QScrollArea {
                 border: none;
-                background-color: #1E1E1E;
+                background-color: #14120F;
             }
             QScrollArea > QWidget > QWidget {
                 border: none;
-                background-color: #1E1E1E;
+                background-color: #14120F;
             }
             /* Material Design 3 Scrollbar Styling */
             QScrollBar:vertical {
@@ -8049,13 +8050,14 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         main_layout.addWidget(self.single_view_splitter)
         self._init_compare_view(main_layout)
         QTimer.singleShot(800, self._show_edr_startup_status)
-        # --- Status bar with Material Design 3 styling ---
-        # Material Design 3 color scheme:
-        # - Surface: #1E1E1E (dark background)
-        # - On Surface: #E0E0E0 (primary text)
-        # - Surface Variant: #2A2A2A (elevated surface)
-        # - Outline: #2E2E2E (borders)
-        # - Secondary: #B0B0B0 (secondary text)
+        # --- Status bar: darkroom theme ---
+        # Warm-neutral dark palette (not blue-black) so the chrome doesn't
+        # bias color judgment of the photo next to it:
+        # - Void: #14120F (dark background)
+        # - Ink: #EDE7DD (primary text)
+        # - Raised: #272219 (elevated surface)
+        # - Line: #3A332A (borders)
+        # - Ink Muted: #96897A (secondary text)
         # Create status bar
         _status = self.statusBar()
         if _status is None:
@@ -8068,9 +8070,9 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         # Symmetric horizontal padding — was 20px right-only effective inset vs ~12px left.
         self.status_bar.setStyleSheet("""
             QStatusBar {
-                background-color: #1E1E1E !important;
-                color: #E0E0E0;
-                border-top: 1px solid #2E2E2E;
+                background-color: #14120F !important;
+                color: #EDE7DD;
+                border-top: 1px solid #3A332A;
                 padding: 10px 12px;
                 font-size: 13px;
                 font-weight: 400;
@@ -8102,7 +8104,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         bottom_icon_only_btn_style = """
             QPushButton,
             QPushButton:flat {
-                color: #B0B0B0;
+                color: #96897A;
                 padding: 0px;
                 margin: 0px;
                 border: none;
@@ -8117,7 +8119,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             QPushButton:flat:hover,
             QPushButton:hover:enabled,
             QPushButton:flat:hover:enabled {
-                color: #E0E0E0;
+                color: #EDE7DD;
                 padding: 0px;
                 margin: 0px;
                 background-color: rgba(255, 255, 255, 0.05);
@@ -8142,7 +8144,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
 
         # Open button (left side) - Using qtawesome for reliability
         self.open_button = QPushButton()
-        self.open_button.setIcon(_qta_icon('fa5s.folder-open', color='#B0B0B0'))
+        self.open_button.setIcon(_qta_icon('fa5s.folder-open', color='#96897A'))
         self.open_button.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         self.open_button.setToolTip("Open Image File")
         self.open_button.clicked.connect(self.open_file)
@@ -8154,7 +8156,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         # Use qtawesome icon if available, otherwise fallback to text
         if qta is not None:
             try:
-                gallery_icon = _qta_icon('fa5s.th', color='#B0B0B0')
+                gallery_icon = _qta_icon('fa5s.th', color='#96897A')
                 self.view_mode_button.setIcon(gallery_icon)
                 self.view_mode_button.setIconSize(QSize(20, 20))
             except Exception as e:
@@ -8171,7 +8173,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self.share_bottom_button = QPushButton()
         self.share_bottom_button.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         try:
-            self.share_bottom_button.setIcon(_qta_icon("fa5s.share-alt", color="#B0B0B0"))
+            self.share_bottom_button.setIcon(_qta_icon("fa5s.share-alt", color="#96897A"))
         except Exception as e:
             safe_print(f"[WARNING] Share icon unavailable: {e}, using text fallback", flush=True)
             self.share_bottom_button.setText("Open")
@@ -8191,7 +8193,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self.slideshow_bottom_button = QPushButton()
         self.slideshow_bottom_button.setObjectName("slideshowBottomButton")
         self.slideshow_bottom_button.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        self.slideshow_bottom_button.setIcon(_qta_icon("fa5s.play", color="#B0B0B0"))
+        self.slideshow_bottom_button.setIcon(_qta_icon("fa5s.play", color="#96897A"))
         _style_bottom_icon_button(self.slideshow_bottom_button)
         self.slideshow_bottom_button.clicked.connect(self._on_slideshow_bottom_clicked)
         self.slideshow_bottom_button.hide()
@@ -8199,7 +8201,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
 
         self.rotate_bottom_button = QPushButton()
         self.rotate_bottom_button.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        self.rotate_bottom_button.setIcon(_qta_icon("fa5s.redo", color="#B0B0B0"))
+        self.rotate_bottom_button.setIcon(_qta_icon("fa5s.redo", color="#96897A"))
         _style_bottom_icon_button(self.rotate_bottom_button)
         self.rotate_bottom_button.clicked.connect(self._rotate_current_image_clockwise_persist)
         self.rotate_bottom_button.hide()
@@ -8248,7 +8250,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self.sort_toggle_button.clicked.connect(self.toggle_sort_method)
         self.sort_toggle_button.setStyleSheet("""
             QPushButton {
-                color: #B0B0B0;
+                color: #96897A;
                 font-size: 13px;
                 font-weight: 500;
                 padding: 0px 10px;
@@ -8261,7 +8263,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 max-height: 28px;
             }
             QPushButton:hover {
-                color: #E0E0E0;
+                color: #EDE7DD;
                 background-color: rgba(255, 255, 255, 0.05);
                 border-radius: 4px;
             }
@@ -8306,7 +8308,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self.search_bottom_button = QPushButton()
         if qta is not None:
             try:
-                self.search_bottom_button.setIcon(_qta_icon("fa5s.search", color="#B0B0B0"))
+                self.search_bottom_button.setIcon(_qta_icon("fa5s.search", color="#96897A"))
             except Exception:
                 self.search_bottom_button.setText("Search")
         else:
@@ -8346,7 +8348,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         )
         self.gallery_search_status_label.setStyleSheet("""
             QLabel {
-                color: #B0B0B0;
+                color: #96897A;
                 font-size: 12px;
                 font-weight: 500;
                 padding: 0px 0px 0px 2px;
@@ -8365,9 +8367,9 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         )
         self.gallery_search_style_input = """
             QLineEdit {
-                color: #E0E0E0;
-                background-color: #2A2A2A;
-                border: 1px solid #3A3A3A;
+                color: #EDE7DD;
+                background-color: #272219;
+                border: 1px solid #3A332A;
                 border-radius: 6px;
                 padding: 0px 28px 0px 10px;
                 font-size: 13px;
@@ -8376,7 +8378,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 outline: none;
             }
             QLineEdit:focus {
-                border: 1px solid #5A5A5A;
+                border: 1px solid #D9691E;
                 outline: none;
             }
         """
@@ -8440,7 +8442,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         if qta is not None:
             try:
                 self.compare_bottom_button.setIcon(
-                    _qta_icon("fa5s.columns", color="#B0B0B0")
+                    _qta_icon("fa5s.columns", color="#96897A")
                 )
             except Exception:
                 self.compare_bottom_button.setText("Compare")
@@ -8464,7 +8466,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self.shortcuts_hint_button.setToolTip(self._keyboard_shortcuts_tooltip())
         self.shortcuts_hint_button.setStyleSheet("""
             QPushButton {
-                color: #888888;
+                color: #665D50;
                 font-size: 12px;
                 font-weight: 600;
                 padding: 0px;
@@ -8477,7 +8479,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 max-height: 28px;
             }
             QPushButton:hover {
-                color: #E0E0E0;
+                color: #EDE7DD;
                 background-color: rgba(255, 255, 255, 0.08);
             }
             QPushButton:pressed {
@@ -8489,7 +8491,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         _counter_right_pad = 6 if platform.system() == "Windows" else 4
         _counter_label_style = f"""
             QLabel {{
-                color: #B0B0B0;
+                color: #96897A;
                 font-size: 13px;
                 font-weight: 400;
                 padding: 0px {_counter_right_pad}px 0px 0px;
@@ -11884,12 +11886,12 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             )
             self.raw_toggle_button.setStyleSheet(raw_btn_base + """
                 QPushButton {
-                    color: #B0B0B0;
+                    color: #96897A;
                     font-size: 13px;
                     font-weight: 500;
                 }
                 QPushButton:hover {
-                    color: #E0E0E0;
+                    color: #EDE7DD;
                 }
             """)
         else:
@@ -11997,7 +11999,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                     font-weight: 500;
                 }
                 QPushButton:hover {
-                    color: #B0B0B0;
+                    color: #96897A;
                 }
             """)
 
@@ -12477,7 +12479,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         # Update icon if using qtawesome
         if qta is not None:
             try:
-                gallery_icon = _qta_icon('fa5s.th', color='#B0B0B0')
+                gallery_icon = _qta_icon('fa5s.th', color='#96897A')
                 self.view_mode_button.setIcon(gallery_icon)
                 self.view_mode_button.setIconSize(QSize(20, 20))
                 self.view_mode_button.setText("")  # Clear text if using icon
@@ -12953,7 +12955,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         gallery_container.setObjectName("rawviewer_gallery_container")
         gallery_container.setStyleSheet("""
             QWidget {
-                background-color: #1E1E1E;
+                background-color: #14120F;
             }
         """)
         gallery_container.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
@@ -12971,7 +12973,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         gallery_scroll.setStyleSheet("""
             QScrollArea {
                 border: none;
-                background-color: #1E1E1E;
+                background-color: #14120F;
             }
             QScrollBar:vertical {
                 background: transparent;
@@ -13815,7 +13817,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         row_widget.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         row_widget.setStyleSheet("""
             QWidget {
-                background-color: #1E1E1E;
+                background-color: #14120F;
                 margin: 0px;
                 padding: 0px;
             }
@@ -13838,7 +13840,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             thumb_label.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
             thumb_label.setStyleSheet("""
                 QLabel {
-                    background-color: #2A2A2A;
+                    background-color: #272219;
                     border: none;
                     margin: 0px;
                     padding: 0px;
@@ -13917,7 +13919,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         row_widget.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)  # Prevent resizing
         row_widget.setStyleSheet("""
             QWidget {
-                background-color: #1E1E1E;
+                background-color: #14120F;
                 margin: 0px;
                 padding: 0px;
             }
@@ -13944,7 +13946,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             thumb_label.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
             thumb_label.setStyleSheet("""
                 QLabel {
-                    background-color: #2A2A2A;
+                    background-color: #272219;
                     border: none;
                     margin: 0px;
                     padding: 0px;
@@ -13968,7 +13970,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             item_widget.setFixedHeight(total_row_height)  # CRITICAL: Match row height exactly
             item_widget.setStyleSheet("""
                 QWidget {
-                    background-color: #1E1E1E;
+                    background-color: #14120F;
                     margin: 0px;
                     padding: 0px;
                 }
@@ -14352,7 +14354,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         item = QWidget()
         item.setStyleSheet("""
             QWidget {
-                background-color: #1E1E1E;
+                background-color: #14120F;
             }
         """)
         item_layout = QVBoxLayout(item)
@@ -14366,7 +14368,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         thumb_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         thumb_label.setStyleSheet("""
             QLabel {
-                background-color: #2A2A2A;
+                background-color: #272219;
                 border: none;
             }
         """)
@@ -15184,7 +15186,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             # Update icon if using qtawesome
             if qta is not None:
                 try:
-                    gallery_icon = _qta_icon('fa5s.th', color='#B0B0B0')
+                    gallery_icon = _qta_icon('fa5s.th', color='#96897A')
                     self.view_mode_button.setIcon(gallery_icon)
                     self.view_mode_button.setIconSize(QSize(20, 20))
                     self.view_mode_button.setText("")  # Clear text if using icon
@@ -16068,7 +16070,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                     max-height: 22px;
                 }
                 QPushButton:hover {
-                    color: #E0E0E0;
+                    color: #EDE7DD;
                     background-color: rgba(255, 255, 255, 0.08);
                 }
                 QPushButton:pressed {
@@ -20095,9 +20097,9 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         try:
             import qtawesome as qta
             if playing:
-                btn.setIcon(_qta_icon("fa5s.pause", color="#B0B0B0"))
+                btn.setIcon(_qta_icon("fa5s.pause", color="#96897A"))
             else:
-                btn.setIcon(_qta_icon("fa5s.play", color="#B0B0B0"))
+                btn.setIcon(_qta_icon("fa5s.play", color="#96897A"))
         except Exception:
             pass
 
@@ -26440,7 +26442,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             # Single view mode - use image_label
             self.image_label.setText(message)
             self.image_label.setStyleSheet(
-                "QLabel { color: #B0B0B0; font-size: 14px; }")
+                "QLabel { color: #96897A; font-size: 14px; }")
         
         # Clear top metadata when no files
         self._apply_top_metadata_text("")

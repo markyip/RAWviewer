@@ -29,7 +29,7 @@ class ThumbnailLabel(QLabel):
 
     _STYLE_DEFAULT = "ThumbnailLabel { background: transparent; }"
     _STYLE_SELECTED = (
-        "ThumbnailLabel { background: transparent; border: 3px solid #4A9EFF; }"
+        "ThumbnailLabel { background: transparent; border: 3px solid #D9691E; }"
     )
 
     def __init__(self, parent=None, pixmap=None):
@@ -182,7 +182,7 @@ class ThumbnailLabel(QLabel):
             if badge is None:
                 badge = QLabel("★", self)
                 badge.setStyleSheet(
-                    "color: #FFD700; font-size: 14px; font-weight: 700;"
+                    "color: #D9A441; font-size: 14px; font-weight: 700;"
                     " background: transparent; border: none;"
                 )
                 badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -214,7 +214,7 @@ class ThumbnailLabel(QLabel):
             if badge is None:
                 badge = QLabel("✎", self)
                 badge.setStyleSheet(
-                    "color: #90CAF9; font-size: 12px; font-weight: 700;"
+                    "color: #D9691E; font-size: 12px; font-weight: 700;"
                     " background: rgba(0, 0, 0, 0.55); border-radius: 8px;"
                 )
                 badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -378,7 +378,7 @@ class GalleryZoomSlider(QSlider):
         ])
         
         # Active color: clean white to match overall style
-        active_color = QColor("#E0E0E0")
+        active_color = QColor("#EDE7DD")
         painter.setBrush(active_color)
         painter.drawPolygon(active_poly)
 

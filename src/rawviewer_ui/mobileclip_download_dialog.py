@@ -39,8 +39,8 @@ class MobileCLIPDownloadDialog(QDialog):
         self.container.setObjectName("mobileclip_download_container")
         self.container.setStyleSheet("""
             #mobileclip_download_container {
-                background-color: #1E1E1E;
-                border: 1px solid #2E2E2E;
+                background-color: #14120F;
+                border: 1px solid #3A332A;
                 border-radius: 12px;
             }
         """)
@@ -69,7 +69,7 @@ class MobileCLIPDownloadDialog(QDialog):
     def _title_style(self) -> str:
         return """
             QLabel {
-                color: #E0E0E0;
+                color: #EDE7DD;
                 font-size: 17px;
                 font-weight: 600;
                 font-family: 'Roboto', 'Segoe UI', sans-serif;
@@ -79,7 +79,7 @@ class MobileCLIPDownloadDialog(QDialog):
     def _body_style(self) -> str:
         return """
             QLabel {
-                color: #B0B0B0;
+                color: #96897A;
                 font-size: 13px;
                 line-height: 1.45;
                 font-family: 'Roboto', 'Segoe UI', sans-serif;
@@ -89,7 +89,7 @@ class MobileCLIPDownloadDialog(QDialog):
     def _note_style(self) -> str:
         return """
             QLabel {
-                color: #888888;
+                color: #665D50;
                 font-size: 12px;
                 font-family: 'Roboto', 'Segoe UI', sans-serif;
             }
@@ -99,7 +99,7 @@ class MobileCLIPDownloadDialog(QDialog):
         return """
             QPushButton {
                 background-color: transparent;
-                color: #B0B0B0;
+                color: #96897A;
                 border: 1px solid #4A4A4A;
                 border-radius: 18px;
                 font-size: 13px;
@@ -108,9 +108,9 @@ class MobileCLIPDownloadDialog(QDialog):
                 padding: 0px 20px;
             }
             QPushButton:hover {
-                color: #E0E0E0;
+                color: #EDE7DD;
                 background-color: rgba(255, 255, 255, 0.05);
-                border-color: #5A5A5A;
+                border-color: #D9691E;
             }
             QPushButton:pressed {
                 background-color: rgba(255, 255, 255, 0.1);
@@ -120,8 +120,8 @@ class MobileCLIPDownloadDialog(QDialog):
     def _primary_button_style(self) -> str:
         return """
             QPushButton {
-                background-color: #3A3A3A;
-                color: #E0E0E0;
+                background-color: #3A332A;
+                color: #EDE7DD;
                 border: 1px solid #4A4A4A;
                 border-radius: 18px;
                 font-size: 13px;
@@ -131,7 +131,7 @@ class MobileCLIPDownloadDialog(QDialog):
             }
             QPushButton:hover {
                 background-color: #4A4A4A;
-                border-color: #5A5A5A;
+                border-color: #D9691E;
             }
             QPushButton:pressed {
                 background-color: #2F2F2F;
@@ -210,12 +210,12 @@ class MobileCLIPDownloadDialog(QDialog):
         self._progress_bar.setFormat("%p%")
         self._progress_bar.setStyleSheet("""
             QProgressBar {
-                background-color: #2A2A2A;
+                background-color: #272219;
                 border: none;
                 border-radius: 4px;
             }
             QProgressBar::chunk {
-                background-color: #5A5A5A;
+                background-color: #D9691E;
                 border-radius: 4px;
             }
         """)

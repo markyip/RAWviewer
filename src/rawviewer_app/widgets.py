@@ -156,11 +156,11 @@ class CustomTitleBar(QFrame):
         self.parent = parent
         self.setFixedHeight(40)  # Smaller height
         
-        # Use the same background color as image viewing area (#1E1E1E)
+        # Use the same background color as image viewing area (#14120F)
         self.setStyleSheet("""
             QFrame {
-                background-color: #1E1E1E;
-                border-bottom: 1px solid #2E2E2E;
+                background-color: #14120F;
+                border-bottom: 1px solid #3A332A;
             }
         """)
         
@@ -214,7 +214,7 @@ class CustomTitleBar(QFrame):
             self.icon_label.setText("R")
             self.icon_label.setStyleSheet("""
                 background-color: #4A4A4A;
-                color: #E0E0E0;
+                color: #EDE7DD;
                 border-radius: 12px;
                 font-weight: bold;
                 font-size: 14px;
@@ -235,7 +235,7 @@ class CustomTitleBar(QFrame):
             Qt.WidgetAttribute.WA_TransparentForMouseEvents, True
         )
         self.metadata_label.setStyleSheet("""
-            color: #B0B0B0;
+            color: #96897A;
             font-size: 12px;
             font-weight: 500;
             padding: 0px 8px;
@@ -266,21 +266,21 @@ class CustomTitleBar(QFrame):
         """
         
         self.min_btn = QPushButton()
-        self.min_btn.setIcon(qta.icon('fa5s.minus', color='#E0E0E0'))
+        self.min_btn.setIcon(qta.icon('fa5s.minus', color='#EDE7DD'))
         self.min_btn.setIconSize(QSize(12, 12))
         self.min_btn.setStyleSheet(control_btn_style)
         self.min_btn.clicked.connect(self.parent.showMinimized)
         layout.addWidget(self.min_btn)
         
         self.max_btn = QPushButton()
-        self.max_btn.setIcon(qta.icon('fa5.square', color='#E0E0E0'))
+        self.max_btn.setIcon(qta.icon('fa5.square', color='#EDE7DD'))
         self.max_btn.setIconSize(QSize(12, 12))
         self.max_btn.setStyleSheet(control_btn_style)
         self.max_btn.clicked.connect(self._toggle_maximize)
         layout.addWidget(self.max_btn)
         
         self.close_btn = QPushButton()
-        self.close_btn.setIcon(qta.icon('fa5s.times', color='#E0E0E0'))
+        self.close_btn.setIcon(qta.icon('fa5s.times', color='#EDE7DD'))
         self.close_btn.setIconSize(QSize(12, 12))
         self.close_btn.setStyleSheet(control_btn_style + "QPushButton:hover { background-color: #f44336; }")
         self.close_btn.clicked.connect(self.parent.close)
@@ -297,9 +297,9 @@ class CustomTitleBar(QFrame):
         maximized = bool(self.parent.isMaximized())
         self._is_maximized = maximized
         if maximized:
-            self.max_btn.setIcon(qta.icon("fa5s.clone", color="#E0E0E0"))
+            self.max_btn.setIcon(qta.icon("fa5s.clone", color="#EDE7DD"))
         else:
-            self.max_btn.setIcon(qta.icon("fa5.square", color="#E0E0E0"))
+            self.max_btn.setIcon(qta.icon("fa5.square", color="#EDE7DD"))
 
     def _toggle_maximize(self):
         if self.parent.isMaximized():
@@ -382,8 +382,8 @@ class TopMetadataBar(QFrame):
         self.setFixedHeight(28)
         self.setStyleSheet("""
             QFrame {
-                background-color: #1E1E1E;
-                border-bottom: 1px solid #2E2E2E;
+                background-color: #14120F;
+                border-bottom: 1px solid #3A332A;
             }
         """)
         layout = QHBoxLayout(self)
@@ -395,7 +395,7 @@ class TopMetadataBar(QFrame):
             Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter
         )
         self.metadata_label.setStyleSheet("""
-            color: #B0B0B0;
+            color: #96897A;
             font-size: 12px;
             font-weight: 500;
             padding: 0px 8px;
@@ -468,9 +468,9 @@ class CustomConfirmDialog(QDialog):
         self.container.setObjectName("confirmDialogContainer")
         self.container.setStyleSheet("""
             #confirmDialogContainer {
-                background-color: #1E1E1E;
+                background-color: #14120F;
                 border-radius: 12px;
-                border: 1px solid #2E2E2E;
+                border: 1px solid #3A332A;
             }
         """)
 
@@ -500,7 +500,7 @@ class CustomConfirmDialog(QDialog):
         )
         self._message_label.setStyleSheet("""
             QLabel {
-                color: #E0E0E0;
+                color: #EDE7DD;
                 font-size: 16px;
                 font-weight: 500;
                 font-family: 'Roboto', 'Segoe UI', sans-serif;
@@ -522,7 +522,7 @@ class CustomConfirmDialog(QDialog):
             )
             self._info_label.setStyleSheet("""
                 QLabel {
-                    color: #B0B0B0;
+                    color: #96897A;
                     font-size: 14px;
                     font-family: 'Roboto', 'Segoe UI', sans-serif;
                     padding: 0px;
@@ -550,7 +550,7 @@ class CustomConfirmDialog(QDialog):
         self.cancel_btn.setStyleSheet("""
             QPushButton#confirmCancelBtn {
                 background-color: transparent;
-                color: #E0E0E0;
+                color: #EDE7DD;
                 border: 1px solid #4A4A4A;
                 border-radius: 20px;
                 font-size: 14px;
@@ -561,7 +561,7 @@ class CustomConfirmDialog(QDialog):
             }
             QPushButton#confirmCancelBtn:hover:!focus {
                 background-color: rgba(255, 255, 255, 0.05);
-                border-color: #5A5A5A;
+                border-color: #D9691E;
             }
             QPushButton#confirmCancelBtn:focus {
                 background-color: rgba(255, 255, 255, 0.16);
@@ -583,7 +583,7 @@ class CustomConfirmDialog(QDialog):
             confirm_style = """
             QPushButton#confirmDiscardBtn {
                 background-color: transparent;
-                color: #E0E0E0;
+                color: #EDE7DD;
                 border: 1px solid #4A4A4A;
                 border-radius: 20px;
                 font-size: 14px;
@@ -599,7 +599,7 @@ class CustomConfirmDialog(QDialog):
             }
             QPushButton#confirmDiscardBtn:focus {
                 background-color: #FFB74D;
-                color: #1E1E1E;
+                color: #14120F;
                 border: 1px solid #FFB74D;
                 outline: none;
             }
@@ -612,7 +612,7 @@ class CustomConfirmDialog(QDialog):
             confirm_style = """
             QPushButton#confirmDeleteBtn {
                 background-color: transparent;
-                color: #E0E0E0;
+                color: #EDE7DD;
                 border: 1px solid #4A4A4A;
                 border-radius: 20px;
                 font-size: 14px;
@@ -820,9 +820,9 @@ class CustomWarningDialog(QDialog):
         self.container.setObjectName("warningDialogContainer")
         self.container.setStyleSheet("""
             #warningDialogContainer {
-                background-color: #1E1E1E;
+                background-color: #14120F;
                 border-radius: 12px;
-                border: 1px solid #2E2E2E;
+                border: 1px solid #3A332A;
             }
         """)
 
@@ -852,7 +852,7 @@ class CustomWarningDialog(QDialog):
         )
         self._message_label.setStyleSheet("""
             QLabel {
-                color: #E0E0E0;
+                color: #EDE7DD;
                 font-size: 16px;
                 font-weight: 500;
                 font-family: 'Roboto', 'Segoe UI', sans-serif;
@@ -874,7 +874,7 @@ class CustomWarningDialog(QDialog):
             )
             self._info_label.setStyleSheet("""
                 QLabel {
-                    color: #B0B0B0;
+                    color: #96897A;
                     font-size: 14px;
                     font-family: 'Roboto', 'Segoe UI', sans-serif;
                     padding: 0px;
@@ -902,7 +902,7 @@ class CustomWarningDialog(QDialog):
         self.ok_btn.setStyleSheet("""
             QPushButton#warningOkBtn {
                 background-color: transparent;
-                color: #E0E0E0;
+                color: #EDE7DD;
                 border: 1px solid #4A4A4A;
                 border-radius: 20px;
                 font-size: 14px;
@@ -913,7 +913,7 @@ class CustomWarningDialog(QDialog):
             }
             QPushButton#warningOkBtn:hover:!focus {
                 background-color: rgba(255, 255, 255, 0.05);
-                border-color: #5A5A5A;
+                border-color: #D9691E;
             }
             QPushButton#warningOkBtn:focus {
                 background-color: rgba(255, 255, 255, 0.16);
@@ -1066,7 +1066,7 @@ class SingleImageViewOverlay(QWidget):
             map_widget.setParent(self)
             map_widget.hide()
         self.setObjectName("single_view_container")
-        self.setStyleSheet("#single_view_container { background-color: #1E1E1E; }")
+        self.setStyleSheet("#single_view_container { background-color: #14120F; }")
         self.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
@@ -1116,8 +1116,8 @@ class SingleImageViewOverlay(QWidget):
         self.rating_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.rating_badge.setStyleSheet("""
             QLabel {
-                background-color: rgba(30, 30, 30, 210);
-                color: #FFD700;
+                background-color: rgba(29, 26, 22, 210);
+                color: #D9A441;
                 font-size: 16px;
                 font-weight: bold;
                 border-radius: 4px;
@@ -2120,7 +2120,7 @@ class BottomRatingWidget(QWidget):
             is_filled = i < self._rating
             try:
                 icon = qta.icon("fa5s.star" if is_filled else "fa5s.star", 
-                                color="#FFD700" if is_filled else "#606060")
+                                color="#D9A441" if is_filled else "#665D50")
                 btn.setIcon(icon)
                 btn.setIconSize(QSize(14, 14))
             except Exception:

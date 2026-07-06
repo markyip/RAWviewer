@@ -40,8 +40,8 @@ class ReleaseUpdateDialog(QDialog):
         self.container.setObjectName("releaseUpdateDialogContainer")
         self.container.setStyleSheet("""
             #releaseUpdateDialogContainer {
-                background-color: #1E1E1E;
-                border: 1px solid #2E2E2E;
+                background-color: #14120F;
+                border: 1px solid #3A332A;
                 border-radius: 12px;
             }
         """)
@@ -53,7 +53,7 @@ class ReleaseUpdateDialog(QDialog):
         title_label = QLabel("Update Available")
         title_label.setStyleSheet("""
             QLabel {
-                color: #E0E0E0;
+                color: #EDE7DD;
                 font-size: 17px;
                 font-weight: 600;
                 font-family: 'Roboto', 'Segoe UI', sans-serif;
@@ -65,7 +65,7 @@ class ReleaseUpdateDialog(QDialog):
         message_label.setWordWrap(True)
         message_label.setStyleSheet("""
             QLabel {
-                color: #B0B0B0;
+                color: #96897A;
                 font-size: 13px;
                 line-height: 1.45;
                 font-family: 'Roboto', 'Segoe UI', sans-serif;
@@ -81,7 +81,7 @@ class ReleaseUpdateDialog(QDialog):
         note_label.setWordWrap(True)
         note_label.setStyleSheet("""
             QLabel {
-                color: #888888;
+                color: #665D50;
                 font-size: 12px;
                 font-family: 'Roboto', 'Segoe UI', sans-serif;
             }
@@ -100,7 +100,7 @@ class ReleaseUpdateDialog(QDialog):
         not_now_btn.setStyleSheet("""
             QPushButton {
                 background-color: transparent;
-                color: #B0B0B0;
+                color: #96897A;
                 border: 1px solid #4A4A4A;
                 border-radius: 18px;
                 font-size: 13px;
@@ -109,9 +109,9 @@ class ReleaseUpdateDialog(QDialog):
                 padding: 0px 20px;
             }
             QPushButton:hover {
-                color: #E0E0E0;
+                color: #EDE7DD;
                 background-color: rgba(255, 255, 255, 0.05);
-                border-color: #5A5A5A;
+                border-color: #D9691E;
             }
             QPushButton:pressed {
                 background-color: rgba(255, 255, 255, 0.1);
@@ -126,8 +126,8 @@ class ReleaseUpdateDialog(QDialog):
         open_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         open_btn.setStyleSheet("""
             QPushButton {
-                background-color: #3A3A3A;
-                color: #E0E0E0;
+                background-color: #3A332A;
+                color: #EDE7DD;
                 border: 1px solid #4A4A4A;
                 border-radius: 18px;
                 font-size: 13px;
@@ -137,7 +137,7 @@ class ReleaseUpdateDialog(QDialog):
             }
             QPushButton:hover {
                 background-color: #4A4A4A;
-                border-color: #5A5A5A;
+                border-color: #D9691E;
             }
             QPushButton:pressed {
                 background-color: #2F2F2F;
