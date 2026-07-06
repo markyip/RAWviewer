@@ -38,6 +38,7 @@ run "dodge & burn" testplan/auto/t_dodge_burn.py
 run "gallery hover prefetch" testplan/auto/t_gallery_hover_prefetch.py
 run "editor skip unsupported" testplan/auto/t_editor_skip_unsupported.py
 run "rating bottom bar" testplan/auto/t_rating_bottom_bar.py
+run "adjust loading overlay" testplan/auto/t_adjust_loading_overlay.py
 
 if [ "$FAST" = "0" ]; then
   # Perf first: it must measure on a quiet machine, not one still hot from

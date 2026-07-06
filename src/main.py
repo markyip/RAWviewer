@@ -18959,6 +18959,15 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             self.image_manager.cancel_task(file_path)
         except Exception:
             pass
+        # Cancelling the task above can strand the generic single-view
+        # "Loading Image..." overlay forever: it was shown by the reload
+        # that toggle_raw_jpeg_workflow() just dispatched (opening the
+        # editor forces RAW mode first), and its own completion callback
+        # -- the only thing that would hide it -- never fires once its
+        # task is cancelled here. The edit-base decode reports its own
+        # progress via the status bar, so the overlay isn't needed for it.
+        if hasattr(self, "loading_overlay"):
+            self.loading_overlay.hide_loading()
         self._defer_sensor_full_decode_path = None
         self._sensor_full_decode_queued_norm = None
         self._adjust_preview_base_rgb = None
