@@ -63,19 +63,35 @@ clang++ -dynamiclib -o libraw_r.25.dylib $(tr '\n' ' ' < objs.txt) \
   -compatibility_version 25 -current_version 25.0
 
 # Self-contain: runtime deps live beside the dylib via @loader_path.
-cp "$ENV/lib/libomp.dylib" "$RAWPY_DIR/libomp.dylib"
 cp "$ENV/lib/libjpeg.8.dylib" "$RAWPY_DIR/libjpeg.8.dylib"
-install_name_tool -id @loader_path/libomp.dylib "$RAWPY_DIR/libomp.dylib"
 install_name_tool -id @loader_path/libjpeg.8.dylib "$RAWPY_DIR/libjpeg.8.dylib"
 JPEG_DEP=$(otool -L libraw_r.25.dylib | awk '/libjpeg/ {print $1}')
 install_name_tool -change "$JPEG_DEP" @loader_path/libjpeg.8.dylib libraw_r.25.dylib
-install_name_tool -change @rpath/libomp.dylib @loader_path/libomp.dylib libraw_r.25.dylib
+
+# OpenMP runtime: exactly ONE libomp may load per process. When torch is in
+# the env it force-loads torch/lib/libomp.dylib at startup (main.py splash
+# pre-import), so point LibRaw at torch's copy -- two loaded LLVM OpenMP
+# runtimes abort ("OMP: Error #15"), and KMP_DUPLICATE_LIB_OK=TRUE papers
+# over it at the documented risk of crashes/silently wrong results (both
+# observed: segfaults in dev runs). Without torch, fall back to a bundled
+# copy beside the dylib as before.
+TORCH_OMP=$("$ENV/bin/python3" -c "import os,importlib.util as u; s=u.find_spec('torch'); print(os.path.join(os.path.dirname(s.origin),'lib','libomp.dylib') if s else '')" 2>/dev/null)
+if [ -n "$TORCH_OMP" ] && [ -f "$TORCH_OMP" ]; then
+  echo "Unifying OpenMP runtime with torch: $TORCH_OMP"
+  install_name_tool -change @rpath/libomp.dylib @loader_path/../torch/lib/libomp.dylib libraw_r.25.dylib
+  rm -f "$RAWPY_DIR/libomp.dylib"
+else
+  cp "$ENV/lib/libomp.dylib" "$RAWPY_DIR/libomp.dylib"
+  install_name_tool -id @loader_path/libomp.dylib "$RAWPY_DIR/libomp.dylib"
+  install_name_tool -change @rpath/libomp.dylib @loader_path/libomp.dylib libraw_r.25.dylib
+fi
 
 if [ ! -f "$RAWPY_DIR/libraw_r.25.dylib.orig" ]; then
   cp "$RAWPY_DIR/libraw_r.25.dylib" "$RAWPY_DIR/libraw_r.25.dylib.orig"
 fi
 cp libraw_r.25.dylib "$RAWPY_DIR/libraw_r.25.dylib"
-codesign -f -s - "$RAWPY_DIR/libraw_r.25.dylib" "$RAWPY_DIR/libomp.dylib" "$RAWPY_DIR/libjpeg.8.dylib"
+codesign -f -s - "$RAWPY_DIR/libraw_r.25.dylib" "$RAWPY_DIR/libjpeg.8.dylib"
+[ -f "$RAWPY_DIR/libomp.dylib" ] && codesign -f -s - "$RAWPY_DIR/libomp.dylib"
 
 "$ENV/bin/python3" - << 'EOF'
 import time, rawpy

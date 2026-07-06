@@ -86,6 +86,12 @@ class GpuImageView(QGraphicsView):
     # Image pixel coordinates (scene space) where the user clicked while color-pick
     # mode was armed (see set_color_pick_mode). One-shot: mode disarms after firing.
     colorPickRequested = pyqtSignal(QPointF)
+    # Dodge & burn brush: (scene_x, scene_y, pressure 0..1, is_stroke_end).
+    # Emitted continuously while painting (set_dodge_burn_mode(True)) so the
+    # host can stamp+repaint per point; is_stroke_end=True on release, the
+    # host's cue to edge-snap the touched region and trigger the exact
+    # (worker-thread) re-render.
+    dodgeBurnStroke = pyqtSignal(QPointF, float, bool)
 
     # Absolute floor for set_scale; wheel zoom cannot go below fit_scale() (fit-to-window).
     MIN_SCALE = 0.01
@@ -110,6 +116,7 @@ class GpuImageView(QGraphicsView):
         self._shortcut_handler = None
         self._edr_initialized = False
         self.file_path = None
+        self._dodge_burn_mode = False
         self._drag_start_pos = None
         self._drag_started = False
         self._color_pick_mode = False
@@ -355,11 +362,17 @@ class GpuImageView(QGraphicsView):
         self._grid_item.set_grid(self._img_w, self._img_h, self._grid_mode)
 
     # ------------------------------------------------------------------ image
-    def set_pixmap(self, pixmap: QPixmap, preserve_view=None) -> None:
+    def set_pixmap(self, pixmap: QPixmap, preserve_view=None, *, exact_framing: bool = False) -> None:
         """Set the displayed image.
 
         ``preserve_view`` keeps the on-screen framing across a resolution upgrade
         (e.g. thumbnail -> full) while zoomed. Defaults to True when zoomed.
+
+        ``exact_framing`` (implies preserving) additionally disables the
+        snap-to-100% heuristics: used for same-content re-renders at varying
+        resolutions (Adjust-panel live preview), where "100% of the current
+        pixmap" is meaningless -- the tiers are stand-ins for the same image
+        and only the on-screen magnification should ever be preserved.
         """
         if pixmap is None or pixmap.isNull():
             self._item.setPixmap(QPixmap())
@@ -415,12 +428,32 @@ class GpuImageView(QGraphicsView):
             self._sync_fit_mode_flag()
             return
 
-        # If user intended to zoom to 100% (actual pixels), do not scale down to preserve the thumbnail's screen size
-        if getattr(self, "_zoom_intent_100", False) or (s_old is not None and s_old >= 1.0 - 1e-4):
+        # If user intended to zoom to 100% (actual pixels), do not scale down to
+        # preserve the thumbnail's screen size. Only valid for a resolution
+        # UPGRADE (new pixmap >= old): snapping a *smaller* same-content render
+        # to scale 1.0 shrinks the on-screen image by old_w/new_w -- observed as
+        # "editing a parameter zooms the image out" in the Adjust panel, whose
+        # live preview swaps the full-res display buffer for a half-size (or
+        # smaller fast-base) render. For downgrades, always preserve on-screen
+        # framing, and skip the MAX_SCALE clamp for the same reason
+        # set_pixmap_zoomed_at has allow_overscale: matching the previous
+        # on-screen magnification on a low-res stand-in may need > MAX_SCALE,
+        # and the later full-quality swap lands back inside the normal range.
+        is_upgrade = new_w >= old_w - 1
+        if (
+            not exact_framing
+            and is_upgrade
+            and (
+                getattr(self, "_zoom_intent_100", False)
+                or (s_old is not None and s_old >= 1.0 - 1e-4)
+            )
+        ):
             s_new = 1.0
         else:
             # Preserve on-screen image scale: s_new * new_w == s_old * old_w
-            s_new = max(self.MIN_SCALE, min(self.MAX_SCALE, s_old * old_w / new_w))
+            s_new = max(self.MIN_SCALE, s_old * old_w / new_w)
+            if is_upgrade and not exact_framing:
+                s_new = min(self.MAX_SCALE, s_new)
         self.resetTransform()
         self.scale(s_new, s_new)
         self.centerOn(QPointF(fx * new_w, fy * new_h))
@@ -741,6 +774,26 @@ class GpuImageView(QGraphicsView):
     def is_color_pick_mode(self) -> bool:
         return bool(getattr(self, "_color_pick_mode", False))
 
+    def set_dodge_burn_mode(self, enabled: bool) -> None:
+        """Arm/disarm brush painting: mouse/tablet drags stamp dodgeBurnStroke
+        instead of panning or driving the compare divider."""
+        self._dodge_burn_mode = bool(enabled)
+        if self._dodge_burn_mode:
+            self.viewport().setCursor(Qt.CursorShape.CrossCursor)
+            self.setAttribute(Qt.WidgetAttribute.WA_TabletTracking, True)
+        else:
+            self.viewport().unsetCursor()
+
+    def is_dodge_burn_mode(self) -> bool:
+        return bool(getattr(self, "_dodge_burn_mode", False))
+
+    def _clamped_scene_point(self, view_pos) -> QPointF:
+        scene_pt = self.mapToScene(view_pos)
+        return QPointF(
+            max(0.0, min(scene_pt.x(), max(0, self._img_w - 1))),
+            max(0.0, min(scene_pt.y(), max(0, self._img_h - 1))),
+        )
+
     # --------------------------------------------------------- compare split
     def set_compare_original_pixmap(self, pixmap: QPixmap | None) -> None:
         """Provide the unedited render to show on the left of the divider."""
@@ -815,6 +868,13 @@ class GpuImageView(QGraphicsView):
 
     # ------------------------------------------------------------------ events
     def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton and self._dodge_burn_mode:
+            if self._has_pixmap:
+                self._dodge_burn_painting = True
+                pt = self._clamped_scene_point(event.position().toPoint())
+                self.dodgeBurnStroke.emit(pt, 1.0, False)
+            event.accept()
+            return
         if event.button() == Qt.MouseButton.LeftButton and self._color_pick_mode:
             if self._has_pixmap:
                 scene_pt = self.mapToScene(event.position().toPoint())
@@ -839,6 +899,15 @@ class GpuImageView(QGraphicsView):
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event) -> None:
+        if (
+            self._dodge_burn_mode
+            and (event.buttons() & Qt.MouseButton.LeftButton)
+            and getattr(self, "_dodge_burn_painting", False)
+        ):
+            pt = self._clamped_scene_point(event.position().toPoint())
+            self.dodgeBurnStroke.emit(pt, 1.0, False)
+            event.accept()
+            return
         host = self.parentWidget()
         if host is not None:
             if hasattr(host, "_ensure_filmstrip_enabled"):
@@ -870,6 +939,14 @@ class GpuImageView(QGraphicsView):
             super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton and getattr(
+            self, "_dodge_burn_painting", False
+        ):
+            self._dodge_burn_painting = False
+            pt = self._clamped_scene_point(event.position().toPoint())
+            self.dodgeBurnStroke.emit(pt, 1.0, True)
+            event.accept()
+            return
         if event.button() == Qt.MouseButton.LeftButton and self._compare_dragging_divider:
             self._compare_dragging_divider = False
             event.accept()
@@ -938,6 +1015,36 @@ class GpuImageView(QGraphicsView):
             event.accept()
             return
         super().keyPressEvent(event)
+
+    def tabletEvent(self, event) -> None:
+        """Real pressure from a graphics tablet/stylus (Wacom, iPad+Sidecar, ...).
+
+        Trackpads (Force Touch / standard) do NOT deliver QTabletEvent on
+        any platform -- that API is stylus-only, and macOS exposes no public
+        per-click pressure/force API to Qt for the trackpad itself. Mouse
+        and trackpad clicks both fall through to mousePressEvent/mouseMove
+        Event above at a fixed pressure of 1.0 (full strength per stamp);
+        a real tablet gets true pressure-proportional strength here.
+        """
+        if not self._dodge_burn_mode or not self._has_pixmap:
+            event.ignore()
+            return
+        from PyQt6.QtCore import QEvent as _QEvent
+
+        pressure = max(0.0, min(1.0, float(event.pressure())))
+        pt = self._clamped_scene_point(event.position().toPoint())
+        etype = event.type()
+        if etype == _QEvent.Type.TabletPress:
+            self._dodge_burn_painting = True
+            self.dodgeBurnStroke.emit(pt, pressure, False)
+        elif etype == _QEvent.Type.TabletMove and getattr(
+            self, "_dodge_burn_painting", False
+        ):
+            self.dodgeBurnStroke.emit(pt, pressure, False)
+        elif etype == _QEvent.Type.TabletRelease:
+            self._dodge_burn_painting = False
+            self.dodgeBurnStroke.emit(pt, pressure, True)
+        event.accept()
 
     def wheelEvent(self, event) -> None:
         delta = event.angleDelta().y()

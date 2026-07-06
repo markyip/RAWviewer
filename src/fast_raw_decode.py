@@ -142,6 +142,218 @@ def _env_disabled() -> bool:
     }
 
 
+def wb_sanity_enabled() -> bool:
+    """As-shot WB sanity check vs embedded JPEG (RAWVIEWER_WB_SANITY=0 disables)."""
+    return str(os.environ.get("RAWVIEWER_WB_SANITY", "1")).strip().lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+
+
+# Midtone-masked median of per-pixel log(R/G), log(B/G) differences between a
+# tiny LibRaw-pipeline render and the camera's embedded JPEG. A genuine WB
+# misparse shifts EVERY pixel the same direction (median catches it); tone
+# curve / Picture Style saturation differences are roughly symmetric around
+# zero (median rejects them). Measured on 23 golden files: correctly parsed
+# bodies score <= 0.21, the misparsed EOS R6 Mark III files score >= 1.12 --
+# threshold 0.5 sits in the middle of a >5x gap.
+_WB_SANITY_THRESHOLD = 0.5
+# key: normcase(abspath). Value: corrected cam_mul list, or None = checked, OK.
+_WB_CORRECTION_CACHE: Dict[str, Optional[list]] = {}
+# Per-MODEL verdict: the WB misparse is a parser-vs-model property, so once
+# one file of a model measures clean, later files of that model skip the
+# embedded-JPEG check entirely -- it costs ~38ms of thumb extract + decode +
+# metric per file, a real tax on every fresh navigation when paid per-file.
+# Misparsed models still measure per file (the as-shot WB is per shot).
+# True = model suspect, False = model verified clean.
+#
+# The key must NOT be the color matrix alone: LibRaw aliases bodies it does
+# not know to an older model's matrix (verified: the misparsed EOS R6 Mark
+# III returns byte-identical rgb_cam to a correctly-parsed older body in the
+# golden set), which let the older body's clean verdict suppress the R6 III
+# correction. Matrix + visible-sensor dims + black levels + white level
+# separates them (4639x6959/black [0,35,102,69] vs 4024x6022/black 2048x4).
+_WB_MODEL_VERDICT: Dict[bytes, bool] = {}
+
+
+def _wb_model_key(
+    rgb_cam: Optional[np.ndarray],
+    mosaic: np.ndarray,
+    black: np.ndarray,
+    white: float,
+) -> bytes:
+    if rgb_cam is None:
+        return b""
+    return (
+        rgb_cam.tobytes()
+        + np.asarray(mosaic.shape, dtype=np.int64).tobytes()
+        + np.asarray(black, dtype=np.float64).tobytes()
+        + np.float64(white).tobytes()
+    )
+
+
+def get_corrected_camera_wb(file_path: str) -> Optional[list]:
+    """Session-cached corrected camera WB multipliers for ``file_path``.
+
+    Non-None only when this file's as-shot WB failed the embedded-JPEG sanity
+    check during :func:`unpack_raw` (e.g. bodies newer than the bundled
+    LibRaw's makernote parser, like the EOS R6 Mark III). Callers that decode
+    via rawpy directly (edit base, EDR) should pass it as ``user_wb`` with
+    ``use_camera_wb=False`` so every pipeline shows the same corrected color.
+    """
+    key = os.path.normcase(os.path.abspath(file_path))
+    return _WB_CORRECTION_CACHE.get(key)
+
+
+def _srgb_to_linear01(arr8: np.ndarray) -> np.ndarray:
+    x = arr8.astype(np.float64) / 255.0
+    return np.where(x <= 0.04045, x / 12.92, ((x + 0.055) / 1.055) ** 2.4)
+
+
+def _wb_correction_from_jpeg(
+    file_path: str,
+    thumb_bytes: Optional[bytes],
+    mosaic: np.ndarray,
+    pattern: np.ndarray,
+    black: np.ndarray,
+    scale_mul: np.ndarray,
+    rgb_cam: np.ndarray,
+    cam_mul: np.ndarray,
+) -> Optional[list]:
+    """Corrected cam_mul when the as-shot WB disagrees with the embedded JPEG.
+
+    Returns None when the WB is fine, the thumb is unusable, or the solve is
+    implausible. Never raises.
+    """
+    try:
+        if not thumb_bytes:
+            return None
+        cv2 = _import_cv2()
+        if cv2 is None:
+            return None
+        arr = cv2.imdecode(
+            np.frombuffer(thumb_bytes, np.uint8), cv2.IMREAD_REDUCED_COLOR_8
+        )
+        if arr is None or arr.ndim != 3:
+            return None
+
+        # Black-subtracted tiny CFA planes (WB-independent, computed once).
+        w2 = mosaic.shape[1] // 2
+        step = max(1, w2 // 192)
+        raw_planes: list = []  # (role, channel_index, plane)
+        for (dy, dx), ci in np.ndenumerate(pattern):
+            plane = mosaic[dy::2, dx::2][::step, ::step].astype(np.float64) - black[ci]
+            role = "R" if ci == 0 else ("B" if ci == 2 else "G")
+            raw_planes.append((role, ci, plane))
+        roles = {r for r, _, _ in raw_planes}
+        if "R" not in roles or "B" not in roles or "G" not in roles:
+            return None
+        hmin = min(p.shape[0] for _, _, p in raw_planes)
+        wmin = min(p.shape[1] for _, _, p in raw_planes)
+        raw_planes = [(r, ci, p[:hmin, :wmin]) for r, ci, p in raw_planes]
+        m3 = rgb_cam.astype(np.float64)
+        m3_inv = np.linalg.pinv(m3)
+        jpg = _srgb_to_linear01(
+            cv2.cvtColor(
+                cv2.resize(arr, (wmin, hmin), interpolation=cv2.INTER_AREA),
+                cv2.COLOR_BGR2RGB,
+            )
+        )
+        lj = 0.2126 * jpg[..., 0] + 0.7152 * jpg[..., 1] + 0.0722 * jpg[..., 2]
+        # scale_mul = (cam_mul / cam_mul.min()) * 65535 / denom
+        denom = (cam_mul[0] / cam_mul.min()) * 65535.0 / scale_mul[0]
+
+        def _render_and_metric(mul: np.ndarray):
+            sc = (mul / mul.min()) * 65535.0 / denom
+            acc: Dict[str, np.ndarray] = {}
+            n_g = 0
+            for role, ci, p in raw_planes:
+                v = np.clip(p * sc[ci], 0, 65535)
+                if role == "G":
+                    acc["G"] = acc.get("G", 0) + v
+                    n_g += 1
+                else:
+                    acc[role] = v
+            cam3 = np.stack([acc["R"], acc["G"] / max(n_g, 1), acc["B"]], -1)
+            render = np.clip(cam3 @ m3.T, 0, 65535) / 65535.0
+            lr = 0.2126 * render[..., 0] + 0.7152 * render[..., 1] + 0.0722 * render[..., 2]
+            mask = (
+                (lr > 0.01) & (lr < 0.6) & (lj > 0.01) & (lj < 0.6)
+                & (render > 1e-4).all(-1) & (jpg > 1e-4).all(-1)
+            )
+            if int(mask.sum()) < 200:
+                return None
+            dr = float(np.median(
+                np.log(render[..., 0][mask] / render[..., 1][mask])
+                - np.log(jpg[..., 0][mask] / jpg[..., 1][mask])
+            ))
+            db = float(np.median(
+                np.log(render[..., 2][mask] / render[..., 1][mask])
+                - np.log(jpg[..., 2][mask] / jpg[..., 1][mask])
+            ))
+            cbar = cam3.reshape(-1, 3)[mask.reshape(-1)].mean(axis=0)
+            return dr, db, max(abs(dr), abs(db)), cbar
+
+        # Iterate the mean-vector Newton step: one step lands well below the
+        # trigger threshold but can leave a visible residual tint (the solve
+        # is exact only for the masked MEAN, while the metric is a median and
+        # the mask itself shifts as color converges). 2-3 iterations settle
+        # under ~0.06 (imperceptible against JPEG tone-curve noise).
+        cur_mul = cam_mul.astype(np.float64).copy()
+        first_dist = None
+        for it in range(5):
+            m = _render_and_metric(cur_mul)
+            if m is None:
+                if it == 0:
+                    return None
+                break
+            dr, db, dist, cbar = m
+            if it == 0:
+                if dist <= _WB_SANITY_THRESHOLD:
+                    return None
+                first_dist = dist
+            elif dist <= 0.06:
+                break
+            # w = (M^-1 (g_srgb * (M cbar))) / cbar -- exact for the mean.
+            g_srgb = np.array([np.exp(-dr), 1.0, np.exp(-db)], dtype=np.float64)
+            if np.any(cbar <= 0):
+                break
+            w = m3_inv @ (g_srgb * (m3 @ cbar)) / cbar
+            if np.any(~np.isfinite(w)) or np.any(w <= 0):
+                break
+            w = np.clip(w, 0.3, 3.5)
+            cur_mul[0] *= w[0]
+            cur_mul[1] *= w[1]
+            cur_mul[2] *= w[2]
+            cur_mul[3] *= w[1]
+
+        # NOTE (evaluated, rejected): fitting a 3x3 crosstalk matrix against
+        # the JPEG on top of this diagonal was tried for the residual
+        # per-region tint (quadrant medians +/-0.24 after convergence). The
+        # scene's colors are near-collinear so plain LSQ is degenerate, and
+        # ridge-regularized fits reduced nothing: the region disagreement
+        # comes from Canon's spatially-LOCAL JPEG processing (ALO etc.),
+        # which no global transform can match. Diagonal-only is the robust
+        # stopping point until LibRaw ships a real profile for the body.
+        new_mul = [float(x) for x in cur_mul]
+        logger.warning(
+            "[FAST_RAW] as-shot WB failed embedded-JPEG sanity for %s "
+            "(dist=%.2f, threshold=%.2f) -- corrected multipliers %s -> %s "
+            "(LibRaw likely predates this camera's makernote layout)",
+            os.path.basename(file_path),
+            first_dist,
+            _WB_SANITY_THRESHOLD,
+            [round(float(x), 1) for x in cam_mul],
+            [round(x, 1) for x in new_mul],
+        )
+        return new_mul
+    except Exception as e:
+        logger.debug("[FAST_RAW] WB sanity check failed for %s: %s", file_path, e)
+        return None
+
+
 @dataclass
 class UnpackedRaw:
     """LibRaw unpack output + derived color metadata, decoupled from rawpy.
@@ -195,13 +407,26 @@ def params_supported_half(params: Dict[str, Any]) -> bool:
     return params_supported(relaxed)
 
 
+_GAMMA_CURVE16: Optional[np.ndarray] = None
+
+
+def gamma_curve16() -> np.ndarray:
+    """dcraw BT.709 curve, 16-bit in -> 16-bit out (see _gamma_lut8).
+
+    Public: the edit pipeline's display/export encode uses this same curve
+    so an edited image at default settings renders identically to browse.
+    """
+    _gamma_lut8()  # builds both LUTs
+    return _GAMMA_CURVE16
+
+
 def _gamma_lut8() -> np.ndarray:
     """dcraw gamma_curve for gamma=(2.222, 4.5): BT.709 OETF, 16-bit -> 8-bit.
 
     The toe breakpoint is solved by bisection exactly like dcraw does, and the
     8-bit value is ``curve >> 8`` (truncation) matching dcraw's write_ppm.
     """
-    global _GAMMA_LUT8
+    global _GAMMA_LUT8, _GAMMA_CURVE16
     if _GAMMA_LUT8 is not None:
         return _GAMMA_LUT8
     pwr, ts = 1.0 / 2.222, 4.5
@@ -218,6 +443,7 @@ def _gamma_lut8() -> np.ndarray:
     x = np.arange(65536, dtype=np.float64) / 65535.0
     y = np.where(x < g3, x * ts, (1 + g4) * np.power(np.maximum(x, 1e-12), pwr) - g4)
     curve16 = np.clip(y * 65535.0 + 0.5, 0, 65535).astype(np.uint16)
+    _GAMMA_CURVE16 = curve16
     _GAMMA_LUT8 = (curve16 >> 8).astype(np.uint8)
     return _GAMMA_LUT8
 
@@ -285,6 +511,9 @@ def unpack_raw(
     """
     if _env_disabled():
         return None
+    from perf_metrics import perf_mark
+
+    _t_unpack = time.perf_counter()
     try:
         import rawpy
 
@@ -312,6 +541,25 @@ def unpack_raw(
             white = float(raw.white_level)
             cam_mul = np.asarray(raw.camera_whitebalance, dtype=np.float64).copy()
             rgb_cam = _rgb_cam_from_cam_xyz(raw.rgb_xyz_matrix)
+            # WB sanity needs the embedded JPEG; extract while the handle is
+            # open, but only on this file's first unpack this session, and
+            # only when the camera model isn't already verified clean (the
+            # per-model verdict skips the ~38ms thumb+metric cost for every
+            # subsequent file from a well-parsed body).
+            thumb_bytes = None
+            wb_key = os.path.normcase(os.path.abspath(file_path))
+            model_key = _wb_model_key(rgb_cam, mosaic, black, white)
+            if (
+                wb_sanity_enabled()
+                and wb_key not in _WB_CORRECTION_CACHE
+                and _WB_MODEL_VERDICT.get(model_key) is not False
+            ):
+                try:
+                    t = raw.extract_thumb()
+                    if getattr(t, "format", None) == rawpy.ThumbFormat.JPEG:
+                        thumb_bytes = t.data
+                except Exception:
+                    thumb_bytes = None
         if rgb_cam is None or black.shape[0] < 4 or cam_mul.shape[0] < 4:
             return None
         if cam_mul[0] <= 0 or cam_mul[1] <= 0 or cam_mul[2] <= 0:
@@ -332,6 +580,37 @@ def unpack_raw(
         if denom <= 0:
             return None
         scale_mul = pre_mul * 65535.0 / denom
+
+        # As-shot WB sanity vs the camera's own JPEG (see get_corrected_camera_wb).
+        if wb_sanity_enabled():
+            if wb_key not in _WB_CORRECTION_CACHE:
+                if _WB_MODEL_VERDICT.get(model_key) is False:
+                    # Model already verified clean this session -- skip.
+                    _WB_CORRECTION_CACHE[wb_key] = None
+                else:
+                    result = _wb_correction_from_jpeg(
+                        file_path, thumb_bytes, mosaic, pattern, black,
+                        scale_mul, rgb_cam, cam_mul,
+                    )
+                    _WB_CORRECTION_CACHE[wb_key] = result
+                    # Record the model verdict only from a real measurement:
+                    # a missing/undecodable thumb must not mark a potentially
+                    # misparsed model as clean for the whole session.
+                    if result is not None:
+                        _WB_MODEL_VERDICT[model_key] = True
+                    elif thumb_bytes:
+                        _WB_MODEL_VERDICT.setdefault(model_key, False)
+            corrected = _WB_CORRECTION_CACHE[wb_key]
+            if corrected is not None:
+                cam_mul = np.asarray(corrected, dtype=np.float64)
+                pre_mul = cam_mul / cam_mul.min()
+                scale_mul = pre_mul * 65535.0 / denom
+        perf_mark(
+            "unpack",
+            (time.perf_counter() - _t_unpack) * 1000.0,
+            file_path,
+            mp=mosaic.shape[0] * mosaic.shape[1] / 1e6,
+        )
         return UnpackedRaw(
             file_path=file_path,
             mosaic=mosaic,
@@ -359,6 +638,9 @@ def finish_full_decode(
     cv2 = _import_cv2()
     if cv2 is None:
         return None
+    from perf_metrics import perf_mark
+
+    _t0 = time.perf_counter()
 
     def _abort_if_cancelled() -> None:
         if cancel_check is not None and cancel_check():
@@ -396,6 +678,12 @@ def finish_full_decode(
     for y0 in range(0, srgb16.shape[0], chunk):
         _abort_if_cancelled()
         out[y0 : y0 + chunk] = glut[srgb16[y0 : y0 + chunk]]
+    perf_mark(
+        "decode_full_cpu",
+        (time.perf_counter() - _t0) * 1000.0,
+        unpacked.file_path,
+        mp=out.shape[0] * out.shape[1] / 1e6,
+    )
     return out
 
 
@@ -422,6 +710,16 @@ def decode_half_from_unpacked(
     math only, so a fit-view paint plus a later full tier pays LibRaw's
     unpack once instead of twice. Returns None when cv2 is unavailable.
     """
+    from perf_metrics import perf_timer
+
+    with perf_timer("decode_half", unpacked.file_path):
+        return _decode_half_from_unpacked_impl(unpacked, cancel_check)
+
+
+def _decode_half_from_unpacked_impl(
+    unpacked: UnpackedRaw,
+    cancel_check: Optional[Callable[[], bool]] = None,
+) -> Optional[np.ndarray]:
     cv2 = _import_cv2()
     if cv2 is None:
         return None
