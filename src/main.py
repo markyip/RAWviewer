@@ -7,6 +7,13 @@ import os
 # silently wrong results). This flag keeps envs that haven't re-run the build
 # script bootable; a properly built env never exercises it.
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+try:
+    # EAGER IMPORT: Must import torch on the main GUI thread before any QRunnables
+    # or ProcessPools are spawned. Initializing PyTorch's OpenMP backend on a
+    # background thread on macOS causes __kmp_abort_process (Thread 17/22 Crash).
+    import torch
+except ImportError:
+    pass
 import platform
 import ctypes
 import time
@@ -7272,7 +7279,6 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         
         # Only handle current file's EXIF (normalize for Windows path format differences)
         if _norm_path(file_path) != _norm_path(getattr(self, "current_file_path", None)):
-            logger.debug(f"[MANAGER] EXIF for different file: {os.path.basename(file_path)}")
             return
 
         # De-bounce duplicate EXIF-ready signals for the same current file.
@@ -11746,6 +11752,12 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         new_value = not current_value
         settings.setValue("use_embedded_jpeg_workflow", new_value)
         entering_raw_mode = not new_value
+        
+        # Show immediate feedback
+        if hasattr(self, "loading_overlay"):
+            msg = "Switching to RAW..." if entering_raw_mode else "Switching to Preview..."
+            self.loading_overlay.show_loading(msg)
+            
         if entering_raw_mode:
             # RAW EDR re-decodes with LibRaw highlight reconstruction (~12x a
             # plain decode); default it off on entry so switching into RAW
@@ -18618,10 +18630,6 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 rgb_image = np.ascontiguousarray(rgb_image)
 
             conversion_start = time.time()
-            logger.info("[DISPLAY] Converting to bytes")
-            image_data = rgb_image.data.tobytes() if hasattr(
-                rgb_image.data, 'tobytes') else bytes(rgb_image.data)
-            logger.info("[DISPLAY] Bytes conversion completed, creating QImage")
 
             q_format = QImage.Format.Format_RGB888
             if channels == 1:
@@ -18629,8 +18637,9 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             elif channels == 4:
                 q_format = QImage.Format.Format_RGBA8888
 
-            q_image = QImage(image_data, width, height,
-                             bytes_per_line, q_format)
+            # Zero-copy QImage from numpy array
+            q_image = QImage(rgb_image.data, width, height, bytes_per_line, q_format)
+            q_image.ndarr = rgb_image  # Keep numpy array alive
             logger.info("[DISPLAY] QImage created, creating QPixmap")
             pixmap = QPixmap.fromImage(q_image)
             conversion_time = time.time() - conversion_start
@@ -18883,6 +18892,13 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 "support (e.g. some panorama/linear DNGs) cannot be edited.",
             )
             return
+
+        settings = self.get_settings()
+        use_embedded = settings.value("use_embedded_jpeg_workflow", True, type=bool)
+        if opening and use_embedded:
+            # Automatically switch to RAW workflow when editing
+            self.toggle_raw_jpeg_workflow()
+
         self._set_adjust_panel_visible(opening)
 
     def _sync_adjust_panel_for_current_file(self, *, force: bool = False) -> None:

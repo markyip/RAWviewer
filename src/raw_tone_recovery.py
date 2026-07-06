@@ -68,7 +68,7 @@ def edit_base_decode_params(
     """
     import rawpy
 
-    params = rawpy.Params(
+    params = dict(
         use_camera_wb=True,
         use_auto_wb=False,
         output_bps=16,
@@ -81,7 +81,7 @@ def edit_base_decode_params(
     )
     if demosaic:
         try:
-            params.demosaic_algorithm = getattr(rawpy.DemosaicAlgorithm, demosaic)
+            params['demosaic_algorithm'] = getattr(rawpy.DemosaicAlgorithm, demosaic)
         except (AttributeError, TypeError):
             pass
     if for_file:
@@ -90,8 +90,8 @@ def edit_base_decode_params(
 
             corrected = get_corrected_camera_wb(for_file)
             if corrected:
-                params.use_camera_wb = False
-                params.user_wb = list(corrected)
+                params['use_camera_wb'] = False
+                params['user_wb'] = list(corrected)
         except Exception:
             pass
     return params
@@ -109,7 +109,7 @@ def recovery_decode_params(
     """
     import rawpy
 
-    params = rawpy.Params(
+    params = dict(
         use_camera_wb=True,
         use_auto_wb=False,
         output_bps=16,
@@ -120,12 +120,11 @@ def recovery_decode_params(
         half_size=half_size,
         highlight_mode=_highlight_reconstruct_mode(),
         exp_shift=1.0,
+        exp_preser=0.45,
     )
-    # exp_preser is not accepted by Params.__init__ on all rawpy builds.
-    params.exp_preser = 0.45
     if demosaic:
         try:
-            params.demosaic_algorithm = getattr(rawpy.DemosaicAlgorithm, demosaic)
+            params['demosaic_algorithm'] = getattr(rawpy.DemosaicAlgorithm, demosaic)
         except (AttributeError, TypeError):
             pass
     if for_file:
@@ -134,8 +133,8 @@ def recovery_decode_params(
 
             corrected = get_corrected_camera_wb(for_file)
             if corrected:
-                params.use_camera_wb = False
-                params.user_wb = list(corrected)
+                params['use_camera_wb'] = False
+                params['user_wb'] = list(corrected)
         except Exception:
             pass
     return params

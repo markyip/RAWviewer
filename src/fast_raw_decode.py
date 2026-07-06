@@ -375,9 +375,14 @@ class UnpackedRaw:
     rgb_cam: np.ndarray  # float32 3x3 camera->sRGB matrix
 
 
-def params_supported(params: Dict[str, Any]) -> bool:
+def params_supported(params: Dict[str, Any], return_linear: bool = False) -> bool:
     """True when the rawpy params match the semantics this module replicates."""
-    if set(params) - _ALLOWED_PARAM_KEYS:
+    # Allowed keys for both modes
+    allowed = _ALLOWED_PARAM_KEYS.copy()
+    if return_linear:
+        allowed.add("highlight_mode")
+
+    if set(params) - allowed:
         return False
     if not params.get("use_camera_wb", False):
         return False
@@ -385,26 +390,36 @@ def params_supported(params: Dict[str, Any]) -> bool:
         return False
     if not params.get("no_auto_bright", False):
         return False
-    if int(params.get("output_bps", 8)) != 8:
-        return False
+    
+    if return_linear:
+        if int(params.get("output_bps", 16)) != 16:
+            return False
+        # Linear adjustments use highlight_mode > 0 (usually 2 for blend)
+        hm = params.get("highlight_mode", 0)
+        if getattr(hm, "value", hm) not in (0, 1, 2):
+            return False
+    else:
+        if int(params.get("output_bps", 8)) != 8:
+            return False
+        gamma = tuple(params.get("gamma", (2.222, 4.5)))
+        if len(gamma) != 2 or abs(gamma[0] - 2.222) > 1e-6 or abs(gamma[1] - 4.5) > 1e-6:
+            return False
+
     if float(params.get("bright", 1.0)) != 1.0:
         return False
     if int(params.get("user_flip", 0)) != 0:
         return False
     if params.get("half_size", False):
         return False
-    gamma = tuple(params.get("gamma", (2.222, 4.5)))
-    if len(gamma) != 2 or abs(gamma[0] - 2.222) > 1e-6 or abs(gamma[1] - 4.5) > 1e-6:
-        return False
     return True
 
 
-def params_supported_half(params: Dict[str, Any]) -> bool:
+def params_supported_half(params: Dict[str, Any], return_linear: bool = False) -> bool:
     """Like :func:`params_supported` but for the half_size display decode."""
     if not params.get("half_size", False):
         return False
     relaxed = {k: v for k, v in params.items() if k != "half_size"}
-    return params_supported(relaxed)
+    return params_supported(relaxed, return_linear=return_linear)
 
 
 _GAMMA_CURVE16: Optional[np.ndarray] = None
@@ -628,6 +643,7 @@ def unpack_raw(
 def finish_full_decode(
     unpacked: UnpackedRaw,
     cancel_check: Optional[Callable[[], bool]] = None,
+    return_linear: bool = False,
 ) -> Optional[np.ndarray]:
     """Full-resolution pixel math (scale/demosaic/matrix/gamma) on an unpack.
 
@@ -673,6 +689,15 @@ def finish_full_decode(
     # uint16 in/out: cv2.transform saturates to [0, 65535] for free
     # (within 1 LSB of the float path on ~0.001% of pixels).
     srgb16 = cv2.transform(rgb16, unpacked.rgb_cam)
+    if return_linear:
+        perf_mark(
+            "decode_full_cpu_linear",
+            (time.perf_counter() - _t0) * 1000.0,
+            unpacked.file_path,
+            mp=srgb16.shape[0] * srgb16.shape[1] / 1e6,
+        )
+        return srgb16
+
     glut = _gamma_lut8()
     out = np.empty(srgb16.shape, dtype=np.uint8)
     for y0 in range(0, srgb16.shape[0], chunk):
@@ -701,24 +726,19 @@ def _scale_luts(unpacked: UnpackedRaw) -> list:
 def decode_half_from_unpacked(
     unpacked: UnpackedRaw,
     cancel_check: Optional[Callable[[], bool]] = None,
+    return_linear: bool = False,
 ) -> Optional[np.ndarray]:
-    """Demosaic-free half-size tier from an existing unpack (fit-view paint).
-
-    Same 2x2 binning + color math as rawpy's ``half_size=True`` (greens
-    averaged; parity gate holds it to +/-1 8-bit LSB), but reusing the
-    already-unpacked mosaic — its marginal cost is quarter-resolution pixel
-    math only, so a fit-view paint plus a later full tier pays LibRaw's
-    unpack once instead of twice. Returns None when cv2 is unavailable.
-    """
+    """Demosaic-free half-size tier from an existing unpack (fit-view paint)."""
     from perf_metrics import perf_timer
 
     with perf_timer("decode_half", unpacked.file_path):
-        return _decode_half_from_unpacked_impl(unpacked, cancel_check)
+        return _decode_half_from_unpacked_impl(unpacked, cancel_check, return_linear)
 
 
 def _decode_half_from_unpacked_impl(
     unpacked: UnpackedRaw,
     cancel_check: Optional[Callable[[], bool]] = None,
+    return_linear: bool = False,
 ) -> Optional[np.ndarray]:
     cv2 = _import_cv2()
     if cv2 is None:
@@ -772,6 +792,7 @@ def try_fast_raw_decode(
     params: Dict[str, Any],
     rawpy_lock: Optional[Any] = None,
     cancel_check: Optional[Any] = None,
+    return_linear: bool = False,
 ) -> Optional[np.ndarray]:
     """Full-resolution decode matching rawpy semantics for ``params``.
 
@@ -783,7 +804,9 @@ def try_fast_raw_decode(
     if _env_disabled():
         return None
     try:
-        if not params_supported(params):
+        is_half = params.get("half_size", False)
+        supported = params_supported_half(params, return_linear=return_linear) if is_half else params_supported(params, return_linear=return_linear)
+        if not supported:
             logger.info(
                 "[FAST_RAW] params not supported, using rawpy: %s",
                 {k: v for k, v in params.items() if k != "demosaic_algorithm"},
@@ -794,9 +817,22 @@ def try_fast_raw_decode(
         if unpacked is None:
             return None
             
+        # If half_size is requested, try to run the fast half-size decode
+        if params.get("half_size", False):
+            # GPU half-size isn't implemented yet, so use CPU
+            out = decode_half_from_unpacked(unpacked, cancel_check=cancel_check, return_linear=return_linear)
+            if out is not None:
+                logger.info(
+                    "[FAST_RAW] %s decoded half-size in %.0fms (pattern=%s)",
+                    os.path.basename(file_path),
+                    (time.perf_counter() - t0) * 1000.0,
+                    unpacked.pat_str,
+                )
+                return out
+                
         try:
             from gpu_raw_processor import try_gpu_decode_from_unpacked
-            gpu_out = try_gpu_decode_from_unpacked(unpacked, cancel_check=cancel_check)
+            gpu_out = try_gpu_decode_from_unpacked(unpacked, cancel_check=cancel_check, return_linear=return_linear)
             if gpu_out is not None:
                 logger.info(
                     "[FAST_RAW] %s decoded (GPU) %dx%d in %.0fms (pattern=%s)",
@@ -812,7 +848,7 @@ def try_fast_raw_decode(
         except Exception as e:
             logger.warning("[FAST_RAW] GPU decode attempt failed, falling back to CPU: %s", e)
             
-        out = finish_full_decode(unpacked, cancel_check=cancel_check)
+        out = finish_full_decode(unpacked, cancel_check=cancel_check, return_linear=return_linear)
         if out is None:
             return None
         logger.info(

@@ -199,13 +199,24 @@ class UnifiedImageProcessor:
                         _heavy_fallback_semaphore,
                         _rawpy_global_lock,
                     )
+                    from fast_raw_decode import try_fast_raw_decode
 
-                    with _rawpy_global_lock:
-                        raw_ctx = rawpy.imread(file_path)
-                    with raw_ctx as raw:
-                        cam_mul_for_scale = list(raw.camera_whitebalance or [])
-                        with _heavy_fallback_semaphore:
-                            rgb_image = raw.postprocess(edit_params)
+                    rgb_image = try_fast_raw_decode(
+                        file_path, 
+                        edit_params, 
+                        rawpy_lock=_rawpy_global_lock,
+                        return_linear=True
+                    )
+
+                    if rgb_image is None:
+                        with _rawpy_global_lock:
+                            raw_ctx = rawpy.imread(file_path)
+                        with raw_ctx as raw:
+                            cam_mul_for_scale = list(raw.camera_whitebalance or [])
+                            with _heavy_fallback_semaphore:
+                                rgb_image = raw.postprocess(**edit_params)
+                    else:
+                        cam_mul_for_scale = None
                     # Restore browse (min-normalized) brightness: dcraw
                     # divides the WB multipliers by their MAX whenever
                     # highlight_mode > 0 (measured: a uniform 1.74x darkening
