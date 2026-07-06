@@ -65,6 +65,22 @@ _RATIO_EPS = 0.005
 # roughly halves the worst-case amplification while still recovering far
 # more than the original 3.0 cap; the strengthened chroma damp below
 # (raised from 0.35 to 0.85 max) does most of the remaining noise control.
+#
+# NOTE (post return_linear fix): fixing decode_half_from_unpacked's
+# ignored return_linear flag (fast_raw_decode.py) means y0 here is now
+# genuinely scene-linear instead of gamma-encoded data mislabeled as
+# linear -- true deep-shadow y0 on a real CR3 runs as low as ~0.0006 in
+# the darkest 5%, which saturates this 8x cap across nearly the entire
+# Shadows 50-100 slider range (measured: Shadows=50 and Shadows=100
+# produce identical output there) and likely contributes to a recurring
+# "grey casting" report. Tried raising back to 16x post-fix: t_tone_engine
+# regressed (chroma speckle test failed, b-g std 0.87 > luma std 0.43),
+# so the cap is not the right knob to turn -- a naive increase reproduces
+# the exact speckle regression 8x was chosen to fix, just via the
+# now-corrected data scale instead of the old buggy one. Left at 8x;
+# the anchor band and lift_frac saturation point (both below) were also
+# tuned against the same buggy data and need their own recalibration
+# pass against real files before this is revisited.
 _MAX_TONE_RATIO = 8.0
 _MIN_TONE_RATIO = 0.25
 
