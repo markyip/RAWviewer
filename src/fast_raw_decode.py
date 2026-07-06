@@ -784,6 +784,8 @@ def _decode_half_from_unpacked_impl(
     # uint16 in/out: saturates to [0, 65535], same as the full-res path.
     srgb16 = cv2.transform(cam3, unpacked.rgb_cam)
     _abort_if_cancelled()
+    if return_linear:
+        return srgb16
     return _gamma_lut8()[srgb16]
 
 
