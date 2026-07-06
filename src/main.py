@@ -6353,6 +6353,15 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 bar.setEnabled(False)
                 self._hide_filmstrip_chrome()
                 return
+            if self._adjust_panel_active():
+                # Editor is open: the filmstrip is deliberately disabled/hidden
+                # (see _set_adjust_panel_visible). This function also runs from
+                # background events (e.g. folder-index-ready) that fire while
+                # editing, and used to unconditionally re-enable the bar here,
+                # which let its hover-reveal logic show it again mid-edit.
+                bar.hide()
+                bar.setEnabled(False)
+                return
             files = self._navigation_files()
             if self._is_semantic_search_filter_active() and files != list(
                 getattr(self, "image_files", []) or []

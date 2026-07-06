@@ -40,6 +40,11 @@ from raw_tone_curve import TONE_CURVE_SERIAL_KEY
 _SHOW_TONE_CURVE_UI = True
 # HSL section — hidden pending a saturation/vibrance review (see docs).
 _SHOW_HSL_UI = True
+# Dodge & burn brush — disabled pending a brush-shape/intensity-accumulation
+# rework (brush currently paints a hard square instead of a soft circular
+# falloff, and stops accumulate strength too fast). Widgets are still built
+# (so main.py's wiring/attribute access stays valid) but hidden.
+_SHOW_DODGE_BURN_UI = False
 
 if _SHOW_TONE_CURVE_UI:
     from rawviewer_ui.tone_curve_widget import ToneCurveEditorRow, ToneCurveWidget
@@ -821,6 +826,12 @@ class ImageAdjustPanelWidget(QWidget):
         # row of secondary actions (Clear/Show Mask) -- instead of packing
         # all five widgets into one row, which overlapped/clipped at the
         # panel's actual width.
+        db_container = QWidget()
+        db_container_layout = QVBoxLayout(db_container)
+        db_container_layout.setContentsMargins(0, 0, 0, 0)
+        db_container_layout.setSpacing(6)
+        db_container.setVisible(_SHOW_DODGE_BURN_UI)
+
         db_row = QHBoxLayout()
         db_row.setSpacing(6)
         db_label = QLabel("Dodge/Burn")
@@ -841,7 +852,7 @@ class ImageAdjustPanelWidget(QWidget):
             db_row.addWidget(btn, 1)
         self._dodge_btn.toggled.connect(lambda on: self._on_dodge_burn_toggled(self._dodge_btn, on))
         self._burn_btn.toggled.connect(lambda on: self._on_dodge_burn_toggled(self._burn_btn, on))
-        self.sect_detail.add_layout(db_row)
+        db_container_layout.addLayout(db_row)
 
         db_actions_row = QHBoxLayout()
         db_actions_row.setSpacing(6)
@@ -865,7 +876,7 @@ class ImageAdjustPanelWidget(QWidget):
         self._db_show_mask_btn.setToolTip("Overlay mask in red")
         self._db_show_mask_btn.toggled.connect(self.dodgeBurnMaskToggled.emit)
         db_actions_row.addWidget(self._db_show_mask_btn, 2)
-        self.sect_detail.add_layout(db_actions_row)
+        db_container_layout.addLayout(db_actions_row)
 
         db_size_row = QHBoxLayout()
         db_size_row.setSpacing(6)
@@ -878,7 +889,7 @@ class ImageAdjustPanelWidget(QWidget):
         self._db_size_slider.setValue(60)
         self._db_size_slider.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         db_size_row.addWidget(self._db_size_slider, 1)
-        self.sect_detail.add_layout(db_size_row)
+        db_container_layout.addLayout(db_size_row)
 
         db_strength_row = QHBoxLayout()
         db_strength_row.setSpacing(6)
@@ -891,7 +902,8 @@ class ImageAdjustPanelWidget(QWidget):
         self._db_strength_slider.setValue(35)
         self._db_strength_slider.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         db_strength_row.addWidget(self._db_strength_slider, 1)
-        self.sect_detail.add_layout(db_strength_row)
+        db_container_layout.addLayout(db_strength_row)
+        self.sect_detail.add_widget(db_container)
 
         export_btn = QPushButton("Export…")
         export_btn.setObjectName("adjust_export_btn")
