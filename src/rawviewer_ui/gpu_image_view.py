@@ -550,11 +550,16 @@ class GpuImageView(QGraphicsView):
     def capture_viewport_pixmap(self) -> QPixmap | None:
         """Capture the visible view for resolution cross-fade (OpenGL-safe).
 
-        On Windows, ANY snapshot of a live QOpenGLWidget surface — grabFramebuffer(),
-        QGraphicsView.render() over a GL viewport, or viewport.grab() — can abort the
-        process (SIGABRT / exit 3) on several GL drivers when gallery decodes are in
-        flight. Return None there so the caller falls back to the cached on-screen
-        pixmap for the crossfade instead of touching the GL surface.
+        ANY snapshot of a live QOpenGLWidget surface — grabFramebuffer(),
+        QGraphicsView.render() over a GL viewport, or viewport.grab() — can abort
+        the process (SIGABRT/SIGSEGV) on several GL drivers when background
+        decodes are in flight. This was originally guarded on Windows only, but
+        reproduced identically on macOS (a real crash: grabFramebuffer() segfaulted
+        on the main thread while a background thread was mid-decode in
+        extract_thumbnail_from_image, right after a gallery->single-view click) --
+        so the guard is unconditional now. Return None so the caller falls back to
+        the cached on-screen pixmap for the crossfade instead of touching the GL
+        surface at all.
         """
         if not self._has_pixmap:
             return None
@@ -569,18 +574,8 @@ class GpuImageView(QGraphicsView):
         except Exception:
             is_gl_viewport = False
 
-        if sys.platform == "win32":
-            # Never snapshot a live GL surface on Windows. Raster viewports are safe.
-            if is_gl_viewport:
-                return None
-        else:
-            if is_gl_viewport:
-                try:
-                    fb = vp.grabFramebuffer()
-                    if fb is not None and not fb.isNull():
-                        return fb
-                except Exception:
-                    pass
+        if is_gl_viewport:
+            return None
         try:
             target = QRect(0, 0, w, h)
             pix = QPixmap(w, h)
