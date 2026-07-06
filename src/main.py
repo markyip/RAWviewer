@@ -9600,7 +9600,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             return
         self._apply_search_expand_container_width(0, animate=False)
 
-    def _set_gallery_search_input_visible(self):
+    def _set_gallery_search_input_visible(self, *, animate: bool = False):
         """Show the search panel beside the search icon (only when user expanded search)."""
         if hasattr(self, "search_expand_layout") and hasattr(self, "gallery_search_panel"):
             self.search_expand_layout.setCurrentWidget(self.gallery_search_panel)
@@ -9617,7 +9617,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 getattr(self, "_search_panel_target_width_idle", 310) or 310
             )
         self._apply_search_expand_container_width(
-            self._search_panel_target_width, animate=False
+            self._search_panel_target_width, animate=animate
         )
         self._sync_gallery_search_input_editable()
         if hasattr(self, "gallery_search_input") and self.gallery_search_input is not None:
@@ -10862,8 +10862,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 self._gallery_search_user_collapsed_while_busy = True
             self._gallery_search_user_wants_semantic = False
             self._defer_semantic_after_metadata = False
-            self._set_search_panel_expanded(False, animate=False)
-            self._ensure_gallery_search_collapsed()
+            self._set_search_panel_expanded(False, animate=True)
             self._sync_gallery_search_input_editable()
             return
 
@@ -10879,8 +10878,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             "[SEARCH][BUTTON] collapsed -> expand and request semantic (corpus=%d)",
             len(corpus_files),
         )
-        self._set_search_panel_expanded(True, animate=False)
-        self._set_gallery_search_input_visible()
+        self._set_search_panel_expanded(True, animate=True)
+        self._set_gallery_search_input_visible(animate=True)
         self._sync_gallery_search_input_editable()
 
         if not corpus_files:
