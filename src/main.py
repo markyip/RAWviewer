@@ -12830,6 +12830,15 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         # exists; calling begin_gallery_warmup earlier is a no-op on first gallery entry.
         self._arm_gallery_warmup()
         
+        # Close the editor before leaving single view: _show_gallery_view only
+        # ever hid single_view_container, never the Adjust panel itself, so a
+        # still-open editor stayed visible over the gallery (splitter gives it
+        # the space single_view_container gave up) and left
+        # _adjust_overlay_visible stuck True -- which also broke the *next*
+        # gallery->single click, since the app still believed it was editing.
+        if self._adjust_panel_active():
+            self._set_adjust_panel_visible(False)
+
         # Hide single view before touching GPU/full-res buffers (Windows GL abort otherwise).
         if hasattr(self, 'single_view_container') and self.single_view_container:
             self.single_view_container.hide()
