@@ -1094,42 +1094,8 @@ class SingleImageViewOverlay(QWidget):
         self._show_filmstrip_timer.setSingleShot(True)
         self._show_filmstrip_timer.timeout.connect(self._show_filmstrip_if_still_in_hotzone)
 
-        # Floating star rating badge overlay
-        from PyQt6.QtWidgets import QLabel
-        from PyQt6.QtCore import pyqtSignal
-        from PyQt6.QtGui import QMouseEvent
-
-        class RatingBadgeLabel(QLabel):
-            ratingClicked = pyqtSignal(int)
-            def mousePressEvent(self, event: QMouseEvent):
-                # Calculate which star was clicked based on horizontal position
-                # Assuming 5 stars, equal width. We add a little margin logic.
-                w = self.width()
-                if w > 0:
-                    star_idx = int((event.position().x() / w) * 5) + 1
-                    star_idx = max(1, min(5, star_idx))
-                    self.ratingClicked.emit(star_idx)
-                super().mousePressEvent(event)
-
-        self.rating_badge = RatingBadgeLabel(self)
-        self.rating_badge.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.rating_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.rating_badge.setStyleSheet("""
-            QLabel {
-                background-color: rgba(29, 26, 22, 210);
-                color: #D9A441;
-                font-size: 16px;
-                font-weight: bold;
-                border-radius: 4px;
-                padding: 4px 10px;
-                border: 1px solid rgba(255, 215, 0, 90);
-                letter-spacing: 2px;
-            }
-        """)
-        # We always show the badge so user can click to rate even if 0 stars.
-        self.rating_badge.setText("☆" * 5)
-        self.rating_badge.show()
-
+        # Rating is shown/edited via the bottom-bar star widget (see
+        # main.py's bottom_rating_widget), not a floating badge on the image.
         self.recovery_badge = QLabel(self)
         self.recovery_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.recovery_badge.setStyleSheet("""
@@ -1497,7 +1463,6 @@ class SingleImageViewOverlay(QWidget):
         self._layout_filmstrip()
         self._layout_histogram()
         self._layout_map()
-        self.relayout_rating_badge()
         self.relayout_recovery_badge()
         self._raise_single_view_layers()
 
@@ -1519,8 +1484,6 @@ class SingleImageViewOverlay(QWidget):
         self._scroll.lower()
         if self._gpu_view is not None and self._gpu_view.isVisible():
             self._gpu_view.raise_()
-        if hasattr(self, "rating_badge") and self.rating_badge.isVisible():
-            self.rating_badge.raise_()
         if hasattr(self, "recovery_badge") and self.recovery_badge.isVisible():
             self.recovery_badge.raise_()
         if self._map is not None and self._map.isVisible():
@@ -1666,21 +1629,10 @@ class SingleImageViewOverlay(QWidget):
         self._layout_histogram()
 
     def set_rating(self, rating: int) -> None:
-        """Set the star rating on the overlay badge."""
-        if not hasattr(self, "rating_badge") or self.rating_badge is None:
-            return
-        r = max(0, min(5, int(rating)))
-        stars = "★" * r + "☆" * (5 - r)
-        self.rating_badge.setText(stars)
-        self.rating_badge.adjustSize()
-        self.rating_badge.show()
-        self.rating_badge.raise_()
-        self.relayout_rating_badge()
-
-    def relayout_rating_badge(self):
-        """Place rating badge float at top-left with custom margin."""
-        if hasattr(self, "rating_badge") and self.rating_badge and self.rating_badge.isVisible():
-            self.rating_badge.move(14, 14)
+        """No-op: rating is shown/edited via the bottom-bar star widget,
+        not a floating badge on the image. Kept so existing callers
+        (_update_single_view_rating_display) don't need a guard."""
+        pass
 
 
 # -----------------------------

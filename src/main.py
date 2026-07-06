@@ -8037,7 +8037,6 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self.single_view_container = SingleImageViewOverlay(
             self.scroll_area, self.single_image_histogram, viewer=self,
             gpu_view=self.gpu_view, map_widget=self.single_image_location_map)
-        self.single_view_container.rating_badge.ratingClicked.connect(self.rate_current_image)
         self._wire_filmstrip()
         
         self.single_view_splitter = QSplitter(Qt.Orientation.Horizontal)
