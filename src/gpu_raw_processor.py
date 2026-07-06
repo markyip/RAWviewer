@@ -7,8 +7,29 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
-# Global lock to serialize GPU decoding and prevent concurrent CUDA context/VRAM allocation conflicts
+# GPU decode concurrency control.
+#
+# PyTorch backends: torch ops are thread-safe and CUDA kernels from different
+# host threads overlap via per-thread streams (see gpu_demosaic_pytorch_
+# unpacked), so decodes are gated by a SEMAPHORE (default 2, tune with
+# RAWVIEWER_GPU_CONCURRENCY) instead of fully serialized -- a prefetch decode
+# can upload while the current decode computes. Bounded because each in-
+# flight decode holds ~130MB of float32 tensors per 33MP frame in VRAM.
+#
+# CuPy keeps a hard LOCK: the historical "multi-threaded CUDA access
+# violation" came from the custom raw ElementwiseKernel path, which is not
+# audited for concurrent launches with shared kernel objects.
 _GPU_LOCK = threading.Lock()
+
+
+def _gpu_concurrency() -> int:
+    try:
+        return max(1, min(4, int(os.environ.get("RAWVIEWER_GPU_CONCURRENCY", "2"))))
+    except ValueError:
+        return 2
+
+
+_GPU_SEMAPHORE = threading.Semaphore(_gpu_concurrency())
 
 # Cache detection results to avoid repeated import attempts
 _GPU_BACKEND: Optional[str] = None
@@ -78,25 +99,78 @@ def gpu_demosaic_pytorch_unpacked(unpacked, device_str: str = "cuda", cancel_che
     Consumes UnpackedRaw from fast_raw_decode.py to guarantee color math parity.
     """
     device = torch.device(device_str)
-    
+
+    # CUDA: run this decode on its own stream so decodes issued from
+    # different worker threads (semaphore allows up to _gpu_concurrency())
+    # overlap upload/compute instead of queueing on the default stream.
+    # The final .cpu() copy synchronizes the stream before returning.
+    stream_ctx = (
+        torch.cuda.stream(torch.cuda.Stream())
+        if device.type == "cuda"
+        else _NullCtx()
+    )
+    with stream_ctx:
+        return _gpu_demosaic_pytorch_body(unpacked, device, cancel_check)
+
+
+class _NullCtx:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+# Per-device cache of the dcraw BT.709 gamma curve as a GPU-resident LUT:
+# fast_raw_decode.gamma_curve16() already computes and caches this curve
+# (a 48-iteration bisection) once at module scope for the CPU path: reuse
+# that instead of re-deriving the identical formula in Python on every GPU
+# decode call. Keyed by device string ("cuda"/"mps") since the underlying
+# tensor must live on the same device as the data it indexes.
+_GAMMA_LUT_GPU: dict = {}
+
+
+def _gpu_gamma_lut(device, torch_mod) -> Any:
+    key = str(device)
+    lut = _GAMMA_LUT_GPU.get(key)
+    if lut is None:
+        from fast_raw_decode import gamma_curve16
+
+        # 16-bit curve, indexed by a 16-bit input -> keep as int64 index
+        # source; convert once to a device-resident float LUT for gather.
+        curve16 = gamma_curve16()  # np.uint16, 65536 entries
+        lut = torch_mod.from_numpy(curve16.astype(np.float32)).to(device)
+        _GAMMA_LUT_GPU[key] = lut
+    return lut
+
+
+def _gpu_demosaic_pytorch_body(unpacked, device, cancel_check=None) -> np.ndarray:
+    def _abort_if_cancelled() -> None:
+        if cancel_check is not None and cancel_check():
+            from fast_raw_decode import DecodeCancelled
+
+            raise DecodeCancelled(unpacked.file_path)
+
     # 1. Upload raw array to GPU as float32
     raw_tensor = torch.from_numpy(unpacked.mosaic.astype(np.float32)).to(device)
     h, w = raw_tensor.shape
-    
+
     # Pre-allocate normalized array
     raw_norm = torch.empty_like(raw_tensor)
-    
+
     # Apply dcraw scale_colors exactly: (raw - black) * (scale_mul / 65535.0), clipped to [0, 1]
     # We iterate over the 2x2 CFA pattern offsets to apply per-channel scaling
     for (dy, dx), ci in np.ndenumerate(unpacked.pattern):
         slc = (slice(dy, None, 2), slice(dx, None, 2))
         black_val = float(unpacked.black[ci])
         scale_val = float(unpacked.scale_mul[ci] / 65535.0)
-        
+
         # Clamp after scale guarantees [0.0, 1.0] and handles highlights properly
         raw_norm[slc] = torch.clamp((raw_tensor[slc] - black_val) * scale_val, 0.0, 1.0)
-        
-    # Map the CFA string to Kornia's enum. 
+
+    _abort_if_cancelled()
+
+    # Map the CFA string to Kornia's enum.
     # Note: Kornia's naming expects the 2x2 block starting at the origin.
     cfa_map = {
         "RGGB": kornia.color.CFA.BG,
@@ -108,46 +182,51 @@ def gpu_demosaic_pytorch_unpacked(unpacked, device_str: str = "cuda", cancel_che
 
     # 2. Reshape for Kornia: (batch_size=1, channels=1, height, width)
     raw_input = raw_norm.view(1, 1, h, w)
-    
+
     # 3. Kornia Demosaicing
     rgb_tensor = kornia.color.raw_to_rgb(raw_input, cfa)
-    
+
     # Squeeze and permute to (H, W, 3)
     rgb_tensor = rgb_tensor.squeeze(0).permute(1, 2, 0)
-    
+
+    _abort_if_cancelled()
+
     # 4. Apply Color Matrix Multiplication (maps sensor RGB directly to sRGB space)
     m_color_tensor = torch.from_numpy(unpacked.rgb_cam).to(device)
     rgb_srgb = torch.matmul(rgb_tensor, m_color_tensor.t())
-    
+
     # Clamp to [0, 1]
     rgb_srgb = rgb_srgb.clamp(0.0, 1.0)
-    
-    # 5. Apply BT.709 Gamma Curve (matching fast_raw_decode _gamma_lut8)
-    pwr = 1.0 / 2.222
-    ts = 4.5
-    bnd = [0.0, 1.0]
-    g2 = 0.0
-    for _ in range(48):
-        g2 = (bnd[0] + bnd[1]) / 2
-        if ((g2 / ts) ** -pwr - 1) / pwr - 1 / g2 > -1:
-            bnd[1] = g2
-        else:
-            bnd[0] = g2
-    g3 = g2 / ts
-    g4 = g2 * (1 / pwr - 1)
-    
-    mask = rgb_srgb < g3
-    rgb_gamma = torch.where(
-        mask,
-        rgb_srgb * ts,
-        (1.0 + g4) * torch.pow(torch.clamp(rgb_srgb, min=1e-12), pwr) - g4
-    )
-    
-    # Convert to uint8 [0, 255] (matching curve16 >> 8 semantics)
-    rgb_final = torch.clamp(rgb_gamma * 255.0 + 0.5, 0, 255).to(torch.uint8)
-    
-    # 6. Download result back to CPU
+
+    _abort_if_cancelled()
+
+    # 5. BT.709 gamma via the shared 16-bit LUT (same curve as
+    # fast_raw_decode._gamma_lut8 / gamma_curve16, computed once and cached
+    # per-device instead of re-derived by bisection on every call).
+    gamma_lut = _gpu_gamma_lut(device, torch)
+    idx = torch.clamp(rgb_srgb * 65535.0 + 0.5, 0, 65535).to(torch.int64)
+    rgb_gamma16 = gamma_lut[idx]  # gather: 16-bit-equivalent curve value
+
+    # Convert to uint8 (curve16 >> 8 semantics, matching the CPU LUT path)
+    rgb_final = torch.clamp(rgb_gamma16 / 256.0, 0, 255).to(torch.uint8)
+
+    _abort_if_cancelled()
+
+    # 6. Download result back to CPU (synchronizes the stream)
     return rgb_final.cpu().numpy()
+
+
+_GAMMA_LUT_CUPY: Optional[Any] = None
+
+
+def _cupy_gamma_lut() -> Any:
+    """CuPy-resident copy of the shared 16-bit gamma curve (see _gpu_gamma_lut)."""
+    global _GAMMA_LUT_CUPY
+    if _GAMMA_LUT_CUPY is None:
+        from fast_raw_decode import gamma_curve16
+
+        _GAMMA_LUT_CUPY = cupy.array(gamma_curve16().astype(np.float32))
+    return _GAMMA_LUT_CUPY
 
 
 def gpu_demosaic_cupy_unpacked(unpacked, cancel_check: Optional[Callable[[], bool]] = None) -> np.ndarray:
@@ -155,20 +234,28 @@ def gpu_demosaic_cupy_unpacked(unpacked, cancel_check: Optional[Callable[[], boo
     GPU-accelerated demosaicing implementation using CuPy.
     Uses CuPy elementwise/raw CUDA kernels for maximum speed.
     """
+    def _abort_if_cancelled() -> None:
+        if cancel_check is not None and cancel_check():
+            from fast_raw_decode import DecodeCancelled
+
+            raise DecodeCancelled(unpacked.file_path)
+
     # Upload to GPU
     raw_gpu = cupy.array(unpacked.mosaic, dtype=cupy.float32)
     h, w = raw_gpu.shape
-    
+
     # Pre-allocate normalized array
     raw_norm = cupy.empty_like(raw_gpu)
-    
+
     for (dy, dx), ci in np.ndenumerate(unpacked.pattern):
         slc = (slice(dy, None, 2), slice(dx, None, 2))
         black_val = float(unpacked.black[ci])
         scale_val = float(unpacked.scale_mul[ci] / 65535.0)
-        
+
         # Clamp to [0, 1]
         raw_norm[slc] = cupy.clip((raw_gpu[slc] - black_val) * scale_val, 0.0, 1.0)
+
+    _abort_if_cancelled()
 
     if unpacked.pat_str != "RGGB":
         raise ValueError(f"CuPy demosaic currently only supports RGGB, got {unpacked.pat_str}")
@@ -222,38 +309,29 @@ def gpu_demosaic_cupy_unpacked(unpacked, cancel_check: Optional[Callable[[], boo
     )
     
     demosaic_kernel(raw_norm, h, w, rgb_gpu)
-    
+
+    _abort_if_cancelled()
+
     # Apply Color Matrix Multiplication
     m_color_gpu = cupy.array(unpacked.rgb_cam, dtype=cupy.float32)
     rgb_srgb = cupy.dot(rgb_gpu, m_color_gpu.T)
-    
+
     # Clamp to [0, 1]
     rgb_srgb = cupy.clip(rgb_srgb, 0.0, 1.0)
-    
-    # BT.709 Gamma Curve
-    pwr = 1.0 / 2.222
-    ts = 4.5
-    bnd = [0.0, 1.0]
-    g2 = 0.0
-    for _ in range(48):
-        g2 = (bnd[0] + bnd[1]) / 2
-        if ((g2 / ts) ** -pwr - 1) / pwr - 1 / g2 > -1:
-            bnd[1] = g2
-        else:
-            bnd[0] = g2
-    g3 = g2 / ts
-    g4 = g2 * (1 / pwr - 1)
-    
-    mask = rgb_srgb < g3
-    rgb_gamma = cupy.where(
-        mask,
-        rgb_srgb * ts,
-        (1.0 + g4) * cupy.power(cupy.maximum(rgb_srgb, 1e-12), pwr) - g4
-    )
-    
-    # Scale and convert to uint8
-    rgb_final = cupy.clip(rgb_gamma * 255.0 + 0.5, 0, 255).astype(cupy.uint8)
-    
+
+    _abort_if_cancelled()
+
+    # BT.709 gamma via the shared 16-bit LUT (same curve as
+    # fast_raw_decode._gamma_lut8 / gamma_curve16; see _cupy_gamma_lut).
+    gamma_lut = _cupy_gamma_lut()
+    idx = cupy.clip(rgb_srgb * 65535.0 + 0.5, 0, 65535).astype(cupy.int64)
+    rgb_gamma16 = gamma_lut[idx]
+
+    # Scale and convert to uint8 (curve16 >> 8 semantics)
+    rgb_final = cupy.clip(rgb_gamma16 / 256.0, 0, 255).astype(cupy.uint8)
+
+    _abort_if_cancelled()
+
     # Download result to CPU
     return cupy.asnumpy(rgb_final)
 
@@ -269,65 +347,96 @@ def try_gpu_decode_from_unpacked(
     backend = detect_gpu_backend()
     if backend == "cpu_only":
         return None
-        
-    global _GPU_LOCK
-    with _GPU_LOCK:
+
+    # Odd-sized mosaics: Kornia's raw_to_rgb hard-rejects odd H/W (raises
+    # "Input H&W must be evenly disible by 2"), so e.g. the EOS R6 Mark III
+    # (4639x6959 visible area) would throw and fall back on EVERY decode --
+    # a wasted GPU upload attempt plus a logged error each time. Skip
+    # straight to the CPU path (cv2's demosaic handles odd dims fine).
+    h, w = unpacked.mosaic.shape[:2]
+    if (h % 2) or (w % 2):
+        logger.debug(
+            "GPU Processor: odd-sized mosaic %dx%d for %s; using CPU path.",
+            w, h, unpacked.file_path,
+        )
+        return None
+
+    if backend == "cupy" and unpacked.pat_str != "RGGB":
+        logger.warning(
+            "GPU Processor: CuPy demosaic only supports RGGB; trying PyTorch for %s.",
+            unpacked.pat_str,
+        )
+        if _HAS_TORCH:
+            if torch.cuda.is_available():
+                backend = "pytorch_cuda"
+            elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+                backend = "pytorch_mps"
+            else:
+                return None
+        else:
+            return None
+
+    # PyTorch backends run under the bounded semaphore (parallel decodes,
+    # streams overlap upload/compute); CuPy keeps the hard lock -- see the
+    # concurrency-control comment at the top of this module.
+    gate = _GPU_LOCK if backend == "cupy" else _GPU_SEMAPHORE
+    with gate:
         if cancel_check is not None and cancel_check():
             from fast_raw_decode import DecodeCancelled
             raise DecodeCancelled(unpacked.file_path)
-            
+
         t_start = time.time()
         try:
-            if backend == "cupy" and unpacked.pat_str != "RGGB":
-                logger.warning(
-                    "GPU Processor: CuPy demosaic only supports RGGB; trying PyTorch for %s.",
-                    unpacked.pat_str,
-                )
-                if _HAS_TORCH:
-                    if torch.cuda.is_available():
-                        backend = "pytorch_cuda"
-                    elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-                        backend = "pytorch_mps"
-                    else:
-                        return None
-                else:
-                    return None
-
+            res = None
             if backend == "pytorch_cuda":
                 res = gpu_demosaic_pytorch_unpacked(
                     unpacked, device_str="cuda", cancel_check=cancel_check
                 )
-                logger.info(
-                    "GPU Processor: Decoded RAW via PyTorch CUDA in %.1fms (bayer=%s)",
-                    (time.time() - t_start) * 1000.0,
-                    unpacked.pat_str,
-                )
-                return res
             elif backend == "pytorch_mps":
                 res = gpu_demosaic_pytorch_unpacked(
                     unpacked, device_str="mps", cancel_check=cancel_check
                 )
-                logger.info(
-                    "GPU Processor: Decoded RAW via PyTorch MPS in %.1fms (bayer=%s)",
-                    (time.time() - t_start) * 1000.0,
-                    unpacked.pat_str,
-                )
-                return res
             elif backend == "cupy":
-                res = gpu_demosaic_cupy_unpacked(
-                    unpacked, cancel_check=cancel_check
-                )
+                res = gpu_demosaic_cupy_unpacked(unpacked, cancel_check=cancel_check)
+            if res is not None:
+                elapsed_ms = (time.time() - t_start) * 1000.0
                 logger.info(
-                    "GPU Processor: Decoded RAW via CuPy in %.1fms (bayer=%s)",
-                    (time.time() - t_start) * 1000.0,
+                    "GPU Processor: Decoded RAW via %s in %.1fms (bayer=%s)",
+                    backend,
+                    elapsed_ms,
                     unpacked.pat_str,
                 )
+                try:
+                    from perf_metrics import perf_mark
+
+                    perf_mark(
+                        "decode_full_gpu",
+                        elapsed_ms,
+                        unpacked.file_path,
+                        backend=backend,
+                        mp=res.shape[0] * res.shape[1] / 1e6,
+                    )
+                except Exception:
+                    pass
                 return res
                 
         except Exception as e:
-            if "DecodeCancelled" in str(e):
-                from fast_raw_decode import DecodeCancelled
-                raise DecodeCancelled(unpacked.file_path)
+            # DecodeCancelled must be caught BEFORE the generic Exception
+            # branch and propagated, not swallowed as a decode failure --
+            # it is IS an Exception subclass, so a single broad `except`
+            # below would catch it too. The previous string-matching check
+            # (`"DecodeCancelled" in str(e)`) never actually matched:
+            # DecodeCancelled's message is just the file path (inherited
+            # str() from Exception(file_path)), which never contains the
+            # literal text "DecodeCancelled" -- so every real cancellation
+            # was silently logged as a GPU failure and returned None,
+            # defeating the cancel_check calls added to the demosaic
+            # bodies (the caller never learns the decode was cancelled and
+            # falls through to a rawpy decode nobody wants anymore).
+            from fast_raw_decode import DecodeCancelled
+
+            if isinstance(e, DecodeCancelled):
+                raise
             logger.warning(f"GPU Processor: Failed to decode RAW on GPU ({backend}): {e}", exc_info=True)
-            
+
         return None

@@ -40,10 +40,21 @@ _BASE_LUT = np.interp(
     _BASE_CURVE_XY[:, 1],
 ).astype(np.float32)
 
-# Cap multiplicative lift in deep shadows (prevents demosaic green blow-up).
-_PERCEPTUAL_LUM_FLOOR = 0.03
-_MAX_TONE_RATIO = 3.0
-_MIN_TONE_RATIO = 0.5
+# Ratio-stability epsilon: added to BOTH numerator and denominator so the
+# no-op case (y1 == y0) is exactly ratio 1.0 at every luminance, while a
+# genuine near-zero denominator can't blow up unbounded. Replaces the old
+# hard floor of 0.03, which zeroed slider response for every pixel whose
+# adjusted luminance stayed under the floor -- exactly the deep-shadow range
+# Shadows/Blacks exist to recover.
+_RATIO_EPS = 0.005
+# 16x = 4 stops of shadow lift, 0.25x = 2 stops of crush. Modern sensors
+# hold recoverable detail well past 3 stops under (Exposure, applied
+# scene-linear upstream, is uncapped and proves it); the old 3.0 cap
+# (~1.6 stops) made Shadows/Blacks top out far below what the file
+# contains. Noise/green-cast control in lifted shadows is the chroma
+# damp's job below, not the ratio cap's.
+_MAX_TONE_RATIO = 16.0
+_MIN_TONE_RATIO = 0.25
 
 
 def _luminance(rgb: np.ndarray) -> np.ndarray:
@@ -177,24 +188,58 @@ def apply_pv2012_tone_rgb(img: np.ndarray, adj: dict[str, float]) -> np.ndarray:
         blacks=float(adj.get("Blacks2012", 0.0)),
     )
 
-    # Floor applies to *both* numerator and denominator: it exists only to
-    # avoid a near-zero-denominator blowup, not to bias the ratio itself. A
-    # floor on the denominator alone made "no sliders touched" (y1 == y0)
-    # into a non-identity operation for any pixel below the floor -- e.g.
-    # y0=0.005 produced ratio=0.5 (max darkening) with every slider at
-    # default, silently crushing deep shadows/blacks before any user
-    # adjustment, and fighting against genuine shadow/black recovery
-    # attempts in exactly the tonal range users reach for it.
-    ratio = np.maximum(y1, _PERCEPTUAL_LUM_FLOOR) / np.maximum(y0, _PERCEPTUAL_LUM_FLOOR)
+    # Shared epsilon (not a shared hard floor): identity (y1 == y0) maps to
+    # exactly ratio 1.0 at every luminance -- the old max(y, 0.03) floor on
+    # both sides met that requirement too, but at the cost of clamping the
+    # *numerator*: any pixel whose adjusted luminance stayed under the floor
+    # got ratio 1.0 = zero slider response, silencing Shadows/Blacks in
+    # precisely the deep-shadow range they're for. The epsilon keeps the
+    # blowup protection (bounded by _MAX_TONE_RATIO) without dead zones.
+    ratio = (y1 + _RATIO_EPS) / (y0 + _RATIO_EPS)
     ratio = np.clip(ratio, _MIN_TONE_RATIO, _MAX_TONE_RATIO)
+
+    # Black-point anchor: taper the lift back toward 1.0 as y0 approaches
+    # black. First tuning ramped over y0 in [0, 0.004] (noise floor only) --
+    # in practice near-black CONTENT just above that band (~7-9 stops under
+    # middle grey: black fabric, deep interior shadow) still took the full
+    # 16x cap, flattening every dark region into the same mid-grey veil,
+    # reported twice as "grey shade/casting". Ramping over [0.001, 0.012]
+    # instead gives a film-toe-like response: absolute black pinned at 0,
+    # ~6.5-stops-under content lifts moderately (still several times more
+    # than the old 3.0-cap engine), and the 5-7-stops-under detail band
+    # (y0 >= ~0.012, scene-linear >= ~0.004) keeps the full recovery range
+    # the Shadows/Blacks rework was built for.
+    t = np.clip((y0 - 0.001) / (0.012 - 0.001), 0.0, 1.0)
+    anchor = t * t * (3.0 - 2.0 * t)
+    # Anchor LIFT only (ratio > 1). Tapering the darkening side too made
+    # near-black pixels darken LESS than slightly-brighter neighbours at
+    # Blacks < 0 -- a real 2-LSB tone inversion at the band edge (caught by
+    # testplan/auto/t_tone_engine.py monotonicity). Darkening needs no
+    # anchor: img * ratio at img ~ 0 stays ~ 0, so there is no grey-veil or
+    # blowup risk in that direction.
+    ratio = np.where(ratio > 1.0, 1.0 + (ratio - 1.0) * anchor, ratio)
     out = img * ratio[..., np.newaxis]
 
     # Shadow lift amplifies demosaic chroma noise — pull chroma toward luma.
     sh = float(adj.get("Shadows2012", 0.0))
     if sh > 1e-4:
         sw = _region_weight_shadows(y_curve)
-        damp = 1.0 - sw[..., np.newaxis] * min(sh / 100.0, 1.0) * 0.55
-        luma = lum[..., np.newaxis]
+        # Anchor on the POST-lift luminance: with the pre-lift ``lum`` here,
+        # a lifted neutral pixel's uniform (out - lum) offset -- which is the
+        # lift itself, not chroma -- was damped up to 55%, cancelling most of
+        # the recovery and making Shadows+Blacks lift *less* than Blacks
+        # alone (measured 38 vs 48 at scene-linear 0.01). Post-lift luminance
+        # makes the damp act only on true color deviation.
+        #
+        # Strength is lift-proportional (up to 0.35 only as the ratio
+        # approaches the cap), not a flat 0.55 across the whole shadow band:
+        # the damp exists to tame noise chroma *amplified by the lift*, and
+        # a flat 55% desaturated every lifted shadow into the same grey wash
+        # the black-point anchor above addresses -- real shadow color must
+        # survive recovery.
+        lift_frac = np.clip((ratio - 1.0) / 7.0, 0.0, 1.0)
+        damp = 1.0 - (sw * min(sh / 100.0, 1.0) * 0.35 * lift_frac)[..., np.newaxis]
+        luma = (lum * ratio)[..., np.newaxis]
         chroma = out - luma
         out = luma + chroma * damp
 

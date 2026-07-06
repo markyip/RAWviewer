@@ -795,27 +795,35 @@ def apply_container_orientation_to_array(
 
 
 def rgb_array_to_qpixmap(rgb_image: np.ndarray) -> QPixmap:
-    """Convert oriented uint8 RGB/grayscale ndarray to QPixmap."""
+    """Convert oriented uint8 RGB/grayscale ndarray to QPixmap.
+
+    Builds the QImage from the array's own buffer (no .tobytes() copy):
+    QPixmap.fromImage() below deep-copies pixel data into the QPixmap's own
+    native storage before this function returns, so the QImage never
+    outlives rgb_image's scope -- safe to reference directly rather than
+    paying for an extra full-frame copy on every conversion (this path runs
+    on every gallery/thumbnail/display repaint).
+    """
     if rgb_image is None or not hasattr(rgb_image, "shape"):
         return QPixmap()
     if rgb_image.dtype != np.uint8:
-        rgb_image = rgb_image.astype(np.uint8)
+        rgb_image = rgb_image.astype(np.uint8, copy=False)
+    if not rgb_image.flags["C_CONTIGUOUS"]:
+        rgb_image = np.ascontiguousarray(rgb_image)
     h, w = rgb_image.shape[:2]
     if len(rgb_image.shape) == 2:
         qimg = QImage(
-            rgb_image.tobytes(), w, h, w, QImage.Format.Format_Grayscale8
+            rgb_image.data, w, h, w, QImage.Format.Format_Grayscale8
         )
     elif rgb_image.shape[2] >= 3:
         channels = int(rgb_image.shape[2])
-        if not rgb_image.flags["C_CONTIGUOUS"]:
-            rgb_image = np.ascontiguousarray(rgb_image)
         q_format = (
             QImage.Format.Format_RGB888
             if channels == 3
             else QImage.Format.Format_RGBA8888
         )
         qimg = QImage(
-            rgb_image.tobytes(), w, h, channels * w, q_format
+            rgb_image.data, w, h, channels * w, q_format
         )
     else:
         return QPixmap()

@@ -39,6 +39,11 @@ DEFAULT_ADJUSTMENTS: Dict[str, float] = {
     # adjustment -- see raw_lens_correction.py.
     "LensCorrectionEnabled": 0.0,
     "DenoiseMethod": 0.0,
+    # Dodge & burn stops-per-mask-unit (see raw_dodge_burn.py). The mask
+    # itself (a base64 PNG blob, potentially large) is NOT a plain numeric
+    # attribute -- it's stored as its own XMP child element, mirroring
+    # ToneCurvePV2012 (see write_xmp_adjustments / parse_dodge_burn_mask_from_xmp).
+    "DodgeBurnStrength": 1.75,
 }
 
 from raw_hsl import HSL_COLOR_NAMES  # noqa: E402
@@ -194,10 +199,24 @@ def resolve_xmp_path(image_path: str) -> str:
     return os.path.splitext(image_path)[0] + ".xmp"
 
 
+# Per-path memo for read_as_shot_temperature: the value is a per-file constant
+# (as-shot metadata), but computing it may need a rawpy.imread -- which ran on
+# the GUI thread on EVERY panel sync (a 100-900ms stall per file open), and
+# ran WITHOUT _rawpy_global_lock (racing worker decodes; every other imread in
+# the app serializes on that lock). Session-scoped, tiny (one float per path).
+_AS_SHOT_TEMP_CACHE: dict[str, float] = {}
+
+
 def read_as_shot_temperature(image_path: str) -> float:
     """Best-effort as-shot CCT from EXIF or RAW metadata (not a UI preset)."""
     if not image_path:
         return DEFAULT_ADJUSTMENTS["Temperature"]
+    cache_key = os.path.normcase(os.path.abspath(image_path))
+    cached = _AS_SHOT_TEMP_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+    result = DEFAULT_ADJUSTMENTS["Temperature"]
+    resolved = False
     try:
         import metadata_backend
 
@@ -213,24 +232,32 @@ def read_as_shot_temperature(image_path: str) -> float:
             if tag.endswith("ColorTemperature"):
                 val = int(float(str(raw).split()[0]))
                 if 2000 <= val <= 12000:
-                    return float(val)
+                    result = float(val)
+                    resolved = True
+                    break
     except Exception:
         pass
-    try:
-        import rawpy
+    if not resolved:
+        try:
+            import rawpy
 
-        with rawpy.imread(image_path) as raw:
-            cam = np.array(raw.camera_whitebalance[:3], dtype=np.float64)
-            day = np.array(raw.daylight_whitebalance[:3], dtype=np.float64)
-            if np.all(cam > 0) and np.all(day > 0):
-                rb_cam = cam[0] / cam[2]
-                rb_day = day[0] / day[2]
-                ratio = rb_cam / max(rb_day, 1e-6)
-                est = 5500.0 * (ratio ** -0.35)
-                return float(np.clip(est, 2000.0, 12000.0))
-    except Exception:
-        pass
-    return DEFAULT_ADJUSTMENTS["Temperature"]
+            from enhanced_raw_processor import _rawpy_global_lock
+
+            with _rawpy_global_lock:
+                raw_ctx = rawpy.imread(image_path)
+            with raw_ctx as raw:
+                cam = np.array(raw.camera_whitebalance[:3], dtype=np.float64)
+                day = np.array(raw.daylight_whitebalance[:3], dtype=np.float64)
+                if np.all(cam > 0) and np.all(day > 0):
+                    rb_cam = cam[0] / cam[2]
+                    rb_day = day[0] / day[2]
+                    ratio = rb_cam / max(rb_day, 1e-6)
+                    est = 5500.0 * (ratio ** -0.35)
+                    result = float(np.clip(est, 2000.0, 12000.0))
+        except Exception:
+            pass
+    _AS_SHOT_TEMP_CACHE[cache_key] = result
+    return result
 
 
 def parse_tone_curve_pv2012_from_xmp(xmp_path: str) -> str:
@@ -268,6 +295,25 @@ def parse_tone_curve_pv2012_from_xmp(xmp_path: str) -> str:
     return serialize_tone_curve_points(points)
 
 
+def parse_dodge_burn_mask_from_xmp(xmp_path: str) -> str:
+    """Read the custom DodgeBurnMask child element -> base64 PNG string."""
+    if not xmp_path or not os.path.isfile(xmp_path):
+        return ""
+    try:
+        tree = ET.parse(xmp_path)
+        root = tree.getroot()
+        ns = {"rdf": RDF_NS, "crs": CRS_NS}
+        for desc in root.findall(".//rdf:Description", ns):
+            for child in desc:
+                tag = child.tag
+                local_key = tag.split("}")[-1] if "}" in tag else tag.split(":")[-1]
+                if local_key == "DodgeBurnMask" and child.text:
+                    return child.text.strip()
+    except Exception:
+        pass
+    return ""
+
+
 def load_adjustments_for_file(image_path: str) -> Dict[str, float]:
     adj = dict(DEFAULT_ADJUSTMENTS)
     as_shot = read_as_shot_temperature(image_path)
@@ -287,6 +333,12 @@ def load_adjustments_for_file(image_path: str) -> Dict[str, float]:
         serial = parse_tone_curve_pv2012_from_xmp(xmp_path)
         if serial:
             adj[TONE_CURVE_SERIAL_KEY] = serial
+    if xmp_path and os.path.isfile(xmp_path):
+        from raw_dodge_burn import MASK_KEY
+
+        mask_serial = parse_dodge_burn_mask_from_xmp(xmp_path)
+        if mask_serial:
+            adj[MASK_KEY] = mask_serial
     return adj
 
 
@@ -358,9 +410,12 @@ def solve_white_balance_from_sample(
 def is_default_adjustments(adj: Dict[str, float] | None) -> bool:
     if not adj:
         return True
+    from raw_dodge_burn import MASK_KEY
     from raw_tone_curve import TONE_CURVE_SERIAL_KEY
 
     if str(adj.get(TONE_CURVE_SERIAL_KEY, "") or "").strip():
+        return False
+    if str(adj.get(MASK_KEY, "") or "").strip():
         return False
     ref_temp = wb_reference_temperature(adj)
     for key, default in DEFAULT_ADJUSTMENTS.items():
@@ -506,6 +561,13 @@ def write_xmp_adjustments(xmp_path: str, adj: Dict[str, float]) -> None:
             li = ET.SubElement(seq, f"{{{RDF_NS}}}li")
             li.text = f"{int(round(x))}, {int(round(y))}"
 
+    from raw_dodge_burn import MASK_KEY
+
+    mask_serial = str(merged.get(MASK_KEY, "") or "")
+    if mask_serial:
+        db = ET.SubElement(desc, f"{{{CRS_NS}}}DodgeBurnMask")
+        db.text = mask_serial
+
     tree = ET.ElementTree(root)
     parent = os.path.dirname(os.path.abspath(xmp_path))
     if parent:
@@ -629,6 +691,24 @@ def _apply_adjustments_to_srgb(rgb_image: np.ndarray, adj: dict[str, float]) -> 
     exp_val = float(merged.get("Exposure2012", 0.0))
     if abs(exp_val) > 1e-4:
         img *= 2.0 ** exp_val
+
+    # 2b. Dodge & burn (see raw_dodge_burn.py). This legacy gamma-space path
+    # is used for cached uint8 full-image redisplay (browse revisit/zoom of
+    # an edited photo, not the live Adjust-panel preview) -- applying the
+    # mask here too keeps that path visually consistent with the scene-
+    # linear pipeline's result (process_linear_edit_buffer).
+    from raw_dodge_burn import MASK_KEY as _db_mask_key
+
+    mask_serial = str(merged.get(_db_mask_key, "") or "")
+    if mask_serial:
+        from raw_dodge_burn import DEFAULT_STRENGTH as _db_default_strength
+        from raw_dodge_burn import STRENGTH_KEY as _db_strength_key
+        from raw_dodge_burn import apply_dodge_burn, deserialize_mask
+
+        mask = deserialize_mask(mask_serial)
+        if mask is not None:
+            stops = float(merged.get(_db_strength_key, _db_default_strength))
+            img = apply_dodge_burn(img, mask, stops)
 
     # 3. Contrast
     contrast_val = float(merged.get("Contrast2012", 0.0))

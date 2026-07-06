@@ -1,6 +1,11 @@
 import sys
 # pyright: reportOptionalMemberAccess=false
 import os
+# Safety net only: the REAL fix is scripts/build_libraw_openmp.sh retargeting
+# the custom LibRaw to torch's libomp so exactly one OpenMP runtime loads
+# (two runtimes = OMP Error #15 abort, or with this flag, possible crashes /
+# silently wrong results). This flag keeps envs that haven't re-run the build
+# script bootable; a properly built env never exercises it.
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 import platform
 import ctypes
@@ -6258,12 +6263,16 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self._skip_resolution_crossfade_once = True
         self._gallery_preview_pending_full = False
         self._clear_pending_resolution_crossfade()
+        self._nav_cache_paint_tier = None
         try:
             full = self.image_cache.get_full_image(file_path)
             if full is not None:
-                return self._display_cached_numpy_for_path(
+                if self._display_cached_numpy_for_path(
                     file_path, full, from_cache="nav_full"
-                )
+                ):
+                    self._nav_cache_paint_tier = "full"
+                    return True
+                return False
         except Exception:
             pass
         if preserve_zoom:
@@ -6278,15 +6287,21 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                     preview, file_path=file_path, context="navigation"
                 )
             ):
-                return self._display_cached_numpy_for_path(
+                if self._display_cached_numpy_for_path(
                     file_path, preview, from_cache="nav_preview"
-                )
+                ):
+                    self._nav_cache_paint_tier = "preview"
+                    return True
+                return False
         except Exception:
             pass
         if suppress_jpeg:
             # RAW workflow: no camera-JPEG interim; wait for the LibRaw render.
             return False
-        return self._paint_instant_preview_for_path(file_path, prefer_gallery=False)
+        if self._paint_instant_preview_for_path(file_path, prefer_gallery=False):
+            self._nav_cache_paint_tier = "instant"
+            return True
+        return False
 
     def _clear_stale_single_view_image(self) -> None:
         """Remove the previous image so navigation does not linger on the wrong file."""
@@ -7935,6 +7950,14 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self.single_image_adjust_panel.lens_correction_toggled.connect(
             self._on_adjust_lens_correction_toggled
         )
+        self.single_image_adjust_panel.dodge_burn_mode_changed.connect(
+            self._on_dodge_burn_mode_changed
+        )
+        self.single_image_adjust_panel.dodge_burn_clear_requested.connect(
+            self._on_dodge_burn_clear_requested
+        )
+        self._dodge_burn_mask = None
+        self._dodge_burn_stroke_active = False
         self._pending_adjust_preview: dict | None = None
         self._adjust_edit_base_signals = _AdjustEditBaseSignals()
         self._adjust_edit_base_signals.finished.connect(self._on_adjust_edit_base_ready)
@@ -7991,6 +8014,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 self.gpu_view.zoomChanged.connect(self._on_gpu_zoom_changed)
                 self.gpu_view.doubleClickedAt.connect(self._on_gpu_double_clicked)
                 self.gpu_view.colorPickRequested.connect(self._on_wb_color_picked)
+                self.gpu_view.dodgeBurnStroke.connect(self._on_dodge_burn_stroke)
                 self.gpu_view._shortcut_handler = self._handle_app_shortcut
                 self._sync_composition_grid_display()
             except Exception as _gpu_exc:
@@ -11755,7 +11779,17 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 self._workflow_toggle_reload = False
 
     def _invalidate_workflow_pixel_caches(self, paths=None) -> None:
-        """Drop display-tier pixel caches that depend on RAW vs embedded workflow."""
+        """Drop display-tier pixel caches that depend on RAW vs embedded workflow.
+
+        Memory caches are removed synchronously (fast dict ops -- the very
+        next paint must not see stale-workflow pixels). The two DISK caches
+        are purged on a background thread: per-file removal is a file-system
+        unlink/DB delete each, and doing thousands of them inline made the
+        RAW/JPEG workflow toggle stall the UI for seconds on large folders.
+        A momentarily stale disk entry is harmless in the gap: the memory
+        tiers are already empty, so the next fetch decodes fresh pixels and
+        overwrites the disk entry.
+        """
         targets = list(paths or getattr(self, "image_files", []) or [])
         cur = getattr(self, "current_file_path", None)
         if cur and cur not in targets:
@@ -11765,6 +11799,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             cache.libraw_preview_paths.clear()
         except Exception:
             pass
+        raw_targets = []
         for fp in targets:
             if not fp:
                 continue
@@ -11773,12 +11808,22 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                     continue
             except Exception:
                 continue
+            raw_targets.append(fp)
             cache.thumbnail_cache.remove(fp)
             cache.preview_cache.remove(fp)
             cache.full_image_cache.remove(fp)
             cache.pixmap_cache.remove(fp)
-            cache.disk_preview_cache.remove(fp)
-            cache.disk_thumbnail_cache.remove(fp)
+
+        if raw_targets:
+            def _purge_disk(paths_snapshot=tuple(raw_targets)):
+                for fp in paths_snapshot:
+                    try:
+                        cache.disk_preview_cache.remove(fp)
+                        cache.disk_thumbnail_cache.remove(fp)
+                    except Exception:
+                        pass
+
+            threading.Thread(target=_purge_disk, daemon=True).start()
 
     def _update_raw_toggle_button_state(self):
         """Update the text, tooltip and styling of the RAW/JPEG toggle button."""
@@ -17177,10 +17222,20 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         logger.info(f"[LOAD] Previous file: {getattr(self, 'current_file_path', 'None')}")
         logger.info(f"[LOAD] Navigation state - in_progress: {getattr(self, '_navigation_in_progress', False)}")
         
-        # Pause background gallery idle preloading when navigating to a new image
+        # Pause background gallery idle preloading when navigating to a new
+        # image, then re-arm it with a settle delay: thumbnail warming keeps
+        # running whenever the user idles in single view (instant later
+        # gallery switch) but stays quiet during navigation bursts -- each
+        # navigation restarts the single-shot timer, so it only fires after
+        # ~4s without further navigation.
         try:
             if hasattr(self, 'gallery_view') and hasattr(self.gallery_view, 'pause_idle_preload'):
                 self.gallery_view.pause_idle_preload()
+                idle_timer = getattr(self.gallery_view, '_idle_preload_timer', None)
+                if idle_timer is not None:
+                    idle_timer.start(
+                        _env_int("RAWVIEWER_SINGLE_VIEW_THUMB_PRELOAD_MS", 4000, minimum=1000)
+                    )
         except Exception as e:
             logger.debug(f"[LOAD] Failed to pause gallery idle preload: {e}")
 
@@ -17486,6 +17541,25 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                     and is_raw_file(requested_file_path)
                 ):
                     self._queue_single_view_embedded_preview_load(requested_file_path)
+                elif getattr(self, "_nav_cache_paint_tier", None) != "full":
+                    # RAW workflow revisit that painted only a persisted
+                    # preview tier (512-1536px -- soft on a retina display):
+                    # kick the CURRENT-priority LibRaw half decode NOW, the
+                    # same request a cache-miss navigation would make.
+                    # Without this, the persisted-preview paint (added for
+                    # revisit color consistency) downgraded the cleanup from
+                    # an immediate CURRENT decode to the 1.2s-deferred
+                    # BACKGROUND sensor decode -- reported as "returns to a
+                    # blurry image that takes a long time to sharpen". The
+                    # manager won't short-circuit: a sub-sensor preview does
+                    # not satisfy the libraw-first 'full' stage check.
+                    self.image_manager.load_image(
+                        requested_file_path,
+                        priority=Priority.CURRENT,
+                        cancel_existing=False,
+                        use_full_resolution=False,
+                        stages={"thumbnail", "exif", "full"},
+                    )
                 self._start_preloading()
                 return
 
@@ -18706,6 +18780,13 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 self._begin_adjust_editing_session(path)
             if bar is not None:
                 bar.setEnabled(False)
+                # Remove (not just grey out) the film strip while editing:
+                # it occupies vertical space the image needs, and navigation
+                # from it is disabled anyway. Remember whether it was
+                # showing so closing the editor restores the user's state.
+                self._filmstrip_hidden_for_adjust = bar.isVisible()
+                if bar.isVisible():
+                    bar.hide()
                 container = getattr(self, "single_view_container", None)
                 if container is not None and hasattr(container, "set_filmstrip_pointer_active"):
                     container.set_filmstrip_pointer_active(False)
@@ -18721,6 +18802,9 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 self._reset_adjust_compare_state()
             if bar is not None:
                 bar.setEnabled(True)
+                if getattr(self, "_filmstrip_hidden_for_adjust", False):
+                    bar.show()
+                    self._filmstrip_hidden_for_adjust = False
         container = getattr(self, "single_view_container", None)
         if container is not None and hasattr(container, "relayout_adjust"):
             container.relayout_adjust()
@@ -18730,10 +18814,76 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self.update_status_bar()
         QTimer.singleShot(0, self._restore_keyboard_focus)
 
+    def _editing_supported_for_file(self, file_path: str | None) -> bool:
+        """Whether the Adjust panel can produce an edit base for this file.
+
+        Unsupported: animated images (GIF/WebP animations) and RAW files
+        LibRaw has already declined this session (X-Trans fallbacks, linear
+        DNG panoramas, ...). Best-effort by design -- a never-decoded exotic
+        RAW is only discovered unsupported at decode time, at which point it
+        lands in _LIBRAW_UNSUPPORTED_PATHS and is skipped from then on.
+        """
+        if not file_path:
+            return False
+        try:
+            if self.is_animated_image(_require_str_path(file_path)):
+                return False
+        except Exception:
+            pass
+        try:
+            if is_raw_file(file_path):
+                from common_image_loader import dng_prefers_embedded_preview_first
+                from unified_image_processor import _LIBRAW_UNSUPPORTED_PATHS
+
+                if dng_prefers_embedded_preview_first(file_path):
+                    return False
+                key = os.path.normcase(os.path.abspath(file_path))
+                if key in _LIBRAW_UNSUPPORTED_PATHS:
+                    return False
+        except Exception:
+            pass
+        return True
+
+    def _advance_index_past_unsupported_for_editing(self, step: int) -> None:
+        """Editor-mode navigation: silently skip files the editor can't open.
+
+        Called after the nav index has been advanced by ``step`` (+1/-1).
+        Keeps stepping in the same direction (with wraparound) until a
+        supported file is found; if every file is unsupported, stays put.
+        """
+        if not self._adjust_panel_active():
+            return
+        n = len(self.image_files or [])
+        if n <= 1:
+            return
+        import logging
+
+        for _ in range(n - 1):
+            path = self.image_files[self.current_file_index]
+            if self._editing_supported_for_file(path):
+                return
+            logging.getLogger(__name__).info(
+                "[ADJUST] Skipping %s during editor navigation (not editable)",
+                os.path.basename(path),
+            )
+            self.current_file_index = (self.current_file_index + step) % n
+
     def _toggle_adjust_panel(self) -> None:
-        self._set_adjust_panel_visible(
-            not getattr(self, "_adjust_overlay_visible", False)
-        )
+        opening = not getattr(self, "_adjust_overlay_visible", False)
+        if opening and not self._editing_supported_for_file(
+            getattr(self, "current_file_path", None)
+        ):
+            from PyQt6.QtWidgets import QMessageBox
+
+            QMessageBox.information(
+                self,
+                "Editing not available",
+                "This file format is not supported by the editor.\n\n"
+                "Animated images and RAW formats without LibRaw demosaic "
+                "support (e.g. some panorama/linear DNGs) cannot be edited.",
+            )
+            return
+        self._set_adjust_panel_visible(opening)
 
     def _sync_adjust_panel_for_current_file(self, *, force: bool = False) -> None:
         panel = getattr(self, "single_image_adjust_panel", None)
@@ -18745,12 +18895,24 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             return
         try:
             from raw_adjustments import load_adjustments_for_file
+            from raw_dodge_burn import MASK_KEY, deserialize_mask
 
-            panel.set_adjustments(load_adjustments_for_file(path))
+            loaded_adj = load_adjustments_for_file(path)
+            panel.set_adjustments(loaded_adj)
+            self._dodge_burn_mask = deserialize_mask(loaded_adj.get(MASK_KEY, ""))
             self._adjust_panel_loaded_norm = norm
             self._pending_adjust_preview = dict(panel.get_adjustments())
         except Exception:
-            pass
+            # Do NOT swallow silently: a failure here leaves the panel showing
+            # default sliders for a file that has a sidecar -- the exact
+            # "previous XMP didn't load" symptom -- with zero diagnostic trail.
+            import logging
+
+            logging.getLogger(__name__).warning(
+                "[ADJUST] Failed to load XMP adjustments into panel for %s",
+                os.path.basename(path),
+                exc_info=True,
+            )
         if panel.isVisible():
             self._request_adjust_edit_base(path)
             if (
@@ -18823,7 +18985,11 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         if getattr(self, "_raw_recovery_active", False):
             self._raw_recovery_active = False
             self._sync_raw_recovery_view_mode()
-        pixmap = pixmap.copy()
+        # No defensive copy: every caller hands over a pixmap produced by
+        # QPixmap.fromImage() (_numpy_to_qpixmap / converter workers), which
+        # already deep-copies into pixmap-owned storage. The copy() here was
+        # a third full-buffer memcpy (~50MB at half-size) on the UI thread
+        # per preview tick.
         self._adjust_preview_painting = True
         try:
             self._orientation_already_applied = True
@@ -18837,7 +19003,12 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 gv = getattr(self, "gpu_view", None)
                 if gv is not None:
                     preserve = not self._single_view_is_fit_mode()
-                    gv.set_pixmap(pixmap, preserve_view=preserve)
+                    # exact_framing: adjust-preview tiers (full-res display
+                    # buffer -> fast downsampled base -> half-size edit base)
+                    # are same-content re-renders at different resolutions;
+                    # without it, set_pixmap's snap-to-100% heuristic zooms
+                    # the view out on every slider tick while zoomed in.
+                    gv.set_pixmap(pixmap, preserve_view=preserve, exact_framing=True)
                     gv.viewport().update()
             else:
                 self.image_label.setPixmap(pixmap)
@@ -18967,7 +19138,198 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         gv = getattr(self, "gpu_view", None)
         comparing = bool(gv is not None and gv.is_compare_mode())
         self._pending_adjust_preview = dict(adj or {})
+        # Zero-latency gain path: when the delta vs the last exact render is
+        # ONLY Exposure/Temperature/Tint, those are (near-)pure per-channel
+        # gains in the BT.709 power region -- apply them as a 256-entry LUT
+        # on the cached rendered frame and paint immediately, every tick,
+        # with no worker round-trip or throttle. The exact render below
+        # still runs (throttled) and replaces the approximation when it
+        # lands, so the image converges to the true pipeline output.
+        if not comparing:
+            self._try_instant_gain_preview(adj)
         self._apply_adjust_panel_preview(full_quality=comparing)
+
+    _INSTANT_GAIN_KEYS = frozenset({"Exposure2012", "Temperature", "Tint"})
+
+    def _try_instant_gain_preview(self, adj: dict) -> bool:
+        last = getattr(self, "_adjust_last_render", None)
+        if last is None:
+            return False
+        last_arr, last_adj = last
+        if last_arr is None or _norm_path(
+            getattr(self, "current_file_path", "") or ""
+        ) != getattr(self, "_adjust_last_render_norm", None):
+            return False
+        try:
+            keys = set(adj) | set(last_adj)
+            for k in keys:
+                if k in self._INSTANT_GAIN_KEYS:
+                    continue
+                a, b = adj.get(k), last_adj.get(k)
+                if isinstance(a, (int, float)) and isinstance(b, (int, float)):
+                    if abs(float(a) - float(b)) > 1e-4:
+                        return False
+                elif str(a or "") != str(b or ""):
+                    return False
+
+            import cv2
+
+            from raw_adjustments import _kelvin_to_rgb
+
+            inv_g = 1.0 / 2.222
+            f = 2.0 ** (
+                (float(adj.get("Exposure2012", 0.0)) - float(last_adj.get("Exposure2012", 0.0)))
+                / 2.222
+            )
+            gains = [f, f, f]
+            t_new = float(adj.get("Temperature", 0.0))
+            t_old = float(last_adj.get("Temperature", 0.0))
+            if t_new > 1000.0 and t_old > 1000.0 and abs(t_new - t_old) > 0.5:
+                rn, gn, bn = _kelvin_to_rgb(t_new)
+                ro, go, bo = _kelvin_to_rgb(t_old)
+                if min(gn, go, ro, bo) > 1e-5:
+                    gains[0] *= ((rn / ro) / (gn / go)) ** inv_g
+                    gains[2] *= ((bn / bo) / (gn / go)) ** inv_g
+            tint_new = float(adj.get("Tint", 0.0))
+            tint_old = float(last_adj.get("Tint", 0.0))
+            if abs(tint_new - tint_old) > 1e-4:
+                denom = 1.0 - (tint_old / 150.0) * 0.1
+                if abs(denom) > 1e-5:
+                    gains[1] *= ((1.0 - (tint_new / 150.0) * 0.1) / denom) ** inv_g
+
+            if all(abs(g - 1.0) < 1e-5 for g in gains):
+                return True  # nothing visible changed; skip repaint
+            ramp = np.arange(256, dtype=np.float64)
+            lut = np.stack(
+                [np.clip(ramp * g + 0.5, 0, 255).astype(np.uint8) for g in gains],
+                axis=-1,
+            ).reshape(256, 1, 3)
+            approx = cv2.LUT(last_arr, lut)
+            pixmap = self._numpy_to_qpixmap(approx)
+            if pixmap is not None and not pixmap.isNull():
+                self._display_adjust_preview_pixmap(pixmap)
+                return True
+        except Exception:
+            return False
+        return False
+
+    # ------------------------------------------------------------- dodge & burn
+
+    def _on_dodge_burn_mode_changed(self, mode) -> None:
+        gv = getattr(self, "gpu_view", None)
+        if gv is not None:
+            gv.set_dodge_burn_mode(mode is not None)
+
+    def _on_dodge_burn_clear_requested(self) -> None:
+        if getattr(self, "_dodge_burn_mask", None) is None:
+            return
+        self._dodge_burn_mask = None
+        panel = getattr(self, "single_image_adjust_panel", None)
+        if panel is not None:
+            panel.set_dodge_burn_mask_present(False)
+        self._apply_adjust_panel_preview(full_quality=True)
+        if panel is not None:
+            self._on_adjust_panel_editing_finished(panel.get_adjustments())
+
+    def _dodge_burn_mask_shape(self) -> tuple[int, int] | None:
+        """Canonical (H, W) the mask is painted at: the (half-res) edit base.
+
+        Fixed regardless of which preview tier is on screen -- apply_dodge_
+        burn resizes the mask to whatever resolution each pipeline stage
+        actually processes (fast-drag base, full preview, full-quality
+        export), so painting always targets one stable coordinate space.
+        """
+        base = getattr(self, "_adjust_preview_base_rgb", None)
+        if base is not None and hasattr(base, "shape"):
+            return int(base.shape[0]), int(base.shape[1])
+        return None
+
+    def _on_dodge_burn_stroke(self, pt, pressure: float, is_end: bool) -> None:
+        panel = getattr(self, "single_image_adjust_panel", None)
+        if panel is None:
+            return
+        mode = panel.dodge_burn_mode()
+        mask_shape = self._dodge_burn_mask_shape()
+        if mode is None or mask_shape is None:
+            if is_end:
+                self._dodge_burn_stroke_active = False
+            return
+        try:
+            from raw_dodge_burn import DodgeBurnMask, apply_dodge_burn, edge_snap_region, stamp_brush
+
+            mh, mw = mask_shape
+            mask = getattr(self, "_dodge_burn_mask", None)
+            if mask is None or mask.data.shape != (mh, mw):
+                mask = DodgeBurnMask.empty(mh, mw)
+                self._dodge_burn_mask = mask
+
+            # Map the stroke point from the CURRENTLY DISPLAYED pixmap's
+            # coordinate space (whatever tier is on screen) down to the
+            # fixed mask resolution.
+            last = getattr(self, "_adjust_last_render", None)
+            disp_w, disp_h = (last[0].shape[1], last[0].shape[0]) if last is not None else (mw, mh)
+            sx = mw / max(1, disp_w)
+            sy = mh / max(1, disp_h)
+            mx, my = pt.x() * sx, pt.y() * sy
+            radius = max(2.0, panel.dodge_burn_brush_radius() * sx)
+            # Per-point delta: brush-strength slider (0..1) * pressure,
+            # scaled down so a slow drag accumulates smoothly instead of
+            # one point already reaching full strength.
+            delta = panel.dodge_burn_brush_strength() * max(0.05, float(pressure)) * 0.25
+            bbox = stamp_brush(mask, mx, my, radius, delta, dodge=(mode == "dodge"))
+            self._dodge_burn_stroke_active = True
+            panel.set_dodge_burn_mask_present(True)
+
+            # Instant visual feedback: patch just the touched region of the
+            # last exact render and repaint immediately -- no worker
+            # round-trip, so the brush tracks the cursor with no perceptible
+            # delay (same mechanism as the Exposure/Temperature/Tint instant-
+            # gain preview above).
+            if last is not None:
+                arr, last_adj = last
+                x0, y0, x1, y1 = bbox
+                px0, py0 = int(x0 / sx), int(y0 / sy)
+                px1, py1 = int(np.ceil(x1 / sx)), int(np.ceil(y1 / sy))
+                px0, py0 = max(0, px0), max(0, py0)
+                px1, py1 = min(disp_w, px1), min(disp_h, py1)
+                if px1 > px0 and py1 > py0:
+                    patch = arr[py0:py1, px0:px1].astype(np.float32) / 255.0
+                    stops = float(last_adj.get("DodgeBurnStrength", 1.75))
+                    patched = apply_dodge_burn(patch, mask, stops)
+                    # patch already carries any prior dodge/burn baked in
+                    # from the exact render, so re-applying the FULL mask
+                    # here (not just this stamp's delta) would double the
+                    # already-converged portion. Approximation is fine for
+                    # the instant-feedback frame; the exact worker render
+                    # (triggered on stroke end) replaces it with the true
+                    # from-scratch pipeline result.
+                    out8 = np.clip(patched * 255.0 + 0.5, 0, 255).astype(np.uint8)
+                    new_arr = arr.copy()
+                    new_arr[py0:py1, px0:px1] = out8
+                    pixmap = self._numpy_to_qpixmap(new_arr)
+                    if pixmap is not None and not pixmap.isNull():
+                        self._display_adjust_preview_pixmap(pixmap)
+
+            if is_end:
+                self._dodge_burn_stroke_active = False
+                luminance = None
+                try:
+                    base = getattr(self, "_adjust_preview_base_rgb", None)
+                    if base is not None and hasattr(base, "shape"):
+                        b = base.astype(np.float32)
+                        luminance = 0.2126 * b[..., 0] + 0.7152 * b[..., 1] + 0.0722 * b[..., 2]
+                except Exception:
+                    luminance = None
+                if luminance is not None:
+                    edge_snap_region(mask, luminance, bbox)
+                self._apply_adjust_panel_preview(full_quality=True)
+                self._on_adjust_panel_editing_finished(panel.get_adjustments())
+        except Exception:
+            import logging
+
+            logging.getLogger(__name__).warning(
+                "[DODGE_BURN] stroke handling failed", exc_info=True
+            )
 
     def _on_adjust_preview_ready(self, generation: int, file_path: str, array) -> None:
         self._adjust_preview_busy = False
@@ -18988,6 +19350,14 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 pixmap = None
             if pixmap is not None and not pixmap.isNull():
                 self._display_adjust_preview_pixmap(pixmap)
+                # Cache this exact render as the new instant-gain baseline
+                # (see _try_instant_gain_preview): array is uint8 RGB, ready
+                # for cv2.LUT with no further conversion.
+                submitted = getattr(self, "_adjust_preview_submitted_adj", None)
+                adj_used = (submitted or {}).get(generation)
+                if adj_used is not None and array.dtype == np.uint8 and array.ndim == 3:
+                    self._adjust_last_render = (array, adj_used)
+                    self._adjust_last_render_norm = _norm_path(file_path)
         if getattr(self, "_adjust_preview_dirty", False):
             self._apply_adjust_panel_preview(full_quality=dirty_full_quality)
 
@@ -19028,6 +19398,17 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         else:
             base = base_fast
             stage_cache = getattr(self, "_adjust_preview_stage_cache_fast", None)
+        # Snapshot the adjustments this generation renders with, so
+        # _on_adjust_preview_ready can cache (exact_array, adj) as the new
+        # instant-gain baseline once the exact render lands. Small dict
+        # pruned to the last few generations -- stale entries are harmless,
+        # just unused memory.
+        submitted = getattr(self, "_adjust_preview_submitted_adj", None)
+        if submitted is None:
+            submitted = self._adjust_preview_submitted_adj = {}
+        submitted[gen] = dict(adj)
+        for stale in [g for g in submitted if g < gen - 4]:
+            del submitted[stale]
         worker = _AdjustPreviewWorker(
             gen,
             path,
@@ -19110,6 +19491,30 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self._apply_adjust_panel_preview(full_quality=True)
         try:
             from raw_adjustments import write_xmp_adjustments_for_file
+            from raw_dodge_burn import (
+                DEFAULT_STRENGTH,
+                MASK_KEY,
+                STRENGTH_KEY,
+                serialize_mask,
+            )
+
+            # The dodge/burn mask lives in main.py state (painted via the
+            # GPU view, not a panel slider) -- fold it into whatever this
+            # save already writes so every save (slider release, brush
+            # stroke end, clear) persists the current mask consistently.
+            mask = getattr(self, "_dodge_burn_mask", None)
+            if mask is not None and not mask.is_empty:
+                adj = dict(adj)
+                adj[MASK_KEY] = serialize_mask(mask)
+                # STRENGTH_KEY (stops per mask unit, see raw_dodge_burn.py) is
+                # a fixed calibration constant, not a user-facing slider --
+                # "Brush Strength" on the panel instead controls per-stamp
+                # accumulation rate (how fast repeated strokes build up),
+                # which is the intuitive "how strong is my brush" control.
+                adj.setdefault(STRENGTH_KEY, DEFAULT_STRENGTH)
+            elif MASK_KEY in adj:
+                adj = dict(adj)
+                del adj[MASK_KEY]
 
             write_xmp_adjustments_for_file(path, adj)
         except Exception as exc:
@@ -22715,6 +23120,17 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                                 f"file={os.path.basename(cur_path)} pixmap={pm_w}x{pm_h}"
                             )
                             logger.info(nav_msg)
+                            try:
+                                from perf_metrics import perf_mark
+
+                                perf_mark(
+                                    "nav_to_display",
+                                    nav_elapsed * 1000.0,
+                                    cur_path,
+                                    px=f"{pm_w}x{pm_h}",
+                                )
+                            except Exception:
+                                pass
                             if os.environ.get("RAWVIEWER_DEBUG", "").strip() == "1" and hasattr(
                                 self, "status_bar"
                             ):
@@ -24513,6 +24929,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                     self.current_file_index = len(self.image_files) - 1
                 else:
                     self.current_file_index -= 1
+                # Editor mode: silently skip files the editor can't open.
+                self._advance_index_past_unsupported_for_editing(-1)
 
                 logger.info(f"[NAV_PREV] Navigating to previous image - old_index: {old_index}, new_index: {self.current_file_index}")
                 logger.info(f"[TRACK] User navigated to previous image (arrow key) - index: {self.current_file_index}")
@@ -24625,6 +25043,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                     self.current_file_index = 0
                 else:
                     self.current_file_index += 1
+                # Editor mode: silently skip files the editor can't open.
+                self._advance_index_past_unsupported_for_editing(+1)
 
                 logger.info(f"[NAV_NEXT] Navigating to next image - old_index: {old_index}, new_index: {self.current_file_index}")
                 logger.info(f"[TRACK] User navigated to next image (arrow key) - index: {self.current_file_index}")

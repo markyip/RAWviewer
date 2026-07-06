@@ -227,7 +227,19 @@ class AdjustSlider(QSlider):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
 
         track_y = groove.center().y() - self._TRACK_HEIGHT / 2.0
-        track_rect = QRectF(groove.x(), track_y, groove.width(), self._TRACK_HEIGHT)
+        # Inset the painted track to the thumb's actual travel range
+        # [groove.x + handle_w/2, groove.right - handle_w/2]: Qt's value
+        # mapping reserves half a *style* handle width (much wider than the
+        # 10px painted thumb on macOS) at each end, so a full-groove track
+        # left dead-looking zones the thumb could never reach -- reported as
+        # "cannot slide to the edge of the slider".
+        half_handle = handle.width() / 2.0
+        track_rect = QRectF(
+            groove.x() + half_handle,
+            track_y,
+            max(1.0, groove.width() - handle.width()),
+            self._TRACK_HEIGHT,
+        )
 
         painter.setPen(Qt.PenStyle.NoPen)
         if self._track_gradient:
@@ -285,6 +297,9 @@ class ImageAdjustPanelWidget(QWidget):
     # baked in (see main.py._on_adjust_lens_correction_toggled) -- unlike other
     # toggles, this needs a full re-decode, not just a preview-pipeline rerun.
     lens_correction_toggled = pyqtSignal(bool)
+    # "dodge" / "burn" / None (disarmed) -- see main.py._on_dodge_burn_mode_changed.
+    dodge_burn_mode_changed = pyqtSignal(object)
+    dodge_burn_clear_requested = pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -676,17 +691,73 @@ class ImageAdjustPanelWidget(QWidget):
         self._lens_correction_row_widget.hide()  # shown only once a profile match is confirmed
         self.sect_detail.add_widget(self._lens_correction_row_widget)
 
-        # Recovery look button
-        self._recovery_btn = QPushButton("Use recovery look")
-        self._recovery_btn.setObjectName("adjust_recovery_btn")
-        self._recovery_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self._recovery_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        self._recovery_btn.setToolTip(
-            "Use P-key recovery tone as the adjust starting point. "
-            "Turns off P recovery preview if active."
-        )
-        self._recovery_btn.clicked.connect(self._on_recovery_baseline_clicked)
-        self.sect_detail.add_widget(self._recovery_btn)
+        # Recovery-look button removed (2026-07): the editor's default
+        # display transform now matches the browse render exactly (dcraw
+        # BT.709 + highlight clip, see raw_edit_pipeline), which eliminated
+        # the tonal gap the recovery baseline existed to bridge. The
+        # pipeline still honors the flag for sessions/dicts that carry it
+        # (set_recovery_baseline stays as a no-op-capable setter); nothing
+        # in the UI can arm it anymore.
+        self._recovery_btn = None
+
+        # Dodge & burn brush: mutually-exclusive Dodge/Burn toggle + Size/
+        # Strength sliders (transient tool settings, not persisted sliders --
+        # see raw_dodge_burn.py; the mask itself is persisted separately).
+        db_row = QHBoxLayout()
+        db_row.setSpacing(6)
+        db_label = QLabel("Dodge/Burn")
+        db_label.setStyleSheet("color: #B0B0B0; font-size: 11px;")
+        db_label.setMinimumWidth(72)
+        db_row.addWidget(db_label)
+        self._dodge_btn = QPushButton("Dodge")
+        self._burn_btn = QPushButton("Burn")
+        for btn, tip in (
+            (self._dodge_btn, "Brush to brighten (edge-snapped to the subject under the stroke)"),
+            (self._burn_btn, "Brush to darken (edge-snapped to the subject under the stroke)"),
+        ):
+            btn.setObjectName("adjust_db_btn")
+            btn.setCheckable(True)
+            btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+            btn.setToolTip(tip)
+            db_row.addWidget(btn, 1)
+        self._dodge_btn.toggled.connect(lambda on: self._on_dodge_burn_toggled(self._dodge_btn, on))
+        self._burn_btn.toggled.connect(lambda on: self._on_dodge_burn_toggled(self._burn_btn, on))
+        self._db_clear_btn = QPushButton("Clear")
+        self._db_clear_btn.setObjectName("adjust_db_clear_btn")
+        self._db_clear_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._db_clear_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self._db_clear_btn.setToolTip("Erase the dodge/burn brush mask for this image")
+        self._db_clear_btn.setEnabled(False)
+        self._db_clear_btn.clicked.connect(self.dodge_burn_clear_requested.emit)
+        db_row.addWidget(self._db_clear_btn)
+        self.sect_detail.add_layout(db_row)
+
+        db_size_row = QHBoxLayout()
+        db_size_row.setSpacing(6)
+        db_size_lbl = QLabel("Brush Size")
+        db_size_lbl.setStyleSheet("color: #B0B0B0; font-size: 11px;")
+        db_size_lbl.setMinimumWidth(72)
+        db_size_row.addWidget(db_size_lbl)
+        self._db_size_slider = AdjustSlider(Qt.Orientation.Horizontal)
+        self._db_size_slider.setRange(8, 400)
+        self._db_size_slider.setValue(60)
+        self._db_size_slider.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        db_size_row.addWidget(self._db_size_slider, 1)
+        self.sect_detail.add_layout(db_size_row)
+
+        db_strength_row = QHBoxLayout()
+        db_strength_row.setSpacing(6)
+        db_strength_lbl = QLabel("Brush Strength")
+        db_strength_lbl.setStyleSheet("color: #B0B0B0; font-size: 11px;")
+        db_strength_lbl.setMinimumWidth(72)
+        db_strength_row.addWidget(db_strength_lbl)
+        self._db_strength_slider = AdjustSlider(Qt.Orientation.Horizontal)
+        self._db_strength_slider.setRange(5, 100)
+        self._db_strength_slider.setValue(35)
+        self._db_strength_slider.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        db_strength_row.addWidget(self._db_strength_slider, 1)
+        self.sect_detail.add_layout(db_strength_row)
 
         export_btn = QPushButton("Export…")
         export_btn.setObjectName("adjust_export_btn")
@@ -932,6 +1003,10 @@ class ImageAdjustPanelWidget(QWidget):
         self._emit_preview_and_save()
 
     def set_adjustments(self, adj: Dict[str, float]) -> None:
+        self.disarm_dodge_burn()
+        from raw_dodge_burn import MASK_KEY as _db_mask_key
+
+        self.set_dodge_burn_mask_present(bool(str((adj or {}).get(_db_mask_key, "") or "")))
         self._block_emit = True
         try:
             merged = dict(DEFAULT_ADJUSTMENTS)
@@ -1065,6 +1140,49 @@ class ImageAdjustPanelWidget(QWidget):
         if btn is not None:
             btn.setText("On" if checked else "Off")
         self._emit_preview_and_save()
+
+    def _on_dodge_burn_toggled(self, btn: QPushButton, checked: bool) -> None:
+        if self._block_emit:
+            return
+        other = self._burn_btn if btn is self._dodge_btn else self._dodge_btn
+        if checked and other.isChecked():
+            self._block_emit = True
+            try:
+                other.setChecked(False)
+            finally:
+                self._block_emit = False
+        mode = None
+        if self._dodge_btn.isChecked():
+            mode = "dodge"
+        elif self._burn_btn.isChecked():
+            mode = "burn"
+        self.dodge_burn_mode_changed.emit(mode)
+
+    def dodge_burn_mode(self) -> str | None:
+        if self._dodge_btn.isChecked():
+            return "dodge"
+        if self._burn_btn.isChecked():
+            return "burn"
+        return None
+
+    def disarm_dodge_burn(self) -> None:
+        """Uncheck both tool buttons without emitting (e.g. on file switch)."""
+        self._block_emit = True
+        try:
+            self._dodge_btn.setChecked(False)
+            self._burn_btn.setChecked(False)
+        finally:
+            self._block_emit = False
+
+    def dodge_burn_brush_radius(self) -> float:
+        return float(self._db_size_slider.value())
+
+    def dodge_burn_brush_strength(self) -> float:
+        """0..1: per-stamp delta at the brush center before pressure scaling."""
+        return float(self._db_strength_slider.value()) / 100.0
+
+    def set_dodge_burn_mask_present(self, present: bool) -> None:
+        self._db_clear_btn.setEnabled(bool(present))
 
     def _update_slider_label(self, key: str, fmt: Callable[[float], str]) -> None:
         slider = self._sliders.get(key)

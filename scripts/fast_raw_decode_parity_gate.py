@@ -29,6 +29,18 @@ import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
+# Parity is defined against rawpy's use_camera_wb output; the embedded-JPEG
+# WB sanity correction INTENTIONALLY diverges from that on misparsed bodies
+# (e.g. EOS R6 Mark III), so it must be off for the parity comparisons.
+# A dedicated section below re-enables it and asserts it fires correctly.
+os.environ["RAWVIEWER_WB_SANITY"] = "0"
+
+# Byte-level parity checks measure the CPU pixel path; the GPU backend uses a
+# different demosaic (Kornia bilinear vs cv2 EA) so its output legitimately
+# differs at edges. A dedicated section below compares GPU vs CPU color with
+# a demosaic-tolerant threshold when a GPU backend is available.
+os.environ["RAWVIEWER_GPU_BACKEND"] = "cpu_only"
+
 DEFAULT_SAMPLE_GLOBS = [
     "/Volumes/Development/Manchester/DSC01089.ARW",
     "/Volumes/Development/Development/Canon_Sample/*.[cC][rR]3",
@@ -166,6 +178,98 @@ def main() -> int:
             )
             if not ok:
                 failures += 1
+
+    # GPU color-parity section (loose): if a GPU backend is actually usable,
+    # its render of the first file must agree with the CPU path after
+    # downsampling -- demosaic algorithms differ by design (Kornia bilinear
+    # vs cv2 EA); only gross color-math divergence should trip this.
+    if smoke is not None:
+        try:
+            import gpu_raw_processor as grp
+
+            grp._GPU_BACKEND = None  # reset cached detection
+            os.environ.pop("RAWVIEWER_GPU_BACKEND", None)
+            backend = grp.detect_gpu_backend()
+            if backend != "cpu_only":
+                from fast_raw_decode import unpack_raw as _unpack
+
+                u = _unpack(smoke)
+                gpu_out = grp.try_gpu_decode_from_unpacked(u)
+                cpu_out = finish_full_decode(u)
+                if gpu_out is None:
+                    print(f"WARN  GPU backend {backend} returned None; skipping GPU parity")
+                else:
+                    import cv2 as _cv2
+
+                    sw, sh = cpu_out.shape[1] // 4, cpu_out.shape[0] // 4
+                    g = _cv2.resize(gpu_out, (sw, sh), interpolation=_cv2.INTER_AREA)
+                    c = _cv2.resize(cpu_out, (sw, sh), interpolation=_cv2.INTER_AREA)
+                    d = np.abs(g.astype(np.int16) - c.astype(np.int16))
+                    ok = d.mean() < 2.0 and np.percentile(d, 99) <= 6
+                    print(
+                        f"{'PASS' if ok else 'FAIL'}  GPU({backend}) vs CPU downsampled: "
+                        f"mean={d.mean():.3f} p99={np.percentile(d, 99):.0f}"
+                    )
+                    if not ok:
+                        failures += 1
+            else:
+                print("GPU parity: no GPU backend available, skipped")
+        except ImportError:
+            print("GPU parity: gpu_raw_processor not importable, skipped")
+        finally:
+            os.environ["RAWVIEWER_GPU_BACKEND"] = "cpu_only"
+            try:
+                import gpu_raw_processor as grp
+
+                grp._GPU_BACKEND = None
+            except ImportError:
+                pass
+
+    # WB sanity section: re-enable the embedded-JPEG check and verify that
+    # (a) it stays quiet on correctly parsed files and (b) when it does fire,
+    # the corrected multipliers move the render TOWARD the embedded JPEG.
+    print("\n--- WB sanity (embedded-JPEG check) ---")
+    os.environ["RAWVIEWER_WB_SANITY"] = "1"
+    import fast_raw_decode as frd
+
+    frd._WB_CORRECTION_CACHE.clear()
+    triggered = []
+    for path in files:
+        u = frd.unpack_raw(path)
+        if u is None:
+            continue
+        corrected = frd.get_corrected_camera_wb(path)
+        if corrected is not None:
+            triggered.append(os.path.basename(path))
+            # Corrected unpack must re-measure BELOW the trigger threshold:
+            # recompute the metric against the JPEG using the corrected scale.
+            import rawpy as _rawpy
+
+            with _rawpy.imread(path) as raw:
+                t = raw.extract_thumb()
+            residual = frd._wb_correction_from_jpeg(
+                path, t.data, u.mosaic, u.pattern, u.black,
+                u.scale_mul, u.rgb_cam,
+                np.asarray(corrected, dtype=np.float64),
+            )
+            if residual is not None:
+                print(f"FAIL  {os.path.basename(path)}: corrected WB still fails sanity")
+                failures += 1
+            else:
+                print(f"PASS  {os.path.basename(path)}: WB corrected, residual below threshold")
+    os.environ["RAWVIEWER_WB_SANITY"] = "0"
+    n_trig = len(triggered)
+    if n_trig > max(2, len(files) // 3):
+        print(f"FAIL  WB sanity triggered on {n_trig}/{len(files)} files -- threshold too loose?")
+        failures += 1
+    # Golden-set regression: the EOS R6 Mark III samples (683A*) are known
+    # misparses and MUST trigger the correction.
+    known_bad = [os.path.basename(f) for f in files if os.path.basename(f).startswith("683A")]
+    for name in known_bad:
+        if name not in triggered:
+            print(f"FAIL  {name}: known misparsed WB did not trigger the sanity correction")
+            failures += 1
+    print(f"WB sanity triggered on {n_trig} file(s): {', '.join(triggered) or 'none'}")
 
     print(f"\n{tested} parity file(s) tested, {failures} failure(s)")
     return 1 if failures else 0

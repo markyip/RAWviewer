@@ -3183,12 +3183,31 @@ class JustifiedGallery(QWidget):
         except Exception:
             pass
         
-        # Guard: do not run if not in gallery view or if there are already active tasks in flight
+        # Runs in gallery view AND while idle in single view: warming the
+        # thumbnail caches during single-view idle makes a later gallery
+        # switch paint instantly instead of re-triggering a folder-wide
+        # thumbnail burst. Tasks go out at the lowest (idle) priority on the
+        # shared load manager, so any navigation/decode work always preempts
+        # them in queue order.
         pv = getattr(self, "parent_viewer", None)
-        if pv and getattr(pv, "view_mode", "single") != "gallery":
+        view_mode = getattr(pv, "view_mode", "single") if pv else "single"
+        if view_mode not in ("gallery", "single"):
             return
         if len(self._active_tasks) > 0:
             return
+        if view_mode == "single":
+            # Extra single-view guard: yield to in-flight navigation work.
+            # Idle priority already queues behind it, but a submitted
+            # thumbnail read cannot be aborted mid-I/O, and fresh RAW
+            # decodes are I/O-bound on the same volume -- so don't even
+            # submit while the manager has a meaningful backlog; retry
+            # after the normal idle interval instead.
+            try:
+                if pv.image_manager.get_stats().get("queue_size", 0) > 2:
+                    self._idle_preload_timer.start(_gallery_idle_preload_ms())
+                    return
+            except Exception:
+                pass
 
         # Bidirectional embedded-JPEG prefetch from current image / viewport center.
         start_index = 0

@@ -2108,15 +2108,24 @@ class ImageCache(QObject):
             jpeg_data = self.disk_grid_cache.get(file_path)
         if jpeg_data is not None:
              try:
-                from PIL import Image, ImageOps
-                import io
-                pil_image = Image.open(io.BytesIO(jpeg_data))
-                pil_image = ImageOps.exif_transpose(pil_image)
-                if pil_image.mode != 'RGB':
-                    pil_image = pil_image.convert('RGB')
-                preview = np.array(pil_image)
+                # cv2.imdecode over PIL: several times faster on the
+                # 1280-1536px entries here, and this path runs on the
+                # CALLING thread -- navigation paints call get_preview()
+                # from the UI thread, so every ms is a paint stall. EXIF
+                # transpose is intentionally absent: disk preview entries
+                # are re-encoded from already-oriented pixels with EXIF
+                # stripped (_jpeg_bytes_max_edge), and grid tiles are
+                # encoded from oriented arrays.
+                import cv2
+
+                arr = cv2.imdecode(
+                    np.frombuffer(jpeg_data, np.uint8), cv2.IMREAD_COLOR
+                )
+                if arr is None:
+                    raise ValueError("imdecode failed")
+                preview = cv2.cvtColor(arr, cv2.COLOR_BGR2RGB)
                 # Also cache in memory
-                self.preview_cache.put(key, preview.copy())
+                self.preview_cache.put(key, preview)
                 self.cache_hit.emit(file_path, 'preview')
                 return preview
              except Exception:

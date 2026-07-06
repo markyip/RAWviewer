@@ -15,6 +15,9 @@ from raw_adjustments import (
     uses_recovery_tone_map,
 )
 from raw_chroma_denoise import apply_chroma_denoise, apply_luma_denoise, chroma_denoise_enabled
+from raw_dodge_burn import DEFAULT_STRENGTH as _DB_DEFAULT_STRENGTH
+from raw_dodge_burn import MASK_KEY as _DB_MASK_KEY
+from raw_dodge_burn import STRENGTH_KEY as _DB_STRENGTH_KEY
 from raw_pv2012 import apply_pv2012_tone_rgb
 from raw_tone_curve import TONE_CURVE_SERIAL_KEY
 
@@ -94,13 +97,32 @@ def _apply_saturation_vibrance(img: np.ndarray, merged: dict[str, float]) -> np.
 
 
 def _tone_map_reinhard_display(img: np.ndarray) -> np.ndarray:
-    """Scene-linear float → display-linear float in [0, 1] (Reinhard shoulder)."""
+    """Scene-linear float → display-linear float in [0, 1] (Reinhard shoulder).
+
+    RETIRED as the default editor transform (kept only for the legacy
+    recovery-look path): Reinhard maps linear 1.0 to display 0.5, so an
+    edited image at DEFAULT settings rendered whites at ~151/255 vs the
+    browse render's 225 -- measured as the reported "grey overcast" -- and
+    compressed chroma spread by 24%. The default path is now
+    _tone_map_clip_display + the dcraw BT.709 encode, matching browse
+    exactly in tone reproduction.
+    """
     from raw_tone_recovery import _luminance
 
     lum = _luminance(img)
     mapped = lum / (1.0 + np.maximum(lum, 0.0))
     scale = mapped / np.maximum(lum, 1e-6)
     return np.clip(img * scale[..., np.newaxis], 0.0, None)
+
+
+def _tone_map_clip_display(img: np.ndarray) -> np.ndarray:
+    """Scene-linear float → display-linear [0, 1] by hard clip (browse parity).
+
+    The browse pipeline saturates highlights at the camera clip point and
+    applies the dcraw BT.709 curve; clipping here reproduces that identically
+    for the editor's default rendering.
+    """
+    return np.clip(img.astype(np.float32, copy=False), 0.0, 1.0)
 
 
 def _tone_map_recovery_display(img: np.ndarray) -> np.ndarray:
@@ -130,8 +152,10 @@ def _tone_map_recovery_display(img: np.ndarray) -> np.ndarray:
 
 def _tone_map_for_display(img: np.ndarray, merged: dict[str, float]) -> np.ndarray:
     if uses_recovery_tone_map(merged):
+        # Legacy sessions only: the recovery-look button was removed from
+        # the Adjust panel (2026-07); nothing sets the baseline flag anymore.
         return _tone_map_recovery_display(img)
-    return _tone_map_reinhard_display(img)
+    return _tone_map_clip_display(img)
 
 
 def _apply_display_stage(img: np.ndarray, merged: dict[str, float]) -> np.ndarray:
@@ -173,6 +197,19 @@ def process_linear_edit_buffer(
     exp_val = float(merged.get("Exposure2012", 0.0))
     if abs(exp_val) > 1e-4:
         img *= 2.0 ** exp_val
+
+    # Dodge & burn: local per-pixel exposure, applied right after the
+    # global exposure gain and before denoise/tone -- local brightness
+    # changes should see the same noise/tone response as global ones
+    # (matches how a real exposure difference at capture time would look).
+    mask_serial = str(merged.get(_DB_MASK_KEY, "") or "")
+    if mask_serial:
+        from raw_dodge_burn import apply_dodge_burn, deserialize_mask
+
+        mask = deserialize_mask(mask_serial)
+        if mask is not None:
+            stops = float(merged.get(_DB_STRENGTH_KEY, _DB_DEFAULT_STRENGTH))
+            img = apply_dodge_burn(img, mask, stops)
 
     do_denoise = chroma_denoise if chroma_denoise is not None else chroma_denoise_enabled()
     nr_amount = float(merged.get("ColorNoiseReduction", 0.0))
@@ -228,6 +265,8 @@ _PRE_TONE_KEYS = (
     "ColorNoiseReduction",
     "LuminanceNoiseReduction",
     "DenoiseMethod",
+    _DB_MASK_KEY,
+    _DB_STRENGTH_KEY,
 )
 
 # Every key uses_recovery_tone_map() and apply_pv2012_tone_rgb() read, so the
@@ -310,6 +349,15 @@ def process_linear_edit_buffer_staged(
             exp_val = float(merged.get("Exposure2012", 0.0))
             if abs(exp_val) > 1e-4:
                 img *= 2.0 ** exp_val
+
+            mask_serial = str(merged.get(_DB_MASK_KEY, "") or "")
+            if mask_serial:
+                from raw_dodge_burn import apply_dodge_burn, deserialize_mask
+
+                mask = deserialize_mask(mask_serial)
+                if mask is not None:
+                    stops = float(merged.get(_DB_STRENGTH_KEY, _DB_DEFAULT_STRENGTH))
+                    img = apply_dodge_burn(img, mask, stops)
 
             do_denoise = chroma_denoise if chroma_denoise is not None else chroma_denoise_enabled()
             nr_amount = float(merged.get("ColorNoiseReduction", 0.0))
@@ -403,20 +451,32 @@ def _apply_display_color_adjustments(
 
 
 def linear_to_display_uint8(img: np.ndarray, adj: dict[str, float] | None = None) -> np.ndarray:
-    from raw_tone_recovery import _encode_srgb8
+    # dcraw BT.709 encode, NOT the IEC sRGB OETF: browse renders encode with
+    # this exact curve, and the two differ most in the toe (12.92x vs 4.5x
+    # linear slope) -- the sRGB encode lifted the deepest shadows ~3x over
+    # the browse render, surfacing sensor noise ("grainy" report). One curve
+    # everywhere = editor default is pixel-comparable with browse.
+    from fast_raw_decode import _gamma_lut8
 
     merged = dict(adj or {})
     display = _apply_display_stage(img, merged)
-    return _encode_srgb8(display)
+    idx = np.clip(display * 65535.0 + 0.5, 0, 65535).astype(np.uint16)
+    return _gamma_lut8()[idx]
 
 
 def linear_to_export_uint16_srgb(img: np.ndarray, adj: dict[str, float] | None = None) -> np.ndarray:
-    """Display-referred 16-bit sRGB for TIFF / DNG export."""
-    from raw_tone_recovery import _encode_srgb16
+    """Display-referred 16-bit export, same dcraw BT.709 curve as display.
+
+    (Name kept for call-site stability; the output is the app's standard
+    BT.709-encoded rendering, tagged/treated as sRGB exactly like every
+    LibRaw/dcraw-derived pipeline does.)
+    """
+    from fast_raw_decode import gamma_curve16
 
     merged = dict(adj or {})
     display = _apply_display_stage(img, merged)
-    return _encode_srgb16(display.astype(np.float32))
+    idx = np.clip(display * 65535.0 + 0.5, 0, 65535).astype(np.uint16)
+    return gamma_curve16()[idx]
 
 
 def _ensure_parent_dir(output_path: str) -> None:

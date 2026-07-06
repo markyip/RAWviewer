@@ -81,6 +81,15 @@ class UnifiedImageProcessor:
 
         self._unpacked_raw_lock = _threading.Lock()
         self._unpacked_raw_slot: Optional[tuple] = None  # (norm_path, UnpackedRaw)
+        # Sidecar-adjusted full-buffer memo: applying XMP adjustments to a
+        # sensor-resolution buffer costs ~2.1s at 45MP (measured), and
+        # _apply_sidecar_if_needed used to re-run it on EVERY
+        # process_full_image() fetch of an edited file (each zoom, revisit,
+        # repaint). Two slots (current + previous file) keyed by
+        # (norm_path, adjustment fingerprint); the fingerprint makes stale
+        # entries self-invalidating when the sidecar changes.
+        self._adjusted_full_lock = _threading.Lock()
+        self._adjusted_full_slots: list = []  # [(norm_path, adj_key, np.ndarray)]
 
     def _stash_unpacked_raw(self, file_path: str, unpacked) -> None:
         key = os.path.normcase(os.path.abspath(file_path))
@@ -99,7 +108,11 @@ class UnifiedImageProcessor:
     def _apply_sidecar_if_needed(
         self, file_path: str, rgb_image: Optional[np.ndarray]
     ) -> Optional[np.ndarray]:
-        """Apply XMP sidecar adjustments on top of a base (unadjusted) RGB buffer."""
+        """Apply XMP sidecar adjustments on top of a base (unadjusted) RGB buffer.
+
+        Memoized per (file, adjustment fingerprint, base buffer shape): see
+        _adjusted_full_slots in __init__ for why.
+        """
         if rgb_image is None:
             return None
         try:
@@ -112,7 +125,39 @@ class UnifiedImageProcessor:
             adj = load_adjustments_for_file(file_path)
             if is_default_adjustments(adj):
                 return rgb_image
-            return apply_adjustments_to_rgb(rgb_image, adj)
+            norm = os.path.normcase(os.path.abspath(file_path))
+            # Fingerprint includes the base buffer's shape so a half-size
+            # cached result can never be served for a full-res request.
+            from raw_dodge_burn import MASK_KEY as _db_mask_key
+
+            adj_key = (
+                tuple(sorted((k, round(float(v), 4)) for k, v in adj.items()
+                             if isinstance(v, (int, float)))),
+                str(adj.get("_tone_curve_pv2012", "") or ""),
+                str(adj.get(_db_mask_key, "") or ""),
+                rgb_image.shape,
+            )
+            with self._adjusted_full_lock:
+                for n, k, buf in self._adjusted_full_slots:
+                    if n == norm and k == adj_key:
+                        return buf
+            import time as _time
+
+            from perf_metrics import perf_mark
+
+            _t0 = _time.perf_counter()
+            out = apply_adjustments_to_rgb(rgb_image, adj)
+            perf_mark(
+                "sidecar_apply",
+                (_time.perf_counter() - _t0) * 1000.0,
+                file_path,
+                mp=rgb_image.shape[0] * rgb_image.shape[1] / 1e6,
+            )
+            with self._adjusted_full_lock:
+                self._adjusted_full_slots = [
+                    e for e in self._adjusted_full_slots if e[0] != norm
+                ][-1:] + [(norm, adj_key, out)]
+            return out
         except Exception:
             return rgb_image
 
@@ -135,12 +180,16 @@ class UnifiedImageProcessor:
         """
         skip_key = os.path.normcase(os.path.abspath(file_path))
         from common_image_loader import dng_prefers_embedded_preview_first
-        from raw_tone_recovery import recovery_decode_params
+        from raw_tone_recovery import edit_base_decode_params
 
         try:
             exif_data = self.exif_extractor.extract_exif_data(file_path)
             half_size = not use_full_resolution
-            edit_params = recovery_decode_params(half_size=half_size, demosaic="AHD")
+            # Browse-brightness decode (Blend highlights, no exp_shift) with
+            # the corrected-WB handling built in; see edit_base_decode_params.
+            edit_params = edit_base_decode_params(
+                half_size=half_size, demosaic="AHD", for_file=file_path
+            )
 
             rgb_image: Optional[np.ndarray] = None
             if skip_key not in _LIBRAW_UNSUPPORTED_PATHS:
@@ -154,8 +203,31 @@ class UnifiedImageProcessor:
                     with _rawpy_global_lock:
                         raw_ctx = rawpy.imread(file_path)
                     with raw_ctx as raw:
+                        cam_mul_for_scale = list(raw.camera_whitebalance or [])
                         with _heavy_fallback_semaphore:
                             rgb_image = raw.postprocess(edit_params)
+                    # Restore browse (min-normalized) brightness: dcraw
+                    # divides the WB multipliers by their MAX whenever
+                    # highlight_mode > 0 (measured: a uniform 1.74x darkening
+                    # on a cam_mul of [1780,1024,1786]), which made the
+                    # editor's default rendering visibly darker than browse.
+                    # Rescale to float32 scene-linear where 1.0 = camera clip
+                    # point: unclipped tones land exactly on browse scale,
+                    # and values > 1.0 are the Blend-reconstructed highlight
+                    # headroom that Exposure/Highlights can pull back down
+                    # (display clips them to white, matching browse).
+                    try:
+                        from fast_raw_decode import get_corrected_camera_wb
+
+                        mul = get_corrected_camera_wb(file_path) or cam_mul_for_scale
+                        mul3 = [float(m) for m in (mul or [])[:3] if float(m) > 0]
+                        dmax_over_dmin = (max(mul3) / min(mul3)) if len(mul3) == 3 else 1.0
+                    except Exception:
+                        dmax_over_dmin = 1.0
+                    if rgb_image is not None and rgb_image.dtype == np.uint16:
+                        rgb_image = rgb_image.astype(np.float32) * (
+                            dmax_over_dmin / 65535.0
+                        )
                 except Exception as libraw_err:
                     is_unsupported = (
                         "unsupported" in str(libraw_err).lower()
@@ -1197,19 +1269,32 @@ class UnifiedImageProcessor:
                 import rawpy
                 import time as _time
                 from enhanced_raw_processor import _rawpy_global_lock, _heavy_fallback_semaphore
+                # Keep the rawpy fallback consistent with the fast path's
+                # embedded-JPEG WB sanity correction (misparsed as-shot WB on
+                # bodies newer than the bundled LibRaw, e.g. EOS R6 Mark III).
+                try:
+                    from fast_raw_decode import get_corrected_camera_wb
+
+                    _corrected_wb = get_corrected_camera_wb(file_path)
+                    if _corrected_wb:
+                        params = dict(params)
+                        params['use_camera_wb'] = False
+                        params['user_wb'] = list(_corrected_wb)
+                except Exception:
+                    pass
                 _t_dec = _time.perf_counter()
                 with _rawpy_global_lock:
                     raw_ctx = rawpy.imread(file_path)
                 with raw_ctx as raw:
                     with _heavy_fallback_semaphore:
                         rgb_image = raw.postprocess(**params)
-                import logging as _logging
+                from perf_metrics import perf_mark
 
-                _logging.getLogger(__name__).debug(
-                    "[DECODE_T] rawpy %s %s in %.0fms",
-                    "full" if use_full_resolution else "half",
-                    os.path.basename(file_path),
+                perf_mark(
+                    "decode_rawpy",
                     (_time.perf_counter() - _t_dec) * 1000.0,
+                    file_path,
+                    tier="full" if use_full_resolution else "half",
                 )
             
             # 應用方向校正 - 確保使用最新的 EXIFExtractor 邏輯

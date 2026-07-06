@@ -53,8 +53,60 @@ def _highlight_reconstruct_mode():
         return rawpy.HighlightMode.ReconstructDefault
 
 
-def recovery_decode_params(*, half_size: bool = True, demosaic: str | None = None):
-    """Linear 16-bit decode with LibRaw highlight reconstruction."""
+def edit_base_decode_params(
+    *, half_size: bool = True, demosaic: str | None = None, for_file: str | None = None
+):
+    """Scene-linear 16-bit decode for the Adjust-panel edit base.
+
+    Unlike :func:`recovery_decode_params` (P-key recovery / EDR), this keeps
+    browse-equivalent brightness: no exp_shift, and ``highlight_mode=Blend``
+    instead of Reconstruct(5) -- Reconstruct lowers overall exposure to buy
+    highlight headroom, which made the editor's default rendering visibly
+    darker than browsing the same file once the editor's display transform
+    was aligned with browse (dcraw BT.709 + clip). Blend keeps unclipped
+    tones at browse scale while still smoothing clipped-highlight edges.
+    """
+    import rawpy
+
+    params = rawpy.Params(
+        use_camera_wb=True,
+        use_auto_wb=False,
+        output_bps=16,
+        gamma=(1, 1),
+        no_auto_bright=True,
+        bright=1.0,
+        user_flip=0,
+        half_size=half_size,
+        highlight_mode=rawpy.HighlightMode.Blend,
+    )
+    if demosaic:
+        try:
+            params.demosaic_algorithm = getattr(rawpy.DemosaicAlgorithm, demosaic)
+        except (AttributeError, TypeError):
+            pass
+    if for_file:
+        try:
+            from fast_raw_decode import get_corrected_camera_wb
+
+            corrected = get_corrected_camera_wb(for_file)
+            if corrected:
+                params.use_camera_wb = False
+                params.user_wb = list(corrected)
+        except Exception:
+            pass
+    return params
+
+
+def recovery_decode_params(
+    *, half_size: bool = True, demosaic: str | None = None, for_file: str | None = None
+):
+    """Linear 16-bit decode with LibRaw highlight reconstruction.
+
+    ``for_file``: when given, applies that file's embedded-JPEG WB sanity
+    correction (see fast_raw_decode.get_corrected_camera_wb) so recovery/EDR
+    renders match the display pipeline on bodies whose as-shot WB LibRaw
+    misparses.
+    """
     import rawpy
 
     params = rawpy.Params(
@@ -75,6 +127,16 @@ def recovery_decode_params(*, half_size: bool = True, demosaic: str | None = Non
         try:
             params.demosaic_algorithm = getattr(rawpy.DemosaicAlgorithm, demosaic)
         except (AttributeError, TypeError):
+            pass
+    if for_file:
+        try:
+            from fast_raw_decode import get_corrected_camera_wb
+
+            corrected = get_corrected_camera_wb(for_file)
+            if corrected:
+                params.use_camera_wb = False
+                params.user_wb = list(corrected)
+        except Exception:
             pass
     return params
 
@@ -343,7 +405,7 @@ def decode_and_recover_raw(
 
         with _rawpy_global_lock:
             with rawpy.imread(file_path) as raw:
-                rgb = raw.postprocess(recovery_decode_params(half_size=True))
+                rgb = raw.postprocess(recovery_decode_params(half_size=True, for_file=file_path))
     except Exception as exc:
         logger.warning(
             "RAW recovery decode failed for %s: %s",
@@ -384,7 +446,7 @@ def decode_raw_for_edr_rgb(
 
         with _rawpy_global_lock:
             with rawpy.imread(file_path) as raw:
-                rgb = raw.postprocess(recovery_decode_params(half_size=True))
+                rgb = raw.postprocess(recovery_decode_params(half_size=True, for_file=file_path))
     except Exception as exc:
         logger.warning(
             "RAW EDR decode failed for %s: %s",
