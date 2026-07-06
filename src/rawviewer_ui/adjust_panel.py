@@ -365,8 +365,8 @@ class ImageAdjustPanelWidget(QWidget):
         card.setStyleSheet(
             """
             QWidget#adjust_panel_card {
-                background-color: #222222;
-                border-left: 1px solid #333333;
+                background-color: #1D1A16;
+                border-left: 1px solid #3A332A;
             }
             QLabel#adjust_panel_title {
                 color: #EDE7DD;
@@ -398,13 +398,13 @@ class ImageAdjustPanelWidget(QWidget):
             QPushButton#adjust_export_btn {
                 color: #D9691E;
                 font-size: 11px;
-                border: 1px solid rgba(144, 202, 249, 80);
+                border: 1px solid rgba(217, 105, 30, 80);
                 border-radius: 4px;
-                background: rgba(144, 202, 249, 25);
+                background: rgba(217, 105, 30, 25);
                 padding: 4px 10px;
             }
             QPushButton#adjust_export_btn:hover {
-                background: rgba(144, 202, 249, 45);
+                background: rgba(217, 105, 30, 45);
                 color: #FFFFFF;
             }
             QPushButton#adjust_export_btn:disabled {
@@ -422,8 +422,8 @@ class ImageAdjustPanelWidget(QWidget):
             }
             QPushButton#adjust_nr_btn:checked {
                 color: #D9691E;
-                border-color: rgba(144, 202, 249, 90);
-                background: rgba(144, 202, 249, 30);
+                border-color: rgba(217, 105, 30, 90);
+                background: rgba(217, 105, 30, 30);
             }
             QPushButton#adjust_nr_btn:hover {
                 color: #FFFFFF;
@@ -435,8 +435,8 @@ class ImageAdjustPanelWidget(QWidget):
                 padding: 0px;
             }
             QPushButton#adjust_wb_picker_btn:checked {
-                border-color: rgba(144, 202, 249, 90);
-                background: rgba(144, 202, 249, 30);
+                border-color: rgba(217, 105, 30, 90);
+                background: rgba(217, 105, 30, 30);
             }
             QPushButton#adjust_wb_picker_btn:hover {
                 background: rgba(255, 255, 255, 24);
@@ -448,8 +448,8 @@ class ImageAdjustPanelWidget(QWidget):
                 padding: 0px;
             }
             QPushButton#adjust_compare_btn:checked {
-                border-color: rgba(144, 202, 249, 90);
-                background: rgba(144, 202, 249, 30);
+                border-color: rgba(217, 105, 30, 90);
+                background: rgba(217, 105, 30, 30);
             }
             QPushButton#adjust_compare_btn:hover {
                 background: rgba(255, 255, 255, 24);
@@ -475,7 +475,6 @@ class ImageAdjustPanelWidget(QWidget):
         card_layout.addWidget(scroll)
 
         inner = QWidget()
-        inner.setMaximumWidth(self._PANEL_W)
         inner.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         scroll.setWidget(inner)
         layout = QVBoxLayout(inner)
@@ -818,6 +817,10 @@ class ImageAdjustPanelWidget(QWidget):
         # Dodge & burn brush: mutually-exclusive Dodge/Burn toggle + Size/
         # Strength sliders (transient tool settings, not persisted sliders --
         # see raw_dodge_burn.py; the mask itself is persisted separately).
+        # Split across two rows -- label + Dodge/Burn toggle, then a second
+        # row of secondary actions (Clear/Show Mask) -- instead of packing
+        # all five widgets into one row, which overlapped/clipped at the
+        # panel's actual width.
         db_row = QHBoxLayout()
         db_row.setSpacing(6)
         db_label = QLabel("Dodge/Burn")
@@ -838,6 +841,13 @@ class ImageAdjustPanelWidget(QWidget):
             db_row.addWidget(btn, 1)
         self._dodge_btn.toggled.connect(lambda on: self._on_dodge_burn_toggled(self._dodge_btn, on))
         self._burn_btn.toggled.connect(lambda on: self._on_dodge_burn_toggled(self._burn_btn, on))
+        self.sect_detail.add_layout(db_row)
+
+        db_actions_row = QHBoxLayout()
+        db_actions_row.setSpacing(6)
+        db_actions_spacer = QLabel("")
+        db_actions_spacer.setMinimumWidth(72)
+        db_actions_row.addWidget(db_actions_spacer)
         self._db_clear_btn = QPushButton("Clear")
         self._db_clear_btn.setObjectName("adjust_db_clear_btn")
         self._db_clear_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
@@ -845,8 +855,8 @@ class ImageAdjustPanelWidget(QWidget):
         self._db_clear_btn.setToolTip("Erase the dodge/burn brush mask for this image")
         self._db_clear_btn.setEnabled(False)
         self._db_clear_btn.clicked.connect(self.dodge_burn_clear_requested.emit)
-        db_row.addWidget(self._db_clear_btn)
-        
+        db_actions_row.addWidget(self._db_clear_btn, 1)
+
         self._db_show_mask_btn = QPushButton("Show Mask (O)")
         self._db_show_mask_btn.setObjectName("adjust_db_show_mask_btn")
         self._db_show_mask_btn.setCheckable(True)
@@ -854,9 +864,8 @@ class ImageAdjustPanelWidget(QWidget):
         self._db_show_mask_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         self._db_show_mask_btn.setToolTip("Overlay mask in red")
         self._db_show_mask_btn.toggled.connect(self.dodgeBurnMaskToggled.emit)
-        db_row.addWidget(self._db_show_mask_btn)
-        
-        self.sect_detail.add_layout(db_row)
+        db_actions_row.addWidget(self._db_show_mask_btn, 2)
+        self.sect_detail.add_layout(db_actions_row)
 
         db_size_row = QHBoxLayout()
         db_size_row.setSpacing(6)

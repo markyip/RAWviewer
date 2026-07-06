@@ -7905,8 +7905,11 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             }
         """)
         self.image_label = QLabel()
-        # Center the label in viewport, but left-align the text content
-        self.image_label.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
+        # This label displays both the loaded photo and (when nothing is
+        # loaded) empty-state/error help text -- always centered, so a
+        # photo narrower than the viewport doesn't end up pinned to the
+        # left edge with the empty space pushed entirely to the right.
+        self.image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         # Create instruction text with modern folder icon
         # Use modern folder icon (📁) instead of old style (🗁)
         self.image_label.setText(self._no_image_loaded_help_text())
