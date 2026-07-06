@@ -204,9 +204,9 @@ def process_linear_edit_buffer(
     # (matches how a real exposure difference at capture time would look).
     mask_serial = str(merged.get(_DB_MASK_KEY, "") or "")
     if mask_serial:
-        from raw_dodge_burn import apply_dodge_burn, deserialize_mask
+        from raw_dodge_burn import _deserialize_mask_cached, apply_dodge_burn
 
-        mask = deserialize_mask(mask_serial)
+        mask = _deserialize_mask_cached(mask_serial)
         if mask is not None:
             stops = float(merged.get(_DB_STRENGTH_KEY, _DB_DEFAULT_STRENGTH))
             img = apply_dodge_burn(img, mask, stops)
@@ -352,9 +352,9 @@ def process_linear_edit_buffer_staged(
 
             mask_serial = str(merged.get(_DB_MASK_KEY, "") or "")
             if mask_serial:
-                from raw_dodge_burn import apply_dodge_burn, deserialize_mask
+                from raw_dodge_burn import _deserialize_mask_cached, apply_dodge_burn
 
-                mask = deserialize_mask(mask_serial)
+                mask = _deserialize_mask_cached(mask_serial)
                 if mask is not None:
                     stops = float(merged.get(_DB_STRENGTH_KEY, _DB_DEFAULT_STRENGTH))
                     img = apply_dodge_burn(img, mask, stops)

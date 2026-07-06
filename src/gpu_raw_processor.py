@@ -93,7 +93,7 @@ def detect_gpu_backend() -> str:
     return _GPU_BACKEND
 
 
-def gpu_demosaic_pytorch_unpacked(unpacked, device_str: str = "cuda", cancel_check: Optional[Callable[[], bool]] = None) -> np.ndarray:
+def gpu_demosaic_pytorch_unpacked(unpacked, device_str: str = "cuda", cancel_check: Optional[Callable[[], bool]] = None, return_linear: bool = False) -> np.ndarray:
     """
     GPU-accelerated Demosaicing using PyTorch and Kornia.
     Consumes UnpackedRaw from fast_raw_decode.py to guarantee color math parity.
@@ -200,6 +200,11 @@ def _gpu_demosaic_pytorch_body(unpacked, device, cancel_check=None) -> np.ndarra
 
     _abort_if_cancelled()
 
+    if return_linear:
+        # Avoid PyTorch's lack of uint16 support on MPS by casting via int32
+        rgb_final16 = (rgb_srgb * 65535.0 + 0.5).to(torch.int32).cpu().numpy().astype(np.uint16)
+        return rgb_final16
+
     # 5. BT.709 gamma via the shared 16-bit LUT (same curve as
     # fast_raw_decode._gamma_lut8 / gamma_curve16, computed once and cached
     # per-device instead of re-derived by bisection on every call).
@@ -229,7 +234,7 @@ def _cupy_gamma_lut() -> Any:
     return _GAMMA_LUT_CUPY
 
 
-def gpu_demosaic_cupy_unpacked(unpacked, cancel_check: Optional[Callable[[], bool]] = None) -> np.ndarray:
+def gpu_demosaic_cupy_unpacked(unpacked, cancel_check: Optional[Callable[[], bool]] = None, return_linear: bool = False) -> np.ndarray:
     """
     GPU-accelerated demosaicing implementation using CuPy.
     Uses CuPy elementwise/raw CUDA kernels for maximum speed.
@@ -321,6 +326,10 @@ def gpu_demosaic_cupy_unpacked(unpacked, cancel_check: Optional[Callable[[], boo
 
     _abort_if_cancelled()
 
+    if return_linear:
+        rgb_final16 = cupy.clip(rgb_srgb * 65535.0 + 0.5, 0, 65535).astype(cupy.uint16)
+        return cupy.asnumpy(rgb_final16)
+
     # BT.709 gamma via the shared 16-bit LUT (same curve as
     # fast_raw_decode._gamma_lut8 / gamma_curve16; see _cupy_gamma_lut).
     gamma_lut = _cupy_gamma_lut()
@@ -338,7 +347,8 @@ def gpu_demosaic_cupy_unpacked(unpacked, cancel_check: Optional[Callable[[], boo
 
 def try_gpu_decode_from_unpacked(
     unpacked,
-    cancel_check: Optional[Callable[[], bool]] = None
+    cancel_check: Optional[Callable[[], bool]] = None,
+    return_linear: bool = False
 ) -> Optional[np.ndarray]:
     """
     Attempt to decode the UnpackedRaw using the detected GPU backend.
@@ -390,14 +400,14 @@ def try_gpu_decode_from_unpacked(
             res = None
             if backend == "pytorch_cuda":
                 res = gpu_demosaic_pytorch_unpacked(
-                    unpacked, device_str="cuda", cancel_check=cancel_check
+                    unpacked, device_str="cuda", cancel_check=cancel_check, return_linear=return_linear
                 )
             elif backend == "pytorch_mps":
                 res = gpu_demosaic_pytorch_unpacked(
-                    unpacked, device_str="mps", cancel_check=cancel_check
+                    unpacked, device_str="mps", cancel_check=cancel_check, return_linear=return_linear
                 )
             elif backend == "cupy":
-                res = gpu_demosaic_cupy_unpacked(unpacked, cancel_check=cancel_check)
+                res = gpu_demosaic_cupy_unpacked(unpacked, cancel_check=cancel_check, return_linear=return_linear)
             if res is not None:
                 elapsed_ms = (time.time() - t_start) * 1000.0
                 logger.info(

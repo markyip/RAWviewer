@@ -19,6 +19,7 @@ from PyQt6.QtWidgets import (
     QSizePolicy,
     QStyle,
     QStyleOptionSlider,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -300,13 +301,12 @@ class ImageAdjustPanelWidget(QWidget):
     # "dodge" / "burn" / None (disarmed) -- see main.py._on_dodge_burn_mode_changed.
     dodge_burn_mode_changed = pyqtSignal(object)
     dodge_burn_clear_requested = pyqtSignal()
+    dodgeBurnMaskToggled = pyqtSignal(bool)
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, histogram_widget=None):
         super().__init__(parent)
         self._sliders: Dict[str, QSlider] = {}
         self._value_labels: Dict[str, QLabel] = {}
-        self._drag_press_global = None
-        self._drag_pos_at_press = None
         self._block_emit = False
         self._as_shot_temperature = float(DEFAULT_ADJUSTMENTS["Temperature"])
         self._recovery_baseline = False
@@ -322,14 +322,12 @@ class ImageAdjustPanelWidget(QWidget):
         self._preview_timer.setSingleShot(True)
         self._preview_timer.timeout.connect(self._emit_live_preview)
 
-        self.setFixedSize(self._PANEL_W, self._PANEL_H)
-        self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
-        self.setCursor(QCursor(Qt.CursorShape.OpenHandCursor))
+        self.setMinimumWidth(self._PANEL_W)
+        self.setMaximumWidth(400)
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
 
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(10, 10, 10, 10)
+        outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
 
         card = QWidget(self)
@@ -337,9 +335,8 @@ class ImageAdjustPanelWidget(QWidget):
         card.setStyleSheet(
             """
             QWidget#adjust_panel_card {
-                background-color: rgba(30, 30, 30, 215);
-                border: 1px solid rgba(255, 255, 255, 45);
-                border-radius: 8px;
+                background-color: #222222;
+                border-left: 1px solid #333333;
             }
             QLabel#adjust_panel_title {
                 color: #E0E0E0;
@@ -347,16 +344,16 @@ class ImageAdjustPanelWidget(QWidget):
                 font-weight: 600;
             }
             QLabel.adjust_slider_label {
-                color: #B0B0B0;
+                color: #888888;
                 font-size: 11px;
             }
             QLabel.adjust_slider_value {
-                color: #90CAF9;
+                color: #E0E0E0;
                 font-size: 11px;
                 min-width: 44px;
             }
             QLabel.adjust_slider_value:hover {
-                color: #BBDEFB;
+                color: #3a8ac8;
             }
             QPushButton#adjust_reset_btn {
                 color: #B0B0B0;
@@ -448,6 +445,7 @@ class ImageAdjustPanelWidget(QWidget):
         card_layout.addWidget(scroll)
 
         inner = QWidget()
+        inner.setMaximumWidth(self._PANEL_W)
         inner.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         scroll.setWidget(inner)
         layout = QVBoxLayout(inner)
@@ -476,6 +474,16 @@ class ImageAdjustPanelWidget(QWidget):
         self._tone_curve_row = None
 
         # Build Collapsible Sections
+        self.histogram_widget = histogram_widget
+        self.sect_histogram = CollapsibleSection("Histogram")
+        if self.histogram_widget:
+            # Add some styling wrapper or just add it directly
+            # Set minimum height for the histogram
+            self.histogram_widget.setMinimumHeight(120)
+            self.sect_histogram.content_layout.addWidget(self.histogram_widget)
+        else:
+            self.sect_histogram.hide()
+
         self.sect_light = CollapsibleSection("Light")
         self.sect_color = CollapsibleSection("Color / WB")
         
@@ -490,6 +498,7 @@ class ImageAdjustPanelWidget(QWidget):
         self.sect_detail = CollapsibleSection("Detail / Correction")
 
         # Add Collapsible Sections to main scroll layout
+        layout.addWidget(self.sect_histogram)
         layout.addWidget(self.sect_light)
         layout.addWidget(self.sect_color)
         layout.addWidget(self.sect_curve)
@@ -498,10 +507,79 @@ class ImageAdjustPanelWidget(QWidget):
 
         # Build tone curve editor row inside the curve section first
         if _SHOW_TONE_CURVE_UI:
+            from PyQt6.QtWidgets import QStackedWidget
+            
+            self._tone_curve_tabs = QWidget()
+            tabs_layout = QVBoxLayout(self._tone_curve_tabs)
+            tabs_layout.setContentsMargins(0, 0, 0, 0)
+            
+            # Segmented control
+            seg_layout = QHBoxLayout()
+            seg_layout.setSpacing(0)
+            
+            self._btn_point = QPushButton("Point")
+            self._btn_param = QPushButton("Parametric")
+            
+            seg_style = """
+                QPushButton {
+                    background: #2A2A2A;
+                    color: #B0B0B0;
+                    border: 1px solid #404040;
+                    padding: 6px 12px;
+                    font-size: 11px;
+                }
+                QPushButton:checked {
+                    background: #404040;
+                    color: #FFFFFF;
+                }
+                QPushButton#btn_point {
+                    border-top-left-radius: 4px;
+                    border-bottom-left-radius: 4px;
+                    border-right: none;
+                }
+                QPushButton#btn_param {
+                    border-top-right-radius: 4px;
+                    border-bottom-right-radius: 4px;
+                }
+            """
+            
+            self._btn_point.setObjectName("btn_point")
+            self._btn_param.setObjectName("btn_param")
+            self._btn_point.setCheckable(True)
+            self._btn_param.setCheckable(True)
+            self._btn_point.setChecked(True)
+            self._btn_point.setStyleSheet(seg_style)
+            self._btn_param.setStyleSheet(seg_style)
+            self._btn_point.setCursor(Qt.CursorShape.PointingHandCursor)
+            self._btn_param.setCursor(Qt.CursorShape.PointingHandCursor)
+            
+            seg_layout.addWidget(self._btn_point)
+            seg_layout.addWidget(self._btn_param)
+            tabs_layout.addLayout(seg_layout)
+            
+            self._tone_curve_stack = QStackedWidget()
+            
+            self._tone_curve_point_tab = QWidget()
+            self._tone_curve_point_layout = QVBoxLayout(self._tone_curve_point_tab)
+            self._tone_curve_point_layout.setContentsMargins(0, 8, 0, 0)
+            
+            self._tone_curve_param_tab = QWidget()
+            self._tone_curve_param_layout = QVBoxLayout(self._tone_curve_param_tab)
+            self._tone_curve_param_layout.setContentsMargins(0, 8, 0, 0)
+            
+            self._tone_curve_stack.addWidget(self._tone_curve_point_tab)
+            self._tone_curve_stack.addWidget(self._tone_curve_param_tab)
+            tabs_layout.addWidget(self._tone_curve_stack)
+            
+            self._btn_point.clicked.connect(lambda: (self._btn_point.setChecked(True), self._btn_param.setChecked(False), self._tone_curve_stack.setCurrentIndex(0)))
+            self._btn_param.clicked.connect(lambda: (self._btn_param.setChecked(True), self._btn_point.setChecked(False), self._tone_curve_stack.setCurrentIndex(1)))
+            
+            self.sect_curve.add_widget(self._tone_curve_tabs)
+
             self._tone_curve_row = ToneCurveEditorRow()
             self._tone_curve_row.points_changed.connect(self._on_tone_curve_changed)
             self._tone_curve_row.editing_finished.connect(self._on_tone_curve_finished)
-            self.sect_curve.add_widget(self._tone_curve_row)
+            self._tone_curve_point_layout.addWidget(self._tone_curve_row)
 
         # Build HSL mixer inside the HSL section
         if _SHOW_HSL_UI:
@@ -512,19 +590,23 @@ class ImageAdjustPanelWidget(QWidget):
             if not _SHOW_TONE_CURVE_UI and spec.key in _PARAMETRIC_TONE_KEYS:
                 continue
                 
-            # Determine target section
+            target_layout = None
             if spec.key in {"Exposure2012", "Contrast2012", "Highlights2012", "Shadows2012", "Whites2012", "Blacks2012"}:
                 target_sect = self.sect_light
             elif spec.key in {"Temperature", "Tint", "Saturation", "Vibrance"}:
                 target_sect = self.sect_color
             elif spec.key in {"ParametricShadows", "ParametricDarks", "ParametricLights", "ParametricHighlights"}:
-                target_sect = self.sect_curve
+                if _SHOW_TONE_CURVE_UI:
+                    target_sect = None
+                    target_layout = self._tone_curve_param_layout
+                else:
+                    target_sect = self.sect_curve
             elif spec.key in {"Sharpness", "Clarity2012", "Defringe", "LuminanceNoiseReduction"}:
                 target_sect = self.sect_detail
             else:
                 target_sect = None
                 
-            if target_sect is None:
+            if target_sect is None and target_layout is None:
                 continue
 
             row = QHBoxLayout()
@@ -572,7 +654,10 @@ class ImageAdjustPanelWidget(QWidget):
             if spec.key == "Temperature":
                 self._build_wb_picker_button(row)
 
-            target_sect.add_layout(row)
+            if target_layout is not None:
+                target_layout.addLayout(row)
+            elif target_sect is not None:
+                target_sect.add_layout(row)
             self._sliders[spec.key] = slider
             self._value_labels[spec.key] = val_lbl
 
@@ -731,6 +816,16 @@ class ImageAdjustPanelWidget(QWidget):
         self._db_clear_btn.setEnabled(False)
         self._db_clear_btn.clicked.connect(self.dodge_burn_clear_requested.emit)
         db_row.addWidget(self._db_clear_btn)
+        
+        self._db_show_mask_btn = QPushButton("Show Mask (O)")
+        self._db_show_mask_btn.setObjectName("adjust_db_show_mask_btn")
+        self._db_show_mask_btn.setCheckable(True)
+        self._db_show_mask_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._db_show_mask_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self._db_show_mask_btn.setToolTip("Overlay mask in red")
+        self._db_show_mask_btn.toggled.connect(self.dodgeBurnMaskToggled.emit)
+        db_row.addWidget(self._db_show_mask_btn)
+        
         self.sect_detail.add_layout(db_row)
 
         db_size_row = QHBoxLayout()
@@ -896,6 +991,18 @@ class ImageAdjustPanelWidget(QWidget):
         color_lbl.setMinimumWidth(72)
         color_row.addWidget(color_lbl)
         self._hsl_color_combo = QComboBox()
+        self._hsl_color_combo.setStyleSheet("""
+            QComboBox {
+                color: #E0E0E0;
+                background-color: #2A2A2A;
+                border: 1px solid #404040;
+                border-radius: 4px;
+                padding: 2px 8px;
+            }
+            QComboBox::drop-down {
+                border: none;
+            }
+        """)
         self._hsl_color_combo.addItems(list(HSL_COLOR_NAMES))
         self._hsl_color_combo.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._hsl_color_combo.currentIndexChanged.connect(self._on_hsl_color_changed)
@@ -1354,82 +1461,5 @@ class ImageAdjustPanelWidget(QWidget):
         if btn is not None:
             btn.setEnabled(bool(enabled))
 
-    def _pointer_on_interactive_child(self, global_pos) -> bool:
-        """True when the cursor is over a slider, button, or value label.
 
-        Uses ``self.childAt()`` (local widget-tree hit-testing) rather than
-        ``QApplication.widgetAt()`` (global OS-level screen-coordinate
-        hit-testing) -- the latter is resolved against actual window/compositor
-        state and is unreliable for a translucent, borderless overlay panel
-        like this one (confirmed: it can return ``None`` at a position a
-        visible child widget genuinely occupies). ``childAt()`` only asks
-        "which of *my own* children is at this local point", which is exactly
-        what this check needs and can't be thrown off by window compositing.
-        """
-        local_pos = self.mapFromGlobal(global_pos.toPoint())
-        w = self.childAt(local_pos)
-        interactive_types: tuple = (
-            QSlider,
-            AdjustSlider,
-            QPushButton,
-            AdjustValueLabel,
-            QComboBox,
-        )
-        if _SHOW_TONE_CURVE_UI:
-            interactive_types = interactive_types + (ToneCurveEditorRow, ToneCurveWidget)
-        while w is not None and w is not self:
-            if isinstance(w, interactive_types):
-                return True
-            w = w.parentWidget()
-        return False
 
-    def enterEvent(self, event):
-        self.setCursor(QCursor(Qt.CursorShape.OpenHandCursor))
-        super().enterEvent(event)
-
-    def leaveEvent(self, event):
-        self.setCursor(QCursor(Qt.CursorShape.ArrowCursor))
-        super().leaveEvent(event)
-
-    def mousePressEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton:
-            if self._pointer_on_interactive_child(event.globalPosition()):
-                super().mousePressEvent(event)
-                return
-            self._drag_press_global = event.globalPosition().toPoint()
-            self._drag_pos_at_press = self.pos()
-            self.setCursor(QCursor(Qt.CursorShape.ClosedHandCursor))
-            event.accept()
-            return
-        super().mousePressEvent(event)
-
-    def mouseMoveEvent(self, event):
-        if (
-            self._drag_press_global is not None
-            and event.buttons() & Qt.MouseButton.LeftButton
-        ):
-            if self._pointer_on_interactive_child(event.globalPosition()):
-                self._drag_press_global = None
-                self._drag_pos_at_press = None
-                super().mouseMoveEvent(event)
-                return
-            parent = self.parentWidget()
-            if parent:
-                d = event.globalPosition().toPoint() - self._drag_press_global
-                nx = self._drag_pos_at_press.x() + d.x()
-                ny = self._drag_pos_at_press.y() + d.y()
-                nx = max(0, min(nx, parent.width() - self.width()))
-                ny = max(0, min(ny, parent.height() - self.height()))
-                self.move(nx, ny)
-                if hasattr(parent, "mark_adjust_user_moved"):
-                    parent.mark_adjust_user_moved()
-            event.accept()
-            return
-        super().mouseMoveEvent(event)
-
-    def mouseReleaseEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton:
-            self._drag_press_global = None
-            self._drag_pos_at_press = None
-            self.setCursor(QCursor(Qt.CursorShape.OpenHandCursor))
-        super().mouseReleaseEvent(event)

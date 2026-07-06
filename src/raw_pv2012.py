@@ -47,13 +47,25 @@ _BASE_LUT = np.interp(
 # adjusted luminance stayed under the floor -- exactly the deep-shadow range
 # Shadows/Blacks exist to recover.
 _RATIO_EPS = 0.005
-# 16x = 4 stops of shadow lift, 0.25x = 2 stops of crush. Modern sensors
+# 8x = 3 stops of shadow lift, 0.25x = 2 stops of crush. Modern sensors
 # hold recoverable detail well past 3 stops under (Exposure, applied
 # scene-linear upstream, is uncapped and proves it); the old 3.0 cap
 # (~1.6 stops) made Shadows/Blacks top out far below what the file
-# contains. Noise/green-cast control in lifted shadows is the chroma
-# damp's job below, not the ratio cap's.
-_MAX_TONE_RATIO = 16.0
+# contains.
+#
+# A first pass raised this to 16x (4 stops) and relied on the chroma damp
+# below to control noise. In practice, real per-pixel sensor chroma noise
+# (the blue channel especially -- lowest QE/highest relative read noise
+# on most Bayer sensors) gets amplified by the SAME ratio as genuine
+# shadow detail: a real photo test measured a synthetic 0.0004 scene-
+# linear blue-channel noise std turning into a display-space blue-vs-green
+# channel deviation of std ~3.0 (about 4x the luminance grain) at 16x,
+# visible as colored speckle in dark clothing/hair -- reported as "blue
+# color artifact" with less perceived detail (the speckle masks it). 8x
+# roughly halves the worst-case amplification while still recovering far
+# more than the original 3.0 cap; the strengthened chroma damp below
+# (raised from 0.35 to 0.85 max) does most of the remaining noise control.
+_MAX_TONE_RATIO = 8.0
 _MIN_TONE_RATIO = 0.25
 
 
@@ -220,25 +232,36 @@ def apply_pv2012_tone_rgb(img: np.ndarray, adj: dict[str, float]) -> np.ndarray:
     ratio = np.where(ratio > 1.0, 1.0 + (ratio - 1.0) * anchor, ratio)
     out = img * ratio[..., np.newaxis]
 
-    # Shadow lift amplifies demosaic chroma noise — pull chroma toward luma.
-    sh = float(adj.get("Shadows2012", 0.0))
-    if sh > 1e-4:
+    # Shadow lift amplifies demosaic/sensor chroma noise — pull chroma
+    # toward luma in proportion to how much a pixel was actually lifted.
+    #
+    # Gated on the RATIO itself (any(ratio > 1)), not on the Shadows slider
+    # value: Blacks alone also raises `ratio` in the shadow region (see
+    # _apply_whites_blacks), and gating on `sh` left a Blacks-only push
+    # completely undamped -- the exact same colored-speckle failure mode,
+    # just reachable without touching Shadows at all.
+    if np.any(ratio > 1.0 + 1e-6):
         sw = _region_weight_shadows(y_curve)
         # Anchor on the POST-lift luminance: with the pre-lift ``lum`` here,
         # a lifted neutral pixel's uniform (out - lum) offset -- which is the
-        # lift itself, not chroma -- was damped up to 55%, cancelling most of
-        # the recovery and making Shadows+Blacks lift *less* than Blacks
-        # alone (measured 38 vs 48 at scene-linear 0.01). Post-lift luminance
+        # lift itself, not chroma -- was damped too, cancelling most of the
+        # recovery and making Shadows+Blacks lift *less* than Blacks alone
+        # (measured 38 vs 48 at scene-linear 0.01). Post-lift luminance
         # makes the damp act only on true color deviation.
         #
-        # Strength is lift-proportional (up to 0.35 only as the ratio
-        # approaches the cap), not a flat 0.55 across the whole shadow band:
-        # the damp exists to tame noise chroma *amplified by the lift*, and
-        # a flat 55% desaturated every lifted shadow into the same grey wash
-        # the black-point anchor above addresses -- real shadow color must
-        # survive recovery.
-        lift_frac = np.clip((ratio - 1.0) / 7.0, 0.0, 1.0)
-        damp = 1.0 - (sw * min(sh / 100.0, 1.0) * 0.35 * lift_frac)[..., np.newaxis]
+        # lift_frac saturates by ratio=4 (2 stops), not just at the ratio
+        # cap: noise amplification is already a problem well before max
+        # lift, so damp strength should ramp up early, not only at the tail.
+        # Max strength raised from 0.35 to 0.85: at 0.35, a real-photo test
+        # (dark clothing/hair, ISO 1100) still showed clear blue speckle
+        # after strong Shadows+Blacks -- amplified per-pixel sensor chroma
+        # noise, not a hue/WB bug (verified: the CPU/GPU color-parity gate
+        # is unaffected by this change). 0.85 converts most of that residual
+        # into luminance-only grain, which reads as ordinary "noise" rather
+        # than a color artifact -- the same trade real raw processors make
+        # when shadows are pushed hard.
+        lift_frac = np.clip((ratio - 1.0) / 3.0, 0.0, 1.0)
+        damp = 1.0 - (sw * 0.85 * lift_frac)[..., np.newaxis]
         luma = (lum * ratio)[..., np.newaxis]
         chroma = out - luma
         out = luma + chroma * damp

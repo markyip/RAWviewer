@@ -35,6 +35,8 @@ run "xmp round-trip" testplan/auto/t_xmp_roundtrip.py
 run "slider specs" testplan/auto/t_slider_specs.py
 run "cache semantics" testplan/auto/t_cache_semantics.py
 run "dodge & burn" testplan/auto/t_dodge_burn.py
+run "gallery hover prefetch" testplan/auto/t_gallery_hover_prefetch.py
+run "editor skip unsupported" testplan/auto/t_editor_skip_unsupported.py
 
 if [ "$FAST" = "0" ]; then
   # Perf first: it must measure on a quiet machine, not one still hot from

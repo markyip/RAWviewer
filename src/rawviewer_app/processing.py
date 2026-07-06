@@ -1273,22 +1273,16 @@ class PixmapConverter(QThread):
             if self._should_stop:
                 return
             
-            # Convert to bytes for PyQt6 compatibility
-            image_data = self.rgb_image.data.tobytes() if hasattr(
-                self.rgb_image.data, 'tobytes') else bytes(self.rgb_image.data)
-            
-            if self._should_stop:
-                return
-            
-            # Create QImage and QPixmap with appropriate format
+            # Create QImage directly from numpy array without copying memory
             q_format = QImage.Format.Format_RGB888
             if channels == 1:
                 q_format = QImage.Format.Format_Grayscale8
             elif channels == 4:
                 q_format = QImage.Format.Format_RGBA8888
 
-            q_image = QImage(image_data, width, height,
+            q_image = QImage(self.rgb_image.data, width, height,
                              bytes_per_line, q_format)
+            q_image.ndarr = self.rgb_image  # Keep numpy array alive
             pixmap = QPixmap.fromImage(q_image)
             
             if self._should_stop:

@@ -33,6 +33,11 @@ def _env_int(name: str, default: int, *, minimum: int = 1) -> int:
         return default
 
 
+def _env_true(name: str, *, default: bool = False) -> bool:
+    raw = os.environ.get(name, "1" if default else "0").strip().lower()
+    return raw not in ("0", "false", "no", "off")
+
+
 def _gallery_prefetch_screens(fast: bool) -> int:
     """Viewport heights to prefetch above/below scroll center (embedded JPEG makes this cheap)."""
     if fast:
@@ -678,6 +683,54 @@ class JustifiedGallery(QWidget):
     def _is_actively_scrolling(self) -> bool:
         """True during an in-progress scroll gesture (trackpad, wheel, or scrollbar)."""
         return (time.time() - self._last_scroll_event_t) < 0.18
+
+    def _on_gallery_thumb_hover(self, widget, *, entered: bool) -> None:
+        """Warm the sensor-res decode for a tile the cursor rests on (not scrolls past).
+
+        Entering single view from the gallery is the single most expensive
+        transition in the app for a RAW file (a full LibRaw decode that was
+        never requested while the thumbnail-only tile was on screen). If the
+        user's cursor is genuinely resting on a tile -- not just passing
+        under it because the content scrolled while the cursor stayed still
+        on screen, which fires the exact same enterEvent -- that decode can
+        start during the idle moment before the click instead of after it.
+
+        Guarded twice against the scroll case (on entry, and again when the
+        debounce timer fires) plus a per-tile debounce so a fast mouse
+        sweep across many tiles queues nothing: only a tile the cursor
+        stays on past the debounce window actually triggers a decode.
+        """
+        path = getattr(widget, "file_path", None)
+        if not path:
+            return
+        if not entered:
+            if getattr(self, "_hover_prefetch_pending_path", None) == path:
+                self._hover_prefetch_pending_path = None
+            return
+        if self._is_actively_scrolling():
+            return
+        if not _env_true("RAWVIEWER_GALLERY_HOVER_PREFETCH", default=True):
+            return
+        self._hover_prefetch_pending_path = path
+        delay_ms = _env_int("RAWVIEWER_GALLERY_HOVER_PREFETCH_MS", 220, minimum=50)
+        QTimer.singleShot(delay_ms, lambda p=path: self._fire_gallery_hover_prefetch(p))
+
+    def _fire_gallery_hover_prefetch(self, path: str) -> None:
+        # Still the same tile (not superseded by a later hover/leave), and
+        # no scroll gesture started during the debounce window.
+        if getattr(self, "_hover_prefetch_pending_path", None) != path:
+            return
+        if self._is_actively_scrolling():
+            return
+        pv = getattr(self, "parent_viewer", None)
+        if pv is None or getattr(pv, "view_mode", "") != "gallery":
+            return
+        if not hasattr(pv, "_maybe_queue_background_full_decode"):
+            return
+        try:
+            pv._maybe_queue_background_full_decode(path)
+        except Exception:
+            pass
 
     @staticmethod
     def _pixmap_matches(widget, pixmap: Optional[QPixmap]) -> bool:
@@ -2854,8 +2907,18 @@ class JustifiedGallery(QWidget):
                         return
                     ThumbnailLabel.mouseReleaseEvent(_w, e)
 
+                def _on_thumb_enter(e, _w=w):
+                    self._on_gallery_thumb_hover(_w, entered=True)
+                    ThumbnailLabel.enterEvent(_w, e)
+
+                def _on_thumb_leave(e, _w=w):
+                    self._on_gallery_thumb_hover(_w, entered=False)
+                    ThumbnailLabel.leaveEvent(_w, e)
+
                 w.mousePressEvent = _on_thumb_press
                 w.mouseReleaseEvent = _on_thumb_release
+                w.enterEvent = _on_thumb_enter
+                w.leaveEvent = _on_thumb_leave
                 created_widgets += 1
                 self._visible_widgets[idx] = w
             else:

@@ -55,8 +55,19 @@ def main() -> int:
     sb = {"Shadows2012": 100.0, "Blacks2012": 100.0}
     check("noise floor (8.5 stops under) stays dark", lift(0.0005, sb) <= 6,
           f"out={lift(0.0005, sb)}")
-    check("detail band (5.2 stops under) recovers", lift(0.005, sb) >= 60,
-          f"out={lift(0.005, sb)}")
+    # Relative, not a fixed pixel value: _MAX_TONE_RATIO was deliberately
+    # lowered from 16x to 8x (real-photo chroma-noise speckle regression,
+    # see raw_pv2012.py's comment on _MAX_TONE_RATIO) which intentionally
+    # reduces the raw recovery magnitude at this exact scene level. Check
+    # recovery is still strong RELATIVE to the unlifted base rather than
+    # pinning to the old (buggier) engine's absolute output.
+    base_at_5_2_stops = lift(0.005, {})
+    recovered = lift(0.005, sb)
+    check(
+        "detail band (5.2 stops under) recovers",
+        recovered >= base_at_5_2_stops * 6,
+        f"base={base_at_5_2_stops} recovered={recovered}",
+    )
 
     # 5. Combined >= individual (regression: chroma damp once cancelled lift)
     s_only = lift(0.01, {"Shadows2012": 100.0})
@@ -68,6 +79,37 @@ def main() -> int:
     # 6. Recovery floor: >= 2x the old 3.0-ratio-cap engine's reach
     base = lift(0.01, {})
     check("recovery strength floor", both >= base * 3, f"base={base} both={both}")
+
+    # 7. Chroma-speckle regression: real per-pixel sensor noise must not be
+    # amplified into a visible color cast by strong Shadows/Blacks lift.
+    # Reproduces the reported bug (blue speckle in dark clothing/hair,
+    # ISO 1100 NEF) with synthetic noise standing in for sensor chroma
+    # noise; asserts the fix's channel-deviation ceiling rather than an
+    # exact value, since some residual chroma is expected and fine.
+    rng = np.random.RandomState(5)
+    h, w = 40, 40
+    noisy = np.full((h, w, 3), 0.01, dtype=np.float32)
+    noisy += rng.normal(0, 0.0006, (h, w, 3)).astype(np.float32)
+    noisy[:, :, 2] += rng.normal(0, 0.0004, (h, w)).astype(np.float32)
+    noisy = np.clip(noisy, 0, None)
+    out_noisy = render(noisy, {"Shadows2012": 94.0, "Blacks2012": 94.0})
+    b_minus_g_std = float((out_noisy[..., 2].astype(np.float32) - out_noisy[..., 1].astype(np.float32)).std())
+    luma_std = float(out_noisy.mean(axis=-1).std())
+    check(
+        "chroma speckle contained (blue-vs-green deviation <= luma grain)",
+        b_minus_g_std <= luma_std * 1.5,
+        f"b-g std={b_minus_g_std:.2f} luma std={luma_std:.2f}",
+    )
+
+    # 8. Blacks-only push must be damped too (bug: damp used to gate on the
+    # Shadows slider value specifically, so a Blacks-only push skipped it).
+    out_blacks_only = render(noisy, {"Blacks2012": 94.0})
+    bg_blacks_only = float((out_blacks_only[..., 2].astype(np.float32) - out_blacks_only[..., 1].astype(np.float32)).std())
+    check(
+        "Blacks-only push also damped",
+        bg_blacks_only <= luma_std * 1.5,
+        f"b-g std={bg_blacks_only:.2f}",
+    )
 
     print(f"\n{len(FAILURES)} failure(s)")
     return 1 if FAILURES else 0

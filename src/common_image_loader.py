@@ -503,12 +503,16 @@ def _pil_file_to_qpixmap(file_path: str, max_edge: int = 0) -> QPixmap:
             if pil_image.mode == "L":
                 pil_image = pil_image.convert("RGB")
             width, height = pil_image.size
+            import numpy as np
+            arr = np.asarray(pil_image)
             qimage = QImage(
-                pil_image.tobytes("raw", "RGB"),
+                arr.data,
                 width,
                 height,
+                width * 3,
                 QImage.Format.Format_RGB888,
             )
+            qimage.ndarr = arr  # Keep array alive
             if qimage.isNull():
                 return QPixmap()
             return QPixmap.fromImage(qimage)
@@ -565,9 +569,12 @@ def load_pixmap_safe(file_path: str, max_edge: int = 0) -> QPixmap:
                     pil_image = pil_image.convert('RGB')
                 
                 width, height = pil_image.size
-                qimage = QImage(pil_image.tobytes('raw', 'RGB'), 
-                               width, height, 
+                import numpy as np
+                arr = np.asarray(pil_image)
+                qimage = QImage(arr.data, 
+                               width, height, width * 3,
                                QImage.Format.Format_RGB888)
+                qimage.ndarr = arr  # Keep array alive
                 
                 if not qimage.isNull():
                     pixmap = QPixmap.fromImage(qimage)
@@ -827,6 +834,8 @@ def rgb_array_to_qpixmap(rgb_image: np.ndarray) -> QPixmap:
         )
     else:
         return QPixmap()
+    
+    qimg.ndarr = rgb_image  # Keep array alive explicitly
     return QPixmap.fromImage(qimg) if not qimg.isNull() else QPixmap()
 
 
@@ -1977,6 +1986,7 @@ def linear_edr_float_to_qpixmap(
     arr_64 = encode_edr_rgbx64(rgb_edr, peak_display=peak_display)
     h, w = arr_64.shape[:2]
     qimage = QImage(arr_64.data, w, h, w * 8, QImage.Format.Format_RGBX64)
+    qimage.ndarr = arr_64  # Keep array alive
     qimage.setColorSpace(QColorSpace(QColorSpace.NamedColorSpace.SRgb))
     if max_edge > 0 and max(w, h) > max_edge:
         if w >= h:
@@ -2190,6 +2200,7 @@ def try_load_hdr_image_pixmap(file_path: str, max_edge: int = 0) -> Optional[QPi
                 w * 8,
                 q_format
             )
+            qimage.ndarr = arr_64  # Keep array alive
             
             # Set the color space so Quartz/Metal rendering will treat values correctly
             if icc_profile:
@@ -2235,6 +2246,7 @@ def try_load_hdr_image_pixmap(file_path: str, max_edge: int = 0) -> Optional[QPi
 
             out_arr = np.ascontiguousarray(out_arr)
             qimage = QImage(out_arr.data, w, h, w * out_arr.shape[2], q_format)
+            qimage.ndarr = out_arr  # Keep array alive
             qimage.setColorSpace(QColorSpace(QColorSpace.NamedColorSpace.SRgb))
 
         # Perform downsizing if requested

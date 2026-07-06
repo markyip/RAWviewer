@@ -703,9 +703,9 @@ def _apply_adjustments_to_srgb(rgb_image: np.ndarray, adj: dict[str, float]) -> 
     if mask_serial:
         from raw_dodge_burn import DEFAULT_STRENGTH as _db_default_strength
         from raw_dodge_burn import STRENGTH_KEY as _db_strength_key
-        from raw_dodge_burn import apply_dodge_burn, deserialize_mask
+        from raw_dodge_burn import _deserialize_mask_cached, apply_dodge_burn
 
-        mask = deserialize_mask(mask_serial)
+        mask = _deserialize_mask_cached(mask_serial)
         if mask is not None:
             stops = float(merged.get(_db_strength_key, _db_default_strength))
             img = apply_dodge_burn(img, mask, stops)
