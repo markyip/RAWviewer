@@ -8188,7 +8188,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
 
         self.bottom_rating_widget = BottomRatingWidget()
         self.bottom_rating_widget.hide()
-        self.bottom_rating_widget.rating_changed.connect(lambda r: self.set_current_image_rating(r))
+        self.bottom_rating_widget.rating_changed.connect(lambda r: self.rate_current_image(r))
 
         self.slideshow_bottom_button = QPushButton()
         self.slideshow_bottom_button.setObjectName("slideshowBottomButton")
@@ -24344,6 +24344,18 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         """Update the floating rating badge display in the single view container."""
         if hasattr(self, "single_view_container") and self.single_view_container is not None:
             self.single_view_container.set_rating(rating)
+
+    def _get_current_image_rating(self) -> int:
+        """Current image's star rating (0 = unrated), same exif-cache lookup
+        used when a file is first loaded (see _display_image's cached_exif
+        read)."""
+        path = getattr(self, "current_file_path", None)
+        if not path:
+            return 0
+        cached_exif = self.image_cache.get_exif(path)
+        if not cached_exif:
+            return 0
+        return cached_exif.get('rating', 0) or 0
 
     def _restore_keyboard_focus(self) -> None:
         """Return keyboard focus to the active view surface (gallery or single image)."""
