@@ -495,6 +495,25 @@ def try_fast_raw_decode(
         unpacked = unpack_raw(file_path, rawpy_lock=rawpy_lock)
         if unpacked is None:
             return None
+            
+        try:
+            from gpu_raw_processor import try_gpu_decode_from_unpacked
+            gpu_out = try_gpu_decode_from_unpacked(unpacked, cancel_check=cancel_check)
+            if gpu_out is not None:
+                logger.info(
+                    "[FAST_RAW] %s decoded (GPU) %dx%d in %.0fms (pattern=%s)",
+                    os.path.basename(file_path),
+                    gpu_out.shape[1],
+                    gpu_out.shape[0],
+                    (time.perf_counter() - t0) * 1000.0,
+                    unpacked.pat_str,
+                )
+                return gpu_out
+        except DecodeCancelled:
+            raise
+        except Exception as e:
+            logger.warning("[FAST_RAW] GPU decode attempt failed, falling back to CPU: %s", e)
+            
         out = finish_full_decode(unpacked, cancel_check=cancel_check)
         if out is None:
             return None
