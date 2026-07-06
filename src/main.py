@@ -12835,7 +12835,15 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         # the space single_view_container gave up) and left
         # _adjust_overlay_visible stuck True -- which also broke the *next*
         # gallery->single click, since the app still believed it was editing.
-        if self._adjust_panel_active():
+        #
+        # NOT _adjust_panel_active(): every caller here already flips
+        # self.view_mode to "gallery" before calling _show_gallery_view(), and
+        # _adjust_panel_active() gates on view_mode == "single" -- so that
+        # check always evaluated False by the time it ran, silently no-op'ing
+        # this entire fix (the bug it was meant to fix kept recurring).
+        # Check the underlying overlay/panel state directly instead.
+        panel = getattr(self, "single_image_adjust_panel", None)
+        if getattr(self, "_adjust_overlay_visible", False) and panel is not None and panel.isVisible():
             self._set_adjust_panel_visible(False)
 
         # Hide single view before touching GPU/full-res buffers (Windows GL abort otherwise).
