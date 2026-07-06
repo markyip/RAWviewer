@@ -67,6 +67,8 @@ export RAWVIEWER_TEST_PYEXIV2="${RAWVIEWER_TEST_PYEXIV2:-1}"
 export RAWVIEWER_TEST_APPKIT="${RAWVIEWER_TEST_APPKIT:-1}"
 # Semantic backend check before app launch. Override: RAWVIEWER_TEST_SEMANTIC=0
 export RAWVIEWER_TEST_SEMANTIC="${RAWVIEWER_TEST_SEMANTIC:-1}"
+# GPU Raw Processor check before app launch. Override: RAWVIEWER_TEST_GPU_RAW=0
+export RAWVIEWER_TEST_GPU_RAW="${RAWVIEWER_TEST_GPU_RAW:-0}"
 export PYTHONPATH="${REPO_ROOT}/src:${PYTHONPATH:-}"
 
 # Prefer pixi (.pixi/envs/default): includes PyObjC CoreML needed for full-profile semantic search on macOS.
@@ -140,6 +142,29 @@ PY
         echo "  Skip this check: RAWVIEWER_TEST_SEMANTIC=0"
         pause_if_interactive
         exit 1
+    fi
+fi
+
+if [ "${RAWVIEWER_TEST_GPU_RAW}" = "1" ]; then
+    echo "Testing GPU RAW processor dependencies..."
+    if ! python3 - <<'PY'
+import sys
+try:
+    import torch
+    import kornia
+    print(f"GPU RAW backend OK: torch {torch.__version__}, kornia {kornia.__version__}")
+except ImportError:
+    sys.exit(1)
+PY
+    then
+        echo "[WARNING] GPU RAW processor dependencies (torch, kornia) are not installed."
+        echo "  The app will fall back to CPU decode seamlessly."
+        echo "  To test GPU raw decode:"
+        echo "  pixi:  pixi add torch kornia"
+        echo "  venv:  pip install torch kornia"
+        echo "  Skip this check: RAWVIEWER_TEST_GPU_RAW=0"
+        echo "  Continuing in 3 seconds..."
+        sleep 3
     fi
 fi
 
