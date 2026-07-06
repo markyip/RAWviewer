@@ -160,7 +160,7 @@ PY
         echo "[WARNING] GPU RAW processor dependencies (torch, kornia) are not installed."
         echo "  The app will fall back to CPU decode seamlessly."
         echo "  To test GPU raw decode:"
-        echo "  pixi:  pixi add torch kornia"
+        echo "  pixi:  pixi add --pypi torch kornia"
         echo "  venv:  pip install torch kornia"
         echo "  Skip this check: RAWVIEWER_TEST_GPU_RAW=0"
         echo "  Continuing in 3 seconds..."
