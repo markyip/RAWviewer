@@ -7970,6 +7970,9 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self.single_image_adjust_panel.dodgeBurnMaskToggled.connect(
             self._on_dodge_burn_mask_toggled
         )
+        self.single_image_adjust_panel.reset_requested.connect(
+            self._on_adjust_panel_reset
+        )
         self._dodge_burn_mask = None
         self._dodge_burn_stroke_active = False
         self._pending_adjust_preview: dict | None = None
@@ -19266,6 +19269,19 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         gv = getattr(self, "gpu_view", None)
         if gv is not None:
             gv.set_dodge_burn_mask_overlay(getattr(self, "_dodge_burn_mask", None), show)
+
+    def _on_adjust_panel_reset(self) -> None:
+        """The panel's Reset button rebuilds a clean adjustments dict, but
+        the dodge/burn mask itself lives here (self._dodge_burn_mask), not
+        in that dict -- _dodge_burn_overlay_adj() re-injects it into every
+        render regardless of what the panel says, so a full Reset silently
+        left a previously painted mask in place. Clear it here too."""
+        if getattr(self, "_dodge_burn_mask", None) is None:
+            return
+        self._dodge_burn_mask = None
+        panel = getattr(self, "single_image_adjust_panel", None)
+        if panel is not None:
+            panel.set_dodge_burn_mask_present(False)
 
     def _on_dodge_burn_clear_requested(self) -> None:
         if getattr(self, "_dodge_burn_mask", None) is None:
