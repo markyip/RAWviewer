@@ -110,7 +110,7 @@ def gpu_demosaic_pytorch_unpacked(unpacked, device_str: str = "cuda", cancel_che
         else _NullCtx()
     )
     with stream_ctx:
-        return _gpu_demosaic_pytorch_body(unpacked, device, cancel_check)
+        return _gpu_demosaic_pytorch_body(unpacked, device, cancel_check, return_linear)
 
 
 class _NullCtx:
@@ -144,7 +144,7 @@ def _gpu_gamma_lut(device, torch_mod) -> Any:
     return lut
 
 
-def _gpu_demosaic_pytorch_body(unpacked, device, cancel_check=None) -> np.ndarray:
+def _gpu_demosaic_pytorch_body(unpacked, device, cancel_check=None, return_linear: bool = False) -> np.ndarray:
     def _abort_if_cancelled() -> None:
         if cancel_check is not None and cancel_check():
             from fast_raw_decode import DecodeCancelled
