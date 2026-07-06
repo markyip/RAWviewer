@@ -21,6 +21,8 @@ RAWVIEWER_GPU_VIEW = "1"
 [dependencies]
 python = ">=3.10,<3.13"
 pip = "*"
+llvm-openmp = ">=22.1.8,<23"
+libjpeg-turbo = ">=3.1.4.1,<4"
 
 [pypi-dependencies]
 PyQt6 = ">=6.6.0"

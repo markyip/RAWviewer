@@ -56,7 +56,6 @@ def decode_raw_file(file_path: str, params: Dict[str, Any]) -> np.ndarray:
     Must be at top level for pickling.
     """
     import rawpy
-    from enhanced_raw_processor import _rawpy_global_lock
     from enhanced_raw_processor import _rawpy_global_lock, _heavy_fallback_semaphore
     with _rawpy_global_lock:
         raw_ctx = rawpy.imread(file_path)
@@ -73,6 +72,29 @@ class UnifiedImageProcessor:
         self.thumbnail_extractor = ThumbnailExtractor()
         self.exif_extractor = EXIFExtractor()
         self.raw_processor = OptimizedRAWProcessor()
+        # Single-slot LibRaw unpack reuse (see fast_raw_decode.UnpackedRaw):
+        # the fit-view half decode stashes its unpacked mosaic here so the
+        # deferred full decode of the same file skips the second unpack (the
+        # 100-900ms dominant cost). One slot only (~2 bytes/sensor-pixel);
+        # replaced on the next stash, consumed by the full decode.
+        import threading as _threading
+
+        self._unpacked_raw_lock = _threading.Lock()
+        self._unpacked_raw_slot: Optional[tuple] = None  # (norm_path, UnpackedRaw)
+
+    def _stash_unpacked_raw(self, file_path: str, unpacked) -> None:
+        key = os.path.normcase(os.path.abspath(file_path))
+        with self._unpacked_raw_lock:
+            self._unpacked_raw_slot = (key, unpacked)
+
+    def _take_unpacked_raw(self, file_path: str):
+        key = os.path.normcase(os.path.abspath(file_path))
+        with self._unpacked_raw_lock:
+            if self._unpacked_raw_slot and self._unpacked_raw_slot[0] == key:
+                unpacked = self._unpacked_raw_slot[1]
+                self._unpacked_raw_slot = None
+                return unpacked
+        return None
 
     def _apply_sidecar_if_needed(
         self, file_path: str, rgb_image: Optional[np.ndarray]
@@ -737,14 +759,31 @@ class UnifiedImageProcessor:
                 
                 if hasattr(cached_image, 'shape'):
                     h, w = cached_image.shape[:2]
-                    
+
                     # Check for orientation mismatch (Portrait metadata but Landscape cached image)
                     if orientation in (6, 8) and w > h:
                         if _verbose_orientation_logs():
                             # print(f"[ORIENTATION] UnifiedImageProcessor: Cached full_image for {os.path.basename(file_path)} is UNROTATED (stale). Re-processing.")
                             pass
                         cached_image = None
-                    
+
+                    # RAW files: full_image_cache is also written by the
+                    # half-size (fit-view) decode -- see _process_raw_image's
+                    # unconditional put_full_image() call -- so a cache hit
+                    # here is not necessarily sensor-resolution. Without this
+                    # check, a use_full_resolution=True request that lands
+                    # right after a half decode wrote this same key returns
+                    # the half-size buffer forever: the image never upgrades
+                    # to full resolution on zoom/idle-decode, and looks
+                    # "stuck"/blank when a caller expects full-res dimensions
+                    # (e.g. gallery -> single view). Only applies to RAW;
+                    # non-RAW full_image_cache entries are always full-res.
+                    if cached_image is not None and is_raw:
+                        if not image_covers_sensor_resolution(w, h, exif_data):
+                            if _verbose_orientation_logs():
+                                pass
+                            cached_image = None
+
                     if cached_image is not None:
                         if _verbose_orientation_logs():
                             # print(f"[ORIENTATION] Using VALID cached full_image for {os.path.basename(file_path)}. Shape: {w}x{h}")
@@ -1025,9 +1064,122 @@ class UnifiedImageProcessor:
             # CRITICAL: Force rawpy to ignore EXIF orientation
             params['user_flip'] = 0
             
-            # 處理 RAW - 使用 Process Pool 繞過 GIL
+            # Fast full-res decode: LibRaw unpack + cv2 SIMD pixel math with
+            # exact LibRaw color parity (see src/fast_raw_decode.py; gate:
+            # scripts/fast_raw_decode_parity_gate.py). 1.4-1.7x faster than
+            # the rawpy LINEAR path below with better demosaic quality (EA
+            # vs bilinear). Returns None for unsupported sensors (X-Trans,
+            # ...) or mismatched params -- everything below is the unchanged
+            # fallback. RAWVIEWER_FAST_RAW_DECODE=0 disables.
             rgb_image = None
-            if executor:
+            if use_full_resolution or params.get('half_size'):
+                from enhanced_raw_processor import _rawpy_global_lock as _fast_lock
+                from fast_raw_decode import (
+                    DecodeCancelled,
+                    decode_half_from_unpacked,
+                    finish_full_decode,
+                    params_supported,
+                    params_supported_half,
+                    try_fast_raw_decode,
+                    unpack_raw,
+                )
+
+                def _load_task_cancelled() -> bool:
+                    try:
+                        from image_load_manager import worker_thread_local
+
+                        t = getattr(worker_thread_local, "task", None)
+                        return bool(t is not None and t.is_cancelled())
+                    except Exception:
+                        return False
+
+                try:
+                    if use_full_resolution:
+                        # Reuse the unpack stashed by this file's fit-view
+                        # half decode (if any): skips the second LibRaw
+                        # unpack, leaving only demosaic + color math.
+                        unpacked = self._take_unpacked_raw(file_path)
+                        if unpacked is not None and params_supported(params):
+                            import logging
+
+                            logging.getLogger(__name__).info(
+                                "[FAST_RAW] full tier from stashed unpack: %s",
+                                os.path.basename(file_path),
+                            )
+                            try:
+                                rgb_image = finish_full_decode(
+                                    unpacked, cancel_check=_load_task_cancelled
+                                )
+                            except DecodeCancelled:
+                                raise
+                            except Exception as e:
+                                # finish_full_decode() has no internal
+                                # safety net (unlike try_fast_raw_decode
+                                # below) -- a demosaic/matrix failure on the
+                                # stashed unpack (e.g. an odd-dimension or
+                                # unusual-CFA sensor that unpack_raw's own
+                                # checks let through) must not propagate and
+                                # abort the whole decode with nothing
+                                # displayed; fall through to try_fast_raw_
+                                # decode / rawpy below instead.
+                                logging.getLogger(__name__).warning(
+                                    "[FAST_RAW] finish_full_decode failed for %s, "
+                                    "falling back: %s",
+                                    os.path.basename(file_path),
+                                    e,
+                                )
+                                rgb_image = None
+                        if rgb_image is None:
+                            rgb_image = try_fast_raw_decode(
+                                file_path,
+                                params,
+                                rawpy_lock=_fast_lock,
+                                cancel_check=_load_task_cancelled,
+                            )
+                    elif params_supported_half(params):
+                        # Fit-view half tier via the fast pixel path so the
+                        # unpack can be stashed for the deferred full decode.
+                        # Marginal cost over rawpy half_size is ~0 (both are
+                        # unpack-bound); any failure falls through to the
+                        # unchanged rawpy half decode below.
+                        unpacked = unpack_raw(file_path, rawpy_lock=_fast_lock)
+                        if unpacked is not None:
+                            try:
+                                rgb_image = decode_half_from_unpacked(
+                                    unpacked, cancel_check=_load_task_cancelled
+                                )
+                            except DecodeCancelled:
+                                raise
+                            except Exception as e:
+                                # Same rationale as finish_full_decode above:
+                                # decode_half_from_unpacked() has no internal
+                                # safety net either. Leave rgb_image None so
+                                # the unchanged rawpy half decode below runs.
+                                import logging
+
+                                logging.getLogger(__name__).warning(
+                                    "[FAST_RAW] decode_half_from_unpacked failed "
+                                    "for %s, falling back: %s",
+                                    os.path.basename(file_path),
+                                    e,
+                                )
+                                rgb_image = None
+                            if rgb_image is not None:
+                                self._stash_unpacked_raw(file_path, unpacked)
+                except DecodeCancelled:
+                    # The owning prefetch task was cancelled (e.g. user
+                    # navigated); abort the whole decode instead of falling
+                    # back to a slower rawpy decode nobody wants anymore.
+                    import logging
+
+                    logging.getLogger(__name__).info(
+                        "[FAST_RAW] decode aborted mid-flight (task cancelled): %s",
+                        os.path.basename(file_path),
+                    )
+                    return None
+
+            # 處理 RAW - 使用 Process Pool 繞過 GIL
+            if rgb_image is None and executor:
                 try:
                     # logger = logging.getLogger(__name__)
                     # logger.info(f"[PIL/PROCESS_POOL] Offloading RAW postprocess to pool for {file_path}")
@@ -1043,13 +1195,22 @@ class UnifiedImageProcessor:
             
             if rgb_image is None:
                 import rawpy
-                from enhanced_raw_processor import _rawpy_global_lock
+                import time as _time
                 from enhanced_raw_processor import _rawpy_global_lock, _heavy_fallback_semaphore
+                _t_dec = _time.perf_counter()
                 with _rawpy_global_lock:
                     raw_ctx = rawpy.imread(file_path)
                 with raw_ctx as raw:
                     with _heavy_fallback_semaphore:
                         rgb_image = raw.postprocess(**params)
+                import logging as _logging
+
+                _logging.getLogger(__name__).debug(
+                    "[DECODE_T] rawpy %s %s in %.0fms",
+                    "full" if use_full_resolution else "half",
+                    os.path.basename(file_path),
+                    (_time.perf_counter() - _t_dec) * 1000.0,
+                )
             
             # 應用方向校正 - 確保使用最新的 EXIFExtractor 邏輯
             if not exif_data or exif_data.get('orientation', 1) == 1:
@@ -1067,6 +1228,58 @@ class UnifiedImageProcessor:
             # Cache unadjusted base; sidecar is applied in process_full_image().
             if rgb_image is not None:
                 self.cache.put_full_image(file_path, rgb_image)
+                if libraw_first:
+                    # RAW workflow: persist a LibRaw-rendered display tier
+                    # (memory + disk JPEG). Every pre-decode tier is embedded-
+                    # JPEG-colored, so without this a revisit whose full
+                    # buffer was evicted repaints camera-JPEG colors and then
+                    # visibly shifts when the fresh LibRaw render lands. With
+                    # it, revisits paint consistent colors from the first
+                    # frame. Workflow toggles already purge these caches, so
+                    # embedded mode is unaffected. Runs on a daemon thread --
+                    # the resize+JPEG encode costs ~110ms and must not delay
+                    # the image-ready callback.
+                    import threading
+
+                    def _persist_libraw_preview(rgb=rgb_image, fp=file_path):
+                        try:
+                            import cv2
+
+                            # NOTE: previously applied sidecar adjustments here
+                            # so the persisted preview reflected edits, not
+                            # just the raw base -- reverted (2026-07) after a
+                            # report of color artifacts in the re-encoded
+                            # preview. Persists the unadjusted base again
+                            # until root-caused; see _reencode_persisted_
+                            # preview_for_sidecar in main.py (also disabled).
+                            h, w = rgb.shape[:2]
+                            cap = memory_preview_max_edge()
+                            if max(h, w) > cap:
+                                sc = cap / max(h, w)
+                                prev = cv2.resize(
+                                    rgb,
+                                    (max(1, int(w * sc)), max(1, int(h * sc))),
+                                    interpolation=cv2.INTER_AREA,
+                                )
+                            else:
+                                prev = rgb
+                            ok, buf = cv2.imencode(
+                                ".jpg",
+                                cv2.cvtColor(prev, cv2.COLOR_RGB2BGR),
+                                [int(cv2.IMWRITE_JPEG_QUALITY), 92],
+                            )
+                            self.cache.put_preview(
+                                fp,
+                                prev,
+                                jpeg_data=buf.tobytes() if ok else None,
+                                libraw_rendered=True,
+                            )
+                        except Exception:
+                            pass
+
+                    threading.Thread(
+                        target=_persist_libraw_preview, daemon=True
+                    ).start()
 
             return rgb_image
                 

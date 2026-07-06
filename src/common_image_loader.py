@@ -1903,11 +1903,28 @@ def summarize_macos_edr_startup(*, gpu_view=None) -> str:
 
 
 def use_raw_edr_display() -> bool:
-    """macOS RAW EDR single-view path (on by default; RAWVIEWER_RAW_EDR=0 to disable)."""
+    """macOS RAW EDR single-view path (on by default; RAWVIEWER_RAW_EDR=0 to disable).
+
+    Also user-toggleable at runtime via the bottom-bar EDR button
+    (QSettings ``raw_edr_display_enabled``) -- EDR display re-decodes each RAW
+    with LibRaw highlight reconstruction (~12x the cost of a plain decode), so
+    turning it off trades highlight headroom for much faster RAW browsing.
+    An explicit RAWVIEWER_RAW_EDR=0 env still hard-disables regardless.
+
+    This setting only gates *whether EDR applies at all*; the dispatch point
+    (``RAWviewerMainWindow._should_use_raw_edr_display`` in main.py) further
+    idle-defers the actual decode so rapid navigation doesn't pay the 12x
+    cost on every frame -- see ``_maybe_arm_raw_edr_after_idle``.
+    """
     if not is_macos_edr_enabled():
         return False
     v = os.environ.get("RAWVIEWER_RAW_EDR", "1").strip().lower()
-    return v not in ("0", "false", "no", "off")
+    if v in ("0", "false", "no", "off"):
+        return False
+    from PyQt6.QtCore import QSettings
+
+    settings = QSettings("RAWviewer", "RAWviewer")
+    return settings.value("raw_edr_display_enabled", True, type=bool)
 
 
 def use_raw_edr_for_display() -> bool:

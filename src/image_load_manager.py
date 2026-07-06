@@ -283,6 +283,17 @@ class ImageLoadWorker(QRunnable):
         worker_thread_local.priority = getattr(self.task, 'priority', None)
         worker_thread_local.task = self.task
         try:
+            if self.task.priority == Priority.CURRENT:
+                import logging
+
+                enq = float(getattr(self.task, "_enqueue_ts", 0.0) or 0.0)
+                if enq > 0.0:
+                    logging.getLogger(__name__).info(
+                        "[PIPE_T] queue-wait %.0fms %s stages=%s",
+                        (time.time() - enq) * 1000.0,
+                        os.path.basename(self.task.file_path),
+                        sorted(self.task.stages or set()),
+                    )
             if self.task.is_cancelled():
                 if self._safe_emit():
                     self.manager._task_finished(self.task)
@@ -1056,6 +1067,7 @@ class ImageLoadManager(QObject):
             gallery_thumbnail=gallery_thumbnail,
         )
         task.task_key = task_key
+        task._enqueue_ts = time.time()
         with self._queue_lock:
             existing = self._active_tasks.get(task_key)
             if existing and not existing.is_cancelled():
@@ -1554,7 +1566,14 @@ class ImageLoadManager(QObject):
                     # the 4-slot limit, preventing gallery starvation in mixed folders.
                     is_heavy = is_raw and 'full' in (task.stages or set())
                     
-                    if is_heavy and self._active_raw_tasks >= self._raw_load_limit:
+                    heavy_limit = self._raw_load_limit
+                    if is_heavy and task.priority != Priority.CURRENT:
+                        # Reserve one RAW slot for the user's current image:
+                        # an in-flight rawpy decode cannot be aborted, so a
+                        # fully prefetch-occupied pool adds up to a whole
+                        # decode (~0.5s) to every navigation's latency.
+                        heavy_limit = max(1, heavy_limit - 1)
+                    if is_heavy and self._active_raw_tasks >= heavy_limit:
                         # Keep throttled heavy RAW aside for now and continue scanning queue.
                         deferred_raw_tasks.append(task)
                         continue

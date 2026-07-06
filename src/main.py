@@ -2201,6 +2201,16 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self._nav_idle_full_generation = 0
         # Navigate while zoomed: request full decode first & apply one-step zoom restore
         self._preserve_nav_zoom_active = False
+        # True while a low-res tier is shown at equivalent zoomed framing
+        # (RAW-mode zoomed navigation); sub-sensor tiers are held back until
+        # the sensor-res buffer clears it.
+        self._nav_zoom_interim_active = False
+        # Per-file zoom memory for zoomed navigation: norm_path ->
+        # (frac_x, frac_y, sensor_level). Returning to a file restores the
+        # framing the user last had *on that file* (fractions are buffer- and
+        # orientation-independent), instead of carrying the neighbor's framing
+        # across differently-oriented images.
+        self._nav_zoom_memory = {}
 
         self._slideshow_timer = None
         self._slideshow_force_fit_next = False
@@ -2660,6 +2670,11 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             return bool(file_path) and self._single_view_pixels_on_screen(file_path)
         try:
             preview = self.image_cache.get_preview(file_path)
+            if preview is not None and self._suppress_jpeg_interim(
+                file_path
+            ) and not self.image_cache.is_libraw_preview(file_path):
+                # RAW workflow: embedded-JPEG preview; wait for LibRaw pixels.
+                preview = None
             if preview is not None:
                 if self._preview_acceptable_for_single_view(
                     preview, file_path=file_path, context="navigation"
@@ -4155,11 +4170,33 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             return QPoint(pm.width() // 2, pm.height() // 2)
         return QPoint(0, 0)
 
-    def _apply_gpu_navigation_zoom_restore(self, pixmap, gv) -> bool:
-        """Restore zoom level/center on a new file in the GPU view."""
+    def _apply_gpu_navigation_zoom_restore(
+        self, pixmap, gv, *, scale_level_to_pixmap: bool = False
+    ) -> bool:
+        """Restore zoom level/center on a new file in the GPU view.
+
+        ``scale_level_to_pixmap``: the pixmap is a low-resolution interim tier
+        (RAW workflow delivers small previews first); scale the restore level
+        by the size ratio so the tier shows at the *same on-screen framing*
+        its full-resolution buffer will have -- blurry but geometrically
+        continuous, instead of flashing out to fit and re-zooming seconds
+        later when the sensor decode lands. The same-file upgrade path then
+        preserves on-screen scale, so the final buffer lands at exactly the
+        preserved zoom.
+        """
         preserve = bool(
             getattr(self, "_preserve_nav_zoom_active", False)
             or getattr(self, "_maintain_zoom_on_navigation", False)
+        )
+        logging.getLogger(__name__).debug(
+            "[ZOOMNAV] restore attempt: preserve=%s scale_mode=%s pm=%sx%s "
+            "level=%s old_size=%s",
+            preserve,
+            scale_level_to_pixmap,
+            pixmap.width() if pixmap is not None and not pixmap.isNull() else 0,
+            pixmap.height() if pixmap is not None and not pixmap.isNull() else 0,
+            getattr(self, "_restore_zoom_level", None),
+            getattr(self, "_restore_pixmap_size", None),
         )
         if not preserve:
             return False
@@ -4173,9 +4210,9 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             eff_center = getattr(self, "zoom_center_point", None)
 
         old_size = getattr(self, "_restore_pixmap_size", None)
-        if (
-            eff_center is not None
-            and old_size is not None
+        level_scale = 1.0
+        sizes_differ = bool(
+            old_size is not None
             and pixmap is not None
             and not pixmap.isNull()
             and old_size.width() > 0
@@ -4184,30 +4221,85 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 old_size.width() != pixmap.width()
                 or old_size.height() != pixmap.height()
             )
-        ):
+        )
+        if sizes_differ:
             sx = pixmap.width() / old_size.width()
             sy = pixmap.height() / old_size.height()
-            eff_center = QPoint(int(eff_center.x() * sx), int(eff_center.y() * sy))
+            if eff_center is not None:
+                eff_center = QPoint(int(eff_center.x() * sx), int(eff_center.y() * sy))
+            if scale_level_to_pixmap and sx > 0:
+                level_scale = 1.0 / sx
+        elif scale_level_to_pixmap and old_size is None:
+            # Cannot compute an equivalent framing without the previous
+            # buffer's size; let the caller fall back to deferred zoom.
+            return False
 
         if eff_center is None and pixmap is not None and not pixmap.isNull():
             eff_center = QPoint(pixmap.width() // 2, pixmap.height() // 2)
 
+        # Prefer the resolution-independent captured level: re-derive this
+        # buffer's scale from EXIF sensor dims, so restoring onto any tier
+        # (512px nav preview .. sensor-res) lands at the same on-screen
+        # framing. Falls back to the buffer-relative math when EXIF dims are
+        # unavailable.
+        level = None
+        overscale = bool(scale_level_to_pixmap)
+        sensor_level = getattr(self, "_restore_sensor_level", None)
+        # Prefer this file's own remembered framing over the neighbor's.
+        mem = None
+        try:
+            mem = self._nav_zoom_memory.get(
+                _norm_path(getattr(self, "current_file_path", "") or "")
+            )
+        except Exception:
+            mem = None
+        if mem is not None and pixmap is not None and not pixmap.isNull():
+            fx, fy, mem_level = mem
+            eff_center = QPoint(
+                int(fx * pixmap.width()), int(fy * pixmap.height())
+            )
+            sensor_level = mem_level
+        if sensor_level is not None and pixmap is not None and not pixmap.isNull():
+            try:
+                from common_image_loader import sensor_pixel_dimensions
+
+                sdims = sensor_pixel_dimensions(
+                    self.image_cache.get_exif(getattr(self, "current_file_path", None))
+                )
+                pm_max = max(pixmap.width(), pixmap.height())
+                if sdims and pm_max > 0:
+                    level = float(sensor_level) * max(sdims) / pm_max
+                    overscale = pm_max < max(sdims) * 0.98
+            except Exception:
+                level = None
+        if level is None:
+            level = float(eff_level or 1.0) * level_scale
+            src = "legacy"
+        else:
+            src = "mem" if mem is not None else "sensor"
+        logging.getLogger(__name__).debug(
+            "[ZOOMNAV] placing level=%.3f source=%s overscale=%s", level, src, overscale
+        )
+
         gv.setUpdatesEnabled(False)
         try:
             fit = gv.fit_scale()
-            level = float(eff_level or 1.0)
             if level <= fit * gv._FIT_SCALE_EPS:
                 gv.set_pixmap(pixmap, preserve_view=False)
                 gv.fit_to_window()
                 self.fit_to_window = True
                 self.current_zoom_level = float(gv.current_scale())
             else:
-                target_scale = max(fit, min(gv.MAX_SCALE, level))
+                if overscale:
+                    target_scale = max(fit, level)
+                else:
+                    target_scale = max(fit, min(gv.MAX_SCALE, level))
                 gv.set_pixmap_zoomed_at(
                     pixmap,
                     float(eff_center.x()),
                     float(eff_center.y()),
                     scale=target_scale,
+                    allow_overscale=overscale,
                 )
                 self.fit_to_window = False
                 self.current_zoom_level = float(gv.current_scale())
@@ -4218,6 +4310,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self._restore_zoom_center = None
         self._restore_zoom_level = None
         self._restore_pixmap_size = None
+        self._restore_sensor_level = None
         self._restore_start_scroll_x = None
         self._restore_start_scroll_y = None
         self._finish_nav_zoom_preserve()
@@ -6062,6 +6155,12 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         """Show the best available preview immediately (preview cache, gallery thumb, or pixmap)."""
         if not file_path:
             return False
+        if self._suppress_jpeg_interim(file_path) and not self.image_cache.is_libraw_preview(
+            file_path
+        ):
+            # RAW workflow: gallery thumbs / cached previews here are
+            # embedded-JPEG pixels; wait for the LibRaw render instead.
+            return False
 
         self._gallery_instant_display_quality = False
         min_quality = _env_int("RAWVIEWER_GALLERY_INSTANT_MIN_DIM", 1400, minimum=400)
@@ -6160,16 +6259,24 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             pass
         if preserve_zoom:
             return False
+        suppress_jpeg = self._suppress_jpeg_interim(file_path)
         try:
             preview = self.image_cache.get_preview(file_path)
-            if preview is not None and self._preview_acceptable_for_single_view(
-                preview, file_path=file_path, context="navigation"
+            if (
+                preview is not None
+                and (not suppress_jpeg or self.image_cache.is_libraw_preview(file_path))
+                and self._preview_acceptable_for_single_view(
+                    preview, file_path=file_path, context="navigation"
+                )
             ):
                 return self._display_cached_numpy_for_path(
                     file_path, preview, from_cache="nav_preview"
                 )
         except Exception:
             pass
+        if suppress_jpeg:
+            # RAW workflow: no camera-JPEG interim; wait for the LibRaw render.
+            return False
         return self._paint_instant_preview_for_path(file_path, prefer_gallery=False)
 
     def _clear_stale_single_view_image(self) -> None:
@@ -6819,6 +6926,27 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 # Keep overlay visible if we're storing thumbnail as pending (waiting for full image)
                 self._pending_thumbnail = thumbnail
                 self.status_bar.showMessage("Processing full image for quality evaluation...")
+                if self._suppress_jpeg_interim(file_path) and _norm_path(
+                    file_path
+                ) == _norm_path(getattr(self, "current_file_path", "") or ""):
+                    # No interim will ever be painted for this file; without an
+                    # explicit request some loads end at the thumbnail stage and
+                    # the viewport stays empty until the 5s watchdog fires.
+                    try:
+                        from image_load_manager import Priority as _Priority
+
+                        # Fit view: half-size LibRaw decode (~0.2-0.6s), not
+                        # the sensor-res decode (1.5-4s) -- same tier the
+                        # LibRaw-first pipeline uses for fit display.
+                        self.image_manager.load_image(
+                            file_path,
+                            priority=_Priority.CURRENT,
+                            cancel_existing=False,
+                            use_full_resolution=False,
+                            stages={"full"},
+                        )
+                    except Exception:
+                        pass
         finally:
             self._orientation_already_applied = False  # Reset flag
 
@@ -8048,6 +8176,26 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self.raw_toggle_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.raw_toggle_button.hide()
         left_buttons_layout.addWidget(self.raw_toggle_button, 0, alignment=Qt.AlignmentFlag.AlignVCenter)
+
+        # EDR display toggle (macOS only; shown beside RAW when the RAW
+        # workflow is active). EDR re-decodes each RAW with LibRaw highlight
+        # reconstruction (~12x a plain decode), so users can turn it off here
+        # to browse RAW much faster at standard dynamic range.
+        from common_image_loader import is_macos_edr_enabled as _edr_available
+
+        if _edr_available():
+            self.edr_toggle_button = QPushButton()
+            self.edr_toggle_button.setFlat(True)
+            self.edr_toggle_button.setAutoDefault(False)
+            self.edr_toggle_button.setDefault(False)
+            self.edr_toggle_button.setFixedSize(44, 28)
+            self.edr_toggle_button.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+            self.edr_toggle_button.clicked.connect(self.toggle_raw_edr_display)
+            self.edr_toggle_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            self.edr_toggle_button.hide()
+            left_buttons_layout.addWidget(
+                self.edr_toggle_button, 0, alignment=Qt.AlignmentFlag.AlignVCenter
+            )
 
         # Sort toggle (gallery only) — before search icon so Search sits beside the expand field.
         self.sort_toggle_button = QPushButton()
@@ -11564,6 +11712,14 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         current_value = settings.value("use_embedded_jpeg_workflow", True, type=bool)
         new_value = not current_value
         settings.setValue("use_embedded_jpeg_workflow", new_value)
+        entering_raw_mode = not new_value
+        if entering_raw_mode:
+            # RAW EDR re-decodes with LibRaw highlight reconstruction (~12x a
+            # plain decode); default it off on entry so switching into RAW
+            # mode doesn't silently slow every navigation down. The user can
+            # still re-enable it per-session via the EDR button.
+            settings.setValue("raw_edr_display_enabled", False)
+            self._update_edr_toggle_button_state()
         self._invalidate_workflow_pixel_caches()
         self._skip_resolution_downgrade_check = True
         self._update_raw_toggle_button_state()
@@ -11596,6 +11752,10 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         if cur and cur not in targets:
             targets.append(cur)
         cache = self.image_cache
+        try:
+            cache.libraw_preview_paths.clear()
+        except Exception:
+            pass
         for fp in targets:
             if not fp:
                 continue
@@ -11682,6 +11842,95 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 QPushButton:pressed {
                     color: #FFFFFF;
                     background-color: rgba(255, 255, 255, 0.12);
+                }
+            """)
+
+    def toggle_raw_edr_display(self):
+        """Toggle EDR display for RAW (macOS): highlight headroom vs decode speed.
+
+        EDR display re-decodes each RAW with LibRaw highlight reconstruction
+        (~12x the cost of a plain decode); off = standard-dynamic-range display
+        straight from the already-decoded buffer, much faster browsing.
+        """
+        if getattr(self, "view_mode", "single") != "single":
+            return
+        settings = self.get_settings()
+        current = settings.value("raw_edr_display_enabled", True, type=bool)
+        settings.setValue("raw_edr_display_enabled", not current)
+        self._update_edr_toggle_button_state()
+        # Cached QPixmaps bake in EDR vs SDR encoding; drop them for RAW files
+        # so the next display re-converts. Decoded numpy buffers stay valid
+        # (they are workflow-tier caches, independent of display encoding), so
+        # toggling is quick -- no full re-decode needed for the SDR direction.
+        try:
+            for fp in list(getattr(self, "image_files", []) or []):
+                if fp and is_raw_file(fp):
+                    self.image_cache.pixmap_cache.remove(fp)
+        except Exception:
+            pass
+        cp = getattr(self, "current_file_path", None)
+        if cp and is_raw_file(cp):
+            self._displayed_content_path = None
+            self._gpu_last_path = None
+            self.load_raw_image(cp, force_reload=True)
+
+    def _update_edr_toggle_button_state(self):
+        """Update text/tooltip/styling of the EDR display toggle button."""
+        btn = getattr(self, "edr_toggle_button", None)
+        if btn is None:
+            return
+        btn.setText("EDR")
+        settings = self.get_settings()
+        enabled = settings.value("raw_edr_display_enabled", True, type=bool)
+        base = """
+            QPushButton {
+                padding: 0px;
+                border: none;
+                background: transparent;
+                text-align: center;
+                letter-spacing: 0.5px;
+                min-width: 44px;
+                max-width: 44px;
+                min-height: 28px;
+                max-height: 28px;
+            }
+            QPushButton:hover {
+                background-color: rgba(255, 255, 255, 0.05);
+                border-radius: 4px;
+            }
+            QPushButton:pressed {
+                background-color: rgba(255, 255, 255, 0.1);
+            }
+        """
+        if enabled:
+            btn.setToolTip(
+                "EDR display on (High Quality highlights, slower RAW browsing)\n"
+                "Click to switch to standard display (Fast)"
+            )
+            btn.setStyleSheet(base + """
+                QPushButton {
+                    color: #D2D2D2;
+                    font-size: 13px;
+                    font-weight: 700;
+                }
+                QPushButton:hover {
+                    color: #E4E4E4;
+                    background-color: rgba(255, 255, 255, 0.08);
+                }
+            """)
+        else:
+            btn.setToolTip(
+                "EDR display off (Fast, standard dynamic range)\n"
+                "Click to enable EDR highlight headroom (slower RAW browsing)"
+            )
+            btn.setStyleSheet(base + """
+                QPushButton {
+                    color: #707070;
+                    font-size: 13px;
+                    font-weight: 500;
+                }
+                QPushButton:hover {
+                    color: #B0B0B0;
                 }
             """)
 
@@ -12567,6 +12816,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             self.rotate_bottom_button.hide()
         if hasattr(self, "raw_toggle_button"):
             self.raw_toggle_button.hide()
+        if hasattr(self, "edr_toggle_button"):
+            self.edr_toggle_button.hide()
         self._schedule_search_expand_overlay_sync()
         
         if hasattr(self, "gallery_scroll") and self.gallery_scroll is not None:
@@ -16065,7 +16316,51 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         except Exception:
             return QPoint(max(0, pm.width() // 2), max(0, pm.height() // 2))
 
+    def _schedule_interim_quality_upgrade(self, file_path: str) -> None:
+        """After showing a low-res interim at zoomed framing, get sharp pixels.
+
+        Deferred a tick so the current display pass settles first. Displays
+        the cached sensor-res buffer when available (the interim upgrade path
+        in _apply_gpu_view re-places it at the same framing), otherwise queues
+        a sensor decode.
+        """
+
+        def _upgrade() -> None:
+            if _norm_path(file_path) != _norm_path(
+                getattr(self, "current_file_path", "") or ""
+            ):
+                return
+            if not getattr(self, "_nav_zoom_interim_active", False):
+                return
+            try:
+                cached_full = self.image_cache.get_full_image(file_path)
+                if cached_full is not None and hasattr(cached_full, "shape"):
+                    ch, cw = cached_full.shape[0], cached_full.shape[1]
+                    exif = self.image_cache.get_exif(file_path)
+                    if image_covers_sensor_resolution(cw, ch, exif):
+                        self._orientation_already_applied = True
+                        try:
+                            self.display_numpy_image(cached_full)
+                        finally:
+                            self._orientation_already_applied = False
+                        return
+            except Exception:
+                pass
+            try:
+                self._queue_sensor_full_decode(file_path, priority_current=True, force=True)
+            except Exception:
+                pass
+
+        QTimer.singleShot(0, _upgrade)
+
     def _finish_nav_zoom_preserve(self) -> None:
+        if getattr(self, "_preserve_nav_zoom_active", False):
+            import sys as _sys
+
+            logging.getLogger(__name__).debug(
+                "[ZOOMNAV] preserve cleared by %s",
+                _sys._getframe(1).f_code.co_name,
+            )
         self._preserve_nav_zoom_active = False
 
     def apply_pan_offset(self):
@@ -16334,6 +16629,11 @@ class RAWImageViewer(SessionMixin, QMainWindow):
 
     def _should_hold_full_until_preview_paint(self, file_path: str) -> bool:
         """preview_first_stages: do not paint full-res before embedded preview lands."""
+        if self._suppress_jpeg_interim(file_path):
+            # RAW workflow suppresses the embedded preview entirely -- the
+            # LibRaw full IS the first render; holding it would deadlock the
+            # display until the TTFR watchdog.
+            return False
         if self._should_defer_full_decode():
             return True
         defer = getattr(self, "_defer_sensor_full_decode_path", None)
@@ -17191,7 +17491,15 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             cache_check_start = time.time()
             cache_check_time = 0.0
 
-            preview_cached = self.image_cache.get_preview(requested_file_path)
+            # RAW workflow JPEG-interim suppression: decide BEFORE fetching --
+            # get_preview() may decode a disk JPEG (~150ms, main thread) that
+            # the gate would then throw away, taxing every navigation.
+            if self._suppress_jpeg_interim(
+                requested_file_path
+            ) and not self.image_cache.is_libraw_preview(requested_file_path):
+                preview_cached = None
+            else:
+                preview_cached = self.image_cache.get_preview(requested_file_path)
             if (
                 not force_reload
                 and preview_cached is not None
@@ -17667,8 +17975,43 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         """Handle memory warning events."""
         safe_print(f"⚠️ Memory usage high: {memory_percent:.1f}%")
 
+    def _suppress_jpeg_interim(self, file_path: str | None = None) -> bool:
+        """True when embedded-JPEG interim tiers must not be painted (RAW workflow).
+
+        The user-facing contract of the RAW (High Quality) workflow is "what
+        you see is the LibRaw render" -- camera-JPEG tiers have different tone
+        and flash on replacement. Suppressed only at fit view (the zoomed-nav
+        interim keeps its own equivalent-framing tier) and only for files
+        LibRaw can actually decode (unsupported files keep their embedded
+        fallback, which is all they have).
+        """
+        path = file_path or getattr(self, "current_file_path", None)
+        if not path or not is_raw_file(path):
+            return False
+        if str(os.environ.get("RAWVIEWER_RAW_NO_JPEG_INTERIM", "1")).strip().lower() in (
+            "0",
+            "false",
+            "no",
+            "off",
+        ):
+            return False  # escape hatch: restore JPEG interim tiers in RAW mode
+        from common_image_loader import use_libraw_consistent_preview_first
+
+        if not use_libraw_consistent_preview_first():
+            return False
+        try:
+            from unified_image_processor import _LIBRAW_UNSUPPORTED_PATHS
+
+            if os.path.normcase(os.path.abspath(path)) in _LIBRAW_UNSUPPORTED_PATHS:
+                return False
+        except Exception:
+            pass
+        return True
+
     def _should_show_thumbnail(self):
         """Determine if we should show thumbnail immediately or wait for full image."""
+        if self._suppress_jpeg_interim():
+            return False
         # If user explicitly wants thumbnails even when zoomed, always show
         if self.show_thumbnails_when_zoomed:
             return True
@@ -17717,7 +18060,14 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self._display_pixmap_converter = None
         self._pending_display_pixmap_context = None
 
-    def _should_use_raw_edr_display(self, file_path: str | None = None) -> bool:
+    def _raw_edr_eligible_ignoring_idle(self, file_path: str | None = None) -> bool:
+        """Settings/workflow gate for RAW EDR display, without the nav-idle debounce.
+
+        Split out of :meth:`_should_use_raw_edr_display` so the idle-arming
+        logic in ``display_numpy_image`` can ask "would EDR apply here at
+        all" before deciding whether to pay for the decode immediately or
+        defer it (see ``_maybe_arm_raw_edr_after_idle``).
+        """
         path = file_path or getattr(self, "current_file_path", None)
         if not path or not is_raw_file(path):
             return False
@@ -17730,6 +18080,75 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         from common_image_loader import use_raw_edr_for_display
 
         return use_raw_edr_for_display()
+
+    def _should_use_raw_edr_display(self, file_path: str | None = None) -> bool:
+        """RAW EDR gate used at the actual decode-dispatch point.
+
+        RAW EDR re-decodes with LibRaw highlight reconstruction (~12x a
+        plain decode; see ``use_raw_edr_display()`` docstring) via its own
+        separate rawpy call, so triggering it on every navigation frame
+        during rapid culling burns that cost on images the user never
+        pauses on. Eligibility is eager only when already zoomed in (the
+        user is examining this exact image); otherwise it additionally
+        requires this file to have been "armed" by
+        ``_maybe_arm_raw_edr_after_idle`` after a settle period with no
+        further navigation -- mirrors ``_schedule_idle_full_decode_after_
+        nav_preview``'s treatment of the sensor-resolution tier.
+        """
+        path = file_path or getattr(self, "current_file_path", None)
+        if not self._raw_edr_eligible_ignoring_idle(path):
+            return False
+        if self._preserve_zoom_navigation_active() or self._single_view_is_zoomed_in():
+            return True
+        return getattr(self, "_raw_edr_armed_key", None) == _norm_path(path or "")
+
+    def _maybe_arm_raw_edr_after_idle(
+        self, file_path: str, rgb_image, width: int, height: int
+    ) -> None:
+        """Schedule a delayed RAW EDR upgrade once nav settles on ``file_path``.
+
+        Called from ``display_numpy_image`` when EDR would apply but hasn't
+        been armed yet: the current frame paints through the fast SDR path,
+        and if no further navigation happens within the idle window, this
+        arms EDR for the file and re-dispatches the same buffer through the
+        EDR converter -- upgrading the on-screen image in place instead of
+        re-decoding on every arrow-key press.
+        """
+        from PyQt6.QtCore import QTimer
+
+        if not file_path:
+            return
+        norm = _norm_path(file_path)
+        gen = int(getattr(self, "_raw_edr_idle_generation", 0)) + 1
+        self._raw_edr_idle_generation = gen
+        delay_ms = _env_int("RAWVIEWER_RAW_EDR_IDLE_MS", 400, minimum=0)
+
+        def _tick(g=gen, fp=file_path, n=norm, rgb=rgb_image, w=width, h=height) -> None:
+            if g != int(getattr(self, "_raw_edr_idle_generation", 0)):
+                return
+            if _norm_path(getattr(self, "current_file_path", "") or "") != n:
+                return
+            self._raw_edr_armed_key = n
+            if not self._should_use_raw_edr_display(fp):
+                return
+            exif_for_edr = None
+            try:
+                exif_for_edr = self.image_cache.get_exif(fp)
+            except Exception:
+                pass
+            is_half_size_edr = not image_covers_sensor_resolution(
+                w, h, exif_for_edr
+            )
+            self._start_display_numpy_pixmap_worker(
+                fp,
+                rgb,
+                width=w,
+                height=h,
+                is_half_size=is_half_size_edr,
+                fallback_rgb=rgb,
+            )
+
+        QTimer.singleShot(delay_ms, _tick)
 
     def _start_display_numpy_pixmap_worker(
         self,
@@ -17789,6 +18208,20 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             converter = PixmapConverter(file_path, rgb_image, None)
             log_label = "QPixmap"
         converter.pixmap_ready.connect(self._on_display_numpy_pixmap_ready)
+        # _display_pixmap_converter is a single slot: when full-res buffers
+        # arrive in rapid succession (fast RAW decode + LibRaw-first mode),
+        # assigning the new converter would drop the last reference to the
+        # previous, still-running QThread -- Python GC then destroys a live
+        # QThread and Qt aborts the process ("QThread: Destroyed while
+        # thread '' is still running"). Keep every converter alive in a set
+        # until its own finished signal fires.
+        live = getattr(self, "_live_display_pixmap_converters", None)
+        if live is None:
+            live = self._live_display_pixmap_converters = set()
+        live.add(converter)
+        converter.finished.connect(
+            lambda c=converter: self._live_display_pixmap_converters.discard(c)
+        )
         self._display_pixmap_converter = converter
         logger.info(
             "[DISPLAY] Queued background %s conversion for %s (%dx%d)",
@@ -17921,6 +18354,31 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             return
         if hasattr(self, 'current_file_path') and self.is_animated_image(_require_str_path(self.current_file_path)):
             return
+        # RAW workflow, JPEG-interim suppression: last line of defense against
+        # sub-display-tier camera-JPEG buffers reaching the screen through any
+        # of the many paint paths. LibRaw-rendered tiers (half decode, sensor
+        # decode, persisted LibRaw preview) are always >= the memory preview
+        # cap; 512px-class buffers here are embedded-JPEG pixels.
+        try:
+            cur = getattr(self, "current_file_path", None)
+            if (
+                rgb_image is not None
+                and hasattr(rgb_image, "shape")
+                and max(rgb_image.shape[0], rgb_image.shape[1]) < 1024
+                and self._suppress_jpeg_interim(cur)
+                and not self.image_cache.is_libraw_preview(cur)
+            ):
+                import logging as _logging
+
+                _logging.getLogger(__name__).debug(
+                    "[TIERSWAP] refusing %sx%s JPEG interim for %s (RAW workflow)",
+                    rgb_image.shape[1],
+                    rgb_image.shape[0],
+                    os.path.basename(cur or ""),
+                )
+                return
+        except Exception:
+            pass
             
         import logging
         import time
@@ -17992,6 +18450,19 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                     fallback_rgb=rgb_image,
                 )
                 return
+
+            if (
+                self._raw_edr_eligible_ignoring_idle(path)
+                and hasattr(self, "current_file_path")
+                and self.current_file_path
+            ):
+                # EDR applies to this file but hasn't settled yet: paint the
+                # fast SDR buffer now (fall through below) and upgrade to
+                # EDR in place if the user is still here after the idle
+                # window -- see _should_use_raw_edr_display's docstring.
+                self._maybe_arm_raw_edr_after_idle(
+                    self.current_file_path, rgb_image, width, height
+                )
 
             self._display_edr_mode = None
 
@@ -18558,6 +19029,67 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         )
         QThreadPool.globalInstance().start(worker)
 
+    def _reencode_persisted_preview_for_sidecar(self, path: str, adj: dict) -> None:
+        """Re-encode the persisted LibRaw preview tier with just-saved sidecar adjustments.
+
+        The cached preview (see ``UnifiedImageProcessor._process_raw_image``'s
+        ``_persist_libraw_preview``) is written once per full decode and
+        otherwise sits untouched, so without this a revisit right after
+        saving briefly flashes the pre-edit render before the adjusted full
+        buffer lands and corrects it -- and would keep doing so on every
+        later cache-cold revisit, since a save alone doesn't trigger a full
+        re-decode. Runs off the UI thread; a no-op if the unadjusted full
+        buffer isn't cached (nothing to re-encode from -- the next full
+        decode persists the adjusted preview itself now that
+        ``_persist_libraw_preview`` applies the sidecar at decode time too).
+        """
+        from common_image_loader import is_raw_file
+
+        if not path or not is_raw_file(path):
+            return
+        base = self.image_cache.get_full_image(path)
+        if base is None:
+            return
+
+        def _worker(fp=path, rgb=base, a=dict(adj)):
+            try:
+                import cv2
+
+                from image_cache import memory_preview_max_edge
+                from raw_adjustments import (
+                    apply_adjustments_to_rgb,
+                    is_default_adjustments,
+                )
+
+                if not is_default_adjustments(a):
+                    rgb = apply_adjustments_to_rgb(rgb, a)
+                h, w = rgb.shape[:2]
+                cap = memory_preview_max_edge()
+                if max(h, w) > cap:
+                    sc = cap / max(h, w)
+                    prev = cv2.resize(
+                        rgb,
+                        (max(1, int(w * sc)), max(1, int(h * sc))),
+                        interpolation=cv2.INTER_AREA,
+                    )
+                else:
+                    prev = rgb
+                ok, buf = cv2.imencode(
+                    ".jpg",
+                    cv2.cvtColor(prev, cv2.COLOR_RGB2BGR),
+                    [int(cv2.IMWRITE_JPEG_QUALITY), 92],
+                )
+                self.image_cache.put_preview(
+                    fp,
+                    prev,
+                    jpeg_data=buf.tobytes() if ok else None,
+                    libraw_rendered=True,
+                )
+            except Exception:
+                pass
+
+        threading.Thread(target=_worker, daemon=True).start()
+
     def _on_adjust_panel_editing_finished(self, adj: dict) -> None:
         path = getattr(self, "current_file_path", None)
         if not path:
@@ -18577,6 +19109,10 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                     f"Could not save adjustments: {exc}", 5000
                 )
             return
+        # Disabled (2026-07): reported color artifacts in the re-encoded
+        # preview. See _reencode_persisted_preview_for_sidecar's docstring;
+        # re-enable once root-caused.
+        # self._reencode_persisted_preview_for_sidecar(path, adj)
         if hasattr(self, "status_bar"):
             self.status_bar.showMessage("Adjustments saved to XMP sidecar", 2500)
         self._refresh_gallery_bookmark_visuals()
@@ -20991,6 +21527,20 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             return
         if hasattr(self, 'current_file_path') and self.is_animated_image(_require_str_path(self.current_file_path)):
             return
+        # RAW workflow JPEG-interim suppression (see display_numpy_image) --
+        # same guard for the QPixmap paint path.
+        try:
+            cur = getattr(self, "current_file_path", None)
+            if (
+                pixmap is not None
+                and not pixmap.isNull()
+                and max(pixmap.width(), pixmap.height()) < 1024
+                and self._suppress_jpeg_interim(cur)
+                and not self.image_cache.is_libraw_preview(cur)
+            ):
+                return
+        except Exception:
+            pass
             
         import logging
         import time
@@ -21044,6 +21594,17 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 prev_path=prev_path,
                 cur_path=cur_path,
             )
+        )
+        logging.getLogger(__name__).debug(
+            "[TIERSWAP] display: prev=%s (%sx%s) -> new=%s (%sx%s) skip=%s fade=%s",
+            os.path.basename(prev_path or "") or None,
+            prev_pm.width() if prev_pm is not None and not prev_pm.isNull() else 0,
+            prev_pm.height() if prev_pm is not None and not prev_pm.isNull() else 0,
+            os.path.basename(cur_path or "") or None,
+            pixmap.width(),
+            pixmap.height(),
+            skip_crossfade,
+            needs_resolution_crossfade,
         )
         viewport_fade_snapshot = None
         viewport_fade_pm = None
@@ -21152,6 +21713,18 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                     or getattr(self, "_maintain_zoom_on_navigation", False)
                 )
                 zoomed_in = not self._single_view_is_fit_mode()
+                logging.getLogger(__name__).debug(
+                    "[ZOOMNAV] apply_gpu_view: new_file=%s nav_preserve=%s zoomed_in=%s "
+                    "pending_user_zoom=%s pm=%sx%s interim=%s path=%s",
+                    new_file,
+                    nav_preserve,
+                    zoomed_in,
+                    pending_user_zoom,
+                    pixmap.width(),
+                    pixmap.height(),
+                    getattr(self, "_nav_zoom_interim_active", False),
+                    os.path.basename(cur_path or ""),
+                )
 
                 if new_file and (nav_preserve or zoomed_in):
                     pm_max_dim = max(pixmap.width(), pixmap.height())
@@ -21161,7 +21734,53 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                         '.cap', '.erf', '.mef', '.mos', '.nrw', '.rwl', '.srf'}
                     is_pixmap_half_size = (pm_max_dim < 3000) and is_raw
                     if is_pixmap_half_size:
-                        # Defer zoom until full resolution arrives
+                        # RAW workflow delivers small tiers first. Show the
+                        # tier at the equivalent on-screen framing (blurry,
+                        # sharpens in place when the sensor buffer lands via
+                        # the same-file upgrade path below) instead of
+                        # flashing out to fit and re-zooming much later.
+                        # Gate only on genuine user zoom intents. A stale
+                        # _pending_zoom (the older defer-until-full-res
+                        # mechanism, which this restore supersedes) must not
+                        # block it -- that left navigation stuck at fit until
+                        # the sensor decode landed, or dropped to fit entirely
+                        # when the stale center could not be resolved.
+                        user_zoom_intent = bool(
+                            getattr(self, "_pending_zoom_toggle", False)
+                            or getattr(self, "_pending_gpu_zoom_point", None) is not None
+                            or getattr(self, "_pending_zoom_focus_subject", False)
+                            or getattr(self, "_focus_zoom_anchor_active", False)
+                        )
+                        if not user_zoom_intent and nav_preserve:
+                            if self._apply_gpu_navigation_zoom_restore(
+                                pixmap, gv, scale_level_to_pixmap=True
+                            ):
+                                # Supersede any stale deferred zoom and hold
+                                # this frame against further sub-sensor tiers
+                                # (their preserve math would wobble the
+                                # framing); the sensor-res buffer clears it.
+                                self._clear_pending_point_zoom_state()
+                                self._nav_zoom_interim_active = True
+                                # The on-screen buffer just regressed to a
+                                # small tier; drop the per-file "already
+                                # displayed at N px" bookkeeping or the
+                                # re-decoded sensor buffer is discarded as a
+                                # stale duplicate and the view stays blurry.
+                                self._manager_displayed_max_dim = 0
+                                try:
+                                    self._file_max_dim_map.pop(
+                                        _norm_path(cur_path), None
+                                    )
+                                except Exception:
+                                    pass
+                                # The interim must not get stuck blurry: some
+                                # cache-hit loads (e.g. quality_preview) never
+                                # queue a follow-up decode. Display the cached
+                                # full buffer if it covers the sensor, else
+                                # queue the sensor decode explicitly.
+                                self._schedule_interim_quality_upgrade(cur_path)
+                                return True
+                        # Fallback: defer zoom until full resolution arrives
                         self._pending_zoom = True
                         self._pending_zoom_center = self.zoom_center_point
                         self._pending_zoom_thumbnail_size = pixmap.size()
@@ -21183,6 +21802,54 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                     if self._single_view_is_fit_mode() and not pending_user_zoom:
                         gv.fit_to_window()
                     return False
+
+                # While the equivalent-framing interim tier is on screen
+                # (zoomed RAW navigation), place each higher-res tier at the
+                # same sensor-equivalent framing (derived on the fly from the
+                # current view + EXIF sensor dims) instead of set_pixmap's
+                # preserve math, whose >=100% snap would wobble the framing.
+                # Lower-res or same-res tiers are dropped. The hold ends when
+                # a sensor-covering buffer lands.
+                if (
+                    getattr(self, "_nav_zoom_interim_active", False)
+                    and not self._single_view_is_fit_mode()
+                    and gv.has_pixmap()
+                ):
+                    cur_max = max(int(gv._img_w or 0), int(gv._img_h or 0))
+                    new_max = max(pixmap.width(), pixmap.height())
+                    if new_max <= cur_max:
+                        return False
+                    placed = False
+                    try:
+                        from common_image_loader import sensor_pixel_dimensions
+
+                        sdims = sensor_pixel_dimensions(
+                            self.image_cache.get_exif(cur_path)
+                        )
+                        if sdims and cur_max > 0:
+                            s_max = max(sdims)
+                            sens_level = float(gv.current_scale()) * cur_max / s_max
+                            new_level = sens_level * s_max / new_max
+                            c = gv.mapToScene(gv.viewport().rect().center())
+                            fx = c.x() / max(1, gv._img_w)
+                            fy = c.y() / max(1, gv._img_h)
+                            gv.set_pixmap_zoomed_at(
+                                pixmap,
+                                fx * pixmap.width(),
+                                fy * pixmap.height(),
+                                scale=new_level,
+                                allow_overscale=new_max < s_max * 0.98,
+                            )
+                            self.current_zoom_level = float(gv.current_scale())
+                            self.fit_to_window = False
+                            placed = True
+                            if new_max >= s_max * 0.98:
+                                self._nav_zoom_interim_active = False
+                    except Exception:
+                        placed = False
+                    if placed:
+                        return False
+                    self._nav_zoom_interim_active = False
 
                 # Same-file buffer upgrade (preview → sensor, etc.)
                 if zoomed_in or nav_preserve or pending_user_zoom:
@@ -21673,7 +22340,13 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         return _env_int("RAWVIEWER_NAV_PRELOAD_RADIUS", 6, minimum=1)
 
     def _nav_preload_display_near_count(self) -> int:
-        return _env_int("RAWVIEWER_NAV_PRELOAD_NEAR", 2, minimum=1)
+        # In the no-JPEG RAW workflow, display buffers are the only tier that
+        # can paint (thumbnail prefetch is useless there), and fresh decodes
+        # cost ~0.2-0.5s each -- prefetch deeper so normal browsing pace stays
+        # inside warm cache. Kept at 3 (not more): each buffered neighbor
+        # costs ~50-100MB and 8GB machines hit memory pressure fast.
+        default = 3 if self._suppress_jpeg_interim() else 2
+        return _env_int("RAWVIEWER_NAV_PRELOAD_NEAR", default, minimum=1)
 
     def _needs_display_buffer_prefetch(self, file_path: str, *, zoomed: bool) -> bool:
         min_dim = 2800 if zoomed else self._single_view_cache_min_dim(for_navigation=False)
@@ -22020,6 +22693,26 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                         logger.info(ttfr_msg)
                         safe_print(ttfr_msg, flush=True)
                         self._single_view_first_render_logged = True
+                        # Navigation-instruction -> image-on-screen latency
+                        # (user-facing responsiveness metric; includes queueing,
+                        # decode, and pixmap conversion). Shown in the status
+                        # bar in dev mode for live tuning.
+                        nav_ts = float(getattr(self, "_nav_instruction_ts", 0.0) or 0.0)
+                        if nav_ts > 0.0:
+                            nav_elapsed = max(0.0, time.time() - nav_ts)
+                            self._nav_instruction_ts = 0.0
+                            nav_msg = (
+                                f"[NAVTIME] navigation->display: {nav_elapsed:.3f}s "
+                                f"file={os.path.basename(cur_path)} pixmap={pm_w}x{pm_h}"
+                            )
+                            logger.info(nav_msg)
+                            if os.environ.get("RAWVIEWER_DEBUG", "").strip() == "1" and hasattr(
+                                self, "status_bar"
+                            ):
+                                self.status_bar.showMessage(
+                                    f"nav→display {nav_elapsed*1000:.0f} ms ({pm_w}x{pm_h})",
+                                    2500,
+                                )
         except Exception:
             pass
 
@@ -23601,6 +24294,10 @@ class RAWImageViewer(SessionMixin, QMainWindow):
 
     def _capture_nav_zoom_state_before_load(self) -> None:
         """Snapshot GPU/legacy zoom so rapid or coalesced navigation can restore it."""
+        logging.getLogger(__name__).debug(
+            "[ZOOMNAV] capture: zoomed_in=%s", self._single_view_is_zoomed_in()
+        )
+        self._nav_zoom_interim_active = False
         if not self._single_view_is_zoomed_in():
             self._preserve_nav_zoom_active = False
             if hasattr(self, "_maintain_zoom_on_navigation"):
@@ -23611,6 +24308,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             self._restore_zoom_center = None
             self._restore_zoom_level = None
             self._restore_pixmap_size = None
+            self._restore_sensor_level = None
             return
         self._preserve_nav_zoom_active = True
         self._maintain_zoom_on_navigation = True
@@ -23626,6 +24324,49 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             self._restore_zoom_level = getattr(self, "current_zoom_level", 1.0)
         if getattr(self, "current_pixmap", None):
             self._restore_pixmap_size = self.current_pixmap.size()
+        # Resolution-independent zoom: the displayed buffer may be any tier
+        # (including a low-res interim shown overscaled), so the raw view
+        # scale is meaningless across buffers. Normalize to "scale on the
+        # sensor-resolution buffer" using EXIF dims (max-dim ratio, immune to
+        # orientation rotation); the restore side re-derives the per-buffer
+        # scale the same way.
+        self._restore_sensor_level = None
+        try:
+            from common_image_loader import sensor_pixel_dimensions
+
+            exif = self.image_cache.get_exif(getattr(self, "current_file_path", None))
+            sdims = sensor_pixel_dimensions(exif)
+            pm = getattr(self, "current_pixmap", None)
+            if sdims and pm is not None and not pm.isNull():
+                pm_max = max(pm.width(), pm.height())
+                s_max = max(sdims)
+                if pm_max > 0 and s_max > 0 and self._restore_zoom_level:
+                    self._restore_sensor_level = (
+                        float(self._restore_zoom_level) * pm_max / s_max
+                    )
+        except Exception:
+            self._restore_sensor_level = None
+        # Remember this file's framing so navigating back restores *its* zoom
+        # position, not the neighbor's.
+        try:
+            gv_mem = getattr(self, "gpu_view", None)
+            cur = getattr(self, "current_file_path", None)
+            if (
+                cur
+                and gv_mem is not None
+                and gv_mem.has_pixmap()
+                and self._restore_sensor_level is not None
+            ):
+                c = gv_mem.mapToScene(gv_mem.viewport().rect().center())
+                fx = c.x() / max(1, gv_mem._img_w)
+                fy = c.y() / max(1, gv_mem._img_h)
+                self._nav_zoom_memory[_norm_path(cur)] = (
+                    float(fx),
+                    float(fy),
+                    float(self._restore_sensor_level),
+                )
+        except Exception:
+            pass
 
     def _flush_coalesced_navigation(self) -> None:
         import logging
@@ -23667,6 +24408,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                    f"time={current_time:.3f}")
         self._navigation_in_progress = True
         self._last_navigation_time = current_time
+        # Anchor for the [NAVTIME] navigation->display latency metric.
+        self._nav_instruction_ts = current_time
         self._pause_prefetch_for_navigation()
         self._cancel_content_crossfade()
         self._skip_resolution_crossfade_once = True
@@ -25492,6 +26235,16 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 self.raw_toggle_button.setVisible(is_raw)
                 if is_raw:
                     self._update_raw_toggle_button_state()
+                if hasattr(self, "edr_toggle_button"):
+                    # EDR only applies in the RAW (LibRaw) workflow; hide the
+                    # toggle when browsing embedded JPEG previews.
+                    use_embedded = self.get_settings().value(
+                        "use_embedded_jpeg_workflow", True, type=bool
+                    )
+                    show_edr = bool(is_raw and not use_embedded)
+                    self.edr_toggle_button.setVisible(show_edr)
+                    if show_edr:
+                        self._update_edr_toggle_button_state()
         self._sync_bookmark_indicator()
         if hasattr(self, "search_bottom_button") and not getattr(
             self, "_burst_group_view_active", False
@@ -27349,6 +28102,16 @@ def main():
     """Main function to run the application"""
     import logging
     import traceback
+
+    # Cap OpenMP threads before rawpy/LibRaw loads. LibRaw decodes are
+    # OpenMP-parallel on Windows (rawpy wheel ships vcomp140) and on macOS
+    # via scripts/build_libraw_openmp.sh; with 2 concurrent RAW workers an
+    # uncapped pool (all cores each) starves the GUI thread (observed as a
+    # full app freeze on M1). Half the cores, clamped to 2..8, keeps most of
+    # the per-decode speedup while leaving headroom for the GUI and the
+    # second worker. Override by exporting OMP_NUM_THREADS.
+    _cores = os.cpu_count() or 8
+    os.environ.setdefault("OMP_NUM_THREADS", str(max(2, min(8, _cores // 2))))
 
     # Packaged or installed app: enable semantic search by default (dev uses launch_dev.sh / run_debug.bat).
     # Lite builds bake PROFILE=lite and skip AI/face via rawviewer_profile defaults.

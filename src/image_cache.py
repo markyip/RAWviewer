@@ -1571,7 +1571,15 @@ class MemoryMonitor:
         preview_items = recommended_preview_cache_items(available_gb)
 
         return {
-            'full_images': min(max_full_images, 8),
+            # Opt-in override for zoomed-culling workflows: retaining more
+            # sensor-res buffers makes zoomed A<->B revisits instant, at
+            # ~100-200MB per slot. Default stays conservative for 8GB machines.
+            'full_images': _env_int(
+                "RAWVIEWER_FULL_IMAGE_CACHE_ITEMS",
+                min(max_full_images, 8),
+                minimum=2,
+                maximum=32,
+            ),
             'thumbnails': min(max_thumbnails, 1000),
             'preview_images': min(preview_items, 16),
             'cache_budget_mb': int(cache_budget_gb * 1024)
@@ -1612,6 +1620,9 @@ class ImageCache(QObject):
         )  # High-res preview working set (RAM-adaptive)
         self.full_image_cache = LRUCache(max_size=cache_sizes['full_images'])
         self.pixmap_cache = LRUCache(max_size=cache_sizes['full_images'])
+        # Session-scoped provenance: preview keys whose pixels came from the
+        # LibRaw pipeline (see put_preview(libraw_rendered=True)).
+        self.libraw_preview_paths: set = set()
         if self.persistent_cache_enabled:
             self.exif_cache = PersistentEXIFCache(cache_dir)
             self.disk_thumbnail_cache = PersistentThumbnailCache(cache_dir)
@@ -2114,15 +2125,35 @@ class ImageCache(QObject):
         self.cache_miss.emit(file_path, 'preview')
         return None
 
-    def put_preview(self, file_path: str, preview: np.ndarray, jpeg_data: bytes = None) -> None:
-        """Cache a preview image (memory); optional disk JPEG clamped to disk_preview_max_edge()."""
+    def put_preview(
+        self,
+        file_path: str,
+        preview: np.ndarray,
+        jpeg_data: bytes = None,
+        *,
+        libraw_rendered: bool = False,
+    ) -> None:
+        """Cache a preview image (memory); optional disk JPEG clamped to disk_preview_max_edge().
+
+        ``libraw_rendered`` marks the preview as LibRaw-pipeline pixels (vs
+        embedded-JPEG-derived) so the RAW workflow can refuse to paint
+        camera-JPEG interim tiers (session-scoped provenance).
+        """
         if preview is not None:
             key = self._path_key(file_path)
             self.preview_cache.put(key, preview.copy())
+            if libraw_rendered:
+                self.libraw_preview_paths.add(key)
+            else:
+                self.libraw_preview_paths.discard(key)
             if jpeg_data is not None:
                 cap = disk_preview_max_edge()
                 jpeg_data = _jpeg_bytes_max_edge(jpeg_data, cap)
                 self.disk_preview_cache.put(file_path, jpeg_data)
+
+    def is_libraw_preview(self, file_path: str) -> bool:
+        """True when the cached preview holds LibRaw-rendered pixels (this session)."""
+        return self._path_key(file_path) in self.libraw_preview_paths
 
     def get_full_image(self, file_path: str) -> Optional[np.ndarray]:
         """Get cached full image or return None if not cached."""

@@ -151,7 +151,7 @@ On **macOS**, HDR **HEIC / HEIF / AVIF** and 16-bit HDR **TIFF** can display wit
 
 | Variable | Default | Effect |
 |----------|---------|--------|
-| `RAWVIEWER_RAW_EDR` | `1` | macOS: EDR decode for RAW when **RAW workflow** is active; set `0` to disable |
+| `RAWVIEWER_RAW_EDR` | `1` | macOS: EDR decode for RAW when **RAW workflow** is active; set `0` to hard-disable. Also toggleable in-app: bottom-bar **EDR** button (visible in RAW workflow; off = much faster RAW browsing at standard dynamic range). Switching **into** RAW workflow resets this toggle to off each time, so entering RAW mode never silently slows down browsing — turn it back on per-session if you want highlight-reconstructed previews |
 | `RAWVIEWER_DISABLE_EDR` | off | Disable all macOS EDR (HDR stills + RAW) |
 
 ---
@@ -298,8 +298,9 @@ Requires **pyexiv2** for maker-note AF on RAW.
 | `RAWVIEWER_GPU_VIEW=1` | GPU single-image viewport (OpenGL zoom/pan; on by default in release builds) |
 | `RAWVIEWER_GPU_VIEW=0` | Force legacy scroll-area single-image view |
 | `RAWVIEWER_DISABLE_EDR=1` | macOS: disable EDR viewport and HDR/RAW 16-bit display path; use SDR tone mapping |
-| `RAWVIEWER_RAW_EDR=1` | **Default.** macOS: EDR for RAW when **RAW (High Quality)** workflow is selected; `0` to disable |
+| `RAWVIEWER_RAW_EDR=1` | **Default.** macOS: EDR for RAW when **RAW (High Quality)** workflow is selected; `0` to hard-disable. In-app: bottom-bar **EDR** button toggles it per-user, but resets to off every time you switch into RAW workflow. EDR decode is also idle-deferred: rapid navigation shows the fast SDR buffer immediately and only upgrades to EDR after you pause on an image, so browsing speed is unaffected either way |
 | `RAWVIEWER_LIBRAW_CONSISTENT_PREVIEW=1` | Same color pipeline for fit vs 100% zoom on RAW (default on) |
+| `RAWVIEWER_FAST_RAW_DECODE=0` | Disable the fast RAW decode path (cv2 pixel math with exact LibRaw color parity, shared unpack between half/full tiers; default on, auto-falls-back to rawpy for unsupported sensors) |
 | `RAWVIEWER_EXIF_BACKEND=auto` | `auto`, `pyexiv2`, or `exifread` |
 | `RAWVIEWER_SHARE_MENU=1` | macOS: Qt share menu (recommended) |
 | `RAWVIEWER_SHARE_TRY_NATIVE_PICKER=1` | macOS: try native share sheet first |
@@ -308,6 +309,7 @@ Requires **pyexiv2** for maker-note AF on RAW.
 | `RAWVIEWER_SEMANTIC_BATCH_AUTO=1` | Auto-tune AI batch/chunk size on index (default) |
 | `RAWVIEWER_SEMANTIC_BATCH_CANDIDATES` | Candidate batch sizes for auto-tune (default `8,16,32,64,128`) |
 | `RAWVIEWER_PREVIEW_CACHE_ITEMS` | Cap in-memory preview LRU count |
+| `RAWVIEWER_FULL_IMAGE_CACHE_ITEMS` | Sensor-res buffer LRU slots (default 8, max 32; higher = instant zoomed A↔B revisits at ~100–200 MB per slot) |
 | `RAWVIEWER_MEMORY_PREVIEW_MAX` | Max long edge for in-memory RAW/JPEG preview (pixels) |
 | `RAWVIEWER_IDLE_DISPLAY_PREFETCH=0` | Disable idle neighbor prefetch in single view |
 | `RAWVIEWER_SESSION_RESTORE_DEFER_PRELOAD=1` | **Default.** After relaunch, delay full decode and neighbor prefetch (see v2.4.1 release notes) |
@@ -335,9 +337,11 @@ Not in a release yet — tracked on a separate development branch.
 
 **Burst image grouping** — Automatically group burst sequences in the gallery (rapid-fire shots taken within a short window). Open a burst group to review its shots together; **Compare** mode shows candidates side by side so you can pick the best frame.
 
-**GPU-accelerated RAW decoding** — Early GPU decode works, but **correct color rendering** (matching the current LibRaw / embedded-JPEG pipeline) is still unresolved. We will only ship it if color accuracy and maintenance cost are acceptable.
+**Fast RAW decoding** — Resolved (2026-07): the color-parity problem that blocked GPU decode has been solved, and the conclusion changed the approach. Both the fit-view (half-size) and sensor-resolution (full) decode tiers now use LibRaw unpack + SIMD pixel math (cv2/numpy) with **exact color parity** to the previous rawpy pipeline (verified ±1 8-bit LSB across a Sony ARW + 21-file Canon CR3 golden set — see `scripts/fast_raw_decode_parity_gate.py`). The two tiers share a single LibRaw unpack per image: the fit-view decode stashes its unpacked sensor data, and the deferred/zoomed full-resolution decode reuses it instead of re-opening and re-unpacking the file — removing a duplicate unpack (100–900ms) from every image the user pauses on or zooms into. Full-resolution decode is 1.4–1.7× faster than the old rawpy LINEAR path with better demosaic quality. GPU offload itself was benchmarked and rejected: on Apple-Silicon unified memory, cv2's CPU demosaic already runs at memory bandwidth (OpenCL showed no gain), so a GPU backend would add dependency weight for nothing. Disable with `RAWVIEWER_FAST_RAW_DECODE=0` (falls back to rawpy for both tiers).
 
-This is separate from the GPU **viewport** (OpenGL zoom/pan on decoded pixels, on by default in release builds; set `RAWVIEWER_GPU_VIEW=0` to disable); the upcoming work targets **RAW decode** itself.
+**Multithreaded LibRaw (macOS dev builds)** — The PyPI rawpy wheel bundles a single-threaded LibRaw on macOS/Linux (Windows wheels already ship OpenMP). `scripts/build_libraw_openmp.sh` rebuilds LibRaw with OpenMP and swaps it into the Pixi env (self-contained dylib, byte-identical output, verified deterministic under concurrent decodes) — roughly 1.5–2× faster unpack on CR3/RAF/pana8 and AHD/DHT/X-Trans demosaic. Not required to run RAWviewer; it's a local dev-env optimization that must be re-applied after `pixi install` recreates the environment. Verify core utilization with `scripts/check_libraw_parallelism.py <raw file>`.
+
+This is separate from the GPU **viewport** (OpenGL zoom/pan on decoded pixels, on by default in release builds; set `RAWVIEWER_GPU_VIEW=0` to disable).
 
 ---
 

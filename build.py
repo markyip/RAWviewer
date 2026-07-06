@@ -826,6 +826,7 @@ def main():
         "--hidden-import", "natsort",
         "--hidden-import", "send2trash",
         "--hidden-import", "metadata_backend",
+        "--hidden-import", "fast_raw_decode",
         "--hidden-import", "rawviewer_profile",
         "--hidden-import", "build_profile",
         "--hidden-import", "app_version",

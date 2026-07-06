@@ -623,8 +623,17 @@ class GpuImageView(QGraphicsView):
         scene_y: float,
         *,
         scale: float = 1.0,
+        allow_overscale: bool = False,
     ) -> None:
-        """Replace the image and apply zoom in one step (avoids a wrong-frame flash)."""
+        """Replace the image and apply zoom in one step (avoids a wrong-frame flash).
+
+        ``allow_overscale``: skip the MAX_SCALE clamp. Used when displaying a
+        low-resolution interim tier at the on-screen magnification its full
+        resolution buffer will have (e.g. a 512px nav preview standing in for
+        a 7000px sensor buffer at 100% needs ~13x) -- the subsequent same-file
+        upgrade preserves on-screen scale, landing exactly back inside the
+        normal range. Interactive zooming still clamps as usual.
+        """
         if pixmap is None or pixmap.isNull():
             self.set_pixmap(QPixmap())
             return
@@ -644,7 +653,9 @@ class GpuImageView(QGraphicsView):
         if s <= fit * self._FIT_SCALE_EPS:
             self.fit_to_window()
             return
-        s = max(fit, min(self.MAX_SCALE, s))
+        if not allow_overscale:
+            s = min(self.MAX_SCALE, s)
+        s = max(fit, s)
         x = max(0.0, min(float(scene_x), max(0, new_w - 1)))
         y = max(0.0, min(float(scene_y), max(0, new_h - 1)))
         self.resetTransform()
