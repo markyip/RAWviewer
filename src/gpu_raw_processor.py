@@ -13,6 +13,22 @@ _GPU_LOCK = threading.Lock()
 # Cache detection results to avoid repeated import attempts
 _GPU_BACKEND: Optional[str] = None
 
+# Pre-import heavy ML libraries on the main thread.
+# Importing torch for the first time inside a background thread (e.g., QRunnable)
+# causes OpenMP (libomp.dylib) to fatally abort on macOS.
+try:
+    import torch
+    import kornia
+    _HAS_TORCH = True
+except ImportError:
+    _HAS_TORCH = False
+
+try:
+    import cupy
+    _HAS_CUPY = True
+except ImportError:
+    _HAS_CUPY = False
+
 def detect_gpu_backend() -> str:
     """
     Detect if the system has PyTorch (with CUDA or MPS) or CuPy installed.
@@ -31,8 +47,7 @@ def detect_gpu_backend() -> str:
         return _GPU_BACKEND
 
     # 1. Check for PyTorch (CUDA / Apple Silicon MPS)
-    try:
-        import torch
+    if _HAS_TORCH:
         if torch.cuda.is_available():
             _GPU_BACKEND = "pytorch_cuda"
             logger.info("GPU Processor: PyTorch CUDA backend detected.")
@@ -41,19 +56,17 @@ def detect_gpu_backend() -> str:
             _GPU_BACKEND = "pytorch_mps"
             logger.info("GPU Processor: PyTorch MPS (Apple Silicon) backend detected.")
             return _GPU_BACKEND
-    except ImportError:
-        pass
 
     # 2. Check for CuPy (NVIDIA CUDA)
-    try:
-        import cupy
-        # Try creating a device context to ensure CUDA driver is working
-        if cupy.cuda.Device().id >= 0:
-            _GPU_BACKEND = "cupy"
-            logger.info("GPU Processor: CuPy CUDA backend detected.")
-            return _GPU_BACKEND
-    except (ImportError, Exception):
-        pass
+    if _HAS_CUPY:
+        try:
+            # Try creating a device context to ensure CUDA driver is working
+            if cupy.cuda.Device().id >= 0:
+                _GPU_BACKEND = "cupy"
+                logger.info("GPU Processor: CuPy CUDA backend detected.")
+                return _GPU_BACKEND
+        except Exception:
+            pass
 
     _GPU_BACKEND = "cpu_only"
     return _GPU_BACKEND
@@ -64,9 +77,6 @@ def gpu_demosaic_pytorch_unpacked(unpacked, device_str: str = "cuda", cancel_che
     GPU-accelerated Demosaicing using PyTorch and Kornia.
     Consumes UnpackedRaw from fast_raw_decode.py to guarantee color math parity.
     """
-    import torch
-    import kornia
-
     device = torch.device(device_str)
     
     # 1. Upload raw array to GPU as float32
@@ -145,14 +155,12 @@ def gpu_demosaic_cupy_unpacked(unpacked, cancel_check: Optional[Callable[[], boo
     GPU-accelerated demosaicing implementation using CuPy.
     Uses CuPy elementwise/raw CUDA kernels for maximum speed.
     """
-    import cupy as cp
-    
     # Upload to GPU
-    raw_gpu = cp.array(unpacked.mosaic, dtype=cp.float32)
+    raw_gpu = cupy.array(unpacked.mosaic, dtype=cupy.float32)
     h, w = raw_gpu.shape
     
     # Pre-allocate normalized array
-    raw_norm = cp.empty_like(raw_gpu)
+    raw_norm = cupy.empty_like(raw_gpu)
     
     for (dy, dx), ci in np.ndenumerate(unpacked.pattern):
         slc = (slice(dy, None, 2), slice(dx, None, 2))
@@ -160,16 +168,16 @@ def gpu_demosaic_cupy_unpacked(unpacked, cancel_check: Optional[Callable[[], boo
         scale_val = float(unpacked.scale_mul[ci] / 65535.0)
         
         # Clamp to [0, 1]
-        raw_norm[slc] = cp.clip((raw_gpu[slc] - black_val) * scale_val, 0.0, 1.0)
+        raw_norm[slc] = cupy.clip((raw_gpu[slc] - black_val) * scale_val, 0.0, 1.0)
 
     if unpacked.pat_str != "RGGB":
         raise ValueError(f"CuPy demosaic currently only supports RGGB, got {unpacked.pat_str}")
 
     # Pre-allocate output RGB image on GPU
-    rgb_gpu = cp.zeros((h, w, 3), dtype=cp.float32)
+    rgb_gpu = cupy.zeros((h, w, 3), dtype=cupy.float32)
     
     # Simple CUDA kernel for bilinear demosaicing on pre-normalized and WB-scaled array
-    demosaic_kernel = cp.ElementwiseKernel(
+    demosaic_kernel = cupy.ElementwiseKernel(
         'raw float32 raw_data, int32 h, int32 w',
         'raw float32 rgb_out',
         '''
@@ -216,11 +224,11 @@ def gpu_demosaic_cupy_unpacked(unpacked, cancel_check: Optional[Callable[[], boo
     demosaic_kernel(raw_norm, h, w, rgb_gpu)
     
     # Apply Color Matrix Multiplication
-    m_color_gpu = cp.array(unpacked.rgb_cam, dtype=cp.float32)
-    rgb_srgb = cp.dot(rgb_gpu, m_color_gpu.T)
+    m_color_gpu = cupy.array(unpacked.rgb_cam, dtype=cupy.float32)
+    rgb_srgb = cupy.dot(rgb_gpu, m_color_gpu.T)
     
     # Clamp to [0, 1]
-    rgb_srgb = cp.clip(rgb_srgb, 0.0, 1.0)
+    rgb_srgb = cupy.clip(rgb_srgb, 0.0, 1.0)
     
     # BT.709 Gamma Curve
     pwr = 1.0 / 2.222
@@ -237,17 +245,17 @@ def gpu_demosaic_cupy_unpacked(unpacked, cancel_check: Optional[Callable[[], boo
     g4 = g2 * (1 / pwr - 1)
     
     mask = rgb_srgb < g3
-    rgb_gamma = cp.where(
+    rgb_gamma = cupy.where(
         mask,
         rgb_srgb * ts,
-        (1.0 + g4) * cp.power(cp.maximum(rgb_srgb, 1e-12), pwr) - g4
+        (1.0 + g4) * cupy.power(cupy.maximum(rgb_srgb, 1e-12), pwr) - g4
     )
     
     # Scale and convert to uint8
-    rgb_final = cp.clip(rgb_gamma * 255.0 + 0.5, 0, 255).astype(cp.uint8)
+    rgb_final = cupy.clip(rgb_gamma * 255.0 + 0.5, 0, 255).astype(cupy.uint8)
     
     # Download result to CPU
-    return cp.asnumpy(rgb_final)
+    return cupy.asnumpy(rgb_final)
 
 
 def try_gpu_decode_from_unpacked(
@@ -275,15 +283,14 @@ def try_gpu_decode_from_unpacked(
                     "GPU Processor: CuPy demosaic only supports RGGB; trying PyTorch for %s.",
                     unpacked.pat_str,
                 )
-                try:
-                    import torch
+                if _HAS_TORCH:
                     if torch.cuda.is_available():
                         backend = "pytorch_cuda"
                     elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
                         backend = "pytorch_mps"
                     else:
                         return None
-                except ImportError:
+                else:
                     return None
 
             if backend == "pytorch_cuda":
