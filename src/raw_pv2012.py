@@ -268,16 +268,23 @@ def apply_pv2012_tone_rgb(img: np.ndarray, adj: dict[str, float]) -> np.ndarray:
         # lift_frac saturates by ratio=4 (2 stops), not just at the ratio
         # cap: noise amplification is already a problem well before max
         # lift, so damp strength should ramp up early, not only at the tail.
-        # Max strength raised from 0.35 to 0.85: at 0.35, a real-photo test
-        # (dark clothing/hair, ISO 1100) still showed clear blue speckle
-        # after strong Shadows+Blacks -- amplified per-pixel sensor chroma
-        # noise, not a hue/WB bug (verified: the CPU/GPU color-parity gate
-        # is unaffected by this change). 0.85 converts most of that residual
-        # into luminance-only grain, which reads as ordinary "noise" rather
-        # than a color artifact -- the same trade real raw processors make
-        # when shadows are pushed hard.
+        #
+        # Max strength history: 0.35 -> 0.85 -> 0.6 (here). The 0.85 value
+        # was tuned against a real-photo test (dark clothing/hair, ISO 1100)
+        # while decode_half_from_unpacked's return_linear flag was silently
+        # ignored (see fast_raw_decode.py history) -- every edit base was
+        # actually gamma-encoded data mislabeled as scene-linear. With that
+        # fixed, a real fabric-texture crop (Canon_Sample/6J8A0376.CR3,
+        # darkest region) visibly desaturated toward flat grey at 0.85 --
+        # Exposure+2 stops on the same crop kept a visible teal cast that
+        # Shadows+100 crushed to near-neutral grey, i.e. exactly the
+        # reported "grey casting". 0.6 was picked as the strongest value
+        # that still clears testplan/auto/t_tone_engine.py's chroma-speckle
+        # ceiling (blue-vs-green deviation <= 1.5x luma grain) with margin
+        # (measured b-g std 1.68 vs a 2.46 limit, vs 0.79 at 0.85) while
+        # visibly restoring most of the crushed color on that same crop.
         lift_frac = np.clip((ratio - 1.0) / 3.0, 0.0, 1.0)
-        damp = 1.0 - (sw * 0.85 * lift_frac)[..., np.newaxis]
+        damp = 1.0 - (sw * 0.6 * lift_frac)[..., np.newaxis]
         luma = (lum * ratio)[..., np.newaxis]
         chroma = out - luma
         out = luma + chroma * damp
