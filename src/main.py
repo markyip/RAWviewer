@@ -1146,6 +1146,14 @@ def _lazy_import_heavy_modules(splash=None):
     except Exception:
         pass
     
+    _update_splash("Loading GPU RAW backend...")
+    try:
+        # Pre-import to ensure PyTorch and OpenMP are initialized on the main thread,
+        # preventing fatal aborts if a background worker imports it first.
+        import gpu_raw_processor
+    except Exception:
+        pass
+
     _update_splash("Loading AI search engine...")
     try:
         from semantic_search import SemanticImageIndex as _SemanticImageIndex
