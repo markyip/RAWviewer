@@ -41,6 +41,7 @@ run "rating bottom bar" testplan/auto/t_rating_bottom_bar.py
 run "adjust loading overlay" testplan/auto/t_adjust_loading_overlay.py
 run "dodge & burn reset" testplan/auto/t_dodge_burn_reset.py
 run "filmstrip hidden in editor" testplan/auto/t_filmstrip_editor_hidden.py
+run "gallery closes editor" testplan/auto/t_gallery_closes_editor.py
 
 if [ "$FAST" = "0" ]; then
   # Perf first: it must measure on a quiet machine, not one still hot from
