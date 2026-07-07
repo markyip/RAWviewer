@@ -833,6 +833,17 @@ def try_fast_raw_decode(
                 return out
                 
         try:
+            # torch/kornia must never be imported for the first time on this
+            # (background) thread -- macOS aborts the process if PyTorch's
+            # OpenMP runtime initializes off the main thread. The main thread
+            # imports gpu_raw_processor right after showing the window
+            # (torch_bootstrap.py); wait for that here instead of importing
+            # it ourselves. A timeout falls back to CPU decode below via the
+            # existing `except Exception` path, same as any other GPU-decode
+            # failure.
+            import torch_bootstrap
+            if not torch_bootstrap.wait_for_gpu_backend_ready(timeout=10.0):
+                raise RuntimeError("GPU backend not ready within timeout")
             from gpu_raw_processor import try_gpu_decode_from_unpacked
             gpu_out = try_gpu_decode_from_unpacked(unpacked, cancel_check=cancel_check, return_linear=return_linear)
             if gpu_out is not None:

@@ -28,7 +28,7 @@ run "compile check" -m py_compile \
   src/main.py src/fast_raw_decode.py src/unified_image_processor.py \
   src/raw_pv2012.py src/raw_adjustments.py src/raw_edit_pipeline.py \
   src/image_cache.py src/image_load_manager.py src/gpu_raw_processor.py \
-  src/perf_metrics.py src/enhanced_raw_processor.py src/common_image_loader.py
+  src/perf_metrics.py src/enhanced_raw_processor.py src/common_image_loader.py src/torch_bootstrap.py
 
 run "tone engine invariants" testplan/auto/t_tone_engine.py
 run "xmp round-trip" testplan/auto/t_xmp_roundtrip.py
