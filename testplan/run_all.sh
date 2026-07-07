@@ -28,7 +28,7 @@ run "compile check" -m py_compile \
   src/main.py src/fast_raw_decode.py src/unified_image_processor.py \
   src/raw_pv2012.py src/raw_adjustments.py src/raw_edit_pipeline.py \
   src/image_cache.py src/image_load_manager.py src/gpu_raw_processor.py \
-  src/perf_metrics.py
+  src/perf_metrics.py src/enhanced_raw_processor.py src/common_image_loader.py
 
 run "tone engine invariants" testplan/auto/t_tone_engine.py
 run "xmp round-trip" testplan/auto/t_xmp_roundtrip.py
@@ -48,6 +48,7 @@ run "half decode return_linear" testplan/auto/t_half_decode_return_linear.py
 run "shadow edge-aware damp" testplan/auto/t_shadow_edge_aware_damp.py
 run "shadow smoothed ratio" testplan/auto/t_shadow_smoothed_ratio.py
 run "channel tone curve (RGB Standard mode)" testplan/auto/t_channel_tone_curve.py
+run "gallery thumbnail cold-decode perf" testplan/auto/t_gallery_thumb_perf.py
 
 if [ "$FAST" = "0" ]; then
   # Perf first: it must measure on a quiet machine, not one still hot from

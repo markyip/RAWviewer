@@ -328,10 +328,21 @@ def _thumbnail_via_qimage_reader(file_path: str, max_size: int, auto_transform: 
         return None
 
 
-def extract_previews_via_tiff_parse(file_path: str) -> list[bytes]:
-    """Parse TIFF structure to find all JPEG preview offsets and lengths accurately."""
+def extract_previews_via_tiff_parse(file_path: str, max_size: int = 0) -> list[bytes]:
+    """Parse TIFF structure to find embedded JPEG previews and return the one
+    to use for `max_size` (0 = full quality, i.e. the largest available).
+
+    Many RAW formats (e.g. Sony ARW) embed 2-3 previews of very different
+    sizes (thumb / medium / near-full-sensor). Reading and decoding the
+    largest one (often 20-40MP, several MB) to produce a 512px gallery tile
+    wastes ~10x the decode time and several MB of I/O for no visual benefit
+    -- it gets downsampled either way. So this only *fully* reads the JPEG
+    segment it actually intends to return; every other candidate is sized
+    up from a cheap <=64KB header read (JPEG SOF marker is always near the
+    start of the segment).
+    """
     import struct
-    previews = []
+    candidates: list[tuple[int, int, int, int, int, bytes]] = []
     try:
         with open(file_path, "rb") as f:
             header = f.read(8)
@@ -408,21 +419,47 @@ def extract_previews_via_tiff_parse(file_path: str) -> list[bytes]:
                                     sub_ifd_offsets.extend(offsets)
                                 f.seek(current_pos)
                 
-                if jpeg_offset is not None and jpeg_length is not None:
-                    # Read the JPEG bytes
+                if jpeg_offset is not None and jpeg_length is not None and jpeg_length > 0:
+                    # Cheap sizing read only -- the full segment is read once,
+                    # below, for whichever single candidate is actually chosen.
+                    current_pos = f.tell()
                     f.seek(jpeg_offset)
-                    jpeg_bytes = f.read(jpeg_length)
-                    if len(jpeg_bytes) == jpeg_length:
-                        previews.append(jpeg_bytes)
-                
+                    header_chunk = f.read(min(jpeg_length, 65536))
+                    f.seek(current_pos)
+                    dims = get_jpeg_dimensions(header_chunk)
+                    if dims is not None:
+                        w, h = dims
+                        candidates.append((w * h, w, h, jpeg_offset, jpeg_length, header_chunk))
+
                 # Add sub-IFDs to visit list
                 for sub_offset in sub_ifd_offsets:
                     if sub_offset != 0 and sub_offset not in visited_offsets:
                         ifds_to_visit.append(sub_offset)
-                        
+
+            if not candidates:
+                return []
+
+            # max_size>0: cheapest preview that still covers the request (no
+            # point decoding a 32MP preview for a 512px tile). max_size==0:
+            # caller wants the best quality available (e.g. full single-image
+            # preview), so keep the old "largest wins" behavior.
+            if max_size > 0:
+                sufficient = [c for c in candidates if max(c[1], c[2]) >= max_size]
+                chosen = min(sufficient, key=lambda c: c[0]) if sufficient else max(candidates, key=lambda c: c[0])
+            else:
+                chosen = max(candidates, key=lambda c: c[0])
+
+            _, _, _, jpeg_offset, jpeg_length, header_chunk = chosen
+            if len(header_chunk) >= jpeg_length:
+                return [header_chunk[:jpeg_length]]
+            f.seek(jpeg_offset)
+            jpeg_bytes = f.read(jpeg_length)
+            if len(jpeg_bytes) == jpeg_length:
+                return [jpeg_bytes]
+            return []
     except Exception:
         pass
-    return previews
+    return []
 
 
 def extract_embedded_jpeg_by_scan(file_path: str, max_size: int) -> Optional[np.ndarray]:
@@ -476,7 +513,7 @@ def _extract_embedded_jpeg_by_scan_impl(file_path: str, max_size: int) -> Option
                 return None
 
         # Try TIFF parsing first
-        tiff_previews = extract_previews_via_tiff_parse(file_path)
+        tiff_previews = extract_previews_via_tiff_parse(file_path, max_size)
         if tiff_previews:
             candidates = []
             for jpeg_bytes in tiff_previews:
@@ -968,7 +1005,13 @@ class EXIFExtractor(QObject):
                             break
                         except: pass
 
-            # Second pass: If it's a RAW file, use rawpy to verify dimensions and orientation (flip)
+            # Second pass: If it's a RAW file, use rawpy to verify dimensions and
+            # orientation (flip), and -- while the file is already open -- also
+            # resolve the embedded-preview orientation fallback in the SAME
+            # rawpy.imread() call. These used to be two separate opens (one here,
+            # one in the block below), and each rawpy.imread() on a RAW file is a
+            # full LibRaw parse (tens of ms even for embedded-preview-only use) --
+            # doubling that cost on every cold gallery thumbnail for no reason.
             import common_image_loader
             if common_image_loader.is_raw_file(file_path):
                 try:
@@ -982,9 +1025,10 @@ class EXIFExtractor(QObject):
                             # EXIF Orient: 1=0, 3=180, 8=90CCW, 6=90CW
                             flip_map = {0: 1, 3: 3, 5: 8, 6: 6}
                             orientation = flip_map.get(sizes.flip, sizes.flip)
-                            if os.environ.get("RAWVIEWER_VERBOSE_ORIENTATION_LOGS") == "1":
-                                # print(f"[ORIENTATION] EXIFExtractor: Falling back to LibRaw flip={sizes.flip} -> Orientation {orientation} for {os.path.basename(file_path)}")
-                                pass
+                        if orientation <= 1:
+                            embedded_o = _orientation_from_embedded_preview(file_path, raw_object)
+                            if embedded_o not in (1, orientation):
+                                orientation = embedded_o
                     else:
                         yield_if_current_task_active()
                         with _rawpy_global_lock:
@@ -995,14 +1039,12 @@ class EXIFExtractor(QObject):
                                 if orientation == 1 and sizes.flip != 0:
                                     flip_map = {0: 1, 3: 3, 5: 8, 6: 6}
                                     orientation = flip_map.get(sizes.flip, sizes.flip)
+                                if orientation <= 1:
+                                    embedded_o = _orientation_from_embedded_preview(file_path, raw)
+                                    if embedded_o not in (1, orientation):
+                                        orientation = embedded_o
                 except Exception:
                     pass
-
-            # When container EXIF lacks orientation, read it from the embedded JPEG preview (Sony ARW, etc.).
-            if common_image_loader.is_raw_file(file_path) and orientation <= 1:
-                embedded_o = _orientation_from_embedded_preview(file_path, raw_object)
-                if embedded_o not in (1, orientation):
-                    orientation = embedded_o
 
             # Third pass: If dimensions are still 0 (e.g. non-RAW missing tags), use QImageReader (fast header read)
             if original_width <= 0 or original_height <= 0:
