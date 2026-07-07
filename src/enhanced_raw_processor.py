@@ -51,15 +51,14 @@ from image_load_manager import yield_if_current_task_active
 _rawpy_global_lock = threading.Lock()
 _heavy_fallback_semaphore = threading.Semaphore(8)
 
-# RAW formats where the lock-free byte-scan (TIFF-parse) extractor reliably yields
-# a correctly oriented embedded preview. Verified on real files (Sony ARW: 15/15,
-# Nikon NEF: 11/11 orientation+aspect match vs LibRaw; 0 failures). Other formats
-# (Canon CR3, DNG, Olympus ORF, Fuji RAF, Panasonic RW2, Hasselblad 3FR) return
-# None from byte-scan, so routing them here would just fall back to LibRaw anyway
-# — but we keep the allowlist tight to avoid any orientation surprises on formats
-# we have not verified (e.g. Canon CR2, whose byte-scan previews can lack the
-# orientation tag). LibRaw stays first for everything not listed here.
-_BYTESCAN_FIRST_EXTS = frozenset({".arw", ".nef"})
+# RAW formats where the lock-free byte-scan extractor reliably yields a correctly
+# oriented embedded preview (finalize_index_thumbnail_array heals container EXIF).
+# Verified vs LibRaw: Sony ARW 15/15, Nikon NEF 36/36, Canon CR3 23/23 (BMFF uuid
+# box JPEG scan). Other formats (DNG, ORF, RAF, RW2, Hasselblad 3FR) still return
+# None from byte-scan and fall through to LibRaw. Canon CR2 is not listed — its
+# TIFF-parse previews can lack the orientation tag. LibRaw stays first for
+# everything not listed here.
+_BYTESCAN_FIRST_EXTS = frozenset({".arw", ".nef", ".cr3"})
 
 
 def _bytescan_first_enabled() -> bool:
@@ -569,7 +568,18 @@ def _extract_embedded_jpeg_by_scan_impl(file_path: str, max_size: int) -> Option
                             w, h, os.path.basename(file_path)
                         )
                         return decoded
-        # TIFF parse failed or yielded no decodable preview; cache as miss and return None
+        # Canon CR3 (BMFF ftyp crx): preview JPEG lives in uuid boxes, not TIFF IFD.
+        if os.path.splitext(file_path)[1].lower() == ".cr3":
+            cr3_thumb = _extract_bmff_uuid_embedded_jpeg(file_path, max_size)
+            if cr3_thumb is not None:
+                import logging
+                logging.getLogger(__name__).info(
+                    "[BMFF_UUID] Decoded CR3 preview for %s shape=%s",
+                    os.path.basename(file_path),
+                    getattr(cr3_thumb, "shape", cr3_thumb),
+                )
+                return cr3_thumb
+        # TIFF / BMFF parse failed or yielded no decodable preview; cache as miss and return None
         with _embedded_scan_miss_lock:
             if len(_embedded_scan_miss_cache) >= _embedded_scan_miss_cache_max:
                 _embedded_scan_miss_cache.clear()
