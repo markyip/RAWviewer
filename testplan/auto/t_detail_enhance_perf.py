@@ -1,22 +1,30 @@
 #!/usr/bin/env python3
 """Regression guard for the detail-enhancement (Sharpness/Clarity/Defringe)
-speed fix.
+speed fix, including the row-band thread-parallel pipeline.
 
 Root cause of a real "low-res preview sits on screen for 10+ seconds before
 the full-res image pops in" bug: apply_adjustments_to_rgb's detail-enhance
 stage (Sharpness/Clarity/Defringe, all of raw_detail_enhance.py) took 7.5s+
-on a real 32MP image with typical Lightroom-style edits applied, because:
+on a real 32MP image with typical Lightroom-style edits applied. Three
+rounds of fixes, same file/settings, median steady-state:
   1. np.max/min(img, axis=-1) is ~8x slower than an elementwise 3-way chain
-     for a size-3 last axis (raw_detail_enhance.py, raw_tone_recovery.py,
-     raw_adjustments.py all had this).
-  2. Clarity's local-contrast blur (sigma=10, inherently low-frequency) was
-     computed at full resolution instead of downsampled.
+     for a size-3 last axis; Clarity's blur (sigma=10) computed at full res
+     instead of downsampled.                              7540ms -> 4964ms
+  2. Broadcasting a (H,W,1) factor against (H,W,3) is slower than a
+     per-channel loop with a sliced out=; skip a redundant astype() copy.
+                                                             4964ms -> 4300ms
+  3. Row-band thread parallelism: every stage is per-pixel except detail-
+     enhance's small-radius Gaussian blurs, so splitting rows across
+     threads with padding covering those blur radii (numpy/cv2 release the
+     GIL, so plain threads get real parallelism) -- 4300ms -> 2222ms.
 
-Checks both the speed budget and that the downsample-blur approximation
-(the one behavior change, Clarity's blur) stays within a small, previously
-measured error bound (max abs diff 8/255, mean ~0.026/255 on real edit
-settings) -- not a byte-exact regression gate like the axis-order fix
-would be, since it's a deliberate, tiny quality/speed tradeoff.
+Checks the speed budget and that approximation error (Clarity's downsample
+blur, plus a small additional per-band grid-alignment effect from step 3)
+stays within a previously measured bound -- not a byte-exact regression
+gate, since these are deliberate, tiny, verified-imperceptible tradeoffs
+(the banding-added error is NOT concentrated at band boundaries -- verified
+manually against real decoded image content, not narrated here since that
+needs a real RAW file this suite doesn't require).
 """
 import os
 import sys
@@ -27,6 +35,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "src"))
 import numpy as np  # noqa: E402
 
 FAILURES = []
+GOLDEN_ARW = "/Volumes/Development/Manchester/DSC01089.ARW"
 
 
 def check(name, ok, detail=""):
@@ -59,7 +68,7 @@ def main() -> int:
     elapsed_s = time.perf_counter() - t0
     check(
         "32MP detail-enhance-heavy edit completes well under the pre-fix ~7.5s baseline",
-        elapsed_s < 5.5,
+        elapsed_s < 3.5,
         f"{elapsed_s:.2f}s",
     )
     check("output shape preserved", out.shape == img.shape)
@@ -73,6 +82,53 @@ def main() -> int:
         "output stays in valid uint8 range",
         small_out.min() >= 0 and small_out.max() <= 255,
     )
+
+    # Banding correctness: random noise can't reveal blur-seam artifacts (no
+    # spatial structure to blur), so this needs real decoded image content.
+    if os.path.isfile(GOLDEN_ARW):
+        import rawpy
+
+        from raw_adjustments import (
+            _apply_adjustments_to_srgb_banded,
+            _apply_adjustments_to_srgb_core,
+        )
+
+        with rawpy.imread(GOLDEN_ARW) as raw:
+            rgb = raw.postprocess(use_camera_wb=True, half_size=True, output_bps=8)
+
+        merged = dict(adj)
+        ref = _apply_adjustments_to_srgb_core(
+            rgb.astype(np.float32) / 255.0, merged
+        )
+        ref_u8 = (np.clip(ref, 0.0, 1.0) * 255.0).astype(np.uint8)
+
+        for nw in (2, 4, 8):
+            banded = _apply_adjustments_to_srgb_banded(rgb, merged, nw)
+            diff = np.abs(banded.astype(np.int16) - ref_u8.astype(np.int16))
+            check(
+                f"banded (n_workers={nw}) matches single-pass within the accepted approximation bound",
+                diff.max() <= 10,
+                f"max={diff.max()} mean={diff.mean():.4f}",
+            )
+
+        h = rgb.shape[0]
+        band_h = -(-h // 4)
+        diff4 = np.abs(
+            _apply_adjustments_to_srgb_banded(rgb, merged, 4).astype(np.int16)
+            - ref_u8.astype(np.int16)
+        ).max(axis=-1)
+        near = np.zeros(h, dtype=bool)
+        for b in (band_h, 2 * band_h, 3 * band_h):
+            near[max(0, b - 20) : min(h, b + 20)] = True
+        near_rate = (diff4[near] > 0).mean() if near.any() else 0.0
+        far_rate = (diff4[~near] > 0).mean() if (~near).any() else 0.0
+        check(
+            "banding error is not concentrated at band boundaries (not a visible seam)",
+            near_rate <= far_rate * 2.0 + 0.05,
+            f"near_boundary_rate={near_rate:.3f} far_from_boundary_rate={far_rate:.3f}",
+        )
+    else:
+        print(f"SKIP  banding correctness check: golden file not present: {GOLDEN_ARW}")
 
     print(f"\n{len(FAILURES)} failure(s)")
     return 1 if FAILURES else 0
