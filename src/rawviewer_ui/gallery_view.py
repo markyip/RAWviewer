@@ -2287,7 +2287,7 @@ class JustifiedGallery(QWidget):
         interval = 50 if not self._is_scrolling_fast else 150
         if self._is_actively_scrolling() and not self._active_tasks:
             interval = max(interval, 120)
-        if not self._load_timer.isActive():
+        if self._load_timer is not None and not self._load_timer.isActive():
             self._load_timer.start(interval)
 
         # Debounce: after scrolling stops, force a final load near thumb position.
@@ -2836,7 +2836,7 @@ class JustifiedGallery(QWidget):
             if idx not in self._visible_widgets:
                 if created_widgets >= max_widgets:
                     # Defer widget creation but keep updating slots that already exist.
-                    if not self._load_timer.isActive():
+                    if self._load_timer is not None and not self._load_timer.isActive():
                         self._load_timer.start(16)
                     continue
                 w = self._widget_pool.pop() if self._widget_pool else ThumbnailLabel(self)
@@ -3145,7 +3145,7 @@ class JustifiedGallery(QWidget):
             return
         for path, priority, stages, *rest in load_tasks:
             if scheduled >= max_tasks:
-                if not self._load_timer.isActive():
+                if self._load_timer is not None and not self._load_timer.isActive():
                     self._load_timer.start(16)
                 break
             if priority != Priority.CURRENT:
@@ -3219,7 +3219,7 @@ class JustifiedGallery(QWidget):
                 self._idle_preload_timer.start(1000)  # 1 second of sustained idle
         elif scheduled_tasks == 0 and len(self._active_tasks) > 0:
             self._idle_preload_timer.stop()
-            if not self._load_timer.isActive():
+            if self._load_timer is None or not self._load_timer.isActive():
                 self._request_load_visible_images(200)
         else:
             self._idle_preload_timer.stop()
