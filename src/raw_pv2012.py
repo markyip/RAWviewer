@@ -289,16 +289,23 @@ def apply_pv2012_tone_rgb(img: np.ndarray, adj: dict[str, float]) -> np.ndarray:
         # multi-pixel real structure (fold lines, weave) intact, so edge
         # detection on *that* actually separates the two -- verified
         # visually (scripts/shadow_tuning_*.py): fold lines read as bright
-        # ridges in the edge map, flat/noisy fabric reads dark. Damp is
-        # halved (not zeroed) at a real edge, not removed entirely: some
-        # noise rides along real structure too, and full damp removal
-        # there would let speckle back in right where it's most visible
-        # against contrast.
+        # ridges in the edge map, flat/noisy fabric reads dark.
+        #
+        # Edge multiplier history: 0.5 -> 1.0 (full damp removal at max
+        # edge confidence). 0.5 (halved, not zeroed, at a real edge) was
+        # the cautious first value; a real-file sweep (Canon fabric crop +
+        # a Sony ARW) showed 1.0 recovers meaningfully more color on both
+        # (sat_proxy +19% and +5.5% respectively over the 0.5 value) with
+        # the flat/noisy region completely unaffected either way (a
+        # synthetic hard-edge-vs-flat-noise test held flat_chroma constant
+        # at 2.32-2.33x its no-lift baseline across 0.5-1.0 -- the edge
+        # weight is ~0 there regardless, so edge_mult only ever acts where
+        # real structure was actually detected).
         from raw_chroma_denoise import _luma_edge_weight, apply_guided_filter
 
         smooth_luma = apply_guided_filter(luma_2d, luma_2d, 10, 0.003)
         edge_w = _luma_edge_weight(smooth_luma.astype(np.float32), soft=0.008)
-        damp_strength = 0.6 * (1.0 - edge_w * 0.5)
+        damp_strength = 0.6 * (1.0 - edge_w)
 
         damp = 1.0 - (sw * damp_strength * lift_frac)[..., np.newaxis]
         luma = luma_2d[..., np.newaxis]
