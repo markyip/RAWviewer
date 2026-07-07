@@ -88,10 +88,13 @@ def uses_recovery_tone_map(adj: dict[str, float] | None) -> bool:
         return False
     if float(adj.get(RECOVERY_BASELINE_KEY, 0.0)) <= 0.5:
         return False
-    from raw_tone_curve import TONE_CURVE_SERIAL_KEY
+    from raw_tone_curve import CHANNEL_CURVE_KEYS, TONE_CURVE_SERIAL_KEY
 
     if str(adj.get(TONE_CURVE_SERIAL_KEY, "") or "").strip():
         return False
+    for key in CHANNEL_CURVE_KEYS:
+        if str(adj.get(key, "") or "").strip():
+            return False
     for key in _PV2012_RECOVERY_EXCLUSIVE_KEYS:
         default = float(DEFAULT_ADJUSTMENTS.get(key, 0.0))
         if abs(float(adj.get(key, default)) - default) > 1e-4:
@@ -260,8 +263,13 @@ def read_as_shot_temperature(image_path: str) -> float:
     return result
 
 
-def parse_tone_curve_pv2012_from_xmp(xmp_path: str) -> str:
-    """Read crs:ToneCurvePV2012 point list → 'x,y;x,y' serialized string."""
+def _parse_point_curve_from_xmp(xmp_path: str, tag_name: str) -> str:
+    """Read a crs:<tag_name> point list → 'x,y;x,y' serialized string.
+
+    Shared by the main luminance curve (ToneCurvePV2012) and the three
+    Standard-mode channel curves (ToneCurvePV2012Red/Green/Blue) -- same
+    XMP shape (an rdf:Seq of "x, y" li entries), different tag name.
+    """
     if not xmp_path or not os.path.isfile(xmp_path):
         return ""
     from raw_tone_curve import serialize_tone_curve_points
@@ -278,7 +286,7 @@ def parse_tone_curve_pv2012_from_xmp(xmp_path: str) -> str:
             for child in desc:
                 tag = child.tag
                 local_key = tag.split("}")[-1] if "}" in tag else tag.split(":")[-1]
-                if local_key != "ToneCurvePV2012":
+                if local_key != tag_name:
                     continue
                 for li in child.findall(".//rdf:li", ns):
                     if not li.text:
@@ -293,6 +301,11 @@ def parse_tone_curve_pv2012_from_xmp(xmp_path: str) -> str:
     except Exception:
         return ""
     return serialize_tone_curve_points(points)
+
+
+def parse_tone_curve_pv2012_from_xmp(xmp_path: str) -> str:
+    """Read crs:ToneCurvePV2012 point list → 'x,y;x,y' serialized string."""
+    return _parse_point_curve_from_xmp(xmp_path, "ToneCurvePV2012")
 
 
 def parse_dodge_burn_mask_from_xmp(xmp_path: str) -> str:
@@ -333,6 +346,21 @@ def load_adjustments_for_file(image_path: str) -> Dict[str, float]:
         serial = parse_tone_curve_pv2012_from_xmp(xmp_path)
         if serial:
             adj[TONE_CURVE_SERIAL_KEY] = serial
+    if xmp_path and os.path.isfile(xmp_path):
+        from raw_tone_curve import (
+            TONE_CURVE_BLUE_KEY,
+            TONE_CURVE_GREEN_KEY,
+            TONE_CURVE_RED_KEY,
+        )
+
+        for key, tag in (
+            (TONE_CURVE_RED_KEY, "ToneCurvePV2012Red"),
+            (TONE_CURVE_GREEN_KEY, "ToneCurvePV2012Green"),
+            (TONE_CURVE_BLUE_KEY, "ToneCurvePV2012Blue"),
+        ):
+            serial = _parse_point_curve_from_xmp(xmp_path, tag)
+            if serial:
+                adj[key] = serial
     if xmp_path and os.path.isfile(xmp_path):
         from raw_dodge_burn import MASK_KEY
 
@@ -411,10 +439,13 @@ def is_default_adjustments(adj: Dict[str, float] | None) -> bool:
     if not adj:
         return True
     from raw_dodge_burn import MASK_KEY
-    from raw_tone_curve import TONE_CURVE_SERIAL_KEY
+    from raw_tone_curve import CHANNEL_CURVE_KEYS, TONE_CURVE_SERIAL_KEY
 
     if str(adj.get(TONE_CURVE_SERIAL_KEY, "") or "").strip():
         return False
+    for key in CHANNEL_CURVE_KEYS:
+        if str(adj.get(key, "") or "").strip():
+            return False
     if str(adj.get(MASK_KEY, "") or "").strip():
         return False
     ref_temp = wb_reference_temperature(adj)
@@ -550,16 +581,29 @@ def write_xmp_adjustments(xmp_path: str, adj: Dict[str, float]) -> None:
         desc.set(f"{{{CRS_NS}}}DefringePurpleAmount", amt)
         desc.set(f"{{{CRS_NS}}}DefringeGreenAmount", amt)
 
-    from raw_tone_curve import TONE_CURVE_SERIAL_KEY, deserialize_tone_curve_points
+    from raw_tone_curve import (
+        TONE_CURVE_BLUE_KEY,
+        TONE_CURVE_GREEN_KEY,
+        TONE_CURVE_RED_KEY,
+        TONE_CURVE_SERIAL_KEY,
+        deserialize_tone_curve_points,
+    )
 
-    serial = str(merged.get(TONE_CURVE_SERIAL_KEY, "") or "")
-    points = deserialize_tone_curve_points(serial)
-    if len(points) >= 2:
-        tc = ET.SubElement(desc, f"{{{CRS_NS}}}ToneCurvePV2012")
+    def _write_point_curve(key: str, tag: str) -> None:
+        serial = str(merged.get(key, "") or "")
+        points = deserialize_tone_curve_points(serial)
+        if len(points) < 2:
+            return
+        tc = ET.SubElement(desc, f"{{{CRS_NS}}}{tag}")
         seq = ET.SubElement(tc, f"{{{RDF_NS}}}Seq")
         for x, y in points:
             li = ET.SubElement(seq, f"{{{RDF_NS}}}li")
             li.text = f"{int(round(x))}, {int(round(y))}"
+
+    _write_point_curve(TONE_CURVE_SERIAL_KEY, "ToneCurvePV2012")
+    _write_point_curve(TONE_CURVE_RED_KEY, "ToneCurvePV2012Red")
+    _write_point_curve(TONE_CURVE_GREEN_KEY, "ToneCurvePV2012Green")
+    _write_point_curve(TONE_CURVE_BLUE_KEY, "ToneCurvePV2012Blue")
 
     from raw_dodge_burn import MASK_KEY
 

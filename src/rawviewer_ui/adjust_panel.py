@@ -34,7 +34,19 @@ from raw_adjustments import (
     recovery_baseline_slider_hints,
 )
 from raw_hsl import HSL_COLOR_NAMES
-from raw_tone_curve import TONE_CURVE_SERIAL_KEY
+from raw_tone_curve import (
+    TONE_CURVE_BLUE_KEY,
+    TONE_CURVE_GREEN_KEY,
+    TONE_CURVE_RED_KEY,
+    TONE_CURVE_SERIAL_KEY,
+)
+
+_CHANNEL_CURVE_KEYS_BY_NAME = {
+    "RGB": TONE_CURVE_SERIAL_KEY,
+    "R": TONE_CURVE_RED_KEY,
+    "G": TONE_CURVE_GREEN_KEY,
+    "B": TONE_CURVE_BLUE_KEY,
+}
 
 # Point-curve + parametric PV rows.
 _SHOW_TONE_CURVE_UI = True
@@ -609,6 +621,57 @@ class ImageAdjustPanelWidget(QWidget):
             self._btn_param.clicked.connect(lambda: (self._btn_param.setChecked(True), self._btn_point.setChecked(False), self._tone_curve_stack.setCurrentIndex(1)))
             
             self.sect_curve.add_widget(self._tone_curve_tabs)
+
+            # Standard-mode R/G/B channel selector (Lightroom/RawTherapee
+            # "Standard" style: each channel independently remapped, only
+            # meaningful for the Point curve, not the Parametric sliders).
+            self._channel_curve_cache: Dict[str, str] = {
+                "RGB": "",
+                "R": "",
+                "G": "",
+                "B": "",
+            }
+            self._current_curve_channel = "RGB"
+            self._channel_btns: Dict[str, QPushButton] = {}
+
+            channel_layout = QHBoxLayout()
+            channel_layout.setSpacing(0)
+            channel_style = """
+                QPushButton {
+                    background: #272219;
+                    color: #96897A;
+                    border: 1px solid #404040;
+                    padding: 4px 10px;
+                    font-size: 10px;
+                }
+                QPushButton:checked {
+                    background: #404040;
+                    color: #FFFFFF;
+                }
+                QPushButton#chan_RGB {
+                    border-top-left-radius: 4px;
+                    border-bottom-left-radius: 4px;
+                }
+                QPushButton#chan_B {
+                    border-top-right-radius: 4px;
+                    border-bottom-right-radius: 4px;
+                    border-left: none;
+                }
+                QPushButton#chan_R, QPushButton#chan_G {
+                    border-left: none;
+                }
+            """
+            for name in ("RGB", "R", "G", "B"):
+                btn = QPushButton(name)
+                btn.setObjectName(f"chan_{name}")
+                btn.setCheckable(True)
+                btn.setChecked(name == "RGB")
+                btn.setStyleSheet(channel_style)
+                btn.setCursor(Qt.CursorShape.PointingHandCursor)
+                btn.clicked.connect(lambda checked, n=name: self._on_curve_channel_selected(n))
+                channel_layout.addWidget(btn)
+                self._channel_btns[name] = btn
+            self._tone_curve_point_layout.addLayout(channel_layout)
 
             self._tone_curve_row = ToneCurveEditorRow()
             self._tone_curve_row.points_changed.connect(self._on_tone_curve_changed)
@@ -1189,9 +1252,12 @@ class ImageAdjustPanelWidget(QWidget):
                 float(merged.get("LensCorrectionEnabled", 0.0)) > 0.5
             )
             if self._tone_curve_row is not None:
-                self._tone_curve_row.load_serial(
-                    str(merged.get(TONE_CURVE_SERIAL_KEY, "") or "")
-                )
+                for name, key in _CHANNEL_CURVE_KEYS_BY_NAME.items():
+                    self._channel_curve_cache[name] = str(merged.get(key, "") or "")
+                self._current_curve_channel = "RGB"
+                for chan, btn in self._channel_btns.items():
+                    btn.setChecked(chan == "RGB")
+                self._tone_curve_row.load_serial(self._channel_curve_cache["RGB"])
             for key in self._hsl_cache:
                 self._hsl_cache[key] = float(merged.get(key, 0.0))
             if hasattr(self, "_hsl_sliders"):
@@ -1278,9 +1344,13 @@ class ImageAdjustPanelWidget(QWidget):
             1.0 if lens_btn is not None and lens_btn.isChecked() else 0.0
         )
         if self._tone_curve_row is not None:
-            serial = self._tone_curve_row.serialized_points()
-            if serial:
-                out[TONE_CURVE_SERIAL_KEY] = serial
+            self._channel_curve_cache[self._current_curve_channel] = (
+                self._tone_curve_row.serialized_points()
+            )
+            for name, key in _CHANNEL_CURVE_KEYS_BY_NAME.items():
+                serial = self._channel_curve_cache.get(name, "")
+                if serial:
+                    out[key] = serial
         if hasattr(self, "_hsl_sliders"):
             self._flush_hsl_cache_from_sliders()
             for key, val in self._hsl_cache.items():
@@ -1373,6 +1443,26 @@ class ImageAdjustPanelWidget(QWidget):
         if self._block_emit:
             return
         self._emit_preview_and_save()
+
+    def _on_curve_channel_selected(self, name: str) -> None:
+        if self._tone_curve_row is None:
+            return
+        if name == self._current_curve_channel:
+            for chan, btn in self._channel_btns.items():
+                btn.setChecked(chan == name)
+            return
+        self._channel_curve_cache[self._current_curve_channel] = (
+            self._tone_curve_row.serialized_points()
+        )
+        self._current_curve_channel = name
+        for chan, btn in self._channel_btns.items():
+            btn.setChecked(chan == name)
+        was_blocked = self._block_emit
+        self._block_emit = True
+        try:
+            self._tone_curve_row.load_serial(self._channel_curve_cache.get(name, ""))
+        finally:
+            self._block_emit = was_blocked
 
     def _clear_recovery_baseline(self) -> None:
         if not self._recovery_baseline:

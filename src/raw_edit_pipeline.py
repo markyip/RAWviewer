@@ -434,13 +434,14 @@ def render_adjust_preview_uint8(
     previous call. Used exclusively by the interactive Adjust-panel preview
     path (_AdjustPreviewWorker in main.py).
     """
+    from raw_tone_curve import apply_channel_curves_encoded
     from raw_tone_recovery import _encode_srgb8
 
     merged = dict(DEFAULT_ADJUSTMENTS)
     merged.update(adj or {})
     processed = process_linear_edit_buffer_staged(rgb_image, merged, cache, preview=True)
     display = _apply_display_stage_staged(processed, merged, cache)
-    return _encode_srgb8(display)
+    return apply_channel_curves_encoded(_encode_srgb8(display), merged, 255.0)
 
 
 def _apply_display_color_adjustments(
@@ -457,11 +458,12 @@ def linear_to_display_uint8(img: np.ndarray, adj: dict[str, float] | None = None
     # the browse render, surfacing sensor noise ("grainy" report). One curve
     # everywhere = editor default is pixel-comparable with browse.
     from fast_raw_decode import _gamma_lut8
+    from raw_tone_curve import apply_channel_curves_encoded
 
     merged = dict(adj or {})
     display = _apply_display_stage(img, merged)
     idx = np.clip(display * 65535.0 + 0.5, 0, 65535).astype(np.uint16)
-    return _gamma_lut8()[idx]
+    return apply_channel_curves_encoded(_gamma_lut8()[idx], merged, 255.0)
 
 
 def linear_to_export_uint16_srgb(img: np.ndarray, adj: dict[str, float] | None = None) -> np.ndarray:
@@ -472,11 +474,12 @@ def linear_to_export_uint16_srgb(img: np.ndarray, adj: dict[str, float] | None =
     LibRaw/dcraw-derived pipeline does.)
     """
     from fast_raw_decode import gamma_curve16
+    from raw_tone_curve import apply_channel_curves_encoded
 
     merged = dict(adj or {})
     display = _apply_display_stage(img, merged)
     idx = np.clip(display * 65535.0 + 0.5, 0, 65535).astype(np.uint16)
-    return gamma_curve16()[idx]
+    return apply_channel_curves_encoded(gamma_curve16()[idx], merged, 65535.0)
 
 
 def _ensure_parent_dir(output_path: str) -> None:
