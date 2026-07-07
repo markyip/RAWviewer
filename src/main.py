@@ -7,13 +7,12 @@ import os
 # silently wrong results). This flag keeps envs that haven't re-run the build
 # script bootable; a properly built env never exercises it.
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
-try:
-    # EAGER IMPORT: Must import torch on the main GUI thread before any QRunnables
-    # or ProcessPools are spawned. Initializing PyTorch's OpenMP backend on a
-    # background thread on macOS causes __kmp_abort_process (Thread 17/22 Crash).
-    import torch
-except ImportError:
-    pass
+# torch/kornia are no longer imported eagerly here (that used to cost ~0.9s
+# before the window could even be constructed, on every launch). Import
+# ordering safety is now handled by torch_bootstrap: the main thread imports
+# the GPU backend right after the window is shown, and background decode
+# threads wait for that instead of ever importing it themselves. See
+# torch_bootstrap.py for the full rationale.
 import platform
 import ctypes
 import time
@@ -1159,13 +1158,10 @@ def _lazy_import_heavy_modules(splash=None):
     except Exception:
         pass
     
-    _update_splash("Loading GPU RAW backend...")
-    try:
-        # Pre-import to ensure PyTorch and OpenMP are initialized on the main thread,
-        # preventing fatal aborts if a background worker imports it first.
-        import gpu_raw_processor
-    except Exception:
-        pass
+    # GPU RAW backend (torch/kornia) import is deferred until right after the
+    # window is shown -- see torch_bootstrap.import_gpu_backend_on_main_thread()
+    # in main(). Background decode threads wait on that instead of importing
+    # it here, so the ~0.9s torch+kornia import no longer blocks first paint.
 
     _update_splash("Loading AI search engine...")
     try:
@@ -28911,6 +28907,13 @@ def main():
             QTimer.singleShot(0, viewer._restore_keyboard_focus)
             _schedule_startup_splash_dismiss(app, viewer, splash)
             safe_print("Splash screen closed, main window displayed", flush=True)
+
+            # Import the torch/kornia GPU decode backend now, on the main
+            # thread, right after the window is visible instead of before it
+            # was constructed. Background decode threads wait for this (see
+            # torch_bootstrap.py) rather than ever importing it themselves.
+            import torch_bootstrap
+            QTimer.singleShot(0, torch_bootstrap.import_gpu_backend_on_main_thread)
 
         # Run application
         logger.info("[MAIN] Starting Qt event loop")
