@@ -7488,6 +7488,34 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             except Exception:
                 pass
 
+        # A "clearly unsupported" failure while forced into full RAW-decode
+        # mode is very often a LibRaw demosaic-support gap for this specific
+        # file's compression (e.g. newer Nikon "High Efficiency" compressed
+        # NEF from Z8/Z9/Z6III/Z50II-generation bodies), not a corrupt file --
+        # the embedded JPEG preview for the same file typically still decodes
+        # fine, since that doesn't need LibRaw to demosaic anything. The RAW-
+        # mode toggle is a persistent, app-wide setting (not per-file), so
+        # without reverting it here, every subsequent navigation would also
+        # force a full decode and hit this same failure again. Auto-revert to
+        # embedded-JPEG mode and explain accurately instead of showing a
+        # "file is corrupt" dialog for a file that displays just fine.
+        if clearly_unsupported and is_raw_file(file_path):
+            settings = self.get_settings()
+            if not settings.value("use_embedded_jpeg_workflow", True, type=bool):
+                settings.setValue("use_embedded_jpeg_workflow", True)
+                self._update_raw_toggle_button_state()
+                self.status_bar.showMessage(
+                    f"{os.path.basename(file_path)}: this file's RAW compression isn't "
+                    f"supported by the current decoder -- showing the embedded preview instead.",
+                    8000,
+                )
+                try:
+                    self._invalidate_workflow_pixel_caches([file_path])
+                except Exception:
+                    pass
+                self.load_raw_image(file_path, force_reload=True)
+                return
+
         if clearly_unsupported:
             try:
                 from raw_file_extensions import get_supported_extensions
