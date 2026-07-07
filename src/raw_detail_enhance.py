@@ -16,7 +16,23 @@ def _gaussian_blur_luma(y: np.ndarray, sigma: float) -> np.ndarray:
     try:
         import cv2
 
-        return cv2.GaussianBlur(y, (0, 0), float(sigma))
+        sigma = float(sigma)
+        # A wide blur (e.g. Clarity's sigma=10) is inherently low-frequency,
+        # so it can't represent detail finer than its own radius -- doing it
+        # at full resolution is wasted work. Downsample 4x, blur at a
+        # correspondingly smaller sigma, upsample back: ~15x faster (measured
+        # 358ms -> 24ms at 32MP) with negligible error (mean abs diff
+        # ~0.0007, max ~0.014 on a 0-1 scale). Left alone for small sigmas
+        # (sharpness ~0.9, defringe ~1.5) where full-res detail matters and
+        # the blur is already cheap.
+        if sigma >= 4.0:
+            h, w = y.shape[:2]
+            small = cv2.resize(
+                y, (max(1, w // 4), max(1, h // 4)), interpolation=cv2.INTER_AREA
+            )
+            blurred_small = cv2.GaussianBlur(small, (0, 0), sigma / 4.0)
+            return cv2.resize(blurred_small, (w, h), interpolation=cv2.INTER_LINEAR)
+        return cv2.GaussianBlur(y, (0, 0), sigma)
     except Exception:
         return y
 
@@ -82,7 +98,10 @@ def apply_defringe(display_linear: np.ndarray, amount: float) -> np.ndarray:
     purple = np.clip(r + b - 2.0 * g, 0.0, None)
     green = np.clip(2.0 * g - r - b, 0.0, None)
     fringe = np.maximum(purple, green)
-    span = np.max(img, axis=-1, keepdims=True) - np.min(img, axis=-1, keepdims=True)
+    # np.max/min(img, axis=-1) is ~8x slower than a direct 3-way elementwise
+    # chain for a size-3 last axis (measured 356ms vs 45ms at 32MP) -- numpy's
+    # generic axis-reduce machinery doesn't specialize for this shape.
+    span = np.maximum(np.maximum(r, g), b) - np.minimum(np.minimum(r, g), b)
     color_mask = np.clip(fringe / (span + 1e-4), 0.0, 1.0)
 
     edge = np.abs(lum2d - _gaussian_blur_luma(lum2d, 1.5))[..., np.newaxis]

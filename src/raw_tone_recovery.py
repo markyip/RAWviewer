@@ -257,7 +257,10 @@ def process_linear_edr_rgb(
 
 
 def _hard_clip_mask(rgb_f: np.ndarray, lum: np.ndarray) -> np.ndarray:
-    spread = np.max(rgb_f, axis=-1) - np.min(rgb_f, axis=-1)
+    # np.max/min(rgb_f, axis=-1) is ~8x slower than a direct elementwise chain
+    # for a size-3 last axis (measured 356ms vs 45ms at 32MP).
+    r, g, b = rgb_f[..., 0], rgb_f[..., 1], rgb_f[..., 2]
+    spread = np.maximum(np.maximum(r, g), b) - np.minimum(np.minimum(r, g), b)
     return (lum >= _HARD_CLIP_LUM) & (spread < _HARD_CLIP_SPREAD)
 
 

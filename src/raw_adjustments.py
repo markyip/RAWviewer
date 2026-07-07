@@ -751,8 +751,11 @@ def _apply_adjustments_to_srgb(rgb_image: np.ndarray, adj: dict[str, float]) -> 
             sat_scale += sat_val / 100.0
 
         if abs(vib_val) > 1e-4:
-            max_val = np.max(img, axis=-1, keepdims=True)
-            min_val = np.min(img, axis=-1, keepdims=True)
+            # np.max/min(img, axis=-1) is ~8x slower than a direct elementwise
+            # chain for a size-3 last axis (measured 356ms vs 45ms at 32MP).
+            r_c, g_c, b_c = img[:, :, 0:1], img[:, :, 1:2], img[:, :, 2:3]
+            max_val = np.maximum(np.maximum(r_c, g_c), b_c)
+            min_val = np.minimum(np.minimum(r_c, g_c), b_c)
             s = (max_val - min_val) / (max_val + 1e-5)
             vib_factor = (vib_val / 100.0) * (1.0 - s)
             sat_scale += vib_factor
