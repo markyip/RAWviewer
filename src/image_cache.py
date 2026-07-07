@@ -568,52 +568,66 @@ class PersistentEXIFCache:
             return 0, 0
 
     def get(self, file_path: str) -> Optional[Dict[str, Any]]:
-        """Get cached EXIF data if still valid."""
+        """Get cached EXIF data if still valid.
+
+        Deliberately NOT under self.lock: this reads via the calling
+        thread's own thread-local connection (_get_connection()), and
+        SQLite WAL mode already lets multiple readers proceed concurrently
+        without blocking each other or a writer -- that's the entire reason
+        get_multiple() has a connection-per-thread design in the first
+        place. Wrapping this in the same process-wide lock used by
+        put()/flush() (which do need it, for the shared writer connection
+        and _pending_writes list) serialized every single-file EXIF read
+        across every thread in the app -- including background semantic
+        indexing's per-file extraction racing single-view navigation for
+        the same lock, which measured as multi-second navigation stalls on
+        real folders. timeout=30.0 on connection open already covers the
+        rare genuine SQLite-level WAL contention case.
+        """
         file_size, file_mtime = self._get_file_hash(file_path)
         if file_size == 0:
             return None
         cache_key = _exif_cache_path_key(file_path)
 
-        with self.lock:
-            try:
-                conn = self._get_connection()
-                cursor = conn.execute(
-                    "SELECT file_size, file_mtime, orientation, camera_make, camera_model, exif_data, "
-                    "capture_time, original_width, original_height, sensor_meta_ver "
-                    "FROM exif_cache WHERE file_path = ?",
-                    (cache_key,),
-                )
-                row = cursor.fetchone()
+        try:
+            conn = self._get_connection()
+            cursor = conn.execute(
+                "SELECT file_size, file_mtime, orientation, camera_make, camera_model, exif_data, "
+                "capture_time, original_width, original_height, sensor_meta_ver "
+                "FROM exif_cache WHERE file_path = ?",
+                (cache_key,),
+            )
+            row = cursor.fetchone()
 
-                if row and row[0] == file_size and row[1] == file_mtime:
-                    # Cache is valid
-                    exif_data = pickle.loads(row[5]) if row[5] else {}
-                    
-                    # Ensure consistent data (DB columns override/augment blob)
-                    result_capture_time = row[6]
-                    if result_capture_time and 'capture_time' not in exif_data:
-                         exif_data['capture_time'] = result_capture_time
-                    
-                    result_width = row[7]
-                    result_height = row[8]
-                    sensor_meta_ver = row[9] if len(row) > 9 else 0
-                    if sensor_meta_ver is None:
-                        sensor_meta_ver = 0
-                    if result_width: exif_data['original_width'] = result_width
-                    if result_height: exif_data['original_height'] = result_height
-                    
-                    return {
-                        'orientation': row[2],
-                        'camera_make': row[3],
-                        'camera_model': row[4],
-                        'exif_data': exif_data,
-                        'capture_time': result_capture_time,
-                        'original_width': result_width if result_width else exif_data.get('original_width'),
-                        'original_height': result_height if result_height else exif_data.get('original_height'),
-                        'raw_exif_sensor_meta_ver': int(sensor_meta_ver),
-                    }
-            except Exception:
-                pass
+            if row and row[0] == file_size and row[1] == file_mtime:
+                # Cache is valid
+                exif_data = pickle.loads(row[5]) if row[5] else {}
+
+                # Ensure consistent data (DB columns override/augment blob)
+                result_capture_time = row[6]
+                if result_capture_time and 'capture_time' not in exif_data:
+                     exif_data['capture_time'] = result_capture_time
+
+                result_width = row[7]
+                result_height = row[8]
+                sensor_meta_ver = row[9] if len(row) > 9 else 0
+                if sensor_meta_ver is None:
+                    sensor_meta_ver = 0
+                if result_width: exif_data['original_width'] = result_width
+                if result_height: exif_data['original_height'] = result_height
+
+                return {
+                    'orientation': row[2],
+                    'camera_make': row[3],
+                    'camera_model': row[4],
+                    'exif_data': exif_data,
+                    'capture_time': result_capture_time,
+                    'original_width': result_width if result_width else exif_data.get('original_width'),
+                    'original_height': result_height if result_height else exif_data.get('original_height'),
+                    'raw_exif_sensor_meta_ver': int(sensor_meta_ver),
+                }
+        except Exception:
+            pass
 
         return None
 
@@ -722,8 +736,11 @@ class PersistentEXIFCache:
         results = {}
         try:
             conn = self._get_connection()
-            # sqlite has a limit on the number of variables in a query
-            # Process in chunks of 500; do not hold lock across entire folder (6889+ files).
+            # sqlite has a limit on the number of variables in a query.
+            # Process in chunks of 450; no lock needed here (see get()'s
+            # docstring) -- this is a read-only query on the calling
+            # thread's own connection, and SQLite WAL mode already permits
+            # concurrent readers.
             for i in range(0, len(file_paths), 450):
                 chunk = file_paths[i : i + 450]
                 lookup: Dict[str, str] = {}
@@ -739,9 +756,8 @@ class PersistentEXIFCache:
                     f"exif_data, capture_time, original_width, original_height, sensor_meta_ver "
                     f"FROM exif_cache WHERE file_path IN ({placeholders})"
                 )
-                with self.lock:
-                    cursor = conn.execute(query, norm_keys)
-                    rows = cursor.fetchall()
+                cursor = conn.execute(query, norm_keys)
+                rows = cursor.fetchall()
 
                 for row in rows:
                     db_path = row[0]
