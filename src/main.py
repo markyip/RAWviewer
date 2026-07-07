@@ -18863,6 +18863,19 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self.update_status_bar()
         QTimer.singleShot(0, self._restore_keyboard_focus)
 
+    def _nef_he_compressed(self, file_path: str) -> bool:
+        """True if this NEF is Nikon HE/HE*-compressed (cached EXIF flag from
+        EXIFExtractor's proactive maker-note detection). These are editable
+        via an embedded-JPEG edit base (see decode_raw_edit_base), unlike
+        other _LIBRAW_UNSUPPORTED_PATHS entries which are hard-blocked."""
+        if not file_path.lower().endswith(".nef"):
+            return False
+        try:
+            cached_exif = self.image_cache.get_exif(file_path)
+        except Exception:
+            return False
+        return bool(cached_exif and cached_exif.get("nef_he_compressed") is True)
+
     def _editing_supported_for_file(self, file_path: str | None) -> bool:
         """Whether the Adjust panel can produce an edit base for this file.
 
@@ -18871,6 +18884,11 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         DNG panoramas, ...). Best-effort by design -- a never-decoded exotic
         RAW is only discovered unsupported at decode time, at which point it
         lands in _LIBRAW_UNSUPPORTED_PATHS and is skipped from then on.
+
+        Exception: Nikon HE/HE*-compressed NEF is editable via an embedded-
+        JPEG edit base even though LibRaw can't demosaic it (see
+        decode_raw_edit_base), so it's excluded from the general
+        _LIBRAW_UNSUPPORTED_PATHS block below.
         """
         if not file_path:
             return False
@@ -18886,6 +18904,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
 
                 if dng_prefers_embedded_preview_first(file_path):
                     return False
+                if self._nef_he_compressed(file_path):
+                    return True
                 key = os.path.normcase(os.path.abspath(file_path))
                 if key in _LIBRAW_UNSUPPORTED_PATHS:
                     return False
@@ -18935,8 +18955,13 @@ class RAWImageViewer(SessionMixin, QMainWindow):
 
         settings = self.get_settings()
         use_embedded = settings.value("use_embedded_jpeg_workflow", True, type=bool)
-        if opening and use_embedded:
-            # Automatically switch to RAW workflow when editing
+        current_path = getattr(self, "current_file_path", None)
+        if opening and use_embedded and not (current_path and self._nef_he_compressed(current_path)):
+            # Automatically switch to RAW workflow when editing. Skipped for
+            # HE/HE*-compressed NEF: LibRaw can't demosaic it at all, so
+            # forcing RAW mode here would just fail -- stay in embedded-JPEG
+            # mode, which decode_raw_edit_base can actually build an edit
+            # base from.
             self.toggle_raw_jpeg_workflow()
 
         self._set_adjust_panel_visible(opening)
@@ -19153,9 +19178,19 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             QThreadPool.globalInstance().start(worker)
         if hasattr(self, "status_bar"):
             h, w = base.shape[0], base.shape[1]
-            self.status_bar.showMessage(
-                f"Linear RAW edit base ready ({w}×{h})", 2500
-            )
+            import numpy as _np
+
+            if getattr(base, "dtype", None) == _np.uint8:
+                # RAW demosaic returns float32/uint16; uint8 here means the
+                # embedded-JPEG fallback was used instead (e.g. HE/HE*-
+                # compressed NEF, or a linear/composite DNG panorama).
+                self.status_bar.showMessage(
+                    f"Editing embedded preview (RAW demosaic unavailable) ({w}×{h})", 4000
+                )
+            else:
+                self.status_bar.showMessage(
+                    f"Linear RAW edit base ready ({w}×{h})", 2500
+                )
 
     def _capture_adjust_preview_base(self, file_path: str | None) -> None:
         """Edit base comes from LibRaw decode when the adjust panel opens."""

@@ -44,7 +44,9 @@ from raw_file_extensions import RAW_FILE_EXTENSIONS
 # v10: unified make-independent orientation authority (removed make-gated skips that left
 #      non-Sony pre-rotated cameras sideways); force re-extraction so cache self-heal has
 #      correct sensor dims/orientation to re-orient any stale wrongly-rotated thumbnails.
-RAW_EXIF_SENSOR_META_VER = 10
+# v11: added nef_he_compressed (proactive Nikon HE/HE* detection); force re-extraction so
+#      already-cached NEF rows pick up the new field instead of staying permanently unknown.
+RAW_EXIF_SENSOR_META_VER = 11
 
 from image_load_manager import yield_if_current_task_active
 
@@ -495,6 +497,140 @@ def extract_previews_via_tiff_parse(file_path: str, max_size: int = 0) -> list[b
     except Exception:
         pass
     return []
+
+
+def _detect_nef_he_compression(file_path: str) -> Optional[bool]:
+    """True if this NEF's NEFCompression value says High Efficiency (13) or
+    High Efficiency* (14) -- the Nikon Z8/Z9/Z6III/Z50II codec LibRaw cannot
+    decode (no upstream ETA). False if a compression value is found and it's
+    something else. None if undetectable (non-Nikon, older maker-note
+    format, parse failure) -- callers should treat that as "unknown, try the
+    normal decode path," never as a hard error.
+
+    Hand-rolled rather than using the `exifread` library's full maker-note
+    parse (already a dependency, used elsewhere for AF regions) because
+    that path was benchmarked at ~136ms/file -- too slow to run on every
+    NEF. This walks IFD0 -> Exif IFD pointer 0x8769 -> MakerNote tag 0x927C
+    -> Nikon's inner "TIFF-within-TIFF" (magic `Nikon\\0` + 2 version bytes
+    + 2 padding bytes, then a second TIFF header at makernote_offset+10
+    whose own IFD offsets are relative to that +10 base -- a well-
+    documented Nikon quirk, not guesswork), then checks two locations for
+    the compression value, in order:
+
+    1. Tag 0x0093 (NEFCompression), a plain top-level int16u -- used by
+       older/non-Z9-generation bodies.
+    2. Tag 0x0051 (an opaque binary sub-block Nikon introduced for the
+       Z8/Z9/Z6III generation, "MakerNotes0x51" per exiftool's Nikon.pm),
+       byte offset 10 within that block's own data, also an int16u --
+       exiftool's source notes NEFCompression was "relocated to
+       MakerNotes_0x51 at offset x'0a (Z9)". Verified against 21 real
+       Z8/Z9/Z6III NEF files (13 HE/HE*, 8 Lossless): matches LibRaw's own
+       decode success/failure on every file, cross-checked directly against
+       rawpy (HE/HE* raise LibRawFileUnsupportedError, Lossless decodes).
+
+    Benchmarked at ~0.05ms/file (tag 0x0093 path) / ~0.1ms/file (tag 0x0051
+    path) against real files -- both cheap enough to run unconditionally.
+    """
+    import struct
+
+    try:
+        with open(file_path, "rb") as f:
+            header = f.read(8)
+            if len(header) < 8:
+                return None
+            if header[:2] == b"II":
+                e = "<"
+            elif header[:2] == b"MM":
+                e = ">"
+            else:
+                return None
+            if struct.unpack(e + "H", header[2:4])[0] != 42:
+                return None
+            ifd0_offset = struct.unpack(e + "I", header[4:8])[0]
+
+            def read_ifd(offset):
+                f.seek(offset)
+                n = struct.unpack(e + "H", f.read(2))[0]
+                return n, f.read(n * 12)
+
+            n, entries = read_ifd(ifd0_offset)
+            if len(entries) < n * 12:
+                return None
+            exif_ifd_offset = None
+            for i in range(n):
+                ent = entries[i * 12:(i + 1) * 12]
+                if struct.unpack(e + "H", ent[0:2])[0] == 0x8769:  # Exif IFD pointer
+                    exif_ifd_offset = struct.unpack(e + "I", ent[8:12])[0]
+                    break
+            if exif_ifd_offset is None:
+                return None
+
+            n, entries = read_ifd(exif_ifd_offset)
+            if len(entries) < n * 12:
+                return None
+            mn_offset = None
+            for i in range(n):
+                ent = entries[i * 12:(i + 1) * 12]
+                if struct.unpack(e + "H", ent[0:2])[0] == 0x927C:  # MakerNote
+                    mn_offset = struct.unpack(e + "I", ent[8:12])[0]
+                    break
+            if mn_offset is None:
+                return None
+
+            f.seek(mn_offset)
+            blob_header = f.read(10)
+            if len(blob_header) < 10 or blob_header[:6] != b"Nikon\x00":
+                return None  # older-format maker note, not our concern
+
+            inner_base = mn_offset + 10
+            f.seek(inner_base)
+            inner_hdr = f.read(8)
+            if len(inner_hdr) < 8:
+                return None
+            if inner_hdr[:2] == b"II":
+                ie = "<"
+            elif inner_hdr[:2] == b"MM":
+                ie = ">"
+            else:
+                return None
+            if struct.unpack(ie + "H", inner_hdr[2:4])[0] != 42:
+                return None
+            inner_ifd_rel = struct.unpack(ie + "I", inner_hdr[4:8])[0]
+
+            f.seek(inner_base + inner_ifd_rel)
+            n2_bytes = f.read(2)
+            if len(n2_bytes) < 2:
+                return None
+            n2 = struct.unpack(ie + "H", n2_bytes)[0]
+            entries2 = f.read(n2 * 12)
+            if len(entries2) < n2 * 12:
+                return None
+
+            tag51_value_offset = None
+            tag51_count = None
+            for i in range(n2):
+                ent = entries2[i * 12:(i + 1) * 12]
+                tag = struct.unpack(ie + "H", ent[0:2])[0]
+                if tag == 0x0093:  # NEFCompression (older/non-Z9-gen bodies)
+                    val = struct.unpack(ie + "H", ent[8:10])[0]
+                    return val in (13, 14)
+                if tag == 0x0051:  # MakerNotes0x51 (Z8/Z9/Z6III-gen bodies)
+                    tag51_count = struct.unpack(ie + "I", ent[4:8])[0]
+                    tag51_value_offset = struct.unpack(ie + "I", ent[8:12])[0]
+
+            if tag51_value_offset is not None and tag51_count is not None and tag51_count > 4:
+                # Compression int16u lives at byte offset 10 within this
+                # sub-block's own data (see docstring); the block itself is
+                # large enough that its value is stored via offset, not inline.
+                f.seek(inner_base + tag51_value_offset + 10)
+                val_bytes = f.read(2)
+                if len(val_bytes) == 2:
+                    val = struct.unpack(ie + "H", val_bytes)[0]
+                    return val in (13, 14)
+
+            return None
+    except Exception:
+        return None
 
 
 def extract_embedded_jpeg_by_scan(file_path: str, max_size: int) -> Optional[np.ndarray]:
@@ -1184,6 +1320,12 @@ class EXIFExtractor(QObject):
                 'verified_orientation': True,
                 'raw_exif_sensor_meta_ver': RAW_EXIF_SENSOR_META_VER,
             }
+
+            if file_path.lower().endswith(".nef"):
+                # Proactive Nikon HE/HE* detection (see _detect_nef_he_compression):
+                # lets callers route straight to the embedded-JPEG fallback instead
+                # of paying for one failed LibRaw decode attempt per file.
+                result['nef_he_compressed'] = _detect_nef_he_compression(file_path)
             
             if os.environ.get("RAWVIEWER_VERBOSE_ORIENTATION_LOGS") == "1":
                 # print(f"[ORIENTATION] EXIFExtractor: Successfully returning metadata with orientation={orientation} for {os.path.basename(file_path)}")

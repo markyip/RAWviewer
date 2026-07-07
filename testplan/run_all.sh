@@ -45,6 +45,9 @@ run "gallery thumbnail cold-decode perf" testplan/auto/t_gallery_thumb_perf.py
 run "detail enhance (sharpness/clarity/defringe) perf" testplan/auto/t_detail_enhance_perf.py
 run "CR3 preview extraction perf" testplan/auto/t_cr3_preview_perf.py
 run "EXIF cache read concurrency" testplan/auto/t_exif_cache_concurrency.py
+run "NEF HE/HE* detection" testplan/auto/t_nef_he_detection.py
+run "NEF HE/HE* editing & export" testplan/auto/t_nef_he_editing_export.py
+run "full-res decode dedup" testplan/auto/t_full_decode_dedup.py
 
 if [ "$FAST" = "0" ]; then
   # Perf first: it must measure on a quiet machine, not one still hot from

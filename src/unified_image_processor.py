@@ -307,6 +307,38 @@ class UnifiedImageProcessor:
                 )
                 return None
 
+            if file_path.lower().endswith(".nef"):
+                # Nikon HE/HE*-compressed NEF: LibRaw can't demosaic it at all.
+                # Use the app's own byte-scan embedded-JPEG extractor (verified
+                # 36/36 against LibRaw for NEF) rather than the DNG branch's PIL
+                # multi-frame trick above -- for NEF the largest-pixel-count TIFF
+                # "frame" is frequently the actual compressed Bayer sensor data,
+                # not the embedded preview, which PIL can't decode correctly.
+                try:
+                    from enhanced_raw_processor import extract_embedded_jpeg_by_scan
+
+                    embedded = extract_embedded_jpeg_by_scan(file_path, 0)
+                    if embedded is not None:
+                        orientation = exif_data.get("orientation", 1) if exif_data else 1
+                        if orientation != 1:
+                            embedded = self._apply_orientation_correction(
+                                embedded, orientation, exif_data
+                            )
+                        logging.getLogger(__name__).info(
+                            "[EDIT] Embedded-JPEG edit base for HE-compressed NEF %s (%dx%d)",
+                            os.path.basename(file_path),
+                            embedded.shape[1],
+                            embedded.shape[0],
+                        )
+                        return embedded
+                except Exception:
+                    pass
+                logging.getLogger(__name__).warning(
+                    "[EDIT] LibRaw unsupported for %s; no embedded-JPEG edit base available either",
+                    os.path.basename(file_path),
+                )
+                return None
+
             return None
         except Exception as e:
             logging.getLogger(__name__).error(
@@ -933,9 +965,27 @@ class UnifiedImageProcessor:
         if orientation != 1:
             embedded = self._apply_orientation_correction(embedded, orientation, exif_data)
 
-        preview_tier = self._preview_tier_from_embedded(embedded)
-        self.cache.put_preview(file_path, preview_tier)
         self.cache.put_full_image(file_path, embedded)
+
+        # The downsampled "preview tier" cache entry isn't needed for this
+        # call's return value (the caller wants the full-res array right
+        # now) -- computing it (a PIL HAMMING resize of the full embedded
+        # JPEG, ~200ms for a 60MP source) was previously blocking the
+        # return, adding that entire cost to time-to-first-pixel for no
+        # benefit. Populate it in the background instead; LRUCache.put is
+        # thread-safe, and this only ever produces a lower-priority cache
+        # entry nothing is blocked waiting on.
+        def _populate_preview_tier_async(arr: np.ndarray = embedded) -> None:
+            try:
+                preview_tier = self._preview_tier_from_embedded(arr)
+                self.cache.put_preview(file_path, preview_tier)
+            except Exception:
+                pass
+
+        import threading
+
+        threading.Thread(target=_populate_preview_tier_async, daemon=True).start()
+
         import logging
 
         logging.getLogger(__name__).info(
@@ -974,6 +1024,14 @@ class UnifiedImageProcessor:
         from common_image_loader import dng_prefers_embedded_preview_first
         if dng_prefers_embedded_preview_first(file_path):
             _LIBRAW_UNSUPPORTED_PATHS.add(skip_key)
+        elif file_path.lower().endswith(".nef"):
+            # Proactive Nikon HE/HE* detection (cached on the EXIF row, see
+            # EXIFExtractor.extract_exif_data): skip straight to the embedded-
+            # JPEG fallback ladder below instead of paying for one failed
+            # LibRaw decode attempt per file.
+            cached_exif = self.cache.get_exif(file_path)
+            if cached_exif and cached_exif.get("nef_he_compressed") is True:
+                _LIBRAW_UNSUPPORTED_PATHS.add(skip_key)
         if skip_key in _LIBRAW_UNSUPPORTED_PATHS:
             cached = self.cache.get_preview(file_path)
             if cached is None:

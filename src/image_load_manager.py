@@ -1033,6 +1033,27 @@ class ImageLoadManager(QObject):
         ):
             return
 
+        # Dedup against an already in-flight 'full' decode for this exact file,
+        # even if it was queued under a different stage set. _make_task_key()
+        # keys on the *exact* stage set, so e.g. stages={'full'} (queued by
+        # _maybe_queue_background_full_decode) and stages={'exif','full',
+        # 'thumbnail'} (queued by the initial navigation load) for the same
+        # file don't naturally dedupe against each other -- both would run a
+        # full LibRaw/embedded-JPEG decode of the same image concurrently.
+        # Strip 'full' from this request if another active task already owns
+        # it; the in-flight task will populate the same full-image cache this
+        # request would have populated. `priority` is passed so a CURRENT
+        # request won't defer to an owner it is about to cancel in the
+        # supersede block below (see _full_stage_already_in_flight).
+        effective_stages = set(stages) if stages is not None else {'thumbnail', 'exif', 'full'}
+        if 'full' in effective_stages and self._full_stage_already_in_flight(
+            file_path, use_full_resolution, priority
+        ):
+            effective_stages.discard('full')
+            if not effective_stages:
+                return
+            stages = effective_stages
+
         task_key = self._make_task_key(
             file_path,
             use_full_resolution,
@@ -1310,6 +1331,39 @@ class ImageLoadManager(QObject):
                 pass
         if hasattr(self, '_process_pool') and self._process_pool:
             self._process_pool.shutdown(wait=False)
+
+    def _full_stage_already_in_flight(
+        self, file_path: str, use_full_resolution: bool, requesting_priority: Priority
+    ) -> bool:
+        """True if an active (queued/running), non-cancelled task for this file
+        already includes the 'full' stage with the same use_full_resolution
+        flag -- see the comment at its call site in load_image().
+
+        A CURRENT request must NOT count an owner it is about to supersede: the
+        supersede block in load_image() cancels every lower-priority task for
+        this file, so deferring ('full'-stripping) to a PRELOAD_/BACKGROUND full
+        owner and then cancelling that same owner would drop the full decode
+        entirely (regression: pressing "next" onto a prefetched neighbor would
+        cancel its in-flight prefetch full decode and never re-issue one). Only
+        an owner that will survive the supersede is a safe one to defer to."""
+        with self._queue_lock:
+            for key in self._task_keys_by_path.get(file_path, ()):
+                task = self._active_tasks.get(key)
+                if task is None or task.is_cancelled():
+                    continue
+                if key[1] != use_full_resolution:
+                    continue
+                if 'full' not in key[2]:
+                    continue
+                if (
+                    requesting_priority == Priority.CURRENT
+                    and task.priority.value > requesting_priority.value
+                ):
+                    # This CURRENT request will cancel this owner below; don't
+                    # rely on it to finish the full decode.
+                    continue
+                return True
+        return False
 
     def _make_task_key(self, file_path: str, use_full_resolution: bool,
                        stages: Optional[set], thumbnail_target_size: Optional[QSize],
