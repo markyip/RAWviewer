@@ -51,6 +51,7 @@ run "shadow smoothed ratio" testplan/auto/t_shadow_smoothed_ratio.py
 run "channel tone curve (RGB Standard mode)" testplan/auto/t_channel_tone_curve.py
 run "gallery thumbnail cold-decode perf" testplan/auto/t_gallery_thumb_perf.py
 run "detail enhance (sharpness/clarity/defringe) perf" testplan/auto/t_detail_enhance_perf.py
+run "CR3 preview extraction perf" testplan/auto/t_cr3_preview_perf.py
 
 if [ "$FAST" = "0" ]; then
   # Perf first: it must measure on a quiet machine, not one still hot from

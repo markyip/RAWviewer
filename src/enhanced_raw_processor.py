@@ -157,80 +157,115 @@ def get_jpeg_dimensions(data: bytes) -> Optional[Tuple[int, int]]:
 
 
 def _largest_jpeg_from_blob(blob: bytes, max_size: int) -> Optional[np.ndarray]:
-    """Find the largest decodable JPEG segment inside a byte blob using fast header parsing."""
-    best_offset = -1
-    best_area = 0
-    best_end_offset = -1
-    
+    """Find a decodable JPEG segment inside a byte blob using fast header
+    parsing -- the smallest one that still covers max_size (0 = full
+    quality, i.e. the largest available), not always the largest.
+
+    Canon CR3 (the caller, _extract_bmff_uuid_embedded_jpeg) embeds a
+    near-sensor-resolution JPEG (20-40MP) alongside much smaller ones;
+    decoding the huge one for a 512px gallery tile wastes ~10x the CPU for
+    an identical downsampled result. Mirrors the equivalent fix already
+    applied to the TIFF-based preview path (extract_previews_via_tiff_parse)
+    for ARW/NEF -- this is the same bug, just never ported to CR3's BMFF
+    parsing since it's a structurally different container format.
+    """
+    candidates: list[tuple[int, int, int, int, int]] = []  # (area, w, h, start, end)
     start = 0
     blob_len = len(blob)
     while True:
         idx = blob.find(b"\xff\xd8\xff", start)
         if idx < 0:
             break
-            
+
         # Parse JPEG header from the next 64KB (or up to the end of the blob)
         header_chunk = blob[idx : min(blob_len, idx + 65536)]
         dims = get_jpeg_dimensions(header_chunk)
         if dims is not None:
             w, h = dims
-            area = w * h
-            if area > best_area and w >= 32 and h >= 32:
-                # Find the EOI marker \xff\xd9 for this JPEG
+            if w >= 32 and h >= 32:
                 end_marker = blob.find(b"\xff\xd9", idx + 3)
-                best_area = area
-                best_offset = idx
-                best_end_offset = end_marker + 2 if end_marker >= 0 else -1
-                
+                end_offset = end_marker + 2 if end_marker >= 0 else blob_len
+                candidates.append((w * h, w, h, idx, end_offset))
+
         start = idx + 3
-        
-    if best_offset >= 0:
-        # Extract the segment
-        if best_end_offset >= 0:
-            segment = blob[best_offset : best_end_offset]
-        else:
-            segment = blob[best_offset:]
-            
-        # Decode only the selected best JPEG segment
-        try:
-            return decode_embedded_jpeg_bytes(segment, max_size)
-        except Exception:
-            pass
-            
-    return None
+
+    if not candidates:
+        return None
+
+    if max_size > 0:
+        sufficient = [c for c in candidates if max(c[1], c[2]) >= max_size]
+        chosen = min(sufficient, key=lambda c: c[0]) if sufficient else max(candidates, key=lambda c: c[0])
+    else:
+        chosen = max(candidates, key=lambda c: c[0])
+
+    _, _, _, best_offset, best_end_offset = chosen
+    segment = blob[best_offset:best_end_offset]
+
+    # Decode only the selected segment.
+    try:
+        return decode_embedded_jpeg_bytes(segment, max_size)
+    except Exception:
+        return None
 
 
 def _extract_bmff_uuid_embedded_jpeg(file_path: str, max_size: int) -> Optional[np.ndarray]:
-    """Canon CR3 stores grid/preview JPEG inside BMFF uuid boxes (ftyp crx), not TIFF IFD."""
+    """Canon CR3 stores grid/preview JPEG inside BMFF uuid boxes (ftyp crx), not TIFF IFD.
+
+    All real preview content lives in the small ftyp/moov/uuid boxes at the
+    START of the file (measured ~366KB on a real 40MB CR3); the sensor RAW
+    data (mdat, the rest of the file) follows and is never touched by this
+    function. Reads incrementally in chunks instead of loading the whole
+    file upfront -- avoids ~40MB+ of unnecessary I/O per thumbnail/preview
+    request on every CR3 file.
+    """
     import struct
+
+    CHUNK = 1 << 20  # 1MB steps; ftyp+moov+uuid boxes are typically well under this
 
     try:
         with open(file_path, "rb") as f:
-            data = f.read()
+            data = f.read(CHUNK)
+            if len(data) < 12 or data[4:8] != b"ftyp":
+                return None
+
+            best: Optional[np.ndarray] = None
+            best_area = 0
+            off, n = 0, len(data)
+            while True:
+                if off + 8 > n:
+                    more = f.read(CHUNK)
+                    if not more:
+                        break
+                    data += more
+                    n = len(data)
+                    if off + 8 > n:
+                        break
+                size = struct.unpack(">I", data[off : off + 4])[0]
+                typ = data[off + 4 : off + 8]
+                if size < 8:
+                    # size==1 (64-bit extended size -- always mdat/the sensor
+                    # payload in practice) or a malformed box: nothing past
+                    # here is a preview, so stop without reading the rest of
+                    # the (often huge) file.
+                    break
+                if off + size > n:
+                    more = f.read(off + size - n)
+                    if more:
+                        data += more
+                        n = len(data)
+                end = min(off + size, n)
+                if typ == b"uuid":
+                    arr = _largest_jpeg_from_blob(data[off:end], max_size)
+                    if arr is not None and hasattr(arr, "shape") and len(arr.shape) >= 2:
+                        h, w = arr.shape[:2]
+                        area = w * h
+                        if area > best_area:
+                            best_area = area
+                            best = arr
+                off = end
+            return best
     except Exception:
         return None
-    if len(data) < 12 or data[4:8] != b"ftyp":
-        return None
-
-    best: Optional[np.ndarray] = None
-    best_area = 0
-    off, n = 0, len(data)
-    while off + 8 <= n:
-        size = struct.unpack(">I", data[off : off + 4])[0]
-        typ = data[off + 4 : off + 8]
-        if size < 8:
-            break
-        end = min(off + size, n)
-        if typ == b"uuid":
-            arr = _largest_jpeg_from_blob(data[off:end], max_size)
-            if arr is not None and hasattr(arr, "shape") and len(arr.shape) >= 2:
-                h, w = arr.shape[:2]
-                area = w * h
-                if area > best_area:
-                    best_area = area
-                    best = arr
-        off = end
-    return best
 
 
 def probe_effective_raw_orientation(
