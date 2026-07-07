@@ -198,7 +198,33 @@ def _apply_pv2012_perceptual(
 def apply_pv2012_tone_rgb(img: np.ndarray, adj: dict[str, float]) -> np.ndarray:
     """Hue-preserving PV2012 tone; ratio capped in perceptual space."""
     lum = _luminance(img)
-    y0 = _scene_to_perceptual(lum)
+    y0_raw = _scene_to_perceptual(lum)
+    # Smooth y0 before it drives anything downstream (tone curve, PV2012
+    # curve, ratio) -- darktable's tone-equalizer approach (see research
+    # notes) to a problem our per-pixel ratio has always had: ratio = y1/y0
+    # computed independently per pixel inherits whatever noise is in that
+    # pixel's own y0, so neighbouring pixels with the same *true* local
+    # brightness get visibly different ratios purely from sensor noise
+    # jitter -- amplifying that jitter into color speckle on top of
+    # whatever the sensor noise already was. A self-guided filter on y0
+    # (small radius: this is noise-scale smoothing, not the coarse
+    # region-scale masking the chroma damp below does) averages out that
+    # per-pixel jitter while a real edge (self-guided, so it's guided by
+    # its own structure) still survives. Verified on two real files
+    # (Canon_Sample/6J8A0376.CR3, a Sony ARW): at r=2, both moved *closer*
+    # to Exposure's color richness at matched brightness (Canon 58% -> 71%
+    # of Exposure's chroma, Sony 90% -> 97%), not just the noisier one --
+    # larger radii (8+) helped the noisy file further but started
+    # over-smoothing the cleaner file's real structure, so this is a light
+    # touch specifically for noise-scale jitter, not a substitute for the
+    # region-scale chroma damp below.
+    from raw_chroma_denoise import apply_guided_filter
+
+    y0 = np.clip(
+        apply_guided_filter(y0_raw.astype(np.float32), y0_raw.astype(np.float32), 2, 0.0005),
+        0.0,
+        None,
+    )
     # y0 must stay the true pre-curve, pre-PV2012 baseline: it's the ratio's
     # denominator below. Reassigning it to the curve-adjusted value here (as
     # this used to do) makes the point tone curve's effect appear in *both*
