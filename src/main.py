@@ -15579,8 +15579,22 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         probe_uncached: bool = True,
         folder_path: Optional[str] = None,
         sort_probe_conservative: bool = False,
+        capture_time_only: bool = False,
     ):
-        """Sort files by capture time according to user preference (Newest/Oldest)"""
+        """Sort files by capture time according to user preference (Newest/Oldest).
+
+        capture_time_only: read ONLY the capture_time column (via
+        get_capture_times_for_sort) instead of the full per-file EXIF blob.
+        Sorting needs nothing else, and get_multiple_exif() does a pickle.loads
+        of a ~97-tag EXIF dict per file -- on a background sort worker that
+        pickle.loads burst holds the GIL and starves the on-screen image's
+        decode/paint (measured stalling session-restore first-image display).
+        In this mode bulk_metadata is returned EMPTY: the full per-file EXIF
+        (gallery tile geometry) is fetched lazily when the gallery is actually
+        opened (see the _GalleryMetadataFetch path), and returning {} here
+        avoids both clobbering _gallery_bulk_metadata and suppressing that lazy
+        fetch.
+        """
         import time
         import logging
         logger = logging.getLogger(__name__)
@@ -15593,23 +15607,32 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         # 1. Bulk fetch metadata for all files at once (MUCH faster than individual calls)
         from image_cache import get_image_cache
         cache = get_image_cache()
-        # Pass the pre-collected file stats to avoid redundant os.stat calls
-        bulk_metadata = cache.get_multiple_exif(file_paths, file_stats)
 
-        # capture_time doesn't depend on RAW_EXIF_SENSOR_META_VER / orientation-trust
-        # checks that get_multiple_exif gates the rest of a row on, so a previously
-        # probed-and-persisted capture_time (record_probed_capture_times) can still
-        # satisfy sorting even when the row it's stored alongside fails those
-        # unrelated freshness checks and gets excluded from bulk_metadata above.
-        # Without this, every folder re-open would re-probe the same files forever.
-        needs_capture_time = [
-            fp for fp in file_paths if not (bulk_metadata.get(fp) or {}).get("capture_time")
-        ]
-        if needs_capture_time:
-            extra_capture_times = cache.get_capture_times_for_sort(needs_capture_time)
-            for fp, ct in extra_capture_times.items():
-                if ct:
-                    bulk_metadata[fp] = {**(bulk_metadata.get(fp) or {}), "capture_time": ct}
+        # sort_meta holds only what the sort keys need (capture_time); it is what
+        # we return as bulk_metadata EXCEPT in capture_time_only mode (see below).
+        if capture_time_only:
+            ct_map = cache.get_capture_times_for_sort(list(file_paths))
+            sort_meta = {
+                fp: {"capture_time": ct} for fp, ct in ct_map.items() if ct
+            }
+        else:
+            # Pass the pre-collected file stats to avoid redundant os.stat calls
+            sort_meta = cache.get_multiple_exif(file_paths, file_stats)
+
+            # capture_time doesn't depend on RAW_EXIF_SENSOR_META_VER / orientation-trust
+            # checks that get_multiple_exif gates the rest of a row on, so a previously
+            # probed-and-persisted capture_time (record_probed_capture_times) can still
+            # satisfy sorting even when the row it's stored alongside fails those
+            # unrelated freshness checks and gets excluded from sort_meta above.
+            # Without this, every folder re-open would re-probe the same files forever.
+            needs_capture_time = [
+                fp for fp in file_paths if not (sort_meta.get(fp) or {}).get("capture_time")
+            ]
+            if needs_capture_time:
+                extra_capture_times = cache.get_capture_times_for_sort(needs_capture_time)
+                for fp, ct in extra_capture_times.items():
+                    if ct:
+                        sort_meta[fp] = {**(sort_meta.get(fp) or {}), "capture_time": ct}
 
         # 2. Parallel probe for any uncached files (skip when caller only wants cache hits)
         probed_timestamps: dict = {}
@@ -15619,7 +15642,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 sample = os.path.dirname(os.path.abspath(file_paths[0]))
             probed_timestamps = self._parallel_probe_capture_times(
                 file_paths,
-                bulk_metadata,
+                sort_meta,
                 sample_path=sample,
                 conservative=sort_probe_conservative,
             )
@@ -15633,7 +15656,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             mtime = 0.0
             if file_stats and fp in file_stats:
                 mtime = file_stats[fp][1]
-            meta = bulk_metadata.get(fp) if bulk_metadata else None
+            meta = sort_meta.get(fp) if sort_meta else None
             probed_ts = probed_timestamps.get(fp, 0.0)
             
             _has_capture, timestamp, _source = resolve_folder_sort_timestamp(
@@ -15653,9 +15676,16 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         )
         
         sort_time = time.time() - sort_start
-        logger.info(f"[SORT] Bulk metadata fetch & sort of {len(file_paths)} files took {sort_time:.3f}s")
+        logger.info(
+            "[SORT] %s fetch & sort of %d files took %.3fs",
+            "Capture-time-only" if capture_time_only else "Bulk metadata",
+            len(file_paths),
+            sort_time,
+        )
         safe_print(f"[PERF] 🔄 Sorted {len(file_paths)} files in {sort_time*1000:.1f}ms")
-        return sorted_files, bulk_metadata
+        # capture_time_only: bulk_metadata is intentionally empty so the gallery
+        # lazily fetches full per-file EXIF on first open (see the docstring).
+        return sorted_files, ({} if capture_time_only else sort_meta)
     
     def sort_image_files(self, file_paths, file_stats=None):
         """Sort files by capture time according to user preference (Newest/Oldest)"""
@@ -28078,11 +28108,17 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                     folder_hint = (
                         os.path.dirname(os.path.abspath(paths[0])) if paths else None
                     )
+                    # Refinement only reorders image_files; it does not need the
+                    # full per-file EXIF blob (the gallery fetches that lazily on
+                    # first open). Reading capture_time-only keeps this background
+                    # sort worker from stealing the GIL via a pickle.loads-per-file
+                    # burst while the current image is decoding/painting.
                     sorted_files, bulk_metadata = viewer.sort_files_by_capture_time(
                         paths,
                         newest_first=newest_first,
                         file_stats=file_stats,
                         folder_path=folder_hint,
+                        capture_time_only=True,
                     )
                 except Exception as e:
                     import logging
