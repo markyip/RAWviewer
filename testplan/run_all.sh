@@ -37,6 +37,7 @@ run "slider specs" testplan/auto/t_slider_specs.py
 run "cache semantics" testplan/auto/t_cache_semantics.py
 run "dodge & burn" testplan/auto/t_dodge_burn.py
 run "gallery closes editor" testplan/auto/t_gallery_closes_editor.py
+run "gallery hover prefetch" testplan/auto/t_gallery_hover_prefetch.py
 run "search bar animation" testplan/auto/t_search_bar_animation.py
 run "gpu return_linear" testplan/auto/t_gpu_return_linear.py
 run "half decode return_linear" testplan/auto/t_half_decode_return_linear.py
