@@ -666,9 +666,87 @@ def _apply_adjustments_to_srgb(rgb_image: np.ndarray, adj: dict[str, float]) -> 
     if is_default_adjustments(merged):
         return rgb_image
 
-    # Convert image to float32 normalized [0.0, 1.0] for calculations
-    img = rgb_image.astype(np.float32) / 255.0
+    # Row-band parallelism: every stage below is per-pixel except the small-
+    # radius Gaussian blurs inside detail-enhance (Sharpness/Clarity/
+    # Defringe), so splitting rows across threads with enough padding to
+    # cover those blur radii gives byte-identical output, just computed
+    # concurrently -- numpy/cv2 release the GIL for these array sizes, so a
+    # plain ThreadPoolExecutor gets real parallelism without the IPC cost of
+    # multiprocessing. Dodge & Burn is excluded (its mask needs its own
+    # per-band slicing, not implemented here) and falls back to the
+    # single-threaded path below.
+    from raw_dodge_burn import MASK_KEY as _db_mask_key
 
+    mask_serial = str(merged.get(_db_mask_key, "") or "")
+    n_workers = _detail_pipeline_worker_count(rgb_image.shape[0])
+    if not mask_serial and n_workers > 1:
+        return _apply_adjustments_to_srgb_banded(rgb_image, merged, n_workers)
+
+    img = rgb_image.astype(np.float32) / 255.0
+    img = _apply_adjustments_to_srgb_core(img, merged)
+    return (np.clip(img, 0.0, 1.0) * 255.0).astype(np.uint8)
+
+
+def _detail_pipeline_worker_count(height: int) -> int:
+    # Thread-pool overhead isn't worth it below a few hundred rows.
+    if height < 512:
+        return 1
+    return min(8, os.cpu_count() or 1)
+
+
+# Comfortably larger than 3x any Gaussian sigma used in apply_detail_enhancements
+# (defringe 1.5, sharpness 0.9, clarity's downsampled effective ~10) -- a band's
+# padded region always has enough real neighboring pixels for every blur stage
+# to produce the same result as processing the full image in one pass.
+_BAND_PAD_PX = 48
+
+
+def _apply_adjustments_to_srgb_banded(
+    rgb_image: np.ndarray, merged: dict[str, float], n_workers: int
+) -> np.ndarray:
+    """Row-band parallel version of _apply_adjustments_to_srgb's core pipeline."""
+    import math
+    from concurrent.futures import ThreadPoolExecutor
+
+    h = rgb_image.shape[0]
+    band_h = math.ceil(h / n_workers)
+    bands = []
+    for i in range(n_workers):
+        y0 = i * band_h
+        y1 = min(h, y0 + band_h)
+        if y0 >= y1:
+            break
+        pad_top = min(_BAND_PAD_PX, y0)
+        pad_bot = min(_BAND_PAD_PX, h - y1)
+        bands.append((y0, y1, pad_top, pad_bot))
+
+    def _process_band(band):
+        y0, y1, pad_top, pad_bot = band
+        src = rgb_image[y0 - pad_top : y1 + pad_bot]
+        img = src.astype(np.float32) / 255.0
+        out = _apply_adjustments_to_srgb_core(img, merged)
+        out_u8 = (np.clip(out, 0.0, 1.0) * 255.0).astype(np.uint8)
+        return out_u8[pad_top : pad_top + (y1 - y0)]
+
+    import cv2
+
+    prev_threads = cv2.getNumThreads()
+    # Avoid oversubscription: cv2's own internal (IPP/TBB) threading would
+    # otherwise compete with our outer thread pool for the same cores.
+    cv2.setNumThreads(1)
+    try:
+        with ThreadPoolExecutor(max_workers=len(bands)) as ex:
+            results = list(ex.map(_process_band, bands))
+    finally:
+        cv2.setNumThreads(prev_threads)
+
+    return np.concatenate(results, axis=0)
+
+
+def _apply_adjustments_to_srgb_core(img: np.ndarray, merged: dict[str, float]) -> np.ndarray:
+    """All per-pixel/local-only adjustment stages on a float32 [0,1] (H,W,3)
+    buffer -- may be a padded row-band slice, see _apply_adjustments_to_srgb_banded.
+    """
     # 1. Temperature & Tint (neutral gray preserved — scale R/B vs G)
     temp_val = float(merged.get("Temperature", DEFAULT_ADJUSTMENTS["Temperature"]))
     tint_val = float(merged.get("Tint", 0.0))
@@ -766,7 +844,7 @@ def _apply_adjustments_to_srgb(rgb_image: np.ndarray, adj: dict[str, float]) -> 
 
     img = np.clip(img, 0.0, 1.0)
     img = apply_detail_enhancements(img, merged)
-    return (np.clip(img, 0.0, 1.0) * 255.0).astype(np.uint8)
+    return img
 
 
 def _linear_float_from_buffer(rgb_image: np.ndarray) -> np.ndarray:
