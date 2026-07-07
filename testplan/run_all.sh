@@ -48,6 +48,7 @@ run "EXIF cache read concurrency" testplan/auto/t_exif_cache_concurrency.py
 run "NEF HE/HE* detection" testplan/auto/t_nef_he_detection.py
 run "NEF HE/HE* editing & export" testplan/auto/t_nef_he_editing_export.py
 run "full-res decode dedup" testplan/auto/t_full_decode_dedup.py
+run "redundant full re-display" testplan/auto/t_redundant_full_redisplay.py
 
 if [ "$FAST" = "0" ]; then
   # Perf first: it must measure on a quiet machine, not one still hot from

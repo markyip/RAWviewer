@@ -18601,6 +18601,39 @@ class RAWImageViewer(SessionMixin, QMainWindow):
 
             self._display_edr_mode = None
 
+            # Collapse redundant full-resolution re-displays. Several session-
+            # restore and cached-full fast-paths (the restored-zoom eager
+            # decode, the deferred post-restore full decode, and assorted
+            # "display cached_full" callers) feed the identical sensor-res
+            # buffer back through here after it is already painted -- observed
+            # 3x for a single session restore, each re-running a ~66MP QPixmap
+            # conversion of a buffer that is already on screen. If an equal-or-
+            # higher-res buffer for this exact file is already painted, there
+            # is nothing to upgrade; skip the convert+display entirely. Gated
+            # with the same escape hatches as the on_manager_image_ready
+            # redundancy guard (_skip_resolution_downgrade_check for workflow/
+            # recovery repaints, _loading_from_gallery for blur->sharp
+            # upgrades) plus an adjust/edit-preview exclusion, and placed after
+            # the EDR paths above so EDR upgrades are never suppressed.
+            if (
+                not recovery_preview
+                and path
+                and max(width, height) >= 3000
+                and not getattr(self, "_skip_resolution_downgrade_check", False)
+                and not getattr(self, "_loading_from_gallery", False)
+                and not getattr(self, "_adjust_preview_painting", False)
+                and not self._adjust_panel_active()
+                and self._already_displaying_buffer_for_path(path, rgb_image)
+            ):
+                logger.info(
+                    "[DISPLAY] Skipping redundant full-res re-display for %s "
+                    "(%dx%d already on screen)",
+                    os.path.basename(path),
+                    width,
+                    height,
+                )
+                return
+
             max_dimension = max(width, height)
             is_full_resolution = max_dimension >= 3000
             
