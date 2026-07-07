@@ -45,6 +45,7 @@ run "gallery closes editor" testplan/auto/t_gallery_closes_editor.py
 run "search bar animation" testplan/auto/t_search_bar_animation.py
 run "gpu return_linear" testplan/auto/t_gpu_return_linear.py
 run "half decode return_linear" testplan/auto/t_half_decode_return_linear.py
+run "shadow edge-aware damp" testplan/auto/t_shadow_edge_aware_damp.py
 
 if [ "$FAST" = "0" ]; then
   # Perf first: it must measure on a quiet machine, not one still hot from
