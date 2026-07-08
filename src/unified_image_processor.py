@@ -1025,12 +1025,27 @@ class UnifiedImageProcessor:
         if dng_prefers_embedded_preview_first(file_path):
             _LIBRAW_UNSUPPORTED_PATHS.add(skip_key)
         elif file_path.lower().endswith(".nef"):
-            # Proactive Nikon HE/HE* detection (cached on the EXIF row, see
-            # EXIFExtractor.extract_exif_data): skip straight to the embedded-
-            # JPEG fallback ladder below instead of paying for one failed
-            # LibRaw decode attempt per file.
+            # Proactive Nikon HE/HE* detection: skip straight to the embedded-
+            # JPEG fallback ladder below instead of a doomed LibRaw decode.
             cached_exif = self.cache.get_exif(file_path)
-            if cached_exif and cached_exif.get("nef_he_compressed") is True:
+            he = cached_exif.get("nef_he_compressed") if cached_exif else None
+            if he is None:
+                # The EXIF row (with the proactive HE flag from EXIFExtractor)
+                # may not be cached yet when the FIRST full-decode task for this
+                # file runs -- e.g. a stages={'full'} nav-preload racing the
+                # combined load that populates EXIF. Without this, that early
+                # task takes the LibRaw path, fails to demosaic HE/HE*, and
+                # returns None -> a spurious "unsupported or corrupt" dialog for
+                # a file that a slightly later task displays fine from its
+                # embedded JPEG. Detect directly (~0.05ms) so every task routes
+                # to the embedded ladder regardless of EXIF-cache timing.
+                try:
+                    from enhanced_raw_processor import _detect_nef_he_compression
+
+                    he = _detect_nef_he_compression(file_path)
+                except Exception:
+                    he = None
+            if he is True:
                 _LIBRAW_UNSUPPORTED_PATHS.add(skip_key)
         if skip_key in _LIBRAW_UNSUPPORTED_PATHS:
             cached = self.cache.get_preview(file_path)

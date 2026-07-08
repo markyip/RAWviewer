@@ -468,7 +468,29 @@ class ImageLoadWorker(QRunnable):
                     and not self.task.is_cancelled()
                     and self.task.priority == Priority.CURRENT
                 ):
-                    if self._safe_emit():
+                    # Suppress the failure dialog when a usable buffer for this
+                    # file is already cached: a concurrent task produced one.
+                    # Most visible for HE/HE* NEF -- LibRaw can't demosaic it, so
+                    # a full-decode task that raced ahead of the embedded-JPEG
+                    # routing returns None while another task already displayed
+                    # the embedded preview. Erroring here pops an "unsupported or
+                    # corrupt" dialog for a file that is already on screen.
+                    already_displayable = False
+                    try:
+                        buf = processor.cache.get_full_image(file_path)
+                        if buf is None:
+                            buf = processor.cache.get_preview(file_path)
+                        if (
+                            buf is not None
+                            and hasattr(buf, "shape")
+                            and getattr(buf, "ndim", 0) >= 2
+                            and max(buf.shape[0], buf.shape[1]) >= 1024
+                        ):
+                            already_displayable = True
+                    except Exception:
+                        already_displayable = False
+
+                    if not already_displayable and self._safe_emit():
                         from common_image_loader import is_raw_file
 
                         if is_raw_file(file_path):

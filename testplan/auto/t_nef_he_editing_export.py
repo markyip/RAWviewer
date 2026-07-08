@@ -128,6 +128,61 @@ def main() -> int:
         "processor.decode_raw_edit_base(" in export_src,
     )
 
+    # --- display path: HE detection must not depend on the EXIF flag already
+    # being cached, or the first (racing) full-decode task takes the LibRaw
+    # path, fails, and pops a spurious "unsupported or corrupt" dialog for a
+    # file that displays fine from its embedded JPEG. ---
+    praw_src = inspect.getsource(uip.UnifiedImageProcessor._process_raw_image)
+    check(
+        "_process_raw_image falls back to direct _detect_nef_he_compression "
+        "when the cached EXIF HE flag is absent",
+        "_detect_nef_he_compression(file_path)" in praw_src,
+    )
+    cached_idx = praw_src.find('cached_exif.get("nef_he_compressed")')
+    direct_idx = praw_src.find("_detect_nef_he_compression(file_path)")
+    add_idx = praw_src.find("_LIBRAW_UNSUPPORTED_PATHS.add(skip_key)", cached_idx)
+    check(
+        "direct detection runs only as a fallback (after the cached-flag read) "
+        "and still routes into _LIBRAW_UNSUPPORTED_PATHS",
+        -1 not in (cached_idx, direct_idx, add_idx) and cached_idx < direct_idx < add_idx,
+    )
+
+    # --- error emit: a concurrent decode returning None must NOT pop the
+    # failure dialog when a usable buffer for the file is already cached ---
+    import image_load_manager as ilm
+
+    run_src = inspect.getsource(ilm.ImageLoadWorker.run)
+    check(
+        "full-decode failure is suppressed when a usable buffer is already cached",
+        "already_displayable" in run_src
+        and "error_occurred.emit" in run_src,
+    )
+    guard_idx = run_src.find("already_displayable")
+    emit_idx = run_src.rfind("error_occurred.emit")
+    check(
+        "the already-cached guard precedes the error emit",
+        -1 not in (guard_idx, emit_idx) and guard_idx < emit_idx,
+    )
+
+    # --- ground truth: the reported files really are HE (so the routing fires) ---
+    from enhanced_raw_processor import _detect_nef_he_compression
+
+    sample = "/Volumes/T5 EVO/RAW_Sample"
+    reported = [
+        os.path.join(sample, "DSC_2138.NEF"),
+        os.path.join(sample, "DSC_2127.NEF"),
+    ]
+    present = [p for p in reported if os.path.exists(p)]
+    if present:
+        results = {os.path.basename(p): _detect_nef_he_compression(p) for p in present}
+        check(
+            "reported HE-NEF files are detected as HE (True)",
+            all(v is True for v in results.values()),
+            detail=str(results),
+        )
+    else:
+        print("SKIP  reported HE-NEF sample files not present on this machine")
+
     print(f"\n{len(FAILURES)} failure(s)")
     return 1 if FAILURES else 0
 
