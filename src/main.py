@@ -2861,10 +2861,21 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 return True
             self._gallery_preview_pending_full = False
             return False
-        if getattr(self, "_pending_resolution_crossfade", False):
-            return True
         prev_max = max(prev_pm.width(), prev_pm.height())
         new_max = max(new_pm.width(), new_pm.height())
+        # Same file (guaranteed above) at essentially the same max dimension is a
+        # redundant re-delivery of the buffer already on screen -- not a
+        # resolution upgrade. Crossfading identical content just pulses (a visible
+        # flash): observed when duplicate full-res deliveries race the viewport
+        # crossfade's DEFERRED display-metadata commit -- the redundancy guards
+        # read stale _manager_displayed_max_dim, let a second delivery through,
+        # and each re-marks _pending_resolution_crossfade, so the second paint
+        # fades a full-res buffer over an identical one. There is nothing to
+        # dissolve, so never fade it, even if a resolution crossfade was pending.
+        if new_max <= int(prev_max * 1.06):
+            return False
+        if getattr(self, "_pending_resolution_crossfade", False):
+            return True
         return new_max > prev_max
 
     def _viewport_crossfade_parent_and_rect(self) -> tuple:
@@ -22219,6 +22230,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         apply_gen = int(getattr(self, "_single_view_display_generation", 0))
 
         def _commit_display_metadata() -> None:
+            prev_displayed_path = getattr(self, "_displayed_content_path", None)
             self.current_pixmap = pixmap
             self._displayed_content_path = cur_path
             if getattr(self, "_focus_subject_outline_active", False):
@@ -22229,9 +22241,21 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 self, "current_file_path", None
             ):
                 pm_max = max(pixmap.width(), pixmap.height())
-                self._manager_displayed_max_dim = max(
-                    getattr(self, "_manager_displayed_max_dim", 0), pm_max
-                )
+                # _manager_displayed_max_dim is a per-file high-water-mark of the
+                # on-screen resolution (a later lower-res delivery must not
+                # downgrade the display). It MUST reset when the displayed file
+                # changes: carrying a larger previous image's value forward makes
+                # a smaller new image's full-res look "already displayed" to
+                # _already_displaying_buffer_for_path, so its full decode is
+                # skipped and it sticks at the blurry preview (regression: nav
+                # from an 8256px image to a 6720px one). On a file change, seed
+                # from this paint; otherwise keep the running max.
+                if _norm_path(prev_displayed_path or "") != _norm_path(cur_path or ""):
+                    self._manager_displayed_max_dim = pm_max
+                else:
+                    self._manager_displayed_max_dim = max(
+                        getattr(self, "_manager_displayed_max_dim", 0), pm_max
+                    )
 
         if not defer_display_commit:
             _commit_display_metadata()

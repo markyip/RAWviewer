@@ -120,6 +120,40 @@ def main() -> int:
         -1 not in (edr_idx, guard_idx) and edr_idx < guard_idx,
     )
 
+    # --- _manager_displayed_max_dim is the per-file high-water-mark the guard
+    # trusts. It MUST reset when the displayed file changes: otherwise a larger
+    # previous image's value carries forward and makes a smaller new image's
+    # full-res look "already displayed", so its full decode is skipped and it
+    # sticks at the blurry preview (real regression: nav 8256px -> 6720px). ---
+    disp_src = inspect.getsource(m.RAWImageViewer.display_pixmap)
+    commit_idx = disp_src.find("_displayed_content_path = cur_path")
+    reset_idx = disp_src.find("self._manager_displayed_max_dim = pm_max")
+    maxrun_idx = disp_src.find("self._manager_displayed_max_dim = max(")
+    check(
+        "_commit_display_metadata resets the high-water-mark on file change (not just max())",
+        reset_idx != -1 and maxrun_idx != -1,
+    )
+    check(
+        "the reset is gated on the displayed path actually changing",
+        "prev_displayed_path" in disp_src
+        and disp_src.find("prev_displayed_path") < maxrun_idx,
+    )
+
+    # Behavioral: the predicate correctly reports NOT-already-displaying once the
+    # high-water-mark reflects only the smaller current file (post-reset).
+    stub2 = type("V2", (), {})()
+    stub2._already_displaying_buffer_for_path = (
+        m.RAWImageViewer._already_displaying_buffer_for_path.__get__(stub2)
+    )
+    stub2._single_view_pixels_on_screen = lambda fp: True
+    stub2._displayed_content_path = "/x/398A0208.CR3"
+    stub2._manager_displayed_max_dim = 512  # only the preview painted after reset
+    check(
+        "new smaller-image full-res is NOT 'already displayed' when only its preview is on screen",
+        stub2._already_displaying_buffer_for_path("/x/398A0208.CR3", FakeArray(4480, 6720))
+        is False,
+    )
+
     print(f"\n{len(FAILURES)} failure(s)")
     return 1 if FAILURES else 0
 

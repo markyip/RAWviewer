@@ -50,6 +50,7 @@ run "NEF HE/HE* editing & export" testplan/auto/t_nef_he_editing_export.py
 run "full-res decode dedup" testplan/auto/t_full_decode_dedup.py
 run "redundant full re-display" testplan/auto/t_redundant_full_redisplay.py
 run "capture-time-only sort" testplan/auto/t_capture_time_only_sort.py
+run "resolution crossfade decision" testplan/auto/t_resolution_crossfade_decision.py
 
 if [ "$FAST" = "0" ]; then
   # Perf first: it must measure on a quiet machine, not one still hot from
