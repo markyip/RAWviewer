@@ -23,6 +23,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+import theme
 from raw_adjustments import (
     AS_SHOT_TEMP_KEY,
     CHROMA_NR_ON_VALUE,
@@ -56,8 +57,8 @@ _PARAMETRIC_TONE_KEYS = frozenset(
 # the saturated hues a web mockup can get away with) so it reads as a subtle
 # cue under the solid accent fill, not a second, competing signal.
 _SLIDER_TRACK_GRADIENTS: dict[str, list[tuple[float, str]]] = {
-    "Temperature": [(0.0, "#4A73B5"), (0.5, "#3A3A3A"), (1.0, "#C98A46")],
-    "Tint": [(0.0, "#4A9B5E"), (0.5, "#3A3A3A"), (1.0, "#B457A0")],
+    "Temperature": [(0.0, "#4A73B5"), (0.5, theme.LINE), (1.0, "#C98A46")],
+    "Tint": [(0.0, "#4A9B5E"), (0.5, theme.LINE), (1.0, "#B457A0")],
 }
 
 
@@ -102,28 +103,28 @@ class CollapsibleSection(QWidget):
         # Header button/panel
         self.header = QWidget()
         self.header.setObjectName("accordion_header")
-        self.header.setStyleSheet("""
-            QWidget#accordion_header {
-                background-color: #242424;
-                border-top: 1px solid #2e2e2e;
-                border-bottom: 1px solid #2e2e2e;
-            }
+        self.header.setStyleSheet(f"""
+            QWidget#accordion_header {{
+                background-color: {theme.RAISED};
+                border-top: 1px solid {theme.LINE};
+                border-bottom: 1px solid {theme.LINE};
+            }}
         """)
         header_layout = QHBoxLayout(self.header)
         header_layout.setContentsMargins(12, 8, 12, 8)
         header_layout.setSpacing(8)
-        
+
         # Arrow label
         self.arrow = QLabel("▼")
-        self.arrow.setStyleSheet("color: #888888; font-size: 10px; font-weight: bold;")
+        self.arrow.setStyleSheet(f"color: {theme.INK_FAINT}; font-size: 10px; font-weight: bold;")
         header_layout.addWidget(self.arrow)
-        
+
         # Title label
         self.title_lbl = QLabel(title.upper())
-        self.title_lbl.setStyleSheet("""
-            color: #A0A0A0; 
-            font-size: 10px; 
-            font-weight: 700; 
+        self.title_lbl.setStyleSheet(f"""
+            color: {theme.INK_MUTED};
+            font-size: 10px;
+            font-weight: 700;
             letter-spacing: 1px;
         """)
         header_layout.addWidget(self.title_lbl, 1)
@@ -183,7 +184,7 @@ class AdjustSlider(QSlider):
         self.setMouseTracking(True)
         self._center_value: float | None = None  # None -> auto (0 if bipolar, else minimum)
         self._track_gradient: list[tuple[float, str]] | None = None
-        self._accent = QColor("#90CAF9")
+        self._accent = QColor(theme.EMBER)
 
     def set_center_value(self, value: float | None) -> None:
         """Override the fill's zero/reference point (e.g. as-shot Temperature
@@ -248,7 +249,7 @@ class AdjustSlider(QSlider):
                 grad.setColorAt(pos, QColor(color_str))
             painter.setBrush(grad)
         else:
-            painter.setBrush(QColor("#3A3A3A"))
+            painter.setBrush(QColor(theme.LINE))
         painter.drawRoundedRect(track_rect, 2, 2)
 
         value_x = self._handle_center_x(self.value(), QRectF(groove), handle.width(), opt.upsideDown)
@@ -267,8 +268,8 @@ class AdjustSlider(QSlider):
             self._THUMB_W,
             self._THUMB_H,
         )
-        painter.setPen(QPen(QColor(50, 50, 50), 1))
-        painter.setBrush(self._accent if self.underMouse() else QColor("#FFFFFF"))
+        painter.setPen(QPen(QColor(*theme.LINE_RGB), 1))
+        painter.setBrush(self._accent if self.underMouse() else QColor(theme.INK))
         painter.drawRoundedRect(thumb_rect, 1.5, 1.5)
         painter.end()
 
@@ -335,98 +336,98 @@ class ImageAdjustPanelWidget(QWidget):
         card = QWidget(self)
         card.setObjectName("adjust_panel_card")
         card.setStyleSheet(
-            """
-            QWidget#adjust_panel_card {
-                background-color: rgba(30, 30, 30, 215);
-                border: 1px solid rgba(255, 255, 255, 45);
+            f"""
+            QWidget#adjust_panel_card {{
+                background-color: {theme.rgba(theme.VOID_RGB, 215)};
+                border: 1px solid {theme.rgba(theme.INK_RGB, 45)};
                 border-radius: 8px;
-            }
-            QLabel#adjust_panel_title {
-                color: #E0E0E0;
+            }}
+            QLabel#adjust_panel_title {{
+                color: {theme.INK};
                 font-size: 13px;
                 font-weight: 600;
-            }
-            QLabel.adjust_slider_label {
-                color: #B0B0B0;
+            }}
+            QLabel.adjust_slider_label {{
+                color: {theme.INK_MUTED};
                 font-size: 11px;
-            }
-            QLabel.adjust_slider_value {
-                color: #90CAF9;
+            }}
+            QLabel.adjust_slider_value {{
+                color: {theme.EMBER};
                 font-size: 11px;
                 min-width: 44px;
-            }
-            QLabel.adjust_slider_value:hover {
-                color: #BBDEFB;
-            }
-            QPushButton#adjust_reset_btn {
-                color: #B0B0B0;
+            }}
+            QLabel.adjust_slider_value:hover {{
+                color: {theme.INK};
+            }}
+            QPushButton#adjust_reset_btn {{
+                color: {theme.INK_MUTED};
                 font-size: 11px;
                 border: none;
                 background: transparent;
                 padding: 2px 6px;
-            }
-            QPushButton#adjust_reset_btn:hover {
-                color: #FFFFFF;
-            }
-            QPushButton#adjust_export_btn {
-                color: #90CAF9;
+            }}
+            QPushButton#adjust_reset_btn:hover {{
+                color: {theme.INK};
+            }}
+            QPushButton#adjust_export_btn {{
+                color: {theme.EMBER};
                 font-size: 11px;
-                border: 1px solid rgba(144, 202, 249, 80);
+                border: 1px solid {theme.rgba(theme.EMBER_RGB, 80)};
                 border-radius: 4px;
-                background: rgba(144, 202, 249, 25);
+                background: {theme.rgba(theme.EMBER_RGB, 25)};
                 padding: 4px 10px;
-            }
-            QPushButton#adjust_export_btn:hover {
-                background: rgba(144, 202, 249, 45);
-                color: #FFFFFF;
-            }
-            QPushButton#adjust_export_btn:disabled {
-                color: #606060;
-                border-color: rgba(255, 255, 255, 20);
+            }}
+            QPushButton#adjust_export_btn:hover {{
+                background: {theme.rgba(theme.EMBER_RGB, 45)};
+                color: {theme.INK};
+            }}
+            QPushButton#adjust_export_btn:disabled {{
+                color: {theme.INK_FAINT};
+                border-color: {theme.rgba(theme.INK_RGB, 20)};
                 background: transparent;
-            }
-            QPushButton#adjust_nr_btn {
-                color: #B0B0B0;
+            }}
+            QPushButton#adjust_nr_btn {{
+                color: {theme.INK_MUTED};
                 font-size: 11px;
-                border: 1px solid rgba(255, 255, 255, 35);
+                border: 1px solid {theme.rgba(theme.INK_RGB, 35)};
                 border-radius: 4px;
-                background: rgba(255, 255, 255, 12);
+                background: {theme.rgba(theme.INK_RGB, 12)};
                 padding: 4px 8px;
-            }
-            QPushButton#adjust_nr_btn:checked {
-                color: #90CAF9;
-                border-color: rgba(144, 202, 249, 90);
-                background: rgba(144, 202, 249, 30);
-            }
-            QPushButton#adjust_nr_btn:hover {
-                color: #FFFFFF;
-            }
-            QPushButton#adjust_wb_picker_btn {
-                border: 1px solid rgba(255, 255, 255, 35);
+            }}
+            QPushButton#adjust_nr_btn:checked {{
+                color: {theme.EMBER};
+                border-color: {theme.rgba(theme.EMBER_RGB, 90)};
+                background: {theme.rgba(theme.EMBER_RGB, 30)};
+            }}
+            QPushButton#adjust_nr_btn:hover {{
+                color: {theme.INK};
+            }}
+            QPushButton#adjust_wb_picker_btn {{
+                border: 1px solid {theme.rgba(theme.INK_RGB, 35)};
                 border-radius: 4px;
-                background: rgba(255, 255, 255, 12);
+                background: {theme.rgba(theme.INK_RGB, 12)};
                 padding: 0px;
-            }
-            QPushButton#adjust_wb_picker_btn:checked {
-                border-color: rgba(144, 202, 249, 90);
-                background: rgba(144, 202, 249, 30);
-            }
-            QPushButton#adjust_wb_picker_btn:hover {
-                background: rgba(255, 255, 255, 24);
-            }
-            QPushButton#adjust_compare_btn {
-                border: 1px solid rgba(255, 255, 255, 35);
+            }}
+            QPushButton#adjust_wb_picker_btn:checked {{
+                border-color: {theme.rgba(theme.EMBER_RGB, 90)};
+                background: {theme.rgba(theme.EMBER_RGB, 30)};
+            }}
+            QPushButton#adjust_wb_picker_btn:hover {{
+                background: {theme.rgba(theme.INK_RGB, 24)};
+            }}
+            QPushButton#adjust_compare_btn {{
+                border: 1px solid {theme.rgba(theme.INK_RGB, 35)};
                 border-radius: 4px;
-                background: rgba(255, 255, 255, 12);
+                background: {theme.rgba(theme.INK_RGB, 12)};
                 padding: 0px;
-            }
-            QPushButton#adjust_compare_btn:checked {
-                border-color: rgba(144, 202, 249, 90);
-                background: rgba(144, 202, 249, 30);
-            }
-            QPushButton#adjust_compare_btn:hover {
-                background: rgba(255, 255, 255, 24);
-            }
+            }}
+            QPushButton#adjust_compare_btn:checked {{
+                border-color: {theme.rgba(theme.EMBER_RGB, 90)};
+                background: {theme.rgba(theme.EMBER_RGB, 30)};
+            }}
+            QPushButton#adjust_compare_btn:hover {{
+                background: {theme.rgba(theme.INK_RGB, 24)};
+            }}
             """
         )
         # AdjustSlider paints its own groove/fill/handle (paintEvent override,
@@ -469,7 +470,7 @@ class ImageAdjustPanelWidget(QWidget):
         layout.addLayout(header)
 
         hint = QLabel("E — hide · drag sliders · click value to reset")
-        hint.setStyleSheet("color: #808080; font-size: 10px;")
+        hint.setStyleSheet(f"color: {theme.INK_FAINT}; font-size: 10px;")
         hint.setWordWrap(True)
         layout.addWidget(hint)
 
@@ -531,7 +532,7 @@ class ImageAdjustPanelWidget(QWidget):
             row.setSpacing(6)
             name_lbl = QLabel(spec.label)
             name_lbl.setProperty("class", "adjust_slider_label")
-            name_lbl.setStyleSheet("color: #B0B0B0; font-size: 11px;")
+            name_lbl.setStyleSheet(f"color: {theme.INK_MUTED}; font-size: 11px;")
             name_lbl.setMinimumWidth(72)
             row.addWidget(name_lbl)
 
@@ -562,7 +563,7 @@ class ImageAdjustPanelWidget(QWidget):
 
             val_lbl = AdjustValueLabel()
             val_lbl.setProperty("class", "adjust_slider_value")
-            val_lbl.setStyleSheet("color: #B0B0B0; font-size: 11px;")
+            val_lbl.setStyleSheet(f"color: {theme.INK_MUTED}; font-size: 11px;")
             val_lbl.setMinimumWidth(32)
             val_lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             val_lbl.setToolTip("Click to reset")
@@ -580,7 +581,7 @@ class ImageAdjustPanelWidget(QWidget):
         nr_row = QHBoxLayout()
         nr_row.setSpacing(6)
         nr_label = QLabel("Chroma NR")
-        nr_label.setStyleSheet("color: #B0B0B0; font-size: 11px;")
+        nr_label.setStyleSheet(f"color: {theme.INK_MUTED}; font-size: 11px;")
         nr_label.setMinimumWidth(72)
         nr_row.addWidget(nr_label)
         self._nr_btn = QPushButton("Off")
@@ -597,7 +598,7 @@ class ImageAdjustPanelWidget(QWidget):
         method_row = QHBoxLayout()
         method_row.setSpacing(6)
         method_lbl = QLabel("NR Method")
-        method_lbl.setStyleSheet("color: #B0B0B0; font-size: 11px;")
+        method_lbl.setStyleSheet(f"color: {theme.INK_MUTED}; font-size: 11px;")
         method_lbl.setMinimumWidth(72)
         method_row.addWidget(method_lbl)
         
@@ -605,51 +606,51 @@ class ImageAdjustPanelWidget(QWidget):
         self._denoise_method_combo.addItems(["Bilateral", "Guided Filter"])
         self._denoise_method_combo.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._denoise_method_combo.currentIndexChanged.connect(self._on_denoise_method_changed)
-        self._denoise_method_combo.setStyleSheet("""
-            QComboBox {
-                background-color: #2D2D2D;
-                border: 1px solid #555;
+        self._denoise_method_combo.setStyleSheet(f"""
+            QComboBox {{
+                background-color: {theme.RAISED};
+                border: 1px solid {theme.LINE};
                 border-radius: 3px;
-                color: #DDD;
+                color: {theme.INK};
                 font-size: 11px;
                 padding: 2px 22px 2px 6px;
-                selection-background-color: #4A4A4A;
-            }
-            QComboBox::drop-down {
+                selection-background-color: {theme.RAISED_HI};
+            }}
+            QComboBox::drop-down {{
                 subcontrol-origin: padding;
                 subcontrol-position: top right;
                 width: 18px;
-                border-left: 1px solid #555;
+                border-left: 1px solid {theme.LINE};
                 border-top-right-radius: 3px;
                 border-bottom-right-radius: 3px;
-                background-color: #383838;
-            }
-            QComboBox::down-arrow {
+                background-color: {theme.RAISED};
+            }}
+            QComboBox::down-arrow {{
                 image: none;
                 width: 0;
                 height: 0;
                 border-left: 4px solid transparent;
                 border-right: 4px solid transparent;
-                border-top: 5px solid #AAA;
-            }
-            QComboBox QAbstractItemView {
-                background-color: #2D2D2D;
-                border: 1px solid #555;
-                color: #DDD;
-                selection-background-color: #4A6080;
-                selection-color: #FFF;
+                border-top: 5px solid {theme.INK_MUTED};
+            }}
+            QComboBox QAbstractItemView {{
+                background-color: {theme.SURFACE};
+                border: 1px solid {theme.LINE};
+                color: {theme.INK};
+                selection-background-color: {theme.rgba(theme.EMBER_RGB, 140)};
+                selection-color: {theme.INK};
                 outline: none;
                 font-size: 11px;
                 padding: 2px;
-            }
-            QComboBox QAbstractItemView::item {
+            }}
+            QComboBox QAbstractItemView::item {{
                 min-height: 22px;
                 padding: 2px 6px;
-            }
-            QComboBox QAbstractItemView::item:hover {
-                background-color: #3A4A5A;
-                color: #FFF;
-            }
+            }}
+            QComboBox QAbstractItemView::item:hover {{
+                background-color: {theme.rgba(theme.EMBER_RGB, 90)};
+                color: {theme.INK};
+            }}
         """)
         method_row.addWidget(self._denoise_method_combo, 1)
         self.sect_detail.add_layout(method_row)
@@ -663,11 +664,11 @@ class ImageAdjustPanelWidget(QWidget):
         lbl_vbox.setContentsMargins(0, 0, 0, 0)
         
         lens_label = QLabel("Lens correction")
-        lens_label.setStyleSheet("color: #B0B0B0; font-size: 11px;")
+        lens_label.setStyleSheet(f"color: {theme.INK_MUTED}; font-size: 11px;")
         lbl_vbox.addWidget(lens_label)
         
         self._lens_profile_lbl = QLabel("")
-        self._lens_profile_lbl.setStyleSheet("color: #808080; font-size: 10px;")
+        self._lens_profile_lbl.setStyleSheet(f"color: {theme.INK_FAINT}; font-size: 10px;")
         self._lens_profile_lbl.setWordWrap(True)
         lbl_vbox.addWidget(self._lens_profile_lbl)
         
@@ -706,7 +707,7 @@ class ImageAdjustPanelWidget(QWidget):
         db_row = QHBoxLayout()
         db_row.setSpacing(6)
         db_label = QLabel("Dodge/Burn")
-        db_label.setStyleSheet("color: #B0B0B0; font-size: 11px;")
+        db_label.setStyleSheet(f"color: {theme.INK_MUTED}; font-size: 11px;")
         db_label.setMinimumWidth(72)
         db_row.addWidget(db_label)
         self._dodge_btn = QPushButton("Dodge")
@@ -736,7 +737,7 @@ class ImageAdjustPanelWidget(QWidget):
         db_size_row = QHBoxLayout()
         db_size_row.setSpacing(6)
         db_size_lbl = QLabel("Brush Size")
-        db_size_lbl.setStyleSheet("color: #B0B0B0; font-size: 11px;")
+        db_size_lbl.setStyleSheet(f"color: {theme.INK_MUTED}; font-size: 11px;")
         db_size_lbl.setMinimumWidth(72)
         db_size_row.addWidget(db_size_lbl)
         self._db_size_slider = AdjustSlider(Qt.Orientation.Horizontal)
@@ -749,7 +750,7 @@ class ImageAdjustPanelWidget(QWidget):
         db_strength_row = QHBoxLayout()
         db_strength_row.setSpacing(6)
         db_strength_lbl = QLabel("Brush Strength")
-        db_strength_lbl.setStyleSheet("color: #B0B0B0; font-size: 11px;")
+        db_strength_lbl.setStyleSheet(f"color: {theme.INK_MUTED}; font-size: 11px;")
         db_strength_lbl.setMinimumWidth(72)
         db_strength_row.addWidget(db_strength_lbl)
         self._db_strength_slider = AdjustSlider(Qt.Orientation.Horizontal)
@@ -797,8 +798,8 @@ class ImageAdjustPanelWidget(QWidget):
             "Compare with original — split view; drag the divider."
             " Click again to exit."
         )
-        self._compare_icon_default = _qta_icon_safe("fa5s.columns", color="#B0B0B0")
-        self._compare_icon_active = _qta_icon_safe("fa5s.columns", color="#90CAF9")
+        self._compare_icon_default = _qta_icon_safe("fa5s.columns", color=theme.INK_MUTED)
+        self._compare_icon_active = _qta_icon_safe("fa5s.columns", color=theme.EMBER)
         btn.setIcon(self._compare_icon_default)
         btn.toggled.connect(self._on_compare_toggled)
         row.addWidget(btn)
@@ -845,8 +846,8 @@ class ImageAdjustPanelWidget(QWidget):
             "Pick white balance — click, then click a neutral gray/white area"
             " in the image. Esc cancels."
         )
-        self._wb_picker_icon_default = _qta_icon_safe("fa5s.eye-dropper", color="#B0B0B0")
-        self._wb_picker_icon_active = _qta_icon_safe("fa5s.eye-dropper", color="#90CAF9")
+        self._wb_picker_icon_default = _qta_icon_safe("fa5s.eye-dropper", color=theme.INK_MUTED)
+        self._wb_picker_icon_active = _qta_icon_safe("fa5s.eye-dropper", color=theme.EMBER)
         btn.setIcon(self._wb_picker_icon_default)
         btn.toggled.connect(self._on_wb_picker_toggled)
         row.addWidget(btn)
@@ -892,7 +893,7 @@ class ImageAdjustPanelWidget(QWidget):
         color_row = QHBoxLayout()
         color_row.setSpacing(6)
         color_lbl = QLabel("Color")
-        color_lbl.setStyleSheet("color: #B0B0B0; font-size: 11px;")
+        color_lbl.setStyleSheet(f"color: {theme.INK_MUTED}; font-size: 11px;")
         color_lbl.setMinimumWidth(72)
         color_row.addWidget(color_lbl)
         self._hsl_color_combo = QComboBox()
@@ -908,7 +909,7 @@ class ImageAdjustPanelWidget(QWidget):
             row = QHBoxLayout()
             row.setSpacing(6)
             name_lbl = QLabel(label)
-            name_lbl.setStyleSheet("color: #B0B0B0; font-size: 11px;")
+            name_lbl.setStyleSheet(f"color: {theme.INK_MUTED}; font-size: 11px;")
             name_lbl.setMinimumWidth(72)
             row.addWidget(name_lbl)
             slider = AdjustSlider(Qt.Orientation.Horizontal)
@@ -1075,10 +1076,10 @@ class ImageAdjustPanelWidget(QWidget):
             if name:
                 if on:
                     lbl.setText(f"{name} (Applied)")
-                    lbl.setStyleSheet("color: #90CAF9; font-size: 10px; font-weight: 500;")
+                    lbl.setStyleSheet(f"color: {theme.EMBER}; font-size: 10px; font-weight: 500;")
                 else:
                     lbl.setText(name)
-                    lbl.setStyleSheet("color: #808080; font-size: 10px;")
+                    lbl.setStyleSheet(f"color: {theme.INK_FAINT}; font-size: 10px;")
 
     def set_lens_correction_available(self, available: bool, profile_name: str = "") -> None:
         """Show/hide the toggle and display the matched lens profile name."""
