@@ -3,6 +3,8 @@ from PyQt6.QtWidgets import QLabel, QApplication, QSlider
 from PyQt6.QtCore import pyqtSignal, Qt, QObject, QPoint, QUrl, QMimeData, QPointF
 from PyQt6.QtGui import QPixmap, QDrag, QPainter, QColor, QPolygonF
 
+import theme
+
 RAWVIEWER_INTERNAL_FILE_DRAG_MIME = "application/x-rawviewer-internal-file-drag"
 
 
@@ -29,7 +31,7 @@ class ThumbnailLabel(QLabel):
 
     _STYLE_DEFAULT = "ThumbnailLabel { background: transparent; }"
     _STYLE_SELECTED = (
-        "ThumbnailLabel { background: transparent; border: 3px solid #4A9EFF; }"
+        f"ThumbnailLabel {{ background: transparent; border: 3px solid {theme.EMBER}; }}"
     )
 
     def __init__(self, parent=None, pixmap=None):
@@ -154,9 +156,12 @@ class ThumbnailLabel(QLabel):
         if count >= 2:
             if badge is None:
                 badge = QLabel(self)
+                # Burst count is informational, not a status mark or an active
+                # state -- kept neutral (ink), not dodge or ember.
                 badge.setStyleSheet(
-                    "color: #FFFFFF; font-size: 11px; font-weight: 700;"
-                    " background: rgba(0, 0, 0, 0.72); border: 1px solid rgba(255,255,255,0.25);"
+                    f"color: {theme.INK}; font-size: 11px; font-weight: 700;"
+                    f" background: rgba({theme.VOID_RGB[0]}, {theme.VOID_RGB[1]}, {theme.VOID_RGB[2]}, 0.72);"
+                    f" border: 1px solid rgba({theme.INK_RGB[0]}, {theme.INK_RGB[1]}, {theme.INK_RGB[2]}, 0.25);"
                     " border-radius: 9px; padding: 0px 5px;"
                 )
                 badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -181,8 +186,10 @@ class ThumbnailLabel(QLabel):
         if self._gallery_bookmarked:
             if badge is None:
                 badge = QLabel("★", self)
+                # Bookmark is a mark already decided about a photo -- dodge,
+                # not ember (rule 4: marks and actions don't share a color).
                 badge.setStyleSheet(
-                    "color: #FFD700; font-size: 14px; font-weight: 700;"
+                    f"color: {theme.DODGE}; font-size: 14px; font-weight: 700;"
                     " background: transparent; border: none;"
                 )
                 badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -213,9 +220,11 @@ class ThumbnailLabel(QLabel):
         if self._gallery_edited:
             if badge is None:
                 badge = QLabel("✎", self)
+                # Edited is a mark, not a live action -- dodge (rule 4).
                 badge.setStyleSheet(
-                    "color: #90CAF9; font-size: 12px; font-weight: 700;"
-                    " background: rgba(0, 0, 0, 0.55); border-radius: 8px;"
+                    f"color: {theme.DODGE}; font-size: 12px; font-weight: 700;"
+                    f" background: rgba({theme.VOID_RGB[0]}, {theme.VOID_RGB[1]}, {theme.VOID_RGB[2]}, 0.55);"
+                    " border-radius: 8px;"
                 )
                 badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
                 badge.setToolTip("Has saved adjustments (Adjust panel / XMP sidecar)")
@@ -364,7 +373,7 @@ class GalleryZoomSlider(QSlider):
         ])
         
         # Inactive color: subtle dark-mode transparent gray
-        inactive_color = QColor(255, 255, 255, 30)
+        inactive_color = QColor(*theme.INK_RGB, 30)
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(inactive_color)
         painter.drawPolygon(inactive_poly)
@@ -377,17 +386,18 @@ class GalleryZoomSlider(QSlider):
             QPointF(x_start, y_center + min_thick / 2.0)
         ])
         
-        # Active color: clean white to match overall style
-        active_color = QColor("#E0E0E0")
+        # Active color: neutral ink-muted, not ember -- resizing thumbnails
+        # isn't a selection or an armed tool (rule 2 stays reserved for those).
+        active_color = QColor(theme.INK_MUTED)
         painter.setBrush(active_color)
         painter.drawPolygon(active_poly)
 
-        # Draw active start dot (small white dot)
-        painter.setBrush(QColor("#FFFFFF"))
+        # Draw active start dot
+        painter.setBrush(QColor(theme.INK_MUTED))
         painter.drawEllipse(QPointF(x_start, y_center), min_thick / 2.0, min_thick / 2.0)
 
-        # Draw thumb handle (solid white circle)
-        painter.setBrush(QColor("#FFFFFF"))
+        # Draw thumb handle
+        painter.setBrush(QColor(theme.INK))
         thumb_radius = self.THUMB_RADIUS
         painter.drawEllipse(QPointF(current_x, y_center), thumb_radius, thumb_radius)
 
