@@ -1688,6 +1688,16 @@ class ImageCache(QObject):
         # per path per session.
         self._orient_verify_lock = threading.Lock()
         self._orient_verify_attempted: set = set()
+        # Dedup-only set (never holds a value, just "already tried"), so
+        # capping it is cheap to reason about: a path evicted here that
+        # comes up again just gets re-queued for one more probe, and a
+        # record that already probed clean short-circuits before ever
+        # reaching this set again (get_exif/get_multiple_exif only call
+        # _schedule_orientation_verify when verified_orientation is falsy).
+        # Uncapped, a very large library browsed in one long session grows
+        # this set forever; same clear-when-full convention as
+        # enhanced_raw_processor._embedded_scan_miss_cache.
+        self._orient_verify_attempted_max = 4096
         self._orient_verify_queue: list = []
         self._orient_verify_thread: Optional[threading.Thread] = None
         self._closing = False
@@ -2520,6 +2530,8 @@ class ImageCache(QObject):
                 return
             if file_path in self._orient_verify_attempted:
                 return
+            if len(self._orient_verify_attempted) >= self._orient_verify_attempted_max:
+                self._orient_verify_attempted.clear()
             self._orient_verify_attempted.add(file_path)
             self._orient_verify_queue.append((file_path, dict(exif_data)))
             if (
