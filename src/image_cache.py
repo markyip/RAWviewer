@@ -2334,23 +2334,31 @@ class ImageCache(QObject):
         return self.exif_cache.get_capture_times_for_folder(folder_path)
 
     def get_multiple_exif(self, file_paths: list, file_stats: Optional[Dict[str, Tuple[int, float]]] = None, fast_mode: bool = True) -> Dict[str, Dict[str, Any]]:
-        """Get cached EXIF data for multiple files at once."""
+        """Get cached EXIF data for multiple files at once.
+
+        Orientation trust for unverified RAW records is optimistic + deferred
+        to a background probe, same as get_exif's verify=False default --
+        NOT the old synchronous cached_raw_exif_orientation_trustworthy() ->
+        rawpy.imread() call per file. That call, run for every file in a
+        folder on the caller's thread (e.g. the main-thread instant-sort
+        fast path in main.py's _on_quick_folder_index_ready), turned a large
+        folder's sort into a serial rawpy-open storm that froze the UI for
+        the whole scan -- get_exif itself was already fixed for this; this
+        bulk sibling had the same synchronous check duplicated inline and
+        was missed.
+        """
         self.stats['exif_requests'] += len(file_paths)
-        
+
         results = {}
         missing_paths = []
-        
+
         try:
-            from enhanced_raw_processor import (
-                RAW_EXIF_SENSOR_META_VER,
-                cached_raw_exif_orientation_trustworthy,
-            )
+            from enhanced_raw_processor import RAW_EXIF_SENSOR_META_VER
             has_ver = True
         except Exception:
             has_ver = False
             RAW_EXIF_SENSOR_META_VER = 0
-            cached_raw_exif_orientation_trustworthy = None
-            
+
         # Check memory cache first
         for path in file_paths:
             exif = self.exif_memory_cache.get(path)
@@ -2360,13 +2368,12 @@ class ImageCache(QObject):
                     if cached_ver < RAW_EXIF_SENSOR_META_VER:
                         missing_paths.append(path)
                         continue
-                    if cached_raw_exif_orientation_trustworthy and not cached_raw_exif_orientation_trustworthy(path, exif):
-                        missing_paths.append(path)
-                        continue
+                    if not exif.get('verified_orientation'):
+                        self._schedule_orientation_verify(path, exif)
                 results[path] = exif
             else:
                 missing_paths.append(path)
-        
+
         if missing_paths:
             # Fetch missing from persistent cache
             db_results = self.exif_cache.get_multiple(missing_paths, file_stats, fast_mode)
@@ -2375,11 +2382,11 @@ class ImageCache(QObject):
                     cached_ver = exif.get('raw_exif_sensor_meta_ver', 0)
                     if cached_ver < RAW_EXIF_SENSOR_META_VER:
                         continue
-                    if cached_raw_exif_orientation_trustworthy and not cached_raw_exif_orientation_trustworthy(path, exif):
-                        continue
+                    if not exif.get('verified_orientation'):
+                        self._schedule_orientation_verify(path, exif)
                 self.exif_memory_cache.put(path, exif)
                 results[path] = exif
-                
+
         return results
 
     def release_full_image_memory(self, file_path: Optional[str]) -> None:
