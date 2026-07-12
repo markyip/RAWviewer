@@ -142,6 +142,27 @@ def _env_disabled() -> bool:
     }
 
 
+def prefer_gpu_decode_enabled() -> bool:
+    """GPU (MPS/CUDA) full-resolution demosaic, default OFF.
+
+    Measured no speed benefit on real files (45-46MP CR3/NEF: ~358-365ms
+    either way, GPU occasionally slower after warmup) -- consistent with
+    this module's own top-of-file docstring, which already reached the same
+    conclusion for the earlier OpenCL/Metal PoC. GPU decode also feeds the
+    MPS unified-memory pressure that needed a dedicated
+    release_cached_gpu_memory() mitigation (image_cache.py); skipping it by
+    default when it buys nothing removes that cost too. Set
+    RAWVIEWER_PREFER_GPU_DECODE=1 to re-enable (e.g. to re-verify on
+    different hardware, or for the parity gate's GPU-vs-CPU comparison).
+    """
+    return str(os.environ.get("RAWVIEWER_PREFER_GPU_DECODE", "0")).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
 def wb_sanity_enabled() -> bool:
     """As-shot WB sanity check vs embedded JPEG (RAWVIEWER_WB_SANITY=0 disables)."""
     return str(os.environ.get("RAWVIEWER_WB_SANITY", "1")).strip().lower() not in {
@@ -654,7 +675,7 @@ def finish_full_decode(
     cancel_check: Optional[Callable[[], bool]] = None,
     return_linear: bool = False,
     *,
-    prefer_gpu: bool = True,
+    prefer_gpu: bool = False,
 ) -> Optional[np.ndarray]:
     """Full-resolution pixel math (scale/demosaic/matrix/gamma) on an unpack.
 
@@ -662,8 +683,16 @@ def finish_full_decode(
     unavailable. Raises :class:`DecodeCancelled` between chunks when
     ``cancel_check`` fires.
 
-    When ``prefer_gpu`` is True (default), try GPU demosaic first so stashed-
-    unpack zoom paths get the same CUDA/MPS path as cold ``try_fast_raw_decode``.
+    ``prefer_gpu`` defaults to False: measured no speed benefit from the MPS
+    path on real files (45-46MP CR3/NEF, ~358-365ms either way, GPU
+    occasionally slower after warmup) -- consistent with this module's own
+    top-of-file docstring, which already concluded the same for the earlier
+    OpenCL/Metal PoC ("19ms GPU vs 17ms CPU... adds dependency weight for no
+    gain"). GPU decode also feeds the MPS unified-memory pressure that
+    needed a dedicated release_cached_gpu_memory() mitigation elsewhere
+    (image_cache.py) -- avoiding it by default when it buys nothing removes
+    that cost too. Set True explicitly for a caller that specifically wants
+    to exercise the GPU path (e.g. a parity/benchmark script).
     """
     if prefer_gpu:
         try:
@@ -863,35 +892,36 @@ def try_fast_raw_decode(
                 )
                 return out
                 
-        try:
-            # torch/kornia must never be imported for the first time on this
-            # (background) thread -- macOS aborts the process if PyTorch's
-            # OpenMP runtime initializes off the main thread. The main thread
-            # imports gpu_raw_processor right after showing the window
-            # (torch_bootstrap.py); wait for that here instead of importing
-            # it ourselves. A timeout falls back to CPU decode below via the
-            # existing `except Exception` path, same as any other GPU-decode
-            # failure.
-            import torch_bootstrap
-            if not torch_bootstrap.wait_for_gpu_backend_ready(timeout=10.0):
-                raise RuntimeError("GPU backend not ready within timeout")
-            from gpu_raw_processor import try_gpu_decode_from_unpacked
-            gpu_out = try_gpu_decode_from_unpacked(unpacked, cancel_check=cancel_check, return_linear=return_linear)
-            if gpu_out is not None:
-                logger.info(
-                    "[FAST_RAW] %s decoded (GPU) %dx%d in %.0fms (pattern=%s)",
-                    os.path.basename(file_path),
-                    gpu_out.shape[1],
-                    gpu_out.shape[0],
-                    (time.perf_counter() - t0) * 1000.0,
-                    unpacked.pat_str,
-                )
-                return gpu_out
-        except DecodeCancelled:
-            raise
-        except Exception as e:
-            logger.warning("[FAST_RAW] GPU decode attempt failed, falling back to CPU: %s", e)
-            
+        if prefer_gpu_decode_enabled():
+            try:
+                # torch/kornia must never be imported for the first time on this
+                # (background) thread -- macOS aborts the process if PyTorch's
+                # OpenMP runtime initializes off the main thread. The main thread
+                # imports gpu_raw_processor right after showing the window
+                # (torch_bootstrap.py); wait for that here instead of importing
+                # it ourselves. A timeout falls back to CPU decode below via the
+                # existing `except Exception` path, same as any other GPU-decode
+                # failure.
+                import torch_bootstrap
+                if not torch_bootstrap.wait_for_gpu_backend_ready(timeout=10.0):
+                    raise RuntimeError("GPU backend not ready within timeout")
+                from gpu_raw_processor import try_gpu_decode_from_unpacked
+                gpu_out = try_gpu_decode_from_unpacked(unpacked, cancel_check=cancel_check, return_linear=return_linear)
+                if gpu_out is not None:
+                    logger.info(
+                        "[FAST_RAW] %s decoded (GPU) %dx%d in %.0fms (pattern=%s)",
+                        os.path.basename(file_path),
+                        gpu_out.shape[1],
+                        gpu_out.shape[0],
+                        (time.perf_counter() - t0) * 1000.0,
+                        unpacked.pat_str,
+                    )
+                    return gpu_out
+            except DecodeCancelled:
+                raise
+            except Exception as e:
+                logger.warning("[FAST_RAW] GPU decode attempt failed, falling back to CPU: %s", e)
+
         out = finish_full_decode(
             unpacked, cancel_check=cancel_check, return_linear=return_linear, prefer_gpu=False
         )
