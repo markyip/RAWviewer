@@ -732,49 +732,33 @@ def _run_applescript(script: str) -> str:
 def _macos_try_force_dark_titlebar():
     """
     Best-effort: request Dark Aqua appearance on macOS so the native title bar
-    matches our dark UI. This uses the Objective-C runtime via ctypes to avoid
-    adding PyObjC as a dependency.
+    matches our dark UI.
+
+    Uses PyObjC (already a project dependency, see _bring_app_to_foreground
+    above) rather than hand-rolled ctypes objc_msgSend calls. The previous
+    ctypes version called Objective-C methods that return autoreleased
+    objects (stringWithUTF8String:, appearanceNamed:, sharedApplication)
+    with no autorelease pool management and no retain -- a real, reproduced
+    SIGSEGV in +[NSAppearance appearanceNamed:] was traced back to this via
+    a live crash-report/faulthandler capture during scroll-stutter
+    investigation (the crash was incidental to scrolling; this function
+    fires once at startup via QTimer.singleShot). PyObjC manages pool/
+    lifetime correctly for the exact same calls.
     """
     if sys.platform != "darwin":
         return False
     try:
-        import ctypes
-        import ctypes.util
+        import objc
 
-        objc_path = ctypes.util.find_library("objc") or "/usr/lib/libobjc.A.dylib"
-        appkit_path = ctypes.util.find_library("AppKit") or "/System/Library/Frameworks/AppKit.framework/AppKit"
-        objc = ctypes.cdll.LoadLibrary(objc_path)
-        ctypes.cdll.LoadLibrary(appkit_path)
+        NSAppearance = objc.lookUpClass("NSAppearance")
+        NSApplication = objc.lookUpClass("NSApplication")
 
-        objc.objc_getClass.restype = ctypes.c_void_p
-        objc.objc_getClass.argtypes = [ctypes.c_char_p]
-        objc.sel_registerName.restype = ctypes.c_void_p
-        objc.sel_registerName.argtypes = [ctypes.c_char_p]
-
-        # On arm64, objc_msgSend must be cast to an appropriately-typed function pointer.
-        _msg_obj = ctypes.CFUNCTYPE(ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p)(("objc_msgSend", objc))
-        _msg_obj_charp = ctypes.CFUNCTYPE(ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_char_p)(("objc_msgSend", objc))
-        _msg_void_obj = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p)(("objc_msgSend", objc))
-
-        def cls(name: str) -> int:
-            return int(objc.objc_getClass(name.encode("utf-8")))
-
-        def sel(name: str) -> int:
-            return int(objc.sel_registerName(name.encode("utf-8")))
-
-        NSString = cls("NSString")
-        NSAppearance = cls("NSAppearance")
-        NSApplication = cls("NSApplication")
-
-        # name = "NSAppearanceNameDarkAqua"
-        name_str = _msg_obj_charp(NSString, sel("stringWithUTF8String:"), b"NSAppearanceNameDarkAqua")
-        appearance = _msg_obj(NSAppearance, sel("appearanceNamed:"), name_str)
-
-        app = _msg_obj(NSApplication, sel("sharedApplication"))
-        if not app or not appearance:
+        appearance = NSAppearance.appearanceNamed_("NSAppearanceNameDarkAqua")
+        app = NSApplication.sharedApplication()
+        if app is None or appearance is None:
             return False
 
-        _msg_void_obj(app, sel("setAppearance:"), appearance)
+        app.setAppearance_(appearance)
         return True
     except Exception:
         # Never fail startup due to cosmetic integration.
@@ -791,63 +775,25 @@ def _macos_try_force_dark_titlebar_for_window(widget):
     if widget is None:
         return False
     try:
-        import ctypes
-        import ctypes.util
+        import objc
 
-        objc_path = ctypes.util.find_library("objc") or "/usr/lib/libobjc.A.dylib"
-        appkit_path = ctypes.util.find_library("AppKit") or "/System/Library/Frameworks/AppKit.framework/AppKit"
-        objc = ctypes.cdll.LoadLibrary(objc_path)
-        ctypes.cdll.LoadLibrary(appkit_path)
+        NSAppearance = objc.lookUpClass("NSAppearance")
+        appearance = NSAppearance.appearanceNamed_("NSAppearanceNameDarkAqua")
+        if appearance is None:
+            return False
 
-        objc.objc_getClass.restype = ctypes.c_void_p
-        objc.objc_getClass.argtypes = [ctypes.c_char_p]
-        objc.sel_registerName.restype = ctypes.c_void_p
-        objc.sel_registerName.argtypes = [ctypes.c_char_p]
-
-        _msg_obj = ctypes.CFUNCTYPE(ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p)(("objc_msgSend", objc))
-        _msg_obj_charp = ctypes.CFUNCTYPE(
-            ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_char_p
-        )(("objc_msgSend", objc))
-        _msg_void_obj = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p)(("objc_msgSend", objc))
-        _msg_void_bool = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_bool)(("objc_msgSend", objc))
-        _msg_void_int = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int)(("objc_msgSend", objc))
-        _msg_obj_4d = ctypes.CFUNCTYPE(
-            ctypes.c_void_p,
-            ctypes.c_void_p,
-            ctypes.c_void_p,
-            ctypes.c_double,
-            ctypes.c_double,
-            ctypes.c_double,
-            ctypes.c_double,
-        )(("objc_msgSend", objc))
-
-        def cls(name: str) -> int:
-            return int(objc.objc_getClass(name.encode("utf-8")))
-
-        def sel(name: str) -> int:
-            return int(objc.sel_registerName(name.encode("utf-8")))
-
-        NSString = cls("NSString")
-        NSAppearance = cls("NSAppearance")
-        NSColor = cls("NSColor")
-
-        # Obtain NSView* from Qt widget. On macOS, QWidget.winId() is a pointer.
+        # Obtain NSView* from Qt widget. On macOS, QWidget.winId() is a pointer;
+        # wrap it as a PyObjC object rather than dereferencing it via raw ctypes.
         view_ptr = int(widget.winId())
         if not view_ptr:
             return False
 
-        window_ptr = _msg_obj(ctypes.c_void_p(view_ptr), sel("window"))
-        window_ptr = int(window_ptr or 0)
-        if not window_ptr:
+        ns_view = objc.objc_object(c_void_p=view_ptr)
+        ns_window = ns_view.window()
+        if ns_window is None:
             return False
 
-        name_str = _msg_obj_charp(NSString, sel("stringWithUTF8String:"), b"NSAppearanceNameDarkAqua")
-        appearance = _msg_obj(NSAppearance, sel("appearanceNamed:"), name_str)
-        if not appearance:
-            return False
-
-        _msg_void_obj(ctypes.c_void_p(window_ptr), sel("setAppearance:"), appearance)
-
+        ns_window.setAppearance_(appearance)
         return True
     except Exception:
         return False

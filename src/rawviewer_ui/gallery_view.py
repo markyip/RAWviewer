@@ -2657,6 +2657,40 @@ class JustifiedGallery(QWidget):
         return -1
 
     def load_visible_images(self):
+        if os.environ.get("RAWVIEWER_SCROLL_PERF_DEBUG", "").strip() == "1":
+            t0 = time.perf_counter()
+            try:
+                return self._load_visible_images_impl()
+            finally:
+                dt_ms = (time.perf_counter() - t0) * 1000.0
+                if dt_ms > 4.0:
+                    logger.info(
+                        "[SCROLL_PERF] load_visible_images took %.1fms (widgets=%d layout_items=%d)",
+                        dt_ms, len(self._visible_widgets), len(getattr(self, "_gallery_layout_items", []) or []),
+                    )
+        if os.environ.get("RAWVIEWER_SCROLL_CPROFILE", "").strip() == "1":
+            n = getattr(self, "_scroll_cprofile_calls", 0)
+            if n < 40:
+                import cProfile, pstats, io as _io
+                pr = cProfile.Profile()
+                pr.enable()
+                result = self._load_visible_images_impl()
+                pr.disable()
+                self._scroll_cprofile_calls = n + 1
+                if not hasattr(self, "_scroll_cprofile_agg"):
+                    self._scroll_cprofile_agg = pstats.Stats(pr)
+                else:
+                    self._scroll_cprofile_agg.add(pr)
+                if self._scroll_cprofile_calls == 40:
+                    s = _io.StringIO()
+                    ps = self._scroll_cprofile_agg
+                    ps.stream = s
+                    ps.sort_stats("cumulative").print_stats(25)
+                    logger.info("[SCROLL_CPROFILE] aggregate over 40 calls:\n%s", s.getvalue())
+                return result
+        return self._load_visible_images_impl()
+
+    def _load_visible_images_impl(self):
         # Stop background preloading when loading visible images (e.g. during scroll)
         self._idle_preload_timer.stop()
 
