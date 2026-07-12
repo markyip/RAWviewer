@@ -1240,20 +1240,34 @@ class PixmapConverter(QThread):
     def __init__(self, file_path, rgb_image, image_cache):
         super().__init__()
         self.file_path = file_path
-        self.rgb_image = rgb_image.copy()  # Make a copy to avoid issues
+        # Not copied here: this class is a QThread, but __init__ runs
+        # synchronously on whatever thread constructs it (always the main/
+        # GUI thread for this class -- see on_manager_image_ready). A
+        # full-resolution RAW buffer can be 100+MB; copying it here blocked
+        # the main event loop for the copy's full duration on every image
+        # display, confirmed via a live SIGUSR1/faulthandler stack dump
+        # during a multi-second UI stall (main thread parked inside this
+        # __init__). The copy still happens -- just moved to the start of
+        # run(), on the background thread, which is what QThread is for.
+        self.rgb_image = rgb_image
         self.image_cache = image_cache
         self._should_stop = False
-    
+
     def stop_processing(self):
         """Request processing to stop"""
         self._should_stop = True
-    
+
     def run(self):
         """Convert numpy array to QPixmap in background"""
         try:
             if self._should_stop:
                 return
-            
+
+            # Copy here (background thread), not in __init__ (main thread).
+            # See __init__ docstring comment for why this moved.
+            if hasattr(self.rgb_image, 'copy'):
+                self.rgb_image = self.rgb_image.copy()
+
             if not hasattr(self.rgb_image, 'shape'):
                 if hasattr(self.rgb_image, 'width') and hasattr(self.rgb_image, 'height'):
                     height, width = self.rgb_image.height(), self.rgb_image.width()
