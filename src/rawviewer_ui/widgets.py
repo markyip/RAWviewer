@@ -40,6 +40,7 @@ class ThumbnailLabel(QLabel):
         self._gallery_selected = False
         self._gallery_bookmarked = False
         self._gallery_edited = False
+        self._gallery_rating = 0
         self._burst_stack_count = 0
         self.file_path = None
         self._drag_start_pos = None
@@ -146,6 +147,40 @@ class ThumbnailLabel(QLabel):
         self._gallery_edited = bool(edited)
         self._update_edited_badge()
 
+    def set_gallery_rating(self, rating: int) -> None:
+        self._gallery_rating = max(0, min(5, int(rating or 0)))
+        self._update_rating_badge()
+
+    def _update_rating_badge(self) -> None:
+        badge = getattr(self, "_rating_badge", None)
+        rating = int(getattr(self, "_gallery_rating", 0) or 0)
+        if rating >= 1:
+            if badge is None:
+                badge = QLabel(self)
+                # Rating is a mark already decided about a photo -- dodge,
+                # same family as the bookmark/edited badges (rule 4).
+                badge.setStyleSheet(
+                    f"color: {theme.DODGE}; font-size: 9px; font-weight: 700;"
+                    f" background: rgba({theme.VOID_RGB[0]}, {theme.VOID_RGB[1]}, {theme.VOID_RGB[2]}, 0.72);"
+                    " border-radius: 3px; padding: 1px 4px;"
+                )
+                badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                self._rating_badge = badge
+            badge.setText("★" * rating)
+            badge.adjustSize()
+            badge.show()
+            self._position_rating_badge()
+        elif badge is not None:
+            badge.hide()
+
+    def _position_rating_badge(self) -> None:
+        badge = getattr(self, "_rating_badge", None)
+        if badge is None or not badge.isVisible():
+            return
+        margin = 4
+        badge.move(max(0, margin), max(0, self.height() - badge.height() - margin))
+        badge.raise_()
+
     def set_burst_stack_count(self, count: int) -> None:
         self._burst_stack_count = max(0, int(count))
         self._update_burst_stack_badge()
@@ -249,6 +284,7 @@ class ThumbnailLabel(QLabel):
         self._position_bookmark_badge()
         self._position_burst_stack_badge()
         self._position_edited_badge()
+        self._position_rating_badge()
 
 
 class ImageLoaded(QObject):
