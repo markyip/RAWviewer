@@ -12,6 +12,7 @@ from PyQt6.QtWidgets import (
     QMainWindow, QScrollArea, QApplication, QGridLayout, QToolButton, QSizePolicy,
     QGraphicsOpacityEffect,
 )
+import theme
 from rawviewer_app.env import safe_print, _env_true
 
 
@@ -135,7 +136,7 @@ class ResizeGripIndicator(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor(176, 176, 176, 100))
+        painter.setBrush(QColor(*theme.INK_MUTED_RGB, 100))
         spacing = 3
         dot = 2
         origin_x = self.width() - dot
@@ -156,14 +157,14 @@ class CustomTitleBar(QFrame):
         self.parent = parent
         self.setFixedHeight(40)  # Smaller height
         
-        # Use the same background color as image viewing area (#1E1E1E)
-        self.setStyleSheet("""
-            QFrame {
-                background-color: #1E1E1E;
-                border-bottom: 1px solid #2E2E2E;
-            }
+        # Use the same background color as image viewing area (theme.VOID)
+        self.setStyleSheet(f"""
+            QFrame {{
+                background-color: {theme.VOID};
+                border-bottom: 1px solid {theme.LINE};
+            }}
         """)
-        
+
         layout = QHBoxLayout(self)
         layout.setContentsMargins(12, 0, 0, 0)
         layout.setSpacing(0)
@@ -212,9 +213,9 @@ class CustomTitleBar(QFrame):
         if not icon_loaded:
             # Fallback to 'R' if favicon not found
             self.icon_label.setText("R")
-            self.icon_label.setStyleSheet("""
-                background-color: #4A4A4A;
-                color: #E0E0E0;
+            self.icon_label.setStyleSheet(f"""
+                background-color: {theme.RAISED};
+                color: {theme.INK};
                 border-radius: 12px;
                 font-weight: bold;
                 font-size: 14px;
@@ -234,8 +235,8 @@ class CustomTitleBar(QFrame):
         self.metadata_label.setAttribute(
             Qt.WidgetAttribute.WA_TransparentForMouseEvents, True
         )
-        self.metadata_label.setStyleSheet("""
-            color: #B0B0B0;
+        self.metadata_label.setStyleSheet(f"""
+            color: {theme.INK_MUTED};
             font-size: 12px;
             font-weight: 500;
             padding: 0px 8px;
@@ -266,21 +267,21 @@ class CustomTitleBar(QFrame):
         """
         
         self.min_btn = QPushButton()
-        self.min_btn.setIcon(qta.icon('fa5s.minus', color='#E0E0E0'))
+        self.min_btn.setIcon(qta.icon('fa5s.minus', color=theme.INK))
         self.min_btn.setIconSize(QSize(12, 12))
         self.min_btn.setStyleSheet(control_btn_style)
         self.min_btn.clicked.connect(self.parent.showMinimized)
         layout.addWidget(self.min_btn)
         
         self.max_btn = QPushButton()
-        self.max_btn.setIcon(qta.icon('fa5.square', color='#E0E0E0'))
+        self.max_btn.setIcon(qta.icon('fa5.square', color=theme.INK))
         self.max_btn.setIconSize(QSize(12, 12))
         self.max_btn.setStyleSheet(control_btn_style)
         self.max_btn.clicked.connect(self._toggle_maximize)
         layout.addWidget(self.max_btn)
         
         self.close_btn = QPushButton()
-        self.close_btn.setIcon(qta.icon('fa5s.times', color='#E0E0E0'))
+        self.close_btn.setIcon(qta.icon('fa5s.times', color=theme.INK))
         self.close_btn.setIconSize(QSize(12, 12))
         self.close_btn.setStyleSheet(control_btn_style + "QPushButton:hover { background-color: #f44336; }")
         self.close_btn.clicked.connect(self.parent.close)
@@ -297,9 +298,9 @@ class CustomTitleBar(QFrame):
         maximized = bool(self.parent.isMaximized())
         self._is_maximized = maximized
         if maximized:
-            self.max_btn.setIcon(qta.icon("fa5s.clone", color="#E0E0E0"))
+            self.max_btn.setIcon(qta.icon("fa5s.clone", color=theme.INK))
         else:
-            self.max_btn.setIcon(qta.icon("fa5.square", color="#E0E0E0"))
+            self.max_btn.setIcon(qta.icon("fa5.square", color=theme.INK))
 
     def _toggle_maximize(self):
         if self.parent.isMaximized():
@@ -380,11 +381,11 @@ class TopMetadataBar(QFrame):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setFixedHeight(28)
-        self.setStyleSheet("""
-            QFrame {
-                background-color: #1E1E1E;
-                border-bottom: 1px solid #2E2E2E;
-            }
+        self.setStyleSheet(f"""
+            QFrame {{
+                background-color: {theme.VOID};
+                border-bottom: 1px solid {theme.LINE};
+            }}
         """)
         layout = QHBoxLayout(self)
         layout.setContentsMargins(12, 0, 12, 0)
@@ -394,8 +395,8 @@ class TopMetadataBar(QFrame):
         self.metadata_label.setAlignment(
             Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter
         )
-        self.metadata_label.setStyleSheet("""
-            color: #B0B0B0;
+        self.metadata_label.setStyleSheet(f"""
+            color: {theme.INK_MUTED};
             font-size: 12px;
             font-weight: 500;
             padding: 0px 8px;
@@ -466,12 +467,12 @@ class CustomConfirmDialog(QDialog):
 
         self.container = QWidget(self)
         self.container.setObjectName("confirmDialogContainer")
-        self.container.setStyleSheet("""
-            #confirmDialogContainer {
-                background-color: #1E1E1E;
+        self.container.setStyleSheet(f"""
+            #confirmDialogContainer {{
+                background-color: {theme.VOID};
                 border-radius: 12px;
-                border: 1px solid #2E2E2E;
-            }
+                border: 1px solid {theme.LINE};
+            }}
         """)
 
         main_layout = QVBoxLayout(self.container)
@@ -498,15 +499,15 @@ class CustomConfirmDialog(QDialog):
         self._message_label.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum
         )
-        self._message_label.setStyleSheet("""
-            QLabel {
-                color: #E0E0E0;
+        self._message_label.setStyleSheet(f"""
+            QLabel {{
+                color: {theme.INK};
                 font-size: 16px;
                 font-weight: 500;
                 font-family: 'Roboto', 'Segoe UI', sans-serif;
                 padding: 0px;
                 margin: 0px;
-            }
+            }}
         """)
         content_layout.addWidget(self._message_label)
 
@@ -520,14 +521,14 @@ class CustomConfirmDialog(QDialog):
             self._info_label.setSizePolicy(
                 QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum
             )
-            self._info_label.setStyleSheet("""
-                QLabel {
-                    color: #B0B0B0;
+            self._info_label.setStyleSheet(f"""
+                QLabel {{
+                    color: {theme.INK_MUTED};
                     font-size: 14px;
                     font-family: 'Roboto', 'Segoe UI', sans-serif;
                     padding: 0px;
                     margin: 0px;
-                }
+                }}
             """)
             content_layout.addWidget(self._info_label)
 
@@ -547,31 +548,31 @@ class CustomConfirmDialog(QDialog):
         self.cancel_btn.setDefault(True)
         self.cancel_btn.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.cancel_btn.setAttribute(Qt.WidgetAttribute.WA_MacShowFocusRect, False)
-        self.cancel_btn.setStyleSheet("""
-            QPushButton#confirmCancelBtn {
+        self.cancel_btn.setStyleSheet(f"""
+            QPushButton#confirmCancelBtn {{
                 background-color: transparent;
-                color: #E0E0E0;
-                border: 1px solid #4A4A4A;
+                color: {theme.INK};
+                border: 1px solid {theme.LINE};
                 border-radius: 20px;
                 font-size: 14px;
                 font-weight: 500;
                 font-family: 'Roboto', 'Segoe UI', sans-serif;
                 padding: 0px 24px;
                 outline: none;
-            }
-            QPushButton#confirmCancelBtn:hover:!focus {
-                background-color: rgba(255, 255, 255, 0.05);
-                border-color: #5A5A5A;
-            }
-            QPushButton#confirmCancelBtn:focus {
-                background-color: rgba(255, 255, 255, 0.16);
-                color: #FFFFFF;
-                border: 1px solid #D0D0D0;
+            }}
+            QPushButton#confirmCancelBtn:hover:!focus {{
+                background-color: rgba({theme.INK_RGB[0]}, {theme.INK_RGB[1]}, {theme.INK_RGB[2]}, 0.05);
+                border-color: {theme.INK_FAINT};
+            }}
+            QPushButton#confirmCancelBtn:focus {{
+                background-color: rgba({theme.INK_RGB[0]}, {theme.INK_RGB[1]}, {theme.INK_RGB[2]}, 0.16);
+                color: {theme.INK};
+                border: 1px solid {theme.INK};
                 outline: none;
-            }
-            QPushButton#confirmCancelBtn:pressed {
-                background-color: rgba(255, 255, 255, 0.12);
-            }
+            }}
+            QPushButton#confirmCancelBtn:pressed {{
+                background-color: rgba({theme.INK_RGB[0]}, {theme.INK_RGB[1]}, {theme.INK_RGB[2]}, 0.12);
+            }}
         """)
         self.cancel_btn.clicked.connect(self.reject)
 
@@ -580,61 +581,66 @@ class CustomConfirmDialog(QDialog):
         self.delete_btn = _ConfirmDialogButton(action_label)
         if is_discard:
             self.delete_btn.setObjectName("confirmDiscardBtn")
-            confirm_style = """
-            QPushButton#confirmDiscardBtn {
+            # Base rule uses chrome tokens; hover/focus/pressed keep the literal
+            # amber warning colors as-is (destructive/warning colors are out of
+            # scope for the darkroom palette migration).
+            confirm_style = f"""
+            QPushButton#confirmDiscardBtn {{
                 background-color: transparent;
-                color: #E0E0E0;
-                border: 1px solid #4A4A4A;
+                color: {theme.INK};
+                border: 1px solid {theme.LINE};
                 border-radius: 20px;
                 font-size: 14px;
                 font-weight: 500;
                 font-family: 'Roboto', 'Segoe UI', sans-serif;
                 padding: 0px 24px;
                 outline: none;
-            }
-            QPushButton#confirmDiscardBtn:hover:!focus {
+            }}
+            QPushButton#confirmDiscardBtn:hover:!focus {{
                 background-color: rgba(255, 183, 77, 0.12);
                 border-color: #FFB74D;
                 color: #FFE082;
-            }
-            QPushButton#confirmDiscardBtn:focus {
+            }}
+            QPushButton#confirmDiscardBtn:focus {{
                 background-color: #FFB74D;
                 color: #1E1E1E;
                 border: 1px solid #FFB74D;
                 outline: none;
-            }
-            QPushButton#confirmDiscardBtn:pressed {
+            }}
+            QPushButton#confirmDiscardBtn:pressed {{
                 background-color: #FFA726;
-            }
+            }}
             """
         else:
             self.delete_btn.setObjectName("confirmDeleteBtn")
-            confirm_style = """
-            QPushButton#confirmDeleteBtn {
+            # Base rule uses chrome tokens; hover/focus/pressed keep the literal
+            # destructive-red colors as-is (out of scope for this migration).
+            confirm_style = f"""
+            QPushButton#confirmDeleteBtn {{
                 background-color: transparent;
-                color: #E0E0E0;
-                border: 1px solid #4A4A4A;
+                color: {theme.INK};
+                border: 1px solid {theme.LINE};
                 border-radius: 20px;
                 font-size: 14px;
                 font-weight: 500;
                 font-family: 'Roboto', 'Segoe UI', sans-serif;
                 padding: 0px 24px;
                 outline: none;
-            }
-            QPushButton#confirmDeleteBtn:hover:!focus {
+            }}
+            QPushButton#confirmDeleteBtn:hover:!focus {{
                 background-color: rgba(255, 82, 82, 0.12);
                 border-color: #FF5252;
                 color: #FF8A80;
-            }
-            QPushButton#confirmDeleteBtn:focus {
+            }}
+            QPushButton#confirmDeleteBtn:focus {{
                 background-color: #FF5252;
                 color: #FFFFFF;
                 border: 1px solid #FF5252;
                 outline: none;
-            }
-            QPushButton#confirmDeleteBtn:pressed {
+            }}
+            QPushButton#confirmDeleteBtn:pressed {{
                 background-color: #FF4444;
-            }
+            }}
             """
         self.delete_btn.setFixedHeight(40)
         self.delete_btn.setMinimumWidth(108)
@@ -818,12 +824,12 @@ class CustomWarningDialog(QDialog):
 
         self.container = QWidget(self)
         self.container.setObjectName("warningDialogContainer")
-        self.container.setStyleSheet("""
-            #warningDialogContainer {
-                background-color: #1E1E1E;
+        self.container.setStyleSheet(f"""
+            #warningDialogContainer {{
+                background-color: {theme.VOID};
                 border-radius: 12px;
-                border: 1px solid #2E2E2E;
-            }
+                border: 1px solid {theme.LINE};
+            }}
         """)
 
         main_layout = QVBoxLayout(self.container)
@@ -850,15 +856,15 @@ class CustomWarningDialog(QDialog):
         self._message_label.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum
         )
-        self._message_label.setStyleSheet("""
-            QLabel {
-                color: #E0E0E0;
+        self._message_label.setStyleSheet(f"""
+            QLabel {{
+                color: {theme.INK};
                 font-size: 16px;
                 font-weight: 500;
                 font-family: 'Roboto', 'Segoe UI', sans-serif;
                 padding: 0px;
                 margin: 0px;
-            }
+            }}
         """)
         content_layout.addWidget(self._message_label)
 
@@ -872,14 +878,14 @@ class CustomWarningDialog(QDialog):
             self._info_label.setSizePolicy(
                 QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum
             )
-            self._info_label.setStyleSheet("""
-                QLabel {
-                    color: #B0B0B0;
+            self._info_label.setStyleSheet(f"""
+                QLabel {{
+                    color: {theme.INK_MUTED};
                     font-size: 14px;
                     font-family: 'Roboto', 'Segoe UI', sans-serif;
                     padding: 0px;
                     margin: 0px;
-                }
+                }}
             """)
             content_layout.addWidget(self._info_label)
 
@@ -899,31 +905,31 @@ class CustomWarningDialog(QDialog):
         self.ok_btn.setDefault(True)
         self.ok_btn.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.ok_btn.setAttribute(Qt.WidgetAttribute.WA_MacShowFocusRect, False)
-        self.ok_btn.setStyleSheet("""
-            QPushButton#warningOkBtn {
+        self.ok_btn.setStyleSheet(f"""
+            QPushButton#warningOkBtn {{
                 background-color: transparent;
-                color: #E0E0E0;
-                border: 1px solid #4A4A4A;
+                color: {theme.INK};
+                border: 1px solid {theme.LINE};
                 border-radius: 20px;
                 font-size: 14px;
                 font-weight: 500;
                 font-family: 'Roboto', 'Segoe UI', sans-serif;
                 padding: 0px 24px;
                 outline: none;
-            }
-            QPushButton#warningOkBtn:hover:!focus {
-                background-color: rgba(255, 255, 255, 0.05);
-                border-color: #5A5A5A;
-            }
-            QPushButton#warningOkBtn:focus {
-                background-color: rgba(255, 255, 255, 0.16);
-                color: #FFFFFF;
-                border: 1px solid #D0D0D0;
+            }}
+            QPushButton#warningOkBtn:hover:!focus {{
+                background-color: rgba({theme.INK_RGB[0]}, {theme.INK_RGB[1]}, {theme.INK_RGB[2]}, 0.05);
+                border-color: {theme.INK_FAINT};
+            }}
+            QPushButton#warningOkBtn:focus {{
+                background-color: rgba({theme.INK_RGB[0]}, {theme.INK_RGB[1]}, {theme.INK_RGB[2]}, 0.16);
+                color: {theme.INK};
+                border: 1px solid {theme.INK};
                 outline: none;
-            }
-            QPushButton#warningOkBtn:pressed {
-                background-color: rgba(255, 255, 255, 0.12);
-            }
+            }}
+            QPushButton#warningOkBtn:pressed {{
+                background-color: rgba({theme.INK_RGB[0]}, {theme.INK_RGB[1]}, {theme.INK_RGB[2]}, 0.12);
+            }}
         """)
         self.ok_btn.clicked.connect(self.accept)
 
@@ -1071,7 +1077,7 @@ class SingleImageViewOverlay(QWidget):
             adjust_widget.setParent(self)
             adjust_widget.hide()
         self.setObjectName("single_view_container")
-        self.setStyleSheet("#single_view_container { background-color: #1E1E1E; }")
+        self.setStyleSheet(f"#single_view_container {{ background-color: {theme.VOID}; }}")
         self.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
@@ -1103,31 +1109,35 @@ class SingleImageViewOverlay(QWidget):
         from PyQt6.QtWidgets import QLabel
         self.rating_badge = QLabel(self)
         self.rating_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.rating_badge.setStyleSheet("""
-            QLabel {
-                background-color: rgba(30, 30, 30, 210);
-                color: #FFD700;
+        # Rating badge is a status mark (rule: marks get DODGE, not EMBER --
+        # EMBER stays reserved for selection/active-tool state only).
+        self.rating_badge.setStyleSheet(f"""
+            QLabel {{
+                background-color: {theme.rgba(theme.VOID_RGB, 210)};
+                color: {theme.DODGE};
                 font-size: 16px;
                 font-weight: bold;
                 border-radius: 4px;
                 padding: 4px 10px;
-                border: 1px solid rgba(255, 215, 0, 90);
-            }
+                border: 1px solid {theme.rgba(theme.DODGE_RGB, 90)};
+            }}
         """)
         self.rating_badge.hide()
 
         self.recovery_badge = QLabel(self)
         self.recovery_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.recovery_badge.setStyleSheet("""
-            QLabel {
-                background-color: rgba(24, 48, 72, 230);
-                color: #E8F4FF;
+        # Recovery preview literally lifts shadows / holds back highlights --
+        # the two darkroom operations BURN's cool slate-blue represents.
+        self.recovery_badge.setStyleSheet(f"""
+            QLabel {{
+                background-color: {theme.rgba(theme.BURN_RGB, 200)};
+                color: {theme.INK};
                 font-size: 12px;
                 font-weight: 600;
                 border-radius: 4px;
                 padding: 5px 10px;
-                border: 1px solid rgba(120, 180, 255, 120);
-            }
+                border: 1px solid {theme.rgba(theme.BURN_RGB, 140)};
+            }}
         """)
         self.recovery_badge.hide()
 
@@ -1749,22 +1759,22 @@ class LoadingOverlay(QWidget):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         
         # Draw semi-transparent background
-        painter.setBrush(QColor(0, 0, 0, 120))
+        painter.setBrush(QColor(*theme.VOID_RGB, 120))
         painter.setPen(Qt.PenStyle.NoPen)
         painter.drawRect(self.rect())
-        
+
         # Draw loading box
         box_width = 240
         box_height = 80
         x = (self.width() - box_width) // 2
         y = (self.height() - box_height) // 2
-        
-        painter.setBrush(QColor(40, 40, 40, 230))
-        painter.setPen(QPen(QColor(100, 100, 100), 1))
+
+        painter.setBrush(QColor(*theme.RAISED_RGB, 230))
+        painter.setPen(QPen(QColor(*theme.INK_FAINT_RGB), 1))
         painter.drawRoundedRect(x, y, box_width, box_height, 10, 10)
-        
+
         # Draw text
-        painter.setPen(QColor(255, 255, 255))
+        painter.setPen(QColor(theme.INK))
         font = painter.font()
         font.setPointSize(12)
         font.setBold(True)
