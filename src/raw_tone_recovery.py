@@ -120,7 +120,7 @@ def recovery_decode_params(
         half_size=half_size,
         highlight_mode=_highlight_reconstruct_mode(),
         exp_shift=1.0,
-        exp_preser=0.45,
+        exp_preserve_highlights=0.45,
     )
     if demosaic:
         try:
@@ -407,7 +407,7 @@ def decode_and_recover_raw(
 
         with _rawpy_global_lock:
             with rawpy.imread(file_path) as raw:
-                rgb = raw.postprocess(recovery_decode_params(half_size=True, for_file=file_path))
+                rgb = raw.postprocess(**recovery_decode_params(half_size=True, for_file=file_path))
     except Exception as exc:
         logger.warning(
             "RAW recovery decode failed for %s: %s",
@@ -448,7 +448,7 @@ def decode_raw_for_edr_rgb(
 
         with _rawpy_global_lock:
             with rawpy.imread(file_path) as raw:
-                rgb = raw.postprocess(recovery_decode_params(half_size=True, for_file=file_path))
+                rgb = raw.postprocess(**recovery_decode_params(half_size=True, for_file=file_path))
     except Exception as exc:
         logger.warning(
             "RAW EDR decode failed for %s: %s",
