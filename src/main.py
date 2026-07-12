@@ -337,8 +337,13 @@ def _enable_fatal_crash_dump_if_needed():
             mode = "a"
 
         f = open(dump_path, mode, encoding="utf-8", buffering=1)
+        # enable() already installs handlers for SIGSEGV/SIGFPE/SIGABRT/SIGBUS/SIGILL;
+        # register()-ing SIGABRT again raises RuntimeError and was silently swallowed
+        # by the except below, so SIGUSR1 registration below never actually ran.
         faulthandler.enable(file=f, all_threads=True)
-        faulthandler.register(signal.SIGABRT, file=f, all_threads=True)
+        faulthandler.register(signal.SIGUSR1, file=f, all_threads=True)
+        if os.environ.get("RAWVIEWER_SCROLL_DEBUG_DUMP", "").strip() == "1":
+            faulthandler.dump_traceback_later(0.5, repeat=True, file=f, exit=False)
     except Exception:
         # Never block startup due to diagnostics setup.
         pass
