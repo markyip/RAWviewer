@@ -957,9 +957,16 @@ def resolve_container_exif_for_file(
     *,
     cache=None,
 ) -> tuple[Optional[Dict[str, Any]], int]:
-    """Return (exif_data, orientation) from ImageCache or container EXIF on disk."""
+    """Return (exif_data, orientation) from ImageCache or container EXIF on disk.
+
+    verify=True: this is the orientation authority for pixel rotation
+    (_heal_raw_orientation / finalize_index_thumbnail_array) -- an
+    untrustworthy cached orientation here rotates pixels wrongly, so the
+    synchronous probe stays. get_exif memoizes the successful probe to disk,
+    so the cost is once per file ever, not per call.
+    """
     cache = cache or get_image_cache()
-    exif_data = cache.get_exif(file_path)
+    exif_data = cache.get_exif(file_path, verify=True)
     if not exif_data:
         try:
             from enhanced_raw_processor import EXIFExtractor
@@ -1476,6 +1483,10 @@ def use_raw_process_pool() -> bool:
     SkySpotter_USE_PROCESS_POOL=0. Default: on when CPU count >= 4 (Windows/Linux).
     macOS default off: spawn re-executes the .app (extra PIDs / splash). Opt in only via
     RAWVIEWER_USE_PROCESS_POOL=1 (SkySpotter_* is ignored on macOS).
+
+    When an in-process GPU demosaic backend is already loaded (cuda/mps/cupy),
+    default off so process-pool LibRaw does not compete with GPU VRAM/host slots.
+    Explicit RAWVIEWER_USE_PROCESS_POOL=1 still forces the pool on.
     """
     import os as _os
     import sys as _sys
@@ -1496,7 +1507,44 @@ def use_raw_process_pool() -> bool:
         return False
     if raw in ("1", "true", "yes", "on"):
         return True
+    # Prefer GPU/in-process fast_raw when that stack is available (late probe:
+    # gpu_raw_processor only after main-thread bootstrap; until then pool may
+    # start, then ImageLoadManager.apply_gpu_decode_profile() tears it down).
+    if _gpu_demosaic_backend_available():
+        return False
     return (_os.cpu_count() or 0) >= 4
+
+
+def _gpu_demosaic_backend_available() -> bool:
+    """True when gpu_raw_processor is loaded and reports a non-CPU backend."""
+    try:
+        import sys as _sys
+
+        mod = _sys.modules.get("gpu_raw_processor")
+        if mod is None:
+            return False
+        backend = mod.detect_gpu_backend()
+        return backend in ("pytorch_cuda", "pytorch_mps", "cupy")
+    except Exception:
+        return False
+
+
+def raw_load_limit_aligned_to_gpu(base_limit: int) -> int:
+    """Cap concurrent heavy RAW work to GPU demosaic concurrency when active."""
+    limit = max(1, int(base_limit or 1))
+    try:
+        import sys as _sys
+
+        mod = _sys.modules.get("gpu_raw_processor")
+        if mod is None:
+            return limit
+        backend = mod.detect_gpu_backend()
+        if backend not in ("pytorch_cuda", "pytorch_mps", "cupy"):
+            return limit
+        gpu_n = int(mod.gpu_decode_concurrency())
+        return max(1, min(limit, gpu_n))
+    except Exception:
+        return limit
 
 
 def _env_int_bounded(name: str, default: int, *, minimum: int = 1, maximum: int = 64) -> int:
@@ -1631,7 +1679,13 @@ def sort_probe_worker_count(
     Thread pool size for cold EXIF header probes during folder sort.
 
     Override: RAWVIEWER_SORT_PROBE_WORKERS (1–32).
-    Conservative mode (fast-open window): RAWVIEWER_SORT_PROBE_WORKERS_CONSERVATIVE or min(3, default).
+    Conservative mode (fast-open window): RAWVIEWER_SORT_PROBE_WORKERS_CONSERVATIVE or
+    half the machine's cores (was a flat 3 regardless of core count -- on an
+    8-core machine that's less than half of even the *conservative* budget a
+    proportional formula gives, and the flat cap doesn't back off further on
+    a weak machine either. Caller triggers conservative mode for any folder
+    over 400 uncached files, not just briefly at fast-open -- on a 6880-file
+    folder this flat cap measured a 23s sort at 3 workers).
     Slow storage (UNC / RAWVIEWER_SLOW_STORAGE_PREFIXES): capped at 3.
     """
     override = os.environ.get("RAWVIEWER_SORT_PROBE_WORKERS", "").strip()
@@ -1649,7 +1703,7 @@ def sort_probe_worker_count(
             return _env_int_bounded(
                 "RAWVIEWER_SORT_PROBE_WORKERS_CONSERVATIVE", 3, minimum=1, maximum=8
             )
-        return min(3, max(2, cpu))
+        return min(6, max(2, cpu // 2))
 
     if sample_path and is_slow_storage_path(sample_path):
         # Network/UNC paths have high latency. We need *more* workers to hide the I/O wait.
@@ -1875,7 +1929,7 @@ def raw_concurrent_load_limit(sample_path: Optional[str] = None) -> int:
                         "RAWVIEWER_EXTERNAL_VOLUME_RAW_LIMIT", 8, minimum=1, maximum=32
                     ),
                 )
-    return limit
+    return raw_load_limit_aligned_to_gpu(limit)
 
 
 def process_pool_worker_count() -> int:
@@ -2178,12 +2232,34 @@ def try_load_hdr_image_pixmap(file_path: str, max_edge: int = 0) -> Optional[QPi
         if arr is None:
             return None
 
-        # Determine float representation [0.0, 1.0]
+        # Determine the [0,1] float denominator from the FULL-resolution
+        # array before any downsizing. INTER_AREA block-averaging can only
+        # ever pull arr.max() down (never up), so computing this heuristic
+        # AFTER a downsize can misjudge a true-16-bit image (native peak just
+        # above 4095) as 10/12-bit if its bright content is sparse enough to
+        # get averaged below the threshold -- picking a denominator dozens of
+        # times too small and rendering the preview badly over-bright.
         if arr.dtype == np.uint16:
             max_val = 65535.0 if arr.max() > 4095 else ((2 ** bit_depth) - 1)
-            img_float = arr.astype(np.float32) / max_val
         else:
-            img_float = arr.astype(np.float32) / 255.0
+            max_val = 255.0
+
+        # Perform downsizing early to save memory and processing time
+        if max_edge > 0 and max(w, h) > max_edge:
+            import cv2
+            if w >= h:
+                sw = max_edge
+                sh = max(1, int(h * max_edge / max(w, 1)))
+            else:
+                sh = max_edge
+                sw = max(1, int(w * max_edge / max(h, 1)))
+            arr = cv2.resize(arr, (sw, sh), interpolation=cv2.INTER_AREA)
+            w, h = sw, sh
+            if len(arr.shape) == 2:
+                arr = arr.reshape((h, w, 1))
+
+        # Determine float representation [0.0, 1.0]
+        img_float = arr.astype(np.float32) / max_val
 
         from PyQt6.QtGui import QColorSpace
         from PyQt6.QtCore import Qt
@@ -2272,21 +2348,6 @@ def try_load_hdr_image_pixmap(file_path: str, max_edge: int = 0) -> Optional[QPi
             qimage = QImage(out_arr.data, w, h, w * out_arr.shape[2], q_format)
             qimage.ndarr = out_arr  # Keep array alive
             qimage.setColorSpace(QColorSpace(QColorSpace.NamedColorSpace.SRgb))
-
-        # Perform downsizing if requested
-        if max_edge > 0 and max(w, h) > max_edge:
-            from PyQt6.QtCore import QSize
-            if w >= h:
-                sw = max_edge
-                sh = max(1, int(h * max_edge / max(w, 1)))
-            else:
-                sh = max_edge
-                sw = max(1, int(w * max_edge / max(h, 1)))
-            qimage = qimage.scaled(
-                QSize(sw, sh),
-                Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation
-            )
 
         return QPixmap.fromImage(qimage)
 

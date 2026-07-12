@@ -7,6 +7,8 @@ import tempfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "src"))
 
+os.environ["RAWVIEWER_ENABLE_EDITING"] = "1"
+
 import numpy as np  # noqa: E402
 
 FAILURES = []

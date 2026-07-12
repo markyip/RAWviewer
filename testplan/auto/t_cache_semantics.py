@@ -29,6 +29,9 @@ def main() -> int:
         write_xmp_adjustments_for_file,
     )
 
+    os.environ["RAWVIEWER_ENABLE_EDITING"] = "1"
+    os.environ["RAWVIEWER_SIDECAR_ADJUST"] = "1"
+
     proc = UnifiedImageProcessor()
     tmpd = tempfile.mkdtemp()
     try:

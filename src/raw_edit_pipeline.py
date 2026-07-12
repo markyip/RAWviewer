@@ -171,6 +171,13 @@ def _apply_display_stage(img: np.ndarray, merged: dict[str, float]) -> np.ndarra
     return display
 
 
+def _linear_pipeline_worker_count(height: int) -> int:
+    # Shared tuning point with raw_adjustments' banded sRGB pipeline.
+    from raw_adjustments import banded_worker_count
+
+    return banded_worker_count(height)
+
+
 def process_linear_edit_buffer(
     rgb_image: np.ndarray,
     adj: dict[str, float],
@@ -192,11 +199,39 @@ def process_linear_edit_buffer(
     if is_default_adjustments(merged) and not uses_recovery_tone_map(merged):
         return img
 
+    mask_serial = str(merged.get(_DB_MASK_KEY, "") or "")
+    do_denoise = chroma_denoise if chroma_denoise is not None else chroma_denoise_enabled()
+    nr_amount = float(merged.get("ColorNoiseReduction", 0.0))
+    luma_nr_amount = float(merged.get("LuminanceNoiseReduction", 0.0))
+    denoise_active = nr_amount > 1e-4 or (do_denoise and not preview) or luma_nr_amount > 1e-4
+
+    # Row-band parallelism: WB, exposure and PV2012 tone are all elementwise
+    # (no cross-row dependency), so splitting rows across threads gives
+    # identical output computed concurrently -- numpy releases the GIL for
+    # arrays this size (same rationale as _apply_adjustments_to_srgb_banded
+    # in raw_adjustments.py). Denoise (real spatial radius) and dodge/burn
+    # (its mask needs its own per-band slicing, not implemented here) fall
+    # back to the single-threaded path below, same as that precedent.
+    n_workers = _linear_pipeline_worker_count(img.shape[0])
+    if not mask_serial and not denoise_active and n_workers > 1:
+        return _process_linear_edit_buffer_banded(img, merged, n_workers)
+
+    return _process_linear_edit_tail(img, merged, preview=preview, chroma_denoise=chroma_denoise)
+
+
+def _process_linear_edit_tail(
+    img: np.ndarray,
+    merged: dict[str, float],
+    *,
+    preview: bool,
+    chroma_denoise: Optional[bool],
+) -> np.ndarray:
+    """WB -> exposure -> dodge/burn -> denoise -> PV2012 tone on a (possibly banded) buffer."""
     img = _apply_wb_tint(img, merged)
 
     exp_val = float(merged.get("Exposure2012", 0.0))
     if abs(exp_val) > 1e-4:
-        img *= 2.0 ** exp_val
+        img = img * (2.0 ** exp_val)
 
     # Dodge & burn: local per-pixel exposure, applied right after the
     # global exposure gain and before denoise/tone -- local brightness
@@ -228,6 +263,28 @@ def process_linear_edit_buffer(
     if not uses_recovery_tone_map(merged):
         img = apply_pv2012_tone_rgb(img, merged)
     return np.clip(img, 0.0, None)
+
+
+def _process_linear_edit_buffer_banded(
+    img: np.ndarray, merged: dict[str, float], n_workers: int
+) -> np.ndarray:
+    """Row-band parallel version of process_linear_edit_buffer's WB/exposure/tone tail.
+
+    Only called when denoise is inactive and no dodge/burn mask is set (see
+    caller), so every stage in ``_process_linear_edit_tail`` is purely
+    elementwise -- bands need no padding, unlike the detail-enhance blur
+    stages in raw_adjustments._apply_adjustments_to_srgb_banded.
+    """
+    from raw_adjustments import band_ranges, banded_executor
+
+    bands = band_ranges(img.shape[0], n_workers)
+
+    def _process_band(band):
+        y0, y1, _pt, _pb = band
+        return _process_linear_edit_tail(img[y0:y1], merged, preview=True, chroma_denoise=False)
+
+    results = list(banded_executor().map(_process_band, bands))
+    return np.concatenate(results, axis=0)
 
 
 class PreviewStageCache:
@@ -459,9 +516,43 @@ def linear_to_display_uint8(img: np.ndarray, adj: dict[str, float] | None = None
     from fast_raw_decode import _gamma_lut8
 
     merged = dict(adj or {})
-    display = _apply_display_stage(img, merged)
+    n_workers = _linear_pipeline_worker_count(img.shape[0])
+    if not uses_recovery_tone_map(merged) and n_workers > 1:
+        display = _apply_display_stage_banded(img, merged, n_workers)
+    else:
+        display = _apply_display_stage(img, merged)
     idx = np.clip(display * 65535.0 + 0.5, 0, 65535).astype(np.uint16)
     return _gamma_lut8()[idx]
+
+
+def _apply_display_stage_banded(
+    img: np.ndarray, merged: dict[str, float], n_workers: int
+) -> np.ndarray:
+    """Row-band parallel version of _apply_display_stage (tone map, sat/vib,
+    HSL, detail-enhance). Only called for the clip tone-map path (the
+    recovery path downsamples the whole image via cv2.resize and isn't
+    row-independent). Reuses raw_adjustments._BAND_PAD_PX -- same blur radii,
+    same padding math as _apply_adjustments_to_srgb_banded.
+    """
+    from raw_adjustments import _BAND_PAD_PX, band_ranges, banded_executor
+
+    bands = band_ranges(img.shape[0], n_workers, pad_px=_BAND_PAD_PX)
+
+    def _process_band(band):
+        y0, y1, pad_top, pad_bot = band
+        src = img[y0 - pad_top : y1 + pad_bot]
+        out = _apply_display_stage(src, merged)
+        return out[pad_top : pad_top + (y1 - y0)]
+
+    import cv2
+
+    prev_threads = cv2.getNumThreads()
+    cv2.setNumThreads(1)
+    try:
+        results = list(banded_executor().map(_process_band, bands))
+    finally:
+        cv2.setNumThreads(prev_threads)
+    return np.concatenate(results, axis=0)
 
 
 def linear_to_export_uint16_srgb(img: np.ndarray, adj: dict[str, float] | None = None) -> np.ndarray:

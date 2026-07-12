@@ -653,13 +653,35 @@ def finish_full_decode(
     unpacked: UnpackedRaw,
     cancel_check: Optional[Callable[[], bool]] = None,
     return_linear: bool = False,
+    *,
+    prefer_gpu: bool = True,
 ) -> Optional[np.ndarray]:
     """Full-resolution pixel math (scale/demosaic/matrix/gamma) on an unpack.
 
     Returns uint8 sRGB in sensor orientation, or None when cv2 is
     unavailable. Raises :class:`DecodeCancelled` between chunks when
     ``cancel_check`` fires.
+
+    When ``prefer_gpu`` is True (default), try GPU demosaic first so stashed-
+    unpack zoom paths get the same CUDA/MPS path as cold ``try_fast_raw_decode``.
     """
+    if prefer_gpu:
+        try:
+            import torch_bootstrap
+
+            if torch_bootstrap.wait_for_gpu_backend_ready(timeout=2.0):
+                from gpu_raw_processor import try_gpu_decode_from_unpacked
+
+                gpu_out = try_gpu_decode_from_unpacked(
+                    unpacked, cancel_check=cancel_check, return_linear=return_linear
+                )
+                if gpu_out is not None:
+                    return gpu_out
+        except DecodeCancelled:
+            raise
+        except Exception as e:
+            logger.debug("[FAST_RAW] GPU finish_full_decode skipped: %s", e)
+
     cv2 = _import_cv2()
     if cv2 is None:
         return None
@@ -870,7 +892,9 @@ def try_fast_raw_decode(
         except Exception as e:
             logger.warning("[FAST_RAW] GPU decode attempt failed, falling back to CPU: %s", e)
             
-        out = finish_full_decode(unpacked, cancel_check=cancel_check, return_linear=return_linear)
+        out = finish_full_decode(
+            unpacked, cancel_check=cancel_check, return_linear=return_linear, prefer_gpu=False
+        )
         if out is None:
             return None
         logger.info(

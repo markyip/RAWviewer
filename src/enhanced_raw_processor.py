@@ -1049,8 +1049,9 @@ class EXIFExtractor(QObject):
 
     def extract_exif_data(self, file_path: str, raw_object: Optional[rawpy.RawPy] = None) -> Optional[Dict[str, Any]]:
         """Extract EXIF data from image file with RAW-specific orientation fallbacks."""
-        # Check SQLite cache first
-        cached = self.cache.get_exif(file_path)
+        # Check SQLite cache first (verify=True: this is the canonical
+        # orientation source for callers that rotate pixels).
+        cached = self.cache.get_exif(file_path, verify=True)
         if cached and not cached.get("minimal_preview_exif"):
             cached_ver = cached.get('raw_exif_sensor_meta_ver', 0)
             if cached_ver < RAW_EXIF_SENSOR_META_VER:
@@ -1299,6 +1300,34 @@ class EXIFExtractor(QObject):
                         break
                     except: pass
 
+            rating = 0
+            for tag in ('XMP-xmp:Rating', 'XMP Rating', 'Rating', 'EXIF Rating'):
+                if tag in tags:
+                    try:
+                        from raw_adjustments import _parse_rating_value
+
+                        rating = _parse_rating_value(tags[tag])
+                        if rating:
+                            break
+                    except Exception:
+                        pass
+                if tag in exif_dict:
+                    try:
+                        from raw_adjustments import _parse_rating_value
+
+                        rating = _parse_rating_value(exif_dict[tag])
+                        if rating:
+                            break
+                    except Exception:
+                        pass
+            if not rating:
+                try:
+                    from raw_adjustments import load_rating_for_file
+
+                    rating = load_rating_for_file(file_path)
+                except Exception:
+                    pass
+
             # Build return dict
             result = {
                 'orientation': orientation,
@@ -1317,6 +1346,7 @@ class EXIFExtractor(QObject):
                 'focal_length': focal_length,
                 'aperture': aperture,
                 'iso': iso,
+                'rating': rating,
                 'verified_orientation': True,
                 'raw_exif_sensor_meta_ver': RAW_EXIF_SENSOR_META_VER,
             }

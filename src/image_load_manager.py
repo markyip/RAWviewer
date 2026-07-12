@@ -856,6 +856,13 @@ class ImageLoadManager(QObject):
             pool.setMaxThreadCount(max(1, int(max_workers)))
 
     def _pool_for_task(self, task: ImageLoadTask) -> QThreadPool:
+        # Gallery viewport tiles are queued as Priority.CURRENT (beat PRELOAD in
+        # the priority queue) but must not share the small interactive CURRENT
+        # pool (default 2–4): after warmup, scroll re-requests dozens of thumbs
+        # and a tiny CURRENT pool stalls the gallery. Single-view CURRENT stays
+        # on _current_thread_pool so it can still preempt a full bg pool.
+        if getattr(task, "gallery_thumbnail", False):
+            return self._thread_pool
         if getattr(task, "priority", None) == Priority.CURRENT:
             return self._current_thread_pool
         return self._thread_pool
@@ -1639,16 +1646,19 @@ class ImageLoadManager(QObject):
                 return True
 
             if gallery_thumbnail:
-                grid_buf = cache.grid_cache.get(file_path)
+                grid_buf = cache.get_grid_memory_only(file_path)
                 if _try_emit_display_thumb(grid_buf):
                     if preview_only:
                         return True
 
-            preview_buf = cache.preview_cache.get(file_path)
+            # Must use *_memory_only/path_key: put_* stores under _path_key(),
+            # so dict gets with raw paths miss after first load and re-decode
+            # on every gallery scroll pass.
+            preview_buf = cache.get_preview_memory_only(file_path)
             if _try_emit_display_thumb(preview_buf):
                 if preview_only:
                     return True
-            thumb = cache.thumbnail_cache.get(file_path)
+            thumb = cache.get_thumbnail_memory_only(file_path)
             if _try_emit_display_thumb(thumb):
                 if preview_only:
                     return True

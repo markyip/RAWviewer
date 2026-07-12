@@ -35,6 +35,16 @@ class SessionMixin:
         )
         if not same_folder:
             self._gallery_bookmarked_paths = self._load_persisted_gallery_bookmarks(folder_path)
+            # Drop full/preview/pixmap RAM and prune LibRaw skip-set when leaving a folder.
+            try:
+                cache = getattr(self, "image_cache", None)
+                if cache is not None and hasattr(cache, "on_folder_changed"):
+                    keep = start_file
+                    if keep and not os.path.isabs(keep):
+                        keep = os.path.join(folder_path, keep)
+                    cache.on_folder_changed(keep_path=keep if keep and os.path.isfile(keep) else None)
+            except Exception:
+                pass
         # Folder scope changed: clear search bar, indexing UI, and filter snapshot.
         if not preserve_folder_index:
             self._reset_semantic_search_for_new_folder()
@@ -171,7 +181,7 @@ class SessionMixin:
                                     meta = bulk_metadata.get(fp)
                                     mtime = file_stats.get(fp, (0, 0))[1]
                                     probed_ts = probed_timestamps.get(fp, 0.0)
-                                    from common_image_loader import resolve_folder_sort_timestamp
+                                    from common_image_loader import resolve_folder_sort_timestamp, is_raw_file
                                     _has_capture, timestamp, _source = resolve_folder_sort_timestamp(
                                         fp,
                                         metadata=meta,

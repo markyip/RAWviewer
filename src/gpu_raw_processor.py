@@ -20,16 +20,77 @@ logger = logging.getLogger(__name__)
 # violation" came from the custom raw ElementwiseKernel path, which is not
 # audited for concurrent launches with shared kernel objects.
 _GPU_LOCK = threading.Lock()
+_GPU_CONCURRENCY_CACHED: Optional[int] = None
+_GPU_SEMAPHORE: Optional[threading.Semaphore] = None
+_LAST_IDLE_EMPTY_CACHE = 0.0
+
+
+def _default_gpu_concurrency() -> int:
+    """Adaptive default: MPS=1 (unified RAM); CUDA scales with VRAM; else 2."""
+    backend = detect_gpu_backend()
+    if backend == "pytorch_mps" or backend == "cupy":
+        # CuPy demosaic is fully serialized by _GPU_LOCK; keep permits=1 for
+        # empty_cache drain logic. MPS thrashing two full floats hurts RSS.
+        base = 1
+    elif backend == "pytorch_cuda" and _HAS_TORCH:
+        try:
+            idx = _cuda_device_index()
+            props = torch.cuda.get_device_properties(idx)
+            # ~700-900MB peak float workspace per ~45MP decode → budget conservatively.
+            vram_gb = float(props.total_memory) / (1024.0 ** 3)
+            if vram_gb >= 16:
+                base = 3
+            elif vram_gb >= 10:
+                base = 2
+            elif vram_gb >= 6:
+                base = 2
+            else:
+                base = 1
+        except Exception:
+            base = 2
+    else:
+        base = 2
+    return max(1, min(4, base))
 
 
 def _gpu_concurrency() -> int:
+    global _GPU_CONCURRENCY_CACHED
+    if _GPU_CONCURRENCY_CACHED is not None:
+        return _GPU_CONCURRENCY_CACHED
+    raw = os.environ.get("RAWVIEWER_GPU_CONCURRENCY", "").strip()
+    if raw:
+        try:
+            _GPU_CONCURRENCY_CACHED = max(1, min(4, int(raw)))
+            return _GPU_CONCURRENCY_CACHED
+        except ValueError:
+            pass
+    _GPU_CONCURRENCY_CACHED = _default_gpu_concurrency()
+    return _GPU_CONCURRENCY_CACHED
+
+
+def gpu_decode_concurrency() -> int:
+    """Public: max in-flight GPU demosaics (for aligning RAW load slots)."""
+    return _gpu_concurrency()
+
+
+def _gpu_semaphore() -> threading.Semaphore:
+    global _GPU_SEMAPHORE
+    if _GPU_SEMAPHORE is None:
+        _GPU_SEMAPHORE = threading.Semaphore(_gpu_concurrency())
+    return _GPU_SEMAPHORE
+
+
+def _cuda_device_index() -> int:
+    raw = os.environ.get("RAWVIEWER_CUDA_DEVICE", "0").strip()
     try:
-        return max(1, min(4, int(os.environ.get("RAWVIEWER_GPU_CONCURRENCY", "2"))))
+        return max(0, int(raw))
     except ValueError:
-        return 2
+        return 0
 
 
-_GPU_SEMAPHORE = threading.Semaphore(_gpu_concurrency())
+def _cuda_device_str() -> str:
+    return f"cuda:{_cuda_device_index()}"
+
 
 # Cache detection results to avoid repeated import attempts
 _GPU_BACKEND: Optional[str] = None
@@ -93,11 +154,86 @@ def detect_gpu_backend() -> str:
     return _GPU_BACKEND
 
 
+def release_cached_gpu_memory() -> None:
+    """Return the GPU/unified-memory backend's caching allocator pool to the OS.
+
+    PyTorch's CUDA/MPS allocators cache freed device buffers for reuse rather
+    than releasing them (a normal, deliberate speed-over-memory tradeoff) --
+    on Apple Silicon this pool is UNIFIED memory shared with system RAM, so it
+    shows up directly as process RSS growth that's invisible to Python's own
+    gc/tracemalloc (it's not Python-heap memory). Never called before this,
+    the cache had no way back to the OS for the life of the process.
+
+    CUDA's caching allocator is documented safe to empty_cache() concurrently
+    with in-flight work on other threads (it only frees currently-unused
+    blocks, never memory backing a live tensor). MPS (Apple Silicon) is a
+    newer backend without the same track record for this exact concurrency
+    pattern, and this is reachable from ANY thread that touches the image
+    cache (get_full_image/get_thumbnail/etc. all funnel through
+    _check_memory_pressure), including background prefetch/decode workers --
+    so a call here could otherwise land while another thread is mid-decode
+    inside the _GPU_SEMAPHORE-gated region below. Drain the semaphore
+    (non-blocking) first: if a decode is in flight, skip this cycle rather
+    than block the caller waiting for it -- _check_memory_pressure's own
+    cooldown means the next opportunity is only ~20-60s away.
+    """
+    backend = detect_gpu_backend()
+    gate = _GPU_LOCK if backend == "cupy" else _gpu_semaphore()
+    concurrency = 1 if backend == "cupy" else _gpu_concurrency()
+    acquired = 0
+    try:
+        for _ in range(concurrency):
+            if not gate.acquire(blocking=False):
+                break
+            acquired += 1
+        if acquired < concurrency:
+            logger.debug(
+                "release_cached_gpu_memory: decode in flight, skipping this cycle "
+                "(acquired %d/%d permits)",
+                acquired,
+                concurrency,
+            )
+            return
+        if backend == "pytorch_mps" and _HAS_TORCH:
+            torch.mps.empty_cache()
+        elif backend == "pytorch_cuda" and _HAS_TORCH:
+            try:
+                torch.cuda.empty_cache()
+                if hasattr(torch.cuda, "ipc_collect"):
+                    torch.cuda.ipc_collect()
+            except Exception:
+                torch.cuda.empty_cache()
+        elif backend == "cupy" and _HAS_CUPY:
+            cupy.get_default_memory_pool().free_all_blocks()
+    except Exception:
+        logger.debug("release_cached_gpu_memory failed", exc_info=True)
+    finally:
+        for _ in range(acquired):
+            gate.release()
+
+
+def maybe_release_gpu_memory_after_decode() -> None:
+    """Throttle post-decode allocator flushes (does not block if GPU busy)."""
+    global _LAST_IDLE_EMPTY_CACHE
+    now = time.time()
+    min_interval = float(os.environ.get("RAWVIEWER_GPU_EMPTY_CACHE_S", "8") or 8)
+    if min_interval <= 0:
+        return
+    if now - _LAST_IDLE_EMPTY_CACHE < min_interval:
+        return
+    _LAST_IDLE_EMPTY_CACHE = now
+    release_cached_gpu_memory()
+
+
 def gpu_demosaic_pytorch_unpacked(unpacked, device_str: str = "cuda", cancel_check: Optional[Callable[[], bool]] = None, return_linear: bool = False) -> np.ndarray:
     """
     GPU-accelerated Demosaicing using PyTorch and Kornia.
     Consumes UnpackedRaw from fast_raw_decode.py to guarantee color math parity.
     """
+    if device_str in ("cuda", "cuda:0") and os.environ.get("RAWVIEWER_CUDA_DEVICE", "").strip():
+        device_str = _cuda_device_str()
+    elif device_str == "cuda":
+        device_str = _cuda_device_str()
     device = torch.device(device_str)
 
     # CUDA: run this decode on its own stream so decodes issued from
@@ -105,7 +241,7 @@ def gpu_demosaic_pytorch_unpacked(unpacked, device_str: str = "cuda", cancel_che
     # overlap upload/compute instead of queueing on the default stream.
     # The final .cpu() copy synchronizes the stream before returning.
     stream_ctx = (
-        torch.cuda.stream(torch.cuda.Stream())
+        torch.cuda.stream(torch.cuda.Stream(device=device))
         if device.type == "cuda"
         else _NullCtx()
     )
@@ -151,8 +287,23 @@ def _gpu_demosaic_pytorch_body(unpacked, device, cancel_check=None, return_linea
 
             raise DecodeCancelled(unpacked.file_path)
 
-    # 1. Upload raw array to GPU as float32
-    raw_tensor = torch.from_numpy(unpacked.mosaic.astype(np.float32)).to(device)
+    # 1. Upload mosaic to GPU. Prefer pin_memory + non_blocking on CUDA so
+    # host→device copies overlap with other streams / next decode prep.
+    mosaic = np.ascontiguousarray(unpacked.mosaic)
+    if mosaic.dtype != np.float32:
+        mosaic_f = mosaic.astype(np.float32, copy=False)
+    else:
+        mosaic_f = mosaic
+    if device.type == "cuda":
+        try:
+            host = torch.from_numpy(mosaic_f)
+            if not host.is_pinned():
+                host = host.pin_memory()
+            raw_tensor = host.to(device, non_blocking=True)
+        except Exception:
+            raw_tensor = torch.from_numpy(mosaic_f).to(device)
+    else:
+        raw_tensor = torch.from_numpy(mosaic_f).to(device)
     h, w = raw_tensor.shape
 
     # Pre-allocate normalized array
@@ -389,7 +540,7 @@ def try_gpu_decode_from_unpacked(
     # PyTorch backends run under the bounded semaphore (parallel decodes,
     # streams overlap upload/compute); CuPy keeps the hard lock -- see the
     # concurrency-control comment at the top of this module.
-    gate = _GPU_LOCK if backend == "cupy" else _GPU_SEMAPHORE
+    gate = _GPU_LOCK if backend == "cupy" else _gpu_semaphore()
     with gate:
         if cancel_check is not None and cancel_check():
             from fast_raw_decode import DecodeCancelled
@@ -400,7 +551,7 @@ def try_gpu_decode_from_unpacked(
             res = None
             if backend == "pytorch_cuda":
                 res = gpu_demosaic_pytorch_unpacked(
-                    unpacked, device_str="cuda", cancel_check=cancel_check, return_linear=return_linear
+                    unpacked, device_str=_cuda_device_str(), cancel_check=cancel_check, return_linear=return_linear
                 )
             elif backend == "pytorch_mps":
                 res = gpu_demosaic_pytorch_unpacked(
@@ -426,6 +577,10 @@ def try_gpu_decode_from_unpacked(
                         backend=backend,
                         mp=res.shape[0] * res.shape[1] / 1e6,
                     )
+                except Exception:
+                    pass
+                try:
+                    maybe_release_gpu_memory_after_decode()
                 except Exception:
                     pass
                 return res

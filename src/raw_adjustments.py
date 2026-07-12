@@ -199,6 +199,84 @@ def resolve_xmp_path(image_path: str) -> str:
     return os.path.splitext(image_path)[0] + ".xmp"
 
 
+def editing_features_enabled() -> bool:
+    """Whether the Adjust panel, XMP writes, and edit export are available.
+
+    Off by default on the fast-raw-decode browse branch
+    (RAWVIEWER_ENABLE_EDITING=1 to enable). Rating read/write and plain
+    browse/export-without-adjustments stay available either way.
+    """
+    return os.environ.get("RAWVIEWER_ENABLE_EDITING", "0").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def sidecar_adjustments_enabled() -> bool:
+    """Whether browse/full-res display applies saved XMP edit sliders to pixels.
+
+    Off by default (RAWVIEWER_SIDECAR_ADJUST=1 to enable). Requires
+    ``editing_features_enabled()`` -- browse-only builds never pay the apply
+    cost even if the env var is set. Explicit
+    ``apply_sidecar_adjustments=True`` callers are unaffected.
+    """
+    if not editing_features_enabled():
+        return False
+    return os.environ.get("RAWVIEWER_SIDECAR_ADJUST", "0").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _parse_rating_value(raw: object) -> int:
+    if raw is None:
+        return 0
+    try:
+        text = str(raw).strip()
+        if not text:
+            return 0
+        return max(0, min(5, int(float(text.split()[0]))))
+    except (TypeError, ValueError):
+        return 0
+
+
+def parse_xmp_rating(xmp_path: str) -> int:
+    """Parse xmp:Rating from a sidecar without loading adjustment sliders."""
+    if not xmp_path or not os.path.isfile(xmp_path):
+        return 0
+    try:
+        tree = ET.parse(xmp_path)
+        root = tree.getroot()
+        ns = {
+            "rdf": "http://www.w3.org/1999/02/22-rdf-syntax-ns#",
+            "xmp": "http://ns.adobe.com/xap/1.0/",
+        }
+        for desc in root.findall(".//rdf:Description", ns):
+            for key, val in desc.attrib.items():
+                local_key = key.split("}", 1)[-1] if "}" in key else key.split(":")[-1]
+                if local_key == "Rating":
+                    rating = _parse_rating_value(val)
+                    if rating:
+                        return rating
+            rating_el = desc.find("{http://ns.adobe.com/xap/1.0/}Rating")
+            if rating_el is not None and rating_el.text:
+                rating = _parse_rating_value(rating_el.text)
+                if rating:
+                    return rating
+    except Exception:
+        pass
+    return 0
+
+
+def load_rating_for_file(image_path: str) -> int:
+    """Lightweight star rating from the image's XMP sidecar (no edit sliders)."""
+    return parse_xmp_rating(resolve_xmp_path(image_path))
+
+
 # Per-path memo for read_as_shot_temperature: the value is a per-file constant
 # (as-shot metadata), but computing it may need a rawpy.imread -- which ran on
 # the GUI thread on EVERY panel sync (a 100-900ms stall per file open), and
@@ -508,6 +586,8 @@ def parse_xmp_adjustments(xmp_path: str) -> dict[str, float]:
 
 def write_xmp_adjustments(xmp_path: str, adj: Dict[str, float]) -> None:
     """Write Lightroom-compatible crs sliders to an XMP sidecar."""
+    if not editing_features_enabled():
+        return
     merged = dict(DEFAULT_ADJUSTMENTS)
     merged.update(adj or {})
     if is_default_adjustments(merged):
@@ -594,6 +674,8 @@ def write_xmp_adjustments(xmp_path: str, adj: Dict[str, float]) -> None:
 
 
 def write_xmp_adjustments_for_file(image_path: str, adj: Dict[str, float]) -> None:
+    if not editing_features_enabled():
+        return
     xmp_path = resolve_xmp_path(image_path)
     if not xmp_path:
         raise ValueError("Invalid image path")
@@ -687,11 +769,68 @@ def _apply_adjustments_to_srgb(rgb_image: np.ndarray, adj: dict[str, float]) -> 
     return (np.clip(img, 0.0, 1.0) * 255.0).astype(np.uint8)
 
 
-def _detail_pipeline_worker_count(height: int) -> int:
+def banded_worker_count(height: int) -> int:
+    """Row-band thread count for the banded pixel pipelines (shared by
+    raw_adjustments and raw_edit_pipeline -- one tuning point, not several).
+    """
     # Thread-pool overhead isn't worth it below a few hundred rows.
     if height < 512:
         return 1
     return min(8, os.cpu_count() or 1)
+
+
+# Back-compat alias (older call sites/tests reference the private name).
+_detail_pipeline_worker_count = banded_worker_count
+
+
+def band_ranges(h: int, n_workers: int, pad_px: int = 0) -> list:
+    """Split ``h`` rows into up to ``n_workers`` contiguous bands.
+
+    Returns [(y0, y1, pad_top, pad_bot), ...] where pads are clamped to the
+    image edges. Single source of truth for the band-boundary math used by
+    every banded pipeline (a boundary off-by-one fixed here fixes all of
+    them; previously three near-identical copies existed).
+    """
+    import math
+
+    band_h = math.ceil(h / max(1, n_workers))
+    bands = []
+    for i in range(n_workers):
+        y0 = i * band_h
+        y1 = min(h, y0 + band_h)
+        if y0 >= y1:
+            break
+        bands.append((y0, y1, min(pad_px, y0), min(pad_px, h - y1)))
+    return bands
+
+
+_BANDED_EXECUTOR = None
+_BANDED_EXECUTOR_LOCK = None
+
+
+def banded_executor():
+    """Shared lazily-created pool for banded pixel stages.
+
+    The banded functions used to build (spawn + join up to 8 OS threads) a
+    fresh ThreadPoolExecutor per call -- on the Adjust-panel live-preview
+    path that's pool churn on every slider tick. One idle pool costs nothing
+    between calls; concurrent callers share it safely (Executor.map is
+    thread-safe).
+    """
+    global _BANDED_EXECUTOR, _BANDED_EXECUTOR_LOCK
+    import threading
+
+    if _BANDED_EXECUTOR_LOCK is None:
+        _BANDED_EXECUTOR_LOCK = threading.Lock()
+    with _BANDED_EXECUTOR_LOCK:
+        if _BANDED_EXECUTOR is None:
+            from concurrent.futures import ThreadPoolExecutor
+
+            _BANDED_EXECUTOR = ThreadPoolExecutor(
+                max_workers=min(8, os.cpu_count() or 1),
+                thread_name_prefix="banded-pixels",
+            )
+        return _BANDED_EXECUTOR
 
 
 # Comfortably larger than 3x any Gaussian sigma used in apply_detail_enhancements
@@ -705,20 +844,8 @@ def _apply_adjustments_to_srgb_banded(
     rgb_image: np.ndarray, merged: dict[str, float], n_workers: int
 ) -> np.ndarray:
     """Row-band parallel version of _apply_adjustments_to_srgb's core pipeline."""
-    import math
-    from concurrent.futures import ThreadPoolExecutor
-
     h = rgb_image.shape[0]
-    band_h = math.ceil(h / n_workers)
-    bands = []
-    for i in range(n_workers):
-        y0 = i * band_h
-        y1 = min(h, y0 + band_h)
-        if y0 >= y1:
-            break
-        pad_top = min(_BAND_PAD_PX, y0)
-        pad_bot = min(_BAND_PAD_PX, h - y1)
-        bands.append((y0, y1, pad_top, pad_bot))
+    bands = band_ranges(h, n_workers, pad_px=_BAND_PAD_PX)
 
     def _process_band(band):
         y0, y1, pad_top, pad_bot = band
@@ -735,8 +862,7 @@ def _apply_adjustments_to_srgb_banded(
     # otherwise compete with our outer thread pool for the same cores.
     cv2.setNumThreads(1)
     try:
-        with ThreadPoolExecutor(max_workers=len(bands)) as ex:
-            results = list(ex.map(_process_band, bands))
+        results = list(banded_executor().map(_process_band, bands))
     finally:
         cv2.setNumThreads(prev_threads)
 

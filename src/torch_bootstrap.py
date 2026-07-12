@@ -29,6 +29,13 @@ def import_gpu_backend_on_main_thread() -> None:
     _import_started.set()
     try:
         import gpu_raw_processor  # noqa: F401 -- imports torch/kornia/cupy as a side effect
+        try:
+            # Align load manager with GPU reality: process-pool vs CUDA/MPS slots.
+            from image_load_manager import apply_gpu_decode_profile_to_manager
+
+            apply_gpu_decode_profile_to_manager()
+        except Exception:
+            pass
     except Exception:
         pass
     finally:
