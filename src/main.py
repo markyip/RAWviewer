@@ -23017,6 +23017,18 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         synchronous rawpy.imread() per file on the main thread, fixed
         separately -- and confirmed not caused by this eager-full logic
         before reinstating it.)
+
+        Second exception to the "full is cheap" assumption: RAF (Fujifilm)
+        and 3FR (Hasselblad) camera firmware embeds a fixed-size preview that
+        essentially never covers sensor resolution, verified against 36 real
+        sample files -- so for these two formats "full" is *not* the ~38ms
+        embedded-JPEG path, it's the real LibRaw demosaic (~20-35s on a
+        100MP RAF, per nav_autotest.py's documented ceiling probing). Skip
+        the eager add for them; idle/on-pause decode still gets there
+        eventually, just not fired off automatically for every neighbor
+        during ordinary arrow-key browsing. See
+        common_image_loader.embedded_preview_rarely_covers_sensor for the
+        full rationale.
         """
         if zoomed:
             return {"exif", "full"}, True
@@ -23024,9 +23036,14 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         if not self.image_cache.get_exif(file_path):
             stages = {"thumbnail", "exif"}
         if near:
-            from common_image_loader import use_full_embedded_raw_preview
+            from common_image_loader import (
+                embedded_preview_rarely_covers_sensor,
+                use_full_embedded_raw_preview,
+            )
 
-            if use_full_embedded_raw_preview():
+            if use_full_embedded_raw_preview() and not embedded_preview_rarely_covers_sensor(
+                file_path
+            ):
                 stages = stages | {"full"}
         return stages, False
 

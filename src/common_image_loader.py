@@ -300,6 +300,30 @@ def use_libraw_consistent_preview_first() -> bool:
 # Embedded JPEG long edge must reach this fraction of sensor long edge to count as "full size".
 FULL_EMBEDDED_SENSOR_COVERAGE = 0.92
 
+# RAF (Fujifilm) and 3FR (Hasselblad) camera firmware embeds a fixed-size JPEG
+# preview capped well below sensor resolution regardless of RAW megapixels --
+# a manufacturer convention, not a coverage edge case, and NOT tied to X-Trans
+# vs Bayer CFA (GFX medium-format RAF and 3FR are both Bayer and still miss).
+# Verified empirically: 36/36 sample RAF+3FR files -- X-Trans APS-C through
+# 100MP Bayer medium format -- all failed FULL_EMBEDDED_SENSOR_COVERAGE (best
+# case ratio 0.71, most 0.33-0.57; direct byte-scan of one file confirmed
+# LibRaw's extract_thumb() already returns the largest embedded JPEG present,
+# nothing bigger is hiding in the container). Checking real coverage requires
+# opening the file with rawpy -- the exact cost callers use this predicate to
+# avoid -- so treat these two formats as a known miss for prefetch decisions
+# rather than eagerly requesting a "full" stage that's actually a ~20-35s
+# LibRaw demosaic in disguise.
+_EAGER_FULL_UNRELIABLE_EXTS = frozenset({".raf", ".3fr"})
+
+
+def embedded_preview_rarely_covers_sensor(file_path: str) -> bool:
+    """Cheap (extension-only) predicate for formats whose embedded preview is
+    known to almost never satisfy FULL_EMBEDDED_SENSOR_COVERAGE. See
+    _EAGER_FULL_UNRELIABLE_EXTS for the rationale and verification.
+    """
+    ext = os.path.splitext(file_path)[1].lower()
+    return ext in _EAGER_FULL_UNRELIABLE_EXTS
+
 
 def use_full_embedded_raw_preview() -> bool:
     """
