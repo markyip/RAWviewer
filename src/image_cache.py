@@ -304,6 +304,17 @@ class LRUCache:
             self.misses += 1
             return None
 
+    def peek(self, key: str) -> Optional[Any]:
+        """Non-mutating lookup: no recency promotion, no hit/miss accounting.
+
+        For "is this warm?" scans (e.g. filmstrip prefetch decisions) that
+        must not distort LRU eviction order -- get() would promote entries
+        that are merely checked, never displayed, pushing genuinely
+        recently-used entries out first.
+        """
+        with self.lock:
+            return self.cache.get(key)
+
     def put(self, key: str, value: Any) -> None:
         with self.lock:
             if key in self.cache:
@@ -1672,6 +1683,15 @@ class ImageCache(QObject):
         self.last_aggressive_purge = 0.0
         self.last_reduce_cache = 0.0
 
+        # Background RAW-orientation verification (see get_exif): one short
+        # queue drained by a single lazily-started daemon thread, one attempt
+        # per path per session.
+        self._orient_verify_lock = threading.Lock()
+        self._orient_verify_attempted: set = set()
+        self._orient_verify_queue: list = []
+        self._orient_verify_thread: Optional[threading.Thread] = None
+        self._closing = False
+
     def _purge_stale_oriented_pixel_caches(self, cache_dir: str) -> None:
         """One-time purge of persisted PIXEL caches when the orientation logic version bumps.
 
@@ -1781,7 +1801,9 @@ class ImageCache(QObject):
         self.thumbnail_cache.shrink_to_size(new_thumbnail_size)
         self.grid_cache.shrink_to_size(new_grid_size)
         self.preview_cache.shrink_to_size(new_preview_size)
-        
+
+        self._release_gpu_memory()
+
         import gc
         gc.collect()
 
@@ -1805,6 +1827,28 @@ class ImageCache(QObject):
         self.thumbnail_cache.shrink_to_size(new_thumbnail_size)
         self.grid_cache.shrink_to_size(new_grid_size)
         self.preview_cache.shrink_to_size(new_preview_size)
+
+        self._release_gpu_memory()
+
+    def _release_gpu_memory(self) -> None:
+        """Return the GPU/unified-memory caching allocator's pool to the OS.
+
+        On Apple Silicon, PyTorch's MPS allocator caches freed device buffers
+        in UNIFIED memory (shared with system RAM) rather than releasing them
+        -- that pool is invisible to gc/tracemalloc but shows up directly as
+        process RSS, and nothing in this codebase ever called
+        torch.mps.empty_cache() before this. v2.5 had no GPU decode path at
+        all and doesn't have this cost; this build's GPU-accelerated decode
+        (gpu_raw_processor.py) does. Piggyback on the existing cache-pressure
+        cadence rather than calling it every decode (that would defeat the
+        allocator's whole point -- reuse without re-requesting from the OS).
+        """
+        try:
+            from gpu_raw_processor import release_cached_gpu_memory
+
+            release_cached_gpu_memory()
+        except Exception:
+            logger.debug("GPU memory release failed", exc_info=True)
 
     def _heal_raw_orientation(self, file_path: str, arr: Optional[np.ndarray]) -> Optional[np.ndarray]:
         """Self-heal: return arr already in EXIF display orientation, re-orienting if not.
@@ -1968,6 +2012,44 @@ class ImageCache(QObject):
             # If JPEG data is provided, also cache to disk
             if jpeg_data is not None:
                 self.disk_thumbnail_cache.put(file_path, jpeg_data)
+
+    def get_preview_memory_only(self, file_path: str) -> Optional[np.ndarray]:
+        """In-memory preview only -- never decodes disk tier on the calling thread."""
+        key = self._path_key(file_path)
+        return self.preview_cache.peek(key)
+
+    def get_grid_memory_only(self, file_path: str) -> Optional[np.ndarray]:
+        """In-memory grid only -- never decodes disk tier on the calling thread."""
+        key = self._path_key(file_path)
+        return self.grid_cache.peek(key)
+
+    def get_thumbnail_memory_only(self, file_path: str) -> Optional[np.ndarray]:
+        """In-memory thumbnail only -- never decodes disk tier on the calling thread."""
+        key = self._path_key(file_path)
+        return self.thumbnail_cache.peek(key)
+
+    def has_warm_thumbnail_in_memory(self, file_path: str) -> bool:
+        """True if a grid/thumbnail tier is already in the fast in-memory
+        cache -- no disk read, no decode, unlike get_grid()/get_thumbnail().
+
+        Those two fall through to a disk-cache read + synchronous PIL decode
+        + EXIF transpose on an in-memory miss. Callers that only want to know
+        "is this warm, should I skip prefetching it" (filmstrip prefetch scan
+        over dozens of neighbor files) were using get_grid()/get_thumbnail()
+        for that check and paying the decode cost as a side effect -- on a
+        long session, once the small in-memory tier evicts entries the disk
+        tier still has, every such "check" becomes a real synchronous decode.
+        Measured via faulthandler stack dumps during a 250+ navigation
+        stress test: multi-second main-thread stalls with the current frame
+        inside PIL's WebP/JPEG decode, called from exactly this "just
+        checking" path.
+        """
+        key = self._path_key(file_path)
+        # peek(): a warmth CHECK must not promote never-displayed entries to MRU.
+        return (
+            self.grid_cache.peek(key) is not None
+            or self.thumbnail_cache.peek(key) is not None
+        )
 
     def get_grid(self, file_path: str) -> Optional[np.ndarray]:
         """Get cached grid image (max 512px) or return None if not cached."""
@@ -2169,16 +2251,41 @@ class ImageCache(QObject):
             self.preview_cache.put(key, preview.copy())
             if libraw_rendered:
                 self.libraw_preview_paths.add(key)
+                self._prune_libraw_preview_paths()
             else:
                 self.libraw_preview_paths.discard(key)
             if jpeg_data is not None:
                 cap = disk_preview_max_edge()
                 jpeg_data = _jpeg_bytes_max_edge(jpeg_data, cap)
                 self.disk_preview_cache.put(file_path, jpeg_data)
+            self._enforce_numpy_cache_byte_budget(
+                self.preview_cache,
+                fraction=0.25,
+                min_keep=2,
+                label="preview",
+            )
 
     def is_libraw_preview(self, file_path: str) -> bool:
         """True when the cached preview holds LibRaw-rendered pixels (this session)."""
         return self._path_key(file_path) in self.libraw_preview_paths
+
+    def _prune_libraw_preview_paths(self, max_paths: int = 2048) -> None:
+        """Bound session provenance set (paths only)."""
+        n = len(self.libraw_preview_paths)
+        if n <= max_paths:
+            return
+        # Discard arbitrary surplus (set has no order); prefer keeping keys still in preview.
+        excess = n - max_paths
+        drop = []
+        for k in self.libraw_preview_paths:
+            if self.preview_cache.peek(k) is None:
+                drop.append(k)
+            if len(drop) >= excess:
+                break
+        for k in drop:
+            self.libraw_preview_paths.discard(k)
+        while len(self.libraw_preview_paths) > max_paths:
+            self.libraw_preview_paths.pop()
 
     def get_full_image(self, file_path: str) -> Optional[np.ndarray]:
         """Get cached full image or return None if not cached."""
@@ -2196,7 +2303,69 @@ class ImageCache(QObject):
     def put_full_image(self, file_path: str, image: np.ndarray) -> None:
         """Cache a full processed image."""
         if image is not None:
-            self.full_image_cache.put(file_path, image.copy())
+            img_copy = image.copy()
+            self.full_image_cache.put(file_path, img_copy)
+            self._enforce_numpy_cache_byte_budget(
+                self.full_image_cache,
+                fraction=0.55,
+                min_keep=2,
+                label="full-image",
+            )
+
+    def _estimate_entry_bytes(self, value: Any) -> int:
+        try:
+            if hasattr(value, "nbytes"):
+                return int(value.nbytes)
+            # QPixmap / QImage
+            if hasattr(value, "width") and hasattr(value, "height") and callable(value.width):
+                w, h = int(value.width()), int(value.height())
+                # Assume up to 4 bytes/pixel (RGBA) for budget purposes.
+                return max(0, w * h * 4)
+        except Exception:
+            pass
+        return 0
+
+    def _enforce_numpy_cache_byte_budget(
+        self,
+        lru: "LRUCache",
+        *,
+        fraction: float,
+        min_keep: int = 2,
+        label: str = "cache",
+    ) -> None:
+        """Evict LRU entries until sum(nbytes) fits fraction of max_memory_mb."""
+        try:
+            budget_bytes = float(self.max_memory_mb) * 1024 * 1024 * float(fraction)
+            cache = lru.cache
+            with lru.lock:
+                total = sum(self._estimate_entry_bytes(v) for v in cache.values())
+                if total <= budget_bytes:
+                    return
+                evicted = 0
+                while total > budget_bytes and len(cache) > max(1, min_keep):
+                    _, oldest = cache.popitem(last=False)
+                    total -= self._estimate_entry_bytes(oldest)
+                    evicted += 1
+            if evicted:
+                logger.info(
+                    "%s cache: evicted %d oldest (budget ~%.0fMB, now ~%.0fMB, %d left)",
+                    label,
+                    evicted,
+                    budget_bytes / 1e6,
+                    total / 1e6,
+                    len(cache),
+                )
+        except Exception:
+            logger.warning("%s byte-budget enforcement failed", label, exc_info=True)
+
+    def _enforce_full_image_byte_budget(self) -> None:
+        """Backward-compatible alias for full-image RAM budget."""
+        self._enforce_numpy_cache_byte_budget(
+            self.full_image_cache,
+            fraction=0.55,
+            min_keep=2,
+            label="full-image",
+        )
 
     def get_pixmap(self, file_path: str) -> Optional[QPixmap]:
         """Get cached QPixmap or return None if not cached."""
@@ -2214,38 +2383,80 @@ class ImageCache(QObject):
         """Cache a QPixmap."""
         if pixmap is not None and not pixmap.isNull():
             self.pixmap_cache.put(file_path, pixmap)
+            self._enforce_numpy_cache_byte_budget(
+                self.pixmap_cache,
+                fraction=0.20,
+                min_keep=2,
+                label="pixmap",
+            )
+
+    def clear_heavy_memory_tiers(self, keep_path: Optional[str] = None) -> None:
+        """Drop full/preview/pixmap RAM tiers (keep grid/thumb for gallery scroll).
+
+        Call on folder change. Optional keep_path retains that file's heavy entries
+        when still navigating within open flow.
+        """
+        keep_key = self._path_key(keep_path) if keep_path else None
+        keep_full = None
+        keep_preview = None
+        keep_pixmap = None
+        if keep_path:
+            keep_full = self.full_image_cache.get(keep_path)
+            keep_preview = self.preview_cache.get(keep_key)
+            keep_pixmap = self.pixmap_cache.get(keep_path)
+
+        self.full_image_cache.clear()
+        self.preview_cache.clear()
+        self.pixmap_cache.clear()
+        self.libraw_preview_paths.clear()
+
+        if keep_path and keep_full is not None:
+            self.full_image_cache.put(keep_path, keep_full)
+        if keep_path and keep_preview is not None and keep_key:
+            self.preview_cache.put(keep_key, keep_preview)
+        if keep_path and keep_pixmap is not None:
+            self.pixmap_cache.put(keep_path, keep_pixmap)
+
+    def on_folder_changed(self, keep_path: Optional[str] = None) -> None:
+        """Folder scope changed: free heavy RAM; leave disk thumbs for warm reopen."""
+        self.clear_heavy_memory_tiers(keep_path=keep_path)
+        try:
+            from unified_image_processor import prune_libraw_unsupported_paths
+
+            prune_libraw_unsupported_paths(clear_all=False, max_keep=512)
+        except Exception:
+            pass
 
     def get_exif_memory_only(self, file_path: str) -> Optional[Dict[str, Any]]:
         """In-memory EXIF only (no SQLite) — for cache-hit emit during preview-first."""
         return self.exif_memory_cache.get(file_path)
 
     def get_exif_for_ui(self, file_path: str) -> Optional[Dict[str, Any]]:
-        """UI hot path: memory first, disk second; skip orientation probe when verified."""
-        exif_data = self.exif_memory_cache.get(file_path)
-        if exif_data is None:
-            exif_data = self.exif_cache.get(file_path)
-            if exif_data is not None:
-                self.exif_memory_cache.put(file_path, exif_data)
-        if exif_data is None:
-            return None
-        try:
-            from enhanced_raw_processor import (
-                RAW_EXIF_SENSOR_META_VER,
-                cached_raw_exif_orientation_trustworthy,
-            )
-            cached_ver = exif_data.get("raw_exif_sensor_meta_ver", 0)
-            if cached_ver < RAW_EXIF_SENSOR_META_VER:
-                return None
-            if exif_data.get("verified_orientation"):
-                return exif_data
-            if not cached_raw_exif_orientation_trustworthy(file_path, exif_data):
-                return None
-        except Exception:
-            pass
-        return exif_data
+        """UI hot path: never blocks (see get_exif's verify=False default)."""
+        return self.get_exif(file_path)
 
-    def get_exif(self, file_path: str) -> Optional[Dict[str, Any]]:
-        """Get cached EXIF data or return None if not cached."""
+    def get_exif(
+        self, file_path: str, *, verify: bool = False
+    ) -> Optional[Dict[str, Any]]:
+        """Get cached EXIF data or return None if not cached.
+
+        RAW orientation trustworthiness: records lacking ``verified_orientation``
+        used to be re-checked synchronously on EVERY call via
+        cached_raw_exif_orientation_trustworthy() -> rawpy.imread() -- a real
+        file open that stalled whatever thread called this (including the Qt
+        main thread: status bar, HUD, prefetch decisions), and whose
+        successful result was never memoized, so the same file re-paid the
+        probe on every subsequent call too.
+
+        Now: ``verify=False`` (default) returns the record optimistically and
+        schedules the probe on a background thread; every pixel-rotation path
+        re-derives orientation at decode time, so a briefly-unverified record
+        can't rotate pixels wrongly, and the background result either stamps
+        verified_orientation=True or evicts the bad record so the next fetch
+        re-extracts fresh. ``verify=True`` (decode paths that gate orientation
+        decisions on this record, e.g. image_load_manager's deferred-EXIF
+        emits) keeps the synchronous probe but now memoizes success.
+        """
         self.stats['exif_requests'] += 1
 
         # 1. Check in-memory cache first
@@ -2256,27 +2467,100 @@ class ImageCache(QObject):
             if exif_data is not None:
                 self.exif_memory_cache.put(file_path, exif_data)
 
-        if exif_data is not None:
-            try:
-                from enhanced_raw_processor import (
-                    RAW_EXIF_SENSOR_META_VER,
-                    cached_raw_exif_orientation_trustworthy,
-                )
-                cached_ver = exif_data.get('raw_exif_sensor_meta_ver', 0)
-                if cached_ver < RAW_EXIF_SENSOR_META_VER:
-                    self.cache_miss.emit(file_path, 'exif')
-                    return None
-                if not cached_raw_exif_orientation_trustworthy(file_path, exif_data):
-                    self.cache_miss.emit(file_path, 'exif')
-                    return None
-            except Exception:
-                pass
-
-            self.cache_hit.emit(file_path, 'exif')
-            return exif_data
-        else:
+        if exif_data is None:
             self.cache_miss.emit(file_path, 'exif')
             return None
+
+        try:
+            from enhanced_raw_processor import (
+                RAW_EXIF_SENSOR_META_VER,
+                cached_raw_exif_orientation_trustworthy,
+            )
+            cached_ver = exif_data.get('raw_exif_sensor_meta_ver', 0)
+            if cached_ver < RAW_EXIF_SENSOR_META_VER:
+                self.cache_miss.emit(file_path, 'exif')
+                return None
+            if not exif_data.get("verified_orientation"):
+                if verify:
+                    if not cached_raw_exif_orientation_trustworthy(
+                        file_path, exif_data
+                    ):
+                        self.cache_miss.emit(file_path, 'exif')
+                        return None
+                    # Memoize the successful probe so no caller ever re-pays it.
+                    exif_data = dict(exif_data)
+                    exif_data["verified_orientation"] = True
+                    self.put_exif(file_path, exif_data)
+                else:
+                    self._schedule_orientation_verify(file_path, exif_data)
+        except Exception:
+            pass
+
+        self.cache_hit.emit(file_path, 'exif')
+        return exif_data
+
+    def _schedule_orientation_verify(
+        self, file_path: str, exif_data: Dict[str, Any]
+    ) -> None:
+        """Queue a background trustworthiness probe for an unverified RAW record.
+
+        One attempt per path per session; a single lazily-started daemon
+        thread drains the queue (probes serialize on the rawpy global lock
+        anyway, so more workers would only pile up blocked threads).
+        """
+        try:
+            import common_image_loader
+
+            if not common_image_loader.is_raw_file(file_path):
+                return
+        except Exception:
+            return
+        with self._orient_verify_lock:
+            if getattr(self, "_closing", False):
+                return
+            if file_path in self._orient_verify_attempted:
+                return
+            self._orient_verify_attempted.add(file_path)
+            self._orient_verify_queue.append((file_path, dict(exif_data)))
+            if (
+                self._orient_verify_thread is None
+                or not self._orient_verify_thread.is_alive()
+            ):
+                self._orient_verify_thread = threading.Thread(
+                    target=self._orientation_verify_worker,
+                    name="exif-orient-verify",
+                    daemon=True,
+                )
+                self._orient_verify_thread.start()
+
+    def _orientation_verify_worker(self) -> None:
+        while True:
+            with self._orient_verify_lock:
+                if not self._orient_verify_queue or getattr(self, "_closing", False):
+                    self._orient_verify_thread = None
+                    return
+                path, cached = self._orient_verify_queue.pop(0)
+            try:
+                from enhanced_raw_processor import (
+                    cached_raw_exif_orientation_trustworthy,
+                )
+
+                if cached_raw_exif_orientation_trustworthy(path, cached):
+                    cached["verified_orientation"] = True
+                    if not getattr(self, "_closing", False):
+                        self.put_exif(path, cached)
+                else:
+                    # Cached orientation is wrong: drop the record so the next
+                    # fetch re-extracts fresh (extraction writes a verified one).
+                    if not getattr(self, "_closing", False):
+                        self.exif_memory_cache.remove(path)
+                    try:
+                        self.exif_cache.remove(path)
+                    except Exception:
+                        pass
+                    self.cache_miss.emit(path, 'exif')
+            except Exception:
+                pass
 
     def put_exif(
         self,
@@ -2417,6 +2701,7 @@ class ImageCache(QObject):
         self.preview_cache.clear()
         self.full_image_cache.clear()
         self.pixmap_cache.clear()
+        self.libraw_preview_paths.clear()
         self.exif_cache.clear()
         self.exif_memory_cache.clear()
         self.disk_thumbnail_cache.clear()
@@ -2510,6 +2795,13 @@ class ImageCache(QObject):
 
     def close(self):
         """Close all persistent cache connections."""
+        self._closing = True
+        
+        with self._orient_verify_lock:
+            self._orient_verify_queue.clear()
+        if self._orient_verify_thread is not None and self._orient_verify_thread.is_alive():
+            self._orient_verify_thread.join(timeout=2.0)
+            
         if hasattr(self, 'exif_cache'):
             self.exif_cache.close()
         if hasattr(self, 'disk_thumbnail_cache'):

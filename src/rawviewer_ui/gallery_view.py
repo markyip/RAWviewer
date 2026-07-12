@@ -2719,10 +2719,25 @@ class JustifiedGallery(QWidget):
         # Slow scroll: keep more around the thumb; fast scroll: keep less.
         # Note: we already early-return on fast scroll, so this mainly helps "normal" scrolling.
         screens = _gallery_prefetch_screens(self._is_scrolling_fast)
-        center_y = scroll_y + (v_h // 2)
-        half_span = int((v_h * screens) // 2)
-        prefetch_top = max(0, center_y - half_span)
-        prefetch_span = max(v_h * screens, buffer_h)
+        
+        last_y = getattr(self, "_last_scheduled_scroll_y", scroll_y)
+        delta_y = scroll_y - last_y
+        
+        # Velocity-aware directional prefetch window
+        if delta_y > 0:  # Scrolling down
+            # Anchor near top of viewport, extend heavily downwards
+            prefetch_top = max(0, scroll_y - buffer_h)
+            prefetch_span = max(int(v_h * screens), buffer_h) + buffer_h
+        elif delta_y < 0:  # Scrolling up
+            # Anchor near bottom of viewport, extend heavily upwards
+            prefetch_span = max(int(v_h * screens), buffer_h) + buffer_h
+            prefetch_top = max(0, scroll_y + v_h + buffer_h - prefetch_span)
+        else:  # Stationary / Jump
+            center_y = scroll_y + (v_h // 2)
+            half_span = int((v_h * screens) // 2)
+            prefetch_top = max(0, center_y - half_span)
+            prefetch_span = max(int(v_h * screens), buffer_h)
+
         prefetch_rect = QRect(0, prefetch_top, v_port.width(), prefetch_span)
         prefetch_indices_items = self._get_visible_range(prefetch_rect)
         prefetch_paths = {item["file_path"] for idx, item in prefetch_indices_items if item.get("file_path")}

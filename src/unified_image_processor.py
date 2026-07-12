@@ -48,6 +48,31 @@ def _verbose_orientation_logs() -> bool:
 
 # LibRaw cannot open some composite HDR DNGs; avoid repeated preview/decode attempts.
 _LIBRAW_UNSUPPORTED_PATHS: set[str] = set()
+_LIBRAW_UNSUPPORTED_MAX = 2048
+
+
+def prune_libraw_unsupported_paths(
+    *, clear_all: bool = False, max_keep: int = 512
+) -> None:
+    """Bound or clear the session-global LibRaw skip set (folder change)."""
+    global _LIBRAW_UNSUPPORTED_PATHS
+    if clear_all:
+        _LIBRAW_UNSUPPORTED_PATHS.clear()
+        return
+    if len(_LIBRAW_UNSUPPORTED_PATHS) <= max_keep:
+        return
+    # Arbitrary surplus drop; next miss re-probes and re-adds if still bad.
+    drop_n = len(_LIBRAW_UNSUPPORTED_PATHS) - max_keep
+    for i, k in enumerate(list(_LIBRAW_UNSUPPORTED_PATHS)):
+        if i >= drop_n:
+            break
+        _LIBRAW_UNSUPPORTED_PATHS.discard(k)
+
+
+def _mark_libraw_unsupported(path_key: str) -> None:
+    _LIBRAW_UNSUPPORTED_PATHS.add(path_key)
+    if len(_LIBRAW_UNSUPPORTED_PATHS) > _LIBRAW_UNSUPPORTED_MAX:
+        prune_libraw_unsupported_paths(max_keep=_LIBRAW_UNSUPPORTED_MAX // 2)
 
 
 def decode_raw_file(file_path: str, params: Dict[str, Any]) -> np.ndarray:
@@ -82,12 +107,17 @@ class UnifiedImageProcessor:
         self._unpacked_raw_lock = _threading.Lock()
         self._unpacked_raw_slot: Optional[tuple] = None  # (norm_path, UnpackedRaw)
         # Sidecar-adjusted full-buffer memo: applying XMP adjustments to a
-        # sensor-resolution buffer costs ~2.1s at 45MP (measured), and
-        # _apply_sidecar_if_needed used to re-run it on EVERY
-        # process_full_image() fetch of an edited file (each zoom, revisit,
-        # repaint). Two slots (current + previous file) keyed by
-        # (norm_path, adjustment fingerprint); the fingerprint makes stale
-        # entries self-invalidating when the sidecar changes.
+        # sensor-resolution buffer costs ~1.8-2.1s at 45MP even with the
+        # row-band threading in raw_edit_pipeline.py, and _apply_sidecar_if_
+        # needed used to re-run it on EVERY process_full_image() fetch of an
+        # edited file (each zoom, revisit, repaint). Two slots (current +
+        # previous file) keyed by (norm_path, adjustment fingerprint); the
+        # fingerprint makes stale entries self-invalidating when the sidecar
+        # changes. (This was briefly replaced with a no-op under the
+        # assumption this build has no editing UI -- wrong: the Adjust panel,
+        # Key_E shortcut, and XMP-saving are all still live in main.py, so
+        # that no-op silently hid saved edits from the full-res view while
+        # the live panel/preview tier still showed them. Restored.)
         self._adjusted_full_lock = _threading.Lock()
         self._adjusted_full_slots: list = []  # [(norm_path, adj_key, np.ndarray)]
 
@@ -154,9 +184,13 @@ class UnifiedImageProcessor:
                 mp=rgb_image.shape[0] * rgb_image.shape[1] / 1e6,
             )
             with self._adjusted_full_lock:
+                # 3 slots (previous/current/next): neighbor prefetch computes
+                # the NEXT file's adjusted buffer in the background; with only
+                # 2 slots that prefetch evicted the CURRENT file's entry, so
+                # any repaint of the current file re-paid the full apply.
                 self._adjusted_full_slots = [
                     e for e in self._adjusted_full_slots if e[0] != norm
-                ][-1:] + [(norm, adj_key, out)]
+                ][-2:] + [(norm, adj_key, out)]
             return out
         except Exception:
             return rgb_image
@@ -245,7 +279,7 @@ class UnifiedImageProcessor:
                         or "not recognized" in str(libraw_err).lower()
                     )
                     if is_unsupported:
-                        _LIBRAW_UNSUPPORTED_PATHS.add(skip_key)
+                        _mark_libraw_unsupported(skip_key)
                     logging.getLogger(__name__).warning(
                         "[EDIT] LibRaw linear decode failed for %s: %s",
                         os.path.basename(file_path),
@@ -652,7 +686,8 @@ class UnifiedImageProcessor:
                 cached = None
 
             if cached is not None and hasattr(cached, "shape"):
-                exif_data = self.cache.get_exif(file_path)
+                # verify=True: feeds an orientation-match decision (worker thread).
+                exif_data = self.cache.get_exif(file_path, verify=True)
                 if exif_data is None:
                     exif_data = self.exif_extractor.extract_exif_data(file_path)
                 if exif_data and not array_matches_exif_display(
@@ -733,7 +768,7 @@ class UnifiedImageProcessor:
                 except Exception as e:
                     import logging
                     logger = logging.getLogger(__name__)
-                    _LIBRAW_UNSUPPORTED_PATHS.add(skip_key)
+                    _mark_libraw_unsupported(skip_key)
                     logger.warning(f"Heavy thumbnail fallback failed for {file_path}: {e}")
                     return None
             else:
@@ -751,8 +786,8 @@ class UnifiedImageProcessor:
             thumbnail = rgb
 
         # For RAW or fallback paths that return np.ndarray:
-        # 獲取 EXIF 數據以獲取 orientation
-        exif_data = self.cache.get_exif(file_path)
+        # 獲取 EXIF 數據以獲取 orientation (verify=True: rotates pixels; worker thread)
+        exif_data = self.cache.get_exif(file_path, verify=True)
         if exif_data is None or exif_data.get("minimal_preview_exif"):
             if single_view_preview and self._is_raw_file(file_path):
                 try:
@@ -804,19 +839,24 @@ class UnifiedImageProcessor:
             # --- Structured Mipmap (Multi-Scale) Caching Pipeline ---
             w, h = pil_img.size
 
-            pv_max = (
-                memory_preview_max_edge()
-                if single_view_preview
-                else disk_preview_max_edge()
-            )
-            if w <= pv_max and h <= pv_max:
-                preview_pil = pil_img
-            else:
-                scale_1 = min(pv_max / w, pv_max / h)
-                new_w1 = max(1, int(w * scale_1))
-                new_h1 = max(1, int(h * scale_1))
-                preview_pil = pil_img.resize((new_w1, new_h1), Image.Resampling.HAMMING)
-            self.cache.put_preview(file_path, np.array(preview_pil))
+            from common_image_loader import encode_tile_bytes
+
+            preview_pil = None
+            grid_pil = None
+            thumb_pil = None
+
+            if single_view_preview:
+                pv_max = memory_preview_max_edge()
+                if w <= pv_max and h <= pv_max:
+                    preview_pil = pil_img
+                else:
+                    scale_1 = min(pv_max / w, pv_max / h)
+                    new_w1 = max(1, int(w * scale_1))
+                    new_h1 = max(1, int(h * scale_1))
+                    preview_pil = pil_img.resize(
+                        (new_w1, new_h1), Image.Resampling.HAMMING
+                    )
+                self.cache.put_preview(file_path, np.array(preview_pil))
 
             grid_max = disk_preview_max_edge()
             if w <= grid_max and h <= grid_max:
@@ -827,9 +867,9 @@ class UnifiedImageProcessor:
                 new_h2 = max(1, int(h * scale_2))
                 grid_pil = pil_img.resize((new_w2, new_h2), Image.Resampling.HAMMING)
 
-            from common_image_loader import encode_tile_bytes
-
-            self.cache.put_grid(file_path, np.array(grid_pil), encode_tile_bytes(grid_pil))
+            self.cache.put_grid(
+                file_path, np.array(grid_pil), encode_tile_bytes(grid_pil)
+            )
 
             if w <= 256 and h <= 256:
                 thumb_pil = pil_img
@@ -840,7 +880,9 @@ class UnifiedImageProcessor:
                 thumb_pil = pil_img.resize((new_w3, new_h3), Image.Resampling.HAMMING)
 
             thumb_np = np.array(thumb_pil)
-            self.cache.put_thumbnail(file_path, thumb_np, encode_tile_bytes(thumb_pil))
+            self.cache.put_thumbnail(
+                file_path, thumb_np, encode_tile_bytes(thumb_pil)
+            )
 
             # Single-view: return screen-preview tier; gallery/preload: return grid tier.
             if single_view_preview:
@@ -858,8 +900,12 @@ class UnifiedImageProcessor:
     def process_full_image(self, file_path: str, 
                           use_full_resolution: bool = False,
                           executor: Optional[Any] = None,
-                          apply_sidecar_adjustments: bool = True) -> Optional[Union[np.ndarray, QPixmap]]:
+                          apply_sidecar_adjustments: Optional[bool] = None) -> Optional[Union[np.ndarray, QPixmap]]:
         """處理完整圖像（統一接口）"""
+        if apply_sidecar_adjustments is None:
+            from raw_adjustments import sidecar_adjustments_enabled
+
+            apply_sidecar_adjustments = sidecar_adjustments_enabled()
         # 檢查快取
         # CRITICAL: For RAW files, only check full_image cache, not pixmap cache
         # This ensures RAW files always go through proper processing with orientation correction
@@ -868,8 +914,11 @@ class UnifiedImageProcessor:
         if use_full_resolution:
             cached_image = self.cache.get_full_image(file_path)
             if cached_image is not None:
-                # Orientation verification for cache hit
-                exif_data = self.exif_extractor.extract_exif_data(file_path)
+                # Orientation verification for cache hit -- use cached EXIF;
+                # re-extracting on every worker hit was adding avoidable delay.
+                exif_data = self.cache.get_exif(file_path, verify=False)
+                if exif_data is None:
+                    exif_data = self.exif_extractor.extract_exif_data(file_path)
                 orientation = exif_data.get('orientation', 1) if exif_data else 1
                 
                 if hasattr(cached_image, 'shape'):
@@ -982,9 +1031,14 @@ class UnifiedImageProcessor:
             except Exception:
                 pass
 
-        import threading
-
-        threading.Thread(target=_populate_preview_tier_async, daemon=True).start()
+        import concurrent.futures
+        
+        # Lazy initialization of module-level executor to prevent unbounded thread churn
+        global _preview_executor
+        if '_preview_executor' not in globals():
+            _preview_executor = concurrent.futures.ThreadPoolExecutor(max_workers=2, thread_name_prefix="preview-tier")
+            
+        _preview_executor.submit(_populate_preview_tier_async, embedded)
 
         import logging
 
@@ -1023,7 +1077,7 @@ class UnifiedImageProcessor:
         skip_key = os.path.normcase(os.path.abspath(file_path))
         from common_image_loader import dng_prefers_embedded_preview_first
         if dng_prefers_embedded_preview_first(file_path):
-            _LIBRAW_UNSUPPORTED_PATHS.add(skip_key)
+            _mark_libraw_unsupported(skip_key)
         elif file_path.lower().endswith(".nef"):
             # Proactive Nikon HE/HE* detection: skip straight to the embedded-
             # JPEG fallback ladder below instead of a doomed LibRaw decode.
@@ -1046,7 +1100,7 @@ class UnifiedImageProcessor:
                 except Exception:
                     he = None
             if he is True:
-                _LIBRAW_UNSUPPORTED_PATHS.add(skip_key)
+                _mark_libraw_unsupported(skip_key)
         if skip_key in _LIBRAW_UNSUPPORTED_PATHS:
             cached = self.cache.get_preview(file_path)
             if cached is None:
@@ -1148,55 +1202,62 @@ class UnifiedImageProcessor:
             # 獲取 EXIF 數據（用於處理參數）
             exif_data = self.exif_extractor.extract_exif_data(file_path)
 
-            full_embedded = self._try_full_embedded_raw_preview(file_path, exif_data)
-            if full_embedded is not None:
-                return full_embedded
-
-            # 檢查文件大小以決定處理策略
+            # 處理文件大小以決定處理策略
             file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
             use_fast_processing = file_size_mb > 20 and not use_full_resolution
+
+            # Full-resolution path only: accept sensor-covering embedded JPEG.
+            # For fit-view / non-full, skip (would pin 30–60MP arrays in RAM).
+            if use_full_resolution:
+                full_embedded = self._try_full_embedded_raw_preview(file_path, exif_data)
+                if full_embedded is not None:
+                    return full_embedded
+            else:
+                # Prefer preview-max-edge embedded/scanned JPEG before demosaic.
+                mem_max = memory_preview_max_edge()
+                cached_preview = self.cache.get_preview(file_path)
+                if cached_preview is not None:
+                    return cached_preview
+                if not libraw_first:
+                    preview = self.thumbnail_extractor.extract_preview_from_raw(
+                        file_path, max_size=mem_max
+                    )
+                    if preview is not None:
+                        h, w = preview.shape[:2]
+                        fit_min = max(1024, int(mem_max * 0.75))
+                        if max(h, w) >= fit_min:
+                            orientation = (
+                                exif_data.get("orientation", 1) if exif_data else 1
+                            )
+                            if orientation != 1:
+                                preview = self._apply_orientation_correction(
+                                    preview, orientation, exif_data
+                                )
+                            self.cache.put_preview(file_path, preview)
+                            return preview
+                    try:
+                        from enhanced_raw_processor import extract_embedded_jpeg_by_scan
+
+                        scanned = extract_embedded_jpeg_by_scan(file_path, mem_max)
+                        if scanned is not None:
+                            orientation = (
+                                exif_data.get("orientation", 1) if exif_data else 1
+                            )
+                            if orientation != 1:
+                                scanned = self._apply_orientation_correction(
+                                    scanned, orientation, exif_data
+                                )
+                            self.cache.put_preview(file_path, scanned)
+                            return scanned
+                    except Exception:
+                        pass
             
             # 處理 RAW 文件
             # Check if we should use Preview (embedded JPEG) instead of processing RAW
             if not use_full_resolution and not libraw_first:
                if skip_key in _LIBRAW_UNSUPPORTED_PATHS:
                    return self.cache.get_preview(file_path)
-               # OPTIMIZATION: Try embedded / cached preview instead of full RAW demosaic.
-               
-               # Check Preview Cache
-               cached_preview = self.cache.get_preview(file_path)
-               if cached_preview is not None:
-                   if _verbose_orientation_logs():
-                       print(f"[PREVIEW] Using cached preview for {os.path.basename(file_path)}")
-                   return cached_preview
-               
-               # Extract Preview
-               if _verbose_orientation_logs():
-                   print(f"[PREVIEW] Extracting preview from RAW for {os.path.basename(file_path)}")
-               mem_max = memory_preview_max_edge()
-               preview = self.thumbnail_extractor.extract_preview_from_raw(
-                   file_path, max_size=mem_max
-               )
-               
-               if preview is not None:
-                   # Check if preview is large enough for a good "Fit" view
-                   # Many phone DNGs have tiny previews (e.g. 1024px) that look bad
-                   h, w = preview.shape[:2]
-                   fit_min = max(1024, int(mem_max * 0.75))
-                   if max(h, w) >= fit_min:
-                       # Apply Orientation to Preview
-                       orientation = exif_data.get('orientation', 1) if exif_data else 1
-                       if orientation != 1:
-                           preview = self._apply_orientation_correction(preview, orientation, exif_data)
-                       
-                       # Cache Preview
-                       self.cache.put_preview(file_path, preview)
-                       return preview
-                   else:
-                       if _verbose_orientation_logs():
-                           print(f"[PREVIEW] Embedded preview is too small ({w}x{h}), falling back to RAW processing for better quality")
-               
-               # Fallback to RAW processing if preview extraction fails
+               # Remaining demosaic fallthrough when embed was too small / missing.
                if _verbose_orientation_logs():
                    print("[PREVIEW] Preview extraction failed, falling back to RAW processing")
 
@@ -1458,7 +1519,7 @@ class UnifiedImageProcessor:
             
             is_unsupported = "unsupported" in str(e).lower() or "not recognized" in str(e).lower()
             if is_unsupported:
-                _LIBRAW_UNSUPPORTED_PATHS.add(skip_key)
+                _mark_libraw_unsupported(skip_key)
                 logger.warning(
                     f"RAW file unsupported by LibRaw (e.g., composite DNG): {os.path.basename(file_path)}. Error: {e}"
                 )
@@ -1525,7 +1586,8 @@ class UnifiedImageProcessor:
             return exif, thumb
 
         # Gallery tiles: try cache + embedded JPEG without parsing the full RAW container.
-        cached_exif = self.cache.get_exif(file_path)
+        # verify=True: this record feeds preview extraction/orientation (worker thread).
+        cached_exif = self.cache.get_exif(file_path, verify=True)
         cached_thumb = self.cache.get_thumbnail(file_path)
         if cached_thumb is None and target_size is None:
             cached_thumb = self.cache.get_preview(file_path)

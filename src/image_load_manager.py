@@ -25,21 +25,37 @@ from image_cache import get_image_cache
 # Thread-local storage to track if current thread is executing a CURRENT priority task
 worker_thread_local = threading.local()
 
-def yield_if_current_task_active() -> None:
-    """Yield execution if another thread is running a high priority task.
+def _has_running_current_task(manager, *, exclude_task=None) -> bool:
+    """True only when a CURRENT task is actively executing (not merely queued).
 
-    BOUNDED: this must never sleep indefinitely. _active_tasks includes CURRENT
-    tasks that are merely QUEUED (registered at enqueue, before dispatch), and
-    _schedule_next_task only starts tasks while activeThreadCount < maxThreadCount.
-    So if the pool is full of non-CURRENT workers all sleeping here, the queued
-    CURRENT tasks can never start and the sleepers never wake — a livelock that
-    froze gallery entry for ~20s (pending>0, zero decodes) until an unrelated event
-    kicked the pool. A bounded yield keeps the intent (give CURRENT work a head
-    start at yield points) while guaranteeing pool threads are eventually released
-    so the queued CURRENT work can actually run. The worker's own task is also
-    checked so cancelled workers exit immediately instead of sleeping.
+    Checking queued CURRENT (_active_tasks) caused thread-pool livelock: every
+    background worker slept waiting for CURRENT, which could not start because
+    those sleeping workers occupied every slot.
+    Note: we use a dedicated _running_tasks_lock to avoid contention with
+    _schedule_next_task, which holds _queue_lock for the duration of a queue drain.
     """
-    import time
+    running = getattr(manager, "_running_tasks", None)
+    if not running:
+        return False
+    lock = getattr(manager, "_running_tasks_lock", None)
+    if lock is None:
+        return False
+    with lock:
+        for t in running:
+            if t is exclude_task:
+                continue
+            if getattr(t, "priority", None) == Priority.CURRENT and not t.is_cancelled():
+                return True
+    return False
+
+
+def yield_if_current_task_active() -> None:
+    """Yield briefly if another thread is *running* a high-priority CURRENT task.
+
+    BOUNDED and running-only (never waits on merely-queued CURRENT). Silent
+    workers + separate _current_thread_pool ensure queued CURRENT can always
+    obtain a thread without requiring sleepers to free the background pool.
+    """
     if threading.current_thread() is threading.main_thread():
         return
     current_priority = getattr(worker_thread_local, 'priority', None)
@@ -56,13 +72,7 @@ def yield_if_current_task_active() -> None:
     while time.time() < deadline:
         if own_task is not None and own_task.is_cancelled():
             return
-        has_current = False
-        with manager._queue_lock:
-            for t in manager._active_tasks.values():
-                if getattr(t, "priority", None) == Priority.CURRENT and not t.is_cancelled():
-                    has_current = True
-                    break
-        if not has_current:
+        if not _has_running_current_task(manager, exclude_task=own_task):
             break
         time.sleep(0.05)
 
@@ -219,29 +229,19 @@ class ImageLoadWorker(QRunnable):
         self.manager = manager
         self._processor = None  # 延遲初始化，避免導入時創建
 
-    def _has_active_current_task_elsewhere(self) -> bool:
-        try:
-            from image_load_manager import Priority
-            with self.manager._queue_lock:
-                for t in self.manager._active_tasks.values():
-                    if (
-                        getattr(t, "priority", None) == Priority.CURRENT
-                        and t is not self.task
-                        and not t.is_cancelled()
-                    ):
-                        return True
-        except Exception:
-            pass
-        return False
-
     def _yield_if_needed(self) -> None:
-        from image_load_manager import Priority
+        """Bounded cooperative yield while another CURRENT task is running."""
         if self.task.priority == Priority.CURRENT:
             return
-        import time
-        while self._has_active_current_task_elsewhere():
+        if self.task.is_cancelled():
+            return
+        max_wait_s = _env_int("RAWVIEWER_YIELD_MAX_MS", 1500, minimum=100) / 1000.0
+        deadline = time.time() + max_wait_s
+        while time.time() < deadline:
             if self.task.is_cancelled():
-                break
+                return
+            if not _has_running_current_task(self.manager, exclude_task=self.task):
+                return
             time.sleep(0.05)
 
 
@@ -282,6 +282,7 @@ class ImageLoadWorker(QRunnable):
         """執行任務"""
         worker_thread_local.priority = getattr(self.task, 'priority', None)
         worker_thread_local.task = self.task
+        self.manager._mark_task_running(self.task)
         try:
             if self.task.priority == Priority.CURRENT:
                 import logging
@@ -388,7 +389,10 @@ class ImageLoadWorker(QRunnable):
                     exif_data = None
                     if allow_heavy_fallback and "exif" not in stages:
                         cache = processor.cache
-                        cached_exif = cache.get_exif(file_path)
+                        # verify=True: this record feeds preview extraction /
+                        # orientation decisions on a worker thread, where the
+                        # synchronous trustworthiness probe is acceptable.
+                        cached_exif = cache.get_exif(file_path, verify=True)
                         cached_thumb = cache.get_preview(file_path)
                         if cached_thumb is None:
                             cached_thumb = cache.get_thumbnail(file_path)
@@ -404,7 +408,7 @@ class ImageLoadWorker(QRunnable):
                             target_size=self.task.thumbnail_target_size,
                         )
                     if allow_heavy_fallback and "exif" not in stages and exif_data is None:
-                        deferred = processor.cache.get_exif(file_path)
+                        deferred = processor.cache.get_exif(file_path, verify=True)
                         if deferred and deferred.get("minimal_preview_exif"):
                             exif_data = deferred
                     if (
@@ -432,7 +436,9 @@ class ImageLoadWorker(QRunnable):
                         ):
                             thumbnail = None
                     if thumbnail is not None and not self.task.is_cancelled():
-                        cache_exif = exif_data or processor.cache.get_exif(file_path)
+                        cache_exif = exif_data or processor.cache.get_exif(
+                            file_path, verify=True
+                        )
                         self._cache_gallery_thumbnail_for_indexing(
                             processor, file_path, thumbnail, cache_exif
                         )
@@ -452,10 +458,13 @@ class ImageLoadWorker(QRunnable):
                     if self._safe_emit():
                         self.manager.progress_updated.emit(file_path, "Processing image...")
 
+                from raw_adjustments import sidecar_adjustments_enabled
+
                 result = processor.process_full_image(
                     file_path,
                     use_full_resolution=self.task.use_full_resolution,
-                    executor=self.manager._process_pool if self._safe_emit() else None
+                    executor=self.manager._process_pool if self._safe_emit() else None,
+                    apply_sidecar_adjustments=sidecar_adjustments_enabled(),
                 )
                 if result is not None and not self.task.is_cancelled():
                     if self._safe_emit():
@@ -513,6 +522,7 @@ class ImageLoadWorker(QRunnable):
             if self._safe_emit():
                 self.manager.error_occurred.emit(file_path, str(e))
         finally:
+            self.manager._mark_task_not_running(self.task)
             if self._safe_emit():
                 self.manager._task_finished(self.task)
             worker_thread_local.priority = None
@@ -634,7 +644,14 @@ class ImageLoadManager(QObject):
             return
         
         self._work_queue = queue.PriorityQueue()
+        # Background / prefetch lane (PRELOAD_*, BACKGROUND).
         self._thread_pool = QThreadPool()
+        # Interactive CURRENT lane: can start even when the background pool is full,
+        # so non-CURRENT sleepers (or long prefetch) never starve visible loads.
+        self._current_thread_pool = QThreadPool()
+        # Tasks currently inside ImageLoadWorker.run() (running-only yield checks).
+        self._running_tasks: set = set()
+        self._running_tasks_lock = threading.Lock()
         
         self._stopped = False  # Flag to stop scheduling new tasks
         self._gallery_warmup_throttle_depth = 0
@@ -648,6 +665,7 @@ class ImageLoadManager(QObject):
         self.update_volume_throttling(os.getcwd())
         if max_workers != 4:
             self._thread_pool.setMaxThreadCount(max_workers)
+            self._apply_current_pool_limit(max_workers)
 
         # PROCESS POOL (optional): on Windows debug/startup paths, process spawn can
         # re-import heavy modules and hurt first-load latency. Keep it opt-in.
@@ -669,6 +687,11 @@ class ImageLoadManager(QObject):
             self._process_pool = concurrent.futures.ProcessPoolExecutor(
                 max_workers=process_pool_worker_count()
             )
+            import atexit
+            
+            # Keep a reference to the bound method so we can unregister it cleanly
+            self._process_pool_shutdown_hook = lambda: self._process_pool.shutdown(wait=False)
+            atexit.register(self._process_pool_shutdown_hook)
         else:
             import logging
             logging.getLogger(__name__).info("[LOAD] LibRaw process pool disabled")
@@ -740,6 +763,15 @@ class ImageLoadManager(QObject):
             if cap is not None:
                 default_workers = min(default_workers, cap)
 
+        # CURRENT pool: small default keeps nav from saturating host; raise via
+        # RAWVIEWER_CURRENT_MAX_WORKERS or gallery warmup throttle (still ≤ bg).
+        current_default = max(2, min(4, default_workers // 4 if default_workers >= 8 else 2))
+        current_workers = _env_int(
+            "RAWVIEWER_CURRENT_MAX_WORKERS", current_default, minimum=1
+        )
+        # Cap wells short of unbounded: CURRENT pool never exceeds bg baseline.
+        current_workers = max(1, min(current_workers, default_workers))
+
         # If no throttle is currently active, apply directly
         is_throttled = (
             (getattr(self, "_io_pressure_throttle_depth", 0) or 0) > 0
@@ -748,13 +780,97 @@ class ImageLoadManager(QObject):
         )
         if not is_throttled:
             self._thread_pool.setMaxThreadCount(default_workers)
+            self._apply_current_pool_limit(current_workers)
         
         # Save baseline to be restored when throttles exit
         self._pressure_saved_max_threads = default_workers
         self._warmup_saved_max_threads = default_workers
         self._indexing_saved_max_threads = default_workers
+        self._pressure_saved_current_threads = current_workers
+        self._warmup_saved_current_threads = current_workers
+        self._indexing_saved_current_threads = current_workers
+        self._current_pool_baseline = current_workers
         
-        self._raw_load_limit = raw_concurrent_load_limit(folder_path)
+        from common_image_loader import raw_load_limit_aligned_to_gpu
+
+        self._raw_load_limit = raw_load_limit_aligned_to_gpu(
+            raw_concurrent_load_limit(folder_path)
+        )
+
+    def apply_gpu_decode_profile(self) -> None:
+        """After GPU backend import: drop process pool conflict; align RAW slots."""
+        import logging
+        from common_image_loader import raw_load_limit_aligned_to_gpu, use_raw_process_pool
+
+        log = logging.getLogger(__name__)
+        try:
+            import sys as _sys
+
+            mod = _sys.modules.get("gpu_raw_processor")
+            backend = mod.detect_gpu_backend() if mod is not None else "cpu_only"
+        except Exception:
+            backend = "cpu_only"
+
+        self._raw_load_limit = raw_load_limit_aligned_to_gpu(
+            int(getattr(self, "_raw_load_limit", 4) or 4)
+        )
+
+        # Tear down process pool when GPU demosaic is active unless forced on.
+        force_on = os.environ.get("RAWVIEWER_USE_PROCESS_POOL", "").strip().lower() in {
+            "1", "true", "yes", "on",
+        }
+        if (
+            backend in ("pytorch_cuda", "pytorch_mps", "cupy")
+            and not force_on
+            and getattr(self, "_process_pool", None) is not None
+        ):
+            import atexit
+
+            pool = self._process_pool
+            self._process_pool = None
+            if hasattr(self, "_process_pool_shutdown_hook"):
+                try:
+                    atexit.unregister(self._process_pool_shutdown_hook)
+                except Exception:
+                    pass
+            try:
+                pool.shutdown(wait=False)
+            except Exception:
+                pass
+            log.info(
+                "[LOAD] LibRaw process pool disabled (GPU demosaic=%s; RAWVIEWER_USE_PROCESS_POOL=1 to force)",
+                backend,
+            )
+        elif not use_raw_process_pool() and getattr(self, "_process_pool", None) is not None:
+            pass  # already handled above
+        log.info(
+            "[LOAD] GPU decode profile: backend=%s raw_limit=%s process_pool=%s",
+            backend,
+            getattr(self, "_raw_load_limit", "?"),
+            getattr(self, "_process_pool", None) is not None,
+        )
+
+    def _apply_current_pool_limit(self, max_workers: int) -> None:
+        pool = getattr(self, "_current_thread_pool", None)
+        if pool is not None:
+            pool.setMaxThreadCount(max(1, int(max_workers)))
+
+    def _pool_for_task(self, task: ImageLoadTask) -> QThreadPool:
+        if getattr(task, "priority", None) == Priority.CURRENT:
+            return self._current_thread_pool
+        return self._thread_pool
+
+    def _mark_task_running(self, task: ImageLoadTask) -> None:
+        lock = getattr(self, "_running_tasks_lock", None)
+        if lock is not None:
+            with lock:
+                self._running_tasks.add(task)
+
+    def _mark_task_not_running(self, task: ImageLoadTask) -> None:
+        lock = getattr(self, "_running_tasks_lock", None)
+        if lock is not None:
+            with lock:
+                self._running_tasks.discard(task)
 
     def prime_volume_speed_async(
         self, folder_path: Optional[str], sample_path: Optional[str] = None
@@ -905,9 +1021,14 @@ class ImageLoadManager(QObject):
         if self._io_pressure_throttle_depth != 1:
             return
         self._pressure_saved_max_threads = self._thread_pool.maxThreadCount()
+        self._pressure_saved_current_threads = self._current_thread_pool.maxThreadCount()
         pressure_max = _env_int("RAWVIEWER_IO_PRESSURE_MAX_WORKERS", 6, minimum=2)
         self._thread_pool.setMaxThreadCount(
             min(pressure_max, self._pressure_saved_max_threads)
+        )
+        # Keep a small CURRENT lane open so UI never hard-blocks under pressure.
+        self._apply_current_pool_limit(
+            min(max(2, pressure_max // 2), self._pressure_saved_current_threads)
         )
         self._pressure_saved_raw_limit = self._raw_load_limit
         self._raw_load_limit = min(2, int(self._raw_load_limit or 2))
@@ -922,6 +1043,9 @@ class ImageLoadManager(QObject):
         saved_threads = getattr(self, "_pressure_saved_max_threads", None)
         if saved_threads is not None:
             self._thread_pool.setMaxThreadCount(saved_threads)
+        saved_current = getattr(self, "_pressure_saved_current_threads", None)
+        if saved_current is not None:
+            self._apply_current_pool_limit(saved_current)
         saved_raw = getattr(self, "_pressure_saved_raw_limit", None)
         if saved_raw is not None:
             self._raw_load_limit = saved_raw
@@ -934,10 +1058,15 @@ class ImageLoadManager(QObject):
         if self._gallery_warmup_throttle_depth != 1:
             return
         self._warmup_saved_max_threads = self._thread_pool.maxThreadCount()
+        self._warmup_saved_current_threads = self._current_thread_pool.maxThreadCount()
         warmed_max = _env_int("RAWVIEWER_GALLERY_WARMUP_MAX_WORKERS", 24, minimum=2)
         self._thread_pool.setMaxThreadCount(
             min(warmed_max, self._warmup_saved_max_threads)
         )
+        # Warmup is CURRENT-heavy: raise CURRENT pool toward the warmup budget
+        # (baseline CURRENT is intentionally small for single-view).
+        bg_cap = self._thread_pool.maxThreadCount()
+        self._apply_current_pool_limit(min(warmed_max, bg_cap))
         self._warmup_saved_raw_limit = self._raw_load_limit
         self._raw_load_limit = min(6, int(self._raw_load_limit or 6))
 
@@ -951,6 +1080,9 @@ class ImageLoadManager(QObject):
         saved_threads = getattr(self, "_warmup_saved_max_threads", None)
         if saved_threads is not None:
             self._thread_pool.setMaxThreadCount(saved_threads)
+        saved_current = getattr(self, "_warmup_saved_current_threads", None)
+        if saved_current is not None:
+            self._apply_current_pool_limit(saved_current)
         saved_raw = getattr(self, "_warmup_saved_raw_limit", None)
         if saved_raw is not None:
             self._raw_load_limit = saved_raw
@@ -967,17 +1099,22 @@ class ImageLoadManager(QObject):
             if self._indexing_throttle_depth != 1:
                 return
             self._indexing_saved_max_threads = self._thread_pool.maxThreadCount()
+            self._indexing_saved_current_threads = self._current_thread_pool.maxThreadCount()
             indexing_max = _env_int("RAWVIEWER_INDEXING_MAX_WORKERS", 6, minimum=2)
             self._thread_pool.setMaxThreadCount(
                 min(indexing_max, self._indexing_saved_max_threads)
+            )
+            self._apply_current_pool_limit(
+                min(indexing_max, self._indexing_saved_current_threads)
             )
             self._indexing_saved_raw_limit = self._raw_load_limit
             self._raw_load_limit = min(1, int(self._raw_load_limit or 1))
             import logging
 
             logging.getLogger(__name__).info(
-                "[LOAD] Semantic indexing throttle ON (max_workers=%d raw_limit=%d)",
+                "[LOAD] Semantic indexing throttle ON (max_workers=%d current=%d raw_limit=%d)",
                 self._thread_pool.maxThreadCount(),
+                self._current_thread_pool.maxThreadCount(),
                 self._raw_load_limit,
             )
         finally:
@@ -998,6 +1135,9 @@ class ImageLoadManager(QObject):
             saved_threads = getattr(self, "_indexing_saved_max_threads", None)
             if saved_threads is not None:
                 self._thread_pool.setMaxThreadCount(saved_threads)
+            saved_current = getattr(self, "_indexing_saved_current_threads", None)
+            if saved_current is not None:
+                self._apply_current_pool_limit(saved_current)
             saved_raw = getattr(self, "_indexing_saved_raw_limit", None)
             if saved_raw is not None:
                 self._raw_load_limit = saved_raw
@@ -1020,6 +1160,9 @@ class ImageLoadManager(QObject):
             saved_threads = getattr(self, "_indexing_saved_max_threads", None)
             if saved_threads is not None:
                 self._thread_pool.setMaxThreadCount(saved_threads)
+            saved_current = getattr(self, "_indexing_saved_current_threads", None)
+            if saved_current is not None:
+                self._apply_current_pool_limit(saved_current)
             saved_raw = getattr(self, "_indexing_saved_raw_limit", None)
             if saved_raw is not None:
                 self._raw_load_limit = saved_raw
@@ -1352,7 +1495,43 @@ class ImageLoadManager(QObject):
             except Exception:
                 pass
         if hasattr(self, '_process_pool') and self._process_pool:
+            import atexit
+            if hasattr(self, '_process_pool_shutdown_hook'):
+                try:
+                    atexit.unregister(self._process_pool_shutdown_hook)
+                except Exception:
+                    pass
             self._process_pool.shutdown(wait=False)
+        for pool_name in ("_thread_pool", "_current_thread_pool"):
+            pool = getattr(self, pool_name, None)
+            if pool is not None:
+                try:
+                    pool.clear()
+                except Exception:
+                    pass
+                try:
+                    pool.waitForDone(1000)
+                except Exception:
+                    pass
+
+    def _task_finished(self, task: ImageLoadTask):
+        """Remove completed/cancelled work from active map and keep the queue moving."""
+        lock = getattr(self, "_running_tasks_lock", None)
+        if lock is not None:
+            with lock:
+                self._running_tasks.discard(task)
+        with self._queue_lock:
+            key = getattr(task, 'task_key', None)
+            if key in self._active_tasks and self._active_tasks[key] is task:
+                del self._active_tasks[key]
+                self._task_keys_by_path[task.file_path].discard(key)
+                if not self._task_keys_by_path[task.file_path]:
+                    self._task_keys_by_path.pop(task.file_path, None)
+            if getattr(task, "_counted_raw_slot", False):
+                self._active_raw_tasks = max(0, self._active_raw_tasks - 1)
+                task._counted_raw_slot = False
+        self.task_completed.emit(task.file_path)
+        self._schedule_next_task()
 
     def _full_stage_already_in_flight(
         self, file_path: str, use_full_resolution: bool, requesting_priority: Priority
@@ -1397,21 +1576,6 @@ class ImageLoadManager(QObject):
         else:
             target_key = None
         return (file_path, use_full_resolution, wanted, target_key)
-
-    def _task_finished(self, task: ImageLoadTask):
-        """Remove completed/cancelled work from active map and keep the queue moving."""
-        with self._queue_lock:
-            key = getattr(task, 'task_key', None)
-            if key in self._active_tasks and self._active_tasks[key] is task:
-                del self._active_tasks[key]
-                self._task_keys_by_path[task.file_path].discard(key)
-                if not self._task_keys_by_path[task.file_path]:
-                    self._task_keys_by_path.pop(task.file_path, None)
-            if getattr(task, "_counted_raw_slot", False):
-                self._active_raw_tasks = max(0, self._active_raw_tasks - 1)
-                task._counted_raw_slot = False
-        self.task_completed.emit(task.file_path)
-        self._schedule_next_task()
 
     @staticmethod
     def _emit_cached_result_later(signal, file_path: str, payload) -> None:
@@ -1469,7 +1633,7 @@ class ImageLoadManager(QObject):
                 )
                 emit(self.thumbnail_ready, file_path, buf)
                 if preview_only:
-                    exif_data = cache.get_exif(file_path)
+                    exif_data = cache.get_exif_memory_only(file_path)
                     if exif_data is not None:
                         emit(self.exif_data_ready, file_path, exif_data)
                 return True
@@ -1490,9 +1654,19 @@ class ImageLoadManager(QObject):
                     return True
                 # Not terminal if callers also requested EXIF/full image work.
 
-        # 2) EXIF stage: check memory + persistent cache and emit if found
+        # 2) EXIF stage: memory-only (this whole method's contract, see docstring).
+        # cache.get_exif() also validates cached RAW orientation via
+        # cached_raw_exif_orientation_trustworthy(), which does a synchronous
+        # rawpy.imread() when the cached record lacks verified_orientation --
+        # a real, sometimes multi-second file open that was firing here on
+        # every prefetch-decision call, straight on the caller's thread
+        # (confirmed via faulthandler stack dumps: rawpy.imread() on the Qt
+        # main thread, called from here via _on_single_view_content_displayed
+        # -> _queue_display_tier_prefetch_for_paths -> load_image). Let the
+        # real load path do that verification when it actually decodes the
+        # file; this is just a fast "is it already warm" check.
         if 'exif' in wanted:
-            exif_data = cache.get_exif(file_path)
+            exif_data = cache.get_exif_memory_only(file_path)
             if exif_data is not None and not exif_data.get("minimal_preview_exif"):
                 self._emit_cached_result_later(self.exif_data_ready, file_path, exif_data)
                 # Note: EXIF hit alone doesn't terminate processing if pixels are also wanted
@@ -1571,7 +1745,7 @@ class ImageLoadManager(QObject):
             )
 
         thumb_ok = _memory_thumb_ok()
-        exif_cached = cache.get_exif(file_path)
+        exif_cached = cache.get_exif_memory_only(file_path)
         if "exif" not in wanted:
             exif_ok = True
         elif preview_only:
@@ -1597,25 +1771,27 @@ class ImageLoadManager(QObject):
         return thumb_ok and exif_ok and full_ok
     
     def _schedule_next_task(self):
-        """調度下一個任務到線程池，實現 RAW 限制"""
+        """Dispatch queued work onto the CURRENT or background pool.
+
+        Policy runs under _queue_lock; tryStart runs outside so enqueue/cancel
+        are not blocked while pool threads spin up.
+        """
         if self._stopped:
             return
-            
+
         from common_image_loader import io_pressure_active, is_raw_file
         pressure = io_pressure_active()
+
+        to_start: list = []  # (task, pool, is_heavy)
+        deferred_put: list = []
+
         with self._queue_lock:
             if self._work_queue.empty():
                 return
-            
             try:
-                # We want to fill the thread pool, but limit heavy RAW tasks
-                # JPEGs can always proceed if threads are free.
-                deferred_raw_tasks = []
-                deferred_prefetch_tasks = []
-                while (
-                    not self._work_queue.empty()
-                    and self._thread_pool.activeThreadCount() < self._thread_pool.maxThreadCount()
-                ):
+                # Provisional heavy slots for this scan while we still hold the lock.
+                provisional_raw = int(self._active_raw_tasks or 0)
+                while not self._work_queue.empty():
                     task = self._work_queue.get_nowait()
 
                     if task.is_cancelled():
@@ -1627,54 +1803,74 @@ class ImageLoadManager(QObject):
                                 self._task_keys_by_path.pop(task.file_path, None)
                         continue
 
+                    pool = self._pool_for_task(task)
+
                     if pressure and task.priority != Priority.CURRENT:
                         active_prefetch = sum(
                             1 for t in self._active_tasks.values()
                             if getattr(t, "priority", None) != Priority.CURRENT and not t.is_cancelled()
                         )
                         if active_prefetch >= 1:
-                            deferred_prefetch_tasks.append(task)
+                            deferred_put.append(task)
                             continue
 
                     is_raw = is_raw_file(task.file_path)
-                    # HEAVY TASK CHECK: Only throttle RAW tasks that perform full-resolution processing.
-                    # Metadata and thumbnail extraction (extract_thumb) are lightweight enough to bypass
-                    # the 4-slot limit, preventing gallery starvation in mixed folders.
                     is_heavy = is_raw and 'full' in (task.stages or set())
-                    
+
                     heavy_limit = self._raw_load_limit
                     if is_heavy and task.priority != Priority.CURRENT:
-                        # Reserve one RAW slot for the user's current image:
-                        # an in-flight rawpy decode cannot be aborted, so a
-                        # fully prefetch-occupied pool adds up to a whole
-                        # decode (~0.5s) to every navigation's latency.
                         heavy_limit = max(1, heavy_limit - 1)
-                    if is_heavy and self._active_raw_tasks >= heavy_limit:
-                        # Keep throttled heavy RAW aside for now and continue scanning queue.
-                        deferred_raw_tasks.append(task)
+                    if is_heavy and provisional_raw >= heavy_limit:
+                        deferred_put.append(task)
                         continue
-                    
-                    if is_heavy:
-                        self._active_raw_tasks += 1
-                        task._counted_raw_slot = True
 
-                    worker = ImageLoadWorker(task, self)
-                    self._thread_pool.start(worker)
-                for deferred in deferred_prefetch_tasks:
-                    self._work_queue.put(deferred)
-                for deferred in deferred_raw_tasks:
-                    self._work_queue.put(deferred)
+                    if is_heavy:
+                        provisional_raw += 1
+                    to_start.append((task, pool, is_heavy))
             except queue.Empty:
                 pass
-    
+
+            for deferred in deferred_put:
+                self._work_queue.put(deferred)
+
+        # Start outside the queue lock.
+        requeue: list = []
+        for task, pool, is_heavy in to_start:
+            if self._stopped or task.is_cancelled():
+                with self._queue_lock:
+                    key = getattr(task, "task_key", None)
+                    if key in self._active_tasks and self._active_tasks[key] is task:
+                        del self._active_tasks[key]
+                        self._task_keys_by_path[task.file_path].discard(key)
+                        if not self._task_keys_by_path[task.file_path]:
+                            self._task_keys_by_path.pop(task.file_path, None)
+                continue
+            worker = ImageLoadWorker(task, self)
+            if not pool.tryStart(worker):
+                requeue.append(task)
+                continue
+            if is_heavy:
+                with self._queue_lock:
+                    self._active_raw_tasks += 1
+                    task._counted_raw_slot = True
+
+        if requeue:
+            with self._queue_lock:
+                for task in requeue:
+                    if not task.is_cancelled():
+                        self._work_queue.put(task)
+
     def get_stats(self) -> Dict[str, Any]:
         """獲取管理器統計信息"""
         with self._queue_lock:
             return {
                 'queue_size': self._work_queue.qsize(),
                 'active_tasks': len(self._active_tasks),
+                'running_tasks': len(self._running_tasks),
                 'active_threads': self._thread_pool.activeThreadCount(),
-                'max_threads': self._thread_pool.maxThreadCount()
+                'max_threads': self._thread_pool.maxThreadCount(),
+                'current_active_threads': self._current_thread_pool.activeThreadCount(),
+                'current_max_threads': self._current_thread_pool.maxThreadCount(),
             }
 
 
@@ -1691,4 +1887,14 @@ def get_image_load_manager(max_workers: int = 4) -> ImageLoadManager:
             if _global_manager is None:
                 _global_manager = ImageLoadManager(max_workers)
     return _global_manager
+
+
+def apply_gpu_decode_profile_to_manager() -> None:
+    """Called after main-thread GPU backend import (see torch_bootstrap)."""
+    mgr = _global_manager
+    if mgr is not None and hasattr(mgr, "apply_gpu_decode_profile"):
+        try:
+            mgr.apply_gpu_decode_profile()
+        except Exception:
+            pass
 

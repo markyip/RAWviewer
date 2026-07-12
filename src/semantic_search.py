@@ -25,6 +25,22 @@ from functools import lru_cache
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Literal, Optional, Sequence, TypeAlias, cast
 
+_SHARED_INDEX_EXECUTOR = None
+_SHARED_EXECUTOR_LOCK = threading.Lock()
+
+def _get_shared_index_executor() -> concurrent.futures.ThreadPoolExecutor:
+    global _SHARED_INDEX_EXECUTOR
+    if _SHARED_INDEX_EXECUTOR is None:
+        with _SHARED_EXECUTOR_LOCK:
+            if _SHARED_INDEX_EXECUTOR is None:
+                max_w = os.cpu_count() or 4
+                # Limit max workers to avoid overwhelming the system
+                max_w = min(16, max_w)
+                _SHARED_INDEX_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
+                    max_workers=max_w, thread_name_prefix="shared-index"
+                )
+    return _SHARED_INDEX_EXECUTOR
+
 import numpy as np
 from PIL import Image, ImageOps
 from PIL.Image import Image as PilImage
@@ -926,7 +942,8 @@ def _apply_exif_rotation_to_pil(file_path: str, im: PilImage, cache) -> PilImage
         from common_image_loader import exif_display_dimensions
         from PIL import ImageOps
         
-        exif_data = cache.get_exif(file_path)
+        # verify=True: orientation here transposes indexed pixels (worker thread).
+        exif_data = cache.get_exif(file_path, verify=True)
         if not exif_data:
             from enhanced_raw_processor import EXIFExtractor
             exif_data = EXIFExtractor().extract_exif_data(file_path)
@@ -1514,10 +1531,7 @@ class MobileCLIPCoreMLBackend:
         if workers <= 1:
             images = [_prep(p) for p in paths]
         else:
-            with concurrent.futures.ThreadPoolExecutor(
-                max_workers=min(workers, len(paths))
-            ) as executor:
-                images = list(executor.map(_prep, paths))
+            images = list(_get_shared_index_executor().map(_prep, paths))
 
         if not semantic_coreml_use_native_batch():
             with objc.autorelease_pool():
@@ -1947,10 +1961,7 @@ class MobileCLIPONNXBackend:
         if len(paths) == 1 or workers <= 1:
             tensors = [_prep_mobileclip_image_chw_resized(p, size) for p in paths]
         else:
-            with concurrent.futures.ThreadPoolExecutor(
-                max_workers=min(workers, len(paths))
-            ) as executor:
-                tensors = list(executor.map(lambda p: _prep_mobileclip_image_chw_resized(p, size), paths))
+            tensors = list(_get_shared_index_executor().map(lambda p: _prep_mobileclip_image_chw_resized(p, size), paths))
         nchw = np.stack(tensors, axis=0)
         inputs = {image_session.get_inputs()[0].name: nchw}
         outputs = image_session.run(None, inputs)
@@ -2034,21 +2045,34 @@ class _ClipBPETokenizer:
         vocab.extend(["<|startoftext|>", "<|endoftext|>"])
         self.encoder = dict(zip(vocab, range(len(vocab))))
         self.bpe_ranks = dict(zip(merges, range(len(merges))))
-        self.cache = {
-            "<|startoftext|>": "<|startoftext|>",
-            "<|endoftext|>": "<|endoftext|>",
-        }
+        import collections
+        self.bpe_cache = collections.OrderedDict()
+        self.bpe_cache["<|startoftext|>"] = "<|startoftext|>"
+        self.bpe_cache["<|endoftext|>"] = "<|endoftext|>"
         self.sot = self.encoder["<|startoftext|>"]
         self.eot = self.encoder["<|endoftext|>"]
 
-    @lru_cache(maxsize=8192)
     def bpe(self, token: str) -> str:
-        if token in self.cache:
-            return self.cache[token]
+        # Prevent memory leak: previously used global @lru_cache kept `self` alive.
+        # Now using instance-level cache `self.bpe_cache`.
+        if not hasattr(self, "bpe_cache"):
+            import collections
+            self.bpe_cache = collections.OrderedDict()
+            
+        if token in self.bpe_cache:
+            # Move to end to mark as recently used
+            self.bpe_cache.move_to_end(token)
+            return self.bpe_cache[token]
+            
         word = tuple(token[:-1]) + (token[-1] + "</w>",)
         pairs = _get_pairs(word)
         if not pairs:
-            return token + "</w>"
+            res = token + "</w>"
+            self.bpe_cache[token] = res
+            if len(self.bpe_cache) > 8192:
+                self.bpe_cache.popitem(last=False)
+            return res
+            
         while True:
             bigram = min(pairs, key=lambda pair: self.bpe_ranks.get(pair, float("inf")))
             if bigram not in self.bpe_ranks:
@@ -2075,9 +2099,10 @@ class _ClipBPETokenizer:
                 break
             pairs = _get_pairs(word)
         out = " ".join(word)
-        self.cache[token] = out
+        self.bpe_cache[token] = out
+        if len(self.bpe_cache) > 8192:
+            self.bpe_cache.popitem(last=False)
         return out
-
     def encode(self, text: str) -> List[int]:
         bpe_tokens: List[int] = []
         for token in re.findall(r"<\|startoftext\|>|<\|endoftext\|>|[\w']+|[^\s\w]", text.lower()):
@@ -2990,7 +3015,7 @@ class SemanticImageIndex:
             return False
 
     @staticmethod
-    @lru_cache(maxsize=16384)
+    @lru_cache(maxsize=1024)
     def _canonical_path(file_path: str) -> str:
         if not file_path:
             return ""
@@ -4214,7 +4239,7 @@ class SemanticImageIndex:
                     _emit_thumb_progress(i)
         else:
             completed = 0
-            executor = concurrent.futures.ThreadPoolExecutor(max_workers=workers)
+            executor = _get_shared_index_executor()
             futures = {executor.submit(_warm_one, p): p for p in pending}
             try:
                 for future in concurrent.futures.as_completed(futures):
@@ -4227,10 +4252,8 @@ class SemanticImageIndex:
             except IndexAborted:
                 for pending_future in futures:
                     pending_future.cancel()
-                executor.shutdown(wait=False, cancel_futures=True)
                 raise
-            else:
-                executor.shutdown(wait=True)
+            # Removed executor.shutdown() since it's shared
         logger.info(
             "[INDEX] %s thumbnail warm-up done: %d/%d in %.2fs",
             purpose,
@@ -4648,29 +4671,29 @@ class SemanticImageIndex:
             workers,
         )
         completed = 0
-        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
-            for chunk_start in range(0, total_face, chunk_size):
-                chunk = face_pending[chunk_start : chunk_start + chunk_size]
-                futures = [executor.submit(_scan_one, cp) for cp in chunk]
-                for future in concurrent.futures.as_completed(futures):
-                    cp, face_count = future.result()
-                    with lock:
-                        self._store_face_count(cp, face_count, conn=conn, commit=False)
-                        batch_writes += 1
-                        if batch_writes >= commit_every:
-                            conn.commit()
-                            batch_writes = 0
-                    completed += 1
-                    if progress_callback and (
-                        completed <= 2
-                        or completed >= total_face
-                        or completed % 10 == 0
-                    ):
-                        progress_callback(
-                            progress_indexed_base,
-                            progress_album_total,
-                            format_index_progress("Face", completed, total_face),
-                        )
+        executor = _get_shared_index_executor()
+        for chunk_start in range(0, total_face, chunk_size):
+            chunk = face_pending[chunk_start : chunk_start + chunk_size]
+            futures = [executor.submit(_scan_one, cp) for cp in chunk]
+            for future in concurrent.futures.as_completed(futures):
+                cp, face_count = future.result()
+                with lock:
+                    self._store_face_count(cp, face_count, conn=conn, commit=False)
+                    batch_writes += 1
+                    if batch_writes >= commit_every:
+                        conn.commit()
+                        batch_writes = 0
+                completed += 1
+                if progress_callback and (
+                    completed <= 2
+                    or completed >= total_face
+                    or completed % 10 == 0
+                ):
+                    progress_callback(
+                        progress_indexed_base,
+                        progress_album_total,
+                        format_index_progress("Face", completed, total_face),
+                    )
 
         if batch_writes > 0:
             with lock:
@@ -4871,7 +4894,7 @@ class SemanticImageIndex:
                     max_workers,
                     total_extract,
                 )
-                executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
+                executor = _get_shared_index_executor()
                 try:
                     def extract_task(item):
                         self._wait_if_paused()
@@ -4931,14 +4954,8 @@ class SemanticImageIndex:
                     except IndexAborted:
                         for pending_future in futures:
                             pending_future.cancel()
-                        executor.shutdown(wait=False, cancel_futures=True)
                         raise
-                    else:
-                        executor.shutdown(wait=True)
                 except IndexAborted:
-                    raise
-                except Exception:
-                    executor.shutdown(wait=True)
                     raise
 
                 if batch_writes > 0:
