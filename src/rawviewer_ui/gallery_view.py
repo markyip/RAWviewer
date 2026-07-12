@@ -3050,6 +3050,9 @@ class JustifiedGallery(QWidget):
                 if pv is not None and hasattr(pv, "_is_gallery_path_edited"):
                     if hasattr(w, "set_gallery_edited"):
                         w.set_gallery_edited(pv._is_gallery_path_edited(path))
+                if pv is not None and hasattr(pv, "_gallery_path_rating"):
+                    if hasattr(w, "set_gallery_rating"):
+                        w.set_gallery_rating(pv._gallery_path_rating(path))
             thumb_missing = not cache_hit
             if thumb_missing and self._thumb_fail_counts.get(path, 0) >= 3:
                 thumb_missing = False
@@ -4169,6 +4172,8 @@ class JustifiedGallery(QWidget):
                     label.set_gallery_selected(False)
                 if hasattr(label, "set_gallery_bookmarked"):
                     label.set_gallery_bookmarked(False)
+                if hasattr(label, "set_gallery_rating"):
+                    label.set_gallery_rating(0)
                 if destroy:
                     label.deleteLater()
                 else:
@@ -4232,6 +4237,16 @@ class JustifiedGallery(QWidget):
             path = getattr(w, "file_path", None)
             if path and hasattr(w, "set_gallery_edited"):
                 w.set_gallery_edited(pv._is_gallery_path_edited(path))
+
+    def refresh_gallery_rating_visuals(self) -> None:
+        """Sync star rating badge on visible pooled thumbnails."""
+        pv = self.parent_viewer
+        if pv is None or not hasattr(pv, "_gallery_path_rating"):
+            return
+        for w in self._visible_widgets.values():
+            path = getattr(w, "file_path", None)
+            if path and hasattr(w, "set_gallery_rating"):
+                w.set_gallery_rating(pv._gallery_path_rating(path))
 
     def _update_empty_label_geometry(self):
         """Lay out empty-state text across the justified gallery canvas (fills the frame when empty)."""
