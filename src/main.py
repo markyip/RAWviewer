@@ -14962,6 +14962,34 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         except Exception:
             return False
 
+    def _gallery_path_rating(self, file_path: str) -> int:
+        """0-5 star rating for the gallery/filmstrip badge.
+
+        Checks the fast in-memory bulk metadata first (populated by folder
+        scan and kept current by rate_current_image), falling back to the
+        EXIF cache for paths bulk metadata hasn't covered yet -- same
+        fallback shape as the single-view rating lookup at image-load time.
+        """
+        if not file_path:
+            return 0
+        meta = getattr(self, "_gallery_bulk_metadata", None) or {}
+        row = meta.get(file_path)
+        if row and row.get('rating'):
+            try:
+                return max(0, min(5, int(row['rating'])))
+            except (TypeError, ValueError):
+                pass
+        try:
+            exif = self.image_cache.get_exif(file_path)
+        except Exception:
+            exif = None
+        if exif and exif.get('rating'):
+            try:
+                return max(0, min(5, int(exif['rating'])))
+            except (TypeError, ValueError):
+                pass
+        return 0
+
     def _sync_share_button_visibility(self) -> None:
         btn = getattr(self, "share_bottom_button", None)
         if btn is None:
@@ -24421,6 +24449,14 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             elif hasattr(gj, "update_visible_images"):
                 try:
                     gj.update_visible_images()
+                except Exception:
+                    pass
+            # refresh_visible_tile_for_path only repaints the pixmap (e.g.
+            # after rotation); badges are a separate sync pass, same as
+            # bookmark/burst/edited.
+            if hasattr(gj, "refresh_gallery_rating_visuals"):
+                try:
+                    gj.refresh_gallery_rating_visuals()
                 except Exception:
                     pass
 
