@@ -2669,8 +2669,9 @@ class JustifiedGallery(QWidget):
                         dt_ms, len(self._visible_widgets), len(getattr(self, "_gallery_layout_items", []) or []),
                     )
         if os.environ.get("RAWVIEWER_SCROLL_CPROFILE", "").strip() == "1":
+            target_calls = _env_int("RAWVIEWER_SCROLL_CPROFILE_CALLS", 40, minimum=1)
             n = getattr(self, "_scroll_cprofile_calls", 0)
-            if n < 40:
+            if n < target_calls:
                 import cProfile, pstats, io as _io
                 pr = cProfile.Profile()
                 pr.enable()
@@ -2681,12 +2682,12 @@ class JustifiedGallery(QWidget):
                     self._scroll_cprofile_agg = pstats.Stats(pr)
                 else:
                     self._scroll_cprofile_agg.add(pr)
-                if self._scroll_cprofile_calls == 40:
+                if self._scroll_cprofile_calls == target_calls:
                     s = _io.StringIO()
                     ps = self._scroll_cprofile_agg
                     ps.stream = s
                     ps.sort_stats("cumulative").print_stats(25)
-                    logger.info("[SCROLL_CPROFILE] aggregate over 40 calls:\n%s", s.getvalue())
+                    logger.info("[SCROLL_CPROFILE] aggregate over %d calls:\n%s", target_calls, s.getvalue())
                 return result
         return self._load_visible_images_impl()
 
