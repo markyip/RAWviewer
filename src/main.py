@@ -22977,7 +22977,9 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         )
         return cached_item is None
 
-    def _nav_prefetch_stages_for_path(self, file_path: str, *, zoomed: bool) -> tuple[set[str], bool]:
+    def _nav_prefetch_stages_for_path(
+        self, file_path: str, *, zoomed: bool, near: bool = True
+    ) -> tuple[set[str], bool]:
         """Stages for warming the next/prev image before navigation.
 
         Non-zoomed (fit-to-window) neighbors only get the light nav-preview
@@ -22994,12 +22996,38 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         exact waste PR-5 (thumbnail-cache-unification-plan.md) targets.
         Zoomed navigation keeps eager full: a user already at 100% zoom
         expects each new image at full resolution immediately.
+
+        Exception, distinct from the reverted behavior above: when the
+        embedded-JPEG workflow is on (use_full_embedded_raw_preview), the
+        "full" stage's own first move is to return the camera's embedded
+        JPEG if it covers sensor resolution (~38ms, unified_image_processor
+        _try_full_embedded_raw_preview) -- only falling through to a LibRaw
+        decode for images where that preview doesn't cover sensor res. That
+        makes eager "full" cheap in the common case, unlike the LibRaw-first
+        mode PR-5 was fixing, so near neighbors (within
+        _nav_preload_display_near_count) get it eagerly instead of waiting
+        for idle. Kept off for the wider background/idle radius: a "full"
+        request still occupies a RAW-decode concurrency slot regardless of
+        which branch it actually takes (image_load_manager's heavy-task
+        throttle keys on 'full' in stages, not on measured cost), so this
+        stays scoped to near neighbors rather than the full preload radius.
+
+        (Previously reverted once after a hang was observed on a large
+        folder; root-caused to an unrelated get_multiple_exif bug -- a
+        synchronous rawpy.imread() per file on the main thread, fixed
+        separately -- and confirmed not caused by this eager-full logic
+        before reinstating it.)
         """
         if zoomed:
             return {"exif", "full"}, True
         stages = {"thumbnail"}
         if not self.image_cache.get_exif(file_path):
             stages = {"thumbnail", "exif"}
+        if near:
+            from common_image_loader import use_full_embedded_raw_preview
+
+            if use_full_embedded_raw_preview():
+                stages = stages | {"full"}
         return stages, False
 
     def _request_display_buffer_prefetch(
@@ -23008,10 +23036,13 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         *,
         priority,
         zoomed: bool,
+        near: bool = True,
     ) -> None:
         if not self._needs_display_buffer_prefetch(file_path, zoomed=zoomed):
             return
-        stages, use_full = self._nav_prefetch_stages_for_path(file_path, zoomed=zoomed)
+        stages, use_full = self._nav_prefetch_stages_for_path(
+            file_path, zoomed=zoomed, near=near
+        )
         self.image_manager.load_image(
             file_path=file_path,
             priority=priority,
@@ -23193,17 +23224,19 @@ class RAWImageViewer(SessionMixin, QMainWindow):
 
         zoomed = self._single_view_is_zoomed_in()
         radius = self._nav_preload_display_radius()
+        near_count = self._nav_preload_display_near_count()
         n = len(self.image_files)
         for step in range(1, radius + 1):
+            near = step <= near_count
             next_idx = (self.current_file_index + step) % n
             prev_idx = (self.current_file_index - step) % n
             prio_next = Priority.PRELOAD_NEXT if step == 1 else Priority.BACKGROUND
             prio_prev = Priority.PRELOAD_PREV if step == 1 else Priority.BACKGROUND
             self._request_display_buffer_prefetch(
-                self.image_files[next_idx], priority=prio_next, zoomed=zoomed
+                self.image_files[next_idx], priority=prio_next, zoomed=zoomed, near=near
             )
             self._request_display_buffer_prefetch(
-                self.image_files[prev_idx], priority=prio_prev, zoomed=zoomed
+                self.image_files[prev_idx], priority=prio_prev, zoomed=zoomed, near=near
             )
 
     def _schedule_ttfr_watchdog(self, file_path: str, load_start: float) -> None:
@@ -23820,7 +23853,10 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 if step_dist == 1 and idx == (base - 1) % n
                 else Priority.BACKGROUND
             )
-            self._request_display_buffer_prefetch(path, priority=priority, zoomed=zoomed)
+            near = step_dist <= self._nav_preload_display_near_count()
+            self._request_display_buffer_prefetch(
+                path, priority=priority, zoomed=zoomed, near=near
+            )
             loaded += 1
 
         self._idle_display_prefetch_cursor = cursor
