@@ -1044,18 +1044,24 @@ _TIER_CACHE_ATTRS = {
 def _tile_cache_encode_format() -> str:
     """Output format for grid/thumbnail/preview disk-cache tiles.
 
-    WebP by default (~25-35% smaller than JPEG at equivalent quality, same
-    encode cost since these tiles are already being resized+re-encoded
-    regardless of output format). RAWVIEWER_TILE_CACHE_FORMAT=jpeg reverts to
-    JPEG. Deliberately NOT used for PR-7's raw embedded-JPEG-bytes cache (a
+    JPEG by default. WebP is ~25-35% smaller at equivalent quality with the
+    same encode cost, but PIL's WebP *decode* is ~5-6x slower than JPEG at
+    these tile sizes (measured directly: ~3ms vs ~0.6ms for a 512x384 tile,
+    both synthetic-gradient and photo-like content) -- and this cache tier is
+    read synchronously on the gallery's main-thread scroll path
+    (get_grid() -> disk_grid_cache), every cache-miss-in-memory tile decode
+    happening inline during a scroll frame. That decode cost, not the disk
+    footprint, is what mattered here, so WebP was a net loss for this
+    specific hot path. RAWVIEWER_TILE_CACHE_FORMAT=webp opts back in.
+    Deliberately NOT used for PR-7's raw embedded-JPEG-bytes cache (a
     verbatim byte-slice from the RAW file, not a re-encode -- converting that
     would force a decode+encode pass the whole point of that cache is to
     avoid). Read side is format-agnostic: PIL.Image.open() sniffs format from
-    content, so existing JPEG entries keep working and this can be toggled
+    content, so existing WebP entries keep working and this can be toggled
     freely without a migration.
     """
-    raw = os.environ.get("RAWVIEWER_TILE_CACHE_FORMAT", "webp").strip().lower()
-    return "JPEG" if raw == "jpeg" else "WEBP"
+    raw = os.environ.get("RAWVIEWER_TILE_CACHE_FORMAT", "jpeg").strip().lower()
+    return "WEBP" if raw == "webp" else "JPEG"
 
 
 def encode_tile_bytes(pil_image, *, quality: int = 85) -> bytes:
