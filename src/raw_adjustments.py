@@ -113,6 +113,7 @@ def is_pv2012_tone_slider(key: str) -> bool:
 CRS_NS = "http://adobe.com/camera-raw-settings/1.0/"
 RDF_NS = "http://www.w3.org/1999/02/22-rdf-syntax-ns#"
 X_NS = "adobe:ns:meta/"
+XMP_NS = "http://ns.adobe.com/xap/1.0/"
 
 
 @dataclass(frozen=True)
@@ -275,6 +276,101 @@ def parse_xmp_rating(xmp_path: str) -> int:
 def load_rating_for_file(image_path: str) -> int:
     """Lightweight star rating from the image's XMP sidecar (no edit sliders)."""
     return parse_xmp_rating(resolve_xmp_path(image_path))
+
+
+def write_xmp_rating(xmp_path: str, rating: int) -> None:
+    """Write (or clear) xmp:Rating in a sidecar, preserving everything else.
+
+    Independent of editing_features_enabled() -- ratings must persist even
+    in browse-only builds that never touch the crs adjustment sliders.
+    Edits the existing tree in place rather than rebuilding it (unlike
+    write_xmp_adjustments) so a rating set here survives untouched even if
+    the sidecar also holds crs sliders / tone curve / dodge-burn data from
+    a build with editing enabled.
+    """
+    if not xmp_path:
+        raise ValueError("Invalid xmp path")
+    rating = max(0, min(5, int(rating)))
+
+    ET.register_namespace("x", X_NS)
+    ET.register_namespace("rdf", RDF_NS)
+    ET.register_namespace("crs", CRS_NS)
+    ET.register_namespace("xmp", XMP_NS)
+
+    root = None
+    if os.path.isfile(xmp_path):
+        try:
+            root = ET.parse(xmp_path).getroot()
+        except Exception:
+            root = None
+
+    if root is None:
+        if rating == 0:
+            return
+        root = ET.Element(f"{{{X_NS}}}xmpmeta")
+        rdf = ET.SubElement(root, f"{{{RDF_NS}}}RDF")
+        desc = ET.SubElement(rdf, f"{{{RDF_NS}}}Description")
+        desc.set(f"{{{RDF_NS}}}about", "")
+    else:
+        rdf = root.find(f"{{{RDF_NS}}}RDF")
+        if rdf is None:
+            rdf = ET.SubElement(root, f"{{{RDF_NS}}}RDF")
+        desc = rdf.find(f"{{{RDF_NS}}}Description")
+        if desc is None:
+            desc = ET.SubElement(rdf, f"{{{RDF_NS}}}Description")
+            desc.set(f"{{{RDF_NS}}}about", "")
+
+    rating_attr = f"{{{XMP_NS}}}Rating"
+    if rating > 0:
+        desc.set(rating_attr, str(rating))
+    else:
+        desc.attrib.pop(rating_attr, None)
+        for child in list(desc):
+            tag = child.tag
+            local = tag.split("}", 1)[-1] if "}" in tag else tag
+            if local == "Rating":
+                desc.remove(child)
+
+    # Nothing left worth keeping (no rating, no crs sliders, no child
+    # elements like tone curve / dodge-burn mask) -- remove the sidecar
+    # instead of littering the folder with an empty .xmp per photo.
+    has_rating = rating_attr in desc.attrib
+    has_crs = any(
+        key.startswith(f"{{{CRS_NS}}}") for key in desc.attrib
+    )
+    has_children = len(list(desc)) > 0
+    if not has_rating and not has_crs and not has_children:
+        if os.path.isfile(xmp_path):
+            os.remove(xmp_path)
+        return
+
+    tree = ET.ElementTree(root)
+    parent = os.path.dirname(os.path.abspath(xmp_path))
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+
+    # Atomic write -- see write_xmp_adjustments for why (crash/race safety).
+    fd, tmp_path = tempfile.mkstemp(
+        dir=parent or None, prefix=os.path.basename(xmp_path) + ".", suffix=".tmp"
+    )
+    try:
+        with os.fdopen(fd, "wb") as f:
+            tree.write(f, encoding="utf-8", xml_declaration=True)
+        os.replace(tmp_path, xmp_path)
+    except BaseException:
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
+def write_rating_for_file(image_path: str, rating: int) -> None:
+    """Persist a star rating (0-5) to the image's XMP sidecar."""
+    xmp_path = resolve_xmp_path(image_path)
+    if not xmp_path:
+        raise ValueError("Invalid image path")
+    write_xmp_rating(xmp_path, rating)
 
 
 # Per-path memo for read_as_shot_temperature: the value is a per-file constant
@@ -585,19 +681,29 @@ def parse_xmp_adjustments(xmp_path: str) -> dict[str, float]:
 
 
 def write_xmp_adjustments(xmp_path: str, adj: Dict[str, float]) -> None:
-    """Write Lightroom-compatible crs sliders to an XMP sidecar."""
+    """Write Lightroom-compatible crs sliders to an XMP sidecar.
+
+    Preserves an existing xmp:Rating -- this rebuilds the sidecar from
+    scratch, and rating is written independently (write_xmp_rating, not
+    gated by editing_features_enabled()), so a slider save must not blow
+    away a star rating that was set earlier.
+    """
     if not editing_features_enabled():
         return
+    existing_rating = parse_xmp_rating(xmp_path)
     merged = dict(DEFAULT_ADJUSTMENTS)
     merged.update(adj or {})
     if is_default_adjustments(merged):
-        if os.path.isfile(xmp_path):
+        if existing_rating > 0:
+            write_xmp_rating(xmp_path, existing_rating)
+        elif os.path.isfile(xmp_path):
             os.remove(xmp_path)
         return
 
     ET.register_namespace("x", X_NS)
     ET.register_namespace("rdf", RDF_NS)
     ET.register_namespace("crs", CRS_NS)
+    ET.register_namespace("xmp", XMP_NS)
 
     root = ET.Element(f"{{{X_NS}}}xmpmeta")
     rdf = ET.SubElement(root, f"{{{RDF_NS}}}RDF")
@@ -608,6 +714,8 @@ def write_xmp_adjustments(xmp_path: str, adj: Dict[str, float]) -> None:
 
     desc.set(f"{{{CRS_NS}}}ProcessVersion", PROCESS_VERSION)
     desc.set(f"{{{CRS_NS}}}ToneCurveName2012", TONE_CURVE_NAME_2012)
+    if existing_rating > 0:
+        desc.set(f"{{{XMP_NS}}}Rating", str(existing_rating))
 
     for key in sorted(RELEVANT_ADJUSTMENT_KEYS):
         if key == "Defringe":

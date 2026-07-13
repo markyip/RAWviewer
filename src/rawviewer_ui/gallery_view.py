@@ -782,7 +782,7 @@ class JustifiedGallery(QWidget):
         widget.original_pixmap = None
         widget.setText("")
 
-    def _scale_crop_to_fit(self, pixmap: QPixmap, target_size):
+    def _scale_crop_to_fit(self, pixmap: QPixmap, target_size, fast: bool = False):
         """Scale pixmap to fully cover target_size, then center-crop to exact size."""
         if not pixmap or pixmap.isNull():
             return pixmap
@@ -791,10 +791,11 @@ class JustifiedGallery(QWidget):
         if tw <= 0 or th <= 0:
             return pixmap
 
+        transform_mode = Qt.TransformationMode.FastTransformation if fast else Qt.TransformationMode.SmoothTransformation
         scaled = pixmap.scaled(
             target_size,
             Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-            Qt.TransformationMode.SmoothTransformation,
+            transform_mode,
         )
         sw = scaled.width()
         sh = scaled.height()
@@ -1486,14 +1487,14 @@ class JustifiedGallery(QWidget):
         self._scroll_to_file_attempts = 0
         self._request_load_visible_images(20)
 
-    def _scaled_cache_key(self, file_path: str, target_size):
+    def _scaled_cache_key(self, file_path: str, target_size: QSize, fast: bool = False):
         """Cache key for crop-to-fit thumbnails at exact tile physical size."""
         th = int(target_size.height())
         tw = int(target_size.width())
         rot = self._get_rotation_degrees_for_path(file_path)
         if th <= 0 or tw <= 0:
-            return (file_path, self._thumb_base_key, rot)
-        return (file_path, tw, th, rot)
+            return (file_path, self._thumb_base_key, rot, "fast") if fast else (file_path, self._thumb_base_key, rot)
+        return (file_path, tw, th, rot, "fast") if fast else (file_path, tw, th, rot)
 
     @staticmethod
     def _pixmap_logical_size(pixmap: QPixmap, dpr: float) -> QSize:
@@ -1519,11 +1520,11 @@ class JustifiedGallery(QWidget):
             return True
 
     def _fit_tile_pixmap(
-        self, file_path: str, base: QPixmap, physical_size: QSize, dpr: float
+        self, file_path: str, base: QPixmap, physical_size: QSize, dpr: float, fast: bool = False
     ) -> QPixmap:
-        fitted = self._fit_rotated_thumbnail(file_path, base, physical_size)
+        fitted = self._fit_rotated_thumbnail(file_path, base, physical_size, fast=fast)
         fitted.setDevicePixelRatio(dpr)
-        self._thumbnail_cache.put(self._scaled_cache_key(file_path, physical_size), fitted)
+        self._thumbnail_cache.put(self._scaled_cache_key(file_path, physical_size, fast=fast), fitted)
         return fitted
 
     def _get_rotation_degrees_for_path(self, file_path: str) -> int:
@@ -1820,11 +1821,11 @@ class JustifiedGallery(QWidget):
                     self._metadata_rebuild_timer.start(500)
         return needs_layout_rebuild
 
-    def _fit_rotated_thumbnail(self, file_path: str, base: QPixmap, target_size):
+    def _fit_rotated_thumbnail(self, file_path: str, base: QPixmap, target_size, fast: bool = False):
         """Apply user rotation then crop-to-fit (tile aspect matches after layout rebuild)."""
         rot = self._get_rotation_degrees_for_path(file_path)
         oriented = _rotate_pixmap_cw(base, rot)
-        return self._scale_crop_to_fit(oriented, target_size)
+        return self._scale_crop_to_fit(oriented, target_size, fast=fast)
 
     def invalidate_thumbnails_for_path(self, file_path: str) -> None:
         """Drop cached gallery pixmaps for a path (e.g. after on-disk rotation)."""
@@ -2987,8 +2988,19 @@ class JustifiedGallery(QWidget):
             # Account for Device Pixel Ratio (Retina/4K)
             dpr = self.devicePixelRatio()
             physical_size = QSize(int(rect.width() * dpr), int(rect.height() * dpr))
-            scaled_key = self._scaled_cache_key(path, physical_size)
+            
+            is_scrolling = (time.time() - self._last_scroll_event_t) < 0.25
+            scaled_key = self._scaled_cache_key(path, physical_size, fast=False)
             cached_scaled = self._thumbnail_cache.get(scaled_key)
+            
+            is_fast_cache = False
+            if not cached_scaled and is_scrolling:
+                fast_key = self._scaled_cache_key(path, physical_size, fast=True)
+                cached_scaled = self._thumbnail_cache.get(fast_key)
+                if cached_scaled and not cached_scaled.isNull():
+                    is_fast_cache = True
+                    scaled_key = fast_key
+
             expected_logical = QSize(rect.width(), rect.height())
             if cached_scaled and not cached_scaled.isNull():
                 # A scaled entry is rect-shaped by construction, so its orientation is the
@@ -3022,7 +3034,6 @@ class JustifiedGallery(QWidget):
                 base = self._thumbnail_cache.get((path, self._thumb_base_key))
                 if not base:
                     # Avoid main thread SQLite lock contention/stutter by skipping synchronous fetches during active scrolls
-                    is_scrolling = (time.time() - self._last_scroll_event_t) < 0.25
                     if is_scrolling:
                         pass
                     else:
@@ -3074,7 +3085,7 @@ class JustifiedGallery(QWidget):
                                 0 if not self._is_scrolling_fast else 250
                             )
                     else:
-                        scaled = self._fit_tile_pixmap(path, base, physical_size, dpr)
+                        scaled = self._fit_tile_pixmap(path, base, physical_size, dpr, fast=is_scrolling)
                         w.setPixmap(scaled)
                         w.setText("")
                         if not scaled.isNull() and not self._first_thumb_ready_after_set:

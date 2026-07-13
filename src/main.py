@@ -28,7 +28,7 @@ import traceback
 import threading
 import weakref
 from datetime import datetime
-from typing import List, Optional, Tuple, Any, cast
+from typing import List, Optional, Tuple, Any, cast, Set
 
 from PIL import Image
 Image.MAX_IMAGE_PIXELS = None
@@ -2172,6 +2172,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self.compare_candidate_view = None
         self._gallery_bookmarked_paths = set()  # normpath keys for bookmarked share targets
         self._gallery_bookmark_filter_active = False  # gallery-only: show bookmarked images only
+        self._gallery_rating_filter_min = 0  # gallery-only: 0=off, else show rating >= N
         self._gallery_preview_pending_full = False  # Gallery thumb on screen; full-res pending
         self._gallery_instant_display_quality = False  # True when gallery→single already shows preview/full
         self._skip_resolution_crossfade_once = False
@@ -2284,6 +2285,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self.current_processor = None  # Legacy support - will be phased out
         self._pending_thumbnail = None  # Store thumbnail when not immediately displayed
         self._preview_upgrade_attempted_paths: set[str] = set()
+        self._raw_workflow_refused_tier_paths: set[str] = set()
         self._exif_data_ready = False  # Flag to track if EXIF data is available
         
         # Initialize new unified image load manager
@@ -3754,10 +3756,22 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         if neutral is None:
             return
         self._orientation_already_applied = True
+        # Recovery preview paints leave _manager_displayed_max_dim at the
+        # sensor-res high-water-mark from before recovery was toggled on
+        # (same file path, so the per-file reset in display_pixmap's
+        # _commit_display_metadata never fires). Without this escape hatch,
+        # _already_displaying_buffer_for_path() sees that stale high-water
+        # mark and thinks the neutral buffer is "already on screen", so the
+        # repaint is silently skipped -- state flips to OFF (title/status
+        # update correctly) but the recovery-look pixels never actually
+        # leave the screen. Mirrors the same guard _display_raw_recovery_buffer
+        # uses for the ON path.
+        self._skip_resolution_downgrade_check = True
         try:
             self.display_numpy_image(neutral)
         finally:
             self._orientation_already_applied = False
+            self._skip_resolution_downgrade_check = False
 
         if self._needs_full_resolution_upgrade(path):
             self._queue_sensor_full_decode(path, priority_current=True)
@@ -4543,6 +4557,37 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             return []
         return [p for p in files if p and _norm_path(p) in bookmarked]
 
+    def _filter_paths_to_min_rating(self, files: List[str], min_rating: int) -> List[str]:
+        if min_rating <= 0:
+            return files
+        return [p for p in files if p and self._gallery_path_rating(p) >= min_rating]
+
+    def _burst_visibility_exclusion_set(self) -> Set[str]:
+        """Burst-rejected paths, plus anything the active rating/bookmark
+        gallery filter hides right now.
+
+        Stack tiles/counts must reflect what's actually visible under the
+        current filter, not the full original burst -- otherwise a single
+        filtered-in photo from an 11-shot burst shows a misleading "x11"
+        badge for a stack where the other 10 aren't even on screen.
+        """
+        excluded = set(getattr(self, "_burst_rejected_paths", set()) or set())
+        bookmark_active = bool(getattr(self, "_gallery_bookmark_filter_active", False))
+        min_rating = int(getattr(self, "_gallery_rating_filter_min", 0) or 0)
+        if not bookmark_active and min_rating <= 0:
+            return excluded
+        files = list(getattr(self, "image_files", []) or [])
+        visible_files = files
+        if bookmark_active:
+            visible_files = self._filter_paths_to_bookmarked(visible_files)
+        visible_files = self._filter_paths_to_min_rating(visible_files, min_rating)
+        visible = {_norm_path(p) for p in visible_files}
+        for p in files:
+            np = _norm_path(p)
+            if np not in visible:
+                excluded.add(np)
+        return excluded
+
     # --- Burst grouping + compare (H) -----------------------------------------
     def _init_compare_view(self, main_layout) -> None:
         from PyQt6.QtWidgets import QHBoxLayout
@@ -4764,7 +4809,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         path_to_group = getattr(self, "_burst_path_to_group", {}) or {}
         if not path_to_group:
             return self._filter_burst_rejected_paths(files)
-        rejected = set(getattr(self, "_burst_rejected_paths", set()) or set())
+        rejected = self._burst_visibility_exclusion_set()
         covers = dict(getattr(self, "_burst_group_covers", {}) or {})
         covers.update(getattr(self, "_burst_stack_covers", {}) or {})
         return build_collapsed_display_paths(files, path_to_group, covers, rejected)
@@ -4776,7 +4821,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             return 0
         if getattr(self, "_burst_group_view_active", False):
             return 0
-        rejected = set(getattr(self, "_burst_rejected_paths", set()) or set())
+        rejected = self._burst_visibility_exclusion_set()
         return stack_count_for_cover(
             file_path,
             getattr(self, "_burst_path_to_group", {}) or {},
@@ -4791,7 +4836,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         )
         if not members:
             return None
-        rejected = set(getattr(self, "_burst_rejected_paths", set()) or set())
+        rejected = self._burst_visibility_exclusion_set()
         from burst_grouping import BURST_MIN_COUNT
 
         visible = [p for p in members if _norm_path(p) not in rejected]
@@ -5998,10 +6043,13 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             self.show_error("Delete Error", f"Could not delete file:\n{str(e)}")
 
     def _gallery_effective_files(self) -> List[str]:
-        """Current gallery scope: folder/search results, optionally ∩ bookmarks."""
+        """Current gallery scope: folder/search results, optionally ∩ bookmarks ∩ min rating."""
         files = list(getattr(self, "image_files", []) or [])
         if getattr(self, "_gallery_bookmark_filter_active", False):
             files = self._filter_paths_to_bookmarked(files)
+        files = self._filter_paths_to_min_rating(
+            files, int(getattr(self, "_gallery_rating_filter_min", 0) or 0)
+        )
         files = self._filter_burst_rejected_paths(files)
         if getattr(self, "_burst_group_view_active", False):
             return self._filter_burst_rejected_paths(
@@ -6032,6 +6080,9 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             return [p for p in scope if p and os.path.isfile(p)]
         if getattr(self, "_gallery_bookmark_filter_active", False):
             files = self._filter_paths_to_bookmarked(files)
+        files = self._filter_paths_to_min_rating(
+            files, int(getattr(self, "_gallery_rating_filter_min", 0) or 0)
+        )
         return files
 
     def _adopt_gallery_navigation_path(self) -> None:
@@ -8327,6 +8378,59 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             _rating_stars_layout.addWidget(_star_btn, 0, alignment=Qt.AlignmentFlag.AlignVCenter)
         self.single_view_rating_stars.hide()
 
+        # Gallery-view rating filter: 5 clickable stars, click star N to show
+        # only images rated N and above (click the active threshold again to
+        # clear). Independent of the single-view rating control above and of
+        # the bookmark filter -- both can be active at once (intersection).
+        self.gallery_rating_filter_stars = QWidget()
+        self.gallery_rating_filter_stars.setObjectName("galleryRatingFilterStars")
+        _gallery_filter_stars_layout = QHBoxLayout(self.gallery_rating_filter_stars)
+        _gallery_filter_stars_layout.setContentsMargins(0, 0, 0, 0)
+        _gallery_filter_stars_layout.setSpacing(0)
+        self._gallery_rating_filter_buttons = []
+        for _star_n in range(1, 6):
+            _star_btn = QPushButton()
+            _star_btn.setObjectName("galleryRatingFilterStarButton")
+            _star_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+            _star_btn.setFlat(True)
+            _star_btn.setFixedSize(20, 28)
+            _star_btn.setIconSize(QSize(13, 13))
+            _star_btn.setIcon(self._rating_star_empty_icon)
+            _star_btn.setStyleSheet(
+                "QPushButton { background: transparent; border: none; }"
+                f" QPushButton:hover {{ background: {theme.rgba(theme.INK_RGB, 18)}; border-radius: 3px; }}"
+            )
+            _star_btn.setToolTip(f"Show {_star_n}★ and above")
+            _star_btn.clicked.connect(
+                lambda checked=False, n=_star_n: self._on_gallery_rating_star_clicked(n)
+            )
+            self._gallery_rating_filter_buttons.append(_star_btn)
+            _gallery_filter_stars_layout.addWidget(
+                _star_btn, 0, alignment=Qt.AlignmentFlag.AlignVCenter
+            )
+        self.gallery_rating_filter_stars.hide()
+
+        # Explicit "show all images" escape hatch for when the rating (or
+        # bookmark) filter narrows the gallery -- clicking the active
+        # threshold star again does the same thing, but that's not obvious,
+        # so surface a dedicated button whenever a filter is actually active.
+        self.gallery_clear_filter_button = QPushButton()
+        self.gallery_clear_filter_button.setObjectName("galleryClearFilterButton")
+        self.gallery_clear_filter_button.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        try:
+            self.gallery_clear_filter_button.setIcon(_qta_icon("fa5s.th", color=theme.INK_MUTED))
+        except Exception:
+            self.gallery_clear_filter_button.setText("Gallery")
+        _style_bottom_icon_button(self.gallery_clear_filter_button)
+        self.gallery_clear_filter_button.setToolTip("Show all images (clear filter)")
+        self.gallery_clear_filter_button.clicked.connect(self._on_gallery_clear_filter_clicked)
+        self.gallery_clear_filter_button.hide()
+        # Sits with the other view-scope controls (left side) rather than beside the
+        # rating-filter stars on the right -- it toggles gallery scope, not rating.
+        left_buttons_layout.addWidget(
+            self.gallery_clear_filter_button, 0, alignment=Qt.AlignmentFlag.AlignVCenter
+        )
+
         self.slideshow_bottom_button = QPushButton()
         self.slideshow_bottom_button.setObjectName("slideshowBottomButton")
         self.slideshow_bottom_button.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
@@ -8656,6 +8760,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             self.compare_bottom_button, 0, alignment=Qt.AlignmentFlag.AlignVCenter)
         right_status_actions_layout.addWidget(
             self.batch_mark_indicator, 0, alignment=Qt.AlignmentFlag.AlignVCenter)
+        right_status_actions_layout.addWidget(
+            self.gallery_rating_filter_stars, 0, alignment=Qt.AlignmentFlag.AlignVCenter)
         right_status_actions_layout.addWidget(
             self.single_view_rating_stars, 0, alignment=Qt.AlignmentFlag.AlignVCenter)
         right_status_actions_layout.addWidget(
@@ -11117,11 +11223,13 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             self.status_counter_label.setText("")
             return
         if getattr(self, "view_mode", "single") == "gallery":
-            if getattr(self, "_gallery_bookmark_filter_active", False):
+            if getattr(self, "_gallery_bookmark_filter_active", False) or int(
+                getattr(self, "_gallery_rating_filter_min", 0) or 0
+            ) > 0:
                 total = len(self._gallery_files_for_display())
-                self.status_counter_label.setText(
-                    f"{total} bookmarked" if total != 1 else "1 bookmarked"
-                )
+                qualifier = self._gallery_scope_filter_qualifier()
+                img_word = "image" if total == 1 else "images"
+                self.status_counter_label.setText(f"{total} {img_word} ({qualifier})")
             elif self._is_semantic_search_filter_active():
                 total = len(self.image_files) if self.image_files else 0
                 self.status_counter_label.setText(
@@ -11926,6 +12034,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             if hasattr(self, "_file_max_dim_map") and norm_cur in self._file_max_dim_map:
                 del self._file_max_dim_map[norm_cur]
             self._preview_upgrade_attempted_paths.discard(norm_cur)
+            self._raw_workflow_refused_tier_paths.discard(norm_cur)
             self._single_view_display_generation = int(
                 getattr(self, "_single_view_display_generation", 0)
             ) + 1
@@ -13423,13 +13532,19 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                     logger.warning(f"[GALLERY] Could not pre-seed semantic metadata: {ex}")
 
                 self._maybe_clear_empty_bookmark_filter()
+                self._maybe_clear_empty_rating_filter()
                 self._rebuild_burst_groups()
                 display_files = self._gallery_files_for_display()
-                if not display_files and getattr(self, "_gallery_bookmark_filter_active", False):
+                filter_active = bool(
+                    getattr(self, "_gallery_bookmark_filter_active", False)
+                ) or int(getattr(self, "_gallery_rating_filter_min", 0) or 0) > 0
+                if not display_files and filter_active:
                     self.gallery_justified.set_images(
                         [], bulk_metadata if bulk_metadata else None
                     )
-                    self.gallery_justified.show_empty_message("No bookmarked images")
+                    self.gallery_justified.show_empty_message(
+                        f"No {self._gallery_scope_filter_description()}"
+                    )
                 else:
                     if hasattr(self.gallery_justified, "hide_empty_message"):
                         self.gallery_justified.hide_empty_message()
@@ -14886,6 +15001,73 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self._sync_bookmark_indicator()
         return True
 
+    def _maybe_clear_empty_rating_filter(self) -> bool:
+        """Reset the rating filter when no images meet the threshold anymore."""
+        min_rating = int(getattr(self, "_gallery_rating_filter_min", 0) or 0)
+        if min_rating <= 0:
+            return False
+        files = list(getattr(self, "image_files", []) or [])
+        if any(self._gallery_path_rating(p) >= min_rating for p in files):
+            return False
+        self._gallery_rating_filter_min = 0
+        self._sync_gallery_rating_filter_stars()
+        return True
+
+    def _clear_gallery_rating_filter(self) -> bool:
+        """Clear the gallery rating filter; keep active search/bookmark filters if any."""
+        if getattr(self, "view_mode", "") != "gallery":
+            return False
+        if int(getattr(self, "_gallery_rating_filter_min", 0) or 0) <= 0:
+            return False
+        self._gallery_rating_filter_min = 0
+        self._sync_gallery_rating_filter_stars()
+        self._apply_gallery_bookmark_filter()
+        return True
+
+    def _on_gallery_rating_star_clicked(self, n: int) -> None:
+        if getattr(self, "view_mode", "") != "gallery":
+            return
+        current = int(getattr(self, "_gallery_rating_filter_min", 0) or 0)
+        self._gallery_rating_filter_min = 0 if current == n else n
+        self._sync_gallery_rating_filter_stars()
+        self._apply_gallery_bookmark_filter()
+
+    def _sync_gallery_rating_filter_stars(self) -> None:
+        widget = getattr(self, "gallery_rating_filter_stars", None)
+        if widget is None:
+            return
+        in_gallery = getattr(self, "view_mode", "") == "gallery"
+        has_files = bool(getattr(self, "image_files", None))
+        if not in_gallery or not has_files:
+            widget.hide()
+            return
+        widget.show()
+        min_rating = int(getattr(self, "_gallery_rating_filter_min", 0) or 0)
+        buttons = getattr(self, "_gallery_rating_filter_buttons", None) or []
+        filled = getattr(self, "_rating_star_filled_icon", None)
+        empty = getattr(self, "_rating_star_empty_icon", None)
+        for i, btn in enumerate(buttons, start=1):
+            btn.setIcon((filled if i <= min_rating else empty) or QIcon())
+            btn.setToolTip(
+                f"Show {i}★ and above (click again to clear)"
+                if i != min_rating
+                else "Click to clear rating filter"
+            )
+
+    def _on_gallery_clear_filter_clicked(self) -> None:
+        self._clear_gallery_bookmark_filter()
+        self._clear_gallery_rating_filter()
+
+    def _sync_gallery_clear_filter_button(self) -> None:
+        btn = getattr(self, "gallery_clear_filter_button", None)
+        if btn is None:
+            return
+        in_gallery = getattr(self, "view_mode", "") == "gallery"
+        filter_active = bool(
+            getattr(self, "_gallery_bookmark_filter_active", False)
+        ) or int(getattr(self, "_gallery_rating_filter_min", 0) or 0) > 0
+        btn.setVisible(in_gallery and filter_active)
+
     def _clear_gallery_bookmark_filter(self) -> bool:
         """Leave bookmark-only gallery view; keep active search results if any."""
         if getattr(self, "view_mode", "") != "gallery":
@@ -14918,11 +15100,32 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self._sync_bookmark_indicator()
         self._apply_gallery_bookmark_filter()
 
+    def _gallery_scope_filter_qualifier(self) -> str:
+        """Short qualifier for the active bookmark/rating gallery filter(s), e.g. 'bookmarked, 3★+'."""
+        bookmark_active = bool(getattr(self, "_gallery_bookmark_filter_active", False))
+        min_rating = int(getattr(self, "_gallery_rating_filter_min", 0) or 0)
+        parts = []
+        if bookmark_active:
+            parts.append("bookmarked")
+        if min_rating > 0:
+            parts.append(f"{min_rating}★+")
+        return ", ".join(parts)
+
+    def _gallery_scope_filter_description(self) -> str:
+        """Human-readable 'images' phrase for the active bookmark/rating gallery filter(s)."""
+        qualifier = self._gallery_scope_filter_qualifier()
+        return f"{qualifier} images" if qualifier else "images"
+
     def _apply_gallery_bookmark_filter(self) -> None:
         if getattr(self, "view_mode", "") != "gallery":
             return
         self._maybe_clear_empty_bookmark_filter()
-        filter_active = bool(getattr(self, "_gallery_bookmark_filter_active", False))
+        self._maybe_clear_empty_rating_filter()
+        self._sync_gallery_rating_filter_stars()
+        self._sync_gallery_clear_filter_button()
+        filter_active = bool(
+            getattr(self, "_gallery_bookmark_filter_active", False)
+        ) or int(getattr(self, "_gallery_rating_filter_min", 0) or 0) > 0
         display_files = self._gallery_files_for_display()
         display_keys = {_norm_path(p) for p in display_files}
         selected = set(getattr(self, "_gallery_selected_paths", set()) or set())
@@ -14934,10 +15137,11 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             meta = getattr(self, "_gallery_bulk_metadata", None) or {}
             if filter_active:
                 if not display_files:
+                    scope_desc = self._gallery_scope_filter_description()
                     empty_msg = (
-                        "No matching bookmarked images"
+                        f"No matching {scope_desc}"
                         if self._is_semantic_search_filter_active()
-                        else "No bookmarked images"
+                        else f"No {scope_desc}"
                     )
                     gj.set_images([], meta if meta else None)
                     gj.show_empty_message(empty_msg)
@@ -14976,14 +15180,15 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         if hasattr(self, "status_bar") and self.status_bar:
             if filter_active:
                 n = len(display_files)
+                scope_desc = self._gallery_scope_filter_description()
                 if self._is_semantic_search_filter_active():
                     self.status_bar.showMessage(
-                        f"Showing {n} bookmarked search match{'es' if n != 1 else ''}",
+                        f"Showing {n} matching {scope_desc}",
                         2500,
                     )
                 else:
                     self.status_bar.showMessage(
-                        f"Showing {n} bookmarked image{'s' if n != 1 else ''}",
+                        f"Showing {n} {scope_desc}",
                         2500,
                     )
             elif self._is_semantic_search_filter_active():
@@ -15028,31 +15233,14 @@ class RAWImageViewer(SessionMixin, QMainWindow):
 
     def _sync_bookmark_indicator(self) -> None:
         self._sync_single_view_rating_stars()
+        self._sync_gallery_rating_filter_stars()
+        self._sync_gallery_clear_filter_button()
+        # The gallery bookmark-filter star is retired: the rating filter
+        # covers "narrow down the gallery" and the ↑ shortcut still toggles
+        # bookmarks on the current image/selection without this button.
         btn = getattr(self, "batch_mark_indicator", None)
-        if btn is None:
-            return
-        in_single = getattr(self, "view_mode", "single") == "single"
-        in_gallery = getattr(self, "view_mode", "") == "gallery"
-        has_files = bool(getattr(self, "image_files", None))
-        if not has_files or in_single or not in_gallery:
+        if btn is not None:
             btn.hide()
-            return
-        btn.show()
-        btn.setFixedSize(28, 28)
-        btn.setIconSize(QSize(20, 20))
-        filter_active = getattr(self, "_gallery_bookmark_filter_active", False)
-        if not self._gallery_has_bookmarks() and not filter_active and not self._gallery_has_selection():
-            btn.hide()
-            return
-        btn.show()
-        btn.setEnabled(True)
-        btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        if filter_active:
-            btn.setIcon(getattr(self, "_bookmark_filter_star_icon", QIcon()))
-            btn.setToolTip("Showing bookmarked images only (click star or Esc to show all)")
-        else:
-            btn.setIcon(getattr(self, "_bookmark_star_outline_icon", QIcon()))
-            btn.setToolTip("Show bookmarked images only")
 
     def _refresh_filmstrip_bookmark_visuals(self) -> None:
         bar = self._filmstrip_bar()
@@ -17740,6 +17928,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             if getattr(self, "_manager_display_track_path", None) != np_req:
                 self._manager_display_track_path = np_req
                 self._preview_upgrade_attempted_paths.discard(np_req)
+                self._raw_workflow_refused_tier_paths.discard(np_req)
                 if not self._display_quality_buffer_cached(requested_file_path):
                     self._manager_displayed_max_dim = 0
             
@@ -18715,6 +18904,17 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                     rgb_image.shape[0],
                     os.path.basename(cur or ""),
                 )
+                # A refused interim can be the ONLY delivery this file's "full"
+                # stage ever produces (e.g. under a RAW<->JPEG workflow toggle
+                # plus rapid navigation load-shedding on a slow volume/raw_limit=1
+                # path). With nothing else queued, the view sticks on whatever
+                # was on screen before forever -- the TTFR watchdog only logs a
+                # warning, it never retries. Re-request the real sensor decode
+                # once per file so a refused tier always gets a follow-up.
+                norm_cur = _norm_path(cur or "")
+                if norm_cur and norm_cur not in self._raw_workflow_refused_tier_paths:
+                    self._raw_workflow_refused_tier_paths.add(norm_cur)
+                    self._queue_sensor_full_decode(cur, priority_current=True)
                 return
         except Exception:
             pass
@@ -22652,6 +22852,21 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 fade_pm = viewport_fade_snapshot or viewport_fade_pm
 
                 def _apply_gpu_view_with_commit() -> None:
+                    # A newer navigation/reload (e.g. RAW<->JPEG workflow toggle,
+                    # or simply moving on to another file) may have bumped
+                    # _single_view_display_generation while this crossfade was
+                    # animating. _apply_gpu_view() already no-ops the actual
+                    # paint in that case, but _commit_display_metadata() has no
+                    # such guard on its own -- calling it anyway would mark
+                    # this stale file/resolution as "displayed" even though the
+                    # GPU view's pixmap was never touched, leaving the screen
+                    # frozen on whatever was on it before while every bookkeeping
+                    # field claims the new file is on screen (observed as
+                    # "toggle RAW view, navigate away, still shows the same
+                    # image"). Skip both together so a newer, valid paint is
+                    # solely responsible for updating state.
+                    if apply_gen != int(getattr(self, "_single_view_display_generation", 0)):
+                        return
                     _commit_display_metadata()
                     _apply_gpu_view()
 
@@ -24665,6 +24880,18 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             
         self.image_cache.put_exif(path, exif_data)
 
+        # 1b. Persist to the XMP sidecar so the rating survives a restart
+        # (in-memory/EXIF-cache updates above are lost when the app closes).
+        try:
+            from raw_adjustments import write_rating_for_file
+
+            write_rating_for_file(path, rating)
+        except Exception:
+            logging.getLogger(__name__).warning(
+                "Failed to write rating to XMP sidecar for %s", path, exc_info=True
+            )
+            self.status_bar.showMessage("Rating set, but couldn't save to XMP sidecar", 3000)
+
         # 2. Update local caches (bulk metadata and justified gallery)
         if hasattr(self, "_gallery_bulk_metadata") and self._gallery_bulk_metadata is not None:
             if path not in self._gallery_bulk_metadata:
@@ -24898,6 +25125,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 return
             if self._clear_gallery_bookmark_filter():
                 return
+            if self._clear_gallery_rating_filter():
+                return
         elif vm == "single":
             if getattr(self, "_adjust_overlay_visible", False):
                 self._set_adjust_panel_visible(False)
@@ -24966,6 +25195,16 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         focused = self.focusWidget()
         from PyQt6.QtWidgets import QLineEdit, QTextEdit, QPlainTextEdit
         if focused and isinstance(focused, (QLineEdit, QTextEdit, QPlainTextEdit)):
+            return False
+        # Toggle-style keys here (P, H, M, F, G, J, ...) must fire once per physical
+        # press, matching the sibling QShortcut objects for the same keys which
+        # explicitly disable auto-repeat. This function is reached via both
+        # keyPressEvent and an eventFilter, neither of which gets that guard for
+        # free -- an OS key-repeat from holding the key even slightly past the
+        # repeat-delay threshold would silently double-toggle (e.g. "P" for RAW
+        # recovery: on, then immediately off again from the repeat, netting no
+        # visible change on that press).
+        if event.isAutoRepeat():
             return False
 
         key = event.key()

@@ -636,6 +636,14 @@ class PersistentEXIFCache:
                     'original_width': result_width if result_width else exif_data.get('original_width'),
                     'original_height': result_height if result_height else exif_data.get('original_height'),
                     'raw_exif_sensor_meta_ver': int(sensor_meta_ver),
+                    # rating is stored inside the pickled exif_data blob (see
+                    # _prepare_put_row/rate_current_image), not its own column --
+                    # promote it to the top level so callers doing exif.get('rating')
+                    # (the same shape put_exif() was called with) see it. Without
+                    # this a rating survived to disk fine but read back as 0 on
+                    # every app restart, since only the in-memory cache (which
+                    # stores the dict as-passed) ever had the top-level key.
+                    'rating': exif_data.get('rating', 0),
                 }
         except Exception:
             pass
@@ -868,6 +876,10 @@ class PersistentEXIFCache:
                         "original_width": result_width,
                         "original_height": result_height,
                         "raw_exif_sensor_meta_ver": sensor_meta_ver,
+                        # See get()'s 'rating' comment -- only recoverable when the
+                        # blob was actually unpickled (not the fast_mode/has_fast_data
+                        # shortcut above, which skips it for bulk-scan speed).
+                        "rating": exif_data.get("rating", 0) if exif_data else 0,
                     }
         except Exception:
             pass
@@ -1024,7 +1036,17 @@ class PersistentEXIFCache:
         return out
     
     def close(self):
-        """Close the database connection for the current thread."""
+        """Close the database connection for the current thread.
+
+        Flushes batched writes first -- without this, any EXIF update that
+        didn't happen to hit the 40-write commit threshold (e.g. a single
+        star rating set near the end of a session) sat in _pending_writes
+        and was silently dropped on quit, never reaching disk.
+        """
+        try:
+            self.flush()
+        except Exception:
+            pass
         try:
             if hasattr(self, '_local') and hasattr(self._local, 'conn'):
                 self._local.conn.close()
