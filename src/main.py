@@ -29185,11 +29185,34 @@ def main():
             safe_print("Splash screen closed, main window displayed", flush=True)
 
             # Import the torch/kornia GPU decode backend now, on the main
-            # thread, right after the window is visible instead of before it
-            # was constructed. Background decode threads wait for this (see
-            # torch_bootstrap.py) rather than ever importing it themselves.
+            # thread (background decode threads wait for this -- see
+            # torch_bootstrap.py -- rather than ever importing it themselves,
+            # since a first-time OpenMP init off the main thread hard-aborts
+            # the process on macOS). This import is normally ~1s with a warm
+            # OS page cache, but a cold cache (first launch since boot/env
+            # change) can push it to several seconds -- and since it's fully
+            # synchronous, it was firing as literally the first event-loop
+            # callback (QTimer.singleShot(0, ...)), racing the fast-opened
+            # image's own first paint. Losing that race blew the preview's
+            # TTFR deadline and forced a slower full-decode fallback on top
+            # of the freeze itself. Defer until the single-view image has
+            # actually painted (or a bounded fallback if there's nothing to
+            # paint, e.g. no folder/file argument) so the freeze -- however
+            # long it ends up being -- happens after the user sees something,
+            # not instead of it. The default 2500ms fallback (shared with
+            # other _defer_until_first_paint callers) is too short on slow
+            # storage: a fast-open from a slow external volume can still be
+            # mid-decode past 2.5s, so the fallback would fire first and the
+            # import would end up blocking the paint anyway. Use a longer,
+            # dedicated fallback instead -- background decode threads already
+            # tolerate waiting up to 10s for this import via
+            # wait_for_gpu_backend_ready(), so there's headroom.
             import torch_bootstrap
-            QTimer.singleShot(0, torch_bootstrap.import_gpu_backend_on_main_thread)
+            viewer._defer_until_first_paint(
+                torch_bootstrap.import_gpu_backend_on_main_thread,
+                fallback_ms=_env_int("RAWVIEWER_GPU_IMPORT_DEFER_FALLBACK_MS", 8000, minimum=0),
+                label="gpu_backend_import",
+            )
 
             if str(os.environ.get("RAWVIEWER_AUTOTEST", "0")).strip().lower() in ("1", "true", "yes"):
                 from nav_autotest import run_nav_autotest
