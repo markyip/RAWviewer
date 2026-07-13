@@ -1683,6 +1683,20 @@ class ImageCache(QObject):
         self.last_aggressive_purge = 0.0
         self.last_reduce_cache = 0.0
 
+        # Background memory-pressure polling: get_memory_info() spawns a
+        # `vm_stat` subprocess on macOS (see _darwin_memory_stats_from_vm_stat),
+        # tens of ms per call. _check_memory_pressure() used to call it inline
+        # on whatever thread touched the cache -- during gallery scrolling
+        # that's the main/GUI thread, so every memory_check_interval seconds
+        # of active scrolling paid a synchronous subprocess-spawn cost right
+        # in the scroll path. A lazily-started daemon thread now refreshes a
+        # cached snapshot on that same interval; _check_memory_pressure only
+        # ever reads it.
+        self._mem_poll_lock = threading.Lock()
+        self._mem_poll_info: Optional[Dict[str, float]] = None
+        self._mem_poll_pressure = 'ok'
+        self._mem_poll_thread: Optional[threading.Thread] = None
+
         # Background RAW-orientation verification (see get_exif): one short
         # queue drained by a single lazily-started daemon thread, one attempt
         # per path per session.
@@ -1746,18 +1760,63 @@ class ImageCache(QObject):
     def _path_key(file_path: str) -> str:
         return _cache_path_key(file_path)
 
+    def _ensure_mem_poll_thread(self) -> None:
+        """Start the background memory-pressure poller if it isn't already running."""
+        if getattr(self, "_closing", False):
+            return
+        with self._mem_poll_lock:
+            if self._mem_poll_thread is not None and self._mem_poll_thread.is_alive():
+                return
+            self._mem_poll_thread = threading.Thread(
+                target=self._mem_poll_worker,
+                name="mem-pressure-poll",
+                daemon=True,
+            )
+            self._mem_poll_thread.start()
+
+    def _mem_poll_worker(self) -> None:
+        """Refresh the cached memory-info/pressure snapshot every
+        memory_check_interval seconds, off the main/calling thread.
+        """
+        while not getattr(self, "_closing", False):
+            try:
+                info = self.memory_monitor.get_memory_info()
+                level = self.memory_monitor.system_memory_pressure_level(info)
+            except Exception:
+                info, level = None, None
+            if info is not None:
+                with self._mem_poll_lock:
+                    self._mem_poll_info = info
+                    self._mem_poll_pressure = level
+            time.sleep(self.memory_check_interval)
+
     def _check_memory_pressure(self) -> bool:
-        """Check if we're under memory pressure and need to reduce cache sizes."""
+        """Check if we're under memory pressure and need to reduce cache sizes.
+
+        Reads the snapshot the background poller last collected rather than
+        collecting it inline -- get_memory_info() spawns a `vm_stat`
+        subprocess on macOS, and this is called from cache-read paths
+        (get_grid/get_thumbnail/etc.) that run on whatever thread touches
+        the cache, including the main/GUI thread during gallery scrolling.
+        """
         current_time = time.time()
         if current_time - self.last_memory_check < self.memory_check_interval:
             return False
-
         self.last_memory_check = current_time
-        memory_info = self.memory_monitor.get_memory_info()
+        self._ensure_mem_poll_thread()
+
+        with self._mem_poll_lock:
+            memory_info = self._mem_poll_info
+            pressure_level = self._mem_poll_pressure
+
+        if memory_info is None:
+            # No snapshot yet (first check(s) after startup) -- the poller
+            # just started; nothing to act on until it reports back.
+            return False
+
         percent_used = memory_info['system_percent_used']
         available_gb = memory_info['system_available_gb']
         rss_mb = memory_info['process_rss_mb']
-        pressure_level = self.memory_monitor.system_memory_pressure_level(memory_info)
 
         if pressure_level == 'critical':
             if current_time - getattr(self, 'last_aggressive_purge', 0.0) < 60.0:
