@@ -6930,11 +6930,18 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                             if hasattr(self, "loading_overlay"):
                                 self.loading_overlay.hide_loading()
                             return
-                    logger.debug(
-                        f"[MANAGER] Skipping small thumbnail; display-quality buffer cached for "
-                        f"{os.path.basename(file_path)}"
-                    )
-                    return
+                        # Tier mismatch: _display_quality_buffer_cached() can report True
+                        # from a cache tier (e.g. "thumbnail") that
+                        # _try_paint_display_quality_cache() never attempts to paint (it
+                        # only checks the "preview" tier). Nothing is on screen yet, so
+                        # don't dead-end here -- fall through and paint this thumbnail
+                        # directly instead of leaving the view blank.
+                    else:
+                        logger.debug(
+                            f"[MANAGER] Skipping small thumbnail; display-quality buffer cached for "
+                            f"{os.path.basename(file_path)}"
+                        )
+                        return
 
                 # Mid-size thumbnail (below the 3840px hard-skip above) arriving
                 # mid-navigation, with a smaller preview already on screen: the
