@@ -891,7 +891,7 @@ def try_fast_raw_decode(
                     unpacked.pat_str,
                 )
                 return out
-                
+
         if prefer_gpu_decode_enabled():
             try:
                 # torch/kornia must never be imported for the first time on this
