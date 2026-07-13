@@ -28,7 +28,7 @@ Design:
 from __future__ import annotations
 
 import base64
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 import numpy as np
@@ -41,17 +41,40 @@ MASK_CLIP = 1.5
 
 @dataclass
 class DodgeBurnMask:
-    """A dodge/burn mask at a fixed working resolution."""
+    """A dodge/burn mask at a fixed working resolution.
+
+    ``version`` bumps on every in-place mutation (stamp_brush,
+    edge_snap_region) and gates the caches below: apply_dodge_burn() runs
+    on EVERY editor render tick (every slider drag, not just brush
+    strokes), but the mask itself only changes during active painting --
+    without these caches, an unchanged mask still paid a full is_empty
+    scan + resize + gain recompute on every unrelated slider tick,
+    measured at ~56ms on a 2200x3300 half-res base (over half the 80ms
+    preview throttle window). Cache fields are excluded from dataclass
+    __eq__/repr (they're derived, not identity).
+    """
 
     data: np.ndarray  # float32, (H, W), range [-MASK_CLIP, MASK_CLIP]
+    version: int = field(default=0, compare=False, repr=False)
+    _empty_cache: Optional[tuple] = field(default=None, compare=False, repr=False)
+    _gain_cache: Optional[tuple] = field(default=None, compare=False, repr=False)
 
     @classmethod
     def empty(cls, height: int, width: int) -> "DodgeBurnMask":
         return cls(np.zeros((height, width), dtype=np.float32))
 
+    def touch(self) -> None:
+        """Call after any in-place mutation of ``data`` to invalidate caches."""
+        self.version += 1
+
     @property
     def is_empty(self) -> bool:
-        return not np.any(np.abs(self.data) > 1e-4)
+        cached = self._empty_cache
+        if cached is not None and cached[0] == self.version:
+            return cached[1]
+        result = not np.any(np.abs(self.data) > 1e-4)
+        self._empty_cache = (self.version, result)
+        return result
 
 
 def stamp_brush(
@@ -91,6 +114,7 @@ def stamp_brush(
     delta = falloff * float(strength) * (1.0 if dodge else -1.0)
     region = mask.data[y0:y1, x0:x1]
     np.clip(region + delta, -MASK_CLIP, MASK_CLIP, out=region)
+    mask.touch()
     return (x0, y0, x1, y1)
 
 
@@ -131,6 +155,7 @@ def edge_snap_region(
     snapped = apply_guided_filter(guide, src, radius, eps)
     np.clip(snapped, -MASK_CLIP, MASK_CLIP, out=snapped)
     mask.data[y0:y1, x0:x1] = snapped
+    mask.touch()
 
 
 def resize_mask_to(mask: DodgeBurnMask, height: int, width: int) -> np.ndarray:
@@ -150,12 +175,25 @@ def apply_dodge_burn(
     ``img`` is (H, W, 3) scene-linear float. No-op (returns img unchanged)
     when the mask is None/empty/all-zero -- the common case, so callers can
     unconditionally call this without an extra branch.
+
+    The resize+exp2 gain map is cached on the mask, keyed by
+    (mask.version, target shape, stops): this function runs on every
+    editor render tick (every slider drag, not just brush strokes), and
+    without the cache, an UNCHANGED mask still paid a full resize + exp2
+    over the whole frame every tick -- measured ~56ms on a 2200x3300 half-
+    res base, more than half the 80ms live-preview throttle window.
     """
     if mask is None or mask.is_empty:
         return img
     h, w = img.shape[:2]
-    m = resize_mask_to(mask, h, w)
-    gain = np.exp2(m * float(stops)).astype(np.float32)
+    cache_key = (mask.version, h, w, round(float(stops), 6))
+    cached = mask._gain_cache
+    if cached is not None and cached[0] == cache_key:
+        gain = cached[1]
+    else:
+        m = resize_mask_to(mask, h, w)
+        gain = np.exp2(m * float(stops)).astype(np.float32)
+        mask._gain_cache = (cache_key, gain)
     return img * gain[..., np.newaxis]
 
 
@@ -188,3 +226,47 @@ def deserialize_mask(serial: str) -> Optional[DodgeBurnMask]:
         return DodgeBurnMask(data)
     except Exception:
         return None
+
+
+# Bounded memo for the render pipeline's read-only mask lookups (see
+# _deserialize_mask_cached). Small (few entries): the working set is
+# realistically 1-2 distinct mask strings at a time (current file, maybe a
+# stale in-flight render generation).
+_DESERIALIZE_CACHE: dict = {}
+_DESERIALIZE_CACHE_ORDER: list = []
+_DESERIALIZE_CACHE_MAX = 4
+
+
+def _deserialize_mask_cached(serial: str) -> Optional[DodgeBurnMask]:
+    """Read-only variant of deserialize_mask() for the render pipeline.
+
+    process_linear_edit_buffer(_staged) and _apply_adjustments_to_srgb call
+    this on EVERY render tick whenever a mask is present, including ticks
+    where an unrelated pre-tone key (Exposure/Temperature/Tint/NR) changed
+    but the mask itself did not -- deserialize_mask() re-decodes the PNG
+    and builds a brand-new DodgeBurnMask from scratch every call, which
+    also defeats apply_dodge_burn's own per-instance gain cache (a fresh
+    object always starts at version 0). Caching the decoded object here
+    (keyed by the serial string) lets repeated same-string calls reuse
+    both the decode AND the gain cache.
+
+    CALLERS MUST NEVER MUTATE THE RETURNED MASK (stamp_brush /
+    edge_snap_region) -- the same instance is shared across calls. Use
+    plain deserialize_mask() for any call site that intends to paint on
+    the result (e.g. loading a file's saved mask into main.py's editable
+    ``self._dodge_burn_mask``).
+    """
+    if not serial:
+        return None
+    cached = _DESERIALIZE_CACHE.get(serial)
+    if cached is not None:
+        return cached
+    mask = deserialize_mask(serial)
+    if mask is None:
+        return None
+    _DESERIALIZE_CACHE[serial] = mask
+    _DESERIALIZE_CACHE_ORDER.append(serial)
+    if len(_DESERIALIZE_CACHE_ORDER) > _DESERIALIZE_CACHE_MAX:
+        oldest = _DESERIALIZE_CACHE_ORDER.pop(0)
+        _DESERIALIZE_CACHE.pop(oldest, None)
+    return mask

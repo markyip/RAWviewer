@@ -5,6 +5,17 @@ from __future__ import annotations
 import numpy as np
 
 TONE_CURVE_SERIAL_KEY = "_tone_curve_pv2012"
+# Standard-mode per-channel curves (Lightroom/RawTherapee "RGB Curves"):
+# each channel remapped independently by its own point curve, applied to
+# already gamma-encoded display-referred values -- unlike the hue-
+# preserving luminance curve above, this DOES shift hue/color balance by
+# design (e.g. lifting Red in the shadows adds warmth only there). Key
+# names match Lightroom's real XMP schema (crs:ToneCurvePV2012Red/Green/
+# Blue) so sidecar files stay interoperable with real Lightroom exports.
+TONE_CURVE_RED_KEY = "_tone_curve_pv2012_red"
+TONE_CURVE_GREEN_KEY = "_tone_curve_pv2012_green"
+TONE_CURVE_BLUE_KEY = "_tone_curve_pv2012_blue"
+CHANNEL_CURVE_KEYS = (TONE_CURVE_RED_KEY, TONE_CURVE_GREEN_KEY, TONE_CURVE_BLUE_KEY)
 
 _SPLIT_SHADOWS = 0.25
 _SPLIT_DARKS = 0.50
@@ -277,6 +288,43 @@ def build_point_curve_lut(points: list[tuple[float, float]]) -> np.ndarray | Non
         return None
     grid = np.linspace(0.0, 1.0, _LUT_SIZE)
     return fit(grid).astype(np.float32)
+
+
+def apply_channel_curves_encoded(
+    encoded: np.ndarray, adj: dict[str, float], max_val: float
+) -> np.ndarray:
+    """Standard-mode R/G/B curves, applied to an already gamma-encoded
+    display-referred buffer (uint8 preview or uint16 export -- whichever
+    ``encoded``/``max_val`` the caller is finishing with). Each channel is
+    remapped independently, matching Lightroom/RawTherapee's "Standard"
+    RGB Curves behavior (as opposed to a hue-preserving "Luminosity" mode):
+    this can and does shift hue/color balance, by design.
+
+    A no-op (returns ``encoded`` unchanged) unless at least one channel
+    key holds a non-identity curve, so files with no channel-curve edits
+    pay no cost here.
+    """
+    active: list[tuple[int, np.ndarray]] = []
+    for i, key in enumerate(CHANNEL_CURVE_KEYS):
+        serial = str(adj.get(key, "") or "")
+        if not serial:
+            continue
+        points = deserialize_tone_curve_points(serial)
+        if not points or is_identity_tone_curve_points(points):
+            continue
+        lut = build_point_curve_lut(points)
+        if lut is not None:
+            active.append((i, lut))
+    if not active:
+        return encoded
+
+    out = encoded.astype(np.float32) / float(max_val)
+    for channel, lut in active:
+        out[..., channel] = _lookup_lut(out[..., channel], lut)
+    out = np.clip(out, 0.0, 1.0) * float(max_val)
+    if np.issubdtype(encoded.dtype, np.integer):
+        out = np.round(out)
+    return out.astype(encoded.dtype)
 
 
 def sample_point_curve_for_display(

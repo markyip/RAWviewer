@@ -100,7 +100,7 @@ class GpuImageView(QGraphicsView):
     _FIT_SCALE_EPS = 1.002  # treat within ~0.2% of fit as fit-to-window
     _shortcut_handler: Any
 
-    def __init__(self, parent=None, background="#1E1E1E"):
+    def __init__(self, parent=None, background="#14120F"):
         # Attributes read from event()/viewportEvent() must exist before super().__init__()
         # because Qt may deliver events during construction.
         self._fit_mode = True
@@ -129,6 +129,9 @@ class GpuImageView(QGraphicsView):
 
         self._item = QGraphicsPixmapItem()
         self._item.setTransformationMode(Qt.TransformationMode.SmoothTransformation)
+        self._mask_item = QGraphicsPixmapItem(self._item)
+        self._mask_item.setOpacity(0.4)
+        self._mask_item.hide()
         self._scene.addItem(self._item)
 
         # Dashed focus / subject overlay rectangle (scene coords == image pixels). Uses a
@@ -267,6 +270,55 @@ class GpuImageView(QGraphicsView):
         if not self._has_pixmap:
             return True
         return self.current_scale() <= self.fit_scale() * self._FIT_SCALE_EPS
+
+    def _zoom_in_blocked(self) -> bool:
+        if not self._has_pixmap or self._item.pixmap() is None:
+            return False
+        return self.current_scale() >= self.MAX_SCALE - 1e-9
+
+    def set_dodge_burn_mask_overlay(self, mask, show: bool) -> None:
+        if not show or mask is None or getattr(mask, "is_empty", True):
+            self._mask_item.hide()
+            return
+        self.update_dodge_burn_mask(mask)
+        self._mask_item.show()
+
+    def update_dodge_burn_mask(self, mask) -> None:
+        if not self._mask_item.isVisible() and mask is not None:
+            # We don't update if hidden, to save work.
+            return
+        if mask is None or getattr(mask, "is_empty", True):
+            self._mask_item.hide()
+            return
+            
+        import numpy as np
+        import cv2
+        from PyQt6.QtGui import QImage, QPixmap
+        
+        # mask.data is float32 [-1.5, 1.5]
+        # We want to show a red overlay where it's non-zero.
+        # Positive = Dodge (Red?), Negative = Burn (Blue?)
+        # For simplicity, we can just show red for both, or red/blue.
+        h, w = mask.data.shape
+        overlay = np.zeros((h, w, 4), dtype=np.uint8)
+        
+        # Red for Dodge (positive)
+        pos_mask = mask.data > 0
+        overlay[pos_mask, 0] = 255 # R
+        overlay[pos_mask, 3] = np.clip(mask.data[pos_mask] / 1.5 * 255, 0, 255).astype(np.uint8)
+        
+        # Blue for Burn (negative)
+        neg_mask = mask.data < 0
+        overlay[neg_mask, 2] = 255 # B
+        overlay[neg_mask, 3] = np.clip(-mask.data[neg_mask] / 1.5 * 255, 0, 255).astype(np.uint8)
+        
+        if self._item.pixmap() is not None:
+            pw, ph = self._item.pixmap().width(), self._item.pixmap().height()
+            if w != pw or h != ph:
+                overlay = cv2.resize(overlay, (pw, ph), interpolation=cv2.INTER_LINEAR)
+        
+        qimg = QImage(overlay.data, overlay.shape[1], overlay.shape[0], overlay.strides[0], QImage.Format.Format_RGBA8888)
+        self._mask_item.setPixmap(QPixmap.fromImage(qimg))
 
     def wants_zoom_in_toggle(self) -> bool:
         """Whether Space / double-click should enter 100% zoom (not zoom out to fit)."""
@@ -891,6 +943,13 @@ class GpuImageView(QGraphicsView):
         if event.button() == Qt.MouseButton.LeftButton and self._fit_mode and self.file_path:
             self._drag_start_pos = event.position().toPoint()
             self._drag_started = False
+        elif event.button() == Qt.MouseButton.LeftButton and not self._fit_mode:
+            self._manual_pan_start = event.position().toPoint()
+            self._manual_pan_scroll_h = self.horizontalScrollBar().value()
+            self._manual_pan_scroll_v = self.verticalScrollBar().value()
+            self.viewport().setCursor(Qt.CursorShape.ClosedHandCursor)
+            event.accept()
+            return
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event) -> None:
@@ -923,15 +982,23 @@ class GpuImageView(QGraphicsView):
             elif not (event.buttons() & Qt.MouseButton.LeftButton):
                 self.viewport().unsetCursor()
 
-        if (event.buttons() & Qt.MouseButton.LeftButton) and self._fit_mode and self.file_path and self._drag_start_pos is not None:
+        if (event.buttons() & Qt.MouseButton.LeftButton) and self._fit_mode and self.file_path and getattr(self, "_drag_start_pos", None) is not None:
             if not self._drag_started:
                 dist = (event.position().toPoint() - self._drag_start_pos).manhattanLength()
                 if dist >= QApplication.startDragDistance():
                     self._drag_started = True
                     self._start_drag()
             event.accept()
-        else:
-            super().mouseMoveEvent(event)
+            return
+            
+        if (event.buttons() & Qt.MouseButton.LeftButton) and not self._fit_mode and getattr(self, "_manual_pan_start", None) is not None:
+            delta = event.position().toPoint() - self._manual_pan_start
+            self.horizontalScrollBar().setValue(self._manual_pan_scroll_h - delta.x())
+            self.verticalScrollBar().setValue(self._manual_pan_scroll_v - delta.y())
+            event.accept()
+            return
+
+        super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:
         if event.button() == Qt.MouseButton.LeftButton and getattr(
@@ -949,6 +1016,11 @@ class GpuImageView(QGraphicsView):
         if event.button() == Qt.MouseButton.LeftButton and self._fit_mode:
             self._drag_start_pos = None
             self._drag_started = False
+        elif event.button() == Qt.MouseButton.LeftButton and not self._fit_mode:
+            self._manual_pan_start = None
+            self.viewport().unsetCursor()
+            event.accept()
+            return
         super().mouseReleaseEvent(event)
 
     def _start_drag(self) -> None:

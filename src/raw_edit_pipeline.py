@@ -246,6 +246,19 @@ def _process_linear_edit_tail(
             stops = float(merged.get(_DB_STRENGTH_KEY, _DB_DEFAULT_STRENGTH))
             img = apply_dodge_burn(img, mask, stops)
 
+    # Dodge & burn: local per-pixel exposure, applied right after the
+    # global exposure gain and before denoise/tone -- local brightness
+    # changes should see the same noise/tone response as global ones
+    # (matches how a real exposure difference at capture time would look).
+    mask_serial = str(merged.get(_DB_MASK_KEY, "") or "")
+    if mask_serial:
+        from raw_dodge_burn import _deserialize_mask_cached, apply_dodge_burn
+
+        mask = _deserialize_mask_cached(mask_serial)
+        if mask is not None:
+            stops = float(merged.get(_DB_STRENGTH_KEY, _DB_DEFAULT_STRENGTH))
+            img = apply_dodge_burn(img, mask, stops)
+
     do_denoise = chroma_denoise if chroma_denoise is not None else chroma_denoise_enabled()
     nr_amount = float(merged.get("ColorNoiseReduction", 0.0))
     method = int(float(merged.get("DenoiseMethod", 0.0)))
@@ -409,9 +422,9 @@ def process_linear_edit_buffer_staged(
 
             mask_serial = str(merged.get(_DB_MASK_KEY, "") or "")
             if mask_serial:
-                from raw_dodge_burn import apply_dodge_burn, deserialize_mask
+                from raw_dodge_burn import _deserialize_mask_cached, apply_dodge_burn
 
-                mask = deserialize_mask(mask_serial)
+                mask = _deserialize_mask_cached(mask_serial)
                 if mask is not None:
                     stops = float(merged.get(_DB_STRENGTH_KEY, _DB_DEFAULT_STRENGTH))
                     img = apply_dodge_burn(img, mask, stops)
@@ -491,13 +504,14 @@ def render_adjust_preview_uint8(
     previous call. Used exclusively by the interactive Adjust-panel preview
     path (_AdjustPreviewWorker in main.py).
     """
+    from raw_tone_curve import apply_channel_curves_encoded
     from raw_tone_recovery import _encode_srgb8
 
     merged = dict(DEFAULT_ADJUSTMENTS)
     merged.update(adj or {})
     processed = process_linear_edit_buffer_staged(rgb_image, merged, cache, preview=True)
     display = _apply_display_stage_staged(processed, merged, cache)
-    return _encode_srgb8(display)
+    return apply_channel_curves_encoded(_encode_srgb8(display), merged, 255.0)
 
 
 def _apply_display_color_adjustments(
@@ -514,6 +528,7 @@ def linear_to_display_uint8(img: np.ndarray, adj: dict[str, float] | None = None
     # the browse render, surfacing sensor noise ("grainy" report). One curve
     # everywhere = editor default is pixel-comparable with browse.
     from fast_raw_decode import _gamma_lut8
+    from raw_tone_curve import apply_channel_curves_encoded
 
     merged = dict(adj or {})
     n_workers = _linear_pipeline_worker_count(img.shape[0])
@@ -522,7 +537,7 @@ def linear_to_display_uint8(img: np.ndarray, adj: dict[str, float] | None = None
     else:
         display = _apply_display_stage(img, merged)
     idx = np.clip(display * 65535.0 + 0.5, 0, 65535).astype(np.uint16)
-    return _gamma_lut8()[idx]
+    return apply_channel_curves_encoded(_gamma_lut8()[idx], merged, 255.0)
 
 
 def _apply_display_stage_banded(
@@ -563,11 +578,12 @@ def linear_to_export_uint16_srgb(img: np.ndarray, adj: dict[str, float] | None =
     LibRaw/dcraw-derived pipeline does.)
     """
     from fast_raw_decode import gamma_curve16
+    from raw_tone_curve import apply_channel_curves_encoded
 
     merged = dict(adj or {})
     display = _apply_display_stage(img, merged)
     idx = np.clip(display * 65535.0 + 0.5, 0, 65535).astype(np.uint16)
-    return gamma_curve16()[idx]
+    return apply_channel_curves_encoded(gamma_curve16()[idx], merged, 65535.0)
 
 
 def _ensure_parent_dir(output_path: str) -> None:

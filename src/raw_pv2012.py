@@ -47,13 +47,41 @@ _BASE_LUT = np.interp(
 # adjusted luminance stayed under the floor -- exactly the deep-shadow range
 # Shadows/Blacks exist to recover.
 _RATIO_EPS = 0.005
-# 16x = 4 stops of shadow lift, 0.25x = 2 stops of crush. Modern sensors
+# 8x = 3 stops of shadow lift, 0.25x = 2 stops of crush. Modern sensors
 # hold recoverable detail well past 3 stops under (Exposure, applied
 # scene-linear upstream, is uncapped and proves it); the old 3.0 cap
 # (~1.6 stops) made Shadows/Blacks top out far below what the file
-# contains. Noise/green-cast control in lifted shadows is the chroma
-# damp's job below, not the ratio cap's.
-_MAX_TONE_RATIO = 16.0
+# contains.
+#
+# A first pass raised this to 16x (4 stops) and relied on the chroma damp
+# below to control noise. In practice, real per-pixel sensor chroma noise
+# (the blue channel especially -- lowest QE/highest relative read noise
+# on most Bayer sensors) gets amplified by the SAME ratio as genuine
+# shadow detail: a real photo test measured a synthetic 0.0004 scene-
+# linear blue-channel noise std turning into a display-space blue-vs-green
+# channel deviation of std ~3.0 (about 4x the luminance grain) at 16x,
+# visible as colored speckle in dark clothing/hair -- reported as "blue
+# color artifact" with less perceived detail (the speckle masks it). 8x
+# roughly halves the worst-case amplification while still recovering far
+# more than the original 3.0 cap; the strengthened chroma damp below
+# (raised from 0.35 to 0.85 max) does most of the remaining noise control.
+#
+# NOTE (post return_linear fix): fixing decode_half_from_unpacked's
+# ignored return_linear flag (fast_raw_decode.py) means y0 here is now
+# genuinely scene-linear instead of gamma-encoded data mislabeled as
+# linear -- true deep-shadow y0 on a real CR3 runs as low as ~0.0006 in
+# the darkest 5%, which saturates this 8x cap across nearly the entire
+# Shadows 50-100 slider range (measured: Shadows=50 and Shadows=100
+# produce identical output there) and likely contributes to a recurring
+# "grey casting" report. Tried raising back to 16x post-fix: t_tone_engine
+# regressed (chroma speckle test failed, b-g std 0.87 > luma std 0.43),
+# so the cap is not the right knob to turn -- a naive increase reproduces
+# the exact speckle regression 8x was chosen to fix, just via the
+# now-corrected data scale instead of the old buggy one. Left at 8x;
+# the anchor band and lift_frac saturation point (both below) were also
+# tuned against the same buggy data and need their own recalibration
+# pass against real files before this is revisited.
+_MAX_TONE_RATIO = 8.0
 _MIN_TONE_RATIO = 0.25
 
 
@@ -170,7 +198,33 @@ def _apply_pv2012_perceptual(
 def apply_pv2012_tone_rgb(img: np.ndarray, adj: dict[str, float]) -> np.ndarray:
     """Hue-preserving PV2012 tone; ratio capped in perceptual space."""
     lum = _luminance(img)
-    y0 = _scene_to_perceptual(lum)
+    y0_raw = _scene_to_perceptual(lum)
+    # Smooth y0 before it drives anything downstream (tone curve, PV2012
+    # curve, ratio) -- darktable's tone-equalizer approach (see research
+    # notes) to a problem our per-pixel ratio has always had: ratio = y1/y0
+    # computed independently per pixel inherits whatever noise is in that
+    # pixel's own y0, so neighbouring pixels with the same *true* local
+    # brightness get visibly different ratios purely from sensor noise
+    # jitter -- amplifying that jitter into color speckle on top of
+    # whatever the sensor noise already was. A self-guided filter on y0
+    # (small radius: this is noise-scale smoothing, not the coarse
+    # region-scale masking the chroma damp below does) averages out that
+    # per-pixel jitter while a real edge (self-guided, so it's guided by
+    # its own structure) still survives. Verified on two real files
+    # (Canon_Sample/6J8A0376.CR3, a Sony ARW): at r=2, both moved *closer*
+    # to Exposure's color richness at matched brightness (Canon 58% -> 71%
+    # of Exposure's chroma, Sony 90% -> 97%), not just the noisier one --
+    # larger radii (8+) helped the noisy file further but started
+    # over-smoothing the cleaner file's real structure, so this is a light
+    # touch specifically for noise-scale jitter, not a substitute for the
+    # region-scale chroma damp below.
+    from raw_chroma_denoise import apply_guided_filter
+
+    y0 = np.clip(
+        apply_guided_filter(y0_raw.astype(np.float32), y0_raw.astype(np.float32), 2, 0.0005),
+        0.0,
+        None,
+    )
     # y0 must stay the true pre-curve, pre-PV2012 baseline: it's the ratio's
     # denominator below. Reassigning it to the curve-adjusted value here (as
     # this used to do) makes the point tone curve's effect appear in *both*
@@ -220,26 +274,67 @@ def apply_pv2012_tone_rgb(img: np.ndarray, adj: dict[str, float]) -> np.ndarray:
     ratio = np.where(ratio > 1.0, 1.0 + (ratio - 1.0) * anchor, ratio)
     out = img * ratio[..., np.newaxis]
 
-    # Shadow lift amplifies demosaic chroma noise — pull chroma toward luma.
-    sh = float(adj.get("Shadows2012", 0.0))
-    if sh > 1e-4:
+    # Shadow lift amplifies demosaic/sensor chroma noise — pull chroma
+    # toward luma in proportion to how much a pixel was actually lifted.
+    #
+    # Gated on the RATIO itself (any(ratio > 1)), not on the Shadows slider
+    # value: Blacks alone also raises `ratio` in the shadow region (see
+    # _apply_whites_blacks), and gating on `sh` left a Blacks-only push
+    # completely undamped -- the exact same colored-speckle failure mode,
+    # just reachable without touching Shadows at all.
+    if np.any(ratio > 1.0 + 1e-6):
         sw = _region_weight_shadows(y_curve)
         # Anchor on the POST-lift luminance: with the pre-lift ``lum`` here,
         # a lifted neutral pixel's uniform (out - lum) offset -- which is the
-        # lift itself, not chroma -- was damped up to 55%, cancelling most of
-        # the recovery and making Shadows+Blacks lift *less* than Blacks
-        # alone (measured 38 vs 48 at scene-linear 0.01). Post-lift luminance
+        # lift itself, not chroma -- was damped too, cancelling most of the
+        # recovery and making Shadows+Blacks lift *less* than Blacks alone
+        # (measured 38 vs 48 at scene-linear 0.01). Post-lift luminance
         # makes the damp act only on true color deviation.
         #
-        # Strength is lift-proportional (up to 0.35 only as the ratio
-        # approaches the cap), not a flat 0.55 across the whole shadow band:
-        # the damp exists to tame noise chroma *amplified by the lift*, and
-        # a flat 55% desaturated every lifted shadow into the same grey wash
-        # the black-point anchor above addresses -- real shadow color must
-        # survive recovery.
-        lift_frac = np.clip((ratio - 1.0) / 7.0, 0.0, 1.0)
-        damp = 1.0 - (sw * min(sh / 100.0, 1.0) * 0.35 * lift_frac)[..., np.newaxis]
-        luma = (lum * ratio)[..., np.newaxis]
+        # lift_frac saturates by ratio=4 (2 stops), not just at the ratio
+        # cap: noise amplification is already a problem well before max
+        # lift, so damp strength should ramp up early, not only at the tail.
+        lift_frac = np.clip((ratio - 1.0) / 3.0, 0.0, 1.0)
+        luma_2d = lum * ratio
+
+        # Edge-aware damp strength (max strength history: 0.35 -> 0.85 ->
+        # 0.6 flat -> edge-aware here). A flat global strength can't tell a
+        # real fold line or fabric weave (genuine local luminance
+        # structure) apart from per-pixel sensor noise -- both produce
+        # similar-looking local chroma deviation, so damping hard enough to
+        # control the noise also flattens real color texture into grey
+        # (measured: at matched brightness, a real fabric crop carried
+        # 2.4x more chroma under an equivalent Exposure push than under
+        # Shadows+100 -- reported as "duller than Exposure"). A plain
+        # Sobel edge weight on the raw lifted luminance doesn't fix this:
+        # per-pixel noise produces gradients just as sharp as a real edge
+        # to a 3x3 operator, so nearly the whole shadow region reads as
+        # "edge" regardless. Self-guided-filtering the luminance first
+        # (eps large enough to actually smooth, ~10x the local noise
+        # variance) suppresses the pixel-independent noise while leaving
+        # multi-pixel real structure (fold lines, weave) intact, so edge
+        # detection on *that* actually separates the two -- verified
+        # visually (scripts/shadow_tuning_*.py): fold lines read as bright
+        # ridges in the edge map, flat/noisy fabric reads dark.
+        #
+        # Edge multiplier history: 0.5 -> 1.0 (full damp removal at max
+        # edge confidence). 0.5 (halved, not zeroed, at a real edge) was
+        # the cautious first value; a real-file sweep (Canon fabric crop +
+        # a Sony ARW) showed 1.0 recovers meaningfully more color on both
+        # (sat_proxy +19% and +5.5% respectively over the 0.5 value) with
+        # the flat/noisy region completely unaffected either way (a
+        # synthetic hard-edge-vs-flat-noise test held flat_chroma constant
+        # at 2.32-2.33x its no-lift baseline across 0.5-1.0 -- the edge
+        # weight is ~0 there regardless, so edge_mult only ever acts where
+        # real structure was actually detected).
+        from raw_chroma_denoise import _luma_edge_weight, apply_guided_filter
+
+        smooth_luma = apply_guided_filter(luma_2d, luma_2d, 10, 0.003)
+        edge_w = _luma_edge_weight(smooth_luma.astype(np.float32), soft=0.008)
+        damp_strength = 0.6 * (1.0 - edge_w)
+
+        damp = 1.0 - (sw * damp_strength * lift_frac)[..., np.newaxis]
+        luma = luma_2d[..., np.newaxis]
         chroma = out - luma
         out = luma + chroma * damp
 

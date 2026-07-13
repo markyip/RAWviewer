@@ -810,7 +810,7 @@ logging.getLogger('rawpy').setLevel(logging.ERROR)
 
 safe_print("Basic imports done, importing PyQt6...", flush=True)
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
-                             QHBoxLayout, QLabel, QFileDialog,
+                             QHBoxLayout, QLabel, QFileDialog, QSplitter,
                              QMessageBox, QScrollArea, QSizePolicy, QPushButton, QDialog, QSplashScreen, QInputDialog,
                              QLineEdit, QStackedLayout, QGraphicsOpacityEffect, QMenu, QStatusBar, QScrollBar)
 from PyQt6.QtCore import Qt, pyqtSignal, pyqtSlot, QPoint, QEvent, QSettings, QSize, QRect, QObject, QRunnable, QThreadPool, QTimer, QPropertyAnimation, QEasingCurve, QUrl
@@ -6405,6 +6405,15 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 bar.setEnabled(False)
                 self._hide_filmstrip_chrome()
                 return
+            if self._adjust_panel_active():
+                # Editor is open: the filmstrip is deliberately disabled/hidden
+                # (see _set_adjust_panel_visible). This function also runs from
+                # background events (e.g. folder-index-ready) that fire while
+                # editing, and used to unconditionally re-enable the bar here,
+                # which let its hover-reveal logic show it again mid-edit.
+                bar.hide()
+                bar.setEnabled(False)
+                return
             files = self._navigation_files()
             if self._is_semantic_search_filter_active() and files != list(
                 getattr(self, "image_files", []) or []
@@ -7889,7 +7898,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 background-color: {theme.SURFACE};
                 border: 1px solid {theme.LINE};
                 border-radius: 4px;
-                padding: 0px;
+                padding: 4px 8px;
                 font-size: 12px;
             }}
         """)
@@ -8068,8 +8077,11 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             }}
         """)
         self.image_label = QLabel()
-        # Center the label in viewport, but left-align the text content
-        self.image_label.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
+        # This label displays both the loaded photo and (when nothing is
+        # loaded) empty-state/error help text -- always centered, so a
+        # photo narrower than the viewport doesn't end up pinned to the
+        # left edge with the empty space pushed entirely to the right.
+        self.image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         # Create instruction text with modern folder icon
         # Use modern folder icon (📁) instead of old style (🗁)
         self.image_label.setText(self._no_image_loaded_help_text())
@@ -8099,13 +8111,17 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         from raw_adjustments import editing_features_enabled
 
         self.single_image_adjust_panel = None
+        self.single_image_adjust_histogram = None
         self._adjust_overlay_visible = False
         self._adjust_user_hidden = True
         self._pending_adjust_preview = None
         self._adjust_preview_stage_cache = None
         self._adjust_preview_stage_cache_fast = None
         if editing_features_enabled() and ImageAdjustPanelWidget is not None:
-            self.single_image_adjust_panel = ImageAdjustPanelWidget()
+            self.single_image_adjust_histogram = ImageHistogramWidget()
+            self.single_image_adjust_panel = ImageAdjustPanelWidget(
+                histogram_widget=self.single_image_adjust_histogram
+            )
             self.single_image_adjust_panel.setFocusPolicy(Qt.FocusPolicy.NoFocus)
             self.single_image_adjust_panel.hide()
             self.single_image_adjust_panel.editing_finished.connect(
@@ -8134,6 +8150,12 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             )
             self.single_image_adjust_panel.dodge_burn_clear_requested.connect(
                 self._on_dodge_burn_clear_requested
+            )
+            self.single_image_adjust_panel.dodgeBurnMaskToggled.connect(
+                self._on_dodge_burn_mask_toggled
+            )
+            self.single_image_adjust_panel.reset_requested.connect(
+                self._on_adjust_panel_reset
             )
             self._adjust_edit_base_signals = _AdjustEditBaseSignals()
             self._adjust_edit_base_signals.finished.connect(self._on_adjust_edit_base_ready)
@@ -8192,10 +8214,21 @@ class RAWImageViewer(SessionMixin, QMainWindow):
 
         self.single_view_container = SingleImageViewOverlay(
             self.scroll_area, self.single_image_histogram, viewer=self,
-            gpu_view=self.gpu_view, map_widget=self.single_image_location_map,
-            adjust_widget=self.single_image_adjust_panel)
+            gpu_view=self.gpu_view, map_widget=self.single_image_location_map)
         self._wire_filmstrip()
-        main_layout.addWidget(self.single_view_container)
+        
+        self.single_view_splitter = QSplitter(Qt.Orientation.Horizontal)
+        self.single_view_splitter.addWidget(self.single_view_container)
+        if self.single_image_adjust_panel is not None:
+            # None on browse-only builds (RAWVIEWER_ENABLE_EDITING=0, the
+            # default) -- QSplitter.addWidget(None) segfaults at the sip
+            # binding layer rather than raising a catchable Python error.
+            self.single_view_splitter.addWidget(self.single_image_adjust_panel)
+        # Give most space to the image viewer, but allow the panel to expand/shrink within its limits.
+        self.single_view_splitter.setStretchFactor(0, 1)
+        self.single_view_splitter.setStretchFactor(1, 0)
+        
+        main_layout.addWidget(self.single_view_splitter)
         self._init_compare_view(main_layout)
         QTimer.singleShot(800, self._show_edr_startup_status)
         # --- Status bar with darkroom styling (see theme.py) ---
@@ -14622,6 +14655,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
     #     """Create a single gallery item with thumbnail"""
     #     pass  # Gallery functionality disabled
         from PyQt6.QtWidgets import QWidget, QVBoxLayout, QLabel
+        from rawviewer_app.widgets import BottomRatingWidget
         from PyQt6.QtCore import Qt
         
         item = QWidget()
@@ -19210,6 +19244,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
     def _sync_single_image_histogram(self):
         """Refresh histogram from current_pixmap when in single-image mode."""
         w = getattr(self, "single_image_histogram", None)
+        w_adj = getattr(self, "single_image_adjust_histogram", None)
         if w is None:
             return
         if getattr(self, "view_mode", "single") != "single":
@@ -19219,6 +19254,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             w.clear()
             w.setEnabled(False)
             w.setVisible(False)
+            if w_adj:
+                w_adj.clear()
             c = getattr(self, "single_view_container", None)
             if c is not None and hasattr(c, "relayout_histogram"):
                 c.relayout_histogram()
@@ -19228,8 +19265,17 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 self._histogram_overlay_visible = False
             else:
                 self._histogram_overlay_visible = True
-            w.setVisible(getattr(self, "_histogram_overlay_visible", False))
+            
+            # Hide floating histogram if adjust panel is visible
+            panel = getattr(self, "single_image_adjust_panel", None)
+            if panel and panel.isVisible():
+                w.setVisible(False)
+            else:
+                w.setVisible(getattr(self, "_histogram_overlay_visible", False))
+                
             w.set_pixmap(pm)
+            if w_adj:
+                w_adj.set_pixmap(pm)
             c = getattr(self, "single_view_container", None)
             if c is not None and hasattr(c, "relayout_histogram"):
                 c.relayout_histogram()
@@ -19260,6 +19306,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         bar = self._filmstrip_bar()
         if self._adjust_overlay_visible and self._single_view_has_display_image():
             panel.setVisible(True)
+            self.single_image_histogram.hide()
             self._sync_adjust_panel_for_current_file()
             path = getattr(self, "current_file_path", None)
             if path:
@@ -19281,6 +19328,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             if gv is not None and gv.is_color_pick_mode():
                 self._cancel_wb_picker()
             panel.setVisible(False)
+            if getattr(self, "_histogram_overlay_visible", False):
+                self.single_image_histogram.show()
             if not self._adjust_overlay_visible:
                 self._adjust_preview_base_rgb = None
                 self._adjust_preview_base_rgb_fast = None
@@ -19475,6 +19524,15 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             self.image_manager.cancel_task(file_path)
         except Exception:
             pass
+        # Cancelling the task above can strand the generic single-view
+        # "Loading Image..." overlay forever: it was shown by the reload
+        # that toggle_raw_jpeg_workflow() just dispatched (opening the
+        # editor forces RAW mode first), and its own completion callback
+        # -- the only thing that would hide it -- never fires once its
+        # task is cancelled here. The edit-base decode reports its own
+        # progress via the status bar, so the overlay isn't needed for it.
+        if hasattr(self, "loading_overlay"):
+            self.loading_overlay.hide_loading()
         self._defer_sensor_full_decode_path = None
         self._sensor_full_decode_queued_norm = None
         self._adjust_preview_base_rgb = None
@@ -19600,10 +19658,33 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         if panel is not None:
             panel.set_lens_correction_available(has_lens_profile, lens_profile_name)
         if base is None or not hasattr(base, "shape"):
+            # Silent handling: an edit-base decode failure used to just show
+            # a 5s error and leave the editor stuck on the broken file (no
+            # image, no way forward except manually navigating away).
+            # _editing_supported_for_file/_advance_index_past_unsupported_
+            # for_editing already skip files known unsupported BEFORE a
+            # decode is attempted (animated images, DNGs preferring the
+            # embedded preview, RAWs already in _LIBRAW_UNSUPPORTED_PATHS);
+            # this covers the remaining case -- a RAW variant that only
+            # reveals it can't be edited once LibRaw actually tries and
+            # fails for a reason decode_raw_edit_base's own "unsupported"/
+            # "not recognized" substring match didn't catch (corrupt file,
+            # decode timeout, ...). Mark it unsupported here too, then move
+            # on to the next editable image exactly like the pre-emptive
+            # skip does, instead of leaving the editor stuck.
+            try:
+                from unified_image_processor import _LIBRAW_UNSUPPORTED_PATHS
+
+                _LIBRAW_UNSUPPORTED_PATHS.add(os.path.normcase(os.path.abspath(file_path)))
+            except Exception:
+                pass
             if hasattr(self, "status_bar"):
                 self.status_bar.showMessage(
-                    "Could not decode RAW for editing", 5000
+                    f"Skipped {os.path.basename(file_path)} (not editable)", 3000
                 )
+            # (norm already matches current_file_path -- checked above.)
+            if self._adjust_panel_active() and self.image_files and len(self.image_files) > 1:
+                self.navigate_to_next_image()
             return
         self._adjust_preview_base_rgb = base
         self._adjust_edit_base_path = norm
@@ -19751,6 +19832,25 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         gv = getattr(self, "gpu_view", None)
         if gv is not None:
             gv.set_dodge_burn_mode(mode is not None)
+            self._apply_adjust_panel_preview()
+
+    def _on_dodge_burn_mask_toggled(self, show: bool) -> None:
+        gv = getattr(self, "gpu_view", None)
+        if gv is not None:
+            gv.set_dodge_burn_mask_overlay(getattr(self, "_dodge_burn_mask", None), show)
+
+    def _on_adjust_panel_reset(self) -> None:
+        """The panel's Reset button rebuilds a clean adjustments dict, but
+        the dodge/burn mask itself lives here (self._dodge_burn_mask), not
+        in that dict -- _dodge_burn_overlay_adj() re-injects it into every
+        render regardless of what the panel says, so a full Reset silently
+        left a previously painted mask in place. Clear it here too."""
+        if getattr(self, "_dodge_burn_mask", None) is None:
+            return
+        self._dodge_burn_mask = None
+        panel = getattr(self, "single_image_adjust_panel", None)
+        if panel is not None:
+            panel.set_dodge_burn_mask_present(False)
 
     def _on_dodge_burn_clear_requested(self) -> None:
         if getattr(self, "_dodge_burn_mask", None) is None:
@@ -19827,7 +19927,13 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 if px1 > px0 and py1 > py0:
                     patch = arr[py0:py1, px0:px1].astype(np.float32) / 255.0
                     stops = float(last_adj.get("DodgeBurnStrength", 1.75))
-                    patched = apply_dodge_burn(patch, mask, stops)
+                    m_x0, m_y0 = int(px0 * sx), int(py0 * sy)
+                    m_x1, m_y1 = int(px1 * sx), int(py1 * sy)
+                    m_patch = mask.data[m_y0:m_y1, m_x0:m_x1]
+                    if m_patch.size > 0:
+                        patched = apply_dodge_burn(patch, DodgeBurnMask(m_patch), stops)
+                    else:
+                        patched = patch
                     # patch already carries any prior dodge/burn baked in
                     # from the exact render, so re-applying the FULL mask
                     # here (not just this stamp's delta) would double the
@@ -19893,6 +19999,35 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         if getattr(self, "_adjust_preview_dirty", False):
             self._apply_adjust_panel_preview(full_quality=dirty_full_quality)
 
+    def _dodge_burn_overlay_adj(self, adj: dict) -> dict:
+        """Fold main.py's dodge/burn mask state into an adjustments dict.
+
+        The mask lives in main.py (painted via the GPU view), not on any
+        panel widget -- ``panel.get_adjustments()`` has no way to include
+        it. Every render/export/save path must therefore route its ``adj``
+        dict through here before use: without this, the mask reaches the
+        XMP sidecar (the one place it used to be injected, in
+        _on_adjust_panel_editing_finished) but never the actual rendered
+        pixels, since process_linear_edit_buffer only applies it when
+        adj[MASK_KEY] is present. The symptom was the brush effect visibly
+        flashing in (the instant on-canvas approximation drawn directly by
+        _on_dodge_burn_stroke) and then vanishing the moment the next real
+        worker-rendered frame landed -- every render request funnels
+        through _apply_adjust_panel_preview, which called this exact
+        function's-worth of logic nowhere.
+        """
+        from raw_dodge_burn import DEFAULT_STRENGTH, MASK_KEY, STRENGTH_KEY, serialize_mask
+
+        mask = getattr(self, "_dodge_burn_mask", None)
+        if mask is not None and not mask.is_empty:
+            adj = dict(adj)
+            adj[MASK_KEY] = serialize_mask(mask)
+            adj.setdefault(STRENGTH_KEY, DEFAULT_STRENGTH)
+        elif MASK_KEY in adj:
+            adj = dict(adj)
+            del adj[MASK_KEY]
+        return adj
+
     def _apply_adjust_panel_preview(self, *, full_quality: bool = False) -> None:
         panel = getattr(self, "single_image_adjust_panel", None)
         path = getattr(self, "current_file_path", None)
@@ -19904,6 +20039,10 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             adj = getattr(self, "_pending_adjust_preview", None)
         if adj is None:
             return
+        try:
+            adj = self._dodge_burn_overlay_adj(adj)
+        except Exception:
+            pass
         self._pending_adjust_preview = dict(adj)
         norm = _norm_path(path)
         base_full = getattr(self, "_adjust_preview_base_rgb", None)
@@ -20047,6 +20186,14 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             elif MASK_KEY in adj:
                 adj = dict(adj)
                 del adj[MASK_KEY]
+
+            # The dodge/burn mask lives in main.py state (painted via the
+            # GPU view, not a panel slider) -- fold it into whatever this
+            # save already writes so every save (slider release, brush
+            # stroke end, clear) persists the current mask consistently.
+            # Shared with _apply_adjust_panel_preview's render dispatch so
+            # the saved file and the on-screen render can never disagree.
+            adj = self._dodge_burn_overlay_adj(adj)
 
             write_xmp_adjustments_for_file(path, adj)
         except Exception as exc:
@@ -20368,6 +20515,14 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             self.status_bar.showMessage(
                 f"Exporting {os.path.basename(output_path)}…", 0
             )
+        # adj comes straight from the panel's export_requested signal, which
+        # (like every other adjustments snapshot) has no knowledge of the
+        # dodge/burn mask -- without this, exported files would silently
+        # drop any dodge/burn brush work. See _dodge_burn_overlay_adj.
+        try:
+            adj = self._dodge_burn_overlay_adj(adj)
+        except Exception:
+            pass
         pool = getattr(getattr(self, "image_manager", None), "_process_pool", None)
         worker = _AdjustExportWorker(
             path,
@@ -20476,6 +20631,9 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         w = getattr(self, "single_image_histogram", None)
         if w is not None:
             w.clear()
+        w_adj = getattr(self, "single_image_adjust_histogram", None)
+        if w_adj is not None:
+            w_adj.clear()
             w.setEnabled(False)
             w.setVisible(False)
             c = getattr(self, "single_view_container", None)
@@ -24943,6 +25101,18 @@ class RAWImageViewer(SessionMixin, QMainWindow):
     def _update_single_view_rating_display(self, rating: int):
         """Update the bottom-bar star rating control for the current image."""
         self._set_rating_stars_display(rating)
+
+    def _get_current_image_rating(self) -> int:
+        """Current image's star rating (0 = unrated), same exif-cache lookup
+        used when a file is first loaded (see _display_image's cached_exif
+        read)."""
+        path = getattr(self, "current_file_path", None)
+        if not path:
+            return 0
+        cached_exif = self.image_cache.get_exif(path)
+        if not cached_exif:
+            return 0
+        return cached_exif.get('rating', 0) or 0
 
     def _restore_keyboard_focus(self) -> None:
         """Return keyboard focus to the active view surface (gallery or single image)."""
