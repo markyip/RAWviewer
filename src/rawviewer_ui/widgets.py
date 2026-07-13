@@ -38,7 +38,6 @@ class ThumbnailLabel(QLabel):
         super().__init__(parent)
         self.original_pixmap = None
         self._gallery_selected = False
-        self._gallery_bookmarked = False
         self._gallery_edited = False
         self._gallery_rating = 0
         self._burst_stack_count = 0
@@ -139,10 +138,6 @@ class ThumbnailLabel(QLabel):
             self._STYLE_SELECTED if self._gallery_selected else self._STYLE_DEFAULT
         )
 
-    def set_gallery_bookmarked(self, bookmarked: bool) -> None:
-        self._gallery_bookmarked = bool(bookmarked)
-        self._update_bookmark_badge()
-
     def set_gallery_edited(self, edited: bool) -> None:
         self._gallery_edited = bool(edited)
         self._update_edited_badge()
@@ -158,7 +153,7 @@ class ThumbnailLabel(QLabel):
             if badge is None:
                 badge = QLabel(self)
                 # Rating is a mark already decided about a photo -- dodge,
-                # same family as the bookmark/edited badges (rule 4).
+                # same family as the edited badge (rule 4).
                 badge.setStyleSheet(
                     f"color: {theme.DODGE}; font-size: 9px; font-weight: 700;"
                     f" background: rgba({theme.VOID_RGB[0]}, {theme.VOID_RGB[1]}, {theme.VOID_RGB[2]}, 0.72);"
@@ -216,37 +211,6 @@ class ThumbnailLabel(QLabel):
         badge.move(max(0, margin), max(0, margin))
         badge.raise_()
 
-    def _update_bookmark_badge(self) -> None:
-        badge = getattr(self, "_bookmark_badge", None)
-        if self._gallery_bookmarked:
-            if badge is None:
-                badge = QLabel("★", self)
-                # Bookmark is a mark already decided about a photo -- dodge,
-                # not ember (rule 4: marks and actions don't share a color).
-                badge.setStyleSheet(
-                    f"color: {theme.DODGE}; font-size: 14px; font-weight: 700;"
-                    " background: transparent; border: none;"
-                )
-                badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
-                self._bookmark_badge = badge
-            badge.show()
-            self._position_bookmark_badge()
-        elif badge is not None:
-            badge.hide()
-
-    def _position_bookmark_badge(self) -> None:
-        badge = getattr(self, "_bookmark_badge", None)
-        if badge is None or not badge.isVisible():
-            return
-        size = 16
-        margin = 2
-        badge.setFixedSize(size, size)
-        badge.move(
-            max(0, self.width() - size - margin),
-            max(0, self.height() - size - margin),
-        )
-        badge.raise_()
-
     def _update_edited_badge(self) -> None:
         """Lightweight 'has saved RAW adjustments' hint (pencil dot) — does not
         change the thumbnail pixels; see docs/EDIT_PIPELINE.md for why
@@ -281,7 +245,6 @@ class ThumbnailLabel(QLabel):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        self._position_bookmark_badge()
         self._position_burst_stack_badge()
         self._position_edited_badge()
         self._position_rating_badge()

@@ -8285,7 +8285,6 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self.batch_mark_indicator.setObjectName("batchMarkIndicator")
         self.batch_mark_indicator.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         self._bookmark_filter_star_icon = _qta_icon("fa5s.star", color=theme.DODGE)
-        self._bookmark_star_bookmarked_icon = _qta_icon("fa5s.star", color=theme.INK)
         try:
             self._bookmark_star_outline_icon = _qta_icon("mdi.star-outline", color=theme.INK_MUTED)
         except Exception:
@@ -8295,6 +8294,38 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self.batch_mark_indicator.clicked.connect(self._on_bookmark_slot_clicked)
         self.batch_mark_indicator.setToolTip("Bookmarked for opening in another app (↑ to toggle)")
         self.batch_mark_indicator.hide()
+
+        # Single-view rating control: 5 clickable stars replacing the old
+        # single bookmark-star indicator in this view (bookmark toggle stays
+        # keyboard-only there, via ↑; gallery mode's batch_mark_indicator is
+        # unaffected).
+        self.single_view_rating_stars = QWidget()
+        self.single_view_rating_stars.setObjectName("singleViewRatingStars")
+        _rating_stars_layout = QHBoxLayout(self.single_view_rating_stars)
+        _rating_stars_layout.setContentsMargins(0, 0, 0, 0)
+        _rating_stars_layout.setSpacing(0)
+        self._rating_star_filled_icon = _qta_icon("fa5s.star", color=theme.DODGE)
+        self._rating_star_empty_icon = self._bookmark_star_outline_icon
+        self._rating_star_buttons = []
+        for _star_n in range(1, 6):
+            _star_btn = QPushButton()
+            _star_btn.setObjectName("ratingStarButton")
+            _star_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+            _star_btn.setFlat(True)
+            _star_btn.setFixedSize(20, 28)
+            _star_btn.setIconSize(QSize(13, 13))
+            _star_btn.setIcon(self._rating_star_empty_icon)
+            _star_btn.setStyleSheet(
+                "QPushButton { background: transparent; border: none; }"
+                f" QPushButton:hover {{ background: {theme.rgba(theme.INK_RGB, 18)}; border-radius: 3px; }}"
+            )
+            _star_btn.setToolTip(f"Rate {_star_n} star{'s' if _star_n != 1 else ''} ({_star_n})")
+            _star_btn.clicked.connect(
+                lambda checked=False, n=_star_n: self._on_rating_star_clicked(n)
+            )
+            self._rating_star_buttons.append(_star_btn)
+            _rating_stars_layout.addWidget(_star_btn, 0, alignment=Qt.AlignmentFlag.AlignVCenter)
+        self.single_view_rating_stars.hide()
 
         self.slideshow_bottom_button = QPushButton()
         self.slideshow_bottom_button.setObjectName("slideshowBottomButton")
@@ -8625,6 +8656,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             self.compare_bottom_button, 0, alignment=Qt.AlignmentFlag.AlignVCenter)
         right_status_actions_layout.addWidget(
             self.batch_mark_indicator, 0, alignment=Qt.AlignmentFlag.AlignVCenter)
+        right_status_actions_layout.addWidget(
+            self.single_view_rating_stars, 0, alignment=Qt.AlignmentFlag.AlignVCenter)
         right_status_actions_layout.addWidget(
             self.share_bottom_button, 0, alignment=Qt.AlignmentFlag.AlignVCenter)
         right_status_actions_layout.addWidget(
@@ -14684,7 +14717,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                     else:
                         hint = "Compare selection (C) · Share · Delete/Down"
             else:
-                hint = "Share — open in editor, Delete/Down bulk actions (↑ toggles, ★ in bar)"
+                hint = "Share — open in editor, Delete/Down bulk actions (↑ toggles bookmark)"
             self.status_bar.showMessage(
                 f"{n} image{'s' if n != 1 else ''} selected — {hint}",
                 5000,
@@ -14769,12 +14802,6 @@ class RAWImageViewer(SessionMixin, QMainWindow):
 
     def _gallery_bookmarked_canonical_paths(self) -> List[str]:
         return self._filter_paths_to_bookmarked(list(getattr(self, "image_files", []) or []))
-
-    def _current_image_bookmarked(self) -> bool:
-        path = getattr(self, "current_file_path", None)
-        if not path:
-            return False
-        return _norm_path(path) in getattr(self, "_gallery_bookmarked_paths", set())
 
     def _gallery_files_for_display(self) -> List[str]:
         """Gallery file list, optionally narrowed to bookmarked images only."""
@@ -14968,29 +14995,51 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             else:
                 self.status_bar.showMessage("Showing all images", 2000)
 
+    def _sync_single_view_rating_stars(self) -> None:
+        widget = getattr(self, "single_view_rating_stars", None)
+        if widget is None:
+            return
+        in_single = getattr(self, "view_mode", "single") == "single"
+        has_files = bool(getattr(self, "image_files", None))
+        if not in_single or not has_files:
+            widget.hide()
+            return
+        widget.show()
+        path = getattr(self, "current_file_path", None)
+        rating = self._gallery_path_rating(path) if path else 0
+        self._set_rating_stars_display(rating)
+
+    def _set_rating_stars_display(self, rating: int) -> None:
+        buttons = getattr(self, "_rating_star_buttons", None)
+        if not buttons:
+            return
+        r = max(0, min(5, int(rating or 0)))
+        filled = getattr(self, "_rating_star_filled_icon", None)
+        empty = getattr(self, "_rating_star_empty_icon", None)
+        for i, btn in enumerate(buttons, start=1):
+            btn.setIcon((filled if i <= r else empty) or QIcon())
+
+    def _on_rating_star_clicked(self, n: int) -> None:
+        path = getattr(self, "current_file_path", None)
+        if not path:
+            return
+        current = self._gallery_path_rating(path)
+        self.rate_current_image(0 if current == n else n)
+
     def _sync_bookmark_indicator(self) -> None:
+        self._sync_single_view_rating_stars()
         btn = getattr(self, "batch_mark_indicator", None)
         if btn is None:
             return
         in_single = getattr(self, "view_mode", "single") == "single"
         in_gallery = getattr(self, "view_mode", "") == "gallery"
         has_files = bool(getattr(self, "image_files", None))
-        if not has_files or (not in_single and not in_gallery):
+        if not has_files or in_single or not in_gallery:
             btn.hide()
             return
         btn.show()
         btn.setFixedSize(28, 28)
         btn.setIconSize(QSize(20, 20))
-        if in_single:
-            btn.setEnabled(True)
-            btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-            if self._current_image_bookmarked():
-                btn.setIcon(getattr(self, "_bookmark_star_bookmarked_icon", QIcon()))
-                btn.setToolTip("Bookmarked — click star or ↑ to remove")
-            else:
-                btn.setIcon(getattr(self, "_bookmark_star_outline_icon", QIcon()))
-                btn.setToolTip("Bookmark for opening in another app — click star or ↑")
-            return
         filter_active = getattr(self, "_gallery_bookmark_filter_active", False)
         if not self._gallery_has_bookmarks() and not filter_active and not self._gallery_has_selection():
             btn.hide()
@@ -24665,9 +24714,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self.status_bar.showMessage(f"Rating set to: {stars_str}", 2000)
 
     def _update_single_view_rating_display(self, rating: int):
-        """Update the floating rating badge display in the single view container."""
-        if hasattr(self, "single_view_container") and self.single_view_container is not None:
-            self.single_view_container.set_rating(rating)
+        """Update the bottom-bar star rating control for the current image."""
+        self._set_rating_stars_display(rating)
 
     def _restore_keyboard_focus(self) -> None:
         """Return keyboard focus to the active view surface (gallery or single image)."""

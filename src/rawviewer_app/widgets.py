@@ -1105,24 +1105,7 @@ class SingleImageViewOverlay(QWidget):
         self._show_filmstrip_timer.setSingleShot(True)
         self._show_filmstrip_timer.timeout.connect(self._show_filmstrip_if_still_in_hotzone)
 
-        # Floating star rating badge overlay
         from PyQt6.QtWidgets import QLabel
-        self.rating_badge = QLabel(self)
-        self.rating_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        # Rating badge is a status mark (rule: marks get DODGE, not EMBER --
-        # EMBER stays reserved for selection/active-tool state only).
-        self.rating_badge.setStyleSheet(f"""
-            QLabel {{
-                background-color: {theme.rgba(theme.VOID_RGB, 210)};
-                color: {theme.DODGE};
-                font-size: 16px;
-                font-weight: bold;
-                border-radius: 4px;
-                padding: 4px 10px;
-                border: 1px solid {theme.rgba(theme.DODGE_RGB, 90)};
-            }}
-        """)
-        self.rating_badge.hide()
 
         self.recovery_badge = QLabel(self)
         self.recovery_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -1494,7 +1477,6 @@ class SingleImageViewOverlay(QWidget):
         self._layout_histogram()
         self._layout_map()
         self._layout_adjust()
-        self.relayout_rating_badge()
         self.relayout_recovery_badge()
         self._raise_single_view_layers()
 
@@ -1516,8 +1498,6 @@ class SingleImageViewOverlay(QWidget):
         self._scroll.lower()
         if self._gpu_view is not None and self._gpu_view.isVisible():
             self._gpu_view.raise_()
-        if hasattr(self, "rating_badge") and self.rating_badge.isVisible():
-            self.rating_badge.raise_()
         if hasattr(self, "recovery_badge") and self.recovery_badge.isVisible():
             self.recovery_badge.raise_()
         if self._map is not None and self._map.isVisible():
@@ -1707,25 +1687,6 @@ class SingleImageViewOverlay(QWidget):
 
     def relayout_histogram(self):
         self._layout_histogram()
-
-    def set_rating(self, rating: int) -> None:
-        """Set the star rating on the overlay badge."""
-        if not hasattr(self, "rating_badge") or self.rating_badge is None:
-            return
-        r = max(0, min(5, int(rating)))
-        if r > 0:
-            self.rating_badge.setText("⭐" * r)
-            self.rating_badge.adjustSize()
-            self.rating_badge.show()
-            self.rating_badge.raise_()
-            self.relayout_rating_badge()
-        else:
-            self.rating_badge.hide()
-
-    def relayout_rating_badge(self):
-        """Place rating badge float at top-left with custom margin."""
-        if hasattr(self, "rating_badge") and self.rating_badge and self.rating_badge.isVisible():
-            self.rating_badge.move(14, 14)
 
 
 # -----------------------------
