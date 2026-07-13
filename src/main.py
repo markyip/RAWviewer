@@ -23465,46 +23465,55 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                         pm_h = int(pm.height()) if pm is not None and not pm.isNull() else 0
                         gv = getattr(self, "gpu_view", None)
                         gpu_has = bool(gv is not None and gv.has_pixmap())
+                        pixels_on_screen_now = self._single_view_pixels_on_screen(cur_path)
                         ttfr_msg = (
                             f"[TTFR] load->first-render: {elapsed:.3f}s "
                             f"file={os.path.basename(cur_path) if cur_path else '<unknown>'} "
                             f"pixmap={pm_w}x{pm_h} gpu_has_pixmap={gpu_has} "
-                            f"pixels_on_screen={self._single_view_pixels_on_screen(cur_path)}"
+                            f"pixels_on_screen={pixels_on_screen_now}"
                         )
                         logger.info(ttfr_msg)
                         safe_print(ttfr_msg, flush=True)
-                        self._single_view_first_render_logged = True
-                        # Navigation-instruction -> image-on-screen latency
-                        # (user-facing responsiveness metric; includes queueing,
-                        # decode, and pixmap conversion). Shown in the status
-                        # bar in dev mode for live tuning.
-                        nav_ts = float(getattr(self, "_nav_instruction_ts", 0.0) or 0.0)
-                        if nav_ts > 0.0:
-                            nav_elapsed = max(0.0, time.time() - nav_ts)
-                            self._nav_instruction_ts = 0.0
-                            nav_msg = (
-                                f"[NAVTIME] navigation->display: {nav_elapsed:.3f}s "
-                                f"file={os.path.basename(cur_path)} pixmap={pm_w}x{pm_h}"
-                            )
-                            logger.info(nav_msg)
-                            try:
-                                from perf_metrics import perf_mark
+                        # Only disarm the TTFR watchdog once pixels are actually on screen.
+                        # This callback also fires from "already displaying, nothing to
+                        # redraw" shortcuts (e.g. _display_cached_numpy_for_path) and from
+                        # a still-in-flight background QPixmap conversion -- marking the
+                        # flag True on those would permanently disable the watchdog's
+                        # timeout recovery for a file that never actually painted, leaving
+                        # the view stuck (observed under rapid mouse/filmstrip navigation).
+                        if pixels_on_screen_now:
+                            self._single_view_first_render_logged = True
+                            # Navigation-instruction -> image-on-screen latency
+                            # (user-facing responsiveness metric; includes queueing,
+                            # decode, and pixmap conversion). Shown in the status
+                            # bar in dev mode for live tuning.
+                            nav_ts = float(getattr(self, "_nav_instruction_ts", 0.0) or 0.0)
+                            if nav_ts > 0.0:
+                                nav_elapsed = max(0.0, time.time() - nav_ts)
+                                self._nav_instruction_ts = 0.0
+                                nav_msg = (
+                                    f"[NAVTIME] navigation->display: {nav_elapsed:.3f}s "
+                                    f"file={os.path.basename(cur_path)} pixmap={pm_w}x{pm_h}"
+                                )
+                                logger.info(nav_msg)
+                                try:
+                                    from perf_metrics import perf_mark
 
-                                perf_mark(
-                                    "nav_to_display",
-                                    nav_elapsed * 1000.0,
-                                    cur_path,
-                                    px=f"{pm_w}x{pm_h}",
-                                )
-                            except Exception:
-                                pass
-                            if os.environ.get("RAWVIEWER_DEBUG", "").strip() == "1" and hasattr(
-                                self, "status_bar"
-                            ):
-                                self.status_bar.showMessage(
-                                    f"nav→display {nav_elapsed*1000:.0f} ms ({pm_w}x{pm_h})",
-                                    2500,
-                                )
+                                    perf_mark(
+                                        "nav_to_display",
+                                        nav_elapsed * 1000.0,
+                                        cur_path,
+                                        px=f"{pm_w}x{pm_h}",
+                                    )
+                                except Exception:
+                                    pass
+                                if os.environ.get("RAWVIEWER_DEBUG", "").strip() == "1" and hasattr(
+                                    self, "status_bar"
+                                ):
+                                    self.status_bar.showMessage(
+                                        f"nav→display {nav_elapsed*1000:.0f} ms ({pm_w}x{pm_h})",
+                                        2500,
+                                    )
         except Exception:
             pass
 
