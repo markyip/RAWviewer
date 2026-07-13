@@ -7,6 +7,13 @@ import os
 # silently wrong results). This flag keeps envs that haven't re-run the build
 # script bootable; a properly built env never exercises it.
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+
+# Darkroom chrome palette (see theme.py). Zero-dependency module (no PyQt
+# imports), safe this early -- needed before PyQt6 import below because the
+# fallback splash-screen drawing code runs at module scope, ahead of any
+# other local import in this file.
+import theme
+
 # torch/kornia are no longer imported eagerly here (that used to cost ~0.9s
 # before the window could even be constructed, on every launch). Import
 # ordering safety is now handled by torch_bootstrap: the main thread imports
@@ -197,9 +204,9 @@ if _IS_GUI_MAIN_PROCESS:
                 )
         else:
             _splash_pixmap = QPixmap(400, 400)
-            _splash_pixmap.fill(QColor(30, 30, 30))
+            _splash_pixmap.fill(QColor(*theme.VOID_RGB))
             _painter = QPainter(_splash_pixmap)
-            _painter.setPen(QPen(QColor(70, 130, 180), 4))
+            _painter.setPen(QPen(QColor(*theme.INK_RGB), 4))
             _font = _painter.font()
             _font.setPointSize(48)
             _font.setBold(True)
@@ -812,7 +819,7 @@ from PyQt6.QtGui import (QPixmap, QImage, QAction, QKeySequence, QShortcut, QDra
 safe_print("PyQt6 imported successfully", flush=True)
 
 
-def _qta_icon(name: str, *, color: str = "#B0B0B0") -> QIcon:
+def _qta_icon(name: str, *, color: str = theme.INK_MUTED) -> QIcon:
     """qtawesome icon with a stable PyQt6 QIcon type for the type checker."""
     if qta is None:
         return QIcon()
@@ -4543,7 +4550,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
 
         container = QWidget()
         container.setObjectName("rawviewer_compare_container")
-        container.setStyleSheet("QWidget { background-color: #1E1E1E; }")
+        container.setStyleSheet(f"QWidget {{ background-color: {theme.VOID}; }}")
         row = QHBoxLayout(container)
         row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(0)
@@ -4571,7 +4578,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self._compare_complete_banner = QLabel("", container)
         self._compare_complete_banner.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._compare_complete_banner.setStyleSheet(
-            "color: #E0E0E0; font-size: 15px; font-weight: 500; background: rgba(0,0,0,0.55);"
+            f"color: {theme.INK}; font-size: 15px; font-weight: 500; background: rgba(0,0,0,0.55);"
             " padding: 12px 18px; border-radius: 8px;"
         )
         self._compare_complete_banner.hide()
@@ -4603,7 +4610,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         try:
             import qtawesome as qta
 
-            color = "#FFFFFF" if enabled else "#888888"
+            color = theme.INK if enabled else theme.INK_FAINT
             btn.blockSignals(True)
             btn.setChecked(enabled)
             btn.setIcon(_qta_icon("fa5s.layer-group", color=color))
@@ -4890,7 +4897,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 self.view_mode_button.setToolTip("Back to main gallery")
                 if qta is not None:
                     try:
-                        self.view_mode_button.setIcon(_qta_icon("fa5s.th", color="#B0B0B0"))
+                        self.view_mode_button.setIcon(_qta_icon("fa5s.th", color=theme.INK_MUTED))
                         self.view_mode_button.setIconSize(QSize(20, 20))
                         self.view_mode_button.setText("")
                     except Exception:
@@ -7815,18 +7822,18 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self.setWindowTitle('RAWviewer')
         
         # Set simple background style (no rounded corners - simplifies window resizing)
-        self.setStyleSheet("""
-            QMainWindow {
-                background-color: #1E1E1E;
-            }
-            QToolTip {
-                color: #E0E0E0;
-                background-color: #2A2A2A;
-                border: 1px solid #444444;
+        self.setStyleSheet(f"""
+            QMainWindow {{
+                background-color: {theme.VOID};
+            }}
+            QToolTip {{
+                color: {theme.INK};
+                background-color: {theme.SURFACE};
+                border: 1px solid {theme.LINE};
                 border-radius: 4px;
                 padding: 0px;
                 font-size: 12px;
-            }
+            }}
         """)
         
         # Set icon based on platform and available files
@@ -7937,70 +7944,70 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self.scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         # Apply Material Design 3 scrollbar styling
-        self.scroll_area.setStyleSheet("""
-            QScrollArea {
+        self.scroll_area.setStyleSheet(f"""
+            QScrollArea {{
                 border: none;
-                background-color: #1E1E1E;
-            }
-            QScrollArea > QWidget > QWidget {
+                background-color: {theme.VOID};
+            }}
+            QScrollArea > QWidget > QWidget {{
                 border: none;
-                background-color: #1E1E1E;
-            }
+                background-color: {theme.VOID};
+            }}
             /* Material Design 3 Scrollbar Styling */
-            QScrollBar:vertical {
+            QScrollBar:vertical {{
                 background: transparent;
                 width: 12px;
                 margin: 0px;
                 border: none;
-            }
-            QScrollBar::handle:vertical {
+            }}
+            QScrollBar::handle:vertical {{
                 background: rgba(255, 255, 255, 0.2);
                 min-height: 30px;
                 border-radius: 6px;
                 margin: 2px;
-            }
-            QScrollBar::handle:vertical:hover {
+            }}
+            QScrollBar::handle:vertical:hover {{
                 background: rgba(255, 255, 255, 0.3);
-            }
-            QScrollBar::handle:vertical:pressed {
+            }}
+            QScrollBar::handle:vertical:pressed {{
                 background: rgba(255, 255, 255, 0.4);
-            }
+            }}
             QScrollBar::add-line:vertical,
-            QScrollBar::sub-line:vertical {
+            QScrollBar::sub-line:vertical {{
                 height: 0px;
                 width: 0px;
-            }
+            }}
             QScrollBar::add-page:vertical,
-            QScrollBar::sub-page:vertical {
+            QScrollBar::sub-page:vertical {{
                 background: transparent;
-            }
-            QScrollBar:horizontal {
+            }}
+            QScrollBar:horizontal {{
                 background: transparent;
                 height: 12px;
                 margin: 0px;
                 border: none;
-            }
-            QScrollBar::handle:horizontal {
+            }}
+            QScrollBar::handle:horizontal {{
                 background: rgba(255, 255, 255, 0.2);
                 min-width: 30px;
                 border-radius: 6px;
                 margin: 2px;
-            }
-            QScrollBar::handle:horizontal:hover {
+            }}
+            QScrollBar::handle:horizontal:hover {{
                 background: rgba(255, 255, 255, 0.3);
-            }
-            QScrollBar::handle:horizontal:pressed {
+            }}
+            QScrollBar::handle:horizontal:pressed {{
                 background: rgba(255, 255, 255, 0.4);
-            }
+            }}
             QScrollBar::add-line:horizontal,
-            QScrollBar::sub-line:horizontal {
+            QScrollBar::sub-line:horizontal {{
                 height: 0px;
                 width: 0px;
-            }
+            }}
             QScrollBar::add-page:horizontal,
-            QScrollBar::sub-page:horizontal {
+            QScrollBar::sub-page:horizontal {{
                 background: transparent;
-            }
+            }}
         """)
         self.image_label = QLabel()
         # Center the label in viewport, but left-align the text content
@@ -8133,13 +8140,12 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         main_layout.addWidget(self.single_view_container)
         self._init_compare_view(main_layout)
         QTimer.singleShot(800, self._show_edr_startup_status)
-        # --- Status bar with Material Design 3 styling ---
-        # Material Design 3 color scheme:
-        # - Surface: #1E1E1E (dark background)
-        # - On Surface: #E0E0E0 (primary text)
-        # - Surface Variant: #2A2A2A (elevated surface)
-        # - Outline: #2E2E2E (borders)
-        # - Secondary: #B0B0B0 (secondary text)
+        # --- Status bar with darkroom styling (see theme.py) ---
+        # - Surface: theme.VOID (dark background)
+        # - On Surface: theme.INK (primary text)
+        # - Surface Variant: theme.SURFACE (elevated surface)
+        # - Outline: theme.RAISED (borders)
+        # - Secondary: theme.INK_MUTED (secondary text)
         # Create status bar
         _status = self.statusBar()
         if _status is None:
@@ -8150,18 +8156,18 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         # Edge resize is handled on the frameless window; grip only adds dead space on the right.
         self.status_bar.setSizeGripEnabled(False)
         # Symmetric horizontal padding — was 20px right-only effective inset vs ~12px left.
-        self.status_bar.setStyleSheet("""
-            QStatusBar {
-                background-color: #1E1E1E !important;
-                color: #E0E0E0;
-                border-top: 1px solid #2E2E2E;
+        self.status_bar.setStyleSheet(f"""
+            QStatusBar {{
+                background-color: {theme.VOID} !important;
+                color: {theme.INK};
+                border-top: 1px solid {theme.RAISED};
                 padding: 10px 12px;
                 font-size: 13px;
                 font-weight: 400;
-            }
-            QStatusBar::item {
+            }}
+            QStatusBar::item {{
                 border: none;
-            }
+            }}
         """)
         
         # Create custom status bar widget with horizontal layout
@@ -8183,10 +8189,10 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         left_buttons_layout.setSpacing(8)
 
         import qtawesome as qta
-        bottom_icon_only_btn_style = """
+        bottom_icon_only_btn_style = f"""
             QPushButton,
-            QPushButton:flat {
-                color: #B0B0B0;
+            QPushButton:flat {{
+                color: {theme.INK_MUTED};
                 padding: 0px;
                 margin: 0px;
                 border: none;
@@ -8196,22 +8202,22 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 min-height: 28px;
                 max-height: 28px;
                 border-radius: 4px;
-            }
+            }}
             QPushButton:hover,
             QPushButton:flat:hover,
             QPushButton:hover:enabled,
-            QPushButton:flat:hover:enabled {
-                color: #E0E0E0;
+            QPushButton:flat:hover:enabled {{
+                color: {theme.INK};
                 padding: 0px;
                 margin: 0px;
                 background-color: rgba(255, 255, 255, 0.05);
-            }
+            }}
             QPushButton:pressed,
-            QPushButton:flat:pressed {
+            QPushButton:flat:pressed {{
                 padding: 0px;
                 margin: 0px;
                 background-color: rgba(255, 255, 255, 0.1);
-            }
+            }}
         """
         bottom_icon_btn_style = bottom_icon_only_btn_style
 
@@ -8226,7 +8232,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
 
         # Open button (left side) - Using qtawesome for reliability
         self.open_button = QPushButton()
-        self.open_button.setIcon(_qta_icon('fa5s.folder-open', color='#B0B0B0'))
+        self.open_button.setIcon(_qta_icon('fa5s.folder-open', color=theme.INK_MUTED))
         self.open_button.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         self.open_button.setToolTip("Open Image File")
         self.open_button.clicked.connect(self.open_file)
@@ -8238,7 +8244,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         # Use qtawesome icon if available, otherwise fallback to text
         if qta is not None:
             try:
-                gallery_icon = _qta_icon('fa5s.th', color='#B0B0B0')
+                gallery_icon = _qta_icon('fa5s.th', color=theme.INK_MUTED)
                 self.view_mode_button.setIcon(gallery_icon)
                 self.view_mode_button.setIconSize(QSize(20, 20))
             except Exception as e:
@@ -8255,7 +8261,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self.share_bottom_button = QPushButton()
         self.share_bottom_button.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         try:
-            self.share_bottom_button.setIcon(_qta_icon("fa5s.share-alt", color="#B0B0B0"))
+            self.share_bottom_button.setIcon(_qta_icon("fa5s.share-alt", color=theme.INK_MUTED))
         except Exception as e:
             safe_print(f"[WARNING] Share icon unavailable: {e}, using text fallback", flush=True)
             self.share_bottom_button.setText("Open")
@@ -8271,13 +8277,13 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self.batch_mark_indicator = QPushButton()
         self.batch_mark_indicator.setObjectName("batchMarkIndicator")
         self.batch_mark_indicator.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        self._bookmark_filter_star_icon = _qta_icon("fa5s.star", color="#FFD700")
-        self._bookmark_star_bookmarked_icon = _qta_icon("fa5s.star", color="#E0E0E0")
+        self._bookmark_filter_star_icon = _qta_icon("fa5s.star", color=theme.DODGE)
+        self._bookmark_star_bookmarked_icon = _qta_icon("fa5s.star", color=theme.INK)
         try:
-            self._bookmark_star_outline_icon = _qta_icon("mdi.star-outline", color="#B0B0B0")
+            self._bookmark_star_outline_icon = _qta_icon("mdi.star-outline", color=theme.INK_MUTED)
         except Exception:
             # fa5r/far regular fonts are not bundled in all qtawesome builds.
-            self._bookmark_star_outline_icon = _qta_icon("fa5s.star", color="#808080")
+            self._bookmark_star_outline_icon = _qta_icon("fa5s.star", color=theme.INK_FAINT)
         _style_bottom_icon_button(self.batch_mark_indicator)
         self.batch_mark_indicator.clicked.connect(self._on_bookmark_slot_clicked)
         self.batch_mark_indicator.setToolTip("Bookmarked for opening in another app (↑ to toggle)")
@@ -8286,7 +8292,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self.slideshow_bottom_button = QPushButton()
         self.slideshow_bottom_button.setObjectName("slideshowBottomButton")
         self.slideshow_bottom_button.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        self.slideshow_bottom_button.setIcon(_qta_icon("fa5s.play", color="#B0B0B0"))
+        self.slideshow_bottom_button.setIcon(_qta_icon("fa5s.play", color=theme.INK_MUTED))
         _style_bottom_icon_button(self.slideshow_bottom_button)
         self.slideshow_bottom_button.clicked.connect(self._on_slideshow_bottom_clicked)
         self.slideshow_bottom_button.hide()
@@ -8294,7 +8300,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
 
         self.rotate_bottom_button = QPushButton()
         self.rotate_bottom_button.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        self.rotate_bottom_button.setIcon(_qta_icon("fa5s.redo", color="#B0B0B0"))
+        self.rotate_bottom_button.setIcon(_qta_icon("fa5s.redo", color=theme.INK_MUTED))
         _style_bottom_icon_button(self.rotate_bottom_button)
         self.rotate_bottom_button.clicked.connect(self._rotate_current_image_clockwise_persist)
         self.rotate_bottom_button.hide()
@@ -8341,9 +8347,9 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self.sort_toggle_button.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         self._update_sort_button_text()
         self.sort_toggle_button.clicked.connect(self.toggle_sort_method)
-        self.sort_toggle_button.setStyleSheet("""
-            QPushButton {
-                color: #B0B0B0;
+        self.sort_toggle_button.setStyleSheet(f"""
+            QPushButton {{
+                color: {theme.INK_MUTED};
                 font-size: 13px;
                 font-weight: 500;
                 padding: 0px 10px;
@@ -8354,15 +8360,15 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 letter-spacing: 0.25px;
                 min-height: 28px;
                 max-height: 28px;
-            }
-            QPushButton:hover {
-                color: #E0E0E0;
+            }}
+            QPushButton:hover {{
+                color: {theme.INK};
                 background-color: rgba(255, 255, 255, 0.05);
                 border-radius: 4px;
-            }
-            QPushButton:pressed {
+            }}
+            QPushButton:pressed {{
                 background-color: rgba(255, 255, 255, 0.1);
-            }
+            }}
         """)
         self.sort_toggle_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         left_buttons_layout.addWidget(
@@ -8401,7 +8407,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self.search_bottom_button = QPushButton()
         if qta is not None:
             try:
-                self.search_bottom_button.setIcon(_qta_icon("fa5s.search", color="#B0B0B0"))
+                self.search_bottom_button.setIcon(_qta_icon("fa5s.search", color=theme.INK_MUTED))
             except Exception:
                 self.search_bottom_button.setText("Search")
         else:
@@ -8439,13 +8445,13 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self.gallery_search_status_label.setSizePolicy(
             QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed
         )
-        self.gallery_search_status_label.setStyleSheet("""
-            QLabel {
-                color: #B0B0B0;
+        self.gallery_search_status_label.setStyleSheet(f"""
+            QLabel {{
+                color: {theme.INK_MUTED};
                 font-size: 12px;
                 font-weight: 500;
                 padding: 0px 0px 0px 2px;
-            }
+            }}
         """)
         self.gallery_search_status_label.hide()
 
@@ -8458,22 +8464,22 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self.gallery_search_input.setSizePolicy(
             QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed
         )
-        self.gallery_search_style_input = """
-            QLineEdit {
-                color: #E0E0E0;
-                background-color: #2A2A2A;
-                border: 1px solid #3A3A3A;
+        self.gallery_search_style_input = f"""
+            QLineEdit {{
+                color: {theme.INK};
+                background-color: {theme.SURFACE};
+                border: 1px solid {theme.LINE};
                 border-radius: 6px;
                 padding: 0px 28px 0px 10px;
                 font-size: 13px;
                 min-height: 0px;
                 max-height: 28px;
                 outline: none;
-            }
-            QLineEdit:focus {
-                border: 1px solid #5A5A5A;
+            }}
+            QLineEdit:focus {{
+                border: 1px solid {theme.RAISED_HI};
                 outline: none;
-            }
+            }}
         """
         self.gallery_search_input.setStyleSheet(self.gallery_search_style_input)
         # macOS draws a bright blue native focus ring unless disabled (dialogs already do this).
@@ -8514,12 +8520,12 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         _style_bottom_icon_button(self.burst_grouping_button)
         self.burst_grouping_button.setStyleSheet(
             bottom_icon_only_btn_style
-            + """
+            + f"""
             QPushButton:checked,
-            QPushButton:checked:flat {
-                color: #FFFFFF;
+            QPushButton:checked:flat {{
+                color: {theme.INK};
                 background: transparent;
-            }
+            }}
         """
         )
         self.burst_grouping_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
@@ -8535,7 +8541,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         if qta is not None:
             try:
                 self.compare_bottom_button.setIcon(
-                    _qta_icon("fa5s.columns", color="#B0B0B0")
+                    _qta_icon("fa5s.columns", color=theme.INK_MUTED)
                 )
             except Exception:
                 self.compare_bottom_button.setText("Compare")
@@ -8557,9 +8563,9 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self.shortcuts_hint_button.setFixedSize(28, 28)
         self.shortcuts_hint_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.shortcuts_hint_button.setToolTip(self._keyboard_shortcuts_tooltip())
-        self.shortcuts_hint_button.setStyleSheet("""
-            QPushButton {
-                color: #888888;
+        self.shortcuts_hint_button.setStyleSheet(f"""
+            QPushButton {{
+                color: {theme.INK_FAINT};
                 font-size: 12px;
                 font-weight: 600;
                 padding: 0px;
@@ -8570,21 +8576,21 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 max-width: 28px;
                 min-height: 28px;
                 max-height: 28px;
-            }
-            QPushButton:hover {
-                color: #E0E0E0;
+            }}
+            QPushButton:hover {{
+                color: {theme.INK};
                 background-color: rgba(255, 255, 255, 0.08);
-            }
-            QPushButton:pressed {
+            }}
+            QPushButton:pressed {{
                 background-color: rgba(255, 255, 255, 0.12);
-            }
+            }}
         """)
 
         # Trailing status: [share][i] in right_status_actions, then counter (v2.1 two-level layout).
         _counter_right_pad = 6 if platform.system() == "Windows" else 4
         _counter_label_style = f"""
             QLabel {{
-                color: #B0B0B0;
+                color: {theme.INK_MUTED};
                 font-size: 13px;
                 font-weight: 400;
                 padding: 0px {_counter_right_pad}px 0px 0px;
@@ -11980,34 +11986,34 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             self.raw_toggle_button.setToolTip(
                 "Embedded JPEG workflow (Fast)\nClick to toggle to RAW image workflow (High Quality)"
             )
-            self.raw_toggle_button.setStyleSheet(raw_btn_base + """
-                QPushButton {
-                    color: #B0B0B0;
+            self.raw_toggle_button.setStyleSheet(raw_btn_base + f"""
+                QPushButton {{
+                    color: {theme.INK_MUTED};
                     font-size: 13px;
                     font-weight: 500;
-                }
-                QPushButton:hover {
-                    color: #E0E0E0;
-                }
+                }}
+                QPushButton:hover {{
+                    color: {theme.INK};
+                }}
             """)
         else:
             self.raw_toggle_button.setToolTip(
                 "RAW workflow (High Quality)\nClick to toggle to Embedded JPEG workflow (Fast)"
             )
-            self.raw_toggle_button.setStyleSheet(raw_btn_base + """
-                QPushButton {
-                    color: #D2D2D2;
+            self.raw_toggle_button.setStyleSheet(raw_btn_base + f"""
+                QPushButton {{
+                    color: {theme.INK_MUTED};
                     font-size: 16px;
                     font-weight: 700;
-                }
-                QPushButton:hover {
-                    color: #E4E4E4;
+                }}
+                QPushButton:hover {{
+                    color: {theme.INK};
                     background-color: rgba(255, 255, 255, 0.08);
-                }
-                QPushButton:pressed {
-                    color: #FFFFFF;
+                }}
+                QPushButton:pressed {{
+                    color: {theme.INK};
                     background-color: rgba(255, 255, 255, 0.12);
-                }
+                }}
             """)
 
     def toggle_raw_edr_display(self):
@@ -12072,31 +12078,31 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 "EDR display on (High Quality highlights, slower RAW browsing)\n"
                 "Click to switch to standard display (Fast)"
             )
-            btn.setStyleSheet(base + """
-                QPushButton {
-                    color: #D2D2D2;
+            btn.setStyleSheet(base + f"""
+                QPushButton {{
+                    color: {theme.INK_MUTED};
                     font-size: 13px;
                     font-weight: 700;
-                }
-                QPushButton:hover {
-                    color: #E4E4E4;
+                }}
+                QPushButton:hover {{
+                    color: {theme.INK};
                     background-color: rgba(255, 255, 255, 0.08);
-                }
+                }}
             """)
         else:
             btn.setToolTip(
                 "EDR display off (Fast, standard dynamic range)\n"
                 "Click to enable EDR highlight headroom (slower RAW browsing)"
             )
-            btn.setStyleSheet(base + """
-                QPushButton {
-                    color: #707070;
+            btn.setStyleSheet(base + f"""
+                QPushButton {{
+                    color: {theme.INK_FAINT};
                     font-size: 13px;
                     font-weight: 500;
-                }
-                QPushButton:hover {
-                    color: #B0B0B0;
-                }
+                }}
+                QPushButton:hover {{
+                    color: {theme.INK_MUTED};
+                }}
             """)
 
     def is_animated_image(self, file_path: str) -> bool:
@@ -12575,7 +12581,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         # Update icon if using qtawesome
         if qta is not None:
             try:
-                gallery_icon = _qta_icon('fa5s.th', color='#B0B0B0')
+                gallery_icon = _qta_icon('fa5s.th', color=theme.INK_MUTED)
                 self.view_mode_button.setIcon(gallery_icon)
                 self.view_mode_button.setIconSize(QSize(20, 20))
                 self.view_mode_button.setText("")  # Clear text if using icon
@@ -13066,10 +13072,10 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         # Create gallery widget container
         gallery_container = QWidget()
         gallery_container.setObjectName("rawviewer_gallery_container")
-        gallery_container.setStyleSheet("""
-            QWidget {
-                background-color: #1E1E1E;
-            }
+        gallery_container.setStyleSheet(f"""
+            QWidget {{
+                background-color: {theme.VOID};
+            }}
         """)
         gallery_container.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         gallery_layout = QVBoxLayout(gallery_container)
@@ -13083,38 +13089,38 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         gallery_scroll.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         gallery_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         gallery_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        gallery_scroll.setStyleSheet("""
-            QScrollArea {
+        gallery_scroll.setStyleSheet(f"""
+            QScrollArea {{
                 border: none;
-                background-color: #1E1E1E;
-            }
-            QScrollBar:vertical {
+                background-color: {theme.VOID};
+            }}
+            QScrollBar:vertical {{
                 background: transparent;
                 width: 24px;
                 margin: 0px;
                 border: none;
-            }
-            QScrollBar::handle:vertical {
+            }}
+            QScrollBar::handle:vertical {{
                 background: rgba(255, 255, 255, 0.2);
                 min-height: 30px;
                 border-radius: 6px;
                 margin: 2px 6px 2px 6px;
-            }
-            QScrollBar::handle:vertical:hover {
+            }}
+            QScrollBar::handle:vertical:hover {{
                 background: rgba(255, 255, 255, 0.3);
-            }
-            QScrollBar::handle:vertical:pressed {
+            }}
+            QScrollBar::handle:vertical:pressed {{
                 background: rgba(255, 255, 255, 0.4);
-            }
+            }}
             QScrollBar::add-line:vertical,
-            QScrollBar::sub-line:vertical {
+            QScrollBar::sub-line:vertical {{
                 height: 0px;
                 width: 0px;
-            }
+            }}
             QScrollBar::add-page:vertical,
-            QScrollBar::sub-page:vertical {
+            QScrollBar::sub-page:vertical {{
                 background: transparent;
-            }
+            }}
         """)
 
         # Create optimized justified gallery widget from rawviewer_ui module.
@@ -13928,12 +13934,12 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         row_widget.setFixedHeight(row_height)
         row_widget.setFixedWidth(available_width)
         row_widget.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-        row_widget.setStyleSheet("""
-            QWidget {
-                background-color: #1E1E1E;
+        row_widget.setStyleSheet(f"""
+            QWidget {{
+                background-color: {theme.VOID};
                 margin: 0px;
                 padding: 0px;
-            }
+            }}
         """)
         
         row_layout = QHBoxLayout(row_widget)
@@ -13951,13 +13957,13 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             thumb_label = ThumbnailLabel()
             thumb_label.setFixedSize(item_width, row_height)
             thumb_label.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-            thumb_label.setStyleSheet("""
-                QLabel {
-                    background-color: #2A2A2A;
+            thumb_label.setStyleSheet(f"""
+                QLabel {{
+                    background-color: {theme.RAISED};
                     border: none;
                     margin: 0px;
                     padding: 0px;
-                }
+                }}
             """)
             thumb_label.file_path = file_path
             
@@ -14030,12 +14036,12 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         row_widget.setFixedHeight(total_row_height)  # CRITICAL: Set fixed height to prevent spacing
         row_widget.setFixedWidth(available_width)  # CRITICAL: Set fixed width to prevent horizontal scroll
         row_widget.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)  # Prevent resizing
-        row_widget.setStyleSheet("""
-            QWidget {
-                background-color: #1E1E1E;
+        row_widget.setStyleSheet(f"""
+            QWidget {{
+                background-color: {theme.VOID};
                 margin: 0px;
                 padding: 0px;
-            }
+            }}
         """)
         row_layout = QHBoxLayout(row_widget)
         row_layout.setContentsMargins(0, 0, 0, 0)  # No margins
@@ -14057,13 +14063,13 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             thumb_label.setFixedSize(new_width, new_height)
             # Ensure size policy is Fixed (already set in ThumbnailLabel.__init__, but double-check)
             thumb_label.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-            thumb_label.setStyleSheet("""
-                QLabel {
-                    background-color: #2A2A2A;
+            thumb_label.setStyleSheet(f"""
+                QLabel {{
+                    background-color: {theme.RAISED};
                     border: none;
                     margin: 0px;
                     padding: 0px;
-                }
+                }}
             """)
             # setScaledContents(False) is set in ThumbnailLabel.__init__
             # We will manually scale pixmap to exact size to prevent stretching
@@ -14081,12 +14087,12 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             # Create item widget - set fixed height to match row
             item_widget = QWidget()
             item_widget.setFixedHeight(total_row_height)  # CRITICAL: Match row height exactly
-            item_widget.setStyleSheet("""
-                QWidget {
-                    background-color: #1E1E1E;
+            item_widget.setStyleSheet(f"""
+                QWidget {{
+                    background-color: {theme.VOID};
                     margin: 0px;
                     padding: 0px;
-                }
+                }}
             """)
             item_layout = QVBoxLayout(item_widget)
             item_layout.setContentsMargins(0, 0, 0, 0)  # No margins
@@ -14464,10 +14470,10 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         from PyQt6.QtCore import Qt
         
         item = QWidget()
-        item.setStyleSheet("""
-            QWidget {
-                background-color: #1E1E1E;
-            }
+        item.setStyleSheet(f"""
+            QWidget {{
+                background-color: {theme.VOID};
+            }}
         """)
         item_layout = QVBoxLayout(item)
         item_layout.setContentsMargins(0, 0, 0, 0)  # No margins for tight packing
@@ -14478,11 +14484,11 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         thumb_height = int(thumb_width * 0.75)  # 4:3 aspect ratio
         thumb_label.setFixedSize(thumb_width, thumb_height)
         thumb_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        thumb_label.setStyleSheet("""
-            QLabel {
-                background-color: #2A2A2A;
+        thumb_label.setStyleSheet(f"""
+            QLabel {{
+                background-color: {theme.RAISED};
                 border: none;
-            }
+            }}
         """)
         # CRITICAL: Use setScaledContents(False) to prevent stretching
         thumb_label.setScaledContents(False)
@@ -15352,7 +15358,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             # Update icon if using qtawesome
             if qta is not None:
                 try:
-                    gallery_icon = _qta_icon('fa5s.th', color='#B0B0B0')
+                    gallery_icon = _qta_icon('fa5s.th', color=theme.INK_MUTED)
                     self.view_mode_button.setIcon(gallery_icon)
                     self.view_mode_button.setIconSize(QSize(20, 20))
                     self.view_mode_button.setText("")  # Clear text if using icon
@@ -16255,9 +16261,9 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         if hovered:
             btn.setEnabled(True)
             btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-            btn.setStyleSheet("""
-                QPushButton {
-                    color: #C8C8C8;
+            btn.setStyleSheet(f"""
+                QPushButton {{
+                    color: {theme.INK_MUTED};
                     font-size: 11px;
                     font-weight: 600;
                     padding: 0px;
@@ -16268,14 +16274,14 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                     max-width: 22px;
                     min-height: 22px;
                     max-height: 22px;
-                }
-                QPushButton:hover {
-                    color: #E0E0E0;
+                }}
+                QPushButton:hover {{
+                    color: {theme.INK};
                     background-color: rgba(255, 255, 255, 0.08);
-                }
-                QPushButton:pressed {
+                }}
+                QPushButton:pressed {{
                     background-color: rgba(255, 255, 255, 0.12);
-                }
+                }}
             """)
         else:
             btn.setEnabled(False)
@@ -20291,9 +20297,9 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         try:
             import qtawesome as qta
             if playing:
-                btn.setIcon(_qta_icon("fa5s.pause", color="#B0B0B0"))
+                btn.setIcon(_qta_icon("fa5s.pause", color=theme.INK_MUTED))
             else:
-                btn.setIcon(_qta_icon("fa5s.play", color="#B0B0B0"))
+                btn.setIcon(_qta_icon("fa5s.play", color=theme.INK_MUTED))
         except Exception:
             pass
 
@@ -26748,7 +26754,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             # Single view mode - use image_label
             self.image_label.setText(message)
             self.image_label.setStyleSheet(
-                "QLabel { color: #B0B0B0; font-size: 14px; }")
+                f"QLabel {{ color: {theme.INK_MUTED}; font-size: 14px; }}")
         
         # Clear top metadata when no files
         self._apply_top_metadata_text("")
@@ -29118,9 +29124,9 @@ def main():
                         splash_pixmap = splash_pixmap.scaled(512, 512, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
                 else:
                     splash_pixmap = QPixmap(400, 400)
-                    splash_pixmap.fill(QColor(30, 30, 30))
+                    splash_pixmap.fill(QColor(*theme.VOID_RGB))
                     painter = QPainter(splash_pixmap)
-                    painter.setPen(QPen(QColor(70, 130, 180), 4))
+                    painter.setPen(QPen(QColor(*theme.INK_RGB), 4))
                     font = painter.font()
                     font.setPointSize(48)
                     font.setBold(True)
