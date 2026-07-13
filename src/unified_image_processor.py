@@ -560,6 +560,22 @@ class UnifiedImageProcessor:
             if scanned is not None:
                 smd = max(int(scanned.shape[0]), int(scanned.shape[1]))
                 if smd >= min_px:
+                    # extract_embedded_jpeg_by_scan decodes the TIFF-IFD preview's raw
+                    # pixels only -- the segment itself carries no orientation tag of
+                    # its own (the container's main EXIF Orientation applies), so it
+                    # must be applied here or this preview displays sideways/upside
+                    # down whenever Orientation != 1.
+                    try:
+                        exif_data = self.cache.exif_cache.get(file_path)
+                        if exif_data is None:
+                            exif_data = self.exif_extractor.extract_exif_data(file_path)
+                        orientation = (exif_data or {}).get("orientation", 1)
+                        if orientation != 1:
+                            scanned = self._apply_orientation_correction(
+                                scanned, orientation, exif_data
+                            )
+                    except Exception:
+                        pass
                     logger.info(
                         "[PREVIEW] Scan fallback raised preview to %dpx for %s",
                         smd,
