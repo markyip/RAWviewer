@@ -13411,14 +13411,29 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         gallery_grip.setMouseTracking(True)
         gallery_grip.hide()
 
-        # Insert gallery widget into main layout (after single-image row: scroll + histogram)
+        # Insert gallery widget into main layout (after single-image row).
+        # The anchor must be a DIRECT child of main_layout: since the Adjust
+        # panel moved single_view_container inside single_view_splitter,
+        # indexOf(single_view_container) returns -1, and insertWidget(-1 + 1)
+        # placed the gallery at index 0 -- ABOVE the custom title bar. In
+        # gallery mode the container then filled the window from the top and
+        # the title bar (min/max/close) was pushed out of its expected spot:
+        # "top bar missing, cannot close or maximize the app".
         main_layout = self.centralWidget().layout()
-        anchor = (
-            self.single_view_container
-            if hasattr(self, "single_view_container") and self.single_view_container
-            else self.scroll_area
-        )
-        scroll_index = main_layout.indexOf(anchor)
+        scroll_index = -1
+        for anchor in (
+            getattr(self, "single_view_splitter", None),
+            getattr(self, "single_view_container", None),
+            getattr(self, "scroll_area", None),
+        ):
+            if anchor is not None:
+                scroll_index = main_layout.indexOf(anchor)
+                if scroll_index >= 0:
+                    break
+        if scroll_index < 0:
+            # No known anchor found: append at the end rather than clobbering
+            # index 0 (the title bar row).
+            scroll_index = main_layout.count() - 1
         cast(Any, main_layout).insertWidget(scroll_index + 1, gallery_container)
 
         self.gallery_widget = gallery_container

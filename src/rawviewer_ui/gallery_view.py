@@ -361,9 +361,22 @@ class JustifiedGallery(QWidget):
         self._wheel_accum_px = 0.0
         self._wheel_timer = QTimer(self)
         self._wheel_timer.setSingleShot(False)
+        # Precise, not the default coarse timer: on Windows a coarse 8ms QTimer
+        # fires with several ms of jitter (5% tolerance class + 15.6ms system
+        # timer coalescing), and with a FIXED step per tick that cadence jitter
+        # becomes velocity jitter -- uneven motion users read as "scrolling is
+        # not smooth" even at high average FPS.
+        self._wheel_timer.setTimerType(Qt.TimerType.PreciseTimer)
         self._wheel_timer.timeout.connect(self._apply_wheel_scroll_step)
-        self._wheel_step_px = 18  # per tick (tuned for smoothness)
+        self._wheel_step_px = 18  # min px per nominal tick (tuned for smoothness)
         self._wheel_tick_ms = 8   # 125Hz-ish
+        # Decay rate for the accumulator: consume 20% per nominal 8ms tick.
+        # _apply_wheel_scroll_step scales this by the MEASURED elapsed time,
+        # so a late tick consumes proportionally more -- constant on-screen
+        # velocity regardless of timer cadence (frame-time independence, the
+        # same idea as dt-scaled game-loop integration).
+        self._wheel_decay_per_tick = 0.2
+        self._wheel_last_tick_t = 0.0
 
         # Idle background thumbnail preloader
         self._idle_preload_timer = QTimer(self)
@@ -2174,6 +2187,7 @@ class JustifiedGallery(QWidget):
                     delta_y = int(notches * 120)
                     self._wheel_accum_px += -float(delta_y)
                     if not self._wheel_timer.isActive():
+                        self._wheel_last_tick_t = 0.0  # fresh burst: dt from nominal tick
                         self._wheel_timer.start(self._wheel_tick_ms)
                     event.accept()
                     return True
@@ -2202,13 +2216,25 @@ class JustifiedGallery(QWidget):
             self._wheel_accum_px = 0.0
             return
 
-        # Adaptive step: consume more when accumulation is high (exponential decay)
-        # 0.2 means we consume 20% of the remaining distance per tick (8ms)
-        # This makes the scroll feel very responsive and stop quickly.
-        # But we still enforce a minimum step of _wheel_step_px (18px) to maintain movement.
-        adaptive_step = self._wheel_accum_px * 0.2
-        if abs(adaptive_step) < self._wheel_step_px:
-            step = self._wheel_step_px if self._wheel_accum_px > 0 else -self._wheel_step_px
+        # Exponential decay of the remaining distance, scaled by MEASURED
+        # elapsed time (see _wheel_decay_per_tick): fraction consumed is
+        # 1 - (1 - rate)^(dt / nominal_tick), so a tick that arrives late
+        # consumes proportionally more and the on-screen velocity stays
+        # constant under timer jitter. The old fixed 20%-per-tick step turned
+        # every late tick into a visible slowdown-then-jump. The minimum step
+        # (which keeps the tail from crawling) is dt-scaled the same way.
+        now = time.time()
+        dt_ticks = 1.0
+        if self._wheel_last_tick_t > 0.0:
+            dt_ticks = min(
+                4.0, max(0.25, (now - self._wheel_last_tick_t) * 1000.0 / self._wheel_tick_ms)
+            )
+        self._wheel_last_tick_t = now
+        frac = 1.0 - (1.0 - self._wheel_decay_per_tick) ** dt_ticks
+        adaptive_step = self._wheel_accum_px * frac
+        min_step = self._wheel_step_px * dt_ticks
+        if abs(adaptive_step) < min_step:
+            step = min_step if self._wheel_accum_px > 0 else -min_step
         else:
             step = adaptive_step
 

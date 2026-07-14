@@ -1273,32 +1273,6 @@ def _apply_masked_luminance_adjust(
     return out
 
 
-def _apply_highlights_shadows_linear(
-    img: np.ndarray, hi_val: float, sh_val: float
-) -> np.ndarray:
-    """Shadows / highlights via masked luminance ratios (no global gray add)."""
-    from raw_tone_recovery import _luminance
-
-    lum = _luminance(img)
-    if abs(sh_val) > 1e-4:
-        img = _apply_masked_luminance_adjust(
-            img, lum, _shadow_region_weight(lum), sh_val / 100.0, lift=True,
-            lift_up_strength=0.07,
-        )
-        lum = _luminance(img)
-    if abs(hi_val) > 1e-4:
-        amt = hi_val / 100.0
-        if amt < 0:
-            img = _apply_masked_luminance_adjust(
-                img, lum, _highlight_region_weight(lum), amt, lift=False
-            )
-        else:
-            img = _apply_masked_luminance_adjust(
-                img, lum, _highlight_region_weight(lum), amt, lift=True
-            )
-    return img
-
-
 def _apply_highlights_shadows(img: np.ndarray, hi_val: float, sh_val: float) -> np.ndarray:
     """Gamma-space HS using the same masked luminance ratios."""
     lum = _channel_luminance(img)
