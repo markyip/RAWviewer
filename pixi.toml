@@ -17,11 +17,11 @@ start-windowless = "pythonw src/main.py"
 [activation.env]
 PYTHONNOUSERSITE = "1"
 RAWVIEWER_GPU_VIEW = "1"
-# Opt-in GPU demosaic (PyTorch CUDA/MPS). Default in code is off; enable for
-# local verification after installing CUDA torch on Windows (see torch index).
-RAWVIEWER_PREFER_GPU_DECODE = "1"
-# When GPU demosaic is preferred, keep LibRaw process pool off so it does not
-# compete with in-process CUDA decode slots.
+# GPU demosaic stays off in day-to-day pixi runs (matches app default). Set to
+# "1" only when intentionally A/B testing CUDA/MPS demosaic; use run_debug.bat
+# for the same stress profile. Large RAF/high-MP frames are unstable/slower.
+RAWVIEWER_PREFER_GPU_DECODE = "0"
+# Keep LibRaw process pool off for a quieter single-process default in pixi.
 RAWVIEWER_USE_PROCESS_POOL = "0"
 
 [dependencies]

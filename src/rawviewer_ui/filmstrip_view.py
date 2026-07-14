@@ -175,7 +175,7 @@ class FilmStripBar(QFrame):
             }
             QLabel#filmstrip_cell_selected {
                 background-color: rgba(51, 51, 51, 120);
-                border: 2px solid #5CB8FF;
+                border: 2px solid #d9691e;
                 border-radius: 3px;
                 padding: 0px;
             }

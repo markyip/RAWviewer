@@ -45,7 +45,7 @@ on a golden file (min-of-3, warm cache) and compares against
 > 25%.** First run (or `--rebaseline`) writes the baseline for this machine;
 baselines are per-machine and gitignored by design.
 
-**Browse-only default (`feature/fast-raw-decode`):** `RAWVIEWER_ENABLE_EDITING=0`
+**Editing default (development):** `RAWVIEWER_ENABLE_EDITING=1` (set `0` for browse-only)
 and `RAWVIEWER_SIDECAR_ADJUST=0` strip the Adjust panel, XMP writes, and
 browse-path sidecar apply. Rating (0–5 keys) and XMP star read still work.
 Editing suites (`t_xmp_roundtrip`, `t_dodge_burn`, `t_cache_semantics`) set

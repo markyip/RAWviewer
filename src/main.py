@@ -182,7 +182,9 @@ if _IS_GUI_MAIN_PROCESS:
                     return
                 if os.path.isfile(path):
                     self.viewer.load_folder_images(
-                        os.path.dirname(path), start_file=os.path.basename(path)
+                        os.path.dirname(path),
+                        start_file=os.path.basename(path),
+                        start_view="single",
                     )
                 elif os.path.isdir(path):
                     self.viewer.load_folder_images(path)
@@ -2598,9 +2600,14 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         return 0
 
     def _single_view_cache_min_dim(self, *, for_navigation: bool = False) -> int:
-        """Minimum max-edge for painting a cached preview in single view."""
+        """Minimum max-edge for painting a cached preview in single view.
+
+        Navigation default is above gallery grid-tier (~512px) so a 341x512
+        disk thumbnail cannot flash in after a failed full-decode retry
+        (``_try_paint_display_quality_cache`` uses context=navigation).
+        """
         if for_navigation:
-            return _env_int("RAWVIEWER_NAV_PREVIEW_MIN_DIM", 512, minimum=256)
+            return _env_int("RAWVIEWER_NAV_PREVIEW_MIN_DIM", 768, minimum=513)
         return _env_int("RAWVIEWER_GALLERY_INSTANT_MIN_DIM", 1400, minimum=400)
 
     def _preview_acceptable_for_single_view(
@@ -7653,6 +7660,19 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                     pass
                 self.load_raw_image(file_path, force_reload=True)
                 return
+            # Already in embedded-JPEG workflow: a failed LibRaw/full attempt
+            # must not modal-storm when a prior (or concurrent) embed paint
+            # already put usable pixels on screen for this file.
+            if self._single_view_pixels_on_screen(file_path):
+                pm = getattr(self, "current_pixmap", None)
+                if pm is not None and not pm.isNull():
+                    if max(int(pm.width()), int(pm.height())) >= 1400:
+                        self.status_bar.showMessage(
+                            f"{os.path.basename(file_path)}: keeping embedded preview "
+                            f"(decoder cannot demosaic this RAW compression).",
+                            5000,
+                        )
+                        return
 
         if clearly_unsupported:
             # This error is often just one failed decode *strategy* (e.g. LibRaw
@@ -7702,12 +7722,21 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         if self._single_view_pixels_on_screen(file_path):
             pm = getattr(self, "current_pixmap", None)
             if pm is not None and not pm.isNull():
+                long_edge = max(int(pm.width()), int(pm.height()))
+                # HE/HE* NEF and other LibRaw-unsupported RAW often settle on a
+                # large embedded JPEG that does not quite cover sensor dims
+                # (e.g. 8256 vs 8280). Treat a solid display-quality paint as
+                # success so we do not flash a false "corrupt" modal.
+                if long_edge >= 1400:
+                    return
                 exif = None
                 try:
                     exif = self.image_cache.get_exif(file_path)
                 except Exception:
                     pass
                 if image_covers_sensor_resolution(pm.width(), pm.height(), exif):
+                    return
+                if self._nef_he_compressed(file_path) and long_edge >= 768:
                     return
         try:
             from raw_file_extensions import get_supported_extensions
@@ -8253,8 +8282,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self.single_view_splitter = QSplitter(Qt.Orientation.Horizontal)
         self.single_view_splitter.addWidget(self.single_view_container)
         if self.single_image_adjust_panel is not None:
-            # None on browse-only builds (RAWVIEWER_ENABLE_EDITING=0, the
-            # default) -- QSplitter.addWidget(None) segfaults at the sip
+            # None when editing is disabled (RAWVIEWER_ENABLE_EDITING=0) —
+            # QSplitter.addWidget(None) segfaults at the sip
             # binding layer rather than raising a catchable Python error.
             self.single_view_splitter.addWidget(self.single_image_adjust_panel)
         # Give most space to the image viewer, but allow the panel to expand/shrink within its limits.
@@ -12217,17 +12246,19 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             )
             self.raw_toggle_button.setStyleSheet(raw_btn_base + f"""
                 QPushButton {{
-                    color: {theme.INK_MUTED};
+                    color: {theme.INK};
+                    background-color: {theme.EMBER};
+                    border-radius: 4px;
                     font-size: 16px;
                     font-weight: 700;
                 }}
                 QPushButton:hover {{
                     color: {theme.INK};
-                    background-color: rgba(255, 255, 255, 0.08);
+                    background-color: {theme.EMBER};
                 }}
                 QPushButton:pressed {{
                     color: {theme.INK};
-                    background-color: rgba(255, 255, 255, 0.12);
+                    background-color: {theme.EMBER};
                 }}
             """)
 
@@ -17220,14 +17251,20 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self._is_half_size_displayed = self._needs_full_resolution_upgrade(fp)
 
     def _should_hold_full_until_preview_paint(self, file_path: str) -> bool:
-        """preview_first_stages: do not paint full-res before embedded preview lands."""
+        """preview_first_stages: do not paint full-res before embedded preview lands.
+
+        Do **not** gate on ``_should_defer_full_decode()`` here. That flag only
+        delays *starting* extra sensor decodes during session restore. When
+        ImageLoadManager already delivered a full buffer (e.g. DNG force-full
+        fast-open), refusing to paint while also skipping a too-small cached
+        preview (and with ``preview_first_stages=False``) leaves a blank view
+        forever — TTFR never logs, so staged session restore never resumes.
+        """
         if self._suppress_jpeg_interim(file_path):
             # RAW workflow suppresses the embedded preview entirely -- the
             # LibRaw full IS the first render; holding it would deadlock the
             # display until the TTFR watchdog.
             return False
-        if self._should_defer_full_decode():
-            return True
         defer = getattr(self, "_defer_sensor_full_decode_path", None)
         if not defer or _norm_path(defer) != _norm_path(file_path or ""):
             return False
@@ -17576,7 +17613,9 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 if ext in exts:
                     folder_path = os.path.dirname(file_path)
                     filename = os.path.basename(file_path)
-                    self.load_folder_images(folder_path, start_file=filename)
+                    self.load_folder_images(
+                        folder_path, start_file=filename, start_view="single"
+                    )
                     return True
                 else:
                     dialog = CustomWarningDialog(
@@ -19416,31 +19455,36 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         QTimer.singleShot(0, self._restore_keyboard_focus)
 
     def _nef_he_compressed(self, file_path: str) -> bool:
-        """True if this NEF is Nikon HE/HE*-compressed (cached EXIF flag from
-        EXIFExtractor's proactive maker-note detection). These are editable
-        via an embedded-JPEG edit base (see decode_raw_edit_base), unlike
-        other _LIBRAW_UNSUPPORTED_PATHS entries which are hard-blocked."""
-        if not file_path.lower().endswith(".nef"):
+        """True if this NEF is Nikon HE/HE*-compressed.
+
+        Uses the cached EXIF flag when present; otherwise a cheap direct
+        maker-note probe so cold opens still block editing before the first
+        browse decode has populated the EXIF cache.
+        """
+        if not file_path or not file_path.lower().endswith(".nef"):
             return False
         try:
             cached_exif = self.image_cache.get_exif(file_path)
         except Exception:
+            cached_exif = None
+        if cached_exif and cached_exif.get("nef_he_compressed") is True:
+            return True
+        if cached_exif and cached_exif.get("nef_he_compressed") is False:
             return False
-        return bool(cached_exif and cached_exif.get("nef_he_compressed") is True)
+        try:
+            from enhanced_raw_processor import _detect_nef_he_compression
+
+            return _detect_nef_he_compression(file_path) is True
+        except Exception:
+            return False
 
     def _editing_supported_for_file(self, file_path: str | None) -> bool:
-        """Whether the Adjust panel can produce an edit base for this file.
+        """Whether the Adjust panel can produce a true RAW demosaic edit base.
 
-        Unsupported: animated images (GIF/WebP animations) and RAW files
-        LibRaw has already declined this session (X-Trans fallbacks, linear
-        DNG panoramas, ...). Best-effort by design -- a never-decoded exotic
-        RAW is only discovered unsupported at decode time, at which point it
-        lands in _LIBRAW_UNSUPPORTED_PATHS and is skipped from then on.
-
-        Exception: Nikon HE/HE*-compressed NEF is editable via an embedded-
-        JPEG edit base even though LibRaw can't demosaic it (see
-        decode_raw_edit_base), so it's excluded from the general
-        _LIBRAW_UNSUPPORTED_PATHS block below.
+        Unsupported: non-RAW (JPEG/HEIC/TIFF/…), animated images, and RAW that
+        LibRaw cannot demosaic (HE/HE* NEF, X-Trans fallbacks, linear / composite
+        DNG panoramas, …). Embedded-JPEG substitutes are browse-only — the
+        editor requires scene-linear demosaic, not a camera JPEG.
         """
         if not file_path:
             return False
@@ -19450,19 +19494,20 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         except Exception:
             pass
         try:
-            if is_raw_file(file_path):
-                from common_image_loader import dng_prefers_embedded_preview_first
-                from unified_image_processor import _LIBRAW_UNSUPPORTED_PATHS
+            if not is_raw_file(file_path):
+                return False
+            from common_image_loader import dng_prefers_embedded_preview_first
+            from unified_image_processor import _LIBRAW_UNSUPPORTED_PATHS
 
-                if dng_prefers_embedded_preview_first(file_path):
-                    return False
-                if self._nef_he_compressed(file_path):
-                    return True
-                key = os.path.normcase(os.path.abspath(file_path))
-                if key in _LIBRAW_UNSUPPORTED_PATHS:
-                    return False
+            if dng_prefers_embedded_preview_first(file_path):
+                return False
+            if self._nef_he_compressed(file_path):
+                return False
+            key = os.path.normcase(os.path.abspath(file_path))
+            if key in _LIBRAW_UNSUPPORTED_PATHS:
+                return False
         except Exception:
-            pass
+            return False
         return True
 
     def _advance_index_past_unsupported_for_editing(self, step: int) -> None:
@@ -19489,6 +19534,83 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             )
             self.current_file_index = (self.current_file_index + step) % n
 
+    def _show_auto_dismiss_notice(
+        self,
+        message: str,
+        *,
+        detail: str = "",
+        duration_ms: int = 2000,
+    ) -> None:
+        """Non-modal centered toast that hides itself after ``duration_ms``."""
+        from PyQt6.QtCore import Qt, QTimer
+        from PyQt6.QtWidgets import QFrame, QLabel, QVBoxLayout
+
+        old = getattr(self, "_auto_dismiss_notice", None)
+        if old is not None:
+            try:
+                old.hide()
+                old.deleteLater()
+            except Exception:
+                pass
+            self._auto_dismiss_notice = None
+
+        frame = QFrame(self)
+        frame.setObjectName("autoDismissNotice")
+        frame.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        frame.setStyleSheet(
+            f"""
+            #autoDismissNotice {{
+                background-color: rgba(29, 26, 22, 235);
+                border: 1px solid {theme.LINE};
+                border-radius: 10px;
+            }}
+            """
+        )
+        layout = QVBoxLayout(frame)
+        layout.setContentsMargins(20, 14, 20, 14)
+        layout.setSpacing(6)
+
+        msg = QLabel(message)
+        msg.setWordWrap(True)
+        msg.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        msg.setStyleSheet(
+            f"color: {theme.INK}; font-size: 14px; font-weight: 600; background: transparent;"
+        )
+        layout.addWidget(msg)
+
+        if detail:
+            info = QLabel(detail)
+            info.setWordWrap(True)
+            info.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            info.setStyleSheet(
+                f"color: {theme.INK_MUTED}; font-size: 12px; background: transparent;"
+            )
+            layout.addWidget(info)
+
+        frame.adjustSize()
+        # Cap width so long wrap text stays readable on large monitors.
+        max_w = min(420, max(280, self.width() - 80))
+        if frame.width() > max_w:
+            frame.setFixedWidth(max_w)
+            frame.adjustSize()
+        x = max(0, (self.width() - frame.width()) // 2)
+        y = max(24, (self.height() - frame.height()) // 3)
+        frame.move(x, y)
+        frame.show()
+        frame.raise_()
+        self._auto_dismiss_notice = frame
+
+        def _hide(token=frame) -> None:
+            if getattr(self, "_auto_dismiss_notice", None) is token:
+                try:
+                    token.hide()
+                    token.deleteLater()
+                except Exception:
+                    pass
+                self._auto_dismiss_notice = None
+
+        QTimer.singleShot(max(400, int(duration_ms)), _hide)
+
     def _toggle_adjust_panel(self) -> None:
         from raw_adjustments import editing_features_enabled
 
@@ -19498,26 +19620,21 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         if opening and not self._editing_supported_for_file(
             getattr(self, "current_file_path", None)
         ):
-            from PyQt6.QtWidgets import QMessageBox
-
-            QMessageBox.information(
-                self,
-                "Editing not available",
-                "This file format is not supported by the editor.\n\n"
-                "Animated images and RAW formats without LibRaw demosaic "
-                "support (e.g. some panorama/linear DNGs) cannot be edited.",
+            self._show_auto_dismiss_notice(
+                "Editing not available for this file",
+                detail=(
+                    "Adjust needs a demosaiced RAW base. "
+                    "JPEG/HEIC and unsupported RAW (e.g. Nikon HE/HE*) are browse-only."
+                ),
+                duration_ms=2000,
             )
             return
 
         settings = self.get_settings()
         use_embedded = settings.value("use_embedded_jpeg_workflow", True, type=bool)
-        current_path = getattr(self, "current_file_path", None)
-        if opening and use_embedded and not (current_path and self._nef_he_compressed(current_path)):
-            # Automatically switch to RAW workflow when editing. Skipped for
-            # HE/HE*-compressed NEF: LibRaw can't demosaic it at all, so
-            # forcing RAW mode here would just fail -- stay in embedded-JPEG
-            # mode, which decode_raw_edit_base can actually build an edit
-            # base from.
+        if opening and use_embedded:
+            # Switch to RAW workflow so edit base is scene-linear demosaic,
+            # not the camera embedded JPEG used for fast browse.
             self.toggle_raw_jpeg_workflow()
 
         self._set_adjust_panel_visible(opening)
@@ -23950,6 +24067,29 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         )
         logger.warning(msg)
         safe_print(msg, flush=True)
+        # Recovery: session-restore (or preview-first) may have refused to paint a
+        # completed full buffer while no interim preview landed. Force paint from
+        # cache / allow deferred sensor flush so the view is not stuck blank.
+        try:
+            if self._session_restore_burst_active():
+                self._session_restore_full_decode_allowed = True
+            cached_full = None
+            try:
+                cached_full = self.image_cache.get_full_image(file_path)
+            except Exception:
+                cached_full = None
+            if cached_full is not None:
+                logger.warning(
+                    "[TTFR] Recovering blank view from cached full for %s",
+                    os.path.basename(file_path),
+                )
+                # Bypass hold: first-render never logged; paint the buffer we already have.
+                self._defer_sensor_full_decode_path = None
+                self.on_manager_image_ready(file_path, cached_full)
+            else:
+                self._flush_deferred_sensor_full_decode(file_path, force=True)
+        except Exception:
+            logger.warning("[TTFR] Blank-view recovery failed for %s", file_path, exc_info=True)
 
     def _on_single_view_content_displayed(self):
         """Called when a single-view image or preview is successfully painted on screen.
@@ -28604,14 +28744,17 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         return None
 
     def _should_fast_open_single_file(self, start_file, start_view) -> bool:
-        """True when opening one file for single view (Explorer, drag-drop, Open File)."""
+        """True when opening one file for single view (Explorer, drag-drop, Open File).
+
+        Any ``start_file`` implies single view unless ``start_view="gallery"``.
+        Do not require current ``view_mode == "single"``: opening a file while
+        the gallery is showing must still fast-open (legacy switches to single).
+        """
         if not start_file:
             return False
         if start_view == "gallery":
             return False
-        if start_view == "single":
-            return True
-        return getattr(self, "view_mode", "single") == "single"
+        return True
 
     def _mtime_sort_image_files(self, image_files, file_stats, newest_first=None):
         """Order folder entries by file mtime (and RAW/JPEG tie-breakers); no EXIF reads."""
@@ -29737,7 +29880,11 @@ def main():
                 path = sys.argv[1]
                 if os.path.isfile(path):
                     # If it's a file, load the folder containing that file
-                    viewer.load_folder_images(os.path.dirname(path), start_file=os.path.basename(path))
+                    viewer.load_folder_images(
+                        os.path.dirname(path),
+                        start_file=os.path.basename(path),
+                        start_view="single",
+                    )
                 elif os.path.isdir(path):
                     # If it's a folder, load the folder
                     viewer.load_folder_images(path)

@@ -3,7 +3,7 @@
 ## 🚀 Version 2.6.0
 **Release Date: July 14, 2026**
 
-RAWviewer 2.6 is a faster **browse / cull** release on top of 2.5: **Fast RAW decode**, star ratings with XMP, Nikon HE/HE* handling, a shared darkroom theme, and dozens of navigation / gallery reliability fixes. On the **development** branch, the **Adjust / Develop editing** panel remains available when enabled via `RAWVIEWER_ENABLE_EDITING=1` (off by default).
+RAWviewer 2.6 is a faster **browse / cull** release on top of 2.5: **Fast RAW decode**, star ratings with XMP, Nikon HE/HE* handling, a shared darkroom theme, and dozens of navigation / gallery reliability fixes. On the **development** branch, the **Adjust / Develop editing** panel is **on by default** (`RAWVIEWER_ENABLE_EDITING=0` to disable).
 
 ### vs 2.5 — what changed
 
@@ -13,14 +13,13 @@ RAWviewer 2.6 is a faster **browse / cull** release on top of 2.5: **Fast RAW de
 | Keepers | Bookmark star (↑) | **1–5 star ratings** (keys **0–5**) + bookmark ↑; gallery filter by rating |
 | Nikon HE/HE* NEF | Limited / false corrupt dialogs | Detected; opens via embedded JPEG (no spurious corrupt dialog) |
 | Theme | Mixed chrome colors | **Darkroom palette** across chrome / widgets |
-| Optional GPU demosaic | N/A | Opt-in (`RAWVIEWER_PREFER_GPU_DECODE=1`); **off by default** (CPU Fast RAW wins for most machines) |
-| Adjust / Develop editing | Env-gated on development | Present on **development**; enable with `RAWVIEWER_ENABLE_EDITING=1` (off by default). Sidecar pixel apply: `RAWVIEWER_SIDECAR_ADJUST=1` |
+| Adjust / Develop editing | Env-gated on development | Present on **development**; **on by default** (`RAWVIEWER_ENABLE_EDITING=0` to disable). Sidecar pixel apply: `RAWVIEWER_SIDECAR_ADJUST=1` |
 
 ### Key feature highlights
 
 #### Adjust / Develop editing (development branch)
 - **Adjust panel** and RAW edit pipeline stay on this branch: tone curve, lens correction, detail, chroma denoise, dodge/burn, PV2012-style develops.
-- Off by default for fast browse; set `RAWVIEWER_ENABLE_EDITING=1` to enable. Pixel apply from XMP sliders: `RAWVIEWER_SIDECAR_ADJUST=1`.
+- On by default; set `RAWVIEWER_ENABLE_EDITING=0` to disable for browse-only. Pixel apply from XMP sliders: `RAWVIEWER_SIDECAR_ADJUST=1`.
 - See `docs/EDIT_PIPELINE.md`.
 
 #### ⭐ Star ratings
@@ -30,14 +29,13 @@ RAWviewer 2.6 is a faster **browse / cull** release on top of 2.5: **Fast RAW de
 
 #### ⚡ Faster RAW decode & navigation
 - **Fast RAW decode** on by default (`RAWVIEWER_FAST_RAW_DECODE=1`): half-size and full sensor tiers share one unpack; verified color parity with the previous pipeline (±1 8-bit LSB on golden ARW/CR3 sets).
-- Optional **GPU demosaic** (PyTorch CUDA / MPS / CuPy) via `RAWVIEWER_PREFER_GPU_DECODE=1`. Measured no overall win vs Fast RAW CPU on typical hardware — left opt-in so you can A/B on your GPU. Separate from the OpenGL **viewport** (`RAWVIEWER_GPU_VIEW`).
 - Cold gallery thumbnail warmup ~3× faster; Canon CR3 embedded previews no longer read the whole file; EXIF cache no longer serializes every reader through one global lock (multi-second nav stalls fixed).
-- Torch/kornia import deferred until after first paint (~0.9s less startup freeze).
+- Heavy optional ML imports deferred until after first paint (~0.9s less startup freeze).
 - Neighbor embedded-JPEG prefetch, directional / hover gallery prefetch, and RAF/3FR skip of eager full demosaic neighbors.
 
 #### 📊 Benchmark (2.5-path vs 2.6 Fast RAW)
 
-Same binary, Fast RAW on vs the previous rawpy path (`RAWVIEWER_FAST_RAW_DECODE=0`), CPU demosaic only. Across mixed camera RAW formats and large-library browse / thumbnail stress:
+Same binary, Fast RAW on vs the previous rawpy path (`RAWVIEWER_FAST_RAW_DECODE=0`). Across mixed camera RAW formats and large-library browse / thumbnail stress:
 
 - **Full sensor decode:** about **1.4×** faster (median); high-end formats in the **1.3–1.7×** range where Fast RAW applies.
 - **Zoom after fit** (reuse the fit-view unpack): roughly **2×** faster than a cold full rawpy decode.
@@ -60,11 +58,9 @@ Same binary, Fast RAW on vs the previous rawpy path (`RAWVIEWER_FAST_RAW_DECODE=
 
 | Variable | Default | Effect |
 |----------|---------|--------|
-| `RAWVIEWER_FAST_RAW_DECODE` | `1` | Fast CPU RAW path; `0` falls back toward rawpy |
-| `RAWVIEWER_PREFER_GPU_DECODE` | `0` | Prefer GPU demosaic when a backend is available |
-| `RAWVIEWER_GPU_CONCURRENCY` | auto | Max in-flight GPU demosaics (CUDA typically 2) |
-| `RAWVIEWER_USE_PROCESS_POOL` | auto | Force LibRaw process pool on/off; leave unset when testing GPU demosaic |
-| `RAWVIEWER_ENABLE_EDITING` | `0` | Enable Adjust panel / XMP edit writes / edit export (development branch) |
+| `RAWVIEWER_FAST_RAW_DECODE` | `1` | Fast RAW path; `0` falls back toward rawpy |
+| `RAWVIEWER_USE_PROCESS_POOL` | auto | Force LibRaw process pool on/off |
+| `RAWVIEWER_ENABLE_EDITING` | `1` | Adjust panel / XMP edit writes / edit export (development branch; `0` to disable) |
 | `RAWVIEWER_SIDECAR_ADJUST` | `0` | Apply saved XMP edit sliders to browse/full-res pixels (requires editing enabled) |
 
 ### Recommended test after upgrade
@@ -72,7 +68,6 @@ Same binary, Fast RAW on vs the previous rawpy path (`RAWVIEWER_FAST_RAW_DECODE=
 1. Optional: run **`clear_cache`** once if tiles look stale after the cache version bump.
 2. Open a mix of ARW / CR3 / NEF (including HE\*): arrow through, zoom to 100%, confirm orientation.
 3. Rate with **1–5**, filter gallery by stars, confirm sidecars.
-4. (Optional) Set `RAWVIEWER_PREFER_GPU_DECODE=1` with CUDA torch and compare timings to default Fast RAW.
 
 ---
 
@@ -480,7 +475,6 @@ RAWviewer 2.6 在 2.5 之上是更快的**瀏覽／篩選**版本：**Fast RAW �
 | Keeper | 書籤星（↑） | **1–5 星評分**（按鍵 **0–5**）+ 書籤 ↑；圖庫可依星級篩選 |
 | Nikon HE/HE* NEF | 有限／易誤報損毀 | 可辨識；經內嵌 JPEG 開啟（不再誤報損毀） |
 | 介面色票 | 雜色 chrome | **暗房色票**涵蓋 chrome／元件 |
-| 可選 GPU demosaic | 無 | 選用（`RAWVIEWER_PREFER_GPU_DECODE=1`）；**預設關閉**（多數機器 Fast RAW CPU 更佳） |
 
 ### 重點功能
 
@@ -491,13 +485,12 @@ RAWviewer 2.6 在 2.5 之上是更快的**瀏覽／篩選**版本：**Fast RAW �
 
 #### ⚡ 更快的 RAW 解碼與導覽
 - **Fast RAW decode** 預設開啟（`RAWVIEWER_FAST_RAW_DECODE=1`）：半尺寸與全尺寸共用一次 unpack；與舊管線色彩驗證一致（黃金 ARW/CR3 集合 ±1 8-bit LSB）。
-- 可選 **GPU demosaic**（PyTorch CUDA／MPS／CuPy）：`RAWVIEWER_PREFER_GPU_DECODE=1`。典型硬體上相對 Fast RAW CPU 無整體勝出，故維持選用。與 OpenGL **視埠**（`RAWVIEWER_GPU_VIEW`）無關。
 - 冷啟動圖庫縮圖預熱約快 3×；Canon CR3 內嵌預覽不再讀整檔；EXIF 快取不再以全域鎖序列化所有讀取。
-- Torch／kornia 延遲至首次繪製後載入；鄰張內嵌 JPEG 預載、方向性／懸停圖庫預載等。
+- 可選大型 ML 套件延遲至首次繪製後載入；鄰張內嵌 JPEG 預載、方向性／懸停圖庫預載等。
 
 #### 📊 基準測試（2.5 路徑 vs 2.6 Fast RAW）
 
-同一 binary，Fast RAW 對先前 rawpy 路徑（`RAWVIEWER_FAST_RAW_DECODE=0`），僅 CPU demosaic。涵蓋多種相機 RAW 與大型圖庫瀏覽／縮圖壓力：
+同一 binary，Fast RAW 對先前 rawpy 路徑（`RAWVIEWER_FAST_RAW_DECODE=0`）。涵蓋多種相機 RAW 與大型圖庫瀏覽／縮圖壓力：
 
 - **全尺寸解碼：** 約 **1.4×**（中位）；Fast RAW 適用格式多落在 **1.3–1.7×**。
 - **符合後再縮放**（重用 fit-view unpack）：相對冷啟動 rawpy 全尺寸約 **2×**。
@@ -518,17 +511,14 @@ RAWviewer 2.6 在 2.5 之上是更快的**瀏覽／篩選**版本：**Fast RAW �
 
 | 變數 | 預設 | 效果 |
 |------|------|------|
-| `RAWVIEWER_FAST_RAW_DECODE` | `1` | 快速 CPU RAW；`0` 偏 rawpy |
-| `RAWVIEWER_PREFER_GPU_DECODE` | `0` | 有後端時優先 GPU demosaic |
-| `RAWVIEWER_GPU_CONCURRENCY` | 自動 | 同時進行的 GPU demosaic 上限 |
-| `RAWVIEWER_USE_PROCESS_POOL` | 自動 | 強制開啟／關閉 LibRaw process pool；測 GPU 時建議設 `0` |
+| `RAWVIEWER_FAST_RAW_DECODE` | `1` | 快速 RAW；`0` 偏 rawpy |
+| `RAWVIEWER_USE_PROCESS_POOL` | 自動 | 強制開啟／關閉 LibRaw process pool |
 
 ### 升級後建議測試
 
 1. 快取版本升級後若磁磚看起來過舊，可選跑一次 **`clear_cache`**。
 2. 混開 ARW／CR3／NEF（含 HE\*）：方向鍵導覽、100% 縮放、確認方向。
 3. 用 **1–5** 評星、圖庫篩選、確認 sidecar。
-4. （可選）設 `RAWVIEWER_PREFER_GPU_DECODE=1` 與預設 Fast RAW 比對時間。
 
 ---
 

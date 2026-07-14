@@ -310,65 +310,19 @@ class UnifiedImageProcessor:
                 return rgb_image
 
             if dng_prefers_embedded_preview_first(file_path):
-                try:
-                    from PIL import Image
-
-                    with Image.open(file_path) as im:
-                        best_w = best_h = 0
-                        best_idx = -1
-                        n_frames = getattr(im, "n_frames", 1)
-                        for idx in range(n_frames):
-                            im.seek(idx)
-                            w, h = im.size
-                            if w * h > best_w * best_h:
-                                best_w, best_h = w, h
-                                best_idx = idx
-                        if best_idx >= 0 and best_w >= 1024:
-                            im.seek(best_idx)
-                            rgb_im = im.convert("RGB")
-                            full_pixels = np.array(rgb_im)
-                            orientation = exif_data.get("orientation", 1) if exif_data else 1
-                            if orientation != 1:
-                                full_pixels = self._apply_orientation_correction(
-                                    full_pixels, orientation, exif_data
-                                )
-                            return full_pixels
-                except Exception:
-                    pass
+                # Browse uses embedded/TIFF frames; Adjust requires demosaic.
                 logging.getLogger(__name__).warning(
                     "[EDIT] LibRaw unsupported for %s; no RAW demosaic base available",
                     os.path.basename(file_path),
                 )
                 return None
 
+            # Nikon HE/HE* (and any other demosaic-failed NEF): browse shows
+            # embedded JPEG, but Adjust must not use that as an edit base —
+            # no scene-linear demosaic is available.
             if file_path.lower().endswith(".nef"):
-                # Nikon HE/HE*-compressed NEF: LibRaw can't demosaic it at all.
-                # Use the app's own byte-scan embedded-JPEG extractor (verified
-                # 36/36 against LibRaw for NEF) rather than the DNG branch's PIL
-                # multi-frame trick above -- for NEF the largest-pixel-count TIFF
-                # "frame" is frequently the actual compressed Bayer sensor data,
-                # not the embedded preview, which PIL can't decode correctly.
-                try:
-                    from enhanced_raw_processor import extract_embedded_jpeg_by_scan
-
-                    embedded = extract_embedded_jpeg_by_scan(file_path, 0)
-                    if embedded is not None:
-                        orientation = exif_data.get("orientation", 1) if exif_data else 1
-                        if orientation != 1:
-                            embedded = self._apply_orientation_correction(
-                                embedded, orientation, exif_data
-                            )
-                        logging.getLogger(__name__).info(
-                            "[EDIT] Embedded-JPEG edit base for HE-compressed NEF %s (%dx%d)",
-                            os.path.basename(file_path),
-                            embedded.shape[1],
-                            embedded.shape[0],
-                        )
-                        return embedded
-                except Exception:
-                    pass
                 logging.getLogger(__name__).warning(
-                    "[EDIT] LibRaw unsupported for %s; no embedded-JPEG edit base available either",
+                    "[EDIT] No LibRaw demosaic edit base for %s (HE/HE* or unsupported)",
                     os.path.basename(file_path),
                 )
                 return None
@@ -1144,9 +1098,17 @@ class UnifiedImageProcessor:
                 cached_dim = max(cached.shape[0], cached.shape[1]) if hasattr(cached, "shape") else 0
                 if cached_dim >= 1024:
                     return cached
+            exif_data = self.exif_extractor.extract_exif_data(file_path)
+
+            # Full-resolution request: prefer sensor-covering embeds / PIL TIFF.
+            # Fit-view request: still must extract a displayable embed -- LibRaw
+            # can never demosaic these files. Returning None here was a regression
+            # for HE/HE* NEF: a stages={'full'} fit-view task (e.g. after
+            # quality_on_screen or RAW-mode consistent-fit) emitted a false
+            # "unsupported or corrupt" error when the in-memory cache had been
+            # evicted by gallery preload, even though the embedded JPEG decodes
+            # fine on the next paint.
             if use_full_resolution:
-                exif_data = self.exif_extractor.extract_exif_data(file_path)
-                
                 # First try decoding the full image via PIL TIFF reader (useful for linear/composite DNG panoramas)
                 try:
                     from PIL import Image
@@ -1188,61 +1150,61 @@ class UnifiedImageProcessor:
                 full_embedded = self._try_full_embedded_raw_preview(file_path, exif_data)
                 if full_embedded is not None:
                     return full_embedded
-                
-                # If that didn't work (due to resolution coverage reject or workflow toggle),
-                # extract the largest native preview since LibRaw can't demosaic this file anyway.
-                #
-                # NOTE: deliberately NOT marked via mark_full_image_source here.
-                # This whole branch is reached only for skip_key already in
-                # _LIBRAW_UNSUPPORTED_PATHS (X-Trans, NEF HE, corrupt/composite
-                # DNG, ...) -- the embedded preview is the permanent, only
-                # available "full" tier for these files; there is no true
-                # decode to ever upgrade to, so tagging it as an embedded-JPEG
-                # stand-in would just make the idle-decode-after-nav-pause
-                # timer re-queue a pointless (if cheap, cache-hit) background
-                # request forever with nothing to gain.
-                native_preview = self.thumbnail_extractor.extract_embedded_native_preview(file_path)
-                if native_preview is not None:
-                    orientation = exif_data.get("orientation", 1) if exif_data else 1
-                    if orientation != 1:
-                        native_preview = self._apply_orientation_correction(
-                            native_preview, orientation, exif_data
-                        )
-                    self.cache.put_preview(file_path, native_preview)
+
+            # If that didn't work (due to resolution coverage reject or workflow toggle),
+            # extract the largest native preview since LibRaw can't demosaic this file anyway.
+            #
+            # NOTE: deliberately NOT marked via mark_full_image_source here.
+            # This whole branch is reached only for skip_key already in
+            # _LIBRAW_UNSUPPORTED_PATHS (X-Trans, NEF HE, corrupt/composite
+            # DNG, ...) -- the embedded preview is the permanent, only
+            # available "full" tier for these files; there is no true
+            # decode to ever upgrade to, so tagging it as an embedded-JPEG
+            # stand-in would just make the idle-decode-after-nav-pause
+            # timer re-queue a pointless (if cheap, cache-hit) background
+            # request forever with nothing to gain.
+            native_preview = self.thumbnail_extractor.extract_embedded_native_preview(file_path)
+            if native_preview is not None:
+                orientation = exif_data.get("orientation", 1) if exif_data else 1
+                if orientation != 1:
+                    native_preview = self._apply_orientation_correction(
+                        native_preview, orientation, exif_data
+                    )
+                self.cache.put_preview(file_path, native_preview)
+                if use_full_resolution:
                     self.cache.put_full_image(file_path, native_preview)
-                    return native_preview
-                
-                mem_max = memory_preview_max_edge()
-                preview = self.thumbnail_extractor.extract_preview_from_raw(
-                    file_path, max_size=mem_max
+                return native_preview
+
+            mem_max = memory_preview_max_edge()
+            preview = self.thumbnail_extractor.extract_preview_from_raw(
+                file_path, max_size=mem_max
+            )
+            if preview is not None:
+                orientation = (
+                    exif_data.get("orientation", 1) if exif_data else 1
                 )
-                if preview is not None:
+                if orientation != 1:
+                    preview = self._apply_orientation_correction(
+                        preview, orientation, exif_data
+                    )
+                self.cache.put_preview(file_path, preview)
+                return preview
+            try:
+                from enhanced_raw_processor import extract_embedded_jpeg_by_scan
+
+                scanned = extract_embedded_jpeg_by_scan(file_path, mem_max)
+                if scanned is not None:
                     orientation = (
                         exif_data.get("orientation", 1) if exif_data else 1
                     )
                     if orientation != 1:
-                        preview = self._apply_orientation_correction(
-                            preview, orientation, exif_data
+                        scanned = self._apply_orientation_correction(
+                            scanned, orientation, exif_data
                         )
-                    self.cache.put_preview(file_path, preview)
-                    return preview
-                try:
-                    from enhanced_raw_processor import extract_embedded_jpeg_by_scan
-
-                    scanned = extract_embedded_jpeg_by_scan(file_path, mem_max)
-                    if scanned is not None:
-                        orientation = (
-                            exif_data.get("orientation", 1) if exif_data else 1
-                        )
-                        if orientation != 1:
-                            scanned = self._apply_orientation_correction(
-                                scanned, orientation, exif_data
-                            )
-                        self.cache.put_preview(file_path, scanned)
-                        return scanned
-                except Exception:
-                    pass
-                return None
+                    self.cache.put_preview(file_path, scanned)
+                    return scanned
+            except Exception:
+                pass
             return None
         try:
             # 獲取 EXIF 數據（用於處理參數）

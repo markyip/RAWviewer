@@ -233,11 +233,11 @@ def resolve_xmp_path(image_path: str) -> str:
 def editing_features_enabled() -> bool:
     """Whether the Adjust panel, XMP writes, and edit export are available.
 
-    Off by default on the development branch
-    (RAWVIEWER_ENABLE_EDITING=1 to enable). Rating read/write and plain
+    On by default on the development branch
+    (``RAWVIEWER_ENABLE_EDITING=0`` to disable). Rating read/write and plain
     browse/export-without-adjustments stay available either way.
     """
-    return os.environ.get("RAWVIEWER_ENABLE_EDITING", "0").strip().lower() in {
+    return os.environ.get("RAWVIEWER_ENABLE_EDITING", "1").strip().lower() in {
         "1",
         "true",
         "yes",

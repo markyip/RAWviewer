@@ -163,6 +163,20 @@ def prefer_gpu_decode_enabled() -> bool:
     }
 
 
+def gpu_decode_max_megapixels() -> float:
+    """Skip GPU demosaic above this mosaic size (CPU usually wins + less VRAM).
+
+    100MP RAF was measured ~10s on CUDA with heavy RSS growth while browsing;
+    fall back to CPU past the cap. Override with RAWVIEWER_GPU_DECODE_MAX_MP
+    (0 disables the cap).
+    """
+    raw = str(os.environ.get("RAWVIEWER_GPU_DECODE_MAX_MP", "48")).strip()
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return 48.0
+
+
 def wb_sanity_enabled() -> bool:
     """As-shot WB sanity check vs embedded JPEG (RAWVIEWER_WB_SANITY=0 disables)."""
     return str(os.environ.get("RAWVIEWER_WB_SANITY", "1")).strip().lower() not in {
@@ -894,29 +908,43 @@ def try_fast_raw_decode(
 
         if prefer_gpu_decode_enabled():
             try:
-                # torch/kornia must never be imported for the first time on this
-                # (background) thread -- macOS aborts the process if PyTorch's
-                # OpenMP runtime initializes off the main thread. The main thread
-                # imports gpu_raw_processor right after showing the window
-                # (torch_bootstrap.py); wait for that here instead of importing
-                # it ourselves. A timeout falls back to CPU decode below via the
-                # existing `except Exception` path, same as any other GPU-decode
-                # failure.
-                import torch_bootstrap
-                if not torch_bootstrap.wait_for_gpu_backend_ready(timeout=10.0):
-                    raise RuntimeError("GPU backend not ready within timeout")
-                from gpu_raw_processor import try_gpu_decode_from_unpacked
-                gpu_out = try_gpu_decode_from_unpacked(unpacked, cancel_check=cancel_check, return_linear=return_linear)
-                if gpu_out is not None:
+                mp_cap = gpu_decode_max_megapixels()
+                mosaic_mp = (
+                    float(unpacked.mosaic.shape[0] * unpacked.mosaic.shape[1]) / 1e6
+                    if getattr(unpacked, "mosaic", None) is not None
+                    else 0.0
+                )
+                if mp_cap > 0 and mosaic_mp > mp_cap:
                     logger.info(
-                        "[FAST_RAW] %s decoded (GPU) %dx%d in %.0fms (pattern=%s)",
+                        "[FAST_RAW] Skipping GPU demosaic for %s (%.1f MP > %.1f MP cap); using CPU",
                         os.path.basename(file_path),
-                        gpu_out.shape[1],
-                        gpu_out.shape[0],
-                        (time.perf_counter() - t0) * 1000.0,
-                        unpacked.pat_str,
+                        mosaic_mp,
+                        mp_cap,
                     )
-                    return gpu_out
+                else:
+                    # torch/kornia must never be imported for the first time on this
+                    # (background) thread -- macOS aborts the process if PyTorch's
+                    # OpenMP runtime initializes off the main thread. The main thread
+                    # imports gpu_raw_processor right after showing the window
+                    # (torch_bootstrap.py); wait for that here instead of importing
+                    # it ourselves. A timeout falls back to CPU decode below via the
+                    # existing `except Exception` path, same as any other GPU-decode
+                    # failure.
+                    import torch_bootstrap
+                    if not torch_bootstrap.wait_for_gpu_backend_ready(timeout=10.0):
+                        raise RuntimeError("GPU backend not ready within timeout")
+                    from gpu_raw_processor import try_gpu_decode_from_unpacked
+                    gpu_out = try_gpu_decode_from_unpacked(unpacked, cancel_check=cancel_check, return_linear=return_linear)
+                    if gpu_out is not None:
+                        logger.info(
+                            "[FAST_RAW] %s decoded (GPU) %dx%d in %.0fms (pattern=%s)",
+                            os.path.basename(file_path),
+                            gpu_out.shape[1],
+                            gpu_out.shape[0],
+                            (time.perf_counter() - t0) * 1000.0,
+                            unpacked.pat_str,
+                        )
+                        return gpu_out
             except DecodeCancelled:
                 raise
             except Exception as e:

@@ -103,7 +103,7 @@
 2. 在安裝精靈選擇 **Full (CUDA)**、**Full (DirectML)** 或 **Lite**。**Full** 會另下載 AI 模型（約 600 MB）。
 3. 啟動 **`RAWviewer.exe`** 或桌面捷徑（勿再次執行 Setup）。
 
-> **v2.6 新功能：** **1–5 星評分**（按鍵 **0–5**、圖庫篩選）；**快速 RAW 解碼**（全尺寸約較先前 rawpy 路徑快 **1.4×**）；Nikon **HE/HE*** NEF；暗房色票；可選 GPU demosaic（`RAWVIEWER_PREFER_GPU_DECODE=1`，預設關閉）。完整說明：development 可用 `RAWVIEWER_ENABLE_EDITING=1` 啟用 Adjust 編輯。完整說明見 [`RELEASE_NOTES.md`](RELEASE_NOTES.md)。
+> **v2.6 新功能：** **1–5 星評分**（按鍵 **0–5**、圖庫篩選）；**快速 RAW 解碼**（全尺寸約較先前 rawpy 路徑快 **1.4×**）；Nikon **HE/HE*** NEF；暗房色票。development 可用 `RAWVIEWER_ENABLE_EDITING=1` 啟用 Adjust 編輯。完整說明見 [`RELEASE_NOTES.md`](RELEASE_NOTES.md)。
 
 會註冊常見格式的**開啟方式**。解除安裝：設定 → 應用程式，或 `%LOCALAPPDATA%\RAWviewer` 內的 **`uninstall.bat`**。
 
@@ -303,9 +303,7 @@ RAW 製造商 AF 需 **pyexiv2**。
 | `RAWVIEWER_RAW_EDR=1` | **預設。** macOS：選 **RAW（高品質）** 時 RAW 走 EDR；`0` 硬性關閉。App 內：底部工具列 **EDR** 按鈕可由使用者切換，但每次切換進入 RAW 工作流程都會重設為關閉。EDR 解碼採閒置延遲：快速瀏覽時立即顯示 SDR 快速緩衝，只有在該張影像暫留後才升級為 EDR，因此瀏覽速度不受影響 |
 | `RAWVIEWER_LIBRAW_CONSISTENT_PREVIEW=1` | RAW 符合與 100% 縮放同色票流程（預設開啟） |
 | `RAWVIEWER_FAST_RAW_DECODE=0` | 停用快速 RAW 解碼路徑（LibRaw unpack + SIMD demosaic，與舊管線色彩一致，half/full tier 共用 unpack；預設開啟，感光元件不支援時自動回退 rawpy） |
-| `RAWVIEWER_PREFER_GPU_DECODE=1` | 優先使用 GPU demosaic（PyTorch CUDA / MPS / CuPy）；**預設關閉**——多數機器上 Fast RAW CPU 整體更快。與 OpenGL 視埠（`RAWVIEWER_GPU_VIEW`）無關 |
-| `RAWVIEWER_GPU_CONCURRENCY` | 同時進行的 GPU demosaic 上限（自動；CUDA 通常為 2） |
-| `RAWVIEWER_USE_PROCESS_POOL=0` | 關閉 LibRaw process pool（測試 GPU demosaic 時有用；一般使用請勿設定） |
+| `RAWVIEWER_USE_PROCESS_POOL=0` | 關閉 LibRaw process pool（一般使用請勿設定） |
 | `RAWVIEWER_EXIF_BACKEND=auto` | `auto`、`pyexiv2` 或 `exifread` |
 | `RAWVIEWER_SHARE_MENU=1` | macOS：Qt 分享選單（建議） |
 | `RAWVIEWER_SHARE_TRY_NATIVE_PICKER=1` | macOS：優先嘗試原生分享表 |
@@ -342,7 +340,7 @@ RAW 製造商 AF 需 **pyexiv2**。
 
 **多執行緒 LibRaw（macOS 開發環境）**——PyPI 的 rawpy wheel 在 macOS/Linux 上內附單執行緒 LibRaw（Windows wheel 已內建 OpenMP）。`scripts/build_libraw_openmp.sh` 會以 OpenMP 重新編譯 LibRaw 並替換進 Pixi 環境，CR3/RAF/pana8 unpack 約快 1.5–2 倍。僅本機開發最佳化，`pixi install` 後需重新執行。可用 `scripts/check_libraw_parallelism.py <raw 檔案>` 驗證。
 
-**已於 2.6 交付（不再列為即將推出）：** 快速 RAW 解碼（預設開啟）、星級評分；連拍分組／比較模式（**C**）自 2.5 起已有。可選 GPU demosaic 仍為選用（`RAWVIEWER_PREFER_GPU_DECODE=1`）。GPU **視埠**（OpenGL 縮放／平移）另項，正式版預設開啟（`RAWVIEWER_GPU_VIEW=0` 關閉）。
+**已於 2.6 交付（不再列為即將推出）：** 快速 RAW 解碼（預設開啟）、星級評分；連拍分組／比較模式（**C**）自 2.5 起已有。GPU **視埠**（OpenGL 縮放／平移）另項，正式版預設開啟（`RAWVIEWER_GPU_VIEW=0` 關閉）。
 
 ---
 
