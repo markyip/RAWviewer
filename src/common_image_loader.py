@@ -1516,11 +1516,12 @@ def use_raw_process_pool() -> bool:
     # Prefer GPU/in-process fast_raw when that stack is available AND actually
     # in use (late probe: gpu_raw_processor only after main-thread bootstrap;
     # until then pool may start, then ImageLoadManager.apply_gpu_decode_profile()
-    # tears it down). RAWVIEWER_PREFER_GPU_DECODE defaults OFF (measured no
-    # speed benefit -- see fast_raw_decode.prefer_gpu_decode_enabled), so a
-    # merely-present GPU backend must not disable the process pool: that
-    # would throw away LibRaw's out-of-process parallelism to serve a GPU
-    # decode path nobody is exercising.
+    # tears it down). GPU decode now defaults ON for CUDA and OFF for MPS/CPU
+    # (see fast_raw_decode.prefer_gpu_decode_enabled), so a merely-present GPU
+    # backend must not disable the process pool: on MPS -- where the default is
+    # still off -- that would throw away LibRaw's out-of-process parallelism to
+    # serve a GPU decode path nobody is exercising. Gate on in_use, not
+    # available.
     if _gpu_demosaic_backend_in_use():
         return False
     return (_os.cpu_count() or 0) >= 4
@@ -1544,13 +1545,18 @@ def _gpu_demosaic_backend_in_use() -> bool:
     """True when a GPU backend is available AND GPU decode is actually enabled.
 
     ``_gpu_demosaic_backend_available()`` alone answers "is a GPU present",
-    not "will decodes use it" -- RAWVIEWER_PREFER_GPU_DECODE defaults to 0
-    (see fast_raw_decode.prefer_gpu_decode_enabled), so on a GPU-equipped
-    machine with GPU decode left at its default, callers that gated on
-    availability alone were tearing down the LibRaw process pool and capping
-    RAW concurrency to GPU semaphore slots (1-3) for a GPU path that never
-    actually decodes anything -- a pure throughput regression vs CPU-only
-    hardware.
+    not "will decodes use it" -- the default is per-backend (ON for CUDA, OFF
+    for MPS; see fast_raw_decode.prefer_gpu_decode_enabled), and either can be
+    forced by RAWVIEWER_PREFER_GPU_DECODE. On a machine where GPU decode is NOT
+    in use (Apple MPS at its default, or an explicit =0), callers that gated on
+    availability alone were tearing down the LibRaw process pool and capping RAW
+    concurrency to GPU semaphore slots (1-3) for a GPU path that never actually
+    decodes anything -- a pure throughput regression vs CPU-only hardware.
+
+    On CUDA, where GPU decode is now on by default, that pool teardown is the
+    INTENDED trade: decodes run on the GPU (measured 2.35x on full sensor-res
+    demosaic), so LibRaw's CPU-side parallelism is worth less than the GPU path
+    it would compete with for the same files.
     """
     if not _gpu_demosaic_backend_available():
         return False

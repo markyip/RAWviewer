@@ -143,24 +143,47 @@ def _env_disabled() -> bool:
 
 
 def prefer_gpu_decode_enabled() -> bool:
-    """GPU (MPS/CUDA) full-resolution demosaic, default OFF.
+    """GPU full-resolution demosaic. Default ON for CUDA, OFF everywhere else.
 
-    Measured no speed benefit on real files (45-46MP CR3/NEF: ~358-365ms
-    either way, GPU occasionally slower after warmup) -- consistent with
-    this module's own top-of-file docstring, which already reached the same
-    conclusion for the earlier OpenCL/Metal PoC. GPU decode also feeds the
-    MPS unified-memory pressure that needed a dedicated
-    release_cached_gpu_memory() mitigation (image_cache.py); skipping it by
-    default when it buys nothing removes that cost too. Set
-    RAWVIEWER_PREFER_GPU_DECODE=1 to re-enable (e.g. to re-verify on
-    different hardware, or for the parity gate's GPU-vs-CPU comparison).
+    The default is per-backend because the measurement is per-backend:
+
+    CUDA (RTX-class, full sensor-res demosaic, unpack excluded, median of 3,
+    warm context) -- worth it:
+        DSC00374.ARW   378ms CPU ->  74ms GPU   5.1x
+        IMG_0255.CR3   250ms CPU ->  49ms GPU   5.1x
+        P1034595.RW2   259ms CPU ->  52ms GPU   4.9x
+        683A1089.CR3   339ms CPU -> 346ms GPU   1.0x  (falls back to CPU)
+        TOTAL         1226ms     -> 522ms       2.35x
+
+    MPS (Apple) -- NOT worth it, and this is what the old blanket default-OFF
+    was actually measured on: 45-46MP CR3/NEF came out ~358-365ms either way,
+    GPU occasionally slower after warmup, while still feeding the unified-memory
+    pressure that needed release_cached_gpu_memory() (image_cache.py). So MPS
+    stays off by default; the earlier conclusion was right for Apple hardware
+    and was simply being applied to hardware it was never measured on.
+
+    Note this does NOT change time-to-first-render: first paint is served by the
+    embedded JPEG, which never touches the GPU (measured: TTFR identical with
+    GPU on vs off, 1.00x over 4 files). The win lands on the sensor-resolution
+    decode -- RAW mode, and zoom to 100% -- which is exactly where the CPU path
+    is slow enough to see.
+
+    RAWVIEWER_PREFER_GPU_DECODE=1/0 still forces either way; an explicit setting
+    always wins over the per-backend default.
     """
-    return str(os.environ.get("RAWVIEWER_PREFER_GPU_DECODE", "0")).strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
+    raw = str(os.environ.get("RAWVIEWER_PREFER_GPU_DECODE", "")).strip().lower()
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    # Unset: decide from the backend. Never raise -- a missing/broken torch must
+    # degrade to the CPU path, not break decoding.
+    try:
+        from gpu_raw_processor import detect_gpu_backend
+
+        return detect_gpu_backend() in {"pytorch_cuda", "cupy"}
+    except Exception:
+        return False
 
 
 def gpu_decode_max_megapixels() -> float:
