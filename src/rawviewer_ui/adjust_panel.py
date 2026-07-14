@@ -51,6 +51,14 @@ _CHANNEL_CURVE_KEYS_BY_NAME = {
 
 # Point-curve + parametric PV rows.
 _SHOW_TONE_CURVE_UI = True
+
+# Session-wide copy/paste clipboard for edit settings (survives navigation and
+# panel rebuilds; intentionally not persisted across app restarts).
+_EDIT_SETTINGS_CLIPBOARD: dict | None = None
+
+
+def _edit_settings_clipboard() -> dict | None:
+    return _EDIT_SETTINGS_CLIPBOARD
 # HSL section — hidden pending a saturation/vibrance review (see docs).
 _SHOW_HSL_UI = True
 # Dodge & burn brush — disabled pending a brush-shape/intensity-accumulation
@@ -506,6 +514,21 @@ class ImageAdjustPanelWidget(QWidget):
         header.addWidget(title)
         header.addStretch(1)
         self._build_compare_button(header)
+        copy_btn = QPushButton("Copy")
+        copy_btn.setObjectName("adjust_reset_btn")  # share Reset's compact style
+        copy_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        copy_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        copy_btn.setToolTip("Copy this image's edit settings (session clipboard)")
+        copy_btn.clicked.connect(self._on_copy_settings_clicked)
+        header.addWidget(copy_btn)
+        self._paste_btn = QPushButton("Paste")
+        self._paste_btn.setObjectName("adjust_reset_btn")
+        self._paste_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._paste_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self._paste_btn.setToolTip("Apply the copied edit settings to this image")
+        self._paste_btn.setEnabled(_edit_settings_clipboard() is not None)
+        self._paste_btn.clicked.connect(self._on_paste_settings_clicked)
+        header.addWidget(self._paste_btn)
         reset_btn = QPushButton("Reset")
         reset_btn.setObjectName("adjust_reset_btn")
         reset_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
@@ -1325,6 +1348,32 @@ class ImageAdjustPanelWidget(QWidget):
             return
         self._set_lens_correction_checked(checked)
         self.lens_correction_toggled.emit(bool(checked))
+        self.editing_finished.emit(self.get_adjustments())
+
+    def _on_copy_settings_clicked(self) -> None:
+        """Snapshot this image's edit settings into the session clipboard.
+
+        Per-image reference values are excluded (AS_SHOT_TEMP_KEY is the
+        camera's own WB reference for THIS file); dodge/burn masks never pass
+        through get_adjustments at all, so local paint stays per-image the
+        way Lightroom's default paste does.
+        """
+        global _EDIT_SETTINGS_CLIPBOARD
+        adj = self.get_adjustments()
+        _EDIT_SETTINGS_CLIPBOARD = {
+            k: v for k, v in adj.items() if k != AS_SHOT_TEMP_KEY
+        }
+        self._paste_btn.setEnabled(True)
+
+    def _on_paste_settings_clicked(self) -> None:
+        """Apply the copied settings to the current image and persist them."""
+        clip = _edit_settings_clipboard()
+        if not clip:
+            return
+        merged = dict(self.get_adjustments())
+        merged.update(clip)
+        self.set_adjustments(merged)
+        # Same path as a slider-release: full-quality preview + XMP write.
         self.editing_finished.emit(self.get_adjustments())
 
     def get_adjustments(self) -> Dict[str, float]:
