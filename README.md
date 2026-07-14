@@ -102,7 +102,7 @@ For a dedicated **cluster map** across an entire album and **geotagging photos m
 2. Choose **Full (CUDA)**, **Full (DirectML)**, or **Lite** in the wizard. **Full** also downloads AI models (~600 MB).
 3. Launch **`RAWviewer.exe`** or the Desktop shortcut (not the Setup file again).
 
-> **v2.6 new:** **1–5 star ratings** (keys **0–5**, gallery filter); **Fast RAW decode** (~**1.4×** full sensor vs prior rawpy path); Nikon **HE/HE*** NEF support; darkroom chrome; optional GPU demosaic (`RAWVIEWER_PREFER_GPU_DECODE=1`, off by default). Full changelog: [`RELEASE_NOTES.md`](RELEASE_NOTES.md).
+> **v2.6 new:** **1–5 star ratings** (keys **0–5**, gallery filter); **Fast RAW decode** (~**1.4×** full sensor vs prior rawpy path); Nikon **HE/HE*** NEF support; darkroom chrome. On **development**, **Adjust editing** is available via `RAWVIEWER_ENABLE_EDITING=1`. Full changelog: [`RELEASE_NOTES.md`](RELEASE_NOTES.md).
 
 Registers **Open with** for common photo formats. Uninstall: Settings → Apps, or **`uninstall.bat`** in `%LOCALAPPDATA%\RAWviewer`.
 
@@ -302,9 +302,7 @@ Requires **pyexiv2** for maker-note AF on RAW.
 | `RAWVIEWER_RAW_EDR=1` | **Default.** macOS: EDR for RAW when **RAW (High Quality)** workflow is selected; `0` to hard-disable. In-app: bottom-bar **EDR** button toggles it per-user, but resets to off every time you switch into RAW workflow. EDR decode is also idle-deferred: rapid navigation shows the fast SDR buffer immediately and only upgrades to EDR after you pause on an image, so browsing speed is unaffected either way |
 | `RAWVIEWER_LIBRAW_CONSISTENT_PREVIEW=1` | Same color pipeline for fit vs 100% zoom on RAW (default on) |
 | `RAWVIEWER_FAST_RAW_DECODE=0` | Disable the fast RAW decode path (LibRaw unpack + SIMD demosaic with exact color parity, shared unpack between half/full tiers; default on, auto-falls-back to rawpy for unsupported sensors) |
-| `RAWVIEWER_PREFER_GPU_DECODE=1` | Prefer GPU demosaic (PyTorch CUDA / MPS / CuPy) when available; **default off** — Fast RAW CPU is usually faster overall. Separate from the OpenGL viewport (`RAWVIEWER_GPU_VIEW`) |
-| `RAWVIEWER_GPU_CONCURRENCY` | Max in-flight GPU demosaics (auto; CUDA typically 2) |
-| `RAWVIEWER_USE_PROCESS_POOL=0` | Disable LibRaw process pool (helpful when testing GPU demosaic; leave unset for normal use) |
+| `RAWVIEWER_USE_PROCESS_POOL=0` | Disable LibRaw process pool (leave unset for normal use) |
 | `RAWVIEWER_EXIF_BACKEND=auto` | `auto`, `pyexiv2`, or `exifread` |
 | `RAWVIEWER_SHARE_MENU=1` | macOS: Qt share menu (recommended) |
 | `RAWVIEWER_SHARE_TRY_NATIVE_PICKER=1` | macOS: try native share sheet first |
@@ -341,7 +339,7 @@ Not in a release yet — tracked separately.
 
 **Multithreaded LibRaw (macOS dev builds)** — The PyPI rawpy wheel bundles a single-threaded LibRaw on macOS/Linux (Windows wheels already ship OpenMP). `scripts/build_libraw_openmp.sh` rebuilds LibRaw with OpenMP and swaps it into the Pixi env — roughly 1.5–2× faster unpack on CR3/RAF/pana8. Local dev-env only; re-apply after `pixi install`. Verify with `scripts/check_libraw_parallelism.py <raw file>`.
 
-**Shipped in 2.6 (no longer “upcoming”):** Fast RAW decode (default on), star ratings, burst grouping / Compare (**C**) from 2.5. Optional GPU demosaic remains opt-in via `RAWVIEWER_PREFER_GPU_DECODE=1`. GPU **viewport** (OpenGL zoom/pan) is separate and on by default (`RAWVIEWER_GPU_VIEW=0` to disable).
+**Shipped in 2.6 (no longer “upcoming”):** Fast RAW decode (default on), star ratings, burst grouping / Compare (**C**) from 2.5. GPU **viewport** (OpenGL zoom/pan) is on by default (`RAWVIEWER_GPU_VIEW=0` to disable). **Adjust / Develop editing** remains on the development branch behind `RAWVIEWER_ENABLE_EDITING=1`.
 
 ---
 
