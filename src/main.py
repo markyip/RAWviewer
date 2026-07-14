@@ -2143,6 +2143,16 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self._histogram_user_hidden = True
         self._adjust_user_hidden = True
         self._adjust_overlay_visible = False
+        # RAW view (toggle_raw_jpeg_workflow) is a persistent app-wide setting,
+        # but it is a *session* choice in practice: full RAW decode costs a
+        # multiple of the embedded-preview path on every navigation, and coming
+        # back to a launch that silently starts in RAW mode reads as "the app is
+        # slow" rather than "RAW mode is still on". Always start in the embedded-
+        # preview workflow; the user re-enables RAW per session.
+        try:
+            self.get_settings().setValue("use_embedded_jpeg_workflow", True)
+        except Exception:
+            pass
         self.thumbnail_threads = []  # Track running thumbnail threads
         
         # View mode: 'single' for single image view, 'gallery' for gallery view
@@ -2570,6 +2580,15 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         if gv is not None:
             if not gv.has_pixmap():
                 return False
+            # CUDA-GL / GL-tex path: image_size is authoritative. display() may
+            # keep a 1×1 placeholder in current_pixmap (avoids a huge empty
+            # QPixmap alloc); do not treat that as a size mismatch / blank view.
+            if getattr(gv, "_use_rgb_gl", False):
+                try:
+                    gw, gh = gv.image_size()
+                    return gw > 0 and gh > 0
+                except Exception:
+                    return False
             pm = getattr(self, "current_pixmap", None)
             if pm is not None and not pm.isNull():
                 try:
@@ -18898,6 +18917,81 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         except Exception:
             return False
 
+    def _try_display_device_rgb_via_cuda_gl(
+        self,
+        device_rgb,
+        *,
+        width: int,
+        height: int,
+        channels: int,
+        is_half_size: bool,
+    ) -> bool:
+        """Phase 2c: CUDA DeviceRgb → GL texture (no D2H for display)."""
+        try:
+            from gpu_gl_bridge import DeviceRgb, cuda_gl_enabled
+            from rawviewer_ui.gpu_image_view import gpu_cuda_gl_enabled
+
+            if not (cuda_gl_enabled() or gpu_cuda_gl_enabled()):
+                return False
+            if not isinstance(device_rgb, DeviceRgb):
+                return False
+            gv = getattr(self, "gpu_view", None)
+            if gv is None or channels != 3:
+                return False
+            if not gv.is_opengl_viewport():
+                return False
+            cur_path = getattr(self, "current_file_path", None) or ""
+            preserve = bool(
+                getattr(self, "_preserve_nav_zoom_active", False)
+                or getattr(self, "_maintain_zoom_on_navigation", False)
+                or not self._single_view_is_fit_mode()
+            )
+            gv.set_file_path(cur_path)
+            if not gv.set_device_rgb(
+                device_rgb, preserve_view=preserve if preserve else None
+            ):
+                return False
+
+            self._orientation_already_applied = True
+            self._is_half_size_displayed = bool(is_half_size)
+            prev_displayed = getattr(self, "_displayed_content_path", None)
+            self._displayed_content_path = cur_path
+            if getattr(self, "current_pixmap", None) is None or (
+                hasattr(self.current_pixmap, "isNull") and self.current_pixmap.isNull()
+            ):
+                from PyQt6.QtGui import QPixmap as _QP
+
+                self.current_pixmap = _QP(1, 1)
+            pm_max = max(int(width), int(height))
+            if _norm_path(prev_displayed or "") != _norm_path(cur_path or ""):
+                self._manager_displayed_max_dim = pm_max
+            else:
+                self._manager_displayed_max_dim = max(
+                    getattr(self, "_manager_displayed_max_dim", 0), pm_max
+                )
+            try:
+                self._sync_single_image_histogram()
+            except Exception:
+                pass
+            try:
+                self._on_single_view_content_displayed()
+            except Exception:
+                pass
+            try:
+                self._sync_gpu_single_view_visibility()
+            except Exception:
+                pass
+            import logging
+
+            logging.getLogger(__name__).info(
+                "[DISPLAY] CUDA-GL DeviceRgb path %dx%d (skipped D2H + QPixmap)",
+                width,
+                height,
+            )
+            return True
+        except Exception:
+            return False
+
     def _start_display_numpy_pixmap_worker(
         self,
         file_path: str,
@@ -19309,6 +19403,22 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 and hasattr(self, "current_file_path")
                 and self.current_file_path
             ):
+                try:
+                    from gpu_gl_bridge import DeviceRgb as _DeviceRgb
+
+                    if isinstance(rgb_image, _DeviceRgb):
+                        if self._try_display_device_rgb_via_cuda_gl(
+                            rgb_image,
+                            width=width,
+                            height=height,
+                            channels=channels,
+                            is_half_size=is_half_size,
+                        ):
+                            return
+                        # Interop failed: fall through with host numpy.
+                        rgb_image = rgb_image.to_numpy()
+                except Exception:
+                    pass
                 if self._try_display_rgb_via_gl_tex(
                     rgb_image,
                     width=width,

@@ -468,7 +468,9 @@ class ImageLoadWorker(QRunnable):
                 )
                 if result is not None and not self.task.is_cancelled():
                     if self._safe_emit():
-                        if isinstance(result, np.ndarray):
+                        from gpu_gl_bridge import DeviceRgb as _DeviceRgb
+
+                        if isinstance(result, (np.ndarray, _DeviceRgb)):
                             self.manager.image_ready.emit(file_path, result)
                         elif isinstance(result, QPixmap):
                             self.manager.pixmap_ready.emit(file_path, result)
@@ -601,7 +603,7 @@ class ImageLoadManager(QObject):
     # 信號定義
     # NOTE: Can emit np.ndarray (base thumbnail) or QImage (pre-scaled/cropped) for smooth UI.
     thumbnail_ready = pyqtSignal(str, object)  # file_path, thumbnail (np.ndarray or QImage)
-    image_ready = pyqtSignal(str, np.ndarray)  # file_path, full_image
+    image_ready = pyqtSignal(str, object)  # file_path, full_image (ndarray or DeviceRgb)
     pixmap_ready = pyqtSignal(str, QPixmap)  # file_path, pixmap
     error_occurred = pyqtSignal(str, str)  # file_path, error_message
     task_completed = pyqtSignal(str)  # file_path

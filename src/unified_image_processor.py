@@ -146,6 +146,22 @@ class UnifiedImageProcessor:
         if rgb_image is None:
             return None
         try:
+            from gpu_gl_bridge import DeviceRgb
+
+            if isinstance(rgb_image, DeviceRgb):
+                # Editing still runs on host today; download only when needed.
+                from raw_adjustments import (
+                    is_default_adjustments,
+                    load_adjustments_for_file,
+                )
+
+                adj = load_adjustments_for_file(file_path)
+                if is_default_adjustments(adj):
+                    return rgb_image
+                rgb_image = rgb_image.to_numpy()
+        except Exception:
+            pass
+        try:
             from raw_adjustments import (
                 apply_adjustments_to_rgb,
                 is_default_adjustments,
@@ -1478,12 +1494,69 @@ class UnifiedImageProcessor:
                 pass
                 
             if orientation != 1 and rgb_image is not None:
-                rgb_image = self._apply_orientation_correction(rgb_image, orientation, exif_data)
+                try:
+                    from gpu_gl_bridge import DeviceRgb, apply_orientation_device_rgb
+
+                    if isinstance(rgb_image, DeviceRgb):
+                        rgb_image = apply_orientation_device_rgb(rgb_image, orientation)
+                    else:
+                        rgb_image = self._apply_orientation_correction(
+                            rgb_image, orientation, exif_data
+                        )
+                except Exception:
+                    try:
+                        from gpu_gl_bridge import DeviceRgb as _DR
+
+                        host = (
+                            rgb_image.to_numpy()
+                            if isinstance(rgb_image, _DR)
+                            else rgb_image
+                        )
+                        rgb_image = self._apply_orientation_correction(
+                            host, orientation, exif_data
+                        )
+                    except Exception:
+                        pass
 
             # Cache unadjusted base; sidecar is applied in process_full_image().
             if rgb_image is not None:
-                self.cache.put_full_image(file_path, rgb_image)
-                self.cache.mark_full_image_source(file_path, is_embedded_jpeg=False)
+                try:
+                    from gpu_gl_bridge import DeviceRgb
+
+                    if isinstance(rgb_image, DeviceRgb):
+                        # Defer host D2H so CUDA-GL display can paint first.
+                        import threading
+
+                        def _cache_device_host(dev=rgb_image, fp=file_path):
+                            try:
+                                host = dev.to_numpy()
+                                self.cache.put_full_image(fp, host)
+                                self.cache.mark_full_image_source(
+                                    fp, is_embedded_jpeg=False
+                                )
+                            except Exception:
+                                pass
+
+                        threading.Thread(
+                            target=_cache_device_host, daemon=True
+                        ).start()
+                        host = None
+                    else:
+                        self.cache.put_full_image(file_path, rgb_image)
+                        self.cache.mark_full_image_source(
+                            file_path, is_embedded_jpeg=False
+                        )
+                        host = rgb_image
+                except Exception:
+                    host = rgb_image if hasattr(rgb_image, "shape") else None
+                    if host is not None and not hasattr(host, "tensor"):
+                        try:
+                            self.cache.put_full_image(file_path, host)
+                            self.cache.mark_full_image_source(
+                                file_path, is_embedded_jpeg=False
+                            )
+                        except Exception:
+                            pass
                 if libraw_first:
                     # RAW workflow: persist a LibRaw-rendered display tier
                     # (memory + disk JPEG). Every pre-decode tier is embedded-
@@ -1500,6 +1573,12 @@ class UnifiedImageProcessor:
                     def _persist_libraw_preview(rgb=rgb_image, fp=file_path):
                         try:
                             import cv2
+                            from gpu_gl_bridge import DeviceRgb as _DR
+
+                            if isinstance(rgb, _DR):
+                                rgb = rgb.to_numpy()
+                            if rgb is None:
+                                return
 
                             # NOTE: previously applied sidecar adjustments here
                             # so the persisted preview reflected edits, not

@@ -258,10 +258,20 @@ def _run_idle_gpu_flush() -> None:
     release_cached_gpu_memory()
 
 
-def gpu_demosaic_pytorch_unpacked(unpacked, device_str: str = "cuda", cancel_check: Optional[Callable[[], bool]] = None, return_linear: bool = False) -> np.ndarray:
+def gpu_demosaic_pytorch_unpacked(
+    unpacked,
+    device_str: str = "cuda",
+    cancel_check: Optional[Callable[[], bool]] = None,
+    return_linear: bool = False,
+    *,
+    retain_device: bool = False,
+):
     """
     GPU-accelerated Demosaicing using PyTorch and Kornia.
     Consumes UnpackedRaw from fast_raw_decode.py to guarantee color math parity.
+
+    When ``retain_device`` is True (CUDA + Phase 2c), returns a ``DeviceRgb``
+    instead of downloading to numpy.
     """
     if device_str in ("cuda", "cuda:0") and os.environ.get("RAWVIEWER_CUDA_DEVICE", "").strip():
         device_str = _cuda_device_str()
@@ -278,7 +288,13 @@ def gpu_demosaic_pytorch_unpacked(unpacked, device_str: str = "cuda", cancel_che
         else _NullCtx()
     )
     with stream_ctx:
-        return _gpu_demosaic_pytorch_body(unpacked, device, cancel_check, return_linear)
+        return _gpu_demosaic_pytorch_body(
+            unpacked,
+            device,
+            cancel_check,
+            return_linear,
+            retain_device=retain_device,
+        )
 
 
 class _NullCtx:
@@ -544,7 +560,14 @@ def _record_gpu_isp_stages(stage_ms: dict[str, float], file_path: str = "") -> N
     logger.info(line)
 
 
-def _gpu_demosaic_pytorch_body(unpacked, device, cancel_check=None, return_linear: bool = False) -> np.ndarray:
+def _gpu_demosaic_pytorch_body(
+    unpacked,
+    device,
+    cancel_check=None,
+    return_linear: bool = False,
+    *,
+    retain_device: bool = False,
+):
     """Fused GPU develop: scale → demosaic → matrix → gamma; single D2H at end.
 
     Uploads the uint16 Bayer mosaic and performs black/WB scale on device so
@@ -649,8 +672,29 @@ def _gpu_demosaic_pytorch_body(unpacked, device, cancel_check=None, return_linea
         rgb_final = torch.clamp(rgb_gamma16 / 256.0, 0, 255).to(torch.uint8)
         del rgb_srgb, idx, rgb_gamma16
         _mark("gamma")
-        out = _download_device_rgb(rgb_final, device, ws, as_uint16=False)
-        _mark("download")
+        keep_device = (
+            bool(retain_device)
+            and device.type == "cuda"
+            and not return_linear
+        )
+        if keep_device:
+            # Synchronize producer stream so GUI-thread CUDA-GL map sees data.
+            try:
+                torch.cuda.current_stream(device).synchronize()
+            except Exception:
+                pass
+            from gpu_gl_bridge import DeviceRgb
+
+            out = DeviceRgb(
+                tensor=rgb_final.contiguous(),
+                file_path=str(getattr(unpacked, "file_path", "") or ""),
+            )
+            if timing:
+                stage_ms["download"] = 0.0
+                t_prev = time.perf_counter()
+        else:
+            out = _download_device_rgb(rgb_final, device, ws, as_uint16=False)
+            _mark("download")
 
     if timing:
         _record_gpu_isp_stages(
@@ -793,11 +837,17 @@ def gpu_demosaic_cupy_unpacked(unpacked, cancel_check: Optional[Callable[[], boo
 def try_gpu_decode_from_unpacked(
     unpacked,
     cancel_check: Optional[Callable[[], bool]] = None,
-    return_linear: bool = False
-) -> Optional[np.ndarray]:
+    return_linear: bool = False,
+    *,
+    retain_device: Optional[bool] = None,
+):
     """
     Attempt to decode the UnpackedRaw using the detected GPU backend.
     Falls back to None if GPU is not available or if processing errors occur.
+
+    When Phase 2c (``RAWVIEWER_GPU_CUDA_GL=1``) is on and ``retain_device`` is
+    not explicitly False, CUDA develops may return ``DeviceRgb`` instead of
+    numpy (skipping D2H for the display path).
     """
     backend = detect_gpu_backend()
     if backend == "cpu_only":
@@ -815,6 +865,14 @@ def try_gpu_decode_from_unpacked(
             w, h, unpacked.file_path,
         )
         return None
+
+    if retain_device is None:
+        try:
+            from gpu_gl_bridge import cuda_gl_enabled
+
+            retain_device = bool(cuda_gl_enabled()) and not return_linear
+        except Exception:
+            retain_device = False
 
     if backend == "cupy" and unpacked.pat_str != "RGGB":
         logger.warning(
@@ -846,11 +904,19 @@ def try_gpu_decode_from_unpacked(
         try:
             if backend == "pytorch_cuda":
                 res = gpu_demosaic_pytorch_unpacked(
-                    unpacked, device_str=_cuda_device_str(), cancel_check=cancel_check, return_linear=return_linear
+                    unpacked,
+                    device_str=_cuda_device_str(),
+                    cancel_check=cancel_check,
+                    return_linear=return_linear,
+                    retain_device=bool(retain_device),
                 )
             elif backend == "pytorch_mps":
                 res = gpu_demosaic_pytorch_unpacked(
-                    unpacked, device_str="mps", cancel_check=cancel_check, return_linear=return_linear
+                    unpacked,
+                    device_str="mps",
+                    cancel_check=cancel_check,
+                    return_linear=return_linear,
+                    retain_device=False,
                 )
             elif backend == "cupy":
                 res = gpu_demosaic_cupy_unpacked(unpacked, cancel_check=cancel_check, return_linear=return_linear)

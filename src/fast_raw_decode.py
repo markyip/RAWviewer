@@ -167,14 +167,15 @@ def gpu_decode_max_megapixels() -> float:
     """Skip GPU demosaic above this mosaic size (CPU usually wins + less VRAM).
 
     100MP RAF was measured ~10s on CUDA with heavy RSS growth while browsing;
-    fall back to CPU past the cap. Override with RAWVIEWER_GPU_DECODE_MAX_MP
-    (0 disables the cap).
+    fall back to CPU past the cap. Default 70 covers a7CR-class bodies while
+    still keeping extreme medium-format / GFX off GPU. Override with
+    RAWVIEWER_GPU_DECODE_MAX_MP (0 disables the cap).
     """
-    raw = str(os.environ.get("RAWVIEWER_GPU_DECODE_MAX_MP", "48")).strip()
+    raw = str(os.environ.get("RAWVIEWER_GPU_DECODE_MAX_MP", "70")).strip()
     try:
         return max(0.0, float(raw))
     except ValueError:
-        return 48.0
+        return 70.0
 
 
 def wb_sanity_enabled() -> bool:
@@ -290,17 +291,18 @@ def _wb_correction_from_jpeg(
         raw_planes = [(r, ci, p[:hmin, :wmin]) for r, ci, p in raw_planes]
         m3 = rgb_cam.astype(np.float64)
         m3_inv = np.linalg.pinv(m3)
-        jpg = _srgb_to_linear01(
-            cv2.cvtColor(
-                cv2.resize(arr, (wmin, hmin), interpolation=cv2.INTER_AREA),
-                cv2.COLOR_BGR2RGB,
-            )
-        )
-        lj = 0.2126 * jpg[..., 0] + 0.7152 * jpg[..., 1] + 0.0722 * jpg[..., 2]
         # scale_mul = (cam_mul / cam_mul.min()) * 65535 / denom
         denom = (cam_mul[0] / cam_mul.min()) * 65535.0 / scale_mul[0]
 
-        def _render_and_metric(mul: np.ndarray):
+        def _build_jpg(src_bgr: np.ndarray) -> np.ndarray:
+            return _srgb_to_linear01(
+                cv2.cvtColor(
+                    cv2.resize(src_bgr, (wmin, hmin), interpolation=cv2.INTER_AREA),
+                    cv2.COLOR_BGR2RGB,
+                )
+            )
+
+        def _render_and_metric(mul: np.ndarray, jpg: np.ndarray, lj: np.ndarray):
             sc = (mul / mul.min()) * 65535.0 / denom
             acc: Dict[str, np.ndarray] = {}
             n_g = 0
@@ -331,25 +333,52 @@ def _wb_correction_from_jpeg(
             cbar = cam3.reshape(-1, 3)[mask.reshape(-1)].mean(axis=0)
             return dr, db, max(abs(dr), abs(db)), cbar
 
+        # Align JPEG aspect to CFA half-planes. Some bodies embed a portrait
+        # JPEG while the mosaic buffer stays sensor-native landscape (or the
+        # reverse). Stretching across that mismatch poisons the median metric.
+        plane_portrait = hmin > wmin
+        jpeg_portrait = arr.shape[0] > arr.shape[1]
+        if plane_portrait == jpeg_portrait:
+            cand_imgs = (arr, cv2.rotate(arr, cv2.ROTATE_180))
+        else:
+            cand_imgs = (
+                cv2.rotate(arr, cv2.ROTATE_90_CLOCKWISE),
+                cv2.rotate(arr, cv2.ROTATE_90_COUNTERCLOCKWISE),
+            )
+        best = None  # (first_dist, jpg, lj)
+        for src in cand_imgs:
+            jpg_t = _build_jpg(src)
+            lj_t = (
+                0.2126 * jpg_t[..., 0]
+                + 0.7152 * jpg_t[..., 1]
+                + 0.0722 * jpg_t[..., 2]
+            )
+            m0 = _render_and_metric(cam_mul, jpg_t, lj_t)
+            if m0 is None:
+                continue
+            dist0 = m0[2]
+            if best is None or dist0 < best[0]:
+                best = (dist0, jpg_t, lj_t)
+        if best is None:
+            return None
+        first_dist, jpg, lj = best
+        if first_dist <= _WB_SANITY_THRESHOLD:
+            return None
+
         # Iterate the mean-vector Newton step: one step lands well below the
         # trigger threshold but can leave a visible residual tint (the solve
         # is exact only for the masked MEAN, while the metric is a median and
         # the mask itself shifts as color converges). 2-3 iterations settle
         # under ~0.06 (imperceptible against JPEG tone-curve noise).
         cur_mul = cam_mul.astype(np.float64).copy()
-        first_dist = None
         for it in range(5):
-            m = _render_and_metric(cur_mul)
+            m = _render_and_metric(cur_mul, jpg, lj)
             if m is None:
                 if it == 0:
                     return None
                 break
             dr, db, dist, cbar = m
-            if it == 0:
-                if dist <= _WB_SANITY_THRESHOLD:
-                    return None
-                first_dist = dist
-            elif dist <= 0.06:
+            if it > 0 and dist <= 0.06:
                 break
             # w = (M^-1 (g_srgb * (M cbar))) / cbar -- exact for the mean.
             g_srgb = np.array([np.exp(-dr), 1.0, np.exp(-db)], dtype=np.float64)
@@ -550,6 +579,63 @@ def _pattern_string(pattern: np.ndarray) -> Optional[str]:
     return s if s in _BAYER_TO_CV2 else None
 
 
+def _resolve_black(raw: Any, cblack: np.ndarray) -> np.ndarray:
+    """True per-channel black level, repairing LibRaw's incomplete report.
+
+    LibRaw splits black into a base (``color.black``) plus per-channel deltas
+    (``color.cblack[0..3]``), and rawpy's ``black_level_per_channel`` exposes
+    only the deltas. On bodies LibRaw parses fully the deltas carry the whole
+    level (EOS R5: [512]*4) and this returns them untouched. On a body whose
+    makernote layout the bundled LibRaw predates, the base holds the level and
+    the deltas come back as small ISO trims over a ZERO floor -- the EOS R6
+    Mark III reports [0, 33, 100, 67] against a true black of 2049. Subtracting
+    only those leaves a ~2048/16383 = 12%-of-range pedestal in every channel,
+    which the WB multipliers then amplify unequally into a heavy color cast:
+    the "new camera color shift". (rawpy's own postprocess renders these files
+    with the same pedestal, so it is no use as a reference here -- the camera's
+    embedded JPEG is, and the repaired black is what matches it.)
+
+    ``cblack.min() <= 0`` is the signature of the missing base: a real sensor
+    floor is never zero. Only then do we measure the sensor's masked
+    optical-black columns, which are the physical zero reference, and use that
+    flat level for all four channels (measured per CFA phase, the R6 III's
+    phases agree to 1 LSB -- LibRaw's lopsided deltas are NOT a per-channel
+    floor and must not be added on top).
+
+    The measurement is deliberately gated rather than universal: on a Sony ARW
+    in the sample set the left margin reads 884 against a true black of 512, so
+    it is not clean masked black on every body. Bodies LibRaw already gets right
+    keep LibRaw's answer and cannot regress.
+    """
+    try:
+        if float(cblack.min()) > 0.0:
+            return cblack  # LibRaw's level is complete -- trust it.
+        s = raw.sizes
+        lm = int(getattr(s, "left_margin", 0) or 0)
+        full = raw.raw_image
+        if full is None or full.ndim != 2 or lm < 24:
+            return cblack
+        # Skip the outermost columns (often tapered/dead rather than a clean
+        # masked reference) and subsample rows: this is a median over a uniform
+        # strip, not a measurement that needs every pixel.
+        strip = full[::4, 8 : lm - 8]
+        if strip.size < 1024:
+            return cblack
+        level = float(np.median(strip))
+        white = float(raw.white_level)
+        if not (0.0 < level < white * 0.5):
+            return cblack  # implausible -- keep LibRaw's answer.
+        logger.info(
+            "[FAST_RAW] LibRaw reported an incomplete black level %s; using the "
+            "measured optical-black floor %.0f (body newer than this LibRaw)",
+            [round(float(x)) for x in cblack],
+            level,
+        )
+        return np.full(4, level, dtype=np.float64)
+    except Exception:
+        return cblack
+
+
 def unpack_raw(
     file_path: str,
     rawpy_lock: Optional[Any] = None,
@@ -588,6 +674,7 @@ def unpack_raw(
             # buffer). Chunked like the gathers below to bound GIL holds.
             mosaic = _chunked_copy(mosaic)
             black = np.asarray(raw.black_level_per_channel, dtype=np.float64)
+            black = _resolve_black(raw, black)
             white = float(raw.white_level)
             cam_mul = np.asarray(raw.camera_whitebalance, dtype=np.float64).copy()
             rgb_cam = _rgb_cam_from_cam_xyz(raw.rgb_xyz_matrix)
@@ -693,9 +780,10 @@ def finish_full_decode(
 ) -> Optional[np.ndarray]:
     """Full-resolution pixel math (scale/demosaic/matrix/gamma) on an unpack.
 
-    Returns uint8 sRGB in sensor orientation, or None when cv2 is
-    unavailable. Raises :class:`DecodeCancelled` between chunks when
-    ``cancel_check`` fires.
+    Returns uint8 sRGB in sensor orientation, or a ``DeviceRgb`` CUDA wrapper
+    when ``RAWVIEWER_GPU_CUDA_GL=1`` and the GPU path retains the device buffer.
+    Returns None when cv2 is unavailable. Raises :class:`DecodeCancelled`
+    between chunks when ``cancel_check`` fires.
 
     ``prefer_gpu`` defaults to False: measured no speed benefit from the MPS
     path on real files (45-46MP CR3/NEF, ~358-365ms either way, GPU
@@ -1010,6 +1098,7 @@ def halfsize_reference_decode(file_path: str) -> Optional[np.ndarray]:
             mosaic = mosaic.astype(np.float32)
             colors = np.asarray(raw.raw_colors_visible)
             black = np.asarray(raw.black_level_per_channel, dtype=np.float64)
+            black = _resolve_black(raw, black)
             white = float(raw.white_level)
             cam_mul = np.asarray(raw.camera_whitebalance, dtype=np.float64).copy()
             rgb_cam = _rgb_cam_from_cam_xyz(raw.rgb_xyz_matrix)

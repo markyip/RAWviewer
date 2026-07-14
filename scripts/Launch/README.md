@@ -164,7 +164,8 @@ RAWVIEWER_TEST_PYEXIV2=0 RAWVIEWER_TEST_SEMANTIC=0 ./scripts/Launch/shell/launch
 | Variable | Default | Notes |
 |----------|---------|--------|
 | `RAWVIEWER_GPU_VIEW` | `1` (release default) | OpenGL single-image viewport; set `0` for legacy scroll view |
-| `RAWVIEWER_PREFER_GPU_DECODE` | `0` (app / pixi / lite debug); `1` in `run_debug.bat` | **Internal / experimental only** — not documented in release notes or README. Prefer PyTorch CUDA/MPS (or CuPy) demosaic; often slower + high VRAM on large RAF |
+| `RAWVIEWER_PREFER_GPU_DECODE` | `1` in debug launch scripts; `0` app/pixi release default | Prefer PyTorch CUDA/MPS (or CuPy) demosaic for Fast RAW |
+| `RAWVIEWER_GPU_CUDA_GL` | `1` in debug launch scripts; `0` app default | Keep RGB on CUDA and upload via CUDA↔GL (Phase 2c) |
 | `RAWVIEWER_DISABLE_EDR` | `0` | macOS: set `1` to disable EDR viewport and force SDR HDR tone mapping |
 | `RAWVIEWER_SHARE_MENU` | `1` | Qt menu of `NSSharingService` targets (reliable under Qt6) |
 | `RAWVIEWER_ENABLE_SEMANTIC_SEARCH` | `1` | Semantic search on |
