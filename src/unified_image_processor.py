@@ -1319,6 +1319,7 @@ class UnifiedImageProcessor:
                     finish_full_decode,
                     params_supported,
                     params_supported_half,
+                    prefer_gpu_decode_enabled,
                     try_fast_raw_decode,
                     unpack_raw,
                 )
@@ -1347,7 +1348,9 @@ class UnifiedImageProcessor:
                             )
                             try:
                                 rgb_image = finish_full_decode(
-                                    unpacked, cancel_check=_load_task_cancelled
+                                    unpacked,
+                                    cancel_check=_load_task_cancelled,
+                                    prefer_gpu=prefer_gpu_decode_enabled(),
                                 )
                             except DecodeCancelled:
                                 raise

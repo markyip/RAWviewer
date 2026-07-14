@@ -706,20 +706,36 @@ def finish_full_decode(
     needed a dedicated release_cached_gpu_memory() mitigation elsewhere
     (image_cache.py) -- avoiding it by default when it buys nothing removes
     that cost too. Set True explicitly for a caller that specifically wants
-    to exercise the GPU path (e.g. a parity/benchmark script).
+    to exercise the GPU path (e.g. stashed full-tier zoom when
+    ``prefer_gpu_decode_enabled()``, or a parity/benchmark script).
     """
     if prefer_gpu:
         try:
-            import torch_bootstrap
-
-            if torch_bootstrap.wait_for_gpu_backend_ready(timeout=2.0):
-                from gpu_raw_processor import try_gpu_decode_from_unpacked
-
-                gpu_out = try_gpu_decode_from_unpacked(
-                    unpacked, cancel_check=cancel_check, return_linear=return_linear
+            mp_cap = gpu_decode_max_megapixels()
+            mosaic_mp = (
+                float(unpacked.mosaic.shape[0] * unpacked.mosaic.shape[1]) / 1e6
+                if getattr(unpacked, "mosaic", None) is not None
+                else 0.0
+            )
+            if mp_cap > 0 and mosaic_mp > mp_cap:
+                logger.info(
+                    "[FAST_RAW] Skipping GPU finish_full for %s "
+                    "(%.1f MP > %.1f MP cap); using CPU",
+                    os.path.basename(unpacked.file_path or ""),
+                    mosaic_mp,
+                    mp_cap,
                 )
-                if gpu_out is not None:
-                    return gpu_out
+            else:
+                import torch_bootstrap
+
+                if torch_bootstrap.wait_for_gpu_backend_ready(timeout=2.0):
+                    from gpu_raw_processor import try_gpu_decode_from_unpacked
+
+                    gpu_out = try_gpu_decode_from_unpacked(
+                        unpacked, cancel_check=cancel_check, return_linear=return_linear
+                    )
+                    if gpu_out is not None:
+                        return gpu_out
         except DecodeCancelled:
             raise
         except Exception as e:
