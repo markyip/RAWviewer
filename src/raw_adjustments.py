@@ -72,10 +72,6 @@ DEFAULT_ADJUSTMENTS: Dict[str, float] = {
     "CropAngle": 0.0,
     "PerspectiveVertical": 0.0,
     "PerspectiveHorizontal": 0.0,
-    "CropLeft": 0.0,
-    "CropRight": 0.0,
-    "CropTop": 0.0,
-    "CropBottom": 0.0,
     # Dodge & burn stops-per-mask-unit (see raw_dodge_burn.py). The mask
     # itself (a base64 PNG blob, potentially large) is NOT a plain numeric
     # attribute -- it's stored as its own XMP child element, mirroring
@@ -233,10 +229,10 @@ SLIDER_SPECS: tuple[SliderSpec, ...] = (
     _slider_linear("CropAngle", "Straighten", -450, 450, 0.0, scale=0.1, fmt=lambda x: f"{x:+.1f}°"),
     _slider_linear("PerspectiveVertical", "Vertical", -100, 100, 0.0),
     _slider_linear("PerspectiveHorizontal", "Horizontal", -100, 100, 0.0),
-    _slider_linear("CropLeft", "Crop L", 0, 45, 0.0, scale=0.01, fmt=lambda x: f"{x*100:.0f}%"),
-    _slider_linear("CropRight", "Crop R", 0, 45, 0.0, scale=0.01, fmt=lambda x: f"{x*100:.0f}%"),
-    _slider_linear("CropTop", "Crop T", 0, 45, 0.0, scale=0.01, fmt=lambda x: f"{x*100:.0f}%"),
-    _slider_linear("CropBottom", "Crop B", 0, 45, 0.0, scale=0.01, fmt=lambda x: f"{x*100:.0f}%"),
+    # Per-edge crop-inset sliders were removed by request: cropping stays out
+    # of the UI until a proper interactive overlay (visible crop rectangle
+    # with drag handles) exists. raw_transform.apply_geometry still honors
+    # the keys, so the future overlay only needs to write them.
 )
 
 

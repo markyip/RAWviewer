@@ -729,7 +729,6 @@ class ImageAdjustPanelWidget(QWidget):
                 target_sect = self.sect_detail
             elif spec.key in {
                 "CropAngle", "PerspectiveVertical", "PerspectiveHorizontal",
-                "CropLeft", "CropRight", "CropTop", "CropBottom",
             }:
                 target_sect = self.sect_transform
             else:

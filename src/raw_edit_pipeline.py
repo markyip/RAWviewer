@@ -348,10 +348,6 @@ _PRE_TONE_KEYS = (
     "CropAngle",
     "PerspectiveVertical",
     "PerspectiveHorizontal",
-    "CropLeft",
-    "CropRight",
-    "CropTop",
-    "CropBottom",
 )
 
 # Every key uses_recovery_tone_map() and apply_pv2012_tone_rgb() read, so the
