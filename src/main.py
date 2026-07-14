@@ -15070,12 +15070,22 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         if widget is None:
             return
         in_gallery = getattr(self, "view_mode", "") == "gallery"
-        has_files = bool(getattr(self, "image_files", None))
-        if not in_gallery or not has_files:
+        files = list(getattr(self, "image_files", None) or [])
+        min_rating = int(getattr(self, "_gallery_rating_filter_min", 0) or 0)
+        # Hide the star row entirely when nothing in the current gallery has
+        # ever been rated -- clicking a star then would just narrow to zero
+        # results (or immediately self-clear via _maybe_clear_empty_rating_
+        # filter), a non-functional control with no visible feedback. Keep it
+        # visible while a filter is already active (min_rating > 0) even if
+        # this particular sync call races ahead of _maybe_clear_empty_rating_
+        # filter -- that function is what actually resets the filter once it
+        # observes zero qualifying images, and the star row must stay up
+        # until then so the active-filter state stays visible/clearable.
+        any_rated = min_rating > 0 or any(self._gallery_path_rating(p) > 0 for p in files)
+        if not in_gallery or not files or not any_rated:
             widget.hide()
             return
         widget.show()
-        min_rating = int(getattr(self, "_gallery_rating_filter_min", 0) or 0)
         buttons = getattr(self, "_gallery_rating_filter_buttons", None) or []
         filled = getattr(self, "_rating_star_filled_icon", None)
         empty = getattr(self, "_rating_star_empty_icon", None)
@@ -17074,11 +17084,25 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         return max(1.0, cap)
 
     def _needs_full_resolution_upgrade(self, file_path: str | None = None) -> bool:
-        """True when on-screen pixels are below sensor resolution (EXIF)."""
+        """True when on-screen pixels are below sensor resolution (EXIF).
+
+        Also true when the on-screen buffer is an embedded-JPEG stand-in
+        (see image_cache.full_image_is_embedded_jpeg) even if its pixel
+        dimensions already reach sensor resolution -- some camera bodies
+        (Canon CR3, Sony ARW, ...) embed a JPEG preview close to full sensor
+        size, which by dimensions alone is indistinguishable from the app's
+        own RAW decode. Without this, the idle-decode-after-nav-pause timer
+        would see "already covers sensor resolution" and never queue the
+        real fast_raw_decode/rawpy pipeline for that file at all -- the
+        image would be permanently stuck showing the camera JPEG's
+        rendering instead of the app's own RAW-decoded pixels.
+        """
         fp = file_path or getattr(self, "current_file_path", None)
         pm = getattr(self, "current_pixmap", None)
         if not fp or pm is None or pm.isNull():
             return False
+        if self.image_cache.full_image_is_embedded_jpeg(fp):
+            return True
         try:
             exif = self.image_cache.get_exif(fp)
         except Exception:
@@ -17086,10 +17110,19 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         return not image_covers_sensor_resolution(pm.width(), pm.height(), exif)
 
     def _cached_full_covers_sensor(self, file_path: str, cached_full=None) -> bool:
-        """True when a cached full-image buffer reaches sensor resolution."""
+        """True when a cached full-image buffer reaches sensor resolution.
+
+        Returns False for an embedded-JPEG stand-in (see
+        _needs_full_resolution_upgrade for the rationale) when reading the
+        live cache entry -- only applies to the ``cached_full=None`` case
+        since an explicitly passed-in buffer isn't necessarily what's
+        currently cached under this path.
+        """
         if not file_path:
             return False
         try:
+            if cached_full is None and self.image_cache.full_image_is_embedded_jpeg(file_path):
+                return False
             buf = cached_full if cached_full is not None else self.image_cache.get_full_image(file_path)
             if buf is None:
                 return False

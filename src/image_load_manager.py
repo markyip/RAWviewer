@@ -800,7 +800,11 @@ class ImageLoadManager(QObject):
     def apply_gpu_decode_profile(self) -> None:
         """After GPU backend import: drop process pool conflict; align RAW slots."""
         import logging
-        from common_image_loader import raw_load_limit_aligned_to_gpu, use_raw_process_pool
+        from common_image_loader import (
+            _gpu_demosaic_backend_in_use,
+            raw_load_limit_aligned_to_gpu,
+            use_raw_process_pool,
+        )
 
         log = logging.getLogger(__name__)
         try:
@@ -815,12 +819,15 @@ class ImageLoadManager(QObject):
             int(getattr(self, "_raw_load_limit", 4) or 4)
         )
 
-        # Tear down process pool when GPU demosaic is active unless forced on.
+        # Tear down process pool only when GPU demosaic is both available AND
+        # actually enabled (RAWVIEWER_PREFER_GPU_DECODE) -- not merely present.
+        # A present-but-unused GPU backend (the shipping default) must not
+        # cost the LibRaw process pool's out-of-process parallelism.
         force_on = os.environ.get("RAWVIEWER_USE_PROCESS_POOL", "").strip().lower() in {
             "1", "true", "yes", "on",
         }
         if (
-            backend in ("pytorch_cuda", "pytorch_mps", "cupy")
+            _gpu_demosaic_backend_in_use()
             and not force_on
             and getattr(self, "_process_pool", None) is not None
         ):

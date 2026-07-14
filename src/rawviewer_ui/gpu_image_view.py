@@ -21,7 +21,7 @@ import os
 import sys
 from typing import Any
 
-from PyQt6.QtCore import Qt, QRect, QRectF, QPoint, QPointF, pyqtSignal, QEvent, QMimeData, QUrl, QEventLoop
+from PyQt6.QtCore import Qt, QRect, QRectF, QPoint, QPointF, pyqtSignal, QEvent, QMimeData, QUrl
 from PyQt6.QtGui import QKeyEvent, QPixmap, QPainter, QColor, QPen, QDrag, QBrush
 from PyQt6.QtWidgets import (
     QGraphicsView,
@@ -633,14 +633,22 @@ class GpuImageView(QGraphicsView):
         y = max(0.0, min(float(scene_y), max(0, self._img_h - 1)))
         self.resetTransform()
         self.scale(1.0, 1.0)
-        
-        # Ensure scrollbars are updated based on the new scale
-        QApplication.processEvents(
-            QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents
-        )
-        
+
+        # Force this view's own deferred geometry-update event (posted by
+        # scale()/resetTransform(), otherwise processed on the next event-loop
+        # iteration) so centerOn() below sees up-to-date scrollbar ranges
+        # instead of the pre-zoom ones -- centerOn's setValue() calls clamp
+        # against stale bounds, mis-centering until Qt catches up on its own.
+        # Scoped to this widget only: a full QApplication.processEvents()
+        # here pumped EVERY queued event for the whole app (timers, other
+        # widgets' input/paint, queued signal/slot deliveries) while
+        # mid-transform, risking reentrancy into this method or navigation
+        # code from unrelated handlers. sendPostedEvents(self, 0) only
+        # flushes events already queued for this view.
+        QApplication.sendPostedEvents(self, 0)
+
         self.centerOn(QPointF(x, y))
-            
+
         self.fitModeChanged.emit(False)
         self.zoomChanged.emit(1.0)
 
@@ -688,14 +696,14 @@ class GpuImageView(QGraphicsView):
         y = max(0.0, min(float(scene_y), max(0, new_h - 1)))
         self.resetTransform()
         self.scale(s, s)
-        
-        # Ensure scrollbars are updated based on the new scale
-        QApplication.processEvents(
-            QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents
-        )
-        
+
+        # See zoom_to_actual_at: flush only this view's own posted geometry
+        # update so centerOn() below uses fresh scrollbar ranges, without
+        # pumping the whole application's event queue.
+        QApplication.sendPostedEvents(self, 0)
+
         self.centerOn(QPointF(x, y))
-            
+
         self.fitModeChanged.emit(False)
         self.zoomChanged.emit(self.current_scale())
 

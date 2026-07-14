@@ -964,6 +964,24 @@ class UnifiedImageProcessor:
                                 pass
                             cached_image = None
 
+                    # An embedded-JPEG stand-in (see _try_full_embedded_raw_
+                    # preview) can reach/exceed sensor resolution in pixel
+                    # count while still not being the app's own RAW-decoded
+                    # pixels -- by dimensions alone it is indistinguishable
+                    # from a true decode, which previously made this cache
+                    # hit permanently short-circuit every subsequent
+                    # use_full_resolution=True request (idle-decode-after-nav
+                    # -pause, zoom-to-actual, ...) with the JPEG forever,
+                    # never reaching the real fast_raw_decode/rawpy pipeline
+                    # below. Reject it here exactly once so the request falls
+                    # through to _process_raw_image, which (via the same
+                    # full_image_is_embedded_jpeg flag) knows this is a
+                    # repeat ask and skips its own JPEG shortcut to produce
+                    # the true decode instead.
+                    if cached_image is not None and is_raw:
+                        if self.cache.full_image_is_embedded_jpeg(file_path):
+                            cached_image = None
+
                     if cached_image is not None:
                         if _verbose_orientation_logs():
                             # print(f"[ORIENTATION] Using VALID cached full_image for {os.path.basename(file_path)}. Shape: {w}x{h}")
@@ -1031,6 +1049,7 @@ class UnifiedImageProcessor:
             embedded = self._apply_orientation_correction(embedded, orientation, exif_data)
 
         self.cache.put_full_image(file_path, embedded)
+        self.cache.mark_full_image_source(file_path, is_embedded_jpeg=True)
 
         # The downsampled "preview tier" cache entry isn't needed for this
         # call's return value (the caller wants the full-res array right
@@ -1151,6 +1170,7 @@ class UnifiedImageProcessor:
                                     full_pixels, orientation, exif_data
                                 )
                             self.cache.put_full_image(file_path, full_pixels)
+                            self.cache.mark_full_image_source(file_path, is_embedded_jpeg=False)
                             self.cache.put_preview(file_path, full_pixels)
                             import logging
                             logging.getLogger(__name__).info(
@@ -1171,6 +1191,16 @@ class UnifiedImageProcessor:
                 
                 # If that didn't work (due to resolution coverage reject or workflow toggle),
                 # extract the largest native preview since LibRaw can't demosaic this file anyway.
+                #
+                # NOTE: deliberately NOT marked via mark_full_image_source here.
+                # This whole branch is reached only for skip_key already in
+                # _LIBRAW_UNSUPPORTED_PATHS (X-Trans, NEF HE, corrupt/composite
+                # DNG, ...) -- the embedded preview is the permanent, only
+                # available "full" tier for these files; there is no true
+                # decode to ever upgrade to, so tagging it as an embedded-JPEG
+                # stand-in would just make the idle-decode-after-nav-pause
+                # timer re-queue a pointless (if cheap, cache-hit) background
+                # request forever with nothing to gain.
                 native_preview = self.thumbnail_extractor.extract_embedded_native_preview(file_path)
                 if native_preview is not None:
                     orientation = exif_data.get("orientation", 1) if exif_data else 1
@@ -1224,10 +1254,24 @@ class UnifiedImageProcessor:
 
             # Full-resolution path only: accept sensor-covering embedded JPEG.
             # For fit-view / non-full, skip (would pin 30–60MP arrays in RAM).
+            #
+            # Only take the embedded-JPEG shortcut the FIRST time this file's
+            # full tier is requested. A repeat use_full_resolution=True
+            # request for a file whose full_image is already an embedded-JPEG
+            # stand-in (full_image_is_embedded_jpeg) means the caller
+            # deliberately wants the true pixels now -- the idle-decode-
+            # after-nav-pause timer or an explicit zoom, both of which exist
+            # specifically to upgrade past the fast interim preview. Without
+            # this, _try_full_embedded_raw_preview would just re-extract/
+            # re-cache the same JPEG every time (its own cache/coverage
+            # checks have no notion of "already served once"), permanently
+            # blocking the real fast_raw_decode/rawpy pipeline below for any
+            # camera body whose embedded preview reaches sensor resolution.
             if use_full_resolution:
-                full_embedded = self._try_full_embedded_raw_preview(file_path, exif_data)
-                if full_embedded is not None:
-                    return full_embedded
+                if not self.cache.full_image_is_embedded_jpeg(file_path):
+                    full_embedded = self._try_full_embedded_raw_preview(file_path, exif_data)
+                    if full_embedded is not None:
+                        return full_embedded
             else:
                 # Prefer preview-max-edge embedded/scanned JPEG before demosaic.
                 mem_max = memory_preview_max_edge()
@@ -1474,6 +1518,7 @@ class UnifiedImageProcessor:
             # Cache unadjusted base; sidecar is applied in process_full_image().
             if rgb_image is not None:
                 self.cache.put_full_image(file_path, rgb_image)
+                self.cache.mark_full_image_source(file_path, is_embedded_jpeg=False)
                 if libraw_first:
                     # RAW workflow: persist a LibRaw-rendered display tier
                     # (memory + disk JPEG). Every pre-decode tier is embedded-
@@ -1544,6 +1589,10 @@ class UnifiedImageProcessor:
 
             # LibRaw failed entirely; try byte-scan for embedded JPEG (already used in thumbnail
             # path, but preview may have been skipped or a different limit may help).
+            # NOTE: deliberately not marked via mark_full_image_source (see the
+            # matching note on the _LIBRAW_UNSUPPORTED_PATHS branch above) --
+            # LibRaw failed here, so a retry will predictably fail the same
+            # way; there is no true decode to ever upgrade to.
             try:
                 from enhanced_raw_processor import extract_embedded_jpeg_by_scan
                 lim = 8192 if use_full_resolution else memory_preview_max_edge()

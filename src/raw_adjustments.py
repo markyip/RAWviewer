@@ -228,36 +228,23 @@ def resolve_xmp_path(image_path: str) -> str:
 
 
 def editing_features_enabled() -> bool:
-    """Whether the Adjust panel, XMP writes, and edit export are available.
+    """Whether the Adjust panel, XMP writes for edits, and edit export are available.
 
-    Off by default on the fast-raw-decode browse branch
-    (RAWVIEWER_ENABLE_EDITING=1 to enable). Rating read/write and plain
-    browse/export-without-adjustments stay available either way.
+    Always False on this browse/cull release. Develop/Adjust ships in a later
+    version — ``RAWVIEWER_ENABLE_EDITING`` is ignored and cannot re-enable it.
+    Rating read/write and plain browse remain available.
     """
-    return os.environ.get("RAWVIEWER_ENABLE_EDITING", "0").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
+    return False
 
 
 def sidecar_adjustments_enabled() -> bool:
     """Whether browse/full-res display applies saved XMP edit sliders to pixels.
 
-    Off by default (RAWVIEWER_SIDECAR_ADJUST=1 to enable). Requires
-    ``editing_features_enabled()`` -- browse-only builds never pay the apply
-    cost even if the env var is set. Explicit
-    ``apply_sidecar_adjustments=True`` callers are unaffected.
+    Always False while :func:`editing_features_enabled` is False.
+    ``RAWVIEWER_SIDECAR_ADJUST`` is ignored on this release.
     """
-    if not editing_features_enabled():
-        return False
-    return os.environ.get("RAWVIEWER_SIDECAR_ADJUST", "0").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
+    return False
+
 
 
 def _parse_rating_value(raw: object) -> int:
