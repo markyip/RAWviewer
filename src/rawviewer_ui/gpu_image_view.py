@@ -15,6 +15,8 @@ host can keep navigation / status / histogram behaviour identical.
 Environment toggles:
 - ``RAWVIEWER_GPU_VIEW=0``       Disable; use legacy scroll-area single-image view.
 - ``RAWVIEWER_GPU_VIEW_NO_GL=1`` Use the raster viewport (debug / fallback).
+- ``RAWVIEWER_GPU_GL_TEX=1``     Paint RGB via ``QImage`` on the OpenGL viewport
+  (skip ``QPixmap``). Opt-in Phase 2b step toward CUDA↔GL.
 """
 
 import os
@@ -22,7 +24,7 @@ import sys
 from typing import Any
 
 from PyQt6.QtCore import Qt, QRect, QRectF, QPoint, QPointF, pyqtSignal, QEvent, QMimeData, QUrl
-from PyQt6.QtGui import QKeyEvent, QPixmap, QPainter, QColor, QPen, QDrag, QBrush
+from PyQt6.QtGui import QKeyEvent, QPixmap, QPainter, QColor, QPen, QDrag, QBrush, QImage
 from PyQt6.QtWidgets import (
     QGraphicsView,
     QGraphicsScene,
@@ -30,6 +32,7 @@ from PyQt6.QtWidgets import (
     QGraphicsRectItem,
     QGraphicsLineItem,
     QGraphicsEllipseItem,
+    QGraphicsObject,
     QLabel,
     QApplication,
 )
@@ -66,6 +69,68 @@ class CompareHandleItem(QGraphicsEllipseItem):
 
 def _env_true(name: str) -> bool:
     return str(os.environ.get(name, "")).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def gpu_gl_tex_enabled() -> bool:
+    """Opt-in QImage→OpenGL paint path (skips QPixmap); see set_rgb_numpy."""
+    return _env_true("RAWVIEWER_GPU_GL_TEX")
+
+
+class RgbGlImageItem(QGraphicsObject):
+    """Scene item that paints RGB888 via ``QPainter.drawImage``.
+
+    With an OpenGL viewport this becomes a GL texture upload without building a
+    ``QPixmap``. True CUDA↔GL (no host buffer) still needs texture registration;
+    this is the intermediate step that removes the pixmap converter cost.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._w = 0
+        self._h = 0
+        self._arr = None
+        self._qimage = None  # Optional[QImage]
+
+    def set_rgb_uint8(self, rgb) -> None:
+        import numpy as np
+
+        arr = np.ascontiguousarray(rgb)
+        if arr.ndim != 3 or arr.shape[2] < 3:
+            raise ValueError(f"expected HxWx3+ uint8 RGB, got shape={getattr(arr, 'shape', None)}")
+        if arr.dtype != np.uint8:
+            arr = np.clip(arr, 0, 255).astype(np.uint8, copy=False)
+        if arr.shape[2] > 3:
+            arr = np.ascontiguousarray(arr[:, :, :3])
+        h, w = int(arr.shape[0]), int(arr.shape[1])
+        self.prepareGeometryChange()
+        self._arr = arr
+        self._qimage = QImage(arr.data, w, h, 3 * w, QImage.Format.Format_RGB888)
+        # Keep numpy alive for as long as QImage borrows its buffer.
+        self._qimage._ndarray = arr  # type: ignore[attr-defined]
+        self._w, self._h = w, h
+        self.update()
+
+    def clear_rgb(self) -> None:
+        self.prepareGeometryChange()
+        self._arr = None
+        self._qimage = None
+        self._w = self._h = 0
+        self.update()
+
+    def image_size(self) -> tuple[int, int]:
+        return self._w, self._h
+
+    def to_qimage(self) -> QImage:
+        return self._qimage if self._qimage is not None else QImage()
+
+    def boundingRect(self) -> QRectF:
+        return QRectF(0, 0, float(self._w), float(self._h))
+
+    def paint(self, painter: QPainter, option, widget=None) -> None:  # noqa: ARG002
+        if self._qimage is None or self._qimage.isNull():
+            return
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+        painter.drawImage(QPointF(0.0, 0.0), self._qimage)
 
 
 class GpuImageView(QGraphicsView):
@@ -133,6 +198,13 @@ class GpuImageView(QGraphicsView):
         self._mask_item.setOpacity(0.4)
         self._mask_item.hide()
         self._scene.addItem(self._item)
+
+        # Opt-in RGB→OpenGL paint path (RAWVIEWER_GPU_GL_TEX=1): skips QPixmap.
+        self._rgb_item = RgbGlImageItem()
+        self._rgb_item.setZValue(0)
+        self._rgb_item.hide()
+        self._scene.addItem(self._rgb_item)
+        self._use_rgb_gl = False
 
         # Dashed focus / subject overlay rectangle (scene coords == image pixels). Uses a
         # cosmetic pen so the on-screen line width stays constant at any zoom level.
@@ -406,6 +478,11 @@ class GpuImageView(QGraphicsView):
             self._clipping_item.hide()
 
     def pixmap(self) -> QPixmap:
+        if getattr(self, "_use_rgb_gl", False):
+            img = self._rgb_item.to_qimage()
+            if img is not None and not img.isNull():
+                return QPixmap.fromImage(img)
+            return QPixmap()
         return self._item.pixmap() if getattr(self, "_has_pixmap", False) else QPixmap()
 
     def set_composition_grid_mode(self, mode: str) -> None:
@@ -427,6 +504,10 @@ class GpuImageView(QGraphicsView):
         and only the on-screen magnification should ever be preserved.
         """
         if pixmap is None or pixmap.isNull():
+            self._use_rgb_gl = False
+            self._rgb_item.hide()
+            self._rgb_item.clear_rgb()
+            self._item.show()
             self._item.setPixmap(QPixmap())
             self._has_pixmap = False
             self._img_w = self._img_h = 0
@@ -436,6 +517,12 @@ class GpuImageView(QGraphicsView):
             self._grid_item.set_grid(0, 0, self._grid_mode)
             self._update_placeholder()
             return
+
+        # Pixmap path owns the scene image; hide the RGB-GL item.
+        self._use_rgb_gl = False
+        self._rgb_item.hide()
+        self._rgb_item.clear_rgb()
+        self._item.show()
 
         new_w, new_h = pixmap.width(), pixmap.height()
         old_w, old_h = self._img_w, self._img_h
@@ -512,6 +599,82 @@ class GpuImageView(QGraphicsView):
         self._sync_fit_mode_flag()
         self.zoomChanged.emit(self.current_scale())
 
+    def set_rgb_numpy(self, rgb, preserve_view=None, *, exact_framing: bool = False) -> bool:
+        """Display HxWx3 uint8 RGB via OpenGL ``drawImage`` (no ``QPixmap``).
+
+        Returns False if the buffer is unsuitable (caller should fall back to
+        ``set_pixmap``). Framing semantics match ``set_pixmap``.
+        """
+        try:
+            import numpy as np
+
+            if rgb is None:
+                return False
+            arr = np.asarray(rgb)
+            if arr.ndim != 3 or arr.shape[2] < 3:
+                return False
+            new_h, new_w = int(arr.shape[0]), int(arr.shape[1])
+            if new_w <= 0 or new_h <= 0:
+                return False
+
+            old_w, old_h = self._img_w, self._img_h
+            had_pixmap = self._has_pixmap
+            if preserve_view is None:
+                preserve_view = not self._fit_mode
+            capture = preserve_view and had_pixmap and old_w > 0 and old_h > 0
+            s_old = fx = fy = None
+            if capture:
+                s_old = self.current_scale()
+                center_scene = self.mapToScene(self.viewport().rect().center())
+                fx = center_scene.x() / old_w
+                fy = center_scene.y() / old_h
+
+            self._item.hide()
+            self._item.setPixmap(QPixmap())
+            self._rgb_item.set_rgb_uint8(arr)
+            self._rgb_item.show()
+            self._use_rgb_gl = True
+
+            self._scene.setSceneRect(QRectF(0, 0, new_w, new_h))
+            self._img_w, self._img_h = new_w, new_h
+            self._has_pixmap = True
+            self._grid_item.set_grid(new_w, new_h, self._grid_mode)
+            self._update_placeholder()
+            if self._compare_active and (new_w, new_h) != (old_w, old_h):
+                self._update_compare_overlay()
+
+            if self._fit_mode or not capture:
+                if self._fit_mode and not getattr(self, "_zoom_intent_100", False):
+                    self.fit_to_window()
+                elif not capture:
+                    if self.is_at_fit_scale() and not getattr(self, "_zoom_intent_100", False):
+                        self.fit_to_window()
+                self._sync_fit_mode_flag()
+                return True
+
+            is_upgrade = new_w >= old_w - 1
+            if (
+                not exact_framing
+                and is_upgrade
+                and (
+                    getattr(self, "_zoom_intent_100", False)
+                    or (s_old is not None and s_old >= 1.0 - 1e-4)
+                )
+            ):
+                s_new = 1.0
+            else:
+                s_new = max(self.MIN_SCALE, s_old * old_w / new_w)
+                if is_upgrade and not exact_framing:
+                    s_new = min(self.MAX_SCALE, s_new)
+            self.resetTransform()
+            self.scale(s_new, s_new)
+            self.centerOn(QPointF(fx * new_w, fy * new_h))
+            self._sync_fit_mode_flag()
+            self.zoomChanged.emit(self.current_scale())
+            return True
+        except Exception:
+            return False
+
     def clear(self) -> None:
         self.set_pixmap(QPixmap())
 
@@ -538,6 +701,14 @@ class GpuImageView(QGraphicsView):
         a 30+ MP texture stays on the GPU while gallery tiles decode.
         """
         self.file_path = None
+        if getattr(self, "_use_rgb_gl", False):
+            try:
+                self._rgb_item.hide()
+                self._rgb_item.clear_rgb()
+                self._use_rgb_gl = False
+                self._item.show()
+            except Exception:
+                pass
         if sys.platform == "win32" and self.is_opengl_viewport():
             if self._viewport_hidden_for_teardown():
                 self._safe_clear_opengl_pixmap()

@@ -18817,6 +18817,87 @@ class RAWImageViewer(SessionMixin, QMainWindow):
 
         QTimer.singleShot(delay_ms, _tick)
 
+    def _try_display_rgb_via_gl_tex(
+        self,
+        rgb_image,
+        *,
+        width: int,
+        height: int,
+        channels: int,
+        is_half_size: bool,
+    ) -> bool:
+        """Phase 2b: paint full-res uint8 RGB via OpenGL drawImage (skip QPixmap).
+
+        Enabled with ``RAWVIEWER_GPU_GL_TEX=1``. Falls back to the pixmap worker
+        when the GPU view is missing or the buffer is not contiguous RGB888.
+        """
+        try:
+            from rawviewer_ui.gpu_image_view import gpu_gl_tex_enabled
+
+            if not gpu_gl_tex_enabled():
+                return False
+            gv = getattr(self, "gpu_view", None)
+            if gv is None or channels != 3:
+                return False
+            import numpy as np
+
+            arr = np.asarray(rgb_image)
+            if arr.dtype != np.uint8 or arr.ndim != 3 or arr.shape[2] < 3:
+                return False
+            arr = np.ascontiguousarray(arr)
+            cur_path = getattr(self, "current_file_path", None) or ""
+            preserve = bool(
+                getattr(self, "_preserve_nav_zoom_active", False)
+                or getattr(self, "_maintain_zoom_on_navigation", False)
+                or not self._single_view_is_fit_mode()
+            )
+            gv.set_file_path(cur_path)
+            if not gv.set_rgb_numpy(arr, preserve_view=preserve if preserve else None):
+                return False
+
+            # Bookkeeping mirrors display_pixmap without building a QPixmap first.
+            self._orientation_already_applied = True
+            self._is_half_size_displayed = bool(is_half_size)
+            prev_displayed = getattr(self, "_displayed_content_path", None)
+            self._displayed_content_path = cur_path
+            # Lightweight 1x1 placeholder pixmap so null-checks don't clear state.
+            # Real pixels live in the GL RGB item.
+            if getattr(self, "current_pixmap", None) is None or (
+                hasattr(self.current_pixmap, "isNull") and self.current_pixmap.isNull()
+            ):
+                from PyQt6.QtGui import QPixmap as _QP
+
+                self.current_pixmap = _QP(1, 1)
+            pm_max = max(int(width), int(height))
+            if _norm_path(prev_displayed or "") != _norm_path(cur_path or ""):
+                self._manager_displayed_max_dim = pm_max
+            else:
+                self._manager_displayed_max_dim = max(
+                    getattr(self, "_manager_displayed_max_dim", 0), pm_max
+                )
+            try:
+                self._sync_single_image_histogram()
+            except Exception:
+                pass
+            try:
+                self._on_single_view_content_displayed()
+            except Exception:
+                pass
+            try:
+                self._sync_gpu_single_view_visibility()
+            except Exception:
+                pass
+            import logging
+
+            logging.getLogger(__name__).info(
+                "[DISPLAY] GL-tex RGB path %dx%d (skipped QPixmap converter)",
+                width,
+                height,
+            )
+            return True
+        except Exception:
+            return False
+
     def _start_display_numpy_pixmap_worker(
         self,
         file_path: str,
@@ -19228,6 +19309,14 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 and hasattr(self, "current_file_path")
                 and self.current_file_path
             ):
+                if self._try_display_rgb_via_gl_tex(
+                    rgb_image,
+                    width=width,
+                    height=height,
+                    channels=channels,
+                    is_half_size=is_half_size,
+                ):
+                    return
                 self._start_display_numpy_pixmap_worker(
                     self.current_file_path,
                     rgb_image,

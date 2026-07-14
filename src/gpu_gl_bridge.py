@@ -1,32 +1,20 @@
-"""CUDA ↔ OpenGL display bridge (Phase 2b scaffold).
+"""CUDA ↔ OpenGL display bridge (Phase 2b).
 
-Current single-view Route B still paints via ``QGraphicsView`` +
-``QGraphicsPixmapItem.setPixmap(QPixmap)``. That path **requires** a host
-buffer before Qt uploads a GL texture, so true zero-copy CUDA→screen is not
-possible without replacing the pixmap item with a custom GL viewport.
+Route today
+-----------
+* Fused GPU ISP downloads uint8 RGB into a **reused pinned** host buffer
+  (``gpu_raw_processor._download_device_rgb``).
+* With ``RAWVIEWER_GPU_GL_TEX=1``, ``GpuImageView.set_rgb_numpy`` paints that
+  buffer via ``QPainter.drawImage`` on the OpenGL viewport — **no QPixmap /
+  PixmapConverter**. Qt uploads a GL texture from the QImage.
+* Default path (flag off) remains: numpy → ``QPixmap`` → ``set_pixmap``.
 
-What RAWviewer does today for the develop hot path
--------------------------------------------------
-* Fused GPU ISP stays on device until gamma produces uint8 RGB.
-* Download uses a **reused pinned-host** buffer (``_download_device_rgb`` in
-  ``gpu_raw_processor.py``) instead of pageable ``tensor.cpu().numpy()``.
-* Display continues: numpy → ``PixmapConverter`` / ``QPixmap`` →
-  ``GpuImageView.set_pixmap``.
-
-What would be needed for real CUDA↔GL
+True zero-copy CUDA↔GL (still future)
 -------------------------------------
-1. Own a ``QOpenGLWidget`` (or share the graphics-view viewport context on
-   the GUI thread) and create an RGB8 texture of sensor size.
-2. On the GUI thread (holding that context):
-   ``cudaGraphicsGLRegisterImage`` → map → ``cudaMemcpy2DToArray`` / 3D copy
-   from the develop stream's uint8 device buffer → unmap / bind / draw.
-3. Decode workers must **not** touch the GL context: pass a CUDA IPC handle
-   or wait and enqueue the copy from the GUI thread after ``image_ready``.
-4. Fallback to pinned D2H + ``set_pixmap`` when GL context is unavailable
-   (``RAWVIEWER_GPU_VIEW_NO_GL``, macOS MPS, Intel iGPU-only, etc.).
-
-Until that viewport rewrite lands, call :func:`download_for_pixmap_path` from
-debug scripts if you need the same pinned staging outside the ISP module.
+Requires owning a texture id on the GUI thread and
+``cudaGraphicsGLRegisterImage`` from a worker-visible device buffer (IPC or
+deferred GUI copy). See earlier notes in this module's history; surface APIs
+below are the stable extension points.
 """
 
 from __future__ import annotations
@@ -35,7 +23,7 @@ from typing import Any, Optional
 
 
 def cuda_gl_interop_available() -> bool:
-    """True when a future custom GL viewport could attempt interop (CUDA only)."""
+    """True when CUDA is present (necessary but not sufficient for interop)."""
     try:
         import torch
 
@@ -44,12 +32,20 @@ def cuda_gl_interop_available() -> bool:
         return False
 
 
-def download_for_pixmap_path(rgb_device: Any, *, as_uint16: bool = False) -> Optional[Any]:
-    """Pinned D2H helper mirroring the ISP download path (numpy owned copy).
+def gl_tex_display_enabled() -> bool:
+    """Host-side OpenGL RGB paint without QPixmap (``RAWVIEWER_GPU_GL_TEX=1``)."""
+    import os
 
-    ``rgb_device`` must be a contiguous CUDA (or CPU) torch tensor shaped HxWx3.
-    Returns ``numpy.ndarray`` or None on failure.
-    """
+    return str(os.environ.get("RAWVIEWER_GPU_GL_TEX", "0")).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def download_for_pixmap_path(rgb_device: Any, *, as_uint16: bool = False) -> Optional[Any]:
+    """Pinned D2H helper mirroring the ISP download path (numpy owned copy)."""
     try:
         import torch
         from gpu_raw_processor import _download_device_rgb, _workspace_for
