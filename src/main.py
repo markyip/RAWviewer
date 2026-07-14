@@ -1031,11 +1031,21 @@ def _dismiss_startup_splash(app, main_window=None, splash=None) -> None:
             pass
     if main_window is not None:
         try:
-            main_window.show()
-            main_window.raise_()
-            main_window.activateWindow()
-            if app is not None:
-                app.processEvents()
+            # _schedule_startup_splash_dismiss calls this 5x (immediate + 4
+            # delayed retries) to cover macOS's laggy QSplashScreen.finish().
+            # Once the window is already visible+active (true on Windows
+            # after the very first call -- it doesn't have the macOS lag),
+            # repeating show()/raise_()/activateWindow() is a no-op for the
+            # window itself but still fires real focus/Z-order events, which
+            # is a known trigger for Windows' taskbar auto-hide to flicker
+            # on a frameless window. Only actually re-poke it when it isn't
+            # already in the state we want.
+            if not (main_window.isVisible() and main_window.isActiveWindow()):
+                main_window.show()
+                main_window.raise_()
+                main_window.activateWindow()
+                if app is not None:
+                    app.processEvents()
         except Exception:
             pass
     if sys.platform == "darwin" and main_window is not None:
@@ -22824,30 +22834,47 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                         return False
                     placed = False
                     try:
+                        if cur_max <= 0:
+                            raise ValueError("no current image extent to scale from")
+                        # new_level = scale * cur_max / new_max holds regardless
+                        # of sensor dims -- in the original derivation
+                        # (sens_level = scale*cur_max/s_max; new_level =
+                        # sens_level*s_max/new_max) the s_max terms cancel
+                        # algebraically, so the framing math never actually
+                        # needed EXIF sensor dimensions. Compute it
+                        # unconditionally: previously a still-uncached EXIF
+                        # entry (plausible mid-navigation, e.g. fast culling
+                        # through many files before EXIF finishes loading for
+                        # each one) made `sdims` empty, silently skipped this
+                        # whole placement, and fell back to set_pixmap's
+                        # generic preserve math -- whose own comment says its
+                        # >=100% snap "wobbles" the framing. That fallback is
+                        # exactly the reported "zoom glitches during culling".
+                        # Sensor dims are still used below, but only for the
+                        # secondary (non-framing) decisions: when to consider
+                        # this the final tier and whether to allow overscale.
+                        new_level = float(gv.current_scale()) * cur_max / new_max
                         from common_image_loader import sensor_pixel_dimensions
 
                         sdims = sensor_pixel_dimensions(
                             self.image_cache.get_exif(cur_path)
                         )
-                        if sdims and cur_max > 0:
-                            s_max = max(sdims)
-                            sens_level = float(gv.current_scale()) * cur_max / s_max
-                            new_level = sens_level * s_max / new_max
-                            c = gv.mapToScene(gv.viewport().rect().center())
-                            fx = c.x() / max(1, gv._img_w)
-                            fy = c.y() / max(1, gv._img_h)
-                            gv.set_pixmap_zoomed_at(
-                                pixmap,
-                                fx * pixmap.width(),
-                                fy * pixmap.height(),
-                                scale=new_level,
-                                allow_overscale=new_max < s_max * 0.98,
-                            )
-                            self.current_zoom_level = float(gv.current_scale())
-                            self.fit_to_window = False
-                            placed = True
-                            if new_max >= s_max * 0.98:
-                                self._nav_zoom_interim_active = False
+                        s_max = max(sdims) if sdims else 0
+                        c = gv.mapToScene(gv.viewport().rect().center())
+                        fx = c.x() / max(1, gv._img_w)
+                        fy = c.y() / max(1, gv._img_h)
+                        gv.set_pixmap_zoomed_at(
+                            pixmap,
+                            fx * pixmap.width(),
+                            fy * pixmap.height(),
+                            scale=new_level,
+                            allow_overscale=bool(s_max) and new_max < s_max * 0.98,
+                        )
+                        self.current_zoom_level = float(gv.current_scale())
+                        self.fit_to_window = False
+                        placed = True
+                        if s_max and new_max >= s_max * 0.98:
+                            self._nav_zoom_interim_active = False
                     except Exception:
                         placed = False
                     if placed:
