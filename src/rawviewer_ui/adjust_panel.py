@@ -52,6 +52,10 @@ _CHANNEL_CURVE_KEYS_BY_NAME = {
 # Point-curve + parametric PV rows.
 _SHOW_TONE_CURVE_UI = True
 
+_TRANSFORM_SLIDER_KEYS = frozenset(
+    {"CropAngle", "PerspectiveVertical", "PerspectiveHorizontal"}
+)
+
 # Session-wide copy/paste clipboard for edit settings (survives navigation and
 # panel rebuilds; intentionally not persisted across app restarts).
 _EDIT_SETTINGS_CLIPBOARD: dict | None = None
@@ -355,6 +359,9 @@ class ImageAdjustPanelWidget(QWidget):
     # toggles, this needs a full re-decode, not just a preview-pipeline rerun.
     lens_correction_toggled = pyqtSignal(bool)
     # "dodge" / "burn" / None (disarmed) -- see main.py._on_dodge_burn_mode_changed.
+    # True while the user is interacting with a Transform slider (straighten/
+    # perspective); the host shows an alignment grid overlay for the duration.
+    transform_interaction = pyqtSignal(bool)
     dodge_burn_mode_changed = pyqtSignal(object)
     dodge_burn_clear_requested = pyqtSignal()
     dodgeBurnMaskToggled = pyqtSignal(bool)
@@ -768,6 +775,15 @@ class ImageAdjustPanelWidget(QWidget):
                 )
             )
             slider.sliderReleased.connect(self._on_slider_released)
+            if spec.key in _TRANSFORM_SLIDER_KEYS:
+                # Alignment grid while straightening / correcting perspective:
+                # pressed -> grid on; released -> grid off (host-side).
+                slider.sliderPressed.connect(
+                    lambda: self.transform_interaction.emit(True)
+                )
+                slider.sliderReleased.connect(
+                    lambda: self.transform_interaction.emit(False)
+                )
             row.addWidget(slider, 1)
 
             val_lbl = AdjustValueLabel()

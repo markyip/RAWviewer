@@ -3991,6 +3991,30 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                     gv.set_composition_grid_mode(mode)
             self._redraw_single_view_pixmap_without_relayout()
 
+    def _on_transform_interaction(self, active: bool) -> None:
+        """Alignment grid while a Transform slider (straighten/perspective) is
+        held: pressed shows a thirds grid over the image, released restores
+        the user's own composition-grid setting. The user's persisted grid
+        preference is never modified -- only the on-screen mode is overridden
+        for the duration of the drag."""
+        gv = getattr(self, "gpu_view", None)
+        if gv is None:
+            return
+        try:
+            if active:
+                self._transform_grid_saved_mode = getattr(
+                    self, "_composition_grid_mode", "off"
+                )
+                gv.set_composition_grid_mode("thirds")
+            else:
+                gv.set_composition_grid_mode(
+                    getattr(self, "_transform_grid_saved_mode", None)
+                    or getattr(self, "_composition_grid_mode", "off")
+                )
+            gv.viewport().update()
+        except Exception:
+            pass
+
     def _refresh_focus_subject_rect_from_exif(self) -> None:
         """Populate _focus_subject_rect_image from pyexiv2, then exifread Subject*, then Canon AF.
 
@@ -8210,6 +8234,9 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             )
             self.single_image_adjust_panel.preview_changed.connect(
                 self._on_adjust_panel_preview_changed
+            )
+            self.single_image_adjust_panel.transform_interaction.connect(
+                self._on_transform_interaction
             )
             self.single_image_adjust_panel.export_requested.connect(
                 self._on_adjust_panel_export_requested
