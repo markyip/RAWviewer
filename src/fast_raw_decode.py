@@ -213,6 +213,12 @@ _WB_CORRECTION_CACHE: Dict[str, Optional[list]] = {}
 # separates them (4639x6959/black [0,35,102,69] vs 4024x6022/black 2048x4).
 _WB_MODEL_VERDICT: Dict[bytes, bool] = {}
 
+# Files whose fast-path unpack came back None this session, keyed on
+# (normcase path, mtime_ns, size) -- see unpack_raw. Re-probes if the file
+# changes on disk. Bounded by the number of distinct undecodable files a
+# session touches, which is tiny; a corrupt/exotic file is the exception.
+_UNPACK_UNSUPPORTED: set = set()
+
 
 def _wb_model_key(
     rgb_cam: Optional[np.ndarray],
@@ -636,6 +642,20 @@ def _resolve_black(raw: Any, cblack: np.ndarray) -> np.ndarray:
         return cblack
 
 
+def _unpack_identity(file_path: str) -> Optional[tuple]:
+    try:
+        st = os.stat(file_path)
+        return (os.path.normcase(os.path.abspath(file_path)), st.st_mtime_ns, st.st_size)
+    except OSError:
+        return None
+
+
+def _note_unpack_unsupported(file_path: str) -> None:
+    ident = _unpack_identity(file_path)
+    if ident is not None:
+        _UNPACK_UNSUPPORTED.add(ident)
+
+
 def unpack_raw(
     file_path: str,
     rawpy_lock: Optional[Any] = None,
@@ -644,9 +664,35 @@ def unpack_raw(
 
     Returns None for anything the fast pixel path can't handle (X-Trans,
     4-color CFA, linear/float DNG, missing camera WB, ...) — never raises.
+
+    A None verdict is remembered for the session (keyed on path + mtime + size,
+    so editing/replacing the file re-probes). The caller's fallback is
+    rawpy.postprocess, and some files fail here but decode fine there: a NEF in
+    the sample set trips LibRaw's unpack with a data error ("data corrupted
+    at ...") yet postprocesses to a perfect full-res image. Without this cache
+    every decode task for such a file -- fit paint, zoom to 100%, edit base,
+    each navigation back -- pays the doomed ~376ms unpack again before falling
+    back, which measured 1.5x SLOWER end-to-end than going straight to rawpy.
+    The failure is only knowable by trying (no compression flag predicts it),
+    so the fix is to try exactly once.
     """
     if _env_disabled():
         return None
+    ident = _unpack_identity(file_path)
+    if ident is not None and ident in _UNPACK_UNSUPPORTED:
+        return None
+    result = _unpack_raw_impl(file_path, rawpy_lock)
+    if result is None:
+        # Every None exit means "the fast path cannot decode this file" --
+        # unsupported CFA, missing camera WB, or a LibRaw unpack error.
+        _note_unpack_unsupported(file_path)
+    return result
+
+
+def _unpack_raw_impl(
+    file_path: str,
+    rawpy_lock: Optional[Any] = None,
+) -> Optional[UnpackedRaw]:
     from perf_metrics import perf_mark
 
     _t_unpack = time.perf_counter()
