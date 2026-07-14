@@ -85,6 +85,20 @@ _MAX_TONE_RATIO = 8.0
 _MIN_TONE_RATIO = 0.25
 
 
+# Where scene-linear white (camera clip, lum=1.0) lands in the perceptual
+# working space: t = 1/(1+0.25) = 0.8, then the base curve -> ~0.813. The
+# parametric splits above assume display-referred space where white is 1.0,
+# but _scene_to_perceptual never reaches 1.0 for finite luminance -- clipped
+# whites sit at ~0.813, only a quarter of the way into the [0.75, 1.0]
+# highlight band. Any highlight math that measures its region weight or knee
+# against 1.0 is therefore triple-attenuated into a no-op on the very pixels
+# Highlights exists for (measured: Highlights=-100 changed a clipped white by
+# 0.7%). Highlight-region math must normalize by this constant.
+_PERCEPTUAL_WHITE = float(
+    np.interp(1.0 / 1.25, _BASE_CURVE_XY[:, 0], _BASE_CURVE_XY[:, 1])
+)  # ~0.813
+
+
 def _luminance(rgb: np.ndarray) -> np.ndarray:
     return (
         0.2126 * rgb[:, :, 0]
@@ -167,12 +181,33 @@ def _apply_highlights_shadows(y: np.ndarray, highlights: float, shadows: float) 
         else:
             out = out + sw * sh * out * 0.38
     if abs(hi) > 1e-6:
-        hw = _region_weight_highlights(out)
         if hi < 0:
-            knee = np.maximum(out - _SPLIT_LIGHTS, 0.0)
-            out = out + hw * hi * knee * 0.55
+            # Highlight recovery as a blend between identity and a fixed
+            # rational shoulder, in WHITE-NORMALIZED space (see
+            # _PERCEPTUAL_WHITE: clipped whites live at ~0.813, so the old
+            # weight*knee*0.55 form -- all measured against 1.0 -- moved a
+            # clipped white by 0.7% at Highlights=-100, reported as
+            # "highlights recovery does not reduce the highlight intensity").
+            #
+            # C(yn) = 0.5 + 0.5*x/(1+8.4*x), x=(yn-0.5)/0.5: identity-joined
+            # (C'(0.5)=1) at normalized mid, compressing to C(1)=0.553 -- a
+            # clipped white at -100 ends ~0.85 stop down in linear, near-
+            # clipped gradations (yn~0.9) pull ~0.7 stop, and scene mid-grey
+            # (yn~0.50) is untouched. Monotone by construction: a fixed-weight
+            # blend of two monotone curves needs no coefficient/slope safety
+            # analysis, unlike the subtractive form it replaces.
+            yn = out / _PERCEPTUAL_WHITE
+            x = np.maximum((yn - 0.5) / 0.5, 0.0)
+            target = (0.5 + 0.5 * x / (1.0 + 8.4 * x)) * _PERCEPTUAL_WHITE
+            target = np.minimum(target, out)  # never brightens
+            out = out + (-hi) * (target - out)
         else:
-            out = out + hw * hi * (1.0 - out) * 0.35
+            # Brighten-highlights keeps the legacy form, but with the region
+            # weight measured in white-normalized space so it actually engages
+            # on real highlight data (same 0.813 issue as above), and the
+            # headroom term measured to normalized white rather than 1.0.
+            hw = _region_weight_highlights(np.minimum(out / _PERCEPTUAL_WHITE, 1.0))
+            out = out + hw * hi * np.maximum(_PERCEPTUAL_WHITE - out, 0.0) * 0.35
     return np.clip(out, 0.0, 1.0)
 
 
@@ -250,7 +285,27 @@ def apply_pv2012_tone_rgb(img: np.ndarray, adj: dict[str, float]) -> np.ndarray:
     # precisely the deep-shadow range they're for. The epsilon keeps the
     # blowup protection (bounded by _MAX_TONE_RATIO) without dead zones.
     ratio = (y1 + _RATIO_EPS) / (y0 + _RATIO_EPS)
-    ratio = np.clip(ratio, _MIN_TONE_RATIO, _MAX_TONE_RATIO)
+    ratio = np.clip(ratio, _MIN_TONE_RATIO, None)
+    # Soft knee instead of a hard clip at _MAX_TONE_RATIO. The hard clip
+    # saturated for deep-shadow pixels well before the slider maxed out
+    # (raw ratio at scene-linear ~0.002 is ~8 at Shadows=50 and ~15 at
+    # Shadows=100 -- both clipped to 8), so Shadows=50 and Shadows=100
+    # produced IDENTICAL output across most of the deep-shadow range: the
+    # "shadow recovery is limited" report, and part of the grey-veil one
+    # (every deep tone collapsing onto the same cap flattens local
+    # contrast). tanh keeps the same asymptotic ceiling and identity below
+    # the knee, but stays strictly increasing in the raw ratio, so slider
+    # positions above ~50 remain distinguishable (measured 7.06 vs 7.97 at
+    # the levels above).
+    _knee = 4.0
+    over = ratio > _knee
+    ratio = np.where(
+        over,
+        _knee
+        + (_MAX_TONE_RATIO - _knee)
+        * np.tanh((ratio - _knee) / (_MAX_TONE_RATIO - _knee)),
+        ratio,
+    )
 
     # Black-point anchor: taper the lift back toward 1.0 as y0 approaches
     # black. First tuning ramped over y0 in [0, 0.004] (noise floor only) --
@@ -336,6 +391,34 @@ def apply_pv2012_tone_rgb(img: np.ndarray, adj: dict[str, float]) -> np.ndarray:
         damp = 1.0 - (sw * damp_strength * lift_frac)[..., np.newaxis]
         luma = luma_2d[..., np.newaxis]
         chroma = out - luma
-        out = luma + chroma * damp
+        # Damp only the HIGH-FREQUENCY chroma component. Sensor/demosaic
+        # chroma noise -- the thing this damp exists for -- is per-pixel
+        # (high-frequency) by nature, while a genuinely colored surface
+        # (fabric, skin, painted wall) carries its color as a low-frequency
+        # chroma field. The previous full-chroma damp could not tell them
+        # apart, so a flat colored surface under a strong lift lost ~60% of
+        # its saturation (measured sat retention 0.44 at Shadows>=50): the
+        # "significant grey artifacts" report. The edge-aware strength above
+        # only protects luminance STRUCTURE (folds, weave); a uniformly
+        # colored flat region has no luma edges and was damped to grey.
+        # Splitting chroma with a small self-guided filter keeps the speckle
+        # suppression bit-for-bit on the noise (per-pixel deviations have
+        # ~zero low-frequency component) while passing surface color through
+        # untouched.
+        # The LF field is low-frequency by definition, so extract it at
+        # quarter resolution: full-res self-guided filtering here measured
+        # 462ms at 3004x2004 (tripling this stage), the 4x-downsampled
+        # equivalent ~35ms with visually identical output (INTER_AREA down /
+        # INTER_LINEAR up cannot introduce content above the very cutoff the
+        # filter is discarding anyway).
+        import cv2
+
+        h, w = chroma.shape[:2]
+        ds = cv2.resize(chroma, (max(1, w // 4), max(1, h // 4)), interpolation=cv2.INTER_AREA)
+        for c in range(3):
+            ch = np.ascontiguousarray(ds[..., c])
+            ds[..., c] = apply_guided_filter(ch, ch, 2, 0.0005)
+        chroma_lf = cv2.resize(ds, (w, h), interpolation=cv2.INTER_LINEAR)
+        out = luma + chroma_lf + (chroma - chroma_lf) * damp
 
     return np.clip(out, 0.0, None)
