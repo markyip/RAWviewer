@@ -1031,11 +1031,21 @@ def _dismiss_startup_splash(app, main_window=None, splash=None) -> None:
             pass
     if main_window is not None:
         try:
-            main_window.show()
-            main_window.raise_()
-            main_window.activateWindow()
-            if app is not None:
-                app.processEvents()
+            # _schedule_startup_splash_dismiss calls this 5x (immediate + 4
+            # delayed retries) to cover macOS's laggy QSplashScreen.finish().
+            # Once the window is already visible+active (true on Windows
+            # after the very first call -- it doesn't have the macOS lag),
+            # repeating show()/raise_()/activateWindow() is a no-op for the
+            # window itself but still fires real focus/Z-order events, which
+            # is a known trigger for Windows' taskbar auto-hide to flicker
+            # on a frameless window. Only actually re-poke it when it isn't
+            # already in the state we want.
+            if not (main_window.isVisible() and main_window.isActiveWindow()):
+                main_window.show()
+                main_window.raise_()
+                main_window.activateWindow()
+                if app is not None:
+                    app.processEvents()
         except Exception:
             pass
     if sys.platform == "darwin" and main_window is not None:
@@ -4748,6 +4758,29 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         if not rejected:
             return list(files or [])
         return [p for p in files if p and _norm_path(p) not in rejected]
+
+    def _reconcile_burst_rejected_paths_with_folder(self) -> None:
+        """Un-reject any path the folder scan actually found.
+
+        _burst_rejected_paths is a permanent per-folder blacklist (survives
+        restarts via QSettings) with nothing that ever removes an entry --
+        rejecting a photo moves it to the Discard subfolder (so it drops out
+        of image_files naturally), but if the user manually moves it back
+        into the main folder, the stale path string stays blacklisted
+        forever and the photo never reappears in gallery view even though
+        it's sitting right there on disk (single-image view isn't filtered
+        through this set, which is why it opens fine there). A path's
+        presence in the current folder scan is proof it's no longer
+        sitting in Discard, so drop it from the blacklist.
+        """
+        rejected = getattr(self, "_burst_rejected_paths", set()) or set()
+        if not rejected:
+            return
+        present = {_norm_path(p) for p in (getattr(self, "image_files", None) or [])}
+        still_rejected = rejected - present
+        if still_rejected != rejected:
+            self._burst_rejected_paths = still_rejected
+            self._save_burst_rejected_paths()
 
     def _capture_times_for_paths(self, paths: List[str]) -> dict:
         capture_times = {}
@@ -15071,12 +15104,22 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         if widget is None:
             return
         in_gallery = getattr(self, "view_mode", "") == "gallery"
-        has_files = bool(getattr(self, "image_files", None))
-        if not in_gallery or not has_files:
+        files = list(getattr(self, "image_files", None) or [])
+        min_rating = int(getattr(self, "_gallery_rating_filter_min", 0) or 0)
+        # Hide the star row entirely when nothing in the current gallery has
+        # ever been rated -- clicking a star then would just narrow to zero
+        # results (or immediately self-clear via _maybe_clear_empty_rating_
+        # filter), a non-functional control with no visible feedback. Keep it
+        # visible while a filter is already active (min_rating > 0) even if
+        # this particular sync call races ahead of _maybe_clear_empty_rating_
+        # filter -- that function is what actually resets the filter once it
+        # observes zero qualifying images, and the star row must stay up
+        # until then so the active-filter state stays visible/clearable.
+        any_rated = min_rating > 0 or any(self._gallery_path_rating(p) > 0 for p in files)
+        if not in_gallery or not files or not any_rated:
             widget.hide()
             return
         widget.show()
-        min_rating = int(getattr(self, "_gallery_rating_filter_min", 0) or 0)
         buttons = getattr(self, "_gallery_rating_filter_buttons", None) or []
         filled = getattr(self, "_rating_star_filled_icon", None)
         empty = getattr(self, "_rating_star_empty_icon", None)
@@ -17075,11 +17118,25 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         return max(1.0, cap)
 
     def _needs_full_resolution_upgrade(self, file_path: str | None = None) -> bool:
-        """True when on-screen pixels are below sensor resolution (EXIF)."""
+        """True when on-screen pixels are below sensor resolution (EXIF).
+
+        Also true when the on-screen buffer is an embedded-JPEG stand-in
+        (see image_cache.full_image_is_embedded_jpeg) even if its pixel
+        dimensions already reach sensor resolution -- some camera bodies
+        (Canon CR3, Sony ARW, ...) embed a JPEG preview close to full sensor
+        size, which by dimensions alone is indistinguishable from the app's
+        own RAW decode. Without this, the idle-decode-after-nav-pause timer
+        would see "already covers sensor resolution" and never queue the
+        real fast_raw_decode/rawpy pipeline for that file at all -- the
+        image would be permanently stuck showing the camera JPEG's
+        rendering instead of the app's own RAW-decoded pixels.
+        """
         fp = file_path or getattr(self, "current_file_path", None)
         pm = getattr(self, "current_pixmap", None)
         if not fp or pm is None or pm.isNull():
             return False
+        if self.image_cache.full_image_is_embedded_jpeg(fp):
+            return True
         try:
             exif = self.image_cache.get_exif(fp)
         except Exception:
@@ -17087,10 +17144,19 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         return not image_covers_sensor_resolution(pm.width(), pm.height(), exif)
 
     def _cached_full_covers_sensor(self, file_path: str, cached_full=None) -> bool:
-        """True when a cached full-image buffer reaches sensor resolution."""
+        """True when a cached full-image buffer reaches sensor resolution.
+
+        Returns False for an embedded-JPEG stand-in (see
+        _needs_full_resolution_upgrade for the rationale) when reading the
+        live cache entry -- only applies to the ``cached_full=None`` case
+        since an explicitly passed-in buffer isn't necessarily what's
+        currently cached under this path.
+        """
         if not file_path:
             return False
         try:
+            if cached_full is None and self.image_cache.full_image_is_embedded_jpeg(file_path):
+                return False
             buf = cached_full if cached_full is not None else self.image_cache.get_full_image(file_path)
             if buf is None:
                 return False
@@ -22959,30 +23025,47 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                         return False
                     placed = False
                     try:
+                        if cur_max <= 0:
+                            raise ValueError("no current image extent to scale from")
+                        # new_level = scale * cur_max / new_max holds regardless
+                        # of sensor dims -- in the original derivation
+                        # (sens_level = scale*cur_max/s_max; new_level =
+                        # sens_level*s_max/new_max) the s_max terms cancel
+                        # algebraically, so the framing math never actually
+                        # needed EXIF sensor dimensions. Compute it
+                        # unconditionally: previously a still-uncached EXIF
+                        # entry (plausible mid-navigation, e.g. fast culling
+                        # through many files before EXIF finishes loading for
+                        # each one) made `sdims` empty, silently skipped this
+                        # whole placement, and fell back to set_pixmap's
+                        # generic preserve math -- whose own comment says its
+                        # >=100% snap "wobbles" the framing. That fallback is
+                        # exactly the reported "zoom glitches during culling".
+                        # Sensor dims are still used below, but only for the
+                        # secondary (non-framing) decisions: when to consider
+                        # this the final tier and whether to allow overscale.
+                        new_level = float(gv.current_scale()) * cur_max / new_max
                         from common_image_loader import sensor_pixel_dimensions
 
                         sdims = sensor_pixel_dimensions(
                             self.image_cache.get_exif(cur_path)
                         )
-                        if sdims and cur_max > 0:
-                            s_max = max(sdims)
-                            sens_level = float(gv.current_scale()) * cur_max / s_max
-                            new_level = sens_level * s_max / new_max
-                            c = gv.mapToScene(gv.viewport().rect().center())
-                            fx = c.x() / max(1, gv._img_w)
-                            fy = c.y() / max(1, gv._img_h)
-                            gv.set_pixmap_zoomed_at(
-                                pixmap,
-                                fx * pixmap.width(),
-                                fy * pixmap.height(),
-                                scale=new_level,
-                                allow_overscale=new_max < s_max * 0.98,
-                            )
-                            self.current_zoom_level = float(gv.current_scale())
-                            self.fit_to_window = False
-                            placed = True
-                            if new_max >= s_max * 0.98:
-                                self._nav_zoom_interim_active = False
+                        s_max = max(sdims) if sdims else 0
+                        c = gv.mapToScene(gv.viewport().rect().center())
+                        fx = c.x() / max(1, gv._img_w)
+                        fy = c.y() / max(1, gv._img_h)
+                        gv.set_pixmap_zoomed_at(
+                            pixmap,
+                            fx * pixmap.width(),
+                            fy * pixmap.height(),
+                            scale=new_level,
+                            allow_overscale=bool(s_max) and new_max < s_max * 0.98,
+                        )
+                        self.current_zoom_level = float(gv.current_scale())
+                        self.fit_to_window = False
+                        placed = True
+                        if s_max and new_max >= s_max * 0.98:
+                            self._nav_zoom_interim_active = False
                     except Exception:
                         placed = False
                     if placed:
@@ -27140,6 +27223,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             # Ensure we only take the sorted file list (sort_image_files returns a tuple of (list, metadata_dict))
             sorted_files, _ = self.sort_image_files(image_files)
             self.image_files = sorted_files
+            self._reconcile_burst_rejected_paths_with_folder()
             # Keep semantic search corpus aligned with the currently scanned folder.
             self._semantic_search_corpus_files = list(self.image_files)
             self._semantic_search_backup_files = None
@@ -29090,6 +29174,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             self.current_folder = folder_path
             self._sync_burst_rejected_for_current_folder()
             self.image_files = image_files
+            self._reconcile_burst_rejected_paths_with_folder()
             self._reconcile_gallery_bookmarks_with_folder()
             self._semantic_search_corpus_files = list(image_files)
             self._gallery_search_index_session_key = None

@@ -1,11 +1,11 @@
-# RAWviewer v2.5
+# RAWviewer v2.6
 
 <p align="center">
   <img src="icons/appicon.ico" alt="RAWviewer Icon" width="256">
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-2.5-blue" alt="Version">
+  <img src="https://img.shields.io/badge/version-2.6-blue" alt="Version">
   <img src="https://img.shields.io/github/downloads/markyip/RAWviewer/total" alt="Downloads">
   <img src="https://img.shields.io/badge/license-MIT-green" alt="License">
   <a href="https://www.buymeacoffee.com/markyip">
@@ -15,9 +15,9 @@
 
 **語言：** [English](README.md) · **繁體中文**
 
-**RAWviewer** 是一款適用於 **Windows 與 macOS** 的快速相片檢視器。瀏覽 RAW 與 JPEG 資料夾、檢查銳利度、篩選淘汰、搜尋圖庫——**全部在本機完成，無需上傳雲端。**
+**RAWviewer** 是一款適用於 **Windows 與 macOS** 的快速相片檢視器。瀏覽 RAW 與 JPEG 資料夾、檢查銳利度、篩選淘汰、為 keeper 評星、搜尋圖庫——**全部在本機完成，無需上傳雲端。**
 
-下載：**[GitHub Releases](https://github.com/markyip/RAWviewer/releases/latest)**
+下載：**[GitHub Releases](https://github.com/markyip/RAWviewer/releases/latest)** · 發行說明：[`RELEASE_NOTES.md`](RELEASE_NOTES.md)
 
 ---
 
@@ -35,10 +35,11 @@
 | **捏合** / **Ctrl+捲動** | 放大 / 縮小 |
 | **←** / **→** | 上一張 / 下一張 |
 | **滑鼠滾輪** | 上一張 / 下一張（單張檢視、符合模式） |
-| **↑** | 加入 / 取消書籤（單張檢視底部**星號**亦可） |
+| **↑** | 加入 / 取消書籤 |
+| **1–5** / **0** | 設定星級 / 清除（單張檢視；底部列亦可點選星級） |
 | **↓** | 移至 Discard 資料夾 |
 | **Delete** | 刪除影像 |
-| **Esc** | 圖庫：清除選取 → 離開書籤篩選 · 單張：返回圖庫 |
+| **Esc** | 圖庫：清除選取 → 離開書籤／星級篩選 · 單張：返回圖庫 |
 | **Ctrl/Cmd+點擊** | 圖庫：切換選取 |
 | **Shift+點擊** | 圖庫：範圍選取（可見順序） |
 | **C** | 切換比較模式（需選取多張） |
@@ -60,9 +61,9 @@
 * **G** — 兩側構圖格線
 * **C** / **Esc** — 離開比較模式
 
-**圖庫書籤：** 點擊空心**星號**（未選取時）僅顯示已加書籤相片；金色星號 = 篩選開啟。已選相片時，**↑** 或星號可切換書籤。
+**圖庫書籤與星級：** 點擊空心**書籤星號**（未選取時）僅顯示已加書籤相片；金色 = 篩選開啟。已選相片時，**↑** 可切換書籤。圖庫另有**星級篩選**（顯示 ≥ N 星，可與書籤併用）。星級寫入 **XMP** sidecar。
 
-**搜尋：** 圖庫搜尋圖示——`camera:sony`、`iso<800` 等（**完整版**另支援 `sunset on beach` 等自然語句）。**分享：** 底部 **Share / Open**，或將圖庫 / 底片列縮圖拖出。
+**搜尋：** 圖庫搜尋圖示——`camera:sony`、`iso<800` 等（**完整版**另支援 `sunset on beach` 等自然語句）。**分享：** 底部 **Share / Open**，或將圖庫／底片列縮圖拖出。
 
 搜尋語法 → [進階參考](#進階參考)。
 
@@ -70,11 +71,11 @@
 
 ## Lite 與 Full
 
-兩個版本共用相同的檢視器、篩選工具、書籤與中繼資料搜尋。**Full（完整版）** 另含離線 AI 搜尋與人臉篩選。
+兩個版本共用相同的檢視器、篩選工具、星級、書籤與中繼資料搜尋。**Full（完整版）** 另含離線 AI 搜尋與人臉篩選。
 
 | | Lite（精簡版） | Full（完整版） |
 |---|:--:|:--:|
-| 圖庫、底片列、縮放、直方圖、書籤、篩選 | ✅ | ✅ |
+| 圖庫、底片列、縮放、直方圖、書籤、星級、篩選 | ✅ | ✅ |
 | 中繼資料搜尋（`camera:`、`iso:`、`date:` 等） | ✅ | ✅ |
 | 地點搜尋（`city:`、`country:` 等，需 GPS） | ✅ | ✅ |
 | 自然語句搜尋 | — | ✅ |
@@ -102,13 +103,13 @@
 2. 在安裝精靈選擇 **Full (CUDA)**、**Full (DirectML)** 或 **Lite**。**Full** 會另下載 AI 模型（約 600 MB）。
 3. 啟動 **`RAWviewer.exe`** 或桌面捷徑（勿再次執行 Setup）。
 
-> **v2.5 新功能：** 圖庫縮放滑桿、捲動錨定、GPS 地圖疊圖（**M**）、HDR 靜態與 **RAW（高品質工作流程）** 的 **macOS HDR/EDR**、RAW 的 **P** 復原預覽 / **J** 裁切疊圖、GIF/WebP 動畫播放、啟動時隱藏直方圖 / 地圖、切換相簿時更可靠的圖庫版面、進入圖庫或跳捲時的直向 / 橫向縮圖比例修正、更乾淨的背景索引取消、連拍分組、以及 **C** 鍵切換的並排比較檢視。
+> **v2.6 新功能：** **1–5 星評分**（按鍵 **0–5**、圖庫篩選）；**快速 RAW 解碼**（全尺寸約較先前 rawpy 路徑快 **1.4×**）；Nikon **HE/HE*** NEF；暗房色票；可選 GPU demosaic（`RAWVIEWER_PREFER_GPU_DECODE=1`，預設關閉）。完整說明：development 可用 `RAWVIEWER_ENABLE_EDITING=1` 啟用 Adjust 編輯。完整說明見 [`RELEASE_NOTES.md`](RELEASE_NOTES.md)。
 
 會註冊常見格式的**開啟方式**。解除安裝：設定 → 應用程式，或 `%LOCALAPPDATA%\RAWviewer` 內的 **`uninstall.bat`**。
 
 ### macOS（13+）
 
-1. 從 **[Releases](https://github.com/markyip/RAWviewer/releases/latest)** 下載 **`RAWviewer-v2.5-macOS.zip`**（Full）或 **`RAWviewer-v2.5-macOS-Lite.zip`**（Lite）並解壓。
+1. 從 **[Releases](https://github.com/markyip/RAWviewer/releases/latest)** 下載 **`RAWviewer-v2.6-macOS.zip`**（Full）或 **`RAWviewer-v2.6-macOS-Lite.zip`**（Lite）並解壓。
 2. 開啟**終端機**，進入解壓資料夾（`cd ` 後將資料夾拖入終端機），執行：
 
 ```bash
@@ -301,7 +302,10 @@ RAW 製造商 AF 需 **pyexiv2**。
 | `RAWVIEWER_DISABLE_EDR=1` | macOS：關閉 EDR 視埠與 HDR/RAW 16 位元顯示；改用 SDR tone-map |
 | `RAWVIEWER_RAW_EDR=1` | **預設。** macOS：選 **RAW（高品質）** 時 RAW 走 EDR；`0` 硬性關閉。App 內：底部工具列 **EDR** 按鈕可由使用者切換，但每次切換進入 RAW 工作流程都會重設為關閉。EDR 解碼採閒置延遲：快速瀏覽時立即顯示 SDR 快速緩衝，只有在該張影像暫留後才升級為 EDR，因此瀏覽速度不受影響 |
 | `RAWVIEWER_LIBRAW_CONSISTENT_PREVIEW=1` | RAW 符合與 100% 縮放同色票流程（預設開啟） |
-| `RAWVIEWER_FAST_RAW_DECODE=0` | 停用快速 RAW 解碼路徑（cv2 像素運算，與 LibRaw 色彩完全一致，half/full tier 共用 unpack；預設開啟，感光元件不支援時自動回退 rawpy） |
+| `RAWVIEWER_FAST_RAW_DECODE=0` | 停用快速 RAW 解碼路徑（LibRaw unpack + SIMD demosaic，與舊管線色彩一致，half/full tier 共用 unpack；預設開啟，感光元件不支援時自動回退 rawpy） |
+| `RAWVIEWER_PREFER_GPU_DECODE=1` | 優先使用 GPU demosaic（PyTorch CUDA / MPS / CuPy）；**預設關閉**——多數機器上 Fast RAW CPU 整體更快。與 OpenGL 視埠（`RAWVIEWER_GPU_VIEW`）無關 |
+| `RAWVIEWER_GPU_CONCURRENCY` | 同時進行的 GPU demosaic 上限（自動；CUDA 通常為 2） |
+| `RAWVIEWER_USE_PROCESS_POOL=0` | 關閉 LibRaw process pool（測試 GPU demosaic 時有用；一般使用請勿設定） |
 | `RAWVIEWER_EXIF_BACKEND=auto` | `auto`、`pyexiv2` 或 `exifread` |
 | `RAWVIEWER_SHARE_MENU=1` | macOS：Qt 分享選單（建議） |
 | `RAWVIEWER_SHARE_TRY_NATIVE_PICKER=1` | macOS：優先嘗試原生分享表 |
@@ -332,17 +336,13 @@ RAW 製造商 AF 需 **pyexiv2**。
 
 ### 開發中（development 分支）
 
-尚未發行——在獨立 development 分支追蹤。
+尚未發行——另行追蹤。
 
-**Windows HDR / EDR**——v2.5 已為 HDR 靜態與 RAW（高品質工作流程）加入 macOS EDR。Windows 目前將 HDR HEIC/TIFF 與 RAW tone-map 至 SDR。未來 Windows 路徑將利用 HDR 螢幕（10 位元 / scRGB 或 Qt QRhi HDR10），使高光可使用延伸動態範圍，類似 macOS。
+**Windows HDR / EDR**——v2.5+ 已為 HDR 靜態與 RAW（高品質工作流程）加入 macOS EDR。Windows 目前仍將 HDR HEIC/TIFF 與 RAW tone-map 至 SDR。未來 Windows 路徑將利用 HDR 螢幕（10 位元 / scRGB 或 Qt QRhi HDR10）提供延伸高光動態範圍。
 
-**連拍分組**——在圖庫自動分組短時間內連拍序列。開啟連拍群組一併檢視；**比較**模式可並排檢視候選以挑選最佳張。
+**多執行緒 LibRaw（macOS 開發環境）**——PyPI 的 rawpy wheel 在 macOS/Linux 上內附單執行緒 LibRaw（Windows wheel 已內建 OpenMP）。`scripts/build_libraw_openmp.sh` 會以 OpenMP 重新編譯 LibRaw 並替換進 Pixi 環境，CR3/RAF/pana8 unpack 約快 1.5–2 倍。僅本機開發最佳化，`pixi install` 後需重新執行。可用 `scripts/check_libraw_parallelism.py <raw 檔案>` 驗證。
 
-**快速 RAW 解碼**——已解決（2026-07）：曾阻擋 GPU 解碼的色彩一致性問題已解決，結論也改變了做法。fit-view（半尺寸）與感光元件解析度（全尺寸）兩個 tier 現在都改用 LibRaw unpack + SIMD 像素運算（cv2/numpy），與舊 rawpy 管線**色彩完全一致**（Sony ARW + 21 個 Canon CR3 黃金樣本驗證於 ±1 8-bit LSB 內——見 `scripts/fast_raw_decode_parity_gate.py`）。兩個 tier 共用同一次 LibRaw unpack：fit-view 解碼會暫存已 unpack 的感光元件資料，之後延遲觸發或縮放觸發的全尺寸解碼直接沿用，不必重新開檔、重新 unpack——省下每張使用者暫留或縮放檢視影像的重複 unpack（100–900ms）。全尺寸解碼比舊 rawpy LINEAR 路徑快 1.4–1.7 倍，demosaic 品質也更佳。GPU offload 本身經實測後否決：在 Apple Silicon 統一記憶體架構下，cv2 的 CPU demosaic 已達到記憶體頻寬上限（OpenCL 未顯示增益），GPU 後端只會增加相依性重量而無實質好處。可用 `RAWVIEWER_FAST_RAW_DECODE=0` 停用（兩個 tier 皆回退 rawpy）。
-
-**多執行緒 LibRaw（macOS 開發環境）**——PyPI 的 rawpy wheel 在 macOS/Linux 上內附單執行緒 LibRaw（Windows wheel 已內建 OpenMP）。`scripts/build_libraw_openmp.sh` 會以 OpenMP 重新編譯 LibRaw 並替換進 Pixi 環境（self-contained dylib、輸出 byte-identical、併發解碼下已驗證具決定性），CR3/RAF/pana8 unpack 及 AHD/DHT/X-Trans demosaic 約快 1.5–2 倍。非執行 RAWviewer 的必要條件，僅為本機開發環境最佳化，`pixi install` 重建環境後需重新執行。可用 `scripts/check_libraw_parallelism.py <raw 檔案>` 驗證核心使用率。
-
-此與 GPU **視埠**（解碼後像素的 OpenGL 縮放 / 平移，正式版預設開啟；`RAWVIEWER_GPU_VIEW=0` 關閉）不同。
+**已於 2.6 交付（不再列為即將推出）：** 快速 RAW 解碼（預設開啟）、星級評分；連拍分組／比較模式（**C**）自 2.5 起已有。可選 GPU demosaic 仍為選用（`RAWVIEWER_PREFER_GPU_DECODE=1`）。GPU **視埠**（OpenGL 縮放／平移）另項，正式版預設開啟（`RAWVIEWER_GPU_VIEW=0` 關閉）。
 
 ---
 
@@ -380,8 +380,8 @@ pixi run start          # full profile（預設）
 
 | 設定檔 | Windows | macOS |
 |--------|---------|-------|
-| **Full / Unified** | `dist/RAWviewer_Setup.exe`（含 Full 與 Lite 選項） | `dist/RAWviewer-v2.5-macOS.zip` |
-| **Lite** | （在 `RAWviewer_Setup.exe` 選 Lite） | `dist/RAWviewer-v2.5-macOS-Lite.zip` |
+| **Full / Unified** | `dist/RAWviewer_Setup.exe`（含 Full 與 Lite 選項） | `dist/RAWviewer-v2.6-macOS.zip` |
+| **Lite** | （在 `RAWviewer_Setup.exe` 選 Lite） | `dist/RAWviewer-v2.6-macOS-Lite.zip` |
 
 相依套件見 `pixi.toml`。封裝腳本建置正式版時使用本機 `rawviewer_env/` 虛擬環境。
 
@@ -406,10 +406,11 @@ scripts\Launch\bat\build_windows_lite.bat
 ### 架構（簡述）
 
 - **ImageLoadManager** — 執行緒載入佇列；切換資料夾會取消進行中任務（**v2.5.0**）
-- **UnifiedImageProcessor** — RAW/JPEG/TIFF 統一路徑
+- **UnifiedImageProcessor** — RAW/JPEG/TIFF 統一路徑；**Fast RAW decode** half/full 共用 unpack（**v2.6.0**）
+- **星級評分** — 1–5 + XMP；圖庫最低星級篩選（**v2.6.0**）
 - **Cache** — 記憶體優先；可選磁碟快取；啟動時 **RAM 層級預設**（`rawviewer_profile.py`）
 - **Semantic index** — SQLite + 本機嵌入（macOS Core ML、Windows ONNX；僅 Full）；切換資料夾範圍時中止背景 pass（**v2.5.0**）
-- **Gallery（JustifiedGallery）** — 齊行網格與縮放滑桿（重排 + 左上捲動錨點）；版面快取綁定資料夾世代；EXIF 排序後以拍攝時間順序開圖庫；鎖定齊行幾何前以容器 EXIF  reconcile 解碼縮圖比例（**v2.5.0**）
+- **Gallery（JustifiedGallery）** — 齊行網格與縮放滑桿（重排 + 左上捲動錨點）；版面快取綁定資料夾世代；EXIF 排序後以拍攝時間順序開圖庫；鎖定齊行幾何前以容器 EXIF reconcile 解碼縮圖比例（**v2.5.0**）
 - **HDR / EDR（macOS）** — GPU 視埠 EDR 層 + 16 位元 HDR 靜態解碼；RAW 工作流程啟用時經線性 LibRaw 走 RAW EDR（**v2.5.0**）
 - **RAW 復原預覽** — **P** 鍵，半解析度線性解碼 + 區域 tone 復原（`raw_tone_recovery.py`；**v2.5.0**）
 - **裁切疊圖** — 單張檢視 **J** 鍵（`exposure_clipping.py`；**v2.5.0**）

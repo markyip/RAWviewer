@@ -1513,10 +1513,15 @@ def use_raw_process_pool() -> bool:
         return False
     if raw in ("1", "true", "yes", "on"):
         return True
-    # Prefer GPU/in-process fast_raw when that stack is available (late probe:
-    # gpu_raw_processor only after main-thread bootstrap; until then pool may
-    # start, then ImageLoadManager.apply_gpu_decode_profile() tears it down).
-    if _gpu_demosaic_backend_available():
+    # Prefer GPU/in-process fast_raw when that stack is available AND actually
+    # in use (late probe: gpu_raw_processor only after main-thread bootstrap;
+    # until then pool may start, then ImageLoadManager.apply_gpu_decode_profile()
+    # tears it down). RAWVIEWER_PREFER_GPU_DECODE defaults OFF (measured no
+    # speed benefit -- see fast_raw_decode.prefer_gpu_decode_enabled), so a
+    # merely-present GPU backend must not disable the process pool: that
+    # would throw away LibRaw's out-of-process parallelism to serve a GPU
+    # decode path nobody is exercising.
+    if _gpu_demosaic_backend_in_use():
         return False
     return (_os.cpu_count() or 0) >= 4
 
@@ -1535,6 +1540,28 @@ def _gpu_demosaic_backend_available() -> bool:
         return False
 
 
+def _gpu_demosaic_backend_in_use() -> bool:
+    """True when a GPU backend is available AND GPU decode is actually enabled.
+
+    ``_gpu_demosaic_backend_available()`` alone answers "is a GPU present",
+    not "will decodes use it" -- RAWVIEWER_PREFER_GPU_DECODE defaults to 0
+    (see fast_raw_decode.prefer_gpu_decode_enabled), so on a GPU-equipped
+    machine with GPU decode left at its default, callers that gated on
+    availability alone were tearing down the LibRaw process pool and capping
+    RAW concurrency to GPU semaphore slots (1-3) for a GPU path that never
+    actually decodes anything -- a pure throughput regression vs CPU-only
+    hardware.
+    """
+    if not _gpu_demosaic_backend_available():
+        return False
+    try:
+        from fast_raw_decode import prefer_gpu_decode_enabled
+
+        return prefer_gpu_decode_enabled()
+    except Exception:
+        return False
+
+
 def raw_load_limit_aligned_to_gpu(base_limit: int) -> int:
     """Cap concurrent heavy RAW work to GPU demosaic concurrency when active."""
     limit = max(1, int(base_limit or 1))
@@ -1544,8 +1571,7 @@ def raw_load_limit_aligned_to_gpu(base_limit: int) -> int:
         mod = _sys.modules.get("gpu_raw_processor")
         if mod is None:
             return limit
-        backend = mod.detect_gpu_backend()
-        if backend not in ("pytorch_cuda", "pytorch_mps", "cupy"):
+        if not _gpu_demosaic_backend_in_use():
             return limit
         gpu_n = int(mod.gpu_decode_concurrency())
         return max(1, min(limit, gpu_n))

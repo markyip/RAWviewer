@@ -22,7 +22,13 @@ logger = logging.getLogger(__name__)
 _GPU_LOCK = threading.Lock()
 _GPU_CONCURRENCY_CACHED: Optional[int] = None
 _GPU_SEMAPHORE: Optional[threading.Semaphore] = None
-_LAST_IDLE_EMPTY_CACHE = 0.0
+# Debounce state for the idle-triggered allocator flush (see
+# maybe_release_gpu_memory_after_decode): a pending threading.Timer that
+# fires release_cached_gpu_memory() only once no new decode has completed
+# for RAWVIEWER_GPU_EMPTY_CACHE_S seconds, re-armed (cancel + reschedule) on
+# every decode instead of firing on a flat calendar-time cadence.
+_IDLE_FLUSH_TIMER: Optional[threading.Timer] = None
+_IDLE_FLUSH_LOCK = threading.Lock()
 
 
 def _default_gpu_concurrency() -> int:
@@ -213,15 +219,42 @@ def release_cached_gpu_memory() -> None:
 
 
 def maybe_release_gpu_memory_after_decode() -> None:
-    """Throttle post-decode allocator flushes (does not block if GPU busy)."""
-    global _LAST_IDLE_EMPTY_CACHE
-    now = time.time()
+    """Schedule an allocator flush after the GPU has been genuinely idle.
+
+    The previous implementation flushed whenever >=N seconds had elapsed
+    since the last flush -- a flat calendar-time cadence with no notion of
+    whether the user was still actively navigating. During continuous rapid
+    browsing that fires roughly every N seconds regardless, so whichever
+    decode happened to finish right after the flush paid a full realloc
+    (cudaMalloc) instead of reusing the caching allocator's pooled blocks --
+    observed in practice as a same-sized 45MP CR3 decode jumping from
+    ~215ms to ~1250ms for no content-related reason, purely because it
+    landed at the unlucky moment.
+
+    Debouncing instead (cancel + reschedule on every decode) means the
+    flush only ever fires once no new decode has completed for
+    RAWVIEWER_GPU_EMPTY_CACHE_S seconds -- i.e. actual idle time, never
+    interrupting an active browsing streak. The independent memory-pressure
+    path in image_cache._release_gpu_memory() is unaffected and still backs
+    this up under genuine RAM/VRAM pressure even mid-session.
+    """
+    global _IDLE_FLUSH_TIMER
     min_interval = float(os.environ.get("RAWVIEWER_GPU_EMPTY_CACHE_S", "8") or 8)
     if min_interval <= 0:
         return
-    if now - _LAST_IDLE_EMPTY_CACHE < min_interval:
-        return
-    _LAST_IDLE_EMPTY_CACHE = now
+    with _IDLE_FLUSH_LOCK:
+        if _IDLE_FLUSH_TIMER is not None:
+            _IDLE_FLUSH_TIMER.cancel()
+        timer = threading.Timer(min_interval, _run_idle_gpu_flush)
+        timer.daemon = True
+        _IDLE_FLUSH_TIMER = timer
+        timer.start()
+
+
+def _run_idle_gpu_flush() -> None:
+    global _IDLE_FLUSH_TIMER
+    with _IDLE_FLUSH_LOCK:
+        _IDLE_FLUSH_TIMER = None
     release_cached_gpu_memory()
 
 
@@ -464,7 +497,13 @@ def gpu_demosaic_cupy_unpacked(unpacked, cancel_check: Optional[Callable[[], boo
         'demosaic_kernel'
     )
     
-    demosaic_kernel(raw_norm, h, w, rgb_gpu)
+    # Both raw_data and rgb_out are declared `raw` (manual indexing with
+    # negative/row-stride offsets), so CuPy has no non-raw array argument to
+    # infer the loop size from -- without an explicit `size`, the launch
+    # collapses to a single element (i=0), which hits the border guard above
+    # and returns immediately: the kernel silently demosaiced nothing but a
+    # black frame. Every pixel must be visited, so size=h*w.
+    demosaic_kernel(raw_norm, h, w, rgb_gpu, size=h * w)
 
     _abort_if_cancelled()
 
@@ -541,6 +580,8 @@ def try_gpu_decode_from_unpacked(
     # streams overlap upload/compute); CuPy keeps the hard lock -- see the
     # concurrency-control comment at the top of this module.
     gate = _GPU_LOCK if backend == "cupy" else _gpu_semaphore()
+    res = None
+    elapsed_ms = 0.0
     with gate:
         if cancel_check is not None and cancel_check():
             from fast_raw_decode import DecodeCancelled
@@ -548,7 +589,6 @@ def try_gpu_decode_from_unpacked(
 
         t_start = time.time()
         try:
-            res = None
             if backend == "pytorch_cuda":
                 res = gpu_demosaic_pytorch_unpacked(
                     unpacked, device_str=_cuda_device_str(), cancel_check=cancel_check, return_linear=return_linear
@@ -559,32 +599,7 @@ def try_gpu_decode_from_unpacked(
                 )
             elif backend == "cupy":
                 res = gpu_demosaic_cupy_unpacked(unpacked, cancel_check=cancel_check, return_linear=return_linear)
-            if res is not None:
-                elapsed_ms = (time.time() - t_start) * 1000.0
-                logger.info(
-                    "GPU Processor: Decoded RAW via %s in %.1fms (bayer=%s)",
-                    backend,
-                    elapsed_ms,
-                    unpacked.pat_str,
-                )
-                try:
-                    from perf_metrics import perf_mark
-
-                    perf_mark(
-                        "decode_full_gpu",
-                        elapsed_ms,
-                        unpacked.file_path,
-                        backend=backend,
-                        mp=res.shape[0] * res.shape[1] / 1e6,
-                    )
-                except Exception:
-                    pass
-                try:
-                    maybe_release_gpu_memory_after_decode()
-                except Exception:
-                    pass
-                return res
-                
+            elapsed_ms = (time.time() - t_start) * 1000.0
         except Exception as e:
             # DecodeCancelled must be caught BEFORE the generic Exception
             # branch and propagated, not swallowed as a decode failure --
@@ -603,5 +618,36 @@ def try_gpu_decode_from_unpacked(
             if isinstance(e, DecodeCancelled):
                 raise
             logger.warning(f"GPU Processor: Failed to decode RAW on GPU ({backend}): {e}", exc_info=True)
+            res = None
+    # Outside `with gate:` (lock/semaphore already released): calling this
+    # while still holding our own permit made release_cached_gpu_memory()'s
+    # "acquire all permits non-blocking, else skip" check always see this
+    # thread's own held permit as "a decode in flight" and skip every single
+    # time -- the post-decode flush was silently a no-op. Releasing first
+    # lets it actually drain the allocator when no other decode is running.
+    if res is not None:
+        logger.info(
+            "GPU Processor: Decoded RAW via %s in %.1fms (bayer=%s)",
+            backend,
+            elapsed_ms,
+            unpacked.pat_str,
+        )
+        try:
+            from perf_metrics import perf_mark
 
-        return None
+            perf_mark(
+                "decode_full_gpu",
+                elapsed_ms,
+                unpacked.file_path,
+                backend=backend,
+                mp=res.shape[0] * res.shape[1] / 1e6,
+            )
+        except Exception:
+            pass
+        try:
+            maybe_release_gpu_memory_after_decode()
+        except Exception:
+            pass
+        return res
+
+    return None

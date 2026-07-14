@@ -166,3 +166,5 @@ src/windows_share_helper/obj/
 
 # Test plan: automation is tracked; perf baselines are per-machine
 testplan/baselines/
+
+bench_results/

@@ -1672,6 +1672,18 @@ class ImageCache(QObject):
         # Session-scoped provenance: preview keys whose pixels came from the
         # LibRaw pipeline (see put_preview(libraw_rendered=True)).
         self.libraw_preview_paths: set = set()
+        # Session-scoped provenance: full_image_cache keys currently holding an
+        # embedded-JPEG stand-in rather than the app's own RAW-decoded pixels
+        # (see mark_full_image_source). Many camera bodies (Canon CR3, Sony
+        # ARW, ...) embed a JPEG preview whose pixel dimensions reach/exceed
+        # FULL_EMBEDDED_SENSOR_COVERAGE of the true sensor resolution -- by
+        # dimensions alone that stand-in is indistinguishable from a true
+        # decode, which previously caused every "does this already cover
+        # sensor resolution" check (the fit-view display, the cached-full
+        # check, and process_full_image's own cache short-circuit) to
+        # conclude no further work was needed, permanently blocking the real
+        # RAW pipeline from ever running for that file during normal browsing.
+        self.full_image_embedded_jpeg_paths: set = set()
         if self.persistent_cache_enabled:
             self.exif_cache = PersistentEXIFCache(cache_dir)
             self.disk_thumbnail_cache = PersistentThumbnailCache(cache_dir)
@@ -2403,6 +2415,47 @@ class ImageCache(QObject):
                 label="full-image",
             )
 
+    def mark_full_image_source(self, file_path: str, *, is_embedded_jpeg: bool) -> None:
+        """Track whether the cached full_image entry is an embedded-JPEG
+        stand-in rather than the app's own RAW-decoded pixels -- see
+        full_image_embedded_jpeg_paths. Call alongside every put_full_image()
+        so the flag never goes stale: mark True from the embedded-preview
+        shortcut, False once a true decode overwrites that same key.
+        """
+        if not file_path:
+            return
+        key = self._path_key(file_path)
+        if is_embedded_jpeg:
+            self.full_image_embedded_jpeg_paths.add(key)
+            self._prune_full_image_embedded_jpeg_paths()
+        else:
+            self.full_image_embedded_jpeg_paths.discard(key)
+
+    def full_image_is_embedded_jpeg(self, file_path: str) -> bool:
+        """True when the currently cached full_image for this path is an
+        embedded-JPEG stand-in (see mark_full_image_source)."""
+        if not file_path:
+            return False
+        return self._path_key(file_path) in self.full_image_embedded_jpeg_paths
+
+    def _prune_full_image_embedded_jpeg_paths(self, max_paths: int = 2048) -> None:
+        """Bound session provenance set (paths only); same shape as
+        _prune_libraw_preview_paths."""
+        n = len(self.full_image_embedded_jpeg_paths)
+        if n <= max_paths:
+            return
+        excess = n - max_paths
+        drop = []
+        for k in self.full_image_embedded_jpeg_paths:
+            if self.full_image_cache.peek(k) is None:
+                drop.append(k)
+            if len(drop) >= excess:
+                break
+        for k in drop:
+            self.full_image_embedded_jpeg_paths.discard(k)
+        while len(self.full_image_embedded_jpeg_paths) > max_paths:
+            self.full_image_embedded_jpeg_paths.pop()
+
     def _estimate_entry_bytes(self, value: Any) -> int:
         try:
             if hasattr(value, "nbytes"):
@@ -2491,18 +2544,25 @@ class ImageCache(QObject):
         keep_full = None
         keep_preview = None
         keep_pixmap = None
+        keep_full_is_embedded_jpeg = False
         if keep_path:
             keep_full = self.full_image_cache.get(keep_path)
             keep_preview = self.preview_cache.get(keep_key)
             keep_pixmap = self.pixmap_cache.get(keep_path)
+            keep_full_is_embedded_jpeg = self.full_image_is_embedded_jpeg(keep_path)
 
         self.full_image_cache.clear()
         self.preview_cache.clear()
         self.pixmap_cache.clear()
         self.libraw_preview_paths.clear()
+        self.full_image_embedded_jpeg_paths.clear()
 
         if keep_path and keep_full is not None:
             self.full_image_cache.put(keep_path, keep_full)
+            # Preserve provenance across the clear -- otherwise a kept
+            # embedded-JPEG stand-in would look like a true decode afterward
+            # and never get upgraded to the real RAW pixels.
+            self.mark_full_image_source(keep_path, is_embedded_jpeg=keep_full_is_embedded_jpeg)
         if keep_path and keep_preview is not None and keep_key:
             self.preview_cache.put(keep_key, keep_preview)
         if keep_path and keep_pixmap is not None:
@@ -2786,6 +2846,7 @@ class ImageCache(QObject):
         self.disk_preview_cache.remove(file_path)
         self.exif_memory_cache.remove(file_path)
         self.exif_cache.remove(file_path)
+        self.full_image_embedded_jpeg_paths.discard(key)
 
     def clear_all(self) -> None:
         """Clear all caches."""
@@ -2795,6 +2856,7 @@ class ImageCache(QObject):
         self.full_image_cache.clear()
         self.pixmap_cache.clear()
         self.libraw_preview_paths.clear()
+        self.full_image_embedded_jpeg_paths.clear()
         self.exif_cache.clear()
         self.exif_memory_cache.clear()
         self.disk_thumbnail_cache.clear()

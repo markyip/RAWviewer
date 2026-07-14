@@ -133,7 +133,15 @@ class ThumbnailLabel(QLabel):
         return self.original_pixmap
 
     def set_gallery_selected(self, selected: bool) -> None:
-        self._gallery_selected = bool(selected)
+        selected = bool(selected)
+        # setStyleSheet forces a full style re-polish/repaint -- one of the
+        # more expensive Qt calls. refresh_gallery_selection_visuals() used
+        # to call this unconditionally on every visible tile per click, so
+        # a single shift/ctrl-click on a dense gallery view repainted tiles
+        # whose selection state hadn't even changed. Skip the no-op case.
+        if selected == self._gallery_selected:
+            return
+        self._gallery_selected = selected
         self.setStyleSheet(
             self._STYLE_SELECTED if self._gallery_selected else self._STYLE_DEFAULT
         )

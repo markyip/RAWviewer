@@ -1,6 +1,6 @@
 [workspace]
 name = "rawviewer"
-version = "2.5.0"
+version = "2.6.0"
 description = "RAWviewer - Professional RAW Image Viewer with Semantic Search"
 authors = ["Mark Yip"]
 channels = ["conda-forge"]
@@ -17,6 +17,12 @@ start-windowless = "pythonw src/main.py"
 [activation.env]
 PYTHONNOUSERSITE = "1"
 RAWVIEWER_GPU_VIEW = "1"
+# Opt-in GPU demosaic (PyTorch CUDA/MPS). Default in code is off; enable for
+# local verification after installing CUDA torch on Windows (see torch index).
+RAWVIEWER_PREFER_GPU_DECODE = "1"
+# When GPU demosaic is preferred, keep LibRaw process pool off so it does not
+# compete with in-process CUDA decode slots.
+RAWVIEWER_USE_PROCESS_POOL = "0"
 
 [dependencies]
 python = ">=3.10,<3.13"
@@ -42,6 +48,7 @@ huggingface_hub = "*"
 requests = "*"
 certifi = "*"
 pillow-heif = "*"
+# Default PyPI torch (macOS MPS / CPU). Windows overrides below to CUDA wheels.
 torch = ">=2.2.2, <3"
 kornia = ">=0.8.3, <0.9"
 
@@ -51,6 +58,8 @@ kornia = ">=0.8.3, <0.9"
 # - Installer variants: build scripts swap this to onnxruntime-directml for DirectML builds
 #   (see scripts/Launch/bat/build_windows_directml.bat and build.py --windows-accel).
 [target.win-64.pypi-dependencies]
+# CUDA demosaic / kornia path: PyPI's default Windows torch is CPU-only.
+torch = { version = ">=2.5.1, <3", index = "https://download.pytorch.org/whl/cu124" }
 onnxruntime-gpu = ">=1.18.0"
 pyexiv2 = "*"
 pywin32 = "*"

@@ -11,13 +11,14 @@ if exist "%~dp0..\..\..\.rawviewer_cold_start" (
 echo Running RAWviewer in debug mode...
 echo To wipe caches/logs/settings: scripts\Launch\bat\clear_cache.bat
 echo GPU single-image view: enabled (RAWVIEWER_GPU_VIEW=1)
+echo GPU demosaic: enabled (RAWVIEWER_PREFER_GPU_DECODE=1)
 echo Semantic ONNX backend: CUDA preferred with DirectML fallback (Model variant B)
 echo All debug logs will be displayed in this console window.
 echo.
 echo Press Ctrl+C to stop the application.
 echo.
 
-set RAWVIEWER_USE_PROCESS_POOL=1
+set RAWVIEWER_USE_PROCESS_POOL=0
 set RAWVIEWER_VERBOSE_INFO_LOGS=1
 set RAWVIEWER_VERBOSE_CONSOLE=0
 set RAWVIEWER_FOCUS_GALLERY_SWITCH=1
@@ -31,6 +32,7 @@ set RAWVIEWER_MOBILECLIP_VARIANT=b
 set RAWVIEWER_INDEX_PAUSE_IN_GALLERY=1
 set RAWVIEWER_ORT_PROVIDERS=CUDAExecutionProvider,DmlExecutionProvider,CPUExecutionProvider
 set RAWVIEWER_GPU_VIEW=1
+set RAWVIEWER_PREFER_GPU_DECODE=1
 
 where pixi >nul 2>nul
 if %ERRORLEVEL% EQU 0 (

@@ -7,11 +7,38 @@ from __future__ import annotations
 
 import os
 import tempfile
+import threading
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from typing import Callable, Dict
 
 import numpy as np
+
+# Per-sidecar-path locks serializing write_xmp_rating/write_xmp_adjustments.
+# Both read the existing file, compute a full replacement in memory, then
+# os.replace() it -- os.replace() is atomic against corruption but not
+# against a lost update, so two writers to the SAME sidecar racing (e.g. a
+# background export-time adjustments save and a same-moment rating click)
+# could each read-before-the-other's-write and one would silently clobber
+# the other's change. Not capped/evicted like other per-path caches in this
+# codebase: a Lock is a few hundred bytes (thousands of files in a session
+# is still negligible), and evicting one while another thread might still
+# hold a reference to it would defeat the whole point -- a second thread
+# creating a fresh Lock for the same path after eviction would no longer be
+# synchronized with the first.
+_xmp_write_locks: Dict[str, threading.Lock] = {}
+_xmp_write_locks_guard = threading.Lock()
+
+
+def _xmp_write_lock(xmp_path: str) -> threading.Lock:
+    key = os.path.normcase(os.path.abspath(xmp_path)) if xmp_path else ""
+    with _xmp_write_locks_guard:
+        lock = _xmp_write_locks.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _xmp_write_locks[key] = lock
+        return lock
+
 
 DEFAULT_ADJUSTMENTS: Dict[str, float] = {
     "Exposure2012": 0.0,
@@ -206,7 +233,7 @@ def resolve_xmp_path(image_path: str) -> str:
 def editing_features_enabled() -> bool:
     """Whether the Adjust panel, XMP writes, and edit export are available.
 
-    Off by default on the fast-raw-decode browse branch
+    Off by default on the development branch
     (RAWVIEWER_ENABLE_EDITING=1 to enable). Rating read/write and plain
     browse/export-without-adjustments stay available either way.
     """
@@ -222,9 +249,9 @@ def sidecar_adjustments_enabled() -> bool:
     """Whether browse/full-res display applies saved XMP edit sliders to pixels.
 
     Off by default (RAWVIEWER_SIDECAR_ADJUST=1 to enable). Requires
-    ``editing_features_enabled()`` -- browse-only builds never pay the apply
+    `editing_features_enabled()` -- browse-only builds never pay the apply
     cost even if the env var is set. Explicit
-    ``apply_sidecar_adjustments=True`` callers are unaffected.
+    `apply_sidecar_adjustments=True` callers are unaffected.
     """
     if not editing_features_enabled():
         return False
@@ -234,6 +261,7 @@ def sidecar_adjustments_enabled() -> bool:
         "yes",
         "on",
     }
+
 
 
 def _parse_rating_value(raw: object) -> int:
@@ -290,9 +318,19 @@ def write_xmp_rating(xmp_path: str, rating: int) -> None:
     write_xmp_adjustments) so a rating set here survives untouched even if
     the sidecar also holds crs sliders / tone curve / dodge-burn data from
     a build with editing enabled.
+
+    Holds this sidecar's write lock for the whole read-modify-write so a
+    concurrent write_xmp_adjustments() call (runs on the export worker
+    thread) can't interleave with this one and lose either change -- see
+    the _xmp_write_lock module comment.
     """
     if not xmp_path:
         raise ValueError("Invalid xmp path")
+    with _xmp_write_lock(xmp_path):
+        _write_xmp_rating_locked(xmp_path, rating)
+
+
+def _write_xmp_rating_locked(xmp_path: str, rating: int) -> None:
     rating = max(0, min(5, int(rating)))
 
     ET.register_namespace("x", X_NS)
@@ -718,15 +756,26 @@ def write_xmp_adjustments(xmp_path: str, adj: Dict[str, float]) -> None:
     scratch, and rating is written independently (write_xmp_rating, not
     gated by editing_features_enabled()), so a slider save must not blow
     away a star rating that was set earlier.
+
+    Holds this sidecar's write lock for the whole read-modify-write --
+    this runs on the export worker thread (see write_xmp_adjustments_for_file
+    callers), so without it a same-moment write_xmp_rating() call from the
+    main thread (rating a photo while it's exporting) could interleave and
+    lose either change. See the _xmp_write_lock module comment.
     """
     if not editing_features_enabled():
         return
+    with _xmp_write_lock(xmp_path):
+        _write_xmp_adjustments_locked(xmp_path, adj)
+
+
+def _write_xmp_adjustments_locked(xmp_path: str, adj: Dict[str, float]) -> None:
     existing_rating = parse_xmp_rating(xmp_path)
     merged = dict(DEFAULT_ADJUSTMENTS)
     merged.update(adj or {})
     if is_default_adjustments(merged):
         if existing_rating > 0:
-            write_xmp_rating(xmp_path, existing_rating)
+            _write_xmp_rating_locked(xmp_path, existing_rating)
         elif os.path.isfile(xmp_path):
             os.remove(xmp_path)
         return
