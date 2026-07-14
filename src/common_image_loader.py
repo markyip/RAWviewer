@@ -558,16 +558,58 @@ def take_last_load_edr_flag() -> bool:
     return used
 
 
+def pixmap_covers_requested_edge(file_path: str, pixmap, max_edge: int) -> bool:
+    """True when a cached ``pixmap`` satisfies a load request of ``max_edge``.
+
+    ``max_edge <= 0`` means "native resolution": the pixmap must reach the
+    file's header-probed dimensions (compared sorted, so an EXIF-rotated
+    pixmap still matches). A pixmap at/above the app's own safety cap
+    (_regular_image_max_edge) is always accepted -- it is the largest this
+    app will ever produce, so rejecting it would re-run an expensive decode
+    into the same result. Unknown native size accepts the cache.
+
+    Without this check, the fit view's preview-capped pixmap (same cache key)
+    satisfied every later full-resolution request: a 32888x8470 panorama
+    cached at 2304px was re-delivered forever, so zooming to 100% showed a
+    blurry upscale and the display never upgraded.
+    """
+    try:
+        have = sorted((int(pixmap.width()), int(pixmap.height())))
+        if have[1] >= _regular_image_max_edge():
+            return True
+        if max_edge > 0 and have[1] >= max_edge - 2:
+            # Fast accept without a header probe -- the common (gallery/fit)
+            # case stays as cheap as the unconditional hit it replaces.
+            return True
+        # Cached pixmap is smaller than the request: it still satisfies it if
+        # the FILE is just natively small (never force a redecode that cannot
+        # produce more pixels). One header-only probe, no pixel decode.
+        from PyQt6.QtGui import QImageReader
+
+        sz = QImageReader(file_path).size()
+        if not sz.isValid() or sz.width() <= 0 or sz.height() <= 0:
+            return True
+        need = sorted((int(sz.width()), int(sz.height())))
+        if max_edge > 0:
+            scale = min(1.0, max_edge / max(need[1], 1))
+            need = [int(need[0] * scale), int(need[1] * scale)]
+        return have[0] >= need[0] - 2 and have[1] >= need[1] - 2
+    except Exception:
+        return True
+
+
 def load_pixmap_safe(file_path: str, max_edge: int = 0) -> QPixmap:
     """安全載入 QPixmap，對 TIFF 文件使用 PIL 以避免 Qt 警告"""
     global _last_load_used_edr
     _last_load_used_edr = False
     cache = get_image_cache()
-    
-    # 檢查快取
+
+    # 檢查快取 (size-aware: a preview-capped entry must not satisfy a
+    # larger/native-resolution request -- see pixmap_covers_requested_edge)
     cached_pixmap = cache.get_pixmap(file_path)
     if cached_pixmap is not None and not cached_pixmap.isNull():
-        return cached_pixmap
+        if pixmap_covers_requested_edge(file_path, cached_pixmap, max_edge):
+            return cached_pixmap
 
     if is_raw_file(file_path):
         preview_max = max_edge if max_edge > 0 else 2048

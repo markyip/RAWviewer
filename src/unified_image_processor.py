@@ -967,10 +967,18 @@ class UnifiedImageProcessor:
         if not is_raw:
             cached_pixmap = self.cache.get_pixmap(file_path)
             if cached_pixmap is not None:
-                if _verbose_orientation_logs():
-                    # print(f"[ORIENTATION] Using cached pixmap for {os.path.basename(file_path)} (non-RAW file)")
-                    pass
-                return cached_pixmap
+                # A full-resolution request must not be satisfied by a
+                # preview-sized cache entry. The fit view caches a
+                # memory_preview_max_edge()-capped pixmap under the same key;
+                # returning it here unconditionally meant zooming into any
+                # image larger than the preview cap (e.g. a 32888x8470
+                # panorama cached at 2304px) re-delivered the small preview
+                # forever -- instant "Pixmap ready" events, never an on-screen
+                # upgrade, blur at 100%.
+                if not use_full_resolution or self._pixmap_covers_file_resolution(
+                    file_path, cached_pixmap
+                ):
+                    return cached_pixmap
         else:
             # For RAW files, don't use cached pixmap - always process fresh
             if _verbose_orientation_logs():
@@ -988,6 +996,25 @@ class UnifiedImageProcessor:
                 file_path, use_full_resolution=use_full_resolution
             )
     
+    def _pixmap_covers_file_resolution(self, file_path: str, pixmap) -> bool:
+        """True when ``pixmap`` is at (or near) the file's native resolution.
+
+        Native size comes from a header-only QImageReader probe (~ms, no pixel
+        decode). Dimensions are compared sorted so an EXIF-rotated pixmap
+        (swapped w/h) still matches. Unknown native size accepts the cache
+        (never force a redecode on a file we cannot even probe), and a pixmap
+        already at the loader's own safety cap (_regular_image_max_edge) is
+        accepted too -- it is the largest this app will ever produce for the
+        file, so rejecting it would just re-run an expensive decode into the
+        same result.
+        """
+        try:
+            from common_image_loader import pixmap_covers_requested_edge
+
+            return pixmap_covers_requested_edge(file_path, pixmap, 0)
+        except Exception:
+            return True
+
     def _try_full_embedded_raw_preview(
         self, file_path: str, exif_data: Optional[Dict[str, Any]]
     ) -> Optional[np.ndarray]:
