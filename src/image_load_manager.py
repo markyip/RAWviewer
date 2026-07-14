@@ -532,6 +532,17 @@ class ImageLoadWorker(QRunnable):
 
     def _handle_thumbnail_result(self, file_path, thumbnail):
         """Internal helper to process and emit thumbnail results."""
+        # Saved XMP edits on the fit/preview tier (see apply_saved_edits_for_
+        # display: no-op unless the file actually has non-default edits).
+        # Worker thread: the ~215ms apply for a 2304px preview of an edited
+        # file must never land on the UI thread. Applied at delivery only --
+        # the caches upstream keep the unadjusted base.
+        try:
+            from raw_adjustments import apply_saved_edits_for_display
+
+            thumbnail = apply_saved_edits_for_display(file_path, thumbnail)
+        except Exception:
+            pass
         tgt = self.task.thumbnail_target_size
         if tgt is not None and isinstance(tgt, QSize) and tgt.isValid():
             try:

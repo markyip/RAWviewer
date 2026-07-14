@@ -1608,6 +1608,21 @@ class JustifiedGallery(QWidget):
                 return self._raw_aspect_undo_user_rotation(file_path, meta_ar)
         return px_ar
 
+    def _apply_edits_to_tile(self, file_path: str, arr):
+        """Render saved XMP edits into a tile buffer at delivery time.
+
+        ndarray in, ndarray out (QImage and other inputs pass through). Cost
+        is ~5ms per 320px tile / ~35ms at 720px rows, paid only for files
+        with non-default saved edits (see raw_adjustments.apply_saved_edits_
+        for_display); nothing is written back to the thumbnail caches.
+        """
+        try:
+            from raw_adjustments import apply_saved_edits_for_display
+
+            return apply_saved_edits_for_display(file_path, arr)
+        except Exception:
+            return arr
+
     def _orient_gallery_thumbnail_array(self, file_path: str, arr: np.ndarray) -> np.ndarray:
         try:
             from common_image_loader import finalize_index_thumbnail_array
@@ -1700,6 +1715,7 @@ class JustifiedGallery(QWidget):
             if global_thumb is None:
                 return None
             arr = self._orient_gallery_thumbnail_array(path, np.ascontiguousarray(global_thumb))
+            arr = self._apply_edits_to_tile(path, arr)
             return _thumbnail_data_to_base_pixmap(arr)
         except Exception:
             return None
@@ -3462,6 +3478,7 @@ class JustifiedGallery(QWidget):
             if thumb is None:
                 continue
             thumb = self._orient_gallery_thumbnail_array(path, thumb)
+            thumb = self._apply_edits_to_tile(path, thumb)
             pixmap = _thumbnail_data_to_base_pixmap(thumb)
             if pixmap is None or pixmap.isNull():
                 continue
@@ -3518,6 +3535,7 @@ class JustifiedGallery(QWidget):
             return
         file_path = resolved
 
+        thumbnail_data = self._apply_edits_to_tile(file_path, thumbnail_data)
         pixmap = _thumbnail_data_to_base_pixmap(thumbnail_data)
 
         if not pixmap or pixmap.isNull():

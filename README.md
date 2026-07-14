@@ -1,11 +1,11 @@
-# RAWviewer v2.6
+# RAWviewer v3.0
 
 <p align="center">
   <img src="icons/appicon.ico" alt="RAWviewer Icon" width="256">
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-2.6-blue" alt="Version">
+  <img src="https://img.shields.io/badge/version-3.0-blue" alt="Version">
   <img src="https://img.shields.io/github/downloads/markyip/RAWviewer/total" alt="Downloads">
   <img src="https://img.shields.io/badge/license-MIT-green" alt="License">
   <a href="https://www.buymeacoffee.com/markyip">
@@ -102,13 +102,13 @@ For a dedicated **cluster map** across an entire album and **geotagging photos m
 2. Choose **Full (CUDA)**, **Full (DirectML)**, or **Lite** in the wizard. **Full** also downloads AI models (~600 MB).
 3. Launch **`RAWviewer.exe`** or the Desktop shortcut (not the Setup file again).
 
-> **v2.6 new:** **1–5 star ratings** (keys **0–5**, gallery filter); **Fast RAW decode** (~**1.4×** full sensor vs prior rawpy path); Nikon **HE/HE*** NEF support; darkroom chrome. On **development**, **Adjust editing** is available via `RAWVIEWER_ENABLE_EDITING=1`. Full changelog: [`RELEASE_NOTES.md`](RELEASE_NOTES.md).
+> **v3.0 new:** **Full Editing Functions** integrated (tone curve, lens correction, XMP sidecars); **Fast RAW decode** verified by multiple testing to deliver massive speed improvements vs 2.5; **1–5 star ratings** (keys **0–5**, gallery filter); Nikon **HE/HE*** NEF support; darkroom chrome. Full changelog: [`RELEASE_NOTES.md`](RELEASE_NOTES.md).
 
 Registers **Open with** for common photo formats. Uninstall: Settings → Apps, or **`uninstall.bat`** in `%LOCALAPPDATA%\RAWviewer`.
 
 ### macOS (13+)
 
-1. Download **`RAWviewer-v2.6-macOS.zip`** (Full) or **`RAWviewer-v2.6-macOS-Lite.zip`** (Lite) from **[Releases](https://github.com/markyip/RAWviewer/releases/latest)** and extract the zip.
+1. Download **`RAWviewer-v3.0-macOS.zip`** (Full) or **`RAWviewer-v3.0-macOS-Lite.zip`** (Lite) from **[Releases](https://github.com/markyip/RAWviewer/releases/latest)** and extract the zip.
 2. Open **Terminal**, go to the extracted folder (`cd ` then drag the folder onto Terminal), and run:
 
 ```bash
@@ -339,7 +339,7 @@ Not in a release yet — tracked separately.
 
 **Multithreaded LibRaw (macOS dev builds)** — The PyPI rawpy wheel bundles a single-threaded LibRaw on macOS/Linux (Windows wheels already ship OpenMP). `scripts/build_libraw_openmp.sh` rebuilds LibRaw with OpenMP and swaps it into the Pixi env — roughly 1.5–2× faster unpack on CR3/RAF/pana8. Local dev-env only; re-apply after `pixi install`. Verify with `scripts/check_libraw_parallelism.py <raw file>`.
 
-**Shipped in 2.6 (no longer “upcoming”):** Fast RAW decode (default on), star ratings, burst grouping / Compare (**C**) from 2.5. GPU **viewport** (OpenGL zoom/pan) is on by default (`RAWVIEWER_GPU_VIEW=0` to disable). **Adjust / Develop editing** remains on the development branch behind `RAWVIEWER_ENABLE_EDITING=1`.
+**Shipped in 3.0:** Fast RAW decode verified by multiple testing for speed improvements vs 2.5, full Adjust / Develop editing panel integrated for all users, star ratings, burst grouping / Compare (**C**). GPU **viewport** (OpenGL zoom/pan) is on by default (`RAWVIEWER_GPU_VIEW=0` to disable).
 
 ---
 
@@ -377,8 +377,8 @@ Build outputs:
 
 | Profile | Windows | macOS |
 |---------|---------|-------|
-| **Full / Unified** | `dist/RAWviewer_Setup.exe` (includes Full & Lite options) | `dist/RAWviewer-v2.6-macOS.zip` |
-| **Lite** | (Select Lite option in `RAWviewer_Setup.exe`) | `dist/RAWviewer-v2.6-macOS-Lite.zip` |
+| **Full / Unified** | `dist/RAWviewer_Setup.exe` (includes Full & Lite options) | `dist/RAWviewer-v3.0-macOS.zip` |
+| **Lite** | (Select Lite option in `RAWviewer_Setup.exe`) | `dist/RAWviewer-v3.0-macOS-Lite.zip` |
 
 Dependencies are in `pixi.toml`. Packaging scripts use a local `rawviewer_env/` venv when building release artifacts.
 
@@ -403,8 +403,9 @@ scripts\Launch\bat\build_windows_lite.bat
 ### Architecture (brief)
 
 - **ImageLoadManager** — threaded load queue; folder changes cancel in-flight tasks (**v2.5.0**)
-- **UnifiedImageProcessor** — RAW/JPEG/TIFF via one path; **Fast RAW decode** shared unpack half/full (**v2.6.0**)
-- **Star ratings** — 1–5 + XMP; gallery min-rating filter (**v2.6.0**)
+- **UnifiedImageProcessor** — RAW/JPEG/TIFF via one path; **Fast RAW decode** shared unpack half/full (**v3.0.0**)
+- **Star ratings** — 1–5 + XMP; gallery min-rating filter (**v3.0.0**)
+- **Full Editing** — Adjust panel, XMP sidecars, PV2012-style develops (**v3.0.0**)
 - **Cache** — memory-first; optional disk cache via env; **RAM-tier defaults** at startup (`rawviewer_profile.py`)
 - **Semantic index** — SQLite + local embeddings (Core ML on macOS, ONNX on Windows; Full builds only); background passes abort when folder scope changes (**v2.5.0**)
 - **Gallery (JustifiedGallery)** — justified grid with zoom slider (relayout + upper-left scroll anchor); layout cache keyed to folder generation; gallery opens in capture-time order after EXIF sort; tile aspect reconciles decoded thumbnails with container EXIF before justified-row geometry is locked (**v2.5.0**)

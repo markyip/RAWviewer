@@ -248,19 +248,63 @@ def editing_features_enabled() -> bool:
 def sidecar_adjustments_enabled() -> bool:
     """Whether browse/full-res display applies saved XMP edit sliders to pixels.
 
-    Off by default (RAWVIEWER_SIDECAR_ADJUST=1 to enable). Requires
-    `editing_features_enabled()` -- browse-only builds never pay the apply
-    cost even if the env var is set. Explicit
+    On by default when editing is enabled (RAWVIEWER_SIDECAR_ADJUST=0 to
+    disable). It shipped default-off while edits were invisible everywhere
+    outside the Adjust panel; now that gallery tiles and the fit preview
+    render saved edits too (edited_previews_enabled), leaving the full-res
+    tier unedited would make the edits visibly VANISH on zoom -- consistency
+    across tiers matters more than the apply cost, which only edited files
+    ever pay. Requires `editing_features_enabled()` -- browse-only builds
+    never pay the apply cost even if the env var is set. Explicit
     `apply_sidecar_adjustments=True` callers are unaffected.
     """
     if not editing_features_enabled():
         return False
-    return os.environ.get("RAWVIEWER_SIDECAR_ADJUST", "0").strip().lower() in {
+    return os.environ.get("RAWVIEWER_SIDECAR_ADJUST", "1").strip().lower() in {
         "1",
         "true",
         "yes",
         "on",
     }
+
+
+def edited_previews_enabled() -> bool:
+    """Whether gallery tiles and the fit preview render saved XMP edits.
+
+    On by default when editing is enabled (RAWVIEWER_EDITED_PREVIEWS=0 to
+    disable). Applied at display/delivery time only -- adjusted pixels are
+    never written back to any pixel cache, so there is no stale-thumbnail
+    invalidation problem: re-editing simply changes what the next delivery
+    applies. Cost (measured): ~5ms per 320px gallery tile, ~35ms per 720px
+    tile, ~215ms for a 2304px fit preview -- worker-thread, edited files only.
+    """
+    if not editing_features_enabled():
+        return False
+    return os.environ.get("RAWVIEWER_EDITED_PREVIEWS", "1").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def apply_saved_edits_for_display(file_path: str, arr):
+    """Apply saved XMP edits to a display-bound uint8 RGB ndarray.
+
+    Returns the input unchanged when previews-with-edits is disabled, the
+    file has no (non-default) saved adjustments, or the buffer is not an
+    ndarray (QImage branches skip). Never raises. Callers must NOT persist
+    the result into pixel caches -- caches hold the unadjusted base.
+    """
+    try:
+        if arr is None or not hasattr(arr, "shape") or not edited_previews_enabled():
+            return arr
+        adj = load_adjustments_for_file(file_path)
+        if is_default_adjustments(adj):
+            return arr
+        return apply_adjustments_to_rgb(arr, adj)
+    except Exception:
+        return arr
 
 
 

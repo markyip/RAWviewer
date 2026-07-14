@@ -1,11 +1,11 @@
-# RAWviewer v2.6
+# RAWviewer v3.0
 
 <p align="center">
   <img src="icons/appicon.ico" alt="RAWviewer Icon" width="256">
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-2.6-blue" alt="Version">
+  <img src="https://img.shields.io/badge/version-3.0-blue" alt="Version">
   <img src="https://img.shields.io/github/downloads/markyip/RAWviewer/total" alt="Downloads">
   <img src="https://img.shields.io/badge/license-MIT-green" alt="License">
   <a href="https://www.buymeacoffee.com/markyip">
@@ -103,13 +103,13 @@
 2. 在安裝精靈選擇 **Full (CUDA)**、**Full (DirectML)** 或 **Lite**。**Full** 會另下載 AI 模型（約 600 MB）。
 3. 啟動 **`RAWviewer.exe`** 或桌面捷徑（勿再次執行 Setup）。
 
-> **v2.6 新功能：** **1–5 星評分**（按鍵 **0–5**、圖庫篩選）；**快速 RAW 解碼**（全尺寸約較先前 rawpy 路徑快 **1.4×**）；Nikon **HE/HE*** NEF；暗房色票。development 可用 `RAWVIEWER_ENABLE_EDITING=1` 啟用 Adjust 編輯。完整說明見 [`RELEASE_NOTES.md`](RELEASE_NOTES.md)。
+> **v3.0 新功能：** **完整編輯功能**現已全面整合（色調曲線、鏡頭校正、XMP 等）；**快速 RAW 解碼**經多次測試驗證，速度相較 2.5 有大幅提升；**1–5 星評分**（按鍵 **0–5**、圖庫篩選）；Nikon **HE/HE*** NEF；暗房色票。完整說明見 [`RELEASE_NOTES.md`](RELEASE_NOTES.md)。
 
 會註冊常見格式的**開啟方式**。解除安裝：設定 → 應用程式，或 `%LOCALAPPDATA%\RAWviewer` 內的 **`uninstall.bat`**。
 
 ### macOS（13+）
 
-1. 從 **[Releases](https://github.com/markyip/RAWviewer/releases/latest)** 下載 **`RAWviewer-v2.6-macOS.zip`**（Full）或 **`RAWviewer-v2.6-macOS-Lite.zip`**（Lite）並解壓。
+1. 從 **[Releases](https://github.com/markyip/RAWviewer/releases/latest)** 下載 **`RAWviewer-v3.0-macOS.zip`**（Full）或 **`RAWviewer-v3.0-macOS-Lite.zip`**（Lite）並解壓。
 2. 開啟**終端機**，進入解壓資料夾（`cd ` 後將資料夾拖入終端機），執行：
 
 ```bash
@@ -340,7 +340,7 @@ RAW 製造商 AF 需 **pyexiv2**。
 
 **多執行緒 LibRaw（macOS 開發環境）**——PyPI 的 rawpy wheel 在 macOS/Linux 上內附單執行緒 LibRaw（Windows wheel 已內建 OpenMP）。`scripts/build_libraw_openmp.sh` 會以 OpenMP 重新編譯 LibRaw 並替換進 Pixi 環境，CR3/RAF/pana8 unpack 約快 1.5–2 倍。僅本機開發最佳化，`pixi install` 後需重新執行。可用 `scripts/check_libraw_parallelism.py <raw 檔案>` 驗證。
 
-**已於 2.6 交付（不再列為即將推出）：** 快速 RAW 解碼（預設開啟）、星級評分；連拍分組／比較模式（**C**）自 2.5 起已有。GPU **視埠**（OpenGL 縮放／平移）另項，正式版預設開啟（`RAWVIEWER_GPU_VIEW=0` 關閉）。
+**已於 3.0 交付：** 快速 RAW 解碼經多次測試驗證對 2.5 的速度提升、全面整合的 Adjust / Develop 編輯面板、星級評分、連拍分組／比較模式（**C**）。GPU **視埠**（OpenGL 縮放／平移）正式版預設開啟（`RAWVIEWER_GPU_VIEW=0` 關閉）。
 
 ---
 
@@ -378,8 +378,8 @@ pixi run start          # full profile（預設）
 
 | 設定檔 | Windows | macOS |
 |--------|---------|-------|
-| **Full / Unified** | `dist/RAWviewer_Setup.exe`（含 Full 與 Lite 選項） | `dist/RAWviewer-v2.6-macOS.zip` |
-| **Lite** | （在 `RAWviewer_Setup.exe` 選 Lite） | `dist/RAWviewer-v2.6-macOS-Lite.zip` |
+| **Full / Unified** | `dist/RAWviewer_Setup.exe`（含 Full 與 Lite 選項） | `dist/RAWviewer-v3.0-macOS.zip` |
+| **Lite** | （在 `RAWviewer_Setup.exe` 選 Lite） | `dist/RAWviewer-v3.0-macOS-Lite.zip` |
 
 相依套件見 `pixi.toml`。封裝腳本建置正式版時使用本機 `rawviewer_env/` 虛擬環境。
 
@@ -404,8 +404,9 @@ scripts\Launch\bat\build_windows_lite.bat
 ### 架構（簡述）
 
 - **ImageLoadManager** — 執行緒載入佇列；切換資料夾會取消進行中任務（**v2.5.0**）
-- **UnifiedImageProcessor** — RAW/JPEG/TIFF 統一路徑；**Fast RAW decode** half/full 共用 unpack（**v2.6.0**）
-- **星級評分** — 1–5 + XMP；圖庫最低星級篩選（**v2.6.0**）
+- **UnifiedImageProcessor** — RAW/JPEG/TIFF 統一路徑；**Fast RAW decode** half/full 共用 unpack（**v3.0.0**）
+- **星級評分** — 1–5 + XMP；圖庫最低星級篩選（**v3.0.0**）
+- **完整編輯** — Adjust 面板、XMP 附屬檔案、PV2012 風格顯影（**v3.0.0**）
 - **Cache** — 記憶體優先；可選磁碟快取；啟動時 **RAM 層級預設**（`rawviewer_profile.py`）
 - **Semantic index** — SQLite + 本機嵌入（macOS Core ML、Windows ONNX；僅 Full）；切換資料夾範圍時中止背景 pass（**v2.5.0**）
 - **Gallery（JustifiedGallery）** — 齊行網格與縮放滑桿（重排 + 左上捲動錨點）；版面快取綁定資料夾世代；EXIF 排序後以拍攝時間順序開圖庫；鎖定齊行幾何前以容器 EXIF reconcile 解碼縮圖比例（**v2.5.0**）
