@@ -4749,6 +4749,29 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             return list(files or [])
         return [p for p in files if p and _norm_path(p) not in rejected]
 
+    def _reconcile_burst_rejected_paths_with_folder(self) -> None:
+        """Un-reject any path the folder scan actually found.
+
+        _burst_rejected_paths is a permanent per-folder blacklist (survives
+        restarts via QSettings) with nothing that ever removes an entry --
+        rejecting a photo moves it to the Discard subfolder (so it drops out
+        of image_files naturally), but if the user manually moves it back
+        into the main folder, the stale path string stays blacklisted
+        forever and the photo never reappears in gallery view even though
+        it's sitting right there on disk (single-image view isn't filtered
+        through this set, which is why it opens fine there). A path's
+        presence in the current folder scan is proof it's no longer
+        sitting in Discard, so drop it from the blacklist.
+        """
+        rejected = getattr(self, "_burst_rejected_paths", set()) or set()
+        if not rejected:
+            return
+        present = {_norm_path(p) for p in (getattr(self, "image_files", None) or [])}
+        still_rejected = rejected - present
+        if still_rejected != rejected:
+            self._burst_rejected_paths = still_rejected
+            self._save_burst_rejected_paths()
+
     def _capture_times_for_paths(self, paths: List[str]) -> dict:
         capture_times = {}
         try:
@@ -26970,6 +26993,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             # Ensure we only take the sorted file list (sort_image_files returns a tuple of (list, metadata_dict))
             sorted_files, _ = self.sort_image_files(image_files)
             self.image_files = sorted_files
+            self._reconcile_burst_rejected_paths_with_folder()
             # Keep semantic search corpus aligned with the currently scanned folder.
             self._semantic_search_corpus_files = list(self.image_files)
             self._semantic_search_backup_files = None
@@ -28920,6 +28944,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             self.current_folder = folder_path
             self._sync_burst_rejected_for_current_folder()
             self.image_files = image_files
+            self._reconcile_burst_rejected_paths_with_folder()
             self._reconcile_gallery_bookmarks_with_folder()
             self._semantic_search_corpus_files = list(image_files)
             self._gallery_search_index_session_key = None
