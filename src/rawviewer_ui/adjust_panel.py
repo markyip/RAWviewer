@@ -557,6 +557,7 @@ class ImageAdjustPanelWidget(QWidget):
 
         self.sect_light = CollapsibleSection("Light", settings_key="light")
         self.sect_color = CollapsibleSection("Color / WB", settings_key="color")
+        self.sect_transform = CollapsibleSection("Transform", settings_key="transform")
 
         self.sect_curve = CollapsibleSection("Tone Curve", settings_key="curve")
         if not _SHOW_TONE_CURVE_UI:
@@ -575,6 +576,7 @@ class ImageAdjustPanelWidget(QWidget):
         layout.addWidget(self.sect_curve)
         layout.addWidget(self.sect_hsl)
         layout.addWidget(self.sect_detail)
+        layout.addWidget(self.sect_transform)
 
         # Build tone curve editor row inside the curve section first
         if _SHOW_TONE_CURVE_UI:
@@ -725,6 +727,11 @@ class ImageAdjustPanelWidget(QWidget):
                     target_sect = self.sect_curve
             elif spec.key in {"Sharpness", "Clarity2012", "Defringe", "LuminanceNoiseReduction"}:
                 target_sect = self.sect_detail
+            elif spec.key in {
+                "CropAngle", "PerspectiveVertical", "PerspectiveHorizontal",
+                "CropLeft", "CropRight", "CropTop", "CropBottom",
+            }:
+                target_sect = self.sect_transform
             else:
                 target_sect = None
                 

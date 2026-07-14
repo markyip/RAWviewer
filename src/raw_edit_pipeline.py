@@ -199,6 +199,12 @@ def process_linear_edit_buffer(
     if is_default_adjustments(merged) and not uses_recovery_tone_map(merged):
         return img
 
+    # Geometry first: every later stage (dodge/burn coordinates included)
+    # works in the transformed frame. No-op unless transform keys are set.
+    from raw_transform import apply_geometry
+
+    img = apply_geometry(img, merged)
+
     mask_serial = str(merged.get(_DB_MASK_KEY, "") or "")
     do_denoise = chroma_denoise if chroma_denoise is not None else chroma_denoise_enabled()
     nr_amount = float(merged.get("ColorNoiseReduction", 0.0))
@@ -337,6 +343,15 @@ _PRE_TONE_KEYS = (
     "DenoiseMethod",
     _DB_MASK_KEY,
     _DB_STRENGTH_KEY,
+    # Geometry runs at the head of the pipeline (before WB), so any transform
+    # change invalidates pre_tone and everything chained to it.
+    "CropAngle",
+    "PerspectiveVertical",
+    "PerspectiveHorizontal",
+    "CropLeft",
+    "CropRight",
+    "CropTop",
+    "CropBottom",
 )
 
 # Every key uses_recovery_tone_map() and apply_pv2012_tone_rgb() read, so the
@@ -414,6 +429,9 @@ def process_linear_edit_buffer_staged(
         pre_key = _stage_key(merged, _PRE_TONE_KEYS)
         if cache.stage_keys.get("pre_tone") != pre_key or "pre_tone" not in cache.stage_out:
             img = _linear_float_from_buffer(rgb_image)
+            from raw_transform import apply_geometry
+
+            img = apply_geometry(img, merged)
             img = _apply_wb_tint(img, merged)
 
             exp_val = float(merged.get("Exposure2012", 0.0))

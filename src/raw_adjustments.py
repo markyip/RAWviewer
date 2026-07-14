@@ -66,6 +66,16 @@ DEFAULT_ADJUSTMENTS: Dict[str, float] = {
     # adjustment -- see raw_lens_correction.py.
     "LensCorrectionEnabled": 0.0,
     "DenoiseMethod": 0.0,
+    # Geometry (see raw_transform.py): straighten + keystone perspective +
+    # per-edge crop insets. Applied once at the head of both pipelines;
+    # always stays within the original pixel frame (auto inscribed-rect crop).
+    "CropAngle": 0.0,
+    "PerspectiveVertical": 0.0,
+    "PerspectiveHorizontal": 0.0,
+    "CropLeft": 0.0,
+    "CropRight": 0.0,
+    "CropTop": 0.0,
+    "CropBottom": 0.0,
     # Dodge & burn stops-per-mask-unit (see raw_dodge_burn.py). The mask
     # itself (a base64 PNG blob, potentially large) is NOT a plain numeric
     # attribute -- it's stored as its own XMP child element, mirroring
@@ -217,6 +227,16 @@ SLIDER_SPECS: tuple[SliderSpec, ...] = (
     _slider_linear("Clarity2012", "Clarity", -100, 100, 0.0),
     _slider_linear("Defringe", "Defringe", 0, 100, 0.0),
     _slider_linear("LuminanceNoiseReduction", "Luma NR", 0, 100, 0.0, fmt=lambda x: f"{x:.0f}"),
+    # Transform (raw_transform.py). Straighten in 0.1-degree steps; keystone
+    # sliders mirror Lightroom's slider-based Transform panel; crop insets as
+    # per-edge percentages (stored as fractions).
+    _slider_linear("CropAngle", "Straighten", -450, 450, 0.0, scale=0.1, fmt=lambda x: f"{x:+.1f}°"),
+    _slider_linear("PerspectiveVertical", "Vertical", -100, 100, 0.0),
+    _slider_linear("PerspectiveHorizontal", "Horizontal", -100, 100, 0.0),
+    _slider_linear("CropLeft", "Crop L", 0, 45, 0.0, scale=0.01, fmt=lambda x: f"{x*100:.0f}%"),
+    _slider_linear("CropRight", "Crop R", 0, 45, 0.0, scale=0.01, fmt=lambda x: f"{x*100:.0f}%"),
+    _slider_linear("CropTop", "Crop T", 0, 45, 0.0, scale=0.01, fmt=lambda x: f"{x*100:.0f}%"),
+    _slider_linear("CropBottom", "Crop B", 0, 45, 0.0, scale=0.01, fmt=lambda x: f"{x*100:.0f}%"),
 )
 
 
@@ -992,6 +1012,14 @@ def _apply_adjustments_to_srgb(rgb_image: np.ndarray, adj: dict[str, float]) -> 
     merged.update(adj)
     if is_default_adjustments(merged):
         return rgb_image
+
+    # Geometry first (straighten/perspective/crop, raw_transform.py) so the
+    # gamma path -- gallery tiles, fit previews, cached uint8 redisplay --
+    # shows the same framing as the linear edit pipeline. Must run before the
+    # row-band split below: it changes the buffer's shape.
+    from raw_transform import apply_geometry
+
+    rgb_image = apply_geometry(rgb_image, merged)
 
     # Row-band parallelism: every stage below is per-pixel except the small-
     # radius Gaussian blurs inside detail-enhance (Sharpness/Clarity/
