@@ -8240,6 +8240,12 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             self.single_image_adjust_panel.transform_interaction.connect(
                 self._on_transform_interaction
             )
+            self.single_image_adjust_panel.auto_wb_requested.connect(
+                self._on_auto_wb_requested
+            )
+            self.single_image_adjust_panel.auto_straighten_requested.connect(
+                self._on_auto_straighten_requested
+            )
             self.single_image_adjust_panel.export_requested.connect(
                 self._on_adjust_panel_export_requested
             )
@@ -20841,6 +20847,62 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 f"White balance set from picked pixel ({int(round(temperature))}K)", 3000
             )
         QTimer.singleShot(0, self._restore_keyboard_focus)
+
+    def _on_auto_wb_requested(self) -> None:
+        """Auto WB: robust gray-world estimate on the edit base, solved through
+        the same Temperature/Tint inverse the WB dropper uses."""
+        panel = getattr(self, "single_image_adjust_panel", None)
+        base = getattr(self, "_adjust_preview_base_rgb", None)
+        if panel is None or base is None or not hasattr(base, "shape"):
+            if hasattr(self, "status_bar"):
+                self.status_bar.showMessage("Auto WB needs a decoded RAW edit base — try again in a moment", 3000)
+            return
+        from raw_adjustments import solve_white_balance_from_sample, wb_reference_temperature
+        from raw_auto_adjust import estimate_neutral_rgb
+        from raw_edit_pipeline import _linear_float_from_buffer
+
+        est = estimate_neutral_rgb(_linear_float_from_buffer(base))
+        if est is None:
+            if hasattr(self, "status_bar"):
+                self.status_bar.showMessage("Auto WB: no reliable neutral estimate in this image", 3000)
+            return
+        r, g, b = est
+        ref_temp = wb_reference_temperature(panel.get_adjustments())
+        temperature, tint = solve_white_balance_from_sample(r, g, b, ref_temp)
+        panel.apply_picked_white_balance(temperature, tint)
+        if hasattr(self, "status_bar"):
+            self.status_bar.showMessage(f"Auto white balance ({int(round(temperature))}K)", 3000)
+
+    def _on_auto_straighten_requested(self) -> None:
+        """Auto straighten: dominant near-axis line tilt on the edit base sets
+        the Straighten slider (through the normal save/preview path)."""
+        panel = getattr(self, "single_image_adjust_panel", None)
+        base = getattr(self, "_adjust_preview_base_rgb", None)
+        if panel is None or base is None or not hasattr(base, "shape"):
+            if hasattr(self, "status_bar"):
+                self.status_bar.showMessage("Auto straighten needs a decoded RAW edit base — try again in a moment", 3000)
+            return
+        import numpy as _np
+
+        from raw_auto_adjust import estimate_straighten_angle
+        from raw_edit_pipeline import _linear_float_from_buffer
+
+        # Cheap display-referred render for edge detection (gamma-only; line
+        # geometry does not care about exact tone).
+        lin = _linear_float_from_buffer(base)
+        disp = (_np.clip(lin, 0.0, 1.0) ** (1.0 / 2.2) * 255.0).astype(_np.uint8)
+        angle = estimate_straighten_angle(disp)
+        if angle is None:
+            if hasattr(self, "status_bar"):
+                self.status_bar.showMessage("Auto straighten: no dominant horizontal/vertical line found", 3000)
+            return
+        adj = panel.get_adjustments()
+        adj["CropAngle"] = float(angle)
+        panel.set_adjustments(adj)
+        # Same path as a slider release: full-quality preview + XMP write.
+        self._on_adjust_panel_editing_finished(panel.get_adjustments())
+        if hasattr(self, "status_bar"):
+            self.status_bar.showMessage(f"Auto straighten: {angle:+.2f}°", 3000)
 
     def _on_adjust_panel_export_requested(self, export_format: str, adj: dict) -> None:
         logger = logging.getLogger(__name__)

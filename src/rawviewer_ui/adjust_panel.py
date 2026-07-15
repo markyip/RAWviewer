@@ -248,7 +248,22 @@ class AdjustSlider(QSlider):
         # slider in main.py). Clicking anywhere else returns focus, and with
         # it arrow-key navigation.
         self.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
+        # Hover-focus: pointing at a slider is enough for Left/Right (and the
+        # wheel) to address it; moving the pointer off hands arrow keys back
+        # to image navigation. Focus follows the mouse only over sliders --
+        # nothing else in the app uses hover focus, so navigation is never
+        # stolen without the pointer visibly resting on a control.
+        self.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
         self._center_value: float | None = None  # None -> auto (0 if bipolar, else minimum)
+
+    def enterEvent(self, event) -> None:
+        self.setFocus(Qt.FocusReason.MouseFocusReason)
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:
+        if self.hasFocus() and not self.isSliderDown():
+            self.clearFocus()
+        super().leaveEvent(event)
         self._track_gradient: list[tuple[float, str]] | None = None
         self._accent = QColor(theme.EMBER)
 
@@ -382,6 +397,10 @@ class ImageAdjustPanelWidget(QWidget):
     # True while the user is interacting with a Transform slider (straighten/
     # perspective); the host shows an alignment grid overlay for the duration.
     transform_interaction = pyqtSignal(bool)
+    # One-shot auto adjustments (see raw_auto_adjust.py); the host computes
+    # from the edit base and writes the result back through the sliders.
+    auto_wb_requested = pyqtSignal()
+    auto_straighten_requested = pyqtSignal()
     dodge_burn_mode_changed = pyqtSignal(object)
     dodge_burn_clear_requested = pyqtSignal()
     dodgeBurnMaskToggled = pyqtSignal(bool)
@@ -585,6 +604,16 @@ class ImageAdjustPanelWidget(QWidget):
         self.sect_light = CollapsibleSection("Light", settings_key="light")
         self.sect_color = CollapsibleSection("Color / WB", settings_key="color")
         self.sect_transform = CollapsibleSection("Transform", settings_key="transform")
+        auto_str = QPushButton("Auto straighten")
+        auto_str.setObjectName("adjust_reset_btn")  # compact style
+        auto_str.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        auto_str.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        auto_str.setToolTip(
+            "Detect the dominant near-horizontal/vertical lines and set "
+            "Straighten to bring them true"
+        )
+        auto_str.clicked.connect(lambda: self.auto_straighten_requested.emit())
+        self.sect_transform.add_widget(auto_str)
 
         self.sect_curve = CollapsibleSection("Tone Curve", settings_key="curve")
         if not _SHOW_TONE_CURVE_UI:
@@ -1143,6 +1172,16 @@ class ImageAdjustPanelWidget(QWidget):
         btn.toggled.connect(self._on_wb_picker_toggled)
         row.addWidget(btn)
         self._wb_picker_btn = btn
+        auto = QPushButton()
+        auto.setObjectName("adjust_wb_picker_btn")  # share the compact style
+        auto.setFixedSize(20, 20)
+        auto.setIconSize(QSize(12, 12))
+        auto.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        auto.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        auto.setToolTip("Auto white balance — estimate from the image (robust gray-world)")
+        auto.setIcon(_qta_icon_safe("fa5s.magic", color=theme.INK_MUTED))
+        auto.clicked.connect(lambda: self.auto_wb_requested.emit())
+        row.addWidget(auto)
 
     def _on_wb_picker_toggled(self, checked: bool) -> None:
         self._sync_wb_picker_icon(checked)
