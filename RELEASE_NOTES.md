@@ -1,5 +1,6 @@
 # RAWviewer Release Notes
 
+
 ## 🚀 Version 3.0.0
 **Release Date: July 14, 2026**
 
@@ -13,6 +14,11 @@ It is built as a faster **browse / cull** release on top of 2.5: featuring **Fas
 - The **Adjust / Develop editing panel** is now fully integrated and on by default for all users.
 - Includes tone curve, lens correction, detail, chroma denoise, dodge/burn, and PV2012-style develops.
 - Editing actions are non-destructive and save directly to **XMP** sidecars (`RAWVIEWER_SIDECAR_ADJUST=1` by default).
+- **Auto WB & Auto Straighten**: Added automatic white balance and one-click horizon straightening.
+- **Hover-focusable sliders**: Adjust sliders now accept keyboard input (`+`/`-` or arrows) when hovered.
+- **Export Progress with Cancel**: Modal dialog with progress bar and cancel support for baked exports.
+- **Accurate Edited Previews**: Enhanced accuracy for edited previews and constrained sidecar saving to RAW-only.
+- **Slider Paint Crash Fix**: Fixed a startup crash related to AdjustSlider hover-focus initialization.
 
 #### ⚡ Updated Image Loading Logic & Verified Speed
 - **Fast RAW decode** is on by default (`RAWVIEWER_FAST_RAW_DECODE=1`): half-size and full sensor tiers share one unpack; verified color parity with the previous pipeline (±1 8-bit LSB on golden ARW/CR3 sets).
@@ -34,6 +40,10 @@ It is built as a faster **browse / cull** release on top of 2.5: featuring **Fas
 - Cold-open / first-paint orientation fixes (sideways / upside-down / blank first RAW).
 - Rapid-navigation races (stuck on stale image, cancelled mid-flight decode).
 - RAW recovery preview (**P**) and EDR path rawpy bugs fixed.
+- **Zoom-on-click Fixes**: Fixed a bug class where clicking a gallery thumbnail could land on a zoomed-in image inherited from the previous view. Gallery clicks now guarantee settling at Fit-to-Window.
+- **Worker Pool Starvation**: Sidecar applies no longer starve the gallery thumbnail worker pool.
+- **Edit-base decoding**: Deduplicated concurrent edit-base decodes and fixed stale in-flight guards.
+- **Tile EXIF parses**: Stopped unnecessary per-tile RAW EXIF parses during edited-preview delivery to improve speed.
 
 #### 🎨 Polish
 - Shared **darkroom** color palette (`theme.py`) for widgets and chrome.
