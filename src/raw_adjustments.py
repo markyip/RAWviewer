@@ -355,6 +355,15 @@ def apply_saved_edits_for_display(file_path: str, arr):
 
         if not is_raw_file(file_path):
             return arr
+        # Sidecar existence FIRST (two isfile checks, ~0.05ms). Going straight
+        # to load_adjustments_for_file ran read_as_shot_temperature -- a full
+        # EXIF parse of the RAW file -- for EVERY delivered gallery tile,
+        # edited or not, before the is_default early-out could save it. On a
+        # cold session that extra per-tile file-open competed with thumbnail
+        # extraction on the same disk: "gallery scrolling slower than before".
+        xmp_path = resolve_xmp_path(file_path)
+        if not (xmp_path and os.path.isfile(xmp_path)):
+            return arr
         adj = load_adjustments_for_file(file_path)
         if is_default_adjustments(adj):
             return arr
