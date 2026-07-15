@@ -255,6 +255,8 @@ class AdjustSlider(QSlider):
         # stolen without the pointer visibly resting on a control.
         self.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
         self._center_value: float | None = None  # None -> auto (0 if bipolar, else minimum)
+        self._track_gradient: list[tuple[float, str]] | None = None
+        self._accent = QColor(theme.EMBER)
 
     def enterEvent(self, event) -> None:
         self.setFocus(Qt.FocusReason.MouseFocusReason)
@@ -264,8 +266,6 @@ class AdjustSlider(QSlider):
         if self.hasFocus() and not self.isSliderDown():
             self.clearFocus()
         super().leaveEvent(event)
-        self._track_gradient: list[tuple[float, str]] | None = None
-        self._accent = QColor(theme.EMBER)
 
     def wheelEvent(self, event) -> None:
         # One minimum step per wheel notch: Qt's default is
