@@ -341,6 +341,12 @@ Not in a release yet — tracked separately.
 
 **Multithreaded LibRaw (macOS dev builds)** — The PyPI rawpy wheel bundles a single-threaded LibRaw on macOS/Linux (Windows wheels already ship OpenMP). `scripts/build_libraw_openmp.sh` rebuilds LibRaw with OpenMP and swaps it into the Pixi env — roughly 1.5–2× faster unpack on CR3/RAF/pana8. Local dev-env only; re-apply after `pixi install`. Verify with `scripts/check_libraw_parallelism.py <raw file>`.
 
+**Future Development Plan:**
+- **White balance preset support**: Add standard and custom WB presets.
+- **LUT support**: Allow users to load and apply custom color lookup tables.
+- **Masking for the editor**: Introduce local adjustments and selective masking.
+- **VLM connection**: Integrate with Vision-Language Models for automatic, intelligent image adjustments.
+
 **Shipped in 3.0:** Fast RAW decode verified by multiple testing for speed improvements vs 2.5, full Adjust / Develop editing panel integrated for all users, star ratings, burst grouping / Compare (**C**). GPU **viewport** (OpenGL zoom/pan) is on by default (`RAWVIEWER_GPU_VIEW=0` to disable).
 
 ---
@@ -414,13 +420,6 @@ scripts\Launch\bat\build_windows_lite.bat
 - **HDR / EDR (macOS)** — GPU viewport EDR layer + 16-bit HDR still decode; RAW EDR via linear LibRaw when RAW workflow is active (**v2.5.0**)
 - **RAW recovery preview** — **P** key, half-res linear decode + local tone recovery (`raw_tone_recovery.py`; **v2.5.0**)
 - **Clipping overlay** — **J** key on current pixmap (`exposure_clipping.py`; **v2.5.0**)
-
-## Future Development Plan
-
-- **White balance preset support**: Add standard and custom WB presets.
-- **LUT support**: Allow users to load and apply custom color lookup tables.
-- **Masking for the editor**: Introduce local adjustments and selective masking.
-- **VLM connection**: Integrate with Vision-Language Models for automatic, intelligent image adjustments.
 
 ---
 

@@ -340,6 +340,12 @@ RAW 製造商 AF 需 **pyexiv2**。
 
 **多執行緒 LibRaw（macOS 開發環境）**——PyPI 的 rawpy wheel 在 macOS/Linux 上內附單執行緒 LibRaw（Windows wheel 已內建 OpenMP）。`scripts/build_libraw_openmp.sh` 會以 OpenMP 重新編譯 LibRaw 並替換進 Pixi 環境，CR3/RAF/pana8 unpack 約快 1.5–2 倍。僅本機開發最佳化，`pixi install` 後需重新執行。可用 `scripts/check_libraw_parallelism.py <raw 檔案>` 驗證。
 
+**未來開發計畫 (Future Development Plan):**
+- **白平衡預設 (White balance preset support)**：新增標準與自訂白平衡預設。
+- **LUT 支援 (LUT support)**：允許使用者載入並套用自訂色彩查找表 (LUT)。
+- **編輯器遮罩 (Masking for the editor)**：引入局部調整與遮罩功能。
+- **VLM 連接 (Connection to VLM)**：整合視覺語言模型以進行自動、智慧的影像調整。
+
 **已於 3.0 交付：** 快速 RAW 解碼經多次測試驗證對 2.5 的速度提升、全面整合的 Adjust / Develop 編輯面板、星級評分、連拍分組／比較模式（**C**）。GPU **視埠**（OpenGL 縮放／平移）正式版預設開啟（`RAWVIEWER_GPU_VIEW=0` 關閉）。
 
 ---
@@ -413,13 +419,6 @@ scripts\Launch\bat\build_windows_lite.bat
 - **HDR / EDR（macOS）** — GPU 視埠 EDR 層 + 16 位元 HDR 靜態解碼；RAW 工作流程啟用時經線性 LibRaw 走 RAW EDR（**v2.5.0**）
 - **RAW 復原預覽** — **P** 鍵，半解析度線性解碼 + 區域 tone 復原（`raw_tone_recovery.py`；**v2.5.0**）
 - **裁切疊圖** — 單張檢視 **J** 鍵（`exposure_clipping.py`；**v2.5.0**）
-
-## 未來開發計畫 (Future Development Plan)
-
-- **白平衡預設 (White balance preset support)**：新增標準與自訂白平衡預設。
-- **LUT 支援 (LUT support)**：允許使用者載入並套用自訂色彩查找表 (LUT)。
-- **編輯器遮罩 (Masking for the editor)**：引入局部調整與遮罩功能。
-- **VLM 連接 (Connection to VLM)**：整合視覺語言模型以進行自動、智慧的影像調整。
 
 ---
 
