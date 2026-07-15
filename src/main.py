@@ -15818,7 +15818,45 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             self._restore_zoom_center = None
         if hasattr(self, '_restore_zoom_level'):
             self._restore_zoom_level = None
-            
+
+        # Settle-to-fit guarantee. Multiple independent races have landed a
+        # gallery click at 100% (stale-viewport fit misreads, leaked
+        # zoom-restore state, late prefetched full-res buffers taking the
+        # preserve path); each was fixed, and each time the field found
+        # another. This closes the CLASS: shortly after the transition, if
+        # the view ended non-fit and the user has not zoomed since (any user
+        # zoom sets _zoom_intent_100 or a pending-zoom flag), force fit and
+        # log which state needed correcting so the residual path stays
+        # visible in logs instead of on screen.
+        self._gallery_fit_token = token = object()
+
+        def _enforce_gallery_fit() -> None:
+            if getattr(self, "_gallery_fit_token", None) is not token:
+                return
+            g = getattr(self, "gpu_view", None)
+            if g is None or not g.has_pixmap():
+                return
+            user_zoomed = bool(
+                getattr(g, "_zoom_intent_100", False)
+                or getattr(self, "_pending_zoom_toggle", False)
+                or getattr(self, "_pending_gpu_zoom_point", None) is not None
+                or getattr(self, "_pending_zoom", False)
+            )
+            if user_zoomed or g.is_fit_mode():
+                return
+            logging.getLogger(__name__).info(
+                "[GALLERY_FIT] Correcting non-fit landing after gallery click "
+                "(scale=%.4f fit=%.4f) — residual zoom path still active",
+                g.current_scale(), g.fit_scale(),
+            )
+            g.fit_to_window()
+
+        # Two shots only: the transition's own paints land within ~400ms, and
+        # a longer window risks undoing a genuine wheel zoom (which sets no
+        # intent flag) made right after landing.
+        QTimer.singleShot(80, _enforce_gallery_fit)
+        QTimer.singleShot(450, _enforce_gallery_fit)
+
         self.view_mode = 'single'
         if hasattr(self, 'view_mode_button'):
             # Update icon if using qtawesome
