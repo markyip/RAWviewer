@@ -415,6 +415,13 @@ scripts\Launch\bat\build_windows_lite.bat
 - **RAW recovery preview** — **P** key, half-res linear decode + local tone recovery (`raw_tone_recovery.py`; **v2.5.0**)
 - **Clipping overlay** — **J** key on current pixmap (`exposure_clipping.py`; **v2.5.0**)
 
+## Future Development Plan
+
+- **White balance preset support**: Add standard and custom WB presets.
+- **LUT support**: Allow users to load and apply custom color lookup tables.
+- **Masking for the editor**: Introduce local adjustments and selective masking.
+- **VLM connection**: Integrate with Vision-Language Models for automatic, intelligent image adjustments.
+
 ---
 
 ## License
