@@ -558,16 +558,58 @@ def take_last_load_edr_flag() -> bool:
     return used
 
 
+def pixmap_covers_requested_edge(file_path: str, pixmap, max_edge: int) -> bool:
+    """True when a cached ``pixmap`` satisfies a load request of ``max_edge``.
+
+    ``max_edge <= 0`` means "native resolution": the pixmap must reach the
+    file's header-probed dimensions (compared sorted, so an EXIF-rotated
+    pixmap still matches). A pixmap at/above the app's own safety cap
+    (_regular_image_max_edge) is always accepted -- it is the largest this
+    app will ever produce, so rejecting it would re-run an expensive decode
+    into the same result. Unknown native size accepts the cache.
+
+    Without this check, the fit view's preview-capped pixmap (same cache key)
+    satisfied every later full-resolution request: a 32888x8470 panorama
+    cached at 2304px was re-delivered forever, so zooming to 100% showed a
+    blurry upscale and the display never upgraded.
+    """
+    try:
+        have = sorted((int(pixmap.width()), int(pixmap.height())))
+        if have[1] >= _regular_image_max_edge():
+            return True
+        if max_edge > 0 and have[1] >= max_edge - 2:
+            # Fast accept without a header probe -- the common (gallery/fit)
+            # case stays as cheap as the unconditional hit it replaces.
+            return True
+        # Cached pixmap is smaller than the request: it still satisfies it if
+        # the FILE is just natively small (never force a redecode that cannot
+        # produce more pixels). One header-only probe, no pixel decode.
+        from PyQt6.QtGui import QImageReader
+
+        sz = QImageReader(file_path).size()
+        if not sz.isValid() or sz.width() <= 0 or sz.height() <= 0:
+            return True
+        need = sorted((int(sz.width()), int(sz.height())))
+        if max_edge > 0:
+            scale = min(1.0, max_edge / max(need[1], 1))
+            need = [int(need[0] * scale), int(need[1] * scale)]
+        return have[0] >= need[0] - 2 and have[1] >= need[1] - 2
+    except Exception:
+        return True
+
+
 def load_pixmap_safe(file_path: str, max_edge: int = 0) -> QPixmap:
     """安全載入 QPixmap，對 TIFF 文件使用 PIL 以避免 Qt 警告"""
     global _last_load_used_edr
     _last_load_used_edr = False
     cache = get_image_cache()
-    
-    # 檢查快取
+
+    # 檢查快取 (size-aware: a preview-capped entry must not satisfy a
+    # larger/native-resolution request -- see pixmap_covers_requested_edge)
     cached_pixmap = cache.get_pixmap(file_path)
     if cached_pixmap is not None and not cached_pixmap.isNull():
-        return cached_pixmap
+        if pixmap_covers_requested_edge(file_path, cached_pixmap, max_edge):
+            return cached_pixmap
 
     if is_raw_file(file_path):
         preview_max = max_edge if max_edge > 0 else 2048
@@ -1516,11 +1558,12 @@ def use_raw_process_pool() -> bool:
     # Prefer GPU/in-process fast_raw when that stack is available AND actually
     # in use (late probe: gpu_raw_processor only after main-thread bootstrap;
     # until then pool may start, then ImageLoadManager.apply_gpu_decode_profile()
-    # tears it down). RAWVIEWER_PREFER_GPU_DECODE defaults OFF (measured no
-    # speed benefit -- see fast_raw_decode.prefer_gpu_decode_enabled), so a
-    # merely-present GPU backend must not disable the process pool: that
-    # would throw away LibRaw's out-of-process parallelism to serve a GPU
-    # decode path nobody is exercising.
+    # tears it down). GPU decode now defaults ON for CUDA and OFF for MPS/CPU
+    # (see fast_raw_decode.prefer_gpu_decode_enabled), so a merely-present GPU
+    # backend must not disable the process pool: on MPS -- where the default is
+    # still off -- that would throw away LibRaw's out-of-process parallelism to
+    # serve a GPU decode path nobody is exercising. Gate on in_use, not
+    # available.
     if _gpu_demosaic_backend_in_use():
         return False
     return (_os.cpu_count() or 0) >= 4
@@ -1544,13 +1587,18 @@ def _gpu_demosaic_backend_in_use() -> bool:
     """True when a GPU backend is available AND GPU decode is actually enabled.
 
     ``_gpu_demosaic_backend_available()`` alone answers "is a GPU present",
-    not "will decodes use it" -- RAWVIEWER_PREFER_GPU_DECODE defaults to 0
-    (see fast_raw_decode.prefer_gpu_decode_enabled), so on a GPU-equipped
-    machine with GPU decode left at its default, callers that gated on
-    availability alone were tearing down the LibRaw process pool and capping
-    RAW concurrency to GPU semaphore slots (1-3) for a GPU path that never
-    actually decodes anything -- a pure throughput regression vs CPU-only
-    hardware.
+    not "will decodes use it" -- the default is per-backend (ON for CUDA, OFF
+    for MPS; see fast_raw_decode.prefer_gpu_decode_enabled), and either can be
+    forced by RAWVIEWER_PREFER_GPU_DECODE. On a machine where GPU decode is NOT
+    in use (Apple MPS at its default, or an explicit =0), callers that gated on
+    availability alone were tearing down the LibRaw process pool and capping RAW
+    concurrency to GPU semaphore slots (1-3) for a GPU path that never actually
+    decodes anything -- a pure throughput regression vs CPU-only hardware.
+
+    On CUDA, where GPU decode is now on by default, that pool teardown is the
+    INTENDED trade: decodes run on the GPU (measured 2.35x on full sensor-res
+    demosaic), so LibRaw's CPU-side parallelism is worth less than the GPU path
+    it would compete with for the same files.
     """
     if not _gpu_demosaic_backend_available():
         return False

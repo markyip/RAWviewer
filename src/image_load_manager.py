@@ -460,15 +460,31 @@ class ImageLoadWorker(QRunnable):
 
                 from raw_adjustments import sidecar_adjustments_enabled
 
+                # Sidecar edits on the full-res tier are only worth paying for
+                # the image actually on screen: the gamma-path apply costs
+                # seconds at 30+MP, and letting PRELOAD/BACKGROUND tasks run it
+                # for neighbors monopolized the worker pool -- gallery
+                # thumbnail queue-waits climbed past 5s with repeated
+                # sidecar_apply ms=3300-7200 entries for files nobody was
+                # looking at ("gallery loading is bottlenecked" report). The
+                # CURRENT task still applies, so the displayed image shows its
+                # edits; a prefetched neighbor gets them applied when it
+                # becomes current (memoized in _apply_sidecar_if_needed).
+                apply_sidecar = (
+                    sidecar_adjustments_enabled()
+                    and self.task.priority == Priority.CURRENT
+                )
                 result = processor.process_full_image(
                     file_path,
                     use_full_resolution=self.task.use_full_resolution,
                     executor=self.manager._process_pool if self._safe_emit() else None,
-                    apply_sidecar_adjustments=sidecar_adjustments_enabled(),
+                    apply_sidecar_adjustments=apply_sidecar,
                 )
                 if result is not None and not self.task.is_cancelled():
                     if self._safe_emit():
-                        if isinstance(result, np.ndarray):
+                        from gpu_gl_bridge import DeviceRgb as _DeviceRgb
+
+                        if isinstance(result, (np.ndarray, _DeviceRgb)):
                             self.manager.image_ready.emit(file_path, result)
                         elif isinstance(result, QPixmap):
                             self.manager.pixmap_ready.emit(file_path, result)
@@ -530,6 +546,17 @@ class ImageLoadWorker(QRunnable):
 
     def _handle_thumbnail_result(self, file_path, thumbnail):
         """Internal helper to process and emit thumbnail results."""
+        # Saved XMP edits on the fit/preview tier (see apply_saved_edits_for_
+        # display: no-op unless the file actually has non-default edits).
+        # Worker thread: the ~215ms apply for a 2304px preview of an edited
+        # file must never land on the UI thread. Applied at delivery only --
+        # the caches upstream keep the unadjusted base.
+        try:
+            from raw_adjustments import apply_saved_edits_for_display
+
+            thumbnail = apply_saved_edits_for_display(file_path, thumbnail)
+        except Exception:
+            pass
         tgt = self.task.thumbnail_target_size
         if tgt is not None and isinstance(tgt, QSize) and tgt.isValid():
             try:
@@ -601,7 +628,7 @@ class ImageLoadManager(QObject):
     # 信號定義
     # NOTE: Can emit np.ndarray (base thumbnail) or QImage (pre-scaled/cropped) for smooth UI.
     thumbnail_ready = pyqtSignal(str, object)  # file_path, thumbnail (np.ndarray or QImage)
-    image_ready = pyqtSignal(str, np.ndarray)  # file_path, full_image
+    image_ready = pyqtSignal(str, object)  # file_path, full_image (ndarray or DeviceRgb)
     pixmap_ready = pyqtSignal(str, QPixmap)  # file_path, pixmap
     error_occurred = pyqtSignal(str, str)  # file_path, error_message
     task_completed = pyqtSignal(str)  # file_path

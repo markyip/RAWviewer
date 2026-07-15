@@ -12,6 +12,7 @@ echo Running RAWviewer in debug mode...
 echo To wipe caches/logs/settings: scripts\Launch\bat\clear_cache.bat
 echo GPU single-image view: enabled (RAWVIEWER_GPU_VIEW=1)
 echo GPU demosaic: enabled (RAWVIEWER_PREFER_GPU_DECODE=1)
+echo CUDA-GL display: enabled (RAWVIEWER_GPU_CUDA_GL=1)
 echo Semantic ONNX backend: CUDA preferred with DirectML fallback (Model variant B)
 echo All debug logs will be displayed in this console window.
 echo.
@@ -33,6 +34,7 @@ set RAWVIEWER_INDEX_PAUSE_IN_GALLERY=1
 set RAWVIEWER_ORT_PROVIDERS=CUDAExecutionProvider,DmlExecutionProvider,CPUExecutionProvider
 set RAWVIEWER_GPU_VIEW=1
 set RAWVIEWER_PREFER_GPU_DECODE=1
+set RAWVIEWER_GPU_CUDA_GL=1
 
 where pixi >nul 2>nul
 if %ERRORLEVEL% EQU 0 (

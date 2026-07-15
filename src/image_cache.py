@@ -382,7 +382,11 @@ class MemoryOnlyPersistentCache:
     def get_capture_times_for_folder(self, folder_path: str) -> Dict[str, str]:
         return {}
 
-    def put(self, file_path: str, value: Any) -> bool:
+    def put(self, file_path: str, value: Any, *args, **kwargs) -> bool:
+        # Signature-tolerant: the real persistent caches grow keyword args
+        # (file_size, mtime, ...) over time and callers pass them through;
+        # a no-op stand-in must absorb whatever the real one accepts, or
+        # memory-only mode crashes on every EXIF put (seen with file_size).
         return False
 
     def has_valid(self, file_path: str) -> bool:

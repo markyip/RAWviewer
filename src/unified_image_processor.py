@@ -48,6 +48,13 @@ def _verbose_orientation_logs() -> bool:
 
 # LibRaw cannot open some composite HDR DNGs; avoid repeated preview/decode attempts.
 _LIBRAW_UNSUPPORTED_PATHS: set[str] = set()
+
+# In-flight decode_raw_edit_base registry (module-level: workers build their
+# own UnifiedImageProcessor instances, so instance state cannot dedup them).
+import threading as _ebt  # noqa: E402
+
+_EDIT_BASE_INFLIGHT: dict = {}
+_EDIT_BASE_INFLIGHT_LOCK = _ebt.Lock()
 _LIBRAW_UNSUPPORTED_MAX = 2048
 
 
@@ -120,6 +127,11 @@ class UnifiedImageProcessor:
         # the live panel/preview tier still showed them. Restored.)
         self._adjusted_full_lock = _threading.Lock()
         self._adjusted_full_slots: list = []  # [(norm_path, adj_key, np.ndarray)]
+        # In-flight sidecar applies keyed (norm_path, adj_key): a second
+        # thread asking for the same apply WAITS for the first instead of
+        # recomputing -- overlapping duplicate applies of a 32MP buffer
+        # measured as stacked 3.5s+7.2s entries in the same second.
+        self._adjusted_inflight: dict = {}
 
     def _stash_unpacked_raw(self, file_path: str, unpacked) -> None:
         key = os.path.normcase(os.path.abspath(file_path))
@@ -146,6 +158,22 @@ class UnifiedImageProcessor:
         if rgb_image is None:
             return None
         try:
+            from gpu_gl_bridge import DeviceRgb
+
+            if isinstance(rgb_image, DeviceRgb):
+                # Editing still runs on host today; download only when needed.
+                from raw_adjustments import (
+                    is_default_adjustments,
+                    load_adjustments_for_file,
+                )
+
+                adj = load_adjustments_for_file(file_path)
+                if is_default_adjustments(adj):
+                    return rgb_image
+                rgb_image = rgb_image.to_numpy()
+        except Exception:
+            pass
+        try:
             from raw_adjustments import (
                 apply_adjustments_to_rgb,
                 is_default_adjustments,
@@ -167,31 +195,55 @@ class UnifiedImageProcessor:
                 str(adj.get(_db_mask_key, "") or ""),
                 rgb_image.shape,
             )
-            with self._adjusted_full_lock:
-                for n, k, buf in self._adjusted_full_slots:
-                    if n == norm and k == adj_key:
-                        return buf
-            import time as _time
+            import threading as _threading
 
-            from perf_metrics import perf_mark
+            inflight_key = (norm, adj_key)
+            mine = False
+            while True:
+                with self._adjusted_full_lock:
+                    for n, k, buf in self._adjusted_full_slots:
+                        if n == norm and k == adj_key:
+                            return buf
+                    waiter = self._adjusted_inflight.get(inflight_key)
+                    if waiter is None:
+                        self._adjusted_inflight[inflight_key] = _threading.Event()
+                        mine = True
+                if mine:
+                    break
+                # Another thread is computing this exact apply (same file,
+                # same adjustments, same base shape): wait for it rather than
+                # burning a second multi-second pass on a 32MP buffer.
+                waiter.wait(timeout=60.0)
+                # Loop: either the memo now has it, or the owner failed and we
+                # become the owner on the next pass.
 
-            _t0 = _time.perf_counter()
-            out = apply_adjustments_to_rgb(rgb_image, adj)
-            perf_mark(
-                "sidecar_apply",
-                (_time.perf_counter() - _t0) * 1000.0,
-                file_path,
-                mp=rgb_image.shape[0] * rgb_image.shape[1] / 1e6,
-            )
-            with self._adjusted_full_lock:
-                # 3 slots (previous/current/next): neighbor prefetch computes
-                # the NEXT file's adjusted buffer in the background; with only
-                # 2 slots that prefetch evicted the CURRENT file's entry, so
-                # any repaint of the current file re-paid the full apply.
-                self._adjusted_full_slots = [
-                    e for e in self._adjusted_full_slots if e[0] != norm
-                ][-2:] + [(norm, adj_key, out)]
-            return out
+            try:
+                import time as _time
+
+                from perf_metrics import perf_mark
+
+                _t0 = _time.perf_counter()
+                out = apply_adjustments_to_rgb(rgb_image, adj)
+                perf_mark(
+                    "sidecar_apply",
+                    (_time.perf_counter() - _t0) * 1000.0,
+                    file_path,
+                    mp=rgb_image.shape[0] * rgb_image.shape[1] / 1e6,
+                )
+                with self._adjusted_full_lock:
+                    # Keep one entry per file (the newest adj/shape) across up
+                    # to 6 files: the previous 3-slot global list was evicted
+                    # wholesale by neighbor prefetch, so revisits re-paid the
+                    # full multi-second apply.
+                    self._adjusted_full_slots = [
+                        e for e in self._adjusted_full_slots if e[0] != norm
+                    ][-5:] + [(norm, adj_key, out)]
+                return out
+            finally:
+                with self._adjusted_full_lock:
+                    ev = self._adjusted_inflight.pop(inflight_key, None)
+                if ev is not None:
+                    ev.set()
         except Exception:
             return rgb_image
 
@@ -213,6 +265,53 @@ class UnifiedImageProcessor:
         buffer's final width/height), not as a per-tick pipeline adjustment.
         """
         skip_key = os.path.normcase(os.path.abspath(file_path))
+        # Module-level in-flight dedup: concurrent identical requests (the
+        # panel's base request racing a preview worker's, each on its OWN
+        # UnifiedImageProcessor instance) share one decode instead of queueing
+        # a redundant multi-hundred-ms unpack behind the global rawpy lock.
+        dedup_key = (skip_key, bool(use_full_resolution), bool(apply_lens_correction))
+        import threading as _threading
+
+        mine = False
+        while True:
+            with _EDIT_BASE_INFLIGHT_LOCK:
+                slot = _EDIT_BASE_INFLIGHT.get(dedup_key)
+                if slot is None:
+                    slot = {"event": _threading.Event(), "result": None}
+                    _EDIT_BASE_INFLIGHT[dedup_key] = slot
+                    mine = True
+            if mine:
+                break
+            slot["event"].wait(timeout=60.0)
+            if slot["result"] is not None:
+                return slot["result"]
+            # Owner failed or timed out: loop and try to become the owner.
+            with _EDIT_BASE_INFLIGHT_LOCK:
+                if _EDIT_BASE_INFLIGHT.get(dedup_key) is slot:
+                    _EDIT_BASE_INFLIGHT.pop(dedup_key, None)
+        try:
+            result = self._decode_raw_edit_base_impl(
+                file_path,
+                skip_key,
+                executor=executor,
+                use_full_resolution=use_full_resolution,
+                apply_lens_correction=apply_lens_correction,
+            )
+            slot["result"] = result
+            return result
+        finally:
+            with _EDIT_BASE_INFLIGHT_LOCK:
+                _EDIT_BASE_INFLIGHT.pop(dedup_key, None)
+            slot["event"].set()
+
+    def _decode_raw_edit_base_impl(
+        self,
+        file_path: str,
+        skip_key: str,
+        executor: Optional[Any] = None,
+        use_full_resolution: bool = False,
+        apply_lens_correction: bool = False,
+    ) -> Optional[np.ndarray]:
         from common_image_loader import dng_prefers_embedded_preview_first
         from raw_tone_recovery import edit_base_decode_params
 
@@ -310,65 +409,19 @@ class UnifiedImageProcessor:
                 return rgb_image
 
             if dng_prefers_embedded_preview_first(file_path):
-                try:
-                    from PIL import Image
-
-                    with Image.open(file_path) as im:
-                        best_w = best_h = 0
-                        best_idx = -1
-                        n_frames = getattr(im, "n_frames", 1)
-                        for idx in range(n_frames):
-                            im.seek(idx)
-                            w, h = im.size
-                            if w * h > best_w * best_h:
-                                best_w, best_h = w, h
-                                best_idx = idx
-                        if best_idx >= 0 and best_w >= 1024:
-                            im.seek(best_idx)
-                            rgb_im = im.convert("RGB")
-                            full_pixels = np.array(rgb_im)
-                            orientation = exif_data.get("orientation", 1) if exif_data else 1
-                            if orientation != 1:
-                                full_pixels = self._apply_orientation_correction(
-                                    full_pixels, orientation, exif_data
-                                )
-                            return full_pixels
-                except Exception:
-                    pass
+                # Browse uses embedded/TIFF frames; Adjust requires demosaic.
                 logging.getLogger(__name__).warning(
                     "[EDIT] LibRaw unsupported for %s; no RAW demosaic base available",
                     os.path.basename(file_path),
                 )
                 return None
 
+            # Nikon HE/HE* (and any other demosaic-failed NEF): browse shows
+            # embedded JPEG, but Adjust must not use that as an edit base —
+            # no scene-linear demosaic is available.
             if file_path.lower().endswith(".nef"):
-                # Nikon HE/HE*-compressed NEF: LibRaw can't demosaic it at all.
-                # Use the app's own byte-scan embedded-JPEG extractor (verified
-                # 36/36 against LibRaw for NEF) rather than the DNG branch's PIL
-                # multi-frame trick above -- for NEF the largest-pixel-count TIFF
-                # "frame" is frequently the actual compressed Bayer sensor data,
-                # not the embedded preview, which PIL can't decode correctly.
-                try:
-                    from enhanced_raw_processor import extract_embedded_jpeg_by_scan
-
-                    embedded = extract_embedded_jpeg_by_scan(file_path, 0)
-                    if embedded is not None:
-                        orientation = exif_data.get("orientation", 1) if exif_data else 1
-                        if orientation != 1:
-                            embedded = self._apply_orientation_correction(
-                                embedded, orientation, exif_data
-                            )
-                        logging.getLogger(__name__).info(
-                            "[EDIT] Embedded-JPEG edit base for HE-compressed NEF %s (%dx%d)",
-                            os.path.basename(file_path),
-                            embedded.shape[1],
-                            embedded.shape[0],
-                        )
-                        return embedded
-                except Exception:
-                    pass
                 logging.getLogger(__name__).warning(
-                    "[EDIT] LibRaw unsupported for %s; no embedded-JPEG edit base available either",
+                    "[EDIT] No LibRaw demosaic edit base for %s (HE/HE* or unsupported)",
                     os.path.basename(file_path),
                 )
                 return None
@@ -997,10 +1050,18 @@ class UnifiedImageProcessor:
         if not is_raw:
             cached_pixmap = self.cache.get_pixmap(file_path)
             if cached_pixmap is not None:
-                if _verbose_orientation_logs():
-                    # print(f"[ORIENTATION] Using cached pixmap for {os.path.basename(file_path)} (non-RAW file)")
-                    pass
-                return cached_pixmap
+                # A full-resolution request must not be satisfied by a
+                # preview-sized cache entry. The fit view caches a
+                # memory_preview_max_edge()-capped pixmap under the same key;
+                # returning it here unconditionally meant zooming into any
+                # image larger than the preview cap (e.g. a 32888x8470
+                # panorama cached at 2304px) re-delivered the small preview
+                # forever -- instant "Pixmap ready" events, never an on-screen
+                # upgrade, blur at 100%.
+                if not use_full_resolution or self._pixmap_covers_file_resolution(
+                    file_path, cached_pixmap
+                ):
+                    return cached_pixmap
         else:
             # For RAW files, don't use cached pixmap - always process fresh
             if _verbose_orientation_logs():
@@ -1018,6 +1079,25 @@ class UnifiedImageProcessor:
                 file_path, use_full_resolution=use_full_resolution
             )
     
+    def _pixmap_covers_file_resolution(self, file_path: str, pixmap) -> bool:
+        """True when ``pixmap`` is at (or near) the file's native resolution.
+
+        Native size comes from a header-only QImageReader probe (~ms, no pixel
+        decode). Dimensions are compared sorted so an EXIF-rotated pixmap
+        (swapped w/h) still matches. Unknown native size accepts the cache
+        (never force a redecode on a file we cannot even probe), and a pixmap
+        already at the loader's own safety cap (_regular_image_max_edge) is
+        accepted too -- it is the largest this app will ever produce for the
+        file, so rejecting it would just re-run an expensive decode into the
+        same result.
+        """
+        try:
+            from common_image_loader import pixmap_covers_requested_edge
+
+            return pixmap_covers_requested_edge(file_path, pixmap, 0)
+        except Exception:
+            return True
+
     def _try_full_embedded_raw_preview(
         self, file_path: str, exif_data: Optional[Dict[str, Any]]
     ) -> Optional[np.ndarray]:
@@ -1144,9 +1224,17 @@ class UnifiedImageProcessor:
                 cached_dim = max(cached.shape[0], cached.shape[1]) if hasattr(cached, "shape") else 0
                 if cached_dim >= 1024:
                     return cached
+            exif_data = self.exif_extractor.extract_exif_data(file_path)
+
+            # Full-resolution request: prefer sensor-covering embeds / PIL TIFF.
+            # Fit-view request: still must extract a displayable embed -- LibRaw
+            # can never demosaic these files. Returning None here was a regression
+            # for HE/HE* NEF: a stages={'full'} fit-view task (e.g. after
+            # quality_on_screen or RAW-mode consistent-fit) emitted a false
+            # "unsupported or corrupt" error when the in-memory cache had been
+            # evicted by gallery preload, even though the embedded JPEG decodes
+            # fine on the next paint.
             if use_full_resolution:
-                exif_data = self.exif_extractor.extract_exif_data(file_path)
-                
                 # First try decoding the full image via PIL TIFF reader (useful for linear/composite DNG panoramas)
                 try:
                     from PIL import Image
@@ -1188,61 +1276,61 @@ class UnifiedImageProcessor:
                 full_embedded = self._try_full_embedded_raw_preview(file_path, exif_data)
                 if full_embedded is not None:
                     return full_embedded
-                
-                # If that didn't work (due to resolution coverage reject or workflow toggle),
-                # extract the largest native preview since LibRaw can't demosaic this file anyway.
-                #
-                # NOTE: deliberately NOT marked via mark_full_image_source here.
-                # This whole branch is reached only for skip_key already in
-                # _LIBRAW_UNSUPPORTED_PATHS (X-Trans, NEF HE, corrupt/composite
-                # DNG, ...) -- the embedded preview is the permanent, only
-                # available "full" tier for these files; there is no true
-                # decode to ever upgrade to, so tagging it as an embedded-JPEG
-                # stand-in would just make the idle-decode-after-nav-pause
-                # timer re-queue a pointless (if cheap, cache-hit) background
-                # request forever with nothing to gain.
-                native_preview = self.thumbnail_extractor.extract_embedded_native_preview(file_path)
-                if native_preview is not None:
-                    orientation = exif_data.get("orientation", 1) if exif_data else 1
-                    if orientation != 1:
-                        native_preview = self._apply_orientation_correction(
-                            native_preview, orientation, exif_data
-                        )
-                    self.cache.put_preview(file_path, native_preview)
+
+            # If that didn't work (due to resolution coverage reject or workflow toggle),
+            # extract the largest native preview since LibRaw can't demosaic this file anyway.
+            #
+            # NOTE: deliberately NOT marked via mark_full_image_source here.
+            # This whole branch is reached only for skip_key already in
+            # _LIBRAW_UNSUPPORTED_PATHS (X-Trans, NEF HE, corrupt/composite
+            # DNG, ...) -- the embedded preview is the permanent, only
+            # available "full" tier for these files; there is no true
+            # decode to ever upgrade to, so tagging it as an embedded-JPEG
+            # stand-in would just make the idle-decode-after-nav-pause
+            # timer re-queue a pointless (if cheap, cache-hit) background
+            # request forever with nothing to gain.
+            native_preview = self.thumbnail_extractor.extract_embedded_native_preview(file_path)
+            if native_preview is not None:
+                orientation = exif_data.get("orientation", 1) if exif_data else 1
+                if orientation != 1:
+                    native_preview = self._apply_orientation_correction(
+                        native_preview, orientation, exif_data
+                    )
+                self.cache.put_preview(file_path, native_preview)
+                if use_full_resolution:
                     self.cache.put_full_image(file_path, native_preview)
-                    return native_preview
-                
-                mem_max = memory_preview_max_edge()
-                preview = self.thumbnail_extractor.extract_preview_from_raw(
-                    file_path, max_size=mem_max
+                return native_preview
+
+            mem_max = memory_preview_max_edge()
+            preview = self.thumbnail_extractor.extract_preview_from_raw(
+                file_path, max_size=mem_max
+            )
+            if preview is not None:
+                orientation = (
+                    exif_data.get("orientation", 1) if exif_data else 1
                 )
-                if preview is not None:
+                if orientation != 1:
+                    preview = self._apply_orientation_correction(
+                        preview, orientation, exif_data
+                    )
+                self.cache.put_preview(file_path, preview)
+                return preview
+            try:
+                from enhanced_raw_processor import extract_embedded_jpeg_by_scan
+
+                scanned = extract_embedded_jpeg_by_scan(file_path, mem_max)
+                if scanned is not None:
                     orientation = (
                         exif_data.get("orientation", 1) if exif_data else 1
                     )
                     if orientation != 1:
-                        preview = self._apply_orientation_correction(
-                            preview, orientation, exif_data
+                        scanned = self._apply_orientation_correction(
+                            scanned, orientation, exif_data
                         )
-                    self.cache.put_preview(file_path, preview)
-                    return preview
-                try:
-                    from enhanced_raw_processor import extract_embedded_jpeg_by_scan
-
-                    scanned = extract_embedded_jpeg_by_scan(file_path, mem_max)
-                    if scanned is not None:
-                        orientation = (
-                            exif_data.get("orientation", 1) if exif_data else 1
-                        )
-                        if orientation != 1:
-                            scanned = self._apply_orientation_correction(
-                                scanned, orientation, exif_data
-                            )
-                        self.cache.put_preview(file_path, scanned)
-                        return scanned
-                except Exception:
-                    pass
-                return None
+                    self.cache.put_preview(file_path, scanned)
+                    return scanned
+            except Exception:
+                pass
             return None
         try:
             # 獲取 EXIF 數據（用於處理參數）
@@ -1357,6 +1445,7 @@ class UnifiedImageProcessor:
                     finish_full_decode,
                     params_supported,
                     params_supported_half,
+                    prefer_gpu_decode_enabled,
                     try_fast_raw_decode,
                     unpack_raw,
                 )
@@ -1385,7 +1474,9 @@ class UnifiedImageProcessor:
                             )
                             try:
                                 rgb_image = finish_full_decode(
-                                    unpacked, cancel_check=_load_task_cancelled
+                                    unpacked,
+                                    cancel_check=_load_task_cancelled,
+                                    prefer_gpu=prefer_gpu_decode_enabled(),
                                 )
                             except DecodeCancelled:
                                 raise
@@ -1513,12 +1604,69 @@ class UnifiedImageProcessor:
                 pass
                 
             if orientation != 1 and rgb_image is not None:
-                rgb_image = self._apply_orientation_correction(rgb_image, orientation, exif_data)
+                try:
+                    from gpu_gl_bridge import DeviceRgb, apply_orientation_device_rgb
+
+                    if isinstance(rgb_image, DeviceRgb):
+                        rgb_image = apply_orientation_device_rgb(rgb_image, orientation)
+                    else:
+                        rgb_image = self._apply_orientation_correction(
+                            rgb_image, orientation, exif_data
+                        )
+                except Exception:
+                    try:
+                        from gpu_gl_bridge import DeviceRgb as _DR
+
+                        host = (
+                            rgb_image.to_numpy()
+                            if isinstance(rgb_image, _DR)
+                            else rgb_image
+                        )
+                        rgb_image = self._apply_orientation_correction(
+                            host, orientation, exif_data
+                        )
+                    except Exception:
+                        pass
 
             # Cache unadjusted base; sidecar is applied in process_full_image().
             if rgb_image is not None:
-                self.cache.put_full_image(file_path, rgb_image)
-                self.cache.mark_full_image_source(file_path, is_embedded_jpeg=False)
+                try:
+                    from gpu_gl_bridge import DeviceRgb
+
+                    if isinstance(rgb_image, DeviceRgb):
+                        # Defer host D2H so CUDA-GL display can paint first.
+                        import threading
+
+                        def _cache_device_host(dev=rgb_image, fp=file_path):
+                            try:
+                                host = dev.to_numpy()
+                                self.cache.put_full_image(fp, host)
+                                self.cache.mark_full_image_source(
+                                    fp, is_embedded_jpeg=False
+                                )
+                            except Exception:
+                                pass
+
+                        threading.Thread(
+                            target=_cache_device_host, daemon=True
+                        ).start()
+                        host = None
+                    else:
+                        self.cache.put_full_image(file_path, rgb_image)
+                        self.cache.mark_full_image_source(
+                            file_path, is_embedded_jpeg=False
+                        )
+                        host = rgb_image
+                except Exception:
+                    host = rgb_image if hasattr(rgb_image, "shape") else None
+                    if host is not None and not hasattr(host, "tensor"):
+                        try:
+                            self.cache.put_full_image(file_path, host)
+                            self.cache.mark_full_image_source(
+                                file_path, is_embedded_jpeg=False
+                            )
+                        except Exception:
+                            pass
                 if libraw_first:
                     # RAW workflow: persist a LibRaw-rendered display tier
                     # (memory + disk JPEG). Every pre-decode tier is embedded-
@@ -1535,6 +1683,12 @@ class UnifiedImageProcessor:
                     def _persist_libraw_preview(rgb=rgb_image, fp=file_path):
                         try:
                             import cv2
+                            from gpu_gl_bridge import DeviceRgb as _DR
+
+                            if isinstance(rgb, _DR):
+                                rgb = rgb.to_numpy()
+                            if rgb is None:
+                                return
 
                             # NOTE: previously applied sidecar adjustments here
                             # so the persisted preview reflected edits, not

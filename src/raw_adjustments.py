@@ -66,6 +66,12 @@ DEFAULT_ADJUSTMENTS: Dict[str, float] = {
     # adjustment -- see raw_lens_correction.py.
     "LensCorrectionEnabled": 0.0,
     "DenoiseMethod": 0.0,
+    # Geometry (see raw_transform.py): straighten + keystone perspective +
+    # per-edge crop insets. Applied once at the head of both pipelines;
+    # always stays within the original pixel frame (auto inscribed-rect crop).
+    "CropAngle": 0.0,
+    "PerspectiveVertical": 0.0,
+    "PerspectiveHorizontal": 0.0,
     # Dodge & burn stops-per-mask-unit (see raw_dodge_burn.py). The mask
     # itself (a base64 PNG blob, potentially large) is NOT a plain numeric
     # attribute -- it's stored as its own XMP child element, mirroring
@@ -115,10 +121,13 @@ def uses_recovery_tone_map(adj: dict[str, float] | None) -> bool:
         return False
     if float(adj.get(RECOVERY_BASELINE_KEY, 0.0)) <= 0.5:
         return False
-    from raw_tone_curve import TONE_CURVE_SERIAL_KEY
+    from raw_tone_curve import CHANNEL_CURVE_KEYS, TONE_CURVE_SERIAL_KEY
 
     if str(adj.get(TONE_CURVE_SERIAL_KEY, "") or "").strip():
         return False
+    for key in CHANNEL_CURVE_KEYS:
+        if str(adj.get(key, "") or "").strip():
+            return False
     for key in _PV2012_RECOVERY_EXCLUSIVE_KEYS:
         default = float(DEFAULT_ADJUSTMENTS.get(key, 0.0))
         if abs(float(adj.get(key, default)) - default) > 1e-4:
@@ -214,6 +223,16 @@ SLIDER_SPECS: tuple[SliderSpec, ...] = (
     _slider_linear("Clarity2012", "Clarity", -100, 100, 0.0),
     _slider_linear("Defringe", "Defringe", 0, 100, 0.0),
     _slider_linear("LuminanceNoiseReduction", "Luma NR", 0, 100, 0.0, fmt=lambda x: f"{x:.0f}"),
+    # Transform (raw_transform.py). Straighten in 0.1-degree steps; keystone
+    # sliders mirror Lightroom's slider-based Transform panel; crop insets as
+    # per-edge percentages (stored as fractions).
+    _slider_linear("CropAngle", "Straighten", -450, 450, 0.0, scale=0.1, fmt=lambda x: f"{x:+.1f}°"),
+    _slider_linear("PerspectiveVertical", "Vertical", -100, 100, 0.0),
+    _slider_linear("PerspectiveHorizontal", "Horizontal", -100, 100, 0.0),
+    # Per-edge crop-inset sliders were removed by request: cropping stays out
+    # of the UI until a proper interactive overlay (visible crop rectangle
+    # with drag handles) exists. raw_transform.apply_geometry still honors
+    # the keys, so the future overlay only needs to write them.
 )
 
 
@@ -228,22 +247,149 @@ def resolve_xmp_path(image_path: str) -> str:
 
 
 def editing_features_enabled() -> bool:
-    """Whether the Adjust panel, XMP writes for edits, and edit export are available.
+    """Whether the Adjust panel, XMP writes, and edit export are available.
 
-    Always False on this browse/cull release. Develop/Adjust ships in a later
-    version — ``RAWVIEWER_ENABLE_EDITING`` is ignored and cannot re-enable it.
-    Rating read/write and plain browse remain available.
+    On by default on the development branch
+    (``RAWVIEWER_ENABLE_EDITING=0`` to disable). Rating read/write and plain
+    browse/export-without-adjustments stay available either way.
     """
-    return False
+    return os.environ.get("RAWVIEWER_ENABLE_EDITING", "1").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
 
 
 def sidecar_adjustments_enabled() -> bool:
     """Whether browse/full-res display applies saved XMP edit sliders to pixels.
 
-    Always False while :func:`editing_features_enabled` is False.
-    ``RAWVIEWER_SIDECAR_ADJUST`` is ignored on this release.
+    On by default when editing is enabled (RAWVIEWER_SIDECAR_ADJUST=0 to
+    disable). It shipped default-off while edits were invisible everywhere
+    outside the Adjust panel; now that gallery tiles and the fit preview
+    render saved edits too (edited_previews_enabled), leaving the full-res
+    tier unedited would make the edits visibly VANISH on zoom -- consistency
+    across tiers matters more than the apply cost, which only edited files
+    ever pay. Requires `editing_features_enabled()` -- browse-only builds
+    never pay the apply cost even if the env var is set. Explicit
+    `apply_sidecar_adjustments=True` callers are unaffected.
     """
-    return False
+    if not editing_features_enabled():
+        return False
+    return os.environ.get("RAWVIEWER_SIDECAR_ADJUST", "1").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def edited_previews_enabled() -> bool:
+    """Whether gallery tiles and the fit preview render saved XMP edits.
+
+    On by default when editing is enabled (RAWVIEWER_EDITED_PREVIEWS=0 to
+    disable). Applied at display/delivery time only -- adjusted pixels are
+    never written back to any pixel cache, so there is no stale-thumbnail
+    invalidation problem: re-editing simply changes what the next delivery
+    applies. Cost (measured): ~5ms per 320px gallery tile, ~35ms per 720px
+    tile, ~215ms for a 2304px fit preview -- worker-thread, edited files only.
+    """
+    if not editing_features_enabled():
+        return False
+    return os.environ.get("RAWVIEWER_EDITED_PREVIEWS", "1").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+_SRGB_DECODE_LUT = None
+
+
+def _decode_srgb_uint8_to_linear(arr: np.ndarray) -> np.ndarray:
+    """Standard sRGB EOTF, uint8 [0,255] -> linear [0,1] float32.
+
+    Gallery/thumbnail buffers for RAW files are the camera's embedded JPEG
+    (extract_embedded_jpeg_by_scan / rawpy.extract_thumb) or, absent that,
+    LibRaw's own raw.postprocess() output -- both approximately sRGB gamma
+    (~2.2 with a linear toe), NOT the app's own dcraw-style BT.709
+    linear16->uint8 encode from fast_raw_decode._gamma_lut8. This function
+    used to invert THAT LUT (see git history), which assumes an input this
+    code path never actually receives: the flatter BT.709 shadow curve,
+    inverted, overestimates linear values versus the steeper true sRGB toe,
+    so the reconstructed "linear" buffer was too bright even before edits --
+    then process_linear_edit_buffer's exposure/tone stage (built for a
+    genuinely linear-RAW input, e.g. decode_raw_edit_base) amplified that
+    overestimate further, making edited gallery thumbnails visibly brighter
+    than the same edit applied in single view (which decodes true
+    scene-linear RAW, never through an 8-bit round trip at all). Report:
+    "thumbnail preview brightness significantly higher than edited image."
+    """
+    global _SRGB_DECODE_LUT
+    if _SRGB_DECODE_LUT is None:
+        c = np.arange(256, dtype=np.float64) / 255.0
+        lin = np.where(c <= 0.04045, c / 12.92, ((c + 0.055) / 1.055) ** 2.4)
+        _SRGB_DECODE_LUT = lin.astype(np.float32)
+    return _SRGB_DECODE_LUT[arr]
+
+
+def apply_saved_edits_for_display(file_path: str, arr):
+    """Apply saved XMP edits to a display-bound uint8 RGB ndarray.
+
+    Returns the input unchanged when previews-with-edits is disabled, the
+    file is not RAW, the file has no (non-default) saved adjustments, or the
+    buffer is not an ndarray (QImage branches skip). Never raises. Callers
+    must NOT persist the result into pixel caches -- caches hold the
+    unadjusted base.
+
+    RAW-only by contract: sidecars are resolved by BASENAME (Lightroom
+    convention), so a JPEG sharing its basename with an edited RAW resolves
+    to the RAW's sidecar -- without this gate the JPEG's gallery tile showed
+    the RAW's edits applied to it ("also flagged as edited" report). Edits
+    can only ever be created for RAW files (the Adjust panel requires a
+    demosaiced RAW base), so non-RAW is always pass-through.
+
+    Renders through the REAL scene-linear pipeline (sRGB decode ->
+    process_linear_edit_buffer -> linear_to_display_uint8), not the legacy
+    gamma-space approximation: the gamma path's tone math diverges visibly
+    from the Adjust panel's render (reported as the gallery/fit preview
+    being "way off" from the edited image). Working from an already
+    tone-curved camera JPEG is still an approximation of the true RAW edit
+    base, but the tone/color processing applied on top is now the same code
+    the editor runs. The uint8->linear decode uses the standard sRGB EOTF,
+    matching the actual gamma of the embedded-JPEG/LibRaw-postprocess
+    thumbnail buffers this function receives (see
+    _decode_srgb_uint8_to_linear's docstring for why the BT.709 LUT this
+    used previously was the wrong inverse and made edited thumbnails read
+    brighter than the true edited image).
+    """
+    try:
+        if arr is None or not hasattr(arr, "shape") or not edited_previews_enabled():
+            return arr
+        from common_image_loader import is_raw_file
+
+        if not is_raw_file(file_path):
+            return arr
+        # Sidecar existence FIRST (two isfile checks, ~0.05ms). Going straight
+        # to load_adjustments_for_file ran read_as_shot_temperature -- a full
+        # EXIF parse of the RAW file -- for EVERY delivered gallery tile,
+        # edited or not, before the is_default early-out could save it. On a
+        # cold session that extra per-tile file-open competed with thumbnail
+        # extraction on the same disk: "gallery scrolling slower than before".
+        xmp_path = resolve_xmp_path(file_path)
+        if not (xmp_path and os.path.isfile(xmp_path)):
+            return arr
+        adj = load_adjustments_for_file(file_path)
+        if is_default_adjustments(adj):
+            return arr
+        from raw_edit_pipeline import linear_to_display_uint8, process_linear_edit_buffer
+
+        lin = _decode_srgb_uint8_to_linear(np.ascontiguousarray(arr))
+        out = process_linear_edit_buffer(lin, adj, preview=True)
+        return linear_to_display_uint8(out, adj)
+    except Exception:
+        return arr
 
 
 
@@ -458,8 +604,13 @@ def read_as_shot_temperature(image_path: str) -> float:
     return result
 
 
-def parse_tone_curve_pv2012_from_xmp(xmp_path: str) -> str:
-    """Read crs:ToneCurvePV2012 point list → 'x,y;x,y' serialized string."""
+def _parse_point_curve_from_xmp(xmp_path: str, tag_name: str) -> str:
+    """Read a crs:<tag_name> point list → 'x,y;x,y' serialized string.
+
+    Shared by the main luminance curve (ToneCurvePV2012) and the three
+    Standard-mode channel curves (ToneCurvePV2012Red/Green/Blue) -- same
+    XMP shape (an rdf:Seq of "x, y" li entries), different tag name.
+    """
     if not xmp_path or not os.path.isfile(xmp_path):
         return ""
     from raw_tone_curve import serialize_tone_curve_points
@@ -476,7 +627,7 @@ def parse_tone_curve_pv2012_from_xmp(xmp_path: str) -> str:
             for child in desc:
                 tag = child.tag
                 local_key = tag.split("}")[-1] if "}" in tag else tag.split(":")[-1]
-                if local_key != "ToneCurvePV2012":
+                if local_key != tag_name:
                     continue
                 for li in child.findall(".//rdf:li", ns):
                     if not li.text:
@@ -491,6 +642,11 @@ def parse_tone_curve_pv2012_from_xmp(xmp_path: str) -> str:
     except Exception:
         return ""
     return serialize_tone_curve_points(points)
+
+
+def parse_tone_curve_pv2012_from_xmp(xmp_path: str) -> str:
+    """Read crs:ToneCurvePV2012 point list → 'x,y;x,y' serialized string."""
+    return _parse_point_curve_from_xmp(xmp_path, "ToneCurvePV2012")
 
 
 def parse_dodge_burn_mask_from_xmp(xmp_path: str) -> str:
@@ -531,6 +687,21 @@ def load_adjustments_for_file(image_path: str) -> Dict[str, float]:
         serial = parse_tone_curve_pv2012_from_xmp(xmp_path)
         if serial:
             adj[TONE_CURVE_SERIAL_KEY] = serial
+    if xmp_path and os.path.isfile(xmp_path):
+        from raw_tone_curve import (
+            TONE_CURVE_BLUE_KEY,
+            TONE_CURVE_GREEN_KEY,
+            TONE_CURVE_RED_KEY,
+        )
+
+        for key, tag in (
+            (TONE_CURVE_RED_KEY, "ToneCurvePV2012Red"),
+            (TONE_CURVE_GREEN_KEY, "ToneCurvePV2012Green"),
+            (TONE_CURVE_BLUE_KEY, "ToneCurvePV2012Blue"),
+        ):
+            serial = _parse_point_curve_from_xmp(xmp_path, tag)
+            if serial:
+                adj[key] = serial
     if xmp_path and os.path.isfile(xmp_path):
         from raw_dodge_burn import MASK_KEY
 
@@ -609,10 +780,13 @@ def is_default_adjustments(adj: Dict[str, float] | None) -> bool:
     if not adj:
         return True
     from raw_dodge_burn import MASK_KEY
-    from raw_tone_curve import TONE_CURVE_SERIAL_KEY
+    from raw_tone_curve import CHANNEL_CURVE_KEYS, TONE_CURVE_SERIAL_KEY
 
     if str(adj.get(TONE_CURVE_SERIAL_KEY, "") or "").strip():
         return False
+    for key in CHANNEL_CURVE_KEYS:
+        if str(adj.get(key, "") or "").strip():
+            return False
     if str(adj.get(MASK_KEY, "") or "").strip():
         return False
     ref_temp = wb_reference_temperature(adj)
@@ -773,16 +947,29 @@ def _write_xmp_adjustments_locked(xmp_path: str, adj: Dict[str, float]) -> None:
         desc.set(f"{{{CRS_NS}}}DefringePurpleAmount", amt)
         desc.set(f"{{{CRS_NS}}}DefringeGreenAmount", amt)
 
-    from raw_tone_curve import TONE_CURVE_SERIAL_KEY, deserialize_tone_curve_points
+    from raw_tone_curve import (
+        TONE_CURVE_BLUE_KEY,
+        TONE_CURVE_GREEN_KEY,
+        TONE_CURVE_RED_KEY,
+        TONE_CURVE_SERIAL_KEY,
+        deserialize_tone_curve_points,
+    )
 
-    serial = str(merged.get(TONE_CURVE_SERIAL_KEY, "") or "")
-    points = deserialize_tone_curve_points(serial)
-    if len(points) >= 2:
-        tc = ET.SubElement(desc, f"{{{CRS_NS}}}ToneCurvePV2012")
+    def _write_point_curve(key: str, tag: str) -> None:
+        serial = str(merged.get(key, "") or "")
+        points = deserialize_tone_curve_points(serial)
+        if len(points) < 2:
+            return
+        tc = ET.SubElement(desc, f"{{{CRS_NS}}}{tag}")
         seq = ET.SubElement(tc, f"{{{RDF_NS}}}Seq")
         for x, y in points:
             li = ET.SubElement(seq, f"{{{RDF_NS}}}li")
             li.text = f"{int(round(x))}, {int(round(y))}"
+
+    _write_point_curve(TONE_CURVE_SERIAL_KEY, "ToneCurvePV2012")
+    _write_point_curve(TONE_CURVE_RED_KEY, "ToneCurvePV2012Red")
+    _write_point_curve(TONE_CURVE_GREEN_KEY, "ToneCurvePV2012Green")
+    _write_point_curve(TONE_CURVE_BLUE_KEY, "ToneCurvePV2012Blue")
 
     from raw_dodge_burn import MASK_KEY
 
@@ -890,6 +1077,14 @@ def _apply_adjustments_to_srgb(rgb_image: np.ndarray, adj: dict[str, float]) -> 
     merged.update(adj)
     if is_default_adjustments(merged):
         return rgb_image
+
+    # Geometry first (straighten/perspective/crop, raw_transform.py) so the
+    # gamma path -- gallery tiles, fit previews, cached uint8 redisplay --
+    # shows the same framing as the linear edit pipeline. Must run before the
+    # row-band split below: it changes the buffer's shape.
+    from raw_transform import apply_geometry
+
+    rgb_image = apply_geometry(rgb_image, merged)
 
     # Row-band parallelism: every stage below is per-pixel except the small-
     # radius Gaussian blurs inside detail-enhance (Sharpness/Clarity/
@@ -1050,9 +1245,9 @@ def _apply_adjustments_to_srgb_core(img: np.ndarray, merged: dict[str, float]) -
     if mask_serial:
         from raw_dodge_burn import DEFAULT_STRENGTH as _db_default_strength
         from raw_dodge_burn import STRENGTH_KEY as _db_strength_key
-        from raw_dodge_burn import apply_dodge_burn, deserialize_mask
+        from raw_dodge_burn import _deserialize_mask_cached, apply_dodge_burn
 
-        mask = deserialize_mask(mask_serial)
+        mask = _deserialize_mask_cached(mask_serial)
         if mask is not None:
             stops = float(merged.get(_db_strength_key, _db_default_strength))
             img = apply_dodge_burn(img, mask, stops)
@@ -1213,32 +1408,6 @@ def _apply_masked_luminance_adjust(
     for c in range(img.shape[-1]):
         np.multiply(img[:, :, c], ratio, out=out[:, :, c])
     return out
-
-
-def _apply_highlights_shadows_linear(
-    img: np.ndarray, hi_val: float, sh_val: float
-) -> np.ndarray:
-    """Shadows / highlights via masked luminance ratios (no global gray add)."""
-    from raw_tone_recovery import _luminance
-
-    lum = _luminance(img)
-    if abs(sh_val) > 1e-4:
-        img = _apply_masked_luminance_adjust(
-            img, lum, _shadow_region_weight(lum), sh_val / 100.0, lift=True,
-            lift_up_strength=0.07,
-        )
-        lum = _luminance(img)
-    if abs(hi_val) > 1e-4:
-        amt = hi_val / 100.0
-        if amt < 0:
-            img = _apply_masked_luminance_adjust(
-                img, lum, _highlight_region_weight(lum), amt, lift=False
-            )
-        else:
-            img = _apply_masked_luminance_adjust(
-                img, lum, _highlight_region_weight(lum), amt, lift=True
-            )
-    return img
 
 
 def _apply_highlights_shadows(img: np.ndarray, hi_val: float, sh_val: float) -> np.ndarray:

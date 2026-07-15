@@ -143,24 +143,62 @@ def _env_disabled() -> bool:
 
 
 def prefer_gpu_decode_enabled() -> bool:
-    """GPU (MPS/CUDA) full-resolution demosaic, default OFF.
+    """GPU full-resolution demosaic. Default ON for CUDA, OFF everywhere else.
 
-    Measured no speed benefit on real files (45-46MP CR3/NEF: ~358-365ms
-    either way, GPU occasionally slower after warmup) -- consistent with
-    this module's own top-of-file docstring, which already reached the same
-    conclusion for the earlier OpenCL/Metal PoC. GPU decode also feeds the
-    MPS unified-memory pressure that needed a dedicated
-    release_cached_gpu_memory() mitigation (image_cache.py); skipping it by
-    default when it buys nothing removes that cost too. Set
-    RAWVIEWER_PREFER_GPU_DECODE=1 to re-enable (e.g. to re-verify on
-    different hardware, or for the parity gate's GPU-vs-CPU comparison).
+    The default is per-backend because the measurement is per-backend:
+
+    CUDA (RTX-class, full sensor-res demosaic, unpack excluded, median of 3,
+    warm context) -- worth it:
+        DSC00374.ARW   378ms CPU ->  74ms GPU   5.1x
+        IMG_0255.CR3   250ms CPU ->  49ms GPU   5.1x
+        P1034595.RW2   259ms CPU ->  52ms GPU   4.9x
+        683A1089.CR3   339ms CPU -> 346ms GPU   1.0x  (falls back to CPU)
+        TOTAL         1226ms     -> 522ms       2.35x
+
+    MPS (Apple) -- NOT worth it, and this is what the old blanket default-OFF
+    was actually measured on: 45-46MP CR3/NEF came out ~358-365ms either way,
+    GPU occasionally slower after warmup, while still feeding the unified-memory
+    pressure that needed release_cached_gpu_memory() (image_cache.py). So MPS
+    stays off by default; the earlier conclusion was right for Apple hardware
+    and was simply being applied to hardware it was never measured on.
+
+    Note this does NOT change time-to-first-render: first paint is served by the
+    embedded JPEG, which never touches the GPU (measured: TTFR identical with
+    GPU on vs off, 1.00x over 4 files). The win lands on the sensor-resolution
+    decode -- RAW mode, and zoom to 100% -- which is exactly where the CPU path
+    is slow enough to see.
+
+    RAWVIEWER_PREFER_GPU_DECODE=1/0 still forces either way; an explicit setting
+    always wins over the per-backend default.
     """
-    return str(os.environ.get("RAWVIEWER_PREFER_GPU_DECODE", "0")).strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
+    raw = str(os.environ.get("RAWVIEWER_PREFER_GPU_DECODE", "")).strip().lower()
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    # Unset: decide from the backend. Never raise -- a missing/broken torch must
+    # degrade to the CPU path, not break decoding.
+    try:
+        from gpu_raw_processor import detect_gpu_backend
+
+        return detect_gpu_backend() in {"pytorch_cuda", "cupy"}
+    except Exception:
+        return False
+
+
+def gpu_decode_max_megapixels() -> float:
+    """Skip GPU demosaic above this mosaic size (CPU usually wins + less VRAM).
+
+    100MP RAF was measured ~10s on CUDA with heavy RSS growth while browsing;
+    fall back to CPU past the cap. Default 70 covers a7CR-class bodies while
+    still keeping extreme medium-format / GFX off GPU. Override with
+    RAWVIEWER_GPU_DECODE_MAX_MP (0 disables the cap).
+    """
+    raw = str(os.environ.get("RAWVIEWER_GPU_DECODE_MAX_MP", "70")).strip()
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return 70.0
 
 
 def wb_sanity_enabled() -> bool:
@@ -197,6 +235,12 @@ _WB_CORRECTION_CACHE: Dict[str, Optional[list]] = {}
 # correction. Matrix + visible-sensor dims + black levels + white level
 # separates them (4639x6959/black [0,35,102,69] vs 4024x6022/black 2048x4).
 _WB_MODEL_VERDICT: Dict[bytes, bool] = {}
+
+# Files whose fast-path unpack came back None this session, keyed on
+# (normcase path, mtime_ns, size) -- see unpack_raw. Re-probes if the file
+# changes on disk. Bounded by the number of distinct undecodable files a
+# session touches, which is tiny; a corrupt/exotic file is the exception.
+_UNPACK_UNSUPPORTED: set = set()
 
 
 def _wb_model_key(
@@ -276,17 +320,18 @@ def _wb_correction_from_jpeg(
         raw_planes = [(r, ci, p[:hmin, :wmin]) for r, ci, p in raw_planes]
         m3 = rgb_cam.astype(np.float64)
         m3_inv = np.linalg.pinv(m3)
-        jpg = _srgb_to_linear01(
-            cv2.cvtColor(
-                cv2.resize(arr, (wmin, hmin), interpolation=cv2.INTER_AREA),
-                cv2.COLOR_BGR2RGB,
-            )
-        )
-        lj = 0.2126 * jpg[..., 0] + 0.7152 * jpg[..., 1] + 0.0722 * jpg[..., 2]
         # scale_mul = (cam_mul / cam_mul.min()) * 65535 / denom
         denom = (cam_mul[0] / cam_mul.min()) * 65535.0 / scale_mul[0]
 
-        def _render_and_metric(mul: np.ndarray):
+        def _build_jpg(src_bgr: np.ndarray) -> np.ndarray:
+            return _srgb_to_linear01(
+                cv2.cvtColor(
+                    cv2.resize(src_bgr, (wmin, hmin), interpolation=cv2.INTER_AREA),
+                    cv2.COLOR_BGR2RGB,
+                )
+            )
+
+        def _render_and_metric(mul: np.ndarray, jpg: np.ndarray, lj: np.ndarray):
             sc = (mul / mul.min()) * 65535.0 / denom
             acc: Dict[str, np.ndarray] = {}
             n_g = 0
@@ -317,25 +362,52 @@ def _wb_correction_from_jpeg(
             cbar = cam3.reshape(-1, 3)[mask.reshape(-1)].mean(axis=0)
             return dr, db, max(abs(dr), abs(db)), cbar
 
+        # Align JPEG aspect to CFA half-planes. Some bodies embed a portrait
+        # JPEG while the mosaic buffer stays sensor-native landscape (or the
+        # reverse). Stretching across that mismatch poisons the median metric.
+        plane_portrait = hmin > wmin
+        jpeg_portrait = arr.shape[0] > arr.shape[1]
+        if plane_portrait == jpeg_portrait:
+            cand_imgs = (arr, cv2.rotate(arr, cv2.ROTATE_180))
+        else:
+            cand_imgs = (
+                cv2.rotate(arr, cv2.ROTATE_90_CLOCKWISE),
+                cv2.rotate(arr, cv2.ROTATE_90_COUNTERCLOCKWISE),
+            )
+        best = None  # (first_dist, jpg, lj)
+        for src in cand_imgs:
+            jpg_t = _build_jpg(src)
+            lj_t = (
+                0.2126 * jpg_t[..., 0]
+                + 0.7152 * jpg_t[..., 1]
+                + 0.0722 * jpg_t[..., 2]
+            )
+            m0 = _render_and_metric(cam_mul, jpg_t, lj_t)
+            if m0 is None:
+                continue
+            dist0 = m0[2]
+            if best is None or dist0 < best[0]:
+                best = (dist0, jpg_t, lj_t)
+        if best is None:
+            return None
+        first_dist, jpg, lj = best
+        if first_dist <= _WB_SANITY_THRESHOLD:
+            return None
+
         # Iterate the mean-vector Newton step: one step lands well below the
         # trigger threshold but can leave a visible residual tint (the solve
         # is exact only for the masked MEAN, while the metric is a median and
         # the mask itself shifts as color converges). 2-3 iterations settle
         # under ~0.06 (imperceptible against JPEG tone-curve noise).
         cur_mul = cam_mul.astype(np.float64).copy()
-        first_dist = None
         for it in range(5):
-            m = _render_and_metric(cur_mul)
+            m = _render_and_metric(cur_mul, jpg, lj)
             if m is None:
                 if it == 0:
                     return None
                 break
             dr, db, dist, cbar = m
-            if it == 0:
-                if dist <= _WB_SANITY_THRESHOLD:
-                    return None
-                first_dist = dist
-            elif dist <= 0.06:
+            if it > 0 and dist <= 0.06:
                 break
             # w = (M^-1 (g_srgb * (M cbar))) / cbar -- exact for the mean.
             g_srgb = np.array([np.exp(-dr), 1.0, np.exp(-db)], dtype=np.float64)
@@ -536,6 +608,77 @@ def _pattern_string(pattern: np.ndarray) -> Optional[str]:
     return s if s in _BAYER_TO_CV2 else None
 
 
+def _resolve_black(raw: Any, cblack: np.ndarray) -> np.ndarray:
+    """True per-channel black level, repairing LibRaw's incomplete report.
+
+    LibRaw splits black into a base (``color.black``) plus per-channel deltas
+    (``color.cblack[0..3]``), and rawpy's ``black_level_per_channel`` exposes
+    only the deltas. On bodies LibRaw parses fully the deltas carry the whole
+    level (EOS R5: [512]*4) and this returns them untouched. On a body whose
+    makernote layout the bundled LibRaw predates, the base holds the level and
+    the deltas come back as small ISO trims over a ZERO floor -- the EOS R6
+    Mark III reports [0, 33, 100, 67] against a true black of 2049. Subtracting
+    only those leaves a ~2048/16383 = 12%-of-range pedestal in every channel,
+    which the WB multipliers then amplify unequally into a heavy color cast:
+    the "new camera color shift". (rawpy's own postprocess renders these files
+    with the same pedestal, so it is no use as a reference here -- the camera's
+    embedded JPEG is, and the repaired black is what matches it.)
+
+    ``cblack.min() <= 0`` is the signature of the missing base: a real sensor
+    floor is never zero. Only then do we measure the sensor's masked
+    optical-black columns, which are the physical zero reference, and use that
+    flat level for all four channels (measured per CFA phase, the R6 III's
+    phases agree to 1 LSB -- LibRaw's lopsided deltas are NOT a per-channel
+    floor and must not be added on top).
+
+    The measurement is deliberately gated rather than universal: on a Sony ARW
+    in the sample set the left margin reads 884 against a true black of 512, so
+    it is not clean masked black on every body. Bodies LibRaw already gets right
+    keep LibRaw's answer and cannot regress.
+    """
+    try:
+        if float(cblack.min()) > 0.0:
+            return cblack  # LibRaw's level is complete -- trust it.
+        s = raw.sizes
+        lm = int(getattr(s, "left_margin", 0) or 0)
+        full = raw.raw_image
+        if full is None or full.ndim != 2 or lm < 24:
+            return cblack
+        # Skip the outermost columns (often tapered/dead rather than a clean
+        # masked reference) and subsample rows: this is a median over a uniform
+        # strip, not a measurement that needs every pixel.
+        strip = full[::4, 8 : lm - 8]
+        if strip.size < 1024:
+            return cblack
+        level = float(np.median(strip))
+        white = float(raw.white_level)
+        if not (0.0 < level < white * 0.5):
+            return cblack  # implausible -- keep LibRaw's answer.
+        logger.info(
+            "[FAST_RAW] LibRaw reported an incomplete black level %s; using the "
+            "measured optical-black floor %.0f (body newer than this LibRaw)",
+            [round(float(x)) for x in cblack],
+            level,
+        )
+        return np.full(4, level, dtype=np.float64)
+    except Exception:
+        return cblack
+
+
+def _unpack_identity(file_path: str) -> Optional[tuple]:
+    try:
+        st = os.stat(file_path)
+        return (os.path.normcase(os.path.abspath(file_path)), st.st_mtime_ns, st.st_size)
+    except OSError:
+        return None
+
+
+def _note_unpack_unsupported(file_path: str) -> None:
+    ident = _unpack_identity(file_path)
+    if ident is not None:
+        _UNPACK_UNSUPPORTED.add(ident)
+
+
 def unpack_raw(
     file_path: str,
     rawpy_lock: Optional[Any] = None,
@@ -544,9 +687,35 @@ def unpack_raw(
 
     Returns None for anything the fast pixel path can't handle (X-Trans,
     4-color CFA, linear/float DNG, missing camera WB, ...) — never raises.
+
+    A None verdict is remembered for the session (keyed on path + mtime + size,
+    so editing/replacing the file re-probes). The caller's fallback is
+    rawpy.postprocess, and some files fail here but decode fine there: a NEF in
+    the sample set trips LibRaw's unpack with a data error ("data corrupted
+    at ...") yet postprocesses to a perfect full-res image. Without this cache
+    every decode task for such a file -- fit paint, zoom to 100%, edit base,
+    each navigation back -- pays the doomed ~376ms unpack again before falling
+    back, which measured 1.5x SLOWER end-to-end than going straight to rawpy.
+    The failure is only knowable by trying (no compression flag predicts it),
+    so the fix is to try exactly once.
     """
     if _env_disabled():
         return None
+    ident = _unpack_identity(file_path)
+    if ident is not None and ident in _UNPACK_UNSUPPORTED:
+        return None
+    result = _unpack_raw_impl(file_path, rawpy_lock)
+    if result is None:
+        # Every None exit means "the fast path cannot decode this file" --
+        # unsupported CFA, missing camera WB, or a LibRaw unpack error.
+        _note_unpack_unsupported(file_path)
+    return result
+
+
+def _unpack_raw_impl(
+    file_path: str,
+    rawpy_lock: Optional[Any] = None,
+) -> Optional[UnpackedRaw]:
     from perf_metrics import perf_mark
 
     _t_unpack = time.perf_counter()
@@ -574,6 +743,7 @@ def unpack_raw(
             # buffer). Chunked like the gathers below to bound GIL holds.
             mosaic = _chunked_copy(mosaic)
             black = np.asarray(raw.black_level_per_channel, dtype=np.float64)
+            black = _resolve_black(raw, black)
             white = float(raw.white_level)
             cam_mul = np.asarray(raw.camera_whitebalance, dtype=np.float64).copy()
             rgb_cam = _rgb_cam_from_cam_xyz(raw.rgb_xyz_matrix)
@@ -679,9 +849,10 @@ def finish_full_decode(
 ) -> Optional[np.ndarray]:
     """Full-resolution pixel math (scale/demosaic/matrix/gamma) on an unpack.
 
-    Returns uint8 sRGB in sensor orientation, or None when cv2 is
-    unavailable. Raises :class:`DecodeCancelled` between chunks when
-    ``cancel_check`` fires.
+    Returns uint8 sRGB in sensor orientation, or a ``DeviceRgb`` CUDA wrapper
+    when ``RAWVIEWER_GPU_CUDA_GL=1`` and the GPU path retains the device buffer.
+    Returns None when cv2 is unavailable. Raises :class:`DecodeCancelled`
+    between chunks when ``cancel_check`` fires.
 
     ``prefer_gpu`` defaults to False: measured no speed benefit from the MPS
     path on real files (45-46MP CR3/NEF, ~358-365ms either way, GPU
@@ -692,20 +863,36 @@ def finish_full_decode(
     needed a dedicated release_cached_gpu_memory() mitigation elsewhere
     (image_cache.py) -- avoiding it by default when it buys nothing removes
     that cost too. Set True explicitly for a caller that specifically wants
-    to exercise the GPU path (e.g. a parity/benchmark script).
+    to exercise the GPU path (e.g. stashed full-tier zoom when
+    ``prefer_gpu_decode_enabled()``, or a parity/benchmark script).
     """
     if prefer_gpu:
         try:
-            import torch_bootstrap
-
-            if torch_bootstrap.wait_for_gpu_backend_ready(timeout=2.0):
-                from gpu_raw_processor import try_gpu_decode_from_unpacked
-
-                gpu_out = try_gpu_decode_from_unpacked(
-                    unpacked, cancel_check=cancel_check, return_linear=return_linear
+            mp_cap = gpu_decode_max_megapixels()
+            mosaic_mp = (
+                float(unpacked.mosaic.shape[0] * unpacked.mosaic.shape[1]) / 1e6
+                if getattr(unpacked, "mosaic", None) is not None
+                else 0.0
+            )
+            if mp_cap > 0 and mosaic_mp > mp_cap:
+                logger.info(
+                    "[FAST_RAW] Skipping GPU finish_full for %s "
+                    "(%.1f MP > %.1f MP cap); using CPU",
+                    os.path.basename(unpacked.file_path or ""),
+                    mosaic_mp,
+                    mp_cap,
                 )
-                if gpu_out is not None:
-                    return gpu_out
+            else:
+                import torch_bootstrap
+
+                if torch_bootstrap.wait_for_gpu_backend_ready(timeout=2.0):
+                    from gpu_raw_processor import try_gpu_decode_from_unpacked
+
+                    gpu_out = try_gpu_decode_from_unpacked(
+                        unpacked, cancel_check=cancel_check, return_linear=return_linear
+                    )
+                    if gpu_out is not None:
+                        return gpu_out
         except DecodeCancelled:
             raise
         except Exception as e:
@@ -894,29 +1081,43 @@ def try_fast_raw_decode(
 
         if prefer_gpu_decode_enabled():
             try:
-                # torch/kornia must never be imported for the first time on this
-                # (background) thread -- macOS aborts the process if PyTorch's
-                # OpenMP runtime initializes off the main thread. The main thread
-                # imports gpu_raw_processor right after showing the window
-                # (torch_bootstrap.py); wait for that here instead of importing
-                # it ourselves. A timeout falls back to CPU decode below via the
-                # existing `except Exception` path, same as any other GPU-decode
-                # failure.
-                import torch_bootstrap
-                if not torch_bootstrap.wait_for_gpu_backend_ready(timeout=10.0):
-                    raise RuntimeError("GPU backend not ready within timeout")
-                from gpu_raw_processor import try_gpu_decode_from_unpacked
-                gpu_out = try_gpu_decode_from_unpacked(unpacked, cancel_check=cancel_check, return_linear=return_linear)
-                if gpu_out is not None:
+                mp_cap = gpu_decode_max_megapixels()
+                mosaic_mp = (
+                    float(unpacked.mosaic.shape[0] * unpacked.mosaic.shape[1]) / 1e6
+                    if getattr(unpacked, "mosaic", None) is not None
+                    else 0.0
+                )
+                if mp_cap > 0 and mosaic_mp > mp_cap:
                     logger.info(
-                        "[FAST_RAW] %s decoded (GPU) %dx%d in %.0fms (pattern=%s)",
+                        "[FAST_RAW] Skipping GPU demosaic for %s (%.1f MP > %.1f MP cap); using CPU",
                         os.path.basename(file_path),
-                        gpu_out.shape[1],
-                        gpu_out.shape[0],
-                        (time.perf_counter() - t0) * 1000.0,
-                        unpacked.pat_str,
+                        mosaic_mp,
+                        mp_cap,
                     )
-                    return gpu_out
+                else:
+                    # torch/kornia must never be imported for the first time on this
+                    # (background) thread -- macOS aborts the process if PyTorch's
+                    # OpenMP runtime initializes off the main thread. The main thread
+                    # imports gpu_raw_processor right after showing the window
+                    # (torch_bootstrap.py); wait for that here instead of importing
+                    # it ourselves. A timeout falls back to CPU decode below via the
+                    # existing `except Exception` path, same as any other GPU-decode
+                    # failure.
+                    import torch_bootstrap
+                    if not torch_bootstrap.wait_for_gpu_backend_ready(timeout=10.0):
+                        raise RuntimeError("GPU backend not ready within timeout")
+                    from gpu_raw_processor import try_gpu_decode_from_unpacked
+                    gpu_out = try_gpu_decode_from_unpacked(unpacked, cancel_check=cancel_check, return_linear=return_linear)
+                    if gpu_out is not None:
+                        logger.info(
+                            "[FAST_RAW] %s decoded (GPU) %dx%d in %.0fms (pattern=%s)",
+                            os.path.basename(file_path),
+                            gpu_out.shape[1],
+                            gpu_out.shape[0],
+                            (time.perf_counter() - t0) * 1000.0,
+                            unpacked.pat_str,
+                        )
+                        return gpu_out
             except DecodeCancelled:
                 raise
             except Exception as e:
@@ -966,6 +1167,7 @@ def halfsize_reference_decode(file_path: str) -> Optional[np.ndarray]:
             mosaic = mosaic.astype(np.float32)
             colors = np.asarray(raw.raw_colors_visible)
             black = np.asarray(raw.black_level_per_channel, dtype=np.float64)
+            black = _resolve_black(raw, black)
             white = float(raw.white_level)
             cam_mul = np.asarray(raw.camera_whitebalance, dtype=np.float64).copy()
             rgb_cam = _rgb_cam_from_cam_xyz(raw.rgb_xyz_matrix)

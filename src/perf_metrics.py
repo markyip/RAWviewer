@@ -24,6 +24,7 @@ Canonical metric names (keep stable -- comparisons depend on them):
     decode_half       fit-view half tier from an unpack
     decode_full_cpu   sensor-res pixel math, CPU path
     decode_full_gpu   sensor-res pixel math, GPU path
+    gpu_isp_stages    fused GPU develop stage breakdown (RAWVIEWER_GPU_ISP_TIMING=1)
     decode_rawpy      rawpy.postprocess fallback
     sidecar_apply     XMP adjustments applied to a full buffer (cache miss)
     nav_to_display    navigation keypress -> pixels on screen (main.py)

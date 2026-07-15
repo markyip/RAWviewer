@@ -54,6 +54,10 @@ export RAWVIEWER_AUTO_METADATA_INDEX="${RAWVIEWER_AUTO_METADATA_INDEX:-1}"
 # GPU-accelerated single-image view (QGraphicsView + OpenGL). Default on for dev.
 # Opt out: RAWVIEWER_GPU_VIEW=0
 export RAWVIEWER_GPU_VIEW="${RAWVIEWER_GPU_VIEW:-1}"
+# Prefer PyTorch CUDA demosaic + CUDA↔GL display for debug launches.
+# Opt out: RAWVIEWER_PREFER_GPU_DECODE=0 / RAWVIEWER_GPU_CUDA_GL=0
+export RAWVIEWER_PREFER_GPU_DECODE="${RAWVIEWER_PREFER_GPU_DECODE:-1}"
+export RAWVIEWER_GPU_CUDA_GL="${RAWVIEWER_GPU_CUDA_GL:-1}"
 # macOS share: Qt menu with NSSharingService targets (works in v2.2 Qt6). Popover often spins empty.
 export RAWVIEWER_SHARE_MENU="${RAWVIEWER_SHARE_MENU:-1}"
 # AirDrop hidden from share menu by default (RAWVIEWER_SHARE_SHOW_AIRDROP=1 to show; PERFORM=1 for in-app test)
@@ -172,11 +176,19 @@ _gpu_label="off"
 if [ "${RAWVIEWER_GPU_VIEW}" = "1" ]; then
     _gpu_label="on"
 fi
+_gpu_decode_label="off"
+if [ "${RAWVIEWER_PREFER_GPU_DECODE}" = "1" ]; then
+    _gpu_decode_label="on"
+fi
+_cuda_gl_label="off"
+if [ "${RAWVIEWER_GPU_CUDA_GL}" = "1" ]; then
+    _cuda_gl_label="on"
+fi
 _share_label="menu"
 if [ "${RAWVIEWER_SHARE_TRY_NATIVE_PICKER:-}" = "1" ] || [ "${RAWVIEWER_SHARE_NATIVE_PICKER:-}" = "1" ]; then
     _share_label="picker+menu-fallback"
 fi
-echo "Launching RAWviewer from ${REPO_ROOT} (GPU ${_gpu_label}, share ${_share_label}, semantic ${RAWVIEWER_ENABLE_SEMANTIC_SEARCH:-1})..."
+echo "Launching RAWviewer from ${REPO_ROOT} (GPU view ${_gpu_label}, demosaic ${_gpu_decode_label}, CUDA-GL ${_cuda_gl_label}, share ${_share_label}, semantic ${RAWVIEWER_ENABLE_SEMANTIC_SEARCH:-1})..."
 set +e
 python3 src/main.py "$@"
 _launch_ec=$?

@@ -15,6 +15,10 @@ host can keep navigation / status / histogram behaviour identical.
 Environment toggles:
 - ``RAWVIEWER_GPU_VIEW=0``       Disable; use legacy scroll-area single-image view.
 - ``RAWVIEWER_GPU_VIEW_NO_GL=1`` Use the raster viewport (debug / fallback).
+- ``RAWVIEWER_GPU_GL_TEX=1``     Paint RGB via ``QImage`` on the OpenGL viewport
+  (skip ``QPixmap``). Opt-in Phase 2b step toward CUDA↔GL.
+- ``RAWVIEWER_GPU_CUDA_GL=1``    Keep decode on CUDA and upload via
+  ``cudaGraphicsGLRegisterImage`` (Phase 2c; falls back to GL_TEX / pixmap).
 """
 
 import os
@@ -22,7 +26,7 @@ import sys
 from typing import Any
 
 from PyQt6.QtCore import Qt, QRect, QRectF, QPoint, QPointF, pyqtSignal, QEvent, QMimeData, QUrl
-from PyQt6.QtGui import QKeyEvent, QPixmap, QPainter, QColor, QPen, QDrag, QBrush
+from PyQt6.QtGui import QKeyEvent, QPixmap, QPainter, QColor, QPen, QDrag, QBrush, QImage
 from PyQt6.QtWidgets import (
     QGraphicsView,
     QGraphicsScene,
@@ -30,6 +34,7 @@ from PyQt6.QtWidgets import (
     QGraphicsRectItem,
     QGraphicsLineItem,
     QGraphicsEllipseItem,
+    QGraphicsObject,
     QLabel,
     QApplication,
 )
@@ -68,6 +73,380 @@ def _env_true(name: str) -> bool:
     return str(os.environ.get(name, "")).strip().lower() in {"1", "true", "yes", "on"}
 
 
+def gpu_gl_tex_enabled() -> bool:
+    """Opt-in QImage→OpenGL paint path (skips QPixmap); see set_rgb_numpy."""
+    return _env_true("RAWVIEWER_GPU_GL_TEX")
+
+
+def gpu_cuda_gl_enabled() -> bool:
+    """Opt-in CUDA↔GL zero-copy display; see set_device_rgb."""
+    return _env_true("RAWVIEWER_GPU_CUDA_GL")
+
+
+class RgbGlImageItem(QGraphicsObject):
+    """Scene item that paints RGB via OpenGL (QImage or CUDA-registered texture).
+
+    * Host path: ``QPainter.drawImage`` (Phase 2b).
+    * Device path: GUI-thread GL texture + ``cudaGraphicsGLRegisterImage``
+      upload, painted with ``beginNativePainting`` (Phase 2c).
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._w = 0
+        self._h = 0
+        self._arr = None
+        self._qimage = None  # Optional[QImage]
+        self._device_rgb = None
+        self._cuda_slot = None  # Optional[CudaGlTextureSlot]
+        self._rgba_device = None
+        self._cuda_upload_failed = False
+        self._cuda_uploaded_key = None  # (id(device_rgb), generation) after upload
+        self._gl_fns = None
+
+    def set_rgb_uint8(self, rgb) -> None:
+        import numpy as np
+
+        self._release_cuda_gl(None)
+        arr = np.ascontiguousarray(rgb)
+        if arr.ndim != 3 or arr.shape[2] < 3:
+            raise ValueError(f"expected HxWx3+ uint8 RGB, got shape={getattr(arr, 'shape', None)}")
+        if arr.dtype != np.uint8:
+            arr = np.clip(arr, 0, 255).astype(np.uint8, copy=False)
+        if arr.shape[2] > 3:
+            arr = np.ascontiguousarray(arr[:, :, :3])
+        h, w = int(arr.shape[0]), int(arr.shape[1])
+        self.prepareGeometryChange()
+        self._arr = arr
+        self._qimage = QImage(arr.data, w, h, 3 * w, QImage.Format.Format_RGB888)
+        # Keep numpy alive for as long as QImage borrows its buffer.
+        self._qimage._ndarray = arr  # type: ignore[attr-defined]
+        self._w, self._h = w, h
+        self._device_rgb = None
+        self._cuda_uploaded_key = None
+        self.update()
+
+    def set_device_rgb(self, device_rgb) -> None:
+        """Display a CUDA ``DeviceRgb`` via CUDA↔GL (lazily registered on paint)."""
+        self.prepareGeometryChange()
+        self._arr = None
+        self._qimage = None
+        self._device_rgb = device_rgb
+        self._cuda_upload_failed = False
+        self._cuda_uploaded_key = None
+        self._w = int(device_rgb.width)
+        self._h = int(device_rgb.height)
+        # Drop previous interop slot; recreated on next paint with GL current.
+        self._release_cuda_gl(None)
+        self.update()
+
+    def clear_rgb(self) -> None:
+        self.prepareGeometryChange()
+        self._release_cuda_gl(None)
+        self._arr = None
+        self._qimage = None
+        self._device_rgb = None
+        self._cuda_uploaded_key = None
+        self._w = self._h = 0
+        self.update()
+
+    def image_size(self) -> tuple[int, int]:
+        return self._w, self._h
+
+    def to_qimage(self) -> QImage:
+        if self._qimage is not None:
+            return self._qimage
+        if self._device_rgb is not None:
+            try:
+                arr = self._device_rgb.to_numpy()
+                h, w = arr.shape[:2]
+                q = QImage(arr.data, w, h, 3 * w, QImage.Format.Format_RGB888)
+                q._ndarray = arr  # type: ignore[attr-defined]
+                return q
+            except Exception:
+                return QImage()
+        return QImage()
+
+    def boundingRect(self) -> QRectF:
+        return QRectF(0, 0, float(self._w), float(self._h))
+
+    def _release_cuda_gl(self, widget) -> None:
+        slot = self._cuda_slot
+        self._cuda_slot = None
+        self._rgba_device = None
+        self._cuda_uploaded_key = None
+        if slot is None:
+            return
+        try:
+            import ctypes
+
+            def _del_tex(tex_id: int) -> None:
+                fns = self._gl_fns
+                if fns is None:
+                    return
+                fns.glDeleteTextures(1, [tex_id])
+
+            if widget is not None:
+                try:
+                    widget.makeCurrent()
+                except Exception:
+                    pass
+            slot.release(gl_delete_fn=_del_tex)
+            if widget is not None:
+                try:
+                    widget.doneCurrent()
+                except Exception:
+                    pass
+        except Exception:
+            try:
+                slot.release()
+            except Exception:
+                pass
+
+    def _device_upload_key(self):
+        d = self._device_rgb
+        if d is None:
+            return None
+        return (id(d), int(getattr(d, "generation", 0)), self._w, self._h)
+
+    def _ensure_cuda_gl(self, widget, *, context_already_current: bool = False) -> bool:
+        if self._cuda_upload_failed or self._device_rgb is None:
+            return False
+        if not self._device_rgb.is_cuda():
+            self._cuda_upload_failed = True
+            return False
+        try:
+            from gpu_gl_bridge import (
+                CudaGlTextureSlot,
+                ensure_rgba_u8,
+                gl_tex_image_2d_rgba_empty,
+                register_gl_texture,
+                upload_device_rgba_to_gl,
+            )
+            from PyQt6.QtOpenGL import QOpenGLFunctions_2_0
+            from PyQt6.QtOpenGLWidgets import QOpenGLWidget
+        except Exception:
+            self._cuda_upload_failed = True
+            return False
+
+        if not isinstance(widget, QOpenGLWidget):
+            return False
+
+        try:
+            if not context_already_current:
+                widget.makeCurrent()
+            if self._gl_fns is None:
+                fns = QOpenGLFunctions_2_0()
+                if not fns.initializeOpenGLFunctions():
+                    self._cuda_upload_failed = True
+                    return False
+                self._gl_fns = fns
+            fns = self._gl_fns
+
+            need_new = (
+                self._cuda_slot is None
+                or self._cuda_slot.width != self._w
+                or self._cuda_slot.height != self._h
+                or not self._cuda_slot.tex_id
+            )
+            if need_new:
+                if self._cuda_slot is not None:
+                    # Keep GL context current when painting; only makeCurrent when
+                    # this helper is called outside beginNativePainting.
+                    self._release_cuda_gl(None if context_already_current else widget)
+                    if not context_already_current:
+                        widget.makeCurrent()
+
+                gen = fns.glGenTextures(1)
+                tex_id = int(gen[0] if isinstance(gen, (tuple, list)) else gen)
+                GL_TEXTURE_2D = 0x0DE1
+                GL_LINEAR = 0x2601
+                GL_CLAMP_TO_EDGE = 0x812F
+                GL_TEXTURE_MIN_FILTER = 0x2801
+                GL_TEXTURE_MAG_FILTER = 0x2800
+                GL_TEXTURE_WRAP_S = 0x2802
+                GL_TEXTURE_WRAP_T = 0x2803
+                fns.glBindTexture(GL_TEXTURE_2D, tex_id)
+                fns.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
+                fns.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
+                fns.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE)
+                fns.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE)
+                gl_tex_image_2d_rgba_empty(self._w, self._h)
+                resource = register_gl_texture(tex_id, target=GL_TEXTURE_2D)
+                self._cuda_slot = CudaGlTextureSlot(
+                    tex_id=tex_id,
+                    resource=resource,
+                    width=self._w,
+                    height=self._h,
+                    rgba=True,
+                )
+                self._cuda_uploaded_key = None
+
+            upload_key = self._device_upload_key()
+            if upload_key != self._cuda_uploaded_key or need_new:
+                rgba = ensure_rgba_u8(self._device_rgb)
+                self._rgba_device = rgba  # keep alive across map
+                upload_device_rgba_to_gl(self._cuda_slot, rgba)
+                self._cuda_uploaded_key = upload_key
+            return True
+        except Exception as e:
+            import logging
+
+            logging.getLogger(__name__).info(
+                "[CUDA_GL] register/upload failed; falling back: %s", e
+            )
+            self._cuda_upload_failed = True
+            try:
+                self._release_cuda_gl(None if context_already_current else widget)
+            except Exception:
+                pass
+            return False
+
+    def _apply_painter_gl_matrices(self, painter: QPainter, fns) -> None:
+        """Map item pixel space through QPainter's transform (Compatibility profile)."""
+        from PyQt6.QtGui import QTransform
+
+        GL_PROJECTION = 0x1701
+        GL_MODELVIEW = 0x1700
+        device = painter.device()
+        dpr = 1.0
+        try:
+            dpr = float(device.devicePixelRatioF())
+        except Exception:
+            try:
+                dpr = float(device.devicePixelRatio())
+            except Exception:
+                dpr = 1.0
+        dw = max(1.0, float(device.width()) * dpr)
+        dh = max(1.0, float(device.height()) * dpr)
+        fns.glMatrixMode(GL_PROJECTION)
+        fns.glLoadIdentity()
+        # Top-left origin to match QPainter device coords.
+        fns.glOrtho(0.0, dw, dh, 0.0, -1.0, 1.0)
+        fns.glMatrixMode(GL_MODELVIEW)
+        fns.glLoadIdentity()
+        t = painter.transform()
+        if dpr != 1.0:
+            # Logical (painter) -> device pixels: apply the painter transform
+            # FIRST, then the DPR scale. Qt's row-vector convention means
+            # `A * B` applies A first, so the DPR factor must be on the RIGHT.
+            #
+            # The reverse (fromScale(dpr, dpr) * t) scales the item's geometry
+            # by dpr but leaves the painter's TRANSLATION in logical pixels --
+            # the quad then lands at t.dx() instead of t.dx() * dpr, i.e. too
+            # far left/up by (1 - 1/dpr) of the offset, while still being the
+            # correct SIZE. That was the "image sits off-center with a black
+            # gap on one side" bug: invisible at 100% scaling, ~115px of left
+            # shift at 125% on a 1400px view, and invisible to Qt's own
+            # hit-testing (mapFromScene still reported the image centered,
+            # because only the GL draw was wrong -- not the scene geometry).
+            t = t * QTransform.fromScale(dpr, dpr)
+        # Column-major 4×4 for column vector GL transforms.
+        mat = [
+            t.m11(),
+            t.m12(),
+            0.0,
+            0.0,
+            t.m21(),
+            t.m22(),
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            t.dx(),
+            t.dy(),
+            0.0,
+            1.0,
+        ]
+        fns.glLoadMatrixf(mat)
+
+    def paint(self, painter: QPainter, option, widget=None) -> None:  # noqa: ARG002
+        # Device path: CUDA→GL texture then native textured quad.
+        if self._device_rgb is not None and not self._cuda_upload_failed:
+            vp = widget
+            if vp is None:
+                # QGraphicsView usually passes the viewport as widget.
+                try:
+                    sc = self.scene()
+                    if sc is not None:
+                        for v in sc.views():
+                            vp = v.viewport()
+                            break
+                except Exception:
+                    vp = None
+            if vp is not None:
+                try:
+                    painter.beginNativePainting()
+                    # Context is current after beginNativePainting — avoid makeCurrent.
+                    if not self._ensure_cuda_gl(vp, context_already_current=True):
+                        painter.endNativePainting()
+                        raise RuntimeError("cuda-gl ensure failed")
+                    fns = self._gl_fns
+                    GL_TEXTURE_2D = 0x0DE1
+                    GL_BLEND = 0x0BE2
+                    GL_DEPTH_TEST = 0x0B71
+                    GL_TEXTURE_ENV = 0x2300
+                    GL_TEXTURE_ENV_MODE = 0x2200
+                    GL_REPLACE = 0x1E01
+                    fns.glDisable(GL_BLEND)
+                    fns.glDisable(GL_DEPTH_TEST)
+                    self._apply_painter_gl_matrices(painter, fns)
+                    fns.glEnable(GL_TEXTURE_2D)
+                    try:
+                        fns.glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE)
+                    except Exception:
+                        pass
+                    try:
+                        fns.glColor4f(1.0, 1.0, 1.0, 1.0)
+                    except Exception:
+                        pass
+                    fns.glBindTexture(GL_TEXTURE_2D, self._cuda_slot.tex_id)
+                    w, h = float(self._w), float(self._h)
+                    # DeviceRgb row0 = image top. cudaMemcpy2DToArray writes that to
+                    # GL texture row y=0. With Y-down glOrtho (top-left item origin),
+                    # sample V=0 at the top edge — do not invert V.
+                    fns.glBegin(0x0007)  # GL_QUADS
+                    fns.glTexCoord2f(0.0, 0.0)
+                    fns.glVertex2f(0.0, 0.0)
+                    fns.glTexCoord2f(1.0, 0.0)
+                    fns.glVertex2f(w, 0.0)
+                    fns.glTexCoord2f(1.0, 1.0)
+                    fns.glVertex2f(w, h)
+                    fns.glTexCoord2f(0.0, 1.0)
+                    fns.glVertex2f(0.0, h)
+                    fns.glEnd()
+                    fns.glBindTexture(GL_TEXTURE_2D, 0)
+                    fns.glDisable(GL_TEXTURE_2D)
+                    painter.endNativePainting()
+                    return
+                except Exception as e:
+                    try:
+                        painter.endNativePainting()
+                    except Exception:
+                        pass
+                    import logging
+
+                    logging.getLogger(__name__).info(
+                        "[CUDA_GL] native paint failed; falling back: %s", e
+                    )
+                    self._cuda_upload_failed = True
+
+            # Fallback: host QImage path once CUDA-GL fails.
+            if self._qimage is None:
+                try:
+                    arr = self._device_rgb.to_numpy()
+                    self.set_rgb_uint8(arr)
+                except Exception:
+                    return
+
+        if self._qimage is None or self._qimage.isNull():
+            return
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+        painter.drawImage(QPointF(0.0, 0.0), self._qimage)
+
+
 class GpuImageView(QGraphicsView):
     """Hardware-accelerated single image viewport.
 
@@ -100,7 +479,7 @@ class GpuImageView(QGraphicsView):
     _FIT_SCALE_EPS = 1.002  # treat within ~0.2% of fit as fit-to-window
     _shortcut_handler: Any
 
-    def __init__(self, parent=None, background="#1E1E1E"):
+    def __init__(self, parent=None, background="#14120F"):
         # Attributes read from event()/viewportEvent() must exist before super().__init__()
         # because Qt may deliver events during construction.
         self._fit_mode = True
@@ -129,7 +508,17 @@ class GpuImageView(QGraphicsView):
 
         self._item = QGraphicsPixmapItem()
         self._item.setTransformationMode(Qt.TransformationMode.SmoothTransformation)
+        self._mask_item = QGraphicsPixmapItem(self._item)
+        self._mask_item.setOpacity(0.4)
+        self._mask_item.hide()
         self._scene.addItem(self._item)
+
+        # Opt-in RGB→OpenGL paint path (RAWVIEWER_GPU_GL_TEX=1): skips QPixmap.
+        self._rgb_item = RgbGlImageItem()
+        self._rgb_item.setZValue(0)
+        self._rgb_item.hide()
+        self._scene.addItem(self._rgb_item)
+        self._use_rgb_gl = False
 
         # Dashed focus / subject overlay rectangle (scene coords == image pixels). Uses a
         # cosmetic pen so the on-screen line width stays constant at any zoom level.
@@ -214,9 +603,24 @@ class GpuImageView(QGraphicsView):
         if _env_true("RAWVIEWER_GPU_VIEW_NO_GL"):
             return
         try:
+            from PyQt6.QtGui import QSurfaceFormat
             from PyQt6.QtOpenGLWidgets import QOpenGLWidget
 
             gl = QOpenGLWidget()
+            # CUDA↔GL Phase 2c paints with fixed-function textured quads
+            # (glBegin / GL_TEXTURE_2D). Qt6's default Core Profile strips
+            # those; without Compatibility the item fills with a solid colour.
+            if gpu_cuda_gl_enabled():
+                fmt = QSurfaceFormat()
+                fmt.setRenderableType(QSurfaceFormat.RenderableType.OpenGL)
+                fmt.setVersion(3, 3)
+                fmt.setProfile(
+                    QSurfaceFormat.OpenGLContextProfile.CompatibilityProfile
+                )
+                fmt.setDepthBufferSize(24)
+                fmt.setStencilBufferSize(8)
+                fmt.setSwapBehavior(QSurfaceFormat.SwapBehavior.DoubleBuffer)
+                gl.setFormat(fmt)
             gl.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
             self.setViewport(gl)
             # Re-enable tracking on the new viewport (HoverMove works before first click).
@@ -267,6 +671,55 @@ class GpuImageView(QGraphicsView):
         if not self._has_pixmap:
             return True
         return self.current_scale() <= self.fit_scale() * self._FIT_SCALE_EPS
+
+    def _zoom_in_blocked(self) -> bool:
+        if not self._has_pixmap or self._item.pixmap() is None:
+            return False
+        return self.current_scale() >= self.MAX_SCALE - 1e-9
+
+    def set_dodge_burn_mask_overlay(self, mask, show: bool) -> None:
+        if not show or mask is None or getattr(mask, "is_empty", True):
+            self._mask_item.hide()
+            return
+        self.update_dodge_burn_mask(mask)
+        self._mask_item.show()
+
+    def update_dodge_burn_mask(self, mask) -> None:
+        if not self._mask_item.isVisible() and mask is not None:
+            # We don't update if hidden, to save work.
+            return
+        if mask is None or getattr(mask, "is_empty", True):
+            self._mask_item.hide()
+            return
+            
+        import numpy as np
+        import cv2
+        from PyQt6.QtGui import QImage, QPixmap
+        
+        # mask.data is float32 [-1.5, 1.5]
+        # We want to show a red overlay where it's non-zero.
+        # Positive = Dodge (Red?), Negative = Burn (Blue?)
+        # For simplicity, we can just show red for both, or red/blue.
+        h, w = mask.data.shape
+        overlay = np.zeros((h, w, 4), dtype=np.uint8)
+        
+        # Red for Dodge (positive)
+        pos_mask = mask.data > 0
+        overlay[pos_mask, 0] = 255 # R
+        overlay[pos_mask, 3] = np.clip(mask.data[pos_mask] / 1.5 * 255, 0, 255).astype(np.uint8)
+        
+        # Blue for Burn (negative)
+        neg_mask = mask.data < 0
+        overlay[neg_mask, 2] = 255 # B
+        overlay[neg_mask, 3] = np.clip(-mask.data[neg_mask] / 1.5 * 255, 0, 255).astype(np.uint8)
+        
+        if self._item.pixmap() is not None:
+            pw, ph = self._item.pixmap().width(), self._item.pixmap().height()
+            if w != pw or h != ph:
+                overlay = cv2.resize(overlay, (pw, ph), interpolation=cv2.INTER_LINEAR)
+        
+        qimg = QImage(overlay.data, overlay.shape[1], overlay.shape[0], overlay.strides[0], QImage.Format.Format_RGBA8888)
+        self._mask_item.setPixmap(QPixmap.fromImage(qimg))
 
     def wants_zoom_in_toggle(self) -> bool:
         """Whether Space / double-click should enter 100% zoom (not zoom out to fit)."""
@@ -354,6 +807,11 @@ class GpuImageView(QGraphicsView):
             self._clipping_item.hide()
 
     def pixmap(self) -> QPixmap:
+        if getattr(self, "_use_rgb_gl", False):
+            img = self._rgb_item.to_qimage()
+            if img is not None and not img.isNull():
+                return QPixmap.fromImage(img)
+            return QPixmap()
         return self._item.pixmap() if getattr(self, "_has_pixmap", False) else QPixmap()
 
     def set_composition_grid_mode(self, mode: str) -> None:
@@ -375,6 +833,10 @@ class GpuImageView(QGraphicsView):
         and only the on-screen magnification should ever be preserved.
         """
         if pixmap is None or pixmap.isNull():
+            self._use_rgb_gl = False
+            self._rgb_item.hide()
+            self._rgb_item.clear_rgb()
+            self._item.show()
             self._item.setPixmap(QPixmap())
             self._has_pixmap = False
             self._img_w = self._img_h = 0
@@ -385,6 +847,12 @@ class GpuImageView(QGraphicsView):
             self._update_placeholder()
             return
 
+        # Pixmap path owns the scene image; hide the RGB-GL item.
+        self._use_rgb_gl = False
+        self._rgb_item.hide()
+        self._rgb_item.clear_rgb()
+        self._item.show()
+
         new_w, new_h = pixmap.width(), pixmap.height()
         old_w, old_h = self._img_w, self._img_h
         had_pixmap = self._has_pixmap
@@ -394,8 +862,16 @@ class GpuImageView(QGraphicsView):
 
         capture = preserve_view and had_pixmap and old_w > 0 and old_h > 0
         s_old = fx = fy = None
+        was_fit_scale = False
         if capture:
             s_old = self.current_scale()
+            # "Clearly above fit", not merely >= 100%: fit scale itself
+            # exceeds 1.0 for content smaller than the viewport, and the
+            # viewport can CHANGE between paints (gallery->single shows the
+            # container mid-transition), which made a plain is_at_fit_scale()
+            # comparison unreliable -- a fitted tile read as "user at 100%"
+            # and snapped, poisoning the zoom-intent machinery.
+            was_fit_scale = not (s_old > self.fit_scale() * 1.1)
             center_scene = self.mapToScene(self.viewport().rect().center())
             fx = center_scene.x() / old_w
             fy = center_scene.y() / old_h
@@ -445,7 +921,12 @@ class GpuImageView(QGraphicsView):
             and is_upgrade
             and (
                 getattr(self, "_zoom_intent_100", False)
-                or (s_old is not None and s_old >= 1.0 - 1e-4)
+                # s_old >= 1 means "user was at/above 100%" ONLY when the view
+                # was not simply fitted: content smaller than the viewport has
+                # a fit scale >= 1, and treating that as 100%-intent snapped a
+                # freshly fitted gallery tile to "100%" on gallery->single
+                # ("clicking a gallery image lands on a zoomed-in view").
+                or (s_old is not None and s_old >= 1.0 - 1e-4 and not was_fit_scale)
             )
         ):
             s_new = 1.0
@@ -457,8 +938,176 @@ class GpuImageView(QGraphicsView):
         self.resetTransform()
         self.scale(s_new, s_new)
         self.centerOn(QPointF(fx * new_w, fy * new_h))
+        self._log_framing("preserve/pixmap")
         self._sync_fit_mode_flag()
         self.zoomChanged.emit(self.current_scale())
+
+    def set_rgb_numpy(self, rgb, preserve_view=None, *, exact_framing: bool = False) -> bool:
+        """Display HxWx3 uint8 RGB via OpenGL ``drawImage`` (no ``QPixmap``).
+
+        Returns False if the buffer is unsuitable (caller should fall back to
+        ``set_pixmap``). Framing semantics match ``set_pixmap``.
+        """
+        try:
+            import numpy as np
+
+            if rgb is None:
+                return False
+            arr = np.asarray(rgb)
+            if arr.ndim != 3 or arr.shape[2] < 3:
+                return False
+            new_h, new_w = int(arr.shape[0]), int(arr.shape[1])
+            if new_w <= 0 or new_h <= 0:
+                return False
+
+            old_w, old_h = self._img_w, self._img_h
+            had_pixmap = self._has_pixmap
+            if preserve_view is None:
+                preserve_view = not self._fit_mode
+            capture = preserve_view and had_pixmap and old_w > 0 and old_h > 0
+            s_old = fx = fy = None
+            was_fit_scale = False
+            if capture:
+                s_old = self.current_scale()
+                # See set_pixmap: "clearly above fit", not merely >= 100%.
+                was_fit_scale = not (s_old > self.fit_scale() * 1.1)
+                center_scene = self.mapToScene(self.viewport().rect().center())
+                fx = center_scene.x() / old_w
+                fy = center_scene.y() / old_h
+
+            self._item.hide()
+            self._item.setPixmap(QPixmap())
+            self._rgb_item.set_rgb_uint8(arr)
+            self._rgb_item.show()
+            self._use_rgb_gl = True
+
+            self._scene.setSceneRect(QRectF(0, 0, new_w, new_h))
+            self._img_w, self._img_h = new_w, new_h
+            self._has_pixmap = True
+            self._grid_item.set_grid(new_w, new_h, self._grid_mode)
+            self._update_placeholder()
+            if self._compare_active and (new_w, new_h) != (old_w, old_h):
+                self._update_compare_overlay()
+
+            if self._fit_mode or not capture:
+                if self._fit_mode and not getattr(self, "_zoom_intent_100", False):
+                    self.fit_to_window()
+                elif not capture:
+                    if self.is_at_fit_scale() and not getattr(self, "_zoom_intent_100", False):
+                        self.fit_to_window()
+                self._sync_fit_mode_flag()
+                return True
+
+            is_upgrade = new_w >= old_w - 1
+            if (
+                not exact_framing
+                and is_upgrade
+                and (
+                    getattr(self, "_zoom_intent_100", False)
+                    # See set_pixmap: fit scale >= 1 for content smaller
+                    # than the viewport must not read as 100%-intent.
+                    or (s_old is not None and s_old >= 1.0 - 1e-4 and not was_fit_scale)
+                )
+            ):
+                s_new = 1.0
+            else:
+                s_new = max(self.MIN_SCALE, s_old * old_w / new_w)
+                if is_upgrade and not exact_framing:
+                    s_new = min(self.MAX_SCALE, s_new)
+            self.resetTransform()
+            self.scale(s_new, s_new)
+            self.centerOn(QPointF(fx * new_w, fy * new_h))
+            self._log_framing("preserve/rgb_numpy")
+            self._sync_fit_mode_flag()
+            self.zoomChanged.emit(self.current_scale())
+            return True
+        except Exception:
+            return False
+
+    def set_device_rgb(self, device_rgb, preserve_view=None, *, exact_framing: bool = False) -> bool:
+        """Display a CUDA ``DeviceRgb`` via CUDA↔GL (no host download for paint).
+
+        Falls back to ``set_rgb_numpy`` if interop is unavailable. Framing
+        matches ``set_pixmap`` / ``set_rgb_numpy``.
+        """
+        try:
+            if device_rgb is None or not hasattr(device_rgb, "shape"):
+                return False
+            new_h = int(device_rgb.shape[0])
+            new_w = int(device_rgb.shape[1])
+            if new_w <= 0 or new_h <= 0:
+                return False
+            if not self.is_opengl_viewport():
+                # No GL context → download and use host path.
+                return self.set_rgb_numpy(
+                    device_rgb.to_numpy(),
+                    preserve_view=preserve_view,
+                    exact_framing=exact_framing,
+                )
+
+            old_w, old_h = self._img_w, self._img_h
+            had_pixmap = self._has_pixmap
+            if preserve_view is None:
+                preserve_view = not self._fit_mode
+            capture = preserve_view and had_pixmap and old_w > 0 and old_h > 0
+            s_old = fx = fy = None
+            was_fit_scale = False
+            if capture:
+                s_old = self.current_scale()
+                # See set_pixmap: "clearly above fit", not merely >= 100%.
+                was_fit_scale = not (s_old > self.fit_scale() * 1.1)
+                center_scene = self.mapToScene(self.viewport().rect().center())
+                fx = center_scene.x() / old_w
+                fy = center_scene.y() / old_h
+
+            self._item.hide()
+            self._item.setPixmap(QPixmap())
+            self._rgb_item.set_device_rgb(device_rgb)
+            self._rgb_item.show()
+            self._use_rgb_gl = True
+
+            self._scene.setSceneRect(QRectF(0, 0, new_w, new_h))
+            self._img_w, self._img_h = new_w, new_h
+            self._has_pixmap = True
+            self._grid_item.set_grid(new_w, new_h, self._grid_mode)
+            self._update_placeholder()
+            if self._compare_active and (new_w, new_h) != (old_w, old_h):
+                self._update_compare_overlay()
+
+            if self._fit_mode or not capture:
+                if self._fit_mode and not getattr(self, "_zoom_intent_100", False):
+                    self.fit_to_window()
+                elif not capture:
+                    if self.is_at_fit_scale() and not getattr(self, "_zoom_intent_100", False):
+                        self.fit_to_window()
+                self._sync_fit_mode_flag()
+                return True
+
+            is_upgrade = new_w >= old_w - 1
+            if (
+                not exact_framing
+                and is_upgrade
+                and (
+                    getattr(self, "_zoom_intent_100", False)
+                    # See set_pixmap: fit scale >= 1 for content smaller
+                    # than the viewport must not read as 100%-intent.
+                    or (s_old is not None and s_old >= 1.0 - 1e-4 and not was_fit_scale)
+                )
+            ):
+                s_new = 1.0
+            else:
+                s_new = max(self.MIN_SCALE, s_old * old_w / new_w)
+                if is_upgrade and not exact_framing:
+                    s_new = min(self.MAX_SCALE, s_new)
+            self.resetTransform()
+            self.scale(s_new, s_new)
+            self.centerOn(QPointF(fx * new_w, fy * new_h))
+            self._log_framing("preserve/device_rgb")
+            self._sync_fit_mode_flag()
+            self.zoomChanged.emit(self.current_scale())
+            return True
+        except Exception:
+            return False
 
     def clear(self) -> None:
         self.set_pixmap(QPixmap())
@@ -486,6 +1135,14 @@ class GpuImageView(QGraphicsView):
         a 30+ MP texture stays on the GPU while gallery tiles decode.
         """
         self.file_path = None
+        if getattr(self, "_use_rgb_gl", False):
+            try:
+                self._rgb_item.hide()
+                self._rgb_item.clear_rgb()
+                self._use_rgb_gl = False
+                self._item.show()
+            except Exception:
+                pass
         if sys.platform == "win32" and self.is_opengl_viewport():
             if self._viewport_hidden_for_teardown():
                 self._safe_clear_opengl_pixmap()
@@ -612,9 +1269,47 @@ class GpuImageView(QGraphicsView):
         if not self._has_pixmap:
             return
         self.resetTransform()
-        self.fitInView(self._item, Qt.AspectRatioMode.KeepAspectRatio)
+        target = self._rgb_item if getattr(self, "_use_rgb_gl", False) else self._item
+        self.fitInView(target, Qt.AspectRatioMode.KeepAspectRatio)
+        self._log_framing("fit")
         self.fitModeChanged.emit(True)
         self.zoomChanged.emit(self.current_scale())
+
+    def _log_framing(self, where: str) -> None:
+        """Diagnostic for the 'image sits off-center with a black gap' report.
+
+        Off by default; set RAWVIEWER_DEBUG_FRAMING=1 to trace where the image
+        lands after a fit. Logs the three rects that must agree: the item's own
+        rect, the scene rect the view scrolls within, and where the item
+        actually ends up in viewport pixels. A left/right gap means the mapped
+        item rect is not centered in the viewport -- and the offending rect
+        (item vs scene) says which side of the pipeline put it there.
+        """
+        if not _env_true("RAWVIEWER_DEBUG_FRAMING"):
+            return
+        try:
+            import logging
+
+            target = self._rgb_item if getattr(self, "_use_rgb_gl", False) else self._item
+            vp = self.viewport().rect()
+            mapped = self.mapFromScene(target.boundingRect()).boundingRect()
+            sr = self._scene.sceneRect()
+            logging.getLogger(__name__).info(
+                "[FRAMING] %s path=%s img=%dx%d scene=(%.0f,%.0f %.0fx%.0f) "
+                "viewport=%dx%d item_on_screen=(x=%d y=%d %dx%d) "
+                "gap_left=%d gap_right=%d gap_top=%d gap_bottom=%d scale=%.4f",
+                where,
+                "rgb_gl" if getattr(self, "_use_rgb_gl", False) else "pixmap",
+                self._img_w, self._img_h,
+                sr.x(), sr.y(), sr.width(), sr.height(),
+                vp.width(), vp.height(),
+                mapped.x(), mapped.y(), mapped.width(), mapped.height(),
+                mapped.left() - vp.left(), vp.right() - mapped.right(),
+                mapped.top() - vp.top(), vp.bottom() - mapped.bottom(),
+                self.current_scale(),
+            )
+        except Exception:
+            pass
 
     def zoom_to_actual(self) -> None:
         """100% — one image pixel per view pixel, centered on the image middle."""
@@ -899,6 +1594,13 @@ class GpuImageView(QGraphicsView):
         if event.button() == Qt.MouseButton.LeftButton and self._fit_mode and self.file_path:
             self._drag_start_pos = event.position().toPoint()
             self._drag_started = False
+        elif event.button() == Qt.MouseButton.LeftButton and not self._fit_mode:
+            self._manual_pan_start = event.position().toPoint()
+            self._manual_pan_scroll_h = self.horizontalScrollBar().value()
+            self._manual_pan_scroll_v = self.verticalScrollBar().value()
+            self.viewport().setCursor(Qt.CursorShape.ClosedHandCursor)
+            event.accept()
+            return
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event) -> None:
@@ -931,15 +1633,23 @@ class GpuImageView(QGraphicsView):
             elif not (event.buttons() & Qt.MouseButton.LeftButton):
                 self.viewport().unsetCursor()
 
-        if (event.buttons() & Qt.MouseButton.LeftButton) and self._fit_mode and self.file_path and self._drag_start_pos is not None:
+        if (event.buttons() & Qt.MouseButton.LeftButton) and self._fit_mode and self.file_path and getattr(self, "_drag_start_pos", None) is not None:
             if not self._drag_started:
                 dist = (event.position().toPoint() - self._drag_start_pos).manhattanLength()
                 if dist >= QApplication.startDragDistance():
                     self._drag_started = True
                     self._start_drag()
             event.accept()
-        else:
-            super().mouseMoveEvent(event)
+            return
+            
+        if (event.buttons() & Qt.MouseButton.LeftButton) and not self._fit_mode and getattr(self, "_manual_pan_start", None) is not None:
+            delta = event.position().toPoint() - self._manual_pan_start
+            self.horizontalScrollBar().setValue(self._manual_pan_scroll_h - delta.x())
+            self.verticalScrollBar().setValue(self._manual_pan_scroll_v - delta.y())
+            event.accept()
+            return
+
+        super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:
         if event.button() == Qt.MouseButton.LeftButton and getattr(
@@ -957,6 +1667,11 @@ class GpuImageView(QGraphicsView):
         if event.button() == Qt.MouseButton.LeftButton and self._fit_mode:
             self._drag_start_pos = None
             self._drag_started = False
+        elif event.button() == Qt.MouseButton.LeftButton and not self._fit_mode:
+            self._manual_pan_start = None
+            self.viewport().unsetCursor()
+            event.accept()
+            return
         super().mouseReleaseEvent(event)
 
     def _start_drag(self) -> None:

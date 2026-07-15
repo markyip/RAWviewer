@@ -258,10 +258,20 @@ def _run_idle_gpu_flush() -> None:
     release_cached_gpu_memory()
 
 
-def gpu_demosaic_pytorch_unpacked(unpacked, device_str: str = "cuda", cancel_check: Optional[Callable[[], bool]] = None, return_linear: bool = False) -> np.ndarray:
+def gpu_demosaic_pytorch_unpacked(
+    unpacked,
+    device_str: str = "cuda",
+    cancel_check: Optional[Callable[[], bool]] = None,
+    return_linear: bool = False,
+    *,
+    retain_device: bool = False,
+):
     """
     GPU-accelerated Demosaicing using PyTorch and Kornia.
     Consumes UnpackedRaw from fast_raw_decode.py to guarantee color math parity.
+
+    When ``retain_device`` is True (CUDA + Phase 2c), returns a ``DeviceRgb``
+    instead of downloading to numpy.
     """
     if device_str in ("cuda", "cuda:0") and os.environ.get("RAWVIEWER_CUDA_DEVICE", "").strip():
         device_str = _cuda_device_str()
@@ -269,17 +279,22 @@ def gpu_demosaic_pytorch_unpacked(unpacked, device_str: str = "cuda", cancel_che
         device_str = _cuda_device_str()
     device = torch.device(device_str)
 
-    # CUDA: run this decode on its own stream so decodes issued from
-    # different worker threads (semaphore allows up to _gpu_concurrency())
-    # overlap upload/compute instead of queueing on the default stream.
-    # The final .cpu() copy synchronizes the stream before returning.
+    # Reuse one stream per device so consecutive develops don't allocate a
+    # new CUDA stream each call (fresh Stream() diluted allocator locality
+    # under rapid re-decode). Final .cpu() still synchronizes.
     stream_ctx = (
-        torch.cuda.stream(torch.cuda.Stream(device=device))
+        torch.cuda.stream(_cuda_stream_for(device))
         if device.type == "cuda"
         else _NullCtx()
     )
     with stream_ctx:
-        return _gpu_demosaic_pytorch_body(unpacked, device, cancel_check, return_linear)
+        return _gpu_demosaic_pytorch_body(
+            unpacked,
+            device,
+            cancel_check,
+            return_linear,
+            retain_device=retain_device,
+        )
 
 
 class _NullCtx:
@@ -297,6 +312,169 @@ class _NullCtx:
 # decode call. Keyed by device string ("cuda"/"mps") since the underlying
 # tensor must live on the same device as the data it indexes.
 _GAMMA_LUT_GPU: dict = {}
+_CUDA_STREAMS: dict = {}
+_GPU_WORKSPACES: dict = {}
+_RGB_CAM_GPU: dict = {}
+
+
+def _cuda_stream_for(device) -> Any:
+    key = str(device)
+    stream = _CUDA_STREAMS.get(key)
+    if stream is None:
+        stream = torch.cuda.Stream(device=device)
+        _CUDA_STREAMS[key] = stream
+    return stream
+
+
+class _GpuIspWorkspace:
+    """Growable device + pinned-host buffers shared across consecutive develops."""
+
+    __slots__ = (
+        "device",
+        "h",
+        "w",
+        "raw_f",
+        "raw_norm",
+        "pinned_u16",
+        "pinned_rgb_u8",
+        "pinned_rgb_u16",
+    )
+
+    def __init__(self, device):
+        self.device = device
+        self.h = 0
+        self.w = 0
+        self.raw_f = None
+        self.raw_norm = None
+        self.pinned_u16 = None
+        self.pinned_rgb_u8 = None
+        self.pinned_rgb_u16 = None
+
+    def ensure(self, h: int, w: int) -> None:
+        if self.raw_f is not None and self.h == h and self.w == w:
+            return
+        self.h, self.w = h, w
+        self.raw_f = torch.empty((h, w), device=self.device, dtype=torch.float32)
+        self.raw_norm = torch.empty((h, w), device=self.device, dtype=torch.float32)
+        if self.device.type == "cuda":
+            try:
+                self.pinned_u16 = torch.empty((h, w), dtype=torch.uint16, pin_memory=True)
+            except Exception:
+                self.pinned_u16 = None
+            try:
+                self.pinned_rgb_u8 = torch.empty(
+                    (h, w, 3), dtype=torch.uint8, pin_memory=True
+                )
+            except Exception:
+                self.pinned_rgb_u8 = None
+            try:
+                self.pinned_rgb_u16 = torch.empty(
+                    (h, w, 3), dtype=torch.uint16, pin_memory=True
+                )
+            except Exception:
+                self.pinned_rgb_u16 = None
+        else:
+            self.pinned_u16 = None
+            self.pinned_rgb_u8 = None
+            self.pinned_rgb_u16 = None
+
+
+def _workspace_for(device) -> _GpuIspWorkspace:
+    key = str(device)
+    ws = _GPU_WORKSPACES.get(key)
+    if ws is None:
+        ws = _GpuIspWorkspace(device)
+        _GPU_WORKSPACES[key] = ws
+    return ws
+
+
+def _rgb_cam_on_device(unpacked, device) -> Any:
+    cam = unpacked.rgb_cam
+    key = (str(device), cam.tobytes() if hasattr(cam, "tobytes") else id(cam))
+    t = _RGB_CAM_GPU.get(key)
+    if t is None or t.device != device:
+        t = torch.as_tensor(cam, device=device, dtype=torch.float32)
+        _RGB_CAM_GPU[key] = t
+        if len(_RGB_CAM_GPU) > 32:
+            _RGB_CAM_GPU.pop(next(iter(_RGB_CAM_GPU)))
+    return t
+
+
+def gpu_vram_snapshot(device_str: Optional[str] = None) -> dict[str, float]:
+    """Return CUDA memory stats in MiB (empty dict if CUDA unavailable)."""
+    if not _HAS_TORCH:
+        return {}
+    try:
+        if not torch.cuda.is_available():
+            return {}
+        if device_str:
+            idx = int(torch.device(device_str).index or 0)
+        else:
+            idx = _cuda_device_index()
+        free_b, total_b = torch.cuda.mem_get_info(idx)
+        return {
+            "allocated_mib": torch.cuda.memory_allocated(idx) / (1024.0 ** 2),
+            "reserved_mib": torch.cuda.memory_reserved(idx) / (1024.0 ** 2),
+            "free_mib": free_b / (1024.0 ** 2),
+            "total_mib": total_b / (1024.0 ** 2),
+        }
+    except Exception:
+        return {}
+
+
+def _download_device_rgb(
+    rgb_device: Any,
+    device,
+    ws: _GpuIspWorkspace,
+    *,
+    as_uint16: bool = False,
+) -> np.ndarray:
+    """D2H into a reused pinned host buffer, then return an owned numpy copy.
+
+    Avoids ``tensor.cpu().numpy()``'s pageable staging alloc on the hot path.
+    Full CUDA↔GL interop (skip host) still needs a custom GL viewport that
+    does not go through ``QGraphicsPixmapItem`` — see ``gpu_gl_bridge.py``.
+    """
+    if device.type != "cuda":
+        arr = rgb_device.detach().cpu().numpy()
+        if as_uint16 and arr.dtype != np.uint16:
+            return arr.astype(np.uint16, copy=False)
+        return arr
+
+    rgb_device = rgb_device.contiguous()
+    if as_uint16:
+        pinned = ws.pinned_rgb_u16
+        if pinned is None or pinned.shape != rgb_device.shape:
+            try:
+                pinned = torch.empty(
+                    rgb_device.shape, dtype=torch.uint16, pin_memory=True
+                )
+                ws.pinned_rgb_u16 = pinned
+            except Exception:
+                return rgb_device.detach().cpu().numpy().astype(np.uint16)
+        if rgb_device.dtype != torch.uint16:
+            # int32 linear path → write into uint16 pin via clamp
+            tmp = rgb_device.clamp(0, 65535).to(torch.uint16)
+            pinned.copy_(tmp, non_blocking=True)
+            del tmp
+        else:
+            pinned.copy_(rgb_device, non_blocking=True)
+    else:
+        pinned = ws.pinned_rgb_u8
+        if pinned is None or pinned.shape != rgb_device.shape:
+            try:
+                pinned = torch.empty(
+                    rgb_device.shape, dtype=torch.uint8, pin_memory=True
+                )
+                ws.pinned_rgb_u8 = pinned
+            except Exception:
+                return rgb_device.detach().cpu().numpy()
+        pinned.copy_(rgb_device, non_blocking=True)
+
+    torch.cuda.current_stream(device).synchronize()
+    # Owned copy: next develop reuses the pin and would otherwise overwrite
+    # arrays still held by PixmapConverter / image cache.
+    return pinned.numpy().copy()
 
 
 def _gpu_gamma_lut(device, torch_mod) -> Any:
@@ -313,96 +491,217 @@ def _gpu_gamma_lut(device, torch_mod) -> Any:
     return lut
 
 
-def _gpu_demosaic_pytorch_body(unpacked, device, cancel_check=None, return_linear: bool = False) -> np.ndarray:
+# Last fused-ISP stage timings (ms), for benches / callers. Cleared/set only
+# when RAWVIEWER_GPU_ISP_TIMING is on.
+LAST_GPU_ISP_STAGES: dict[str, float] = {}
+
+
+def _gpu_isp_timing_enabled() -> bool:
+    """Stage timing for fused GPU develop (upload/scale/demosaic/...)."""
+    return str(os.environ.get("RAWVIEWER_GPU_ISP_TIMING", "0")).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _gpu_isp_timing_sync_enabled() -> bool:
+    """When stage timing is on, sync device between stages (default on).
+
+    Set RAWVIEWER_GPU_ISP_TIMING_SYNC=0 for host timestamps without
+    cudaSynchronize — wall time closer to production, stage borders blurrier.
+    """
+    return str(os.environ.get("RAWVIEWER_GPU_ISP_TIMING_SYNC", "1")).strip().lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+
+
+def _sync_if_timing(device, enabled: bool) -> None:
+    if not enabled or not _gpu_isp_timing_sync_enabled():
+        return
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+    elif device.type == "mps" and hasattr(torch, "mps"):
+        try:
+            torch.mps.synchronize()
+        except Exception:
+            pass
+
+
+def _record_gpu_isp_stages(stage_ms: dict[str, float], file_path: str = "") -> None:
+    """Publish stage timings for the bench script even when logging is quiet."""
+    global LAST_GPU_ISP_STAGES
+    LAST_GPU_ISP_STAGES = dict(stage_ms)
+    total = sum(stage_ms.values())
+    try:
+        from perf_metrics import perf_mark
+
+        perf_mark(
+            "gpu_isp_stages",
+            total,
+            file_path or None,
+            **{k: round(v, 1) for k, v in stage_ms.items()},
+        )
+    except Exception:
+        pass
+    sync = "sync" if _gpu_isp_timing_sync_enabled() else "nosync"
+    line = (
+        f"[GPU_ISP] stages({sync}) ms "
+        + " ".join(f"{k}={v:.1f}" for k, v in stage_ms.items())
+        + f" total={total:.1f}"
+    )
+    if file_path:
+        line += f" file={os.path.basename(file_path)}"
+    print(line, flush=True)
+    logger.info(line)
+
+
+def _gpu_demosaic_pytorch_body(
+    unpacked,
+    device,
+    cancel_check=None,
+    return_linear: bool = False,
+    *,
+    retain_device: bool = False,
+):
+    """Fused GPU develop: scale → demosaic → matrix → gamma; single D2H at end.
+
+    Uploads the uint16 Bayer mosaic and performs black/WB scale on device so
+    the host does not allocate a full-frame float32 copy before H2D.
+    """
     def _abort_if_cancelled() -> None:
         if cancel_check is not None and cancel_check():
             from fast_raw_decode import DecodeCancelled
 
             raise DecodeCancelled(unpacked.file_path)
 
-    # 1. Upload mosaic to GPU. Prefer pin_memory + non_blocking on CUDA so
-    # host→device copies overlap with other streams / next decode prep.
+    timing = _gpu_isp_timing_enabled()
+    stage_ms: dict[str, float] = {}
+    t_prev = time.perf_counter()
+
+    def _mark(stage: str) -> None:
+        nonlocal t_prev
+        if not timing:
+            return
+        _sync_if_timing(device, True)
+        now = time.perf_counter()
+        stage_ms[stage] = (now - t_prev) * 1000.0
+        t_prev = now
+
+    # 1. Upload uint16 mosaic via reused pinned buffer / device float workspace.
     mosaic = np.ascontiguousarray(unpacked.mosaic)
-    if mosaic.dtype != np.float32:
-        mosaic_f = mosaic.astype(np.float32, copy=False)
-    else:
-        mosaic_f = mosaic
-    if device.type == "cuda":
+    if mosaic.dtype != np.uint16:
+        mosaic = mosaic.astype(np.uint16, copy=False)
+    h, w = mosaic.shape
+    ws = _workspace_for(device)
+    ws.ensure(h, w)
+
+    if device.type == "cuda" and ws.pinned_u16 is not None:
         try:
-            host = torch.from_numpy(mosaic_f)
+            ws.pinned_u16.copy_(torch.from_numpy(mosaic))
+            raw_u16 = ws.pinned_u16.to(device, non_blocking=True)
+        except Exception:
+            raw_u16 = torch.from_numpy(mosaic).to(device)
+    elif device.type == "cuda":
+        try:
+            host = torch.from_numpy(mosaic)
             if not host.is_pinned():
                 host = host.pin_memory()
-            raw_tensor = host.to(device, non_blocking=True)
+            raw_u16 = host.to(device, non_blocking=True)
         except Exception:
-            raw_tensor = torch.from_numpy(mosaic_f).to(device)
+            raw_u16 = torch.from_numpy(mosaic).to(device)
     else:
-        raw_tensor = torch.from_numpy(mosaic_f).to(device)
-    h, w = raw_tensor.shape
+        raw_u16 = torch.from_numpy(mosaic).to(device)
+    _mark("upload")
 
-    # Pre-allocate normalized array
-    raw_norm = torch.empty_like(raw_tensor)
+    raw_tensor = ws.raw_f
+    raw_tensor.copy_(raw_u16.to(dtype=torch.float32))
+    del raw_u16
+    _mark("to_float")
 
-    # Apply dcraw scale_colors exactly: (raw - black) * (scale_mul / 65535.0), clipped to [0, 1]
-    # We iterate over the 2x2 CFA pattern offsets to apply per-channel scaling
+    raw_norm = ws.raw_norm
+
+    # dcraw scale_colors: (raw - black) * (scale_mul / 65535.0), clip to [0, 1]
     for (dy, dx), ci in np.ndenumerate(unpacked.pattern):
         slc = (slice(dy, None, 2), slice(dx, None, 2))
         black_val = float(unpacked.black[ci])
         scale_val = float(unpacked.scale_mul[ci] / 65535.0)
-
-        # Clamp after scale guarantees [0.0, 1.0] and handles highlights properly
         raw_norm[slc] = torch.clamp((raw_tensor[slc] - black_val) * scale_val, 0.0, 1.0)
+    _mark("scale")
 
     _abort_if_cancelled()
 
-    # Map the CFA string to Kornia's enum.
-    # Note: Kornia's naming expects the 2x2 block starting at the origin.
+    # Kornia CFA naming expects the 2x2 block at the origin.
+    # Slot for Debayer5x5 / other demosaics later: keep (1,1,H,W) float in [0,1].
     cfa_map = {
         "RGGB": kornia.color.CFA.BG,
         "BGGR": kornia.color.CFA.RG,
         "GRBG": kornia.color.CFA.GB,
-        "GBRG": kornia.color.CFA.GR
+        "GBRG": kornia.color.CFA.GR,
     }
     cfa = cfa_map.get(unpacked.pat_str, kornia.color.CFA.BG)
-
-    # 2. Reshape for Kornia: (batch_size=1, channels=1, height, width)
     raw_input = raw_norm.view(1, 1, h, w)
-
-    # 3. Kornia Demosaicing
     rgb_tensor = kornia.color.raw_to_rgb(raw_input, cfa)
-
-    # Squeeze and permute to (H, W, 3)
     rgb_tensor = rgb_tensor.squeeze(0).permute(1, 2, 0)
+    _mark("demosaic")
 
     _abort_if_cancelled()
 
-    # 4. Apply Color Matrix Multiplication (maps sensor RGB directly to sRGB space)
-    m_color_tensor = torch.from_numpy(unpacked.rgb_cam).to(device)
-    rgb_srgb = torch.matmul(rgb_tensor, m_color_tensor.t())
-
-    # Clamp to [0, 1]
-    rgb_srgb = rgb_srgb.clamp(0.0, 1.0)
+    m_color_tensor = _rgb_cam_on_device(unpacked, device)
+    rgb_srgb = torch.matmul(rgb_tensor, m_color_tensor.t()).clamp(0.0, 1.0)
+    del rgb_tensor
+    _mark("matrix")
 
     _abort_if_cancelled()
 
     if return_linear:
-        # Avoid PyTorch's lack of uint16 support on MPS by casting via int32
-        rgb_final16 = (rgb_srgb * 65535.0 + 0.5).to(torch.int32).cpu().numpy().astype(np.uint16)
-        return rgb_final16
+        rgb_final16 = (rgb_srgb * 65535.0 + 0.5).to(torch.int32)
+        _mark("gamma")
+        out = _download_device_rgb(rgb_final16, device, ws, as_uint16=True)
+        _mark("download")
+    else:
+        gamma_lut = _gpu_gamma_lut(device, torch)
+        # int32 indices: ~half the temporary VRAM vs int64 (45MP RGB ≈ 0.5GB).
+        idx = torch.clamp(rgb_srgb * 65535.0 + 0.5, 0, 65535).to(torch.int32)
+        # CUDA indexing accepts int32; MPS gather wants long.
+        rgb_gamma16 = gamma_lut[idx.to(torch.int64) if device.type == "mps" else idx]
+        rgb_final = torch.clamp(rgb_gamma16 / 256.0, 0, 255).to(torch.uint8)
+        del rgb_srgb, idx, rgb_gamma16
+        _mark("gamma")
+        keep_device = (
+            bool(retain_device)
+            and device.type == "cuda"
+            and not return_linear
+        )
+        if keep_device:
+            # Synchronize producer stream so GUI-thread CUDA-GL map sees data.
+            try:
+                torch.cuda.current_stream(device).synchronize()
+            except Exception:
+                pass
+            from gpu_gl_bridge import DeviceRgb
 
-    # 5. BT.709 gamma via the shared 16-bit LUT (same curve as
-    # fast_raw_decode._gamma_lut8 / gamma_curve16, computed once and cached
-    # per-device instead of re-derived by bisection on every call).
-    gamma_lut = _gpu_gamma_lut(device, torch)
-    idx = torch.clamp(rgb_srgb * 65535.0 + 0.5, 0, 65535).to(torch.int64)
-    rgb_gamma16 = gamma_lut[idx]  # gather: 16-bit-equivalent curve value
+            out = DeviceRgb(
+                tensor=rgb_final.contiguous(),
+                file_path=str(getattr(unpacked, "file_path", "") or ""),
+            )
+            if timing:
+                stage_ms["download"] = 0.0
+                t_prev = time.perf_counter()
+        else:
+            out = _download_device_rgb(rgb_final, device, ws, as_uint16=False)
+            _mark("download")
 
-    # Convert to uint8 (curve16 >> 8 semantics, matching the CPU LUT path)
-    rgb_final = torch.clamp(rgb_gamma16 / 256.0, 0, 255).to(torch.uint8)
+    if timing:
+        _record_gpu_isp_stages(
+            stage_ms, getattr(unpacked, "file_path", "") or ""
+        )
 
-    _abort_if_cancelled()
-
-    # 6. Download result back to CPU (synchronizes the stream)
-    return rgb_final.cpu().numpy()
+    return out
 
 
 _GAMMA_LUT_CUPY: Optional[Any] = None
@@ -538,11 +837,17 @@ def gpu_demosaic_cupy_unpacked(unpacked, cancel_check: Optional[Callable[[], boo
 def try_gpu_decode_from_unpacked(
     unpacked,
     cancel_check: Optional[Callable[[], bool]] = None,
-    return_linear: bool = False
-) -> Optional[np.ndarray]:
+    return_linear: bool = False,
+    *,
+    retain_device: Optional[bool] = None,
+):
     """
     Attempt to decode the UnpackedRaw using the detected GPU backend.
     Falls back to None if GPU is not available or if processing errors occur.
+
+    When Phase 2c (``RAWVIEWER_GPU_CUDA_GL=1``) is on and ``retain_device`` is
+    not explicitly False, CUDA develops may return ``DeviceRgb`` instead of
+    numpy (skipping D2H for the display path).
     """
     backend = detect_gpu_backend()
     if backend == "cpu_only":
@@ -560,6 +865,14 @@ def try_gpu_decode_from_unpacked(
             w, h, unpacked.file_path,
         )
         return None
+
+    if retain_device is None:
+        try:
+            from gpu_gl_bridge import cuda_gl_enabled
+
+            retain_device = bool(cuda_gl_enabled()) and not return_linear
+        except Exception:
+            retain_device = False
 
     if backend == "cupy" and unpacked.pat_str != "RGGB":
         logger.warning(
@@ -591,11 +904,19 @@ def try_gpu_decode_from_unpacked(
         try:
             if backend == "pytorch_cuda":
                 res = gpu_demosaic_pytorch_unpacked(
-                    unpacked, device_str=_cuda_device_str(), cancel_check=cancel_check, return_linear=return_linear
+                    unpacked,
+                    device_str=_cuda_device_str(),
+                    cancel_check=cancel_check,
+                    return_linear=return_linear,
+                    retain_device=bool(retain_device),
                 )
             elif backend == "pytorch_mps":
                 res = gpu_demosaic_pytorch_unpacked(
-                    unpacked, device_str="mps", cancel_check=cancel_check, return_linear=return_linear
+                    unpacked,
+                    device_str="mps",
+                    cancel_check=cancel_check,
+                    return_linear=return_linear,
+                    retain_device=False,
                 )
             elif backend == "cupy":
                 res = gpu_demosaic_cupy_unpacked(unpacked, cancel_check=cancel_check, return_linear=return_linear)

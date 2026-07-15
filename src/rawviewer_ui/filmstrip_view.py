@@ -162,8 +162,8 @@ class FilmStripBar(QFrame):
         self.setStyleSheet(
             """
             QFrame#filmstrip_bar {
-                background-color: rgba(24, 24, 24, 230);
-                border-top: 1px solid #3A3A3A;
+                background-color: rgba(20, 18, 15, 230);
+                border-top: 1px solid #3A332A;
             }
             QLabel#filmstrip_cell {
                 background-color: transparent;
@@ -175,12 +175,12 @@ class FilmStripBar(QFrame):
             }
             QLabel#filmstrip_cell_selected {
                 background-color: rgba(51, 51, 51, 120);
-                border: 2px solid #5CB8FF;
+                border: 2px solid #d9691e;
                 border-radius: 3px;
                 padding: 0px;
             }
             QLabel#filmstrip_batch_badge {
-                color: #FFD700;
+                color: #D9A441;
                 font-size: 11px;
                 font-weight: 700;
                 background: transparent;

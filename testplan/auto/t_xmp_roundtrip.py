@@ -27,7 +27,12 @@ def main() -> int:
         resolve_xmp_path,
         write_xmp_adjustments_for_file,
     )
-    from raw_tone_curve import TONE_CURVE_SERIAL_KEY
+    from raw_tone_curve import (
+        TONE_CURVE_BLUE_KEY,
+        TONE_CURVE_GREEN_KEY,
+        TONE_CURVE_RED_KEY,
+        TONE_CURVE_SERIAL_KEY,
+    )
 
     tmpd = tempfile.mkdtemp()
     try:
@@ -44,6 +49,9 @@ def main() -> int:
             "ColorNoiseReduction": 50.0, "DenoiseMethod": 1.0,
             "LensCorrectionEnabled": 1.0,
             TONE_CURVE_SERIAL_KEY: "0,0;64,80;255,255",
+            TONE_CURVE_RED_KEY: "0,0;128,150;255,255",
+            TONE_CURVE_GREEN_KEY: "0,0;128,110;255,255",
+            TONE_CURVE_BLUE_KEY: "0,10;128,140;255,245",
         }
         hsl = [k for k in DEFAULT_ADJUSTMENTS if k.startswith(("HueAdjustment", "SaturationAdjustment", "LuminanceAdjustment"))][:3]
         for k in hsl:

@@ -162,21 +162,65 @@ def _draw_pin(
     *,
     is_current: bool,
 ) -> None:
-    """Draw a map pin representing an image location (Green = active, Red = neighbor)."""
-    from PyQt6.QtCore import Qt
-    from PyQt6.QtGui import QBrush, QColor, QPen
+    """Draw a reverse-teardrop pin matching the location-card reference.
 
-    radius = 8 if is_current else 5
-    fill = QColor(40, 220, 90) if is_current else QColor(220, 60, 60)
-    
+    Solid ember fill, sharp tip on the GPS point, soft radial glow behind the
+    head (current pin only). Neighbors are smaller/muted without glow.
+    """
+    from PyQt6.QtCore import Qt, QPointF, QRectF
+    from PyQt6.QtGui import QBrush, QColor, QPainterPath, QRadialGradient
+
+    # theme.EMBER = #d9691e → (217, 105, 30)
     if is_current:
-        painter.setBrush(QBrush(Qt.BrushStyle.NoBrush))
-        painter.setPen(QPen(QColor(255, 255, 255), 2.5))
-        painter.drawEllipse(int(x - radius - 2), int(y - radius - 2), (radius + 2) * 2, (radius + 2) * 2)
-        
+        head_r = 8.0
+        tip_h = 13.0
+        fill = QColor(217, 105, 30)
+        glow_alpha = 120
+        glow_r = 24.0
+    else:
+        head_r = 5.5
+        tip_h = 9.0
+        fill = QColor(217, 105, 30, 175)
+        glow_alpha = 0
+        glow_r = 0.0
+
+    head_cx = float(x)
+    # Tip on GPS; circular head sits above (reverse teardrop / map marker).
+    head_cy = float(y) - tip_h
+    tip = QPointF(float(x), float(y))
+
+    # Continuous silhouette: tip → left flank → full circular head → right flank → tip.
+    path = QPainterPath()
+    path.moveTo(tip)
+    path.lineTo(QPointF(head_cx - head_r * 0.72, head_cy + head_r * 0.55))
+    path.arcTo(
+        QRectF(head_cx - head_r, head_cy - head_r, head_r * 2.0, head_r * 2.0),
+        200.0,
+        -220.0,
+    )
+    path.lineTo(tip)
+    path.closeSubpath()
+
+    painter.setRenderHint(painter.RenderHint.Antialiasing, True)
+
+    if glow_alpha > 0:
+        glow = QRadialGradient(QPointF(head_cx, head_cy + head_r * 0.15), glow_r)
+        glow.setColorAt(0.0, QColor(217, 105, 30, glow_alpha))
+        glow.setColorAt(0.4, QColor(217, 105, 30, int(glow_alpha * 0.5)))
+        glow.setColorAt(1.0, QColor(217, 105, 30, 0))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QBrush(glow))
+        painter.drawEllipse(
+            QPointF(head_cx, head_cy + head_r * 0.15),
+            glow_r,
+            glow_r,
+        )
+
     painter.setBrush(QBrush(fill))
-    painter.setPen(QPen(QColor(255, 255, 255), 1.5))
-    painter.drawEllipse(int(x - radius), int(y - radius), radius * 2, radius * 2)
+    painter.setPen(Qt.PenStyle.NoPen)
+    painter.drawPath(path)
+
+
 
 
 class LocationMapModel:

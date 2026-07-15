@@ -38,9 +38,16 @@ run "cache semantics" testplan/auto/t_cache_semantics.py
 run "dodge & burn" testplan/auto/t_dodge_burn.py
 run "gallery closes editor" testplan/auto/t_gallery_closes_editor.py
 run "gallery hover prefetch" testplan/auto/t_gallery_hover_prefetch.py
+run "editor skip unsupported" testplan/auto/t_editor_skip_unsupported.py
+run "adjust loading overlay" testplan/auto/t_adjust_loading_overlay.py
+run "dodge & burn reset" testplan/auto/t_dodge_burn_reset.py
+run "filmstrip hidden in editor" testplan/auto/t_filmstrip_editor_hidden.py
 run "search bar animation" testplan/auto/t_search_bar_animation.py
 run "gpu return_linear" testplan/auto/t_gpu_return_linear.py
 run "half decode return_linear" testplan/auto/t_half_decode_return_linear.py
+run "shadow edge-aware damp" testplan/auto/t_shadow_edge_aware_damp.py
+run "shadow smoothed ratio" testplan/auto/t_shadow_smoothed_ratio.py
+run "channel tone curve (RGB Standard mode)" testplan/auto/t_channel_tone_curve.py
 run "gallery thumbnail cold-decode perf" testplan/auto/t_gallery_thumb_perf.py
 run "detail enhance (sharpness/clarity/defringe) perf" testplan/auto/t_detail_enhance_perf.py
 run "CR3 preview extraction perf" testplan/auto/t_cr3_preview_perf.py

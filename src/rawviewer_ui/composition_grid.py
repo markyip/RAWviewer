@@ -15,6 +15,11 @@ GRID_MODES: Tuple[str, ...] = (
     "diagonal",
     "thirds_diagonal",
     "golden",
+    # Dense alignment grid used while dragging Transform sliders (straighten
+    # / keystone): a 3x3 is too coarse to judge whether a line has come true,
+    # a fine mesh gives references near every edge in the frame. Reachable
+    # through the normal grid cycle too.
+    "fine",
 )
 _GRID_LINE = QColor(200, 200, 200, 175)
 _GRID_LINE_WIDTH_COSMETIC = 2  # screen pixels (GPU overlay)
@@ -47,6 +52,7 @@ def grid_mode_label(mode: str) -> str:
         "diagonal": "Diagonal",
         "thirds_diagonal": "3×3 + diagonal",
         "golden": "Phi grid (golden ratio)",
+        "fine": "Fine alignment grid",
     }.get(mode, "Off")
 
 
@@ -87,6 +93,20 @@ def draw_composition_grid(
         for t in phi_grid_positions():
             x = w * t
             y = h * t
+            painter.drawLine(int(round(x)), 0, int(round(x)), height)
+            painter.drawLine(0, int(round(y)), width, int(round(y)))
+    if mode == "fine":
+        # ~9x9 mesh with slightly fainter lines so it reads as a reference
+        # lattice rather than competing with the image.
+        pen = _grid_pen(cosmetic=cosmetic)
+        c = QColor(_GRID_LINE)
+        c.setAlpha(120)
+        pen.setColor(c)
+        painter.setPen(pen)
+        n = 9
+        for i in range(1, n):
+            x = w * i / n
+            y = h * i / n
             painter.drawLine(int(round(x)), 0, int(round(x)), height)
             painter.drawLine(0, int(round(y)), width, int(round(y)))
     painter.restore()

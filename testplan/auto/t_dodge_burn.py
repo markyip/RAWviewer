@@ -137,6 +137,45 @@ def main() -> int:
         int(out8[50, 75, 0]) != int(out8[5, 5, 0]),
     )
 
+    # 10. Regression: the mask must survive a render/save/export request
+    # that only carries the panel's plain get_adjustments() dict (which has
+    # no knowledge of the mask -- it lives in main.py state). Simulates
+    # main.py._dodge_burn_overlay_adj without importing main.py (heavy Qt
+    # app dependency): a "bare" adj dict from the panel must NOT apply the
+    # mask on its own; only after folding in MASK_KEY/STRENGTH_KEY does it.
+    def _render(img, adj):
+        return linear_to_display_uint8(process_linear_edit_buffer(img, adj, preview=True), adj)
+
+    bare_adj = dict(DEFAULT_ADJUSTMENTS)
+    bare_adj[AS_SHOT_TEMP_KEY] = 5500.0
+    out_bare = _render(flat, bare_adj)
+    check(
+        "bare panel adj (no mask folded in) is flat -- proves overlay is required",
+        int(out_bare[50, 75, 0]) == int(out_bare[5, 5, 0]),
+    )
+    overlaid_adj = dict(bare_adj)
+    overlaid_adj[MASK_KEY] = serial
+    overlaid_adj[STRENGTH_KEY] = 1.75
+    out_overlaid = _render(flat, overlaid_adj)
+    check(
+        "overlaid adj (mask folded in) actually differs -- overlay must be applied somewhere",
+        int(out_overlaid[50, 75, 0]) != int(out_overlaid[5, 5, 0]),
+    )
+
+    # 11. Deserialize cache: repeated calls with the SAME serial string
+    # must reuse the same decoded mask object (this is what makes the
+    # per-instance gain cache actually pay off across render ticks -- see
+    # _deserialize_mask_cached's docstring). Regression for the ~56ms/tick
+    # cost measured before caching (resize+exp2 recomputed from scratch on
+    # every unrelated slider tick once a mask existed).
+    from raw_dodge_burn import _DESERIALIZE_CACHE, _deserialize_mask_cached
+
+    _DESERIALIZE_CACHE.clear()
+    m1 = _deserialize_mask_cached(serial)
+    m2 = _deserialize_mask_cached(serial)
+    check("deserialize cache returns the same object for the same string", m1 is m2)
+    check("deserialize cache populated exactly once", len(_DESERIALIZE_CACHE) == 1)
+
     print(f"\n{len(FAILURES)} failure(s)")
     return 1 if FAILURES else 0
 

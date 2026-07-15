@@ -361,9 +361,22 @@ class JustifiedGallery(QWidget):
         self._wheel_accum_px = 0.0
         self._wheel_timer = QTimer(self)
         self._wheel_timer.setSingleShot(False)
+        # Precise, not the default coarse timer: on Windows a coarse 8ms QTimer
+        # fires with several ms of jitter (5% tolerance class + 15.6ms system
+        # timer coalescing), and with a FIXED step per tick that cadence jitter
+        # becomes velocity jitter -- uneven motion users read as "scrolling is
+        # not smooth" even at high average FPS.
+        self._wheel_timer.setTimerType(Qt.TimerType.PreciseTimer)
         self._wheel_timer.timeout.connect(self._apply_wheel_scroll_step)
-        self._wheel_step_px = 18  # per tick (tuned for smoothness)
+        self._wheel_step_px = 18  # min px per nominal tick (tuned for smoothness)
         self._wheel_tick_ms = 8   # 125Hz-ish
+        # Decay rate for the accumulator: consume 20% per nominal 8ms tick.
+        # _apply_wheel_scroll_step scales this by the MEASURED elapsed time,
+        # so a late tick consumes proportionally more -- constant on-screen
+        # velocity regardless of timer cadence (frame-time independence, the
+        # same idea as dt-scaled game-loop integration).
+        self._wheel_decay_per_tick = 0.2
+        self._wheel_last_tick_t = 0.0
 
         # Idle background thumbnail preloader
         self._idle_preload_timer = QTimer(self)
@@ -1595,6 +1608,21 @@ class JustifiedGallery(QWidget):
                 return self._raw_aspect_undo_user_rotation(file_path, meta_ar)
         return px_ar
 
+    def _apply_edits_to_tile(self, file_path: str, arr):
+        """Render saved XMP edits into a tile buffer at delivery time.
+
+        ndarray in, ndarray out (QImage and other inputs pass through). Cost
+        is ~5ms per 320px tile / ~35ms at 720px rows, paid only for files
+        with non-default saved edits (see raw_adjustments.apply_saved_edits_
+        for_display); nothing is written back to the thumbnail caches.
+        """
+        try:
+            from raw_adjustments import apply_saved_edits_for_display
+
+            return apply_saved_edits_for_display(file_path, arr)
+        except Exception:
+            return arr
+
     def _orient_gallery_thumbnail_array(self, file_path: str, arr: np.ndarray) -> np.ndarray:
         try:
             from common_image_loader import finalize_index_thumbnail_array
@@ -1687,6 +1715,7 @@ class JustifiedGallery(QWidget):
             if global_thumb is None:
                 return None
             arr = self._orient_gallery_thumbnail_array(path, np.ascontiguousarray(global_thumb))
+            arr = self._apply_edits_to_tile(path, arr)
             return _thumbnail_data_to_base_pixmap(arr)
         except Exception:
             return None
@@ -1828,7 +1857,7 @@ class JustifiedGallery(QWidget):
         return self._scale_crop_to_fit(oriented, target_size, fast=fast)
 
     def invalidate_thumbnails_for_path(self, file_path: str) -> None:
-        """Drop cached gallery pixmaps for a path (e.g. after on-disk rotation)."""
+        """Drop cached gallery pixmaps for a path (e.g. after on-disk rotation or a saved edit)."""
         resolved = self._resolve_gallery_path(file_path)
         if resolved:
             file_path = resolved
@@ -1838,6 +1867,21 @@ class JustifiedGallery(QWidget):
             pass
         # Drop the remembered aspect so a re-decode (e.g. after on-disk rotation) re-measures.
         self._measured_raw_aspects.pop(file_path, None)
+        # Clearing the cache alone doesn't repaint an already-visible tile --
+        # it's still showing the old QPixmap set the last time this widget
+        # was laid out. Force it back through the cache-miss path (which
+        # re-requests a fresh decode) on the next paint pass so a saved edit
+        # shows up in the grid without requiring a scroll/relayout.
+        needs_reload = False
+        for w in self._visible_widgets.values():
+            if getattr(w, "file_path", None) == file_path:
+                self._clear_widget_thumbnail(w)
+                needs_reload = True
+        if needs_reload and not self._is_scrolling_fast:
+            try:
+                self.load_visible_images()
+            except Exception:
+                pass
 
     def _invalidate_scaled_thumbnails_for_path(self, file_path: str) -> None:
         """Drop only scaled variants for a path; keep base thumbnail to speed immediate redraw."""
@@ -2174,6 +2218,7 @@ class JustifiedGallery(QWidget):
                     delta_y = int(notches * 120)
                     self._wheel_accum_px += -float(delta_y)
                     if not self._wheel_timer.isActive():
+                        self._wheel_last_tick_t = 0.0  # fresh burst: dt from nominal tick
                         self._wheel_timer.start(self._wheel_tick_ms)
                     event.accept()
                     return True
@@ -2202,13 +2247,25 @@ class JustifiedGallery(QWidget):
             self._wheel_accum_px = 0.0
             return
 
-        # Adaptive step: consume more when accumulation is high (exponential decay)
-        # 0.2 means we consume 20% of the remaining distance per tick (8ms)
-        # This makes the scroll feel very responsive and stop quickly.
-        # But we still enforce a minimum step of _wheel_step_px (18px) to maintain movement.
-        adaptive_step = self._wheel_accum_px * 0.2
-        if abs(adaptive_step) < self._wheel_step_px:
-            step = self._wheel_step_px if self._wheel_accum_px > 0 else -self._wheel_step_px
+        # Exponential decay of the remaining distance, scaled by MEASURED
+        # elapsed time (see _wheel_decay_per_tick): fraction consumed is
+        # 1 - (1 - rate)^(dt / nominal_tick), so a tick that arrives late
+        # consumes proportionally more and the on-screen velocity stays
+        # constant under timer jitter. The old fixed 20%-per-tick step turned
+        # every late tick into a visible slowdown-then-jump. The minimum step
+        # (which keeps the tail from crawling) is dt-scaled the same way.
+        now = time.time()
+        dt_ticks = 1.0
+        if self._wheel_last_tick_t > 0.0:
+            dt_ticks = min(
+                4.0, max(0.25, (now - self._wheel_last_tick_t) * 1000.0 / self._wheel_tick_ms)
+            )
+        self._wheel_last_tick_t = now
+        frac = 1.0 - (1.0 - self._wheel_decay_per_tick) ** dt_ticks
+        adaptive_step = self._wheel_accum_px * frac
+        min_step = self._wheel_step_px * dt_ticks
+        if abs(adaptive_step) < min_step:
+            step = min_step if self._wheel_accum_px > 0 else -min_step
         else:
             step = adaptive_step
 
@@ -3436,6 +3493,7 @@ class JustifiedGallery(QWidget):
             if thumb is None:
                 continue
             thumb = self._orient_gallery_thumbnail_array(path, thumb)
+            thumb = self._apply_edits_to_tile(path, thumb)
             pixmap = _thumbnail_data_to_base_pixmap(thumb)
             if pixmap is None or pixmap.isNull():
                 continue
@@ -3492,6 +3550,7 @@ class JustifiedGallery(QWidget):
             return
         file_path = resolved
 
+        thumbnail_data = self._apply_edits_to_tile(file_path, thumbnail_data)
         pixmap = _thumbnail_data_to_base_pixmap(thumbnail_data)
 
         if not pixmap or pixmap.isNull():
