@@ -41,6 +41,7 @@ desktop.ini
 *.PNG
 *.TIF
 *.TIFF
+!icons/appicon.png
 
 # Log files
 *.log
