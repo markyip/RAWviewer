@@ -460,11 +460,25 @@ class ImageLoadWorker(QRunnable):
 
                 from raw_adjustments import sidecar_adjustments_enabled
 
+                # Sidecar edits on the full-res tier are only worth paying for
+                # the image actually on screen: the gamma-path apply costs
+                # seconds at 30+MP, and letting PRELOAD/BACKGROUND tasks run it
+                # for neighbors monopolized the worker pool -- gallery
+                # thumbnail queue-waits climbed past 5s with repeated
+                # sidecar_apply ms=3300-7200 entries for files nobody was
+                # looking at ("gallery loading is bottlenecked" report). The
+                # CURRENT task still applies, so the displayed image shows its
+                # edits; a prefetched neighbor gets them applied when it
+                # becomes current (memoized in _apply_sidecar_if_needed).
+                apply_sidecar = (
+                    sidecar_adjustments_enabled()
+                    and self.task.priority == Priority.CURRENT
+                )
                 result = processor.process_full_image(
                     file_path,
                     use_full_resolution=self.task.use_full_resolution,
                     executor=self.manager._process_pool if self._safe_emit() else None,
-                    apply_sidecar_adjustments=sidecar_adjustments_enabled(),
+                    apply_sidecar_adjustments=apply_sidecar,
                 )
                 if result is not None and not self.task.is_cancelled():
                     if self._safe_emit():

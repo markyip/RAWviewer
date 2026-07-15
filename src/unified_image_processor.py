@@ -120,6 +120,11 @@ class UnifiedImageProcessor:
         # the live panel/preview tier still showed them. Restored.)
         self._adjusted_full_lock = _threading.Lock()
         self._adjusted_full_slots: list = []  # [(norm_path, adj_key, np.ndarray)]
+        # In-flight sidecar applies keyed (norm_path, adj_key): a second
+        # thread asking for the same apply WAITS for the first instead of
+        # recomputing -- overlapping duplicate applies of a 32MP buffer
+        # measured as stacked 3.5s+7.2s entries in the same second.
+        self._adjusted_inflight: dict = {}
 
     def _stash_unpacked_raw(self, file_path: str, unpacked) -> None:
         key = os.path.normcase(os.path.abspath(file_path))
@@ -183,31 +188,55 @@ class UnifiedImageProcessor:
                 str(adj.get(_db_mask_key, "") or ""),
                 rgb_image.shape,
             )
-            with self._adjusted_full_lock:
-                for n, k, buf in self._adjusted_full_slots:
-                    if n == norm and k == adj_key:
-                        return buf
-            import time as _time
+            import threading as _threading
 
-            from perf_metrics import perf_mark
+            inflight_key = (norm, adj_key)
+            mine = False
+            while True:
+                with self._adjusted_full_lock:
+                    for n, k, buf in self._adjusted_full_slots:
+                        if n == norm and k == adj_key:
+                            return buf
+                    waiter = self._adjusted_inflight.get(inflight_key)
+                    if waiter is None:
+                        self._adjusted_inflight[inflight_key] = _threading.Event()
+                        mine = True
+                if mine:
+                    break
+                # Another thread is computing this exact apply (same file,
+                # same adjustments, same base shape): wait for it rather than
+                # burning a second multi-second pass on a 32MP buffer.
+                waiter.wait(timeout=60.0)
+                # Loop: either the memo now has it, or the owner failed and we
+                # become the owner on the next pass.
 
-            _t0 = _time.perf_counter()
-            out = apply_adjustments_to_rgb(rgb_image, adj)
-            perf_mark(
-                "sidecar_apply",
-                (_time.perf_counter() - _t0) * 1000.0,
-                file_path,
-                mp=rgb_image.shape[0] * rgb_image.shape[1] / 1e6,
-            )
-            with self._adjusted_full_lock:
-                # 3 slots (previous/current/next): neighbor prefetch computes
-                # the NEXT file's adjusted buffer in the background; with only
-                # 2 slots that prefetch evicted the CURRENT file's entry, so
-                # any repaint of the current file re-paid the full apply.
-                self._adjusted_full_slots = [
-                    e for e in self._adjusted_full_slots if e[0] != norm
-                ][-2:] + [(norm, adj_key, out)]
-            return out
+            try:
+                import time as _time
+
+                from perf_metrics import perf_mark
+
+                _t0 = _time.perf_counter()
+                out = apply_adjustments_to_rgb(rgb_image, adj)
+                perf_mark(
+                    "sidecar_apply",
+                    (_time.perf_counter() - _t0) * 1000.0,
+                    file_path,
+                    mp=rgb_image.shape[0] * rgb_image.shape[1] / 1e6,
+                )
+                with self._adjusted_full_lock:
+                    # Keep one entry per file (the newest adj/shape) across up
+                    # to 6 files: the previous 3-slot global list was evicted
+                    # wholesale by neighbor prefetch, so revisits re-paid the
+                    # full multi-second apply.
+                    self._adjusted_full_slots = [
+                        e for e in self._adjusted_full_slots if e[0] != norm
+                    ][-5:] + [(norm, adj_key, out)]
+                return out
+            finally:
+                with self._adjusted_full_lock:
+                    ev = self._adjusted_inflight.pop(inflight_key, None)
+                if ev is not None:
+                    ev.set()
         except Exception:
             return rgb_image
 
