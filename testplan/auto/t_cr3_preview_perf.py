@@ -23,7 +23,7 @@ import time
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "src"))
 
 FAILURES = []
-SAMPLE_DIR = "/Volumes/T5 EVO/RAW_Sample"
+SAMPLE_DIR = os.environ.get("RAWVIEWER_TEST_ASSETS", "/tmp/RAW_Sample")
 
 
 def check(name, ok, detail=""):

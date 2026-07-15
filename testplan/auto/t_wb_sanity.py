@@ -10,8 +10,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "src"))
 def _sample_dirs():
     return [
         os.environ.get("RAWVIEWER_WB_SAMPLE_DIR", "").strip(),
-        r"I:\RAW_Sample",
-        "/Volumes/Development/Development/Canon_Sample",
+        os.environ.get("RAWVIEWER_TEST_ASSETS", ""),
     ]
 
 

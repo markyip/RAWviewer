@@ -112,7 +112,7 @@ def main() -> int:
     # --- ground truth samples (optional) ---
     from enhanced_raw_processor import _detect_nef_he_compression
 
-    sample = "/Volumes/T5 EVO/RAW_Sample"
+    sample = os.environ.get("RAWVIEWER_TEST_ASSETS", "/tmp/RAW_Sample")
     reported = [
         os.path.join(sample, "DSC_2138.NEF"),
         os.path.join(sample, "DSC_2127.NEF"),

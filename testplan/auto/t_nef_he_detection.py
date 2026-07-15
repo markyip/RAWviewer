@@ -14,7 +14,7 @@ Two on-disk locations are checked, per exiftool's Nikon.pm:
 
 Both paths are covered here with hand-built synthetic TIFF fixtures for
 deterministic byte-level verification, PLUS (when available) a real-file
-ground-truth sweep against /Volumes/T5 EVO/RAW_Sample: every result is cross-
+ground-truth sweep against a local RAW_Sample directory: every result is cross-
 checked directly against rawpy's actual decode success/failure, not just
 against what the detector claims. When last run against that sample set (61
 real NEFs spanning Z5/Z6/Z6II/Z6III/Z7/Z7II/Z8/Z9/Z50/Z50II/Zf/Zfc/Z30/D780/
@@ -29,7 +29,7 @@ import tempfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "src"))
 
-SAMPLE_DIR = "/Volumes/T5 EVO/RAW_Sample"
+SAMPLE_DIR = os.environ.get("RAWVIEWER_TEST_ASSETS", "/tmp/RAW_Sample")
 
 FAILURES = []
 

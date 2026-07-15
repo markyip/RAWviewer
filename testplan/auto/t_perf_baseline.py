@@ -11,7 +11,7 @@ import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "src"))
 
-GOLDEN = "/Volumes/Development/Development/Canon_Sample/1G9A0419.CR3"
+GOLDEN = os.environ.get("RAWVIEWER_TEST_ASSETS", "/tmp/RAW_Sample/1G9A0419.CR3")
 BASELINE = os.path.join(os.path.dirname(__file__), "..", "baselines", "perf_baseline.json")
 TOLERANCE = 1.25  # fail if slower than baseline * 1.25
 

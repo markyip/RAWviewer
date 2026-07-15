@@ -35,7 +35,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "src"))
 import numpy as np  # noqa: E402
 
 FAILURES = []
-GOLDEN_ARW = "/Volumes/Development/Manchester/DSC01089.ARW"
+GOLDEN_ARW = os.environ.get("RAWVIEWER_TEST_ASSETS_ARW", "/tmp/RAW_Sample/DSC01089.ARW")
 
 
 def check(name, ok, detail=""):
