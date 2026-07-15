@@ -304,21 +304,65 @@ def edited_previews_enabled() -> bool:
     }
 
 
+_BT709_DECODE_LUT = None
+
+
+def _decode_bt709_uint8_to_linear(arr: np.ndarray) -> np.ndarray:
+    """Inverse of the dcraw BT.709 encode used by linear_to_display_uint8."""
+    global _BT709_DECODE_LUT
+    if _BT709_DECODE_LUT is None:
+        from fast_raw_decode import _gamma_lut8
+
+        fwd = _gamma_lut8()  # 65536-entry linear16 -> uint8
+        # Invert numerically: for each of the 256 output codes, the mean
+        # linear input that maps to it.
+        lin16 = np.arange(65536, dtype=np.float64)
+        sums = np.bincount(fwd, weights=lin16, minlength=256)
+        counts = np.maximum(np.bincount(fwd, minlength=256), 1)
+        _BT709_DECODE_LUT = (sums / counts / 65535.0).astype(np.float32)
+    return _BT709_DECODE_LUT[arr]
+
+
 def apply_saved_edits_for_display(file_path: str, arr):
     """Apply saved XMP edits to a display-bound uint8 RGB ndarray.
 
     Returns the input unchanged when previews-with-edits is disabled, the
-    file has no (non-default) saved adjustments, or the buffer is not an
-    ndarray (QImage branches skip). Never raises. Callers must NOT persist
-    the result into pixel caches -- caches hold the unadjusted base.
+    file is not RAW, the file has no (non-default) saved adjustments, or the
+    buffer is not an ndarray (QImage branches skip). Never raises. Callers
+    must NOT persist the result into pixel caches -- caches hold the
+    unadjusted base.
+
+    RAW-only by contract: sidecars are resolved by BASENAME (Lightroom
+    convention), so a JPEG sharing its basename with an edited RAW resolves
+    to the RAW's sidecar -- without this gate the JPEG's gallery tile showed
+    the RAW's edits applied to it ("also flagged as edited" report). Edits
+    can only ever be created for RAW files (the Adjust panel requires a
+    demosaiced RAW base), so non-RAW is always pass-through.
+
+    Renders through the REAL scene-linear pipeline (BT.709 decode ->
+    process_linear_edit_buffer -> linear_to_display_uint8), not the legacy
+    gamma-space approximation: the gamma path's tone math diverges visibly
+    from the Adjust panel's render (reported as the gallery/fit preview
+    being "way off" from the edited image). Working from an already
+    tone-curved camera JPEG is still an approximation of the true RAW edit
+    base, but the tone/color processing applied on top is now the same code
+    the editor runs.
     """
     try:
         if arr is None or not hasattr(arr, "shape") or not edited_previews_enabled():
             return arr
+        from common_image_loader import is_raw_file
+
+        if not is_raw_file(file_path):
+            return arr
         adj = load_adjustments_for_file(file_path)
         if is_default_adjustments(adj):
             return arr
-        return apply_adjustments_to_rgb(arr, adj)
+        from raw_edit_pipeline import linear_to_display_uint8, process_linear_edit_buffer
+
+        lin = _decode_bt709_uint8_to_linear(np.ascontiguousarray(arr))
+        out = process_linear_edit_buffer(lin, adj, preview=True)
+        return linear_to_display_uint8(out, adj)
     except Exception:
         return arr
 

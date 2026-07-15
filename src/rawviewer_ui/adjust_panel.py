@@ -242,9 +242,29 @@ class AdjustSlider(QSlider):
         super().__init__(orientation, parent)
         self.setMinimumHeight(22)
         self.setMouseTracking(True)
+        # Click-to-focus: while a slider has focus, Left/Right arrows nudge
+        # its value by one step (the main window's image-navigation shortcuts
+        # defer to a focused AdjustSlider -- see _nav_shortcut_defers_to_
+        # slider in main.py). Clicking anywhere else returns focus, and with
+        # it arrow-key navigation.
+        self.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
         self._center_value: float | None = None  # None -> auto (0 if bipolar, else minimum)
         self._track_gradient: list[tuple[float, str]] | None = None
         self._accent = QColor(theme.EMBER)
+
+    def wheelEvent(self, event) -> None:
+        # One minimum step per wheel notch: Qt's default is
+        # singleStep * wheelScrollLines (3x) which overshoots fine-grained
+        # sliders like Straighten's 0.1-degree steps.
+        delta = event.angleDelta().y() or event.angleDelta().x()
+        if delta == 0:
+            event.ignore()
+            return
+        self.setValue(self.value() + (self.singleStep() if delta > 0 else -self.singleStep()))
+        # Wheel adjustments never pass through sliderReleased, so persist the
+        # same way a click-release does.
+        self.sliderReleased.emit()
+        event.accept()
 
     def set_center_value(self, value: float | None) -> None:
         """Override the fill's zero/reference point (e.g. as-shot Temperature
@@ -757,7 +777,8 @@ class ImageAdjustPanelWidget(QWidget):
             slider.setRange(spec.minimum, spec.maximum)
             slider.setSingleStep(spec.single_step)
             slider.setPageStep(max(spec.single_step, (spec.maximum - spec.minimum) // 20))
-            slider.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            # ClickFocus (from AdjustSlider.__init__) stays: a clicked slider
+            # owns Left/Right for value nudging until focus moves elsewhere.
             gradient = _SLIDER_TRACK_GRADIENTS.get(spec.key)
             if gradient is not None:
                 slider.set_track_gradient(gradient)

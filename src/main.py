@@ -4005,7 +4005,9 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 self._transform_grid_saved_mode = getattr(
                     self, "_composition_grid_mode", "off"
                 )
-                gv.set_composition_grid_mode("thirds")
+                # Fine 9x9 mesh: a 3x3 is too coarse to judge straightening /
+                # keystone convergence against.
+                gv.set_composition_grid_mode("fine")
             else:
                 gv.set_composition_grid_mode(
                     getattr(self, "_transform_grid_saved_mode", None)
@@ -15429,7 +15431,12 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             gj.refresh_gallery_edited_visuals()
 
     def _is_gallery_path_edited(self, file_path: str) -> bool:
-        """Cheap "has saved RAW adjustments" signal for the gallery badge."""
+        """Cheap "has saved RAW adjustments" signal for the gallery badge.
+
+        RAW-only: sidecars resolve by basename, so a JPEG next to an edited
+        RAW of the same name would otherwise be badged (and, since edited
+        previews landed, rendered) with the RAW's edits.
+        """
         from raw_adjustments import editing_features_enabled
 
         if not editing_features_enabled():
@@ -15437,8 +15444,11 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         if not file_path:
             return False
         try:
+            from common_image_loader import is_raw_file
             from raw_adjustments import resolve_xmp_path
 
+            if not is_raw_file(file_path):
+                return False
             xmp_path = resolve_xmp_path(file_path)
             return bool(xmp_path) and os.path.isfile(xmp_path)
         except Exception:
@@ -25719,7 +25729,30 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             return
         self._toggle_adjust_panel()
 
+    def _nav_shortcut_defers_to_slider(self, step: int) -> bool:
+        """When an Adjust-panel slider has (click) focus, Left/Right nudge its
+        value by one step instead of navigating images. The nav shortcuts are
+        ApplicationShortcut-scoped, so they fire before the focused widget
+        ever sees the key -- the deferral has to happen here."""
+        try:
+            from PyQt6.QtWidgets import QApplication
+
+            from rawviewer_ui.adjust_panel import AdjustSlider
+
+            w = QApplication.focusWidget()
+            if isinstance(w, AdjustSlider) and w.isVisible():
+                w.setValue(w.value() + step * w.singleStep())
+                # Arrow nudges never pass through sliderReleased; persist the
+                # same way a click-release does.
+                w.sliderReleased.emit()
+                return True
+        except Exception:
+            pass
+        return False
+
     def _shortcut_activate_nav_prev(self) -> None:
+        if self._nav_shortcut_defers_to_slider(-1):
+            return
         if getattr(self, "view_mode", "") == "compare":
             session = getattr(self, "_comparison_session", None)
             if session is not None and not session.complete:
@@ -25733,6 +25766,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self._navigate_single_view_step(-1)
 
     def _shortcut_activate_nav_next(self) -> None:
+        if self._nav_shortcut_defers_to_slider(+1):
+            return
         if getattr(self, "view_mode", "") == "compare":
             session = getattr(self, "_comparison_session", None)
             if session is not None and not session.complete:
