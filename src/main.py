@@ -15796,6 +15796,12 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         if gv is not None:
             gv._fit_mode = True
             gv._zoom_intent_100 = False
+        # The canonical clear, not the partial hand-rolled reset below: the
+        # PREVIOUS image's zoom-restore state (_restore_zoom_level,
+        # _pending_zoom_toggle, _pending_gpu_zoom_point, ...) otherwise
+        # re-applies its 100% to the NEWLY clicked image the moment its full
+        # buffer lands ("clicking a gallery image zooms to 100%").
+        self._clear_all_zoom_state()
         self._paint_instant_preview_for_path(file_path, prefer_gallery=True)
 
         # CRITICAL: Reset zoom state to fit-to-window when loading from gallery
@@ -26756,11 +26762,22 @@ class RAWImageViewer(SessionMixin, QMainWindow):
 
     def _clear_all_zoom_state(self):
         """Clear all variables that could cause accidental zoom restorations."""
-        for attr in ['_pending_zoom', '_pending_zoom_center', '_pending_zoom_thumbnail_size', 
-                     '_pending_zoom_level', '_pending_zoom_restore', '_restore_zoom_center', 
+        for attr in ['_pending_zoom', '_pending_zoom_center', '_pending_zoom_thumbnail_size',
+                     '_pending_zoom_level', '_pending_zoom_restore', '_restore_zoom_center',
                      '_restore_zoom_level', '_preserve_nav_zoom_active', '_maintain_zoom_on_navigation']:
             if hasattr(self, attr):
                 delattr(self, attr)
+        # GPU-era flags grew after this helper was written and were never
+        # added, so "clear all" callers still leaked deferred zooms through
+        # the GPU path (gallery -> single landed at the PREVIOUS image's 100%
+        # restore). Assign neutral values rather than delattr: unlike the
+        # legacy attrs above (always read through getattr), these are normal
+        # instance attributes other code reads directly.
+        self._pending_zoom_toggle = False
+        self._pending_gpu_zoom_point = None
+        self._pending_zoom_focus_subject = False
+        self._focus_zoom_anchor_active = False
+        self._smooth_zoom_full_request_sent = False
 
     def _gpu_request_full_resolution_if_needed(self):
         """When zooming in on the GPU view, request the full-res buffer if we only have a preview."""

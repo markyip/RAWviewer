@@ -865,7 +865,13 @@ class GpuImageView(QGraphicsView):
         was_fit_scale = False
         if capture:
             s_old = self.current_scale()
-            was_fit_scale = self.is_at_fit_scale()
+            # "Clearly above fit", not merely >= 100%: fit scale itself
+            # exceeds 1.0 for content smaller than the viewport, and the
+            # viewport can CHANGE between paints (gallery->single shows the
+            # container mid-transition), which made a plain is_at_fit_scale()
+            # comparison unreliable -- a fitted tile read as "user at 100%"
+            # and snapped, poisoning the zoom-intent machinery.
+            was_fit_scale = not (s_old > self.fit_scale() * 1.1)
             center_scene = self.mapToScene(self.viewport().rect().center())
             fx = center_scene.x() / old_w
             fy = center_scene.y() / old_h
@@ -963,7 +969,8 @@ class GpuImageView(QGraphicsView):
             was_fit_scale = False
             if capture:
                 s_old = self.current_scale()
-                was_fit_scale = self.is_at_fit_scale()
+                # See set_pixmap: "clearly above fit", not merely >= 100%.
+                was_fit_scale = not (s_old > self.fit_scale() * 1.1)
                 center_scene = self.mapToScene(self.viewport().rect().center())
                 fx = center_scene.x() / old_w
                 fy = center_scene.y() / old_h
@@ -1047,7 +1054,8 @@ class GpuImageView(QGraphicsView):
             was_fit_scale = False
             if capture:
                 s_old = self.current_scale()
-                was_fit_scale = self.is_at_fit_scale()
+                # See set_pixmap: "clearly above fit", not merely >= 100%.
+                was_fit_scale = not (s_old > self.fit_scale() * 1.1)
                 center_scene = self.mapToScene(self.viewport().rect().center())
                 fx = center_scene.x() / old_w
                 fy = center_scene.y() / old_h
