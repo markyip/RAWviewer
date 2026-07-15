@@ -48,6 +48,13 @@ def _verbose_orientation_logs() -> bool:
 
 # LibRaw cannot open some composite HDR DNGs; avoid repeated preview/decode attempts.
 _LIBRAW_UNSUPPORTED_PATHS: set[str] = set()
+
+# In-flight decode_raw_edit_base registry (module-level: workers build their
+# own UnifiedImageProcessor instances, so instance state cannot dedup them).
+import threading as _ebt  # noqa: E402
+
+_EDIT_BASE_INFLIGHT: dict = {}
+_EDIT_BASE_INFLIGHT_LOCK = _ebt.Lock()
 _LIBRAW_UNSUPPORTED_MAX = 2048
 
 
@@ -258,6 +265,53 @@ class UnifiedImageProcessor:
         buffer's final width/height), not as a per-tick pipeline adjustment.
         """
         skip_key = os.path.normcase(os.path.abspath(file_path))
+        # Module-level in-flight dedup: concurrent identical requests (the
+        # panel's base request racing a preview worker's, each on its OWN
+        # UnifiedImageProcessor instance) share one decode instead of queueing
+        # a redundant multi-hundred-ms unpack behind the global rawpy lock.
+        dedup_key = (skip_key, bool(use_full_resolution), bool(apply_lens_correction))
+        import threading as _threading
+
+        mine = False
+        while True:
+            with _EDIT_BASE_INFLIGHT_LOCK:
+                slot = _EDIT_BASE_INFLIGHT.get(dedup_key)
+                if slot is None:
+                    slot = {"event": _threading.Event(), "result": None}
+                    _EDIT_BASE_INFLIGHT[dedup_key] = slot
+                    mine = True
+            if mine:
+                break
+            slot["event"].wait(timeout=60.0)
+            if slot["result"] is not None:
+                return slot["result"]
+            # Owner failed or timed out: loop and try to become the owner.
+            with _EDIT_BASE_INFLIGHT_LOCK:
+                if _EDIT_BASE_INFLIGHT.get(dedup_key) is slot:
+                    _EDIT_BASE_INFLIGHT.pop(dedup_key, None)
+        try:
+            result = self._decode_raw_edit_base_impl(
+                file_path,
+                skip_key,
+                executor=executor,
+                use_full_resolution=use_full_resolution,
+                apply_lens_correction=apply_lens_correction,
+            )
+            slot["result"] = result
+            return result
+        finally:
+            with _EDIT_BASE_INFLIGHT_LOCK:
+                _EDIT_BASE_INFLIGHT.pop(dedup_key, None)
+            slot["event"].set()
+
+    def _decode_raw_edit_base_impl(
+        self,
+        file_path: str,
+        skip_key: str,
+        executor: Optional[Any] = None,
+        use_full_resolution: bool = False,
+        apply_lens_correction: bool = False,
+    ) -> Optional[np.ndarray]:
         from common_image_loader import dng_prefers_embedded_preview_first
         from raw_tone_recovery import edit_base_decode_params
 

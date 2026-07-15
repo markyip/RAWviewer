@@ -20122,7 +20122,15 @@ class RAWImageViewer(SessionMixin, QMainWindow):
 
     def _on_adjust_edit_base_ready(self, file_path: str, base, has_lens_profile: bool, lens_profile_name: str) -> None:
         norm = _norm_path(file_path)
-        self._adjust_edit_base_loading_norm = None
+        # Only clear the in-flight guard when it belongs to THIS completion:
+        # clearing unconditionally let a PREVIOUS image's late completion
+        # unlock a duplicate decode request for the current one -- every
+        # navigation with the panel open ran decode_raw_edit_base twice
+        # (doubled "[EDIT] Linear edit base" log lines), and the redundant
+        # unpacks queued behind the global rawpy lock inflated unpack times
+        # to seconds.
+        if getattr(self, "_adjust_edit_base_loading_norm", None) == norm:
+            self._adjust_edit_base_loading_norm = None
         if norm != _norm_path(getattr(self, "current_file_path", "") or ""):
             return
         panel = getattr(self, "single_image_adjust_panel", None)

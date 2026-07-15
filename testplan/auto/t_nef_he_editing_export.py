@@ -87,7 +87,11 @@ def main() -> int:
     )
 
     # --- decode_raw_edit_base: no embedded-JPEG substitute for NEF ---
+    # decode_raw_edit_base is now a thin in-flight-dedup wrapper around
+    # _decode_raw_edit_base_impl; the decode logic these checks inspect lives
+    # in the impl, so inspect both.
     src = inspect.getsource(uip.UnifiedImageProcessor.decode_raw_edit_base)
+    src += inspect.getsource(uip.UnifiedImageProcessor._decode_raw_edit_base_impl)
     check(
         "decode_raw_edit_base no longer builds a JPEG edit base via byte-scan",
         "extract_embedded_jpeg_by_scan(file_path, 0)" not in src,
