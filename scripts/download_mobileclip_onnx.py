@@ -19,8 +19,9 @@ MODELS_DIR = Path(__file__).resolve().parent.parent / "models" / "mobileclip_onn
 DOWNLOAD_RETRIES = 3
 RETRY_DELAY_SEC = 3
 
-VISION_PCT_END = 58
-TEXT_PCT_END = 98
+VISION_PCT_END = 57
+TEXT_PCT_END = 96
+DENOISE_PCT_END = 99
 
 
 def _human_bytes(num_bytes: int) -> str:
@@ -160,6 +161,22 @@ def main() -> int:
 
         shutil.rmtree(MODELS_DIR / "onnx")
 
+    denoise_model_path = MODELS_DIR.parent / "1xDeNoise_realplksr_otf.safetensors"
+    if not denoise_model_path.exists():
+        def _fetch_denoise_model():
+            print("[INFO] Fetching AI denoise model (realPLKSR)", flush=True)
+            _download_url_with_progress(
+                "https://github.com/Phhofm/models/releases/download/1xDeNoise_realplksr_otf/1xDeNoise_realplksr_otf.safetensors",
+                denoise_model_path,
+                stage_start=TEXT_PCT_END,
+                stage_end=DENOISE_PCT_END,
+                emit=emit_installer_progress,
+            )
+
+        rc = _download_with_retry("denoise model", _fetch_denoise_model)
+        if rc != 0:
+            return rc
+
     tokenizer_path = MODELS_DIR / "bpe_simple_vocab_16e6.txt.gz"
     if not tokenizer_path.exists():
         def _fetch_tokenizer():
@@ -167,7 +184,7 @@ def main() -> int:
             _download_url_with_progress(
                 "https://openaipublic.azureedge.net/clip/bpe_simple_vocab_16e6.txt.gz",
                 tokenizer_path,
-                stage_start=TEXT_PCT_END,
+                stage_start=DENOISE_PCT_END,
                 stage_end=100,
                 emit=emit_installer_progress,
             )

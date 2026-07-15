@@ -83,19 +83,25 @@ def _weights_path() -> Optional[str]:
     return None
 
 
+def nn_denoise_weights_present() -> bool:
+    return _weights_path() is not None
+
+
 def nn_denoise_available() -> bool:
-    """CUDA + spandrel + weights all present (cheap after the first call)."""
+    """CUDA/MPS + spandrel all present (cheap after the first call)."""
     if _model is not None:
         return True
     if _model_failed:
-        return False
-    if _weights_path() is None:
         return False
     try:
         import spandrel  # noqa: F401
         import torch
 
-        return bool(torch.cuda.is_available())
+        if torch.cuda.is_available():
+            return True
+        if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+            return True
+        return False
     except Exception:
         return False
 
@@ -110,13 +116,19 @@ def _load_model():
             from spandrel import ModelLoader
 
             path = _weights_path()
-            if path is None or not torch.cuda.is_available():
-                raise RuntimeError("weights or CUDA unavailable")
+            device_name = "cpu"
+            if torch.cuda.is_available():
+                device_name = "cuda"
+            elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+                device_name = "mps"
+
+            if path is None or device_name == "cpu":
+                raise RuntimeError("weights or CUDA/MPS unavailable")
             desc = ModelLoader().load_from_file(path)
-            _model = desc.model.cuda().eval().to(torch.float16)
+            _model = desc.model.to(device_name).eval().to(torch.float16)
             logger.info(
-                "[NN_DENOISE] loaded %s (%s) fp16/cuda",
-                os.path.basename(path), desc.architecture.name,
+                "[NN_DENOISE] loaded %s (%s) fp16/%s",
+                os.path.basename(path), desc.architecture.name, device_name,
             )
         except Exception as e:
             logger.warning("[NN_DENOISE] model load failed: %s", e)
@@ -160,11 +172,12 @@ def denoise_display_float(rgb01: np.ndarray) -> Optional[np.ndarray]:
                     ys, xs = max(0, y0 - _MARGIN), max(0, x0 - _MARGIN)
                     ye, xe = min(h, y0 + step + _MARGIN), min(w, x0 + step + _MARGIN)
                     tile = np.ascontiguousarray(rgb01[ys:ye, xs:xe])
+                    device = next(model.parameters()).device
                     t = (
                         torch.from_numpy(tile)
                         .permute(2, 0, 1)
                         .unsqueeze(0)
-                        .to("cuda", torch.float16)
+                        .to(device, torch.float16)
                     )
                     r = model(t).clamp_(0, 1)
                     r = r.squeeze(0).permute(1, 2, 0).float().cpu().numpy()

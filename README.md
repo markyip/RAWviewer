@@ -84,6 +84,13 @@ Both editions share the same viewer, culling tools, star ratings, bookmarks, and
 
 Pick **Lite** for a smaller install and browse-by-eye workflow. Pick **Full** to search with everyday words — still 100% offline.
 
+### AI Denoise (Optional)
+
+RAWviewer supports an optional neural denoise model (realPLKSR) for high-quality noise reduction during export. To enable AI denoise:
+1. Download **`1xDeNoise_realplksr_otf.safetensors`** from [OpenModelDB](https://openmodeldb.info/models/1x-DeNoise-realplksr-otf). (Model by Philip Hofmann, CC-BY-4.0).
+2. Place the file in `%LOCALAPPDATA%\RAWviewer\models\` on Windows, or `models/` inside the macOS app bundle (or specify the path via the `RAWVIEWER_NN_DENOISE_MODEL` environment variable).
+3. The option "JPEG + AI denoise (realPLKSR)" will appear in the export format dropdown in the Adjust panel if your system has a compatible GPU.
+
 ---
 
 ## GPS map overlay & geotagging

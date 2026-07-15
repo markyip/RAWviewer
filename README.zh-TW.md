@@ -83,6 +83,13 @@
 
 選 **Lite** 可獲較小安裝包，以目視瀏覽為主。選 **Full** 可用日常用語搜尋——仍為 **100% 離線**。
 
+### AI 降噪（選用）
+
+RAWviewer 支援選用的神經網路降噪模型（realPLKSR），可在匯出時提供高品質的雜訊抑制。若要啟用 AI 降噪：
+1. 從 [OpenModelDB](https://openmodeldb.info/models/1x-DeNoise-realplksr-otf) 下載 **`1xDeNoise_realplksr_otf.safetensors`**。（模型作者：Philip Hofmann，CC-BY-4.0）。
+2. 在 Windows 上，將檔案放置於 `%LOCALAPPDATA%\RAWviewer\models\`，macOS 則放於應用程式套件內的 `models/`（或透過 `RAWVIEWER_NN_DENOISE_MODEL` 環境變數指定路徑）。
+3. 若您的系統具備相容的 GPU，調整面板的匯出格式下拉選單中將出現「JPEG + AI denoise (realPLKSR)」選項。
+
 ---
 
 ## GPS 地圖疊圖與地理標記
