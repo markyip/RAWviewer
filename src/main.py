@@ -15765,8 +15765,20 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         
         # Mark that we're loading from gallery view - this will trigger full resolution load
         self._loading_from_gallery = True
+        # Reset the GPU view's OWN fit state BEFORE painting the instant tile:
+        # the legacy variables below only cover the QLabel route. If the user
+        # left the previous single image zoomed (fit_mode False), the tile
+        # paint took set_pixmap's preserve-view branch and treated the NEW
+        # image's small gallery tile as a same-content downgrade of the OLD
+        # image -- s_new = s_old * old_w/tile_w blew up to ~14x ("clicking a
+        # gallery image lands on a zoomed-in view", every image once the
+        # stale non-fit state stuck).
+        gv = getattr(self, "gpu_view", None)
+        if gv is not None:
+            gv._fit_mode = True
+            gv._zoom_intent_100 = False
         self._paint_instant_preview_for_path(file_path, prefer_gallery=True)
-        
+
         # CRITICAL: Reset zoom state to fit-to-window when loading from gallery
         # This ensures we don't land on a zoomed-in view
         self.fit_to_window = True

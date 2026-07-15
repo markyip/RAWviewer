@@ -862,8 +862,10 @@ class GpuImageView(QGraphicsView):
 
         capture = preserve_view and had_pixmap and old_w > 0 and old_h > 0
         s_old = fx = fy = None
+        was_fit_scale = False
         if capture:
             s_old = self.current_scale()
+            was_fit_scale = self.is_at_fit_scale()
             center_scene = self.mapToScene(self.viewport().rect().center())
             fx = center_scene.x() / old_w
             fy = center_scene.y() / old_h
@@ -913,7 +915,12 @@ class GpuImageView(QGraphicsView):
             and is_upgrade
             and (
                 getattr(self, "_zoom_intent_100", False)
-                or (s_old is not None and s_old >= 1.0 - 1e-4)
+                # s_old >= 1 means "user was at/above 100%" ONLY when the view
+                # was not simply fitted: content smaller than the viewport has
+                # a fit scale >= 1, and treating that as 100%-intent snapped a
+                # freshly fitted gallery tile to "100%" on gallery->single
+                # ("clicking a gallery image lands on a zoomed-in view").
+                or (s_old is not None and s_old >= 1.0 - 1e-4 and not was_fit_scale)
             )
         ):
             s_new = 1.0
@@ -953,8 +960,10 @@ class GpuImageView(QGraphicsView):
                 preserve_view = not self._fit_mode
             capture = preserve_view and had_pixmap and old_w > 0 and old_h > 0
             s_old = fx = fy = None
+            was_fit_scale = False
             if capture:
                 s_old = self.current_scale()
+                was_fit_scale = self.is_at_fit_scale()
                 center_scene = self.mapToScene(self.viewport().rect().center())
                 fx = center_scene.x() / old_w
                 fy = center_scene.y() / old_h
@@ -988,7 +997,9 @@ class GpuImageView(QGraphicsView):
                 and is_upgrade
                 and (
                     getattr(self, "_zoom_intent_100", False)
-                    or (s_old is not None and s_old >= 1.0 - 1e-4)
+                    # See set_pixmap: fit scale >= 1 for content smaller
+                    # than the viewport must not read as 100%-intent.
+                    or (s_old is not None and s_old >= 1.0 - 1e-4 and not was_fit_scale)
                 )
             ):
                 s_new = 1.0
@@ -1033,8 +1044,10 @@ class GpuImageView(QGraphicsView):
                 preserve_view = not self._fit_mode
             capture = preserve_view and had_pixmap and old_w > 0 and old_h > 0
             s_old = fx = fy = None
+            was_fit_scale = False
             if capture:
                 s_old = self.current_scale()
+                was_fit_scale = self.is_at_fit_scale()
                 center_scene = self.mapToScene(self.viewport().rect().center())
                 fx = center_scene.x() / old_w
                 fy = center_scene.y() / old_h
@@ -1068,7 +1081,9 @@ class GpuImageView(QGraphicsView):
                 and is_upgrade
                 and (
                     getattr(self, "_zoom_intent_100", False)
-                    or (s_old is not None and s_old >= 1.0 - 1e-4)
+                    # See set_pixmap: fit scale >= 1 for content smaller
+                    # than the viewport must not read as 100%-intent.
+                    or (s_old is not None and s_old >= 1.0 - 1e-4 and not was_fit_scale)
                 )
             ):
                 s_new = 1.0
