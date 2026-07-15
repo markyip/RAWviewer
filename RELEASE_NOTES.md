@@ -14,7 +14,7 @@ It is built as a faster **browse / cull** release on top of 2.5: featuring **Fas
 - The **Adjust / Develop editing panel** is now fully integrated and on by default for all users.
 - Includes tone curve, lens correction, detail, chroma denoise, dodge/burn, and PV2012-style develops.
 - Editing actions are non-destructive and save directly to **XMP** sidecars (`RAWVIEWER_SIDECAR_ADJUST=1` by default).
-- **Auto WB & Auto Straighten**: Added automatic white balance and one-click horizon straightening.
+- **Auto WB**: Added automatic white balance estimation.
 - **Hover-focusable sliders**: Adjust sliders now accept keyboard input (`+`/`-` or arrows) when hovered.
 - **Export Progress with Cancel**: Modal dialog with progress bar and cancel support for baked exports.
 - **Accurate Edited Previews**: Enhanced accuracy for edited previews and constrained sidecar saving to RAW-only.

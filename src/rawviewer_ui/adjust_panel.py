@@ -400,7 +400,6 @@ class ImageAdjustPanelWidget(QWidget):
     # One-shot auto adjustments (see raw_auto_adjust.py); the host computes
     # from the edit base and writes the result back through the sliders.
     auto_wb_requested = pyqtSignal()
-    auto_straighten_requested = pyqtSignal()
     dodge_burn_mode_changed = pyqtSignal(object)
     dodge_burn_clear_requested = pyqtSignal()
     dodgeBurnMaskToggled = pyqtSignal(bool)
@@ -501,17 +500,23 @@ class ImageAdjustPanelWidget(QWidget):
             QPushButton#adjust_nr_btn:hover {{
                 color: {theme.INK};
             }}
-            QPushButton#adjust_wb_picker_btn {{
+            QPushButton#adjust_wb_picker_btn, QPushButton#adjust_auto_wb_btn {{
                 border: 1px solid {theme.rgba(theme.INK_RGB, 35)};
                 border-radius: 4px;
                 background: {theme.rgba(theme.INK_RGB, 12)};
                 padding: 0px;
             }}
-            QPushButton#adjust_wb_picker_btn:checked {{
+            QPushButton#adjust_auto_wb_btn {{
+                padding: 0px 4px;
+                color: {theme.INK_MUTED};
+                font-size: 10px;
+                font-weight: 600;
+            }}
+            QPushButton#adjust_wb_picker_btn:checked, QPushButton#adjust_auto_wb_btn:checked {{
                 border-color: {theme.rgba(theme.EMBER_RGB, 90)};
                 background: {theme.rgba(theme.EMBER_RGB, 30)};
             }}
-            QPushButton#adjust_wb_picker_btn:hover {{
+            QPushButton#adjust_wb_picker_btn:hover, QPushButton#adjust_auto_wb_btn:hover {{
                 background: {theme.rgba(theme.INK_RGB, 24)};
             }}
             QPushButton#adjust_compare_btn {{
@@ -604,16 +609,6 @@ class ImageAdjustPanelWidget(QWidget):
         self.sect_light = CollapsibleSection("Light", settings_key="light")
         self.sect_color = CollapsibleSection("Color / WB", settings_key="color")
         self.sect_transform = CollapsibleSection("Transform", settings_key="transform")
-        auto_str = QPushButton("Auto straighten")
-        auto_str.setObjectName("adjust_reset_btn")  # compact style
-        auto_str.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        auto_str.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        auto_str.setToolTip(
-            "Detect the dominant near-horizontal/vertical lines and set "
-            "Straighten to bring them true"
-        )
-        auto_str.clicked.connect(lambda: self.auto_straighten_requested.emit())
-        self.sect_transform.add_widget(auto_str)
 
         self.sect_curve = CollapsibleSection("Tone Curve", settings_key="curve")
         if not _SHOW_TONE_CURVE_UI:
@@ -1172,14 +1167,12 @@ class ImageAdjustPanelWidget(QWidget):
         btn.toggled.connect(self._on_wb_picker_toggled)
         row.addWidget(btn)
         self._wb_picker_btn = btn
-        auto = QPushButton()
-        auto.setObjectName("adjust_wb_picker_btn")  # share the compact style
-        auto.setFixedSize(20, 20)
-        auto.setIconSize(QSize(12, 12))
+        auto = QPushButton("AUTO")
+        auto.setObjectName("adjust_auto_wb_btn")
+        auto.setFixedHeight(20)
         auto.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         auto.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         auto.setToolTip("Auto white balance — estimate from the image (robust gray-world)")
-        auto.setIcon(_qta_icon_safe("fa5s.magic", color=theme.INK_MUTED))
         auto.clicked.connect(lambda: self.auto_wb_requested.emit())
         row.addWidget(auto)
 

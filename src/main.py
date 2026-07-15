@@ -8262,9 +8262,6 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             self.single_image_adjust_panel.auto_wb_requested.connect(
                 self._on_auto_wb_requested
             )
-            self.single_image_adjust_panel.auto_straighten_requested.connect(
-                self._on_auto_straighten_requested
-            )
             self.single_image_adjust_panel.export_requested.connect(
                 self._on_adjust_panel_export_requested
             )
@@ -9094,6 +9091,11 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self._shortcut_compare.setContext(Qt.ShortcutContext.ApplicationShortcut)
         self._shortcut_compare.setAutoRepeat(False)
         self._shortcut_compare.activated.connect(self._shortcut_activate_compare)
+
+        self._shortcut_undo = QShortcut(QKeySequence("Ctrl+Z"), self)
+        self._shortcut_undo.setContext(Qt.ShortcutContext.ApplicationShortcut)
+        self._shortcut_undo.setAutoRepeat(False)
+        self._shortcut_undo.activated.connect(self._shortcut_activate_undo)
 
         self._shortcut_gallery_up = QShortcut(QKeySequence(Qt.Key.Key_Up), self)
         self._shortcut_gallery_up.setContext(Qt.ShortcutContext.ApplicationShortcut)
@@ -20684,13 +20686,23 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         # request; the (comparatively slow) XMP write below doesn't block it.
         self._apply_adjust_panel_preview(full_quality=True)
         try:
-            from raw_adjustments import write_xmp_adjustments_for_file
+            from raw_adjustments import load_adjustments_for_file, write_xmp_adjustments_for_file
             from raw_dodge_burn import (
                 DEFAULT_STRENGTH,
                 MASK_KEY,
                 STRENGTH_KEY,
                 serialize_mask,
             )
+
+            if not getattr(self, "_disable_undo_tracking", False):
+                if not hasattr(self, "_undo_stack"):
+                    self._undo_stack = {}
+                old_adj = load_adjustments_for_file(path)
+                history = self._undo_stack.setdefault(path, [])
+                if not history or history[-1] != old_adj:
+                    history.append(old_adj)
+                    if len(history) > 50:
+                        history.pop(0)
 
             # The dodge/burn mask lives in main.py state (painted via the
             # GPU view, not a panel slider) -- fold it into whatever this
@@ -20955,37 +20967,6 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         panel.apply_picked_white_balance(temperature, tint)
         if hasattr(self, "status_bar"):
             self.status_bar.showMessage(f"Auto white balance ({int(round(temperature))}K)", 3000)
-
-    def _on_auto_straighten_requested(self) -> None:
-        """Auto straighten: dominant near-axis line tilt on the edit base sets
-        the Straighten slider (through the normal save/preview path)."""
-        panel = getattr(self, "single_image_adjust_panel", None)
-        base = getattr(self, "_adjust_preview_base_rgb", None)
-        if panel is None or base is None or not hasattr(base, "shape"):
-            if hasattr(self, "status_bar"):
-                self.status_bar.showMessage("Auto straighten needs a decoded RAW edit base — try again in a moment", 3000)
-            return
-        import numpy as _np
-
-        from raw_auto_adjust import estimate_straighten_angle
-        from raw_edit_pipeline import _linear_float_from_buffer
-
-        # Cheap display-referred render for edge detection (gamma-only; line
-        # geometry does not care about exact tone).
-        lin = _linear_float_from_buffer(base)
-        disp = (_np.clip(lin, 0.0, 1.0) ** (1.0 / 2.2) * 255.0).astype(_np.uint8)
-        angle = estimate_straighten_angle(disp)
-        if angle is None:
-            if hasattr(self, "status_bar"):
-                self.status_bar.showMessage("Auto straighten: no dominant horizontal/vertical line found", 3000)
-            return
-        adj = panel.get_adjustments()
-        adj["CropAngle"] = float(angle)
-        panel.set_adjustments(adj)
-        # Same path as a slider release: full-quality preview + XMP write.
-        self._on_adjust_panel_editing_finished(panel.get_adjustments())
-        if hasattr(self, "status_bar"):
-            self.status_bar.showMessage(f"Auto straighten: {angle:+.2f}°", 3000)
 
     def _on_adjust_panel_export_requested(self, export_format: str, adj: dict) -> None:
         logger = logging.getLogger(__name__)
@@ -25995,6 +25976,33 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             if self._is_exif_sort_ready():
                 self.toggle_view_mode()
 
+    def _shortcut_activate_undo(self) -> None:
+        if self._shortcut_blocked_by_text_input():
+            return
+        path = getattr(self, "current_file_path", None)
+        if not path:
+            return
+        stack = getattr(self, "_undo_stack", {})
+        history = stack.get(path, [])
+        if not history:
+            if hasattr(self, "status_bar"):
+                self.status_bar.showMessage("Nothing to undo for this image", 2500)
+            return
+        
+        old_adj = history.pop()
+        
+        self._disable_undo_tracking = True
+        try:
+            panel = getattr(self, "single_image_adjust_panel", None)
+            if panel is not None:
+                panel.set_adjustments(old_adj)
+                self._on_adjust_panel_editing_finished(old_adj)
+        finally:
+            self._disable_undo_tracking = False
+        
+        if hasattr(self, "status_bar"):
+            self.status_bar.showMessage("Undo applied", 2500)
+
     def _shortcut_activate_compare(self) -> None:
         if self._shortcut_blocked_by_text_input():
             return
@@ -26163,6 +26171,9 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             return True
         elif key == Qt.Key.Key_C:
             self._shortcut_activate_compare()
+            return True
+        elif key == Qt.Key.Key_Z and event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+            self._shortcut_activate_undo()
             return True
         elif key == Qt.Key.Key_Up:
             self._shortcut_activate_gallery_up()
