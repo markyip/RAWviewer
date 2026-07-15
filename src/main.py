@@ -20856,21 +20856,26 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             EXPORT_FORMAT_WEBP,
         )
 
-        fmt = (export_format or EXPORT_FORMAT_TIFF16).strip().lower()
+        # "<fmt>_nn" = AI-denoise variant (see export_adjusted_image); the
+        # suffix rides along in export_format for the pipeline dispatch, but
+        # filename/filter/extension logic keys off the base format.
+        raw_fmt = (export_format or EXPORT_FORMAT_TIFF16).strip().lower()
+        nn_suffix = " + AI denoise" if raw_fmt.endswith("_nn") else ""
+        fmt = raw_fmt[:-len("_nn")] if raw_fmt.endswith("_nn") else raw_fmt
         base = os.path.splitext(os.path.basename(path))[0]
         start_dir = os.path.dirname(os.path.abspath(path))
 
         if fmt == EXPORT_FORMAT_JPEG:
             default_name = f"{base}_edited.jpg"
-            dialog_title = "Export JPEG"
+            dialog_title = "Export JPEG" + nn_suffix
             file_filter = "JPEG (*.jpg *.jpeg)"
         elif fmt == EXPORT_FORMAT_WEBP:
             default_name = f"{base}_edited.webp"
-            dialog_title = "Export WebP"
+            dialog_title = "Export WebP" + nn_suffix
             file_filter = "WebP (*.webp)"
         else:
             default_name = f"{base}_edited.tif"
-            dialog_title = "Export 16-bit TIFF"
+            dialog_title = "Export 16-bit TIFF" + nn_suffix
             file_filter = "TIFF (*.tif *.tiff)"
 
         if fmt == EXPORT_FORMAT_JPEG:
@@ -20931,7 +20936,9 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             output_path += ".tif"
 
         self._adjust_export_in_progress = True
-        self._adjust_export_format = fmt
+        # raw_fmt, not fmt: the "_nn" AI-denoise suffix must reach
+        # export_adjusted_image's dispatch.
+        self._adjust_export_format = raw_fmt
         panel = getattr(self, "single_image_adjust_panel", None)
         if panel is not None and hasattr(panel, "set_export_enabled"):
             panel.set_export_enabled(False)
