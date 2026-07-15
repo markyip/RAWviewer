@@ -47,51 +47,61 @@ if [ ! -f "icons/appicon.icns" ]; then
     echo "The app will be built without a custom icon."
 fi
 
-VENV_DIR="$REPO_ROOT/rawviewer_env"
-PYTHON_BIN="$VENV_DIR/bin/python3"
-
-if [ ! -d "$VENV_DIR" ]; then
-    echo "Creating virtual environment..."
-    python3 -m venv "$VENV_DIR"
-    echo "Virtual environment created."
+USE_PIXI=0
+if command -v pixi >/dev/null 2>&1 && [ -f "pixi.toml" ]; then
+    USE_PIXI=1
 fi
 
-if [ ! -x "$PYTHON_BIN" ]; then
-    echo "[ERROR] Missing venv interpreter: $PYTHON_BIN"
-    echo "Remove the broken folder and re-run: rm -rf rawviewer_env"
-    exit 1
-fi
-
-echo "Using virtual environment: $VENV_DIR"
-
-if command -v brew >/dev/null 2>&1; then
-    echo "Checking Homebrew dependencies for pyexiv2 (inih, gettext)..."
-    brew list inih &>/dev/null || brew install inih
-    brew list gettext &>/dev/null || brew install gettext
+if [ "$USE_PIXI" = "1" ]; then
+    echo "Pixi environment detected. Using Pixi to build for identical performance and dependencies..."
+    PYTHON_BIN="pixi run python"
 else
-    echo "[INFO] brew not on PATH. If the build fails on pyexiv2: install Homebrew, then: brew install inih gettext"
+    VENV_DIR="$REPO_ROOT/rawviewer_env"
+    PYTHON_BIN="$VENV_DIR/bin/python3"
+
+    if [ ! -d "$VENV_DIR" ]; then
+        echo "Creating virtual environment..."
+        python3 -m venv "$VENV_DIR"
+        echo "Virtual environment created."
+    fi
+
+    if [ ! -x "$PYTHON_BIN" ]; then
+        echo "[ERROR] Missing venv interpreter: $PYTHON_BIN"
+        echo "Remove the broken folder and re-run: rm -rf rawviewer_env"
+        exit 1
+    fi
+
+    echo "Using virtual environment: $VENV_DIR"
+
+    if command -v brew >/dev/null 2>&1; then
+        echo "Checking Homebrew dependencies for pyexiv2 (inih, gettext)..."
+        brew list inih &>/dev/null || brew install inih
+        brew list gettext &>/dev/null || brew install gettext
+    else
+        echo "[INFO] brew not on PATH. If the build fails on pyexiv2: install Homebrew, then: brew install inih gettext"
+    fi
+
+    echo "Upgrading pip..."
+    "$PYTHON_BIN" -m pip install --upgrade pip
+
+    echo "Installing core dependencies..."
+    CORE_DEPS="PyQt6 rawpy send2trash pyinstaller natsort exifread Pillow psutil numpy qtawesome pycountry certifi pyobjc-framework-Cocoa pyobjc-framework-Quartz opencv-python-headless pillow-heif tifffile lensfunpy"
+    if [[ "$PROFILE" == "full" ]]; then
+        CORE_DEPS="$CORE_DEPS requests huggingface-hub pyobjc-framework-CoreML pyobjc-framework-Vision"
+    fi
+    "$PYTHON_BIN" -m pip install --upgrade $CORE_DEPS
+
+    echo "Installing required dependency: pyexiv2..."
+    if ! "$PYTHON_BIN" -m pip install --upgrade pyexiv2; then
+        echo "[ERROR] pyexiv2 install failed (required for macOS release builds)."
+        echo "  Install native libraries, then re-run:"
+        echo "    brew install inih gettext"
+        exit 1
+    fi
+    echo "[INFO] pyexiv2 installed (Exiv2 / focus-point path enabled)."
+
+    "$PYTHON_BIN" -m pip uninstall -y sentence-transformers torch torchvision transformers scikit-learn tokenizers safetensors coremltools >/dev/null 2>&1 || true
 fi
-
-echo "Upgrading pip..."
-"$PYTHON_BIN" -m pip install --upgrade pip
-
-echo "Installing core dependencies..."
-CORE_DEPS="PyQt6 rawpy send2trash pyinstaller natsort exifread Pillow psutil numpy qtawesome pycountry certifi pyobjc-framework-Cocoa pyobjc-framework-Quartz opencv-python-headless pillow-heif tifffile lensfunpy"
-if [[ "$PROFILE" == "full" ]]; then
-    CORE_DEPS="$CORE_DEPS requests huggingface-hub pyobjc-framework-CoreML pyobjc-framework-Vision"
-fi
-"$PYTHON_BIN" -m pip install --upgrade $CORE_DEPS
-
-echo "Installing required dependency: pyexiv2..."
-if ! "$PYTHON_BIN" -m pip install --upgrade pyexiv2; then
-    echo "[ERROR] pyexiv2 install failed (required for macOS release builds)."
-    echo "  Install native libraries, then re-run:"
-    echo "    brew install inih gettext"
-    exit 1
-fi
-echo "[INFO] pyexiv2 installed (Exiv2 / focus-point path enabled)."
-
-"$PYTHON_BIN" -m pip uninstall -y sentence-transformers torch torchvision transformers scikit-learn tokenizers safetensors coremltools >/dev/null 2>&1 || true
 
 echo "Cleaning previous builds..."
 chmod -R u+w build dist 2>/dev/null || true
