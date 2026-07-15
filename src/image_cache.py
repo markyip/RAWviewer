@@ -1673,9 +1673,12 @@ class ImageCache(QObject):
         )  # High-res preview working set (RAM-adaptive)
         self.full_image_cache = LRUCache(max_size=cache_sizes['full_images'])
         self.pixmap_cache = LRUCache(max_size=cache_sizes['full_images'])
-        # Session-scoped provenance: preview keys whose pixels came from the
-        # LibRaw pipeline (see put_preview(libraw_rendered=True)).
         self.libraw_preview_paths: set = set()
+        if self.cache_dir:
+            self._libraw_preview_paths_file = os.path.join(self.cache_dir, "libraw_preview_paths.json")
+            self._load_libraw_preview_paths()
+        else:
+            self._libraw_preview_paths_file = None
         # Session-scoped provenance: full_image_cache keys currently holding an
         # embedded-JPEG stand-in rather than the app's own RAW-decoded pixels
         # (see mark_full_image_source). Many camera bodies (Canon CR3, Sony
@@ -2359,8 +2362,11 @@ class ImageCache(QObject):
             if libraw_rendered:
                 self.libraw_preview_paths.add(key)
                 self._prune_libraw_preview_paths()
+                self._save_libraw_preview_paths()
             else:
-                self.libraw_preview_paths.discard(key)
+                if key in self.libraw_preview_paths:
+                    self.libraw_preview_paths.discard(key)
+                    self._save_libraw_preview_paths()
             if jpeg_data is not None:
                 cap = disk_preview_max_edge()
                 jpeg_data = _jpeg_bytes_max_edge(jpeg_data, cap)
@@ -2860,6 +2866,11 @@ class ImageCache(QObject):
         self.full_image_cache.clear()
         self.pixmap_cache.clear()
         self.libraw_preview_paths.clear()
+        if self._libraw_preview_paths_file and os.path.isfile(self._libraw_preview_paths_file):
+            try:
+                os.remove(self._libraw_preview_paths_file)
+            except Exception:
+                pass
         self.full_image_embedded_jpeg_paths.clear()
         self.exif_cache.clear()
         self.exif_memory_cache.clear()
@@ -2952,9 +2963,28 @@ class ImageCache(QObject):
         )
         return usage_mb
 
+    def _load_libraw_preview_paths(self) -> None:
+        try:
+            if self._libraw_preview_paths_file and os.path.isfile(self._libraw_preview_paths_file):
+                import json
+                with open(self._libraw_preview_paths_file, "r", encoding="utf-8") as f:
+                    self.libraw_preview_paths = set(json.load(f))
+        except Exception:
+            self.libraw_preview_paths = set()
+
+    def _save_libraw_preview_paths(self) -> None:
+        try:
+            if self._libraw_preview_paths_file:
+                import json
+                with open(self._libraw_preview_paths_file, "w", encoding="utf-8") as f:
+                    json.dump(list(self.libraw_preview_paths), f)
+        except Exception:
+            pass
+
     def close(self):
         """Close all persistent cache connections."""
         self._closing = True
+        self._save_libraw_preview_paths()
         
         with self._orient_verify_lock:
             self._orient_verify_queue.clear()

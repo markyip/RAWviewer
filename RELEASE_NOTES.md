@@ -11,6 +11,8 @@ It is built as a faster **browse / cull** release on top of 2.5: featuring **Fas
 ### 🚀 Key Feature Highlights
 
 #### 🎨 Full Editing Functions
+> [!WARNING]
+> **Disclaimer:** The editing feature is currently experimental. We cannot guarantee compatibility with all camera models, especially newly released models.
 - The **Adjust / Develop editing panel** is now fully integrated and on by default for all users.
 - Includes tone curve, lens correction, detail, chroma denoise, dodge/burn, and PV2012-style develops.
 - Editing actions are non-destructive and save directly to **XMP** sidecars (`RAWVIEWER_SIDECAR_ADJUST=1` by default).
@@ -64,6 +66,12 @@ It is built as a faster **browse / cull** release on top of 2.5: featuring **Fas
 1. Optional: run **`clear_cache`** once if tiles look stale after the cache version bump.
 2. Open a mix of ARW / CR3 / NEF (including HE\*): arrow through, zoom to 100%, confirm orientation.
 3. Rate with **1–5**, filter gallery by stars, confirm sidecars.
+
+### ⚠️ Known Issues & Upcoming Features
+
+- **Known Issue (Unstable Live Preview Updates)**: In the gallery view and single-image non-RAW mode, edited thumbnails/single images can sometimes display the original unedited embedded version instead of the edited version. This occurs due to cache synchronization delays and worker-thread queue performance under heavy load.
+- **Known Issue (Unsupported RAW Formats for Editing)**: Nikon HE-NEF (High Efficiency) files cannot unpack the RAW image data, so RAWviewer can only show the embedded JPEG and they remain browse-only. The Adjust/Develop editing panel is disabled for these formats.
+- **Upcoming Feature (Real-Time Live Edit Synchronization)**: True real-time live updates of adjustments to gallery view tiles and single-image non-RAW previews is planned for a future update to ensure smooth and stable visual synchronization.
 
 ---
 

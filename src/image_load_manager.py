@@ -1644,7 +1644,7 @@ class ImageLoadManager(QObject):
         )
 
         is_raw = is_raw_file(file_path)
-        libraw_first = use_libraw_consistent_preview_first()
+        libraw_first = use_libraw_consistent_preview_first(file_path)
         wanted = stages if stages is not None else {'thumbnail', 'exif', 'full'}
 
         cache = self._cache
@@ -1736,6 +1736,11 @@ class ImageLoadManager(QObject):
                         exif_data = cache.exif_cache.get(file_path)
                         preview = cache.preview_cache.get(file_path)
                         if preview is not None:
+                            if cache.is_libraw_preview(file_path):
+                                self._emit_cached_result_later(
+                                    self.image_ready, file_path, preview
+                                )
+                                return True
                             h, w = preview.shape[:2]
                             if image_covers_sensor_resolution(w, h, exif_data):
                                 self._emit_cached_result_later(

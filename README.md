@@ -87,9 +87,9 @@ Pick **Lite** for a smaller install and browse-by-eye workflow. Pick **Full** to
 ### AI Denoise (Optional)
 
 RAWviewer supports an optional neural denoise model (realPLKSR) for high-quality noise reduction during export. To enable AI denoise:
-1. Download **`1xDeNoise_realplksr_otf.safetensors`** from [OpenModelDB](https://openmodeldb.info/models/1x-DeNoise-realplksr-otf). (Model by Philip Hofmann, CC-BY-4.0).
-2. Place the file in `%LOCALAPPDATA%\RAWviewer\models\` on Windows, or `models/` inside the macOS app bundle (or specify the path via the `RAWVIEWER_NN_DENOISE_MODEL` environment variable).
-3. The option "JPEG + AI denoise (realPLKSR)" will appear in the export format dropdown in the Adjust panel if your system has a compatible GPU.
+1. **Windows**: The setup installer automatically downloads and installs the denoise model weights (`1xDeNoise_realplksr_otf.safetensors`, model by Philip Hofmann, CC-BY-4.0) during first setup.
+2. **macOS**: The app automatically prompts and handles the model download in-app the first time you attempt to export an image using the "AI denoise" option.
+3. The options "JPEG + AI denoise (realPLKSR)" and "16-bit TIFF + AI denoise" will appear in the export dropdown in the Adjust panel if your system has a compatible GPU (requires a CUDA-compatible GPU on Windows or an Apple Silicon GPU on macOS).
 
 ---
 
@@ -334,6 +334,7 @@ Not in a release yet — tracked separately.
 **Multithreaded LibRaw (macOS dev builds)** — The PyPI rawpy wheel bundles a single-threaded LibRaw on macOS/Linux (Windows wheels already ship OpenMP). `scripts/build_libraw_openmp.sh` rebuilds LibRaw with OpenMP and swaps it into the Pixi env — roughly 1.5–2× faster unpack on CR3/RAF/pana8. Local dev-env only; re-apply after `pixi install`. Verify with `scripts/check_libraw_parallelism.py <raw file>`.
 
 **Future Development Plan:**
+- **Live Edit Synchronization**: Stabilize and implement real-time live updates of adjustment sidecars across gallery thumbnails and single-image non-RAW previews (currently a known issue where original/cached unedited embedded previews are shown due to cache sync delays).
 - **White balance preset support**: Add standard and custom WB presets.
 - **LUT support**: Allow users to load and apply custom color lookup tables.
 - **Masking for the editor**: Introduce local adjustments and selective masking.

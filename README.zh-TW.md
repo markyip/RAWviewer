@@ -86,9 +86,9 @@
 ### AI 降噪（選用）
 
 RAWviewer 支援選用的神經網路降噪模型（realPLKSR），可在匯出時提供高品質的雜訊抑制。若要啟用 AI 降噪：
-1. 從 [OpenModelDB](https://openmodeldb.info/models/1x-DeNoise-realplksr-otf) 下載 **`1xDeNoise_realplksr_otf.safetensors`**。（模型作者：Philip Hofmann，CC-BY-4.0）。
-2. 在 Windows 上，將檔案放置於 `%LOCALAPPDATA%\RAWviewer\models\`，macOS 則放於應用程式套件內的 `models/`（或透過 `RAWVIEWER_NN_DENOISE_MODEL` 環境變數指定路徑）。
-3. 若您的系統具備相容的 GPU，調整面板的匯出格式下拉選單中將出現「JPEG + AI denoise (realPLKSR)」選項。
+1. **Windows**：安裝程式會在初次設定時自動下載並安裝降噪模型權重（`1xDeNoise_realplksr_otf.safetensors`，由 Philip Hofmann 製作，CC-BY-4.0）。
+2. **macOS**：應用程式會在您首次嘗試使用「AI 降噪」選項匯出影像時，自動在 App 內彈出提示並處理模型下載。
+3. 若您的系統具備相容的 GPU（Windows 上需要相容 CUDA 的 GPU，macOS 上需要 Apple Silicon GPU），調整面板的匯出格式下拉選單中將出現「JPEG + AI denoise (realPLKSR)」與「16-bit TIFF + AI denoise」選項。
 
 ---
 
@@ -333,6 +333,7 @@ RAW 製造商 AF 需 **pyexiv2**。
 **多執行緒 LibRaw（macOS 開發環境）**——PyPI 的 rawpy wheel 在 macOS/Linux 上內附單執行緒 LibRaw（Windows wheel 已內建 OpenMP）。`scripts/build_libraw_openmp.sh` 會以 OpenMP 重新編譯 LibRaw 並替換進 Pixi 環境，CR3/RAF/pana8 unpack 約快 1.5–2 倍。僅本機開發最佳化，`pixi install` 後需重新執行。可用 `scripts/check_libraw_parallelism.py <raw 檔案>` 驗證。
 
 **未來開發計畫 (Future Development Plan):**
+- **實時編輯同步 (Live Edit Synchronization)**：穩定並實現圖庫縮圖和單圖非 RAW 預覽的調整 sidecar 實時更新（目前為已知問題：由於快取同步延遲，有時會顯示原始/快取未編輯的內嵌預覽）。
 - **白平衡預設 (White balance preset support)**：新增標準與自訂白平衡預設。
 - **LUT 支援 (LUT support)**：允許使用者載入並套用自訂色彩查找表 (LUT)。
 - **編輯器遮罩 (Masking for the editor)**：引入局部調整與遮罩功能。

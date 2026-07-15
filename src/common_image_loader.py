@@ -277,7 +277,7 @@ def folder_sort_key_tuple(
     return (primary_ts, stem, raw_rank, ext, base_name)
 
 
-def use_libraw_consistent_preview_first() -> bool:
+def use_libraw_consistent_preview_first(file_path: Optional[str] = None) -> bool:
     """
     When True (default), single-image RAW avoids embedded-JPEG preview paths so fit and zoom
     share the same LibRaw postprocess look. Set RAWVIEWER_LIBRAW_CONSISTENT_PREVIEW=0 to restore
@@ -286,6 +286,15 @@ def use_libraw_consistent_preview_first() -> bool:
     Full-resolution embedded JPEGs (see use_full_embedded_raw_preview) bypass LibRaw even when
     this flag is on.
     """
+    if file_path:
+        try:
+            from raw_adjustments import load_adjustments_for_file, is_default_adjustments
+            adj = load_adjustments_for_file(file_path)
+            if adj and not is_default_adjustments(adj):
+                return True
+        except Exception:
+            pass
+
     from PyQt6.QtCore import QSettings
     settings = QSettings("RAWviewer", "RAWviewer")
     if settings.contains("use_embedded_jpeg_workflow"):
@@ -460,7 +469,7 @@ def check_memory_cache_for_image(file_path: str, use_full_resolution: bool = Fal
                     preview.shape[1], preview.shape[0], exif_data
                 ):
                     return preview, 'preview'
-                if not use_libraw_consistent_preview_first():
+                if not use_libraw_consistent_preview_first(file_path):
                     return preview, 'preview'
 
     return None, None

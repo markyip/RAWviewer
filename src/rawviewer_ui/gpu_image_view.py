@@ -110,9 +110,14 @@ class RgbGlImageItem(QGraphicsObject):
         self._release_cuda_gl(None)
         arr = np.ascontiguousarray(rgb)
         if arr.ndim != 3 or arr.shape[2] < 3:
-            raise ValueError(f"expected HxWx3+ uint8 RGB, got shape={getattr(arr, 'shape', None)}")
-        if arr.dtype != np.uint8:
-            arr = np.clip(arr, 0, 255).astype(np.uint8, copy=False)
+            raise ValueError(f"expected HxWx3+ RGB, got shape={getattr(arr, 'shape', None)}")
+        if arr.dtype == np.uint16:
+            arr = (arr / 257.0).astype(np.uint8)
+        elif np.issubdtype(arr.dtype, np.floating):
+            from raw_tone_recovery import _encode_srgb8
+            arr = _encode_srgb8(np.clip(arr.astype(np.float32), 0.0, None))
+        elif arr.dtype != np.uint8:
+            arr = np.clip(arr, 0, 255).astype(np.uint8)
         if arr.shape[2] > 3:
             arr = np.ascontiguousarray(arr[:, :, :3])
         h, w = int(arr.shape[0]), int(arr.shape[1])

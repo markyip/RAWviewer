@@ -2690,7 +2690,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         allow_sensor = bool(
             for_navigation
             and file_path
-            and use_libraw_consistent_preview_first()
+            and use_libraw_consistent_preview_first(file_path)
             and is_raw_file(file_path)
         )
         return self._cache_buffer_suitable_for_single_view(
@@ -17965,6 +17965,16 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         import logging
         import traceback
         logger = logging.getLogger(__name__)
+        
+        # Trigger preview generation for old image on navigation
+        old_path = getattr(self, "current_file_path", None)
+        if old_path and file_path != old_path:
+            try:
+                from raw_adjustments import load_adjustments_for_file
+                self._reencode_persisted_preview_for_sidecar(old_path, load_adjustments_for_file(old_path))
+            except Exception as e:
+                logger.debug(f"[LOAD] Failed to re-encode preview for old path: {e}")
+
         load_start = time.time()
         logger.info(f"[LOAD] ========== load_raw_image() STARTED at {load_start:.3f} ==========")
         safe_print(
@@ -18291,7 +18301,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                         stages={"exif"},
                     )
                 if not (
-                    use_libraw_consistent_preview_first()
+                    use_libraw_consistent_preview_first(requested_file_path)
                     and is_raw_file(requested_file_path)
                 ):
                     self._queue_single_view_embedded_preview_load(requested_file_path)
@@ -18552,7 +18562,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 # 1. Progressive RAW load is explicitly set
                 # 2. A fast-open token is active (cold opens should paint in milliseconds)
                 libraw_fit = (
-                    use_libraw_consistent_preview_first()
+                    use_libraw_consistent_preview_first(requested_file_path)
                     and is_raw_file(requested_file_path)
                     and not preserve_zoom_navigation
                     and not force_full_res_for_dng
@@ -18561,7 +18571,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                     and (not nav_fit_browse or workflow_toggle)
                 )
                 libraw_nav_fit = (
-                    use_libraw_consistent_preview_first()
+                    use_libraw_consistent_preview_first(requested_file_path)
                     and is_raw
                     and nav_fit_browse
                     and not preserve_zoom_navigation
@@ -18840,7 +18850,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             return False  # escape hatch: restore JPEG interim tiers in RAW mode
         from common_image_loader import use_libraw_consistent_preview_first
 
-        if not use_libraw_consistent_preview_first():
+        if not use_libraw_consistent_preview_first(path):
             return False
         try:
             from unified_image_processor import _LIBRAW_UNSUPPORTED_PATHS
@@ -19594,6 +19604,16 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 return
 
             # Convert to QPixmap (preview / sub-full-res path stays on UI thread)
+            if rgb_image.dtype == np.uint16:
+                rgb_image = (rgb_image / 257.0).astype(np.uint8)
+            elif np.issubdtype(rgb_image.dtype, np.floating):
+                from raw_tone_recovery import _encode_srgb8
+                rgb_image = _encode_srgb8(
+                    np.clip(rgb_image.astype(np.float32), 0.0, None)
+                )
+            elif rgb_image.dtype != np.uint8:
+                rgb_image = np.clip(rgb_image, 0, 255).astype(np.uint8)
+
             bytes_per_line = channels * width
             logger.info(f"[DISPLAY] Converting numpy array to QPixmap - bytes_per_line: {bytes_per_line}")
 
@@ -19994,6 +20014,15 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             self.toggle_raw_jpeg_workflow()
 
         self._set_adjust_panel_visible(opening)
+        if not opening:
+            path = getattr(self, "current_file_path", None)
+            if path:
+                from raw_adjustments import load_adjustments_for_file
+                self._reencode_persisted_preview_for_sidecar(path, load_adjustments_for_file(path))
+            settings = self.get_settings()
+            use_embedded = settings.value("use_embedded_jpeg_workflow", True, type=bool)
+            if not use_embedded:
+                self.toggle_raw_jpeg_workflow()
 
     def _sync_adjust_panel_for_current_file(self, *, force: bool = False) -> None:
         panel = getattr(self, "single_image_adjust_panel", None)
@@ -20656,6 +20685,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         if not path or not is_raw_file(path):
             return
         base = self.image_cache.get_full_image(path)
+        if base is None:
+            base = getattr(self, "_adjust_preview_base_rgb", None)
         if base is None:
             return
 

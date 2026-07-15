@@ -608,7 +608,7 @@ class RAWProcessor(QThread):
                         self.image_processed.emit(thumbnail_data)
                         logger.info(f"[RAW_PROC] Cached thumbnail emitted successfully")
                 else:
-                    if use_libraw_consistent_preview_first():
+                    if use_libraw_consistent_preview_first(self.file_path):
                         logger.debug(
                             f"[RAW_PROC] LibRaw-consistent preview: skipping embedded JPEG for "
                             f"{os.path.basename(self.file_path)}"
@@ -837,7 +837,7 @@ class RAWProcessor(QThread):
                         # But if we already emitted cached thumbnail above, skip extraction
                         # Also skip if we already extracted embedded JPEG thumbnail above
                         elif thumbnail_data is None:
-                            libraw_consistent = use_libraw_consistent_preview_first()
+                            libraw_consistent = use_libraw_consistent_preview_first(self.file_path)
                             # OPTIMIZATION: Try to extract thumbnail using already-opened raw handle first
                             # This avoids reopening the file, which is much faster
                             logger.debug(f"Extracting thumbnail: {os.path.basename(self.file_path)}")
@@ -1278,6 +1278,16 @@ class PixmapConverter(QThread):
                 shape = self.rgb_image.shape
                 height, width = shape[0], shape[1]
                 channels = shape[2] if len(shape) > 2 else 1
+                if self.rgb_image.dtype == np.uint16:
+                    self.rgb_image = (self.rgb_image / 257.0).astype(np.uint8)
+                elif np.issubdtype(self.rgb_image.dtype, np.floating):
+                    from raw_tone_recovery import _encode_srgb8
+                    self.rgb_image = _encode_srgb8(
+                        np.clip(self.rgb_image.astype(np.float32), 0.0, None)
+                    )
+                elif self.rgb_image.dtype != np.uint8:
+                    self.rgb_image = np.clip(self.rgb_image, 0, 255).astype(np.uint8)
+
             bytes_per_line = channels * width
             
             # Ensure the data is contiguous

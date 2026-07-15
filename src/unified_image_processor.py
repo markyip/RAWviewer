@@ -158,6 +158,21 @@ class UnifiedImageProcessor:
         if rgb_image is None:
             return None
         try:
+            from raw_adjustments import _already_adjusted_ids, _already_adjusted_lock
+            with _already_adjusted_lock:
+                if id(rgb_image) in _already_adjusted_ids:
+                    return rgb_image
+        except Exception:
+            pass
+        try:
+            if self.cache.is_libraw_preview(file_path):
+                h, w = rgb_image.shape[:2]
+                from image_cache import memory_preview_max_edge
+                if max(h, w) <= memory_preview_max_edge():
+                    return rgb_image
+        except Exception:
+            pass
+        try:
             from gpu_gl_bridge import DeviceRgb
 
             if isinstance(rgb_image, DeviceRgb):
@@ -732,6 +747,38 @@ class UnifiedImageProcessor:
     def process_thumbnail(self, file_path: str, allow_heavy_fallback: bool = True,
                           target_size: Optional[QSize] = None) -> Optional[np.ndarray]:
         """處理縮圖（統一接口）"""
+        if self.cache.is_libraw_preview(file_path):
+            prev = self.cache.get_preview(file_path)
+            if prev is not None:
+                from raw_adjustments import mark_array_as_already_adjusted
+                # Downscale to target_size or grid size
+                single_view_preview = self._single_view_display_thumbnail(
+                    target_size, allow_heavy_fallback
+                )
+                if target_size is not None:
+                    h, w = prev.shape[:2]
+                    scale = min(target_size.width() / w, target_size.height() / h)
+                    if scale < 1.0:
+                        import cv2
+                        prev = cv2.resize(
+                            prev,
+                            (max(1, int(w * scale)), max(1, int(h * scale))),
+                            interpolation=cv2.INTER_AREA,
+                        )
+                elif not single_view_preview:
+                    h, w = prev.shape[:2]
+                    cap = 512
+                    if max(h, w) > cap:
+                        scale = cap / max(h, w)
+                        import cv2
+                        prev = cv2.resize(
+                            prev,
+                            (max(1, int(w * scale)), max(1, int(h * scale))),
+                            interpolation=cv2.INTER_AREA,
+                        )
+                mark_array_as_already_adjusted(prev)
+                return prev
+
         MAX_THUMB_DIM = 1024
         single_view_preview = self._single_view_display_thumbnail(
             target_size, allow_heavy_fallback
@@ -1214,7 +1261,7 @@ class UnifiedImageProcessor:
                           use_full_resolution: bool = False,
                           executor: Optional[Any] = None) -> Optional[np.ndarray]:
         """處理 RAW 圖像"""
-        libraw_first = use_libraw_consistent_preview_first()
+        libraw_first = use_libraw_consistent_preview_first(file_path)
         skip_key = os.path.normcase(os.path.abspath(file_path))
         from common_image_loader import dng_prefers_embedded_preview_first
         if dng_prefers_embedded_preview_first(file_path):
@@ -1716,13 +1763,10 @@ class UnifiedImageProcessor:
                             if rgb is None:
                                 return
 
-                            # NOTE: previously applied sidecar adjustments here
-                            # so the persisted preview reflected edits, not
-                            # just the raw base -- reverted (2026-07) after a
-                            # report of color artifacts in the re-encoded
-                            # preview. Persists the unadjusted base again
-                            # until root-caused; see _reencode_persisted_
-                            # preview_for_sidecar in main.py (also disabled).
+                            from raw_adjustments import load_adjustments_for_file, apply_adjustments_to_rgb, is_default_adjustments
+                            adj = load_adjustments_for_file(fp)
+                            if adj and not is_default_adjustments(adj):
+                                rgb = apply_adjustments_to_rgb(rgb, adj)
                             h, w = rgb.shape[:2]
                             cap = memory_preview_max_edge()
                             if max(h, w) > cap:
@@ -1822,6 +1866,24 @@ class UnifiedImageProcessor:
         COMBINED OPTIMIZATION: Extract both metadata and thumbnail in a single pass.
         This is crucial for RAW files to avoid opening the large file twice.
         """
+        if self.cache.is_libraw_preview(file_path):
+            cached_exif = self.cache.get_exif(file_path, verify=True)
+            prev = self.cache.get_preview(file_path)
+            if prev is not None:
+                from raw_adjustments import mark_array_as_already_adjusted
+                if target_size is not None:
+                    h, w = prev.shape[:2]
+                    scale = min(target_size.width() / w, target_size.height() / h)
+                    if scale < 1.0:
+                        import cv2
+                        prev = cv2.resize(
+                            prev,
+                            (max(1, int(w * scale)), max(1, int(h * scale))),
+                            interpolation=cv2.INTER_AREA,
+                        )
+                mark_array_as_already_adjusted(prev)
+                return cached_exif, prev
+
         is_raw = self._is_raw_file(file_path)
         
         if not is_raw:

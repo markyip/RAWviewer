@@ -240,6 +240,9 @@ def resolve_xmp_path(image_path: str) -> str:
     """Sidecar path next to the image (Lightroom-style basename.xmp)."""
     if not image_path:
         return ""
+    from common_image_loader import is_raw_file
+    if not is_raw_file(image_path):
+        return ""
     companion = image_path + ".xmp"
     if os.path.isfile(companion):
         return companion
@@ -334,7 +337,26 @@ def _decode_srgb_uint8_to_linear(arr: np.ndarray) -> np.ndarray:
     return _SRGB_DECODE_LUT[arr]
 
 
+import threading
+_already_adjusted_ids = set()
+_already_adjusted_lock = threading.Lock()
+
+def mark_array_as_already_adjusted(arr):
+    if arr is None:
+        return
+    with _already_adjusted_lock:
+        _already_adjusted_ids.add(id(arr))
+        if len(_already_adjusted_ids) > 10000:
+            # Pop some elements to prevent memory accumulation
+            for _ in range(2000):
+                if _already_adjusted_ids:
+                    _already_adjusted_ids.pop()
+
 def apply_saved_edits_for_display(file_path: str, arr):
+    """Apply saved XMP edits to a display-bound uint8 RGB ndarray."""
+    with _already_adjusted_lock:
+        if id(arr) in _already_adjusted_ids:
+            return arr
     """Apply saved XMP edits to a display-bound uint8 RGB ndarray.
 
     Returns the input unchanged when previews-with-edits is disabled, the
