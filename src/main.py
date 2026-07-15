@@ -1943,6 +1943,11 @@ class _AdjustExportWorker(QRunnable):
         self.export_format = export_format
         self.process_pool = process_pool
         self.signals = signals
+        # Set from the export progress dialog's Cancel button (main thread);
+        # polled between export stages and between NN-denoise tiles.
+        import threading as _threading
+
+        self.cancel_event = _threading.Event()
 
     def run(self) -> None:
         logger = logging.getLogger(__name__)
@@ -1980,6 +1985,10 @@ class _AdjustExportWorker(QRunnable):
                     xmp_path if xmp_path and os.path.isfile(xmp_path) else None
                 )
 
+            from raw_edit_pipeline import ExportCancelled
+
+            if self.cancel_event.is_set():
+                raise ExportCancelled()
             logger.info("[EXPORT] Decoding full-resolution edit base…")
             processor = UnifiedImageProcessor()
             base = processor.decode_raw_edit_base(
@@ -1998,11 +2007,21 @@ class _AdjustExportWorker(QRunnable):
                 rgb_linear=base,
                 adj=self.adj,
                 embed_xmp_path=embed_xmp,
+                cancel_check=self.cancel_event.is_set,
             )
             logger.info("[EXPORT] export_adjusted_image() completed without raising")
         except Exception as exc:
             err = exc
-            logger.error("[EXPORT] Worker failed", exc_info=True)
+            if type(exc).__name__ == "ExportCancelled":
+                logger.info("[EXPORT] Worker cancelled by user")
+                # Never leave a partial file behind for a cancelled export.
+                try:
+                    if os.path.isfile(self.output_path):
+                        os.remove(self.output_path)
+                except Exception:
+                    pass
+            else:
+                logger.error("[EXPORT] Worker failed", exc_info=True)
         logger.info(
             "[EXPORT] Worker finished: err=%s xmp_warning=%s — emitting finished signal",
             err,
@@ -21048,6 +21067,25 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             self._adjust_export_signals,
         )
         logger.info("[EXPORT] Handing off to background worker (format=%s)", fmt)
+        # Modal progress dialog: freezes app interaction for the duration
+        # (window-modal), offers Cancel (polled between export stages and
+        # between AI-denoise tiles, so it lands within ~2s), and is dismissed
+        # automatically by _on_adjust_export_finished.
+        try:
+            from PyQt6.QtWidgets import QProgressDialog
+
+            dlg = QProgressDialog(
+                f"Exporting {os.path.basename(output_path)}…", "Cancel", 0, 0, self
+            )
+            dlg.setWindowTitle("Export")
+            dlg.setWindowModality(Qt.WindowModality.WindowModal)
+            dlg.setMinimumDuration(300)  # skip the flash for fast exports
+            dlg.setAutoClose(False)
+            dlg.setAutoReset(False)
+            dlg.canceled.connect(worker.cancel_event.set)
+            self._adjust_export_dialog = dlg
+        except Exception:
+            self._adjust_export_dialog = None
         _get_bg_thread_pool().start(worker)
 
     def _on_adjust_export_finished(
@@ -21066,6 +21104,18 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             err,
         )
         self._adjust_export_in_progress = False
+        dlg = getattr(self, "_adjust_export_dialog", None)
+        if dlg is not None:
+            self._adjust_export_dialog = None
+            try:
+                dlg.canceled.disconnect()
+            except Exception:
+                pass
+            try:
+                dlg.close()
+                dlg.deleteLater()
+            except Exception:
+                pass
         panel = getattr(self, "single_image_adjust_panel", None)
         if panel is not None and hasattr(panel, "set_export_enabled"):
             panel.set_export_enabled(True)
@@ -21100,7 +21150,10 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             return
         if err is not None:
             if hasattr(self, "status_bar"):
-                self.status_bar.showMessage(f"Export failed: {err}", 7000)
+                if type(err).__name__ == "ExportCancelled":
+                    self.status_bar.showMessage("Export cancelled", 4000)
+                else:
+                    self.status_bar.showMessage(f"Export failed: {err}", 7000)
             return
         fmt = (export_format or "tiff16").strip().lower()
         labels = {

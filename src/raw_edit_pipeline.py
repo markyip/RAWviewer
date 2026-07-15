@@ -745,6 +745,10 @@ EXPORT_FORMAT_JPEG = "jpeg"
 EXPORT_FORMAT_WEBP = "webp"
 
 
+class ExportCancelled(Exception):
+    """Raised when the user cancels an in-progress export."""
+
+
 def export_adjusted_image(
     export_format: str,
     *,
@@ -752,6 +756,7 @@ def export_adjusted_image(
     rgb_linear: Optional[np.ndarray],
     adj: dict[str, float],
     embed_xmp_path: Optional[str] = None,
+    cancel_check=None,
 ) -> None:
     """Dispatch baked export (TIFF16 / JPEG / WebP; "_nn" suffix = AI denoise).
 
@@ -766,12 +771,28 @@ def export_adjusted_image(
         fmt = fmt[: -len("_nn")]
     if rgb_linear is None:
         raise RuntimeError("Full-resolution RAW decode failed")
-    if fmt == EXPORT_FORMAT_JPEG:
-        export_adjusted_jpeg(rgb_linear, adj, output_path, nn_denoise=nn)
-    elif fmt == EXPORT_FORMAT_WEBP:
-        export_adjusted_webp(rgb_linear, adj, output_path, nn_denoise=nn)
-    else:
-        export_adjusted_tiff16(
-            rgb_linear, adj, output_path, embed_xmp_path=embed_xmp_path,
-            nn_denoise=nn,
-        )
+    if cancel_check is not None and cancel_check():
+        raise ExportCancelled()
+    if nn:
+        from raw_nn_denoise import set_cancel_check
+
+        set_cancel_check(cancel_check)
+    try:
+        if fmt == EXPORT_FORMAT_JPEG:
+            export_adjusted_jpeg(rgb_linear, adj, output_path, nn_denoise=nn)
+        elif fmt == EXPORT_FORMAT_WEBP:
+            export_adjusted_webp(rgb_linear, adj, output_path, nn_denoise=nn)
+        else:
+            export_adjusted_tiff16(
+                rgb_linear, adj, output_path, embed_xmp_path=embed_xmp_path,
+                nn_denoise=nn,
+            )
+    except Exception as e:
+        if type(e).__name__ == "NNDenoiseCancelled":
+            raise ExportCancelled() from e
+        raise
+    finally:
+        if nn:
+            from raw_nn_denoise import set_cancel_check
+
+            set_cancel_check(None)

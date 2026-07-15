@@ -41,6 +41,19 @@ _MARGIN = 32     # per-side context margin; only the inner region is kept,
 _lock = threading.Lock()
 _model = None          # loaded torch module (fp16, cuda) or None
 _model_failed = False
+# Optional cancel probe installed by the export dispatcher for the duration of
+# one export (see raw_edit_pipeline.export_adjusted_image). Checked between
+# tiles, so cancellation lands within one ~2s tile of the request.
+_cancel_check = None
+
+
+def set_cancel_check(fn) -> None:
+    global _cancel_check
+    _cancel_check = fn
+
+
+class NNDenoiseCancelled(Exception):
+    pass
 
 
 def _weights_path() -> Optional[str]:
@@ -115,9 +128,13 @@ def denoise_display_float(rgb01: np.ndarray) -> Optional[np.ndarray]:
     source (gated to sane ratios so a pathological output can't be
     over-amplified).
     """
+    if _cancel_check is not None and _cancel_check():
+        raise NNDenoiseCancelled()
     model = _load_model()
     if model is None or rgb01 is None or rgb01.ndim != 3:
         return None
+    if _cancel_check is not None and _cancel_check():
+        raise NNDenoiseCancelled()
     try:
         import torch
 
@@ -127,6 +144,8 @@ def denoise_display_float(rgb01: np.ndarray) -> Optional[np.ndarray]:
         with torch.no_grad():
             for y0 in range(0, h, step):
                 for x0 in range(0, w, step):
+                    if _cancel_check is not None and _cancel_check():
+                        raise NNDenoiseCancelled()
                     ys, xs = max(0, y0 - _MARGIN), max(0, x0 - _MARGIN)
                     ye, xe = min(h, y0 + step + _MARGIN), min(w, x0 + step + _MARGIN)
                     tile = np.ascontiguousarray(rgb01[ys:ye, xs:xe])
@@ -150,6 +169,8 @@ def denoise_display_float(rgb01: np.ndarray) -> Optional[np.ndarray]:
         if lum_out > 1e-6 and abs(lum_in - lum_out) / max(lum_in, 1e-6) < 0.15:
             out = np.clip(out * (lum_in / lum_out), 0.0, 1.0)
         return out
+    except NNDenoiseCancelled:
+        raise
     except Exception as e:
         logger.warning("[NN_DENOISE] inference failed: %s", e)
         return None
