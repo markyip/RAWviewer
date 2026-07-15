@@ -22,6 +22,7 @@ It is built as a faster **browse / cull** release on top of 2.5: featuring **Fas
 
 #### ⚡ Updated Image Loading Logic & Verified Speed
 - **Fast RAW decode** is on by default (`RAWVIEWER_FAST_RAW_DECODE=1`): half-size and full sensor tiers share one unpack; verified color parity with the previous pipeline (±1 8-bit LSB on golden ARW/CR3 sets).
+- **EDR Support Removed:** macOS EDR (Extended Dynamic Range) support has been removed at this stage. The new, highly optimized image loading pipeline is not compatible with EDR, causing very slow image decoding and loading. To maintain high-speed browsing and editing performance, EDR has been disabled.
 - **Multiple testing verified**: Extensive benchmarking against version 2.5 confirms massive speed improvements:
   - **Full sensor decode:** about **1.4×** faster (median); high-end formats in the **1.3–1.7×** range where Fast RAW applies.
   - **Zoom after fit** (reuse the fit-view unpack): roughly **2×** faster than a cold full rawpy decode.

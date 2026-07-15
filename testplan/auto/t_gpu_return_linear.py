@@ -34,9 +34,19 @@ def main() -> int:
     )
 
     wrapper_src = inspect.getsource(g.gpu_demosaic_pytorch_unpacked)
+    import ast
+    tree = ast.parse(wrapper_src)
+    passed = False
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "_gpu_demosaic_pytorch_body":
+            args_names = [getattr(arg, "id", None) for arg in node.args]
+            kw_names = [kw.arg for kw in node.keywords]
+            if "return_linear" in args_names or "return_linear" in kw_names:
+                passed = True
+                break
     check(
         "gpu_demosaic_pytorch_unpacked forwards return_linear to the body call",
-        "_gpu_demosaic_pytorch_body(unpacked, device, cancel_check, return_linear)" in wrapper_src,
+        passed,
     )
 
     print(f"\n{len(FAILURES)} failure(s)")

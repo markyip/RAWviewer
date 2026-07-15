@@ -2020,11 +2020,8 @@ def process_pool_worker_count() -> int:
 
 
 def is_macos_edr_enabled() -> bool:
-    import platform
-    import os
-    if platform.system() != "Darwin":
-        return False
-    return os.environ.get("RAWVIEWER_DISABLE_EDR", "0") not in ("1", "true", "yes", "on")
+    # EDR support is removed at this stage because the updated image loading pipeline is not compatible with EDR, causing slow loads.
+    return False
 
 
 def format_edr_status_label(
@@ -2032,28 +2029,7 @@ def format_edr_status_label(
     display_mode: str | None = None,
     gpu_view=None,
 ) -> str | None:
-    """
-    Short label for metadata / status bar.
-
-    display_mode: "raw" | "hdr" when the current image uses extended range output.
-    """
-    import platform
-
-    if platform.system() != "Darwin":
-        return None
-    if not is_macos_edr_enabled():
-        return "SDR (EDR off)"
-    if display_mode == "raw":
-        return "EDR · RAW"
-    if display_mode == "hdr":
-        return "EDR · HDR"
-    viewport = bool(getattr(gpu_view, "_edr_initialized", False)) if gpu_view is not None else False
-    if viewport and use_raw_edr_for_display():
-        return "EDR ready · RAW on"
-    if viewport and use_raw_edr_display():
-        return "EDR ready · embedded JPEG workflow"
-    if viewport:
-        return "EDR ready"
+    """Short label for metadata / status bar."""
     return None
 
 

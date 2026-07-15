@@ -40,6 +40,7 @@ run "gallery closes editor" testplan/auto/t_gallery_closes_editor.py
 run "gallery hover prefetch" testplan/auto/t_gallery_hover_prefetch.py
 run "editor skip unsupported" testplan/auto/t_editor_skip_unsupported.py
 run "adjust loading overlay" testplan/auto/t_adjust_loading_overlay.py
+run "adjust copy paste shortcuts" testplan/auto/t_adjust_copy_paste_shortcuts.py
 run "dodge & burn reset" testplan/auto/t_dodge_burn_reset.py
 run "filmstrip hidden in editor" testplan/auto/t_filmstrip_editor_hidden.py
 run "search bar animation" testplan/auto/t_search_bar_animation.py

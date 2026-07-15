@@ -639,6 +639,9 @@ class GpuImageView(QGraphicsView):
             return
         import platform
         if platform.system() == "Darwin":
+            from common_image_loader import is_macos_edr_enabled
+            if not is_macos_edr_enabled():
+                return
             try:
                 import objc
                 vp = self.viewport()
@@ -820,6 +823,10 @@ class GpuImageView(QGraphicsView):
         self._grid_item.set_grid(self._img_w, self._img_h, self._grid_mode)
 
     # ------------------------------------------------------------------ image
+    def clear_pixmap_keep_placeholder_hidden(self) -> None:
+        """Clear the displayed pixmap image but keep placeholder text hidden (e.g. during reload)."""
+        self._item.setPixmap(QPixmap())
+
     def set_pixmap(self, pixmap: QPixmap, preserve_view=None, *, exact_framing: bool = False) -> None:
         """Set the displayed image.
 

@@ -12375,20 +12375,17 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         current = settings.value("raw_edr_display_enabled", True, type=bool)
         settings.setValue("raw_edr_display_enabled", not current)
         self._update_edr_toggle_button_state()
-        # Cached QPixmaps bake in EDR vs SDR encoding; drop them for RAW files
-        # so the next display re-converts. Decoded numpy buffers stay valid
-        # (they are workflow-tier caches, independent of display encoding), so
-        # toggling is quick -- no full re-decode needed for the SDR direction.
-        try:
-            for fp in list(getattr(self, "image_files", []) or []):
-                if fp and is_raw_file(fp):
-                    self.image_cache.pixmap_cache.remove(fp)
-        except Exception:
-            pass
+        # Invalidate all workflow pixel caches (memory + disk) since EDR/SDR display encoding has toggled globally
+        self._invalidate_workflow_pixel_caches()
         cp = getattr(self, "current_file_path", None)
         if cp and is_raw_file(cp):
             self._displayed_content_path = None
             self._gpu_last_path = None
+            # Clear viewport pixmap to avoid format conversion mismatch / solarized flashing during reload
+            if getattr(self, "gpu_view", None) is not None:
+                self.gpu_view.clear_pixmap_keep_placeholder_hidden()
+            else:
+                self.image_label.setPixmap(QPixmap())
             self.load_raw_image(cp, force_reload=True)
 
     def _update_edr_toggle_button_state(self):
@@ -26159,6 +26156,29 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         modifiers = event.modifiers()
         vm = getattr(self, "view_mode", "single")
 
+        if vm == "single" and getattr(self, "_adjust_overlay_visible", False):
+            ctrl_or_cmd = bool(modifiers & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.MetaModifier))
+            if ctrl_or_cmd:
+                if key == Qt.Key.Key_C:
+                    panel = getattr(self, "single_image_adjust_panel", None)
+                    if panel is not None:
+                        panel._on_copy_settings_clicked()
+                        if hasattr(self, "status_bar") and self.status_bar:
+                            self.status_bar.showMessage("Edit settings copied", 2000)
+                        return True
+                elif key == Qt.Key.Key_V:
+                    panel = getattr(self, "single_image_adjust_panel", None)
+                    if panel is not None:
+                        from rawviewer_ui.adjust_panel import _edit_settings_clipboard
+                        if _edit_settings_clipboard() is not None:
+                            panel._on_paste_settings_clicked()
+                            if hasattr(self, "status_bar") and self.status_bar:
+                                self.status_bar.showMessage("Edit settings pasted", 2000)
+                        else:
+                            if hasattr(self, "status_bar") and self.status_bar:
+                                self.status_bar.showMessage("No edit settings to paste", 2000)
+                        return True
+
         if key == Qt.Key.Key_Escape:
             gv = getattr(self, "gpu_view", None)
             if gv is not None and gv.is_color_pick_mode():
@@ -26255,8 +26275,9 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             self._shortcut_activate_nav_next()
             return True
         elif key == Qt.Key.Key_C:
-            self._shortcut_activate_compare()
-            return True
+            if not (modifiers & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.MetaModifier)):
+                self._shortcut_activate_compare()
+                return True
         elif key == Qt.Key.Key_Z and event.modifiers() & Qt.KeyboardModifier.ControlModifier:
             self._shortcut_activate_undo()
             return True

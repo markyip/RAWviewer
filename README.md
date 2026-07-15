@@ -142,27 +142,12 @@ To clear thumbnails only: **`scripts\Launch\bat\clear_cache.bat`** (Windows) · 
 
 **RAW:** CR2, CR3, NEF, ARW, DNG, ORF, RW2, RAF, and other LibRaw types · **Standard:** JPEG, TIFF, HEIF, **GIF** (animated), **WebP** (animated)
 
-On **macOS**, HDR **HEIC / HEIF / AVIF** and 16-bit HDR **TIFF** can display with extended dynamic range in single-image view when EDR is enabled (default). With the **RAW (High Quality)** workflow toggle, **RAW / DNG** files also use the EDR path (linear 16-bit decode). **Embedded JPEG workflow** keeps the camera’s embedded preview (SDR). Other platforms tone-map HDR stills to SDR.
+> [!NOTE]
+> **EDR Support Removed:** macOS EDR (Extended Dynamic Range) support has been removed at this stage. The updated, highly optimized image loading pipeline is not compatible with EDR at this stage; attempting to combine them results in very slow image decoding and loading. To maintain high-speed browsing and editing performance, EDR support has been disabled/removed. All platforms now display images using standard dynamic range (SDR) with high-fidelity tone-mapping.
 
-**Workflow toggle** (single view): switch between **Embedded JPEG (Fast)** and **RAW (High Quality)**. EDR applies only in RAW workflow.
+**Workflow toggle** (single view): switch between **Embedded JPEG (Fast)** and **RAW (High Quality)**.
 
 **Recovery preview (**P**):** half-res shadow/highlight recovery for judging extreme contrast — session only, does not replace full-res view.
-
----
-
-## macOS EDR quick reference
-
-| What you see | Meaning |
-|--------------|---------|
-| `EDR · RAW` in metadata | RAW file displayed with extended dynamic range |
-| `EDR · HDR` | HDR still (HEIC/TIFF) in EDR |
-| `EDR ready · embedded JPEG workflow` | EDR viewport on; showing embedded JPEG (SDR) |
-| Startup: `RAW EDR active` | RAW EDR enabled and RAW workflow selected |
-
-| Variable | Default | Effect |
-|----------|---------|--------|
-| `RAWVIEWER_RAW_EDR` | `1` | macOS: EDR decode for RAW when **RAW workflow** is active; set `0` to hard-disable. Also toggleable in-app: bottom-bar **EDR** button (visible in RAW workflow; off = much faster RAW browsing at standard dynamic range). Switching **into** RAW workflow resets this toggle to off each time, so entering RAW mode never silently slows down browsing — turn it back on per-session if you want highlight-reconstructed previews |
-| `RAWVIEWER_DISABLE_EDR` | off | Disable all macOS EDR (HDR stills + RAW) |
 
 ---
 

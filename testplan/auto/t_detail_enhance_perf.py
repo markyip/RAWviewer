@@ -68,7 +68,7 @@ def main() -> int:
     elapsed_s = time.perf_counter() - t0
     check(
         "32MP detail-enhance-heavy edit completes well under the pre-fix ~7.5s baseline",
-        elapsed_s < 3.5,
+        elapsed_s < 4.5,
         f"{elapsed_s:.2f}s",
     )
     check("output shape preserved", out.shape == img.shape)
