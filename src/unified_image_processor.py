@@ -888,6 +888,32 @@ class UnifiedImageProcessor:
         if exif_data and exif_data.get("minimal_preview_exif"):
             self.cache.put_exif(file_path, exif_data, persist_disk=False)
         
+        # Apply XMP adjustments if they exist and are not default
+        try:
+            from raw_adjustments import (
+                load_adjustments_for_file,
+                is_default_adjustments,
+                apply_adjustments_to_rgb,
+                sidecar_adjustments_enabled,
+            )
+            if sidecar_adjustments_enabled() and thumbnail is not None:
+                adj = load_adjustments_for_file(file_path)
+                if adj and not is_default_adjustments(adj):
+                    if not isinstance(thumbnail, np.ndarray):
+                        if isinstance(thumbnail, QImage):
+                            from_qimage_autotransform = True
+                            from enhanced_raw_processor import _qimage_to_rgb_array
+                            rgb = _qimage_to_rgb_array(thumbnail)
+                            if rgb is not None:
+                                thumbnail = rgb
+                    if isinstance(thumbnail, np.ndarray):
+                        thumbnail = apply_adjustments_to_rgb(thumbnail, adj)
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning(
+                f"Failed to apply sidecar adjustments to thumbnail for {file_path}: {e}"
+            )
+        
         try:
             from PIL import Image
             import io
