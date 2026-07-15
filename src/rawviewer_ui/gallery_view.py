@@ -1857,7 +1857,7 @@ class JustifiedGallery(QWidget):
         return self._scale_crop_to_fit(oriented, target_size, fast=fast)
 
     def invalidate_thumbnails_for_path(self, file_path: str) -> None:
-        """Drop cached gallery pixmaps for a path (e.g. after on-disk rotation)."""
+        """Drop cached gallery pixmaps for a path (e.g. after on-disk rotation or a saved edit)."""
         resolved = self._resolve_gallery_path(file_path)
         if resolved:
             file_path = resolved
@@ -1867,6 +1867,21 @@ class JustifiedGallery(QWidget):
             pass
         # Drop the remembered aspect so a re-decode (e.g. after on-disk rotation) re-measures.
         self._measured_raw_aspects.pop(file_path, None)
+        # Clearing the cache alone doesn't repaint an already-visible tile --
+        # it's still showing the old QPixmap set the last time this widget
+        # was laid out. Force it back through the cache-miss path (which
+        # re-requests a fresh decode) on the next paint pass so a saved edit
+        # shows up in the grid without requiring a scroll/relayout.
+        needs_reload = False
+        for w in self._visible_widgets.values():
+            if getattr(w, "file_path", None) == file_path:
+                self._clear_widget_thumbnail(w)
+                needs_reload = True
+        if needs_reload and not self._is_scrolling_fast:
+            try:
+                self.load_visible_images()
+            except Exception:
+                pass
 
     def _invalidate_scaled_thumbnails_for_path(self, file_path: str) -> None:
         """Drop only scaled variants for a path; keep base thumbnail to speed immediate redraw."""

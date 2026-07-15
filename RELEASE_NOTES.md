@@ -56,7 +56,7 @@ It is built as a faster **browse / cull** release on top of 2.5: featuring **Fas
 |----------|---------|--------|
 | `RAWVIEWER_FAST_RAW_DECODE` | `1` | Fast RAW path; `0` falls back toward rawpy |
 | `RAWVIEWER_USE_PROCESS_POOL` | auto | Force LibRaw process pool on/off |
-| `RAWVIEWER_SIDECAR_ADJUST` | `0` | Apply saved XMP edit sliders to browse/full-res pixels (requires editing enabled) |
+| `RAWVIEWER_SIDECAR_ADJUST` | `1` | Apply saved XMP edit sliders to browse/full-res pixels (requires editing enabled) |
 
 ### Recommended test after upgrade
 

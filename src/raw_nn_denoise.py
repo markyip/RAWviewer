@@ -45,11 +45,20 @@ _model_failed = False
 # one export (see raw_edit_pipeline.export_adjusted_image). Checked between
 # tiles, so cancellation lands within one ~2s tile of the request.
 _cancel_check = None
+# Optional progress probe installed alongside _cancel_check for the duration
+# of one export. Called (tiles_done, tiles_total) after each tile so the
+# export dialog can show real, tile-driven percentage instead of a marquee.
+_progress_cb = None
 
 
 def set_cancel_check(fn) -> None:
     global _cancel_check
     _cancel_check = fn
+
+
+def set_progress_cb(fn) -> None:
+    global _progress_cb
+    _progress_cb = fn
 
 
 class NNDenoiseCancelled(Exception):
@@ -141,6 +150,8 @@ def denoise_display_float(rgb01: np.ndarray) -> Optional[np.ndarray]:
         h, w = rgb01.shape[:2]
         out = np.empty((h, w, 3), dtype=np.float32)
         step = _TILE - 2 * _MARGIN
+        tiles_total = max(1, len(range(0, h, step)) * len(range(0, w, step)))
+        tiles_done = 0
         with torch.no_grad():
             for y0 in range(0, h, step):
                 for x0 in range(0, w, step):
@@ -161,6 +172,12 @@ def denoise_display_float(rgb01: np.ndarray) -> Optional[np.ndarray]:
                     iy1 = min(y0 + step, h) - ys
                     ix1 = min(x0 + step, w) - xs
                     out[y0:y0 + (iy1 - iy0), x0:x0 + (ix1 - ix0)] = r[iy0:iy1, ix0:ix1]
+                    tiles_done += 1
+                    if _progress_cb is not None:
+                        try:
+                            _progress_cb(tiles_done, tiles_total)
+                        except Exception:
+                            pass
         # Global luminance re-anchor (see docstring).
         lum_in = float((0.2126 * rgb01[..., 0] + 0.7152 * rgb01[..., 1]
                         + 0.0722 * rgb01[..., 2]).mean())

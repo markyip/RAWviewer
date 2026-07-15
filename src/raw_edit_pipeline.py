@@ -757,6 +757,7 @@ def export_adjusted_image(
     adj: dict[str, float],
     embed_xmp_path: Optional[str] = None,
     cancel_check=None,
+    progress_cb=None,
 ) -> None:
     """Dispatch baked export (TIFF16 / JPEG / WebP; "_nn" suffix = AI denoise).
 
@@ -774,9 +775,10 @@ def export_adjusted_image(
     if cancel_check is not None and cancel_check():
         raise ExportCancelled()
     if nn:
-        from raw_nn_denoise import set_cancel_check
+        from raw_nn_denoise import set_cancel_check, set_progress_cb
 
         set_cancel_check(cancel_check)
+        set_progress_cb(progress_cb)
     try:
         if fmt == EXPORT_FORMAT_JPEG:
             export_adjusted_jpeg(rgb_linear, adj, output_path, nn_denoise=nn)
@@ -793,6 +795,7 @@ def export_adjusted_image(
         raise
     finally:
         if nn:
-            from raw_nn_denoise import set_cancel_check
+            from raw_nn_denoise import set_cancel_check, set_progress_cb
 
             set_cancel_check(None)
+            set_progress_cb(None)

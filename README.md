@@ -49,6 +49,8 @@ In **gallery view**, drag the **size slider** in the bottom bar to change thumbn
 | **P** | Toggle RAW recovery preview — half-res shadow/highlight recovery (RAW/DNG, session only; fit-only) |
 | **F** | Show / hide focus overlay (supported files) |
 | **M** | Show / hide GPS map overlay (single view, geotagged photos; hidden by default on launch) |
+| **E** | Show / hide Adjust (Develop) panel (single view) |
+| **Ctrl+Z** | Undo last slider adjustment (single view) |
 
 **Compare mode shortcuts:**
 * **← / →** — Previous / next candidate image

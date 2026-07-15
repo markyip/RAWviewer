@@ -1922,6 +1922,8 @@ class _AdjustEditBaseWorker(QRunnable):
 class _AdjustExportSignals(QObject):
     # source, output, format, error|None, xmp_warning|None
     finished = pyqtSignal(str, str, str, object, object)
+    # source, percent (0-100), stage label
+    progress = pyqtSignal(str, int, str)
 
 
 class _AdjustExportWorker(QRunnable):
@@ -1987,8 +1989,15 @@ class _AdjustExportWorker(QRunnable):
 
             from raw_edit_pipeline import ExportCancelled
 
+            def emit_progress(percent: int, stage: str) -> None:
+                try:
+                    self.signals.progress.emit(self.file_path, percent, stage)
+                except Exception:
+                    pass
+
             if self.cancel_event.is_set():
                 raise ExportCancelled()
+            emit_progress(5, "Decoding…")
             logger.info("[EXPORT] Decoding full-resolution edit base…")
             processor = UnifiedImageProcessor()
             base = processor.decode_raw_edit_base(
@@ -2001,6 +2010,19 @@ class _AdjustExportWorker(QRunnable):
                 "[EXPORT] Full-resolution decode %s",
                 "OK, shape=%s" % (base.shape,) if base is not None else "FAILED (returned None)",
             )
+            is_nn = self.export_format.endswith("_nn")
+            # NN-denoise runs a real tile loop we can track precisely; without
+            # it the remaining work (tonemap + encode) is one opaque call, so
+            # the bar just steps to a "working" milestone rather than faking
+            # granularity nothing backs.
+            decode_done_pct = 35 if is_nn else 70
+            emit_progress(decode_done_pct, "AI denoising…" if is_nn else "Encoding…")
+
+            def nn_tile_progress(done: int, total: int) -> None:
+                span = 90 - decode_done_pct
+                pct = decode_done_pct + int(span * done / max(total, 1))
+                emit_progress(pct, "AI denoising…")
+
             export_adjusted_image(
                 self.export_format,
                 output_path=self.output_path,
@@ -2008,7 +2030,9 @@ class _AdjustExportWorker(QRunnable):
                 adj=self.adj,
                 embed_xmp_path=embed_xmp,
                 cancel_check=self.cancel_event.is_set,
+                progress_cb=nn_tile_progress if is_nn else None,
             )
+            emit_progress(100, "Done")
             logger.info("[EXPORT] export_adjusted_image() completed without raising")
         except Exception as exc:
             err = exc
@@ -8313,6 +8337,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             self._adjust_export_in_progress = False
             self._adjust_export_signals = _AdjustExportSignals()
             self._adjust_export_signals.finished.connect(self._on_adjust_export_finished)
+            self._adjust_export_signals.progress.connect(self._on_adjust_export_progress)
             self._adjust_preview_painting = False
             self._adjust_hist_sync_timer = QTimer(self)
             self._adjust_hist_sync_timer.setSingleShot(True)
@@ -20744,6 +20769,26 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         if hasattr(self, "status_bar"):
             self.status_bar.showMessage("Adjustments saved to XMP sidecar", 2500)
         self._refresh_gallery_bookmark_visuals()
+        # Every cache tier that can hold an edits-baked-in render of this file
+        # (gallery's own composited thumbnail pixmap, and the shared
+        # preview/grid/full-image/pixmap tiers _paint_instant_preview_for_path
+        # reads for the gallery->single instant paint) must drop its entry
+        # here. Without this the just-saved edits were invisible both back in
+        # the gallery grid and on the FIRST click into single view -- both
+        # read a pre-edit cached render until something else happened to
+        # evict it.
+        try:
+            from image_cache import get_image_cache
+
+            get_image_cache().invalidate_file(path)
+        except Exception:
+            pass
+        gj = getattr(self, "gallery_justified", None)
+        if gj is not None and hasattr(gj, "invalidate_thumbnails_for_path"):
+            try:
+                gj.invalidate_thumbnails_for_path(path)
+            except Exception:
+                pass
         QTimer.singleShot(0, self._restore_keyboard_focus)
 
     def _on_adjust_recovery_baseline_requested(self) -> None:
@@ -21103,23 +21148,43 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         # Modal progress dialog: freezes app interaction for the duration
         # (window-modal), offers Cancel (polled between export stages and
         # between AI-denoise tiles, so it lands within ~2s), and is dismissed
-        # automatically by _on_adjust_export_finished.
+        # automatically by _on_adjust_export_finished. Frameless MD3 chrome
+        # matching CustomConfirmDialog (stock QProgressDialog was OS-native
+        # title bar + an indeterminate marquee with no real percentage).
         try:
-            from PyQt6.QtWidgets import QProgressDialog
+            from rawviewer_app.widgets import ExportProgressDialog
 
-            dlg = QProgressDialog(
-                f"Exporting {os.path.basename(output_path)}…", "Cancel", 0, 0, self
+            dlg = ExportProgressDialog(
+                self, title="Export", message=f"Exporting {os.path.basename(output_path)}…"
             )
-            dlg.setWindowTitle("Export")
-            dlg.setWindowModality(Qt.WindowModality.WindowModal)
-            dlg.setMinimumDuration(300)  # skip the flash for fast exports
-            dlg.setAutoClose(False)
-            dlg.setAutoReset(False)
             dlg.canceled.connect(worker.cancel_event.set)
             self._adjust_export_dialog = dlg
+            self._adjust_export_dialog_path = path
+            # Skip the flash for fast exports, same as the old QProgressDialog's
+            # setMinimumDuration(300) -- only show once the export has actually
+            # been running for a moment.
+            QTimer.singleShot(
+                300,
+                lambda d=dlg: d.show()
+                if getattr(self, "_adjust_export_dialog", None) is d
+                else None,
+            )
         except Exception:
             self._adjust_export_dialog = None
+            self._adjust_export_dialog_path = None
         _get_bg_thread_pool().start(worker)
+
+    def _on_adjust_export_progress(self, source_path: str, percent: int, stage: str) -> None:
+        dlg = getattr(self, "_adjust_export_dialog", None)
+        if dlg is None or _norm_path(source_path) != _norm_path(
+            getattr(self, "_adjust_export_dialog_path", "") or ""
+        ):
+            return
+        try:
+            dlg.set_progress(percent)
+            dlg.set_message(f"Exporting {os.path.basename(source_path)}… {stage}")
+        except Exception:
+            pass
 
     def _on_adjust_export_finished(
         self,
@@ -21140,6 +21205,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         dlg = getattr(self, "_adjust_export_dialog", None)
         if dlg is not None:
             self._adjust_export_dialog = None
+            self._adjust_export_dialog_path = None
             try:
                 dlg.canceled.disconnect()
             except Exception:

@@ -304,23 +304,34 @@ def edited_previews_enabled() -> bool:
     }
 
 
-_BT709_DECODE_LUT = None
+_SRGB_DECODE_LUT = None
 
 
-def _decode_bt709_uint8_to_linear(arr: np.ndarray) -> np.ndarray:
-    """Inverse of the dcraw BT.709 encode used by linear_to_display_uint8."""
-    global _BT709_DECODE_LUT
-    if _BT709_DECODE_LUT is None:
-        from fast_raw_decode import _gamma_lut8
+def _decode_srgb_uint8_to_linear(arr: np.ndarray) -> np.ndarray:
+    """Standard sRGB EOTF, uint8 [0,255] -> linear [0,1] float32.
 
-        fwd = _gamma_lut8()  # 65536-entry linear16 -> uint8
-        # Invert numerically: for each of the 256 output codes, the mean
-        # linear input that maps to it.
-        lin16 = np.arange(65536, dtype=np.float64)
-        sums = np.bincount(fwd, weights=lin16, minlength=256)
-        counts = np.maximum(np.bincount(fwd, minlength=256), 1)
-        _BT709_DECODE_LUT = (sums / counts / 65535.0).astype(np.float32)
-    return _BT709_DECODE_LUT[arr]
+    Gallery/thumbnail buffers for RAW files are the camera's embedded JPEG
+    (extract_embedded_jpeg_by_scan / rawpy.extract_thumb) or, absent that,
+    LibRaw's own raw.postprocess() output -- both approximately sRGB gamma
+    (~2.2 with a linear toe), NOT the app's own dcraw-style BT.709
+    linear16->uint8 encode from fast_raw_decode._gamma_lut8. This function
+    used to invert THAT LUT (see git history), which assumes an input this
+    code path never actually receives: the flatter BT.709 shadow curve,
+    inverted, overestimates linear values versus the steeper true sRGB toe,
+    so the reconstructed "linear" buffer was too bright even before edits --
+    then process_linear_edit_buffer's exposure/tone stage (built for a
+    genuinely linear-RAW input, e.g. decode_raw_edit_base) amplified that
+    overestimate further, making edited gallery thumbnails visibly brighter
+    than the same edit applied in single view (which decodes true
+    scene-linear RAW, never through an 8-bit round trip at all). Report:
+    "thumbnail preview brightness significantly higher than edited image."
+    """
+    global _SRGB_DECODE_LUT
+    if _SRGB_DECODE_LUT is None:
+        c = np.arange(256, dtype=np.float64) / 255.0
+        lin = np.where(c <= 0.04045, c / 12.92, ((c + 0.055) / 1.055) ** 2.4)
+        _SRGB_DECODE_LUT = lin.astype(np.float32)
+    return _SRGB_DECODE_LUT[arr]
 
 
 def apply_saved_edits_for_display(file_path: str, arr):
@@ -339,14 +350,19 @@ def apply_saved_edits_for_display(file_path: str, arr):
     can only ever be created for RAW files (the Adjust panel requires a
     demosaiced RAW base), so non-RAW is always pass-through.
 
-    Renders through the REAL scene-linear pipeline (BT.709 decode ->
+    Renders through the REAL scene-linear pipeline (sRGB decode ->
     process_linear_edit_buffer -> linear_to_display_uint8), not the legacy
     gamma-space approximation: the gamma path's tone math diverges visibly
     from the Adjust panel's render (reported as the gallery/fit preview
     being "way off" from the edited image). Working from an already
     tone-curved camera JPEG is still an approximation of the true RAW edit
     base, but the tone/color processing applied on top is now the same code
-    the editor runs.
+    the editor runs. The uint8->linear decode uses the standard sRGB EOTF,
+    matching the actual gamma of the embedded-JPEG/LibRaw-postprocess
+    thumbnail buffers this function receives (see
+    _decode_srgb_uint8_to_linear's docstring for why the BT.709 LUT this
+    used previously was the wrong inverse and made edited thumbnails read
+    brighter than the true edited image).
     """
     try:
         if arr is None or not hasattr(arr, "shape") or not edited_previews_enabled():
@@ -369,7 +385,7 @@ def apply_saved_edits_for_display(file_path: str, arr):
             return arr
         from raw_edit_pipeline import linear_to_display_uint8, process_linear_edit_buffer
 
-        lin = _decode_bt709_uint8_to_linear(np.ascontiguousarray(arr))
+        lin = _decode_srgb_uint8_to_linear(np.ascontiguousarray(arr))
         out = process_linear_edit_buffer(lin, adj, preview=True)
         return linear_to_display_uint8(out, adj)
     except Exception:

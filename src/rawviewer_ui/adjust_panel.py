@@ -851,34 +851,18 @@ class ImageAdjustPanelWidget(QWidget):
             self._value_labels[spec.key] = val_lbl
 
         # Chroma NR
-        nr_row = QHBoxLayout()
-        nr_row.setSpacing(6)
-        nr_label = QLabel("Chroma NR")
-        nr_label.setStyleSheet(f"color: {theme.INK_MUTED}; font-size: 11px;")
-        nr_label.setMinimumWidth(72)
-        nr_row.addWidget(nr_label)
-        self._nr_btn = QPushButton("Off")
-        self._nr_btn.setObjectName("adjust_nr_btn")
-        self._nr_btn.setCheckable(True)
-        self._nr_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self._nr_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        self._nr_btn.setToolTip("Chroma-only bilateral denoise (luminance preserved)")
-        self._nr_btn.toggled.connect(self._on_nr_toggled)
-        nr_row.addWidget(self._nr_btn, 1)
-        self.sect_detail.add_layout(nr_row)
-
-        # Denoise Method Row
         method_row = QHBoxLayout()
         method_row.setSpacing(6)
-        method_lbl = QLabel("NR Method")
+        method_lbl = QLabel("Chroma NR")
         method_lbl.setStyleSheet(f"color: {theme.INK_MUTED}; font-size: 11px;")
         method_lbl.setMinimumWidth(72)
         method_row.addWidget(method_lbl)
         
         self._denoise_method_combo = QComboBox()
-        self._denoise_method_combo.addItems(["Bilateral", "Guided Filter"])
+        self._denoise_method_combo.addItems(["Off", "Bilateral filter", "Guided filter"])
         self._denoise_method_combo.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._denoise_method_combo.currentIndexChanged.connect(self._on_denoise_method_changed)
+        self._denoise_method_combo.setToolTip("Chroma-only denoise (luminance preserved)")
         self._denoise_method_combo.setStyleSheet(f"""
             QComboBox {{
                 background-color: {theme.RAISED};
@@ -1065,6 +1049,38 @@ class ImageAdjustPanelWidget(QWidget):
         export_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         export_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         export_menu = QMenu(export_btn)
+        # Bare QMenu renders with OS-native chrome, clashing with the app's
+        # frameless dark-chrome dialogs (see release_update_dialog.py) -- the
+        # only other QMenu-style popup in the app. Match those tokens.
+        export_menu.setStyleSheet(
+            f"""
+            QMenu {{
+                background-color: {theme.SURFACE};
+                border: 1px solid {theme.LINE};
+                border-radius: 8px;
+                padding: 4px;
+                color: {theme.INK};
+                font-size: 12px;
+            }}
+            QMenu::item {{
+                padding: 6px 20px 6px 12px;
+                border-radius: 5px;
+                background-color: transparent;
+            }}
+            QMenu::item:selected {{
+                background-color: {theme.EMBER_DIM};
+                color: {theme.INK};
+            }}
+            QMenu::item:disabled {{
+                color: {theme.INK_FAINT};
+            }}
+            QMenu::separator {{
+                height: 1px;
+                background-color: {theme.LINE};
+                margin: 4px 8px;
+            }}
+            """
+        )
         export_menu.addAction(
             "16-bit TIFF (baked)",
             lambda: self._request_export("tiff16"),
@@ -1362,7 +1378,6 @@ class ImageAdjustPanelWidget(QWidget):
                 slider.setValue(spec.value_to_slider(value))
                 if val_lbl is not None:
                     val_lbl.setText(spec.format_value(value))
-            self._set_nr_checked(float(merged.get("ColorNoiseReduction", 0.0)) > 0.0)
             self._set_lens_correction_checked(
                 float(merged.get("LensCorrectionEnabled", 0.0)) > 0.5
             )
@@ -1381,11 +1396,15 @@ class ImageAdjustPanelWidget(QWidget):
             self.set_recovery_baseline(
                 float(merged.get(RECOVERY_BASELINE_KEY, 0.0)) > 0.5
             )
-            # Load denoise method combo index
-            method_idx = int(float(merged.get("DenoiseMethod", 0.0)))
+            nr_amount = float(merged.get("ColorNoiseReduction", 0.0))
+            if nr_amount > 0.0:
+                method_idx = int(float(merged.get("DenoiseMethod", 0.0)))
+                combo_idx = method_idx + 1
+            else:
+                combo_idx = 0
             if hasattr(self, "_denoise_method_combo"):
                 self._denoise_method_combo.blockSignals(True)
-                self._denoise_method_combo.setCurrentIndex(min(1, max(0, method_idx)))
+                self._denoise_method_combo.setCurrentIndex(min(2, max(0, combo_idx)))
                 self._denoise_method_combo.blockSignals(False)
         finally:
             self._block_emit = False
@@ -1476,10 +1495,12 @@ class ImageAdjustPanelWidget(QWidget):
             if slider is None:
                 continue
             out[spec.key] = spec.slider_to_value(slider.value())
-        btn = getattr(self, "_nr_btn", None)
-        out["ColorNoiseReduction"] = (
-            CHROMA_NR_ON_VALUE if btn is not None and btn.isChecked() else 0.0
-        )
+        if hasattr(self, "_denoise_method_combo"):
+            idx = self._denoise_method_combo.currentIndex()
+            out["DenoiseMethod"] = float(max(0, idx - 1))
+            out["ColorNoiseReduction"] = CHROMA_NR_ON_VALUE if idx > 0 else 0.0
+        else:
+            out["ColorNoiseReduction"] = 0.0
         lens_btn = getattr(self, "_lens_correction_btn", None)
         out["LensCorrectionEnabled"] = (
             1.0 if lens_btn is not None and lens_btn.isChecked() else 0.0
@@ -1498,17 +1519,7 @@ class ImageAdjustPanelWidget(QWidget):
                 out[key] = float(val)
         if self._recovery_baseline:
             out[RECOVERY_BASELINE_KEY] = 1.0
-        if hasattr(self, "_denoise_method_combo"):
-            out["DenoiseMethod"] = float(self._denoise_method_combo.currentIndex())
         return out
-
-    def _on_nr_toggled(self, checked: bool) -> None:
-        if self._block_emit:
-            return
-        btn = getattr(self, "_nr_btn", None)
-        if btn is not None:
-            btn.setText("On" if checked else "Off")
-        self._emit_preview_and_save()
 
     def _on_dodge_burn_toggled(self, btn: QPushButton, checked: bool) -> None:
         if self._block_emit:
@@ -1719,7 +1730,6 @@ class ImageAdjustPanelWidget(QWidget):
             or k.startswith("SaturationAdjustment")
             or k.startswith("LuminanceAdjustment")
         }
-        self._set_nr_checked(False)
         self._current_hsl_color = HSL_COLOR_NAMES[0]
         if hasattr(self, "_hsl_color_combo"):
             self._hsl_color_combo.blockSignals(True)
