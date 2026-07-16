@@ -197,8 +197,11 @@ if _IS_GUI_MAIN_PROCESS:
         # Try to load platform app icon as splash
         _icon_path = _branded_icon_resource_path()
         if _icon_path:
-            _splash_pixmap = QPixmap(_icon_path)
-            if _splash_pixmap.width() > 512:
+            from PyQt6.QtGui import QIcon
+            _splash_pixmap = QIcon(_icon_path).pixmap(512, 512)
+            if _splash_pixmap.isNull():
+                _splash_pixmap = QPixmap(_icon_path)
+            if not _splash_pixmap.isNull() and _splash_pixmap.width() > 512:
                 _splash_pixmap = _splash_pixmap.scaled(
                     512, 512,
                     Qt.AspectRatioMode.KeepAspectRatio,
