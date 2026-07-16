@@ -54,6 +54,11 @@ It is built as a faster **browse / cull** release on top of 2.5: featuring **Fas
 - Gallery disk-cache default flipped toward **JPEG** tiles (WebP remains available).
 - Culling zoom glitches, Windows taskbar flicker on startup, discarded-photo-never-returns, and slow gallery multi-select fixes.
 
+#### 📦 Lite packaging (精簡 B)
+- **Lite keeps Adjust** (CPU Fast RAW + editor) but **omits PyTorch / kornia** — no GPU demosaic and no AI denoise export in Lite.
+- Windows Lite pixi payload skips `torch` / `torchvision` / `kornia` so install size stays near the ~500 MB class instead of dragging CUDA wheels.
+- Lite runtime default: `RAWVIEWER_PREFER_GPU_DECODE=0`. Full (CUDA) still prefers GPU demosaic when the backend is present.
+
 ### Environment variables (new / notable)
 
 | Variable | Default | Effect |

@@ -10,6 +10,9 @@ LITE_PREFETCH_DEFAULTS: dict[str, str] = {
     "RAWVIEWER_ENABLE_SEMANTIC_SEARCH": "0",
     "RAWVIEWER_ENABLE_FACE_SCAN": "0",
     "RAWVIEWER_AUTO_METADATA_INDEX": "1",
+    # Lite omits torch/kornia; keep CPU Fast RAW (cv2 EA). Full may setdefault
+    # PREFER_GPU_DECODE=1 via pyi_rth_release_defaults after this hook.
+    "RAWVIEWER_PREFER_GPU_DECODE": "0",
     "RAWVIEWER_NAV_PRELOAD_ADAPTIVE": "1",
     "RAWVIEWER_NAV_PRELOAD_NEAR": "4",
     "RAWVIEWER_NAV_PRELOAD_DISPLAY": "1",

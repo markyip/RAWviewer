@@ -23,6 +23,11 @@ _WINDOWS_LITE_PIXI_SKIP = (
     "onnxruntime-gpu",
     "onnxruntime-directml",
     "requests",
+    # GPU demosaic / optional AI denoise backend. CUDA torch wheels dominate
+    # Windows install size; Lite keeps CPU Fast RAW (cv2) + Adjust editing.
+    "torch",
+    "torchvision",
+    "kornia",
 )
 # opencv-python-headless was in this skip list -- correct while cv2 was only
 # used by the (Lite-excluded) semantic search preprocessing, but the
@@ -31,6 +36,8 @@ _WINDOWS_LITE_PIXI_SKIP = (
 # raw_lens_correction.py) imports cv2 unconditionally -- stripping it from
 # the Lite pixi manifest would make every Adjust panel control crash with
 # ModuleNotFoundError on first use. See docs/EDIT_PIPELINE.md "Installer size".
+# torch/kornia stay skipped: Lite is browse + light Adjust on CPU; Full ships
+# CUDA demosaic (and optional realPLKSR export denoise) separately.
 
 
 def write_app_version() -> None:
@@ -393,7 +400,7 @@ def _prepare_windows_pixi_manifest(accel: str, *, profile: str = "full") -> Path
         raw = "\n".join(kept_lines) + "\n"
         raw = raw.replace(
             "Professional RAW Image Viewer with Semantic Search",
-            "Professional RAW Image Viewer (Lite — viewing, EXIF/GPS search)",
+            "Professional RAW Image Viewer (Lite — browse, cull, Adjust; no AI/GPU demosaic)",
         )
     elif accel == "cuda":
         raw = raw.replace("onnxruntime-directml", "onnxruntime-gpu")

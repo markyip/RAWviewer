@@ -1,7 +1,7 @@
 # RAWviewer v3.0
 
 <p align="center">
-  <img src="icons/appicon.ico" alt="RAWviewer Icon" width="256">
+  <img src="icons/appicon.png" alt="RAWviewer Icon" width="256">
 </p>
 
 <p align="center">
@@ -71,21 +71,24 @@
 
 ## Lite 與 Full
 
-兩個版本共用相同的檢視器、篩選工具、星級、書籤與中繼資料搜尋。**Full（完整版）** 另含離線 AI 搜尋與人臉篩選。
+兩個版本共用相同的檢視器、篩選工具、星級、書籤、中繼資料搜尋，以及 **Adjust** 編輯器（CPU）。**Full（完整版）** 另含離線 AI 搜尋、人臉篩選，以及（Windows CUDA）GPU demosaic／選用 AI 降噪匯出。
 
 | | Lite（精簡版） | Full（完整版） |
 |---|:--:|:--:|
 | 圖庫、底片列、縮放、直方圖、書籤、星級、篩選 | ✅ | ✅ |
+| Fast RAW 解碼（CPU／OpenCV） | ✅ | ✅ |
+| Adjust／Develop 編輯器（色調、鏡頭、JPEG／TIFF 匯出） | ✅ | ✅ |
 | 中繼資料搜尋（`camera:`、`iso:`、`date:` 等） | ✅ | ✅ |
 | 地點搜尋（`city:`、`country:` 等，需 GPS） | ✅ | ✅ |
 | 自然語句搜尋 | — | ✅ |
 | 人臉篩選（`has:face` 等） | — | ✅ |
+| GPU demosaic（PyTorch CUDA）／AI 降噪匯出 | — | ✅ |
 
-選 **Lite** 可獲較小安裝包，以目視瀏覽為主。選 **Full** 可用日常用語搜尋——仍為 **100% 離線**。
+選 **Lite** 可獲較小安裝包（無 AI 模型、無 CUDA torch），以目視瀏覽為主。選 **Full** 可用日常用語搜尋——仍為 **100% 離線**。
 
 ### AI 降噪（選用）
 
-RAWviewer 支援選用的神經網路降噪模型（realPLKSR），可在匯出時提供高品質的雜訊抑制。若要啟用 AI 降噪：
+**Full** 支援選用的神經網路降噪模型（realPLKSR），可在匯出時提供高品質雜訊抑制（**Lite** 不含 PyTorch，因此沒有這些選項）。若要啟用 AI 降噪：
 1. **Windows**：安裝程式會在初次設定時自動下載並安裝降噪模型權重（`1xDeNoise_realplksr_otf.safetensors`，由 Philip Hofmann 製作，CC-BY-4.0）。
 2. **macOS**：應用程式會在您首次嘗試使用「AI 降噪」選項匯出影像時，自動在 App 內彈出提示並處理模型下載。
 3. 若您的系統具備相容的 GPU（Windows 上需要相容 CUDA 的 GPU，macOS 上需要 Apple Silicon GPU），調整面板的匯出格式下拉選單中將出現「JPEG + AI denoise (realPLKSR)」與「16-bit TIFF + AI denoise」選項。
@@ -131,7 +134,7 @@ bash install_macos_app.sh
 
 ### 系統需求
 
-Windows 10+ · macOS 13+ · 8 GB RAM（**Full** + 大型資料夾建議 16 GB+）· 約 500 MB 磁碟（**Lite**）或 1.5 GB+（**Full** 含模型）
+Windows 10+ · macOS 13+ · 8 GB RAM（**Full** + 大型資料夾建議 16 GB+）· 約 500 MB 磁碟（**Lite**，無 AI 模型／無 CUDA torch）或 1.5 GB+（**Full** 含模型；Windows CUDA Full 因 torch 更大）
 
 僅清除縮圖快取：**`scripts\Launch\bat\clear_cache.bat`**（Windows）· **`scripts/Launch/shell/clear_cache.sh`**（Mac）
 

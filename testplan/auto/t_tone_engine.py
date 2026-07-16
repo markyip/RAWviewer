@@ -80,6 +80,36 @@ def main() -> int:
     base = lift(0.01, {})
     check("recovery strength floor", both >= base * 3, f"base={base} both={both}")
 
+    # 6b. Scene-linear Shadows: deep detail recovers like a partial Exposure
+    # push, while midtones stay nearly put (the whole point vs Exposure).
+    s100 = lift(0.01, {"Shadows2012": 100.0})
+    exp_half = lift(0.01, {"Exposure2012": 0.9})
+    check(
+        "Shadows=100 deep lift rivals ~+0.9 EV locally",
+        s100 >= exp_half - 2,
+        f"shadows={s100} exp0.9={exp_half}",
+    )
+    mid0 = lift(0.25, {})
+    mid_s = lift(0.25, {"Shadows2012": 100.0})
+    check(
+        "Shadows=100 leaves midtones nearly unchanged",
+        abs(mid_s - mid0) <= 8,
+        f"mid0={mid0} mid_s={mid_s}",
+    )
+    hi0 = lift(0.85, {})
+    hi_rec = lift(0.85, {"Highlights2012": -100.0})
+    check(
+        "Highlights=-100 darkens near-white",
+        hi_rec < hi0 - 5,
+        f"hi0={hi0} hi_rec={hi_rec}",
+    )
+    mid_hi = lift(0.25, {"Highlights2012": -100.0})
+    check(
+        "Highlights=-100 leaves midtones nearly unchanged",
+        abs(mid_hi - mid0) <= 8,
+        f"mid0={mid0} mid_hi={mid_hi}",
+    )
+
     # 7. Chroma-speckle regression: real per-pixel sensor noise must not be
     # amplified into a visible color cast by strong Shadows/Blacks lift.
     # Reproduces the reported bug (blue speckle in dark clothing/hair,

@@ -8,6 +8,8 @@ perceptual space. Tone work is luminance-only to preserve hue.
 
 from __future__ import annotations
 
+from typing import Optional
+
 import numpy as np
 
 from raw_tone_curve import apply_tone_curve_perceptual
@@ -83,6 +85,98 @@ _RATIO_EPS = 0.005
 # pass against real files before this is revisited.
 _MAX_TONE_RATIO = 8.0
 _MIN_TONE_RATIO = 0.25
+
+# Scene-linear regional Exposure-like gain for Shadows/Highlights (applied
+# before the perceptual PV2012 path). This is what makes Shadows feel closer
+# to Lightroom / to bumping Exposure: stop-based multiply in linear space,
+# masked so midtones stay put. Perceptual Shadows/Highlights are then zeroed
+# in _apply_pv2012_perceptual to avoid double-application (Contrast / Whites /
+# Blacks still run). Tuned for monotonicity on a scene-linear ramp
+# (t_tone_engine) — steep masks + high stops invert; keep the band wide.
+_SHADOW_LINEAR_MAX_STOPS = 1.75
+_HIGHLIGHT_LINEAR_MAX_STOPS = 1.55
+_SHADOW_MASK_LO = 0.012  # full shadow weight at/below
+_SHADOW_MASK_HI = 0.22  # zero weight at/above
+_HIGHLIGHT_MASK_LO = 0.38  # zero highlight weight at/below
+_HIGHLIGHT_MASK_HI = 0.98  # full weight at/above
+
+
+def _smoothstep01(t: np.ndarray) -> np.ndarray:
+    t = np.clip(t, 0.0, 1.0)
+    return t * t * (3.0 - 2.0 * t)
+
+
+def _shadow_mask_scene_linear(lum: np.ndarray) -> np.ndarray:
+    """1 in deep shadows → 0 through upper-shadow / midtone."""
+    span = max(_SHADOW_MASK_HI - _SHADOW_MASK_LO, 1e-6)
+    return 1.0 - _smoothstep01((lum - _SHADOW_MASK_LO) / span)
+
+
+def _highlight_mask_scene_linear(lum: np.ndarray) -> np.ndarray:
+    """0 through midtone → 1 in highlights / near-white."""
+    span = max(_HIGHLIGHT_MASK_HI - _HIGHLIGHT_MASK_LO, 1e-6)
+    return _smoothstep01((lum - _HIGHLIGHT_MASK_LO) / span)
+
+
+def apply_regional_linear_exposure(
+    img: np.ndarray, shadows: float, highlights: float
+) -> tuple[np.ndarray, Optional[np.ndarray]]:
+    """Exposure-like regional gain in scene-linear RGB.
+
+    Returns ``(rgb, gain_map)``. ``gain_map`` is None when the op is a no-op
+    (used by chroma-damp to know whether a lift happened). Absolute black
+    stays 0 under multiply. Midtones stay near gain 1 by construction of the
+    masks.
+    """
+    sh = float(shadows) / 100.0
+    hi = float(highlights) / 100.0
+    if abs(sh) < 1e-6 and abs(hi) < 1e-6:
+        return img, None
+
+    lum = _luminance(img).astype(np.float32)
+    log2_gain = np.zeros_like(lum, dtype=np.float32)
+    if abs(sh) > 1e-6:
+        log2_gain = log2_gain + (sh * _SHADOW_LINEAR_MAX_STOPS) * _shadow_mask_scene_linear(
+            lum
+        )
+    if abs(hi) > 1e-6:
+        # hi > 0 brightens highlights; hi < 0 compresses (recovery), same
+        # stop language as Exposure but masked to the highlight region.
+        log2_gain = log2_gain + (
+            hi * _HIGHLIGHT_LINEAR_MAX_STOPS
+        ) * _highlight_mask_scene_linear(lum)
+
+    gain = np.power(2.0, log2_gain).astype(np.float32)
+    out = img.astype(np.float32, copy=False) * gain[..., np.newaxis]
+    return out, gain
+
+
+def _damp_chroma_after_lift(
+    out: np.ndarray,
+    *,
+    luma_2d: np.ndarray,
+    region_weight: np.ndarray,
+    lift_frac: np.ndarray,
+) -> np.ndarray:
+    """Edge-aware HF chroma damp after a luminance lift (shared by ratio + linear paths)."""
+    from raw_chroma_denoise import _luma_edge_weight, apply_guided_filter
+    import cv2
+
+    smooth_luma = apply_guided_filter(luma_2d, luma_2d, 10, 0.003)
+    edge_w = _luma_edge_weight(smooth_luma.astype(np.float32), soft=0.008)
+    damp_strength = 0.6 * (1.0 - edge_w)
+    damp = 1.0 - (region_weight * damp_strength * lift_frac)[..., np.newaxis]
+    luma = luma_2d[..., np.newaxis]
+    chroma = out - luma
+    h, w = chroma.shape[:2]
+    ds = cv2.resize(
+        chroma, (max(1, w // 4), max(1, h // 4)), interpolation=cv2.INTER_AREA
+    )
+    for c in range(3):
+        ch = np.ascontiguousarray(ds[..., c])
+        ds[..., c] = apply_guided_filter(ch, ch, 2, 0.0005)
+    chroma_lf = cv2.resize(ds, (w, h), interpolation=cv2.INTER_LINEAR)
+    return luma + chroma_lf + (chroma - chroma_lf) * damp
 
 
 # Where scene-linear white (camera clip, lum=1.0) lands in the perceptual
@@ -238,12 +332,43 @@ def apply_pv2012_tone_rgb(
 ) -> np.ndarray:
     """Hue-preserving PV2012 tone; ratio capped in perceptual space.
 
+    Shadows/Highlights first get an Exposure-like scene-linear regional gain
+    (masked stops), then Contrast/Whites/Blacks + curves run through the
+    perceptual ratio path. Perceptual Shadows/Highlights are zeroed so the
+    linear gain is not double-applied.
+
     ``preview_lite=True`` (Adjust live-drag only): skip the y0 guided filter
     and shadow chroma-damp guided filters. Those dominate tick cost on the
     fast base; settle / export always use the full path. Live-drag uses a
     separate PreviewStageCache, so lite outputs never poison full-quality
     stages.
     """
+    shadows = float(adj.get("Shadows2012", 0.0))
+    highlights = float(adj.get("Highlights2012", 0.0))
+    img, linear_gain = apply_regional_linear_exposure(img, shadows, highlights)
+
+    # Chroma damp for the linear shadow lift (ratio-path damp below won't see
+    # it once perceptual Shadows are zeroed). Skip in preview_lite.
+    if (
+        linear_gain is not None
+        and not preview_lite
+        and np.any(linear_gain > 1.0 + 1e-3)
+    ):
+        lum_lifted = _luminance(img)
+        # Normalize lift amount against the max shadow stops so damp ramps
+        # similarly to the old ratio-based path.
+        max_gain = float(2.0 ** _SHADOW_LINEAR_MAX_STOPS)
+        lift_frac = np.clip((linear_gain - 1.0) / max(max_gain - 1.0, 1e-6), 0.0, 1.0)
+        # Region weight from pre-gain would need the original lum; approximate
+        # with the inverse of how much we still consider "shadow" after lift
+        # by reusing the scene-linear shadow mask on the *unlifted* estimate
+        # lum/gain (gain>=1 in lifted areas).
+        lum_pre = np.where(linear_gain > 1e-6, lum_lifted / linear_gain, lum_lifted)
+        sw = _shadow_mask_scene_linear(lum_pre)
+        img = _damp_chroma_after_lift(
+            img, luma_2d=lum_lifted, region_weight=sw, lift_frac=lift_frac
+        )
+
     lum = _luminance(img)
     y0_raw = _scene_to_perceptual(lum)
     # Smooth y0 before it drives anything downstream (tone curve, PV2012
@@ -285,11 +410,13 @@ def apply_pv2012_tone_rgb(
     # wired end-to-end (widget -> XMP -> pipeline) but had zero visible
     # effect on the image, reported as "the tone curve is unresponsive".
     y_curve = apply_tone_curve_perceptual(y0, adj)
+    # Shadows/Highlights already applied as scene-linear regional gain above;
+    # pass zeros here so the weak perceptual S/H path does not double-dip.
     y1 = _apply_pv2012_perceptual(
         y_curve,
         contrast=float(adj.get("Contrast2012", 0.0)),
-        highlights=float(adj.get("Highlights2012", 0.0)),
-        shadows=float(adj.get("Shadows2012", 0.0)),
+        highlights=0.0,
+        shadows=0.0,
         whites=float(adj.get("Whites2012", 0.0)),
         blacks=float(adj.get("Blacks2012", 0.0)),
     )
@@ -368,74 +495,8 @@ def apply_pv2012_tone_rgb(
         # lift, so damp strength should ramp up early, not only at the tail.
         lift_frac = np.clip((ratio - 1.0) / 3.0, 0.0, 1.0)
         luma_2d = lum * ratio
-
-        # Edge-aware damp strength (max strength history: 0.35 -> 0.85 ->
-        # 0.6 flat -> edge-aware here). A flat global strength can't tell a
-        # real fold line or fabric weave (genuine local luminance
-        # structure) apart from per-pixel sensor noise -- both produce
-        # similar-looking local chroma deviation, so damping hard enough to
-        # control the noise also flattens real color texture into grey
-        # (measured: at matched brightness, a real fabric crop carried
-        # 2.4x more chroma under an equivalent Exposure push than under
-        # Shadows+100 -- reported as "duller than Exposure"). A plain
-        # Sobel edge weight on the raw lifted luminance doesn't fix this:
-        # per-pixel noise produces gradients just as sharp as a real edge
-        # to a 3x3 operator, so nearly the whole shadow region reads as
-        # "edge" regardless. Self-guided-filtering the luminance first
-        # (eps large enough to actually smooth, ~10x the local noise
-        # variance) suppresses the pixel-independent noise while leaving
-        # multi-pixel real structure (fold lines, weave) intact, so edge
-        # detection on *that* actually separates the two -- verified
-        # visually (scripts/shadow_tuning_*.py): fold lines read as bright
-        # ridges in the edge map, flat/noisy fabric reads dark.
-        #
-        # Edge multiplier history: 0.5 -> 1.0 (full damp removal at max
-        # edge confidence). 0.5 (halved, not zeroed, at a real edge) was
-        # the cautious first value; a real-file sweep (Canon fabric crop +
-        # a Sony ARW) showed 1.0 recovers meaningfully more color on both
-        # (sat_proxy +19% and +5.5% respectively over the 0.5 value) with
-        # the flat/noisy region completely unaffected either way (a
-        # synthetic hard-edge-vs-flat-noise test held flat_chroma constant
-        # at 2.32-2.33x its no-lift baseline across 0.5-1.0 -- the edge
-        # weight is ~0 there regardless, so edge_mult only ever acts where
-        # real structure was actually detected).
-        from raw_chroma_denoise import _luma_edge_weight, apply_guided_filter
-
-        smooth_luma = apply_guided_filter(luma_2d, luma_2d, 10, 0.003)
-        edge_w = _luma_edge_weight(smooth_luma.astype(np.float32), soft=0.008)
-        damp_strength = 0.6 * (1.0 - edge_w)
-
-        damp = 1.0 - (sw * damp_strength * lift_frac)[..., np.newaxis]
-        luma = luma_2d[..., np.newaxis]
-        chroma = out - luma
-        # Damp only the HIGH-FREQUENCY chroma component. Sensor/demosaic
-        # chroma noise -- the thing this damp exists for -- is per-pixel
-        # (high-frequency) by nature, while a genuinely colored surface
-        # (fabric, skin, painted wall) carries its color as a low-frequency
-        # chroma field. The previous full-chroma damp could not tell them
-        # apart, so a flat colored surface under a strong lift lost ~60% of
-        # its saturation (measured sat retention 0.44 at Shadows>=50): the
-        # "significant grey artifacts" report. The edge-aware strength above
-        # only protects luminance STRUCTURE (folds, weave); a uniformly
-        # colored flat region has no luma edges and was damped to grey.
-        # Splitting chroma with a small self-guided filter keeps the speckle
-        # suppression bit-for-bit on the noise (per-pixel deviations have
-        # ~zero low-frequency component) while passing surface color through
-        # untouched.
-        # The LF field is low-frequency by definition, so extract it at
-        # quarter resolution: full-res self-guided filtering here measured
-        # 462ms at 3004x2004 (tripling this stage), the 4x-downsampled
-        # equivalent ~35ms with visually identical output (INTER_AREA down /
-        # INTER_LINEAR up cannot introduce content above the very cutoff the
-        # filter is discarding anyway).
-        import cv2
-
-        h, w = chroma.shape[:2]
-        ds = cv2.resize(chroma, (max(1, w // 4), max(1, h // 4)), interpolation=cv2.INTER_AREA)
-        for c in range(3):
-            ch = np.ascontiguousarray(ds[..., c])
-            ds[..., c] = apply_guided_filter(ch, ch, 2, 0.0005)
-        chroma_lf = cv2.resize(ds, (w, h), interpolation=cv2.INTER_LINEAR)
-        out = luma + chroma_lf + (chroma - chroma_lf) * damp
+        out = _damp_chroma_after_lift(
+            out, luma_2d=luma_2d, region_weight=sw, lift_frac=lift_frac
+        )
 
     return np.clip(out, 0.0, None)

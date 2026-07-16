@@ -1,7 +1,7 @@
 # RAWviewer v3.0
 
 <p align="center">
-  <img src="icons/appicon.ico" alt="RAWviewer Icon" width="256">
+  <img src="icons/appicon.png" alt="RAWviewer Icon" width="256">
 </p>
 
 <p align="center">
@@ -73,20 +73,23 @@ Search syntax → [Advanced reference](#advanced-reference).
 
 ## Lite vs Full
 
-Both editions share the same viewer, culling tools, star ratings, bookmarks, and metadata search. **Full** adds offline AI search and face filters.
+Both editions share the same viewer, culling tools, star ratings, bookmarks, metadata search, and the **Adjust** editor (CPU). **Full** adds offline AI search, face filters, and (on Windows with CUDA) GPU demosaic / optional AI denoise export.
 
 | | Lite | Full |
 |---|:--:|:--:|
 | Gallery, film strip, zoom, histogram, bookmarks, ratings, culling | ✅ | ✅ |
+| Fast RAW decode (CPU / OpenCV) | ✅ | ✅ |
+| Adjust / Develop editor (tone, lens, export JPEG/TIFF) | ✅ | ✅ |
 | Metadata search (`camera:`, `iso:`, `date:`, …) | ✅ | ✅ |
 | Plain-language search | — | ✅ |
 | Face filters (`has:face`, …) | — | ✅ |
+| GPU demosaic (PyTorch CUDA) / AI denoise export | — | ✅ |
 
-Pick **Lite** for a smaller install and browse-by-eye workflow. Pick **Full** to search with everyday words — still 100% offline.
+Pick **Lite** for a smaller install and browse-by-eye workflow (no AI models, no CUDA torch). Pick **Full** to search with everyday words — still 100% offline.
 
 ### AI Denoise (Optional)
 
-RAWviewer supports an optional neural denoise model (realPLKSR) for high-quality noise reduction during export. To enable AI denoise:
+**Full** builds support an optional neural denoise model (realPLKSR) for high-quality noise reduction during export (**Lite** omits PyTorch, so these options are unavailable). To enable AI denoise:
 1. **Windows**: The setup installer automatically downloads and installs the denoise model weights (`1xDeNoise_realplksr_otf.safetensors`, model by Philip Hofmann, CC-BY-4.0) during first setup.
 2. **macOS**: The app automatically prompts and handles the model download in-app the first time you attempt to export an image using the "AI denoise" option.
 3. The options "JPEG + AI denoise (realPLKSR)" and "16-bit TIFF + AI denoise" will appear in the export dropdown in the Adjust panel if your system has a compatible GPU (requires a CUDA-compatible GPU on Windows or an Apple Silicon GPU on macOS).
@@ -132,7 +135,7 @@ Uninstall: **`uninstall_macos_app.sh`** or **`Uninstall RAWviewer.command`** in 
 
 ### Requirements
 
-Windows 10+ · macOS 13+ · 8 GB RAM (16 GB+ recommended for **Full** + large folders) · ~500 MB disk (**Lite**) or ~1.5 GB+ (**Full** with models)
+Windows 10+ · macOS 13+ · 8 GB RAM (16 GB+ recommended for **Full** + large folders) · ~500 MB disk (**Lite**, no AI models / no CUDA torch) or ~1.5 GB+ (**Full** with models; Windows CUDA Full larger due to torch)
 
 To clear thumbnails only: **`scripts\Launch\bat\clear_cache.bat`** (Windows) · **`scripts/Launch/shell/clear_cache.sh`** (Mac)
 
