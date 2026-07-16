@@ -1,11 +1,11 @@
-# RAWviewer v3.0
+# RAWviewer v2.5
 
 <p align="center">
-  <img src="icons/appicon.png" alt="RAWviewer Icon" width="320">
+  <img src="icons/appicon.png" alt="RAWviewer Icon" width="256">
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-3.0-blue" alt="Version">
+  <img src="https://img.shields.io/badge/version-2.5-blue" alt="Version">
   <img src="https://img.shields.io/github/downloads/markyip/RAWviewer/total" alt="Downloads">
   <img src="https://img.shields.io/badge/license-MIT-green" alt="License">
   <a href="https://www.buymeacoffee.com/markyip">
@@ -15,9 +15,9 @@
 
 **Language / 語言：** [English](README.md) · [繁體中文](README.zh-TW.md)
 
-**RAWviewer** is a fast photo viewer for **Windows and macOS**. Browse folders of RAW and JPEG files, check sharpness, cull rejects, rate keepers, and search your library — **on your computer, no cloud upload.**
+**RAWviewer** is a fast photo viewer for **Windows and macOS**. Browse folders of RAW and JPEG files, check sharpness, cull rejects, and search your library — **on your computer, no cloud upload.**
 
-Download: **[GitHub Releases](https://github.com/markyip/RAWviewer/releases/latest)** · Release notes: [`RELEASE_NOTES.md`](RELEASE_NOTES.md)
+Download: **[GitHub Releases](https://github.com/markyip/RAWviewer/releases/latest)**
 
 ---
 
@@ -35,11 +35,10 @@ In **gallery view**, drag the **size slider** in the bottom bar to change thumbn
 | **Pinch** / **Ctrl+scroll** | Zoom in or out |
 | **←** / **→** | Previous / next image |
 | **Scroll wheel** | Previous / next (single view, fit mode) |
-| **↑** | Bookmark / unbookmark |
-| **1–5** / **0** | Set star rating / clear (single view; also clickable stars in the bottom bar) |
+| **↑** | Bookmark / unbookmark (bottom **star** in single view too) |
 | **↓** | Move to Discard folder |
 | **Delete** | Delete image(s) |
-| **Esc** | Gallery: clear selection → exit bookmark/rating filter · Single view: back to gallery |
+| **Esc** | Gallery: clear selection → exit bookmark filter · Single view: back to gallery |
 | **Ctrl/Cmd+click** | Gallery: toggle selection |
 | **Shift+click** | Gallery: select range (visible order) |
 | **C** | Toggle Compare mode on/off (requires multiple images selected) |
@@ -49,8 +48,6 @@ In **gallery view**, drag the **size slider** in the bottom bar to change thumbn
 | **P** | Toggle RAW recovery preview — half-res shadow/highlight recovery (RAW/DNG, session only; fit-only) |
 | **F** | Show / hide focus overlay (supported files) |
 | **M** | Show / hide GPS map overlay (single view, geotagged photos; hidden by default on launch) |
-| **E** | Show / hide Adjust (Develop) panel (single view) |
-| **Ctrl+Z** | Undo last slider adjustment (single view) |
 
 **Compare mode shortcuts:**
 * **← / →** — Previous / next candidate image
@@ -63,7 +60,7 @@ In **gallery view**, drag the **size slider** in the bottom bar to change thumbn
 * **G** — Cycle composition grid guide on both panes
 * **C** / **Esc** — Exit Compare mode
 
-**Gallery bookmarks & ratings:** Click the outline **bookmark star** (nothing selected) to show bookmarked shots only; gold = filter on. With photos selected, **↑** or the bookmark control toggles bookmarks. Use the gallery **rating filter** for stars ≥ N (combine with bookmarks). Ratings save to **XMP** sidecars.
+**Gallery bookmarks:** Click the outline **star** (nothing selected) to show bookmarked shots only; gold star = filter on. With photos selected, **↑** or the star toggles bookmarks on the selection.
 
 **Search:** gallery search icon — `camera:sony`, `iso<800`, … (**Full** also accepts `sunset on beach`). **Share:** bottom **Share / Open** button, or drag gallery / film-strip thumbnails out.
 
@@ -73,26 +70,16 @@ Search syntax → [Advanced reference](#advanced-reference).
 
 ## Lite vs Full
 
-Both editions share the same viewer, culling tools, star ratings, bookmarks, metadata search, and the **Adjust** editor (CPU). **Full** adds offline AI search, face filters, and (on Windows with CUDA) GPU demosaic / optional AI denoise export.
+Both editions share the same viewer, culling tools, bookmarks, and metadata search. **Full** adds offline AI search and face filters.
 
 | | Lite | Full |
 |---|:--:|:--:|
-| Gallery, film strip, zoom, histogram, bookmarks, ratings, culling | ✅ | ✅ |
-| Fast RAW decode (CPU / OpenCV) | ✅ | ✅ |
-| Adjust / Develop editor (tone, lens, export JPEG/TIFF) | ✅ | ✅ |
+| Gallery, film strip, zoom, histogram, bookmarks, culling | ✅ | ✅ |
 | Metadata search (`camera:`, `iso:`, `date:`, …) | ✅ | ✅ |
 | Plain-language search | — | ✅ |
 | Face filters (`has:face`, …) | — | ✅ |
-| GPU demosaic (PyTorch CUDA) / AI denoise export | — | ✅ |
 
-Pick **Lite** for a smaller install and browse-by-eye workflow (no AI models, no CUDA torch). Pick **Full** to search with everyday words — still 100% offline.
-
-### AI Denoise (Optional)
-
-**Full** builds support an optional neural denoise model (realPLKSR) for high-quality noise reduction during export (**Lite** omits PyTorch, so these options are unavailable). To enable AI denoise:
-1. **Windows**: The setup installer automatically downloads and installs the denoise model weights (`1xDeNoise_realplksr_otf.safetensors`, model by Philip Hofmann, CC-BY-4.0) during first setup.
-2. **macOS**: The app automatically prompts and handles the model download in-app the first time you attempt to export an image using the "AI denoise" option.
-3. The options "JPEG + AI denoise (realPLKSR)" and "16-bit TIFF + AI denoise" will appear in the export dropdown in the Adjust panel if your system has a compatible GPU (requires a CUDA-compatible GPU on Windows or an Apple Silicon GPU on macOS).
+Pick **Lite** for a smaller install and browse-by-eye workflow. Pick **Full** to search with everyday words — still 100% offline.
 
 ---
 
@@ -114,13 +101,13 @@ For a dedicated **cluster map** across an entire album and **geotagging photos m
 2. Choose **Full (CUDA)**, **Full (DirectML)**, or **Lite** in the wizard. **Full** also downloads AI models (~600 MB).
 3. Launch **`RAWviewer.exe`** or the Desktop shortcut (not the Setup file again).
 
-> **v3.0 new:** **Full Editing** (tone curve, lens correction, WB presets, crop overlay, dodge/burn, vignette/dehaze, XMP); **Fast RAW decode** vs 2.5; **1–5 star ratings**; Nikon **HE/HE*** browse; Lite without torch; darkroom chrome. Full changelog: [`RELEASE_NOTES.md`](RELEASE_NOTES.md).
+> **v2.5 new:** Gallery zoom slider, scroll anchoring, GPS map overlay (**M**), **macOS HDR/EDR** for HDR stills and **RAW (High Quality workflow)**, **P** recovery preview / **J** clipping overlay on RAW, animated GIF/WebP playback, histogram/map hidden on launch, reliable gallery layout when switching albums, portrait/landscape tile aspect fixes when entering gallery or jumping scroll, cleaner cancellation of background indexing, burst image grouping, and side-by-side Compare view with C-key toggle.
 
 Registers **Open with** for common photo formats. Uninstall: Settings → Apps, or **`uninstall.bat`** in `%LOCALAPPDATA%\RAWviewer`.
 
 ### macOS (13+)
 
-1. Download **`RAWviewer-v3.0-macOS.zip`** (Full) or **`RAWviewer-v3.0-macOS-Lite.zip`** (Lite) from **[Releases](https://github.com/markyip/RAWviewer/releases/latest)** and extract the zip.
+1. Download **`RAWviewer-v2.5-macOS.zip`** (Full) or **`RAWviewer-v2.5-macOS-Lite.zip`** (Lite) from **[Releases](https://github.com/markyip/RAWviewer/releases/latest)** and extract the zip.
 2. Open **Terminal**, go to the extracted folder (`cd ` then drag the folder onto Terminal), and run:
 
 ```bash
@@ -135,7 +122,7 @@ Uninstall: **`uninstall_macos_app.sh`** or **`Uninstall RAWviewer.command`** in 
 
 ### Requirements
 
-Windows 10+ · macOS 13+ · 8 GB RAM (16 GB+ recommended for **Full** + large folders) · ~500 MB disk (**Lite**, no AI models / no CUDA torch) or ~1.5 GB+ (**Full** with models; Windows CUDA Full larger due to torch)
+Windows 10+ · macOS 13+ · 8 GB RAM (16 GB+ recommended for **Full** + large folders) · ~500 MB disk (**Lite**) or ~1.5 GB+ (**Full** with models)
 
 To clear thumbnails only: **`scripts\Launch\bat\clear_cache.bat`** (Windows) · **`scripts/Launch/shell/clear_cache.sh`** (Mac)
 
@@ -145,12 +132,27 @@ To clear thumbnails only: **`scripts\Launch\bat\clear_cache.bat`** (Windows) · 
 
 **RAW:** CR2, CR3, NEF, ARW, DNG, ORF, RW2, RAF, and other LibRaw types · **Standard:** JPEG, TIFF, HEIF, **GIF** (animated), **WebP** (animated)
 
-> [!NOTE]
-> **EDR Support Removed:** macOS EDR (Extended Dynamic Range) support has been removed at this stage. The updated, highly optimized image loading pipeline is not compatible with EDR at this stage; attempting to combine them results in very slow image decoding and loading. To maintain high-speed browsing and editing performance, EDR support has been disabled/removed. All platforms now display images using standard dynamic range (SDR) with high-fidelity tone-mapping.
+On **macOS**, HDR **HEIC / HEIF / AVIF** and 16-bit HDR **TIFF** can display with extended dynamic range in single-image view when EDR is enabled (default). With the **RAW (High Quality)** workflow toggle, **RAW / DNG** files also use the EDR path (linear 16-bit decode). **Embedded JPEG workflow** keeps the camera’s embedded preview (SDR). Other platforms tone-map HDR stills to SDR.
 
-**Workflow toggle** (single view): switch between **Embedded JPEG (Fast)** and **RAW (High Quality)**.
+**Workflow toggle** (single view): switch between **Embedded JPEG (Fast)** and **RAW (High Quality)**. EDR applies only in RAW workflow.
 
 **Recovery preview (**P**):** half-res shadow/highlight recovery for judging extreme contrast — session only, does not replace full-res view.
+
+---
+
+## macOS EDR quick reference
+
+| What you see | Meaning |
+|--------------|---------|
+| `EDR · RAW` in metadata | RAW file displayed with extended dynamic range |
+| `EDR · HDR` | HDR still (HEIC/TIFF) in EDR |
+| `EDR ready · embedded JPEG workflow` | EDR viewport on; showing embedded JPEG (SDR) |
+| Startup: `RAW EDR active` | RAW EDR enabled and RAW workflow selected |
+
+| Variable | Default | Effect |
+|----------|---------|--------|
+| `RAWVIEWER_RAW_EDR` | `1` | macOS: EDR decode for RAW when **RAW workflow** is active; set `0` to disable |
+| `RAWVIEWER_DISABLE_EDR` | off | Disable all macOS EDR (HDR stills + RAW) |
 
 ---
 
@@ -296,12 +298,8 @@ Requires **pyexiv2** for maker-note AF on RAW.
 | `RAWVIEWER_GPU_VIEW=1` | GPU single-image viewport (OpenGL zoom/pan; on by default in release builds) |
 | `RAWVIEWER_GPU_VIEW=0` | Force legacy scroll-area single-image view |
 | `RAWVIEWER_DISABLE_EDR=1` | macOS: disable EDR viewport and HDR/RAW 16-bit display path; use SDR tone mapping |
-| `RAWVIEWER_RAW_EDR=1` | **Default.** macOS: EDR for RAW when **RAW (High Quality)** workflow is selected; `0` to hard-disable. In-app: bottom-bar **EDR** button toggles it per-user, but resets to off every time you switch into RAW workflow. EDR decode is also idle-deferred: rapid navigation shows the fast SDR buffer immediately and only upgrades to EDR after you pause on an image, so browsing speed is unaffected either way |
+| `RAWVIEWER_RAW_EDR=1` | **Default.** macOS: EDR for RAW when **RAW (High Quality)** workflow is selected; `0` to disable |
 | `RAWVIEWER_LIBRAW_CONSISTENT_PREVIEW=1` | Same color pipeline for fit vs 100% zoom on RAW (default on) |
-| `RAWVIEWER_FAST_RAW_DECODE=0` | Disable the fast RAW decode path (LibRaw unpack + SIMD demosaic with exact color parity, shared unpack between half/full tiers; default on, auto-falls-back to rawpy for unsupported sensors) |
-| `RAWVIEWER_SIDECAR_ADJUST=1` | Apply saved XMP edits to browse/full-res pixels (default **off** — edits show in Adjust only; when on, CURRENT full loads paint a preview-sized edited interim before the full apply) |
-| `RAWVIEWER_UNPACK_STASH_SLOTS` | LibRaw unpack mosaic LRU size for half→full reuse (default `3`, range 1–8) |
-| `RAWVIEWER_USE_PROCESS_POOL=0` | Disable LibRaw process pool (leave unset for normal use) |
 | `RAWVIEWER_EXIF_BACKEND=auto` | `auto`, `pyexiv2`, or `exifread` |
 | `RAWVIEWER_SHARE_MENU=1` | macOS: Qt share menu (recommended) |
 | `RAWVIEWER_SHARE_TRY_NATIVE_PICKER=1` | macOS: try native share sheet first |
@@ -310,7 +308,6 @@ Requires **pyexiv2** for maker-note AF on RAW.
 | `RAWVIEWER_SEMANTIC_BATCH_AUTO=1` | Auto-tune AI batch/chunk size on index (default) |
 | `RAWVIEWER_SEMANTIC_BATCH_CANDIDATES` | Candidate batch sizes for auto-tune (default `8,16,32,64,128`) |
 | `RAWVIEWER_PREVIEW_CACHE_ITEMS` | Cap in-memory preview LRU count |
-| `RAWVIEWER_FULL_IMAGE_CACHE_ITEMS` | Sensor-res buffer LRU slots (default 8, max 32; higher = instant zoomed A↔B revisits at ~100–200 MB per slot) |
 | `RAWVIEWER_MEMORY_PREVIEW_MAX` | Max long edge for in-memory RAW/JPEG preview (pixels) |
 | `RAWVIEWER_IDLE_DISPLAY_PREFETCH=0` | Disable idle neighbor prefetch in single view |
 | `RAWVIEWER_SESSION_RESTORE_DEFER_PRELOAD=1` | **Default.** After relaunch, delay full decode and neighbor prefetch (see v2.4.1 release notes) |
@@ -332,22 +329,15 @@ Full list and dev defaults: [`scripts/Launch/README.md`](scripts/Launch/README.m
 
 ### Upcoming (development branch)
 
-Not in a release yet — tracked in [`RELEASE_NOTES.md`](RELEASE_NOTES.md) (v3.0 Known Issues & Remaining Work).
+Not in a release yet — tracked on a separate development branch.
 
-**Windows HDR / EDR** — v2.5+ shipped macOS EDR for HDR stills and RAW (High Quality workflow); **3.0 removed macOS EDR** so the Fast RAW load path stays fast. Windows still tone-maps HDR HEIC/TIFF and RAW to SDR. A future Windows (or restored Mac) HDR path would use HDR-capable displays (10-bit / scRGB or HDR10 via Qt QRhi) without regressing browse speed.
+**Windows HDR / EDR** — v2.5 added macOS EDR for HDR stills and RAW (High Quality workflow). Windows currently tone-maps HDR HEIC/TIFF and RAW to SDR. A future Windows path would use HDR-capable displays (10-bit / scRGB or HDR10 via Qt QRhi) so bright highlights can use extended headroom, similar to macOS.
 
-**Multithreaded LibRaw (macOS)** — Official macOS packages now install OpenMP LibRaw via `scripts/build_libraw_openmp.sh` (standalone `libomp`, because the `.app` excludes torch). Expect roughly **1.5–2×** faster unpack on CR3/RAF/pana8, byte-identical output. Local Pixi envs that keep torch may unify onto torch’s `libomp` when not packaging. Verify with `scripts/check_libraw_parallelism.py <raw file>` (parallelism ≳1.5× means OpenMP is active).
+**Burst image grouping** — Automatically group burst sequences in the gallery (rapid-fire shots taken within a short window). Open a burst group to review its shots together; **Compare** mode shows candidates side by side so you can pick the best frame.
 
-**Remaining work (feasibility high → low):**
-1. **Cold-folder edited tile regen** — save-from-Adjust already bakes editor-aligned thumbs; optional full `SIDECAR_ADJUST` for never-opened edits.
-2. **Broader local masks** — gradients / extra brushes (Dodge & Burn + crop already ship).
-3. **DNG export** — real writer (removed stub).
-4. **ML subject masks** — Full only.
-5. **Windows HDR / restore Mac EDR safely** — display path without killing Fast RAW.
-6. **VLM-assisted adjust** — large product/model scope.
-7. **HE-NEF RAW edit** — blocked until a decoder exists (browse-only today).
+**GPU-accelerated RAW decoding** — Early GPU decode works, but **correct color rendering** (matching the current LibRaw / embedded-JPEG pipeline) is still unresolved. We will only ship it if color accuracy and maintenance cost are acceptable.
 
-**Shipped in 3.0 (incl. post-tag editor work):** Fast RAW vs 2.5, Adjust panel (HSL mixer, Creative LUT `.cube`, WB presets, auto straighten, crop overlay, D&B + edge assist, vignette/dehaze, editor-aligned gallery thumbs on save), **OpenMP LibRaw in macOS release packages**, star ratings, burst / Compare (**C**), Lite without torch, new app icon, Mac semantic MultiArray bridge. GPU **viewport** on by default (`RAWVIEWER_GPU_VIEW=0` to disable).
+This is separate from the GPU **viewport** (OpenGL zoom/pan on decoded pixels, on by default in release builds; set `RAWVIEWER_GPU_VIEW=0` to disable); the upcoming work targets **RAW decode** itself.
 
 ---
 
@@ -385,8 +375,8 @@ Build outputs:
 
 | Profile | Windows | macOS |
 |---------|---------|-------|
-| **Full / Unified** | `dist/RAWviewer_Setup.exe` (includes Full & Lite options) | `dist/RAWviewer-v3.0-macOS.zip` |
-| **Lite** | (Select Lite option in `RAWviewer_Setup.exe`) | `dist/RAWviewer-v3.0-macOS-Lite.zip` |
+| **Full / Unified** | `dist/RAWviewer_Setup.exe` (includes Full & Lite options) | `dist/RAWviewer-v2.5-macOS.zip` |
+| **Lite** | (Select Lite option in `RAWviewer_Setup.exe`) | `dist/RAWviewer-v2.5-macOS-Lite.zip` |
 
 Dependencies are in `pixi.toml`. Packaging scripts use a local `rawviewer_env/` venv when building release artifacts.
 
@@ -411,9 +401,7 @@ scripts\Launch\bat\build_windows_lite.bat
 ### Architecture (brief)
 
 - **ImageLoadManager** — threaded load queue; folder changes cancel in-flight tasks (**v2.5.0**)
-- **UnifiedImageProcessor** — RAW/JPEG/TIFF via one path; **Fast RAW decode** shared unpack half/full (**v3.0.0**)
-- **Star ratings** — 1–5 + XMP; gallery min-rating filter (**v3.0.0**)
-- **Full Editing** — Adjust panel (WB presets, crop, D&B, vignette/dehaze), XMP, PV2012-style develops (**v3.0.0**)
+- **UnifiedImageProcessor** — RAW/JPEG/TIFF via one path
 - **Cache** — memory-first; optional disk cache via env; **RAM-tier defaults** at startup (`rawviewer_profile.py`)
 - **Semantic index** — SQLite + local embeddings (Core ML on macOS, ONNX on Windows; Full builds only); background passes abort when folder scope changes (**v2.5.0**)
 - **Gallery (JustifiedGallery)** — justified grid with zoom slider (relayout + upper-left scroll anchor); layout cache keyed to folder generation; gallery opens in capture-time order after EXIF sort; tile aspect reconciles decoded thumbnails with container EXIF before justified-row geometry is locked (**v2.5.0**)

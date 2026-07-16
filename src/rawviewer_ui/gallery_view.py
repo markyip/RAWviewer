@@ -384,18 +384,17 @@ class JustifiedGallery(QWidget):
         # same idea as dt-scaled game-loop integration).
         self._wheel_decay_per_tick = 0.2
         self._wheel_last_tick_t = 0.0
-        # Input gain: keys scroll singleStep*4 per repeat, but a wheel notch
-        # was a fixed 120px and trackpad pixelDelta passed through 1:1 —
-        # wheel/trackpad felt much slower than holding Down. Wheel notches
-        # scale with spin rate up to _wheel_fast_gain; trackpad deltas get a
-        # constant multiplier (native momentum still applies on top).
-        self._wheel_base_gain = _env_float("RAWVIEWER_WHEEL_GAIN", 1.0, minimum=0.25)
-        self._wheel_fast_gain = _env_float(
-            "RAWVIEWER_WHEEL_FAST_GAIN", 3.0, minimum=1.0
+        # Input gain: keys / wheel / trackpad share rawviewer_ui.gallery_scroll
+        # so arrow-key singleStep*N stays aligned with wheel/trackpad feel.
+        from rawviewer_ui.gallery_scroll import (
+            trackpad_gain,
+            wheel_base_gain,
+            wheel_fast_gain,
         )
-        self._trackpad_gain = _env_float(
-            "RAWVIEWER_TRACKPAD_GAIN", 1.6, minimum=0.25
-        )
+
+        self._wheel_base_gain = wheel_base_gain()
+        self._wheel_fast_gain = wheel_fast_gain()
+        self._trackpad_gain = trackpad_gain()
         self._wheel_last_notch_t = 0.0
 
         # Idle background thumbnail preloader
@@ -415,7 +414,10 @@ class JustifiedGallery(QWidget):
         # number per event-loop tick so per-frame main-thread work stays smooth. Disable
         # with RAWVIEWER_GALLERY_BATCH_TILE_APPLY=0; tune batch size with
         # RAWVIEWER_GALLERY_TILE_APPLY_BATCH (default 8).
+        # Also coalesce deferred on_thumbnail_ready work (was one QTimer.singleShot(0)
+        # per tile) into the same drain timer.
         self._pending_tile_applies: "dict[str, bool]" = {}
+        self._pending_thumb_ready: "dict[str, object]" = {}
         self._tile_apply_timer = QTimer(self)
         self._tile_apply_timer.setSingleShot(True)
         self._tile_apply_timer.timeout.connect(self._drain_tile_applies)
@@ -668,6 +670,7 @@ class JustifiedGallery(QWidget):
         self._measured_raw_aspects.clear()
         self._orientation_flip_paths.clear()
         self._metadata_fetch_attempted.clear()
+        self._thumb_fail_counts.clear()
         self.clear_thumbnail_widgets()
 
     def _evict_stale_active_tasks(
@@ -2272,7 +2275,8 @@ class JustifiedGallery(QWidget):
                     notches = angle.y() / 120.0
                     # Velocity-scaled notch distance: slow clicks stay precise
                     # (~120px), fast spins ramp toward _wheel_fast_gain so a
-                    # flick traverses like holding the Down key.
+                    # flick traverses like holding the Down key. Gains come from
+                    # gallery_scroll (same module as key singleStep*N).
                     now_t = time.time()
                     dt_notch = now_t - self._wheel_last_notch_t
                     self._wheel_last_notch_t = now_t
@@ -3674,19 +3678,19 @@ class JustifiedGallery(QWidget):
         if file_path not in self._path_to_indices:
             return
         if self._building or self._gallery_warmup_active() or self._thumb_ready_depth > 0:
-            QTimer.singleShot(
-                0,
-                lambda fp=file_path, td=thumbnail_data: self._apply_thumbnail_ready(fp, td),
-            )
+            # Coalesce into the drain timer (one event) instead of one
+            # QTimer.singleShot(0) per completed tile.
+            self._pending_thumb_ready[file_path] = thumbnail_data
+            if not self._tile_apply_timer.isActive():
+                self._tile_apply_timer.start(0)
             return
         self._apply_thumbnail_ready(file_path, thumbnail_data)
 
     def _apply_thumbnail_ready(self, file_path, thumbnail_data):
         if self._thumb_ready_depth > 0:
-            QTimer.singleShot(
-                0,
-                lambda fp=file_path, td=thumbnail_data: self._apply_thumbnail_ready(fp, td),
-            )
+            self._pending_thumb_ready[file_path] = thumbnail_data
+            if not self._tile_apply_timer.isActive():
+                self._tile_apply_timer.start(0)
             return
         self._thumb_ready_depth += 1
         try:
@@ -3828,12 +3832,20 @@ class JustifiedGallery(QWidget):
                 w.setText("")
 
     def _drain_tile_applies(self):
-        """Apply a bounded batch of pending tile pixmaps per event-loop tick."""
+        """Apply a bounded batch of pending thumb-ready + tile pixmaps per tick."""
         if self._gallery_folder_superseded():
             self._pending_tile_applies.clear()
+            self._pending_thumb_ready.clear()
             return
         batch = _tile_apply_batch_size()
         count = 0
+        # First: coalesce deferred thumbnail_ready payloads (was one singleShot each).
+        while self._pending_thumb_ready and count < batch:
+            file_path = next(iter(self._pending_thumb_ready))
+            thumbnail_data = self._pending_thumb_ready.pop(file_path)
+            self._apply_thumbnail_ready(file_path, thumbnail_data)
+            count += 1
+        # Then: paint cached base pixmaps onto visible tiles.
         while self._pending_tile_applies and count < batch:
             file_path = next(iter(self._pending_tile_applies))
             del self._pending_tile_applies[file_path]
@@ -3842,7 +3854,10 @@ class JustifiedGallery(QWidget):
                 continue
             self._apply_tile_pixmap_now(file_path)
             count += 1
-        if self._pending_tile_applies and not self._is_scrolling_fast:
+        if (
+            self._pending_thumb_ready
+            or (self._pending_tile_applies and not self._is_scrolling_fast)
+        ):
             self._tile_apply_timer.start(0)
 
     def on_task_completed(self, file_path):
@@ -3879,6 +3894,11 @@ class JustifiedGallery(QWidget):
             )
         )
         attempt = self._thumb_fail_counts.get(file_path, 0) + 1
+        # Cap the fail map so a long session browsing many folders cannot
+        # grow without bound (folder switch clears it; this is a backstop).
+        if len(self._thumb_fail_counts) >= 4096 and file_path not in self._thumb_fail_counts:
+            # Drop an arbitrary oldest-ish entry (dict insertion order).
+            self._thumb_fail_counts.pop(next(iter(self._thumb_fail_counts)))
         self._thumb_fail_counts[file_path] = attempt
         max_retries = 3
 

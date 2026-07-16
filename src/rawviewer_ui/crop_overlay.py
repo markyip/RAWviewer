@@ -6,6 +6,7 @@ Scene coordinates == image pixels. Insets are fractions of width/height
 
 from __future__ import annotations
 
+import sys
 from typing import Optional
 
 from PyQt6.QtCore import QPointF, QRectF, Qt, pyqtSignal
@@ -41,6 +42,7 @@ class CropOverlayItem(QGraphicsObject):
         self._drag_mode: Optional[str] = None
         self._drag_origin = QPointF()
         self._drag_start_insets = (0.0, 0.0, 0.0, 0.0)
+        self._hover_mode = ""
         self.hide()
 
     def boundingRect(self) -> QRectF:
@@ -161,24 +163,72 @@ class CropOverlayItem(QGraphicsObject):
             return "move"
         return ""
 
-    def hoverMoveEvent(self, event) -> None:
-        mode = self._hit_test(event.pos())
-        cursors = {
-            "tl": Qt.CursorShape.SizeFDiagCursor,
-            "br": Qt.CursorShape.SizeFDiagCursor,
-            "tr": Qt.CursorShape.SizeBDiagCursor,
-            "bl": Qt.CursorShape.SizeBDiagCursor,
-            "t": Qt.CursorShape.SizeVerCursor,
-            "b": Qt.CursorShape.SizeVerCursor,
-            "l": Qt.CursorShape.SizeHorCursor,
-            "r": Qt.CursorShape.SizeHorCursor,
-            "move": Qt.CursorShape.SizeAllCursor,
-        }
-        if mode in cursors:
-            self.setCursor(QCursor(cursors[mode]))
+    def _viewport(self):
+        sc = self.scene()
+        if sc is None:
+            return None
+        views = sc.views()
+        if not views:
+            return None
+        return views[0].viewport()
+
+    def _apply_hover_cursor(self, mode: str) -> None:
+        """Set resize/move cursor without QGraphicsItem.setCursor.
+
+        On recent macOS (observed 26/27), QGraphicsItem.setCursor →
+        QImage::toCGImage → CGImageCreate hits EXC_BREAKPOINT inside
+        CoreGraphics colorspace validation (SIGTRAP hard-kill, no Python
+        traceback). Drive the view viewport cursor instead, and only when
+        the hit mode changes so we do not re-enter Cocoa on every pixel.
+        """
+        if mode == self._hover_mode:
+            return
+        self._hover_mode = mode
+        # Avoid SizeFDiag/SizeBDiag/SizeVer/SizeHor bitmaps — those are the
+        # shapes that go through the crashing toCGImage path on this Qt/macOS
+        # combo. Cross + SizeAll are enough to signal interactive crop.
+        if sys.platform == "darwin":
+            shape = {
+                "tl": Qt.CursorShape.CrossCursor,
+                "tr": Qt.CursorShape.CrossCursor,
+                "bl": Qt.CursorShape.CrossCursor,
+                "br": Qt.CursorShape.CrossCursor,
+                "t": Qt.CursorShape.CrossCursor,
+                "b": Qt.CursorShape.CrossCursor,
+                "l": Qt.CursorShape.CrossCursor,
+                "r": Qt.CursorShape.CrossCursor,
+                "move": Qt.CursorShape.SizeAllCursor,
+            }.get(mode)
         else:
-            self.unsetCursor()
+            shape = {
+                "tl": Qt.CursorShape.SizeFDiagCursor,
+                "br": Qt.CursorShape.SizeFDiagCursor,
+                "tr": Qt.CursorShape.SizeBDiagCursor,
+                "bl": Qt.CursorShape.SizeBDiagCursor,
+                "t": Qt.CursorShape.SizeVerCursor,
+                "b": Qt.CursorShape.SizeVerCursor,
+                "l": Qt.CursorShape.SizeHorCursor,
+                "r": Qt.CursorShape.SizeHorCursor,
+                "move": Qt.CursorShape.SizeAllCursor,
+            }.get(mode)
+        vp = self._viewport()
+        if vp is None:
+            return
+        try:
+            if shape is not None:
+                vp.setCursor(QCursor(shape))
+            else:
+                vp.unsetCursor()
+        except Exception:
+            pass
+
+    def hoverMoveEvent(self, event) -> None:
+        self._apply_hover_cursor(self._hit_test(event.pos()))
         super().hoverMoveEvent(event)
+
+    def hoverLeaveEvent(self, event) -> None:
+        self._apply_hover_cursor("")
+        super().hoverLeaveEvent(event)
 
     def mousePressEvent(self, event) -> None:
         mode = self._hit_test(event.pos())

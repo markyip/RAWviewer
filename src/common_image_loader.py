@@ -108,14 +108,20 @@ def decode_embedded_jpeg_bytes(
         ImageFile.LOAD_TRUNCATED_IMAGES = True
 
         im = Image.open(io.BytesIO(jpeg_bytes))
-        # Grid-tier fast path: JPEG DCT-domain scaled decode (1/2, 1/4, 1/8). Decoding a
-        # 30MP+ embedded preview at 1/8 scale instead of full size then downsizing is
-        # ~3.4x faster per gallery tile and dominates tile cost. draft() never upsizes
-        # and keeps pixel orientation identical to a full decode, so the downstream
-        # orientation authority is unaffected. Quality loss is irrelevant at <=1024px.
-        # Kill-switch: RAWVIEWER_JPEG_DRAFT_DECODE=0.
+        # Fast path: JPEG DCT-domain scaled decode (1/2, 1/4, 1/8). Decoding a
+        # 30MP+ embedded preview at reduced scale instead of full size then
+        # downsizing dominates both gallery (~512) and single-view display-tier
+        # (~1920–2304) cost. draft() never upsizes and keeps pixel orientation
+        # identical to a full decode. Kill-switch: RAWVIEWER_JPEG_DRAFT_DECODE=0.
+        draft_cap = 1024
+        try:
+            from image_cache import memory_preview_max_edge
+
+            draft_cap = max(1024, int(memory_preview_max_edge()))
+        except Exception:
+            draft_cap = 2304
         if (
-            0 < max_size <= 1024
+            0 < max_size <= draft_cap
             and im.format == "JPEG"
             and max(im.size) > max_size * 2
             and os.environ.get("RAWVIEWER_JPEG_DRAFT_DECODE", "1").strip().lower()
@@ -277,6 +283,42 @@ def folder_sort_key_tuple(
     return (primary_ts, stem, raw_rank, ext, base_name)
 
 
+# Memoized QSettings read for the embedded-JPEG workflow toggle. Invalidated
+# via invalidate_libraw_consistent_preview_settings() when the user flips the
+# workflow control so load paths don't construct QSettings on every call.
+# Sentinel distinguishes "key missing" (None) from "not yet read".
+_EMBEDDED_JPEG_WORKFLOW_UNSET = object()
+_EMBEDDED_JPEG_WORKFLOW_MEMO: Any = _EMBEDDED_JPEG_WORKFLOW_UNSET
+
+
+def invalidate_libraw_consistent_preview_settings() -> None:
+    """Clear the memoized ``use_embedded_jpeg_workflow`` QSettings value."""
+    global _EMBEDDED_JPEG_WORKFLOW_MEMO
+    _EMBEDDED_JPEG_WORKFLOW_MEMO = _EMBEDDED_JPEG_WORKFLOW_UNSET
+
+
+def _embedded_jpeg_workflow_setting() -> Optional[bool]:
+    """Cached QSettings read: True/False when set, None when key absent."""
+    global _EMBEDDED_JPEG_WORKFLOW_MEMO
+    if _EMBEDDED_JPEG_WORKFLOW_MEMO is not _EMBEDDED_JPEG_WORKFLOW_UNSET:
+        return _EMBEDDED_JPEG_WORKFLOW_MEMO  # type: ignore[return-value]
+    try:
+        from PyQt6.QtCore import QSettings
+
+        settings = QSettings("RAWviewer", "RAWviewer")
+        if not settings.contains("use_embedded_jpeg_workflow"):
+            _EMBEDDED_JPEG_WORKFLOW_MEMO = None
+            return None
+        use_embedded = bool(
+            settings.value("use_embedded_jpeg_workflow", True, type=bool)
+        )
+        _EMBEDDED_JPEG_WORKFLOW_MEMO = use_embedded
+        return use_embedded
+    except Exception:
+        _EMBEDDED_JPEG_WORKFLOW_MEMO = None
+        return None
+
+
 def use_libraw_consistent_preview_first(file_path: Optional[str] = None) -> bool:
     """
     When True (default), single-image RAW avoids embedded-JPEG preview paths so fit and zoom
@@ -306,12 +348,9 @@ def use_libraw_consistent_preview_first(file_path: Optional[str] = None) -> bool
         except Exception:
             pass
 
-    from PyQt6.QtCore import QSettings
-    settings = QSettings("RAWviewer", "RAWviewer")
-    if settings.contains("use_embedded_jpeg_workflow"):
-        use_embedded = settings.value("use_embedded_jpeg_workflow", True, type=bool)
-        if not use_embedded:
-            return True
+    use_embedded = _embedded_jpeg_workflow_setting()
+    if use_embedded is False:
+        return True
 
     v = os.environ.get("RAWVIEWER_LIBRAW_CONSISTENT_PREVIEW", "0").strip().lower()
     return v not in ("0", "false", "no", "off")
@@ -359,9 +398,18 @@ def use_full_embedded_raw_preview() -> bool:
     return v not in ("0", "false", "no", "off")
 
 
+# RAW sensor dims below this are almost always a preview/thumbnail IFD
+# (e.g. 160x120) wrongly cached as original_width/height — treating them as
+# sensor size makes a 512px gallery buffer look "full-res", which then races
+# RAW-mode JPEG-interim refusal into a permanent stuck-on-previous-file view.
+_MIN_TRUSTED_SENSOR_LONG_EDGE = 1920
+
+
 def sensor_pixel_dimensions(exif_data: Optional[Dict[str, Any]]) -> Optional[Tuple[int, int]]:
-    """Sensor / full-frame pixel size from EXIF cache, if known."""
+    """Sensor / full-frame pixel size from EXIF cache, if known and trustworthy."""
     if not exif_data:
+        return None
+    if exif_data.get("minimal_preview_exif"):
         return None
     ow = exif_data.get("original_width")
     oh = exif_data.get("original_height")
@@ -369,9 +417,11 @@ def sensor_pixel_dimensions(exif_data: Optional[Dict[str, Any]]) -> Optional[Tup
         w, h = int(ow), int(oh)
     except (TypeError, ValueError):
         return None
-    if w > 0 and h > 0:
-        return w, h
-    return None
+    if w <= 0 or h <= 0:
+        return None
+    if max(w, h) < _MIN_TRUSTED_SENSOR_LONG_EDGE:
+        return None
+    return w, h
 
 
 def image_covers_sensor_resolution(
@@ -1549,8 +1599,10 @@ def use_raw_process_pool() -> bool:
     """
     Offload LibRaw postprocess to a process pool (multi-core). Opt-out with
     SkySpotter_USE_PROCESS_POOL=0. Default: on when CPU count >= 4 (Windows/Linux).
-    macOS default off: spawn re-executes the .app (extra PIDs / splash). Opt in only via
-    RAWVIEWER_USE_PROCESS_POOL=1 (SkySpotter_* is ignored on macOS).
+    macOS default off: spawn re-executes the .app (extra PIDs / splash). Opt in via
+    RAWVIEWER_USE_PROCESS_POOL=1. For frozen macOS builds, also set
+    RAWVIEWER_PROCESS_POOL_PYTHON to a plain interpreter (see libraw_pool_worker.py)
+    so workers do not re-launch the GUI .app.
 
     When an in-process GPU demosaic backend is already loaded (cuda/mps/cupy),
     default off so process-pool LibRaw does not compete with GPU VRAM/host slots.
@@ -1564,6 +1616,10 @@ def use_raw_process_pool() -> bool:
         if raw in ("0", "false", "no", "off"):
             return False
         if raw in ("1", "true", "yes", "on"):
+            # Frozen .app without a plain-python helper would spawn the GUI
+            # binary again — refuse unless the helper is configured.
+            if getattr(_sys, "frozen", False) and not process_pool_python_executable():
+                return False
             return True
         return False
 
@@ -1587,6 +1643,25 @@ def use_raw_process_pool() -> bool:
     if _gpu_demosaic_backend_in_use():
         return False
     return (_os.cpu_count() or 0) >= 4
+
+
+def process_pool_python_executable() -> str:
+    """Optional plain-Python interpreter for ProcessPool workers (macOS .app safe)."""
+    return (os.environ.get("RAWVIEWER_PROCESS_POOL_PYTHON") or "").strip()
+
+
+def process_pool_mp_context():
+    """Spawn context; retarget executable when RAWVIEWER_PROCESS_POOL_PYTHON is set."""
+    import multiprocessing as mp
+
+    ctx = mp.get_context("spawn")
+    helper = process_pool_python_executable()
+    if helper and os.path.isfile(helper) and os.access(helper, os.X_OK):
+        try:
+            ctx.set_executable(helper)
+        except Exception:
+            pass
+    return ctx
 
 
 def _gpu_demosaic_backend_available() -> bool:

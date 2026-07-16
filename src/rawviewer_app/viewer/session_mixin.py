@@ -444,7 +444,7 @@ class SessionMixin:
                         self._session_restore_full_decode_allowed = False
                         logger.info(
                             "[SESSION] Deferring heavy loads until first paint "
-                            "(full decode ~2.5s later; "
+                            "(full decode ~0.8s later; "
                             "RAWVIEWER_SESSION_RESTORE_DEFER_PRELOAD=0 to disable)"
                         )
                         try:

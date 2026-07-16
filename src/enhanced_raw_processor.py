@@ -736,20 +736,24 @@ class ThumbnailExtractor(QObject):
         """Extract embedded thumbnail from RAW file and resize to max_size."""
         thumb = None
 
-        # Gallery grid-tier extraction (max_size <= 1024) for verified formats: try the
-        # lock-free byte-scan (TIFF-parse) FIRST so we skip _rawpy_global_lock. That lock
-        # serializes ALL RAW thumbnail decodes app-wide, so under gallery concurrency it
-        # caps throughput regardless of drive — measured ~7.8 vs ~29 tiles/sec on a slow
-        # external drive, and it also lets one slow-format file stall the whole queue.
-        # Applies on any drive (the lock hurts everywhere); byte-scan is verified correct
-        # + slightly faster than LibRaw for these formats. Byte-scan returns None for
-        # files it cannot handle, so this cleanly falls through to LibRaw below. Single-
-        # view high-res preview (larger max_size) is untouched — keeps LibRaw first for
-        # quality. Avoiding LibRaw here also reduces the concurrent-LibRaw pressure
-        # implicated in the Windows gallery crash.
+        # Gallery / display-tier extraction for verified formats: try the
+        # lock-free byte-scan (TIFF-parse) FIRST so we skip _rawpy_global_lock.
+        # That lock serializes ALL RAW thumbnail decodes app-wide, so under
+        # gallery concurrency it caps throughput regardless of drive —
+        # measured ~7.8 vs ~29 tiles/sec on a slow external drive, and it also
+        # lets one slow-format file stall the whole queue.
+        # Cap matches memory_preview_max_edge so single-view ~1920–2304 upgrades
+        # also skip LibRaw (previously only gallery <=1024 used bytescan-first).
+        bytescan_cap = 1024
+        try:
+            from image_cache import memory_preview_max_edge
+
+            bytescan_cap = max(1024, int(memory_preview_max_edge()))
+        except Exception:
+            bytescan_cap = 2304
         if (
             raw_object is None
-            and 0 < max_size <= 1024
+            and 0 < max_size <= bytescan_cap
             and _bytescan_first_enabled()
             and os.path.splitext(file_path)[1].lower() in _BYTESCAN_FIRST_EXTS
         ):

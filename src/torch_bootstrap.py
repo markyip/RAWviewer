@@ -8,11 +8,12 @@ main thread got there first -- correct, but it paid torch+kornia's ~0.9s
 import cost before the window could even be constructed, on every launch,
 whether or not GPU decode is ever used for that image.
 
-This module makes the import lazy (triggered once, right after the window is
-shown) while preserving the safety guarantee: background decode threads never
-import the GPU backend themselves. They call wait_for_gpu_backend_ready() and
-either wait for the main thread to finish importing it, or fall back to CPU
-decode if that takes unexpectedly long.
+This module makes the import lazy (triggered once after first paint, via a
+short post-paint delay so session-restore timers can run first) while
+preserving the safety guarantee: background decode threads never import the
+GPU backend themselves. They call wait_for_gpu_backend_ready() and either wait
+for the main thread to finish importing it, or fall back to CPU decode if that
+takes unexpectedly long.
 """
 import threading
 
@@ -27,6 +28,12 @@ def import_gpu_backend_on_main_thread() -> None:
     if _import_started.is_set():
         return
     _import_started.set()
+    import logging
+    import time
+
+    logger = logging.getLogger(__name__)
+    t0 = time.perf_counter()
+    logger.info("[GPU] Importing torch/kornia backend on main thread...")
     try:
         import gpu_raw_processor  # noqa: F401 -- imports torch/kornia/cupy as a side effect
         try:
@@ -37,9 +44,13 @@ def import_gpu_backend_on_main_thread() -> None:
         except Exception:
             pass
     except Exception:
-        pass
+        logger.exception("[GPU] Backend import failed; decode will stay on CPU")
     finally:
         _ready.set()
+        logger.info(
+            "[GPU] Backend import finished in %.3fs",
+            time.perf_counter() - t0,
+        )
 
 
 def wait_for_gpu_backend_ready(timeout: float = 10.0) -> bool:

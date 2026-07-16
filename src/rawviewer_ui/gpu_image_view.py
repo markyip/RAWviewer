@@ -1137,7 +1137,28 @@ class GpuImageView(QGraphicsView):
             return False
 
     def clear(self) -> None:
-        self.set_pixmap(QPixmap())
+        self.clear_image(show_placeholder=True)
+
+    def clear_image(self, *, show_placeholder: bool = True) -> None:
+        """Drop the current image; optionally show the empty-state placeholder."""
+        self._use_rgb_gl = False
+        try:
+            self._rgb_item.hide()
+            self._rgb_item.clear_rgb()
+        except Exception:
+            pass
+        self._item.show()
+        self._item.setPixmap(QPixmap())
+        self._has_pixmap = False
+        self._img_w = self._img_h = 0
+        self.clear_overlay()
+        self.clear_clipping_overlay()
+        self.set_compare_mode(False)
+        self._grid_item.set_grid(0, 0, self._grid_mode)
+        if show_placeholder:
+            self._update_placeholder()
+        else:
+            self._placeholder.hide()
 
     def has_heavy_pixmap(self) -> bool:
         return bool(getattr(self, "_has_pixmap", False)) and max(
@@ -1533,6 +1554,7 @@ class GpuImageView(QGraphicsView):
             self.fit_to_window()
         else:
             self._crop_item.hide()
+            self._crop_item._apply_hover_cursor("")
             self.viewport().unsetCursor()
 
     def is_crop_mode(self) -> bool:

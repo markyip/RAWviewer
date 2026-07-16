@@ -741,15 +741,18 @@ class ImageLoadManager(QObject):
         self._process_pool = None
         if use_process_pool:
             import logging
+            import atexit
+
+            from common_image_loader import process_pool_mp_context
+
             logging.getLogger(__name__).info(
                 "[LOAD] LibRaw process pool enabled (%d workers)",
                 process_pool_worker_count(),
             )
             self._process_pool = concurrent.futures.ProcessPoolExecutor(
-                max_workers=process_pool_worker_count()
+                max_workers=process_pool_worker_count(),
+                mp_context=process_pool_mp_context(),
             )
-            import atexit
-            
             # Keep a reference to the bound method so we can unregister it cleanly
             self._process_pool_shutdown_hook = lambda: self._process_pool.shutdown(wait=False)
             atexit.register(self._process_pool_shutdown_hook)
@@ -1845,9 +1848,18 @@ class ImageLoadManager(QObject):
                                 )
                                 return True
                         full_img = cache.get_full_image(file_path)
-                        if full_img is not None:
-                            self._emit_cached_result_later(self.image_ready, file_path, full_img)
-                            return True
+                        # Gallery grid tiers (~512px) must not satisfy a RAW-mode
+                        # 'full' stage: they get refused as JPEG interim and — with
+                        # bogus small EXIF sensor dims — never re-queue a real decode.
+                        if full_img is not None and hasattr(full_img, "shape"):
+                            fh, fw = full_img.shape[:2]
+                            if max(fh, fw) >= 1024 or image_covers_sensor_resolution(
+                                fw, fh, exif_data
+                            ):
+                                self._emit_cached_result_later(
+                                    self.image_ready, file_path, full_img
+                                )
+                                return True
                     else:
                         # Preview cache is memory-only LRU (embedded JPEG path)
                         preview = cache.preview_cache.get(file_path)

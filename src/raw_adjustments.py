@@ -9,6 +9,7 @@ import os
 import tempfile
 import threading
 import xml.etree.ElementTree as ET
+from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Callable, Dict
 
@@ -597,8 +598,16 @@ def write_rating_for_file(image_path: str, rating: int) -> None:
 # (as-shot metadata), but computing it may need a rawpy.imread -- which ran on
 # the GUI thread on EVERY panel sync (a 100-900ms stall per file open), and
 # ran WITHOUT _rawpy_global_lock (racing worker decodes; every other imread in
-# the app serializes on that lock). Session-scoped, tiny (one float per path).
-_AS_SHOT_TEMP_CACHE: dict[str, float] = {}
+# the app serializes on that lock). Session-scoped LRU (one float per path).
+_AS_SHOT_TEMP_CACHE: "OrderedDict[str, float]" = OrderedDict()
+_AS_SHOT_TEMP_CACHE_MAX = 2048
+
+
+def _as_shot_temp_cache_put(cache_key: str, value: float) -> None:
+    _AS_SHOT_TEMP_CACHE[cache_key] = float(value)
+    _AS_SHOT_TEMP_CACHE.move_to_end(cache_key)
+    while len(_AS_SHOT_TEMP_CACHE) > _AS_SHOT_TEMP_CACHE_MAX:
+        _AS_SHOT_TEMP_CACHE.popitem(last=False)
 
 
 def read_as_shot_temperature(image_path: str) -> float:
@@ -608,6 +617,7 @@ def read_as_shot_temperature(image_path: str) -> float:
     cache_key = os.path.normcase(os.path.abspath(image_path))
     cached = _AS_SHOT_TEMP_CACHE.get(cache_key)
     if cached is not None:
+        _AS_SHOT_TEMP_CACHE.move_to_end(cache_key)
         return cached
     result = DEFAULT_ADJUSTMENTS["Temperature"]
     resolved = False
@@ -650,7 +660,7 @@ def read_as_shot_temperature(image_path: str) -> float:
                     result = float(np.clip(est, 2000.0, 12000.0))
         except Exception:
             pass
-    _AS_SHOT_TEMP_CACHE[cache_key] = result
+    _as_shot_temp_cache_put(cache_key, result)
     return result
 
 

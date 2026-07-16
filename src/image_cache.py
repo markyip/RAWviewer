@@ -488,6 +488,22 @@ class PersistentEXIFCache:
                 if not height:
                     height = exif_dict.get('original_height')
 
+        # Never persist preview/thumbnail IFD sizes as sensor dimensions for RAW —
+        # those (often 160x120) poison image_covers_sensor_resolution and stall
+        # single-view upgrades on the previous file's pixels.
+        try:
+            from common_image_loader import (
+                _MIN_TRUSTED_SENSOR_LONG_EDGE,
+                is_raw_file,
+            )
+
+            if is_raw_file(file_path) and width and height:
+                if max(int(width), int(height)) < _MIN_TRUSTED_SENSOR_LONG_EDGE:
+                    width = None
+                    height = None
+        except Exception:
+            pass
+
         sensor_meta_ver = exif_info.get('raw_exif_sensor_meta_ver')
         if sensor_meta_ver is None:
             sensor_meta_ver = 0

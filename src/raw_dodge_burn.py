@@ -298,9 +298,25 @@ def apply_dodge_burn(
     if cached is not None and cached[0] == cache_key:
         gain = cached[1]
     else:
-        m = resize_mask_to(mask, h, w)
-        gain = np.exp2(m * float(stops)).astype(np.float32)
-        mask._gain_cache = (cache_key, gain)
+        try:
+            from perf_metrics import perf_mark
+            import time as _time
+
+            t0 = _time.perf_counter()
+            m = resize_mask_to(mask, h, w)
+            gain = np.exp2(m * float(stops)).astype(np.float32)
+            mask._gain_cache = (cache_key, gain)
+            perf_mark(
+                "db_apply",
+                (_time.perf_counter() - t0) * 1000.0,
+                h=h,
+                w=w,
+                cache="miss",
+            )
+        except Exception:
+            m = resize_mask_to(mask, h, w)
+            gain = np.exp2(m * float(stops)).astype(np.float32)
+            mask._gain_cache = (cache_key, gain)
     return img * gain[..., np.newaxis]
 
 

@@ -28,6 +28,12 @@ Canonical metric names (keep stable -- comparisons depend on them):
     decode_rawpy      rawpy.postprocess fallback
     sidecar_apply     XMP adjustments applied to a full buffer (cache miss)
     nav_to_display    navigation keypress -> pixels on screen (main.py)
+    adjust_preview    Adjust panel live/settle render (worker thread)
+    db_stamp          dodge/burn single brush stamp (slow outliers only)
+    db_live_patch     dodge/burn instant display-patch blit (slow outliers)
+    db_edge_snap      dodge/burn guided-filter snap on stroke release
+    db_stroke         dodge/burn per-stroke summary (stamp/patch totals)
+    db_apply          dodge/burn gain-map build inside apply_dodge_burn (cache miss)
 """
 
 from __future__ import annotations

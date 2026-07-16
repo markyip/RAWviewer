@@ -1598,16 +1598,19 @@ class UnifiedImageProcessor:
             # full tier is requested. A repeat use_full_resolution=True
             # request for a file whose full_image is already an embedded-JPEG
             # stand-in (full_image_is_embedded_jpeg) means the caller
-            # deliberately wants the true pixels now -- the idle-decode-
-            # after-nav-pause timer or an explicit zoom, both of which exist
-            # specifically to upgrade past the fast interim preview. Without
-            # this, _try_full_embedded_raw_preview would just re-extract/
-            # re-cache the same JPEG every time (its own cache/coverage
-            # checks have no notion of "already served once"), permanently
-            # blocking the real fast_raw_decode/rawpy pipeline below for any
-            # camera body whose embedded preview reaches sensor resolution.
+            # deliberately wants the true pixels now -- but ONLY in the RAW
+            # (libraw_first) workflow. In the non-RAW / embedded-JPEG workflow
+            # that stand-in *is* the intended full image; demosaicing on
+            # zoom/idle made non-RAW browsing look like LibRaw and feel slow.
             if use_full_resolution:
                 if not self.cache.full_image_is_embedded_jpeg(file_path):
+                    full_embedded = self._try_full_embedded_raw_preview(file_path, exif_data)
+                    if full_embedded is not None:
+                        return full_embedded
+                elif not libraw_first:
+                    cached_full = self.cache.get_full_image(file_path)
+                    if cached_full is not None:
+                        return cached_full
                     full_embedded = self._try_full_embedded_raw_preview(file_path, exif_data)
                     if full_embedded is not None:
                         return full_embedded
