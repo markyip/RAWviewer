@@ -856,6 +856,11 @@ def main():
             "--exclude-module", "coremltools",
             "--exclude-module", "torch",
             "--exclude-module", "torchvision",
+            # GPU demosaic (gpu_raw_processor) is default-off on macOS
+            # (RAWVIEWER_PREFER_GPU_DECODE=0); kornia exists only for it, and
+            # its static import would otherwise drag the package in.
+            "--exclude-module", "kornia",
+            "--exclude-module", "kornia_rs",
             "--exclude-module", "sentence_transformers",
             "--exclude-module", "transformers",
             "--exclude-module", "sklearn",
