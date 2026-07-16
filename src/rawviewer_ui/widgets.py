@@ -150,6 +150,18 @@ class ThumbnailLabel(QLabel):
         self._gallery_edited = bool(edited)
         self._update_edited_badge()
 
+    def _thumb_pixels_ready(self) -> bool:
+        """Badges float on empty tiles otherwise: layout aspect comes from the
+        EXIF cache, so tiles exist (and get metadata) before pixels arrive."""
+        pm = self.pixmap()
+        return pm is not None and not pm.isNull()
+
+    def setPixmap(self, pixmap) -> None:
+        super().setPixmap(pixmap)
+        self._update_rating_badge()
+        self._update_burst_stack_badge()
+        self._update_edited_badge()
+
     def set_gallery_rating(self, rating: int) -> None:
         self._gallery_rating = max(0, min(5, int(rating or 0)))
         self._update_rating_badge()
@@ -157,7 +169,7 @@ class ThumbnailLabel(QLabel):
     def _update_rating_badge(self) -> None:
         badge = getattr(self, "_rating_badge", None)
         rating = int(getattr(self, "_gallery_rating", 0) or 0)
-        if rating >= 1:
+        if rating >= 1 and self._thumb_pixels_ready():
             if badge is None:
                 badge = QLabel(self)
                 # Rating is a mark already decided about a photo -- dodge,
@@ -191,7 +203,7 @@ class ThumbnailLabel(QLabel):
     def _update_burst_stack_badge(self) -> None:
         badge = getattr(self, "_burst_stack_badge", None)
         count = int(getattr(self, "_burst_stack_count", 0) or 0)
-        if count >= 2:
+        if count >= 2 and self._thumb_pixels_ready():
             if badge is None:
                 badge = QLabel(self)
                 # Burst count is informational, not a status mark or an active
@@ -224,7 +236,7 @@ class ThumbnailLabel(QLabel):
         change the thumbnail pixels; see docs/EDIT_PIPELINE.md for why
         (gallery thumbnails are not re-rendered through the adjust pipeline)."""
         badge = getattr(self, "_edited_badge", None)
-        if self._gallery_edited:
+        if self._gallery_edited and self._thumb_pixels_ready():
             if badge is None:
                 badge = QLabel("✎", self)
                 # Edited is a mark, not a live action -- dodge (rule 4).

@@ -56,7 +56,9 @@ export RAWVIEWER_AUTO_METADATA_INDEX="${RAWVIEWER_AUTO_METADATA_INDEX:-1}"
 export RAWVIEWER_GPU_VIEW="${RAWVIEWER_GPU_VIEW:-1}"
 # Prefer PyTorch CUDA demosaic + CUDA↔GL display for debug launches.
 # Opt out: RAWVIEWER_PREFER_GPU_DECODE=0 / RAWVIEWER_GPU_CUDA_GL=0
-export RAWVIEWER_PREFER_GPU_DECODE="${RAWVIEWER_PREFER_GPU_DECODE:-1}"
+# macOS default off: MPS demosaic serializes heavy RAW decodes (raw_limit=1),
+# which starves gallery tile fill through the shared load pool.
+export RAWVIEWER_PREFER_GPU_DECODE="${RAWVIEWER_PREFER_GPU_DECODE:-0}"
 export RAWVIEWER_GPU_CUDA_GL="${RAWVIEWER_GPU_CUDA_GL:-1}"
 # macOS share: Qt menu with NSSharingService targets (works in v2.2 Qt6). Popover often spins empty.
 export RAWVIEWER_SHARE_MENU="${RAWVIEWER_SHARE_MENU:-1}"

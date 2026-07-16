@@ -842,9 +842,14 @@ class ImageLoadManager(QObject):
         except Exception:
             backend = "cpu_only"
 
-        self._raw_load_limit = raw_load_limit_aligned_to_gpu(
-            int(getattr(self, "_raw_load_limit", 4) or 4)
-        )
+        # Keep both limits: GPU demosaic wants heavy decodes serialized, but that
+        # throttle starves gallery tile fill, so gallery view swaps back to the
+        # pre-GPU limit (set_gallery_view_active) and single view re-applies it.
+        pre_gpu = int(getattr(self, "_raw_load_limit", 4) or 4)
+        self._pre_gpu_raw_limit = pre_gpu
+        self._gpu_aligned_raw_limit = raw_load_limit_aligned_to_gpu(pre_gpu)
+        if not getattr(self, "_gallery_view_active", False):
+            self._raw_load_limit = self._gpu_aligned_raw_limit
 
         # Tear down process pool only when GPU demosaic is both available AND
         # actually enabled (RAWVIEWER_PREFER_GPU_DECODE) -- not merely present.
@@ -882,6 +887,31 @@ class ImageLoadManager(QObject):
             backend,
             getattr(self, "_raw_load_limit", "?"),
             getattr(self, "_process_pool", None) is not None,
+        )
+
+    def set_gallery_view_active(self, active: bool) -> None:
+        """Suspend the GPU-decode raw throttle while gallery view is showing.
+
+        GPU demosaic serializes heavy RAW decodes (raw_limit=1 on MPS), which
+        starves gallery tile fill through the shared pool. Gallery only needs
+        thumbnails, so restore the volume-probed limit there and re-apply the
+        GPU-aligned limit when returning to single view.
+        """
+        self._gallery_view_active = bool(active)
+        # The effective limit is resolved at dispatch time in the scheduler
+        # (heavy_limit override): mutating _raw_load_limit here raced with the
+        # warmup/indexing throttles' save/restore and got pinned back to the
+        # GPU value. This setter only records the mode.
+        gpu_limit = getattr(self, "_gpu_aligned_raw_limit", None)
+        pre_gpu = getattr(self, "_pre_gpu_raw_limit", None)
+        if gpu_limit is None or pre_gpu is None or gpu_limit == pre_gpu:
+            return  # GPU profile not applied (or it changed nothing)
+        import logging
+
+        logging.getLogger(__name__).info(
+            "[LOAD] Gallery-aware GPU throttle: raw_limit=%d (gallery_active=%s)",
+            pre_gpu if active else gpu_limit,
+            active,
         )
 
     def _apply_current_pool_limit(self, max_workers: int) -> None:
@@ -1225,11 +1255,15 @@ class ImageLoadManager(QObject):
         # Don't accept new tasks if stopped
         if self._stopped:
             return
-            
+
+        _li_debug = os.environ.get("RAWVIEWER_SCROLL_PERF_DEBUG", "").strip() == "1"
+        _li_t0 = time.perf_counter() if _li_debug else 0.0
+
         # 取消現有任務（如果需要）
         if cancel_existing:
             self.cancel_task(file_path)
-        
+        _li_t_cancel = time.perf_counter() if _li_debug else 0.0
+
         # 檢查快取（memory-only, stage-aware）
         if not bypass_cache and self._check_cache(
             file_path,
@@ -1238,6 +1272,7 @@ class ImageLoadManager(QObject):
             gallery_thumbnail=gallery_thumbnail,
         ):
             return
+        _li_t_cache = time.perf_counter() if _li_debug else 0.0
 
         # Dedup against an already in-flight 'full' decode for this exact file,
         # even if it was queued under a different stage set. _make_task_key()
@@ -1303,8 +1338,24 @@ class ImageLoadManager(QObject):
             self._task_keys_by_path[file_path].add(task_key)
         
         # 添加到工作隊列
+        _li_t_queue = time.perf_counter() if _li_debug else 0.0
         self._work_queue.put(task)
         self._schedule_next_task()
+        if _li_debug:
+            _li_end = time.perf_counter()
+            total_ms = (_li_end - _li_t0) * 1000.0
+            if total_ms > 50.0:
+                import logging
+
+                logging.getLogger(__name__).info(
+                    "[SCROLL_PERF] load_image segments: cancel=%.0fms cache=%.0fms "
+                    "keying=%.0fms schedule=%.0fms total=%.0fms",
+                    (_li_t_cancel - _li_t0) * 1000.0,
+                    (_li_t_cache - _li_t_cancel) * 1000.0,
+                    (_li_t_queue - _li_t_cache) * 1000.0,
+                    (_li_end - _li_t_queue) * 1000.0,
+                    total_ms,
+                )
     
     def has_active_work_for_path(self, file_path: str) -> bool:
         """True when a load task for this path is queued or running."""
@@ -1644,8 +1695,15 @@ class ImageLoadManager(QObject):
         )
 
         is_raw = is_raw_file(file_path)
-        libraw_first = use_libraw_consistent_preview_first(file_path)
         wanted = stages if stages is not None else {'thumbnail', 'exif', 'full'}
+        # Only the 'full' stage consults this, and computing it costs a
+        # sidecar probe (and used to cost a per-file EXIF parse) — a gallery
+        # thumbnail-only request must never pay that on the UI thread.
+        libraw_first = (
+            use_libraw_consistent_preview_first(file_path)
+            if 'full' in wanted
+            else False
+        )
 
         cache = self._cache
         preview_only = wanted == {"thumbnail"}
@@ -1667,9 +1725,14 @@ class ImageLoadManager(QObject):
                     gallery_thumbnail=gallery_thumbnail,
                 ):
                     return False
+                # Gallery tiles: defer the emit. Synchronous emission runs the
+                # whole tile-apply handler inline inside the gallery's
+                # scheduling loop, stacking dozens of ~50-100ms applies into one
+                # main-thread stall. Single-view (non-gallery) keeps the
+                # immediate emit for instant nav display.
                 emit = (
                     self._emit_cached_result_now
-                    if preview_only
+                    if preview_only and not gallery_thumbnail
                     else self._emit_cached_result_later
                 )
                 emit(self.thumbnail_ready, file_path, buf)
@@ -1867,6 +1930,15 @@ class ImageLoadManager(QObject):
                     is_heavy = is_raw and 'full' in (task.stages or set())
 
                     heavy_limit = self._raw_load_limit
+                    if getattr(self, "_gallery_view_active", False):
+                        # Gallery only needs thumbnails; don't let the GPU
+                        # demosaic alignment (raw_limit=1 on MPS) serialize the
+                        # shared pool while tiles are filling. Read-time
+                        # override so warmup/indexing save/restore of
+                        # _raw_load_limit cannot pin the GPU value.
+                        pre_gpu = getattr(self, "_pre_gpu_raw_limit", None)
+                        if pre_gpu:
+                            heavy_limit = max(heavy_limit, int(pre_gpu))
                     if is_heavy and task.priority != Priority.CURRENT:
                         heavy_limit = max(1, heavy_limit - 1)
                     if is_heavy and provisional_raw >= heavy_limit:
@@ -1929,11 +2001,22 @@ _manager_lock = threading.Lock()
 
 
 def get_image_load_manager(max_workers: int = 4) -> ImageLoadManager:
-    """獲取全局圖像加載管理器實例（函數級單例模式）"""
+    """獲取全局圖像加載管理器實例（函數級單例模式）
+
+    RAWVIEWER_LOAD_WORKERS overrides max_workers (clamped to [2, 16]); the
+    4-thread default has been the gallery tile-fill ceiling on multi-core
+    machines even when every thumbnail is disk-cached.
+    """
     global _global_manager
     if _global_manager is None:
         with _manager_lock:
             if _global_manager is None:
+                raw = os.environ.get("RAWVIEWER_LOAD_WORKERS", "").strip()
+                if raw:
+                    try:
+                        max_workers = max(2, min(16, int(raw)))
+                    except ValueError:
+                        pass
                 _global_manager = ImageLoadManager(max_workers)
     return _global_manager
 

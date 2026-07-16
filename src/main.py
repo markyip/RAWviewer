@@ -5230,6 +5230,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         session = getattr(self, "_comparison_session", None)
         if session is None:
             return
+        if hasattr(self.image_manager, "set_gallery_view_active"):
+            self.image_manager.set_gallery_view_active(False)
         self._stop_slideshow()
         bar = self._filmstrip_bar()
         if bar is not None:
@@ -12827,6 +12829,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             return
         start_time = time.time()
         logger.info(f"[VIEW_MODE] ========== _show_single_view() STARTED at {start_time} ==========")
+        if hasattr(self.image_manager, "set_gallery_view_active"):
+            self.image_manager.set_gallery_view_active(False)
         self._suppress_single_manager_callbacks = False
         try:
             from PyQt6.QtCore import QTimer
@@ -13198,6 +13202,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self._hide_filmstrip_chrome()
         logger.debug("[MODESWITCH] _show_gallery_view entered; files=%d", len(self.image_files))
         logger.info("[GALLERY] Showing gallery view")
+        if hasattr(self.image_manager, "set_gallery_view_active"):
+            self.image_manager.set_gallery_view_active(True)
         if getattr(self, "current_file_path", None):
             self._gallery_scroll_target_path = self.current_file_path
         if getattr(self, "gallery_justified", None) is not None:
@@ -20681,7 +20687,12 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         ``_persist_libraw_preview`` applies the sidecar at decode time too).
         """
         from common_image_loader import is_raw_file
+        from raw_adjustments import sidecar_adjustments_enabled
 
+        if not sidecar_adjustments_enabled():
+            # Browse tiers show original pixels; never bake edits into the
+            # persisted preview cache.
+            return
         if not path or not is_raw_file(path):
             return
         base = self.image_cache.get_full_image(path)
@@ -24418,6 +24429,14 @@ class RAWImageViewer(SessionMixin, QMainWindow):
 
         logger = logging.getLogger(__name__)
         if not self._session_restore_burst_active():
+            return
+        if getattr(self, "view_mode", "single") == "gallery":
+            # Gallery tile loads share the ImageLoadManager pool; a 30+ MP full
+            # decode here starves visible-tile fill. Retry after the gallery quiets.
+            logger.info(
+                "[SESSION] Deferring full decode: gallery view active"
+            )
+            QTimer.singleShot(2000, self._run_post_session_restore_full_decode)
             return
         self._session_restore_full_decode_allowed = True
         logger.info(
@@ -30545,6 +30564,11 @@ def main():
                 fallback_ms=_env_int("RAWVIEWER_GPU_IMPORT_DEFER_FALLBACK_MS", 8000, minimum=0),
                 label="gpu_backend_import",
             )
+
+            if str(os.environ.get("RAWVIEWER_GALLERY_AUTOTEST", "0")).strip().lower() in ("1", "true", "yes"):
+                from gallery_autotest import run_gallery_autotest
+
+                run_gallery_autotest(viewer, safe_print=safe_print)
 
             if str(os.environ.get("RAWVIEWER_AUTOTEST", "0")).strip().lower() in ("1", "true", "yes"):
                 from nav_autotest import run_nav_autotest

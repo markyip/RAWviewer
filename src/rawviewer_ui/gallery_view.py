@@ -33,6 +33,13 @@ def _env_int(name: str, default: int, *, minimum: int = 1) -> int:
         return default
 
 
+def _env_float(name: str, default: float, *, minimum: float = 0.0) -> float:
+    try:
+        return max(minimum, float(os.environ.get(name, str(default)).strip()))
+    except (TypeError, ValueError):
+        return default
+
+
 def _env_true(name: str, *, default: bool = False) -> bool:
     raw = os.environ.get(name, "1" if default else "0").strip().lower()
     return raw not in ("0", "false", "no", "off")
@@ -377,6 +384,19 @@ class JustifiedGallery(QWidget):
         # same idea as dt-scaled game-loop integration).
         self._wheel_decay_per_tick = 0.2
         self._wheel_last_tick_t = 0.0
+        # Input gain: keys scroll singleStep*4 per repeat, but a wheel notch
+        # was a fixed 120px and trackpad pixelDelta passed through 1:1 —
+        # wheel/trackpad felt much slower than holding Down. Wheel notches
+        # scale with spin rate up to _wheel_fast_gain; trackpad deltas get a
+        # constant multiplier (native momentum still applies on top).
+        self._wheel_base_gain = _env_float("RAWVIEWER_WHEEL_GAIN", 1.0, minimum=0.25)
+        self._wheel_fast_gain = _env_float(
+            "RAWVIEWER_WHEEL_FAST_GAIN", 3.0, minimum=1.0
+        )
+        self._trackpad_gain = _env_float(
+            "RAWVIEWER_TRACKPAD_GAIN", 1.6, minimum=0.25
+        )
+        self._wheel_last_notch_t = 0.0
 
         # Idle background thumbnail preloader
         self._idle_preload_timer = QTimer(self)
@@ -1402,6 +1422,14 @@ class JustifiedGallery(QWidget):
     def _schedule_scroll_to_file_retry(self, delay_ms: int) -> None:
         QTimer.singleShot(max(0, int(delay_ms)), self._apply_pending_scroll_to_file)
 
+    def _abandon_pending_scroll_to_file(self) -> None:
+        """Give up on the entry scroll and unblock tile loading at the current offset."""
+        self._pending_scroll_to_path = None
+        self._pending_scroll_anchor_state = None
+        self._scroll_to_file_attempts = 0
+        logger.info("[GALLERY] scroll_to_file abandoned after max retries; loading at current offset")
+        self._request_load_visible_images(20)
+
     def _apply_pending_scroll_to_file(self):
         anchor_state = getattr(self, "_pending_scroll_anchor_state", None)
         path = self._pending_scroll_to_path
@@ -1414,6 +1442,8 @@ class JustifiedGallery(QWidget):
             self._scroll_to_file_attempts = attempts
             if attempts < 40:
                 self._schedule_scroll_to_file_retry(50)
+            else:
+                self._abandon_pending_scroll_to_file()
             return
 
         if anchor_state:
@@ -1427,6 +1457,8 @@ class JustifiedGallery(QWidget):
             self._scroll_to_file_attempts = attempts
             if attempts < 40:
                 self._schedule_scroll_to_file_retry(50)
+            else:
+                self._abandon_pending_scroll_to_file()
             return
 
         if not path:
@@ -1457,12 +1489,14 @@ class JustifiedGallery(QWidget):
             self._scroll_to_file_attempts = attempts
             if attempts < 40:
                 self._schedule_scroll_to_file_retry(50)
-            elif attempts == 40:
-                logger.warning(
-                    "[GALLERY] scroll_to_file gave up: %s not in layout (%d images)",
-                    os.path.basename(path) if path else "?",
-                    len(self.images or []),
-                )
+            else:
+                if attempts == 40:
+                    logger.warning(
+                        "[GALLERY] scroll_to_file gave up: %s not in layout (%d images)",
+                        os.path.basename(path) if path else "?",
+                        len(self.images or []),
+                    )
+                self._abandon_pending_scroll_to_file()
             return
         indices = self._path_to_indices.get(resolved)
         if not indices:
@@ -1470,6 +1504,8 @@ class JustifiedGallery(QWidget):
             self._scroll_to_file_attempts = attempts
             if attempts < 40:
                 self._schedule_scroll_to_file_retry(50)
+            else:
+                self._abandon_pending_scroll_to_file()
             return
         idx = indices[0]
         if idx < 0 or idx >= len(self._gallery_layout_items):
@@ -1490,6 +1526,8 @@ class JustifiedGallery(QWidget):
             self._scroll_to_file_attempts = attempts
             if attempts < 40:
                 self._schedule_scroll_to_file_retry(50)
+            else:
+                self._abandon_pending_scroll_to_file()
             return
 
         rect = self._gallery_layout_items[idx]["rect"]
@@ -2211,11 +2249,39 @@ class JustifiedGallery(QWidget):
                 pixel = event.pixelDelta()
                 angle = event.angleDelta()
                 if not pixel.isNull() and pixel.y() != 0:
-                    # Trackpad pixel scrolling: let QScrollArea handle natively (smoother on macOS).
-                    return False
+                    if abs(self._trackpad_gain - 1.0) < 0.01:
+                        # Unity gain: let QScrollArea handle natively (smoother on macOS).
+                        return False
+                    # Amplified trackpad: scale the pixel delta directly on the
+                    # scrollbar. macOS momentum still applies (it arrives as
+                    # more pixelDelta events), so the feel stays native.
+                    sb.setValue(
+                        max(
+                            sb.minimum(),
+                            min(
+                                sb.maximum(),
+                                sb.value()
+                                + int(-pixel.y() * self._trackpad_gain),
+                            ),
+                        )
+                    )
+                    self._last_scroll_event_t = time.time()
+                    event.accept()
+                    return True
                 if angle.y() != 0:
                     notches = angle.y() / 120.0
-                    delta_y = int(notches * 120)
+                    # Velocity-scaled notch distance: slow clicks stay precise
+                    # (~120px), fast spins ramp toward _wheel_fast_gain so a
+                    # flick traverses like holding the Down key.
+                    now_t = time.time()
+                    dt_notch = now_t - self._wheel_last_notch_t
+                    self._wheel_last_notch_t = now_t
+                    gain = self._wheel_base_gain
+                    if 0.0 < dt_notch < 0.20:
+                        # 200ms→1x ramping to max gain at <=40ms between notches
+                        speed = min(1.0, (0.20 - dt_notch) / 0.16)
+                        gain *= 1.0 + (self._wheel_fast_gain - 1.0) * speed
+                    delta_y = int(notches * 120 * gain)
                     self._wheel_accum_px += -float(delta_y)
                     if not self._wheel_timer.isActive():
                         self._wheel_last_tick_t = 0.0  # fresh burst: dt from nominal tick
@@ -2750,10 +2816,24 @@ class JustifiedGallery(QWidget):
         return self._load_visible_images_impl()
 
     def _load_visible_images_impl(self):
+        _sp_debug = os.environ.get("RAWVIEWER_SCROLL_PERF_DEBUG", "").strip() == "1"
+        _sp_t0 = time.perf_counter() if _sp_debug else 0.0
         # Stop background preloading when loading visible images (e.g. during scroll)
         self._idle_preload_timer.stop()
 
         if self._building:
+            self._request_load_visible_images(50)
+            return
+
+        # Entry scroll not applied yet: the viewport still sits at the old
+        # scroll offset (usually 0), so loading now aims CURRENT work at the
+        # wrong rows and the anchor's tiles queue behind it. Wait for
+        # _apply_pending_scroll_to_file (it re-requests a load on success;
+        # the attempt cap keeps this from parking forever).
+        if (
+            getattr(self, "_pending_scroll_to_path", None)
+            and getattr(self, "_scroll_to_file_attempts", 0) < 40
+        ):
             self._request_load_visible_images(50)
             return
 
@@ -2935,7 +3015,32 @@ class JustifiedGallery(QWidget):
             active_cap,
             _env_int("RAWVIEWER_GALLERY_ACTIVE_CAP_HARD", 80, minimum=8),
         )
+        # Main-thread budget per pass: the sync cache path below (disk read +
+        # JPEG decode + scale per tile) ran for seconds on a cold gallery,
+        # freezing the UI. Overflow tiles resume on the next 16ms tick.
+        pass_t0 = time.perf_counter()
+        pass_budget_s = (
+            _env_int("RAWVIEWER_GALLERY_PASS_BUDGET_MS", 50, minimum=10) / 1000.0
+        )
+        if actively_scrolling:
+            # A live gesture needs ~60fps paints; a 50ms(+2x schedule) pass
+            # drops most frames and reads as trackpad lag. Fill catches up on
+            # the settle pass.
+            pass_budget_s = min(
+                pass_budget_s,
+                _env_int("RAWVIEWER_GALLERY_SCROLL_PASS_BUDGET_MS", 12, minimum=4)
+                / 1000.0,
+            )
+        pass_processed = 0
+        pass_budget_exhausted = False
         for idx, item in visible_indices_items:
+            if (
+                pass_processed > 0
+                and (time.perf_counter() - pass_t0) > pass_budget_s
+            ):
+                pass_budget_exhausted = True
+                break
+            pass_processed += 1
             path = item.get("file_path")
             rect = item.get("rect")
             if not path or rect is None:
@@ -3185,6 +3290,16 @@ class JustifiedGallery(QWidget):
                 target = QSize(physical_size.width(), physical_size.height())
                 load_tasks.append((path, Priority.CURRENT, stages, target))
 
+        _sp_t_loop = time.perf_counter() if _sp_debug else 0.0
+        if pass_budget_exhausted:
+            logger.info(
+                "[GALLERY] load_visible_images pass budget hit after %d/%d tiles; resuming next tick",
+                pass_processed,
+                len(visible_indices_items),
+            )
+            if self._load_timer is not None and not self._load_timer.isActive():
+                self._load_timer.start(16)
+
         if actively_scrolling and not load_tasks and not self._active_tasks:
             viewport_rect = QRect(0, scroll_y, v_port.width(), v_h)
             viewport_items = self._get_visible_range(viewport_rect)
@@ -3223,6 +3338,7 @@ class JustifiedGallery(QWidget):
                 if stages and path not in self._active_tasks:
                     load_tasks.append((path, Priority.PRELOAD_NEXT, stages))
 
+        _sp_t_prep = time.perf_counter() if _sp_debug else 0.0
         # Closest to prefetch center first (bidirectional up/down), then non-RAW.
         load_tasks.sort(
             key=lambda item: (
@@ -3266,6 +3382,16 @@ class JustifiedGallery(QWidget):
                 if self._load_timer is not None and not self._load_timer.isActive():
                     self._load_timer.start(16)
                 break
+            # load_image() can complete synchronously for memory-cache hits
+            # (thumbnail_ready emitted inline), so this loop is main-thread
+            # work too — share the pass budget with the tile loop above.
+            if (
+                scheduled > 0
+                and (time.perf_counter() - pass_t0) > 2 * pass_budget_s
+            ):
+                if self._load_timer is not None and not self._load_timer.isActive():
+                    self._load_timer.start(16)
+                break
             if priority != Priority.CURRENT:
                 if self._prefetch_active_count() >= prefetch_active_cap:
                     continue
@@ -3283,6 +3409,7 @@ class JustifiedGallery(QWidget):
             # content inside a correct portrait frame. The gallery caches the payload
             # as its BASE and crop-fits per tile itself (_fit_tile_pixmap), so the
             # worker-side crop was redundant as well as destructive.
+            _li_t0 = time.perf_counter() if _sp_debug else 0.0
             self.load_manager.load_image(
                 path,
                 priority=priority,
@@ -3291,9 +3418,32 @@ class JustifiedGallery(QWidget):
                 gallery_thumbnail=True,
                 thumbnail_target_size=None,
             )
+            if _sp_debug:
+                _li_ms = (time.perf_counter() - _li_t0) * 1000.0
+                if _li_ms > 50.0:
+                    logger.info(
+                        "[SCROLL_PERF] load_image %.0fms path=%s stages=%s",
+                        _li_ms,
+                        os.path.basename(path),
+                        sorted(stages),
+                    )
             self._mark_active_task(path, priority)
             scheduled += 1
         scheduled_tasks = scheduled
+
+        if _sp_debug:
+            _sp_t_end = time.perf_counter()
+            _sp_total_ms = (_sp_t_end - _sp_t0) * 1000.0
+            if _sp_total_ms > 100.0:
+                logger.info(
+                    "[SCROLL_PERF] impl sections: pre_loop=%.0fms tile_loop=%.0fms "
+                    "prep=%.0fms schedule=%.0fms total=%.0fms",
+                    (pass_t0 - _sp_t0) * 1000.0,
+                    (_sp_t_loop - pass_t0) * 1000.0,
+                    (_sp_t_prep - _sp_t_loop) * 1000.0,
+                    (_sp_t_end - _sp_t_prep) * 1000.0,
+                    _sp_total_ms,
+                )
 
         if scheduled_tasks > 0:
             logger.info(
