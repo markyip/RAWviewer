@@ -89,7 +89,7 @@ def resource_path(relative_path):
 
 
 def _branded_icon_resource_path() -> str | None:
-    """Bundled app icon for splash/window (platform format; PNG omitted from release bundles)."""
+    """Bundled app icon for window chrome (platform format preferred)."""
     if platform.system() == "Windows":
         candidates = (
             os.path.join("icons", "appicon.ico"),
@@ -107,6 +107,14 @@ def _branded_icon_resource_path() -> str | None:
         if os.path.exists(path):
             return path
     return None
+
+
+def _splash_icon_resource_path() -> str | None:
+    """Prefer hi-res PNG for startup splash; fall back to platform icon."""
+    png = resource_path(os.path.join("icons", "appicon.png"))
+    if os.path.exists(png):
+        return png
+    return _branded_icon_resource_path()
 
 
 # PyInstaller Splash Screen: Helper to close the boot-time splash
@@ -194,16 +202,24 @@ if _IS_GUI_MAIN_PROCESS:
         if not _temp_app:
             _temp_app = RAWApplication(sys.argv)
 
-        # Try to load platform app icon as splash
-        _icon_path = _branded_icon_resource_path()
+        # Prefer hi-res PNG splash (2048 master); fall back to .icns/.ico.
+        _icon_path = _splash_icon_resource_path()
         if _icon_path:
             from PyQt6.QtGui import QIcon
-            _splash_pixmap = QIcon(_icon_path).pixmap(512, 512)
-            if _splash_pixmap.isNull():
+            _splash_max = 1024
+            if _icon_path.lower().endswith(".png"):
                 _splash_pixmap = QPixmap(_icon_path)
-            if not _splash_pixmap.isNull() and _splash_pixmap.width() > 512:
+            else:
+                _splash_pixmap = QIcon(_icon_path).pixmap(_splash_max, _splash_max)
+                if _splash_pixmap.isNull():
+                    _splash_pixmap = QPixmap(_icon_path)
+            if not _splash_pixmap.isNull() and (
+                _splash_pixmap.width() > _splash_max
+                or _splash_pixmap.height() > _splash_max
+            ):
                 _splash_pixmap = _splash_pixmap.scaled(
-                    512, 512,
+                    _splash_max,
+                    _splash_max,
                     Qt.AspectRatioMode.KeepAspectRatio,
                     Qt.TransformationMode.SmoothTransformation,
                 )

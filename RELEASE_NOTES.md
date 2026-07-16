@@ -59,6 +59,9 @@ It is built as a faster **browse / cull** release on top of 2.5: featuring **Fas
 - Windows Lite pixi payload skips `torch` / `torchvision` / `kornia` so install size stays near the ~500 MB class instead of dragging CUDA wheels.
 - Lite runtime default: `RAWVIEWER_PREFER_GPU_DECODE=0`. Full (CUDA) still prefers GPU demosaic when the backend is present.
 
+#### 🎨 App icon
+- New darkroom flat icon: 2×2 gallery tiles + Adjust tone-curve tile (EMBER accent). Hi-res `icons/appicon.png` (2048²) for splash/README; platform `.icns`/`.ico` for the app; simplified `favicon.ico` for small sizes.
+
 ### Environment variables (new / notable)
 
 | Variable | Default | Effect |

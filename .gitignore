@@ -41,7 +41,15 @@ desktop.ini
 *.PNG
 *.TIF
 *.TIFF
+# Brand icons (must remain tracked despite the image ignores above)
 !icons/appicon.png
+!icons/appicon-master.png
+!icons/appicon.ico
+!icons/appicon.icns
+!icons/favicon.png
+!icons/favicon-master.png
+!icons/favicon.ico
+!icons/folder_open_md3.svg
 
 # Log files
 *.log
@@ -141,6 +149,7 @@ PERFORMANCE_ANALYSIS.md
 
 # Icon source assets
 icon.iconset/
+icons/concepts/
 
 # Tests directory (local scripts and reports)
 tests/

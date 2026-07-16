@@ -1,7 +1,7 @@
 # RAWviewer v3.0
 
 <p align="center">
-  <img src="icons/appicon.png" alt="RAWviewer Icon" width="256">
+  <img src="icons/appicon.png" alt="RAWviewer Icon" width="320">
 </p>
 
 <p align="center">

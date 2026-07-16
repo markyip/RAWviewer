@@ -775,6 +775,7 @@ def main():
         add_data_args = [
             f'--add-data "{imageformats_src}{add_data_sep}imageformats"',
             f'--add-data "icons{os.sep}appicon.ico{add_data_sep}icons"',
+            f'--add-data "icons{os.sep}appicon.png{add_data_sep}icons"',
             f'--add-data "src{os.sep}icons{os.sep}folder_open_md3.svg{add_data_sep}icons"',
             f'--add-data "src{os.sep}icons{os.sep}cities500.csv.gz{add_data_sep}icons"',
             f'--add-data "src{os.sep}icons{os.sep}landmarks.csv.gz{add_data_sep}icons"',
@@ -783,6 +784,7 @@ def main():
         add_data_args = [
             f'--add-data "{imageformats_src}{add_data_sep}imageformats"',
             f'--add-data "icons{os.sep}appicon.icns{add_data_sep}icons"',
+            f'--add-data "icons{os.sep}appicon.png{add_data_sep}icons"',
             f'--add-data "src{os.sep}icons{os.sep}folder_open_md3.svg{add_data_sep}icons"',
             f'--add-data "src{os.sep}icons{os.sep}cities500.csv.gz{add_data_sep}icons"',
             f'--add-data "src{os.sep}icons{os.sep}landmarks.csv.gz{add_data_sep}icons"',
