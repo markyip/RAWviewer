@@ -46,6 +46,15 @@ def main() -> int:
     dodged = apply_dodge_burn(img, mask, 1.75)
     check("dodge brightens center", dodged[50, 75, 0] > img[50, 75, 0])
     check("dodge leaves far corner unchanged", np.allclose(dodged[2, 2], img[2, 2], atol=1e-4))
+    # Soft circular kernel: bbox corners stay near empty (not a filled square).
+    x0, y0, x1, y1 = 75 - 20 - 1, 50 - 20 - 1, 75 + 20 + 2, 50 + 20 + 2
+    corner = float(abs(mask.data[y0, x0]))
+    center = float(abs(mask.data[50, 75]))
+    check(
+        "stamp is circular (bbox corner ≪ center)",
+        center > 0 and corner < center * 0.08,
+        f"corner={corner:.4f} center={center:.4f}",
+    )
 
     mask_b = DodgeBurnMask.empty(100, 150)
     stamp_brush(mask_b, 75, 50, 20, 0.4, dodge=False)
@@ -72,6 +81,34 @@ def main() -> int:
     edge_snap_region(mask, luminance, bbox)
     check("edge-snap produces finite values", np.all(np.isfinite(mask.data)))
     check("edge-snap keeps mask non-empty", not mask.is_empty)
+
+    # 5b. Edge-assist stamp: paint on dark subject next to bright neighbor
+    # should not bleed strongly onto the bright side.
+    split = np.zeros((120, 200), dtype=np.float32)
+    split[:, 100:] = 0.85  # bright right half
+    split[:, :100] = 0.15  # dark left half
+    mask_e = DodgeBurnMask.empty(120, 200)
+    # Brush centered on dark side, large enough to geometrically cover the bright side
+    stamp_brush(
+        mask_e, 90, 60, 40, 0.5, dodge=True, luminance=split, edge_assist=True
+    )
+    left = float(np.abs(mask_e.data[60, 70]).mean()) if False else float(np.abs(mask_e.data[55:65, 60:80]).mean())
+    right = float(np.abs(mask_e.data[55:65, 120:140]).mean())
+    check(
+        "edge-assist attenuates across subject boundary",
+        left > right * 2.5,
+        f"left={left:.4f} right={right:.4f}",
+    )
+    mask_plain = DodgeBurnMask.empty(120, 200)
+    stamp_brush(
+        mask_plain, 90, 60, 40, 0.5, dodge=True, luminance=split, edge_assist=False
+    )
+    right_plain = float(np.abs(mask_plain.data[55:65, 120:140]).mean())
+    check(
+        "without edge-assist bright side receives more paint",
+        right_plain > right * 1.5,
+        f"assist={right:.4f} plain={right_plain:.4f}",
+    )
 
     # 6. Serialize round-trip (8-bit quantization tolerance)
     serial = serialize_mask(mask)

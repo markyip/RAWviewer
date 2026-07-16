@@ -1833,6 +1833,12 @@ class _AdjustPreviewWorker(QRunnable):
 
                 out = _encode_srgb8(np.clip(out.astype(np.float32), 0.0, None))
         except Exception:
+            import logging
+
+            logging.getLogger(__name__).exception(
+                "Adjust preview worker failed for %s",
+                os.path.basename(self.file_path or "") or "?",
+            )
             out = None
         self.signals.finished.emit(self.generation, self.file_path, out)
 
@@ -8320,6 +8326,9 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             self.single_image_adjust_panel.auto_wb_requested.connect(
                 self._on_auto_wb_requested
             )
+            self.single_image_adjust_panel.auto_straighten_requested.connect(
+                self._on_auto_straighten_requested
+            )
             self.single_image_adjust_panel.export_requested.connect(
                 self._on_adjust_panel_export_requested
             )
@@ -8343,6 +8352,21 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             )
             self.single_image_adjust_panel.dodgeBurnMaskToggled.connect(
                 self._on_dodge_burn_mask_toggled
+            )
+            self.single_image_adjust_panel.crop_mode_changed.connect(
+                self._on_crop_mode_changed
+            )
+            self.single_image_adjust_panel.crop_aspect_changed.connect(
+                self._on_crop_aspect_changed
+            )
+            self.single_image_adjust_panel.crop_apply_requested.connect(
+                self._on_crop_apply_requested
+            )
+            self.single_image_adjust_panel.crop_cancel_requested.connect(
+                self._on_crop_cancel_requested
+            )
+            self.single_image_adjust_panel.crop_reset_requested.connect(
+                self._on_crop_reset_requested
             )
             self.single_image_adjust_panel.reset_requested.connect(
                 self._on_adjust_panel_reset
@@ -8378,6 +8402,11 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             self._adjust_hist_sync_timer.timeout.connect(self._sync_single_image_histogram)
         self._dodge_burn_mask = None
         self._dodge_burn_stroke_active = False
+        self._dodge_burn_stroke_baseline = None
+        self._dodge_burn_mask_at_stroke_start = None
+        self._dodge_burn_stroke_dirty = None
+        self._crop_preview_uncropped = False
+        self._crop_working_insets = (0.0, 0.0, 0.0, 0.0)
 
         # Route B: GPU-accelerated single-image view (QGraphicsView + OpenGL).
         # On by default; set RAWVIEWER_GPU_VIEW=0 for the legacy QScrollArea/QLabel path.
@@ -8395,6 +8424,10 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 if editing_features_enabled():
                     self.gpu_view.colorPickRequested.connect(self._on_wb_color_picked)
                     self.gpu_view.dodgeBurnStroke.connect(self._on_dodge_burn_stroke)
+                    self.gpu_view.cropInsetsChanged.connect(self._on_crop_insets_live)
+                    self.gpu_view.cropEditingFinished.connect(
+                        lambda: None
+                    )  # live only; commit via Apply
                 self.gpu_view._shortcut_handler = self._handle_app_shortcut
                 self._sync_composition_grid_display()
             except Exception as _gpu_exc:
@@ -19817,6 +19850,10 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         panel = getattr(self, "single_image_adjust_panel", None)
         if panel is None:
             return
+        gv = getattr(self, "gpu_view", None)
+        if gv is not None and hasattr(gv, "set_export_drag_enabled"):
+            # Drag-out + share fight crop/D&B gestures while editing.
+            gv.set_export_drag_enabled(not bool(visible))
         if self._adjust_overlay_visible:
             if self._raw_recovery_preview_active():
                 self._disable_raw_recovery()
@@ -19826,6 +19863,14 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         if self._adjust_overlay_visible and self._single_view_has_display_image():
             panel.setVisible(True)
             self.single_image_histogram.hide()
+            # Give the adjust panel its preferred width so slider values
+            # aren't clipped (panel min-width alone isn't enough under QSplitter).
+            splitter = getattr(self, "single_view_splitter", None)
+            if splitter is not None and splitter.count() >= 2:
+                total = max(splitter.width(), 1)
+                panel_w = max(panel.minimumWidth(), getattr(panel, "_PANEL_W", 440))
+                image_w = max(120, total - panel_w)
+                splitter.setSizes([image_w, panel_w])
             self._sync_adjust_panel_for_current_file()
             path = getattr(self, "current_file_path", None)
             if path:
@@ -20077,6 +20122,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             loaded_adj = load_adjustments_for_file(path)
             panel.set_adjustments(loaded_adj)
             self._dodge_burn_mask = deserialize_mask(loaded_adj.get(MASK_KEY, ""))
+            self._dodge_burn_luma_guide = None
             self._adjust_panel_loaded_norm = norm
             self._pending_adjust_preview = dict(panel.get_adjustments())
         except Exception:
@@ -20448,6 +20494,85 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             gv.set_dodge_burn_mode(mode is not None)
             self._apply_adjust_panel_preview()
 
+    def _crop_keys_zeroed(self, adj: dict) -> dict:
+        """Preview adj with crop insets cleared (full frame under the overlay)."""
+        out = dict(adj)
+        for k in ("CropLeft", "CropRight", "CropTop", "CropBottom"):
+            out[k] = 0.0
+        return out
+
+    def _on_crop_mode_changed(self, active: bool) -> None:
+        panel = getattr(self, "single_image_adjust_panel", None)
+        gv = getattr(self, "gpu_view", None)
+        if panel is None or gv is None:
+            return
+        if active:
+            panel.disarm_dodge_burn()
+            insets = panel.get_crop_insets()
+            self._crop_working_insets = insets
+            gv.set_crop_mode(True, insets=insets, aspect=None)
+            self._crop_preview_uncropped = True
+            self._apply_adjust_panel_preview(full_quality=True)
+            if hasattr(self, "status_bar"):
+                self.status_bar.showMessage(
+                    "Crop mode — drag handles; Apply to commit, Cancel to leave",
+                    4000,
+                )
+        else:
+            self._crop_preview_uncropped = False
+            gv.set_crop_mode(False)
+            self._apply_adjust_panel_preview(full_quality=True)
+
+    def _on_crop_aspect_changed(self, aspect) -> None:
+        gv = getattr(self, "gpu_view", None)
+        if gv is None or not gv.is_crop_mode():
+            return
+        if aspect == "original":
+            w, h = gv.image_size()
+            aspect = (float(w) / float(h)) if w > 0 and h > 0 else None
+        gv.set_crop_aspect_ratio(aspect if isinstance(aspect, (int, float)) else None)
+        self._crop_working_insets = gv.crop_insets()
+
+    def _on_crop_insets_live(
+        self, left: float, right: float, top: float, bottom: float
+    ) -> None:
+        self._crop_working_insets = (float(left), float(right), float(top), float(bottom))
+
+    def _on_crop_apply_requested(self) -> None:
+        panel = getattr(self, "single_image_adjust_panel", None)
+        gv = getattr(self, "gpu_view", None)
+        if panel is None:
+            return
+        insets = (
+            gv.crop_insets()
+            if gv is not None and gv.is_crop_mode()
+            else getattr(self, "_crop_working_insets", panel.get_crop_insets())
+        )
+        self._crop_preview_uncropped = False
+        panel.set_crop_mode_ui(False)
+        if gv is not None:
+            gv.set_crop_mode(False)
+        panel.set_crop_insets(*insets, emit=True)
+
+    def _on_crop_cancel_requested(self) -> None:
+        panel = getattr(self, "single_image_adjust_panel", None)
+        gv = getattr(self, "gpu_view", None)
+        self._crop_preview_uncropped = False
+        if panel is not None:
+            panel.set_crop_mode_ui(False)
+        if gv is not None:
+            gv.set_crop_mode(False)
+        self._apply_adjust_panel_preview(full_quality=True)
+
+    def _on_crop_reset_requested(self) -> None:
+        panel = getattr(self, "single_image_adjust_panel", None)
+        gv = getattr(self, "gpu_view", None)
+        self._crop_working_insets = (0.0, 0.0, 0.0, 0.0)
+        if gv is not None and gv.is_crop_mode():
+            gv.set_crop_insets(0.0, 0.0, 0.0, 0.0)
+        if panel is not None:
+            panel.set_crop_insets(0.0, 0.0, 0.0, 0.0, emit=not panel.is_crop_mode())
+
     def _on_dodge_burn_mask_toggled(self, show: bool) -> None:
         gv = getattr(self, "gpu_view", None)
         if gv is not None:
@@ -20462,6 +20587,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         if getattr(self, "_dodge_burn_mask", None) is None:
             return
         self._dodge_burn_mask = None
+        self._dodge_burn_luma_guide = None
         panel = getattr(self, "single_image_adjust_panel", None)
         if panel is not None:
             panel.set_dodge_burn_mask_present(False)
@@ -20470,6 +20596,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         if getattr(self, "_dodge_burn_mask", None) is None:
             return
         self._dodge_burn_mask = None
+        self._dodge_burn_luma_guide = None
         panel = getattr(self, "single_image_adjust_panel", None)
         if panel is not None:
             panel.set_dodge_burn_mask_present(False)
@@ -20499,9 +20626,15 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         if mode is None or mask_shape is None:
             if is_end:
                 self._dodge_burn_stroke_active = False
+                self._dodge_burn_stroke_baseline = None
+                self._dodge_burn_mask_at_stroke_start = None
             return
         try:
-            from raw_dodge_burn import DodgeBurnMask, apply_dodge_burn, edge_snap_region, stamp_brush
+            from raw_dodge_burn import (
+                DodgeBurnMask,
+                edge_snap_region,
+                stamp_brush,
+            )
 
             mh, mw = mask_shape
             mask = getattr(self, "_dodge_burn_mask", None)
@@ -20517,46 +20650,132 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             sx = mw / max(1, disp_w)
             sy = mh / max(1, disp_h)
             mx, my = pt.x() * sx, pt.y() * sy
+            # Brush size slider is in *display* pixels; convert to mask space.
             radius = max(2.0, panel.dodge_burn_brush_radius() * sx)
             # Per-point delta: brush-strength slider (0..1) * pressure,
             # scaled down so a slow drag accumulates smoothly instead of
-            # one point already reaching full strength.
-            delta = panel.dodge_burn_brush_strength() * max(0.05, float(pressure)) * 0.25
-            bbox = stamp_brush(mask, mx, my, radius, delta, dodge=(mode == "dodge"))
+            # one point already reaching full strength. Kept low (0.12) so
+            # live patch feedback stays cheap and strokes don't blow out.
+            delta = panel.dodge_burn_brush_strength() * max(0.05, float(pressure)) * 0.12
+
+            # Snapshot baseline once per stroke so live preview applies only
+            # this stroke's mask delta (never re-bakes prior strokes into a
+            # rectangular blit — that path produced hard square blocks when
+            # the mask patch resized poorly against the display buffer).
+            if not getattr(self, "_dodge_burn_stroke_active", False):
+                if last is not None:
+                    self._dodge_burn_stroke_baseline = last[0].copy()
+                    self._dodge_burn_stroke_baseline_adj = last[1]
+                else:
+                    self._dodge_burn_stroke_baseline = None
+                    self._dodge_burn_stroke_baseline_adj = None
+                self._dodge_burn_mask_at_stroke_start = mask.data.copy()
+                self._dodge_burn_stroke_dirty = None
+
+            # Edge-assist guide: cache luminance for the stroke so each stamp
+            # stays O(brush area). Rebuild when the edit-base shape changes.
+            luma = getattr(self, "_dodge_burn_luma_guide", None)
+            if luma is None or getattr(luma, "shape", None) != (mh, mw):
+                luma = None
+                try:
+                    base = getattr(self, "_adjust_preview_base_rgb", None)
+                    if base is not None and hasattr(base, "shape"):
+                        from raw_edit_pipeline import _linear_float_from_buffer
+
+                        b = _linear_float_from_buffer(base)
+                        if b.shape[0] != mh or b.shape[1] != mw:
+                            import cv2
+
+                            b = cv2.resize(
+                                b, (mw, mh), interpolation=cv2.INTER_AREA
+                            )
+                        luma = (
+                            0.2126 * b[..., 0]
+                            + 0.7152 * b[..., 1]
+                            + 0.0722 * b[..., 2]
+                        ).astype(np.float32)
+                        self._dodge_burn_luma_guide = luma
+                except Exception:
+                    luma = None
+                    self._dodge_burn_luma_guide = None
+
+            edge_on = bool(panel.dodge_burn_edge_assist())
+            bbox = stamp_brush(
+                mask,
+                mx,
+                my,
+                radius,
+                delta,
+                dodge=(mode == "dodge"),
+                luminance=luma,
+                edge_assist=edge_on,
+            )
             self._dodge_burn_stroke_active = True
             panel.set_dodge_burn_mask_present(True)
 
-            # Instant visual feedback: patch just the touched region of the
-            # last exact render and repaint immediately -- no worker
-            # round-trip, so the brush tracks the cursor with no perceptible
-            # delay (same mechanism as the Exposure/Temperature/Tint instant-
-            # gain preview above).
-            if last is not None:
-                arr, last_adj = last
+            baseline = getattr(self, "_dodge_burn_stroke_baseline", None)
+            mask_start = getattr(self, "_dodge_burn_mask_at_stroke_start", None)
+            if baseline is not None and mask_start is not None:
+                import cv2
+
+                from raw_dodge_burn import circular_brush_falloff
+
                 x0, y0, x1, y1 = bbox
-                px0, py0 = int(x0 / sx), int(y0 / sy)
-                px1, py1 = int(np.ceil(x1 / sx)), int(np.ceil(y1 / sy))
-                px0, py0 = max(0, px0), max(0, py0)
-                px1, py1 = min(disp_w, px1), min(disp_h, py1)
+                # Pad the stamp bbox slightly so soft edges aren't clipped.
+                pad = 2
+                x0 = max(0, x0 - pad)
+                y0 = max(0, y0 - pad)
+                x1 = min(mw, x1 + pad)
+                y1 = min(mh, y1 + pad)
+                # Accumulate stroke dirty rect so multi-point drags preview
+                # the whole stroke, not only the latest stamp.
+                prev = getattr(self, "_dodge_burn_stroke_dirty", None)
+                if prev is not None:
+                    x0 = min(x0, prev[0])
+                    y0 = min(y0, prev[1])
+                    x1 = max(x1, prev[2])
+                    y1 = max(y1, prev[3])
+                self._dodge_burn_stroke_dirty = (x0, y0, x1, y1)
+
+                px0 = max(0, int(x0 / sx))
+                py0 = max(0, int(y0 / sy))
+                px1 = min(disp_w, int(np.ceil(x1 / sx)))
+                py1 = min(disp_h, int(np.ceil(y1 / sy)))
                 if px1 > px0 and py1 > py0:
-                    patch = arr[py0:py1, px0:px1].astype(np.float32) / 255.0
-                    stops = float(last_adj.get("DodgeBurnStrength", 1.75))
-                    m_x0, m_y0 = int(px0 * sx), int(py0 * sy)
-                    m_x1, m_y1 = int(px1 * sx), int(py1 * sy)
-                    m_patch = mask.data[m_y0:m_y1, m_x0:m_x1]
-                    if m_patch.size > 0:
-                        patched = apply_dodge_burn(patch, DodgeBurnMask(m_patch), stops)
+                    m_x0 = max(0, int(px0 * sx))
+                    m_y0 = max(0, int(py0 * sy))
+                    m_x1 = min(mw, max(m_x0 + 1, int(np.ceil(px1 * sx))))
+                    m_y1 = min(mh, max(m_y0 + 1, int(np.ceil(py1 * sy))))
+                    d_patch = (mask.data[m_y0:m_y1, m_x0:m_x1] - mask_start[m_y0:m_y1, m_x0:m_x1])
+                    ph, pw = py1 - py0, px1 - px0
+                    if d_patch.size > 0 and min(d_patch.shape) >= 2:
+                        if d_patch.shape != (ph, pw):
+                            d_disp = cv2.resize(
+                                d_patch.astype(np.float32),
+                                (pw, ph),
+                                interpolation=cv2.INTER_LINEAR,
+                            )
+                        else:
+                            d_disp = d_patch.astype(np.float32)
                     else:
-                        patched = patch
-                    # patch already carries any prior dodge/burn baked in
-                    # from the exact render, so re-applying the FULL mask
-                    # here (not just this stamp's delta) would double the
-                    # already-converged portion. Approximation is fine for
-                    # the instant-feedback frame; the exact worker render
-                    # (triggered on stroke end) replaces it with the true
-                    # from-scratch pipeline result.
-                    out8 = np.clip(patched * 255.0 + 0.5, 0, 255).astype(np.uint8)
-                    new_arr = arr.copy()
+                        # Degenerate mask mapping — stamp a display-space
+                        # gaussian at the cursor instead of a flat block.
+                        r_disp = max(2.0, float(panel.dodge_burn_brush_radius()))
+                        d_disp = circular_brush_falloff(
+                            0, ph, 0, pw, pt.x() - px0, pt.y() - py0, r_disp
+                        ) * float(delta) * (1.0 if mode == "dodge" else -1.0)
+
+                    stops = float(
+                        (getattr(self, "_dodge_burn_stroke_baseline_adj", None) or {}).get(
+                            "DodgeBurnStrength", 1.75
+                        )
+                    )
+                    gain = np.exp2(d_disp * stops).astype(np.float32)
+                    patch = baseline[py0:py1, px0:px1].astype(np.float32)
+                    out8 = np.clip(patch * gain[..., np.newaxis] + 0.5, 0, 255).astype(
+                        np.uint8
+                    )
+                    new_arr = baseline.copy()
                     new_arr[py0:py1, px0:px1] = out8
                     pixmap = self._numpy_to_qpixmap(new_arr)
                     if pixmap is not None and not pixmap.isNull():
@@ -20564,14 +20783,23 @@ class RAWImageViewer(SessionMixin, QMainWindow):
 
             if is_end:
                 self._dodge_burn_stroke_active = False
-                luminance = None
-                try:
-                    base = getattr(self, "_adjust_preview_base_rgb", None)
-                    if base is not None and hasattr(base, "shape"):
-                        b = base.astype(np.float32)
-                        luminance = 0.2126 * b[..., 0] + 0.7152 * b[..., 1] + 0.0722 * b[..., 2]
-                except Exception:
+                self._dodge_burn_stroke_baseline = None
+                self._dodge_burn_mask_at_stroke_start = None
+                self._dodge_burn_stroke_dirty = None
+                luminance = getattr(self, "_dodge_burn_luma_guide", None)
+                if luminance is None or getattr(luminance, "shape", None) != (mh, mw):
                     luminance = None
+                    try:
+                        base = getattr(self, "_adjust_preview_base_rgb", None)
+                        if base is not None and hasattr(base, "shape"):
+                            b = base.astype(np.float32)
+                            luminance = (
+                                0.2126 * b[..., 0]
+                                + 0.7152 * b[..., 1]
+                                + 0.0722 * b[..., 2]
+                            )
+                    except Exception:
+                        luminance = None
                 if luminance is not None:
                     edge_snap_region(mask, luminance, bbox)
                 self._apply_adjust_panel_preview(full_quality=True)
@@ -20582,6 +20810,10 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             logging.getLogger(__name__).warning(
                 "[DODGE_BURN] stroke handling failed", exc_info=True
             )
+            self._dodge_burn_stroke_active = False
+            self._dodge_burn_stroke_baseline = None
+            self._dodge_burn_mask_at_stroke_start = None
+            self._dodge_burn_stroke_dirty = None
 
     def _on_adjust_preview_ready(self, generation: int, file_path: str, array) -> None:
         self._adjust_preview_busy = False
@@ -20657,6 +20889,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             adj = self._dodge_burn_overlay_adj(adj)
         except Exception:
             pass
+        if getattr(self, "_crop_preview_uncropped", False):
+            adj = self._crop_keys_zeroed(adj)
         self._pending_adjust_preview = dict(adj)
         norm = _norm_path(path)
         base_full = getattr(self, "_adjust_preview_base_rgb", None)
@@ -20856,6 +21090,11 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             get_image_cache().invalidate_file(path)
         except Exception:
             pass
+        # Bake editor-aligned browse thumbs AFTER invalidate so gallery /
+        # single-view match the Adjust panel without re-running the linear
+        # pipeline on the embedded JPEG (which diverges from the demosaic
+        # path and must never touch companion JPEGs of the same basename).
+        self._persist_editor_aligned_browse_caches(path)
         gj = getattr(self, "gallery_justified", None)
         if gj is not None and hasattr(gj, "invalidate_thumbnails_for_path"):
             try:
@@ -20863,6 +21102,117 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             except Exception:
                 pass
         QTimer.singleShot(0, self._restore_keyboard_focus)
+
+    def _persist_editor_aligned_browse_caches(self, path: str) -> None:
+        """Downscale the just-rendered Adjust frame into thumbnail/preview cache.
+
+        Performance: uses the already-computed ``_adjust_last_render`` uint8
+        buffer — only a resize + JPEG encode (~5–30ms on typical preview
+        sizes), not a full edit pipeline pass and not part of Export.
+        Runs synchronously so gallery refresh after save sees the edited
+        pixels immediately. Companion JPEGs are never written (RAW-only).
+        Keeps ``SIDECAR_ADJUST`` / ``EDITED_PREVIEWS`` off by default.
+        """
+        from common_image_loader import is_raw_file
+
+        if not path or not is_raw_file(path):
+            return
+        last = getattr(self, "_adjust_last_render", None)
+        if not last or not isinstance(last, tuple) or len(last) < 1:
+            return
+        array = last[0]
+        if array is None or getattr(array, "ndim", 0) != 3 or array.dtype != np.uint8:
+            return
+        if _norm_path(getattr(self, "_adjust_last_render_norm", "") or "") != _norm_path(path):
+            return
+        try:
+            import cv2
+
+            from image_cache import (
+                disk_preview_max_edge,
+                get_image_cache,
+                memory_preview_max_edge,
+            )
+
+            rgb = np.ascontiguousarray(array)
+            cache = get_image_cache()
+            h, w = rgb.shape[:2]
+            thumb_cap = disk_preview_max_edge()
+            if max(h, w) > thumb_cap:
+                sc = thumb_cap / float(max(h, w))
+                thumb = cv2.resize(
+                    rgb,
+                    (max(1, int(w * sc)), max(1, int(h * sc))),
+                    interpolation=cv2.INTER_AREA,
+                )
+            else:
+                thumb = rgb
+            ok, buf = cv2.imencode(
+                ".jpg",
+                cv2.cvtColor(thumb, cv2.COLOR_RGB2BGR),
+                [int(cv2.IMWRITE_JPEG_QUALITY), 90],
+            )
+            jpeg = buf.tobytes() if ok else None
+            cache.put_thumbnail(path, thumb, jpeg)
+            # Gallery prefers the grid tier; put_grid rejects edges > 512.
+            grid_cap = 512
+            if max(thumb.shape[0], thumb.shape[1]) > grid_cap:
+                sc = grid_cap / float(max(thumb.shape[0], thumb.shape[1]))
+                grid = cv2.resize(
+                    thumb,
+                    (
+                        max(1, int(thumb.shape[1] * sc)),
+                        max(1, int(thumb.shape[0] * sc)),
+                    ),
+                    interpolation=cv2.INTER_AREA,
+                )
+                okg, bufg = cv2.imencode(
+                    ".jpg",
+                    cv2.cvtColor(grid, cv2.COLOR_RGB2BGR),
+                    [int(cv2.IMWRITE_JPEG_QUALITY), 90],
+                )
+                cache.put_grid(path, grid, bufg.tobytes() if okg else None)
+            else:
+                cache.put_grid(path, thumb, jpeg)
+
+            prev_cap = memory_preview_max_edge()
+            if max(h, w) > prev_cap:
+                sc = prev_cap / float(max(h, w))
+                prev = cv2.resize(
+                    rgb,
+                    (max(1, int(w * sc)), max(1, int(h * sc))),
+                    interpolation=cv2.INTER_AREA,
+                )
+            else:
+                prev = rgb
+            disk_cap = disk_preview_max_edge()
+            if max(prev.shape[0], prev.shape[1]) > disk_cap:
+                sc = disk_cap / float(max(prev.shape[0], prev.shape[1]))
+                disk_prev = cv2.resize(
+                    prev,
+                    (
+                        max(1, int(prev.shape[1] * sc)),
+                        max(1, int(prev.shape[0] * sc)),
+                    ),
+                    interpolation=cv2.INTER_AREA,
+                )
+            else:
+                disk_prev = prev
+            ok2, buf2 = cv2.imencode(
+                ".jpg",
+                cv2.cvtColor(disk_prev, cv2.COLOR_RGB2BGR),
+                [int(cv2.IMWRITE_JPEG_QUALITY), 92],
+            )
+            cache.put_preview(
+                path,
+                prev,
+                jpeg_data=buf2.tobytes() if ok2 else None,
+                libraw_rendered=True,
+            )
+        except Exception:
+            logging.getLogger(__name__).debug(
+                "editor-aligned browse cache bake failed", exc_info=True
+            )
 
     def _on_adjust_recovery_baseline_requested(self) -> None:
         path = getattr(self, "current_file_path", None)
@@ -21085,6 +21435,62 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         panel.apply_picked_white_balance(temperature, tint)
         if hasattr(self, "status_bar"):
             self.status_bar.showMessage(f"Auto white balance ({int(round(temperature))}K)", 3000)
+
+    def _on_auto_straighten_requested(self) -> None:
+        """Auto straighten: Hough / gradient estimate → CropAngle slider."""
+        panel = getattr(self, "single_image_adjust_panel", None)
+        if panel is None:
+            return
+        from raw_auto_adjust import estimate_straighten_angle
+
+        # Estimate on a display buffer WITHOUT current CropAngle so the result
+        # is an absolute straighten angle (not a residual on an already-warped
+        # preview). Other adjustments can stay — they help edges without
+        # rotating the frame.
+        rgb = None
+        base = getattr(self, "_adjust_preview_base_rgb", None)
+        if base is not None and hasattr(base, "shape"):
+            try:
+                from raw_edit_pipeline import linear_to_display_uint8
+
+                adj0 = dict(panel.get_adjustments())
+                adj0["CropAngle"] = 0.0
+                adj0["PerspectiveVertical"] = 0.0
+                adj0["PerspectiveHorizontal"] = 0.0
+                rgb = linear_to_display_uint8(base, adj0)
+            except Exception:
+                rgb = None
+        if rgb is None:
+            last = getattr(self, "_adjust_last_render", None)
+            if last is not None and last[0] is not None:
+                rgb = last[0]
+        if rgb is None:
+            if hasattr(self, "status_bar"):
+                self.status_bar.showMessage(
+                    "Auto straighten needs a decoded image — try again in a moment",
+                    3000,
+                )
+            return
+        angle = estimate_straighten_angle(rgb)
+        if angle is None:
+            if hasattr(self, "status_bar"):
+                self.status_bar.showMessage(
+                    "Auto straighten: no dominant horizon/vertical found",
+                    3500,
+                )
+            return
+        import numpy as np
+
+        adj = panel.get_adjustments()
+        new_angle = float(np.clip(angle, -45.0, 45.0))
+        adj["CropAngle"] = new_angle
+        panel.set_adjustments(adj)
+        panel._emit_preview_and_save()
+        if hasattr(self, "status_bar"):
+            self.status_bar.showMessage(
+                f"Auto straighten {new_angle:+.1f}°",
+                3500,
+            )
 
     def _on_adjust_panel_export_requested(self, export_format: str, adj: dict) -> None:
         logger = logging.getLogger(__name__)

@@ -1,4 +1,9 @@
-"""Lightroom-style HSL per-color adjustments in display-linear RGB."""
+"""Lightroom-style HSL per-color adjustments in display-linear RGB.
+
+OpenCV float32 ``COLOR_BGR2HSV`` uses H in [0, 360] and S/V in [0, 1]
+(unlike uint8 HSV where H is [0, 179] and S/V are [0, 255]). Callers must
+never rescale float HSV as if it were uint8 — that was Performance review #6.
+"""
 
 from __future__ import annotations
 
@@ -29,20 +34,38 @@ _HSL_BANDS: tuple[tuple[str, float, float], ...] = (
 
 
 def _rgb_to_hsv(rgb: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """RGB float [0,1] → H [0,360], S/V [0,1] (OpenCV float32 HSV convention)."""
     import cv2
 
-    bgr = np.clip(rgb[..., ::-1], 0.0, 1.0).astype(np.float32)
+    bgr = np.ascontiguousarray(np.clip(rgb[..., ::-1], 0.0, 1.0), dtype=np.float32)
     hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
-    h = hsv[:, :, 0].copy()
-    s = hsv[:, :, 1].copy()
-    v = hsv[:, :, 2].copy()
-    return h, s, v
+    # Defensive: some builds historically surprised callers with uint8-like
+    # packing even on float input. Detect and convert once.
+    h = hsv[:, :, 0]
+    s = hsv[:, :, 1]
+    v = hsv[:, :, 2]
+    if float(np.nanmax(s)) > 1.5 or float(np.nanmax(v)) > 1.5:
+        # Treat as uint8-scaled channels packed into float.
+        h = h * (360.0 / 179.0) if float(np.nanmax(h)) <= 180.5 else h
+        s = s / 255.0
+        v = v / 255.0
+    return h.astype(np.float32, copy=False), s.astype(np.float32, copy=False), v.astype(
+        np.float32, copy=False
+    )
 
 
 def _hsv_to_rgb(h: np.ndarray, s: np.ndarray, v: np.ndarray) -> np.ndarray:
+    """H [0,360], S/V [0,1] → RGB float [0,1]."""
     import cv2
 
-    hsv = np.stack([np.clip(h, 0.0, 360.0), np.clip(s, 0.0, 1.0), np.clip(v, 0.0, 1.0)], axis=-1)
+    hsv = np.stack(
+        [
+            np.clip(h, 0.0, 360.0).astype(np.float32, copy=False),
+            np.clip(s, 0.0, 1.0).astype(np.float32, copy=False),
+            np.clip(v, 0.0, 1.0).astype(np.float32, copy=False),
+        ],
+        axis=-1,
+    )
     bgr = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
     return np.clip(bgr[..., ::-1], 0.0, 1.0)
 

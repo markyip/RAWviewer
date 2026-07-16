@@ -479,6 +479,70 @@ def build_windows_launcher_stub(icon_path: str | None) -> Path:
     return out
 
 
+def _macos_rawpy_openmp_binaries() -> list[Path]:
+    """OpenMP LibRaw runtime files that must ship beside rawpy in the .app.
+
+    Official macOS packages exclude torch, so LibRaw must use a standalone
+    ``libomp.dylib`` under ``@loader_path`` (see scripts/build_libraw_openmp.sh
+    with ``RAWVIEWER_LIBRAW_OPENMP_STANDALONE=1``). Explicitly pass them to
+    PyInstaller so dependency tracing cannot drop the sibling dylibs.
+    """
+    try:
+        import rawpy  # type: ignore
+    except Exception:
+        return []
+    rawpy_dir = Path(rawpy.__file__).resolve().parent
+    names = (
+        "libraw_r.25.dylib",
+        "libomp.dylib",
+        "libjpeg.8.dylib",
+    )
+    return [p for name in names if (p := rawpy_dir / name).is_file()]
+
+
+def _ensure_macos_openmp_libraw_in_app(exe_path: Path) -> None:
+    """Fail the build if packaged LibRaw is still single-threaded or torch-linked."""
+    if platform.system() != "Darwin":
+        return
+    libraw_hits = list(exe_path.rglob("libraw_r*.dylib"))
+    if not libraw_hits:
+        print("[WARNING] No libraw dylib in app bundle — OpenMP check skipped.")
+        return
+    libraw = libraw_hits[0]
+    try:
+        deps = subprocess.check_output(["otool", "-L", str(libraw)], text=True)
+    except Exception as exc:
+        print(f"[WARNING] otool failed on {libraw}: {exc}")
+        return
+    print(f"[INFO] Packaged LibRaw: {libraw}")
+    for line in deps.splitlines():
+        print(f"  {line}")
+    if "torch/lib/libomp" in deps:
+        raise RuntimeError(
+            "Packaged LibRaw references torch/lib/libomp, but macOS builds "
+            "exclude torch. Rebuild with RAWVIEWER_LIBRAW_OPENMP_STANDALONE=1 "
+            "(build_macos.sh does this automatically)."
+        )
+    if "libomp.dylib" not in deps:
+        raise RuntimeError(
+            "Packaged LibRaw does not link libomp — OpenMP decode inactive. "
+            "Run scripts/build_libraw_openmp.sh before packaging."
+        )
+    libomp_hits = list(exe_path.rglob("libomp.dylib"))
+    if not libomp_hits:
+        # Last-chance copy from the build env next to LibRaw.
+        for src in _macos_rawpy_openmp_binaries():
+            if src.name == "libomp.dylib":
+                dest = libraw.parent / "libomp.dylib"
+                shutil.copy2(src, dest)
+                print(f"[INFO] Copied standalone libomp into bundle: {dest}")
+                libomp_hits = [dest]
+                break
+    if not libomp_hits:
+        raise RuntimeError(f"libomp.dylib missing from {exe_path}")
+    print(f"[OK] OpenMP LibRaw packaged ({libomp_hits[0]})")
+
+
 def _prune_built_app(exe_path: Path, profile: str) -> None:
     if platform.system() != 'Darwin':
         return
@@ -886,6 +950,11 @@ def main():
             "--exclude-module", "pyqtgraph",
             "--exclude-module", "hf_xet",
         ])
+        # OpenMP LibRaw siblings (standalone libomp + libjpeg). build_macos.sh
+        # installs these via scripts/build_libraw_openmp.sh before packaging.
+        for bin_path in _macos_rawpy_openmp_binaries():
+            cmd_base.extend(["--add-binary", f"{bin_path}:rawpy"])
+            print(f"[INFO] Bundling OpenMP LibRaw binary: {bin_path.name}")
         
         # Exclude unused heavy PyQt6 modules to keep built bundle lightweight
         unused_pyqt6 = [
@@ -1018,6 +1087,7 @@ def main():
             print("Patching macOS Info.plist...")
             update_macos_plist(str(exe_path), profile=args.profile)
             _prune_built_app(exe_path, args.profile)
+            _ensure_macos_openmp_libraw_in_app(exe_path)
             print("Re-signing macOS app bundle (ad-hoc)...")
             run_command(['codesign', '--force', '--deep', '-s', '-', str(exe_path)])
             print("Clearing macOS quarantine attribute...")

@@ -72,11 +72,21 @@ DEFAULT_ADJUSTMENTS: Dict[str, float] = {
     "CropAngle": 0.0,
     "PerspectiveVertical": 0.0,
     "PerspectiveHorizontal": 0.0,
+    "CropLeft": 0.0,
+    "CropRight": 0.0,
+    "CropTop": 0.0,
+    "CropBottom": 0.0,
     # Dodge & burn stops-per-mask-unit (see raw_dodge_burn.py). The mask
     # itself (a base64 PNG blob, potentially large) is NOT a plain numeric
     # attribute -- it's stored as its own XMP child element, mirroring
     # ToneCurvePV2012 (see write_xmp_adjustments / parse_dodge_burn_mask_from_xmp).
     "DodgeBurnStrength": 1.75,
+    # Look / effects (see raw_effects.py) — display-linear after tone-map.
+    "PostCropVignetteAmount": 0.0,
+    "Dehaze": 0.0,
+    # Creative 3D LUT amount 0–100 (see raw_lut.py). LUT basename is a string
+    # key (CreativeLUTName), handled like tone-curve serials — not in this float map.
+    "CreativeLUTAmount": 0.0,
 }
 
 from raw_hsl import HSL_COLOR_NAMES  # noqa: E402
@@ -88,6 +98,20 @@ for _hsl_color in HSL_COLOR_NAMES:
 
 RELEVANT_ADJUSTMENT_KEYS = frozenset(DEFAULT_ADJUSTMENTS.keys())
 AS_SHOT_TEMP_KEY = "AsShotTemperature"
+
+# Common photographic white-balance presets (Kelvin). These are industry-
+# standard illuminant targets (Lightroom-style), not EXIF enums — cameras
+# rarely store "Cloudy"/"Shade" as a named mode with a reliable K value.
+# "As Shot" uses read_as_shot_temperature() / AsShotTemperature from EXIF.
+WB_PRESETS: tuple[tuple[str, float | None], ...] = (
+    ("As Shot", None),
+    ("Daylight", 5500.0),
+    ("Cloudy", 6500.0),
+    ("Shade", 7500.0),
+    ("Tungsten", 2850.0),
+    ("Fluorescent", 3800.0),
+    ("Flash", 5500.0),
+)
 CHROMA_NR_ON_VALUE = 50.0
 RECOVERY_BASELINE_KEY = "_recovery_baseline"
 # UI hints when recovery look is on (local S/H recovery ≈ these PV2012 readouts).
@@ -233,6 +257,9 @@ SLIDER_SPECS: tuple[SliderSpec, ...] = (
     # of the UI until a proper interactive overlay (visible crop rectangle
     # with drag handles) exists. raw_transform.apply_geometry still honors
     # the keys, so the future overlay only needs to write them.
+    # (Crop overlay writes CropLeft/Right/Top/Bottom; no numeric sliders.)
+    _slider_linear("PostCropVignetteAmount", "Vignette", -100, 100, 0.0),
+    _slider_linear("Dehaze", "Dehaze", -100, 100, 0.0),
 )
 
 
@@ -691,6 +718,29 @@ def parse_dodge_burn_mask_from_xmp(xmp_path: str) -> str:
     return ""
 
 
+def parse_creative_lut_name_from_xmp(xmp_path: str) -> str:
+    """Read crs:CreativeLUTName (string basename of a managed .cube)."""
+    if not xmp_path or not os.path.isfile(xmp_path):
+        return ""
+    try:
+        tree = ET.parse(xmp_path)
+        root = tree.getroot()
+        ns = {"rdf": RDF_NS, "crs": CRS_NS}
+        for desc in root.findall(".//rdf:Description", ns):
+            for key, val in desc.attrib.items():
+                local_key = key.split("}")[-1] if "}" in key else key.split(":")[-1]
+                if local_key == "CreativeLUTName" and val:
+                    return str(val).strip()
+            for child in desc:
+                tag = child.tag
+                local_key = tag.split("}")[-1] if "}" in tag else tag.split(":")[-1]
+                if local_key == "CreativeLUTName" and child.text:
+                    return child.text.strip()
+    except Exception:
+        pass
+    return ""
+
+
 def load_adjustments_for_file(image_path: str) -> Dict[str, float]:
     adj = dict(DEFAULT_ADJUSTMENTS)
     as_shot = read_as_shot_temperature(image_path)
@@ -731,6 +781,12 @@ def load_adjustments_for_file(image_path: str) -> Dict[str, float]:
         mask_serial = parse_dodge_burn_mask_from_xmp(xmp_path)
         if mask_serial:
             adj[MASK_KEY] = mask_serial
+    if xmp_path and os.path.isfile(xmp_path):
+        from raw_lut import LUT_NAME_KEY
+
+        lut_name = parse_creative_lut_name_from_xmp(xmp_path)
+        if lut_name:
+            adj[LUT_NAME_KEY] = lut_name
     return adj
 
 
@@ -803,6 +859,7 @@ def is_default_adjustments(adj: Dict[str, float] | None) -> bool:
     if not adj:
         return True
     from raw_dodge_burn import MASK_KEY
+    from raw_lut import LUT_AMOUNT_KEY, LUT_NAME_KEY
     from raw_tone_curve import CHANNEL_CURVE_KEYS, TONE_CURVE_SERIAL_KEY
 
     if str(adj.get(TONE_CURVE_SERIAL_KEY, "") or "").strip():
@@ -812,9 +869,19 @@ def is_default_adjustments(adj: Dict[str, float] | None) -> bool:
             return False
     if str(adj.get(MASK_KEY, "") or "").strip():
         return False
+    lut_name = str(adj.get(LUT_NAME_KEY, "") or "").strip()
+    try:
+        lut_amt = float(adj.get(LUT_AMOUNT_KEY, 0.0) or 0.0)
+    except (TypeError, ValueError):
+        lut_amt = 0.0
+    if lut_name and abs(lut_amt) > 1e-4:
+        return False
     ref_temp = wb_reference_temperature(adj)
     for key, default in DEFAULT_ADJUSTMENTS.items():
-        av = float(adj.get(key, default))
+        try:
+            av = float(adj.get(key, default) if adj.get(key, default) is not None else default)
+        except (TypeError, ValueError):
+            return False
         bv = float(default)
         if key == "Temperature":
             if abs(av - ref_temp) > 0.5:
@@ -825,6 +892,10 @@ def is_default_adjustments(adj: Dict[str, float] | None) -> bool:
 
 
 def adjustments_equal(a: Dict[str, float], b: Dict[str, float]) -> bool:
+    from raw_lut import LUT_NAME_KEY
+
+    if str(a.get(LUT_NAME_KEY, "") or "").strip() != str(b.get(LUT_NAME_KEY, "") or "").strip():
+        return False
     ref_a = wb_reference_temperature(a)
     ref_b = wb_reference_temperature(b)
     for key, default in DEFAULT_ADJUSTMENTS.items():
@@ -1000,6 +1071,13 @@ def _write_xmp_adjustments_locked(xmp_path: str, adj: Dict[str, float]) -> None:
     if mask_serial:
         db = ET.SubElement(desc, f"{{{CRS_NS}}}DodgeBurnMask")
         db.text = mask_serial
+
+    from raw_lut import LUT_AMOUNT_KEY, LUT_NAME_KEY
+
+    lut_name = str(merged.get(LUT_NAME_KEY, "") or "").strip()
+    lut_amt = float(merged.get(LUT_AMOUNT_KEY, 0.0) or 0.0)
+    if lut_name and abs(lut_amt) > 1e-4:
+        desc.set(f"{{{CRS_NS}}}CreativeLUTName", lut_name)
 
     tree = ET.ElementTree(root)
     parent = os.path.dirname(os.path.abspath(xmp_path))

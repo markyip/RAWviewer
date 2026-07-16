@@ -1138,6 +1138,118 @@ class SearchHit:
     face_count: int = 0
 
 
+def _objc_pointer_addr(ptr: Any) -> Optional[int]:
+    """Best-effort address from a PyObjC / ctypes pointer-like value."""
+    if ptr is None:
+        return None
+    try:
+        addr = int(ptr)
+        return addr if addr else None
+    except (TypeError, ValueError):
+        pass
+    try:
+        import ctypes
+
+        return ctypes.cast(ptr, ctypes.c_void_p).value
+    except Exception:
+        return None
+
+
+def copy_numpy_into_mlmultiarray(multi_array: Any, flat: np.ndarray) -> bool:
+    """Bulk-fill an MLMultiArray from a contiguous 1-D numpy buffer.
+
+    Uses ``dataPointer`` + ``memmove`` instead of per-element
+    ``setObject_atIndexedSubscript_`` (hundreds of thousands of ObjC calls for
+    a 1×3×256×256 float image tensor). Returns False so callers can fall back.
+    """
+    try:
+        import ctypes
+
+        src = np.ascontiguousarray(flat).reshape(-1)
+        nbytes = int(src.nbytes)
+        if nbytes <= 0:
+            return False
+        addr = _objc_pointer_addr(multi_array.dataPointer())
+        if not addr:
+            return False
+        ctypes.memmove(addr, src.ctypes.data, nbytes)
+        return True
+    except Exception:
+        return False
+
+
+def mlmultiarray_to_numpy_f32(multi_array: Any) -> Optional[np.ndarray]:
+    """Bulk-read MLMultiArray contents via ``dataPointer`` into float32.
+
+    Supports Float32 / Float16 / Double outputs used by MobileCLIP. Returns None
+    when the pointer path is unavailable so callers can use ``numberArray()``.
+    """
+    try:
+        import ctypes
+
+        count = int(multi_array.count())
+        if count <= 0:
+            return np.zeros((0,), dtype=np.float32)
+        dtype = int(multi_array.dataType())
+        # Apple MLMultiArrayDataType: Float16=16, Float32=65568, Double=65552
+        if dtype == 65568:
+            np_dtype: Any = np.float32
+            itemsize = 4
+        elif dtype == 65552:
+            np_dtype = np.float64
+            itemsize = 8
+        elif dtype == 16:
+            np_dtype = np.float16
+            itemsize = 2
+        else:
+            return None
+        addr = _objc_pointer_addr(multi_array.dataPointer())
+        if not addr:
+            return None
+        buf_type = ctypes.c_char * (count * itemsize)
+        raw = buf_type.from_address(addr)
+        arr = np.frombuffer(raw, dtype=np_dtype, count=count).astype(
+            np.float32, copy=True
+        )
+        return np.ascontiguousarray(arr)
+    except Exception:
+        return None
+
+
+def copy_bgra_into_cvpixelbuffer(
+    base_addr: Any,
+    bytes_per_row: int,
+    bgra: np.ndarray,
+    height: int = 256,
+    width: int = 256,
+) -> bool:
+    """Bulk-write a contiguous BGRA HxWx4 array into a locked CVPixelBuffer.
+
+    When ``bytes_per_row`` matches tightly packed rows, one ``memmove`` replaces
+    a Python per-row loop. Returns False to fall back to row copies.
+    """
+    try:
+        import ctypes
+
+        packed = int(width) * 4
+        src = np.ascontiguousarray(bgra, dtype=np.uint8)
+        if src.shape != (height, width, 4):
+            return False
+        addr = _objc_pointer_addr(base_addr)
+        if not addr:
+            return False
+        if int(bytes_per_row) == packed:
+            ctypes.memmove(addr, src.ctypes.data, height * packed)
+            return True
+        # Strided destination: still avoid tobytes() per row.
+        row_src = src.reshape(height, packed)
+        for y in range(height):
+            ctypes.memmove(addr + y * int(bytes_per_row), row_src[y].ctypes.data, packed)
+        return True
+    except Exception:
+        return False
+
+
 class MobileCLIPCoreMLBackend:
     """Optional macOS Core ML backend for MobileCLIP.
 
@@ -1499,8 +1611,9 @@ class MobileCLIPCoreMLBackend:
         )
         if err is not None or arr is None:
             raise RuntimeError(f"Failed to allocate Core ML image tensor: {err}")
-        for i, value in enumerate(flat):
-            arr.setObject_atIndexedSubscript_(float(value), i)
+        if not copy_numpy_into_mlmultiarray(arr, flat):
+            for i, value in enumerate(flat):
+                arr.setObject_atIndexedSubscript_(float(value), i)
         return arr
 
     def encode_image(self, file_path: str) -> np.ndarray:
@@ -1675,12 +1788,16 @@ class MobileCLIPCoreMLBackend:
         if err is not None or arr is None:
             raise RuntimeError(f"Failed to allocate Core ML token array: {err}")
         flat = np.asarray(values, dtype=np.int32).reshape(-1)
-        for i, value in enumerate(flat):
-            arr.setObject_atIndexedSubscript_(int(value), i)
+        if not copy_numpy_into_mlmultiarray(arr, flat):
+            for i, value in enumerate(flat):
+                arr.setObject_atIndexedSubscript_(int(value), i)
         return arr
 
     @staticmethod
     def _multi_array_to_numpy(multi_array) -> np.ndarray:
+        fast = mlmultiarray_to_numpy_f32(multi_array)
+        if fast is not None:
+            return fast
         values = multi_array.numberArray()
         return np.asarray([float(values[i]) for i in range(len(values))], dtype=np.float32)
 
@@ -1709,11 +1826,12 @@ class MobileCLIPCoreMLBackend:
         try:
             bytes_per_row = int(Quartz.CVPixelBufferGetBytesPerRow(pixel_buffer))
             base = Quartz.CVPixelBufferGetBaseAddress(pixel_buffer)
-            buf = base.as_buffer(bytes_per_row * 256)
-            row_bytes = 256 * 4
-            for y in range(256):
-                start = y * bytes_per_row
-                buf[start:start + row_bytes] = bgra[y].tobytes()
+            if not copy_bgra_into_cvpixelbuffer(base, bytes_per_row, bgra):
+                buf = base.as_buffer(bytes_per_row * 256)
+                row_bytes = 256 * 4
+                for y in range(256):
+                    start = y * bytes_per_row
+                    buf[start:start + row_bytes] = bgra[y].tobytes()
         finally:
             Quartz.CVPixelBufferUnlockBaseAddress(pixel_buffer, 0)
         return pixel_buffer
@@ -4255,11 +4373,14 @@ class SemanticImageIndex:
                 raise
             # Removed executor.shutdown() since it's shared
         logger.info(
-            "[INDEX] %s thumbnail warm-up done: %d/%d in %.2fs",
+            "[INDEX][SPEED] %s thumbnail warm-up: warmed=%d pending=%d already_cached=%d "
+            "elapsed=%.3fs throughput=%.2f img/s",
             purpose,
             warmed,
             len(pending),
+            already_cached,
             time.time() - t0,
+            float(len(pending)) / max(1e-9, time.time() - t0),
         )
         return warmed
 
@@ -5048,12 +5169,14 @@ class SemanticImageIndex:
                             provider_exc,
                         )
                     warm_paths = [cp for cp, _ in pending_for_semantic]
-                    self._warm_thumbnail_cache_for_semantic_index(
+                    t_warm_start = time.time()
+                    warm_count = self._warm_thumbnail_cache_for_semantic_index(
                         warm_paths,
                         progress_callback,
                         progress_album_total=progress_album_total,
                         progress_indexed_base=progress_indexed_base,
                     )
+                    t_warm_elapsed = max(0.0, time.time() - t_warm_start)
                     throttle_sec = semantic_gpu_throttle_seconds()
                     batch_size = self._auto_select_semantic_batch_size(
                         pending_for_semantic,
@@ -5075,6 +5198,7 @@ class SemanticImageIndex:
                     sem_success = 0
                     sem_fail = 0
                     i = 0
+                    t_encode_cpu = 0.0
                     for batch_start in range(0, total_sem, batch_size):
                         self._wait_if_paused()
                         batch_items = pending_for_semantic[batch_start : batch_start + batch_size]
@@ -5083,6 +5207,7 @@ class SemanticImageIndex:
                             t_batch_neural = time.time()
                             vecs = self._encode_images_best_effort(batch_paths)
                             t_batch_dur = time.time() - t_batch_neural
+                            t_encode_cpu += t_batch_dur
                             if t_batch_dur > 0.5:
                                 logger.info(
                                     "[INDEX] MobileCLIP encoding batch=%d took %.4fs",
@@ -5134,6 +5259,7 @@ class SemanticImageIndex:
                                     t_single_neural = time.time()
                                     vec = self._encode_image(canonical_fp)
                                     t_neural_dur = time.time() - t_single_neural
+                                    t_encode_cpu += t_neural_dur
                                     if t_neural_dur > 0.5:
                                         logger.info(
                                             f"[INDEX] MobileCLIP encoding for {os.path.basename(canonical_fp)} took {t_neural_dur:.4f}s"
@@ -5212,6 +5338,14 @@ class SemanticImageIndex:
                     sem_elapsed = max(1e-9, time.time() - t_sem_start)
                     sem_avg = sem_elapsed / max(1, total_sem)
                     sem_throughput = float(total_sem) / sem_elapsed
+                    encode_elapsed = max(1e-9, t_encode_cpu)
+                    warm_throughput = (
+                        float(len(warm_paths)) / max(1e-9, t_warm_elapsed)
+                        if warm_paths
+                        else 0.0
+                    )
+                    encode_throughput = float(total_sem) / encode_elapsed
+                    wall_phases = max(1e-9, t_warm_elapsed + sem_elapsed)
                     logger.info(f"[INDEX] Completed AI neural pass in {sem_elapsed:.4f}s.")
                     logger.info(
                         "[INDEX][SPEED] Semantic pass stats: total=%d success=%d failed=%d elapsed=%.3fs avg=%.4fs/img throughput=%.2f img/s",
@@ -5221,6 +5355,17 @@ class SemanticImageIndex:
                         sem_elapsed,
                         sem_avg,
                         sem_throughput,
+                    )
+                    logger.info(
+                        "[INDEX][SPEED] Phase split: warm=%.3fs (%.2f img/s, warmed=%d) "
+                        "encode=%.3fs (%.2f img/s) encode_wall=%.3fs warm_share=%.0f%%",
+                        t_warm_elapsed,
+                        warm_throughput,
+                        int(warm_count),
+                        encode_elapsed,
+                        encode_throughput,
+                        sem_elapsed,
+                        100.0 * t_warm_elapsed / wall_phases,
                     )
                 else:
                     logger.info(f"[INDEX] Skipping AI features neural pass (MobileCLIP) for {total_sem} files (metadata-only index).")

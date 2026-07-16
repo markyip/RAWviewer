@@ -113,7 +113,7 @@
 2. 在安裝精靈選擇 **Full (CUDA)**、**Full (DirectML)** 或 **Lite**。**Full** 會另下載 AI 模型（約 600 MB）。
 3. 啟動 **`RAWviewer.exe`** 或桌面捷徑（勿再次執行 Setup）。
 
-> **v3.0 新功能：** **完整編輯功能**現已全面整合（色調曲線、鏡頭校正、XMP 等）；**快速 RAW 解碼**經多次測試驗證，速度相較 2.5 有大幅提升；**1–5 星評分**（按鍵 **0–5**、圖庫篩選）；Nikon **HE/HE*** NEF；暗房色票。完整說明見 [`RELEASE_NOTES.md`](RELEASE_NOTES.md)。
+> **v3.0 新功能：** **完整編輯**（色調曲線、鏡頭校正、WB 預設、裁切 overlay、Dodge/Burn、暈影／去霧、XMP）；**快速 RAW 解碼**；**1–5 星評分**；Nikon **HE/HE*** 瀏覽；Lite 不含 torch；暗房色票。完整說明見 [`RELEASE_NOTES.md`](RELEASE_NOTES.md)。
 
 會註冊常見格式的**開啟方式**。解除安裝：設定 → 應用程式，或 `%LOCALAPPDATA%\RAWviewer` 內的 **`uninstall.bat`**。
 
@@ -331,20 +331,22 @@ RAW 製造商 AF 需 **pyexiv2**。
 
 ### 開發中（development 分支）
 
-尚未發行——另行追蹤。
+細節與可行性排序見 [`RELEASE_NOTES.md`](RELEASE_NOTES.md)（v3.0 Known Issues & Remaining Work）。
 
-**Windows HDR / EDR**——v2.5+ 已為 HDR 靜態與 RAW（高品質工作流程）加入 macOS EDR。Windows 目前仍將 HDR HEIC/TIFF 與 RAW tone-map 至 SDR。未來 Windows 路徑將利用 HDR 螢幕（10 位元 / scRGB 或 Qt QRhi HDR10）提供延伸高光動態範圍。
+**Windows HDR / EDR**——v2.5+ 曾為 HDR 靜態與 RAW（高品質流程）提供 macOS EDR；**3.0 為維持 Fast RAW 載入速度已移除 macOS EDR**。Windows 目前仍將 HDR HEIC/TIFF 與 RAW tone-map 至 SDR。未來若恢復／新增 HDR 顯示，需避免拖慢瀏覽。
 
-**多執行緒 LibRaw（macOS 開發環境）**——PyPI 的 rawpy wheel 在 macOS/Linux 上內附單執行緒 LibRaw（Windows wheel 已內建 OpenMP）。`scripts/build_libraw_openmp.sh` 會以 OpenMP 重新編譯 LibRaw 並替換進 Pixi 環境，CR3/RAF/pana8 unpack 約快 1.5–2 倍。僅本機開發最佳化，`pixi install` 後需重新執行。可用 `scripts/check_libraw_parallelism.py <raw 檔案>` 驗證。
+**多執行緒 LibRaw（macOS）**——正式 macOS 包會透過 `scripts/build_libraw_openmp.sh` 安裝 OpenMP LibRaw（standalone `libomp`，因為 `.app` 不含 torch）。CR3／RAF／pana8 解包約快 **1.5–2×**，輸出位元組一致。本機 Pixi 若保留 torch、非打包時可統一到 torch 的 `libomp`。用 `scripts/check_libraw_parallelism.py <raw 檔案>` 驗證（parallelism ≳1.5× 表示 OpenMP 已啟用）。
 
-**未來開發計畫 (Future Development Plan):**
-- **實時編輯同步 (Live Edit Synchronization)**：穩定並實現圖庫縮圖和單圖非 RAW 預覽的調整 sidecar 實時更新（目前為已知問題：由於快取同步延遲，有時會顯示原始/快取未編輯的內嵌預覽）。
-- **白平衡預設 (White balance preset support)**：新增標準與自訂白平衡預設。
-- **LUT 支援 (LUT support)**：允許使用者載入並套用自訂色彩查找表 (LUT)。
-- **編輯器遮罩 (Masking for the editor)**：引入局部調整與遮罩功能。
-- **VLM 連接 (Connection to VLM)**：整合視覺語言模型以進行自動、智慧的影像調整。
+**剩餘工作（可行性高→低）：**
+1. **冷資料夾已編輯縮圖重生** — Adjust 儲存時已烘焙與編輯器對齊的縮圖；從未開過 Adjust 的編輯可選 `SIDECAR_ADJUST`。
+2. **更廣的局部遮罩** — 漸層／額外筆刷（Dodge & Burn＋裁切已交付）。
+3. **DNG 匯出** — 需真正 writer。
+4. **ML 主體遮罩** — 僅 Full。
+5. **Windows HDR／安全恢復 Mac EDR**。
+6. **VLM 輔助調整** — 產品／模型範圍大。
+7. **HE-NEF RAW 編輯** — 尚無 demosaic 解碼器（目前僅瀏覽內嵌 JPEG）。
 
-**已於 3.0 交付：** 快速 RAW 解碼經多次測試驗證對 2.5 的速度提升、全面整合的 Adjust / Develop 編輯面板、星級評分、連拍分組／比較模式（**C**）。GPU **視埠**（OpenGL 縮放／平移）正式版預設開啟（`RAWVIEWER_GPU_VIEW=0` 關閉）。
+**已於 3.0 交付（含後續編輯強化）：** 快速 RAW、Adjust（HSL 混色器、Creative LUT `.cube`、WB 預設、自動拉直、裁切 overlay、D&B＋邊緣輔助、暈影／去霧、儲存時對齊圖庫縮圖）、**macOS 正式包 OpenMP LibRaw**、星級、連拍／比較（**C**）、Lite 不含 torch、新圖示、Mac 語意 MultiArray 橋接。GPU **視埠**預設開啟（`RAWVIEWER_GPU_VIEW=0` 關閉）。
 
 ---
 
@@ -410,7 +412,7 @@ scripts\Launch\bat\build_windows_lite.bat
 - **ImageLoadManager** — 執行緒載入佇列；切換資料夾會取消進行中任務（**v2.5.0**）
 - **UnifiedImageProcessor** — RAW/JPEG/TIFF 統一路徑；**Fast RAW decode** half/full 共用 unpack（**v3.0.0**）
 - **星級評分** — 1–5 + XMP；圖庫最低星級篩選（**v3.0.0**）
-- **完整編輯** — Adjust 面板、XMP 附屬檔案、PV2012 風格顯影（**v3.0.0**）
+- **完整編輯** — Adjust 面板（WB 預設、裁切、D&B、暈影／去霧）、XMP、PV2012 風格顯影（**v3.0.0**）
 - **Cache** — 記憶體優先；可選磁碟快取；啟動時 **RAM 層級預設**（`rawviewer_profile.py`）
 - **Semantic index** — SQLite + 本機嵌入（macOS Core ML、Windows ONNX；僅 Full）；切換資料夾範圍時中止背景 pass（**v2.5.0**）
 - **Gallery（JustifiedGallery）** — 齊行網格與縮放滑桿（重排 + 左上捲動錨點）；版面快取綁定資料夾世代；EXIF 排序後以拍攝時間順序開圖庫；鎖定齊行幾何前以容器 EXIF reconcile 解碼縮圖比例（**v2.5.0**）

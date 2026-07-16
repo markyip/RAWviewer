@@ -114,7 +114,7 @@ For a dedicated **cluster map** across an entire album and **geotagging photos m
 2. Choose **Full (CUDA)**, **Full (DirectML)**, or **Lite** in the wizard. **Full** also downloads AI models (~600 MB).
 3. Launch **`RAWviewer.exe`** or the Desktop shortcut (not the Setup file again).
 
-> **v3.0 new:** **Full Editing Functions** integrated (tone curve, lens correction, XMP sidecars); **Fast RAW decode** verified by multiple testing to deliver massive speed improvements vs 2.5; **1–5 star ratings** (keys **0–5**, gallery filter); Nikon **HE/HE*** NEF support; darkroom chrome. Full changelog: [`RELEASE_NOTES.md`](RELEASE_NOTES.md).
+> **v3.0 new:** **Full Editing** (tone curve, lens correction, WB presets, crop overlay, dodge/burn, vignette/dehaze, XMP); **Fast RAW decode** vs 2.5; **1–5 star ratings**; Nikon **HE/HE*** browse; Lite without torch; darkroom chrome. Full changelog: [`RELEASE_NOTES.md`](RELEASE_NOTES.md).
 
 Registers **Open with** for common photo formats. Uninstall: Settings → Apps, or **`uninstall.bat`** in `%LOCALAPPDATA%\RAWviewer`.
 
@@ -332,20 +332,22 @@ Full list and dev defaults: [`scripts/Launch/README.md`](scripts/Launch/README.m
 
 ### Upcoming (development branch)
 
-Not in a release yet — tracked separately.
+Not in a release yet — tracked in [`RELEASE_NOTES.md`](RELEASE_NOTES.md) (v3.0 Known Issues & Remaining Work).
 
-**Windows HDR / EDR** — v2.5+ ships macOS EDR for HDR stills and RAW (High Quality workflow). Windows still tone-maps HDR HEIC/TIFF and RAW to SDR. A future Windows path would use HDR-capable displays (10-bit / scRGB or HDR10 via Qt QRhi) for extended highlight headroom.
+**Windows HDR / EDR** — v2.5+ shipped macOS EDR for HDR stills and RAW (High Quality workflow); **3.0 removed macOS EDR** so the Fast RAW load path stays fast. Windows still tone-maps HDR HEIC/TIFF and RAW to SDR. A future Windows (or restored Mac) HDR path would use HDR-capable displays (10-bit / scRGB or HDR10 via Qt QRhi) without regressing browse speed.
 
-**Multithreaded LibRaw (macOS dev builds)** — The PyPI rawpy wheel bundles a single-threaded LibRaw on macOS/Linux (Windows wheels already ship OpenMP). `scripts/build_libraw_openmp.sh` rebuilds LibRaw with OpenMP and swaps it into the Pixi env — roughly 1.5–2× faster unpack on CR3/RAF/pana8. Local dev-env only; re-apply after `pixi install`. Verify with `scripts/check_libraw_parallelism.py <raw file>`.
+**Multithreaded LibRaw (macOS)** — Official macOS packages now install OpenMP LibRaw via `scripts/build_libraw_openmp.sh` (standalone `libomp`, because the `.app` excludes torch). Expect roughly **1.5–2×** faster unpack on CR3/RAF/pana8, byte-identical output. Local Pixi envs that keep torch may unify onto torch’s `libomp` when not packaging. Verify with `scripts/check_libraw_parallelism.py <raw file>` (parallelism ≳1.5× means OpenMP is active).
 
-**Future Development Plan:**
-- **Live Edit Synchronization**: Stabilize and implement real-time live updates of adjustment sidecars across gallery thumbnails and single-image non-RAW previews (currently a known issue where original/cached unedited embedded previews are shown due to cache sync delays).
-- **White balance preset support**: Add standard and custom WB presets.
-- **LUT support**: Allow users to load and apply custom color lookup tables.
-- **Masking for the editor**: Introduce local adjustments and selective masking.
-- **VLM connection**: Integrate with Vision-Language Models for automatic, intelligent image adjustments.
+**Remaining work (feasibility high → low):**
+1. **Cold-folder edited tile regen** — save-from-Adjust already bakes editor-aligned thumbs; optional full `SIDECAR_ADJUST` for never-opened edits.
+2. **Broader local masks** — gradients / extra brushes (Dodge & Burn + crop already ship).
+3. **DNG export** — real writer (removed stub).
+4. **ML subject masks** — Full only.
+5. **Windows HDR / restore Mac EDR safely** — display path without killing Fast RAW.
+6. **VLM-assisted adjust** — large product/model scope.
+7. **HE-NEF RAW edit** — blocked until a decoder exists (browse-only today).
 
-**Shipped in 3.0:** Fast RAW decode verified by multiple testing for speed improvements vs 2.5, full Adjust / Develop editing panel integrated for all users, star ratings, burst grouping / Compare (**C**). GPU **viewport** (OpenGL zoom/pan) is on by default (`RAWVIEWER_GPU_VIEW=0` to disable).
+**Shipped in 3.0 (incl. post-tag editor work):** Fast RAW vs 2.5, Adjust panel (HSL mixer, Creative LUT `.cube`, WB presets, auto straighten, crop overlay, D&B + edge assist, vignette/dehaze, editor-aligned gallery thumbs on save), **OpenMP LibRaw in macOS release packages**, star ratings, burst / Compare (**C**), Lite without torch, new app icon, Mac semantic MultiArray bridge. GPU **viewport** on by default (`RAWVIEWER_GPU_VIEW=0` to disable).
 
 ---
 
@@ -411,7 +413,7 @@ scripts\Launch\bat\build_windows_lite.bat
 - **ImageLoadManager** — threaded load queue; folder changes cancel in-flight tasks (**v2.5.0**)
 - **UnifiedImageProcessor** — RAW/JPEG/TIFF via one path; **Fast RAW decode** shared unpack half/full (**v3.0.0**)
 - **Star ratings** — 1–5 + XMP; gallery min-rating filter (**v3.0.0**)
-- **Full Editing** — Adjust panel, XMP sidecars, PV2012-style develops (**v3.0.0**)
+- **Full Editing** — Adjust panel (WB presets, crop, D&B, vignette/dehaze), XMP, PV2012-style develops (**v3.0.0**)
 - **Cache** — memory-first; optional disk cache via env; **RAM-tier defaults** at startup (`rawviewer_profile.py`)
 - **Semantic index** — SQLite + local embeddings (Core ML on macOS, ONNX on Windows; Full builds only); background passes abort when folder scope changes (**v2.5.0**)
 - **Gallery (JustifiedGallery)** — justified grid with zoom slider (relayout + upper-left scroll anchor); layout cache keyed to folder generation; gallery opens in capture-time order after EXIF sort; tile aspect reconciles decoded thumbnails with container EXIF before justified-row geometry is locked (**v2.5.0**)

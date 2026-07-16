@@ -8,6 +8,7 @@ from PyQt6.QtCore import QPoint, QPointF, Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QCursor, QMouseEvent, QPainter, QPen
 from PyQt6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QSizePolicy, QVBoxLayout, QWidget
 
+import theme
 from raw_tone_curve import (
     default_tone_curve_points,
     deserialize_tone_curve_points,
@@ -224,9 +225,28 @@ class ToneCurveEditorRow(QWidget):
         row.addWidget(self.curve, 1)
 
         reset_btn = QPushButton("Linear")
+        reset_btn.setObjectName("tone_curve_linear_btn")
         reset_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         reset_btn.setFixedWidth(52)
+        reset_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         reset_btn.setToolTip("Reset point curve to linear")
+        reset_btn.setStyleSheet(
+            f"""
+            QPushButton#tone_curve_linear_btn {{
+                color: {theme.EMBER};
+                font-size: 11px;
+                border: 1px solid {theme.rgba(theme.EMBER_RGB, 90)};
+                border-radius: 4px;
+                background: {theme.rgba(theme.EMBER_RGB, 25)};
+                padding: 4px 6px;
+            }}
+            QPushButton#tone_curve_linear_btn:hover {{
+                color: {theme.INK};
+                border-color: {theme.rgba(theme.EMBER_RGB, 140)};
+                background: {theme.rgba(theme.EMBER_RGB, 45)};
+            }}
+            """
+        )
         reset_btn.clicked.connect(self._on_reset)
         row.addWidget(reset_btn, 0, Qt.AlignmentFlag.AlignTop)
         layout.addLayout(row)

@@ -476,6 +476,9 @@ class GpuImageView(QGraphicsView):
     # host's cue to edge-snap the touched region and trigger the exact
     # (worker-thread) re-render.
     dodgeBurnStroke = pyqtSignal(QPointF, float, bool)
+    # Crop overlay: insets changed / drag finished (CropLeft/Right/Top/Bottom).
+    cropInsetsChanged = pyqtSignal(float, float, float, float)
+    cropEditingFinished = pyqtSignal()
 
     # Absolute floor for set_scale; wheel zoom cannot go below fit_scale() (fit-to-window).
     MIN_SCALE = 0.01
@@ -501,6 +504,8 @@ class GpuImageView(QGraphicsView):
         self._edr_initialized = False
         self.file_path = None
         self._dodge_burn_mode = False
+        self._crop_mode = False
+        self._export_drag_enabled = True
         self._drag_start_pos = None
         self._drag_started = False
         self._color_pick_mode = False
@@ -548,6 +553,14 @@ class GpuImageView(QGraphicsView):
         self._compare_overlay_item.setTransformationMode(Qt.TransformationMode.SmoothTransformation)
         self._compare_overlay_item.hide()
         self._scene.addItem(self._compare_overlay_item)
+
+        from rawviewer_ui.crop_overlay import CropOverlayItem
+
+        self._crop_item = CropOverlayItem()
+        self._crop_item.hide()
+        self._crop_item.insetsChanged.connect(self.cropInsetsChanged.emit)
+        self._crop_item.editingFinished.connect(self.cropEditingFinished.emit)
+        self._scene.addItem(self._crop_item)
 
         self._compare_divider_line = QGraphicsLineItem()
         self._compare_divider_line.setZValue(13)
@@ -894,6 +907,8 @@ class GpuImageView(QGraphicsView):
         self._img_w, self._img_h = new_w, new_h
         self._has_pixmap = True
         self._grid_item.set_grid(new_w, new_h, self._grid_mode)
+        if getattr(self, "_crop_mode", False) and getattr(self, "_crop_item", None) is not None:
+            self._crop_item.set_image_size(new_w, new_h)
         self._update_placeholder()
         if self._compare_active and (new_w, new_h) != (old_w, old_h):
             # The compare-with-original crop/divider are computed from _img_w/_img_h
@@ -1489,6 +1504,7 @@ class GpuImageView(QGraphicsView):
         instead of panning or driving the compare divider."""
         self._dodge_burn_mode = bool(enabled)
         if self._dodge_burn_mode:
+            self.set_crop_mode(False)
             self.viewport().setCursor(Qt.CursorShape.CrossCursor)
             self.setAttribute(Qt.WidgetAttribute.WA_TabletTracking, True)
         else:
@@ -1496,6 +1512,67 @@ class GpuImageView(QGraphicsView):
 
     def is_dodge_burn_mode(self) -> bool:
         return bool(getattr(self, "_dodge_burn_mode", False))
+
+    def set_crop_mode(
+        self,
+        enabled: bool,
+        *,
+        insets: tuple[float, float, float, float] | None = None,
+        aspect: float | None = None,
+    ) -> None:
+        """Show/hide the interactive crop overlay (mutually exclusive with D&B)."""
+        enabled = bool(enabled) and self._has_pixmap
+        self._crop_mode = enabled
+        if enabled:
+            self.set_dodge_burn_mode(False)
+            self._crop_item.set_image_size(self._img_w, self._img_h)
+            if insets is not None:
+                self._crop_item.set_insets(*insets)
+            self._crop_item.set_aspect_ratio(aspect)
+            self._crop_item.show()
+            self.fit_to_window()
+        else:
+            self._crop_item.hide()
+            self.viewport().unsetCursor()
+
+    def is_crop_mode(self) -> bool:
+        return bool(getattr(self, "_crop_mode", False))
+
+    def set_crop_aspect_ratio(self, aspect: float | None) -> None:
+        if getattr(self, "_crop_item", None) is not None:
+            self._crop_item.set_aspect_ratio(aspect)
+
+    def set_crop_insets(self, left: float, right: float, top: float, bottom: float) -> None:
+        if getattr(self, "_crop_item", None) is not None:
+            self._crop_item.set_insets(left, right, top, bottom)
+
+    def crop_insets(self) -> tuple[float, float, float, float]:
+        item = getattr(self, "_crop_item", None)
+        if item is None:
+            return (0.0, 0.0, 0.0, 0.0)
+        return item.insets()
+
+    def set_export_drag_enabled(self, enabled: bool) -> None:
+        """Enable/disable fit-mode file drag-out (disabled while Adjust is open)."""
+        self._export_drag_enabled = bool(enabled)
+        if not self._export_drag_enabled:
+            self._drag_start_pos = None
+            self._drag_started = False
+
+    def is_export_drag_enabled(self) -> bool:
+        return bool(getattr(self, "_export_drag_enabled", True))
+
+    def _export_drag_allowed(self) -> bool:
+        """File drag-out is blocked in Adjust, crop, dodge/burn, and color-pick."""
+        if not getattr(self, "_export_drag_enabled", True):
+            return False
+        if getattr(self, "_crop_mode", False):
+            return False
+        if getattr(self, "_dodge_burn_mode", False):
+            return False
+        if getattr(self, "_color_pick_mode", False):
+            return False
+        return True
 
     def _clamped_scene_point(self, view_pos) -> QPointF:
         scene_pt = self.mapToScene(view_pos)
@@ -1604,8 +1681,12 @@ class GpuImageView(QGraphicsView):
                 event.accept()
                 return
         if event.button() == Qt.MouseButton.LeftButton and self._fit_mode and self.file_path:
-            self._drag_start_pos = event.position().toPoint()
-            self._drag_started = False
+            if self._export_drag_allowed():
+                self._drag_start_pos = event.position().toPoint()
+                self._drag_started = False
+            else:
+                self._drag_start_pos = None
+                self._drag_started = False
         elif event.button() == Qt.MouseButton.LeftButton and not self._fit_mode:
             self._manual_pan_start = event.position().toPoint()
             self._manual_pan_scroll_h = self.horizontalScrollBar().value()
@@ -1645,7 +1726,13 @@ class GpuImageView(QGraphicsView):
             elif not (event.buttons() & Qt.MouseButton.LeftButton):
                 self.viewport().unsetCursor()
 
-        if (event.buttons() & Qt.MouseButton.LeftButton) and self._fit_mode and self.file_path and getattr(self, "_drag_start_pos", None) is not None:
+        if (
+            (event.buttons() & Qt.MouseButton.LeftButton)
+            and self._fit_mode
+            and self.file_path
+            and getattr(self, "_drag_start_pos", None) is not None
+            and self._export_drag_allowed()
+        ):
             if not self._drag_started:
                 dist = (event.position().toPoint() - self._drag_start_pos).manhattanLength()
                 if dist >= QApplication.startDragDistance():
@@ -1687,6 +1774,8 @@ class GpuImageView(QGraphicsView):
         super().mouseReleaseEvent(event)
 
     def _start_drag(self) -> None:
+        if not self._export_drag_allowed():
+            return
         if not self.file_path or not os.path.exists(self.file_path):
             return
         drag = QDrag(self)

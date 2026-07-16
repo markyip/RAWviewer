@@ -5,13 +5,26 @@ from __future__ import annotations
 from typing import Callable, Dict
 
 from PyQt6.QtCore import QRectF, Qt, QSettings, QSize, QTimer, pyqtSignal
-from PyQt6.QtGui import QColor, QCursor, QIcon, QLinearGradient, QPainter, QPen
+from PyQt6.QtGui import (
+    QColor,
+    QCursor,
+    QDragEnterEvent,
+    QDropEvent,
+    QIcon,
+    QLinearGradient,
+    QPainter,
+    QPalette,
+    QPen,
+)
 from PyQt6.QtWidgets import (
     QApplication,
     QComboBox,
+    QFileDialog,
     QFrame,
     QHBoxLayout,
     QLabel,
+    QListWidget,
+    QListWidgetItem,
     QMenu,
     QPushButton,
     QScrollArea,
@@ -31,6 +44,7 @@ from raw_adjustments import (
     DEFAULT_ADJUSTMENTS,
     RECOVERY_BASELINE_KEY,
     SLIDER_SPECS,
+    WB_PRESETS,
     is_pv2012_tone_slider,
     recovery_baseline_slider_hints,
 )
@@ -63,13 +77,67 @@ _EDIT_SETTINGS_CLIPBOARD: dict | None = None
 
 def _edit_settings_clipboard() -> dict | None:
     return _EDIT_SETTINGS_CLIPBOARD
+
+
+def _adjust_combo_stylesheet() -> str:
+    """Shared QComboBox chrome: no separate drop-down button (click anywhere)."""
+    return f"""
+        QComboBox {{
+            background-color: {theme.RAISED};
+            border: 1px solid {theme.LINE};
+            border-radius: 3px;
+            color: {theme.INK};
+            font-size: 11px;
+            padding: 3px 8px;
+            min-height: 18px;
+        }}
+        QComboBox:hover {{
+            border-color: {theme.rgba(theme.INK_RGB, 70)};
+        }}
+        QComboBox::drop-down {{
+            subcontrol-origin: padding;
+            subcontrol-position: top right;
+            width: 0px;
+            border: none;
+            background: transparent;
+        }}
+        QComboBox::down-arrow {{
+            image: none;
+            width: 0px;
+            height: 0px;
+            border: none;
+        }}
+        QComboBox QAbstractItemView {{
+            background-color: {theme.SURFACE};
+            border: 1px solid {theme.LINE};
+            color: {theme.INK};
+            selection-background-color: {theme.rgba(theme.EMBER_RGB, 140)};
+            selection-color: {theme.INK};
+            outline: none;
+            font-size: 11px;
+            padding: 2px;
+        }}
+        QComboBox QAbstractItemView::item {{
+            min-height: 22px;
+            padding: 2px 6px;
+        }}
+        QComboBox QAbstractItemView::item:hover {{
+            background-color: {theme.rgba(theme.EMBER_RGB, 90)};
+            color: {theme.INK};
+        }}
+    """
+
+
 # HSL section — hidden pending a saturation/vibrance review (see docs).
 _SHOW_HSL_UI = True
 # Dodge & burn brush — disabled pending a brush-shape/intensity-accumulation
 # rework (brush currently paints a hard square instead of a soft circular
 # falloff, and stops accumulate strength too fast). Widgets are still built
 # (so main.py's wiring/attribute access stays valid) but hidden.
-_SHOW_DODGE_BURN_UI = False
+# Hidden until soft-brush + accumulation were tuned (see stamp strength in
+# main._on_dodge_burn_stroke). Re-enabled 2026-07 with lower per-stamp delta
+# and live patch preview so full pipeline isn't paid on every mouse move.
+_SHOW_DODGE_BURN_UI = True
 
 if _SHOW_TONE_CURVE_UI:
     from rawviewer_ui.tone_curve_widget import ToneCurveEditorRow, ToneCurveWidget
@@ -122,6 +190,35 @@ class AdjustValueLabel(QLabel):
 _SECTION_EXPANDED_SETTINGS_PREFIX = "adjust_panel/section_expanded/"
 
 
+class _LutDropFrame(QFrame):
+    """Accepts dropped ``.cube`` file paths for Creative LUT import."""
+
+    files_dropped = pyqtSignal(list)
+
+    def dragEnterEvent(self, event: QDragEnterEvent) -> None:  # noqa: N802
+        if event.mimeData().hasUrls():
+            for url in event.mimeData().urls():
+                if url.toLocalFile().lower().endswith(".cube"):
+                    event.acceptProposedAction()
+                    return
+        event.ignore()
+
+    def dragMoveEvent(self, event) -> None:  # noqa: N802
+        event.acceptProposedAction()
+
+    def dropEvent(self, event: QDropEvent) -> None:  # noqa: N802
+        paths = []
+        for url in event.mimeData().urls():
+            p = url.toLocalFile()
+            if p.lower().endswith(".cube"):
+                paths.append(p)
+        if paths:
+            self.files_dropped.emit(paths)
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+
 class CollapsibleSection(QWidget):
     """A clean, Lightroom-style collapsible accordion section for PyQt6.
 
@@ -164,7 +261,7 @@ class CollapsibleSection(QWidget):
         # Title label
         self.title_lbl = QLabel(title.upper())
         self.title_lbl.setStyleSheet(f"""
-            color: {theme.INK_MUTED};
+            color: {theme.INK};
             font-size: 10px;
             font-weight: 700;
             letter-spacing: 1px;
@@ -177,8 +274,18 @@ class CollapsibleSection(QWidget):
         
         main_layout.addWidget(self.header)
 
-        # Content container
+        # Content container — opaque Surface so macOS light-mode scroll
+        # viewports cannot wash out cream INK labels (white-on-white).
         self.content = QWidget()
+        self.content.setObjectName("accordion_content")
+        self.content.setAutoFillBackground(True)
+        self.content.setStyleSheet(
+            f"""
+            QWidget#accordion_content {{
+                background-color: {theme.SURFACE};
+            }}
+            """
+        )
         self.content_layout = QVBoxLayout(self.content)
         self.content_layout.setContentsMargins(12, 8, 12, 8)
         self.content_layout.setSpacing(10)
@@ -378,7 +485,9 @@ class ImageAdjustPanelWidget(QWidget):
   - ``sliderReleased``: final preview + ``editing_finished`` (XMP write).
     """
 
-    _PANEL_W = 280
+    # Wide enough for label + slider + value (+ AUTO / picker) without
+    # clipping or forcing horizontal scroll on typical layouts.
+    _PANEL_W = 440
     _PANEL_H = 520
     _PREVIEW_THROTTLE_MS = 80
 
@@ -400,9 +509,16 @@ class ImageAdjustPanelWidget(QWidget):
     # One-shot auto adjustments (see raw_auto_adjust.py); the host computes
     # from the edit base and writes the result back through the sliders.
     auto_wb_requested = pyqtSignal()
+    auto_straighten_requested = pyqtSignal()
     dodge_burn_mode_changed = pyqtSignal(object)
     dodge_burn_clear_requested = pyqtSignal()
     dodgeBurnMaskToggled = pyqtSignal(bool)
+    # Crop overlay (Transform): enter/exit mode, aspect lock, apply/cancel/reset.
+    crop_mode_changed = pyqtSignal(bool)
+    crop_aspect_changed = pyqtSignal(object)  # float|None
+    crop_apply_requested = pyqtSignal()
+    crop_cancel_requested = pyqtSignal()
+    crop_reset_requested = pyqtSignal()
 
     def __init__(self, parent=None, histogram_widget=None):
         super().__init__(parent)
@@ -424,8 +540,20 @@ class ImageAdjustPanelWidget(QWidget):
         self._preview_timer.timeout.connect(self._emit_live_preview)
 
         self.setMinimumWidth(self._PANEL_W)
-        self.setMaximumWidth(400)
+        self.setMaximumWidth(560)
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        # Inherit darkroom palette so any child without an explicit color
+        # still gets cream ink on Surface — never system light WindowText.
+        pal = self.palette()
+        pal.setColor(QPalette.ColorRole.Window, QColor(*theme.SURFACE_RGB))
+        pal.setColor(QPalette.ColorRole.Base, QColor(*theme.SURFACE_RGB))
+        pal.setColor(QPalette.ColorRole.AlternateBase, QColor(*theme.RAISED_RGB))
+        pal.setColor(QPalette.ColorRole.WindowText, QColor(*theme.INK_RGB))
+        pal.setColor(QPalette.ColorRole.Text, QColor(*theme.INK_RGB))
+        pal.setColor(QPalette.ColorRole.ButtonText, QColor(*theme.INK_RGB))
+        pal.setColor(QPalette.ColorRole.BrightText, QColor(*theme.INK_RGB))
+        self.setPalette(pal)
+        self.setAutoFillBackground(True)
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -436,7 +564,7 @@ class ImageAdjustPanelWidget(QWidget):
         card.setStyleSheet(
             f"""
             QWidget#adjust_panel_card {{
-                background-color: {theme.rgba(theme.VOID_RGB, 215)};
+                background-color: {theme.SURFACE};
                 border: 1px solid {theme.rgba(theme.INK_RGB, 45)};
                 border-radius: 8px;
             }}
@@ -445,27 +573,27 @@ class ImageAdjustPanelWidget(QWidget):
                 font-size: 13px;
                 font-weight: 600;
             }}
-            QLabel.adjust_slider_label {{
-                color: {theme.INK_MUTED};
+            QLabel[class="adjust_slider_label"] {{
+                color: {theme.INK};
                 font-size: 11px;
             }}
-            QLabel.adjust_slider_value {{
+            QLabel[class="adjust_slider_value"] {{
                 color: {theme.EMBER};
                 font-size: 11px;
-                min-width: 44px;
+                min-width: 48px;
             }}
-            QLabel.adjust_slider_value:hover {{
+            QLabel[class="adjust_slider_value"]:hover {{
                 color: {theme.INK};
             }}
             QPushButton#adjust_reset_btn {{
-                color: {theme.INK_MUTED};
+                color: {theme.INK};
                 font-size: 11px;
                 border: none;
                 background: transparent;
                 padding: 2px 6px;
             }}
             QPushButton#adjust_reset_btn:hover {{
-                color: {theme.INK};
+                color: {theme.EMBER};
             }}
             QPushButton#adjust_export_btn {{
                 color: {theme.EMBER};
@@ -484,21 +612,37 @@ class ImageAdjustPanelWidget(QWidget):
                 border-color: {theme.rgba(theme.INK_RGB, 20)};
                 background: transparent;
             }}
-            QPushButton#adjust_nr_btn {{
-                color: {theme.INK_MUTED};
+            QPushButton#adjust_nr_btn,
+            QPushButton#adjust_db_btn,
+            QPushButton#adjust_db_clear_btn,
+            QPushButton#adjust_db_show_mask_btn {{
+                color: {theme.INK};
                 font-size: 11px;
                 border: 1px solid {theme.rgba(theme.INK_RGB, 35)};
                 border-radius: 4px;
                 background: {theme.rgba(theme.INK_RGB, 12)};
                 padding: 4px 8px;
             }}
-            QPushButton#adjust_nr_btn:checked {{
+            QPushButton#adjust_nr_btn:checked,
+            QPushButton#adjust_db_btn:checked,
+            QPushButton#adjust_db_show_mask_btn:checked {{
                 color: {theme.EMBER};
                 border-color: {theme.rgba(theme.EMBER_RGB, 90)};
                 background: {theme.rgba(theme.EMBER_RGB, 30)};
             }}
-            QPushButton#adjust_nr_btn:hover {{
+            QPushButton#adjust_nr_btn:hover,
+            QPushButton#adjust_db_btn:hover,
+            QPushButton#adjust_db_clear_btn:hover,
+            QPushButton#adjust_db_show_mask_btn:hover {{
                 color: {theme.INK};
+                background: {theme.rgba(theme.INK_RGB, 24)};
+            }}
+            QPushButton#adjust_db_clear_btn:disabled,
+            QPushButton#adjust_db_show_mask_btn:disabled,
+            QPushButton#adjust_db_btn:disabled {{
+                color: {theme.INK_FAINT};
+                border-color: {theme.rgba(theme.INK_RGB, 20)};
+                background: transparent;
             }}
             QPushButton#adjust_wb_picker_btn, QPushButton#adjust_auto_wb_btn {{
                 border: 1px solid {theme.rgba(theme.INK_RGB, 35)};
@@ -508,13 +652,14 @@ class ImageAdjustPanelWidget(QWidget):
             }}
             QPushButton#adjust_auto_wb_btn {{
                 padding: 0px 4px;
-                color: {theme.INK_MUTED};
+                color: {theme.INK};
                 font-size: 10px;
                 font-weight: 600;
             }}
             QPushButton#adjust_wb_picker_btn:checked, QPushButton#adjust_auto_wb_btn:checked {{
                 border-color: {theme.rgba(theme.EMBER_RGB, 90)};
                 background: {theme.rgba(theme.EMBER_RGB, 30)};
+                color: {theme.EMBER};
             }}
             QPushButton#adjust_wb_picker_btn:hover, QPushButton#adjust_auto_wb_btn:hover {{
                 background: {theme.rgba(theme.INK_RGB, 24)};
@@ -549,14 +694,51 @@ class ImageAdjustPanelWidget(QWidget):
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         scroll.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        scroll.setStyleSheet("QScrollArea { background: transparent; border: none; }")
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        # macOS Qt leaves the scroll viewport on the system light Base color
+        # when only the QScrollArea itself is styled transparent — cream INK
+        # labels then vanish. Paint Surface all the way through.
+        scroll.setAutoFillBackground(True)
+        scroll.setStyleSheet(
+            f"""
+            QScrollArea {{
+                background-color: {theme.SURFACE};
+                border: none;
+            }}
+            QScrollBar:vertical {{
+                background: {theme.SURFACE};
+                width: 10px;
+                margin: 0;
+            }}
+            QScrollBar::handle:vertical {{
+                background: {theme.LINE};
+                border-radius: 4px;
+                min-height: 24px;
+            }}
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
+                height: 0;
+            }}
+            """
+        )
+        vp = scroll.viewport()
+        vp.setAutoFillBackground(True)
+        vp.setStyleSheet(f"background-color: {theme.SURFACE};")
         card_layout.addWidget(scroll)
 
         inner = QWidget()
+        inner.setObjectName("adjust_panel_inner")
         inner.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        inner.setAutoFillBackground(True)
+        inner.setStyleSheet(
+            f"""
+            QWidget#adjust_panel_inner {{
+                background-color: {theme.SURFACE};
+            }}
+            """
+        )
         scroll.setWidget(inner)
         layout = QVBoxLayout(inner)
-        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setContentsMargins(14, 10, 14, 10)
         layout.setSpacing(6)
 
         header = QHBoxLayout()
@@ -619,6 +801,7 @@ class ImageAdjustPanelWidget(QWidget):
             self.sect_hsl.hide()
 
         self.sect_detail = CollapsibleSection("Detail / Correction", settings_key="detail")
+        self.sect_lut = CollapsibleSection("Creative LUT", settings_key="lut")
 
         # Add Collapsible Sections to main scroll layout
         layout.addWidget(self.sect_histogram)
@@ -627,6 +810,7 @@ class ImageAdjustPanelWidget(QWidget):
         layout.addWidget(self.sect_curve)
         layout.addWidget(self.sect_hsl)
         layout.addWidget(self.sect_detail)
+        layout.addWidget(self.sect_lut)
         layout.addWidget(self.sect_transform)
 
         # Build tone curve editor row inside the curve section first
@@ -760,6 +944,9 @@ class ImageAdjustPanelWidget(QWidget):
         if _SHOW_HSL_UI:
             self._build_hsl_section(self.sect_hsl.content_layout)
 
+        # WB situation presets (Daylight/Cloudy/…) sit above Temp/Tint.
+        self._build_wb_preset_row(self.sect_color)
+
         # Loop through sliders and assign to sections
         for spec in SLIDER_SPECS:
             if not _SHOW_TONE_CURVE_UI and spec.key in _PARAMETRIC_TONE_KEYS:
@@ -782,6 +969,8 @@ class ImageAdjustPanelWidget(QWidget):
                 "CropAngle", "PerspectiveVertical", "PerspectiveHorizontal",
             }:
                 target_sect = self.sect_transform
+            elif spec.key in {"PostCropVignetteAmount", "Dehaze"}:
+                target_sect = self.sect_detail
             else:
                 target_sect = None
                 
@@ -792,8 +981,9 @@ class ImageAdjustPanelWidget(QWidget):
             row.setSpacing(6)
             name_lbl = QLabel(spec.label)
             name_lbl.setProperty("class", "adjust_slider_label")
-            name_lbl.setStyleSheet(f"color: {theme.INK_MUTED}; font-size: 11px;")
-            name_lbl.setMinimumWidth(72)
+            name_lbl.setStyleSheet(f"color: {theme.INK}; font-size: 11px;")
+            name_lbl.setFixedWidth(82)
+            name_lbl.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred)
             row.addWidget(name_lbl)
 
             slider = AdjustSlider(Qt.Orientation.Horizontal)
@@ -831,10 +1021,23 @@ class ImageAdjustPanelWidget(QWidget):
                 )
             row.addWidget(slider, 1)
 
+            if spec.key == "CropAngle":
+                auto_st = QPushButton("AUTO")
+                auto_st.setObjectName("adjust_auto_wb_btn")
+                auto_st.setFixedHeight(20)
+                auto_st.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+                auto_st.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+                auto_st.setToolTip(
+                    "Auto straighten — detect dominant near-horizontal/vertical lines"
+                )
+                auto_st.clicked.connect(lambda: self.auto_straighten_requested.emit())
+                row.addWidget(auto_st)
+
             val_lbl = AdjustValueLabel()
             val_lbl.setProperty("class", "adjust_slider_value")
-            val_lbl.setStyleSheet(f"color: {theme.INK_MUTED}; font-size: 11px;")
-            val_lbl.setMinimumWidth(32)
+            val_lbl.setStyleSheet(f"color: {theme.EMBER}; font-size: 11px;")
+            val_lbl.setFixedWidth(52)
+            val_lbl.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred)
             val_lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             val_lbl.setToolTip("Click to reset")
             val_lbl.clicked.connect(lambda k=spec.key: self._reset_slider(k))
@@ -850,12 +1053,14 @@ class ImageAdjustPanelWidget(QWidget):
             self._sliders[spec.key] = slider
             self._value_labels[spec.key] = val_lbl
 
+        self._build_crop_controls(self.sect_transform)
+
         # Chroma NR
         method_row = QHBoxLayout()
         method_row.setSpacing(6)
         method_lbl = QLabel("Chroma NR")
-        method_lbl.setStyleSheet(f"color: {theme.INK_MUTED}; font-size: 11px;")
-        method_lbl.setMinimumWidth(72)
+        method_lbl.setStyleSheet(f"color: {theme.INK}; font-size: 11px;")
+        method_lbl.setMinimumWidth(78)
         method_row.addWidget(method_lbl)
         
         self._denoise_method_combo = QComboBox()
@@ -863,52 +1068,7 @@ class ImageAdjustPanelWidget(QWidget):
         self._denoise_method_combo.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._denoise_method_combo.currentIndexChanged.connect(self._on_denoise_method_changed)
         self._denoise_method_combo.setToolTip("Chroma-only denoise (luminance preserved)")
-        self._denoise_method_combo.setStyleSheet(f"""
-            QComboBox {{
-                background-color: {theme.RAISED};
-                border: 1px solid {theme.LINE};
-                border-radius: 3px;
-                color: {theme.INK};
-                font-size: 11px;
-                padding: 2px 22px 2px 6px;
-                selection-background-color: {theme.RAISED_HI};
-            }}
-            QComboBox::drop-down {{
-                subcontrol-origin: padding;
-                subcontrol-position: top right;
-                width: 18px;
-                border-left: 1px solid {theme.LINE};
-                border-top-right-radius: 3px;
-                border-bottom-right-radius: 3px;
-                background-color: {theme.RAISED};
-            }}
-            QComboBox::down-arrow {{
-                image: none;
-                width: 0;
-                height: 0;
-                border-left: 4px solid transparent;
-                border-right: 4px solid transparent;
-                border-top: 5px solid {theme.INK_MUTED};
-            }}
-            QComboBox QAbstractItemView {{
-                background-color: {theme.SURFACE};
-                border: 1px solid {theme.LINE};
-                color: {theme.INK};
-                selection-background-color: {theme.rgba(theme.EMBER_RGB, 140)};
-                selection-color: {theme.INK};
-                outline: none;
-                font-size: 11px;
-                padding: 2px;
-            }}
-            QComboBox QAbstractItemView::item {{
-                min-height: 22px;
-                padding: 2px 6px;
-            }}
-            QComboBox QAbstractItemView::item:hover {{
-                background-color: {theme.rgba(theme.EMBER_RGB, 90)};
-                color: {theme.INK};
-            }}
-        """)
+        self._denoise_method_combo.setStyleSheet(_adjust_combo_stylesheet())
         method_row.addWidget(self._denoise_method_combo, 1)
         self.sect_detail.add_layout(method_row)
 
@@ -921,7 +1081,7 @@ class ImageAdjustPanelWidget(QWidget):
         lbl_vbox.setContentsMargins(0, 0, 0, 0)
         
         lens_label = QLabel("Lens correction")
-        lens_label.setStyleSheet(f"color: {theme.INK_MUTED}; font-size: 11px;")
+        lens_label.setStyleSheet(f"color: {theme.INK}; font-size: 11px;")
         lbl_vbox.addWidget(lens_label)
         
         self._lens_profile_lbl = QLabel("")
@@ -931,7 +1091,7 @@ class ImageAdjustPanelWidget(QWidget):
         
         lbl_container = QWidget()
         lbl_container.setLayout(lbl_vbox)
-        lbl_container.setMinimumWidth(72)
+        lbl_container.setMinimumWidth(78)
         
         self._lens_correction_row.addWidget(lbl_container)
         self._lens_correction_btn = QPushButton("Off")
@@ -958,30 +1118,27 @@ class ImageAdjustPanelWidget(QWidget):
         # in the UI can arm it anymore.
         self._recovery_btn = None
 
-        # Dodge & burn brush: mutually-exclusive Dodge/Burn toggle + Size/
-        # Strength sliders (transient tool settings, not persisted sliders --
-        # see raw_dodge_burn.py; the mask itself is persisted separately).
-        # Split across two rows -- label + Dodge/Burn toggle, then a second
-        # row of secondary actions (Clear/Show Mask) -- instead of packing
-        # all five widgets into one row, which overlapped/clipped at the
-        # panel's actual width.
+        # Dodge & burn brush (Local section under Detail): mutually-exclusive
+        # Dodge/Burn + Size/Flow. Mask persists via XMP; live strokes use a
+        # cheap region patch (main._on_dodge_burn_stroke) so unrelated sliders
+        # don't re-pay brush cost (gain map cached in raw_dodge_burn).
         db_container = QWidget()
         db_container_layout = QVBoxLayout(db_container)
-        db_container_layout.setContentsMargins(0, 0, 0, 0)
+        db_container_layout.setContentsMargins(0, 4, 0, 0)
         db_container_layout.setSpacing(6)
         db_container.setVisible(_SHOW_DODGE_BURN_UI)
 
         db_row = QHBoxLayout()
         db_row.setSpacing(6)
-        db_label = QLabel("Dodge/Burn")
-        db_label.setStyleSheet(f"color: {theme.INK_MUTED}; font-size: 11px;")
-        db_label.setMinimumWidth(72)
+        db_label = QLabel("Local")
+        db_label.setStyleSheet(f"color: {theme.INK}; font-size: 11px;")
+        db_label.setMinimumWidth(78)
         db_row.addWidget(db_label)
         self._dodge_btn = QPushButton("Dodge")
         self._burn_btn = QPushButton("Burn")
         for btn, tip in (
-            (self._dodge_btn, "Brush to brighten (edge-snapped to the subject under the stroke)"),
-            (self._burn_btn, "Brush to darken (edge-snapped to the subject under the stroke)"),
+            (self._dodge_btn, "Brush to brighten — soft falloff, edge-snaps on release"),
+            (self._burn_btn, "Brush to darken — soft falloff, edge-snaps on release"),
         ):
             btn.setObjectName("adjust_db_btn")
             btn.setCheckable(True)
@@ -996,7 +1153,7 @@ class ImageAdjustPanelWidget(QWidget):
         db_actions_row = QHBoxLayout()
         db_actions_row.setSpacing(6)
         db_actions_spacer = QLabel("")
-        db_actions_spacer.setMinimumWidth(72)
+        db_actions_spacer.setMinimumWidth(78)
         db_actions_row.addWidget(db_actions_spacer)
         self._db_clear_btn = QPushButton("Clear")
         self._db_clear_btn.setObjectName("adjust_db_clear_btn")
@@ -1014,35 +1171,52 @@ class ImageAdjustPanelWidget(QWidget):
         self._db_show_mask_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         self._db_show_mask_btn.setToolTip("Overlay mask in red")
         self._db_show_mask_btn.toggled.connect(self.dodgeBurnMaskToggled.emit)
-        db_actions_row.addWidget(self._db_show_mask_btn, 2)
+        db_actions_row.addWidget(self._db_show_mask_btn, 1)
+
+        self._db_edge_btn = QPushButton("Edge Assist")
+        self._db_edge_btn.setObjectName("adjust_db_show_mask_btn")
+        self._db_edge_btn.setCheckable(True)
+        self._db_edge_btn.setChecked(True)
+        self._db_edge_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._db_edge_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self._db_edge_btn.setToolTip(
+            "Keep brush paint on the subject under the cursor — attenuates "
+            "across luminance/gradient edges so strokes don't spill onto neighbors"
+        )
+        db_actions_row.addWidget(self._db_edge_btn, 1)
         db_container_layout.addLayout(db_actions_row)
 
         db_size_row = QHBoxLayout()
         db_size_row.setSpacing(6)
         db_size_lbl = QLabel("Brush Size")
-        db_size_lbl.setStyleSheet(f"color: {theme.INK_MUTED}; font-size: 11px;")
-        db_size_lbl.setMinimumWidth(72)
+        db_size_lbl.setStyleSheet(f"color: {theme.INK}; font-size: 11px;")
+        db_size_lbl.setMinimumWidth(78)
         db_size_row.addWidget(db_size_lbl)
         self._db_size_slider = AdjustSlider(Qt.Orientation.Horizontal)
         self._db_size_slider.setRange(8, 400)
-        self._db_size_slider.setValue(60)
+        self._db_size_slider.setValue(80)
         self._db_size_slider.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         db_size_row.addWidget(self._db_size_slider, 1)
         db_container_layout.addLayout(db_size_row)
 
         db_strength_row = QHBoxLayout()
         db_strength_row.setSpacing(6)
-        db_strength_lbl = QLabel("Brush Strength")
-        db_strength_lbl.setStyleSheet(f"color: {theme.INK_MUTED}; font-size: 11px;")
-        db_strength_lbl.setMinimumWidth(72)
+        db_strength_lbl = QLabel("Brush Flow")
+        db_strength_lbl.setStyleSheet(f"color: {theme.INK}; font-size: 11px;")
+        db_strength_lbl.setMinimumWidth(78)
         db_strength_row.addWidget(db_strength_lbl)
         self._db_strength_slider = AdjustSlider(Qt.Orientation.Horizontal)
         self._db_strength_slider.setRange(5, 100)
-        self._db_strength_slider.setValue(35)
+        self._db_strength_slider.setValue(28)
         self._db_strength_slider.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._db_strength_slider.setToolTip(
+            "Per-stroke flow (low = build up gradually; avoids overshoot while dragging)"
+        )
         db_strength_row.addWidget(self._db_strength_slider, 1)
         db_container_layout.addLayout(db_strength_row)
         self.sect_detail.add_widget(db_container)
+
+        self._build_lut_section(self.sect_lut)
 
         export_btn = QPushButton("Export…")
         export_btn.setObjectName("adjust_export_btn")
@@ -1164,6 +1338,233 @@ class ImageAdjustPanelWidget(QWidget):
         if icon is not None:
             btn.setIcon(icon)
 
+    def _build_wb_preset_row(self, sect: CollapsibleSection) -> None:
+        """Dropdown of common illuminants + As Shot (EXIF Kelvin when available)."""
+        row = QHBoxLayout()
+        row.setSpacing(6)
+        lbl = QLabel("WB")
+        lbl.setStyleSheet(f"color: {theme.INK}; font-size: 11px;")
+        lbl.setFixedWidth(82)
+        row.addWidget(lbl)
+        combo = QComboBox()
+        combo.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        combo.setToolTip(
+            "White-balance preset (Kelvin). As Shot uses the camera/EXIF "
+            "color temperature when present; other entries are standard "
+            "illuminant targets (not EXIF named modes)."
+        )
+        for name, kelvin in WB_PRESETS:
+            if kelvin is None:
+                combo.addItem(name, None)
+            else:
+                combo.addItem(f"{name} ({int(kelvin)}K)", float(kelvin))
+        combo.addItem("Custom", -1.0)
+        combo.setStyleSheet(_adjust_combo_stylesheet())
+        combo.currentIndexChanged.connect(self._on_wb_preset_changed)
+        row.addWidget(combo, 1)
+        sect.add_layout(row)
+        self._wb_preset_combo = combo
+        self._wb_preset_block = False
+
+    def _on_wb_preset_changed(self, _index: int) -> None:
+        if getattr(self, "_wb_preset_block", False):
+            return
+        combo = getattr(self, "_wb_preset_combo", None)
+        if combo is None:
+            return
+        data = combo.currentData()
+        name = combo.currentText()
+        if data == -1.0 or (isinstance(name, str) and name.startswith("Custom")):
+            return
+        if data is None:
+            kelvin = float(
+                getattr(self, "_as_shot_temperature", DEFAULT_ADJUSTMENTS["Temperature"])
+            )
+        else:
+            kelvin = float(data)
+        slider = self._sliders.get("Temperature")
+        if slider is None:
+            return
+        spec = next(s for s in SLIDER_SPECS if s.key == "Temperature")
+        self._block_emit = True
+        try:
+            slider.setValue(spec.value_to_slider(kelvin))
+            self._update_slider_label("Temperature", spec.format_value)
+        finally:
+            self._block_emit = False
+        self._emit_preview_and_save()
+
+    def _sync_wb_preset_combo(self, temperature: float | None = None) -> None:
+        """Match the WB dropdown to the current Kelvin (or Custom)."""
+        combo = getattr(self, "_wb_preset_combo", None)
+        if combo is None:
+            return
+        if temperature is None:
+            slider = self._sliders.get("Temperature")
+            if slider is None:
+                return
+            spec = next(s for s in SLIDER_SPECS if s.key == "Temperature")
+            temperature = float(spec.slider_to_value(slider.value()))
+        # Keep the current selection when it already matches (Daylight and Flash
+        # share 5500K — don't flip the label on every slider tick).
+        cur_data = combo.currentData()
+        cur_text = str(combo.currentText())
+        as_shot = float(
+            getattr(self, "_as_shot_temperature", DEFAULT_ADJUSTMENTS["Temperature"])
+        )
+        if cur_data is None and not cur_text.startswith("Custom"):
+            if abs(temperature - as_shot) <= 25.0:
+                return
+        elif cur_data is not None and cur_data != -1.0:
+            if abs(temperature - float(cur_data)) <= 25.0:
+                return
+        target_idx = None
+        for i in range(combo.count()):
+            data = combo.itemData(i)
+            text = combo.itemText(i)
+            if text.startswith("Custom"):
+                continue
+            if data is None:
+                if abs(temperature - as_shot) <= 25.0:
+                    target_idx = i
+                    break
+            elif data != -1.0 and abs(temperature - float(data)) <= 25.0:
+                target_idx = i
+                break
+        if target_idx is None:
+            for i in range(combo.count()):
+                if str(combo.itemText(i)).startswith("Custom"):
+                    target_idx = i
+                    break
+        if target_idx is None:
+            return
+        self._wb_preset_block = True
+        try:
+            combo.setCurrentIndex(target_idx)
+        finally:
+            self._wb_preset_block = False
+
+    def _build_crop_controls(self, sect: CollapsibleSection) -> None:
+        """Crop mode entry + aspect pills + Apply/Cancel/Reset."""
+        wrap = QWidget()
+        layout = QVBoxLayout(wrap)
+        layout.setContentsMargins(0, 4, 0, 0)
+        layout.setSpacing(6)
+
+        self._crop_btn = QPushButton("Crop")
+        self._crop_btn.setObjectName("adjust_nr_btn")
+        self._crop_btn.setCheckable(True)
+        self._crop_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._crop_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self._crop_btn.setToolTip(
+            "Interactive crop on the image — drag handles; Apply writes Crop insets"
+        )
+        self._crop_btn.toggled.connect(self._on_crop_toggled)
+        layout.addWidget(self._crop_btn)
+
+        ratio_row = QHBoxLayout()
+        ratio_row.setSpacing(4)
+        self._crop_ratio_btns: dict[str, QPushButton] = {}
+        # label -> aspect (width/height) or None for free; "original" is special.
+        self._crop_ratio_defs = (
+            ("Free", None),
+            ("Original", "original"),
+            ("1:1", 1.0),
+            ("4:3", 4.0 / 3.0),
+            ("3:2", 3.0 / 2.0),
+            ("16:9", 16.0 / 9.0),
+        )
+        for label, _aspect in self._crop_ratio_defs:
+            btn = QPushButton(label)
+            btn.setObjectName("adjust_nr_btn")
+            btn.setCheckable(True)
+            btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+            btn.setEnabled(False)
+            btn.clicked.connect(lambda _=False, lab=label: self._on_crop_ratio(lab))
+            ratio_row.addWidget(btn, 1)
+            self._crop_ratio_btns[label] = btn
+        self._crop_ratio_btns["Free"].setChecked(True)
+        layout.addLayout(ratio_row)
+
+        action_row = QHBoxLayout()
+        action_row.setSpacing(6)
+        self._crop_apply_btn = QPushButton("Apply")
+        self._crop_cancel_btn = QPushButton("Cancel")
+        self._crop_reset_btn = QPushButton("Reset")
+        for btn, tip, slot in (
+            (self._crop_apply_btn, "Commit crop insets", self.crop_apply_requested.emit),
+            (self._crop_cancel_btn, "Leave crop mode without saving", self.crop_cancel_requested.emit),
+            (self._crop_reset_btn, "Clear crop insets", self.crop_reset_requested.emit),
+        ):
+            btn.setObjectName("adjust_nr_btn")
+            btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+            btn.setToolTip(tip)
+            btn.setEnabled(False)
+            btn.clicked.connect(slot)
+            action_row.addWidget(btn, 1)
+        layout.addLayout(action_row)
+        sect.add_widget(wrap)
+        self._crop_active = False
+        self._crop_insets = (0.0, 0.0, 0.0, 0.0)
+
+    def _on_crop_toggled(self, checked: bool) -> None:
+        self._crop_active = bool(checked)
+        for btn in self._crop_ratio_btns.values():
+            btn.setEnabled(self._crop_active)
+        self._crop_apply_btn.setEnabled(self._crop_active)
+        self._crop_cancel_btn.setEnabled(self._crop_active)
+        self._crop_reset_btn.setEnabled(self._crop_active)
+        if self._crop_active:
+            self.disarm_dodge_burn()
+        self.crop_mode_changed.emit(self._crop_active)
+
+    def _on_crop_ratio(self, label: str) -> None:
+        for name, btn in self._crop_ratio_btns.items():
+            btn.setChecked(name == label)
+        aspect = None
+        for name, value in self._crop_ratio_defs:
+            if name == label:
+                aspect = value
+                break
+        self.crop_aspect_changed.emit(aspect)
+
+    def is_crop_mode(self) -> bool:
+        return bool(getattr(self, "_crop_active", False))
+
+    def set_crop_mode_ui(self, active: bool) -> None:
+        """Sync Crop button without re-emitting (host cancel / apply)."""
+        btn = getattr(self, "_crop_btn", None)
+        if btn is None:
+            return
+        btn.blockSignals(True)
+        try:
+            btn.setChecked(bool(active))
+        finally:
+            btn.blockSignals(False)
+        self._crop_active = bool(active)
+        for b in self._crop_ratio_btns.values():
+            b.setEnabled(self._crop_active)
+        self._crop_apply_btn.setEnabled(self._crop_active)
+        self._crop_cancel_btn.setEnabled(self._crop_active)
+        self._crop_reset_btn.setEnabled(self._crop_active)
+
+    def get_crop_insets(self) -> tuple[float, float, float, float]:
+        return tuple(getattr(self, "_crop_insets", (0.0, 0.0, 0.0, 0.0)))
+
+    def set_crop_insets(
+        self, left: float, right: float, top: float, bottom: float, *, emit: bool = True
+    ) -> None:
+        self._crop_insets = (
+            float(left),
+            float(right),
+            float(top),
+            float(bottom),
+        )
+        if emit:
+            self._emit_preview_and_save()
+
     def _build_wb_picker_button(self, row: QHBoxLayout) -> None:
         """Small icon-only dropper button, inline at the end of the Temperature row."""
         btn = QPushButton()
@@ -1228,26 +1629,198 @@ class ImageAdjustPanelWidget(QWidget):
         self.set_adjustments(current)
         self._emit_preview_and_save()
 
+    def _build_lut_section(self, sect: CollapsibleSection) -> None:
+        """Drag-drop .cube management + amount for Creative LUT."""
+        tip = QLabel("Drop a .cube here, or Add…")
+        tip.setStyleSheet(f"color: {theme.INK_MUTED}; font-size: 10px;")
+        tip.setWordWrap(True)
+        sect.add_widget(tip)
+
+        drop = _LutDropFrame()
+        drop.setObjectName("lut_drop_frame")
+        drop.setAcceptDrops(True)
+        drop.setMinimumHeight(72)
+        drop.setStyleSheet(
+            f"""
+            QFrame#lut_drop_frame {{
+                background: {theme.SURFACE};
+                border: 1px dashed {theme.LINE};
+                border-radius: 6px;
+            }}
+            """
+        )
+        drop_layout = QVBoxLayout(drop)
+        drop_layout.setContentsMargins(6, 6, 6, 6)
+        drop_layout.setSpacing(4)
+
+        self._lut_list = QListWidget()
+        self._lut_list.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._lut_list.setMaximumHeight(110)
+        self._lut_list.setStyleSheet(
+            f"""
+            QListWidget {{
+                background: transparent;
+                border: none;
+                color: {theme.INK};
+                font-size: 11px;
+            }}
+            QListWidget::item:selected {{
+                background: {theme.EMBER_DIM};
+                color: {theme.INK};
+            }}
+            """
+        )
+        self._lut_list.currentItemChanged.connect(self._on_lut_selection_changed)
+        drop_layout.addWidget(self._lut_list)
+        drop.files_dropped.connect(self._import_lut_paths)
+        sect.add_widget(drop)
+
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(6)
+        add_btn = QPushButton("Add…")
+        add_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        add_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        add_btn.clicked.connect(self._browse_add_lut)
+        btn_row.addWidget(add_btn)
+        rem_btn = QPushButton("Remove")
+        rem_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        rem_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        rem_btn.clicked.connect(self._remove_selected_lut)
+        btn_row.addWidget(rem_btn)
+        clear_btn = QPushButton("None")
+        clear_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        clear_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        clear_btn.setToolTip("Clear active LUT for this image")
+        clear_btn.clicked.connect(self._clear_active_lut)
+        btn_row.addWidget(clear_btn)
+        btn_row.addStretch(1)
+        sect.add_layout(btn_row)
+
+        amt_row = QHBoxLayout()
+        amt_row.setSpacing(6)
+        amt_lbl = QLabel("Amount")
+        amt_lbl.setStyleSheet(f"color: {theme.INK}; font-size: 11px;")
+        amt_lbl.setMinimumWidth(78)
+        amt_row.addWidget(amt_lbl)
+        self._lut_amount_slider = AdjustSlider(Qt.Orientation.Horizontal)
+        self._lut_amount_slider.setRange(0, 100)
+        self._lut_amount_slider.setValue(100)
+        self._lut_amount_slider.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._lut_amount_value = QLabel("100")
+        self._lut_amount_value.setStyleSheet(f"color: {theme.EMBER}; font-size: 11px;")
+        self._lut_amount_value.setMinimumWidth(28)
+        self._lut_amount_slider.valueChanged.connect(self._on_lut_amount_changed)
+        self._lut_amount_slider.sliderReleased.connect(self._emit_preview_and_save)
+        amt_row.addWidget(self._lut_amount_slider, 1)
+        amt_row.addWidget(self._lut_amount_value)
+        sect.add_layout(amt_row)
+
+        self._lut_active_name = ""
+        self._refresh_lut_list(select_name=None)
+
+    def _refresh_lut_list(self, select_name: str | None = None) -> None:
+        from raw_lut import list_managed_luts
+
+        lw = getattr(self, "_lut_list", None)
+        if lw is None:
+            return
+        wanted = select_name if select_name is not None else getattr(self, "_lut_active_name", "")
+        lw.blockSignals(True)
+        try:
+            lw.clear()
+            for name in list_managed_luts():
+                lw.addItem(QListWidgetItem(name))
+            if wanted:
+                matches = lw.findItems(wanted, Qt.MatchFlag.MatchExactly)
+                if matches:
+                    lw.setCurrentItem(matches[0])
+                else:
+                    lw.clearSelection()
+            else:
+                lw.clearSelection()
+        finally:
+            lw.blockSignals(False)
+
+    def _browse_add_lut(self) -> None:
+        paths, _ = QFileDialog.getOpenFileNames(
+            self,
+            "Add .cube LUT",
+            "",
+            "Cube LUT (*.cube);;All files (*)",
+        )
+        if paths:
+            self._import_lut_paths(list(paths))
+
+    def _import_lut_paths(self, paths: list[str]) -> None:
+        from raw_lut import import_cube_file
+
+        last = ""
+        for p in paths:
+            try:
+                last = import_cube_file(p)
+            except Exception as exc:
+                print(f"[LUT] import failed: {p}: {exc}")
+        if last:
+            self._lut_active_name = last
+            if self._lut_amount_slider.value() < 1:
+                self._lut_amount_slider.setValue(100)
+            self._refresh_lut_list(select_name=last)
+            self._emit_preview_and_save()
+        else:
+            self._refresh_lut_list()
+
+    def _remove_selected_lut(self) -> None:
+        from raw_lut import remove_managed_lut
+
+        lw = getattr(self, "_lut_list", None)
+        if lw is None:
+            return
+        item = lw.currentItem()
+        if item is None:
+            return
+        name = item.text()
+        try:
+            remove_managed_lut(name)
+        except Exception:
+            pass
+        if getattr(self, "_lut_active_name", "") == name:
+            self._lut_active_name = ""
+        self._refresh_lut_list()
+        self._emit_preview_and_save()
+
+    def _clear_active_lut(self) -> None:
+        self._lut_active_name = ""
+        lw = getattr(self, "_lut_list", None)
+        if lw is not None:
+            lw.clearSelection()
+        self._emit_preview_and_save()
+
+    def _on_lut_selection_changed(self, current, _previous) -> None:
+        if self._block_emit:
+            return
+        name = current.text() if current is not None else ""
+        self._lut_active_name = name
+        if name and self._lut_amount_slider.value() < 1:
+            self._lut_amount_slider.setValue(100)
+        self._emit_preview_and_save()
+
+    def _on_lut_amount_changed(self, value: int) -> None:
+        lbl = getattr(self, "_lut_amount_value", None)
+        if lbl is not None:
+            lbl.setText(str(int(value)))
+        if self._block_emit:
+            return
+        self._schedule_live_preview()
+
     def _build_hsl_section(self, layout: QVBoxLayout) -> None:
         color_row = QHBoxLayout()
         color_row.setSpacing(6)
         color_lbl = QLabel("Color")
-        color_lbl.setStyleSheet(f"color: {theme.INK_MUTED}; font-size: 11px;")
-        color_lbl.setMinimumWidth(72)
+        color_lbl.setStyleSheet(f"color: {theme.INK}; font-size: 11px;")
+        color_lbl.setFixedWidth(82)
         color_row.addWidget(color_lbl)
         self._hsl_color_combo = QComboBox()
-        self._hsl_color_combo.setStyleSheet("""
-            QComboBox {
-                color: #EDE7DD;
-                background-color: #272219;
-                border: 1px solid #404040;
-                border-radius: 4px;
-                padding: 2px 8px;
-            }
-            QComboBox::drop-down {
-                border: none;
-            }
-        """)
+        self._hsl_color_combo.setStyleSheet(_adjust_combo_stylesheet())
         self._hsl_color_combo.addItems(list(HSL_COLOR_NAMES))
         self._hsl_color_combo.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._hsl_color_combo.currentIndexChanged.connect(self._on_hsl_color_changed)
@@ -1260,8 +1833,8 @@ class ImageAdjustPanelWidget(QWidget):
             row = QHBoxLayout()
             row.setSpacing(6)
             name_lbl = QLabel(label)
-            name_lbl.setStyleSheet(f"color: {theme.INK_MUTED}; font-size: 11px;")
-            name_lbl.setMinimumWidth(72)
+            name_lbl.setStyleSheet(f"color: {theme.INK}; font-size: 11px;")
+            name_lbl.setFixedWidth(82)
             row.addWidget(name_lbl)
             slider = AdjustSlider(Qt.Orientation.Horizontal)
             slider.setTracking(True)
@@ -1277,6 +1850,9 @@ class ImageAdjustPanelWidget(QWidget):
             row.addWidget(slider, 1)
             val_lbl = AdjustValueLabel()
             val_lbl.setProperty("class", "adjust_slider_value")
+            val_lbl.setStyleSheet(f"color: {theme.EMBER}; font-size: 11px;")
+            val_lbl.setFixedWidth(52)
+            val_lbl.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred)
             val_lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             val_lbl.setToolTip("Click to reset")
             val_lbl.clicked.connect(lambda ch=channel: self._reset_hsl_channel(ch))
@@ -1406,6 +1982,29 @@ class ImageAdjustPanelWidget(QWidget):
                 self._denoise_method_combo.blockSignals(True)
                 self._denoise_method_combo.setCurrentIndex(min(2, max(0, combo_idx)))
                 self._denoise_method_combo.blockSignals(False)
+            self._sync_wb_preset_combo(float(merged.get("Temperature", self._as_shot_temperature)))
+            # Refresh "As Shot" label with the file's Kelvin when known.
+            combo = getattr(self, "_wb_preset_combo", None)
+            if combo is not None:
+                for i in range(combo.count()):
+                    if combo.itemData(i) is None and not str(combo.itemText(i)).startswith("Custom"):
+                        combo.setItemText(i, f"As Shot ({int(round(self._as_shot_temperature))}K)")
+                        break
+            self._crop_insets = (
+                float(merged.get("CropLeft", 0.0) or 0.0),
+                float(merged.get("CropRight", 0.0) or 0.0),
+                float(merged.get("CropTop", 0.0) or 0.0),
+                float(merged.get("CropBottom", 0.0) or 0.0),
+            )
+            from raw_lut import LUT_AMOUNT_KEY, LUT_NAME_KEY
+
+            self._lut_active_name = str(merged.get(LUT_NAME_KEY, "") or "").strip()
+            amt = int(round(float(merged.get(LUT_AMOUNT_KEY, 0.0) or 0.0)))
+            if self._lut_active_name and amt < 1:
+                amt = 100
+            if hasattr(self, "_lut_amount_slider"):
+                self._lut_amount_slider.setValue(max(0, min(100, amt)))
+            self._refresh_lut_list(select_name=self._lut_active_name or None)
         finally:
             self._block_emit = False
 
@@ -1519,6 +2118,20 @@ class ImageAdjustPanelWidget(QWidget):
                 out[key] = float(val)
         if self._recovery_baseline:
             out[RECOVERY_BASELINE_KEY] = 1.0
+        l, r, t, b = self.get_crop_insets()
+        out["CropLeft"] = float(l)
+        out["CropRight"] = float(r)
+        out["CropTop"] = float(t)
+        out["CropBottom"] = float(b)
+        from raw_lut import LUT_AMOUNT_KEY, LUT_NAME_KEY
+
+        name = str(getattr(self, "_lut_active_name", "") or "").strip()
+        amt = float(getattr(self, "_lut_amount_slider", None).value()) if hasattr(self, "_lut_amount_slider") else 0.0
+        if name and amt > 0:
+            out[LUT_NAME_KEY] = name
+            out[LUT_AMOUNT_KEY] = amt
+        else:
+            out[LUT_AMOUNT_KEY] = 0.0
         return out
 
     def _on_dodge_burn_toggled(self, btn: QPushButton, checked: bool) -> None:
@@ -1561,6 +2174,10 @@ class ImageAdjustPanelWidget(QWidget):
         """0..1: per-stamp delta at the brush center before pressure scaling."""
         return float(self._db_strength_slider.value()) / 100.0
 
+    def dodge_burn_edge_assist(self) -> bool:
+        btn = getattr(self, "_db_edge_btn", None)
+        return True if btn is None else bool(btn.isChecked())
+
     def set_dodge_burn_mask_present(self, present: bool) -> None:
         self._db_clear_btn.setEnabled(bool(present))
 
@@ -1573,6 +2190,8 @@ class ImageAdjustPanelWidget(QWidget):
         text = fmt(spec.slider_to_value(slider.value()))
         if val_lbl is not None:
             val_lbl.setText(text)
+        if key == "Temperature":
+            self._sync_wb_preset_combo(float(spec.slider_to_value(slider.value())))
 
     def _emit_live_preview(self) -> None:
         if self._block_emit:

@@ -165,7 +165,7 @@ def _apply_display_stage(img: np.ndarray, merged: dict[str, float]) -> np.ndarra
 
     display = _tone_map_for_display(img, merged)
     if merged:
-        display = _apply_display_color_adjustments(display, merged)
+        display = _apply_display_color_adjustments(display, merged, preview=False)
         display = apply_hsl_adjustments(display, merged)
     display = apply_detail_enhancements(display, merged)
     return display
@@ -238,19 +238,6 @@ def _process_linear_edit_tail(
     exp_val = float(merged.get("Exposure2012", 0.0))
     if abs(exp_val) > 1e-4:
         img = img * (2.0 ** exp_val)
-
-    # Dodge & burn: local per-pixel exposure, applied right after the
-    # global exposure gain and before denoise/tone -- local brightness
-    # changes should see the same noise/tone response as global ones
-    # (matches how a real exposure difference at capture time would look).
-    mask_serial = str(merged.get(_DB_MASK_KEY, "") or "")
-    if mask_serial:
-        from raw_dodge_burn import apply_dodge_burn, deserialize_mask
-
-        mask = deserialize_mask(mask_serial)
-        if mask is not None:
-            stops = float(merged.get(_DB_STRENGTH_KEY, _DB_DEFAULT_STRENGTH))
-            img = apply_dodge_burn(img, mask, stops)
 
     # Dodge & burn: local per-pixel exposure, applied right after the
     # global exposure gain and before denoise/tone -- local brightness
@@ -348,6 +335,10 @@ _PRE_TONE_KEYS = (
     "CropAngle",
     "PerspectiveVertical",
     "PerspectiveHorizontal",
+    "CropLeft",
+    "CropRight",
+    "CropTop",
+    "CropBottom",
 )
 
 # Every key uses_recovery_tone_map() and apply_pv2012_tone_rgb() read, so the
@@ -377,7 +368,14 @@ def _hsl_color_keys() -> tuple[str, ...]:
     )
 
 
-_COLOR_KEYS = ("Saturation", "Vibrance") + _hsl_color_keys()
+_COLOR_KEYS = (
+    "Saturation",
+    "Vibrance",
+    "PostCropVignetteAmount",
+    "Dehaze",
+    "CreativeLUTAmount",
+    "CreativeLUTName",
+) + _hsl_color_keys()
 
 _DETAIL_KEYS = ("Sharpness", "Clarity2012", "Defringe")
 
@@ -386,7 +384,19 @@ def _stage_key(merged: dict, keys: tuple) -> tuple:
     parts = []
     for k in keys:
         v = merged.get(k, 0.0)
-        parts.append(v if isinstance(v, str) else round(float(v), 6))
+        if v is None:
+            # Missing/blank XMP leftovers: string-ish keys stay "", numeric stay 0.
+            parts.append("" if k in ("CreativeLUTName",) or str(k).endswith("Mask") or "Curve" in str(k) else 0.0)
+            continue
+        if isinstance(v, str):
+            parts.append(v)
+            continue
+        # Harden against blank leftovers — a TypeError here used to be swallowed
+        # by _AdjustPreviewWorker and leave the live preview stuck on the last frame.
+        try:
+            parts.append(round(float(v), 6))
+        except (TypeError, ValueError):
+            parts.append(0.0)
     return tuple(parts)
 
 
@@ -503,7 +513,7 @@ def _apply_display_stage_staged(
 
         color_key = (cache.stage_keys.get("tonemap"), _stage_key(merged, _COLOR_KEYS))
         if cache.stage_keys.get("color") != color_key or "color" not in cache.stage_out:
-            out = _apply_display_color_adjustments(display, merged)
+            out = _apply_display_color_adjustments(display, merged, preview=True)
             out = apply_hsl_adjustments(out, merged)
             cache.stage_out["color"] = out
             cache.stage_keys["color"] = color_key
@@ -532,9 +542,13 @@ def render_adjust_preview_uint8(
 
     ``preview_lite=True`` for the downsampled live-drag base only; settle /
     Compare / export keep the full PV2012 path.
+
+    Encode must match ``linear_to_display_uint8`` (dcraw BT.709 / ``_gamma_lut8``),
+    not IEC sRGB OETF — otherwise staged preview diverges from the uncached
+    path and smoke tests (and on-screen parity with settle/export) break.
     """
+    from fast_raw_decode import _gamma_lut8
     from raw_tone_curve import apply_channel_curves_encoded
-    from raw_tone_recovery import _encode_srgb8
 
     merged = dict(DEFAULT_ADJUSTMENTS)
     merged.update(adj or {})
@@ -542,14 +556,33 @@ def render_adjust_preview_uint8(
         rgb_image, merged, cache, preview=True, preview_lite=preview_lite
     )
     display = _apply_display_stage_staged(processed, merged, cache)
-    return apply_channel_curves_encoded(_encode_srgb8(display), merged, 255.0)
+    # Copy before encode: display may be a live cache buffer; returning a view
+    # into stage_out would let the next worker tick mutate pixels already
+    # queued for the UI thread's QPixmap conversion.
+    idx = np.clip(display * 65535.0 + 0.5, 0, 65535).astype(np.uint16)
+    encoded = np.ascontiguousarray(_gamma_lut8()[idx])
+    return apply_channel_curves_encoded(encoded, merged, 255.0)
 
 
 def _apply_display_color_adjustments(
-    display_linear: np.ndarray, merged: dict[str, float]
+    display_linear: np.ndarray,
+    merged: dict[str, float],
+    *,
+    preview: bool = False,
 ) -> np.ndarray:
-    """Saturation / vibrance in display-linear space (after tone mapping)."""
-    return _apply_saturation_vibrance(display_linear, merged)
+    """Saturation / vibrance / vignette / dehaze / creative LUT in display-linear space."""
+    from raw_effects import apply_dehaze, apply_vignette
+    from raw_lut import apply_creative_lut
+
+    out = _apply_saturation_vibrance(display_linear, merged)
+    dehaze = float(merged.get("Dehaze", 0.0) or 0.0)
+    if abs(dehaze) > 1e-3:
+        out = apply_dehaze(out, dehaze, preview=preview)
+    vignette = float(merged.get("PostCropVignetteAmount", 0.0) or 0.0)
+    if abs(vignette) > 1e-3:
+        out = apply_vignette(out, vignette)
+    out = apply_creative_lut(out, merged)
+    return out
 
 
 def linear_to_display_uint8(img: np.ndarray, adj: dict[str, float] | None = None) -> np.ndarray:

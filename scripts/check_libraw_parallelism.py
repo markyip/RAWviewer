@@ -7,9 +7,12 @@ Usage (any platform):
 
 Interpretation:
 - parallelism ~1.0x  -> single-threaded LibRaw (stock macOS/Linux PyPI wheel).
-  On macOS run scripts/build_libraw_openmp.sh to fix.
+  On macOS run scripts/build_libraw_openmp.sh to fix (release packages do
+  this automatically via build_macos.sh with standalone libomp).
 - parallelism >1.5x  -> OpenMP active (Windows PyPI wheels ship this out of
   the box: raw_r.dll links VCOMP140.DLL; verified for rawpy 0.27.0).
+  Note: Sony ARW / Nikon NEF unpack itself has little OpenMP work in LibRaw
+  0.22 — look at the postprocess ratio for those formats.
 
 Notes: Canon CR3, Fuji RAF, Panasonic show the largest unpack gains; Sony ARW
 and Nikon NEF unpack has no OpenMP path in LibRaw 0.22 (only the demosaic and

@@ -107,6 +107,71 @@ else
     "$PYTHON_BIN" -m pip uninstall -y sentence-transformers torch torchvision transformers scikit-learn tokenizers safetensors coremltools >/dev/null 2>&1 || true
 fi
 
+# OpenMP LibRaw for official macOS packages.
+# Stock PyPI rawpy is single-threaded on macOS; Windows wheels already ship
+# OpenMP. Official .app builds exclude torch, so we MUST install a standalone
+# libomp beside rawpy (not @loader_path/../torch/lib/libomp.dylib).
+ensure_openmp_libraw() {
+    if [[ "$(uname -m)" != "arm64" ]]; then
+        echo "[INFO] OpenMP LibRaw packaging is arm64-only today; skipping ($(uname -m))."
+        return 0
+    fi
+    if [ "$USE_PIXI" != "1" ]; then
+        echo "[WARNING] OpenMP LibRaw requires the Pixi env (llvm-openmp). Skipping for venv builds."
+        return 0
+    fi
+    if [ ! -x "$REPO_ROOT/scripts/build_libraw_openmp.sh" ]; then
+        echo "[WARNING] scripts/build_libraw_openmp.sh missing; macOS package will use stock single-threaded LibRaw."
+        return 0
+    fi
+    echo "Installing OpenMP LibRaw for release packaging (standalone libomp)..."
+    RAWVIEWER_LIBRAW_OPENMP_STANDALONE=1 \
+      bash "$REPO_ROOT/scripts/build_libraw_openmp.sh"
+}
+
+verify_openmp_in_app() {
+    local app_path="$1"
+    local libraw
+    libraw="$(find "$app_path" -name 'libraw_r*.dylib' 2>/dev/null | head -1 || true)"
+    if [ -z "$libraw" ]; then
+        echo "[WARNING] No libraw dylib found inside $app_path — cannot verify OpenMP."
+        return 0
+    fi
+    echo "Verifying OpenMP LibRaw in package:"
+    echo "  $libraw"
+    otool -L "$libraw" | sed 's/^/  /'
+    if otool -L "$libraw" | grep -q 'torch/lib/libomp'; then
+        echo "[ERROR] Packaged LibRaw still references torch's libomp, but torch is excluded from the .app."
+        echo "        Re-run with RAWVIEWER_LIBRAW_OPENMP_STANDALONE=1."
+        return 1
+    fi
+    if ! otool -L "$libraw" | grep -Eq 'libomp\.dylib'; then
+        echo "[ERROR] Packaged LibRaw does not link libomp — OpenMP decode will not be active."
+        return 1
+    fi
+    local libomp
+    libomp="$(find "$app_path" -name 'libomp.dylib' 2>/dev/null | head -1 || true)"
+    if [ -z "$libomp" ]; then
+        # PyInstaller sometimes misses @loader_path siblings — copy beside libraw.
+        local rawpy_src
+        rawpy_src="$(find "$REPO_ROOT/.pixi/envs/default/lib" -path '*/site-packages/rawpy/libomp.dylib' 2>/dev/null | head -1 || true)"
+        if [ -n "$rawpy_src" ] && [ -f "$rawpy_src" ]; then
+            echo "[INFO] Copying standalone libomp beside packaged LibRaw..."
+            cp -f "$rawpy_src" "$(dirname "$libraw")/libomp.dylib"
+            codesign -f -s - "$(dirname "$libraw")/libomp.dylib" >/dev/null 2>&1 || true
+            libomp="$(dirname "$libraw")/libomp.dylib"
+        fi
+    fi
+    if [ -z "$libomp" ] || [ ! -f "$libomp" ]; then
+        echo "[ERROR] libomp.dylib missing from $app_path"
+        return 1
+    fi
+    echo "[OK] OpenMP LibRaw packaged ($libomp)"
+    return 0
+}
+
+ensure_openmp_libraw
+
 echo "Cleaning previous builds..."
 chmod -R u+w build dist 2>/dev/null || true
 rm -rf build || true
@@ -121,6 +186,10 @@ if $PYTHON_BIN build.py --profile "$PROFILE"; then
     echo ""
 
     if [ -d "dist/${APP_BUNDLE}" ]; then
+        if ! verify_openmp_in_app "dist/${APP_BUNDLE}"; then
+            echo "[ERROR] OpenMP LibRaw verification failed for dist/${APP_BUNDLE}"
+            exit 1
+        fi
         echo "macOS App Bundle created: dist/${APP_BUNDLE} (v${VERSION}, ${PROFILE})"
         echo ""
         echo "Packaging release zip (app + installer)..."
@@ -147,6 +216,9 @@ if $PYTHON_BIN build.py --profile "$PROFILE"; then
         echo ""
         echo "Local dev run (no download quarantine):"
         echo "  open dist/${APP_BUNDLE}"
+        echo ""
+        echo "OpenMP check (optional):"
+        echo "  pixi run python scripts/check_libraw_parallelism.py <some.CR3>"
     elif [ -f "dist/RAWviewer" ]; then
         echo "Executable created: dist/RAWviewer"
         echo ""

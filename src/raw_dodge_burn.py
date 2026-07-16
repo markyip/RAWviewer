@@ -9,12 +9,16 @@ Design:
     - Painting stamps a soft (gaussian-falloff) circular brush at the
       cursor position, scaled by trackpad/tablet pressure, directly into
       the mask -- cheap, O(brush area) per point, not O(image).
+    - Edge-assisted painting (default on): each stamp is attenuated by luma
+      similarity to the brush-center seed plus a local gradient barrier, so
+      the stroke stays on the subject under the cursor and does not bleed
+      onto a neighboring subject mid-drag.
     - On stroke release the touched region is edge-snapped: a guided
       filter (existing raw_chroma_denoise.apply_guided_filter, reused
       as-is) using the base image's luminance as the guide pulls the
       mask's soft edges onto real image edges (a hand-painted circle over
       a sky/foreground boundary ends up following the boundary, not the
-      brush's geometric edge). This is the "edge-assisted selection".
+      brush's geometric edge). This is the final tidy-up pass.
     - Applied as a per-pixel exposure multiplier: 2**(mask * stops), where
       stops (typically 1.5-2.0) is the panel's Dodge/Burn Strength slider
       -- consistent with how Exposure2012 is applied elsewhere in the
@@ -77,6 +81,94 @@ class DodgeBurnMask:
         return result
 
 
+def _sample_luma(luminance: np.ndarray, cx: float, cy: float) -> float:
+    """Nearest-pixel luminance at (cx, cy), clamped to bounds."""
+    h, w = luminance.shape[:2]
+    x = int(np.clip(round(cx), 0, w - 1))
+    y = int(np.clip(round(cy), 0, h - 1))
+    return float(luminance[y, x])
+
+
+def _edge_assist_gate(
+    luminance: np.ndarray,
+    y0: int,
+    x0: int,
+    y1: int,
+    x1: int,
+    cx: float,
+    cy: float,
+    *,
+    luma_tol: float = 0.10,
+) -> np.ndarray:
+    """Per-pixel [0,1] weight: keep paint on the seed's side of subject edges.
+
+    Combines:
+      1. Luma similarity to the brush-center seed (soft threshold)
+      2. A cheap barrier from local gradient magnitude — strong edges between
+         the seed and a pixel attenuate the stamp so the brush does not bleed
+         onto a neighboring subject during the stroke (not only on release).
+    """
+    patch = luminance[y0:y1, x0:x1].astype(np.float32, copy=False)
+    seed = _sample_luma(luminance, cx, cy)
+    # Similarity gate (display-linear or scene-linear luma both work; tol is
+    # relative to the local dynamic range).
+    local_span = float(max(0.08, np.percentile(patch, 90) - np.percentile(patch, 10)))
+    tol = max(float(luma_tol), 0.45 * local_span)
+    diff = np.abs(patch - seed)
+    sim = np.clip(1.0 - diff / tol, 0.0, 1.0)
+    sim = sim * sim * (3.0 - 2.0 * sim)  # smoothstep
+
+    # Gradient barrier: pixels across a strong edge from the seed get cut.
+    # Use a small Sobel on the patch (cv2 if available, else numpy diff).
+    try:
+        import cv2
+
+        gx = cv2.Sobel(patch, cv2.CV_32F, 1, 0, ksize=3)
+        gy = cv2.Sobel(patch, cv2.CV_32F, 0, 1, ksize=3)
+        mag = cv2.magnitude(gx, gy)
+    except Exception:
+        gy, gx = np.gradient(patch)
+        mag = np.hypot(gx, gy).astype(np.float32)
+
+    # Normalize edge strength; ignore very weak texture.
+    edge_ref = float(np.percentile(mag, 85)) + 1e-6
+    edge = np.clip(mag / edge_ref, 0.0, 2.0)
+    # Soft inverse: flat regions ~1, strong edges ~0.15
+    barrier = 1.0 / (1.0 + 1.75 * edge)
+    # Preserve the seed neighborhood — never fully zero the brush core.
+    yy, xx = np.mgrid[y0:y1, x0:x1].astype(np.float32)
+    dist = np.sqrt((xx - cx) ** 2 + (yy - cy) ** 2)
+    core = np.clip(1.0 - dist / max(3.0, 0.35 * max(y1 - y0, x1 - x0, 1)), 0.0, 1.0)
+    gate = np.maximum(sim * barrier, 0.35 * core * sim)
+    return np.clip(gate, 0.0, 1.0).astype(np.float32)
+
+
+def circular_brush_falloff(
+    y0: int,
+    y1: int,
+    x0: int,
+    x1: int,
+    cx: float,
+    cy: float,
+    radius: float,
+) -> np.ndarray:
+    """Soft circular brush kernel on ``[y0:y1, x0:x1]`` (peak 1 at center).
+
+    Uses a gaussian disk (not a hard square / flat core): corners of the
+    axis-aligned stamp bbox stay near zero so live rectangular blits cannot
+    read as a filled block.
+    """
+    r = max(1.0, float(radius))
+    yy, xx = np.mgrid[y0:y1, x0:x1].astype(np.float32)
+    dist = np.sqrt((xx - float(cx)) ** 2 + (yy - float(cy)) ** 2)
+    # sigma ≈ r/2 → ~0.14 at the nominal edge, then hard-clip outside r
+    # so the bbox corners (dist = r√2) stay empty.
+    sigma = max(r * 0.5, 1e-3)
+    falloff = np.exp(-0.5 * (dist / sigma) ** 2).astype(np.float32)
+    falloff[dist > r] = 0.0
+    return falloff
+
+
 def stamp_brush(
     mask: DodgeBurnMask,
     cx: float,
@@ -84,6 +176,10 @@ def stamp_brush(
     radius: float,
     strength: float,
     dodge: bool,
+    *,
+    luminance: Optional[np.ndarray] = None,
+    edge_assist: bool = True,
+    luma_tol: float = 0.10,
 ) -> tuple[int, int, int, int]:
     """Add one soft circular stamp to ``mask`` in place.
 
@@ -92,6 +188,12 @@ def stamp_brush(
     point is a reasonable single-point delta at 60fps-ish sampling; repeated
     overlapping stamps during a slow drag accumulate to the full effect,
     exactly like a real brush).
+
+    When ``luminance`` is provided and ``edge_assist`` is True, the stamp is
+    attenuated across subject boundaries (luma similarity + gradient barrier)
+    so paint stays on the surface under the cursor instead of spilling onto a
+    neighboring subject mid-stroke. Release-time ``edge_snap_region`` still
+    runs for a final guided-filter tidy-up.
 
     Returns the touched (x0, y0, x1, y1) bounding box in mask pixel
     coordinates, clamped to the mask bounds, for incremental/edge-snap work.
@@ -105,11 +207,16 @@ def stamp_brush(
     if x1 <= x0 or y1 <= y0:
         return (x0, y0, x1, y1)
 
-    yy, xx = np.mgrid[y0:y1, x0:x1].astype(np.float32)
-    dist = np.sqrt((xx - cx) ** 2 + (yy - cy) ** 2)
-    # Soft falloff: solid core to ~60% radius, cosine falloff to the edge.
-    falloff = np.clip(1.0 - (dist - r * 0.6) / max(r * 0.4, 1e-3), 0.0, 1.0)
-    falloff = falloff * falloff * (3.0 - 2.0 * falloff)  # smoothstep
+    falloff = circular_brush_falloff(y0, y1, x0, x1, cx, cy, r)
+
+    if (
+        edge_assist
+        and luminance is not None
+        and luminance.shape[:2] == (h, w)
+    ):
+        falloff = falloff * _edge_assist_gate(
+            luminance, y0, x0, y1, x1, cx, cy, luma_tol=luma_tol
+        )
 
     delta = falloff * float(strength) * (1.0 if dodge else -1.0)
     region = mask.data[y0:y1, x0:x1]

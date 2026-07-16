@@ -25,7 +25,8 @@ Replace **8-bit sRGB / gamma-space** adjust preview with a **scene-linear** pipe
 | PV2012 tone (ProcessVersion 11.0) | Done | Base curve + HS/W/B in perceptual space; live-drag uses `preview_lite` (#26) |
 | Point tone curve UI | Done | `tone_curve_widget.py`; `_SHOW_TONE_CURVE_UI = True` in panel (re-enabled 2026-07-04) |
 | Parametric tone regions | Done | PV Shad / Dark / Light / High (same flag); monotonicity bug fixed before re-enabling (see Performance review #14) |
-| HSL (8 colors) | **Hidden** | Code in `raw_hsl.py`; `_SHOW_HSL_UI = False` in panel — also has an open cv2 HSV-scale bug (see below) |
+| HSL (8 colors) | Done | UI on (`_SHOW_HSL_UI = True`); float32 HSV scale fixed (Performance review #6) |
+| Creative LUT (.cube) | Done | Managed library + amount; display-stage apply (`raw_lut.py`) |
 | Detail (Sharpness / Clarity / Defringe) | Done | Display-linear, after tone map |
 | Chroma / Luma NR | Done | Both bilateral filter, no NLM/uint8 quantization; Luma NR is new (see Performance review #11/#12). Chroma NR also gets a downsample/blur/upsample coarse pass for blotchy noise a bilateral kernel can't reach (see Performance review #20) |
 | Recovery baseline | Done | “Use recovery look” = P-key tone as adjust start |
@@ -36,10 +37,12 @@ Replace **8-bit sRGB / gamma-space** adjust preview with a **scene-linear** pipe
 | Background preview worker | Done | 80 ms throttle; generation merge; uint8 encode guard |
 | sRGB encode LUT | Done | `_encode_srgb8`/`_encode_srgb16` use a precomputed LUT instead of per-pixel `np.power`; ~2.7× faster (see Performance review) |
 | Saturation / Vibrance color fix | Done | Now scales HSV S in gamma-encoded space via a LUT round-trip, not additive chroma in scene-linear space (see Performance review) |
+| Gallery "edited" badge | Done | Lightweight pencil badge on RAW tiles with a saved XMP sidecar |
+| Gallery / browse edited pixels | Partial | On Adjust save, bake editor render into thumb/grid/preview cache (aligned with panel). Default browse still does **not** re-run `SIDECAR_ADJUST` per tile. Companion JPEGs never get RAW XMP. |
+| Creative LUT UI | Done | Drag-drop `.cube` + manage list + amount in Adjust panel |
 | White balance dropper | Done | Small icon-only button inline in Temperature row; click a neutral area to solve Temperature/Tint (GPU single-view only) |
 | Compare with original (split view) | Done | Icon-only toggle in panel header; draggable divider shows original (left) vs live edited (right) over the same `GpuImageView` — see Compare with original section (2026-07-05) |
 | Lens profile correction | Done | `lensfunpy` geometric distortion correction; toggle only shown when a profile matches the file's camera+lens; baked in at decode time, not per-tick (see Lens profile correction section, 2026-07-05) |
-| Gallery "edited" badge | Done | Lightweight pencil badge on tiles with a saved XMP sidecar; thumbnail pixels unchanged (see Gallery integration) |
 | Keyboard / focus fixes | Done | Shortcuts work with panel open |
 | Value readout styling | Done | Blue `#90CAF9` (was low-contrast gray on dark card) |
 | Slider visual language | Done | Custom-painted center-out bipolar fill, rectangular thumb, Temp/Tint gradient hints — see Slider visual language section (2026-07-06) |
@@ -443,7 +446,7 @@ established chrome instead of a second, competing accent.
   which would also compete with the Compare toggle already built into the
   panel header this session.
 
-### HSL (UI hidden)
+### HSL / Color Mixer
 
 Eight colors: **Red, Orange, Yellow, Green, Aqua, Blue, Purple, Magenta**.
 
@@ -454,9 +457,18 @@ Eight colors: **Red, Orange, Yellow, Green, Aqua, Blue, Purple, Magenta**.
 | Luminance | `LuminanceAdjustment{Color}` | −100 … +100 |
 
 UI: color dropdown + three sliders; per-color values cached when switching colors.
-**Hidden** — set `_SHOW_HSL_UI = True` in `adjust_panel.py` to re-enable. `raw_hsl.py`'s
-`_rgb_to_hsv`/`_hsv_to_rgb` also has an open colorspace-scale bug (see Performance
-review #6); fix that before re-enabling.
+`_SHOW_HSL_UI = True`. Float32 HSV scale bug (Performance review #6) is **fixed** —
+H is degrees [0,360], S/V are [0,1]; sliders behave proportionally.
+
+### Creative LUT
+
+| Control | XMP key | Notes |
+|---------|---------|-------|
+| LUT basename | `CreativeLUTName` | Managed file under app-support `luts/` |
+| Strength | `CreativeLUTAmount` | 0–100; 0 = off |
+
+Drag-drop / Add / Remove / None in the Adjust **Creative LUT** section. Applied in
+the display color stage after vignette/dehaze (`raw_lut.py`).
 
 ### Detail
 
@@ -677,17 +689,20 @@ colorspace-scale bug first — see Performance review #6).
 
 ## Known limitations / future work
 
-- HSL section hidden in UI; `raw_hsl.py` has an open colorspace-scale bug — fix
-  before re-enabling (see Performance review #6)
-- No per-channel (R/G/B) tone curves
-- No mask / brush / gradient / dodge-burn local edits (see Roadmap
-  investigations C and D)
+See also the ranked table in [`RELEASE_NOTES.md`](../RELEASE_NOTES.md) (v3.0).
+
+- HSL UI is visible but `raw_hsl.py` still has an open colorspace-scale bug — treat
+  results as experimental until fixed (Performance review #6)
+- Channel tone curves (R/G/B tabs) exist in UI; treat parity with Lightroom as ongoing
+- Dodge/burn + interactive crop ship; broader masks (gradient / radial / ML subject)
+  remain future work
 - Recovery baseline is preview-session UI state, not persisted in XMP
 - No DNG export (removed 2026-07-04; see Export formats) — no non-destructive
   RAW+XMP round-trip or RGB-DNG output until a real DNG writer is built
 - Browse / gallery **default** to original pixels (`RAWVIEWER_SIDECAR_ADJUST=0`);
   saved XMP edits render in the Adjust panel. Opt in with
   `RAWVIEWER_SIDECAR_ADJUST=1` (progressive full apply — see Performance review #25).
+  Gallery tiles still show an edited **badge**, not regenerated edited pixels, by default.
 
 ---
 
@@ -734,9 +749,23 @@ tile whose file has a saved XMP sidecar — the thumbnail pixels themselves are
 
 ### Deferred for future reference: regenerating the actual edited thumbnail pixels
 
-If a literal "gallery shows the edited look" experience is wanted later instead
-of (or in addition to) the badge, this is the lowest-risk path — additive only,
-does not change the default (unedited) fast path at all:
+**Shipped path (2026-07, preferred):** on Adjust save
+(`_on_adjust_panel_editing_finished`), after cache invalidate, bake the
+just-rendered editor frame (`_adjust_last_render`) into thumbnail / grid /
+preview tiers via `_persist_editor_aligned_browse_caches`. Cost is resize +
+JPEG encode only (~5–30ms) — **not** part of Export, and **not** a full
+linear-pipeline re-bake of the embedded JPEG (which diverged from Adjust).
+
+**Hard rules:**
+- RAW-only (`resolve_xmp_path` / badge / bake all gate on `is_raw_file`) so a
+  companion JPEG sharing the RAW basename never receives the RAW's XMP look.
+- Keep `RAWVIEWER_SIDECAR_ADJUST=0` / `RAWVIEWER_EDITED_PREVIEWS=0` as default
+  so cold gallery scroll does not pay per-tile pipeline cost.
+
+**Still open if wanted later:** cold folders that never visited Adjust still
+show embedded JPEG until the next save (or until an optional
+`SIDECAR_ADJUST`/edited-preview opt-in path regenerates tiles). The older
+sketch below remains valid for that opt-in:
 
 1. **Invalidate, don't restructure.** On XMP save
    (`_on_adjust_panel_editing_finished`, `main.py`, and the export worker's
@@ -765,7 +794,8 @@ does not change the default (unedited) fast path at all:
    small subset of files, but should be verified against a folder with many
    edited RAWs before shipping, to make sure regenerating dozens of edited
    thumbnails at once (e.g. after a batch XMP edit) doesn't stall the gallery
-   thread pool.
+   thread pool. The editor-bake path above avoids this cost on the common
+   save-from-Adjust workflow.
 5. **Filmstrip/preload** (`_PRELOAD_NEXT_COUNT`/`_PRELOAD_PREV_COUNT`,
    `main.py`) only prefetches `{"thumbnail","exif"}` for normal navigation
    (sidecar-unaware) and `{"exif","full"}` (sidecar-aware) only once zoomed to
@@ -789,7 +819,7 @@ recompute.
 | 3 | Recovery baseline (`_tone_map_recovery_display`) reruns a `scipy.ndimage.gaussian_filter(sigma=22)` + downsample/upsample round-trip on every tick, even though Exposure/Sat/Vibrance/HSL/Detail are layered "on top of" recovery tone and don't need it recomputed | ~2.0–2.3s per tick with recovery on, the slowest path measured | **Partially fixed** — see Performance review #18; the gaussian-filter pass is now skipped when only a sat/vibrance/HSL/detail slider changes with recovery held on, since it lives in the cached tonemap stage, but still reruns on any pre-tone or PV2012-tone-slider change |
 | 4 | `UnifiedImageProcessor.decode_raw_edit_base(..., executor=self.process_pool)` accepts `executor` but never uses it — decode always runs in-process on the calling `QRunnable` thread, not offloaded to the process pool | N/A (code review) | **Fixed (2026-07-16)** — rawpy/AHD fallback submits via `executor.submit(decode_raw_file, ...)` when a process pool is present (Windows/Linux default); macOS usually has `executor=None` (pool off). Fast path still in-process. |
 | 5 | `phase_develop_adjust_linear.py` only checks correctness on tiny (16×16–64×64) synthetic arrays; no benchmark at realistic preview resolution | N/A | Open — a perf regression (like #1) would not be caught by the existing suite |
-| 6 | `raw_hsl.py`'s `_rgb_to_hsv` treats cv2's **float32** `COLOR_BGR2HSV` output (already H:0–360, S/V:0–1) as if it were the **uint8** convention (H:0–179, S/V:0–255) — `h * 2.0` doubles an already-0–360 hue (wraps/misassigns color bands), and `s / 255.0`, `v / 255.0` crush saturation/value to ~1/255 of true scale. `_hsv_to_rgb`'s uint8 packing then largely undoes the S/V crush on the way back out, but the per-color slider deltas (`ds`/`dv`, order ±1.0) are added *before* that undo, so they dominate the crushed (~0.004) true value — HSL Hue/Sat/Lum sliders would behave close to on/off rather than proportional, and hue-band assignment is wrong. Not visible while `_SHOW_HSL_UI = False`, but still runs for any file with pre-existing non-zero `HueAdjustment*`/`SaturationAdjustment*`/`LuminanceAdjustment*` XMP values (browse view, export) | Confirmed via direct `cv2.cvtColor` test; not benchmarked (no user-visible path while hidden) | **Open, not fixed** — out of scope for this pass (user asked to hide HSL, not fix it); fix before setting `_SHOW_HSL_UI = True` again |
+| 6 | `raw_hsl.py`'s `_rgb_to_hsv` treats cv2's **float32** `COLOR_BGR2HSV` output (already H:0–360, S/V:0–1) as if it were the **uint8** convention (H:0–179, S/V:0–255) — `h * 2.0` doubles an already-0–360 hue (wraps/misassigns color bands), and `s / 255.0`, `v / 255.0` crush saturation/value to ~1/255 of true scale. `_hsv_to_rgb`'s uint8 packing then largely undoes the S/V crush on the way back out, but the per-color slider deltas (`ds`/`dv`, order ±1.0) are added *before* that undo, so they dominate the crushed (~0.004) true value — HSL Hue/Sat/Lum sliders would behave close to on/off rather than proportional, and hue-band assignment is wrong. Not visible while `_SHOW_HSL_UI = False`, but still runs for any file with pre-existing non-zero `HueAdjustment*`/`SaturationAdjustment*`/`LuminanceAdjustment*` XMP values (browse view, export) | Confirmed via direct `cv2.cvtColor` test; not benchmarked (no user-visible path while hidden) | **Fixed** — float path uses H∈[0,360], S/V∈[0,1]; defensive uint8-scale detection retained; `t_hsl_correctness.py` guards proportional sat + hue shift |
 | 7 | `_apply_saturation_vibrance` scaled chroma (`img - luma`) additively on **scene-linear** RGB with no upper clip. Linear-light channel spread is highly hue-dependent (green/yellow have large spread relative to luma, red/blue less so), so the same `+50` slider value clipped green/yellow to a flat, fully-saturated block (`ΔS` up to 0.54, hitting the gamut ceiling) while skin tones and blue sky barely moved (`ΔS` ~0.11–0.13) — the reported "colors look off, no pop" | Measured `ΔS` (HSV saturation, encoded output) across 6 test hues at Saturation +50: **0.11–0.54** (7× spread, several hues clipped to `S=1.0`) | **Fixed** — `_apply_saturation_vibrance` now round-trips scene-linear → sRGB-encoded (float LUT, `_encode_srgb_float01`/`_decode_srgb_float01` in `raw_tone_recovery.py`) and scales the HSV **S** channel there, bounded to `[0, 1]` by construction. Same 6 hues at +50 now measure **0.13–0.30** (~2× spread, no clipping). Cost: +~50–80ms per preview tick when Saturation/Vibrance is non-zero (HSV round-trip); no-op path unaffected |
 | 8 | `apply_defringe` (`raw_detail_enhance.py`) had no edge/locality gate at all — any pixel whose hue leaned purple/green relative to its own chroma got desaturated, including uniform, unfringed regions, because `fringe / span` is scale-invariant along the purple/green hue axis rather than proportional to cast strength. A uniform purple patch (e.g. a flower petal, no edge anywhere) lost **90% saturation at Defringe=100** with nothing to correct. Separately, `green = g - 0.5*(r+b)` had half the gain of `purple = r+b-2*g` for the same absolute color imbalance — green fringing was flagged as half as severe as equally-strong purple fringing | Uniform purple patch: **90% saturation loss** at Defringe=100 with zero edges present; purple-vs-green raw mask ratio confirmed **exactly 2.00×** at every tested magnitude (d=0.02/0.05/0.10) | **Fixed** — `green` now uses `2*g - r - b` (exact negation of `purple`, so `fringe == \|r + b - 2*g\|`); added `edge_weight` gated on local luminance contrast (same Gaussian-blur trick as clarity/sharpness, sigma=1.5, soft-knee `edge/(edge+0.04)`) so the mask only engages near a real luminance transition. Uniform purple/green patches now measure **0% saturation loss** at Defringe=100; a genuine fringe pixel at a dark/bright edge still loses ~57-75%. 3 new smoke tests added (`test_defringe_*`) |
 | 9 | `raw_pv2012._apply_whites_blacks` had Whites/Blacks **sign-inverted**: `white_pt = 1.0 + w*0.12` / `black_pt = b*0.12` made Blacks+100 *crush* shadows and Whites+100 *darken* highlights — backwards from every reference tool and from this app's own legacy gamma-space implementation of the same named controls, which get the direction right. Affects 100% of PV2012 Whites/Blacks usage, not an edge case | End-to-end test on a shadow/highlight ramp: `Blacks=+100` darkened 0.02→0.01 (should lighten); `Blacks=-100` lightened 0.02→0.060 (should darken); `Whites=+100` darkened 0.9→0.804 (should brighten); legacy path's own Blacks/Whites confirmed correct-direction on the identical test | **Fixed** — signs flipped: `white_pt = 1.0 - w*0.12`, `black_pt = -b*0.12`. Re-verified same ramp now moves in the expected direction both ways |
