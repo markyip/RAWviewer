@@ -230,8 +230,20 @@ def _apply_pv2012_perceptual(
     return np.clip(out, 0.0, 1.0)
 
 
-def apply_pv2012_tone_rgb(img: np.ndarray, adj: dict[str, float]) -> np.ndarray:
-    """Hue-preserving PV2012 tone; ratio capped in perceptual space."""
+def apply_pv2012_tone_rgb(
+    img: np.ndarray,
+    adj: dict[str, float],
+    *,
+    preview_lite: bool = False,
+) -> np.ndarray:
+    """Hue-preserving PV2012 tone; ratio capped in perceptual space.
+
+    ``preview_lite=True`` (Adjust live-drag only): skip the y0 guided filter
+    and shadow chroma-damp guided filters. Those dominate tick cost on the
+    fast base; settle / export always use the full path. Live-drag uses a
+    separate PreviewStageCache, so lite outputs never poison full-quality
+    stages.
+    """
     lum = _luminance(img)
     y0_raw = _scene_to_perceptual(lum)
     # Smooth y0 before it drives anything downstream (tone curve, PV2012
@@ -253,13 +265,18 @@ def apply_pv2012_tone_rgb(img: np.ndarray, adj: dict[str, float]) -> np.ndarray:
     # over-smoothing the cleaner file's real structure, so this is a light
     # touch specifically for noise-scale jitter, not a substitute for the
     # region-scale chroma damp below.
-    from raw_chroma_denoise import apply_guided_filter
+    if preview_lite:
+        y0 = np.clip(y0_raw.astype(np.float32), 0.0, None)
+    else:
+        from raw_chroma_denoise import apply_guided_filter
 
-    y0 = np.clip(
-        apply_guided_filter(y0_raw.astype(np.float32), y0_raw.astype(np.float32), 2, 0.0005),
-        0.0,
-        None,
-    )
+        y0 = np.clip(
+            apply_guided_filter(
+                y0_raw.astype(np.float32), y0_raw.astype(np.float32), 2, 0.0005
+            ),
+            0.0,
+            None,
+        )
     # y0 must stay the true pre-curve, pre-PV2012 baseline: it's the ratio's
     # denominator below. Reassigning it to the curve-adjusted value here (as
     # this used to do) makes the point tone curve's effect appear in *both*
@@ -337,7 +354,7 @@ def apply_pv2012_tone_rgb(img: np.ndarray, adj: dict[str, float]) -> np.ndarray:
     # _apply_whites_blacks), and gating on `sh` left a Blacks-only push
     # completely undamped -- the exact same colored-speckle failure mode,
     # just reachable without touching Shadows at all.
-    if np.any(ratio > 1.0 + 1e-6):
+    if np.any(ratio > 1.0 + 1e-6) and not preview_lite:
         sw = _region_weight_shadows(y_curve)
         # Anchor on the POST-lift luminance: with the pre-lift ``lum`` here,
         # a lifted neutral pixel's uniform (out - lum) offset -- which is the

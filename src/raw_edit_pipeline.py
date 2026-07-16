@@ -397,8 +397,14 @@ def process_linear_edit_buffer_staged(
     *,
     preview: bool = True,
     chroma_denoise: Optional[bool] = None,
+    preview_lite: bool = False,
 ) -> np.ndarray:
-    """Cached equivalent of process_linear_edit_buffer for the preview path."""
+    """Cached equivalent of process_linear_edit_buffer for the preview path.
+
+    ``preview_lite`` selects the cheaper PV2012 path (live-drag only). Live
+    and settle use separate PreviewStageCache instances in main.py, so lite
+    tone outputs cannot be reused after a full-quality settle.
+    """
     if rgb_image is None:
         return rgb_image
     merged = dict(DEFAULT_ADJUSTMENTS)
@@ -464,12 +470,16 @@ def process_linear_edit_buffer_staged(
         # Chained to pre_key: the tone stage's *input* is pre_tone_out, so a
         # change to a pre-tone-only key (e.g. Exposure2012) must invalidate
         # the tone stage too, even though no _TONE_KEYS value moved.
-        tone_key = (pre_key, _stage_key(merged, _TONE_KEYS))
+        # preview_lite is part of the key so flipping lite↔full never reuses
+        # the other path's tone buffer (belt-and-suspenders vs dual caches).
+        tone_key = (pre_key, _stage_key(merged, _TONE_KEYS), bool(preview_lite))
         if cache.stage_keys.get("tone") != tone_key or "tone" not in cache.stage_out:
             if uses_recovery_tone_map(merged):
                 toned = pre_tone_out
             else:
-                toned = apply_pv2012_tone_rgb(pre_tone_out, merged)
+                toned = apply_pv2012_tone_rgb(
+                    pre_tone_out, merged, preview_lite=bool(preview_lite)
+                )
             cache.stage_out["tone"] = np.clip(toned, 0.0, None)
             cache.stage_keys["tone"] = tone_key
         return cache.stage_out["tone"]
@@ -510,6 +520,8 @@ def render_adjust_preview_uint8(
     rgb_image: np.ndarray,
     adj: dict[str, float],
     cache: "PreviewStageCache",
+    *,
+    preview_lite: bool = False,
 ) -> np.ndarray:
     """
     Staged/cached equivalent of process_linear_edit_buffer(preview=True) +
@@ -517,13 +529,18 @@ def render_adjust_preview_uint8(
     same base image when only later-stage adjustment keys changed since the
     previous call. Used exclusively by the interactive Adjust-panel preview
     path (_AdjustPreviewWorker in main.py).
+
+    ``preview_lite=True`` for the downsampled live-drag base only; settle /
+    Compare / export keep the full PV2012 path.
     """
     from raw_tone_curve import apply_channel_curves_encoded
     from raw_tone_recovery import _encode_srgb8
 
     merged = dict(DEFAULT_ADJUSTMENTS)
     merged.update(adj or {})
-    processed = process_linear_edit_buffer_staged(rgb_image, merged, cache, preview=True)
+    processed = process_linear_edit_buffer_staged(
+        rgb_image, merged, cache, preview=True, preview_lite=preview_lite
+    )
     display = _apply_display_stage_staged(processed, merged, cache)
     return apply_channel_curves_encoded(_encode_srgb8(display), merged, 255.0)
 

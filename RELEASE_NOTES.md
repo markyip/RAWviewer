@@ -46,6 +46,7 @@ It is built as a faster **browse / cull** release on top of 2.5: featuring **Fas
 - **Zoom-on-click Fixes**: Fixed a bug class where clicking a gallery thumbnail could land on a zoomed-in image inherited from the previous view. Gallery clicks now guarantee settling at Fit-to-Window.
 - **Worker Pool Starvation**: Sidecar applies no longer starve the gallery thumbnail worker pool.
 - **Edit-base decoding**: Deduplicated concurrent edit-base decodes and fixed stale in-flight guards.
+- **Edit / load perf (post-3.0)**: Corrected-WB files stay on the fast EA edit-base path (no AHD fallback); unpack stash LRU; half-size edit-base cache; Adjust live-drag uses a 640px base + lite PV2012 (full quality on slider release); optional sidecar browse apply is progressive (preview interim then full).
 - **Tile EXIF parses**: Stopped unnecessary per-tile RAW EXIF parses during edited-preview delivery to improve speed.
 
 #### 🎨 Polish
@@ -59,7 +60,8 @@ It is built as a faster **browse / cull** release on top of 2.5: featuring **Fas
 |----------|---------|--------|
 | `RAWVIEWER_FAST_RAW_DECODE` | `1` | Fast RAW path; `0` falls back toward rawpy |
 | `RAWVIEWER_USE_PROCESS_POOL` | auto | Force LibRaw process pool on/off |
-| `RAWVIEWER_SIDECAR_ADJUST` | `1` | Apply saved XMP edit sliders to browse/full-res pixels (requires editing enabled) |
+| `RAWVIEWER_SIDECAR_ADJUST` | `0` | Apply saved XMP edit sliders to browse/full-res pixels (requires editing enabled). Default off: browse shows original; edits render in Adjust. When on, CURRENT full loads use progressive interim→full apply |
+| `RAWVIEWER_UNPACK_STASH_SLOTS` | `3` | How many LibRaw unpack mosaics to keep for half→full / A↔B revisit (1–8) |
 
 ### Recommended test after upgrade
 

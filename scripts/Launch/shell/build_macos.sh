@@ -54,6 +54,9 @@ fi
 PIXI_PYTHON="$REPO_ROOT/.pixi/envs/default/bin/python"
 if [ -x "$PIXI_PYTHON" ] && "$PIXI_PYTHON" -c "import PyInstaller" >/dev/null 2>&1; then
     PYTHON_BIN="$PIXI_PYTHON"
+    # Without this, build.py re-execs itself into ./rawviewer_env and the
+    # Pixi interpreter choice is silently discarded.
+    export RAWVIEWER_USE_SYSTEM_PYTHON_BUILD=1
     echo "Using Pixi environment interpreter: $PYTHON_BIN ($("$PYTHON_BIN" --version 2>&1))"
 else
     VENV_DIR="$REPO_ROOT/rawviewer_env"

@@ -48,12 +48,18 @@ desktop.ini
 rawviewer_debug_*.log
 debug_*.log
 
-# Test files
+# Test files (ad-hoc root scripts — not the tracked testplan suite)
 test_images/
 sample_images/
 test_*.py
 *_test.py
 *_tests.py
+# Keep CI / auto regression tests under testplan/ (names are t_*.py, but
+# also un-ignore any test_*.py that land there by convention).
+!testplan/
+!testplan/**
+!testplan/auto/
+!testplan/auto/**
 
 # Debug and development files
 debug_*.py
@@ -169,3 +175,7 @@ src/windows_share_helper/obj/
 testplan/baselines/
 
 bench_results/
+
+# Cursor Canvas / local IDE artifacts (never ship)
+*.canvas.tsx
+.cursor/

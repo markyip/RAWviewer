@@ -296,6 +296,8 @@ Requires **pyexiv2** for maker-note AF on RAW.
 | `RAWVIEWER_RAW_EDR=1` | **Default.** macOS: EDR for RAW when **RAW (High Quality)** workflow is selected; `0` to hard-disable. In-app: bottom-bar **EDR** button toggles it per-user, but resets to off every time you switch into RAW workflow. EDR decode is also idle-deferred: rapid navigation shows the fast SDR buffer immediately and only upgrades to EDR after you pause on an image, so browsing speed is unaffected either way |
 | `RAWVIEWER_LIBRAW_CONSISTENT_PREVIEW=1` | Same color pipeline for fit vs 100% zoom on RAW (default on) |
 | `RAWVIEWER_FAST_RAW_DECODE=0` | Disable the fast RAW decode path (LibRaw unpack + SIMD demosaic with exact color parity, shared unpack between half/full tiers; default on, auto-falls-back to rawpy for unsupported sensors) |
+| `RAWVIEWER_SIDECAR_ADJUST=1` | Apply saved XMP edits to browse/full-res pixels (default **off** — edits show in Adjust only; when on, CURRENT full loads paint a preview-sized edited interim before the full apply) |
+| `RAWVIEWER_UNPACK_STASH_SLOTS` | LibRaw unpack mosaic LRU size for half→full reuse (default `3`, range 1–8) |
 | `RAWVIEWER_USE_PROCESS_POOL=0` | Disable LibRaw process pool (leave unset for normal use) |
 | `RAWVIEWER_EXIF_BACKEND=auto` | `auto`, `pyexiv2`, or `exifread` |
 | `RAWVIEWER_SHARE_MENU=1` | macOS: Qt share menu (recommended) |

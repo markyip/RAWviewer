@@ -1758,6 +1758,8 @@ class _AdjustPreviewWorker(QRunnable):
         adj: dict,
         signals: _AdjustPreviewSignals,
         stage_cache: Any = None,
+        *,
+        preview_lite: bool = False,
     ):
         super().__init__()
         self.generation = int(generation)
@@ -1766,6 +1768,7 @@ class _AdjustPreviewWorker(QRunnable):
         self.adj = dict(adj or {})
         self.signals = signals
         self.stage_cache = stage_cache
+        self.preview_lite = bool(preview_lite)
 
     def run(self) -> None:
         out = None
@@ -1778,9 +1781,16 @@ class _AdjustPreviewWorker(QRunnable):
                 # raw_edit_pipeline.py) -- this is what makes dragging a
                 # single slider (e.g. Sharpness) skip re-running WB/exposure/
                 # denoise/PV2012 tone/tonemap on every tick.
+                # preview_lite: cheaper PV2012 on the downsampled drag base;
+                # settle passes preview_lite=False on the full base.
                 from raw_edit_pipeline import render_adjust_preview_uint8
 
-                out = render_adjust_preview_uint8(self.base_rgb, self.adj, self.stage_cache)
+                out = render_adjust_preview_uint8(
+                    self.base_rgb,
+                    self.adj,
+                    self.stage_cache,
+                    preview_lite=self.preview_lite,
+                )
             else:
                 from raw_adjustments import apply_adjustments_to_rgb
 
@@ -1847,7 +1857,10 @@ class _AdjustCompareOriginalWorker(QRunnable):
         self.signals.finished.emit(self.file_path, out)
 
 
-_ADJUST_FAST_PREVIEW_MAX_EDGE = 1000
+# Live-drag max edge. Was 1000 (~55ms Contrast tick at half-res base); 640
+# cuts pixel count ~2.4x so upstream PV2012 ticks stay nearer the 80ms
+# throttle. Settle / Compare still use the full edit base.
+_ADJUST_FAST_PREVIEW_MAX_EDGE = 640
 
 
 def _make_fast_preview_base(base: Any) -> Any:
@@ -20645,12 +20658,13 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self._adjust_preview_gen = int(getattr(self, "_adjust_preview_gen", 0)) + 1
         gen = self._adjust_preview_gen
         base_fast = getattr(self, "_adjust_preview_base_rgb_fast", None)
-        if full_quality or base_fast is None:
-            base = base_full
-            stage_cache = getattr(self, "_adjust_preview_stage_cache", None)
-        else:
+        use_fast = not full_quality and base_fast is not None
+        if use_fast:
             base = base_fast
             stage_cache = getattr(self, "_adjust_preview_stage_cache_fast", None)
+        else:
+            base = base_full
+            stage_cache = getattr(self, "_adjust_preview_stage_cache", None)
         # Snapshot the adjustments this generation renders with, so
         # _on_adjust_preview_ready can cache (exact_array, adj) as the new
         # instant-gain baseline once the exact render lands. Small dict
@@ -20669,6 +20683,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             dict(adj),
             self._adjust_preview_signals,
             stage_cache=stage_cache,
+            preview_lite=use_fast,
         )
         _get_bg_thread_pool().start(worker)
 

@@ -6,6 +6,8 @@
 """
 
 import os
+from collections import OrderedDict
+
 import numpy as np
 from typing import Optional, Dict, Any, Union, Tuple
 from PyQt6.QtCore import QSize, QLoggingCategory
@@ -55,7 +57,37 @@ import threading as _ebt  # noqa: E402
 
 _EDIT_BASE_INFLIGHT: dict = {}
 _EDIT_BASE_INFLIGHT_LOCK = _ebt.Lock()
+# Half-size float32 edit-base LRU (reopen Adjust / revisit without re-unpack).
+# Full-res export bases are NOT cached (too large). Cross-platform: keyed with
+# normcase(abspath) + mtime_ns/size so Windows path case and file replaces work.
+_EDIT_BASE_LRU: OrderedDict = OrderedDict()
+_EDIT_BASE_LRU_LOCK = _ebt.Lock()
+_EDIT_BASE_LRU_MAX = 2
 _LIBRAW_UNSUPPORTED_MAX = 2048
+
+
+def _edit_base_file_ident(file_path: str) -> tuple:
+    try:
+        st = os.stat(file_path)
+        mtime_ns = getattr(st, "st_mtime_ns", int(st.st_mtime * 1e9))
+        return (int(mtime_ns), int(st.st_size))
+    except OSError:
+        return (0, 0)
+
+
+def _unpack_stash_max_slots() -> int:
+    """How many UnpackedRaw mosaics to keep for half→full / A↔B revisit.
+
+    ~2 bytes/sensor-pixel each; default 3 covers current + two neighbors.
+    Override with RAWVIEWER_UNPACK_STASH_SLOTS (1–8).
+    """
+    raw = os.environ.get("RAWVIEWER_UNPACK_STASH_SLOTS", "").strip()
+    if raw:
+        try:
+            return max(1, min(8, int(raw)))
+        except ValueError:
+            pass
+    return 3
 
 
 def prune_libraw_unsupported_paths(
@@ -104,15 +136,16 @@ class UnifiedImageProcessor:
         self.thumbnail_extractor = ThumbnailExtractor()
         self.exif_extractor = EXIFExtractor()
         self.raw_processor = OptimizedRAWProcessor()
-        # Single-slot LibRaw unpack reuse (see fast_raw_decode.UnpackedRaw):
-        # the fit-view half decode stashes its unpacked mosaic here so the
-        # deferred full decode of the same file skips the second unpack (the
-        # 100-900ms dominant cost). One slot only (~2 bytes/sensor-pixel);
-        # replaced on the next stash, consumed by the full decode.
+        # LibRaw unpack reuse (see fast_raw_decode.UnpackedRaw): the fit-view
+        # half decode stashes its unpacked mosaic so the deferred full decode
+        # of the same file skips the second unpack (the 100-900ms dominant
+        # cost). Small LRU (~2 bytes/sensor-pixel per slot) so A↔B revisit
+        # and neighbor prefetch do not immediately evict the current file.
+        # Consumed by the full decode via _take_unpacked_raw.
         import threading as _threading
 
         self._unpacked_raw_lock = _threading.Lock()
-        self._unpacked_raw_slot: Optional[tuple] = None  # (norm_path, UnpackedRaw)
+        self._unpacked_raw_slots: OrderedDict = OrderedDict()
         # Sidecar-adjusted full-buffer memo: applying XMP adjustments to a
         # sensor-resolution buffer costs ~1.8-2.1s at 45MP even with the
         # row-band threading in raw_edit_pipeline.py, and _apply_sidecar_if_
@@ -135,25 +168,33 @@ class UnifiedImageProcessor:
 
     def _stash_unpacked_raw(self, file_path: str, unpacked) -> None:
         key = os.path.normcase(os.path.abspath(file_path))
+        max_slots = _unpack_stash_max_slots()
         with self._unpacked_raw_lock:
-            self._unpacked_raw_slot = (key, unpacked)
+            if key in self._unpacked_raw_slots:
+                del self._unpacked_raw_slots[key]
+            self._unpacked_raw_slots[key] = unpacked
+            while len(self._unpacked_raw_slots) > max_slots:
+                self._unpacked_raw_slots.popitem(last=False)
 
     def _take_unpacked_raw(self, file_path: str):
         key = os.path.normcase(os.path.abspath(file_path))
         with self._unpacked_raw_lock:
-            if self._unpacked_raw_slot and self._unpacked_raw_slot[0] == key:
-                unpacked = self._unpacked_raw_slot[1]
-                self._unpacked_raw_slot = None
-                return unpacked
-        return None
+            return self._unpacked_raw_slots.pop(key, None)
 
     def _apply_sidecar_if_needed(
-        self, file_path: str, rgb_image: Optional[np.ndarray]
+        self,
+        file_path: str,
+        rgb_image: Optional[np.ndarray],
+        *,
+        force: bool = False,
     ) -> Optional[np.ndarray]:
         """Apply XMP sidecar adjustments on top of a base (unadjusted) RGB buffer.
 
         Memoized per (file, adjustment fingerprint, base buffer shape): see
         _adjusted_full_slots in __init__ for why.
+
+        ``force=True`` skips the libraw-preview short-circuit so a deliberately
+        downscaled interim buffer (progressive full apply) still gets edits.
         """
         if rgb_image is None:
             return None
@@ -164,14 +205,15 @@ class UnifiedImageProcessor:
                     return rgb_image
         except Exception:
             pass
-        try:
-            if self.cache.is_libraw_preview(file_path):
-                h, w = rgb_image.shape[:2]
-                from image_cache import memory_preview_max_edge
-                if max(h, w) <= memory_preview_max_edge():
-                    return rgb_image
-        except Exception:
-            pass
+        if not force:
+            try:
+                if self.cache.is_libraw_preview(file_path):
+                    h, w = rgb_image.shape[:2]
+                    from image_cache import memory_preview_max_edge
+                    if max(h, w) <= memory_preview_max_edge():
+                        return rgb_image
+            except Exception:
+                pass
         try:
             from gpu_gl_bridge import DeviceRgb
 
@@ -262,6 +304,98 @@ class UnifiedImageProcessor:
         except Exception:
             return rgb_image
 
+    def apply_sidecar_progressive(
+        self,
+        file_path: str,
+        rgb_image: Optional[np.ndarray],
+        *,
+        cancel_check: Optional[Any] = None,
+        on_interim: Optional[Any] = None,
+    ) -> Optional[np.ndarray]:
+        """Apply XMP edits with an optional preview-sized interim callback.
+
+        For large bases (above ``memory_preview_max_edge``), downscale + apply
+        first (~hundreds of ms) and invoke ``on_interim`` so the UI can paint
+        demosaic-accurate edited pixels while the full-resolution apply
+        (often 1–2s at 45MP) continues. Prefetch / default-adj callers should
+        not use this — keep using ``_apply_sidecar_if_needed`` directly.
+
+        Never writes adjusted pixels into ``full_image_cache`` (unadjusted
+        base stays path-keyed; memo lives in ``_adjusted_full_slots``).
+        Cross-platform: same path/normcase fingerprinting as the sync apply.
+        """
+        if rgb_image is None:
+            return None
+
+        def _cancelled() -> bool:
+            try:
+                return bool(cancel_check is not None and cancel_check())
+            except Exception:
+                return False
+
+        try:
+            from raw_adjustments import (
+                is_default_adjustments,
+                load_adjustments_for_file,
+            )
+
+            adj = load_adjustments_for_file(file_path)
+            if is_default_adjustments(adj):
+                return rgb_image
+        except Exception:
+            pass
+
+        host = rgb_image
+        try:
+            from gpu_gl_bridge import DeviceRgb
+
+            if isinstance(host, DeviceRgb):
+                host = host.to_numpy()
+        except Exception:
+            pass
+
+        if _cancelled():
+            return None
+
+        try:
+            from image_cache import memory_preview_max_edge
+
+            h, w = int(host.shape[0]), int(host.shape[1])
+            cap = int(memory_preview_max_edge())
+            if (
+                on_interim is not None
+                and cap > 0
+                and max(h, w) > cap
+            ):
+                import cv2
+
+                scale = cap / float(max(h, w))
+                nw = max(1, int(round(w * scale)))
+                nh = max(1, int(round(h * scale)))
+                small = cv2.resize(host, (nw, nh), interpolation=cv2.INTER_AREA)
+                if _cancelled():
+                    return None
+                interim = self._apply_sidecar_if_needed(
+                    file_path, small, force=True
+                )
+                if interim is not None and not _cancelled():
+                    try:
+                        on_interim(interim)
+                    except Exception:
+                        logging.getLogger(__name__).debug(
+                            "sidecar interim callback failed",
+                            exc_info=True,
+                        )
+        except Exception:
+            logging.getLogger(__name__).debug(
+                "sidecar progressive interim failed",
+                exc_info=True,
+            )
+
+        if _cancelled():
+            return None
+        return self._apply_sidecar_if_needed(file_path, host, force=True)
+
     def decode_raw_edit_base(
         self,
         file_path: str,
@@ -280,6 +414,23 @@ class UnifiedImageProcessor:
         buffer's final width/height), not as a per-tick pipeline adjustment.
         """
         skip_key = os.path.normcase(os.path.abspath(file_path))
+        # Half-size only: full-res export bases are too large to keep around.
+        # Ident includes mtime/size so a replaced file on Windows/macOS
+        # invalidates without relying on path alone.
+        file_ident = _edit_base_file_ident(file_path)
+        cache_key = (
+            skip_key,
+            bool(use_full_resolution),
+            bool(apply_lens_correction),
+            file_ident,
+        )
+        if not use_full_resolution:
+            with _EDIT_BASE_LRU_LOCK:
+                cached = _EDIT_BASE_LRU.get(cache_key)
+                if cached is not None:
+                    _EDIT_BASE_LRU.move_to_end(cache_key)
+                    return cached
+
         # Module-level in-flight dedup: concurrent identical requests (the
         # panel's base request racing a preview worker's, each on its OWN
         # UnifiedImageProcessor instance) share one decode instead of queueing
@@ -312,6 +463,12 @@ class UnifiedImageProcessor:
                 use_full_resolution=use_full_resolution,
                 apply_lens_correction=apply_lens_correction,
             )
+            if result is not None and not use_full_resolution:
+                with _EDIT_BASE_LRU_LOCK:
+                    _EDIT_BASE_LRU[cache_key] = result
+                    _EDIT_BASE_LRU.move_to_end(cache_key)
+                    while len(_EDIT_BASE_LRU) > _EDIT_BASE_LRU_MAX:
+                        _EDIT_BASE_LRU.popitem(last=False)
             slot["result"] = result
             return result
         finally:
@@ -350,11 +507,30 @@ class UnifiedImageProcessor:
                     from fast_raw_decode import try_fast_raw_decode
 
                     rgb_image = try_fast_raw_decode(
-                        file_path, 
-                        edit_params, 
+                        file_path,
+                        edit_params,
                         rawpy_lock=_rawpy_global_lock,
-                        return_linear=True
+                        return_linear=True,
                     )
+
+                    cam_mul_for_scale = None
+                    if rgb_image is None and executor is not None:
+                        # Windows/Linux default: LibRaw process pool bypasses
+                        # the GIL for the AHD/rawpy fallback. macOS usually
+                        # has executor=None (pool off). Same helper as browse.
+                        try:
+                            future = executor.submit(
+                                decode_raw_file, file_path, edit_params
+                            )
+                            rgb_image = future.result()
+                        except Exception as pool_err:
+                            logging.getLogger(__name__).warning(
+                                "[EDIT] Process pool edit-base decode failed "
+                                "for %s: %s; falling back in-process",
+                                os.path.basename(file_path),
+                                pool_err,
+                            )
+                            rgb_image = None
 
                     if rgb_image is None:
                         with _rawpy_global_lock:
@@ -363,8 +539,6 @@ class UnifiedImageProcessor:
                             cam_mul_for_scale = list(raw.camera_whitebalance or [])
                             with _heavy_fallback_semaphore:
                                 rgb_image = raw.postprocess(**edit_params)
-                    else:
-                        cam_mul_for_scale = None
                     # Restore browse (min-normalized) brightness: dcraw
                     # divides the WB multipliers by their MAX whenever
                     # highlight_mode > 0 (measured: a uniform 1.74x darkening
@@ -379,8 +553,12 @@ class UnifiedImageProcessor:
                         from fast_raw_decode import get_corrected_camera_wb
 
                         mul = get_corrected_camera_wb(file_path) or cam_mul_for_scale
+                        if mul is None and edit_params.get("user_wb"):
+                            mul = edit_params.get("user_wb")
                         mul3 = [float(m) for m in (mul or [])[:3] if float(m) > 0]
-                        dmax_over_dmin = (max(mul3) / min(mul3)) if len(mul3) == 3 else 1.0
+                        dmax_over_dmin = (
+                            (max(mul3) / min(mul3)) if len(mul3) == 3 else 1.0
+                        )
                     except Exception:
                         dmax_over_dmin = 1.0
                     if rgb_image is not None and rgb_image.dtype == np.uint16:

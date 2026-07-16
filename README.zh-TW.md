@@ -295,6 +295,8 @@ RAW 製造商 AF 需 **pyexiv2**。
 | `RAWVIEWER_RAW_EDR=1` | **預設。** macOS：選 **RAW（高品質）** 時 RAW 走 EDR；`0` 硬性關閉。App 內：底部工具列 **EDR** 按鈕可由使用者切換，但每次切換進入 RAW 工作流程都會重設為關閉。EDR 解碼採閒置延遲：快速瀏覽時立即顯示 SDR 快速緩衝，只有在該張影像暫留後才升級為 EDR，因此瀏覽速度不受影響 |
 | `RAWVIEWER_LIBRAW_CONSISTENT_PREVIEW=1` | RAW 符合與 100% 縮放同色票流程（預設開啟） |
 | `RAWVIEWER_FAST_RAW_DECODE=0` | 停用快速 RAW 解碼路徑（LibRaw unpack + SIMD demosaic，與舊管線色彩一致，half/full tier 共用 unpack；預設開啟，感光元件不支援時自動回退 rawpy） |
+| `RAWVIEWER_SIDECAR_ADJUST=1` | 將已存 XMP 編輯套到瀏覽／全圖（預設**關閉** — 編輯僅在 Adjust 顯示；開啟時 CURRENT 全圖會先畫 preview 尺寸 interim 再升全解析度） |
+| `RAWVIEWER_UNPACK_STASH_SLOTS` | LibRaw unpack mosaic LRU 槽數，供 half→full 重用（預設 `3`，範圍 1–8） |
 | `RAWVIEWER_USE_PROCESS_POOL=0` | 關閉 LibRaw process pool（一般使用請勿設定） |
 | `RAWVIEWER_EXIF_BACKEND=auto` | `auto`、`pyexiv2` 或 `exifread` |
 | `RAWVIEWER_SHARE_MENU=1` | macOS：Qt 分享選單（建議） |

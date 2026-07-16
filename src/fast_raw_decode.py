@@ -94,6 +94,7 @@ _GAMMA_LUT8: Optional[np.ndarray] = None
 _ALLOWED_PARAM_KEYS = {
     "use_camera_wb",
     "use_auto_wb",
+    "user_wb",  # corrected cam_mul when as-shot WB failed JPEG sanity
     "output_bps",
     "no_auto_bright",
     "gamma",
@@ -103,6 +104,17 @@ _ALLOWED_PARAM_KEYS = {
     "demosaic_algorithm",  # fast path substitutes its own (EA >= LINEAR quality)
     "dcb_enhance",  # demosaic-only knob, no color impact
 }
+
+
+def _valid_user_wb(user_wb: Any) -> bool:
+    """True when ``user_wb`` is a usable 3- or 4-channel camera multiplier list."""
+    try:
+        vals = [float(x) for x in list(user_wb)[:4]]
+    except (TypeError, ValueError):
+        return False
+    if len(vals) < 3:
+        return False
+    return vals[0] > 0.0 and vals[1] > 0.0 and vals[2] > 0.0
 
 
 def _import_cv2():
@@ -469,7 +481,15 @@ class UnpackedRaw:
 
 
 def params_supported(params: Dict[str, Any], return_linear: bool = False) -> bool:
-    """True when the rawpy params match the semantics this module replicates."""
+    """True when the rawpy params match the semantics this module replicates.
+
+    Accepts either ``use_camera_wb=True`` (normal as-shot) or
+    ``use_camera_wb=False`` + a valid ``user_wb`` list. The latter is how
+    :func:`edit_base_decode_params` / browse rawpy fallback pass the
+    embedded-JPEG WB sanity correction; ``unpack_raw`` already bakes that
+    correction into ``scale_mul``, so the fast pixel path stays color-true
+    without falling back to slow rawpy AHD.
+    """
     # Allowed keys for both modes
     allowed = _ALLOWED_PARAM_KEYS.copy()
     if return_linear:
@@ -477,13 +497,23 @@ def params_supported(params: Dict[str, Any], return_linear: bool = False) -> boo
 
     if set(params) - allowed:
         return False
-    if not params.get("use_camera_wb", False):
+
+    use_camera_wb = bool(params.get("use_camera_wb", False))
+    user_wb = params.get("user_wb")
+    if use_camera_wb:
+        # Camera WB path: ignore any leftover user_wb key (rawpy would too
+        # when use_camera_wb is True).
+        pass
+    elif user_wb is not None and _valid_user_wb(user_wb):
+        pass
+    else:
         return False
+
     if params.get("use_auto_wb", False):
         return False
     if not params.get("no_auto_bright", False):
         return False
-    
+
     if return_linear:
         if int(params.get("output_bps", 16)) != 16:
             return False

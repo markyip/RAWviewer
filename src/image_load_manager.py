@@ -458,7 +458,11 @@ class ImageLoadWorker(QRunnable):
                     if self._safe_emit():
                         self.manager.progress_updated.emit(file_path, "Processing image...")
 
-                from raw_adjustments import sidecar_adjustments_enabled
+                from raw_adjustments import (
+                    is_default_adjustments,
+                    load_adjustments_for_file,
+                    sidecar_adjustments_enabled,
+                )
 
                 # Sidecar edits on the full-res tier are only worth paying for
                 # the image actually on screen: the gamma-path apply costs
@@ -470,6 +474,12 @@ class ImageLoadWorker(QRunnable):
                 # CURRENT task still applies, so the displayed image shows its
                 # edits; a prefetched neighbor gets them applied when it
                 # becomes current (memoized in _apply_sidecar_if_needed).
+                #
+                # Progressive path (CURRENT + non-default XMP only): decode
+                # unadjusted first (still caches the unadjusted base), emit a
+                # preview-sized edited interim so demosaic-accurate edits
+                # paint before the multi-second full apply finishes, then
+                # emit the full adjusted buffer. Prefetch stays sidecar-free.
                 apply_sidecar = (
                     sidecar_adjustments_enabled()
                     and self.task.priority == Priority.CURRENT
@@ -478,16 +488,40 @@ class ImageLoadWorker(QRunnable):
                     file_path,
                     use_full_resolution=self.task.use_full_resolution,
                     executor=self.manager._process_pool if self._safe_emit() else None,
-                    apply_sidecar_adjustments=apply_sidecar,
+                    apply_sidecar_adjustments=False,
                 )
-                if result is not None and not self.task.is_cancelled():
-                    if self._safe_emit():
-                        from gpu_gl_bridge import DeviceRgb as _DeviceRgb
 
-                        if isinstance(result, (np.ndarray, _DeviceRgb)):
-                            self.manager.image_ready.emit(file_path, result)
-                        elif isinstance(result, QPixmap):
-                            self.manager.pixmap_ready.emit(file_path, result)
+                def _emit_image_buffer(buf) -> None:
+                    if buf is None or self.task.is_cancelled() or not self._safe_emit():
+                        return
+                    from gpu_gl_bridge import DeviceRgb as _DeviceRgb
+
+                    if isinstance(buf, (np.ndarray, _DeviceRgb)):
+                        self.manager.image_ready.emit(file_path, buf)
+                    elif isinstance(buf, QPixmap):
+                        self.manager.pixmap_ready.emit(file_path, buf)
+
+                if (
+                    result is not None
+                    and apply_sidecar
+                    and not self.task.is_cancelled()
+                ):
+                    needs_apply = False
+                    try:
+                        adj = load_adjustments_for_file(file_path)
+                        needs_apply = not is_default_adjustments(adj)
+                    except Exception:
+                        needs_apply = False
+                    if needs_apply:
+                        result = processor.apply_sidecar_progressive(
+                            file_path,
+                            result,
+                            cancel_check=self.task.is_cancelled,
+                            on_interim=_emit_image_buffer,
+                        )
+
+                if result is not None and not self.task.is_cancelled():
+                    _emit_image_buffer(result)
                 elif (
                     "full" in stages
                     and not self.task.is_cancelled()
