@@ -267,19 +267,19 @@ def editing_features_enabled() -> bool:
 def sidecar_adjustments_enabled() -> bool:
     """Whether browse/full-res display applies saved XMP edit sliders to pixels.
 
-    On by default when editing is enabled (RAWVIEWER_SIDECAR_ADJUST=0 to
-    disable). It shipped default-off while edits were invisible everywhere
-    outside the Adjust panel; now that gallery tiles and the fit preview
-    render saved edits too (edited_previews_enabled), leaving the full-res
-    tier unedited would make the edits visibly VANISH on zoom -- consistency
-    across tiers matters more than the apply cost, which only edited files
-    ever pay. Requires `editing_features_enabled()` -- browse-only builds
-    never pay the apply cost even if the env var is set. Explicit
-    `apply_sidecar_adjustments=True` callers are unaffected.
+    Off by default (RAWVIEWER_SIDECAR_ADJUST=1 to enable): saved XMP edits
+    render ONLY inside the Adjust panel (explicit
+    `apply_sidecar_adjustments=True` callers). Browse surfaces show the
+    original pixels — gallery tiles and single-view non-RAW show the embedded
+    JPEG as shot, the RAW tier shows the unadjusted raw decode. Rendering
+    edits per-tier produced visible mismatches between the thumbnail and the
+    single-image edited version (tone pipeline differs at thumbnail scale),
+    which was worse than not previewing edits at all. Requires
+    `editing_features_enabled()` even when the env var opts in.
     """
     if not editing_features_enabled():
         return False
-    return os.environ.get("RAWVIEWER_SIDECAR_ADJUST", "1").strip().lower() in {
+    return os.environ.get("RAWVIEWER_SIDECAR_ADJUST", "0").strip().lower() in {
         "1",
         "true",
         "yes",
@@ -290,16 +290,17 @@ def sidecar_adjustments_enabled() -> bool:
 def edited_previews_enabled() -> bool:
     """Whether gallery tiles and the fit preview render saved XMP edits.
 
-    On by default when editing is enabled (RAWVIEWER_EDITED_PREVIEWS=0 to
-    disable). Applied at display/delivery time only -- adjusted pixels are
+    Off by default (RAWVIEWER_EDITED_PREVIEWS=1 to enable): edits render only
+    in the Adjust panel; browse tiers show original pixels (see
+    sidecar_adjustments_enabled for why — tier-to-tier edit rendering
+    mismatched). Applied at display/delivery time only -- adjusted pixels are
     never written back to any pixel cache, so there is no stale-thumbnail
     invalidation problem: re-editing simply changes what the next delivery
-    applies. Cost (measured): ~5ms per 320px gallery tile, ~35ms per 720px
-    tile, ~215ms for a 2304px fit preview -- worker-thread, edited files only.
+    applies.
     """
     if not editing_features_enabled():
         return False
-    return os.environ.get("RAWVIEWER_EDITED_PREVIEWS", "1").strip().lower() in {
+    return os.environ.get("RAWVIEWER_EDITED_PREVIEWS", "0").strip().lower() in {
         "1",
         "true",
         "yes",

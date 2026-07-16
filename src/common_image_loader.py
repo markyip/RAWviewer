@@ -288,10 +288,21 @@ def use_libraw_consistent_preview_first(file_path: Optional[str] = None) -> bool
     """
     if file_path:
         try:
-            from raw_adjustments import load_adjustments_for_file, is_default_adjustments
-            adj = load_adjustments_for_file(file_path)
-            if adj and not is_default_adjustments(adj):
-                return True
+            # This escalation exists so DISPLAYED edits look the same at fit
+            # and zoom (LibRaw both ways). With sidecar display off (the
+            # default: edits render only in the Adjust panel) it must not
+            # fire at all — a mere xmp:Rating sidecar was flipping rated
+            # files into the RAW workflow, showing LibRaw renders in non-RAW
+            # view and blanking gallery→single landings while the interim
+            # JPEG was refused. Existence probe only (never
+            # load_adjustments_for_file: its as-shot EXIF parse cost ~0.5s
+            # per ARW on the UI thread via _check_cache).
+            from raw_adjustments import resolve_xmp_path, sidecar_adjustments_enabled
+
+            if sidecar_adjustments_enabled():
+                xmp = resolve_xmp_path(file_path)
+                if xmp and os.path.isfile(xmp):
+                    return True
         except Exception:
             pass
 

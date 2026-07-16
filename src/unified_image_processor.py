@@ -1763,10 +1763,19 @@ class UnifiedImageProcessor:
                             if rgb is None:
                                 return
 
-                            from raw_adjustments import load_adjustments_for_file, apply_adjustments_to_rgb, is_default_adjustments
-                            adj = load_adjustments_for_file(fp)
-                            if adj and not is_default_adjustments(adj):
-                                rgb = apply_adjustments_to_rgb(rgb, adj)
+                            from raw_adjustments import (
+                                load_adjustments_for_file,
+                                apply_adjustments_to_rgb,
+                                is_default_adjustments,
+                                sidecar_adjustments_enabled,
+                            )
+                            # Only bake edits into the persisted preview when
+                            # browse tiers render edits; the default shows
+                            # original pixels outside the Adjust panel.
+                            if sidecar_adjustments_enabled():
+                                adj = load_adjustments_for_file(fp)
+                                if adj and not is_default_adjustments(adj):
+                                    rgb = apply_adjustments_to_rgb(rgb, adj)
                             h, w = rgb.shape[:2]
                             cap = memory_preview_max_edge()
                             if max(h, w) > cap:
