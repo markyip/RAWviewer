@@ -111,7 +111,7 @@ rm -rf dist || true
 rm -f *.spec
 
 echo "Building RAWviewer (${PROFILE})..."
-if "$PYTHON_BIN" build.py --profile "$PROFILE"; then
+if $PYTHON_BIN build.py --profile "$PROFILE"; then
     echo ""
     echo "[SUCCESS] Build completed!"
     echo ""
