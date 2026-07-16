@@ -55,6 +55,7 @@ fi
 if [ "$USE_PIXI" = "1" ]; then
     echo "Pixi environment detected. Using Pixi to build for identical performance and dependencies..."
     PYTHON_BIN="pixi run python"
+    export RAWVIEWER_USE_SYSTEM_PYTHON_BUILD=1
 else
     VENV_DIR="$REPO_ROOT/rawviewer_env"
     PYTHON_BIN="$VENV_DIR/bin/python3"
