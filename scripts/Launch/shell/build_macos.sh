@@ -47,17 +47,18 @@ if [ ! -f "icons/appicon.icns" ]; then
     echo "The app will be built without a custom icon."
 fi
 
-# Prefer the Pixi environment: it is the interpreter + exact package set the
-# app is developed and tested with, so the frozen .app matches dev behavior.
-# The venv fallback pip-installs unpinned latest versions on a different
-# Python — only used when Pixi isn't available.
-PIXI_PYTHON="$REPO_ROOT/.pixi/envs/default/bin/python"
-if [ -x "$PIXI_PYTHON" ] && "$PIXI_PYTHON" -c "import PyInstaller" >/dev/null 2>&1; then
-    PYTHON_BIN="$PIXI_PYTHON"
-    # Without this, build.py re-execs itself into ./rawviewer_env and the
-    # Pixi interpreter choice is silently discarded.
+# Prefer Pixi when available so the frozen .app matches the developed env.
+# Without RAWVIEWER_USE_SYSTEM_PYTHON_BUILD=1, build.py re-execs into
+# ./rawviewer_env and the Pixi interpreter choice is silently discarded.
+USE_PIXI=0
+if command -v pixi >/dev/null 2>&1 && [ -f "pixi.toml" ]; then
+    USE_PIXI=1
+fi
+
+if [ "$USE_PIXI" = "1" ]; then
+    echo "Pixi environment detected. Using Pixi to build for identical performance and dependencies..."
+    PYTHON_BIN="pixi run python"
     export RAWVIEWER_USE_SYSTEM_PYTHON_BUILD=1
-    echo "Using Pixi environment interpreter: $PYTHON_BIN ($("$PYTHON_BIN" --version 2>&1))"
 else
     VENV_DIR="$REPO_ROOT/rawviewer_env"
     PYTHON_BIN="$VENV_DIR/bin/python3"
@@ -114,7 +115,7 @@ rm -rf dist || true
 rm -f *.spec
 
 echo "Building RAWviewer (${PROFILE})..."
-if "$PYTHON_BIN" build.py --profile "$PROFILE"; then
+if $PYTHON_BIN build.py --profile "$PROFILE"; then
     echo ""
     echo "[SUCCESS] Build completed!"
     echo ""
