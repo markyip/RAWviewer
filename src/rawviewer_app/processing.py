@@ -1,5 +1,5 @@
 """Background RAW / pixmap processing."""
-import logging, os, time, traceback
+import logging, threading, os, time, traceback
 import numpy as np
 from PyQt6.QtCore import QThread, pyqtSignal
 from PyQt6.QtGui import QImage, QPixmap

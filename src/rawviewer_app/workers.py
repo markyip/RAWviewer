@@ -1,5 +1,5 @@
 """QRunnable background workers."""
-import logging, os, sys, time, traceback
+import logging, threading, os, sys, time, traceback
 import numpy as np
 from PyQt6.QtCore import QRunnable, QObject, pyqtSignal
 from PyQt6.QtGui import QImage
