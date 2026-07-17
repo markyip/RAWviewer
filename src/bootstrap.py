@@ -770,6 +770,23 @@ oLink2.Save
             _cleanup_partial_install(target_dir, self.log_signal.emit)
             self.finished.emit(False, "")
 
+# Darkroom palette — keep in sync with src/theme.py (installer exe is built
+# standalone, so the module is not imported here).
+_VOID = "#14120f"
+_SURFACE = "#1d1a16"
+_RAISED = "#272219"
+_RAISED_HI = "#302a1f"
+_LINE = "#3a332a"
+_LINE_SOFT = "#2a251d"
+_INK = "#ede7dd"
+_INK_MUTED = "#96897a"
+_INK_FAINT = "#665d50"
+_EMBER = "#d9691e"
+_EMBER_HOVER = "#e87f39"
+_HIST_R = "#e5484d"
+_HIST_G = "#3dd68c"
+
+
 class InstallerGUI(QMainWindow):
     _SUCCESS_DESC_BASE = (
         "Installation complete.\n\n"
@@ -812,7 +829,7 @@ class InstallerGUI(QMainWindow):
         title_layout.setContentsMargins(20, 0, 10, 0)
         
         win_title = QLabel("RAWVIEWER SETUP")
-        win_title.setStyleSheet("font-size: 11px; font-weight: 800; letter-spacing: 1px; color: #888;")
+        win_title.setStyleSheet(f"font-size: 11px; font-weight: 800; letter-spacing: 1px; color: {_INK_MUTED};")
         icon_path = _installer_icon_path()
         if icon_path:
             title_icon = QLabel()
@@ -873,87 +890,103 @@ class InstallerGUI(QMainWindow):
         layout.addWidget(self.bottom_bar)
 
     def load_styles(self):
-        self.setStyleSheet("""
-            QFrame#main_container { 
-                background-color: #121212; 
+        self.setStyleSheet(f"""
+            QFrame#main_container {{
+                background-color: {_VOID};
                 border-radius: 12px;
-                border: 1px solid #333;
-            }
-            QLabel { color: #ffffff; font-family: 'Segoe UI', Arial; }
-            QLabel#title { font-size: 32px; font-weight: bold; }
-            QLabel#desc { color: #aaa; font-size: 14px; line-height: 1.5; }
-            QLineEdit { 
-                background-color: #1e1e1e; 
-                border: 1px solid #444; 
-                padding: 10px; 
-                border-radius: 6px; 
-                color: #fff;
-            }
-            QPushButton { 
-                border-radius: 6px; 
+                border: 1px solid {_LINE};
+            }}
+            QLabel {{ color: {_INK}; font-family: 'Segoe UI', Arial; }}
+            QLabel#title {{ font-size: 32px; font-weight: bold; }}
+            QLabel#desc {{ color: {_INK_MUTED}; font-size: 14px; line-height: 1.5; }}
+            QLineEdit {{
+                background-color: {_SURFACE};
+                border: 1px solid {_LINE};
+                padding: 10px;
+                border-radius: 6px;
+                color: {_INK};
+            }}
+            QLineEdit:focus {{ border: 1px solid {_EMBER}; }}
+            QPushButton {{
+                border-radius: 6px;
                 font-weight: bold;
-            }
-            QPushButton#btn_close {
+            }}
+            QPushButton#btn_close {{
                 background: transparent;
-                color: #888;
+                color: {_INK_MUTED};
                 font-size: 16px;
                 border: none;
-            }
-            QPushButton#btn_close:hover { color: #ff5555; }
-            QPushButton#btn_cancel { 
-                background: transparent; 
-                border: 1px solid #555; 
-                color: #fff; 
-            }
-            QPushButton#btn_cancel:hover { background: #1e1e1e; border: 1px solid #777; }
-            QPushButton#btn_next { 
-                background-color: #3b82f6; 
-                color: #fff; 
-                border: none; 
-            }
-            QPushButton#btn_next:hover { background-color: #60a5fa; }
-            QFrame#bottom_bar {
-                background-color: #1a1a1a;
-                border-top: 1px solid #2a2a2a;
+            }}
+            QPushButton#btn_close:hover {{ color: {_HIST_R}; }}
+            QPushButton#btn_cancel {{
+                background: transparent;
+                border: 1px solid {_LINE};
+                color: {_INK};
+            }}
+            QPushButton#btn_cancel:hover {{ background: {_SURFACE}; border: 1px solid {_INK_FAINT}; }}
+            QPushButton#btn_next {{
+                background-color: {_EMBER};
+                color: {_INK};
+                border: none;
+            }}
+            QPushButton#btn_next:hover {{ background-color: {_EMBER_HOVER}; }}
+            QPushButton#btn_next:disabled {{ background-color: {_RAISED_HI}; color: {_INK_FAINT}; }}
+            QFrame#bottom_bar {{
+                background-color: {_SURFACE};
+                border-top: 1px solid {_LINE_SOFT};
                 border-bottom-left-radius: 12px;
                 border-bottom-right-radius: 12px;
-            }
-            QProgressBar {
-                background-color: #1e1e1e;
+            }}
+            QProgressBar {{
+                background-color: {_RAISED};
                 border-radius: 6px;
                 text-align: center;
                 color: transparent;
-            }
-            QProgressBar::chunk {
-                background-color: #3b82f6;
+            }}
+            QProgressBar::chunk {{
+                background-color: {_EMBER};
                 border-radius: 6px;
-            }
-            QPlainTextEdit {
-                background-color: #0a0a0a;
-                color: #888;
-                border: 1px solid #222;
+            }}
+            QPlainTextEdit {{
+                background-color: {_SURFACE};
+                color: {_INK_MUTED};
+                border: 1px solid {_LINE_SOFT};
                 border-radius: 6px;
                 font-family: Consolas, monospace;
                 padding: 10px;
-            }
-            QRadioButton {
-                color: #ffffff;
+            }}
+            QRadioButton {{
+                color: {_INK};
                 font-family: 'Segoe UI', Arial;
                 font-size: 13px;
-            }
-            QRadioButton::indicator {
+            }}
+            QRadioButton::indicator {{
                 width: 16px;
                 height: 16px;
-            }
-            QCheckBox {
-                color: #ffffff;
+                border-radius: 8px;
+                border: 1px solid {_LINE};
+                background: {_SURFACE};
+            }}
+            QRadioButton::indicator:checked {{
+                border: 4px solid {_EMBER};
+                background: {_INK};
+            }}
+            QCheckBox {{
+                color: {_INK};
                 font-family: 'Segoe UI', Arial;
                 font-size: 13px;
-            }
-            QCheckBox::indicator {
+            }}
+            QCheckBox::indicator {{
                 width: 16px;
                 height: 16px;
-            }
+                border-radius: 4px;
+                border: 1px solid {_LINE};
+                background: {_SURFACE};
+            }}
+            QCheckBox::indicator:checked {{
+                border: 1px solid {_EMBER};
+                background: {_EMBER};
+            }}
         """)
 
     def init_welcome_page(self):
@@ -975,7 +1008,7 @@ class InstallerGUI(QMainWindow):
         layout.addWidget(desc)
 
         options_label = QLabel("Installation Options:")
-        options_label.setStyleSheet("color: #888; font-weight: bold; margin-top: 15px;")
+        options_label.setStyleSheet(f"color: {_INK_MUTED}; font-weight: bold; margin-top: 15px;")
         layout.addWidget(options_label)
 
         self.radio_cuda = QRadioButton("Full — NVIDIA GPU (CUDA Acceleration, downloads ~600MB models)")
@@ -1005,7 +1038,7 @@ class InstallerGUI(QMainWindow):
         layout.addWidget(self.clear_cache_cb)
         
         path_label = QLabel("Installation Directory:")
-        path_label.setStyleSheet("color: #888; font-weight: bold; margin-top: 15px;")
+        path_label.setStyleSheet(f"color: {_INK_MUTED}; font-weight: bold; margin-top: 15px;")
         layout.addWidget(path_label)
         
         row = QHBoxLayout()
@@ -1016,7 +1049,7 @@ class InstallerGUI(QMainWindow):
         
         btn_browse = QPushButton("Browse...")
         btn_browse.setFixedSize(80, 36)
-        btn_browse.setStyleSheet("background: #2a2a2a; border: 1px solid #444; color: #fff;")
+        btn_browse.setStyleSheet(f"background: {_RAISED}; border: 1px solid {_LINE}; color: {_INK};")
         btn_browse.clicked.connect(self.browse_path)
         
         row.addWidget(self.path_edit)
@@ -1037,7 +1070,7 @@ class InstallerGUI(QMainWindow):
         layout.addWidget(title)
 
         self.install_step_label = QLabel("")
-        self.install_step_label.setStyleSheet("color: #A0A0A0; font-size: 13px;")
+        self.install_step_label.setStyleSheet(f"color: {_INK_MUTED}; font-size: 13px;")
         layout.addWidget(self.install_step_label)
 
         self.progress_bar = QProgressBar()
@@ -1055,7 +1088,7 @@ class InstallerGUI(QMainWindow):
         
         title = QLabel("Success!")
         title.setObjectName("title")
-        title.setStyleSheet("font-size: 40px; color: #4ade80;")
+        title.setStyleSheet(f"font-size: 40px; color: {_HIST_G};")
         layout.addWidget(title, alignment=Qt.AlignmentFlag.AlignCenter)
         
         desc = QLabel(self._SUCCESS_DESC_BASE)
