@@ -52,6 +52,9 @@ desktop.ini
 !icons/favicon.ico
 !icons/folder_open_md3.svg
 !icons/readme-icon.png
+# README screenshots (must remain tracked despite the image ignores above)
+!docs/images/*.jpg
+!docs/images/*.png
 
 # Log files
 *.log
