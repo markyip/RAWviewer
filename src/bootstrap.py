@@ -13,8 +13,11 @@ import winreg
 
 from app_version import APP_VERSION
 
+# Pin the Windows installer pixi binary so a future upstream release cannot
+# break installs mid-flight (do not use .../releases/latest/...).
+PIXI_VERSION = "0.73.0"
 PIXI_DOWNLOAD_URL = (
-    "https://github.com/prefix-dev/pixi/releases/latest/download/"
+    f"https://github.com/prefix-dev/pixi/releases/download/v{PIXI_VERSION}/"
     "pixi-x86_64-pc-windows-msvc.zip"
 )
 DOWNLOAD_RETRIES = 3
@@ -550,8 +553,15 @@ class InstallWorker(QObject):
 
             target_exe = os.path.join(target_dir, "RAWviewer.exe")
             launcher_stub_src = os.path.join(BUNDLE_DIR, "RAWviewer.exe")
+            launcher_runtime_src = os.path.join(BUNDLE_DIR, "_launcher")
             if os.path.isfile(launcher_stub_src):
                 shutil.copy2(launcher_stub_src, target_exe)
+                # onedir stub runtime (avoids PyInstaller _MEI* cleanup MessageBox)
+                if os.path.isdir(launcher_runtime_src):
+                    launcher_runtime_dst = os.path.join(target_dir, "_launcher")
+                    if os.path.isdir(launcher_runtime_dst):
+                        shutil.rmtree(launcher_runtime_dst, ignore_errors=True)
+                    shutil.copytree(launcher_runtime_src, launcher_runtime_dst)
             else:
                 self.log_signal.emit(
                     "Warning: launcher stub missing from installer; creating launcher.vbs fallback."
@@ -569,7 +579,9 @@ class InstallWorker(QObject):
             pixi_exe = os.path.join(pixi_dir, "pixi.exe")
 
             if not os.path.exists(pixi_exe):
-                self.log_signal.emit("Downloading Pixi environment manager...")
+                self.log_signal.emit(
+                    f"Downloading Pixi environment manager (v{PIXI_VERSION})..."
+                )
                 zip_path = os.path.join(pixi_dir, "pixi.zip")
                 if not _download_file_with_retry(PIXI_DOWNLOAD_URL, zip_path, self.log_signal.emit):
                     _cleanup_partial_install(target_dir, self.log_signal.emit)
@@ -1206,12 +1218,37 @@ class InstallerGUI(QMainWindow):
     def launch_app(self):
         install_dir = self.path_edit.text()
         app_exe = os.path.join(install_dir, "RAWviewer.exe")
-        if os.path.isfile(app_exe):
-            subprocess.Popen([app_exe], cwd=install_dir, creationflags=subprocess.CREATE_NO_WINDOW)
-        else:
-            launcher_vbs = os.path.join(install_dir, "launcher.vbs")
-            subprocess.Popen(["wscript.exe", launcher_vbs], creationflags=subprocess.CREATE_NO_WINDOW)
-        self.close()
+        try:
+            if os.path.isfile(app_exe):
+                # Fully detach so Setup's onefile _MEI* cleanup is not blocked
+                # by inherited handles from the child process.
+                os.startfile(app_exe)  # noqa: S606 — intended Windows shell launch
+            else:
+                launcher_vbs = os.path.join(install_dir, "launcher.vbs")
+                if os.path.isfile(launcher_vbs):
+                    os.startfile(launcher_vbs)  # noqa: S606
+                else:
+                    return
+        except OSError:
+            if os.path.isfile(app_exe):
+                flags = (
+                    getattr(subprocess, "DETACHED_PROCESS", 0)
+                    | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+                    | getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                )
+                subprocess.Popen(
+                    [app_exe],
+                    cwd=install_dir,
+                    creationflags=flags,
+                    close_fds=True,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+        # Let Qt unwind briefly before the onefile bootloader deletes _MEI*.
+        from PyQt6.QtCore import QTimer
+
+        QTimer.singleShot(400, self.close)
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:

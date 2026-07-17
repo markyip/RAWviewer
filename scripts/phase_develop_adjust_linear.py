@@ -192,6 +192,45 @@ def test_chroma_denoise_edge_bleed_bounded_near_hard_edge() -> None:
     assert np.abs(out_edge[row, 100 - 4] - target).max() < 0.08
 
 
+def test_chroma_denoise_shadow_blotch_stronger_than_midtone() -> None:
+    """Shadow-weighted coarse mix must cut blotchy chroma harder in deep
+    shadows (where Shadows2012 lift reveals it) than on a midtone flat."""
+    import cv2
+
+    from raw_chroma_denoise import _rgb_to_ycbcr, apply_chroma_denoise
+
+    rng = np.random.default_rng(1)
+    h, w = 240, 240
+
+    def blotchy(amp: float) -> tuple[np.ndarray, np.ndarray]:
+        n = rng.normal(0, 1, (h, w)).astype(np.float32)
+        n = cv2.GaussianBlur(n, (0, 0), 4.0)
+        n = n / (n.std() + 1e-6) * amp
+        return n, n.copy()
+
+    def reduction_at_base(base_level: float) -> float:
+        base = np.full((h, w, 3), base_level, dtype=np.float32)
+        noise_cb, noise_cr = blotchy(0.05)
+        img = base.copy()
+        img[:, :, 0] += noise_cr * 1.5
+        img[:, :, 2] += noise_cb * 1.8
+        img = np.clip(img, 0.0, None)
+        _, cb_in, cr_in = _rgb_to_ycbcr(img)
+        out = apply_chroma_denoise(img.copy(), strength=1.25, preview=False)
+        _, cb_out, cr_out = _rgb_to_ycbcr(out)
+        before = cb_in.std() + cr_in.std()
+        after = cb_out.std() + cr_out.std()
+        return 1.0 - after / max(before, 1e-8)
+
+    mid = reduction_at_base(0.40)
+    shadow = reduction_at_base(0.03)
+    assert shadow > mid + 0.03, (
+        f"shadow blotch reduction ({shadow * 100:.1f}%) should beat "
+        f"midtone ({mid * 100:.1f}%) by a clear margin"
+    )
+    assert shadow > 0.12, f"shadow blotch reduction too weak: {shadow * 100:.1f}%"
+
+
 def test_luma_denoise_reduces_noise_and_preserves_edge() -> None:
     from raw_chroma_denoise import _rgb_to_ycbcr, apply_luma_denoise
 

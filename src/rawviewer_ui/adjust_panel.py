@@ -897,7 +897,7 @@ class ImageAdjustPanelWidget(QWidget):
         hint.setToolTip(
             "While Adjust is open:\n"
             "• E or Esc closes the editor (restores browse RAW/JPEG mode)\n"
-            "• D / B / X / H arm Dodge / Burn / Eraser / Heal (press again to disarm)\n"
+            "• D / B / X / H arm Dodge / Burn / Eraser / Heal (press again to disarm; also disarms when the cursor leaves the image)\n"
             "• With a brush tool armed, two-finger scroll changes Brush Size "
             "(Ctrl+scroll still zooms)\n"
             "• Brush Flow changes how opaque the brush preview looks"

@@ -4,11 +4,13 @@ version = "3.0.0"
 description = "RAWviewer - Professional RAW Image Viewer with Semantic Search"
 authors = ["Mark Yip"]
 channels = ["conda-forge"]
-platforms = ["win-64", "osx-arm64", "osx-64"]
-
-# pyexiv2 arm64 wheels target macOS 14+ (macosx_14_0_arm64); Intel wheels use macosx_13_0_x86_64.
-[system-requirements]
-macos = "14.0"
+# pyexiv2 arm64 wheels target macOS 14+ (macosx_14_0_arm64); Intel wheels use
+# macosx_13_0_x86_64. Pin __osx via per-platform virtual packages (pixi >= 0.73).
+platforms = [
+    "win-64",
+    { platform = "osx-arm64", macos = "14.0" },
+    { platform = "osx-64", macos = "14.0" },
+]
 
 [tasks]
 start = "python src/main.py"

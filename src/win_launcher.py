@@ -43,12 +43,20 @@ def main() -> int:
         cmd.append("--")
         cmd.extend(file_args)
 
-    creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    creationflags = (
+        getattr(subprocess, "DETACHED_PROCESS", 0)
+        | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        | getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    )
     try:
         subprocess.Popen(
             cmd,
             cwd=install_dir,
             creationflags=creationflags,
+            close_fds=True,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
         )
     except OSError as exc:
         _show_error(f"Could not start RAWviewer:\n\n{exc}")

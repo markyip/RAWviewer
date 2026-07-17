@@ -62,7 +62,7 @@ RAWviewer 3.0 turns the viewer into a complete **cull-and-develop** tool: a full
 
 ### ⚠️ Breaking change: macOS EDR removed
 
-The 2.5 macOS EDR (HDR display) path is **removed in 3.0** — it was incompatible with the new fast loading pipeline and made RAW decoding very slow. HDR stills (HEIC/HEIF/AVIF/HDR TIFF) are tone-mapped to SDR. Restoring EDR without regressing speed is tracked under Known Issues.
+The 2.5 macOS EDR (HDR display) path is **removed in 3.0** — it was incompatible with the new fast loading pipeline and made RAW decoding very slow. HDR stills (HEIC/HEIF/AVIF/HDR TIFF) are tone-mapped to SDR. Restoring EDR without regressing speed is tracked under [Looking ahead](README.md#looking-ahead) in the README.
 
 ### Environment variables (new / notable)
 
@@ -79,25 +79,6 @@ The 2.5 macOS EDR (HDR display) path is **removed in 3.0** — it was incompatib
 2. Open a mix of ARW / CR3 / NEF (including HE\*): arrow through, zoom to 100%, confirm orientation.
 3. Rate with **1–5**, filter gallery by stars, confirm sidecars.
 4. Open Adjust (**E** or the sliders button): try WB presets, Crop, Dodge/Burn, Heal, Vignette/Dehaze, a Creative LUT; save and confirm the XMP sidecar appears next to the RAW.
-
-### ⚠️ Known Issues & Remaining Work (feasibility ranked)
-
-Rule of thumb: **if it can ship in Full, it counts as feasible** even when Lite must omit it (size / no ML).
-
-| Rank | Item | Feasibility | Effort | Notes |
-|------|------|-------------|--------|-------|
-| 1 | **Cold-folder edited tile regen** (`SIDECAR_ADJUST` / edited-preview opt-in) | **High** | M | Save-from-Adjust already bakes editor-aligned thumb/grid/preview; cold folders still show embedded JPEG until next Adjust visit |
-| 2 | **General local masks** (gradient / radial / second brush beyond D&B) | **Medium–High** | L | D&B + crop already ship; extend private mask schema / UI |
-| 3 | **DNG export / round-trip** | **Medium** | L | Writer removed 2026-07; needs a real DNG path, not a stub |
-| 4 | **Object / subject ML masks** | **Medium** | L | Full-only (model size); Lite stays brush/geometry |
-| 5 | **Windows HDR display path** | **Medium** | L | macOS EDR was removed for Fast RAW perf; Windows still SDR tone-map |
-| 6 | **Restore macOS EDR alongside Fast RAW** | **Low–Medium** | L | Previously conflicted with the fast load pipeline; needs a non-regressing design |
-| 7 | **VLM-assisted auto adjust** | **Low–Medium** | L | Product + model/API scope; not blocked by editor plumbing alone |
-| 8 | **Edit Nikon HE/HE\* NEF as RAW** | **Low** | L+ | LibRaw cannot unpack HE mosaics today → browse-only by design until a decoder exists |
-
-**Still true today (bugs / limits, not roadmap fluff):**
-- **Cold gallery tiles** for never-opened-in-Adjust edits may still show embedded JPEG (edited **badge** + save-bake cover the common path). Same root as row 1 above.
-- **Nikon HE-NEF**: Adjust disabled; embedded JPEG browse only (row 8).
 
 ---
 

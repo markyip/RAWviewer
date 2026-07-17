@@ -139,18 +139,7 @@ Full list and dev defaults: [`scripts/Launch/README.md`](../scripts/Launch/READM
 
 ## Upcoming / remaining work
 
-Tracked in [`RELEASE_NOTES.md`](../RELEASE_NOTES.md) (v3.0 Known Issues & Remaining Work).
-
-**Windows HDR / restore Mac EDR safely** — v2.5 shipped macOS EDR; **3.0 removed it** so Fast RAW stays fast. A future path would use HDR-capable displays without regressing browse speed.
-
-**Remaining work (feasibility high → low):**
-1. **Cold-folder edited tile regen** — save-from-Adjust already bakes editor-aligned thumbs; optional full `SIDECAR_ADJUST` for never-opened edits.
-2. **Broader local masks** — gradients / clone stamp (Dodge/Burn + Heal + crop already ship).
-3. **DNG export** — real writer.
-4. **ML subject masks** — Full only.
-5. **Windows HDR / restore Mac EDR safely**.
-6. **VLM-assisted adjust** — large product/model scope.
-7. **HE-NEF RAW edit** — blocked until a decoder exists (browse-only today).
+Tracked in the README — [Looking ahead](../README.md#looking-ahead) (not in release notes; those cover shipped features only).
 
 **Shipped in 3.0:** Fast RAW vs 2.5, Adjust panel (HSL, Creative LUT, WB presets, crop, D&B + Heal, vignette/dehaze, XMP presets), OpenMP LibRaw in macOS packages, star ratings, burst / Compare (**C**), Lite without torch, gallery loading overhaul. GPU **viewport** on by default (`RAWVIEWER_GPU_VIEW=0` to disable).
 

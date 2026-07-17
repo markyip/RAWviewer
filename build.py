@@ -423,8 +423,13 @@ def _windows_setup_exe_name(accel: str, *, profile: str = "full") -> str:
     return f"RAWviewer_Setup_{suffix}"
 
 
-def build_windows_launcher_stub(icon_path: str | None) -> Path:
-    """Build a tiny RAWviewer.exe that launches pixi in the install directory."""
+def build_windows_launcher_stub(icon_path: str | None) -> tuple[Path, Path]:
+    """Build a tiny onedir RAWviewer.exe that launches pixi in the install directory.
+
+    onedir (not onefile) avoids PyInstaller's ``_MEI*`` extract/cleanup MessageBox
+    on every short-lived launcher exit. Runtime files go in ``_launcher`` so they
+    do not collide with the install folder's ``_internal/pixi``.
+    """
     stub_root = REPO_ROOT / "build" / "launcher_stub"
     dist_dir = stub_root / "dist"
     work_dir = stub_root / "build"
@@ -440,7 +445,9 @@ def build_windows_launcher_stub(icon_path: str | None) -> Path:
         sys.executable,
         "-m",
         "PyInstaller",
-        "--onefile",
+        "--onedir",
+        "--contents-directory",
+        "_launcher",
         "--windowed",
         "--noconfirm",
         "--name",
@@ -466,17 +473,22 @@ def build_windows_launcher_stub(icon_path: str | None) -> Path:
     if icon_path and os.path.isfile(icon_path):
         cmd.extend(["--icon", icon_path])
 
-    print("[INFO] Building Windows launcher stub (RAWviewer.exe)...")
+    print("[INFO] Building Windows launcher stub (RAWviewer.exe onedir)...")
     if not run_command(cmd):
         print("[ERROR] Launcher stub build failed.")
         sys.exit(1)
 
-    out = dist_dir / "RAWviewer.exe"
-    if not out.is_file():
-        print(f"[ERROR] Launcher stub was not created: {out}")
+    out_dir = dist_dir / "RAWviewer"
+    out_exe = out_dir / "RAWviewer.exe"
+    out_runtime = out_dir / "_launcher"
+    if not out_exe.is_file() or not out_runtime.is_dir():
+        print(f"[ERROR] Launcher stub was not created under: {out_dir}")
         sys.exit(1)
-    print(f"[INFO] Launcher stub ready: {out} ({out.stat().st_size:,} bytes)")
-    return out
+    print(
+        f"[INFO] Launcher stub ready: {out_exe} "
+        f"({out_exe.stat().st_size:,} bytes) + {out_runtime.name}/"
+    )
+    return out_exe, out_runtime
 
 
 def _macos_rawpy_openmp_binaries() -> list[Path]:
@@ -879,10 +891,11 @@ def main():
         add_data_args.append(f'--add-data "{lite_str};."')
         
         app_bundle_name = "RAWviewer_Setup"
-        launcher_stub = build_windows_launcher_stub(
+        launcher_exe, launcher_runtime = build_windows_launcher_stub(
             icon_path if os.path.exists(icon_path) else None
         )
-        add_data_args.append(f'--add-data "{launcher_stub.resolve()};."')
+        add_data_args.append(f'--add-data "{launcher_exe.resolve()};."')
+        add_data_args.append(f'--add-data "{launcher_runtime.resolve()};_launcher"')
         print(f"[INFO] Windows installer output: dist\\{app_bundle_name}.exe")
         print("[INFO] Bundling all Windows environment manifests (CUDA, DirectML, and Lite).")
     add_data_arg_str = " ".join(add_data_args)

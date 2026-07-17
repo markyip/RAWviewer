@@ -8619,6 +8619,9 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                     self.gpu_view.dodgeBurnBrushSizeWheel.connect(
                         self._on_dodge_burn_brush_size_wheel
                     )
+                    self.gpu_view.brushToolLeftImage.connect(
+                        self._on_brush_tool_left_image
+                    )
                     self.gpu_view.cropInsetsChanged.connect(self._on_crop_insets_live)
                     self.gpu_view.cropEditingFinished.connect(
                         lambda: None
@@ -21604,6 +21607,13 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             if mode is not None:
                 self._sync_dodge_burn_brush_cursor()
         self._sync_dodge_burn_mask_overlay()
+
+    def _on_brush_tool_left_image(self) -> None:
+        """Disarm Dodge/Burn/Eraser/Heal when the cursor leaves the photo."""
+        panel = getattr(self, "single_image_adjust_panel", None)
+        if panel is not None and hasattr(panel, "disarm_dodge_burn"):
+            if panel.dodge_burn_mode() is not None:
+                panel.disarm_dodge_burn()
 
     def _sync_dodge_burn_brush_cursor(self) -> None:
         panel = getattr(self, "single_image_adjust_panel", None)

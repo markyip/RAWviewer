@@ -476,6 +476,9 @@ class GpuImageView(QGraphicsView):
     # host's cue to edge-snap the touched region and trigger the exact
     # (worker-thread) re-render.
     dodgeBurnStroke = pyqtSignal(QPointF, float, bool)
+    # Mouse left the photo (or the view) while a brush tool was armed — host
+    # should disarm Dodge/Burn/Eraser/Heal so the tool does not stay sticky.
+    brushToolLeftImage = pyqtSignal()
     # Vertical wheel/trackpad delta while D&B is armed — host nudges Brush Size
     # instead of navigating images.
     dodgeBurnBrushSizeWheel = pyqtSignal(int)
@@ -1795,6 +1798,27 @@ class GpuImageView(QGraphicsView):
             max(0.0, min(scene_pt.y(), max(0, self._img_h - 1))),
         )
 
+    def _view_pos_on_image(self, view_pos) -> bool:
+        """True when ``view_pos`` maps onto the pixmap (not letterbox / off-view)."""
+        if not getattr(self, "_has_pixmap", False):
+            return False
+        if self._img_w <= 0 or self._img_h <= 0:
+            return False
+        scene_pt = self.mapToScene(view_pos)
+        return (
+            0.0 <= scene_pt.x() < float(self._img_w)
+            and 0.0 <= scene_pt.y() < float(self._img_h)
+        )
+
+    def _maybe_emit_brush_tool_left_image(self, view_pos=None) -> None:
+        if not getattr(self, "_dodge_burn_mode", False):
+            return
+        if getattr(self, "_dodge_burn_painting", False):
+            return
+        if view_pos is not None and self._view_pos_on_image(view_pos):
+            return
+        self.brushToolLeftImage.emit()
+
     # --------------------------------------------------------- compare split
     def set_compare_original_pixmap(self, pixmap: QPixmap | None) -> None:
         """Provide the unedited render to show on the left of the divider."""
@@ -1877,8 +1901,13 @@ class GpuImageView(QGraphicsView):
     def mousePressEvent(self, event) -> None:
         if event.button() == Qt.MouseButton.LeftButton and self._dodge_burn_mode:
             if self._has_pixmap:
+                view_pos = event.position().toPoint()
+                if not self._view_pos_on_image(view_pos):
+                    self._maybe_emit_brush_tool_left_image(view_pos)
+                    event.accept()
+                    return
                 self._dodge_burn_painting = True
-                pt = self._clamped_scene_point(event.position().toPoint())
+                pt = self._clamped_scene_point(view_pos)
                 self._place_brush_cursor(pt)
                 self.dodgeBurnStroke.emit(pt, self._mouse_stroke_pressure(event), False)
             event.accept()
@@ -1919,11 +1948,17 @@ class GpuImageView(QGraphicsView):
 
     def mouseMoveEvent(self, event) -> None:
         if self._dodge_burn_mode and self._has_pixmap:
-            pt = self._clamped_scene_point(event.position().toPoint())
-            self._place_brush_cursor(pt)
-            if (event.buttons() & Qt.MouseButton.LeftButton) and getattr(
+            view_pos = event.position().toPoint()
+            painting = (event.buttons() & Qt.MouseButton.LeftButton) and getattr(
                 self, "_dodge_burn_painting", False
-            ):
+            )
+            if not painting and not self._view_pos_on_image(view_pos):
+                self._maybe_emit_brush_tool_left_image(view_pos)
+                event.accept()
+                return
+            pt = self._clamped_scene_point(view_pos)
+            self._place_brush_cursor(pt)
+            if painting:
                 self.dodgeBurnStroke.emit(pt, self._mouse_stroke_pressure(event), False)
                 event.accept()
                 return
@@ -1976,8 +2011,11 @@ class GpuImageView(QGraphicsView):
             self, "_dodge_burn_painting", False
         ):
             self._dodge_burn_painting = False
-            pt = self._clamped_scene_point(event.position().toPoint())
+            view_pos = event.position().toPoint()
+            pt = self._clamped_scene_point(view_pos)
             self.dodgeBurnStroke.emit(pt, self._mouse_stroke_pressure(event), True)
+            if not self._view_pos_on_image(view_pos):
+                self._maybe_emit_brush_tool_left_image(view_pos)
             event.accept()
             return
         if event.button() == Qt.MouseButton.LeftButton and self._compare_dragging_divider:
@@ -1993,6 +2031,11 @@ class GpuImageView(QGraphicsView):
             event.accept()
             return
         super().mouseReleaseEvent(event)
+
+    def leaveEvent(self, event) -> None:
+        # Leaving the view (e.g. into the Adjust panel) disarms brush tools.
+        self._maybe_emit_brush_tool_left_image(None)
+        super().leaveEvent(event)
 
     def _start_drag(self) -> None:
         if not self._export_drag_allowed():
@@ -2070,19 +2113,32 @@ class GpuImageView(QGraphicsView):
         from PyQt6.QtCore import QEvent as _QEvent
 
         pressure = max(0.0, min(1.0, float(event.pressure())))
-        pt = self._clamped_scene_point(event.position().toPoint())
-        self._place_brush_cursor(pt)
+        view_pos = event.position().toPoint()
         etype = event.type()
+        painting = getattr(self, "_dodge_burn_painting", False)
+        if (
+            etype == _QEvent.Type.TabletMove
+            and not painting
+            and not self._view_pos_on_image(view_pos)
+        ):
+            self._maybe_emit_brush_tool_left_image(view_pos)
+            event.accept()
+            return
+        pt = self._clamped_scene_point(view_pos)
+        self._place_brush_cursor(pt)
         if etype == _QEvent.Type.TabletPress:
+            if not self._view_pos_on_image(view_pos):
+                event.accept()
+                return
             self._dodge_burn_painting = True
             self.dodgeBurnStroke.emit(pt, pressure, False)
-        elif etype == _QEvent.Type.TabletMove and getattr(
-            self, "_dodge_burn_painting", False
-        ):
+        elif etype == _QEvent.Type.TabletMove and painting:
             self.dodgeBurnStroke.emit(pt, pressure, False)
         elif etype == _QEvent.Type.TabletRelease:
             self._dodge_burn_painting = False
             self.dodgeBurnStroke.emit(pt, pressure, True)
+            if not self._view_pos_on_image(view_pos):
+                self._maybe_emit_brush_tool_left_image(view_pos)
         event.accept()
 
     def wheelEvent(self, event) -> None:

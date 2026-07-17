@@ -128,6 +128,17 @@ def _luma_edge_weight(y: np.ndarray, *, soft: float = 0.04) -> np.ndarray:
     return grad / (grad + soft)
 
 
+def _shadow_weight(y: np.ndarray, *, mid: float = 0.12) -> np.ndarray:
+    """~1 in deep shadows, falls toward 0 in midtones/highlights.
+
+    Scene-linear relative luminance: lifting Shadows2012 amplifies chroma
+    blotches that live in these dark regions, so the coarse chroma pass
+    should lean harder there than on well-exposed flats.
+    """
+    yf = np.maximum(y.astype(np.float32, copy=False), 0.0)
+    return mid / (mid + yf)
+
+
 def apply_chroma_denoise(
     rgb_linear: np.ndarray,
     *,
@@ -138,11 +149,12 @@ def apply_chroma_denoise(
     """
     Denoise chroma (Cb/Cr); luminance is unchanged.
 
-    Two passes, both edge-aware: a small-kernel bilateral filter (fine,
+    Two passes, both edge-aware: a small-kernel bilateral/guided filter (fine,
     pixel-scale noise) followed by a downsample/blur/upsample pass (coarse,
-    blotchy noise a small kernel can't reach), blended back in proportion to
-    how flat the region is (via a luma-gradient edge mask) so real color
-    edges stay sharp while flat regions get the much stronger coarse pass.
+    blotchy noise a small kernel can't reach). The coarse pass is blended
+    stronger in flat regions (luma-edge mask) and stronger still in deep
+    shadows (shadow weight), where lifting Shadows2012 reveals Bayer chroma
+    blotches that midtone settings under-treat.
 
     ``strength`` is expected in ~[0, 1.5] (matches the existing Chroma NR
     toggle's scaling).
@@ -159,20 +171,18 @@ def apply_chroma_denoise(
     cb_fine = _denoise_channel(cb, sigma_color, method=method, preview=preview)
     cr_fine = _denoise_channel(cr, sigma_color, method=method, preview=preview)
 
-    # factor/blur_sigma/coarse_mix were tuned against a synthetic edge test
-    # (a hard red|blue boundary) to keep bleed within ~4px of a real edge at
-    # even the strongest setting (measured max channel error ~0.055 at 4px,
-    # ~0.01 at 6px, ~0 at 8px+) while still meaningfully cutting blotchy,
-    # spatially-correlated noise a small bilateral kernel can't reach (~13%
-    # extra std reduction at max strength on noise with a several-pixel
-    # correlation length, on top of the bilateral pass above).
+    # factor/blur_sigma/coarse_mix: slightly stronger blotch reach than the
+    # original (factor 3 / mix≤0.6), with shadow-weighted extra mix. Edge
+    # bleed stays bounded by the luma-edge mask (phase_develop tests).
     factor = 2 if preview else 3
-    blur_sigma = 0.3 + s * 0.33
+    blur_sigma = 0.35 + s * 0.40
     cb_coarse = _downsample_blur_upsample(cb_fine, factor, blur_sigma)
     cr_coarse = _downsample_blur_upsample(cr_fine, factor, blur_sigma)
 
-    edge_w = _luma_edge_weight(y)
-    coarse_mix = min(0.6, 0.15 + s * 0.3)
+    edge_w = _luma_edge_weight(y, soft=0.03)
+    shadow_w = _shadow_weight(y)
+    # Midtone base ≈ original mix curve; shadows lean harder into coarse.
+    coarse_mix = np.clip(0.16 + s * 0.32 + shadow_w * (0.20 + s * 0.28), 0.0, 0.85)
     blend = coarse_mix * (1.0 - edge_w)
     cb_out = cb_fine * (1.0 - blend) + cb_coarse * blend
     cr_out = cr_fine * (1.0 - blend) + cr_coarse * blend

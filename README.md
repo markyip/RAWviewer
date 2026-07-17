@@ -322,6 +322,30 @@ To clear cache: **`scripts\Launch\bat\clear_cache.bat`** (Windows) · **`scripts
 
 ---
 
+## Looking ahead
+
+Project directions and remaining work that are **not** tied to a particular release. Release notes cover shipped features only.
+
+Rule of thumb: **if it can ship in Full, it counts as feasible** even when Lite must omit it (size / no ML).
+
+| Rank | Item | Feasibility | Effort | Notes |
+|------|------|-------------|--------|-------|
+| 1 | **Cold-folder edited tile regen** (`SIDECAR_ADJUST` / edited-preview opt-in) | **High** | M | Save-from-Adjust already bakes editor-aligned thumb/grid/preview; cold folders still show embedded JPEG until next Adjust visit |
+| 2 | **General local masks** (gradient / radial / second brush beyond D&B) | **Medium–High** | L | D&B + crop already ship; extend private mask schema / UI |
+| 3 | **DNG export / round-trip** | **Medium** | L | Writer removed 2026-07; needs a real DNG path, not a stub |
+| 4 | **Object / subject ML masks** | **Medium** | L | Full-only (model size); Lite stays brush/geometry |
+| 5 | **Windows HDR display path** | **Medium** | L | macOS EDR was removed for Fast RAW perf; Windows still SDR tone-map |
+| 6 | **Restore macOS EDR alongside Fast RAW** | **Low–Medium** | L | Previously conflicted with the fast load pipeline; needs a non-regressing design |
+| 7 | **VLM-assisted auto adjust** | **Low–Medium** | L | Product + model/API scope (e.g. local Ollama); not blocked by editor plumbing alone |
+| 8 | **Google Drive browse / edit / XMP sync** | **Medium** | L | Local cache sync (download → existing pipeline → upload XMP/export); OAuth + virtual folder session |
+| 9 | **Edit Nikon HE/HE\* NEF as RAW** | **Low** | L+ | LibRaw cannot unpack HE mosaics today → browse-only by design until a decoder exists |
+
+**Current limits (not aspirational):**
+- **Cold gallery tiles** for never-opened-in-Adjust edits may still show embedded JPEG (edited **badge** + save-bake cover the common path). Same root as row 1.
+- **Nikon HE-NEF**: Adjust disabled; embedded JPEG browse only (row 9).
+
+---
+
 ## For developers
 
 Build scripts, environment variables, memory tuning, and architecture notes: **[docs/DEVELOPING.md](docs/DEVELOPING.md)**. Pull requests welcome.
