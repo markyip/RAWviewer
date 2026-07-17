@@ -1544,11 +1544,11 @@ class ImageAdjustPanelWidget(QWidget):
             if nn_denoise_available():
                 export_menu.addSeparator()
                 export_menu.addAction(
-                    "JPEG + AI denoise (realPLKSR)",
+                    "JPEG + AI denoise (SCUNet)",
                     lambda: self._request_export("jpeg_nn"),
                 )
                 export_menu.addAction(
-                    "16-bit TIFF + AI denoise",
+                    "16-bit TIFF + AI denoise (SCUNet)",
                     lambda: self._request_export("tiff16_nn"),
                 )
         except Exception:

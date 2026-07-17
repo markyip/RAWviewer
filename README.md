@@ -50,7 +50,7 @@
 
 ## New in 3.0
 
-- **Adjust panel** — develop RAWs non-destructively: tone, white-balance presets, crop, dodge & burn, healing, vignette/dehaze, creative LUTs, and savable presets
+- **Adjust panel** — develop RAWs non-destructively: tone, white-balance presets, crop, dodge & burn, healing, vignette/dehaze, creative LUTs, and savable presets; export JPEG / WebP / 16-bit TIFF (**Full** also offers export-only **AI denoise** via SCUNet)
 - **Star ratings** — rate 1–5 with the number keys; filter the gallery by minimum rating
 - **Faster RAW loading** than 2.5 across browsing and zooming
 - **Nikon High Efficiency (HE/HE*) files** now open for browsing and culling
@@ -207,6 +207,7 @@ Both editions have the complete viewer: gallery, culling, Compare, star ratings,
 | | Lite | Full |
 |---|:--:|:--:|
 | Everything above — browse, cull, rate, compare, develop, export | ✅ | ✅ |
+| Export-time AI denoise (SCUNet) | — | ✅ |
 | Search by describing the photo (`sunset on beach`) | — | ✅ |
 | Find photos with people (`has:face`) | — | ✅ |
 | Install size | ~500 MB | ~1.5 GB+ |
@@ -335,10 +336,11 @@ Build scripts, environment variables, memory tuning, and architecture notes: **[
 
 RAWviewer stands on excellent open-source work, including:
 
-- **AI denoise model:** [1xDeNoise_realplksr_otf](https://openmodeldb.info/models/1x-DeNoise-realplksr-otf) by **Philip Hofmann** (CC-BY-4.0) — used for the export-time neural noise reduction
+- **AI denoise model:** [SCUNet](https://github.com/cszn/SCUNet) `scunet_color_real_psnr` by **Kai Zhang et al.** (Apache-2.0) — export-only neural noise reduction ([paper](https://doi.org/10.1007/s11633-023-1466-0); weights from [KAIR](https://github.com/cszn/KAIR/releases/tag/v1.0))
 - **[LibRaw](https://www.libraw.org/)** / **[rawpy](https://github.com/letmaik/rawpy)** — RAW decoding
 - **[MobileCLIP](https://github.com/apple/ml-mobileclip)** (Apple) — on-device photo-description search (Full edition)
 - **[Qt / PyQt6](https://www.riverbankcomputing.com/software/pyqt/)** — application framework
+- **[spandrel](https://github.com/chaiNNer-org/spandrel)** — loads the SCUNet checkpoint for export denoise
 
 ## License
 

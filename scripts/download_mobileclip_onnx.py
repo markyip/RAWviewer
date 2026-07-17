@@ -161,12 +161,12 @@ def main() -> int:
 
         shutil.rmtree(MODELS_DIR / "onnx")
 
-    denoise_model_path = MODELS_DIR.parent / "1xDeNoise_realplksr_otf.safetensors"
+    denoise_model_path = MODELS_DIR.parent / "scunet_color_real_psnr.pth"
     if not denoise_model_path.exists():
         def _fetch_denoise_model():
-            print("[INFO] Fetching AI denoise model (realPLKSR)", flush=True)
+            print("[INFO] Fetching AI denoise model (SCUNet real_psnr)", flush=True)
             _download_url_with_progress(
-                "https://github.com/Phhofm/models/releases/download/1xDeNoise_realplksr_otf/1xDeNoise_realplksr_otf.safetensors",
+                "https://github.com/cszn/KAIR/releases/download/v1.0/scunet_color_real_psnr.pth",
                 denoise_model_path,
                 stage_start=TEXT_PCT_END,
                 stage_end=DENOISE_PCT_END,

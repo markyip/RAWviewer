@@ -936,10 +936,10 @@ def export_adjusted_image(
 ) -> None:
     """Dispatch baked export (TIFF16 / JPEG / WebP; "_nn" suffix = AI denoise).
 
-    The "<fmt>_nn" variants run the realPLKSR export denoise
+    The "<fmt>_nn" variants run SCUNet real_psnr export denoise
     (raw_nn_denoise.py) on the display-referred buffer just before encoding.
-    Export-only: inference costs ~830 ms/MP even at fp16/CUDA, so it never
-    belongs in the live preview path.
+    Export-only: inference is too slow for live preview and is never applied
+    during Adjust browsing.
     """
     fmt = (export_format or EXPORT_FORMAT_TIFF16).strip().lower()
     nn = fmt.endswith("_nn")

@@ -20,7 +20,7 @@ RAWviewer 3.0 turns the viewer into a complete **cull-and-develop** tool: a full
 - **Local tools:** **Dodge & Burn** with soft circular stamps, Edge Assist, and mask overlay; **Heal (H)** inpainting for dust/smudge removal. Both work in Lite and Full.
 - **Effects & detail:** vignette (Amount/Midpoint), dehaze, sharpness, chroma noise reduction with selectable method.
 - **Looks:** **Creative LUT** (`.cube` drag-drop + managed library) and managed **XMP presets** — import, apply, remove.
-- **Export** to JPEG / WebP / 16-bit TIFF with a progress dialog and cancel; **AI denoise** export path (Full, realPLKSR model).
+- **Export** to JPEG / WebP / 16-bit TIFF with a progress dialog and cancel; **AI denoise** on export only (Full; [SCUNet](https://github.com/cszn/SCUNet) `scunet_color_real_psnr` by Kai Zhang et al., Apache-2.0 — not applied during Adjust preview).
 - A new **Adjust button** in the single-view bar opens the editor (mirrors the **E** shortcut, highlights while active).
 
 #### ⭐ Star ratings

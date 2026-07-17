@@ -23264,16 +23264,22 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         raw_fmt = (export_format or EXPORT_FORMAT_TIFF16).strip().lower()
         if raw_fmt.endswith("_nn"):
             try:
-                from raw_nn_denoise import nn_denoise_weights_present
+                from raw_nn_denoise import model_filename, nn_denoise_weights_present
                 if not nn_denoise_weights_present():
                     from PyQt6.QtWidgets import QDialog
                     from rawviewer_ui.denoise_download_dialog import DenoiseModelDownloadDialog
                     dest_dir = os.environ.get("LOCALAPPDATA", "")
                     if dest_dir:
-                        dest_path = os.path.join(dest_dir, "RAWviewer", "models", "1xDeNoise_realplksr_otf.safetensors")
+                        dest_path = os.path.join(
+                            dest_dir, "RAWviewer", "models", model_filename()
+                        )
                     else:
-                        dest_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "models", "1xDeNoise_realplksr_otf.safetensors")
-                    
+                        dest_path = os.path.join(
+                            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                            "models",
+                            model_filename(),
+                        )
+
                     dialog = DenoiseModelDownloadDialog(dest_path=dest_path, parent=self)
                     if dialog.exec() != QDialog.DialogCode.Accepted:
                         return

@@ -37,7 +37,7 @@ _WINDOWS_LITE_PIXI_SKIP = (
 # the Lite pixi manifest would make every Adjust panel control crash with
 # ModuleNotFoundError on first use. See docs/EDIT_PIPELINE.md "Installer size".
 # torch/kornia stay skipped: Lite is browse + light Adjust on CPU; Full ships
-# CUDA demosaic (and optional realPLKSR export denoise) separately.
+# CUDA demosaic (and optional SCUNet export denoise) separately.
 
 
 def write_app_version() -> None:

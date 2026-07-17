@@ -29,7 +29,9 @@ class DenoiseDownloadWorker(QThread):
     def __init__(self, dest_path: str, parent=None):
         super().__init__(parent)
         self.dest_path = dest_path
-        self.url = "https://github.com/Phhofm/models/releases/download/1xDeNoise_realplksr_otf/1xDeNoise_realplksr_otf.safetensors"
+        from raw_nn_denoise import model_download_url
+
+        self.url = model_download_url()
 
     def run(self):
         dest = Path(self.dest_path)
@@ -193,9 +195,12 @@ class DenoiseModelDownloadDialog(QDialog):
         title.setStyleSheet(self._title_style())
         layout.addWidget(title)
 
+        from raw_nn_denoise import model_download_size_mb
+
         message = QLabel(
-            "AI denoise requires a one-time download of the realPLKSR model "
-            "(~1 MB, internet required). It will be saved locally for offline use."
+            "AI denoise (export only) requires a one-time download of the "
+            f"SCUNet real_psnr model (~{model_download_size_mb()} MB, internet "
+            "required). It will be saved locally for offline use."
         )
         message.setWordWrap(True)
         message.setStyleSheet(self._body_style())
@@ -236,7 +241,9 @@ class DenoiseModelDownloadDialog(QDialog):
         title.setStyleSheet(self._title_style())
         layout.addWidget(title)
 
-        self._progress_message = QLabel("Downloading 1xDeNoise_realplksr_otf…")
+        from raw_nn_denoise import model_filename
+
+        self._progress_message = QLabel(f"Downloading {model_filename()}…")
         self._progress_message.setWordWrap(False)
         self._progress_message.setStyleSheet(self._body_style())
         layout.addWidget(self._progress_message)

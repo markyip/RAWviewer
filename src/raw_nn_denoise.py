@@ -1,25 +1,20 @@
-"""Neural denoise (realPLKSR) for baked export -- NOT a live pipeline stage.
+"""Neural denoise (SCUNet) for baked export -- NOT a live pipeline stage.
 
-Model: 1xDeNoise_realplksr_otf by Philip Hofmann (CC-BY-4.0),
-https://openmodeldb.info/models/1x-DeNoise-realplksr-otf -- a 1x RealPLKSR
-restoration net trained with the realesrgan-otf degradation pipeline. On real
-high-ISO files it removes chroma speckle while keeping surface texture that
-the guided-filter chain blurs away (measured: high-pass energy 9.1 -> 6.5 vs
-guided's 2.4 on an ISO 6400 RW2 crop).
+Model: scunet_color_real_psnr from SCUNet / KAIR by Kai Zhang et al.
+(Apache-2.0), https://github.com/cszn/SCUNet -- Practical Blind Image Denoising
+via Swin-Conv-UNet and Data Synthesis (Machine Intelligence Research, 2023).
+The PSNR checkpoint is the faithful real-world blind denoise variant (vs the
+GAN checkpoint, which is more aggressive / perceptual).
 
-Export-only by design: fp16 CUDA inference measures ~830 ms/MP (a 24MP export
-adds ~20s -- fp32 was 3.5 s/MP, so fp16 alone is a 4.3x speedup; larger tiles
-and channels_last measured no further gain on a 12GB RTX). That is far too
-slow for live preview and entirely acceptable for a one-shot export.
-
-The model runs on DISPLAY-REFERRED sRGB (what it was trained on), i.e. after
-tone mapping/encode, immediately before the file is written.
+Export-only by design: inference is too slow for live preview and is applied
+on the DISPLAY-REFERRED sRGB buffer (what the model was trained on) immediately
+before the file is written -- never during Adjust preview or browsing.
 
 Weights are looked up at (first hit wins):
   1. RAWVIEWER_NN_DENOISE_MODEL (explicit path)
-  2. %LOCALAPPDATA%/RAWviewer/models/1xDeNoise_realplksr_otf.safetensors
-  3. <repo>/models/1xDeNoise_realplksr_otf.safetensors
-Requires the `spandrel` package and a CUDA torch build; anything missing makes
+  2. %LOCALAPPDATA%/RAWviewer/models/scunet_color_real_psnr.pth
+  3. <repo>/models/scunet_color_real_psnr.pth
+Requires the `spandrel` package and CUDA or MPS torch; anything missing makes
 nn_denoise_available() False and the export UI hides the option.
 """
 
@@ -34,21 +29,39 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
-_MODEL_FILENAME = "1xDeNoise_realplksr_otf.safetensors"
-_TILE = 512      # processing tile (fastest measured fp16 configuration)
-_MARGIN = 32     # per-side context margin; only the inner region is kept,
-                 # which makes tiling seam-free without feather blending
+_MODEL_FILENAME = "scunet_color_real_psnr.pth"
+_MODEL_URL = (
+    "https://github.com/cszn/KAIR/releases/download/v1.0/scunet_color_real_psnr.pth"
+)
+# Approximate download size shown in the download dialog (~68.6 MiB).
+_MODEL_SIZE_MB = 69
+# SCUNet tiling is discouraged by spandrel (global context); keep a generous
+# overlap so export of multi-megapixel photos stays VRAM-safe without seams.
+_TILE = 512
+_MARGIN = 64
 _lock = threading.Lock()
-_model = None          # loaded torch module (fp16, cuda) or None
+_model = None          # spandrel ImageModelDescriptor (fp16) or None
 _model_failed = False
 # Optional cancel probe installed by the export dispatcher for the duration of
 # one export (see raw_edit_pipeline.export_adjusted_image). Checked between
-# tiles, so cancellation lands within one ~2s tile of the request.
+# tiles, so cancellation lands within one tile of the request.
 _cancel_check = None
 # Optional progress probe installed alongside _cancel_check for the duration
 # of one export. Called (tiles_done, tiles_total) after each tile so the
 # export dialog can show real, tile-driven percentage instead of a marquee.
 _progress_cb = None
+
+
+def model_filename() -> str:
+    return _MODEL_FILENAME
+
+
+def model_download_url() -> str:
+    return _MODEL_URL
+
+
+def model_download_size_mb() -> int:
+    return _MODEL_SIZE_MB
 
 
 def set_cancel_check(fn) -> None:
@@ -125,7 +138,9 @@ def _load_model():
             if path is None or device_name == "cpu":
                 raise RuntimeError("weights or CUDA/MPS unavailable")
             desc = ModelLoader().load_from_file(path)
-            _model = desc.model.to(device_name).eval().to(torch.float16)
+            # Keep the ImageModelDescriptor so __call__ applies size padding.
+            desc = desc.to(device_name).eval().half()
+            _model = desc
             logger.info(
                 "[NN_DENOISE] loaded %s (%s) fp16/%s",
                 os.path.basename(path), desc.architecture.name, device_name,
@@ -140,14 +155,11 @@ def _load_model():
 def denoise_display_float(rgb01: np.ndarray) -> Optional[np.ndarray]:
     """Denoise a display-referred float32 [0,1] HxWx3 buffer. None on failure.
 
-    Seam-free margin tiling: each 512px tile carries a 32px context margin
-    and only its interior is written back, so no blending pass is needed.
-    Luminance-preserving: the model slightly darkens the frame (removing
-    noise removes the upward brightness bias noise causes after gamma), which
-    reads as a tone shift next to the un-denoised render -- corrected with a
-    single global gain matching the output's mean luminance back to the
-    source (gated to sane ratios so a pathological output can't be
-    over-amplified).
+    Seam-aware margin tiling: each tile carries a context margin and only its
+    interior is written back. Luminance-preserving: the model slightly darkens
+    the frame (removing noise removes the upward brightness bias noise causes
+    after gamma), corrected with a single global gain matching mean luminance
+    back to the source (gated to sane ratios).
     """
     if _cancel_check is not None and _cancel_check():
         raise NNDenoiseCancelled()
@@ -172,13 +184,13 @@ def denoise_display_float(rgb01: np.ndarray) -> Optional[np.ndarray]:
                     ys, xs = max(0, y0 - _MARGIN), max(0, x0 - _MARGIN)
                     ye, xe = min(h, y0 + step + _MARGIN), min(w, x0 + step + _MARGIN)
                     tile = np.ascontiguousarray(rgb01[ys:ye, xs:xe])
-                    device = next(model.parameters()).device
                     t = (
                         torch.from_numpy(tile)
                         .permute(2, 0, 1)
                         .unsqueeze(0)
-                        .to(device, torch.float16)
+                        .to(device=model.device, dtype=model.dtype)
                     )
+                    # Descriptor pads to size_requirements and strips padding.
                     r = model(t).clamp_(0, 1)
                     r = r.squeeze(0).permute(1, 2, 0).float().cpu().numpy()
                     iy0, ix0 = y0 - ys, x0 - xs

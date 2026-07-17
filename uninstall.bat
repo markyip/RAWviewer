@@ -127,7 +127,7 @@ if exist "%TARGET_DIR%" (
 )
 
 :: Runtime data outside a custom install dir (and residual after install wipe):
-:: logs, map_tiles, cache, CrashDumps, models\1xDeNoise_*.safetensors, etc.
+:: logs, map_tiles, cache, CrashDumps, models\scunet_*.pth, etc.
 if exist "%LOCALAPPDATA%\RAWviewer\logs" rd /s /q "%LOCALAPPDATA%\RAWviewer\logs" >nul 2>&1
 if exist "%LOCALAPPDATA%\RAWviewer\map_tiles" rd /s /q "%LOCALAPPDATA%\RAWviewer\map_tiles" >nul 2>&1
 if exist "%LOCALAPPDATA%\RAWviewer\cache" rd /s /q "%LOCALAPPDATA%\RAWviewer\cache" >nul 2>&1
