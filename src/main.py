@@ -8875,6 +8875,19 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self.rotate_bottom_button.hide()
         left_buttons_layout.addWidget(self.rotate_bottom_button, 0, alignment=Qt.AlignmentFlag.AlignVCenter)
 
+        # Adjust (develop) entry point — the E shortcut's visible, discoverable
+        # twin. Routed through _toggle_adjust_panel so unsupported files get
+        # the same explanatory notice as the keyboard path. Icon goes EMBER
+        # while the panel is open (theme: EMBER = currently active).
+        self.adjust_bottom_button = QPushButton()
+        self.adjust_bottom_button.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.adjust_bottom_button.setIcon(_qta_icon("fa5s.sliders-h", color=theme.INK_MUTED))
+        self.adjust_bottom_button.setToolTip("Adjust — develop this photo (E)")
+        _style_bottom_icon_button(self.adjust_bottom_button)
+        self.adjust_bottom_button.clicked.connect(self._toggle_adjust_panel)
+        self.adjust_bottom_button.hide()
+        left_buttons_layout.addWidget(self.adjust_bottom_button, 0, alignment=Qt.AlignmentFlag.AlignVCenter)
+
         # RAW/JPEG Toggle button (before search so expand field stays adjacent to search icon)
         self.raw_toggle_button = QPushButton()
         self.raw_toggle_button.setFlat(True)
@@ -13826,6 +13839,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self._sync_compare_button_visibility()
         if hasattr(self, "rotate_bottom_button"):
             self.rotate_bottom_button.hide()
+        if hasattr(self, "adjust_bottom_button"):
+            self.adjust_bottom_button.hide()
         if hasattr(self, "raw_toggle_button"):
             self.raw_toggle_button.hide()
         if hasattr(self, "edr_toggle_button"):
@@ -30619,6 +30634,32 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             )
             if hasattr(self, "rotate_bottom_button"):
                 self.rotate_bottom_button.setVisible(show_rotate)
+            if hasattr(self, "adjust_bottom_button"):
+                from raw_adjustments import editing_features_enabled
+
+                # Unlike rotate, stays visible while the panel is open — it is
+                # the panel's on-screen toggle (EMBER icon = active).
+                show_adjust = bool(
+                    self.image_files
+                    and self.view_mode == "single"
+                    and cp
+                    and os.path.isfile(cp)
+                    and editing_features_enabled()
+                )
+                self.adjust_bottom_button.setVisible(show_adjust)
+                if show_adjust:
+                    adjust_active = self._adjust_panel_active()
+                    self.adjust_bottom_button.setIcon(
+                        _qta_icon(
+                            "fa5s.sliders-h",
+                            color=theme.EMBER if adjust_active else theme.INK_MUTED,
+                        )
+                    )
+                    self.adjust_bottom_button.setToolTip(
+                        "Close Adjust (E)"
+                        if adjust_active
+                        else "Adjust — develop this photo (E)"
+                    )
             if hasattr(self, "raw_toggle_button"):
                 is_raw = bool(show_rotate and is_raw_file(cp))
                 self.raw_toggle_button.setVisible(is_raw)

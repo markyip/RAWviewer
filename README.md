@@ -18,6 +18,10 @@
 
 <p align="center">Free · Open source (MIT) · Works offline — your photos never leave your machine</p>
 
+<p align="center">
+  <img src="https://img.shields.io/github/downloads/markyip/RAWviewer/total?style=flat-square&labelColor=2b2925&color=d9691e&label=downloads" alt="Total downloads">
+</p>
+
 **Language / 語言：** [English](README.md) · [繁體中文](README.zh-TW.md)
 
 ---
@@ -321,6 +325,15 @@ Build scripts, environment variables, memory tuning, and architecture notes: **[
 1. Check [Troubleshooting](#troubleshooting) above
 2. Search [existing issues](https://github.com/markyip/RAWviewer/issues)
 3. Open a new issue with OS version, steps, and logs if possible
+
+## Credits
+
+RAWviewer stands on excellent open-source work, including:
+
+- **AI denoise model:** [1xDeNoise_realplksr_otf](https://openmodeldb.info/models/1x-DeNoise-realplksr-otf) by **Philip Hofmann** (CC-BY-4.0) — used for the export-time neural noise reduction
+- **[LibRaw](https://www.libraw.org/)** / **[rawpy](https://github.com/letmaik/rawpy)** — RAW decoding
+- **[MobileCLIP](https://github.com/apple/ml-mobileclip)** (Apple) — on-device photo-description search (Full edition)
+- **[Qt / PyQt6](https://www.riverbankcomputing.com/software/pyqt/)** — application framework
 
 ## License
 
