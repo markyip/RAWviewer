@@ -1727,9 +1727,11 @@ class GpuImageView(QGraphicsView):
         *,
         insets: tuple[float, float, float, float] | None = None,
         aspect: float | None = None,
+        refit: bool = True,
     ) -> None:
         """Show/hide the interactive crop overlay (mutually exclusive with D&B)."""
         enabled = bool(enabled) and self._has_pixmap
+        was_on = bool(getattr(self, "_crop_mode", False))
         self._crop_mode = enabled
         if enabled:
             self.set_dodge_burn_mode(False)
@@ -1738,7 +1740,10 @@ class GpuImageView(QGraphicsView):
                 self._crop_item.set_insets(*insets)
             self._crop_item.set_aspect_ratio(aspect)
             self._crop_item.show()
-            self.fit_to_window()
+            # Skip fit when already in crop mode — Transform-slider ticks
+            # re-enter overlay often; refitting every time feels laggy.
+            if refit and not was_on:
+                self.fit_to_window()
         else:
             self._crop_item.hide()
             self._crop_item._apply_hover_cursor("")

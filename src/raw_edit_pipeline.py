@@ -330,6 +330,16 @@ class PreviewStageCache:
         self.stage_out: dict[str, np.ndarray] = {}
 
 
+_TRANSFORM_KEYS = (
+    "CropAngle",
+    "PerspectiveVertical",
+    "PerspectiveHorizontal",
+    "CropLeft",
+    "CropRight",
+    "CropTop",
+    "CropBottom",
+)
+
 _PRE_TONE_KEYS = (
     "Temperature",
     "Tint",
@@ -342,14 +352,12 @@ _PRE_TONE_KEYS = (
     _HEAL_MASK_KEY,
     # Geometry runs at the head of the pipeline (before WB), so any transform
     # change invalidates pre_tone and everything chained to it.
-    "CropAngle",
-    "PerspectiveVertical",
-    "PerspectiveHorizontal",
-    "CropLeft",
-    "CropRight",
-    "CropTop",
-    "CropBottom",
+    *_TRANSFORM_KEYS,
 )
+
+# Live-drag (preview_lite) may denoise before warp so Transform-slider ticks
+# only re-run apply_geometry — see process_linear_edit_buffer_staged.
+_PRE_TONE_KEYS_NO_GEO = tuple(k for k in _PRE_TONE_KEYS if k not in _TRANSFORM_KEYS)
 
 # Every key uses_recovery_tone_map() and apply_pv2012_tone_rgb() read, so the
 # "tone" stage key alone is enough to detect any change that would flip the
@@ -468,39 +476,80 @@ def process_linear_edit_buffer_staged(
             img = _linear_float_from_buffer(rgb_image)
             from raw_transform import apply_geometry
 
-            img = apply_geometry(img, merged)
-            img = _apply_wb_tint(img, merged)
+            # preview_lite: apply WB/denoise on the uncropped frame once, then
+            # warp. Transform-slider ticks then only invalidate the cheap
+            # geometry stage instead of re-running denoise every angle step.
+            # Settle / export keep geometry-first order (correct for D&B).
+            if preview_lite:
+                pre_geo_key = _stage_key(merged, _PRE_TONE_KEYS_NO_GEO)
+                if (
+                    cache.stage_keys.get("pre_geom") != pre_geo_key
+                    or "pre_geom" not in cache.stage_out
+                ):
+                    pre = img
+                    pre = _apply_wb_tint(pre, merged)
+                    exp_val = float(merged.get("Exposure2012", 0.0))
+                    if abs(exp_val) > 1e-4:
+                        pre = pre * (2.0 ** exp_val)
+                    mask = _resolve_db_mask(merged)
+                    if mask is not None:
+                        from raw_dodge_burn import apply_dodge_burn
 
-            exp_val = float(merged.get("Exposure2012", 0.0))
-            if abs(exp_val) > 1e-4:
-                img *= 2.0 ** exp_val
+                        stops = float(merged.get(_DB_STRENGTH_KEY, _DB_DEFAULT_STRENGTH))
+                        pre = apply_dodge_burn(pre, mask, stops)
+                    heal_mask = _resolve_heal_mask(merged)
+                    if heal_mask is not None:
+                        from raw_spot_heal import apply_spot_heal
 
-            mask = _resolve_db_mask(merged)
-            if mask is not None:
-                from raw_dodge_burn import apply_dodge_burn
+                        pre = apply_spot_heal(pre, heal_mask)
+                    # Skip denoise on lite transform path — largest cost after
+                    # warp; settle_fast / full path still applies NR.
+                    cache.stage_out["pre_geom"] = pre
+                    cache.stage_keys["pre_geom"] = pre_geo_key
+                geo_key = (pre_geo_key, _stage_key(merged, _TRANSFORM_KEYS))
+                if (
+                    cache.stage_keys.get("geom") != geo_key
+                    or "geom" not in cache.stage_out
+                ):
+                    cache.stage_out["geom"] = apply_geometry(
+                        cache.stage_out["pre_geom"], merged, preview=True
+                    )
+                    cache.stage_keys["geom"] = geo_key
+                img = cache.stage_out["geom"]
+            else:
+                img = apply_geometry(img, merged, preview=False)
+                img = _apply_wb_tint(img, merged)
 
-                stops = float(merged.get(_DB_STRENGTH_KEY, _DB_DEFAULT_STRENGTH))
-                img = apply_dodge_burn(img, mask, stops)
+                exp_val = float(merged.get("Exposure2012", 0.0))
+                if abs(exp_val) > 1e-4:
+                    img *= 2.0 ** exp_val
 
-            heal_mask = _resolve_heal_mask(merged)
-            if heal_mask is not None:
-                from raw_spot_heal import apply_spot_heal
+                mask = _resolve_db_mask(merged)
+                if mask is not None:
+                    from raw_dodge_burn import apply_dodge_burn
 
-                img = apply_spot_heal(img, heal_mask)
+                    stops = float(merged.get(_DB_STRENGTH_KEY, _DB_DEFAULT_STRENGTH))
+                    img = apply_dodge_burn(img, mask, stops)
 
-            do_denoise = chroma_denoise if chroma_denoise is not None else chroma_denoise_enabled()
-            nr_amount = float(merged.get("ColorNoiseReduction", 0.0))
-            method = int(float(merged.get("DenoiseMethod", 0.0)))
-            if nr_amount > 1e-4:
-                img = apply_chroma_denoise(
-                    img, strength=min(1.5, nr_amount / 100.0 * 1.25), method=method, preview=preview
-                )
-            elif do_denoise and not preview:
-                img = apply_chroma_denoise(img, method=method, preview=False)
+                heal_mask = _resolve_heal_mask(merged)
+                if heal_mask is not None:
+                    from raw_spot_heal import apply_spot_heal
 
-            luma_nr_amount = float(merged.get("LuminanceNoiseReduction", 0.0))
-            if luma_nr_amount > 1e-4:
-                img = apply_luma_denoise(img, strength=luma_nr_amount / 100.0, method=method, preview=preview)
+                    img = apply_spot_heal(img, heal_mask)
+
+                do_denoise = chroma_denoise if chroma_denoise is not None else chroma_denoise_enabled()
+                nr_amount = float(merged.get("ColorNoiseReduction", 0.0))
+                method = int(float(merged.get("DenoiseMethod", 0.0)))
+                if nr_amount > 1e-4:
+                    img = apply_chroma_denoise(
+                        img, strength=min(1.5, nr_amount / 100.0 * 1.25), method=method, preview=preview
+                    )
+                elif do_denoise and not preview:
+                    img = apply_chroma_denoise(img, method=method, preview=False)
+
+                luma_nr_amount = float(merged.get("LuminanceNoiseReduction", 0.0))
+                if luma_nr_amount > 1e-4:
+                    img = apply_luma_denoise(img, strength=luma_nr_amount / 100.0, method=method, preview=preview)
 
             cache.stage_out["pre_tone"] = img
             cache.stage_keys["pre_tone"] = pre_key

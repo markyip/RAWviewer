@@ -51,6 +51,7 @@ pillow-heif = "*"
 # Default PyPI torch (macOS MPS / CPU). Windows overrides below to CUDA wheels.
 torch = ">=2.2.2, <3"
 kornia = ">=0.8.3, <0.9"
+spandrel = ">=0.4.2, <0.5"
 
 
 # Windows semantic search (MobileCLIP ONNX). Default for `pixi install` / `pixi run`.

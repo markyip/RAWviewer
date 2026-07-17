@@ -4196,8 +4196,31 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         held: pressed shows a thirds grid over the image, released restores
         the user's own composition-grid setting. The user's persisted grid
         preference is never modified -- only the on-screen mode is overridden
-        for the duration of the drag."""
+        for the duration of the drag.
+
+        Also enter geometry-overlay preview so rotation/keystone is shown on
+        the full frame with the crop rectangle indicating the final outcome
+        (instead of hard-cropping away context while the slider moves).
+        """
         gv = getattr(self, "gpu_view", None)
+        self._transform_interacting = bool(active)
+        try:
+            if active:
+                self._enter_geometry_overlay_preview(refresh=True)
+            else:
+                panel = getattr(self, "single_image_adjust_panel", None)
+                adj = panel.get_adjustments() if panel is not None else {}
+                if not self._adj_has_warp(adj) and not (
+                    panel is not None and panel.is_crop_mode()
+                ):
+                    self._exit_geometry_overlay_preview(refresh=True)
+                elif panel is not None and not panel.is_crop_mode():
+                    # Keep overlay while straighten/perspective remain non-zero;
+                    # upgrade to settle quality after the slider releases.
+                    self._enter_geometry_overlay_preview(refresh=False)
+                    self._apply_adjust_panel_preview(full_quality=True)
+        except Exception:
+            pass
         if gv is None:
             return
         try:
@@ -8574,6 +8597,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self._dodge_burn_stroke_dirty = None
         self._crop_preview_uncropped = False
         self._crop_working_insets = (0.0, 0.0, 0.0, 0.0)
+        self._geometry_overlay_preview = False
+        self._transform_interacting = False
 
         # Route B: GPU-accelerated single-image view (QGraphicsView + OpenGL).
         # On by default; set RAWVIEWER_GPU_VIEW=0 for the legacy QScrollArea/QLabel path.
@@ -13195,10 +13220,13 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         """Toggle between single image view and gallery view"""
         if getattr(self, '_is_delete_dialog_open', False):
             return
+        # Do not block gallery entry on EXIF sort. Large cold folders can take
+        # minutes to probe; _apply_folder_sort_refinement still reorders later.
         if not self._is_exif_sort_ready():
             import logging
-            logging.getLogger(__name__).info("[VIEW_MODE] Sorting not complete. Blocked toggle.")
-            return
+            logging.getLogger(__name__).info(
+                "[VIEW_MODE] EXIF sort still running; entering gallery on provisional order"
+            )
         if getattr(self, "view_mode", "") == "compare":
             self._exit_compare_mode()
             return
@@ -16758,31 +16786,34 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 import time
                 manager = get_image_load_manager()
                 viewer = self
-                # Yield disk to CURRENT decode and ±1 neighbor PRELOAD, and to
-                # in-flight arrow-key navigation. Folder sort probing 100s of
-                # files otherwise saturates USB and makes the first next-image
-                # paint wait ~1s+ on a cold decode.
-                while True:
-                    if getattr(viewer, "_navigation_in_progress", False):
+                # Yield only while arrow-key navigation is in flight so cold
+                # folder sort does not steal the disk from the on-screen image.
+                # Do NOT wait on PRELOAD_* (idle neighbor prefetch is almost
+                # always queued) or on CURRENT once navigation has stopped —
+                # full-res CURRENT upgrades stay active for seconds, and a
+                # per-file 250ms wait × thousands of files permanently delayed
+                # EXIF sort, keeping the Gallery button hidden.
+                # Cap: RAWVIEWER_SORT_PROBE_MAX_YIELD_MS (0 = never yield).
+                max_yield_ms = _env_int(
+                    "RAWVIEWER_SORT_PROBE_MAX_YIELD_MS", 250, minimum=0
+                )
+                if max_yield_ms > 0:
+                    yield_deadline = time.monotonic() + (max_yield_ms / 1000.0)
+                    while time.monotonic() < yield_deadline:
+                        if not getattr(viewer, "_navigation_in_progress", False):
+                            break
+                        has_current = False
+                        if manager is not None:
+                            with manager._queue_lock:
+                                for t in manager._active_tasks.values():
+                                    if t.is_cancelled():
+                                        continue
+                                    if getattr(t, "priority", None) == Priority.CURRENT:
+                                        has_current = True
+                                        break
+                        if not has_current:
+                            break
                         time.sleep(0.05)
-                        continue
-                    has_urgent = False
-                    if manager is not None:
-                        with manager._queue_lock:
-                            for t in manager._active_tasks.values():
-                                if t.is_cancelled():
-                                    continue
-                                prio = getattr(t, "priority", None)
-                                if prio in (
-                                    Priority.CURRENT,
-                                    Priority.PRELOAD_NEXT,
-                                    Priority.PRELOAD_PREV,
-                                ):
-                                    has_urgent = True
-                                    break
-                    if not has_urgent:
-                        break
-                    time.sleep(0.05)
             except Exception:
                 pass
 
@@ -16796,6 +16827,12 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             for p, ts in pool.map(_probe_one, missing_paths, chunksize=chunksize):
                 if ts > 0:
                     probed_timestamps[p] = ts
+
+        logger.info(
+            "[SORT] Probed %d/%d capture timestamps",
+            len(probed_timestamps),
+            len(missing_paths),
+        )
 
         if probed_timestamps:
             try:
@@ -20566,6 +20603,11 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             # drop the interactive overlay and D&B brush so they cannot
             # linger on the single-image view after the panel is gone.
             self._crop_preview_uncropped = False
+            self._geometry_overlay_preview = False
+            self._transform_interacting = False
+            self._adjust_transform_source_u8 = None
+            self._adjust_transform_source_adj = None
+            self._adjust_transform_source_norm = None
             if panel.is_crop_mode():
                 panel.set_crop_mode_ui(False)
             if gv is not None and gv.is_crop_mode():
@@ -21418,9 +21460,21 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         # path; settle still upgrades via editing_finished → full_quality.
         if not comparing:
             self._try_instant_gain_preview(adj)
+            self._try_instant_transform_preview(adj)
         self._apply_adjust_panel_preview(full_quality=False)
 
     _INSTANT_GAIN_KEYS = frozenset({"Exposure2012", "Temperature", "Tint"})
+    _INSTANT_TRANSFORM_KEYS = frozenset(
+        {
+            "CropAngle",
+            "PerspectiveVertical",
+            "PerspectiveHorizontal",
+            "CropLeft",
+            "CropRight",
+            "CropTop",
+            "CropBottom",
+        }
+    )
 
     def _try_instant_gain_preview(self, adj: dict) -> bool:
         last = getattr(self, "_adjust_last_render", None)
@@ -21477,6 +21531,63 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             ).reshape(256, 1, 3)
             approx = cv2.LUT(last_arr, lut)
             pixmap = self._numpy_to_qpixmap(approx)
+            if pixmap is not None and not pixmap.isNull():
+                self._display_adjust_preview_pixmap(pixmap)
+                return True
+        except Exception:
+            return False
+        return False
+
+    def _try_instant_transform_preview(self, adj: dict) -> bool:
+        """Warp a cached identity-geometry display frame on the UI thread.
+
+        When only Transform keys changed, skip the full preview worker round-trip
+        for immediate feedback; the throttled worker still converges to the
+        exact pipeline output.
+        """
+        src = getattr(self, "_adjust_transform_source_u8", None)
+        src_adj = getattr(self, "_adjust_transform_source_adj", None)
+        if src is None or src_adj is None:
+            return False
+        if _norm_path(getattr(self, "current_file_path", "") or "") != getattr(
+            self, "_adjust_transform_source_norm", None
+        ):
+            return False
+        try:
+            keys = set(adj) | set(src_adj)
+            for k in keys:
+                if k in self._INSTANT_TRANSFORM_KEYS:
+                    continue
+                a, b = adj.get(k), src_adj.get(k)
+                if isinstance(a, (int, float)) and isinstance(b, (int, float)):
+                    if abs(float(a) - float(b)) > 1e-4:
+                        return False
+                elif str(a or "") != str(b or ""):
+                    return False
+            # Need at least one transform key to have moved.
+            moved = False
+            for k in self._INSTANT_TRANSFORM_KEYS:
+                a, b = adj.get(k), src_adj.get(k)
+                if isinstance(a, (int, float)) and isinstance(b, (int, float)):
+                    if abs(float(a) - float(b)) > 1e-4:
+                        moved = True
+                        break
+                elif str(a or "") != str(b or ""):
+                    moved = True
+                    break
+            if not moved:
+                return False
+
+            from raw_transform import apply_geometry
+
+            geo_adj = dict(adj)
+            if getattr(self, "_crop_preview_uncropped", False):
+                for k in ("CropLeft", "CropRight", "CropTop", "CropBottom"):
+                    geo_adj[k] = 0.0
+            out = apply_geometry(src, geo_adj, preview=True)
+            if out is None or getattr(out, "size", 0) == 0:
+                return False
+            pixmap = self._numpy_to_qpixmap(out)
             if pixmap is not None and not pixmap.isNull():
                 self._display_adjust_preview_pixmap(pixmap)
                 return True
@@ -21551,12 +21662,99 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             out[k] = 0.0
         return out
 
+    def _adj_has_warp(self, adj: dict | None) -> bool:
+        """True when straighten / keystone would change the frame."""
+        if not adj:
+            return False
+        try:
+            return any(
+                abs(float(adj.get(k, 0.0) or 0.0)) > 1e-4
+                for k in (
+                    "CropAngle",
+                    "PerspectiveVertical",
+                    "PerspectiveHorizontal",
+                )
+            )
+        except Exception:
+            return False
+
+    def _enter_geometry_overlay_preview(self, *, refresh: bool = True) -> None:
+        """Show full-frame transform under the crop overlay (final outcome).
+
+        Used while Crop mode is on, and whenever straighten/perspective is
+        active so rotation does not hard-crop away context.
+        """
+        panel = getattr(self, "single_image_adjust_panel", None)
+        gv = getattr(self, "gpu_view", None)
+        if panel is None or gv is None:
+            return
+        insets = panel.get_crop_insets()
+        self._crop_working_insets = insets
+        self._crop_preview_uncropped = True
+        # Live Transform drag stays on the lite path; settle upgrades later.
+        fq = not bool(getattr(self, "_transform_interacting", False))
+        if panel.is_crop_mode():
+            if not gv.is_crop_mode():
+                gv.set_crop_mode(True, insets=insets, aspect=None, refit=True)
+            else:
+                gv.set_crop_insets(*insets)
+            if refresh:
+                self._apply_adjust_panel_preview(full_quality=fq)
+            return
+        self._geometry_overlay_preview = True
+        if not gv.is_crop_mode():
+            gv.set_crop_mode(True, insets=insets, aspect=None, refit=True)
+        else:
+            gv.set_crop_insets(*insets)
+        if refresh:
+            self._apply_adjust_panel_preview(full_quality=fq)
+
+    def _exit_geometry_overlay_preview(self, *, refresh: bool = True) -> None:
+        """Leave temporary geometry overlay unless explicit Crop mode is on."""
+        panel = getattr(self, "single_image_adjust_panel", None)
+        gv = getattr(self, "gpu_view", None)
+        if panel is not None and panel.is_crop_mode():
+            return
+        if not getattr(self, "_geometry_overlay_preview", False):
+            self._crop_preview_uncropped = False
+            if gv is not None and gv.is_crop_mode():
+                gv.set_crop_mode(False)
+            return
+        self._geometry_overlay_preview = False
+        self._crop_preview_uncropped = False
+        if panel is not None:
+            insets = getattr(self, "_crop_working_insets", None)
+            if insets is not None:
+                try:
+                    panel.set_crop_insets(*insets, emit=False)
+                except Exception:
+                    pass
+        if gv is not None:
+            gv.set_crop_mode(False)
+        if refresh:
+            self._apply_adjust_panel_preview(full_quality=True)
+
+    def _sync_geometry_overlay_with_adj(self, adj: dict | None) -> None:
+        """Keep overlay preview in sync with warp keys outside explicit Crop mode."""
+        panel = getattr(self, "single_image_adjust_panel", None)
+        if panel is not None and panel.is_crop_mode():
+            self._crop_preview_uncropped = True
+            return
+        if getattr(self, "_transform_interacting", False) or self._adj_has_warp(adj):
+            if not getattr(self, "_geometry_overlay_preview", False):
+                self._enter_geometry_overlay_preview(refresh=False)
+            else:
+                self._crop_preview_uncropped = True
+        elif getattr(self, "_geometry_overlay_preview", False):
+            self._exit_geometry_overlay_preview(refresh=False)
+
     def _on_crop_mode_changed(self, active: bool) -> None:
         panel = getattr(self, "single_image_adjust_panel", None)
         gv = getattr(self, "gpu_view", None)
         if panel is None or gv is None:
             return
         if active:
+            self._geometry_overlay_preview = False
             panel.disarm_dodge_burn()
             insets = panel.get_crop_insets()
             self._crop_working_insets = insets
@@ -21565,13 +21763,19 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             self._apply_adjust_panel_preview(full_quality=True)
             if hasattr(self, "status_bar"):
                 self.status_bar.showMessage(
-                    "Crop mode — drag handles; Apply to commit, Cancel to leave",
+                    "Crop mode — drag handles; pick a ratio to lock aspect; Apply to commit",
                     4000,
                 )
         else:
             self._crop_preview_uncropped = False
-            gv.set_crop_mode(False)
-            self._apply_adjust_panel_preview(full_quality=True)
+            if gv.is_crop_mode() and not getattr(self, "_geometry_overlay_preview", False):
+                gv.set_crop_mode(False)
+            adj = panel.get_adjustments() if panel is not None else {}
+            if self._adj_has_warp(adj):
+                self._enter_geometry_overlay_preview(refresh=True)
+            else:
+                self._geometry_overlay_preview = False
+                self._apply_adjust_panel_preview(full_quality=True)
 
     def _on_crop_aspect_changed(self, aspect) -> None:
         gv = getattr(self, "gpu_view", None)
@@ -21587,6 +21791,20 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self, left: float, right: float, top: float, bottom: float
     ) -> None:
         self._crop_working_insets = (float(left), float(right), float(top), float(bottom))
+        panel = getattr(self, "single_image_adjust_panel", None)
+        # Geometry-overlay preview (straighten/perspective) is not explicit Crop
+        # mode — write insets through so the dimmed rect matches saved crop.
+        if (
+            panel is not None
+            and getattr(self, "_geometry_overlay_preview", False)
+            and not panel.is_crop_mode()
+        ):
+            try:
+                panel.set_crop_insets(
+                    float(left), float(right), float(top), float(bottom), emit=False
+                )
+            except Exception:
+                pass
 
     def _on_crop_apply_requested(self) -> None:
         panel = getattr(self, "single_image_adjust_panel", None)
@@ -21598,21 +21816,30 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             if gv is not None and gv.is_crop_mode()
             else getattr(self, "_crop_working_insets", panel.get_crop_insets())
         )
+        self._geometry_overlay_preview = False
         self._crop_preview_uncropped = False
         panel.set_crop_mode_ui(False)
         if gv is not None:
             gv.set_crop_mode(False)
         panel.set_crop_insets(*insets, emit=True)
+        adj = panel.get_adjustments()
+        if self._adj_has_warp(adj):
+            self._enter_geometry_overlay_preview(refresh=True)
 
     def _on_crop_cancel_requested(self) -> None:
         panel = getattr(self, "single_image_adjust_panel", None)
         gv = getattr(self, "gpu_view", None)
+        self._geometry_overlay_preview = False
         self._crop_preview_uncropped = False
         if panel is not None:
             panel.set_crop_mode_ui(False)
         if gv is not None:
             gv.set_crop_mode(False)
-        self._apply_adjust_panel_preview(full_quality=True)
+        adj = panel.get_adjustments() if panel is not None else {}
+        if self._adj_has_warp(adj):
+            self._enter_geometry_overlay_preview(refresh=True)
+        else:
+            self._apply_adjust_panel_preview(full_quality=True)
 
     def _on_crop_reset_requested(self) -> None:
         panel = getattr(self, "single_image_adjust_panel", None)
@@ -22178,6 +22405,24 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                     if not skip_cache:
                         self._adjust_last_render = (array, adj_used)
                         self._adjust_last_render_norm = _norm_path(file_path)
+                        # Identity-geometry display frame for instant Transform warps.
+                        # Prefer uncropped (overlay) frames so straighten can show
+                        # context outside the crop rect.
+                        try:
+                            warp_zero = not any(
+                                abs(float(adj_used.get(k, 0.0) or 0.0)) > 1e-4
+                                for k in (
+                                    "CropAngle",
+                                    "PerspectiveVertical",
+                                    "PerspectiveHorizontal",
+                                )
+                            )
+                            if warp_zero and array.dtype == np.uint8:
+                                self._adjust_transform_source_u8 = array
+                                self._adjust_transform_source_adj = dict(adj_used)
+                                self._adjust_transform_source_norm = _norm_path(file_path)
+                        except Exception:
+                            pass
                     if max(int(array.shape[0]), int(array.shape[1])) >= 1200:
                         self._adjust_hires_render = (array, adj_used)
                         self._adjust_hires_render_norm = _norm_path(file_path)
@@ -22256,6 +22501,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             adj = self._dodge_burn_overlay_adj(adj)
         except Exception:
             pass
+        self._sync_geometry_overlay_with_adj(adj)
         if getattr(self, "_crop_preview_uncropped", False):
             adj = self._crop_keys_zeroed(adj)
         self._pending_adjust_preview = dict(adj)
@@ -32016,6 +32262,16 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         def _start_worker():
             if token != getattr(viewer, "_folder_load_generation", None):
                 return
+            import logging
+
+            logging.getLogger(__name__).info(
+                "[SORT_REFINE] Starting background EXIF capture-time sort (%d files)",
+                len(paths),
+            )
+            if hasattr(viewer, "status_bar") and viewer.status_bar:
+                viewer.status_bar.showMessage(
+                    "Sorting folder by capture time…", 0
+                )
             _get_bg_thread_pool().start(_FolderSortRefineWorker())
 
         if getattr(self, "_folder_fast_open_token", None) == token:

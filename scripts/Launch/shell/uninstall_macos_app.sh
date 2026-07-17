@@ -19,7 +19,8 @@ This will:
 • Close RAWviewer if running
 • Remove RAWviewer from your Applications folder
 • Delete your photo cache (~/.rawviewer_cache)
-• Delete app logs and preferences" with title "RAWviewer Uninstaller" buttons {"Cancel", "Uninstall"} default button "Uninstall" with icon caution
+• Delete map tiles (~/Library/Caches/RAWviewer)
+• Delete app logs, models, and preferences" with title "RAWviewer Uninstaller" buttons {"Cancel", "Uninstall"} default button "Uninstall" with icon caution
 EOF
         return $?
     fi
@@ -60,9 +61,19 @@ fi
 echo "Removing photo cache (~/.rawviewer_cache)..."
 rm -rf "${HOME}/.rawviewer_cache" 2>/dev/null || true
 
+echo "Removing map tiles and app caches..."
+rm -rf "${HOME}/Library/Caches/RAWviewer" 2>/dev/null || true
+rm -rf "${HOME}/.cache/rawviewer" 2>/dev/null || true
+
+# Optional Hugging Face hub leftovers from MobileCLIP downloads (best-effort)
+rm -rf "${HOME}/.cache/huggingface/hub/models--plhery--mobileclip2-onnx" 2>/dev/null || true
+rm -rf "${HOME}/.cache/huggingface/hub/models--apple--coreml-mobileclip" 2>/dev/null || true
+
 echo "Removing application support and logs..."
 rm -rf "${HOME}/Library/Application Support/RAWviewer" 2>/dev/null || true
 rm -rf "${HOME}/Library/Logs/RAWviewer" 2>/dev/null || true
+# Saved Application State / crash reports (best-effort)
+rm -rf "${HOME}/Library/Saved Application State/"*[Rr][Aa][Ww]viewer*.savedState 2>/dev/null || true
 
 echo "Removing preferences plists..."
 plists=(
@@ -94,7 +105,7 @@ done
 
 # Prepare success message
 if [ ${#REMOVED_APPS[@]} -gt 0 ]; then
-    show_success "RAWviewer has been successfully uninstalled. All application bundles, logs, cache, and preferences have been removed."
+    show_success "RAWviewer has been successfully uninstalled. All application bundles, logs, cache, models, and preferences have been removed."
 else
     show_success "Caches and preferences were removed, but no RAWviewer app bundle was found in /Applications."
 fi

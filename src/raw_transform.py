@@ -89,17 +89,20 @@ def _point_in_quad(px: np.ndarray, quad: np.ndarray) -> bool:
     return True
 
 
-def _inscribed_rect(w: int, h: int, quad: np.ndarray) -> tuple[int, int, int, int]:
+def _inscribed_rect(
+    w: int, h: int, quad: np.ndarray, *, iterations: int = 24
+) -> tuple[int, int, int, int]:
     """Largest centered rect of the ORIGINAL aspect fully inside ``quad``.
 
-    Binary search on scale -- 24 iterations bound the error under a pixel at
+    Binary search on scale -- ~24 iterations bound the error under a pixel at
     any realistic size, and the centered-original-aspect constraint is what
     guarantees "no pixels invented": every point of the returned rect maps
-    from real source content.
+    from real source content. Live preview may pass fewer iterations.
     """
     cx, cy = w / 2.0, h / 2.0
     lo, hi = 0.0, 1.0
-    for _ in range(24):
+    n = max(8, min(24, int(iterations)))
+    for _ in range(n):
         mid = (lo + hi) / 2.0
         hw, hh = cx * mid, cy * mid
         pts = np.array(
@@ -120,11 +123,20 @@ def _inscribed_rect(w: int, h: int, quad: np.ndarray) -> tuple[int, int, int, in
     return x0, y0, max(x1, x0 + 1), max(y1, y0 + 1)
 
 
-def apply_geometry(img: np.ndarray, adj: dict | None) -> np.ndarray:
+def apply_geometry(
+    img: np.ndarray,
+    adj: dict | None,
+    *,
+    preview: bool = False,
+) -> np.ndarray:
     """Straighten + keystone + crop a (H, W, 3) buffer; dtype preserved.
 
     No-op (identity, same object) when no transform keys are set. Works on
     uint8 display buffers and float linear edit bases alike.
+
+    ``preview=True`` uses a cheaper warp (nearest) and a shorter inscribed-rect
+    search — for live Transform-slider ticks only. Export / settle keep the
+    default high-quality path.
     """
     if not has_geometry(adj):
         return img
@@ -145,11 +157,15 @@ def apply_geometry(img: np.ndarray, adj: dict | None) -> np.ndarray:
             )
             dst = _warped_quad(w, h, angle, pv, ph)
             m = cv2.getPerspectiveTransform(src, dst)
+            # INTER_NEAREST is ~2–4× faster than LINEAR on large float buffers
+            # and is fine for 640px live-drag / instant overlay feedback.
+            flags = cv2.INTER_NEAREST if preview else cv2.INTER_LINEAR
             out = cv2.warpPerspective(
-                img, m, (w, h), flags=cv2.INTER_LINEAR,
+                img, m, (w, h), flags=flags,
                 borderMode=cv2.BORDER_CONSTANT, borderValue=0,
             )
-            x0, y0, x1, y1 = _inscribed_rect(w, h, dst)
+            iters = 12 if preview else 24
+            x0, y0, x1, y1 = _inscribed_rect(w, h, dst, iterations=iters)
             out = out[y0:y1, x0:x1]
 
         # User crop insets, applied within whatever survived the warp crop.

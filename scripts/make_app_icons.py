@@ -13,6 +13,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+import numpy as np
 from PIL import Image
 
 REPO = Path(__file__).resolve().parents[1]
@@ -28,8 +29,28 @@ def _png_bytes(im: Image.Image) -> bytes:
     return buf.getvalue()
 
 
+def clean_rounded_icon(im: Image.Image) -> Image.Image:
+    """Strip light AA fringe that shows as a white border on Windows ICO/taskbar.
+
+    Keeps opaque interior accents (yellow star, cream curve). Only removes
+    semi-transparent light halo / near-invisible dust outside the plate.
+    """
+    a = np.array(im.convert("RGBA"), dtype=np.uint8)
+    rgb = a[:, :, :3].astype(np.float32)
+    alpha = a[:, :, 3].astype(np.float32)
+    lum = rgb.mean(axis=2)
+    fringe = (lum >= 100.0) & (alpha > 0) & (alpha < 48)
+    dust = (alpha > 0) & (alpha < 10)
+    kill = fringe | dust
+    a[kill, :] = 0
+    a[a[:, :, 3] == 0, :3] = 0
+    return Image.fromarray(a, "RGBA")
+
+
 def write_png_ico(path: Path, src: Image.Image, sizes: list[int]) -> None:
-    images = [src.resize((s, s), Image.Resampling.LANCZOS) for s in sizes]
+    images = [
+        clean_rounded_icon(src.resize((s, s), Image.Resampling.LANCZOS)) for s in sizes
+    ]
     pngs = [_png_bytes(im) for im in images]
     n = len(images)
     header = struct.pack("<HHH", 0, 1, n)
@@ -66,7 +87,9 @@ def build_icns(master: Image.Image, out_icns: Path) -> None:
         ("icon_512x512@2x.png", 1024),
     ]
     for name, size in pairs:
-        master.resize((size, size), Image.Resampling.LANCZOS).save(iconset / name)
+        clean_rounded_icon(master.resize((size, size), Image.Resampling.LANCZOS)).save(
+            iconset / name
+        )
     subprocess.run(
         ["iconutil", "-c", "icns", str(iconset), "-o", str(out_icns)],
         check=True,
@@ -81,11 +104,11 @@ def main() -> int:
         print(f"[ERROR] missing favicon master: {FAV_MASTER}", file=sys.stderr)
         return 1
 
-    master = Image.open(MASTER).convert("RGBA")
-    fav = Image.open(FAV_MASTER).convert("RGBA")
+    master = clean_rounded_icon(Image.open(MASTER).convert("RGBA"))
+    fav = clean_rounded_icon(Image.open(FAV_MASTER).convert("RGBA"))
 
     # Hi-res PNG for splash + README
-    hi = master.resize((2048, 2048), Image.Resampling.LANCZOS)
+    hi = clean_rounded_icon(master.resize((2048, 2048), Image.Resampling.LANCZOS))
     hi.save(ICONS / "appicon.png", optimize=True)
     print(f"[OK] {ICONS / 'appicon.png'} {hi.size}")
 
@@ -93,7 +116,9 @@ def main() -> int:
     print(f"[OK] {ICONS / 'appicon.ico'}")
 
     write_png_ico(ICONS / "favicon.ico", fav, [16, 32, 48])
-    fav.resize((64, 64), Image.Resampling.LANCZOS).save(ICONS / "favicon.png", optimize=True)
+    clean_rounded_icon(fav.resize((64, 64), Image.Resampling.LANCZOS)).save(
+        ICONS / "favicon.png", optimize=True
+    )
     print(f"[OK] {ICONS / 'favicon.ico'} + favicon.png")
 
     if sys.platform == "darwin":

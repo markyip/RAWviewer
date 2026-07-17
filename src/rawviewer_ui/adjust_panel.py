@@ -1716,7 +1716,12 @@ class ImageAdjustPanelWidget(QWidget):
             self._wb_preset_block = False
 
     def _build_crop_controls(self, sect: CollapsibleSection) -> None:
-        """Crop mode entry + aspect pills + Apply/Cancel/Reset."""
+        """Crop mode entry + aspect pills + Apply/Cancel/Reset.
+
+        Ratio and action rows stay hidden until Crop is toggled on — visible but
+        disabled pills felt unresponsive. No ratio is pre-selected: entering crop
+        starts unconstrained (free) until the user picks a lock.
+        """
         wrap = QWidget()
         layout = QVBoxLayout(wrap)
         layout.setContentsMargins(0, 4, 0, 0)
@@ -1733,7 +1738,9 @@ class ImageAdjustPanelWidget(QWidget):
         self._crop_btn.toggled.connect(self._on_crop_toggled)
         layout.addWidget(self._crop_btn)
 
-        ratio_row = QHBoxLayout()
+        self._crop_ratio_wrap = QWidget()
+        ratio_row = QHBoxLayout(self._crop_ratio_wrap)
+        ratio_row.setContentsMargins(0, 0, 0, 0)
         ratio_row.setSpacing(4)
         self._crop_ratio_btns: dict[str, QPushButton] = {}
         # label -> aspect (width/height) or None for free; "original" is special.
@@ -1751,14 +1758,16 @@ class ImageAdjustPanelWidget(QWidget):
             btn.setCheckable(True)
             btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
             btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-            btn.setEnabled(False)
+            btn.setAutoExclusive(True)
             btn.clicked.connect(lambda _=False, lab=label: self._on_crop_ratio(lab))
             ratio_row.addWidget(btn, 1)
             self._crop_ratio_btns[label] = btn
-        self._crop_ratio_btns["Free"].setChecked(True)
-        layout.addLayout(ratio_row)
+        self._crop_ratio_wrap.setVisible(False)
+        layout.addWidget(self._crop_ratio_wrap)
 
-        action_row = QHBoxLayout()
+        self._crop_action_wrap = QWidget()
+        action_row = QHBoxLayout(self._crop_action_wrap)
+        action_row.setContentsMargins(0, 0, 0, 0)
         action_row.setSpacing(6)
         self._crop_apply_btn = QPushButton("Apply")
         self._crop_cancel_btn = QPushButton("Cancel")
@@ -1772,26 +1781,42 @@ class ImageAdjustPanelWidget(QWidget):
             btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
             btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
             btn.setToolTip(tip)
-            btn.setEnabled(False)
             btn.clicked.connect(slot)
             action_row.addWidget(btn, 1)
-        layout.addLayout(action_row)
+        self._crop_action_wrap.setVisible(False)
+        layout.addWidget(self._crop_action_wrap)
         sect.add_widget(wrap)
         self._crop_active = False
         self._crop_insets = (0.0, 0.0, 0.0, 0.0)
 
+    def _sync_crop_subcontrols_visible(self, active: bool) -> None:
+        """Show ratio / Apply-Cancel-Reset only while crop mode is on."""
+        on = bool(active)
+        if hasattr(self, "_crop_ratio_wrap"):
+            self._crop_ratio_wrap.setVisible(on)
+        if hasattr(self, "_crop_action_wrap"):
+            self._crop_action_wrap.setVisible(on)
+        if not on:
+            # autoExclusive blocks clearing the checked button; disable briefly.
+            for btn in getattr(self, "_crop_ratio_btns", {}).values():
+                btn.blockSignals(True)
+                btn.setAutoExclusive(False)
+                try:
+                    btn.setChecked(False)
+                finally:
+                    btn.setAutoExclusive(True)
+                    btn.blockSignals(False)
+
     def _on_crop_toggled(self, checked: bool) -> None:
         self._crop_active = bool(checked)
-        for btn in self._crop_ratio_btns.values():
-            btn.setEnabled(self._crop_active)
-        self._crop_apply_btn.setEnabled(self._crop_active)
-        self._crop_cancel_btn.setEnabled(self._crop_active)
-        self._crop_reset_btn.setEnabled(self._crop_active)
+        self._sync_crop_subcontrols_visible(self._crop_active)
         if self._crop_active:
             self.disarm_dodge_burn()
         self.crop_mode_changed.emit(self._crop_active)
 
     def _on_crop_ratio(self, label: str) -> None:
+        if not getattr(self, "_crop_active", False):
+            return
         for name, btn in self._crop_ratio_btns.items():
             btn.setChecked(name == label)
         aspect = None
@@ -1815,11 +1840,7 @@ class ImageAdjustPanelWidget(QWidget):
         finally:
             btn.blockSignals(False)
         self._crop_active = bool(active)
-        for b in self._crop_ratio_btns.values():
-            b.setEnabled(self._crop_active)
-        self._crop_apply_btn.setEnabled(self._crop_active)
-        self._crop_cancel_btn.setEnabled(self._crop_active)
-        self._crop_reset_btn.setEnabled(self._crop_active)
+        self._sync_crop_subcontrols_visible(self._crop_active)
 
     def get_crop_insets(self) -> tuple[float, float, float, float]:
         return tuple(getattr(self, "_crop_insets", (0.0, 0.0, 0.0, 0.0)))
