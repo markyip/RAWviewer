@@ -193,6 +193,15 @@ class UnifiedImageProcessor:
             while len(self._unpacked_raw_slots) > max_slots:
                 self._unpacked_raw_slots.popitem(last=False)
 
+    def _peek_unpacked_raw(self, file_path: str):
+        """Return stashed unpack without consuming it (Adjust can share browse stash)."""
+        key = os.path.normcase(os.path.abspath(file_path))
+        with self._unpacked_raw_lock:
+            unpacked = self._unpacked_raw_slots.get(key)
+            if unpacked is not None:
+                self._unpacked_raw_slots.move_to_end(key)
+            return unpacked
+
     def _take_unpacked_raw(self, file_path: str):
         key = os.path.normcase(os.path.abspath(file_path))
         with self._unpacked_raw_lock:
@@ -521,14 +530,34 @@ class UnifiedImageProcessor:
                         _heavy_fallback_semaphore,
                         _rawpy_global_lock,
                     )
-                    from fast_raw_decode import try_fast_raw_decode
-
-                    rgb_image = try_fast_raw_decode(
-                        file_path,
-                        edit_params,
-                        rawpy_lock=_rawpy_global_lock,
-                        return_linear=True,
+                    from fast_raw_decode import (
+                        decode_half_from_unpacked,
+                        params_supported_half,
+                        try_fast_raw_decode,
                     )
+
+                    # Prefer browse half-unpack stash (peek, don't consume) so
+                    # opening Adjust skips a second LibRaw unpack when possible.
+                    if half_size:
+                        stashed = self._peek_unpacked_raw(file_path)
+                        if (
+                            stashed is not None
+                            and params_supported_half(edit_params, return_linear=True)
+                        ):
+                            try:
+                                rgb_image = decode_half_from_unpacked(
+                                    stashed, return_linear=True
+                                )
+                            except Exception:
+                                rgb_image = None
+
+                    if rgb_image is None:
+                        rgb_image = try_fast_raw_decode(
+                            file_path,
+                            edit_params,
+                            rawpy_lock=_rawpy_global_lock,
+                            return_linear=True,
+                        )
 
                     cam_mul_for_scale = None
                     if rgb_image is None and executor is not None:
@@ -907,17 +936,43 @@ class UnifiedImageProcessor:
         logger = logging.getLogger(__name__)
         target = memory_preview_max_edge()
         try:
-            import rawpy
-
             from enhanced_raw_processor import _rawpy_global_lock
-            with _rawpy_global_lock:
-                with rawpy.imread(file_path) as raw:
-                    rgb = raw.postprocess(
-                        half_size=True,
-                        use_camera_wb=True,
-                        no_auto_bright=False,
-                        output_bps=8,
-                    )
+            from fast_raw_decode import (
+                decode_half_from_unpacked,
+                params_supported_half,
+                unpack_raw,
+            )
+
+            # Prefer the fast unpack path so a later full decode can reuse
+            # the mosaic (same stash as fit-view half in _process_raw_image).
+            half_params = {
+                "half_size": True,
+                "use_camera_wb": True,
+                "no_auto_bright": False,
+                "output_bps": 8,
+                "user_flip": 0,
+            }
+            rgb = None
+            if params_supported_half(half_params):
+                unpacked = unpack_raw(file_path, rawpy_lock=_rawpy_global_lock)
+                if unpacked is not None:
+                    try:
+                        rgb = decode_half_from_unpacked(unpacked)
+                    except Exception:
+                        rgb = None
+                    if rgb is not None:
+                        self._stash_unpacked_raw(file_path, unpacked)
+            if rgb is None:
+                import rawpy
+
+                with _rawpy_global_lock:
+                    with rawpy.imread(file_path) as raw:
+                        rgb = raw.postprocess(
+                            half_size=True,
+                            use_camera_wb=True,
+                            no_auto_bright=False,
+                            output_bps=8,
+                        )
             if rgb is None or rgb.size == 0:
                 return None
             from PIL import Image
@@ -1268,17 +1323,10 @@ class UnifiedImageProcessor:
                             pass
                         cached_image = None
 
-                    # RAW files: full_image_cache is also written by the
-                    # half-size (fit-view) decode -- see _process_raw_image's
-                    # unconditional put_full_image() call -- so a cache hit
-                    # here is not necessarily sensor-resolution. Without this
-                    # check, a use_full_resolution=True request that lands
-                    # right after a half decode wrote this same key returns
-                    # the half-size buffer forever: the image never upgrades
-                    # to full resolution on zoom/idle-decode, and looks
-                    # "stuck"/blank when a caller expects full-res dimensions
-                    # (e.g. gallery -> single view). Only applies to RAW;
-                    # non-RAW full_image_cache entries are always full-res.
+                    # RAW files: a prior half-size decode must never satisfy a
+                    # full-resolution request. Half tiles go to preview/grid
+                    # only (see _process_raw_image); if a stale half buffer
+                    # somehow remains under this key, reject it here.
                     if cached_image is not None and is_raw:
                         if not image_covers_sensor_resolution(w, h, exif_data):
                             if _verbose_orientation_logs():
@@ -1708,6 +1756,16 @@ class UnifiedImageProcessor:
             # ...) or mismatched params -- everything below is the unchanged
             # fallback. RAWVIEWER_FAST_RAW_DECODE=0 disables.
             rgb_image = None
+
+            def _load_task_cancelled() -> bool:
+                try:
+                    from image_load_manager import worker_thread_local
+
+                    t = getattr(worker_thread_local, "task", None)
+                    return bool(t is not None and t.is_cancelled())
+                except Exception:
+                    return False
+
             if use_full_resolution or params.get('half_size'):
                 from enhanced_raw_processor import _rawpy_global_lock as _fast_lock
                 from fast_raw_decode import (
@@ -1720,15 +1778,6 @@ class UnifiedImageProcessor:
                     try_fast_raw_decode,
                     unpack_raw,
                 )
-
-                def _load_task_cancelled() -> bool:
-                    try:
-                        from image_load_manager import worker_thread_local
-
-                        t = getattr(worker_thread_local, "task", None)
-                        return bool(t is not None and t.is_cancelled())
-                    except Exception:
-                        return False
 
                 try:
                     if use_full_resolution:
@@ -1805,6 +1854,10 @@ class UnifiedImageProcessor:
                                 rgb_image = None
                             if rgb_image is not None:
                                 self._stash_unpacked_raw(file_path, unpacked)
+                            elif unpacked is not None:
+                                # Decode failed but unpack succeeded — keep
+                                # mosaic for a later full-tier finish.
+                                self._stash_unpacked_raw(file_path, unpacked)
                 except DecodeCancelled:
                     # The owning prefetch task was cancelled (e.g. user
                     # navigated); abort the whole decode instead of falling
@@ -1819,11 +1872,21 @@ class UnifiedImageProcessor:
 
             # 處理 RAW - 使用 Process Pool 繞過 GIL
             if rgb_image is None and executor:
+                if _load_task_cancelled():
+                    return None
                 try:
-                    # logger = logging.getLogger(__name__)
-                    # logger.info(f"[PIL/PROCESS_POOL] Offloading RAW postprocess to pool for {file_path}")
+                    import concurrent.futures
+
                     future = executor.submit(decode_raw_file, file_path, params)
-                    rgb_image = future.result()
+                    while True:
+                        if _load_task_cancelled():
+                            future.cancel()
+                            return None
+                        try:
+                            rgb_image = future.result(timeout=0.05)
+                            break
+                        except concurrent.futures.TimeoutError:
+                            continue
                 except Exception as pool_err:
                     import logging
                     logger = logging.getLogger(__name__)
@@ -1833,6 +1896,8 @@ class UnifiedImageProcessor:
                     )
             
             if rgb_image is None:
+                if _load_task_cancelled():
+                    return None
                 import rawpy
                 import time as _time
                 from enhanced_raw_processor import _rawpy_global_lock, _heavy_fallback_semaphore
@@ -1851,9 +1916,15 @@ class UnifiedImageProcessor:
                     pass
                 _t_dec = _time.perf_counter()
                 with _rawpy_global_lock:
+                    if _load_task_cancelled():
+                        return None
                     raw_ctx = rawpy.imread(file_path)
                 with raw_ctx as raw:
+                    if _load_task_cancelled():
+                        return None
                     with _heavy_fallback_semaphore:
+                        if _load_task_cancelled():
+                            return None
                         rgb_image = raw.postprocess(**params)
                 from perf_metrics import perf_mark
 
@@ -1884,6 +1955,11 @@ class UnifiedImageProcessor:
                         rgb_image = self._apply_orientation_correction(
                             rgb_image, orientation, exif_data
                         )
+                        # rot90/flip often yield non-contiguous views; compact
+                        # once here so put_full_image(copy=False) does not pay
+                        # a second full-frame copy.
+                        if use_full_resolution and hasattr(rgb_image, "flags"):
+                            rgb_image = np.ascontiguousarray(rgb_image)
                 except Exception:
                     try:
                         from gpu_gl_bridge import DeviceRgb as _DR
@@ -1900,6 +1976,9 @@ class UnifiedImageProcessor:
                         pass
 
             # Cache unadjusted base; sidecar is applied in process_full_image().
+            # Half-size fit decodes must NOT enter full_image_cache (pollutes
+            # the sensor-res tier and forces a useless multi-hundred-MB copy);
+            # LibRaw half still persists via put_preview below.
             if rgb_image is not None:
                 # One generation for this decode's deferred put_full / preview
                 # persist so a later decode of the same path can invalidate both.
@@ -1907,41 +1986,54 @@ class UnifiedImageProcessor:
                 try:
                     from gpu_gl_bridge import DeviceRgb
 
-                    if isinstance(rgb_image, DeviceRgb):
-                        # Defer host D2H so CUDA-GL display can paint first.
-                        import threading
+                    if use_full_resolution:
+                        if isinstance(rgb_image, DeviceRgb):
+                            # Defer host D2H so CUDA-GL display can paint first.
+                            import threading
 
-                        def _cache_device_host(
-                            dev=rgb_image, fp=file_path, expected=cache_gen
-                        ):
-                            try:
-                                if self._async_cache_gen_current(fp) != expected:
-                                    return
-                                host = dev.to_numpy()
-                                if self._async_cache_gen_current(fp) != expected:
-                                    return
-                                self.cache.put_full_image(fp, host)
-                                self.cache.mark_full_image_source(
-                                    fp, is_embedded_jpeg=False
-                                )
-                            except Exception:
-                                pass
+                            def _cache_device_host(
+                                dev=rgb_image, fp=file_path, expected=cache_gen
+                            ):
+                                try:
+                                    if self._async_cache_gen_current(fp) != expected:
+                                        return
+                                    host = dev.to_numpy()
+                                    if self._async_cache_gen_current(fp) != expected:
+                                        return
+                                    self.cache.put_full_image(fp, host, copy=False)
+                                    self.cache.mark_full_image_source(
+                                        fp, is_embedded_jpeg=False
+                                    )
+                                except Exception:
+                                    pass
 
-                        threading.Thread(
-                            target=_cache_device_host, daemon=True
-                        ).start()
-                        host = None
+                            threading.Thread(
+                                target=_cache_device_host, daemon=True
+                            ).start()
+                            host = None
+                        else:
+                            self.cache.put_full_image(
+                                file_path, rgb_image, copy=False
+                            )
+                            self.cache.mark_full_image_source(
+                                file_path, is_embedded_jpeg=False
+                            )
+                            host = rgb_image
                     else:
-                        self.cache.put_full_image(file_path, rgb_image)
-                        self.cache.mark_full_image_source(
-                            file_path, is_embedded_jpeg=False
+                        host = (
+                            None
+                            if isinstance(rgb_image, DeviceRgb)
+                            else rgb_image
                         )
-                        host = rgb_image
                 except Exception:
                     host = rgb_image if hasattr(rgb_image, "shape") else None
-                    if host is not None and not hasattr(host, "tensor"):
+                    if (
+                        use_full_resolution
+                        and host is not None
+                        and not hasattr(host, "tensor")
+                    ):
                         try:
-                            self.cache.put_full_image(file_path, host)
+                            self.cache.put_full_image(file_path, host, copy=False)
                             self.cache.mark_full_image_source(
                                 file_path, is_embedded_jpeg=False
                             )

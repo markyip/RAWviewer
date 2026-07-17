@@ -341,12 +341,14 @@ def upload_device_rgba_to_gl(
         )
 
     rgba.device  # noqa: B018 — keep tensor live
+    # Sync only the producer stream (not torch.cuda.synchronize() device-wide)
+    # so CUDA-GL map sees finished kernels without stalling unrelated work.
     torch.cuda.current_stream(rgba.device).synchronize()
 
     res_arr = (ctypes.c_void_p * 1)(ctypes.c_void_p(slot.resource))
-    stream = ctypes.c_void_p(stream_ptr) if stream_ptr else ctypes.c_void_p(None)
+    cu_stream = ctypes.c_void_p(stream_ptr) if stream_ptr else ctypes.c_void_p(None)
     _cuda_check(
-        lib.cudaGraphicsMapResources(1, res_arr, stream),
+        lib.cudaGraphicsMapResources(1, res_arr, cu_stream),
         "cudaGraphicsMapResources",
     )
     try:
@@ -377,7 +379,7 @@ def upload_device_rgba_to_gl(
         )
     finally:
         _cuda_check(
-            lib.cudaGraphicsUnmapResources(1, res_arr, stream),
+            lib.cudaGraphicsUnmapResources(1, res_arr, cu_stream),
             "cudaGraphicsUnmapResources",
         )
 

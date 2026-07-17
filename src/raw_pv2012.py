@@ -329,6 +329,7 @@ def apply_pv2012_tone_rgb(
     adj: dict[str, float],
     *,
     preview_lite: bool = False,
+    settle_fast: bool = False,
 ) -> np.ndarray:
     """Hue-preserving PV2012 tone; ratio capped in perceptual space.
 
@@ -342,16 +343,21 @@ def apply_pv2012_tone_rgb(
     fast base; settle / export always use the full path. Live-drag uses a
     separate PreviewStageCache, so lite outputs never poison full-quality
     stages.
+
+    ``settle_fast=True`` (Adjust panel settle only, not export): keep the y0
+    guided filter, skip the heavier shadow chroma-damp guided passes.
     """
     shadows = float(adj.get("Shadows2012", 0.0))
     highlights = float(adj.get("Highlights2012", 0.0))
     img, linear_gain = apply_regional_linear_exposure(img, shadows, highlights)
 
+    skip_chroma_damp = bool(preview_lite or settle_fast)
+
     # Chroma damp for the linear shadow lift (ratio-path damp below won't see
-    # it once perceptual Shadows are zeroed). Skip in preview_lite.
+    # it once perceptual Shadows are zeroed). Skip in preview_lite / settle_fast.
     if (
         linear_gain is not None
-        and not preview_lite
+        and not skip_chroma_damp
         and np.any(linear_gain > 1.0 + 1e-3)
     ):
         lum_lifted = _luminance(img)
@@ -481,7 +487,7 @@ def apply_pv2012_tone_rgb(
     # _apply_whites_blacks), and gating on `sh` left a Blacks-only push
     # completely undamped -- the exact same colored-speckle failure mode,
     # just reachable without touching Shadows at all.
-    if np.any(ratio > 1.0 + 1e-6) and not preview_lite:
+    if np.any(ratio > 1.0 + 1e-6) and not skip_chroma_damp:
         sw = _region_weight_shadows(y_curve)
         # Anchor on the POST-lift luminance: with the pre-lift ``lum`` here,
         # a lifted neutral pixel's uniform (out - lum) offset -- which is the

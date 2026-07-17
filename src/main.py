@@ -1809,6 +1809,7 @@ class _AdjustPreviewWorker(QRunnable):
         stage_cache: Any = None,
         *,
         preview_lite: bool = False,
+        settle_fast: bool = False,
     ):
         super().__init__()
         self.generation = int(generation)
@@ -1818,6 +1819,7 @@ class _AdjustPreviewWorker(QRunnable):
         self.signals = signals
         self.stage_cache = stage_cache
         self.preview_lite = bool(preview_lite)
+        self.settle_fast = bool(settle_fast)
 
     def run(self) -> None:
         out = None
@@ -1835,7 +1837,7 @@ class _AdjustPreviewWorker(QRunnable):
                 # single slider (e.g. Sharpness) skip re-running WB/exposure/
                 # denoise/PV2012 tone/tonemap on every tick.
                 # preview_lite: cheaper PV2012 on the downsampled drag base;
-                # settle passes preview_lite=False on the full base.
+                # settle_fast: full base with lighter chroma damp.
                 from raw_edit_pipeline import render_adjust_preview_uint8
 
                 out = render_adjust_preview_uint8(
@@ -1843,6 +1845,7 @@ class _AdjustPreviewWorker(QRunnable):
                     self.adj,
                     self.stage_cache,
                     preview_lite=self.preview_lite,
+                    settle_fast=self.settle_fast,
                 )
             else:
                 from raw_adjustments import apply_adjustments_to_rgb
@@ -1942,7 +1945,8 @@ class _AdjustCompareOriginalWorker(QRunnable):
 
 # Live-drag max edge. Was 1000 (~55ms Contrast tick at half-res base); 640
 # cuts pixel count ~2.4x so upstream PV2012 ticks stay nearer the 80ms
-# throttle. Settle / Compare still use the full edit base.
+# throttle. Settle uses the full edit base; Compare drag uses lite too
+# (overlay scales original to match).
 _ADJUST_FAST_PREVIEW_MAX_EDGE = 640
 
 
@@ -14416,11 +14420,16 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             # Calculate bytes per line (must be exact, no padding)
             bytes_per_line = channels * width
             
-            # Convert to bytes
-            image_data = numpy_array.tobytes()
-            
-            # Create QImage
-            qimage = QImage(image_data, width, height, bytes_per_line, QImage.Format.Format_RGB888)
+            # Wrap the numpy buffer directly — avoids an extra full-frame
+            # tobytes() allocation. QImage does not own the memory, so
+            # .copy() once into Qt-owned storage before building the pixmap.
+            qimage = QImage(
+                numpy_array.data,
+                width,
+                height,
+                bytes_per_line,
+                QImage.Format.Format_RGB888,
+            ).copy()
             
             if qimage.isNull():
                 logger.warning(f"[GALLERY] Failed to create QImage from numpy array {width}x{height}")
@@ -20926,7 +20935,9 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 self.image_label.resize(pixmap.size())
             timer = getattr(self, "_adjust_hist_sync_timer", None)
             if timer is not None:
-                timer.start(120)
+                # Debounce harder during Adjust paints (instant-gain / D&B /
+                # lite ticks) — 120ms still re-ran hist nearly every throttle.
+                timer.start(220)
             else:
                 self._sync_single_image_histogram()
         finally:
@@ -21102,9 +21113,12 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         # with no worker round-trip or throttle. The exact render below
         # still runs (throttled) and replaces the approximation when it
         # lands, so the image converges to the true pipeline output.
+        # Compare overlay already scales the original to the edited pixmap
+        # size (_update_compare_overlay), so drag can stay on the 640px lite
+        # path; settle still upgrades via editing_finished → full_quality.
         if not comparing:
             self._try_instant_gain_preview(adj)
-        self._apply_adjust_panel_preview(full_quality=comparing)
+        self._apply_adjust_panel_preview(full_quality=False)
 
     _INSTANT_GAIN_KEYS = frozenset({"Exposure2012", "Temperature", "Tint"})
 
@@ -21378,6 +21392,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             if is_end:
                 self._dodge_burn_stroke_active = False
                 self._dodge_burn_stroke_baseline = None
+                self._dodge_burn_stroke_work = None
+                self._dodge_burn_stroke_pixmap = None
                 self._dodge_burn_mask_at_stroke_start = None
             return
         try:
@@ -21424,6 +21440,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 else:
                     self._dodge_burn_stroke_baseline = None
                     self._dodge_burn_stroke_baseline_adj = None
+                self._dodge_burn_stroke_work = None
+                self._dodge_burn_stroke_pixmap = None
                 self._dodge_burn_mask_at_stroke_start = mask.data.copy()
                 self._dodge_burn_stroke_dirty = None
                 self._dodge_burn_stroke_perf = {
@@ -21566,11 +21584,48 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                     out8 = np.clip(patch * gain[..., np.newaxis] + 0.5, 0, 255).astype(
                         np.uint8
                     )
-                    new_arr = baseline.copy()
-                    new_arr[py0:py1, px0:px1] = out8
-                    pixmap = self._numpy_to_qpixmap(new_arr)
-                    if pixmap is not None and not pixmap.isNull():
-                        self._display_adjust_preview_pixmap(pixmap)
+                    # One full-frame working buffer per stroke; blit the dirty
+                    # patch into the existing QPixmap instead of baseline.copy()
+                    # + full tobytes every pointer sample.
+                    work = getattr(self, "_dodge_burn_stroke_work", None)
+                    stroke_pm = getattr(self, "_dodge_burn_stroke_pixmap", None)
+                    if (
+                        work is None
+                        or work.shape != baseline.shape
+                        or stroke_pm is None
+                        or stroke_pm.isNull()
+                        or stroke_pm.width() != baseline.shape[1]
+                        or stroke_pm.height() != baseline.shape[0]
+                    ):
+                        work = baseline.copy()
+                        self._dodge_burn_stroke_work = work
+                        stroke_pm = self._numpy_to_qpixmap(work)
+                        self._dodge_burn_stroke_pixmap = stroke_pm
+                    work[py0:py1, px0:px1] = out8
+                    if stroke_pm is not None and not stroke_pm.isNull():
+                        from PyQt6.QtGui import QImage, QPainter
+
+                        ph, pw = out8.shape[0], out8.shape[1]
+                        patch_img = QImage(
+                            out8.data,
+                            pw,
+                            ph,
+                            int(out8.strides[0]),
+                            QImage.Format.Format_RGB888,
+                        ).copy()
+                        painter = QPainter(stroke_pm)
+                        painter.drawImage(px0, py0, patch_img)
+                        painter.end()
+                        self._display_adjust_preview_pixmap(stroke_pm)
+                        # Keep last_render aligned with the live stroke buffer.
+                        self._adjust_last_render = (
+                            work,
+                            getattr(self, "_dodge_burn_stroke_baseline_adj", None)
+                            or (last[1] if last is not None else {}),
+                        )
+                        self._adjust_last_render_norm = _norm_path(
+                            getattr(self, "current_file_path", "") or ""
+                        )
                 patch_ms = (time.perf_counter() - t_patch) * 1000.0
                 if isinstance(perf_acc, dict):
                     perf_acc["patch_sum"] = float(perf_acc.get("patch_sum", 0.0)) + patch_ms
@@ -21589,6 +21644,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             if is_end:
                 self._dodge_burn_stroke_active = False
                 self._dodge_burn_stroke_baseline = None
+                self._dodge_burn_stroke_work = None
+                self._dodge_burn_stroke_pixmap = None
                 self._dodge_burn_mask_at_stroke_start = None
                 self._dodge_burn_stroke_dirty = None
                 luminance = getattr(self, "_dodge_burn_luma_guide", None)
@@ -21639,6 +21696,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             )
             self._dodge_burn_stroke_active = False
             self._dodge_burn_stroke_baseline = None
+            self._dodge_burn_stroke_work = None
+            self._dodge_burn_stroke_pixmap = None
             self._dodge_burn_mask_at_stroke_start = None
             self._dodge_burn_stroke_dirty = None
             self._dodge_burn_stroke_perf = None
@@ -21715,28 +21774,29 @@ class RAWImageViewer(SessionMixin, QMainWindow):
 
         The mask lives in main.py (painted via the GPU view), not on any
         panel widget -- ``panel.get_adjustments()`` has no way to include
-        it. Every render/export/save path must therefore route its ``adj``
-        dict through here before use: without this, the mask reaches the
-        XMP sidecar (the one place it used to be injected, in
-        _on_adjust_panel_editing_finished) but never the actual rendered
-        pixels, since process_linear_edit_buffer only applies it when
-        adj[MASK_KEY] is present. The symptom was the brush effect visibly
-        flashing in (the instant on-canvas approximation drawn directly by
-        _on_dodge_burn_stroke) and then vanishing the moment the next real
-        worker-rendered frame landed -- every render request funnels
-        through _apply_adjust_panel_preview, which called this exact
-        function's-worth of logic nowhere.
+        it. Preview/export paths inject a live mask object plus a cheap
+        fingerprint for stage-cache keys; XMP save serializes PNG separately
+        (see ``_on_adjust_panel_editing_finished``).
         """
-        from raw_dodge_burn import DEFAULT_STRENGTH, MASK_KEY, STRENGTH_KEY, serialize_mask
+        from raw_dodge_burn import (
+            DEFAULT_STRENGTH,
+            MASK_KEY,
+            MASK_OBJ_KEY,
+            STRENGTH_KEY,
+            mask_stage_fingerprint,
+        )
 
         mask = getattr(self, "_dodge_burn_mask", None)
         if mask is not None and not mask.is_empty:
             adj = dict(adj)
-            adj[MASK_KEY] = serialize_mask(mask)
+            adj[MASK_OBJ_KEY] = mask
+            adj[MASK_KEY] = mask_stage_fingerprint(mask)
             adj.setdefault(STRENGTH_KEY, DEFAULT_STRENGTH)
-        elif MASK_KEY in adj:
-            adj = dict(adj)
-            del adj[MASK_KEY]
+        else:
+            if MASK_KEY in adj or MASK_OBJ_KEY in adj:
+                adj = dict(adj)
+                adj.pop(MASK_KEY, None)
+                adj.pop(MASK_OBJ_KEY, None)
         return adj
 
     def _apply_adjust_panel_preview(self, *, full_quality: bool = False) -> None:
@@ -21802,6 +21862,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             self._adjust_preview_signals,
             stage_cache=stage_cache,
             preview_lite=use_fast,
+            # Settle on half-res base: keep y0 guided filter, skip chroma-damp.
+            settle_fast=bool(full_quality) and not use_fast,
         )
         _get_bg_thread_pool().start(worker)
 
@@ -21895,6 +21957,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             from raw_dodge_burn import (
                 DEFAULT_STRENGTH,
                 MASK_KEY,
+                MASK_OBJ_KEY,
                 STRENGTH_KEY,
                 serialize_mask,
             )
@@ -21909,31 +21972,16 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                     if len(history) > 50:
                         history.pop(0)
 
-            # The dodge/burn mask lives in main.py state (painted via the
-            # GPU view, not a panel slider) -- fold it into whatever this
-            # save already writes so every save (slider release, brush
-            # stroke end, clear) persists the current mask consistently.
+            # Persist PNG for XMP only here — preview ticks use an in-memory
+            # fingerprint via _dodge_burn_overlay_adj (no encode per slider).
+            adj = dict(adj)
+            adj.pop(MASK_OBJ_KEY, None)
             mask = getattr(self, "_dodge_burn_mask", None)
             if mask is not None and not mask.is_empty:
-                adj = dict(adj)
                 adj[MASK_KEY] = serialize_mask(mask)
-                # STRENGTH_KEY (stops per mask unit, see raw_dodge_burn.py) is
-                # a fixed calibration constant, not a user-facing slider --
-                # "Brush Strength" on the panel instead controls per-stamp
-                # accumulation rate (how fast repeated strokes build up),
-                # which is the intuitive "how strong is my brush" control.
                 adj.setdefault(STRENGTH_KEY, DEFAULT_STRENGTH)
-            elif MASK_KEY in adj:
-                adj = dict(adj)
-                del adj[MASK_KEY]
-
-            # The dodge/burn mask lives in main.py state (painted via the
-            # GPU view, not a panel slider) -- fold it into whatever this
-            # save already writes so every save (slider release, brush
-            # stroke end, clear) persists the current mask consistently.
-            # Shared with _apply_adjust_panel_preview's render dispatch so
-            # the saved file and the on-screen render can never disagree.
-            adj = self._dodge_burn_overlay_adj(adj)
+            else:
+                adj.pop(MASK_KEY, None)
 
             write_xmp_adjustments_for_file(path, adj)
         except Exception as exc:
@@ -22576,8 +22624,16 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         # (like every other adjustments snapshot) has no knowledge of the
         # dodge/burn mask -- without this, exported files would silently
         # drop any dodge/burn brush work. See _dodge_burn_overlay_adj.
+        # Export may run in a process pool, so replace the live mask object
+        # with a PNG serial the worker can pickle/deserialize.
         try:
+            from raw_dodge_burn import MASK_KEY, MASK_OBJ_KEY, serialize_mask
+
             adj = self._dodge_burn_overlay_adj(adj)
+            adj = dict(adj)
+            mask_obj = adj.pop(MASK_OBJ_KEY, None)
+            if mask_obj is not None and not getattr(mask_obj, "is_empty", True):
+                adj[MASK_KEY] = serialize_mask(mask_obj)
         except Exception:
             pass
         pool = getattr(getattr(self, "image_manager", None), "_process_pool", None)

@@ -18,6 +18,7 @@ from raw_chroma_denoise import apply_chroma_denoise, apply_luma_denoise, chroma_
 from raw_dodge_burn import DEFAULT_STRENGTH as _DB_DEFAULT_STRENGTH
 from raw_dodge_burn import MASK_KEY as _DB_MASK_KEY
 from raw_dodge_burn import STRENGTH_KEY as _DB_STRENGTH_KEY
+from raw_dodge_burn import resolve_mask_from_adj as _resolve_db_mask
 from raw_pv2012 import apply_pv2012_tone_rgb
 from raw_tone_curve import TONE_CURVE_SERIAL_KEY
 
@@ -205,7 +206,7 @@ def process_linear_edit_buffer(
 
     img = apply_geometry(img, merged)
 
-    mask_serial = str(merged.get(_DB_MASK_KEY, "") or "")
+    mask = _resolve_db_mask(merged)
     do_denoise = chroma_denoise if chroma_denoise is not None else chroma_denoise_enabled()
     nr_amount = float(merged.get("ColorNoiseReduction", 0.0))
     luma_nr_amount = float(merged.get("LuminanceNoiseReduction", 0.0))
@@ -219,7 +220,7 @@ def process_linear_edit_buffer(
     # (its mask needs its own per-band slicing, not implemented here) fall
     # back to the single-threaded path below, same as that precedent.
     n_workers = _linear_pipeline_worker_count(img.shape[0])
-    if not mask_serial and not denoise_active and n_workers > 1:
+    if mask is None and not denoise_active and n_workers > 1:
         return _process_linear_edit_buffer_banded(img, merged, n_workers)
 
     return _process_linear_edit_tail(img, merged, preview=preview, chroma_denoise=chroma_denoise)
@@ -243,14 +244,12 @@ def _process_linear_edit_tail(
     # global exposure gain and before denoise/tone -- local brightness
     # changes should see the same noise/tone response as global ones
     # (matches how a real exposure difference at capture time would look).
-    mask_serial = str(merged.get(_DB_MASK_KEY, "") or "")
-    if mask_serial:
-        from raw_dodge_burn import _deserialize_mask_cached, apply_dodge_burn
+    mask = _resolve_db_mask(merged)
+    if mask is not None:
+        from raw_dodge_burn import apply_dodge_burn
 
-        mask = _deserialize_mask_cached(mask_serial)
-        if mask is not None:
-            stops = float(merged.get(_DB_STRENGTH_KEY, _DB_DEFAULT_STRENGTH))
-            img = apply_dodge_burn(img, mask, stops)
+        stops = float(merged.get(_DB_STRENGTH_KEY, _DB_DEFAULT_STRENGTH))
+        img = apply_dodge_burn(img, mask, stops)
 
     do_denoise = chroma_denoise if chroma_denoise is not None else chroma_denoise_enabled()
     nr_amount = float(merged.get("ColorNoiseReduction", 0.0))
@@ -421,12 +420,14 @@ def process_linear_edit_buffer_staged(
     preview: bool = True,
     chroma_denoise: Optional[bool] = None,
     preview_lite: bool = False,
+    settle_fast: bool = False,
 ) -> np.ndarray:
     """Cached equivalent of process_linear_edit_buffer for the preview path.
 
     ``preview_lite`` selects the cheaper PV2012 path (live-drag only). Live
     and settle use separate PreviewStageCache instances in main.py, so lite
     tone outputs cannot be reused after a full-quality settle.
+    ``settle_fast`` keeps y0 guided filter but skips chroma-damp on settle.
     """
     if rgb_image is None:
         return rgb_image
@@ -463,14 +464,12 @@ def process_linear_edit_buffer_staged(
             if abs(exp_val) > 1e-4:
                 img *= 2.0 ** exp_val
 
-            mask_serial = str(merged.get(_DB_MASK_KEY, "") or "")
-            if mask_serial:
-                from raw_dodge_burn import _deserialize_mask_cached, apply_dodge_burn
+            mask = _resolve_db_mask(merged)
+            if mask is not None:
+                from raw_dodge_burn import apply_dodge_burn
 
-                mask = _deserialize_mask_cached(mask_serial)
-                if mask is not None:
-                    stops = float(merged.get(_DB_STRENGTH_KEY, _DB_DEFAULT_STRENGTH))
-                    img = apply_dodge_burn(img, mask, stops)
+                stops = float(merged.get(_DB_STRENGTH_KEY, _DB_DEFAULT_STRENGTH))
+                img = apply_dodge_burn(img, mask, stops)
 
             do_denoise = chroma_denoise if chroma_denoise is not None else chroma_denoise_enabled()
             nr_amount = float(merged.get("ColorNoiseReduction", 0.0))
@@ -495,13 +494,21 @@ def process_linear_edit_buffer_staged(
         # the tone stage too, even though no _TONE_KEYS value moved.
         # preview_lite is part of the key so flipping lite↔full never reuses
         # the other path's tone buffer (belt-and-suspenders vs dual caches).
-        tone_key = (pre_key, _stage_key(merged, _TONE_KEYS), bool(preview_lite))
+        tone_key = (
+            pre_key,
+            _stage_key(merged, _TONE_KEYS),
+            bool(preview_lite),
+            bool(settle_fast),
+        )
         if cache.stage_keys.get("tone") != tone_key or "tone" not in cache.stage_out:
             if uses_recovery_tone_map(merged):
                 toned = pre_tone_out
             else:
                 toned = apply_pv2012_tone_rgb(
-                    pre_tone_out, merged, preview_lite=bool(preview_lite)
+                    pre_tone_out,
+                    merged,
+                    preview_lite=bool(preview_lite),
+                    settle_fast=bool(settle_fast),
                 )
             cache.stage_out["tone"] = np.clip(toned, 0.0, None)
             cache.stage_keys["tone"] = tone_key
@@ -545,6 +552,7 @@ def render_adjust_preview_uint8(
     cache: "PreviewStageCache",
     *,
     preview_lite: bool = False,
+    settle_fast: bool = False,
 ) -> np.ndarray:
     """
     Staged/cached equivalent of process_linear_edit_buffer(preview=True) +
@@ -553,8 +561,9 @@ def render_adjust_preview_uint8(
     previous call. Used exclusively by the interactive Adjust-panel preview
     path (_AdjustPreviewWorker in main.py).
 
-    ``preview_lite=True`` for the downsampled live-drag base only; settle /
-    Compare / export keep the full PV2012 path.
+    ``preview_lite=True`` for the downsampled live-drag base only.
+    ``settle_fast=True`` for Adjust settle (keeps y0 guide, skips chroma damp);
+    export keeps the full PV2012 path.
 
     Encode must match ``linear_to_display_uint8`` (dcraw BT.709 / ``_gamma_lut8``),
     not IEC sRGB OETF — otherwise staged preview diverges from the uncached
@@ -567,7 +576,12 @@ def render_adjust_preview_uint8(
     merged = dict(DEFAULT_ADJUSTMENTS)
     merged.update(adj or {})
     processed = process_linear_edit_buffer_staged(
-        rgb_image, merged, cache, preview=True, preview_lite=preview_lite
+        rgb_image,
+        merged,
+        cache,
+        preview=True,
+        preview_lite=preview_lite,
+        settle_fast=settle_fast,
     )
     display = _apply_display_stage_staged(processed, merged, cache)
     display = apply_pipeline_lut_linear(display, merged)

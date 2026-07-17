@@ -41,9 +41,29 @@ from typing import Optional
 import numpy as np
 
 MASK_KEY = "_dodge_burn_mask_v1"
+MASK_OBJ_KEY = "_dodge_burn_mask_obj"  # live DodgeBurnMask; never write to XMP
 STRENGTH_KEY = "DodgeBurnStrength"
 DEFAULT_STRENGTH = 1.75  # stops at mask value +/-1.0
 MASK_CLIP = 1.5
+
+
+def mask_stage_fingerprint(mask: "DodgeBurnMask") -> str:
+    """Cheap stage-cache key: shape + mutation version (no PNG encode)."""
+    h, w = mask.data.shape[:2]
+    return f"mem:{int(h)}x{int(w)}:v{int(mask.version)}"
+
+
+def resolve_mask_from_adj(adj: dict | None) -> Optional["DodgeBurnMask"]:
+    """Prefer live mask object; fall back to XMP/base64 serial (not mem: fingerprints)."""
+    if not adj:
+        return None
+    obj = adj.get(MASK_OBJ_KEY)
+    if isinstance(obj, DodgeBurnMask):
+        return obj
+    serial = str(adj.get(MASK_KEY, "") or "")
+    if not serial or serial.startswith("mem:"):
+        return None
+    return _deserialize_mask_cached(serial)
 
 
 @dataclass

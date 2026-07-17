@@ -327,12 +327,16 @@ class CollapsibleSection(QWidget):
         self.header.setObjectName("accordion_header")
         self.header.setStyleSheet(f"""
             QWidget#accordion_header {{
-                background-color: {theme.RAISED};
-                border-top: 1px solid {theme.LINE};
+                background-color: transparent;
+                border: none;
                 border-bottom: 1px solid {theme.LINE};
             }}
             QWidget#accordion_header:hover {{
-                background-color: {theme.RAISED_HI};
+                background-color: {theme.rgba(theme.INK_RGB, 10)};
+            }}
+            QWidget#accordion_header QLabel {{
+                background: transparent;
+                border: none;
             }}
         """)
         header_layout = QHBoxLayout(self.header)
@@ -341,16 +345,25 @@ class CollapsibleSection(QWidget):
 
         # Arrow label
         self.arrow = QLabel("▼")
-        self.arrow.setStyleSheet(f"color: {theme.INK_FAINT}; font-size: 10px; font-weight: bold;")
+        self.arrow.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.arrow.setAutoFillBackground(False)
+        self.arrow.setStyleSheet(
+            f"color: {theme.INK_FAINT}; font-size: 10px; font-weight: bold;"
+            " background: transparent; border: none;"
+        )
         header_layout.addWidget(self.arrow)
 
         # Title label
         self.title_lbl = QLabel(title.upper())
+        self.title_lbl.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.title_lbl.setAutoFillBackground(False)
         self.title_lbl.setStyleSheet(f"""
             color: {theme.INK};
             font-size: 10px;
             font-weight: 700;
             letter-spacing: 1px;
+            background: transparent;
+            border: none;
         """)
         header_layout.addWidget(self.title_lbl, 1)
         
@@ -688,21 +701,25 @@ class ImageAdjustPanelWidget(QWidget):
                 color: {theme.EMBER};
             }}
             QPushButton#adjust_export_btn {{
-                color: {theme.EMBER};
-                font-size: 11px;
-                border: 1px solid {theme.rgba(theme.EMBER_RGB, 80)};
-                border-radius: 4px;
-                background: {theme.rgba(theme.EMBER_RGB, 25)};
-                padding: 4px 10px;
+                color: {theme.INK};
+                font-size: 13px;
+                font-weight: 600;
+                border: 1px solid {theme.rgba(theme.EMBER_RGB, 120)};
+                border-radius: 6px;
+                background: {theme.rgba(theme.EMBER_RGB, 70)};
+                padding: 10px 14px;
+                min-height: 22px;
             }}
             QPushButton#adjust_export_btn:hover {{
-                background: {theme.rgba(theme.EMBER_RGB, 45)};
+                background: {theme.rgba(theme.EMBER_RGB, 110)};
                 color: {theme.INK};
+                border-color: {theme.EMBER};
             }}
             QPushButton#adjust_export_btn:disabled {{
                 color: {theme.INK_FAINT};
                 border-color: {theme.rgba(theme.INK_RGB, 20)};
                 background: transparent;
+                font-weight: 400;
             }}
             QPushButton#adjust_nr_btn,
             QPushButton#adjust_db_btn,
@@ -892,7 +909,12 @@ class ImageAdjustPanelWidget(QWidget):
         if not _SHOW_HSL_UI:
             self.sect_hsl.hide()
 
-        self.sect_detail = CollapsibleSection("Detail / Correction", settings_key="detail")
+        self.sect_detail = CollapsibleSection("Detail", settings_key="detail")
+        self.sect_noise = CollapsibleSection("Noise Reduction", settings_key="noise")
+        self.sect_effects = CollapsibleSection("Effects", settings_key="effects")
+        self.sect_local = CollapsibleSection("Local", settings_key="local")
+        if not _SHOW_DODGE_BURN_UI:
+            self.sect_local.hide()
         self.sect_lut = CollapsibleSection("Looks (.cube / .xmp)", settings_key="lut")
 
         # Add Collapsible Sections to main scroll layout
@@ -902,6 +924,9 @@ class ImageAdjustPanelWidget(QWidget):
         layout.addWidget(self.sect_curve)
         layout.addWidget(self.sect_hsl)
         layout.addWidget(self.sect_detail)
+        layout.addWidget(self.sect_noise)
+        layout.addWidget(self.sect_effects)
+        layout.addWidget(self.sect_local)
         layout.addWidget(self.sect_lut)
         layout.addWidget(self.sect_transform)
 
@@ -1055,8 +1080,10 @@ class ImageAdjustPanelWidget(QWidget):
                     target_layout = self._tone_curve_param_layout
                 else:
                     target_sect = self.sect_curve
-            elif spec.key in {"Sharpness", "Clarity2012", "Defringe", "LuminanceNoiseReduction"}:
+            elif spec.key in {"Sharpness", "Clarity2012", "Defringe"}:
                 target_sect = self.sect_detail
+            elif spec.key in {"LuminanceNoiseReduction"}:
+                target_sect = self.sect_noise
             elif spec.key in {
                 "CropAngle", "PerspectiveVertical", "PerspectiveHorizontal",
             }:
@@ -1066,7 +1093,7 @@ class ImageAdjustPanelWidget(QWidget):
                 "PostCropVignetteMidpoint",
                 "Dehaze",
             }:
-                target_sect = self.sect_detail
+                target_sect = self.sect_effects
             else:
                 target_sect = None
                 
@@ -1169,7 +1196,7 @@ class ImageAdjustPanelWidget(QWidget):
         self._denoise_method_combo.setToolTip("Chroma-only denoise (luminance preserved)")
         self._denoise_method_combo.setStyleSheet(_adjust_combo_stylesheet())
         method_row.addWidget(self._denoise_method_combo, 1)
-        self.sect_detail.add_layout(method_row)
+        self.sect_noise.add_layout(method_row)
 
         chroma_amt_row = QHBoxLayout()
         chroma_amt_row.setSpacing(6)
@@ -1196,9 +1223,9 @@ class ImageAdjustPanelWidget(QWidget):
         self._chroma_nr_amount_row = QWidget()
         self._chroma_nr_amount_row.setLayout(chroma_amt_row)
         self._chroma_nr_amount_row.setVisible(False)
-        self.sect_detail.add_widget(self._chroma_nr_amount_row)
+        self.sect_noise.add_widget(self._chroma_nr_amount_row)
 
-        # Lens correction
+        # Lens correction (optics — lives with Transform / crop geometry)
         self._lens_correction_row = QHBoxLayout()
         self._lens_correction_row.setSpacing(6)
         
@@ -1233,7 +1260,7 @@ class ImageAdjustPanelWidget(QWidget):
         self._lens_correction_row_widget = QWidget()
         self._lens_correction_row_widget.setLayout(self._lens_correction_row)
         self._lens_correction_row_widget.hide()  # shown only once a profile match is confirmed
-        self.sect_detail.add_widget(self._lens_correction_row_widget)
+        self.sect_transform.add_widget(self._lens_correction_row_widget)
 
         # Recovery-look button removed (2026-07): the editor's default
         # display transform now matches the browse render exactly (dcraw
@@ -1244,22 +1271,21 @@ class ImageAdjustPanelWidget(QWidget):
         # in the UI can arm it anymore.
         self._recovery_btn = None
 
-        # Dodge & burn brush (Local section under Detail): mutually-exclusive
+        # Dodge & burn brush (own Local accordion): mutually-exclusive
         # Dodge/Burn + Size/Flow. Mask persists via XMP; live strokes use a
         # cheap region patch (main._on_dodge_burn_stroke) so unrelated sliders
         # don't re-pay brush cost (gain map cached in raw_dodge_burn).
         db_container = QWidget()
         db_container_layout = QVBoxLayout(db_container)
-        db_container_layout.setContentsMargins(0, 4, 0, 0)
+        db_container_layout.setContentsMargins(0, 0, 0, 0)
         db_container_layout.setSpacing(6)
-        db_container.setVisible(_SHOW_DODGE_BURN_UI)
 
         db_row = QHBoxLayout()
         db_row.setSpacing(6)
-        db_label = QLabel("Local")
-        db_label.setStyleSheet(f"color: {theme.INK}; font-size: 11px;")
-        db_label.setMinimumWidth(78)
-        db_row.addWidget(db_label)
+        db_mode_lbl = QLabel("Mode")
+        db_mode_lbl.setStyleSheet(f"color: {theme.INK}; font-size: 11px;")
+        db_mode_lbl.setMinimumWidth(78)
+        db_row.addWidget(db_mode_lbl)
         self._dodge_btn = QPushButton("Dodge")
         self._burn_btn = QPushButton("Burn")
         for btn, tip in (
@@ -1378,14 +1404,15 @@ class ImageAdjustPanelWidget(QWidget):
         db_mask_str_row.addWidget(self._db_mask_strength_slider, 1)
         db_mask_str_row.addWidget(self._db_mask_strength_value)
         db_container_layout.addLayout(db_mask_str_row)
-        self.sect_detail.add_widget(db_container)
+        self.sect_local.add_widget(db_container)
 
         self._build_looks_section(self.sect_lut)
 
-        export_btn = QPushButton("Export…")
+        export_btn = QPushButton("Export")
         export_btn.setObjectName("adjust_export_btn")
         export_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         export_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        export_btn.setMinimumHeight(40)
         export_menu = QMenu(export_btn)
         # Bare QMenu renders with OS-native chrome, clashing with the app's
         # frameless dark-chrome dialogs (see release_update_dialog.py) -- the

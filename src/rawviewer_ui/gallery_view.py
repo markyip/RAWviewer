@@ -1769,14 +1769,19 @@ class JustifiedGallery(QWidget):
         return oriented
 
     def _global_cache_to_base_pixmap(self, path: str) -> Optional[QPixmap]:
-        """Pull an oriented base pixmap from the global ImageCache for gallery tiles."""
+        """Pull an oriented base pixmap from the global ImageCache for gallery tiles.
+
+        Memory tiers only — ``get_grid``/``get_thumbnail`` fall through to disk
+        JPEG decode on the UI thread (same stall filmstrip already avoided).
+        Disk misses return None so async thumbnail loads fill the tile.
+        """
         try:
             from image_cache import get_image_cache
 
             global_cache = get_image_cache()
-            global_thumb = global_cache.get_grid(path)
+            global_thumb = global_cache.get_grid_memory_only(path)
             if global_thumb is None:
-                global_thumb = global_cache.get_thumbnail(path)
+                global_thumb = global_cache.get_thumbnail_memory_only(path)
             if global_thumb is None:
                 return None
             arr = self._orient_gallery_thumbnail_array(path, np.ascontiguousarray(global_thumb))
@@ -3036,6 +3041,16 @@ class JustifiedGallery(QWidget):
                 self._active_tasks.pop(fp, None)
             self._requested_thumbnail_paths = wanted_paths | protected_paths
         else:
+            # Still cancel offscreen CURRENT work while scrolling — otherwise
+            # active_cap stays filled with tiles the user already passed until
+            # the 4s sweep, starving the new viewport.
+            to_cancel = self._requested_thumbnail_paths - visible_paths
+            for fp in list(to_cancel):
+                try:
+                    self.load_manager.cancel_task(fp)
+                except Exception:
+                    pass
+                self._active_tasks.pop(fp, None)
             self._requested_thumbnail_paths = set(visible_paths)
 
         load_tasks = []
@@ -3641,8 +3656,8 @@ class JustifiedGallery(QWidget):
             if self._thumbnail_cache.get((path, self._thumb_base_key)) is not None:
                 continue
 
-            # Skip if already in global cache (either thumbnail or grid)
-            if global_cache.get_thumbnail(path) is not None or global_cache.get_grid(path) is not None:
+            # Skip if already warm in memory (never touch disk on this UI timer).
+            if global_cache.has_warm_thumbnail_in_memory(path):
                 continue
 
             # Skip if already being processed or active
@@ -3683,9 +3698,9 @@ class JustifiedGallery(QWidget):
                 continue
             if self._thumbnail_cache.get((path, self._thumb_base_key)):
                 continue
-            thumb = global_cache.get_thumbnail(path)
+            thumb = global_cache.get_thumbnail_memory_only(path)
             if thumb is None:
-                thumb = global_cache.get_grid(path)
+                thumb = global_cache.get_grid_memory_only(path)
             if thumb is None:
                 continue
             thumb = self._orient_gallery_thumbnail_array(path, thumb)

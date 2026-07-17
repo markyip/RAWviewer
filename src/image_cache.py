@@ -2525,11 +2525,21 @@ class ImageCache(QObject):
             self.cache_miss.emit(file_path, 'full_image')
             return None
 
-    def put_full_image(self, file_path: str, image: np.ndarray) -> None:
-        """Cache a full processed image."""
+    def put_full_image(
+        self, file_path: str, image: np.ndarray, *, copy: bool = True
+    ) -> None:
+        """Cache a full processed image.
+
+        ``copy=False`` transfers ownership of a freshly allocated buffer the
+        caller will not mutate (avoids a second multi-hundred-MB memcpy on
+        40–60MP decodes). Contiguous arrays are stored as-is; non-contiguous
+        inputs are still compacted with ``ascontiguousarray``.
+        """
         if image is not None:
-            img_copy = image.copy()
-            self.full_image_cache.put(file_path, img_copy)
+            stored = (
+                np.ascontiguousarray(image) if not copy else image.copy()
+            )
+            self.full_image_cache.put(file_path, stored)
             self._enforce_numpy_cache_byte_budget(
                 self.full_image_cache,
                 fraction=0.55,
