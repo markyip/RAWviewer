@@ -50,7 +50,7 @@
 
 ## New in 3.0
 
-- **Much faster than 2.5** — cold Windows suite (cache cleared each run): gallery ready **~2.9×** sooner (**8.6s → 3.0s** Lite); RAW full-res navigation median **~1.6–1.7×** sooner (**0.95s → 0.57s** Lite / **0.60s** Full+GPU). Lite and Full both beat 2.5 on these cull paths — see [`RELEASE_NOTES.md`](RELEASE_NOTES.md)
+- **Much faster than 2.5** — cold Windows suite (cache cleared each run): gallery ready **~2.7–2.9×** sooner (**8.6s → ~3s**); RAW full-res navigation median **~1.6–1.7×** sooner (**0.95s → ~0.6s**). Lite and Full share the same 3.0 pipeline and both beat 2.5 on cull paths — see [`RELEASE_NOTES.md`](RELEASE_NOTES.md)
 - **Adjust panel** — develop RAWs non-destructively: tone, white-balance presets, crop, dodge & burn, healing, vignette/dehaze, creative LUTs, and savable presets; export JPEG / WebP / 16-bit TIFF (**Windows Full** also offers export-only **AI denoise** via SCUNet; not in the macOS `.app` — see [Lite or Full?](#lite-or-full))
 - **Star ratings** — rate 1–5 with the number keys; filter the gallery by minimum rating
 - **Nikon High Efficiency (HE/HE*) files** now open for browsing and culling

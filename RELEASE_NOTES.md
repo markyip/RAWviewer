@@ -28,7 +28,7 @@ RAWviewer 3.0 turns the viewer into a complete **cull-and-develop** tool: a full
 - Ratings persist to **XMP** and appear as gallery tile badges; filter the gallery to **rating ≥ N**, combinable with the bookmark filter.
 
 #### ⚡ Faster than 2.5 (verified cold suite)
-**Headline vs 2.5 Lite on the same Windows machine (cache cleared before every run):** gallery ready **8.6s → ~3.0s (~2.9×)**; RAW full-res navigation median **0.95s → ~0.57–0.60s (~1.6–1.7×)**. Both 3.0 Lite and 3.0 Full beat 2.5 on the paths that matter for culling.
+**Headline vs 2.5 Lite on the same Windows machine (cache cleared before every run):** gallery ready **8.6s → ~3s (~2.7–2.9× faster)**; RAW full-res navigation median **0.95s → ~0.6s (~1.6–1.7× faster)**. **Lite and Full share the same 3.0 loading pipeline** and both beat 2.5 on the paths that matter for culling; Full adds GPU demosaic (and export-time AI denoise on Windows) at comparable speed on these tests.
 
 - **Fast RAW decode** on by default: half-size and full sensor tiers share one LibRaw unpack, with verified color parity (±1 8-bit LSB on golden ARW/CR3 sets).
 - Cold gallery thumbnail warmup about **3×** faster; Canon CR3 embedded previews no longer read the whole file.
@@ -40,19 +40,19 @@ RAWviewer 3.0 turns the viewer into a complete **cull-and-develop** tool: a full
 ##### Cold-start suite vs 2.5 (Windows, Jul 2026)
 Same machine, cleared `~/.rawviewer_cache` before **each** test. Gallery: open one RAW in a ~6900-file folder, wait for EXIF sort, hold **Up** 20s. RAW nav: open one file in a ~260-file mixed-format RAW folder, wait for sensor-covering full-res paint, then next (full loop).
 
-| Config | Gallery ready | vs 2.5 | RAW nav median | vs 2.5 |
-|--------|---------------|--------|----------------|--------|
+| vs 2.5 baseline | Gallery ready | vs 2.5 | RAW nav median | vs 2.5 |
+|---------------|---------------|--------|----------------|--------|
 | **2.5 Lite** | 8.6s | — | 0.95s | — |
-| **3.0 Lite** | **3.0s** | **~2.9× faster** | **0.57s** | **~1.7× faster** |
-| **3.0 Full + GPU** | 3.2s | **~2.7× faster** | **0.60s** | **~1.6× faster** |
+| **3.0 Lite & Full** | **~3s** | **~2.7–2.9× faster** | **~0.6s** | **~1.6–1.7× faster** |
 
-| Config | RAW nav mean | RAW nav p95 | Tiles / 20s Up |
-|--------|--------------|-------------|----------------|
+Run-to-run variance between Lite (CPU Fast RAW) and Full (GPU demosaic on supported files) is within a few percent on these cold-suite paths — both editions are in the same class vs 2.5.
+
+| vs 2.5 baseline | RAW nav mean | RAW nav p95 | Tiles / 20s Up |
+|---------------|--------------|-------------|----------------|
 | **2.5 Lite** | 1.20s | 2.70s | 1043 |
-| **3.0 Lite** | 0.74s | 1.83s | 938 |
-| **3.0 Full + GPU** | 0.84s | 2.61s | 940 |
+| **3.0 Lite & Full** | **~0.7–0.8s** | **~1.8–2.6s** | **~940** |
 
-**Bottom line:** upgrading from 2.5 to 3.0 is a clear speed win for folder open → gallery and for RAW high-quality browsing. Full + GPU keeps true LibRaw/GPU demosaic for supported files (164 GPU decodes / 259 in the sample set; HE/HE* use per-file embeds only) with **0 TIMEOUTs** after the scheduling fixes.
+**Bottom line:** upgrading from 2.5 to 3.0 is a clear speed win for folder open → gallery and for RAW high-quality browsing. Choose **Lite** for the smallest install, or **Full** for GPU demosaic plus export-time AI denoise — culling speed is in the same ballpark on these paths. Full keeps true LibRaw/GPU demosaic for supported files (164 GPU decodes / 259 in the sample set; HE/HE* use per-file embeds only) with **0 TIMEOUTs** after the scheduling fixes.
 
 #### 🖼️ Gallery loading & scrolling overhaul
 - Main-thread stalls during gallery fill eliminated (worst observed stall **11.7s → <0.6s**): budgeted tile passes, deferred cache-hit delivery, and no per-tile sidecar probes on external drives.

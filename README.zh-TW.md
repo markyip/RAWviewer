@@ -50,7 +50,7 @@
 
 ## 3.0 新功能
 
-- **明顯快過 2.5** — Windows 冷啟動套件（每次清快取）：圖庫就緒約 **2.9×**（**8.6 秒 → 3.0 秒** Lite）；RAW 全解析度導航中位數約 **1.6–1.7×**（**0.95 秒 → 0.57 秒** Lite／**0.60 秒** Full+GPU）。Lite 與 Full 在篩片關鍵路徑上都勝過 2.5 — 見 [`RELEASE_NOTES.zh-TW.md`](RELEASE_NOTES.zh-TW.md)
+- **明顯快過 2.5** — Windows 冷啟動套件（每次清快取）：圖庫就緒約 **2.7–2.9×**（**8.6 秒 → 約 3 秒**）；RAW 全解析度導航中位數約 **1.6–1.7×**（**0.95 秒 → 約 0.6 秒**）。Lite 與 Full 共用 3.0 管線，篩片關鍵路徑皆勝過 2.5 — 見 [`RELEASE_NOTES.zh-TW.md`](RELEASE_NOTES.zh-TW.md)
 - **Adjust 面板** — 非破壞顯影：色調、白平衡預設、裁切、Dodge & Burn、修復筆刷、暈影／去霧、Creative LUT 與可儲存的預設；匯出 JPEG／WebP／16 位元 TIFF（**Windows 完整版**另提供僅於匯出時套用的 **AI 降噪**，使用 SCUNet；macOS 的 `.app` 不含此選項——見[選 Lite 還是 Full？](#選-lite-還是-full)）
 - **星級評分** — 用數字鍵 1–5 評分；圖庫可依最低星級篩選
 - **Nikon 高效率（HE/HE\*）檔案**現可瀏覽與篩片
