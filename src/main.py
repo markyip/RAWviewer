@@ -18087,21 +18087,19 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             # Already in flight from session restore / idle flush — just wait.
             self._smooth_zoom_full_request_sent = True
             return
-        import logging
-
-        logging.getLogger(__name__).info(
-            "[ZOOM] Preview below sensor resolution — starting full-resolution decode"
-        )
-        # Set the guard before queueing so a failing / no-op queue cannot
-        # re-log on every pinch sample (was flooding dozens of identical
-        # lines per gesture while the adjust half-res buffer was on screen).
-        self._smooth_zoom_full_request_sent = True
+        # Latch the one-shot only after a real queue. Setting it before a
+        # refused call (Adjust opened mid-gesture, etc.) left the flag True
+        # with a dead else/`pass` that claimed retries were allowed — so the
+        # rest of the pinch gesture never asked again. Log only on success
+        # to avoid the prior per-sample flood on no-op queues.
         if self._queue_sensor_full_decode(fp, priority_current=True, urgent=True):
+            self._smooth_zoom_full_request_sent = True
             self._full_resolution_loading = True
-        else:
-            # Allow a later retry once something clears the zoom-request flag
-            # (file switch / fit). Keep it set for this gesture.
-            pass
+            import logging
+
+            logging.getLogger(__name__).info(
+                "[ZOOM] Preview below sensor resolution — starting full-resolution decode"
+            )
 
     def _schedule_raw_sensor_exif_status_refresh(self) -> None:
         """Reload EXIF through EXIFExtractor so status shows sensor WxH."""
