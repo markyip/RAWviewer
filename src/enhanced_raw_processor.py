@@ -859,7 +859,7 @@ class ThumbnailExtractor(QObject):
                         if tmp_name and os.path.exists(tmp_name):
                             try:
                                 os.remove(tmp_name)
-                            except: pass
+                            except Exception: pass
                 except Exception:
                     pass
         return thumb
@@ -1110,7 +1110,7 @@ class EXIFExtractor(QObject):
                                 orientation = val
                                 orientation_tag_found = tag_name
                                 break
-                    except: pass
+                    except Exception: pass
                     
                     # Fallback to string mapping (same as main.py)
                     orientation_str = str(tag).strip()
@@ -1148,7 +1148,7 @@ class EXIFExtractor(QObject):
                 try:
                     original_width = int(crop_size.values[0])
                     original_height = int(crop_size.values[1])
-                except: pass
+                except Exception: pass
 
             # 2. Try DNG ActiveArea (Top, Left, Bottom, Right)
             if original_width <= 0 or original_height <= 0:
@@ -1162,7 +1162,7 @@ class EXIFExtractor(QObject):
                         right = int(active_area.values[3])
                         original_height = bottom - top
                         original_width = right - left
-                    except: pass
+                    except Exception: pass
             
             # 3. Fallback to standard EXIF width/height
             if original_width <= 0:
@@ -1171,7 +1171,7 @@ class EXIFExtractor(QObject):
                         try: 
                             original_width = int(tags[tag].values[0])
                             break
-                        except: pass
+                        except Exception: pass
             
             if original_height <= 0:
                 for tag in ('EXIF ExifImageLength', 'Image ImageLength'):
@@ -1179,7 +1179,7 @@ class EXIFExtractor(QObject):
                         try:
                             original_height = int(tags[tag].values[0])
                             break
-                        except: pass
+                        except Exception: pass
 
             # Second pass: If it's a RAW file, use rawpy to verify dimensions and
             # orientation (flip), and -- while the file is already open -- also
@@ -1234,7 +1234,7 @@ class EXIFExtractor(QObject):
                         # But standard JPEGs with missing tags usually have orientation=1.
                         original_width = size.width()
                         original_height = size.height()
-                except:
+                except Exception:
                     pass
 
             # Fourth pass: If on macOS and missing dimensions, fallback to native sips
@@ -1276,7 +1276,7 @@ class EXIFExtractor(QObject):
                         else:
                             focal_length = f"{round(float(val))}mm"
                         break
-                    except: pass
+                    except Exception: pass
             
             # Aperture
             for tag in ('EXIF FNumber', 'EXIF ApertureValue'):
@@ -1289,7 +1289,7 @@ class EXIFExtractor(QObject):
                         else:
                             aperture = f"f/{float(val):.1f}"
                         break
-                    except: pass
+                    except Exception: pass
             
             # ISO
             for tag in ('EXIF ISOSpeedRatings', 'EXIF ISO', 'EXIF PhotographicSensitivity'):
@@ -1302,7 +1302,7 @@ class EXIFExtractor(QObject):
                         else:
                             iso = f"ISO {val}"
                         break
-                    except: pass
+                    except Exception: pass
 
             rating = 0
             for tag in ('XMP-xmp:Rating', 'XMP Rating', 'Rating', 'EXIF Rating'):
@@ -1448,7 +1448,7 @@ class OptimizedRAWProcessor(QObject):
         # Get file size for processing decisions
         try:
             file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
-        except:
+        except Exception:
             file_size_mb = 50  # Default assumption
 
         # Adjust for large files (use faster processing)

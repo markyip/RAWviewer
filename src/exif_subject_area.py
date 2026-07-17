@@ -670,7 +670,7 @@ def _get_focus_hint_sensor_space(path: str) -> tuple[tuple[int, int, int, int], 
                 lt_af = pixmap_ltwh_af_from_exifread(path, 1000, 1000)
                 if lt_af:
                     return lt_af, "maker_af", 1000, 1000
-        except:
+        except Exception:
             pass
         return None
 

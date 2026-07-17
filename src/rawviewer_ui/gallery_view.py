@@ -2997,6 +2997,13 @@ class JustifiedGallery(QWidget):
                     self.load_manager.cancel_all_tasks()
             except Exception:
                 pass
+            # flush_queue clears the manager's active map but does not emit
+            # task_completed — drop the gallery's parallel bookkeeping or
+            # phantom CURRENT entries block reschedule until the 4s sweep.
+            try:
+                self._active_tasks.clear()
+            except Exception:
+                pass
             # A deliberate jump away means the user is no longer following the entry
             # point -- stop anchoring center_paths/prefetch to it (see
             # _entry_prefetch_active, which is otherwise purely spatial and would

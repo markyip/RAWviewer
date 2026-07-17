@@ -493,6 +493,18 @@ class InstallWorker(QObject):
                     return
                 try:
                     with zipfile.ZipFile(zip_path, "r") as zf:
+                        root = os.path.realpath(pixi_dir)
+                        for info in zf.infolist():
+                            name = info.filename.replace("\\", "/")
+                            if name.startswith("/") or ".." in name.split("/"):
+                                raise zipfile.BadZipFile(
+                                    f"refusing unsafe zip member: {info.filename!r}"
+                                )
+                            dest = os.path.realpath(os.path.join(pixi_dir, name))
+                            if dest != root and not dest.startswith(root + os.sep):
+                                raise zipfile.BadZipFile(
+                                    f"refusing zip path escape: {info.filename!r}"
+                                )
                         zf.extractall(pixi_dir)
                     os.remove(zip_path)
                 except (OSError, zipfile.BadZipFile) as exc:

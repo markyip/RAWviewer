@@ -1388,7 +1388,7 @@ def setup_logging():
                 with open(fallback_log, 'a', encoding='utf-8') as f:
                     f.write(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} - {error_msg}\n")
                     f.write(f"{traceback.format_exc()}\n")
-        except:
+        except Exception:
             pass  # If even fallback fails, we've done our best
         
         raise  # Re-raise to let caller handle it
@@ -1900,12 +1900,11 @@ class _AdjustCompareOriginalSignals(QObject):
 
 
 class _AdjustCompareOriginalWorker(QRunnable):
-    """Render the unedited (all-default adjustments) look for the compare-with-original split view.
+    """Render the unedited look for compare-with-original (tone defaults).
 
-    Uses the same encode path as the live preview, just with DEFAULT_ADJUSTMENTS
-    instead of the panel's current values -- this hits process_linear_edit_buffer's
-    existing "adjustments are all default" fast path (no WB/denoise/tone math at
-    all, just decode + sRGB encode), so it's cheap even without its own stage cache.
+    Geometry (crop/straighten/keystone) from the live edit is applied so the
+    original side matches the edited frame's framing; IgnoreAspectRatio stretch
+    is no longer required when sizes already agree.
     """
 
     def __init__(
@@ -1913,18 +1912,25 @@ class _AdjustCompareOriginalWorker(QRunnable):
         file_path: str,
         base_rgb: Any,
         signals: _AdjustCompareOriginalSignals,
+        geometry_adj: dict | None = None,
     ):
         super().__init__()
         self.file_path = file_path
         self.base_rgb = base_rgb
         self.signals = signals
+        self.geometry_adj = dict(geometry_adj or {})
 
     def run(self) -> None:
         out = None
         try:
             from raw_adjustments import DEFAULT_ADJUSTMENTS, apply_adjustments_to_rgb
+            from raw_transform import TRANSFORM_KEYS
 
-            out = apply_adjustments_to_rgb(self.base_rgb, dict(DEFAULT_ADJUSTMENTS))
+            adj = dict(DEFAULT_ADJUSTMENTS)
+            for key in TRANSFORM_KEYS:
+                if key in self.geometry_adj:
+                    adj[key] = self.geometry_adj[key]
+            out = apply_adjustments_to_rgb(self.base_rgb, adj)
             if out is not None and str(getattr(out, "dtype", "")) != "uint8":
                 from raw_tone_recovery import _encode_srgb8
 
@@ -12496,8 +12502,10 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             except Exception:
                 continue
             raw_targets.append(fp)
-            cache.thumbnail_cache.remove(fp)
-            cache.preview_cache.remove(fp)
+            key = cache._path_key(fp)
+            cache.thumbnail_cache.remove(key)
+            cache.grid_cache.remove(key)
+            cache.preview_cache.remove(key)
             cache.full_image_cache.remove(fp)
             cache.pixmap_cache.remove(fp)
 
@@ -12507,6 +12515,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                     try:
                         cache.disk_preview_cache.remove(fp)
                         cache.disk_thumbnail_cache.remove(fp)
+                        cache.disk_grid_cache.remove(fp)
                     except Exception:
                         pass
 
@@ -14326,7 +14335,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                         elif flip == 5: cached_exif['orientation'] = 8
                         else: cached_exif['orientation'] = 1
                         self.image_cache.put_exif(file_path, cached_exif)
-                    except: pass
+                    except Exception: pass
                     return aspect
             except Exception:
                 pass
@@ -14343,7 +14352,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                     exif = exif_getter() if callable(exif_getter) else None
                     if isinstance(exif, dict):
                         orientation = int(exif.get(274, 1))  # 274 is Orientation tag
-                except: pass
+                except Exception: pass
                 
                 if h > 0:
                     real_w, real_h = (h, w) if orientation in (5, 6, 7, 8) else (w, h)
@@ -14965,7 +14974,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                     # Also cache in global image cache for smooth switching between views
                     try:
                         self.image_cache.put_pixmap(file_path, pixmap)
-                    except:
+                    except Exception:
                         pass  # Cache might be full, continue anyway
                     # Update aspect cache
                     aspect = pixmap.width() / pixmap.height() if pixmap.height() > 0 else 4.0 / 3.0
@@ -18337,7 +18346,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                     # Try to clear reference even if cleanup failed
                     try:
                         self.current_processor = None
-                    except:
+                    except Exception:
                         pass
             else:
                 logger.debug("No current_processor to clean up")
@@ -19147,7 +19156,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                     parent_dir = os.path.dirname(target_path)
                     if not os.path.exists(parent_dir):
                         self.reset_to_initial_state()
-            except:
+            except Exception:
                 pass
             raise
 
@@ -20778,18 +20787,45 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 pass
         return None
 
+    def _unrotated_display_size(self) -> tuple[int, int] | None:
+        """Display size in pre-visual-rotation space (matches edit/sample buffers)."""
+        disp = self._adjust_display_pixel_size()
+        if disp is None:
+            return None
+        deg = int(self._get_visual_rotation_degrees() or 0) % 360
+        dw, dh = disp
+        if deg in (90, 270):
+            return dh, dw
+        return dw, dh
+
+    def _display_point_to_unrotated(self, x: float, y: float) -> tuple[float, float]:
+        """Map a click on the visually-rotated pixmap back to buffer space."""
+        deg = int(self._get_visual_rotation_degrees() or 0) % 360
+        disp = self._adjust_display_pixel_size()
+        if disp is None or deg == 0:
+            return float(x), float(y)
+        dw, dh = disp
+        if deg == 90:
+            return float(dh - 1 - y), float(x)
+        if deg == 180:
+            return float(dw - 1 - x), float(dh - 1 - y)
+        if deg == 270:
+            return float(y), float(dw - 1 - x)
+        return float(x), float(y)
+
     def _map_adjust_display_point_to_buffer(
         self, pt, buffer_w: int, buffer_h: int
     ) -> tuple[float, float]:
         """Display-pixmap point → same-framing buffer (dodge/burn + WB pick)."""
         from raw_transform import map_display_point_to_buffer
 
-        disp = self._adjust_display_pixel_size()
+        ux, uy = self._display_point_to_unrotated(float(pt.x()), float(pt.y()))
+        disp = self._unrotated_display_size()
         if disp is None:
-            return float(pt.x()), float(pt.y())
+            return ux, uy
         return map_display_point_to_buffer(
-            float(pt.x()),
-            float(pt.y()),
+            ux,
+            uy,
             display_w=disp[0],
             display_h=disp[1],
             buffer_w=int(buffer_w),
@@ -20810,9 +20846,12 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         from raw_transform import apply_geometry
 
         img = _linear_float_from_buffer(base)
+        geo = dict(adj or {})
         if getattr(self, "_crop_preview_uncropped", False):
-            return img
-        return apply_geometry(img, adj or {})
+            # Crop overlay zeroes insets but still shows straighten/keystone.
+            for k in ("CropLeft", "CropRight", "CropTop", "CropBottom"):
+                geo[k] = 0.0
+        return apply_geometry(img, geo)
 
     def _restore_adjust_hires_before_zoom(self) -> bool:
         """If Fit live-drag left a 640px buffer on screen, restore settle first.
@@ -20994,8 +21033,13 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             self._apply_adjust_panel_preview(full_quality=True)
             
             # Kick off compare pre-render asynchronously
+            geo = None
+            try:
+                geo = panel.get_adjustments()
+            except Exception:
+                geo = None
             worker = _AdjustCompareOriginalWorker(
-                file_path, base, self._adjust_compare_original_signals
+                file_path, base, self._adjust_compare_original_signals, geometry_adj=geo
             )
             _get_bg_thread_pool().start(worker)
         if hasattr(self, "status_bar"):
@@ -21286,17 +21330,43 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         gv.set_dodge_burn_mask_overlay(getattr(self, "_dodge_burn_mask", None), show)
 
     def _dodge_burn_mask_shape(self) -> tuple[int, int] | None:
-        """Canonical (H, W) the mask is painted at: the (half-res) edit base.
+        """Canonical (H, W) the mask is painted at: post-geometry edit frame.
 
-        Fixed regardless of which preview tier is on screen -- apply_dodge_
-        burn resizes the mask to whatever resolution each pipeline stage
-        actually processes (fast-drag base, full preview, full-quality
-        export), so painting always targets one stable coordinate space.
+        Matches the Adjust display framing (crop/straighten/keystone) so
+        stroke mapping agrees with WB pick / on-screen pixels. Cached per
+        base identity + transform keys.
         """
         base = getattr(self, "_adjust_preview_base_rgb", None)
-        if base is not None and hasattr(base, "shape"):
-            return int(base.shape[0]), int(base.shape[1])
-        return None
+        if base is None or not hasattr(base, "shape"):
+            return None
+        panel = getattr(self, "single_image_adjust_panel", None)
+        adj = {}
+        try:
+            if panel is not None:
+                adj = panel.get_adjustments() or {}
+        except Exception:
+            adj = {}
+        from raw_transform import TRANSFORM_KEYS, has_geometry
+
+        uncropped = bool(getattr(self, "_crop_preview_uncropped", False))
+        geo_key = tuple(float(adj.get(k, 0.0) or 0.0) for k in TRANSFORM_KEYS)
+        cache_key = (id(base), geo_key, uncropped)
+        if getattr(self, "_dodge_burn_mask_shape_cache_key", None) == cache_key:
+            cached = getattr(self, "_dodge_burn_mask_shape_cached", None)
+            if cached is not None:
+                return cached
+        h, w = int(base.shape[0]), int(base.shape[1])
+        if uncropped or not has_geometry(adj):
+            shape = (h, w)
+        else:
+            sample = self._wb_linear_sample_buffer(adj)
+            if sample is None or not hasattr(sample, "shape"):
+                shape = (h, w)
+            else:
+                shape = (int(sample.shape[0]), int(sample.shape[1]))
+        self._dodge_burn_mask_shape_cache_key = cache_key
+        self._dodge_burn_mask_shape_cached = shape
+        return shape
 
     def _on_dodge_burn_stroke(self, pt, pressure: float, is_end: bool) -> None:
         panel = getattr(self, "single_image_adjust_panel", None)
@@ -21590,6 +21660,13 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 pixmap = self._numpy_to_qpixmap(array)
             except Exception:
                 pixmap = None
+            dirty_now = bool(getattr(self, "_adjust_preview_dirty", False))
+            # A newer request is already queued — do not paint/cache this stale
+            # generation (was flashing the previous slider values, then settling).
+            if dirty_now:
+                if getattr(self, "_adjust_preview_dirty", False):
+                    self._apply_adjust_panel_preview(full_quality=dirty_full_quality)
+                return
             if pixmap is not None and not pixmap.isNull():
                 deferred = self._should_defer_adjust_preview_paint(pixmap)
                 if not deferred:
@@ -21619,6 +21696,17 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                     if max(int(array.shape[0]), int(array.shape[1])) >= 1200:
                         self._adjust_hires_render = (array, adj_used)
                         self._adjust_hires_render_norm = _norm_path(file_path)
+                # Deferred browse bake after full-quality settle (editing_finished
+                # used to bake the previous last_render while this worker ran).
+                pending_bake = getattr(self, "_pending_browse_bake_path", None)
+                if (
+                    pending_bake
+                    and _norm_path(pending_bake) == _norm_path(file_path)
+                    and not deferred
+                    and max(int(array.shape[0]), int(array.shape[1])) >= 1200
+                ):
+                    self._pending_browse_bake_path = None
+                    self._persist_editor_aligned_browse_caches(file_path)
         if getattr(self, "_adjust_preview_dirty", False):
             self._apply_adjust_panel_preview(full_quality=dirty_full_quality)
 
@@ -21892,8 +21980,12 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         # edited frame — re-baking it would put the edited look back into
         # gallery/filmstrip after the XMP sidecar was cleared.
         if not cleared:
-            self._persist_editor_aligned_browse_caches(path)
+            # Defer bake until the full-quality settle lands in
+            # _on_adjust_preview_ready (instant-gain / stale last_render
+            # must not be written into browse caches).
+            self._pending_browse_bake_path = path
         else:
+            self._pending_browse_bake_path = None
             # Drop the stale edited frame so a later accidental bake cannot
             # resurrect it; gallery reload will fetch original thumbs.
             if _norm_path(getattr(self, "_adjust_last_render_norm", "") or "") == _norm_path(
@@ -21936,8 +22028,13 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         Keeps ``SIDECAR_ADJUST`` / ``EDITED_PREVIEWS`` off by default.
         """
         from common_image_loader import is_raw_file
+        from raw_adjustments import edited_previews_enabled
 
         if not path or not is_raw_file(path):
+            return
+        # When browse tiers re-apply sidecars themselves, baking edited pixels
+        # here would double-apply on next delivery.
+        if edited_previews_enabled():
             return
         last = getattr(self, "_adjust_last_render", None)
         if not last or not isinstance(last, tuple) or len(last) < 1:
@@ -22152,8 +22249,13 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             return
         if hasattr(self, "status_bar"):
             self.status_bar.showMessage("Rendering original for comparison…", 0)
+        geo = None
+        try:
+            geo = panel.get_adjustments() if panel is not None else None
+        except Exception:
+            geo = None
         worker = _AdjustCompareOriginalWorker(
-            path, base, self._adjust_compare_original_signals
+            path, base, self._adjust_compare_original_signals, geometry_adj=geo
         )
         _get_bg_thread_pool().start(worker)
 
@@ -26842,7 +26944,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             if not hasattr(self, 'current_file_path'):
                 logger.warning("[PROCESS] on_image_processed called but object may be invalid")
                 return
-        except:
+        except Exception:
             logger.error("[PROCESS] on_image_processed called but object is invalid (access violation risk)")
             return
         
@@ -31924,7 +32026,7 @@ def main():
                 try:
                     platform_result[0] = platform.system()
                     platform_result[1] = platform.release()
-                except:
+                except Exception:
                     pass
             
             thread = threading.Thread(target=get_platform_info, daemon=True)
@@ -32174,7 +32276,7 @@ def main():
                 msg.setText("The application encountered a fatal error and will now exit.")
                 msg.setDetailedText(f"{error_msg}\n\n{error_traceback}")
                 msg.exec()
-        except:
+        except Exception:
             pass  # If we can't show dialog, at least we logged it
         
         sys.exit(1)

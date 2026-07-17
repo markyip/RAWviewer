@@ -471,7 +471,7 @@ class SessionMixin:
                 try:
                     settings.remove("last_session_folder")
                     settings.remove("last_session_file")
-                except:
+                except Exception:
                     pass
                 return False
         

@@ -117,7 +117,7 @@ class RAWProcessor(QThread):
             try:
                 with self._raw_handle_lock:
                     self._raw_handle = None
-            except:
+            except Exception:
                 pass
 
     def get_orientation_from_exif(self, file_path):

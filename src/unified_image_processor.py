@@ -165,6 +165,23 @@ class UnifiedImageProcessor:
         # recomputing -- overlapping duplicate applies of a 32MP buffer
         # measured as stacked 3.5s+7.2s entries in the same second.
         self._adjusted_inflight: dict = {}
+        # Generation tokens for deferred put_full / preview persist threads —
+        # a newer decode of the same path bumps the token so a late write
+        # cannot poison the cache after cancel/navigation.
+        self._async_cache_lock = _threading.Lock()
+        self._async_cache_gen: dict = {}
+
+    def _bump_async_cache_gen(self, file_path: str) -> int:
+        key = os.path.normcase(os.path.abspath(file_path or ""))
+        with self._async_cache_lock:
+            gen = int(self._async_cache_gen.get(key, 0)) + 1
+            self._async_cache_gen[key] = gen
+            return gen
+
+    def _async_cache_gen_current(self, file_path: str) -> int:
+        key = os.path.normcase(os.path.abspath(file_path or ""))
+        with self._async_cache_lock:
+            return int(self._async_cache_gen.get(key, 0))
 
     def _stash_unpacked_raw(self, file_path: str, unpacked) -> None:
         key = os.path.normcase(os.path.abspath(file_path))
@@ -1884,6 +1901,9 @@ class UnifiedImageProcessor:
 
             # Cache unadjusted base; sidecar is applied in process_full_image().
             if rgb_image is not None:
+                # One generation for this decode's deferred put_full / preview
+                # persist so a later decode of the same path can invalidate both.
+                cache_gen = self._bump_async_cache_gen(file_path)
                 try:
                     from gpu_gl_bridge import DeviceRgb
 
@@ -1891,9 +1911,15 @@ class UnifiedImageProcessor:
                         # Defer host D2H so CUDA-GL display can paint first.
                         import threading
 
-                        def _cache_device_host(dev=rgb_image, fp=file_path):
+                        def _cache_device_host(
+                            dev=rgb_image, fp=file_path, expected=cache_gen
+                        ):
                             try:
+                                if self._async_cache_gen_current(fp) != expected:
+                                    return
                                 host = dev.to_numpy()
+                                if self._async_cache_gen_current(fp) != expected:
+                                    return
                                 self.cache.put_full_image(fp, host)
                                 self.cache.mark_full_image_source(
                                     fp, is_embedded_jpeg=False
@@ -1934,14 +1960,20 @@ class UnifiedImageProcessor:
                     # the image-ready callback.
                     import threading
 
-                    def _persist_libraw_preview(rgb=rgb_image, fp=file_path):
+                    def _persist_libraw_preview(
+                        rgb=rgb_image, fp=file_path, expected=cache_gen
+                    ):
                         try:
+                            if self._async_cache_gen_current(fp) != expected:
+                                return
                             import cv2
                             from gpu_gl_bridge import DeviceRgb as _DR
 
                             if isinstance(rgb, _DR):
                                 rgb = rgb.to_numpy()
                             if rgb is None:
+                                return
+                            if self._async_cache_gen_current(fp) != expected:
                                 return
 
                             from raw_adjustments import (
@@ -1957,6 +1989,8 @@ class UnifiedImageProcessor:
                                 adj = load_adjustments_for_file(fp)
                                 if adj and not is_default_adjustments(adj):
                                     rgb = apply_adjustments_to_rgb(rgb, adj)
+                            if self._async_cache_gen_current(fp) != expected:
+                                return
                             h, w = rgb.shape[:2]
                             cap = memory_preview_max_edge()
                             if max(h, w) > cap:
@@ -1968,11 +2002,15 @@ class UnifiedImageProcessor:
                                 )
                             else:
                                 prev = rgb
+                            if self._async_cache_gen_current(fp) != expected:
+                                return
                             ok, buf = cv2.imencode(
                                 ".jpg",
                                 cv2.cvtColor(prev, cv2.COLOR_RGB2BGR),
                                 [int(cv2.IMWRITE_JPEG_QUALITY), 92],
                             )
+                            if self._async_cache_gen_current(fp) != expected:
+                                return
                             self.cache.put_preview(
                                 fp,
                                 prev,

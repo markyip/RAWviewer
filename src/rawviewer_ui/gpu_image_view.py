@@ -1795,12 +1795,18 @@ class GpuImageView(QGraphicsView):
         if src.isNull():
             return
         if src.width() != self._img_w or src.height() != self._img_h:
+            # Prefer letterboxed KeepAspectRatio over IgnoreAspectRatio so a
+            # full-frame original is not stretched into a cropped edited frame.
             src = src.scaled(
                 self._img_w,
                 self._img_h,
-                Qt.AspectRatioMode.IgnoreAspectRatio,
+                Qt.AspectRatioMode.KeepAspectRatioByExpanding,
                 Qt.TransformationMode.SmoothTransformation,
             )
+            if src.width() != self._img_w or src.height() != self._img_h:
+                x0 = max(0, (src.width() - self._img_w) // 2)
+                y0 = max(0, (src.height() - self._img_h) // 2)
+                src = src.copy(x0, y0, self._img_w, self._img_h)
         split_x = int(round(self._compare_divider_scene_x()))
         split_x = max(0, min(self._img_w, split_x))
         if split_x <= 0:

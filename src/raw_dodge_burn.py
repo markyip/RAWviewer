@@ -34,6 +34,7 @@ Design:
 from __future__ import annotations
 
 import base64
+import threading
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -412,6 +413,7 @@ def deserialize_mask(serial: str) -> Optional[DodgeBurnMask]:
 _DESERIALIZE_CACHE: dict = {}
 _DESERIALIZE_CACHE_ORDER: list = []
 _DESERIALIZE_CACHE_MAX = 4
+_DESERIALIZE_CACHE_LOCK = threading.Lock()
 
 
 def _deserialize_mask_cached(serial: str) -> Optional[DodgeBurnMask]:
@@ -435,15 +437,17 @@ def _deserialize_mask_cached(serial: str) -> Optional[DodgeBurnMask]:
     """
     if not serial:
         return None
-    cached = _DESERIALIZE_CACHE.get(serial)
-    if cached is not None:
-        return cached
+    with _DESERIALIZE_CACHE_LOCK:
+        cached = _DESERIALIZE_CACHE.get(serial)
+        if cached is not None:
+            return cached
     mask = deserialize_mask(serial)
     if mask is None:
         return None
-    _DESERIALIZE_CACHE[serial] = mask
-    _DESERIALIZE_CACHE_ORDER.append(serial)
-    if len(_DESERIALIZE_CACHE_ORDER) > _DESERIALIZE_CACHE_MAX:
-        oldest = _DESERIALIZE_CACHE_ORDER.pop(0)
-        _DESERIALIZE_CACHE.pop(oldest, None)
+    with _DESERIALIZE_CACHE_LOCK:
+        _DESERIALIZE_CACHE[serial] = mask
+        _DESERIALIZE_CACHE_ORDER.append(serial)
+        if len(_DESERIALIZE_CACHE_ORDER) > _DESERIALIZE_CACHE_MAX:
+            oldest = _DESERIALIZE_CACHE_ORDER.pop(0)
+            _DESERIALIZE_CACHE.pop(oldest, None)
     return mask

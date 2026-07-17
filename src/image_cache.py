@@ -6,6 +6,7 @@ to dramatically improve browsing performance.
 """
 
 import os
+import json
 import logging
 import platform
 import subprocess
@@ -23,6 +24,47 @@ from PyQt6.QtGui import QPixmap, QImage
 from PyQt6.QtCore import QObject, pyqtSignal
 
 logger = logging.getLogger(__name__)
+
+
+def _encode_exif_blob(data: Dict[str, Any] | None) -> bytes:
+    """Serialize EXIF blob as UTF-8 JSON (safe; no pickle on write)."""
+    payload = data if isinstance(data, dict) else {}
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+
+
+def _decode_exif_blob(blob) -> Dict[str, Any]:
+    """Deserialize EXIF blob: prefer JSON, fall back to legacy pickle rows."""
+    if not blob:
+        return {}
+    try:
+        if isinstance(blob, str):
+            out = json.loads(blob)
+            return out if isinstance(out, dict) else {}
+        raw = bytes(blob)
+        if raw[:1] in (b"{", b"["):
+            out = json.loads(raw.decode("utf-8"))
+            return out if isinstance(out, dict) else {}
+    except Exception:
+        pass
+    try:
+        out = pickle.loads(blob)
+        return out if isinstance(out, dict) else {}
+    except Exception:
+        return {}
+
+
+def _safe_path_under_root(path: str | None, root: str | None) -> Optional[str]:
+    """Return realpath of ``path`` only if it resolves under ``root``."""
+    if not path or not root:
+        return None
+    try:
+        root_real = os.path.realpath(root)
+        candidate = os.path.realpath(path)
+    except OSError:
+        return None
+    if candidate == root_real or candidate.startswith(root_real + os.sep):
+        return candidate
+    return None
 
 _psutil_vm_fallback_logged = False
 
@@ -470,7 +512,7 @@ class PersistentEXIFCache:
             return None
 
         storage_path = _exif_cache_path_key(file_path)
-        exif_blob = pickle.dumps(exif_info.get('exif_data', {}))
+        exif_blob = _encode_exif_blob(exif_info.get("exif_data", {}))
 
         capture_time = exif_info.get('capture_time')
         if not capture_time:
@@ -632,7 +674,7 @@ class PersistentEXIFCache:
 
             if row and row[0] == file_size and row[1] == file_mtime:
                 # Cache is valid
-                exif_data = pickle.loads(row[5]) if row[5] else {}
+                exif_data = _decode_exif_blob(row[5])
 
                 # Ensure consistent data (DB columns override/augment blob)
                 result_capture_time = row[6]
@@ -820,7 +862,7 @@ class PersistentEXIFCache:
                     result_capture_time = _capture_time_from_exif_row(row)
                     if not result_capture_time and row[6]:
                         try:
-                            exif_data = pickle.loads(row[6]) or {}
+                            exif_data = _decode_exif_blob(row[6])
                             result_capture_time = _capture_time_from_exif_row(row, exif_data)
                         except Exception:
                             exif_data = {}
@@ -842,7 +884,7 @@ class PersistentEXIFCache:
                     elif mtime_ok:
                         if not exif_data and row[6]:
                             try:
-                                exif_data = pickle.loads(row[6]) or {}
+                                exif_data = _decode_exif_blob(row[6])
                             except Exception:
                                 exif_data = {}
                         if not result_capture_time:
@@ -935,7 +977,7 @@ class PersistentEXIFCache:
                     ct = ct_col if ct_col and str(ct_col).strip() else None
                     if not ct and blob:
                         try:
-                            data = pickle.loads(blob) or {}
+                            data = _decode_exif_blob(blob)
                             if isinstance(data, dict):
                                 ct = data.get("capture_time")
                         except Exception:
@@ -982,7 +1024,7 @@ class PersistentEXIFCache:
                     )
                     existing = {row[0] for row in cursor.fetchall()}
                     insert_rows = [
-                        (pk, None, None, 1, "", "", pickle.dumps({}), time.time(), ct, None, None, 0)
+                        (pk, None, None, 1, "", "", _encode_exif_blob({}), time.time(), ct, None, None, 0)
                         for ct, pk in chunk
                         if pk not in existing
                     ]
@@ -1036,7 +1078,7 @@ class PersistentEXIFCache:
                         if nk in out or not blob:
                             continue
                         try:
-                            data = pickle.loads(blob) or {}
+                            data = _decode_exif_blob(blob)
                             if isinstance(data, dict):
                                 ct = data.get("capture_time")
                                 if ct and str(ct).strip():
@@ -1167,6 +1209,10 @@ class PersistentThumbnailCache:
         # Use hash of normalized path so case variants share one disk entry on Windows.
         path_hash = hashlib.md5(_cache_path_key(file_path).encode('utf-8')).hexdigest()
         return os.path.join(self.cache_dir, f"{path_hash}.jpg")
+
+    def _jailed_cache_file(self, cache_file: str | None) -> Optional[str]:
+        """Allow disk ops only for paths under this cache directory."""
+        return _safe_path_under_root(cache_file, getattr(self, "cache_dir", None))
     
     def has_valid(self, file_path: str) -> bool:
         """True if a valid on-disk entry exists (metadata + file path only, no JPEG read)."""
@@ -1182,7 +1228,7 @@ class PersistentThumbnailCache:
             )
             row = cursor.fetchone()
             if row and row[0] == file_size and row[1] == file_mtime:
-                cache_file = row[2]
+                cache_file = self._jailed_cache_file(row[2])
                 return bool(cache_file) and os.path.exists(cache_file)
         except Exception:
             pass
@@ -1205,9 +1251,9 @@ class PersistentThumbnailCache:
             row = cursor.fetchone()
             
             if row and row[0] == file_size and row[1] == file_mtime:
-                # Cache is valid, check if file exists
-                cache_file = row[2]
-                if os.path.exists(cache_file):
+                # Cache is valid, check if file exists (path-jailed)
+                cache_file = self._jailed_cache_file(row[2])
+                if cache_file and os.path.exists(cache_file):
                     with open(cache_file, 'rb') as f:
                         return f.read()
                 else:
@@ -1246,8 +1292,9 @@ class PersistentThumbnailCache:
             except Exception as e:
                 # Clean up on error
                 try:
-                    if os.path.exists(cache_file):
-                        os.remove(cache_file)
+                    safe = self._jailed_cache_file(cache_file)
+                    if safe and os.path.exists(safe):
+                        os.remove(safe)
                 except Exception:
                     pass
                 return False
@@ -1265,10 +1312,10 @@ class PersistentThumbnailCache:
                 row = cursor.fetchone()
                 
                 if row:
-                    cache_file = row[0]
-                    # Delete cache file
+                    cache_file = self._jailed_cache_file(row[0])
+                    # Delete cache file only inside this cache root
                     try:
-                        if os.path.exists(cache_file):
+                        if cache_file and os.path.exists(cache_file):
                             os.remove(cache_file)
                     except Exception:
                         pass
@@ -1293,11 +1340,12 @@ class PersistentThumbnailCache:
                 )
                 rows = cursor.fetchall()
                 
-                # Delete cache files
+                # Delete cache files (path-jailed)
                 for row in rows:
                     try:
-                        if os.path.exists(row[1]):
-                            os.remove(row[1])
+                        cache_file = self._jailed_cache_file(row[1])
+                        if cache_file and os.path.exists(cache_file):
+                            os.remove(cache_file)
                     except Exception:
                         pass
                 
@@ -1318,7 +1366,9 @@ class PersistentThumbnailCache:
                 cursor = conn.execute("SELECT cache_file FROM thumbnail_cache")
                 for (cache_file,) in cursor.fetchall():
                     try:
-                        total += os.path.getsize(cache_file)
+                        safe = self._jailed_cache_file(cache_file)
+                        if safe:
+                            total += os.path.getsize(safe)
                     except OSError:
                         pass
             except Exception:
@@ -1342,13 +1392,15 @@ class PersistentThumbnailCache:
                 for file_path, cache_file in rows:
                     if freed >= bytes_to_free:
                         break
+                    safe = self._jailed_cache_file(cache_file)
                     try:
-                        freed += os.path.getsize(cache_file)
+                        if safe:
+                            freed += os.path.getsize(safe)
                     except OSError:
                         pass
                     try:
-                        if os.path.exists(cache_file):
-                            os.remove(cache_file)
+                        if safe and os.path.exists(safe):
+                            os.remove(safe)
                     except Exception:
                         pass
                     evicted_paths.append(file_path)
@@ -1372,7 +1424,7 @@ class PersistentThumbnailCache:
                 rows = cursor.fetchall()
                 for row in rows:
                     try:
-                        cache_file = row[0]
+                        cache_file = self._jailed_cache_file(row[0])
                         if cache_file and os.path.exists(cache_file):
                             os.remove(cache_file)
                     except Exception:
