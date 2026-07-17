@@ -518,10 +518,28 @@ class GpuImageView(QGraphicsView):
 
         self._item = QGraphicsPixmapItem()
         self._item.setTransformationMode(Qt.TransformationMode.SmoothTransformation)
-        self._mask_item = QGraphicsPixmapItem(self._item)
-        self._mask_item.setOpacity(0.4)
-        self._mask_item.hide()
         self._scene.addItem(self._item)
+
+        # Sibling of the image (not a child of _item) so Show Mask stays
+        # visible on both the QPixmap and RGB-GL display paths.
+        self._mask_item = QGraphicsPixmapItem()
+        self._mask_item.setOpacity(0.45)
+        self._mask_item.setZValue(5)
+        self._mask_item.hide()
+        self._mask_overlay_wanted = False
+        self._mask_overlay_mask = None
+        self._scene.addItem(self._mask_item)
+
+        # Dodge/burn brush preview: soft radial falloff (matches stamp kernel).
+        self._brush_cursor_item = QGraphicsPixmapItem()
+        self._brush_cursor_item.setZValue(25)
+        self._brush_cursor_item.setTransformationMode(
+            Qt.TransformationMode.SmoothTransformation
+        )
+        self._brush_cursor_item.hide()
+        self._dodge_burn_brush_radius = 40.0
+        self._brush_cursor_pixmap_r = -1.0
+        self._scene.addItem(self._brush_cursor_item)
 
         # Opt-in RGB→OpenGL paint path (RAWVIEWER_GPU_GL_TEX=1): skips QPixmap.
         self._rgb_item = RgbGlImageItem()
@@ -699,48 +717,103 @@ class GpuImageView(QGraphicsView):
         return self.current_scale() >= self.MAX_SCALE - 1e-9
 
     def set_dodge_burn_mask_overlay(self, mask, show: bool) -> None:
+        self._mask_overlay_wanted = bool(show)
+        self._mask_overlay_mask = mask if show else None
         if not show or mask is None or getattr(mask, "is_empty", True):
             self._mask_item.hide()
+            self._mask_item.setPixmap(QPixmap())
             return
         self.update_dodge_burn_mask(mask)
         self._mask_item.show()
 
     def update_dodge_burn_mask(self, mask) -> None:
-        if not self._mask_item.isVisible() and mask is not None:
-            # We don't update if hidden, to save work.
+        """Refresh the red/blue mask overlay when Show Mask is on.
+
+        Callers may invoke this during painting even if the item was just
+        shown; skip only when the user has Show Mask off.
+        """
+        if not getattr(self, "_mask_overlay_wanted", False):
             return
+        self._mask_overlay_mask = mask
         if mask is None or getattr(mask, "is_empty", True):
             self._mask_item.hide()
+            self._mask_item.setPixmap(QPixmap())
             return
-            
+
         import numpy as np
         import cv2
-        from PyQt6.QtGui import QImage, QPixmap
-        
-        # mask.data is float32 [-1.5, 1.5]
-        # We want to show a red overlay where it's non-zero.
-        # Positive = Dodge (Red?), Negative = Burn (Blue?)
-        # For simplicity, we can just show red for both, or red/blue.
+
+        # mask.data is float32 [-MASK_CLIP, MASK_CLIP]
         h, w = mask.data.shape
         overlay = np.zeros((h, w, 4), dtype=np.uint8)
-        
-        # Red for Dodge (positive)
+
+        # Red for Dodge (positive), Blue for Burn (negative)
         pos_mask = mask.data > 0
-        overlay[pos_mask, 0] = 255 # R
-        overlay[pos_mask, 3] = np.clip(mask.data[pos_mask] / 1.5 * 255, 0, 255).astype(np.uint8)
-        
-        # Blue for Burn (negative)
+        overlay[pos_mask, 0] = 255  # R
+        overlay[pos_mask, 3] = np.clip(
+            mask.data[pos_mask] / 1.5 * 180.0 + 40.0, 0, 255
+        ).astype(np.uint8)
+
         neg_mask = mask.data < 0
-        overlay[neg_mask, 2] = 255 # B
-        overlay[neg_mask, 3] = np.clip(-mask.data[neg_mask] / 1.5 * 255, 0, 255).astype(np.uint8)
-        
-        if self._item.pixmap() is not None:
-            pw, ph = self._item.pixmap().width(), self._item.pixmap().height()
-            if w != pw or h != ph:
-                overlay = cv2.resize(overlay, (pw, ph), interpolation=cv2.INTER_LINEAR)
-        
-        qimg = QImage(overlay.data, overlay.shape[1], overlay.shape[0], overlay.strides[0], QImage.Format.Format_RGBA8888)
+        overlay[neg_mask, 2] = 255  # B
+        overlay[neg_mask, 3] = np.clip(
+            -mask.data[neg_mask] / 1.5 * 180.0 + 40.0, 0, 255
+        ).astype(np.uint8)
+
+        if self._img_w > 0 and self._img_h > 0 and (w != self._img_w or h != self._img_h):
+            overlay = cv2.resize(
+                overlay, (self._img_w, self._img_h), interpolation=cv2.INTER_LINEAR
+            )
+
+        # QImage does not own the numpy buffer — copy before the array drops.
+        overlay = np.ascontiguousarray(overlay)
+        qimg = QImage(
+            overlay.data,
+            overlay.shape[1],
+            overlay.shape[0],
+            overlay.strides[0],
+            QImage.Format.Format_RGBA8888,
+        ).copy()
         self._mask_item.setPixmap(QPixmap.fromImage(qimg))
+        self._mask_item.setOffset(0, 0)
+        if not self._mask_item.isVisible():
+            self._mask_item.show()
+
+    def _refresh_dodge_burn_mask_overlay_size(self) -> None:
+        """Re-fit the mask overlay after the displayed pixmap size changes."""
+        if not getattr(self, "_mask_overlay_wanted", False):
+            return
+        mask = getattr(self, "_mask_overlay_mask", None)
+        if mask is not None:
+            self.update_dodge_burn_mask(mask)
+
+    def _mouse_stroke_pressure(self, event) -> float:
+        """Pressure for mouse/trackpad dodge-burn stamps (0.05..1).
+
+        Stylus pressure comes from ``tabletEvent``. Mouse/trackpad usually
+        report a flat 1.0 via Qt; on macOS Force Touch trackpads we also
+        read ``NSEvent.pressure()`` when the current event carries real
+        force data. If neither varies, fall back to full strength.
+        """
+        try:
+            p = float(event.pressure())
+            if 0.02 < p < 0.999:
+                return max(0.05, min(1.0, p))
+        except Exception:
+            pass
+        if sys.platform == "darwin":
+            try:
+                from AppKit import NSApp
+
+                nev = NSApp.currentEvent()
+                if nev is not None:
+                    p = float(nev.pressure())
+                    # Non-force events often report 0.0; treat as "no data".
+                    if p > 0.02:
+                        return max(0.05, min(1.0, p))
+            except Exception:
+                pass
+        return 1.0
 
     def wants_zoom_in_toggle(self) -> bool:
         """Whether Space / double-click should enter 100% zoom (not zoom out to fit)."""
@@ -909,6 +982,8 @@ class GpuImageView(QGraphicsView):
         self._grid_item.set_grid(new_w, new_h, self._grid_mode)
         if getattr(self, "_crop_mode", False) and getattr(self, "_crop_item", None) is not None:
             self._crop_item.set_image_size(new_w, new_h)
+        if (new_w, new_h) != (old_w, old_h):
+            self._refresh_dodge_burn_mask_overlay_size()
         self._update_placeholder()
         if self._compare_active and (new_w, new_h) != (old_w, old_h):
             # The compare-with-original crop/divider are computed from _img_w/_img_h
@@ -1012,6 +1087,8 @@ class GpuImageView(QGraphicsView):
             self._img_w, self._img_h = new_w, new_h
             self._has_pixmap = True
             self._grid_item.set_grid(new_w, new_h, self._grid_mode)
+            if (new_w, new_h) != (old_w, old_h):
+                self._refresh_dodge_burn_mask_overlay_size()
             self._update_placeholder()
             if self._compare_active and (new_w, new_h) != (old_w, old_h):
                 self._update_compare_overlay()
@@ -1097,6 +1174,8 @@ class GpuImageView(QGraphicsView):
             self._img_w, self._img_h = new_w, new_h
             self._has_pixmap = True
             self._grid_item.set_grid(new_w, new_h, self._grid_mode)
+            if (new_w, new_h) != (old_w, old_h):
+                self._refresh_dodge_burn_mask_overlay_size()
             self._update_placeholder()
             if self._compare_active and (new_w, new_h) != (old_w, old_h):
                 self._update_compare_overlay()
@@ -1526,10 +1605,90 @@ class GpuImageView(QGraphicsView):
         self._dodge_burn_mode = bool(enabled)
         if self._dodge_burn_mode:
             self.set_crop_mode(False)
-            self.viewport().setCursor(Qt.CursorShape.CrossCursor)
+            # Hide OS cursor — the circular brush preview is the hit target.
+            self.viewport().setCursor(Qt.CursorShape.BlankCursor)
             self.setAttribute(Qt.WidgetAttribute.WA_TabletTracking, True)
+            self.setMouseTracking(True)
+            self._brush_cursor_item.show()
+            self._sync_brush_cursor_at_view_center()
         else:
+            self._brush_cursor_item.hide()
             self.viewport().unsetCursor()
+            self.setMouseTracking(False)
+
+    def set_dodge_burn_brush_radius(self, radius_px: float) -> None:
+        """Brush radius in *display/scene* pixels (matches the Size slider)."""
+        self._dodge_burn_brush_radius = max(2.0, float(radius_px))
+        center = None
+        if not self._brush_cursor_item.pixmap().isNull():
+            off = self._brush_cursor_item.offset()
+            pm = self._brush_cursor_item.pixmap()
+            center = QPointF(
+                off.x() + pm.width() * 0.5, off.y() + pm.height() * 0.5
+            )
+        self._ensure_brush_cursor_pixmap()
+        if center is not None and self._brush_cursor_item.isVisible():
+            self._place_brush_cursor(center)
+        elif self._brush_cursor_item.isVisible():
+            self._sync_brush_cursor_at_view_center()
+
+    def _ensure_brush_cursor_pixmap(self) -> None:
+        """Build a soft radial preview matching ``circular_brush_falloff``."""
+        r = float(getattr(self, "_dodge_burn_brush_radius", 40.0))
+        # Rebuild when radius moves by >=0.5px (avoids thrashing on tiny slides).
+        if abs(r - float(getattr(self, "_brush_cursor_pixmap_r", -1.0))) < 0.5:
+            if not self._brush_cursor_item.pixmap().isNull():
+                return
+        try:
+            import numpy as np
+            from raw_dodge_burn import circular_brush_falloff
+
+            ri = max(2, int(np.ceil(r)))
+            size = 2 * ri + 1
+            falloff = circular_brush_falloff(0, size, 0, size, float(ri), float(ri), r)
+            rgba = np.zeros((size, size, 4), dtype=np.uint8)
+            # Soft white fill with alpha = falloff (center opaque-ish, edge 0).
+            rgba[..., 0:3] = 255
+            rgba[..., 3] = np.clip(falloff * 150.0, 0, 255).astype(np.uint8)
+            # Thin size ring near the nominal radius for readability.
+            yy, xx = np.mgrid[0:size, 0:size].astype(np.float32)
+            dist = np.sqrt((xx - ri) ** 2 + (yy - ri) ** 2)
+            ring = np.clip(1.0 - np.abs(dist - r) / 1.25, 0.0, 1.0)
+            rgba[..., 3] = np.maximum(
+                rgba[..., 3],
+                np.clip(ring * 200.0, 0, 255).astype(np.uint8),
+            )
+            rgba = np.ascontiguousarray(rgba)
+            qimg = QImage(
+                rgba.data,
+                size,
+                size,
+                rgba.strides[0],
+                QImage.Format.Format_RGBA8888,
+            ).copy()
+            self._brush_cursor_item.setPixmap(QPixmap.fromImage(qimg))
+            self._brush_cursor_pixmap_r = r
+        except Exception:
+            # Fallback: empty — cursor still hidden OS-side while armed.
+            self._brush_cursor_item.setPixmap(QPixmap())
+            self._brush_cursor_pixmap_r = -1.0
+
+    def _place_brush_cursor(self, scene_pt: QPointF) -> None:
+        self._ensure_brush_cursor_pixmap()
+        pm = self._brush_cursor_item.pixmap()
+        if pm.isNull():
+            return
+        self._brush_cursor_item.setOffset(
+            scene_pt.x() - pm.width() * 0.5,
+            scene_pt.y() - pm.height() * 0.5,
+        )
+
+    def _sync_brush_cursor_at_view_center(self) -> None:
+        if not self._has_pixmap:
+            return
+        self._place_brush_cursor(
+            self._clamped_scene_point(self.viewport().rect().center())
+        )
 
     def is_dodge_burn_mode(self) -> bool:
         return bool(getattr(self, "_dodge_burn_mode", False))
@@ -1681,7 +1840,8 @@ class GpuImageView(QGraphicsView):
             if self._has_pixmap:
                 self._dodge_burn_painting = True
                 pt = self._clamped_scene_point(event.position().toPoint())
-                self.dodgeBurnStroke.emit(pt, 1.0, False)
+                self._place_brush_cursor(pt)
+                self.dodgeBurnStroke.emit(pt, self._mouse_stroke_pressure(event), False)
             event.accept()
             return
         if event.button() == Qt.MouseButton.LeftButton and self._color_pick_mode:
@@ -1719,15 +1879,15 @@ class GpuImageView(QGraphicsView):
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event) -> None:
-        if (
-            self._dodge_burn_mode
-            and (event.buttons() & Qt.MouseButton.LeftButton)
-            and getattr(self, "_dodge_burn_painting", False)
-        ):
+        if self._dodge_burn_mode and self._has_pixmap:
             pt = self._clamped_scene_point(event.position().toPoint())
-            self.dodgeBurnStroke.emit(pt, 1.0, False)
-            event.accept()
-            return
+            self._place_brush_cursor(pt)
+            if (event.buttons() & Qt.MouseButton.LeftButton) and getattr(
+                self, "_dodge_burn_painting", False
+            ):
+                self.dodgeBurnStroke.emit(pt, self._mouse_stroke_pressure(event), False)
+                event.accept()
+                return
         host = self.parentWidget()
         if host is not None:
             if hasattr(host, "_ensure_filmstrip_enabled"):
@@ -1778,7 +1938,7 @@ class GpuImageView(QGraphicsView):
         ):
             self._dodge_burn_painting = False
             pt = self._clamped_scene_point(event.position().toPoint())
-            self.dodgeBurnStroke.emit(pt, 1.0, True)
+            self.dodgeBurnStroke.emit(pt, self._mouse_stroke_pressure(event), True)
             event.accept()
             return
         if event.button() == Qt.MouseButton.LeftButton and self._compare_dragging_divider:
@@ -1860,12 +2020,10 @@ class GpuImageView(QGraphicsView):
     def tabletEvent(self, event) -> None:
         """Real pressure from a graphics tablet/stylus (Wacom, iPad+Sidecar, ...).
 
-        Trackpads (Force Touch / standard) do NOT deliver QTabletEvent on
-        any platform -- that API is stylus-only, and macOS exposes no public
-        per-click pressure/force API to Qt for the trackpad itself. Mouse
-        and trackpad clicks both fall through to mousePressEvent/mouseMove
-        Event above at a fixed pressure of 1.0 (full strength per stamp);
-        a real tablet gets true pressure-proportional strength here.
+        Trackpads do not deliver ``QTabletEvent`` (stylus-only). Mouse /
+        trackpad strokes use ``mousePressEvent`` / ``mouseMoveEvent`` and
+        ``_mouse_stroke_pressure`` (Qt pressure when available, else macOS
+        Force Touch via ``NSEvent.pressure``, else full strength).
         """
         if not self._dodge_burn_mode or not self._has_pixmap:
             event.ignore()
@@ -1874,6 +2032,7 @@ class GpuImageView(QGraphicsView):
 
         pressure = max(0.0, min(1.0, float(event.pressure())))
         pt = self._clamped_scene_point(event.position().toPoint())
+        self._place_brush_cursor(pt)
         etype = event.type()
         if etype == _QEvent.Type.TabletPress:
             self._dodge_burn_painting = True

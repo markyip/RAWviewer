@@ -10,33 +10,61 @@ from __future__ import annotations
 import numpy as np
 
 VIGNETTE_KEY = "PostCropVignetteAmount"
+VIGNETTE_MIDPOINT_KEY = "PostCropVignetteMidpoint"
 DEHAZE_KEY = "Dehaze"
-EFFECT_KEYS = (VIGNETTE_KEY, DEHAZE_KEY)
+EFFECT_KEYS = (VIGNETTE_KEY, VIGNETTE_MIDPOINT_KEY, DEHAZE_KEY)
+VIGNETTE_MIDPOINT_DEFAULT = 50.0
 
 
-def apply_vignette(img: np.ndarray, amount: float) -> np.ndarray:
-    """Radial exposure falloff. ``amount`` in [-100, 100]; negative = brighten edges."""
+def apply_vignette(
+    img: np.ndarray,
+    amount: float,
+    midpoint: float = VIGNETTE_MIDPOINT_DEFAULT,
+) -> np.ndarray:
+    """Post-crop vignette matching Lightroom Amount / Midpoint polarity.
+
+    ``amount`` in [-100, 100] (``crs:PostCropVignetteAmount``):
+      negative → darken corners, positive → lighten corners.
+
+    ``midpoint`` in [0, 100] (``crs:PostCropVignetteMidpoint``, default 50):
+      lower → vignette reaches further toward the center (larger);
+      higher → effect stays near the corners (smaller).
+
+    Paint Overlay–style blend (lerp toward black / white by a radial mask).
+    """
     a = float(amount)
     if abs(a) < 1e-3 or img is None or img.ndim != 3:
         return img
     h, w = img.shape[:2]
     if h < 2 or w < 2:
         return img
-    # Midpoint ~0.55 of half-diagonal; feather to the corners.
+
+    mid = float(np.clip(midpoint, 0.0, 100.0))
+    # Radius normalized so image corners are 1.0 (edge midpoints ≈ 0.71).
+    # The previous half-axis ellipse left corners at √2, so Midpoint=100 still
+    # painted a huge band from the long edges inward.
     yy, xx = np.ogrid[0:h, 0:w]
     cy = (h - 1) * 0.5
     cx = (w - 1) * 0.5
-    # Normalize so corners are ~1.0
-    rx = max(cx, 1.0)
-    ry = max(cy, 1.0)
-    r = np.sqrt(((xx - cx) / rx) ** 2 + ((yy - cy) / ry) ** 2).astype(np.float32)
-    # Smooth falloff starting around 0.35 → 1.15
-    t = np.clip((r - 0.35) / 0.80, 0.0, 1.0)
-    t = t * t * (3.0 - 2.0 * t)
-    strength = (a / 100.0) * 0.85  # max ~±0.85 stops-ish at corners
-    # Darken edges when amount > 0 (classic vignette)
-    gain = np.exp2((-strength) * t).astype(np.float32)
-    return np.clip(img * gain[..., np.newaxis], 0.0, None)
+    corner_r = max(np.hypot(cx, cy), 1.0)
+    r = (np.hypot(xx - cx, yy - cy) / corner_r).astype(np.float32)
+
+    # Midpoint → onset radius. Pack high values tightly toward the corners so
+    # Midpoint=100 is a small corner-only vignette (LR-like), not a wide rim.
+    #   0 → 0.00,  50 → ~0.55,  100 → 0.93
+    u = mid / 100.0
+    inner = (0.35 * u + 0.65 * (u * u)) * 0.93
+    span = max(0.05, 1.0 - inner)
+    t = np.clip((r - inner) / span, 0.0, 1.0)
+    mask = (t * t * (3.0 - 2.0 * t)).astype(np.float32)  # smoothstep
+    strength = abs(a) / 100.0
+    wgt = (strength * mask)[..., np.newaxis]
+    src = np.clip(img, 0.0, None).astype(np.float32, copy=False)
+    if a < 0:
+        out = src * (1.0 - wgt)
+    else:
+        out = src + (1.0 - np.clip(src, 0.0, 1.0)) * wgt
+    return np.clip(out, 0.0, None).astype(np.float32)
 
 
 def apply_dehaze(img: np.ndarray, amount: float, *, preview: bool = False) -> np.ndarray:

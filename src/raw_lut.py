@@ -1,8 +1,14 @@
-"""Creative 3D LUT (.cube) load / apply for the Adjust display stage.
+"""Creative 3D LUT (.cube) load / apply for the Adjust pipeline.
 
 LUTs are managed as files under the app support ``luts/`` directory. The
-active look is referenced from XMP via ``CreativeLUTName`` (basename) and
-``CreativeLUTAmount`` (0–100 strength; 0 = off).
+active look is referenced from XMP via ``CreativeLUTName`` (basename),
+``CreativeLUTAmount`` (0–100 strength; 0 = off), and
+``CreativeLUTWorkingSpace`` (``Rec709`` | ``Linear``).
+
+Default working space is **Rec709**: apply after the BT.709/dcraw gamma
+encode so typical creative .cube files (Resolve / PS display-referred)
+land in the domain they expect. **Linear** restores the older
+display-linear (pre-encode) apply for scene-referred / identity cubes.
 """
 
 from __future__ import annotations
@@ -17,7 +23,11 @@ import numpy as np
 
 LUT_NAME_KEY = "CreativeLUTName"
 LUT_AMOUNT_KEY = "CreativeLUTAmount"
-LUT_KEYS = (LUT_NAME_KEY, LUT_AMOUNT_KEY)
+LUT_SPACE_KEY = "CreativeLUTWorkingSpace"
+LUT_SPACE_REC709 = "Rec709"
+LUT_SPACE_LINEAR = "Linear"
+LUT_SPACE_DEFAULT = LUT_SPACE_REC709
+LUT_KEYS = (LUT_NAME_KEY, LUT_AMOUNT_KEY, LUT_SPACE_KEY)
 
 
 @dataclass
@@ -146,8 +156,23 @@ def load_managed_lut(name: str) -> Optional[CubeLUT]:
     return lut
 
 
+def lut_working_space(adj: dict | None) -> str:
+    """Return ``Rec709`` (default) or ``Linear`` from adjustments."""
+    if not adj:
+        return LUT_SPACE_DEFAULT
+    raw = str(adj.get(LUT_SPACE_KEY, "") or "").strip()
+    if not raw:
+        return LUT_SPACE_DEFAULT
+    key = raw.lower().replace(".", "").replace("_", "").replace("-", "")
+    if key in ("linear", "lin", "scene", "scenelinear"):
+        return LUT_SPACE_LINEAR
+    if key in ("rec709", "709", "bt709", "gamma", "display", "srgb"):
+        return LUT_SPACE_REC709
+    return LUT_SPACE_DEFAULT
+
+
 def apply_cube_lut(img: np.ndarray, lut: CubeLUT, amount: float = 100.0) -> np.ndarray:
-    """Apply a 3D LUT to display-linear RGB float [0,1]; ``amount`` 0–100."""
+    """Apply a 3D LUT to RGB float [0,1] (any transfer the caller chose)."""
     if img is None or lut is None:
         return img
     a = float(amount) / 100.0
@@ -201,6 +226,7 @@ def apply_cube_lut(img: np.ndarray, lut: CubeLUT, amount: float = 100.0) -> np.n
 
 
 def apply_creative_lut(img: np.ndarray, adj: dict | None) -> np.ndarray:
+    """Apply managed LUT to float RGB [0,1] (caller chooses Linear vs encoded domain)."""
     if img is None or not adj:
         return img
     name = str(adj.get(LUT_NAME_KEY, "") or "").strip()
@@ -211,3 +237,38 @@ def apply_creative_lut(img: np.ndarray, adj: dict | None) -> np.ndarray:
     if lut is None:
         return img
     return apply_cube_lut(img, lut, amount)
+
+
+def apply_creative_lut_encoded(
+    encoded: np.ndarray, adj: dict | None, peak: float
+) -> np.ndarray:
+    """Apply LUT on display-encoded pixels (uint8/uint16), return same dtype."""
+    if encoded is None or not adj:
+        return encoded
+    name = str(adj.get(LUT_NAME_KEY, "") or "").strip()
+    amount = float(adj.get(LUT_AMOUNT_KEY, 0.0) or 0.0)
+    if not name or abs(amount) < 1e-3:
+        return encoded
+    peak_f = float(peak) if peak else 255.0
+    f = encoded.astype(np.float32) / peak_f
+    out = apply_creative_lut(f, adj)
+    if encoded.dtype == np.uint8 or peak_f <= 255.5:
+        return np.clip(out * 255.0 + 0.5, 0, 255).astype(np.uint8)
+    max_v = float(np.iinfo(encoded.dtype).max) if np.issubdtype(encoded.dtype, np.integer) else peak_f
+    return np.clip(out * peak_f + 0.5, 0, max_v).astype(encoded.dtype)
+
+
+def apply_pipeline_lut_linear(display_linear: np.ndarray, adj: dict | None) -> np.ndarray:
+    """Pre-encode apply when working space is Linear."""
+    if lut_working_space(adj) != LUT_SPACE_LINEAR:
+        return display_linear
+    return apply_creative_lut(display_linear, adj)
+
+
+def apply_pipeline_lut_encoded(
+    encoded: np.ndarray, adj: dict | None, peak: float
+) -> np.ndarray:
+    """Post-gamma apply when working space is Rec709 (default)."""
+    if lut_working_space(adj) == LUT_SPACE_LINEAR:
+        return encoded
+    return apply_creative_lut_encoded(encoded, adj, peak)

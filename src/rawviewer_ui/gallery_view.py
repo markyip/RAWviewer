@@ -1267,13 +1267,23 @@ class JustifiedGallery(QWidget):
                 if bulk_metadata:
                     self._metadata_cache.update(bulk_metadata)
 
-                # Fetch updated metadata from cache for paths that are missing it or have minimal metadata
+                # Fetch updated metadata near the entry anchor only — never
+                # walk all ~N missing paths on the UI thread (large folders).
                 if self.parent_viewer and hasattr(self.parent_viewer, "image_cache"):
                     paths = [img for img in self.images if isinstance(img, str)]
-                    missing_paths = [p for p in paths if p not in self._metadata_cache or self._metadata_cache[p].get("minimal_preview_exif")]
+                    missing_paths = [
+                        p
+                        for p in paths
+                        if p not in self._metadata_cache
+                        or self._metadata_cache[p].get("minimal_preview_exif")
+                    ]
                     if missing_paths:
-                        fetch_paths = self._prioritize_entry_paths(missing_paths)
-                        bulk_fetched = self.parent_viewer.image_cache.get_multiple_exif(fetch_paths)
+                        fetch_paths = self._prioritize_entry_paths(
+                            missing_paths, cap=self.BUILD_EXIF_PREFETCH_MAX
+                        )
+                        bulk_fetched = self.parent_viewer.image_cache.get_multiple_exif(
+                            fetch_paths
+                        )
                         if bulk_fetched:
                             self._metadata_cache.update(bulk_fetched)
                             # If any aspect ratios/rotations changed, trigger a layout rebuild
@@ -1286,10 +1296,12 @@ class JustifiedGallery(QWidget):
                                 return
 
                 self._reposition_thumbnail_widgets()
+                # Same-order re-entry: layout/scroll are already valid. Do not
+                # park tile loads behind scroll_to_file retries — that left the
+                # gallery blank for seconds on large folders (no load_visible).
                 if self._pending_scroll_to_path:
                     QTimer.singleShot(0, self._apply_pending_scroll_to_file)
-                else:
-                    self._request_load_visible_images(20)
+                self._request_load_visible_images(0)
                 return
 
             self._gallery_generation += 1
@@ -1512,6 +1524,12 @@ class JustifiedGallery(QWidget):
             return
         idx = indices[0]
         if idx < 0 or idx >= len(self._gallery_layout_items):
+            attempts = getattr(self, "_scroll_to_file_attempts", 0) + 1
+            self._scroll_to_file_attempts = attempts
+            if attempts < 40:
+                self._schedule_scroll_to_file_retry(50)
+            else:
+                self._abandon_pending_scroll_to_file()
             return
         p = self._scroll_area
         if p is None:
@@ -1519,6 +1537,12 @@ class JustifiedGallery(QWidget):
             while p and not isinstance(p, QScrollArea):
                 p = p.parent()
         if not isinstance(p, QScrollArea):
+            attempts = getattr(self, "_scroll_to_file_attempts", 0) + 1
+            self._scroll_to_file_attempts = attempts
+            if attempts < 40:
+                self._schedule_scroll_to_file_retry(50)
+            else:
+                self._abandon_pending_scroll_to_file()
             return
 
         # Guard 2: Verify the scrollbar's maximum range has updated to match content_h
@@ -2829,17 +2853,28 @@ class JustifiedGallery(QWidget):
             self._request_load_visible_images(50)
             return
 
-        # Entry scroll not applied yet: the viewport still sits at the old
-        # scroll offset (usually 0), so loading now aims CURRENT work at the
-        # wrong rows and the anchor's tiles queue behind it. Wait for
-        # _apply_pending_scroll_to_file (it re-requests a load on success;
-        # the attempt cap keeps this from parking forever).
-        if (
-            getattr(self, "_pending_scroll_to_path", None)
-            and getattr(self, "_scroll_to_file_attempts", 0) < 40
+        # Entry scroll not applied yet: try once inline, then either load tiles
+        # or briefly defer. Never park forever — same-order re-entry used to
+        # sit here with pending scroll and zero load_visible passes.
+        if getattr(self, "_pending_scroll_to_path", None) or getattr(
+            self, "_pending_scroll_anchor_state", None
         ):
-            self._request_load_visible_images(50)
-            return
+            attempts = int(getattr(self, "_scroll_to_file_attempts", 0) or 0)
+            if attempts < 40:
+                try:
+                    self._apply_pending_scroll_to_file()
+                except Exception:
+                    pass
+            if (
+                getattr(self, "_pending_scroll_to_path", None)
+                or getattr(self, "_pending_scroll_anchor_state", None)
+            ) and int(getattr(self, "_scroll_to_file_attempts", 0) or 0) < 40:
+                self._request_load_visible_images(50)
+                return
+            if getattr(self, "_pending_scroll_to_path", None) or getattr(
+                self, "_pending_scroll_anchor_state", None
+            ):
+                self._abandon_pending_scroll_to_file()
 
         if self._gallery_folder_superseded():
             return

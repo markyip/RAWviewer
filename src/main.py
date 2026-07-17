@@ -735,6 +735,36 @@ def _activate_macos_foreground_app() -> None:
         _share_log(logging.WARNING, "NSApplication foreground activation failed: %s", exc)
 
 
+_macos_app_nap_activity_token = None
+
+
+def _disable_macos_app_nap() -> None:
+    """Hold an NSActivity for the process lifetime so App Nap cannot throttle QTimers.
+
+    Without this, launching unfocused (or idling briefly) coalesces timer firing
+    to ~10s ticks: the 800ms session-restore full-decode timer was observed
+    firing 9-15s late, leaving the first image at preview tier until the user
+    interacted. Uses UserInitiatedAllowingIdleSystemSleep so system idle sleep
+    is unaffected — this only opts out of timer/App Nap throttling.
+    """
+    global _macos_app_nap_activity_token
+    if sys.platform != "darwin" or _macos_app_nap_activity_token is not None:
+        return
+    if _env_true("RAWVIEWER_ALLOW_APP_NAP"):
+        return
+    try:
+        import objc
+
+        process_info = objc.lookUpClass("NSProcessInfo").processInfo()
+        # NSActivityUserInitiatedAllowingIdleSystemSleep
+        options = 0x00FFFFFF & ~(1 << 20)
+        _macos_app_nap_activity_token = process_info.beginActivityWithOptions_reason_(
+            options, "RAWviewer image pipeline timers"
+        )
+    except Exception:
+        _macos_app_nap_activity_token = None
+
+
 def _applescript_escape(value: str) -> str:
     return (value or "").replace("\\", "\\\\").replace('"', '\\"')
 
@@ -2237,6 +2267,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self._session_restore_prefetch_timer = None
         self._session_restore_staged_scheduled = False
         self._session_restore_full_decode_allowed = False
+        self._user_zoom_interaction_ts = 0.0
         self._single_view_ttfr_watch_generation = 0
         self._defer_sensor_full_decode_path = None
         self._sensor_full_decode_queued_norm = None
@@ -2298,6 +2329,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self._gallery_bookmarked_paths = set()  # normpath keys for bookmarked share targets
         self._gallery_bookmark_filter_active = False  # gallery-only: show bookmarked images only
         self._gallery_rating_filter_min = 0  # gallery-only: 0=off, else show rating >= N
+        self._gallery_rating_presence_epoch = 0
+        self._gallery_any_rated_cache = None
         self._gallery_preview_pending_full = False  # Gallery thumb on screen; full-res pending
         self._gallery_instant_display_quality = False  # True when gallery→single already shows preview/full
         self._skip_resolution_crossfade_once = False
@@ -3399,12 +3432,14 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         gv = getattr(self, "gpu_view", None)
         pm = getattr(self, "current_pixmap", None)
         if gv is not None and gv.has_pixmap():
+            self._allow_full_decode_for_user_zoom()
+            self._try_sync_full_before_zoom()
             should_upgrade = self._needs_full_resolution_upgrade(fp)
             focus_jump = bool(
                 getattr(self, "_pending_zoom_focus_subject", False)
                 or getattr(self, "_focus_zoom_anchor_active", False)
             )
-            if should_upgrade:
+            if should_upgrade and not self._adjust_panel_active():
                 self._pending_zoom = True
                 self._pending_zoom_center = (
                     self.zoom_center_point
@@ -3415,16 +3450,28 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                     pm.size() if pm is not None and not pm.isNull() else None
                 )
                 gv._zoom_intent_100 = True
-                self._queue_sensor_full_decode(fp, priority_current=True)
+                self._queue_sensor_full_decode(fp, priority_current=True, urgent=True)
                 if not focus_jump:
                     self._gpu_zoom_in_to_point_finish()
                 return
+            self._restore_adjust_hires_before_zoom()
             self._gpu_zoom_in_to_point_finish()
+            if self._adjust_panel_active():
+                self._apply_adjust_panel_preview(full_quality=True)
             return
         if pm is None or pm.isNull():
             return
 
         should_upgrade = self._needs_full_resolution_upgrade(fp)
+
+        if should_upgrade and self._adjust_panel_active():
+            self._restore_adjust_hires_before_zoom()
+            self.fit_to_window = False
+            self.current_zoom_level = 1.0
+            if self.current_pixmap:
+                self.zoom_to_point()
+            self._apply_adjust_panel_preview(full_quality=True)
+            return
 
         if should_upgrade:
             if getattr(self, "_full_resolution_loading", False):
@@ -3634,14 +3681,32 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         elif gv.wants_zoom_in_toggle():
             self._recenter_on_focus_after_nav = False
             self.zoom_center_point = QPoint(int(scene_pt.x()), int(scene_pt.y()))
+            self._allow_full_decode_for_user_zoom()
+            # Upgrade from cache before zoom when full is already in memory but
+            # the on-screen pixmap is still the preview tier.
+            self._try_sync_full_before_zoom()
+            # Adjust: restore half-res settle if Fit lite (640) is currently painted.
+            self._restore_adjust_hires_before_zoom()
             self._gpu_zoom_in_to_point_finish()
-            if self._needs_full_resolution_upgrade():
+            # Adjust owns the half-res edit buffer — never queue browse-path
+            # sensor decode here (it fought the editor and left zoom on a soft
+            # stand-in). Space-key zoom already had this gate; double-click did not.
+            if (
+                not self._adjust_panel_active()
+                and self._needs_full_resolution_upgrade()
+            ):
                 self._pending_zoom = True
                 self._pending_zoom_center = self.zoom_center_point
                 self._pending_zoom_thumbnail_size = self.current_pixmap.size() if self.current_pixmap else None
                 self._queue_sensor_full_decode(
-                    _require_str_path(self.current_file_path), priority_current=True
+                    _require_str_path(self.current_file_path),
+                    priority_current=True,
+                    urgent=True,
                 )
+            elif self._adjust_panel_active():
+                # Prefer the half-res settle buffer over a live-drag 640px tier
+                # when the user zooms in mid-edit.
+                self._apply_adjust_panel_preview(full_quality=True)
         else:
             gv.fit_to_window()
             self.fit_to_window = True
@@ -8431,6 +8496,15 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             self.single_image_adjust_panel.dodgeBurnMaskToggled.connect(
                 self._on_dodge_burn_mask_toggled
             )
+            self.single_image_adjust_panel.dodge_burn_brush_changed.connect(
+                self._sync_dodge_burn_brush_cursor
+            )
+            self.single_image_adjust_panel.xmp_preset_applied.connect(
+                self._on_xmp_preset_applied
+            )
+            self.single_image_adjust_panel.looks_drop_rejected.connect(
+                self._on_looks_drop_rejected
+            )
             self.single_image_adjust_panel.crop_mode_changed.connect(
                 self._on_crop_mode_changed
             )
@@ -11874,6 +11948,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self._semantic_search_result_paths = list(ranked_paths)
         if bulk_meta:
             self._gallery_bulk_metadata = bulk_meta
+            self._bump_gallery_rating_presence_epoch()
 
         if preserved and preserved in self.image_files:
             self.current_file_index = self.image_files.index(preserved)
@@ -12876,6 +12951,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         if getattr(self, "view_mode", "") == "compare":
             self._exit_compare_mode()
             return
+        self._last_view_mode_switch_ts = time.monotonic()
         import logging
         logger = logging.getLogger(__name__)
         logger.debug("[MODESWITCH] toggle_view_mode called; current=%s", self.view_mode)
@@ -13355,8 +13431,20 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             self.image_manager.set_gallery_view_active(True)
         if getattr(self, "current_file_path", None):
             self._gallery_scroll_target_path = self.current_file_path
+        # Only queue entry-scroll when the gallery still needs a fresh layout.
+        # Re-entry with an intact layout must not set _pending_scroll_to_path
+        # (that parked load_visible and left tiles blank for seconds).
         if getattr(self, "gallery_justified", None) is not None:
-            self._scroll_gallery_to_current_file(backup=False)
+            gj = self.gallery_justified
+            display_files = self._gallery_files_for_display()
+            already_laid_out = bool(
+                display_files
+                and hasattr(gj, "_layout_matches_current_images")
+                and gj._layout_matches_current_images(display_files)
+                and getattr(gj, "_gallery_layout_items", None)
+            )
+            if not already_laid_out:
+                self._scroll_gallery_to_current_file(backup=False)
         self._stop_slideshow()
         if hasattr(self, "loading_overlay"):
             self.loading_overlay.hide_loading()
@@ -13448,7 +13536,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         # Check the underlying overlay/panel state directly instead.
         panel = getattr(self, "single_image_adjust_panel", None)
         if getattr(self, "_adjust_overlay_visible", False) and panel is not None and panel.isVisible():
-            self._set_adjust_panel_visible(False)
+            self._close_adjust_panel_from_ui()
 
         # Hide single view before touching GPU/full-res buffers (Windows GL abort otherwise).
         if hasattr(self, 'single_view_container') and self.single_view_container:
@@ -13738,7 +13826,10 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 return
             self._gallery_bulk_metadata = meta
             self._gallery_metadata_fetch_in_progress = False
+            self._bump_gallery_rating_presence_epoch()
             self._rebuild_burst_groups()
+            if getattr(self, "view_mode", "") == "gallery":
+                self._sync_gallery_rating_filter_stars()
             
             if hasattr(self, 'gallery_justified') and self.gallery_justified and self.image_files:
                 try:
@@ -13919,20 +14010,15 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                         and gj._layout_matches_current_images(display_files)
                         and getattr(gj, "_gallery_layout_items", None)
                     )
-                    viewport_anchor = None
-                    if preserve_viewport and hasattr(gj, "get_scroll_anchor_path"):
-                        try:
-                            viewport_anchor = gj.get_scroll_anchor_path()
-                        except Exception:
-                            viewport_anchor = None
                     if not preserve_viewport:
                         self._scroll_gallery_to_current_file(backup=False)
                     self.gallery_justified.set_images(
                         display_files, bulk_metadata if bulk_metadata else None
                     )
-                    if preserve_viewport and viewport_anchor:
-                        gj.scroll_to_file(viewport_anchor)
-                    elif not preserve_viewport:
+                    # Preserve path: scroll position is already correct — calling
+                    # scroll_to_file() would reset attempt counters and park
+                    # load_visible behind entry-scroll retries (blank gallery).
+                    if not preserve_viewport:
                         self._scroll_gallery_to_current_file()
                 # Avoid forced rebuild loops; set_images() already schedules build/layout.
                 # Only nudge visible-load passes after initial layout is expected ready.
@@ -15374,6 +15460,12 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         files = list(getattr(self, "image_files", []) or [])
         if any(self._gallery_path_rating(p) >= min_rating for p in files):
             return False
+        # Memory-only ratings: while bulk metadata is still loading (or empty),
+        # do not clear — SQLite-only ratings land with the folder meta fetch.
+        if getattr(self, "_gallery_metadata_fetch_in_progress", False):
+            return False
+        if not (getattr(self, "_gallery_bulk_metadata", None) or {}):
+            return False
         self._gallery_rating_filter_min = 0
         self._sync_gallery_rating_filter_stars()
         return True
@@ -15413,8 +15505,13 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         # filter -- that function is what actually resets the filter once it
         # observes zero qualifying images, and the star row must stay up
         # until then so the active-filter state stays visible/clearable.
-        any_rated = min_rating > 0 or any(self._gallery_path_rating(p) > 0 for p in files)
-        if not in_gallery or not files or not any_rated:
+        if not in_gallery or not files:
+            widget.hide()
+            return
+        # Gallery-only: still O(n) over paths, but ratings are memory-only
+        # (bulk meta / RAM EXIF) — never per-file get_exif() disk/SQLite.
+        any_rated = min_rating > 0 or self._gallery_folder_has_any_rating(files)
+        if not any_rated:
             widget.hide()
             return
         widget.show()
@@ -15640,6 +15737,14 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         RAW-only: sidecars resolve by basename, so a JPEG next to an edited
         RAW of the same name would otherwise be badged (and, since edited
         previews landed, rendered) with the RAW's edits.
+
+        Presence of an ``.xmp`` alone is not enough — rating-only sidecars
+        (or foreign LR fields with all our sliders at default) must not
+        light the pencil badge after Reset.
+
+        Memoized by sidecar mtime so ``load_visible_images`` does not re-parse
+        XML for every tile on every pass (that stalled large-folder gallery
+        re-entry).
         """
         from raw_adjustments import editing_features_enabled
 
@@ -15649,42 +15754,111 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             return False
         try:
             from common_image_loader import is_raw_file
-            from raw_adjustments import resolve_xmp_path
+            from raw_adjustments import (
+                is_default_adjustments,
+                load_adjustments_from_xmp,
+                resolve_xmp_path,
+            )
 
             if not is_raw_file(file_path):
                 return False
             xmp_path = resolve_xmp_path(file_path)
-            return bool(xmp_path) and os.path.isfile(xmp_path)
+            if not xmp_path or not os.path.isfile(xmp_path):
+                return False
+            try:
+                mtime = os.path.getmtime(xmp_path)
+            except OSError:
+                return False
+            memo = getattr(self, "_gallery_edited_memo", None)
+            if memo is None:
+                self._gallery_edited_memo = {}
+                memo = self._gallery_edited_memo
+            hit = memo.get(file_path)
+            if hit is not None and hit[0] == mtime:
+                return bool(hit[1])
+            edited = not is_default_adjustments(load_adjustments_from_xmp(xmp_path))
+            memo[file_path] = (mtime, edited)
+            return edited
         except Exception:
             return False
 
-    def _gallery_path_rating(self, file_path: str) -> int:
-        """0-5 star rating for the gallery/filmstrip badge.
+    def _invalidate_gallery_edited_memo(self, file_path: str | None = None) -> None:
+        """Drop cached edited-badge answers after save/reset."""
+        memo = getattr(self, "_gallery_edited_memo", None)
+        if not memo:
+            return
+        if not file_path:
+            memo.clear()
+            return
+        memo.pop(file_path, None)
+        try:
+            memo.pop(os.path.normpath(file_path), None)
+        except Exception:
+            pass
 
-        Checks the fast in-memory bulk metadata first (populated by folder
-        scan and kept current by rate_current_image), falling back to the
-        EXIF cache for paths bulk metadata hasn't covered yet -- same
-        fallback shape as the single-view rating lookup at image-load time.
+    def _bump_gallery_rating_presence_epoch(self) -> None:
+        """Invalidate cached 'any file rated?' answers for the star-filter row."""
+        self._gallery_rating_presence_epoch = (
+            int(getattr(self, "_gallery_rating_presence_epoch", 0) or 0) + 1
+        )
+        self._gallery_any_rated_cache = None
+
+    def _gallery_path_rating(self, file_path: str) -> int:
+        """0-5 star rating for gallery/filmstrip badges and rating filters.
+
+        Memory-only: bulk metadata (folder scan / rate_current_image) then the
+        in-RAM EXIF map. Never calls ``get_exif()`` — that path stats + hits
+        SQLite per file, and walking thousands of paths from status-bar /
+        filter sync on a USB gallery froze the UI for 10s+. Ratings that only
+        live in SQLite appear once bulk metadata (or a rate action) lands.
         """
         if not file_path:
             return 0
         meta = getattr(self, "_gallery_bulk_metadata", None) or {}
         row = meta.get(file_path)
-        if row and row.get('rating'):
+        if row and row.get("rating"):
             try:
-                return max(0, min(5, int(row['rating'])))
+                return max(0, min(5, int(row["rating"])))
             except (TypeError, ValueError):
                 pass
         try:
-            exif = self.image_cache.get_exif(file_path)
+            cache = getattr(self, "image_cache", None)
+            exif = (
+                cache.get_exif_memory_only(file_path)
+                if cache is not None and hasattr(cache, "get_exif_memory_only")
+                else None
+            )
         except Exception:
             exif = None
-        if exif and exif.get('rating'):
+        if exif and exif.get("rating"):
             try:
-                return max(0, min(5, int(exif['rating'])))
+                return max(0, min(5, int(exif["rating"])))
             except (TypeError, ValueError):
                 pass
         return 0
+
+    def _gallery_folder_has_any_rating(self, files) -> bool:
+        """True if any path in ``files`` has a known in-memory rating > 0."""
+        files = list(files or [])
+        epoch = int(getattr(self, "_gallery_rating_presence_epoch", 0) or 0)
+        bulk = getattr(self, "_gallery_bulk_metadata", None) or {}
+        key = (
+            getattr(self, "current_folder", None),
+            len(files),
+            epoch,
+            id(bulk),
+            len(bulk),
+        )
+        cached = getattr(self, "_gallery_any_rated_cache", None)
+        if cached is not None and cached[0] == key:
+            return bool(cached[1])
+        any_rated = False
+        for path in files:
+            if path and self._gallery_path_rating(path) > 0:
+                any_rated = True
+                break
+        self._gallery_any_rated_cache = (key, any_rated)
+        return any_rated
 
     def _sync_share_button_visibility(self) -> None:
         btn = getattr(self, "share_bottom_button", None)
@@ -16179,6 +16353,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
 
         self.image_files = sorted_files
         self._gallery_bulk_metadata = bulk_metadata
+        self._bump_gallery_rating_presence_epoch()
 
         if current_file in self.image_files:
             self.current_file_index = self.image_files.index(current_file)
@@ -17738,15 +17913,26 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self._queue_sensor_full_decode(fp, priority_current=False, force=force)
 
     def _queue_sensor_full_decode(
-        self, file_path: str, *, priority_current: bool = True, force: bool = False
-    ) -> None:
-        """Decode sensor-resolution buffer (e.g. after showing a cached preview tier)."""
+        self, file_path: str, *, priority_current: bool = True, force: bool = False,
+        urgent: bool = False,
+    ) -> bool:
+        """Decode sensor-resolution buffer (e.g. after showing a cached preview tier).
+
+        ``force``: bypass session-restore defer *and* prefer a fresh decode when
+        the cached tier is untrusted (e.g. refused RAW interim).
+        ``urgent``: bypass session-restore defer only (user zoom / 100%) while
+        still using a covering cache hit when available.
+
+        Returns True only when a decode was actually queued — callers that set
+        in-flight flags (e.g. _full_resolution_loading) must not set them on an
+        early return, or the stale flag blocks every later upgrade attempt.
+        """
         if self._adjust_panel_blocks_display_refresh():
-            return
-        if not force and self._should_defer_full_decode():
-            return
+            return False
+        if not force and not urgent and self._should_defer_full_decode():
+            return False
         if not file_path:
-            return
+            return False
         if not force:
             try:
                 exif = self.image_cache.get_exif(file_path)
@@ -17754,9 +17940,9 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 if preview is not None and image_covers_sensor_resolution(
                     preview.shape[1], preview.shape[0], exif
                 ):
-                    return
+                    return False
                 if self._cached_full_covers_sensor(file_path):
-                    return
+                    return False
             except Exception:
                 pass
         from image_load_manager import Priority as _Priority
@@ -17770,6 +17956,22 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             stages={"full"},
             bypass_cache=force or not self._cached_full_covers_sensor(file_path),
         )
+        return True
+
+    def _allow_full_decode_for_user_zoom(self) -> None:
+        """User zoom/100% must not wait on session-restore full-decode deferral."""
+        if getattr(self, "_session_restore_defer_preload", False):
+            self._session_restore_full_decode_allowed = True
+        # Mark interaction so GPU torch import stays out of the way.
+        self._user_zoom_interaction_ts = time.monotonic()
+        # If deferred full was held for TTFR quiet time, kick it now.
+        try:
+            fp = getattr(self, "current_file_path", None)
+            if fp and self._needs_full_resolution_upgrade(fp):
+                self._flush_deferred_sensor_full_decode(fp, force=True)
+        except Exception:
+            pass
+
 
     def _try_sync_full_before_zoom(self) -> bool:
         """Paint cached full-res before 100% zoom so the user never sees a soft preview upscale."""
@@ -17831,6 +18033,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
 
     def _defer_zoom_until_full_or_apply(self) -> bool:
         """If zoom needs full-res, load it first; return True when zoom must wait."""
+        self._allow_full_decode_for_user_zoom()
         if not self._needs_full_resolution_upgrade():
             return False
         if self._try_sync_full_before_zoom():
@@ -17860,21 +18063,45 @@ class RAWImageViewer(SessionMixin, QMainWindow):
     def _maybe_request_full_res_for_smooth_zoom(self) -> None:
         if self._raw_recovery_preview_active():
             return
-        if not self._needs_full_resolution_upgrade():
+        # Adjust uses half-res / settle preview tiers — never queue browse
+        # sensor full-decode from pinch/100% while the editor is open.
+        if self._adjust_panel_active():
             return
-        if not getattr(self, "current_file_path", None):
+        fp = getattr(self, "current_file_path", None)
+        if not fp:
+            return
+        self._allow_full_decode_for_user_zoom()
+        # Prefer a covering cache hit even when current_pixmap is still the
+        # preview tier (common race: full numpy landed, pixmap conversion still
+        # queued). Avoids a redundant "starting full-resolution decode" path.
+        if self._try_sync_full_before_zoom():
+            return
+        if not self._needs_full_resolution_upgrade():
             return
         if getattr(self, "_full_resolution_loading", False):
             return
         if getattr(self, "_smooth_zoom_full_request_sent", False):
             return
+        norm = _norm_path(fp)
+        if getattr(self, "_sensor_full_decode_queued_norm", None) == norm:
+            # Already in flight from session restore / idle flush — just wait.
+            self._smooth_zoom_full_request_sent = True
+            return
         import logging
 
-        self._smooth_zoom_full_request_sent = True
         logging.getLogger(__name__).info(
             "[ZOOM] Preview below sensor resolution — starting full-resolution decode"
         )
-        self._load_full_resolution_on_demand()
+        # Set the guard before queueing so a failing / no-op queue cannot
+        # re-log on every pinch sample (was flooding dozens of identical
+        # lines per gesture while the adjust half-res buffer was on screen).
+        self._smooth_zoom_full_request_sent = True
+        if self._queue_sensor_full_decode(fp, priority_current=True, urgent=True):
+            self._full_resolution_loading = True
+        else:
+            # Allow a later retry once something clears the zoom-request flag
+            # (file switch / fit). Keep it set for this gesture.
+            pass
 
     def _schedule_raw_sensor_exif_status_refresh(self) -> None:
         """Reload EXIF through EXIFExtractor so status shows sensor WxH."""
@@ -20018,6 +20245,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 self._disable_raw_recovery()
             if getattr(self, "_search_panel_expanded", False):
                 self._set_search_panel_expanded(False, animate=False)
+            self._maybe_maximize_brightness_for_adjust(True)
         bar = self._filmstrip_bar()
         if self._adjust_overlay_visible and self._single_view_has_display_image():
             panel.setVisible(True)
@@ -20076,6 +20304,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 if getattr(self, "_filmstrip_hidden_for_adjust", False):
                     bar.show()
                     self._filmstrip_hidden_for_adjust = False
+            self._maybe_maximize_brightness_for_adjust(False)
         container = getattr(self, "single_view_container", None)
         if container is not None and hasattr(container, "relayout_adjust"):
             container.relayout_adjust()
@@ -20084,6 +20313,58 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self._last_status_signature = None
         self.update_status_bar()
         QTimer.singleShot(0, self._restore_keyboard_focus)
+
+    def _adjust_maximize_brightness_enabled(self) -> bool:
+        """Default on; disable with settings or RAWVIEWER_ADJUST_MAX_BRIGHTNESS=0."""
+        env = os.environ.get("RAWVIEWER_ADJUST_MAX_BRIGHTNESS", "").strip().lower()
+        if env in ("0", "false", "no", "off"):
+            return False
+        if env in ("1", "true", "yes", "on"):
+            return True
+        try:
+            return bool(
+                self.get_settings().value("adjust_maximize_brightness", True, type=bool)
+            )
+        except Exception:
+            return True
+
+    def _maybe_maximize_brightness_for_adjust(self, entering: bool) -> None:
+        """Raise built-in display brightness while editing; restore on exit."""
+        if not self._adjust_maximize_brightness_enabled():
+            if not entering:
+                self._restore_adjust_brightness()
+            return
+        if entering:
+            if getattr(self, "_adjust_brightness_saved", None) is not None:
+                return
+            try:
+                from display_brightness import get_brightness, set_brightness
+
+                current = get_brightness()
+                if current is None:
+                    return
+                # Already near max — nothing to do / restore.
+                if current >= 0.98:
+                    self._adjust_brightness_saved = current
+                    return
+                if set_brightness(1.0):
+                    self._adjust_brightness_saved = current
+            except Exception:
+                self._adjust_brightness_saved = None
+            return
+        self._restore_adjust_brightness()
+
+    def _restore_adjust_brightness(self) -> None:
+        saved = getattr(self, "_adjust_brightness_saved", None)
+        self._adjust_brightness_saved = None
+        if saved is None:
+            return
+        try:
+            from display_brightness import set_brightness
+
+            set_brightness(float(saved))
+        except Exception:
+            pass
 
     def _nef_he_compressed(self, file_path: str) -> bool:
         """True if this NEF is Nikon HE/HE*-compressed.
@@ -20321,19 +20602,36 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             )
             return
 
-        settings = self.get_settings()
-        use_embedded = settings.value("use_embedded_jpeg_workflow", True, type=bool)
-        if opening and use_embedded:
-            # Switch to RAW workflow so edit base is scene-linear demosaic,
-            # not the camera embedded JPEG used for fast browse.
-            self.toggle_raw_jpeg_workflow()
+        if opening:
+            settings = self.get_settings()
+            use_embedded = settings.value("use_embedded_jpeg_workflow", True, type=bool)
+            # Editor needs scene-linear demosaic. Remember if we flipped the
+            # global workflow so Esc / E close can restore browse (JPEG) mode.
+            if use_embedded:
+                self._adjust_forced_raw_workflow = True
+                self.toggle_raw_jpeg_workflow()
+            else:
+                self._adjust_forced_raw_workflow = False
+            self._set_adjust_panel_visible(True)
+        else:
+            self._close_adjust_panel_from_ui()
 
-        self._set_adjust_panel_visible(opening)
-        if not opening:
-            path = getattr(self, "current_file_path", None)
-            if path:
-                # Load sidecar on the reencode worker — never on the UI thread.
-                self._reencode_persisted_preview_for_sidecar(path, None)
+    def _close_adjust_panel_from_ui(self) -> None:
+        """Close Adjust and restore browse workflow if the editor forced RAW.
+
+        Esc used to call ``_set_adjust_panel_visible(False)`` only, which left
+        ``use_embedded_jpeg_workflow=False`` behind — the next gallery click
+        then loaded in RAW mode. E-toggle already restored; share that path.
+        """
+        if not getattr(self, "_adjust_overlay_visible", False):
+            return
+        self._set_adjust_panel_visible(False)
+        path = getattr(self, "current_file_path", None)
+        if path:
+            # Load sidecar on the reencode worker — never on the UI thread.
+            self._reencode_persisted_preview_for_sidecar(path, None)
+        if getattr(self, "_adjust_forced_raw_workflow", False):
+            self._adjust_forced_raw_workflow = False
             settings = self.get_settings()
             use_embedded = settings.value("use_embedded_jpeg_workflow", True, type=bool)
             if not use_embedded:
@@ -20355,6 +20653,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             panel.set_adjustments(loaded_adj)
             self._dodge_burn_mask = deserialize_mask(loaded_adj.get(MASK_KEY, ""))
             self._dodge_burn_luma_guide = None
+            self._sync_dodge_burn_mask_overlay()
             self._adjust_panel_loaded_norm = norm
             self._pending_adjust_preview = dict(panel.get_adjustments())
         except Exception:
@@ -20442,9 +20741,63 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         panel = getattr(self, "single_image_adjust_panel", None)
         return panel is not None and panel.isVisible()
 
+    def _should_defer_adjust_preview_paint(self, pixmap: QPixmap) -> bool:
+        """True when a live-drag lite tier would trash a zoomed sharper buffer.
+
+        Last-run log: Fit settle at 3514px → double-click 100% → slider ticks
+        painted 640px lite previews with exact_framing, so 100% zoom showed a
+        soft postage stamp until the next ~3s settle.
+        """
+        if pixmap is None or pixmap.isNull():
+            return False
+        if self._single_view_is_fit_mode():
+            return False
+        cur = getattr(self, "current_pixmap", None)
+        if cur is None or cur.isNull():
+            return False
+        cur_max = max(int(cur.width()), int(cur.height()))
+        new_max = max(int(pixmap.width()), int(pixmap.height()))
+        return cur_max >= 1200 and new_max < int(cur_max * 0.55)
+
+    def _restore_adjust_hires_before_zoom(self) -> bool:
+        """If Fit live-drag left a 640px buffer on screen, restore settle first.
+
+        Last-run: status showed ``640x427 - 100%`` after double-click because
+        lite had replaced the half-res settle while still in Fit.
+        """
+        if not self._adjust_panel_active():
+            return False
+        hires = getattr(self, "_adjust_hires_render", None)
+        if hires is None:
+            return False
+        if _norm_path(getattr(self, "_adjust_hires_render_norm", "") or "") != _norm_path(
+            getattr(self, "current_file_path", "") or ""
+        ):
+            return False
+        arr = hires[0]
+        if arr is None or getattr(arr, "ndim", 0) != 3:
+            return False
+        h, w = int(arr.shape[0]), int(arr.shape[1])
+        if max(h, w) < 1200:
+            return False
+        cur = getattr(self, "current_pixmap", None)
+        if cur is not None and not cur.isNull():
+            if max(h, w) <= max(int(cur.width()), int(cur.height())) * 1.05:
+                return False
+        try:
+            pixmap = self._numpy_to_qpixmap(arr)
+        except Exception:
+            return False
+        if pixmap is None or pixmap.isNull():
+            return False
+        self._display_adjust_preview_pixmap(pixmap)
+        return True
+
     def _display_adjust_preview_pixmap(self, pixmap: QPixmap) -> None:
         """Paint adjust live-preview without navigation cross-fades or loader races."""
         if pixmap is None or pixmap.isNull():
+            return
+        if self._should_defer_adjust_preview_paint(pixmap):
             return
         if getattr(self, "_raw_recovery_active", False):
             self._raw_recovery_active = False
@@ -20724,7 +21077,37 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         gv = getattr(self, "gpu_view", None)
         if gv is not None:
             gv.set_dodge_burn_mode(mode is not None)
+            if mode is not None:
+                self._sync_dodge_burn_brush_cursor()
             self._apply_adjust_panel_preview()
+
+    def _sync_dodge_burn_brush_cursor(self) -> None:
+        panel = getattr(self, "single_image_adjust_panel", None)
+        gv = getattr(self, "gpu_view", None)
+        if panel is None or gv is None or not hasattr(gv, "set_dodge_burn_brush_radius"):
+            return
+        gv.set_dodge_burn_brush_radius(panel.dodge_burn_brush_radius())
+
+    def _on_xmp_preset_applied(self) -> None:
+        """Drop per-image local mask when a global XMP look is applied."""
+        self._dodge_burn_mask = None
+        self._dodge_burn_luma_guide = None
+        panel = getattr(self, "single_image_adjust_panel", None)
+        if panel is not None:
+            panel.set_dodge_burn_mask_present(False)
+        self._sync_dodge_burn_mask_overlay()
+
+    def _on_looks_drop_rejected(self, message: str) -> None:
+        msg = (message or "").strip() or (
+            "Only .cube and .xmp files can be added to Looks"
+        )
+        self._show_auto_dismiss_notice(
+            "Unsupported file",
+            detail=msg,
+            duration_ms=3500,
+        )
+        if hasattr(self, "status_bar") and self.status_bar:
+            self.status_bar.showMessage(msg, 4000)
 
     def _crop_keys_zeroed(self, adj: dict) -> dict:
         """Preview adj with crop insets cleared (full frame under the overlay)."""
@@ -20823,6 +21206,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         panel = getattr(self, "single_image_adjust_panel", None)
         if panel is not None:
             panel.set_dodge_burn_mask_present(False)
+        self._sync_dodge_burn_mask_overlay()
 
     def _on_dodge_burn_clear_requested(self) -> None:
         if getattr(self, "_dodge_burn_mask", None) is None:
@@ -20832,9 +21216,19 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         panel = getattr(self, "single_image_adjust_panel", None)
         if panel is not None:
             panel.set_dodge_burn_mask_present(False)
+        self._sync_dodge_burn_mask_overlay()
         self._apply_adjust_panel_preview(full_quality=True)
         if panel is not None:
             self._on_adjust_panel_editing_finished(panel.get_adjustments())
+
+    def _sync_dodge_burn_mask_overlay(self) -> None:
+        """Push current mask (or empty) to the view when Show Mask is on."""
+        gv = getattr(self, "gpu_view", None)
+        if gv is None:
+            return
+        panel = getattr(self, "single_image_adjust_panel", None)
+        show = bool(panel is not None and panel.dodge_burn_show_mask())
+        gv.set_dodge_burn_mask_overlay(getattr(self, "_dodge_burn_mask", None), show)
 
     def _dodge_burn_mask_shape(self) -> tuple[int, int] | None:
         """Canonical (H, W) the mask is painted at: the (half-res) edit base.
@@ -20886,10 +21280,11 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             # Brush size slider is in *display* pixels; convert to mask space.
             radius = max(2.0, panel.dodge_burn_brush_radius() * sx)
             # Per-point delta: brush-strength slider (0..1) * pressure,
-            # scaled down so a slow drag accumulates smoothly instead of
-            # one point already reaching full strength. Kept low (0.12) so
-            # live patch feedback stays cheap and strokes don't blow out.
-            delta = panel.dodge_burn_brush_strength() * max(0.05, float(pressure)) * 0.12
+            # scaled so a short drag is still clearly visible after the
+            # full-quality settle (scene-linear + tone). Was 0.12 — too
+            # subtle once live uint8 patches were replaced by the real
+            # pipeline render.
+            delta = panel.dodge_burn_brush_strength() * max(0.05, float(pressure)) * 0.28
 
             # Snapshot baseline once per stroke so live preview applies only
             # this stroke's mask delta (never re-bakes prior strokes into a
@@ -20970,6 +21365,16 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 )
             self._dodge_burn_stroke_active = True
             panel.set_dodge_burn_mask_present(True)
+
+            # Keep Show Mask overlay in sync while painting (throttled).
+            if panel.dodge_burn_show_mask():
+                now = time.perf_counter()
+                last = float(getattr(self, "_dodge_burn_mask_overlay_last", 0.0) or 0.0)
+                if is_end or (now - last) >= 0.05:
+                    self._dodge_burn_mask_overlay_last = now
+                    gv = getattr(self, "gpu_view", None)
+                    if gv is not None:
+                        gv.update_dodge_burn_mask(mask)
 
             baseline = getattr(self, "_dodge_burn_stroke_baseline", None)
             mask_start = getattr(self, "_dodge_burn_mask_at_stroke_start", None)
@@ -21129,15 +21534,34 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             except Exception:
                 pixmap = None
             if pixmap is not None and not pixmap.isNull():
-                self._display_adjust_preview_pixmap(pixmap)
+                deferred = self._should_defer_adjust_preview_paint(pixmap)
+                if not deferred:
+                    self._display_adjust_preview_pixmap(pixmap)
                 # Cache this exact render as the new instant-gain baseline
                 # (see _try_instant_gain_preview): array is uint8 RGB, ready
-                # for cv2.LUT with no further conversion.
+                # for cv2.LUT with no further conversion. While zoomed, do not
+                # replace a sharper settle baseline with a deferred lite tier
+                # — otherwise Exposure instant-gain and zoom-in restore both
+                # collapse to 640px.
                 submitted = getattr(self, "_adjust_preview_submitted_adj", None)
                 adj_used = (submitted or {}).get(generation)
                 if adj_used is not None and array.dtype == np.uint8 and array.ndim == 3:
-                    self._adjust_last_render = (array, adj_used)
-                    self._adjust_last_render_norm = _norm_path(file_path)
+                    skip_cache = False
+                    prev = getattr(self, "_adjust_last_render", None)
+                    if (
+                        deferred
+                        and prev is not None
+                        and prev[0] is not None
+                        and max(int(prev[0].shape[0]), int(prev[0].shape[1]))
+                        > max(int(array.shape[0]), int(array.shape[1])) * 1.2
+                    ):
+                        skip_cache = True
+                    if not skip_cache:
+                        self._adjust_last_render = (array, adj_used)
+                        self._adjust_last_render_norm = _norm_path(file_path)
+                    if max(int(array.shape[0]), int(array.shape[1])) >= 1200:
+                        self._adjust_hires_render = (array, adj_used)
+                        self._adjust_hires_render_norm = _norm_path(file_path)
         if getattr(self, "_adjust_preview_dirty", False):
             self._apply_adjust_panel_preview(full_quality=dirty_full_quality)
 
@@ -21377,8 +21801,15 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         # preview. See _reencode_persisted_preview_for_sidecar's docstring;
         # re-enable once root-caused.
         # self._reencode_persisted_preview_for_sidecar(path, adj)
+        from raw_adjustments import is_default_adjustments
+
+        cleared = is_default_adjustments(adj)
+        self._invalidate_gallery_edited_memo(path)
         if hasattr(self, "status_bar"):
-            self.status_bar.showMessage("Adjustments saved to XMP sidecar", 2500)
+            self.status_bar.showMessage(
+                "Edits cleared" if cleared else "Adjustments saved to XMP sidecar",
+                2500,
+            )
         self._refresh_gallery_bookmark_visuals()
         # Every cache tier that can hold an edits-baked-in render of this file
         # (gallery's own composited thumbnail pixmap, and the shared
@@ -21398,11 +21829,41 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         # single-view match the Adjust panel without re-running the linear
         # pipeline on the embedded JPEG (which diverges from the demosaic
         # path and must never touch companion JPEGs of the same basename).
-        self._persist_editor_aligned_browse_caches(path)
+        #
+        # Skip bake on Reset / all-defaults: ``_apply_adjust_panel_preview``
+        # above is async, so ``_adjust_last_render`` is still the *previous*
+        # edited frame — re-baking it would put the edited look back into
+        # gallery/filmstrip after the XMP sidecar was cleared.
+        if not cleared:
+            self._persist_editor_aligned_browse_caches(path)
+        else:
+            # Drop the stale edited frame so a later accidental bake cannot
+            # resurrect it; gallery reload will fetch original thumbs.
+            if _norm_path(getattr(self, "_adjust_last_render_norm", "") or "") == _norm_path(
+                path
+            ):
+                self._adjust_last_render = None
+                self._adjust_last_render_norm = None
+            if _norm_path(getattr(self, "_adjust_hires_render_norm", "") or "") == _norm_path(
+                path
+            ):
+                self._adjust_hires_render = None
+                self._adjust_hires_render_norm = None
         gj = getattr(self, "gallery_justified", None)
         if gj is not None and hasattr(gj, "invalidate_thumbnails_for_path"):
             try:
                 gj.invalidate_thumbnails_for_path(path)
+            except Exception:
+                pass
+        bar = self._filmstrip_bar() if hasattr(self, "_filmstrip_bar") else None
+        if bar is not None and hasattr(bar, "invalidate_thumbnails_for_path"):
+            try:
+                bar.invalidate_thumbnails_for_path(path)
+            except Exception:
+                pass
+        elif bar is not None and hasattr(bar, "refresh_visible_thumbnails"):
+            try:
+                bar.refresh_visible_thumbnails(refresh_cache=True)
             except Exception:
                 pass
         QTimer.singleShot(0, self._restore_keyboard_focus)
@@ -24891,6 +25352,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         if not self.current_file_path:
             return
 
+        self._allow_full_decode_for_user_zoom()
+
         if self.current_pixmap and not self.current_pixmap.isNull():
             exif_now = None
             try:
@@ -24930,29 +25393,16 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         # Check if we're already loading full resolution
         if hasattr(self, '_full_resolution_loading') and self._full_resolution_loading:
             return
+        norm = _norm_path(self.current_file_path)
+        if getattr(self, "_sensor_full_decode_queued_norm", None) == norm:
+            self._full_resolution_loading = True
+            return
         
         logger.info("Loading full resolution image on-demand (user zoomed in)...")
-        self._full_resolution_loading = True
-        
-        # Determine if this is a RAW file based on extension
-        raw_extensions = {'.cr2', '.cr3', '.nef', '.arw', '.dng', '.orf', '.rw2', 
-                         '.pef', '.srw', '.x3f', '.raf', '.3fr', '.fff', '.iiq', 
-                         '.cap', '.erf', '.mef', '.mos', '.nrw', '.rwl', '.srf'}
-        file_ext = os.path.splitext(_require_str_path(self.current_file_path))[1].lower()
-        is_raw = file_ext in raw_extensions
-        
-        # Use ImageLoadManager to load full resolution
-        # This replaces the legacy RAWProcessor usage
-        logger.info(f"[LOAD] Requesting FULL RESOLUTION via ImageLoadManager for: {self.current_file_path}")
-        
-        # We use Priority.CURRENT to ensure it processes immediately
-        self.image_manager.load_image(
-            file_path=self.current_file_path,
-            priority=Priority.CURRENT,
-            cancel_existing=False, # Don't cancel existing (though theoretically this replaces previous)
-            use_full_resolution=True,
-            bypass_cache=True,
-        )
+        if self._queue_sensor_full_decode(
+            self.current_file_path, priority_current=True, urgent=True
+        ):
+            self._full_resolution_loading = True
     
     # Dangling block removed
     
@@ -25224,6 +25674,135 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             self._queue_display_tier_prefetch_for_paths(
                 self._paths_within_nav_prefetch_radius()
             )
+        except Exception:
+            pass
+        # Full decode + neighbor preload have landed — now it's safe to pay
+        # the main-thread torch import without starving those timers.
+        self._schedule_deferred_gpu_backend_import(reason="post_session_restore")
+
+    def _schedule_deferred_gpu_backend_import(self, *, reason: str = "fallback") -> None:
+        """Queue torch/kornia import after quiet period (main thread only).
+
+        OpenMP forces the import onto the GUI thread; we only choose *when*
+        so it cannot land on top of session-restore full decode or mid-nav.
+        """
+        try:
+            import torch_bootstrap
+
+            if torch_bootstrap.gpu_backend_import_started():
+                return
+        except Exception:
+            return
+        # Prefer the post-restore schedule: after-paint is only a fallback when
+        # session-restore staging never runs (no folder / empty restore).
+        restore_busy = (
+            getattr(self, "_session_restore_defer_preload", False)
+            or self._should_defer_full_decode()
+            or getattr(self, "_session_restore_staged_scheduled", False)
+        )
+        if reason == "after_first_paint" and restore_busy:
+            # Safety net if nav-preload never fires (gallery stall, etc.).
+            QTimer.singleShot(
+                _env_int("RAWVIEWER_GPU_IMPORT_DEFER_FALLBACK_MS", 8000, minimum=0),
+                lambda: self._schedule_deferred_gpu_backend_import(reason="fallback"),
+            )
+            return
+        if reason == "post_session_restore":
+            delay_ms = _env_int(
+                "RAWVIEWER_GPU_IMPORT_AFTER_RESTORE_MS", 1500, minimum=0
+            )
+        else:
+            delay_ms = _env_int(
+                "RAWVIEWER_GPU_IMPORT_AFTER_PAINT_MS", 4000, minimum=0
+            )
+        import logging
+
+        logging.getLogger(__name__).info(
+            "[GPU] Scheduling backend import in %dms (%s)", delay_ms, reason
+        )
+        timer = getattr(self, "_gpu_backend_import_timer", None)
+        if timer is None:
+            timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.timeout.connect(self._try_import_gpu_backend)
+            self._gpu_backend_import_timer = timer
+        timer.stop()
+        timer.start(delay_ms)
+
+    def _try_import_gpu_backend(self) -> None:
+        """Idle-gated main-thread torch import; retries while the user is busy."""
+        retry_ms = _env_int("RAWVIEWER_GPU_IMPORT_RETRY_MS", 2000, minimum=200)
+        zoom_quiet_ms = _env_int(
+            "RAWVIEWER_GPU_IMPORT_ZOOM_QUIET_MS", 2500, minimum=0
+        )
+        nav_quiet_ms = _env_int(
+            "RAWVIEWER_GPU_IMPORT_NAV_QUIET_MS", 2500, minimum=0
+        )
+        try:
+            import torch_bootstrap
+
+            if torch_bootstrap.gpu_backend_ready():
+                return
+        except Exception:
+            torch_bootstrap = None  # type: ignore
+
+        gv = getattr(self, "gpu_view", None)
+        if gv is not None and not gv.is_fit_mode():
+            QTimer.singleShot(retry_ms, self._try_import_gpu_backend)
+            return
+        if getattr(self, "_pending_zoom", False) or getattr(
+            self, "_full_resolution_loading", False
+        ):
+            QTimer.singleShot(retry_ms, self._try_import_gpu_backend)
+            return
+        zoom_ts = float(getattr(self, "_user_zoom_interaction_ts", 0.0) or 0.0)
+        if zoom_ts > 0.0 and (time.monotonic() - zoom_ts) * 1000.0 < zoom_quiet_ms:
+            QTimer.singleShot(retry_ms, self._try_import_gpu_backend)
+            return
+        nav_ts = float(getattr(self, "_last_navigation_finish_ts", 0.0) or 0.0)
+        if nav_ts > 0.0 and (time.monotonic() - nav_ts) * 1000.0 < nav_quiet_ms:
+            QTimer.singleShot(retry_ms, self._try_import_gpu_backend)
+            return
+        if self._should_defer_full_decode():
+            QTimer.singleShot(retry_ms, self._try_import_gpu_backend)
+            return
+        if self._adjust_panel_active():
+            QTimer.singleShot(retry_ms, self._try_import_gpu_backend)
+            return
+        # A view switch (esp. single -> gallery) queues a burst of main-thread
+        # work; a 6-8s torch import landing right then freezes the gallery
+        # before any tile can paint (observed: import fired 1s after gallery
+        # entry, tiles blocked for the full import). Wait for switch quiet and
+        # for the gallery's visible-tile fill to drain.
+        switch_ts = float(getattr(self, "_last_view_mode_switch_ts", 0.0) or 0.0)
+        if switch_ts > 0.0 and (time.monotonic() - switch_ts) * 1000.0 < nav_quiet_ms:
+            QTimer.singleShot(retry_ms, self._try_import_gpu_backend)
+            return
+        gj = getattr(self, "gallery_justified", None)
+        if (
+            getattr(self, "view_mode", "single") == "gallery"
+            and gj is not None
+            and len(getattr(gj, "_active_tasks", ()) or ()) > 0
+        ):
+            QTimer.singleShot(retry_ms, self._try_import_gpu_backend)
+            return
+        if torch_bootstrap is None:
+            return
+
+        def _pump() -> None:
+            app = QApplication.instance()
+            if app is not None:
+                app.processEvents()
+
+        try:
+            if hasattr(self, "status_bar") and self.status_bar:
+                self.status_bar.showMessage("Loading GPU decode backend…", 8000)
+        except Exception:
+            pass
+        torch_bootstrap.import_gpu_backend_on_main_thread(pump=_pump)
+        try:
+            if hasattr(self, "status_bar") and self.status_bar:
+                self.status_bar.clearMessage()
         except Exception:
             pass
 
@@ -26646,7 +27225,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             if path not in self._gallery_bulk_metadata:
                 self._gallery_bulk_metadata[path] = {}
             self._gallery_bulk_metadata[path]['rating'] = rating
-            
+        self._bump_gallery_rating_presence_epoch()
+
         gj = getattr(self, "gallery_justified", None)
         if gj is not None and hasattr(gj, "_metadata_cache"):
             if path not in gj._metadata_cache:
@@ -26915,7 +27495,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 return
         elif vm == "single":
             if getattr(self, "_adjust_overlay_visible", False):
-                self._set_adjust_panel_visible(False)
+                self._close_adjust_panel_from_ui()
                 return
             if getattr(self, "_burst_group_view_active", False):
                 if not self._path_in_burst_group_view(getattr(self, "current_file_path", None)):
@@ -27046,6 +27626,11 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                             if hasattr(self, "status_bar") and self.status_bar:
                                 self.status_bar.showMessage("No edit settings to paste", 2000)
                         return True
+            if key == Qt.Key.Key_O and not ctrl_or_cmd:
+                panel = getattr(self, "single_image_adjust_panel", None)
+                if panel is not None:
+                    panel.toggle_dodge_burn_show_mask()
+                    return True
 
         if key == Qt.Key.Key_Escape:
             gv = getattr(self, "gpu_view", None)
@@ -27806,6 +28391,12 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         """When zooming in on the GPU view, request the full-res buffer if we only have a preview."""
         if self._raw_recovery_preview_active():
             return
+        # Adjust panel paints its own half-res / settle preview tiers. Those
+        # never cover EXIF sensor WxH, so treating every pinch/100% as a
+        # browse-path sensor decode flooded the log with
+        # "[ZOOM] Preview below sensor resolution" and fought the edit base.
+        if self._adjust_panel_active():
+            return
         try:
             self._maybe_request_full_res_for_smooth_zoom()
         except Exception:
@@ -27892,14 +28483,24 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                         self.zoom_center_point = QPoint(
                             max(0, w // 2), max(0, h // 2)
                         )
+                self._allow_full_decode_for_user_zoom()
+                self._try_sync_full_before_zoom()
+                self._restore_adjust_hires_before_zoom()
                 self._gpu_zoom_in_to_point_finish()
-                if self._needs_full_resolution_upgrade():
+                if (
+                    not self._adjust_panel_active()
+                    and self._needs_full_resolution_upgrade()
+                ):
                     self._pending_zoom = True
                     self._pending_zoom_center = self.zoom_center_point
                     self._pending_zoom_thumbnail_size = self.current_pixmap.size() if self.current_pixmap else None
                     self._queue_sensor_full_decode(
-                        _require_str_path(self.current_file_path), priority_current=True
+                        _require_str_path(self.current_file_path),
+                        priority_current=True,
+                        urgent=True,
                     )
+                elif self._adjust_panel_active():
+                    self._apply_adjust_panel_preview(full_quality=True)
                 self.fit_to_window = gv.is_fit_mode()
                 self.current_zoom_level = float(gv.current_scale())
                 self.update_status_bar()
@@ -30352,6 +30953,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                             if not self._gallery_bulk_metadata:
                                 self._gallery_bulk_metadata = {}
                             self._gallery_bulk_metadata.update(merged_meta)
+                            self._bump_gallery_rating_presence_epoch()
         except Exception as e:
             logger.warning(f"[FOLDER] Instant EXIF sort failed: {e}")
 
@@ -30429,6 +31031,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             self._quick_folder_file_stats = {}
             self._filmstrip_warmed_paths = set()
             self._gallery_bulk_metadata = {}
+            self._bump_gallery_rating_presence_epoch()
         try:
             if getattr(self, "image_manager", None) is not None:
                 if preserve_folder_index and prev_path:
@@ -30615,6 +31218,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self._gallery_search_index_session_key = None
         if bulk_metadata:
             self._gallery_bulk_metadata = bulk_metadata
+            self._bump_gallery_rating_presence_epoch()
         self._rebuild_burst_groups()
         if preserved:
             preserved_norm = _norm_path(preserved)
@@ -30787,6 +31391,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             self._gallery_search_index_session_key = None
             self._filmstrip_warmed_paths = set()
             self._gallery_bulk_metadata = bulk_metadata
+            self._bump_gallery_rating_presence_epoch()
             if not was_fast_open:
                 self._folder_fast_open_preserved_path = None
                 # Standard folder load already performed full capture-time sorting in background
@@ -30949,11 +31554,46 @@ class RAWImageViewer(SessionMixin, QMainWindow):
     
     
     def closeEvent(self, event):
-        """Handle application close event with proper cleanup"""
+        """Handle application close event with proper cleanup.
+
+        Hide the UI immediately so quit feels instant; then do a short
+        best-effort cleanup. Thread-pool waits used to leave the window
+        on screen for up to several seconds even when work was already
+        cancelled.
+        """
         import logging
+        import time as _time
+
         logger = logging.getLogger(__name__)
+        t0 = _time.perf_counter()
         logger.info("[CLOSE] Application close event triggered, starting cleanup...")
-        
+
+        # Restore display brightness before teardown if Adjust raised it.
+        try:
+            self._restore_adjust_brightness()
+        except Exception:
+            pass
+
+        # 1) Take the frontend down first — user-visible quit.
+        try:
+            self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, False)
+            self.hide()
+            for w in list(QApplication.topLevelWidgets()):
+                try:
+                    if w is not self and w.isVisible():
+                        w.hide()
+                except Exception:
+                    pass
+            app = QApplication.instance()
+            if app is not None:
+                app.processEvents()
+            logger.info(
+                "[CLOSE] Frontend hidden in %.0fms",
+                (_time.perf_counter() - t0) * 1000.0,
+            )
+        except Exception as e:
+            logger.warning("[CLOSE] Failed to hide frontend promptly: %s", e)
+
         try:
             self._stop_animations()
             if getattr(self, "_save_session_debounce_timer", None) is not None:
@@ -31016,7 +31656,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 except Exception as e:
                     logger.warning(f"[CLOSE] Error stopping gallery background loading: {e}", exc_info=True)
             
-            # Stop and cancel all image load tasks
+            # Stop and cancel all image load tasks — do not wait long; os._exit follows.
             if hasattr(self, 'image_manager') and self.image_manager is not None:
                 logger.info("[CLOSE] Stopping and cancelling all image load tasks...")
                 try:
@@ -31031,59 +31671,49 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 except Exception as e:
                     logger.warning(f"[CLOSE] Error stopping/cancelling image load tasks: {e}", exc_info=True)
             
-            # Wait for thread pool to finish (with timeout)
+            # Brief wait only — frontend is already hidden.
+            _pool_wait_ms = _env_int("RAWVIEWER_CLOSE_POOL_WAIT_MS", 250, minimum=0)
             if hasattr(self, 'thread_pool') and self.thread_pool is not None:
                 logger.info("[CLOSE] Waiting for thread pool to finish...")
                 try:
-                    # Wait up to 2 seconds for threads to finish
-                    self.thread_pool.waitForDone(2000)
+                    self.thread_pool.waitForDone(_pool_wait_ms)
                     logger.info("[CLOSE] Thread pool finished")
                 except Exception as e:
                     logger.warning(f"[CLOSE] Error waiting for thread pool: {e}", exc_info=True)
             
-            # Wait for image manager thread pool to finish
             if hasattr(self, 'image_manager') and self.image_manager is not None:
                 if hasattr(self.image_manager, '_thread_pool') and self.image_manager._thread_pool is not None:
                     logger.info("[CLOSE] Waiting for image manager thread pool to finish...")
                     try:
-                        # Wait up to 2 seconds for threads to finish
-                        self.image_manager._thread_pool.waitForDone(2000)
+                        self.image_manager._thread_pool.waitForDone(_pool_wait_ms)
                         logger.info("[CLOSE] Image manager thread pool finished")
                     except Exception as e:
                         logger.warning(f"[CLOSE] Error waiting for image manager thread pool: {e}", exc_info=True)
             
-            # Force terminate any remaining threads/processes
+            # Force terminate any remaining threads/processes (no sleeps)
             logger.info("[CLOSE] Force terminating any remaining processes...")
             try:
-                # Force cleanup current processor one more time
                 if hasattr(self, 'current_processor') and self.current_processor is not None:
                     logger.warning("[CLOSE] Force terminating current processor...")
                     try:
                         if hasattr(self.current_processor, 'terminate'):
                             self.current_processor.terminate()
                         if hasattr(self.current_processor, 'wait'):
-                            self.current_processor.wait(100)  # Wait 100ms
+                            self.current_processor.wait(50)
                     except Exception as e:
                         logger.warning(f"[CLOSE] Error force terminating processor: {e}")
                     finally:
                         self.current_processor = None
                 
-                # Force cleanup preload manager
                 if hasattr(self, 'preload_manager') and self.preload_manager is not None:
                     try:
-                        # Cancel all and wait
                         self.preload_manager.cancel_all_preloads()
-                        import time
-                        time.sleep(0.1)  # Give it 100ms to finish
                     except Exception as e:
                         logger.warning(f"[CLOSE] Error force cleaning preload manager: {e}")
                 
-                # Force cleanup image manager
                 if hasattr(self, 'image_manager') and self.image_manager is not None:
                     try:
                         self.image_manager.cancel_all_tasks()
-                        import time
-                        time.sleep(0.1)  # Give it 100ms to finish
                     except Exception as e:
                         logger.warning(f"[CLOSE] Error force cleaning image manager: {e}")
             except Exception as e:
@@ -31098,7 +31728,10 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 except Exception as e:
                     logger.warning(f"[CLOSE] Error closing image cache: {e}")
 
-            logger.info("[CLOSE] Cleanup completed successfully")
+            logger.info(
+                "[CLOSE] Cleanup completed successfully in %.0fms",
+                (_time.perf_counter() - t0) * 1000.0,
+            )
             
         except Exception as e:
             logger.error(f"[CLOSE] Error during cleanup: {e}", exc_info=True)
@@ -31124,6 +31757,11 @@ def main():
     # second worker. Override by exporting OMP_NUM_THREADS.
     _cores = os.cpu_count() or 8
     os.environ.setdefault("OMP_NUM_THREADS", str(max(2, min(8, _cores // 2))))
+
+    # macOS: opt out of App Nap before any pipeline timers are created —
+    # throttled QTimers delay the staged full decode by 9-15s when the app
+    # launches unfocused or sits idle.
+    _disable_macos_app_nap()
 
     # Packaged or installed app: enable semantic search by default (dev uses launch_dev.sh / run_debug.bat).
     # Lite builds bake PROFILE=lite and skip AI/face via rawviewer_profile defaults.
@@ -31361,28 +31999,13 @@ def main():
 
             # Import torch/kornia on the main thread after first paint (see
             # torch_bootstrap.py). Must stay on the GUI thread: OpenMP first
-            # init off-main hard-aborts on macOS. Never import synchronously
-            # here -- if TTFR already happened via processEvents before
-            # app.exec(), a sync import stalls the event loop from starting
-            # and freezes every post-TTFR QTimer (session full decode, nav
-            # preload) for the whole cold-import cost (often several seconds).
-            # After paint, wait a short extra beat so session-restore deferred
-            # work can claim the event loop first; background decode threads
-            # already tolerate waiting via wait_for_gpu_backend_ready().
-            import torch_bootstrap
-
-            gpu_after_paint_ms = _env_int(
-                "RAWVIEWER_GPU_IMPORT_AFTER_PAINT_MS", 1200, minimum=0
-            )
-
-            def _schedule_gpu_backend_import() -> None:
-                QTimer.singleShot(
-                    gpu_after_paint_ms,
-                    torch_bootstrap.import_gpu_backend_on_main_thread,
-                )
-
+            # init off-main hard-aborts on macOS. Prefer scheduling from
+            # session-restore nav preload; this paint-based path is the
+            # fallback when restore staging did not run (empty session, etc.).
             viewer._defer_until_first_paint(
-                _schedule_gpu_backend_import,
+                lambda: viewer._schedule_deferred_gpu_backend_import(
+                    reason="after_first_paint"
+                ),
                 fallback_ms=_env_int(
                     "RAWVIEWER_GPU_IMPORT_DEFER_FALLBACK_MS", 8000, minimum=0
                 ),

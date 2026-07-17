@@ -58,6 +58,36 @@ def main() -> int:
             np.allclose(apply_creative_lut(img, {"CreativeLUTAmount": 100.0}), img),
         )
 
+        from raw_lut import (
+            LUT_SPACE_LINEAR,
+            LUT_SPACE_REC709,
+            apply_pipeline_lut_encoded,
+            apply_pipeline_lut_linear,
+            lut_working_space,
+        )
+
+        check("default space Rec709", lut_working_space({}) == LUT_SPACE_REC709)
+        check(
+            "linear space parse",
+            lut_working_space({"CreativeLUTWorkingSpace": "Linear"}) == LUT_SPACE_LINEAR,
+        )
+        # Without a managed name, pipeline helpers are no-ops in both spaces.
+        enc = (img * 255).astype(np.uint8)
+        check(
+            "pipeline encoded no-op without name",
+            np.array_equal(
+                apply_pipeline_lut_encoded(enc, {"CreativeLUTAmount": 100}, 255.0),
+                enc,
+            ),
+        )
+        check(
+            "pipeline linear no-op without name",
+            np.allclose(
+                apply_pipeline_lut_linear(img, {"CreativeLUTWorkingSpace": "Linear"}),
+                img,
+            ),
+        )
+
     print(f"\n{len(FAILURES)} failure(s)")
     return 1 if FAILURES else 0
 

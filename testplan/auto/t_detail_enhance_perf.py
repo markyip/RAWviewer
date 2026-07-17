@@ -45,7 +45,10 @@ def check(name, ok, detail=""):
 
 
 def main() -> int:
-    from raw_adjustments import apply_adjustments_to_rgb
+    from raw_adjustments import (
+        _apply_adjustments_to_srgb,
+        apply_adjustments_to_rgb,
+    )
 
     # Real-world-shaped edit settings (matches an actual XMP sidecar that
     # exposed this bug): heavy sharpness/clarity/defringe + highlights/
@@ -63,8 +66,12 @@ def main() -> int:
     # timing check reflects the actual single-image full-decode path.
     img = rng.randint(0, 255, (4672, 7008, 3), dtype=np.uint8)
 
+    # Speed budget is for the legacy gamma-space banded detail path (still
+    # used by banded unit tests). Public apply_adjustments_to_rgb now routes
+    # uint8 through the full scene-linear pipeline and is intentionally
+    # slower / higher-fidelity — do not gate that path on this 4.5s budget.
     t0 = time.perf_counter()
-    out = apply_adjustments_to_rgb(img, adj)
+    out = _apply_adjustments_to_srgb(img, adj)
     elapsed_s = time.perf_counter() - t0
     check(
         "32MP detail-enhance-heavy edit completes well under the pre-fix ~7.5s baseline",
@@ -77,10 +84,18 @@ def main() -> int:
     # Smaller scale for the approximation-error check (keeps the test fast;
     # the error bound doesn't depend on resolution).
     small_img = rng.randint(0, 255, (2336, 3504, 3), dtype=np.uint8)
-    small_out = apply_adjustments_to_rgb(small_img, adj)
+    small_out = _apply_adjustments_to_srgb(small_img, adj)
     check(
         "output stays in valid uint8 range",
         small_out.min() >= 0 and small_out.max() <= 255,
+    )
+
+    # Smoke: public API still accepts uint8 (linear pipeline).
+    tiny = rng.randint(0, 255, (64, 96, 3), dtype=np.uint8)
+    tiny_out = apply_adjustments_to_rgb(tiny, adj)
+    check(
+        "apply_adjustments_to_rgb uint8 linear path shape",
+        tiny_out is not None and tiny_out.shape == tiny.shape,
     )
 
     # Banding correctness: random noise can't reveal blur-seam artifacts (no

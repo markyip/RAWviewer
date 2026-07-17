@@ -1713,6 +1713,7 @@ class ImageCache(QObject):
             self.disk_grid_cache = PersistentGridCache(cache_dir)
             self.disk_preview_cache = PersistentPreviewCache(cache_dir)
             self._purge_stale_oriented_pixel_caches(cache_dir)
+            self._purge_stale_edit_baked_pixel_caches(cache_dir)
         else:
             # Trial mode: keep all acceleration in RAM and never create/write local cache files.
             self.exif_cache = MemoryOnlyPersistentCache()
@@ -1810,6 +1811,49 @@ class ImageCache(QObject):
                     pass
             with open(marker, "w", encoding="utf-8") as fh:
                 fh.write(str(int(RAW_EXIF_SENSOR_META_VER)))
+        except Exception:
+            pass
+
+    # Bump when edited-look thumbnails may have been persisted without a way
+    # to invalidate them (disk tiers key on RAW size+mtime only; an XMP edit
+    # or Reset never touches the RAW file). v1: editor bake used to re-run
+    # after Reset / miss invalidation, leaving permanently stale edited thumbs.
+    EDIT_BAKE_PIXEL_VER = 1
+
+    def _purge_stale_edit_baked_pixel_caches(self, cache_dir: str) -> None:
+        """One-time purge of persisted pixel tiers when the edit-bake hygiene version bumps.
+
+        _persist_editor_aligned_browse_caches writes edits-baked-in pixels into
+        the same disk tiers as plain browse thumbs. Those tiers validate by RAW
+        (size, mtime), which an XMP sidecar edit/reset never changes -- so any
+        stale edited bake (older Reset bug, crash between bake and invalidate)
+        survives forever. Same pattern as _purge_stale_oriented_pixel_caches.
+        """
+        try:
+            marker = os.path.join(cache_dir, "edit_bake_ver.txt")
+            stored = None
+            try:
+                with open(marker, "r", encoding="utf-8") as fh:
+                    stored = int(fh.read().strip() or 0)
+            except Exception:
+                stored = None
+            if stored == int(self.EDIT_BAKE_PIXEL_VER):
+                return
+            print(
+                "[CACHE] Edit-bake hygiene version changed "
+                f"({stored} -> {self.EDIT_BAKE_PIXEL_VER}); purging persisted pixel caches"
+            )
+            for cache in (
+                self.disk_thumbnail_cache,
+                self.disk_grid_cache,
+                self.disk_preview_cache,
+            ):
+                try:
+                    cache.clear()
+                except Exception:
+                    pass
+            with open(marker, "w", encoding="utf-8") as fh:
+                fh.write(str(int(self.EDIT_BAKE_PIXEL_VER)))
         except Exception:
             pass
 

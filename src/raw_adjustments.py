@@ -84,6 +84,7 @@ DEFAULT_ADJUSTMENTS: Dict[str, float] = {
     "DodgeBurnStrength": 1.75,
     # Look / effects (see raw_effects.py) — display-linear after tone-map.
     "PostCropVignetteAmount": 0.0,
+    "PostCropVignetteMidpoint": 50.0,
     "Dehaze": 0.0,
     # Creative 3D LUT amount 0–100 (see raw_lut.py). LUT basename is a string
     # key (CreativeLUTName), handled like tone-curve serials — not in this float map.
@@ -140,6 +141,22 @@ _PV2012_RECOVERY_EXCLUSIVE_KEYS = _PV2012_TONE_SLIDER_KEYS - {
 }
 
 
+def tone_curve_serial_is_active(serial: object) -> bool:
+    """True when a tone-curve serial encodes a non-identity edit."""
+    text = str(serial or "").strip()
+    if not text:
+        return False
+    from raw_tone_curve import (
+        deserialize_tone_curve_points,
+        is_identity_tone_curve_points,
+    )
+
+    points = deserialize_tone_curve_points(text)
+    if len(points) < 2:
+        return False
+    return not is_identity_tone_curve_points(points)
+
+
 def uses_recovery_tone_map(adj: dict[str, float] | None) -> bool:
     """True when adjust should use P-key recovery tone instead of Reinhard + PV2012."""
     if not adj:
@@ -148,10 +165,10 @@ def uses_recovery_tone_map(adj: dict[str, float] | None) -> bool:
         return False
     from raw_tone_curve import CHANNEL_CURVE_KEYS, TONE_CURVE_SERIAL_KEY
 
-    if str(adj.get(TONE_CURVE_SERIAL_KEY, "") or "").strip():
+    if tone_curve_serial_is_active(adj.get(TONE_CURVE_SERIAL_KEY)):
         return False
     for key in CHANNEL_CURVE_KEYS:
-        if str(adj.get(key, "") or "").strip():
+        if tone_curve_serial_is_active(adj.get(key)):
             return False
     for key in _PV2012_RECOVERY_EXCLUSIVE_KEYS:
         default = float(DEFAULT_ADJUSTMENTS.get(key, 0.0))
@@ -260,6 +277,14 @@ SLIDER_SPECS: tuple[SliderSpec, ...] = (
     # the keys, so the future overlay only needs to write them.
     # (Crop overlay writes CropLeft/Right/Top/Bottom; no numeric sliders.)
     _slider_linear("PostCropVignetteAmount", "Vignette", -100, 100, 0.0),
+    _slider_linear(
+        "PostCropVignetteMidpoint",
+        "Midpoint",
+        0,
+        100,
+        50.0,
+        fmt=lambda x: f"{x:.0f}",
+    ),
     _slider_linear("Dehaze", "Dehaze", -100, 100, 0.0),
 )
 
@@ -730,7 +755,16 @@ def parse_dodge_burn_mask_from_xmp(xmp_path: str) -> str:
 
 def parse_creative_lut_name_from_xmp(xmp_path: str) -> str:
     """Read crs:CreativeLUTName (string basename of a managed .cube)."""
-    if not xmp_path or not os.path.isfile(xmp_path):
+    return _parse_crs_string_from_xmp(xmp_path, "CreativeLUTName")
+
+
+def parse_creative_lut_space_from_xmp(xmp_path: str) -> str:
+    """Read crs:CreativeLUTWorkingSpace (``Rec709`` / ``Linear``)."""
+    return _parse_crs_string_from_xmp(xmp_path, "CreativeLUTWorkingSpace")
+
+
+def _parse_crs_string_from_xmp(xmp_path: str, local_name: str) -> str:
+    if not xmp_path or not os.path.isfile(xmp_path) or not local_name:
         return ""
     try:
         tree = ET.parse(xmp_path)
@@ -739,16 +773,64 @@ def parse_creative_lut_name_from_xmp(xmp_path: str) -> str:
         for desc in root.findall(".//rdf:Description", ns):
             for key, val in desc.attrib.items():
                 local_key = key.split("}")[-1] if "}" in key else key.split(":")[-1]
-                if local_key == "CreativeLUTName" and val:
+                if local_key == local_name and val:
                     return str(val).strip()
             for child in desc:
                 tag = child.tag
                 local_key = tag.split("}")[-1] if "}" in tag else tag.split(":")[-1]
-                if local_key == "CreativeLUTName" and child.text:
+                if local_key == local_name and child.text:
                     return child.text.strip()
     except Exception:
         pass
     return ""
+
+
+def load_adjustments_from_xmp(xmp_path: str) -> Dict[str, float]:
+    """Load edit settings from an arbitrary XMP file (sidecar or managed preset).
+
+    Does not invent AsShotTemperature — callers that apply onto an image should
+    keep the current file's as-shot reference. Omits nothing the sidecar path
+    would load (sliders, tone curves, LUT name, dodge/burn mask).
+    """
+    adj: Dict[str, float] = dict(DEFAULT_ADJUSTMENTS)
+    if not xmp_path or not os.path.isfile(xmp_path):
+        return adj
+    parsed = parse_xmp_adjustments(xmp_path)
+    adj.update(parsed)
+    from raw_tone_curve import (
+        TONE_CURVE_BLUE_KEY,
+        TONE_CURVE_GREEN_KEY,
+        TONE_CURVE_RED_KEY,
+        TONE_CURVE_SERIAL_KEY,
+    )
+
+    serial = parse_tone_curve_pv2012_from_xmp(xmp_path)
+    if serial:
+        adj[TONE_CURVE_SERIAL_KEY] = serial
+    for key, tag in (
+        (TONE_CURVE_RED_KEY, "ToneCurvePV2012Red"),
+        (TONE_CURVE_GREEN_KEY, "ToneCurvePV2012Green"),
+        (TONE_CURVE_BLUE_KEY, "ToneCurvePV2012Blue"),
+    ):
+        ch = _parse_point_curve_from_xmp(xmp_path, tag)
+        if ch:
+            adj[key] = ch
+    from raw_dodge_burn import MASK_KEY
+
+    mask_serial = parse_dodge_burn_mask_from_xmp(xmp_path)
+    if mask_serial:
+        adj[MASK_KEY] = mask_serial
+    from raw_lut import LUT_NAME_KEY, LUT_SPACE_DEFAULT, LUT_SPACE_KEY
+
+    lut_name = parse_creative_lut_name_from_xmp(xmp_path)
+    if lut_name:
+        adj[LUT_NAME_KEY] = lut_name
+    lut_space = parse_creative_lut_space_from_xmp(xmp_path)
+    if lut_space:
+        adj[LUT_SPACE_KEY] = lut_space
+    elif lut_name:
+        adj[LUT_SPACE_KEY] = LUT_SPACE_DEFAULT
+    return adj
 
 
 def load_adjustments_for_file(image_path: str) -> Dict[str, float]:
@@ -758,45 +840,14 @@ def load_adjustments_for_file(image_path: str) -> Dict[str, float]:
     xmp_path = resolve_xmp_path(image_path)
     has_xmp_temp = False
     if xmp_path and os.path.isfile(xmp_path):
-        parsed = parse_xmp_adjustments(xmp_path)
-        if "Temperature" in parsed:
-            has_xmp_temp = True
+        # Only crs:Temperature present in the file counts — defaults from
+        # load_adjustments_from_xmp must not fake an authored WB.
+        has_xmp_temp = "Temperature" in parse_xmp_adjustments(xmp_path)
+        parsed = load_adjustments_from_xmp(xmp_path)
+        parsed.pop(AS_SHOT_TEMP_KEY, None)
         adj.update(parsed)
     if not has_xmp_temp:
         adj["Temperature"] = as_shot
-    if xmp_path and os.path.isfile(xmp_path):
-        from raw_tone_curve import TONE_CURVE_SERIAL_KEY
-
-        serial = parse_tone_curve_pv2012_from_xmp(xmp_path)
-        if serial:
-            adj[TONE_CURVE_SERIAL_KEY] = serial
-    if xmp_path and os.path.isfile(xmp_path):
-        from raw_tone_curve import (
-            TONE_CURVE_BLUE_KEY,
-            TONE_CURVE_GREEN_KEY,
-            TONE_CURVE_RED_KEY,
-        )
-
-        for key, tag in (
-            (TONE_CURVE_RED_KEY, "ToneCurvePV2012Red"),
-            (TONE_CURVE_GREEN_KEY, "ToneCurvePV2012Green"),
-            (TONE_CURVE_BLUE_KEY, "ToneCurvePV2012Blue"),
-        ):
-            serial = _parse_point_curve_from_xmp(xmp_path, tag)
-            if serial:
-                adj[key] = serial
-    if xmp_path and os.path.isfile(xmp_path):
-        from raw_dodge_burn import MASK_KEY
-
-        mask_serial = parse_dodge_burn_mask_from_xmp(xmp_path)
-        if mask_serial:
-            adj[MASK_KEY] = mask_serial
-    if xmp_path and os.path.isfile(xmp_path):
-        from raw_lut import LUT_NAME_KEY
-
-        lut_name = parse_creative_lut_name_from_xmp(xmp_path)
-        if lut_name:
-            adj[LUT_NAME_KEY] = lut_name
     return adj
 
 
@@ -872,10 +923,13 @@ def is_default_adjustments(adj: Dict[str, float] | None) -> bool:
     from raw_lut import LUT_AMOUNT_KEY, LUT_NAME_KEY
     from raw_tone_curve import CHANNEL_CURVE_KEYS, TONE_CURVE_SERIAL_KEY
 
-    if str(adj.get(TONE_CURVE_SERIAL_KEY, "") or "").strip():
+    # Identity serials ("0,0;255,255") are visually a no-op; treat them as
+    # default so Reset / clear can delete the sidecar and skip baking a stale
+    # edited preview back into gallery thumbs.
+    if tone_curve_serial_is_active(adj.get(TONE_CURVE_SERIAL_KEY)):
         return False
     for key in CHANNEL_CURVE_KEYS:
-        if str(adj.get(key, "") or "").strip():
+        if tone_curve_serial_is_active(adj.get(key)):
             return False
     if str(adj.get(MASK_KEY, "") or "").strip():
         return False
@@ -888,6 +942,10 @@ def is_default_adjustments(adj: Dict[str, float] | None) -> bool:
         return False
     ref_temp = wb_reference_temperature(adj)
     for key, default in DEFAULT_ADJUSTMENTS.items():
+        # Strength only matters with a painted mask; alone it must not keep
+        # an otherwise-empty sidecar after Reset.
+        if key == "DodgeBurnStrength":
+            continue
         try:
             av = float(adj.get(key, default) if adj.get(key, default) is not None else default)
         except (TypeError, ValueError):
@@ -902,10 +960,16 @@ def is_default_adjustments(adj: Dict[str, float] | None) -> bool:
 
 
 def adjustments_equal(a: Dict[str, float], b: Dict[str, float]) -> bool:
-    from raw_lut import LUT_NAME_KEY
+    from raw_lut import LUT_NAME_KEY, LUT_SPACE_KEY, lut_working_space
 
     if str(a.get(LUT_NAME_KEY, "") or "").strip() != str(b.get(LUT_NAME_KEY, "") or "").strip():
         return False
+    if lut_working_space(a) != lut_working_space(b):
+        # Only matters when a LUT is active; still compare so UI dirty-checks work.
+        if str(a.get(LUT_NAME_KEY, "") or "").strip() or str(b.get(LUT_NAME_KEY, "") or "").strip():
+            return False
+        if str(a.get(LUT_SPACE_KEY, "") or "").strip() != str(b.get(LUT_SPACE_KEY, "") or "").strip():
+            return False
     ref_a = wb_reference_temperature(a)
     ref_b = wb_reference_temperature(b)
     for key, default in DEFAULT_ADJUSTMENTS.items():
@@ -983,18 +1047,16 @@ def parse_xmp_adjustments(xmp_path: str) -> dict[str, float]:
 
 
 def write_xmp_adjustments(xmp_path: str, adj: Dict[str, float]) -> None:
-    """Write Lightroom-compatible crs sliders to an XMP sidecar.
+    """Merge Lightroom-compatible crs sliders into an XMP sidecar.
 
-    Preserves an existing xmp:Rating -- this rebuilds the sidecar from
-    scratch, and rating is written independently (write_xmp_rating, not
-    gated by editing_features_enabled()), so a slider save must not blow
-    away a star rating that was set earlier.
+    Updates only RAWviewer-owned ``crs:`` attributes / child elements and
+    preserves foreign Lightroom fields (Look, masks, Grain, Profile, …).
+    Rating is preserved (also written independently via write_xmp_rating).
 
-    Holds this sidecar's write lock for the whole read-modify-write --
+    Holds this sidecar's write lock for the whole read-modify-write —
     this runs on the export worker thread (see write_xmp_adjustments_for_file
     callers), so without it a same-moment write_xmp_rating() call from the
-    main thread (rating a photo while it's exporting) could interleave and
-    lose either change. See the _xmp_write_lock module comment.
+    main thread could interleave and lose either change.
     """
     if not editing_features_enabled():
         return
@@ -1002,26 +1064,185 @@ def write_xmp_adjustments(xmp_path: str, adj: Dict[str, float]) -> None:
         _write_xmp_adjustments_locked(xmp_path, adj)
 
 
+# crs: attributes / children that RAWviewer authors. Everything else on the
+# rdf:Description is left untouched on merge write.
+_OUR_CRS_ATTR_LOCALS = frozenset(RELEVANT_ADJUSTMENT_KEYS) | frozenset(
+    {
+        "DefringePurpleAmount",
+        "DefringeGreenAmount",
+        "ProcessVersion",
+        "ToneCurveName2012",
+        "CreativeLUTName",
+        "CreativeLUTWorkingSpace",
+    }
+)
+_OUR_CRS_CHILD_LOCALS = frozenset(
+    {
+        "ToneCurvePV2012",
+        "ToneCurvePV2012Red",
+        "ToneCurvePV2012Green",
+        "ToneCurvePV2012Blue",
+        "DodgeBurnMask",
+        "CreativeLUTName",
+        "CreativeLUTWorkingSpace",
+    }
+)
+
+
+def _crs_local_name(tag_or_attr: str) -> str:
+    if "}" in tag_or_attr:
+        return tag_or_attr.split("}", 1)[-1]
+    if ":" in tag_or_attr:
+        return tag_or_attr.split(":")[-1]
+    return tag_or_attr
+
+
+def _find_or_create_rdf_description(root: ET.Element) -> ET.Element:
+    rdf = root.find(f"{{{RDF_NS}}}RDF")
+    if rdf is None:
+        # Some sidecars use a default/prefixed form; fall back to any RDF.
+        for el in root.iter():
+            if _crs_local_name(el.tag) == "RDF":
+                rdf = el
+                break
+    if rdf is None:
+        rdf = ET.SubElement(root, f"{{{RDF_NS}}}RDF")
+    desc = rdf.find(f"{{{RDF_NS}}}Description")
+    if desc is None:
+        for el in rdf:
+            if _crs_local_name(el.tag) == "Description":
+                desc = el
+                break
+    if desc is None:
+        desc = ET.SubElement(rdf, f"{{{RDF_NS}}}Description")
+        desc.set(f"{{{RDF_NS}}}about", "")
+    return desc
+
+
+def _strip_our_crs_fields(desc: ET.Element) -> None:
+    """Remove only RAWviewer-owned crs attributes and child elements."""
+    for attr in list(desc.attrib.keys()):
+        local = _crs_local_name(attr)
+        if local in _OUR_CRS_ATTR_LOCALS and (
+            attr.startswith(f"{{{CRS_NS}}}")
+            or attr.startswith("crs:")
+            or (not attr.startswith("{") and local in _OUR_CRS_ATTR_LOCALS)
+        ):
+            # Only strip crs-scoped attrs (never dc:/xmp: with same local name).
+            if attr.startswith(f"{{{CRS_NS}}}") or attr.startswith("crs:"):
+                desc.attrib.pop(attr, None)
+    for child in list(desc):
+        local = _crs_local_name(child.tag)
+        if local not in _OUR_CRS_CHILD_LOCALS:
+            continue
+        if child.tag.startswith(f"{{{CRS_NS}}}") or (
+            not child.tag.startswith("{") and local in _OUR_CRS_CHILD_LOCALS
+        ):
+            desc.remove(child)
+
+
+def _sidecar_has_foreign_content(desc: ET.Element) -> bool:
+    """True if Description still holds non-RAWviewer / non-empty content."""
+    rating_attr = f"{{{XMP_NS}}}Rating"
+    if rating_attr in desc.attrib:
+        try:
+            if int(desc.attrib.get(rating_attr) or 0) > 0:
+                return True
+        except ValueError:
+            return True
+    for attr, val in desc.attrib.items():
+        if attr in (f"{{{RDF_NS}}}about", rating_attr):
+            continue
+        local = _crs_local_name(attr)
+        if attr.startswith(f"{{{CRS_NS}}}"):
+            if local not in _OUR_CRS_ATTR_LOCALS:
+                return True
+        elif not attr.startswith("{"):
+            # Unprefixed / other — treat as foreign to be safe.
+            if local not in _OUR_CRS_ATTR_LOCALS and local != "about":
+                return True
+        else:
+            # Other namespaces (dc, photoshop, …)
+            if not attr.startswith(f"{{{CRS_NS}}}") and not attr.startswith(f"{{{RDF_NS}}}"):
+                return True
+    for child in desc:
+        local = _crs_local_name(child.tag)
+        if child.tag.startswith(f"{{{CRS_NS}}}"):
+            if local not in _OUR_CRS_CHILD_LOCALS:
+                return True
+        else:
+            return True
+    return False
+
+
+def _write_xmp_tree_atomic(root: ET.Element, xmp_path: str) -> None:
+    tree = ET.ElementTree(root)
+    parent = os.path.dirname(os.path.abspath(xmp_path))
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(
+        dir=parent or None, prefix=os.path.basename(xmp_path) + ".", suffix=".tmp"
+    )
+    try:
+        with os.fdopen(fd, "wb") as f:
+            tree.write(f, encoding="utf-8", xml_declaration=True)
+        os.replace(tmp_path, xmp_path)
+    except BaseException:
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
 def _write_xmp_adjustments_locked(xmp_path: str, adj: Dict[str, float]) -> None:
     existing_rating = parse_xmp_rating(xmp_path)
     merged = dict(DEFAULT_ADJUSTMENTS)
     merged.update(adj or {})
-    if is_default_adjustments(merged):
-        if existing_rating > 0:
-            _write_xmp_rating_locked(xmp_path, existing_rating)
-        elif os.path.isfile(xmp_path):
-            os.remove(xmp_path)
-        return
 
     ET.register_namespace("x", X_NS)
     ET.register_namespace("rdf", RDF_NS)
     ET.register_namespace("crs", CRS_NS)
     ET.register_namespace("xmp", XMP_NS)
 
-    root = ET.Element(f"{{{X_NS}}}xmpmeta")
-    rdf = ET.SubElement(root, f"{{{RDF_NS}}}RDF")
-    desc = ET.SubElement(rdf, f"{{{RDF_NS}}}Description")
-    desc.set(f"{{{RDF_NS}}}about", "")
+    root = None
+    if os.path.isfile(xmp_path):
+        try:
+            root = ET.parse(xmp_path).getroot()
+        except Exception:
+            root = None
+
+    if is_default_adjustments(merged):
+        if root is None:
+            if existing_rating > 0:
+                _write_xmp_rating_locked(xmp_path, existing_rating)
+            elif os.path.isfile(xmp_path):
+                os.remove(xmp_path)
+            return
+        desc = _find_or_create_rdf_description(root)
+        _strip_our_crs_fields(desc)
+        rating_attr = f"{{{XMP_NS}}}Rating"
+        if existing_rating > 0:
+            desc.set(rating_attr, str(existing_rating))
+        else:
+            desc.attrib.pop(rating_attr, None)
+        if not _sidecar_has_foreign_content(desc) and existing_rating <= 0:
+            if os.path.isfile(xmp_path):
+                os.remove(xmp_path)
+            return
+        _write_xmp_tree_atomic(root, xmp_path)
+        return
+
+    if root is None:
+        root = ET.Element(f"{{{X_NS}}}xmpmeta")
+        rdf = ET.SubElement(root, f"{{{RDF_NS}}}RDF")
+        desc = ET.SubElement(rdf, f"{{{RDF_NS}}}Description")
+        desc.set(f"{{{RDF_NS}}}about", "")
+    else:
+        desc = _find_or_create_rdf_description(root)
+
+    # Replace our fields in place; leave Look / masks / Grain / etc. alone.
+    _strip_our_crs_fields(desc)
 
     from raw_pv2012 import PROCESS_VERSION, TONE_CURVE_NAME_2012
 
@@ -1062,7 +1283,7 @@ def _write_xmp_adjustments_locked(xmp_path: str, adj: Dict[str, float]) -> None:
     def _write_point_curve(key: str, tag: str) -> None:
         serial = str(merged.get(key, "") or "")
         points = deserialize_tone_curve_points(serial)
-        if len(points) < 2:
+        if len(points) < 2 or not tone_curve_serial_is_active(serial):
             return
         tc = ET.SubElement(desc, f"{{{CRS_NS}}}{tag}")
         seq = ET.SubElement(tc, f"{{{RDF_NS}}}Seq")
@@ -1082,36 +1303,23 @@ def _write_xmp_adjustments_locked(xmp_path: str, adj: Dict[str, float]) -> None:
         db = ET.SubElement(desc, f"{{{CRS_NS}}}DodgeBurnMask")
         db.text = mask_serial
 
-    from raw_lut import LUT_AMOUNT_KEY, LUT_NAME_KEY
+    from raw_lut import (
+        LUT_AMOUNT_KEY,
+        LUT_NAME_KEY,
+        LUT_SPACE_DEFAULT,
+        LUT_SPACE_KEY,
+        lut_working_space,
+    )
 
     lut_name = str(merged.get(LUT_NAME_KEY, "") or "").strip()
     lut_amt = float(merged.get(LUT_AMOUNT_KEY, 0.0) or 0.0)
     if lut_name and abs(lut_amt) > 1e-4:
         desc.set(f"{{{CRS_NS}}}CreativeLUTName", lut_name)
+        space = lut_working_space(merged)
+        # Persist explicitly so older builds that assumed Linear can detect Rec709.
+        desc.set(f"{{{CRS_NS}}}CreativeLUTWorkingSpace", space or LUT_SPACE_DEFAULT)
 
-    tree = ET.ElementTree(root)
-    parent = os.path.dirname(os.path.abspath(xmp_path))
-    if parent:
-        os.makedirs(parent, exist_ok=True)
-
-    # Atomic write: write to a temp file in the same directory, then os.replace()
-    # (atomic on POSIX and Windows). A direct tree.write(xmp_path, ...) could leave
-    # a truncated/corrupted sidecar if interrupted (crash, force-quit, disk full)
-    # mid-write, or if two writers race on the same path (e.g. the export worker
-    # and a slider release firing concurrently).
-    fd, tmp_path = tempfile.mkstemp(
-        dir=parent or None, prefix=os.path.basename(xmp_path) + ".", suffix=".tmp"
-    )
-    try:
-        with os.fdopen(fd, "wb") as f:
-            tree.write(f, encoding="utf-8", xml_declaration=True)
-        os.replace(tmp_path, xmp_path)
-    except BaseException:
-        try:
-            os.remove(tmp_path)
-        except OSError:
-            pass
-        raise
+    _write_xmp_tree_atomic(root, xmp_path)
 
 
 def write_xmp_adjustments_for_file(image_path: str, adj: Dict[str, float]) -> None:
@@ -1134,22 +1342,36 @@ def _format_xmp_value(key: str, value: float) -> str:
 
 
 def apply_adjustments_to_rgb(rgb_image: np.ndarray, adj: dict[str, float]) -> np.ndarray:
-    """Apply adjustments; scene-linear uint16/float32 use the linear edit pipeline."""
+    """Apply adjustments via the scene-linear edit pipeline.
+
+    uint16/float32 buffers are already scene-linear. uint8 display buffers
+    (embedded JPEG / LibRaw postprocess) are decoded with the sRGB EOTF,
+    processed with the same pipeline as the Adjust panel, then encoded back
+    to display uint8 — the legacy gamma-space path is no longer used here
+    (it diverged on PV2012, HSL, vignette, dehaze, LUT, NR, and AsShot WB).
+    """
     if rgb_image is None:
         return rgb_image
     if adj is None:
         return rgb_image
-    if rgb_image.dtype in (np.uint16, np.float32):
-        out = apply_adjustments_to_linear(rgb_image, adj)
-        if out is not None and out.dtype in (np.uint16, np.float32):
-            from raw_edit_pipeline import linear_to_display_uint8, process_linear_edit_buffer
+    from raw_edit_pipeline import linear_to_display_uint8, process_linear_edit_buffer
 
-            merged = dict(DEFAULT_ADJUSTMENTS)
-            merged.update(adj or {})
-            processed = process_linear_edit_buffer(rgb_image, merged, preview=True)
-            out = linear_to_display_uint8(processed, merged)
-        return out
-    return _apply_adjustments_to_srgb(rgb_image, adj)
+    merged = dict(DEFAULT_ADJUSTMENTS)
+    merged.update(adj or {})
+    if rgb_image.dtype in (np.uint16, np.float32):
+        use_recovery = uses_recovery_tone_map(merged)
+        if is_default_adjustments(merged) and not use_recovery:
+            processed = process_linear_edit_buffer(rgb_image, {}, preview=True)
+            return linear_to_display_uint8(processed, {})
+        processed = process_linear_edit_buffer(rgb_image, merged, preview=True)
+        return linear_to_display_uint8(processed, merged)
+    if rgb_image.dtype != np.uint8 or getattr(rgb_image, "ndim", 0) != 3:
+        return rgb_image
+    if is_default_adjustments(merged) and not uses_recovery_tone_map(merged):
+        return rgb_image
+    lin = _decode_srgb_uint8_to_linear(np.ascontiguousarray(rgb_image))
+    processed = process_linear_edit_buffer(lin, merged, preview=True)
+    return linear_to_display_uint8(processed, merged)
 
 
 def apply_adjustments_to_linear(rgb_image: np.ndarray, adj: dict[str, float]) -> np.ndarray:
@@ -1323,11 +1545,14 @@ def _apply_adjustments_to_srgb_core(img: np.ndarray, merged: dict[str, float]) -
     buffer -- may be a padded row-band slice, see _apply_adjustments_to_srgb_banded.
     """
     # 1. Temperature & Tint (neutral gray preserved — scale R/B vs G)
+    # Use AsShot / authored reference — never hard-code 5500K (that made
+    # legacy uint8 WB disagree with the linear Adjust pipeline).
     temp_val = float(merged.get("Temperature", DEFAULT_ADJUSTMENTS["Temperature"]))
     tint_val = float(merged.get("Tint", 0.0))
-    if temp_val > 1000.0 and abs(temp_val - DEFAULT_ADJUSTMENTS["Temperature"]) > 1.0:
+    ref_temp = wb_reference_temperature(merged)
+    if temp_val > 1000.0 and abs(temp_val - ref_temp) > 0.5:
         r_tgt, g_tgt, b_tgt = _kelvin_to_rgb(temp_val)
-        r_ref, g_ref, b_ref = _kelvin_to_rgb(DEFAULT_ADJUSTMENTS["Temperature"])
+        r_ref, g_ref, b_ref = _kelvin_to_rgb(ref_temp)
         if g_ref > 1e-5 and g_tgt > 1e-5:
             img[:, :, 0] *= (r_tgt / r_ref) / (g_tgt / g_ref)
             img[:, :, 2] *= (b_tgt / b_ref) / (g_tgt / g_ref)

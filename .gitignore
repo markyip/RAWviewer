@@ -190,3 +190,14 @@ bench_results/
 # Cursor Canvas / local IDE artifacts (never ship)
 *.canvas.tsx
 .cursor/
+canvases/
+
+# Local build stash / tempfile dirs (PyInstaller leftovers, mkdtemp)
+dist_keep/
+tmp*/
+
+# Local UI mockups / one-off review notes at repo root
+pyqt-*-panel*.html
+project-review-*.md
+UPCOMING_FEATURES.md
+/poc/

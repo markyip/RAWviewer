@@ -9,10 +9,12 @@ Design:
     - Painting stamps a soft (gaussian-falloff) circular brush at the
       cursor position, scaled by trackpad/tablet pressure, directly into
       the mask -- cheap, O(brush area) per point, not O(image).
-    - Edge-assisted painting (default on): each stamp is attenuated by luma
-      similarity to the brush-center seed plus a local gradient barrier, so
-      the stroke stays on the subject under the cursor and does not bleed
-      onto a neighboring subject mid-drag.
+    - Edge-assisted painting (default on): each stamp is gated by a seed
+      flood-fill within a luma tolerance (connected component), so a hard
+      subject boundary blocks paint from bleeding onto a neighbor mid-drag
+      even when both sides share a similar tone. Soft luma similarity and a
+      small gaussian soften the region mask; release-time guided-filter
+      edge-snap still tidies the stroke onto real luminance edges.
     - On stroke release the touched region is edge-snapped: a guided
       filter (existing raw_chroma_denoise.apply_guided_filter, reused
       as-is) using the base image's luminance as the guide pulls the
@@ -100,15 +102,21 @@ def _edge_assist_gate(
     *,
     luma_tol: float = 0.10,
 ) -> np.ndarray:
-    """Per-pixel [0,1] weight: keep paint on the seed's side of subject edges.
+    """Per-pixel [0,1] weight: keep paint on the seed's connected subject.
 
-    Combines:
-      1. Luma similarity to the brush-center seed (soft threshold)
-      2. A cheap barrier from local gradient magnitude — strong edges between
-         the seed and a pixel attenuate the stamp so the brush does not bleed
-         onto a neighboring subject during the stroke (not only on release).
+    Previous approach multiplied by *local* Sobel magnitude — that dims paint
+    sitting *on* an edge, but does not stop bleed onto a neighbor across the
+    edge (the classic failure mode). Correct behavior is a seed flood-fill
+    within a luma tolerance so a hard subject boundary breaks connectivity
+    even when the far side happens to share a similar tone.
+
+    Steps:
+      1. Soft luma similarity to the brush-center seed (smooth falloff)
+      2. Binary connected component of similar pixels, grown from the seed
+      3. Soften the region mask so stamp edges aren't a hard cut
     """
     patch = luminance[y0:y1, x0:x1].astype(np.float32, copy=False)
+    h, w = patch.shape
     seed = _sample_luma(luminance, cx, cy)
     # Similarity gate (display-linear or scene-linear luma both work; tol is
     # relative to the local dynamic range).
@@ -118,28 +126,67 @@ def _edge_assist_gate(
     sim = np.clip(1.0 - diff / tol, 0.0, 1.0)
     sim = sim * sim * (3.0 - 2.0 * sim)  # smoothstep
 
-    # Gradient barrier: pixels across a strong edge from the seed get cut.
-    # Use a small Sobel on the patch (cv2 if available, else numpy diff).
+    similar = diff <= tol
+    sx = int(np.clip(round(cx), x0, max(x0, x1 - 1))) - x0
+    sy = int(np.clip(round(cy), y0, max(y0, y1 - 1))) - y0
+    sx = int(np.clip(sx, 0, w - 1))
+    sy = int(np.clip(sy, 0, h - 1))
+
+    connected = np.zeros((h, w), dtype=np.float32)
+    if similar[sy, sx]:
+        try:
+            import cv2
+
+            # FLOODFILL_MASK_ONLY: non-zero mask cells block fill; filled
+            # cells are written as 255 in the padded mask.
+            ff_mask = np.zeros((h + 2, w + 2), dtype=np.uint8)
+            ff_mask[1 : h + 1, 1 : w + 1][~similar] = 1
+            fill_img = np.zeros((h, w), dtype=np.uint8)
+            flags = 4 | (255 << 8) | cv2.FLOODFILL_MASK_ONLY
+            cv2.floodFill(fill_img, ff_mask, (sx, sy), 0, 0, 0, flags)
+            connected = (ff_mask[1 : h + 1, 1 : w + 1] == 255).astype(np.float32)
+        except Exception:
+            # BFS fallback (4-connected) when OpenCV is unavailable.
+            from collections import deque
+
+            seen = np.zeros((h, w), dtype=bool)
+            q: deque = deque()
+            q.append((sy, sx))
+            seen[sy, sx] = True
+            while q:
+                y, x = q.popleft()
+                connected[y, x] = 1.0
+                for dy, dx in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+                    ny, nx = y + dy, x + dx
+                    if (
+                        0 <= ny < h
+                        and 0 <= nx < w
+                        and not seen[ny, nx]
+                        and similar[ny, nx]
+                    ):
+                        seen[ny, nx] = True
+                        q.append((ny, nx))
+    else:
+        # Seed pixel itself failed the hard threshold — still allow a tiny core.
+        connected[sy, sx] = 1.0
+
+    # Soften the hard flood region so stamps don't look cut with scissors.
     try:
         import cv2
 
-        gx = cv2.Sobel(patch, cv2.CV_32F, 1, 0, ksize=3)
-        gy = cv2.Sobel(patch, cv2.CV_32F, 0, 1, ksize=3)
-        mag = cv2.magnitude(gx, gy)
+        soft_sigma = max(0.8, 0.06 * max(h, w))
+        region = cv2.GaussianBlur(connected, (0, 0), soft_sigma)
     except Exception:
-        gy, gx = np.gradient(patch)
-        mag = np.hypot(gx, gy).astype(np.float32)
+        region = connected
 
-    # Normalize edge strength; ignore very weak texture.
-    edge_ref = float(np.percentile(mag, 85)) + 1e-6
-    edge = np.clip(mag / edge_ref, 0.0, 2.0)
-    # Soft inverse: flat regions ~1, strong edges ~0.15
-    barrier = 1.0 / (1.0 + 1.75 * edge)
-    # Preserve the seed neighborhood — never fully zero the brush core.
-    yy, xx = np.mgrid[y0:y1, x0:x1].astype(np.float32)
-    dist = np.sqrt((xx - cx) ** 2 + (yy - cy) ** 2)
-    core = np.clip(1.0 - dist / max(3.0, 0.35 * max(y1 - y0, x1 - x0, 1)), 0.0, 1.0)
-    gate = np.maximum(sim * barrier, 0.35 * core * sim)
+    gate = region * sim
+    # Preserve a small core around the seed so the brush never fully dies
+    # under aggressive tolerances.
+    yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
+    dist = np.sqrt((xx - sx) ** 2 + (yy - sy) ** 2)
+    core_r = max(2.0, 0.12 * max(h, w))
+    core = np.clip(1.0 - dist / core_r, 0.0, 1.0)
+    gate = np.maximum(gate, core * sim)
     return np.clip(gate, 0.0, 1.0).astype(np.float32)
 
 
@@ -154,17 +201,16 @@ def circular_brush_falloff(
 ) -> np.ndarray:
     """Soft circular brush kernel on ``[y0:y1, x0:x1]`` (peak 1 at center).
 
-    Uses a gaussian disk (not a hard square / flat core): corners of the
-    axis-aligned stamp bbox stay near zero so live rectangular blits cannot
-    read as a filled block.
+    Raised-cosine (Hann) radial profile: full strength at the center, smooth
+    gradient to zero at ``radius``. Hard-clips outside ``radius`` so the
+    axis-aligned stamp bbox corners stay empty (avoids rectangular live blits).
     """
     r = max(1.0, float(radius))
     yy, xx = np.mgrid[y0:y1, x0:x1].astype(np.float32)
     dist = np.sqrt((xx - float(cx)) ** 2 + (yy - float(cy)) ** 2)
-    # sigma ≈ r/2 → ~0.14 at the nominal edge, then hard-clip outside r
-    # so the bbox corners (dist = r√2) stay empty.
-    sigma = max(r * 0.5, 1e-3)
-    falloff = np.exp(-0.5 * (dist / sigma) ** 2).astype(np.float32)
+    t = np.clip(dist / r, 0.0, 1.0)
+    # Hann window: 1 at center, 0 at edge, continuous first derivative.
+    falloff = (0.5 * (1.0 + np.cos(np.pi * t))).astype(np.float32)
     falloff[dist > r] = 0.0
     return falloff
 
@@ -190,7 +236,7 @@ def stamp_brush(
     exactly like a real brush).
 
     When ``luminance`` is provided and ``edge_assist`` is True, the stamp is
-    attenuated across subject boundaries (luma similarity + gradient barrier)
+    gated to the seed's connected luma region (flood-fill + soft similarity)
     so paint stays on the surface under the cursor instead of spilling onto a
     neighboring subject mid-stroke. Release-time ``edge_snap_region`` still
     runs for a final guided-filter tidy-up.
@@ -259,8 +305,16 @@ def edge_snap_region(
     if guide.shape != (y1 - y0, x1 - x0):
         return
     src = mask.data[y0:y1, x0:x1]
+    # Preserve peak energy: guided filter can flatten soft stamps so the
+    # post-settle render looks like "no effect" vs the live uint8 patch.
+    src_peak = float(np.max(np.abs(src)))
     snapped = apply_guided_filter(guide, src, radius, eps)
     np.clip(snapped, -MASK_CLIP, MASK_CLIP, out=snapped)
+    if src_peak > 1e-4:
+        sn_peak = float(np.max(np.abs(snapped)))
+        if sn_peak > 1e-6 and sn_peak < src_peak * 0.85:
+            snapped *= src_peak / sn_peak
+            np.clip(snapped, -MASK_CLIP, MASK_CLIP, out=snapped)
     mask.data[y0:y1, x0:x1] = snapped
     mask.touch()
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from typing import Callable, Dict
 
 from PyQt6.QtCore import QRectF, Qt, QSettings, QSize, QTimer, pyqtSignal
@@ -48,6 +49,8 @@ from raw_adjustments import (
     is_pv2012_tone_slider,
     recovery_baseline_slider_hints,
 )
+from raw_dodge_burn import DEFAULT_STRENGTH as DB_DEFAULT_STRENGTH
+from raw_dodge_burn import STRENGTH_KEY as DB_STRENGTH_KEY
 from raw_hsl import HSL_COLOR_NAMES
 from raw_tone_curve import (
     TONE_CURVE_BLUE_KEY,
@@ -190,33 +193,116 @@ class AdjustValueLabel(QLabel):
 _SECTION_EXPANDED_SETTINGS_PREFIX = "adjust_panel/section_expanded/"
 
 
-class _LutDropFrame(QFrame):
-    """Accepts dropped ``.cube`` file paths for Creative LUT import."""
+class _FileDropFrame(QFrame):
+    """Drop target for files ending in ``suffixes``.
+
+    Always accepts URL drags so unsupported drops can surface a warning
+    instead of the OS silently refusing the drop.
+    """
 
     files_dropped = pyqtSignal(list)
+    unsupported_dropped = pyqtSignal(list)  # rejected local paths (basenames ok)
+
+    def __init__(self, suffixes: tuple[str, ...], parent=None):
+        super().__init__(parent)
+        self._suffixes = tuple(s.lower() for s in suffixes)
+
+    def _accepts(self, path: str) -> bool:
+        pl = path.lower()
+        return any(pl.endswith(s) for s in self._suffixes)
 
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:  # noqa: N802
         if event.mimeData().hasUrls():
-            for url in event.mimeData().urls():
-                if url.toLocalFile().lower().endswith(".cube"):
-                    event.acceptProposedAction()
-                    return
+            event.acceptProposedAction()
+            return
         event.ignore()
 
     def dragMoveEvent(self, event) -> None:  # noqa: N802
-        event.acceptProposedAction()
-
-    def dropEvent(self, event: QDropEvent) -> None:  # noqa: N802
-        paths = []
-        for url in event.mimeData().urls():
-            p = url.toLocalFile()
-            if p.lower().endswith(".cube"):
-                paths.append(p)
-        if paths:
-            self.files_dropped.emit(paths)
+        if event.mimeData().hasUrls():
             event.acceptProposedAction()
         else:
             event.ignore()
+
+    def dropEvent(self, event: QDropEvent) -> None:  # noqa: N802
+        ok: list[str] = []
+        bad: list[str] = []
+        for url in event.mimeData().urls():
+            p = url.toLocalFile()
+            if not p:
+                continue
+            if self._accepts(p):
+                ok.append(p)
+            else:
+                bad.append(p)
+        if ok:
+            self.files_dropped.emit(ok)
+        if bad:
+            self.unsupported_dropped.emit(bad)
+        if ok or bad:
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+
+# Back-compat alias
+class _LutDropFrame(_FileDropFrame):
+    def __init__(self, parent=None):
+        super().__init__((".cube",), parent)
+
+
+_LOOKS_NAME_ROLE = int(Qt.ItemDataRole.UserRole) + 1
+
+
+class _LooksRowWidget(QWidget):
+    """One Looks list row: name + type badge + remove (×)."""
+
+    remove_clicked = pyqtSignal()
+
+    def __init__(self, name: str, kind: str, parent=None):
+        super().__init__(parent)
+        self._suppress_item_click = False
+        row = QHBoxLayout(self)
+        row.setContentsMargins(4, 2, 2, 2)
+        row.setSpacing(6)
+
+        title = QLabel(name)
+        title.setStyleSheet(f"color: {theme.INK}; font-size: 11px; background: transparent;")
+        title.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        row.addWidget(title, 1)
+
+        badge = QLabel(".cube" if kind == "cube" else ".xmp")
+        badge.setStyleSheet(
+            f"color: {theme.INK_FAINT}; font-size: 10px; background: transparent;"
+        )
+        row.addWidget(badge)
+
+        rem = QPushButton("×")
+        rem.setFixedSize(22, 22)
+        rem.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        rem.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        rem.setToolTip("Remove from library")
+        rem.setStyleSheet(
+            f"""
+            QPushButton {{
+                background: transparent;
+                color: {theme.INK_MUTED};
+                border: none;
+                border-radius: 4px;
+                font-size: 14px;
+                padding: 0;
+            }}
+            QPushButton:hover {{
+                background: {theme.RAISED_HI};
+                color: {theme.INK};
+            }}
+            """
+        )
+        rem.clicked.connect(self._on_remove_clicked)
+        row.addWidget(rem)
+
+    def _on_remove_clicked(self) -> None:
+        self._suppress_item_click = True
+        self.remove_clicked.emit()
 
 
 class CollapsibleSection(QWidget):
@@ -513,6 +599,12 @@ class ImageAdjustPanelWidget(QWidget):
     dodge_burn_mode_changed = pyqtSignal(object)
     dodge_burn_clear_requested = pyqtSignal()
     dodgeBurnMaskToggled = pyqtSignal(bool)
+    dodge_burn_brush_changed = pyqtSignal()  # size/flow changed — refresh brush cursor
+    # Fired when an XMP preset is applied so the host can drop per-image local
+    # state (dodge/burn mask) that should not ride along with a global look.
+    xmp_preset_applied = pyqtSignal()
+    # User dropped files that are not .cube / .xmp onto the Looks panel.
+    looks_drop_rejected = pyqtSignal(str)
     # Crop overlay (Transform): enter/exit mode, aspect lock, apply/cancel/reset.
     crop_mode_changed = pyqtSignal(bool)
     crop_aspect_changed = pyqtSignal(object)  # float|None
@@ -801,7 +893,7 @@ class ImageAdjustPanelWidget(QWidget):
             self.sect_hsl.hide()
 
         self.sect_detail = CollapsibleSection("Detail / Correction", settings_key="detail")
-        self.sect_lut = CollapsibleSection("Creative LUT", settings_key="lut")
+        self.sect_lut = CollapsibleSection("Looks (.cube / .xmp)", settings_key="lut")
 
         # Add Collapsible Sections to main scroll layout
         layout.addWidget(self.sect_histogram)
@@ -969,7 +1061,11 @@ class ImageAdjustPanelWidget(QWidget):
                 "CropAngle", "PerspectiveVertical", "PerspectiveHorizontal",
             }:
                 target_sect = self.sect_transform
-            elif spec.key in {"PostCropVignetteAmount", "Dehaze"}:
+            elif spec.key in {
+                "PostCropVignetteAmount",
+                "PostCropVignetteMidpoint",
+                "Dehaze",
+            }:
                 target_sect = self.sect_detail
             else:
                 target_sect = None
@@ -999,6 +1095,9 @@ class ImageAdjustPanelWidget(QWidget):
             if spec.key == "Temperature":
                 slider.set_center_value(self._as_shot_temperature)
                 self._temperature_slider = slider
+            elif spec.key == "PostCropVignetteMidpoint":
+                # Default Midpoint is 50 (LR); fill from the middle like Amount.
+                slider.set_center_value(50.0)
             slider.sliderMoved.connect(
                 lambda _v, k=spec.key, fmt=spec.format_value: self._update_slider_label(
                     k, fmt
@@ -1071,6 +1170,33 @@ class ImageAdjustPanelWidget(QWidget):
         self._denoise_method_combo.setStyleSheet(_adjust_combo_stylesheet())
         method_row.addWidget(self._denoise_method_combo, 1)
         self.sect_detail.add_layout(method_row)
+
+        chroma_amt_row = QHBoxLayout()
+        chroma_amt_row.setSpacing(6)
+        chroma_amt_lbl = QLabel("Chroma Amount")
+        chroma_amt_lbl.setStyleSheet(f"color: {theme.INK}; font-size: 11px;")
+        chroma_amt_lbl.setMinimumWidth(78)
+        chroma_amt_row.addWidget(chroma_amt_lbl)
+        self._chroma_nr_amount_slider = AdjustSlider(Qt.Orientation.Horizontal)
+        self._chroma_nr_amount_slider.setRange(1, 100)
+        self._chroma_nr_amount_slider.setValue(int(CHROMA_NR_ON_VALUE))
+        self._chroma_nr_amount_slider.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._chroma_nr_amount_slider.setToolTip(
+            "Chroma denoise strength (0–100). Only applies when a method is selected."
+        )
+        self._chroma_nr_amount_value = AdjustValueLabel()
+        self._chroma_nr_amount_value.setProperty("class", "adjust_slider_value")
+        self._chroma_nr_amount_value.setStyleSheet(f"color: {theme.EMBER}; font-size: 11px;")
+        self._chroma_nr_amount_value.setFixedWidth(52)
+        self._chroma_nr_amount_value.setText(str(int(CHROMA_NR_ON_VALUE)))
+        self._chroma_nr_amount_slider.valueChanged.connect(self._on_chroma_nr_amount_changed)
+        self._chroma_nr_amount_slider.sliderReleased.connect(self._on_slider_released)
+        chroma_amt_row.addWidget(self._chroma_nr_amount_slider, 1)
+        chroma_amt_row.addWidget(self._chroma_nr_amount_value)
+        self._chroma_nr_amount_row = QWidget()
+        self._chroma_nr_amount_row.setLayout(chroma_amt_row)
+        self._chroma_nr_amount_row.setVisible(False)
+        self.sect_detail.add_widget(self._chroma_nr_amount_row)
 
         # Lens correction
         self._lens_correction_row = QHBoxLayout()
@@ -1169,7 +1295,9 @@ class ImageAdjustPanelWidget(QWidget):
         self._db_show_mask_btn.setCheckable(True)
         self._db_show_mask_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._db_show_mask_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        self._db_show_mask_btn.setToolTip("Overlay mask in red")
+        self._db_show_mask_btn.setToolTip(
+            "Overlay the dodge/burn mask (red = dodge, blue = burn). Shortcut: O"
+        )
         self._db_show_mask_btn.toggled.connect(self.dodgeBurnMaskToggled.emit)
         db_actions_row.addWidget(self._db_show_mask_btn, 1)
 
@@ -1180,8 +1308,9 @@ class ImageAdjustPanelWidget(QWidget):
         self._db_edge_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._db_edge_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         self._db_edge_btn.setToolTip(
-            "Keep brush paint on the subject under the cursor — attenuates "
-            "across luminance/gradient edges so strokes don't spill onto neighbors"
+            "Keep brush paint on the subject under the cursor — flood-fills "
+            "within similar luminance so strokes stop at subject edges "
+            "instead of spilling onto neighbors"
         )
         db_actions_row.addWidget(self._db_edge_btn, 1)
         db_container_layout.addLayout(db_actions_row)
@@ -1196,6 +1325,9 @@ class ImageAdjustPanelWidget(QWidget):
         self._db_size_slider.setRange(8, 400)
         self._db_size_slider.setValue(80)
         self._db_size_slider.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._db_size_slider.valueChanged.connect(
+            lambda _v: self.dodge_burn_brush_changed.emit()
+        )
         db_size_row.addWidget(self._db_size_slider, 1)
         db_container_layout.addLayout(db_size_row)
 
@@ -1207,16 +1339,48 @@ class ImageAdjustPanelWidget(QWidget):
         db_strength_row.addWidget(db_strength_lbl)
         self._db_strength_slider = AdjustSlider(Qt.Orientation.Horizontal)
         self._db_strength_slider.setRange(5, 100)
-        self._db_strength_slider.setValue(28)
+        # Default was 28 * 0.12 stamp scale ≈ too subtle after full settle;
+        # raise flow so a short stroke remains clearly visible after apply.
+        self._db_strength_slider.setValue(55)
         self._db_strength_slider.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._db_strength_slider.setToolTip(
-            "Per-stroke flow (low = build up gradually; avoids overshoot while dragging)"
+            "Per-stroke flow (low = build up gradually; high = stronger each pass)"
+        )
+        self._db_strength_slider.valueChanged.connect(
+            lambda _v: self.dodge_burn_brush_changed.emit()
         )
         db_strength_row.addWidget(self._db_strength_slider, 1)
         db_container_layout.addLayout(db_strength_row)
+
+        # Stops-per-mask-unit (persisted as DodgeBurnStrength). Distinct from
+        # Brush Flow, which only controls per-stroke accumulation while painting.
+        db_mask_str_row = QHBoxLayout()
+        db_mask_str_row.setSpacing(6)
+        db_mask_str_lbl = QLabel("Effect Strength")
+        db_mask_str_lbl.setStyleSheet(f"color: {theme.INK}; font-size: 11px;")
+        db_mask_str_lbl.setMinimumWidth(78)
+        db_mask_str_row.addWidget(db_mask_str_lbl)
+        self._db_mask_strength_slider = AdjustSlider(Qt.Orientation.Horizontal)
+        # 0.50–3.00 stops in 0.05 steps → slider 10–60
+        self._db_mask_strength_slider.setRange(10, 60)
+        self._db_mask_strength_slider.setValue(int(round(DB_DEFAULT_STRENGTH * 20.0)))
+        self._db_mask_strength_slider.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._db_mask_strength_slider.setToolTip(
+            "How many stops of exposure the painted mask applies at full strength"
+        )
+        self._db_mask_strength_value = AdjustValueLabel()
+        self._db_mask_strength_value.setProperty("class", "adjust_slider_value")
+        self._db_mask_strength_value.setStyleSheet(f"color: {theme.EMBER}; font-size: 11px;")
+        self._db_mask_strength_value.setFixedWidth(52)
+        self._db_mask_strength_value.setText(f"{DB_DEFAULT_STRENGTH:.2f}")
+        self._db_mask_strength_slider.valueChanged.connect(self._on_db_mask_strength_changed)
+        self._db_mask_strength_slider.sliderReleased.connect(self._on_slider_released)
+        db_mask_str_row.addWidget(self._db_mask_strength_slider, 1)
+        db_mask_str_row.addWidget(self._db_mask_strength_value)
+        db_container_layout.addLayout(db_mask_str_row)
         self.sect_detail.add_widget(db_container)
 
-        self._build_lut_section(self.sect_lut)
+        self._build_looks_section(self.sect_lut)
 
         export_btn = QPushButton("Export…")
         export_btn.setObjectName("adjust_export_btn")
@@ -1629,20 +1793,25 @@ class ImageAdjustPanelWidget(QWidget):
         self.set_adjustments(current)
         self._emit_preview_and_save()
 
-    def _build_lut_section(self, sect: CollapsibleSection) -> None:
-        """Drag-drop .cube management + amount for Creative LUT."""
-        tip = QLabel("Drop a .cube here, or Add…")
+    def _build_looks_section(self, sect: CollapsibleSection) -> None:
+        """Shared library for Creative LUT (.cube) and XMP presets (.xmp)."""
+        tip = QLabel(
+            "Drop .cube / .xmp here to add. Click to apply; click again to clear. "
+            "× removes from the library. .cube stays linked with Amount "
+            "(default Rec.709 = after gamma; Linear = scene-linear); "
+            ".xmp applies once like pasting a look."
+        )
         tip.setStyleSheet(f"color: {theme.INK_MUTED}; font-size: 10px;")
         tip.setWordWrap(True)
         sect.add_widget(tip)
 
-        drop = _LutDropFrame()
-        drop.setObjectName("lut_drop_frame")
+        drop = _FileDropFrame((".cube", ".xmp"))
+        drop.setObjectName("looks_drop_frame")
         drop.setAcceptDrops(True)
-        drop.setMinimumHeight(72)
+        drop.setMinimumHeight(96)
         drop.setStyleSheet(
             f"""
-            QFrame#lut_drop_frame {{
+            QFrame#looks_drop_frame {{
                 background: {theme.SURFACE};
                 border: 1px dashed {theme.LINE};
                 border-radius: 6px;
@@ -1653,52 +1822,43 @@ class ImageAdjustPanelWidget(QWidget):
         drop_layout.setContentsMargins(6, 6, 6, 6)
         drop_layout.setSpacing(4)
 
-        self._lut_list = QListWidget()
-        self._lut_list.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self._lut_list.setMaximumHeight(110)
-        self._lut_list.setStyleSheet(
+        self._looks_list = QListWidget()
+        self._lut_list = self._looks_list  # legacy alias used by LUT helpers
+        self._looks_list.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._looks_list.setMaximumHeight(130)
+        self._looks_list.setSpacing(1)
+        self._looks_list.setStyleSheet(
             f"""
             QListWidget {{
                 background: transparent;
                 border: none;
                 color: {theme.INK};
                 font-size: 11px;
+                outline: none;
+            }}
+            QListWidget::item {{
+                padding: 0;
+                margin: 0;
+                border-radius: 4px;
             }}
             QListWidget::item:selected {{
                 background: {theme.EMBER_DIM};
                 color: {theme.INK};
             }}
+            QListWidget::item:hover {{
+                background: {theme.RAISED};
+            }}
             """
         )
-        self._lut_list.currentItemChanged.connect(self._on_lut_selection_changed)
-        drop_layout.addWidget(self._lut_list)
-        drop.files_dropped.connect(self._import_lut_paths)
+        self._looks_list.itemClicked.connect(self._on_looks_item_clicked)
+        drop_layout.addWidget(self._looks_list)
+        drop.files_dropped.connect(self._import_looks_paths)
+        drop.unsupported_dropped.connect(self._on_looks_unsupported_dropped)
         sect.add_widget(drop)
-
-        btn_row = QHBoxLayout()
-        btn_row.setSpacing(6)
-        add_btn = QPushButton("Add…")
-        add_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        add_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        add_btn.clicked.connect(self._browse_add_lut)
-        btn_row.addWidget(add_btn)
-        rem_btn = QPushButton("Remove")
-        rem_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        rem_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        rem_btn.clicked.connect(self._remove_selected_lut)
-        btn_row.addWidget(rem_btn)
-        clear_btn = QPushButton("None")
-        clear_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        clear_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        clear_btn.setToolTip("Clear active LUT for this image")
-        clear_btn.clicked.connect(self._clear_active_lut)
-        btn_row.addWidget(clear_btn)
-        btn_row.addStretch(1)
-        sect.add_layout(btn_row)
 
         amt_row = QHBoxLayout()
         amt_row.setSpacing(6)
-        amt_lbl = QLabel("Amount")
+        amt_lbl = QLabel("LUT Amount")
         amt_lbl.setStyleSheet(f"color: {theme.INK}; font-size: 11px;")
         amt_lbl.setMinimumWidth(78)
         amt_row.addWidget(amt_lbl)
@@ -1706,6 +1866,7 @@ class ImageAdjustPanelWidget(QWidget):
         self._lut_amount_slider.setRange(0, 100)
         self._lut_amount_slider.setValue(100)
         self._lut_amount_slider.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._lut_amount_slider.setToolTip("Strength of the active .cube LUT (ignored for .xmp)")
         self._lut_amount_value = QLabel("100")
         self._lut_amount_value.setStyleSheet(f"color: {theme.EMBER}; font-size: 11px;")
         self._lut_amount_value.setMinimumWidth(28)
@@ -1715,94 +1876,236 @@ class ImageAdjustPanelWidget(QWidget):
         amt_row.addWidget(self._lut_amount_value)
         sect.add_layout(amt_row)
 
+        space_row = QHBoxLayout()
+        space_row.setSpacing(6)
+        space_lbl = QLabel("LUT Space")
+        space_lbl.setStyleSheet(f"color: {theme.INK}; font-size: 11px;")
+        space_lbl.setMinimumWidth(78)
+        space_row.addWidget(space_lbl)
+        from raw_lut import LUT_SPACE_LINEAR, LUT_SPACE_REC709
+
+        self._lut_space_combo = QComboBox()
+        self._lut_space_combo.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._lut_space_combo.addItem("Rec.709 (after gamma)", LUT_SPACE_REC709)
+        self._lut_space_combo.addItem("Linear (scene)", LUT_SPACE_LINEAR)
+        self._lut_space_combo.setToolTip(
+            "Rec.709: apply .cube after BT.709 encode (typical creative LUTs). "
+            "Linear: apply in display-linear before encode (scene-referred cubes)."
+        )
+        self._lut_space_combo.currentIndexChanged.connect(self._on_lut_space_changed)
+        space_row.addWidget(self._lut_space_combo, 1)
+        sect.add_layout(space_row)
+
         self._lut_active_name = ""
-        self._refresh_lut_list(select_name=None)
+        self._xmp_highlight_name = ""
+        self._looks_ignore_item_click = False
+        self._refresh_looks_list(select_lut=None)
 
-    def _refresh_lut_list(self, select_name: str | None = None) -> None:
+    def _looks_item_kind(self, item) -> str:
+        if item is None:
+            return ""
+        kind = item.data(Qt.ItemDataRole.UserRole)
+        return str(kind or "")
+
+    def _looks_item_name(self, item) -> str:
+        if item is None:
+            return ""
+        name = item.data(_LOOKS_NAME_ROLE)
+        if name:
+            return str(name)
+        return str(item.text() or "")
+
+    def _refresh_looks_list(self, select_lut: str | None = None) -> None:
         from raw_lut import list_managed_luts
+        from raw_xmp_presets import list_managed_presets
 
-        lw = getattr(self, "_lut_list", None)
+        lw = getattr(self, "_looks_list", None)
         if lw is None:
             return
-        wanted = select_name if select_name is not None else getattr(self, "_lut_active_name", "")
+        wanted_lut = (
+            select_lut
+            if select_lut is not None
+            else getattr(self, "_lut_active_name", "")
+        )
+        wanted_xmp = str(getattr(self, "_xmp_highlight_name", "") or "")
         lw.blockSignals(True)
         try:
             lw.clear()
+            entries: list[tuple[str, str]] = []
             for name in list_managed_luts():
-                lw.addItem(QListWidgetItem(name))
-            if wanted:
-                matches = lw.findItems(wanted, Qt.MatchFlag.MatchExactly)
-                if matches:
-                    lw.setCurrentItem(matches[0])
-                else:
-                    lw.clearSelection()
+                entries.append((name, "cube"))
+            for name in list_managed_presets():
+                entries.append((name, "xmp"))
+            entries.sort(key=lambda t: t[0].lower())
+            select_item = None
+            for name, kind in entries:
+                item = QListWidgetItem()
+                item.setData(Qt.ItemDataRole.UserRole, kind)
+                item.setData(_LOOKS_NAME_ROLE, name)
+                item.setText(name)  # for accessibility / findItems
+                item.setToolTip(
+                    "Creative LUT (.cube) — click to apply, click again to clear"
+                    if kind == "cube"
+                    else "XMP preset — click to paste onto this image; click again to deselect"
+                )
+                row = _LooksRowWidget(name, kind)
+                row.remove_clicked.connect(
+                    lambda checked=False, n=name, k=kind: self._remove_look(n, k)
+                )
+                item.setSizeHint(QSize(0, max(28, row.sizeHint().height())))
+                lw.addItem(item)
+                lw.setItemWidget(item, row)
+                # Prefer the just-applied .xmp highlight over an embedded .cube
+                # so click-to-apply feedback stays on the preset row.
+                if kind == "xmp" and wanted_xmp and name == wanted_xmp:
+                    select_item = item
+                elif (
+                    kind == "cube"
+                    and wanted_lut
+                    and name == wanted_lut
+                    and select_item is None
+                ):
+                    select_item = item
+            if select_item is not None:
+                lw.setCurrentItem(select_item)
             else:
+                lw.setCurrentRow(-1)
                 lw.clearSelection()
         finally:
             lw.blockSignals(False)
 
-    def _browse_add_lut(self) -> None:
-        paths, _ = QFileDialog.getOpenFileNames(
-            self,
-            "Add .cube LUT",
-            "",
-            "Cube LUT (*.cube);;All files (*)",
+    def _refresh_lut_list(self, select_name: str | None = None) -> None:
+        """Back-compat for set_adjustments — refresh shared Looks list."""
+        self._refresh_looks_list(select_lut=select_name)
+
+    def _refresh_xmp_preset_list(self, select_name: str | None = None) -> None:
+        """Back-compat — XMP highlight is ephemeral; just refresh the list."""
+        if select_name:
+            self._xmp_highlight_name = select_name
+        self._refresh_looks_list()
+
+    def _on_looks_unsupported_dropped(self, paths: list[str]) -> None:
+        names = [os.path.basename(p) for p in paths if p]
+        if not names:
+            return
+        sample = ", ".join(names[:3])
+        extra = f" (+{len(names) - 3} more)" if len(names) > 3 else ""
+        self.looks_drop_rejected.emit(
+            f"Only .cube and .xmp files can be added here — ignored: {sample}{extra}"
         )
-        if paths:
-            self._import_lut_paths(list(paths))
 
-    def _import_lut_paths(self, paths: list[str]) -> None:
+    def _import_looks_paths(self, paths: list[str]) -> None:
+        """Drop / import only adds to the library — click a row to apply."""
         from raw_lut import import_cube_file
+        from raw_xmp_presets import import_xmp_preset
 
-        last = ""
         for p in paths:
+            pl = p.lower()
             try:
-                last = import_cube_file(p)
+                if pl.endswith(".cube"):
+                    import_cube_file(p)
+                elif pl.endswith(".xmp"):
+                    import_xmp_preset(p)
+                else:
+                    self._on_looks_unsupported_dropped([p])
             except Exception as exc:
-                print(f"[LUT] import failed: {p}: {exc}")
-        if last:
-            self._lut_active_name = last
-            if self._lut_amount_slider.value() < 1:
-                self._lut_amount_slider.setValue(100)
-            self._refresh_lut_list(select_name=last)
-            self._emit_preview_and_save()
-        else:
-            self._refresh_lut_list()
+                print(f"[LOOKS] import failed: {p}: {exc}")
+        self._refresh_looks_list(
+            select_lut=getattr(self, "_lut_active_name", "") or None
+        )
 
-    def _remove_selected_lut(self) -> None:
+    def _remove_look(self, name: str, kind: str) -> None:
         from raw_lut import remove_managed_lut
+        from raw_xmp_presets import remove_managed_preset
 
-        lw = getattr(self, "_lut_list", None)
+        self._looks_ignore_item_click = True
+        try:
+            if kind == "cube":
+                remove_managed_lut(name)
+                if getattr(self, "_lut_active_name", "") == name:
+                    self._lut_active_name = ""
+                    self._emit_preview_and_save()
+            elif kind == "xmp":
+                remove_managed_preset(name)
+                if getattr(self, "_xmp_highlight_name", "") == name:
+                    self._xmp_highlight_name = ""
+        except Exception:
+            pass
+        self._refresh_looks_list(
+            select_lut=getattr(self, "_lut_active_name", "") or None
+        )
+
+    def _remove_selected_look(self) -> None:
+        """Back-compat helper — remove the current list selection."""
+        lw = getattr(self, "_looks_list", None)
         if lw is None:
             return
         item = lw.currentItem()
         if item is None:
             return
-        name = item.text()
-        try:
-            remove_managed_lut(name)
-        except Exception:
-            pass
-        if getattr(self, "_lut_active_name", "") == name:
-            self._lut_active_name = ""
-        self._refresh_lut_list()
-        self._emit_preview_and_save()
+        self._remove_look(self._looks_item_name(item), self._looks_item_kind(item))
 
     def _clear_active_lut(self) -> None:
-        self._lut_active_name = ""
-        lw = getattr(self, "_lut_list", None)
-        if lw is not None:
-            lw.clearSelection()
+        """Clear the active Creative LUT for this image (toggle-off / None)."""
+        self._block_emit = True
+        try:
+            self._lut_active_name = ""
+            self._xmp_highlight_name = ""
+            lw = getattr(self, "_looks_list", None)
+            if lw is not None:
+                lw.setCurrentRow(-1)
+                lw.clearSelection()
+        finally:
+            self._block_emit = False
         self._emit_preview_and_save()
 
-    def _on_lut_selection_changed(self, current, _previous) -> None:
-        if self._block_emit:
+    def _on_looks_item_clicked(self, item) -> None:
+        if item is None or self._block_emit:
             return
-        name = current.text() if current is not None else ""
-        self._lut_active_name = name
-        if name and self._lut_amount_slider.value() < 1:
-            self._lut_amount_slider.setValue(100)
-        self._emit_preview_and_save()
+        # The Looks list is rebuilt (items deleted) by set_adjustments /
+        # _refresh_looks_list; a click queued against the old list can arrive
+        # holding a dead QListWidgetItem — touching it raises RuntimeError
+        # (observed crash in _on_looks_item_clicked, 2026-07-17).
+        try:
+            from PyQt6 import sip as _sip
+
+            if _sip.isdeleted(item):
+                return
+        except Exception:
+            pass
+        lw = getattr(self, "_looks_list", None)
+        if lw is not None:
+            row = lw.itemWidget(item)
+            if row is not None and getattr(row, "_suppress_item_click", False):
+                row._suppress_item_click = False
+                return
+        if getattr(self, "_looks_ignore_item_click", False):
+            self._looks_ignore_item_click = False
+            return
+        kind = self._looks_item_kind(item)
+        name = self._looks_item_name(item)
+        if not name:
+            return
+        if kind == "cube":
+            if getattr(self, "_lut_active_name", "") == name:
+                self._clear_active_lut()
+                return
+            self._xmp_highlight_name = ""
+            self._lut_active_name = name
+            if self._lut_amount_slider.value() < 1:
+                self._lut_amount_slider.setValue(100)
+            self._emit_preview_and_save()
+        elif kind == "xmp":
+            if getattr(self, "_xmp_highlight_name", "") == name:
+                # Second click: deselect (preset pixels already baked in).
+                self._xmp_highlight_name = ""
+                if lw is not None:
+                    lw.setCurrentRow(-1)
+                    lw.clearSelection()
+                return
+            # Apply rebuilds the Looks list via set_adjustments — never reuse
+            # this QListWidgetItem afterward (it is deleted on refresh).
+            self._apply_xmp_preset_named(name)
 
     def _on_lut_amount_changed(self, value: int) -> None:
         lbl = getattr(self, "_lut_amount_value", None)
@@ -1811,6 +2114,42 @@ class ImageAdjustPanelWidget(QWidget):
         if self._block_emit:
             return
         self._schedule_live_preview()
+
+    def _on_lut_space_changed(self, _index: int = 0) -> None:
+        if self._block_emit:
+            return
+        self._emit_preview_and_save()
+
+    def _apply_xmp_preset_named(self, name: str) -> None:
+        """One-shot: load managed XMP look onto this image and persist."""
+        if not name:
+            return
+        try:
+            from raw_dodge_burn import MASK_KEY
+            from raw_xmp_presets import load_preset_adjustments
+
+            preset = load_preset_adjustments(name)
+        except Exception as exc:
+            print(f"[XMP_PRESET] apply failed: {name}: {exc}")
+            return
+        current = self.get_adjustments()
+        as_shot = current.get(AS_SHOT_TEMP_KEY)
+        # Local paint stays per-image (same as copy/paste settings).
+        preset.pop(MASK_KEY, None)
+        preset.pop(AS_SHOT_TEMP_KEY, None)
+        merged = dict(DEFAULT_ADJUSTMENTS)
+        merged.update(preset)
+        if as_shot is not None:
+            merged[AS_SHOT_TEMP_KEY] = as_shot
+        self.xmp_preset_applied.emit()
+        self.set_adjustments(merged)
+        # set_adjustments clears the ephemeral xmp highlight; restore selection
+        # on the *new* list items after the rebuild.
+        self._xmp_highlight_name = name
+        self._refresh_looks_list(
+            select_lut=getattr(self, "_lut_active_name", "") or None
+        )
+        self.editing_finished.emit(self.get_adjustments())
 
     def _build_hsl_section(self, layout: QVBoxLayout) -> None:
         color_row = QHBoxLayout()
@@ -1982,6 +2321,23 @@ class ImageAdjustPanelWidget(QWidget):
                 self._denoise_method_combo.blockSignals(True)
                 self._denoise_method_combo.setCurrentIndex(min(2, max(0, combo_idx)))
                 self._denoise_method_combo.blockSignals(False)
+            if hasattr(self, "_chroma_nr_amount_slider"):
+                amt = int(round(nr_amount)) if nr_amount > 0.0 else int(CHROMA_NR_ON_VALUE)
+                amt = max(1, min(100, amt))
+                self._chroma_nr_amount_slider.blockSignals(True)
+                self._chroma_nr_amount_slider.setValue(amt)
+                self._chroma_nr_amount_slider.blockSignals(False)
+                if hasattr(self, "_chroma_nr_amount_value"):
+                    self._chroma_nr_amount_value.setText(str(amt))
+                self._sync_chroma_nr_amount_row_visible()
+            if hasattr(self, "_db_mask_strength_slider"):
+                stops = float(merged.get(DB_STRENGTH_KEY, DB_DEFAULT_STRENGTH) or DB_DEFAULT_STRENGTH)
+                stops = max(0.5, min(3.0, stops))
+                self._db_mask_strength_slider.blockSignals(True)
+                self._db_mask_strength_slider.setValue(int(round(stops * 20.0)))
+                self._db_mask_strength_slider.blockSignals(False)
+                if hasattr(self, "_db_mask_strength_value"):
+                    self._db_mask_strength_value.setText(f"{stops:.2f}")
             self._sync_wb_preset_combo(float(merged.get("Temperature", self._as_shot_temperature)))
             # Refresh "As Shot" label with the file's Kelvin when known.
             combo = getattr(self, "_wb_preset_combo", None)
@@ -1996,7 +2352,13 @@ class ImageAdjustPanelWidget(QWidget):
                 float(merged.get("CropTop", 0.0) or 0.0),
                 float(merged.get("CropBottom", 0.0) or 0.0),
             )
-            from raw_lut import LUT_AMOUNT_KEY, LUT_NAME_KEY
+            from raw_lut import (
+                LUT_AMOUNT_KEY,
+                LUT_NAME_KEY,
+                LUT_SPACE_KEY,
+                LUT_SPACE_REC709,
+                lut_working_space,
+            )
 
             self._lut_active_name = str(merged.get(LUT_NAME_KEY, "") or "").strip()
             amt = int(round(float(merged.get(LUT_AMOUNT_KEY, 0.0) or 0.0)))
@@ -2004,7 +2366,21 @@ class ImageAdjustPanelWidget(QWidget):
                 amt = 100
             if hasattr(self, "_lut_amount_slider"):
                 self._lut_amount_slider.setValue(max(0, min(100, amt)))
-            self._refresh_lut_list(select_name=self._lut_active_name or None)
+            space = lut_working_space(merged)
+            combo = getattr(self, "_lut_space_combo", None)
+            if combo is not None:
+                idx = combo.findData(space)
+                if idx < 0:
+                    idx = combo.findData(LUT_SPACE_REC709)
+                if idx >= 0:
+                    combo.blockSignals(True)
+                    combo.setCurrentIndex(idx)
+                    combo.blockSignals(False)
+            # Loading adjustments from an image is not an "active xmp preset"
+            # click — drop the ephemeral highlight so a prior Looks selection
+            # does not stick across files. (Apply path restores highlight after.)
+            self._xmp_highlight_name = ""
+            self._refresh_looks_list(select_lut=self._lut_active_name or None)
         finally:
             self._block_emit = False
 
@@ -2097,9 +2473,19 @@ class ImageAdjustPanelWidget(QWidget):
         if hasattr(self, "_denoise_method_combo"):
             idx = self._denoise_method_combo.currentIndex()
             out["DenoiseMethod"] = float(max(0, idx - 1))
-            out["ColorNoiseReduction"] = CHROMA_NR_ON_VALUE if idx > 0 else 0.0
+            if idx > 0:
+                if hasattr(self, "_chroma_nr_amount_slider"):
+                    out["ColorNoiseReduction"] = float(self._chroma_nr_amount_slider.value())
+                else:
+                    out["ColorNoiseReduction"] = CHROMA_NR_ON_VALUE
+            else:
+                out["ColorNoiseReduction"] = 0.0
         else:
             out["ColorNoiseReduction"] = 0.0
+        if hasattr(self, "_db_mask_strength_slider"):
+            out[DB_STRENGTH_KEY] = float(self._db_mask_strength_slider.value()) / 20.0
+        else:
+            out[DB_STRENGTH_KEY] = float(DB_DEFAULT_STRENGTH)
         lens_btn = getattr(self, "_lens_correction_btn", None)
         out["LensCorrectionEnabled"] = (
             1.0 if lens_btn is not None and lens_btn.isChecked() else 0.0
@@ -2109,8 +2495,14 @@ class ImageAdjustPanelWidget(QWidget):
                 self._tone_curve_row.serialized_points()
             )
             for name, key in _CHANNEL_CURVE_KEYS_BY_NAME.items():
-                serial = self._channel_curve_cache.get(name, "")
-                if serial:
+                serial = str(self._channel_curve_cache.get(name, "") or "").strip()
+                # serialize_tone_curve_points already returns "" for identity;
+                # still skip any leftover "0,0;255,255" so Reset clears XMP.
+                if not serial:
+                    continue
+                from raw_adjustments import tone_curve_serial_is_active
+
+                if tone_curve_serial_is_active(serial):
                     out[key] = serial
         if hasattr(self, "_hsl_sliders"):
             self._flush_hsl_cache_from_sliders()
@@ -2123,15 +2515,26 @@ class ImageAdjustPanelWidget(QWidget):
         out["CropRight"] = float(r)
         out["CropTop"] = float(t)
         out["CropBottom"] = float(b)
-        from raw_lut import LUT_AMOUNT_KEY, LUT_NAME_KEY
+        from raw_lut import LUT_AMOUNT_KEY, LUT_NAME_KEY, LUT_SPACE_KEY, LUT_SPACE_REC709
 
         name = str(getattr(self, "_lut_active_name", "") or "").strip()
         amt = float(getattr(self, "_lut_amount_slider", None).value()) if hasattr(self, "_lut_amount_slider") else 0.0
+        combo = getattr(self, "_lut_space_combo", None)
+        space = LUT_SPACE_REC709
+        if combo is not None:
+            data = combo.currentData()
+            if data:
+                space = str(data)
         if name and amt > 0:
             out[LUT_NAME_KEY] = name
             out[LUT_AMOUNT_KEY] = amt
+            out[LUT_SPACE_KEY] = space
         else:
+            # Explicit empty name so XMP merge drops CreativeLUTName and
+            # the preview stage key invalidates (toggle-off / amount 0).
+            out[LUT_NAME_KEY] = ""
             out[LUT_AMOUNT_KEY] = 0.0
+            out[LUT_SPACE_KEY] = space
         return out
 
     def _on_dodge_burn_toggled(self, btn: QPushButton, checked: bool) -> None:
@@ -2180,6 +2583,12 @@ class ImageAdjustPanelWidget(QWidget):
 
     def set_dodge_burn_mask_present(self, present: bool) -> None:
         self._db_clear_btn.setEnabled(bool(present))
+
+    def dodge_burn_show_mask(self) -> bool:
+        return bool(self._db_show_mask_btn.isChecked())
+
+    def toggle_dodge_burn_show_mask(self) -> None:
+        self._db_show_mask_btn.toggle()
 
     def _update_slider_label(self, key: str, fmt: Callable[[float], str]) -> None:
         slider = self._sliders.get(key)
@@ -2311,7 +2720,35 @@ class ImageAdjustPanelWidget(QWidget):
     def _on_denoise_method_changed(self, index: int) -> None:
         if self._block_emit:
             return
+        self._sync_chroma_nr_amount_row_visible()
+        # Turning on from Off: seed amount to the historical default (50) if
+        # the slider was never touched for this file.
+        if index > 0 and hasattr(self, "_chroma_nr_amount_slider"):
+            if self._chroma_nr_amount_slider.value() < 1:
+                self._chroma_nr_amount_slider.setValue(int(CHROMA_NR_ON_VALUE))
         self._emit_preview_and_save()
+
+    def _sync_chroma_nr_amount_row_visible(self) -> None:
+        row = getattr(self, "_chroma_nr_amount_row", None)
+        combo = getattr(self, "_denoise_method_combo", None)
+        if row is None or combo is None:
+            return
+        row.setVisible(combo.currentIndex() > 0)
+
+    def _on_chroma_nr_amount_changed(self, value: int) -> None:
+        if hasattr(self, "_chroma_nr_amount_value"):
+            self._chroma_nr_amount_value.setText(str(int(value)))
+        if self._block_emit:
+            return
+        self._schedule_live_preview()
+
+    def _on_db_mask_strength_changed(self, value: int) -> None:
+        stops = float(value) / 20.0
+        if hasattr(self, "_db_mask_strength_value"):
+            self._db_mask_strength_value.setText(f"{stops:.2f}")
+        if self._block_emit:
+            return
+        self._schedule_live_preview()
 
     def _reset_slider(self, key: str) -> None:
         spec = next((s for s in SLIDER_SPECS if s.key == key), None)
@@ -2355,11 +2792,33 @@ class ImageAdjustPanelWidget(QWidget):
             self._hsl_color_combo.setCurrentIndex(0)
             self._hsl_color_combo.blockSignals(False)
         if self._tone_curve_row is not None:
+            for name in list(self._channel_curve_cache.keys()):
+                self._channel_curve_cache[name] = ""
             self._tone_curve_row.reset_linear()
+        self._lut_active_name = ""
+        self._xmp_highlight_name = ""
+        if hasattr(self, "_lut_amount_slider"):
+            self._lut_amount_slider.blockSignals(True)
+            self._lut_amount_slider.setValue(100)
+            self._lut_amount_slider.blockSignals(False)
+        self._refresh_looks_list(select_lut=None)
         if hasattr(self, "_denoise_method_combo"):
             self._denoise_method_combo.blockSignals(True)
             self._denoise_method_combo.setCurrentIndex(0)
             self._denoise_method_combo.blockSignals(False)
+        if hasattr(self, "_chroma_nr_amount_slider"):
+            self._chroma_nr_amount_slider.blockSignals(True)
+            self._chroma_nr_amount_slider.setValue(int(CHROMA_NR_ON_VALUE))
+            self._chroma_nr_amount_slider.blockSignals(False)
+            if hasattr(self, "_chroma_nr_amount_value"):
+                self._chroma_nr_amount_value.setText(str(int(CHROMA_NR_ON_VALUE)))
+            self._sync_chroma_nr_amount_row_visible()
+        if hasattr(self, "_db_mask_strength_slider"):
+            self._db_mask_strength_slider.blockSignals(True)
+            self._db_mask_strength_slider.setValue(int(round(DB_DEFAULT_STRENGTH * 20.0)))
+            self._db_mask_strength_slider.blockSignals(False)
+            if hasattr(self, "_db_mask_strength_value"):
+                self._db_mask_strength_value.setText(f"{DB_DEFAULT_STRENGTH:.2f}")
         self._clear_recovery_baseline()
         self.reset_requested.emit()
         self._emit_preview_and_save()

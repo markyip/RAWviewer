@@ -372,9 +372,8 @@ _COLOR_KEYS = (
     "Saturation",
     "Vibrance",
     "PostCropVignetteAmount",
+    "PostCropVignetteMidpoint",
     "Dehaze",
-    "CreativeLUTAmount",
-    "CreativeLUTName",
 ) + _hsl_color_keys()
 
 _DETAIL_KEYS = ("Sharpness", "Clarity2012", "Defringe")
@@ -386,10 +385,24 @@ def _stage_key(merged: dict, keys: tuple) -> tuple:
         v = merged.get(k, 0.0)
         if v is None:
             # Missing/blank XMP leftovers: string-ish keys stay "", numeric stay 0.
-            parts.append("" if k in ("CreativeLUTName",) or str(k).endswith("Mask") or "Curve" in str(k) else 0.0)
+            parts.append(
+                ""
+                if k in ("CreativeLUTName", "CreativeLUTWorkingSpace")
+                or str(k).endswith("Mask")
+                or "Curve" in str(k)
+                else 0.0
+            )
             continue
         if isinstance(v, str):
-            parts.append(v)
+            # Dodge/burn mask serials are multi-MB base64 PNGs — hash so
+            # stage-key compares stay O(1) and don't pin giant strings in
+            # the cache dict (still invalidates whenever the mask changes).
+            if len(v) > 256 or str(k).endswith("Mask") or k.endswith("Curve") or "Curve" in str(k):
+                import hashlib
+
+                parts.append(hashlib.sha1(v.encode("utf-8", errors="replace")).hexdigest())
+            else:
+                parts.append(v)
             continue
         # Harden against blank leftovers — a TypeError here used to be swallowed
         # by _AdjustPreviewWorker and leave the live preview stuck on the last frame.
@@ -548,6 +561,7 @@ def render_adjust_preview_uint8(
     path and smoke tests (and on-screen parity with settle/export) break.
     """
     from fast_raw_decode import _gamma_lut8
+    from raw_lut import apply_pipeline_lut_encoded, apply_pipeline_lut_linear
     from raw_tone_curve import apply_channel_curves_encoded
 
     merged = dict(DEFAULT_ADJUSTMENTS)
@@ -556,11 +570,13 @@ def render_adjust_preview_uint8(
         rgb_image, merged, cache, preview=True, preview_lite=preview_lite
     )
     display = _apply_display_stage_staged(processed, merged, cache)
+    display = apply_pipeline_lut_linear(display, merged)
     # Copy before encode: display may be a live cache buffer; returning a view
     # into stage_out would let the next worker tick mutate pixels already
     # queued for the UI thread's QPixmap conversion.
     idx = np.clip(display * 65535.0 + 0.5, 0, 65535).astype(np.uint16)
     encoded = np.ascontiguousarray(_gamma_lut8()[idx])
+    encoded = apply_pipeline_lut_encoded(encoded, merged, 255.0)
     return apply_channel_curves_encoded(encoded, merged, 255.0)
 
 
@@ -570,9 +586,17 @@ def _apply_display_color_adjustments(
     *,
     preview: bool = False,
 ) -> np.ndarray:
-    """Saturation / vibrance / vignette / dehaze / creative LUT in display-linear space."""
-    from raw_effects import apply_dehaze, apply_vignette
-    from raw_lut import apply_creative_lut
+    """Saturation / vibrance / vignette / dehaze in display-linear space.
+
+    Creative LUT is applied later via ``apply_pipeline_lut_*`` (Rec.709 after
+    gamma encode by default; Linear keeps the pre-encode path).
+    """
+    from raw_effects import (
+        VIGNETTE_MIDPOINT_DEFAULT,
+        VIGNETTE_MIDPOINT_KEY,
+        apply_dehaze,
+        apply_vignette,
+    )
 
     out = _apply_saturation_vibrance(display_linear, merged)
     dehaze = float(merged.get("Dehaze", 0.0) or 0.0)
@@ -580,8 +604,11 @@ def _apply_display_color_adjustments(
         out = apply_dehaze(out, dehaze, preview=preview)
     vignette = float(merged.get("PostCropVignetteAmount", 0.0) or 0.0)
     if abs(vignette) > 1e-3:
-        out = apply_vignette(out, vignette)
-    out = apply_creative_lut(out, merged)
+        midpoint = float(
+            merged.get(VIGNETTE_MIDPOINT_KEY, VIGNETTE_MIDPOINT_DEFAULT)
+            or VIGNETTE_MIDPOINT_DEFAULT
+        )
+        out = apply_vignette(out, vignette, midpoint=midpoint)
     return out
 
 
@@ -592,6 +619,7 @@ def linear_to_display_uint8(img: np.ndarray, adj: dict[str, float] | None = None
     # the browse render, surfacing sensor noise ("grainy" report). One curve
     # everywhere = editor default is pixel-comparable with browse.
     from fast_raw_decode import _gamma_lut8
+    from raw_lut import apply_pipeline_lut_encoded, apply_pipeline_lut_linear
     from raw_tone_curve import apply_channel_curves_encoded
 
     merged = dict(adj or {})
@@ -600,8 +628,10 @@ def linear_to_display_uint8(img: np.ndarray, adj: dict[str, float] | None = None
         display = _apply_display_stage_banded(img, merged, n_workers)
     else:
         display = _apply_display_stage(img, merged)
+    display = apply_pipeline_lut_linear(display, merged)
     idx = np.clip(display * 65535.0 + 0.5, 0, 65535).astype(np.uint16)
-    return apply_channel_curves_encoded(_gamma_lut8()[idx], merged, 255.0)
+    encoded = apply_pipeline_lut_encoded(_gamma_lut8()[idx], merged, 255.0)
+    return apply_channel_curves_encoded(encoded, merged, 255.0)
 
 
 def _apply_display_stage_banded(
@@ -612,8 +642,20 @@ def _apply_display_stage_banded(
     recovery path downsamples the whole image via cv2.resize and isn't
     row-independent). Reuses raw_adjustments._BAND_PAD_PX -- same blur radii,
     same padding math as _apply_adjustments_to_srgb_banded.
+
+    Vignette and dehaze are whole-frame effects (radial center / atmospheric
+    light). Applying them inside a row band re-centers the vignette on each
+    strip and yields large preview/export mismatches — fall back to the
+    single-pass path when either is active.
     """
     from raw_adjustments import _BAND_PAD_PX, band_ranges, banded_executor
+    from raw_effects import DEHAZE_KEY, VIGNETTE_KEY
+
+    if (
+        abs(float(merged.get(VIGNETTE_KEY, 0.0) or 0.0)) > 1e-3
+        or abs(float(merged.get(DEHAZE_KEY, 0.0) or 0.0)) > 1e-3
+    ):
+        return _apply_display_stage(img, merged)
 
     bands = band_ranges(img.shape[0], n_workers, pad_px=_BAND_PAD_PX)
 
@@ -642,12 +684,15 @@ def linear_to_export_uint16_srgb(img: np.ndarray, adj: dict[str, float] | None =
     LibRaw/dcraw-derived pipeline does.)
     """
     from fast_raw_decode import gamma_curve16
+    from raw_lut import apply_pipeline_lut_encoded, apply_pipeline_lut_linear
     from raw_tone_curve import apply_channel_curves_encoded
 
     merged = dict(adj or {})
     display = _apply_display_stage(img, merged)
+    display = apply_pipeline_lut_linear(display, merged)
     idx = np.clip(display * 65535.0 + 0.5, 0, 65535).astype(np.uint16)
-    return apply_channel_curves_encoded(gamma_curve16()[idx], merged, 65535.0)
+    encoded = apply_pipeline_lut_encoded(gamma_curve16()[idx], merged, 65535.0)
+    return apply_channel_curves_encoded(encoded, merged, 65535.0)
 
 
 def _ensure_parent_dir(output_path: str) -> None:

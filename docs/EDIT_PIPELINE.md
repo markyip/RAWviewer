@@ -29,9 +29,9 @@ Replace **8-bit sRGB / gamma-space** adjust preview with a **scene-linear** pipe
 | Creative LUT (.cube) | Done | Managed library + amount; display-stage apply (`raw_lut.py`) |
 | Detail (Sharpness / Clarity / Defringe) | Done | Display-linear, after tone map |
 | Chroma / Luma NR | Done | Both bilateral filter, no NLM/uint8 quantization; Luma NR is new (see Performance review #11/#12). Chroma NR also gets a downsample/blur/upsample coarse pass for blotchy noise a bilateral kernel can't reach (see Performance review #20) |
-| Recovery baseline | Done | “Use recovery look” = P-key tone as adjust start |
-| Recovery ↔ Adjust UX | Done | P blocked while Adjust open; opening Adjust disables P preview |
-| Recovery slider hints | Done | Shadows +40 / Highlights −35 readouts when recovery on |
+| Recovery baseline | Legacy | UI removed 2026-07; flag still honored if present in adj dict |
+| Recovery ↔ Adjust UX | Done | P blocked while Adjust open |
+| Recovery slider hints | Done | Shadows +40 / Highlights −35 when recovery flag on |
 | Multi-format export | Done | TIFF16 / JPEG / WebP baked only — DNG options removed (see Export formats) |
 | XMP sidecar I/O | Done | Basic + tone curve + HSL; as-shot Temp |
 | Background preview worker | Done | 80 ms throttle; generation merge; uint8 encode guard |
@@ -46,8 +46,13 @@ Replace **8-bit sRGB / gamma-space** adjust preview with a **scene-linear** pipe
 | Keyboard / focus fixes | Done | Shortcuts work with panel open |
 | Value readout styling | Done | Blue `#90CAF9` (was low-contrast gray on dark card) |
 | Slider visual language | Done | Custom-painted center-out bipolar fill, rectangular thumb, Temp/Tint gradient hints — see Slider visual language section (2026-07-06) |
+| Effects (vignette / dehaze) | Done | Paint-overlay vignette + Midpoint; LR Amount sign; whole-frame (not per-band) |
+| Dodge/Burn Effect Strength | Done | `DodgeBurnStrength` stops separate from Brush Flow |
+| XMP presets | Done | Managed `.xmp` library (import/apply/remove), same chrome as Creative LUT (`raw_xmp_presets.py`) |
+| Adjust zoom vs lite preview | Done | Zoomed-in view keeps settle buffer; Fit may use 640px lite — see Performance review #27 |
+| Identity tone-curve = default | Done | `tone_curve_serial_is_active()` so Reset / `is_default` treat `"0,0;255,255"` as unset |
 
-**Not supported:** Lightroom masks, local adjustments, layers, per-channel RGB tone curves.
+**Not supported:** Lightroom-style radial/gradient/brush masks (beyond dodge/burn), layers. Per-channel RGB tone curves **are** supported (`ToneCurvePV2012Red/Green/Blue`, applied post-encode like LR Standard mode).
 
 ---
 
@@ -73,9 +78,13 @@ RAW file
       • Default: luminance-preserving Reinhard
       • Recovery baseline: linear_tone_map_to_display + local shadow/highlight polish
   → saturation / vibrance (HSV S-scale, round-tripped through sRGB OETF LUT — see below)
-  → HSL (8 colors, UI hidden)
+  → dehaze / post-crop vignette (display-linear; whole-frame)
+  → HSL (8 colors)
   → sharpness / clarity / defringe
-  → sRGB OETF → uint8 (preview) or uint16 (TIFF16 export)
+  → creative LUT (Linear working space, optional)
+  → BT.709 encode → uint8 (preview) or uint16 (TIFF16 export)
+  → creative LUT (Rec.709 working space, default)
+  → R/G/B channel curves (encoded)
 ```
 
 Browse / gallery / non-edit paths **unchanged** (embedded JPEG + fast 8-bit LibRaw).
@@ -483,7 +492,8 @@ the display color stage after vignette/dehaze (`raw_lut.py`).
 | Control | XMP key | Range | Notes |
 |---------|---------|-------|-------|
 | Luma NR | `LuminanceNoiseReduction` | 0 … 100 | Bilateral filter on Y only; chroma untouched |
-| Chroma NR (toggle) | `ColorNoiseReduction` | 0 or 50 when On | Bilateral filter on Cb/Cr only; luminance untouched |
+| Chroma NR method | `DenoiseMethod` | Off / Bilateral / Guided | Combo in Detail section |
+| Chroma Amount | `ColorNoiseReduction` | 0 … 100 | Strength when a method is selected (UI default 50) |
 
 Both use an edge-aware bilateral filter directly on float32 (`raw_chroma_denoise.py`)
 — no NLM, no uint8 quantization step. Luma NR uses a gentler sigmaColor range
@@ -491,25 +501,37 @@ Both use an edge-aware bilateral filter directly on float32 (`raw_chroma_denoise
 detail; both keep hard edges sharp regardless of strength (bilateral filter is
 edge-aware by construction — see Performance review #11/#12).
 
-Preview: Chroma NR only when toggle On. Export: Chroma NR when toggle On or
+Preview: Chroma NR when method ≠ Off and amount > 0. Export: same, or
 `RAWVIEWER_EDIT_CHROMA_DENOISE=1`. Luma NR applies whenever its slider is
 non-zero, in both preview and export (same as any other slider, no separate
 env-var force-on path).
 
-### Recovery baseline (session UI flag)
+### Effects / Local
+
+| Control | XMP key | Range | Notes |
+|---------|---------|-------|-------|
+| Vignette | `PostCropVignetteAmount` | −100 … +100 | LR sign: negative darkens corners, positive lightens. **Paint Overlay** (lerp toward black/white), not stops/`exp2` |
+| Midpoint | `PostCropVignetteMidpoint` | 0 … 100 (default 50) | Corner-normalized radius: lower = larger falloff (toward center); higher = packed at corners |
+| Dehaze | `Dehaze` | −100 … +100 | Whole-frame; display-linear |
+| Dodge/Burn Effect Strength | `DodgeBurnStrength` | 0.50 … 3.00 stops | Stops at full mask; Brush Flow is paint-only; alone without a mask is still “default” for Reset |
+| Dodge/Burn mask | `crs:DodgeBurnMask` | base64 PNG | Custom element |
+
+Vignette/dehaze always run on the **full preview frame** (banded display must not re-center the radial map per row band).
+
+### Recovery baseline (legacy flag)
 
 | Control | Internal key | Notes |
 |---------|--------------|-------|
-| Use recovery look | `_recovery_baseline` | Not written to XMP |
+| Use recovery look | `_recovery_baseline` | **UI removed (2026-07)**; still honored if present in a session dict. Not written to XMP. |
 
-When enabled:
+When enabled (programmatic / legacy session):
 
 - Skips PV2012 tone; uses P-key recovery tone map + local shadow/highlight recovery.
 - **Highlights / Shadows sliders** move to hint readouts (`+40` / `−35`) so the panel reflects recovery; hints do not disable recovery tone.
 - Moving **Contrast**, **Whites**, **Blacks**, or parametric tone controls clears recovery baseline.
 - Moving **Highlights** or **Shadows** off the hints clears recovery and switches to PV2012 tone using the new values.
-- **P** recovery preview is disabled while Adjust is open; use **Use recovery look** instead.
-- Exposure / WB / Sat / Vibrance / Detail still apply on top of recovery tone (HSL UI hidden — see above).
+- **P** recovery preview is disabled while Adjust is open.
+- Exposure / WB / Sat / Vibrance / Detail / HSL still apply on top of recovery tone.
 
 Constants: `RECOVERY_BASELINE_SHADOWS2012`, `RECOVERY_BASELINE_HIGHLIGHTS2012` in `raw_adjustments.py`.
 
@@ -520,14 +542,35 @@ Constants: `RECOVERY_BASELINE_SHADOWS2012`, `RECOVERY_BASELINE_HIGHLIGHTS2012` i
 - Floating panel (**E**), draggable card, scrollable content
 - Sliders: immediate value readout in **blue** (`#90CAF9`); **80 ms** throttled preview; XMP on release
 - Click value label → reset single slider; **Reset** → all defaults + as-shot Temp
-- **Tone curve** graph + PV Shad/Dark/Light/High sliders (`_SHOW_TONE_CURVE_UI = True`)
-- **HSL** section — **hidden** (`_SHOW_HSL_UI = False`); pipeline/XMP I/O still present
-- **Chroma NR** toggle
+- **Tone curve** graph + R/G/B channels + PV Shad/Dark/Light/High (`_SHOW_TONE_CURVE_UI = True`)
+- **HSL** section — visible (`_SHOW_HSL_UI = True`)
+- **Chroma NR** method combo + Amount slider
+- **Vignette / Midpoint / Dehaze** sliders in Detail
+- **Dodge & Burn** Local tools + Brush Size/Flow + Effect Strength (stops)
+- **Creative LUT** + **XMP presets** managed libraries (drag-drop / apply / remove)
 - **Lens correction** toggle — hidden unless a matching profile is found for the current file
-- **Use recovery look** button
+- Recovery look button — **removed** from UI (pipeline flag still honored if set)
 - **Compare** toggle (header, split-view icon) — see Compare with original
 - **Export…** menu (see below)
 - Sliders / buttons use `NoFocus` so app shortcuts keep working
+
+> `apply_adjustments_to_rgb` (uint8 browse/export helpers) now always routes
+> through the scene-linear pipeline (sRGB EOTF → process → encode), matching
+> the Adjust panel. The legacy gamma-space core remains only for internal
+> banded detail-enhance unit tests.
+
+### Adjust zoom vs live-drag tiers
+
+While Adjust is open, **100% zoom is relative to the edit buffer** (typically
+half-res settle, e.g. ~3500px long edge), not a browse-path sensor decode.
+
+| Mode | Live-drag (`full_quality=False`) | Settle / zoom-in |
+|------|----------------------------------|------------------|
+| Fit | May paint **640px** lite (`_ADJUST_FAST_PREVIEW_MAX_EDGE`) | Half-res settle replaces lite |
+| 100% (zoomed) | Lite paints are **deferred** so they cannot replace the sharper buffer | Restore `_adjust_hires_render` before zoom; request `full_quality=True` |
+
+Double-click / Space while Adjust is open **do not** queue
+`_queue_sensor_full_decode` (browse full-res). See Performance review #27.
 
 ---
 
@@ -594,7 +637,12 @@ Written on slider / curve release and before export:
 | `raw_chroma_denoise.py` | Chroma (Cb/Cr) + luma (Y) bilateral denoise (OpenCV) |
 | `raw_lens_correction.py` | Lensfun profile lookup + geometric distortion correction |
 | `raw_edit_pipeline.py` | Shared pipeline + export dispatch (TIFF16 / JPEG / WebP); 16-bit TIFF via `tifffile` |
-| `raw_adjustments.py` | XMP I/O, defaults, `apply_adjustments_to_linear` |
+| `raw_adjustments.py` | XMP I/O, defaults, `apply_adjustments_to_linear`; identity tone-curve helpers |
+| `raw_effects.py` | Post-crop vignette (paint overlay + Midpoint) + dehaze |
+| `raw_dodge_burn.py` | Local dodge/burn mask + `DodgeBurnStrength` |
+| `raw_lut.py` | Creative `.cube` LUT apply |
+| `raw_xmp_presets.py` | Managed XMP preset library (import / list / apply / remove) |
+| `display_brightness.py` | Best-effort macOS display brightness bump while Adjust is open |
 | `rawviewer_ui/adjust_panel.py` | Adjust panel UI |
 | `rawviewer_ui/tone_curve_widget.py` | Draggable point curve editor |
 | `unified_image_processor.py` | `decode_raw_edit_base()` |
@@ -628,7 +676,7 @@ Written on slider / curve release and before export:
 
 1. Open RAW → **E** → wait for edit base (linear demosaic, not embedded JPEG)
 2. Drag **Exposure** / **Shadows** — PV2012 tone, not gamma add
-3. **Use recovery look** — Shadows/Highlights readouts jump to +40/−35; preview matches recovery tone
+3. (Legacy) If `_recovery_baseline` is set programmatically — Shadows/Highlights readouts jump to +40/−35; preview matches recovery tone
 4. **Saturation** / **Vibrance** — consistent "pop" across hues (red, green, blue, skin tones); no hard clipping to a flat fully-saturated color on any one hue
 5. **Sharpness** / **Clarity** — no black frame; image stays visible
 6. **Export…** — TIFF / JPEG / WebP options
@@ -644,46 +692,49 @@ Written on slider / curve release and before export:
     brightens/pushes highlights toward clipping, left (−) recovers them — not the reverse
 12. **Shadows** past ~50 on a smooth dark gradient (e.g. a soft shadow falloff) — no
     banding/reversed local contrast in the shadow region
-13. **Chroma NR** toggle on a neutral gray/white subject (e.g. a gray card, overcast
-    sky) — no green tint after toggling on
-14. **Luma NR** slider on a noisy high-ISO shot — grain visibly reduces; hard edges
+13. **Adjust zoom:** settle half-res → Fit drag (status may show 640) → double-click 100% —
+    status restores ~half-res dimensions (not stuck at 640×427); further slider drags must
+    not drop the zoomed buffer to lite
+14. **Chroma NR** method + Amount on a neutral gray/white subject (e.g. a gray card, overcast
+    sky) — no green tint after enabling
+15. **Luma NR** slider on a noisy high-ISO shot — grain visibly reduces; hard edges
     (e.g. a horizon line) stay sharp, no smearing
-15. **Export…** — every remaining format (TIFF16, JPEG, WebP) completes without
+16. **Export…** — every remaining format (TIFF16, JPEG, WebP) completes without
     error; open the 16-bit TIFF in another app and confirm it's genuinely
     16-bit (not silently 8-bit)
-16. **Tone curve** — drag a point on the graph, and PV Shad/Dark/Light/High
+17. **Tone curve** — drag a point on the graph, and PV Shad/Dark/Light/High
     past ~50 in either direction — no banding/reversed local contrast anywhere
     on the curve
-17. `PYTHONPATH=src python3 scripts/phase_develop_adjust_linear.py`
-18. **Compare** toggle (panel header, split-view icon) — split view appears with
+18. `PYTHONPATH=src python3 scripts/phase_develop_adjust_linear.py`
+19. **Compare** toggle (panel header, split-view icon) — split view appears with
     original on the left, edited on the right; drag the divider anywhere across
     the image and it tracks the cursor; adjust a slider while comparing — only
     the edited (right) side updates; toggle off — split view disappears cleanly
-19. **Lens correction** toggle — hidden on a file with no matching lens profile
+20. **Lens correction** toggle — hidden on a file with no matching lens profile
     (check with an unusual/manual lens); shown on a file with a recognized
     camera+lens; toggling on visibly corrects barrel/pincushion distortion and
     re-decodes (brief status message); exported file reflects the same toggle
     state as the preview
-20. `PYTHONPATH=src pixi run python3 scripts/phase_develop_adjust_linear.py`
+21. `PYTHONPATH=src pixi run python3 scripts/phase_develop_adjust_linear.py`
     (run via pixi specifically — the lens-correction tests need `lensfunpy`)
-21. Drag a bipolar slider (e.g. **Exposure**) both directions — fill grows
+22. Drag a bipolar slider (e.g. **Exposure**) both directions — fill grows
     from the center, not the left edge; at exactly the default value, no
     fill shows at all. Drag a unipolar slider (**Sharpness**) — fill grows
     from the left edge as usual. Drag **Temp** — background shows a dim
     blue→orange gradient, fill starts from the as-shot value (not the
     slider's numeric midpoint), and the reference point moves if you switch
     to a file with a different as-shot temperature
-22. **WB dropper button** — click it while the panel is scrolled to any
+23. **WB dropper button** — click it while the panel is scrolled to any
     position; it should toggle (icon highlights, status bar shows the
     "click a neutral area" message, cursor becomes a crosshair) every time,
     not just when the button happens to be positioned somewhere specific
-23. Drag **Contrast** (or **Highlights**/**Shadows**/**Whites**/**Blacks**/the
+24. Drag **Contrast** (or **Highlights**/**Shadows**/**Whites**/**Blacks**/the
     tone curve) on a large RAW file — the preview should visibly track the
     cursor smoothly while dragging (briefly softer detail is expected), then
     snap to full sharpness within roughly a second of releasing
 
-To re-enable HSL UI: set `_SHOW_HSL_UI = True` in `adjust_panel.py` (fix the `raw_hsl.py`
-colorspace-scale bug first — see Performance review #6).
+HSL UI is on (`_SHOW_HSL_UI = True`); treat results as experimental until any
+remaining colorspace-scale issues are closed (see Performance review #6).
 
 ---
 
@@ -691,8 +742,8 @@ colorspace-scale bug first — see Performance review #6).
 
 See also the ranked table in [`RELEASE_NOTES.md`](../RELEASE_NOTES.md) (v3.0).
 
-- HSL UI is visible but `raw_hsl.py` still has an open colorspace-scale bug — treat
-  results as experimental until fixed (Performance review #6)
+- HSL UI is visible; treat results as experimental until any remaining
+  colorspace-scale issues are closed (Performance review #6)
 - Channel tone curves (R/G/B tabs) exist in UI; treat parity with Lightroom as ongoing
 - Dodge/burn + interactive crop ship; broader masks (gradient / radial / ML subject)
   remain future work
@@ -855,6 +906,8 @@ recompute.
 | 25 | Load / edit-base latency after Fast RAW: (a) `edit_base_decode_params` injects `use_camera_wb=False` + `user_wb` when JPEG-sanity WB correction exists, but `params_supported` rejected that combo → every corrected body fell through to slow rawpy AHD; (b) unpack stash was a single slot so A↔B revisit re-paid LibRaw unpack; (c) edit-base was not reused across reopen Adjust; (d) when `RAWVIEWER_SIDECAR_ADJUST=1`, CURRENT full apply blocked emit for ~1.8–2.1s @45MP with no interim | Code review + synthetic tests (`t_params_supported_user_wb`, `t_unpack_stash_lru`, `t_sidecar_progressive`) | **Implemented (2026-07-16, Mac+Windows)** — (a) `params_supported` accepts valid `user_wb` (unpack already bakes the same correction into `scale_mul`); (b) unpack stash is an LRU (`RAWVIEWER_UNPACK_STASH_SLOTS`, default 3); (c) half-size edit-base LRU (2 slots, mtime/size keyed); (d) `apply_sidecar_progressive`: decode unadjusted → emit preview-capped edited interim → full apply → emit; PRELOAD still skips sidecar. `full_image_cache` remains unadjusted-only. |
 
 | 26 | Follow-up to #23: upstream PV2012 ticks (Contrast/Shadows/Highlights/curve) still lag on the ~1000px fast base once guided-filter y0 smooth + shadow chroma damp run | Same architecture as #23; drag path only | **Implemented (2026-07-16)** — `_ADJUST_FAST_PREVIEW_MAX_EDGE` **1000→640**; live-drag passes `preview_lite=True` into `apply_pv2012_tone_rgb` (skip y0 guided filter + shadow chroma damp). Settle / Compare / export keep the full tone path. Separate fast/full `PreviewStageCache` instances plus `preview_lite` in the tone cache key prevent lite buffers from poisoning settle. Tests: `t_pv2012_preview_lite.py`. |
+
+| 27 | Adjust open: Fit settle (~3514px) → drag sliders paints 640px lite → double-click 100% zooms the soft buffer (`640x427 - 100%` in status). Separately, double-click still queued browse `_queue_sensor_full_decode` while Space already gated it off under Adjust | Last-run `rawviewer_dev.log` on DSC01416.ARW: settle `3514x2344`, then lite spam `640x427`, then `640x427 - 100%` after zoom-in | **Fixed (2026-07-17)** — (1) gate double-click / zoom-to-point browse sensor decode when `_adjust_panel_active()` (match Space); (2) `_should_defer_adjust_preview_paint` skips lite paints while zoomed; (3) `_adjust_hires_render` keeps last ≥1200px settle; `_restore_adjust_hires_before_zoom` puts it back before 100%; (4) zoom-in requests `full_quality=True`. Instant-gain baseline is not replaced by a deferred lite tier. |
 
 Numbers were captured with `raw_edit_pipeline.process_linear_edit_buffer` +
 `linear_to_display_uint8` directly (no Qt/GUI thread involved); see the

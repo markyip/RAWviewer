@@ -47,6 +47,9 @@ It is built as a faster **browse / cull** release on top of 2.5: featuring **Fas
 - **Worker Pool Starvation**: Sidecar applies no longer starve the gallery thumbnail worker pool.
 - **Edit-base decoding**: Deduplicated concurrent edit-base decodes and fixed stale in-flight guards.
 - **Edit / load perf (post-3.0)**: Corrected-WB files stay on the fast EA edit-base path (no AHD fallback); unpack stash LRU; half-size edit-base cache; Adjust live-drag uses a 640px base + lite PV2012 (full quality on slider release); optional sidecar browse apply is progressive (preview interim then full).
+- **Adjust zoom vs lite preview (post-3.0)**: While Adjust is open, Fit may paint a 640px live-drag tier, but zooming to 100% restores the half-res settle buffer and does not queue a browse-path sensor decode; lite frames are not painted over a zoomed sharper buffer.
+- **Effects refinements (post-3.0)**: Vignette uses LR Amount sign + paint-overlay falloff with Midpoint; Chroma NR Amount slider; Dodge/Burn Effect Strength (stops) separate from Brush Flow; identity tone curves no longer block Reset.
+- **XMP presets (post-3.0)**: Managed `.xmp` library in Adjust (alongside Creative LUT).
 - **Tile EXIF parses**: Stopped unnecessary per-tile RAW EXIF parses during edited-preview delivery to improve speed.
 
 #### 🎨 Polish
@@ -79,8 +82,9 @@ It is built as a faster **browse / cull** release on top of 2.5: featuring **Fas
 - **White-balance presets** dropdown (As Shot from EXIF Kelvin when present; Daylight / Cloudy / Shade / Tungsten / Fluorescent / Flash) above Temp/Tint.
 - **Dodge & Burn** UI (Local: Dodge/Burn, Size, Flow, Clear, Show Mask, Edge Assist) with soft **circular** gaussian stamps, stroke-delta live preview (no hard square blit), and edge-assisted painting.
 - **Crop overlay** in Transform: interactive dimmed mask + handles; aspect pills Free / Original / 1:1 / 4:3 / 3:2 / 16:9; Apply writes `CropLeft/Right/Top/Bottom` (geometry pipeline already honored these keys).
-- **Vignette** (`PostCropVignetteAmount`) and **Dehaze** (`Dehaze`) in Detail — display-linear, Lite-safe (cv2/numpy).
+- **Vignette** (`PostCropVignetteAmount` / `PostCropVignetteMidpoint`) and **Dehaze** (`Dehaze`) in Detail — display-linear paint-overlay vignette, Lite-safe (cv2/numpy).
 - **Editor chrome**: wider Adjust panel, higher-contrast labels, unified combo style (no separate drop-down button), Tone Curve **Linear** button readable on dark chrome.
+- **XMP presets**: import / apply / remove managed `.xmp` files (same library chrome as Creative LUT).
 
 ### Environment variables (new / notable)
 
@@ -96,7 +100,7 @@ It is built as a faster **browse / cull** release on top of 2.5: featuring **Fas
 1. Optional: run **`clear_cache`** once if tiles look stale after the cache version bump.
 2. Open a mix of ARW / CR3 / NEF (including HE\*): arrow through, zoom to 100%, confirm orientation.
 3. Rate with **1–5**, filter gallery by stars, confirm sidecars.
-4. Open Adjust (**E**): try WB presets, Crop (Transform), Dodge/Burn with Edge Assist, Vignette/Dehaze.
+4. Open Adjust (**E**): try WB presets, Crop (Transform), Dodge/Burn with Edge Assist, Vignette/Midpoint/Dehaze; after a Fit slider drag, double-click 100% and confirm status stays on the half-res settle size (not 640×427).
 
 ### ⚠️ Known Issues & Remaining Work (feasibility ranked)
 

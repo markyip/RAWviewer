@@ -351,6 +351,26 @@ class FilmStripBar(QFrame):
                         self._try_apply_cache_for_cell(idx, path, cell)
         self._reload_visible()
 
+    def invalidate_thumbnails_for_path(self, file_path: str) -> None:
+        """Drop the cached cell pixmap for a path (e.g. after a saved/reset edit).
+
+        refresh_visible_thumbnails() keeps a bound cell's existing pixmap when
+        the global cache misses, so after image_cache.invalidate_file() the
+        strip kept showing the stale edited render until the cell was recycled.
+        Clearing the cell forces _reload_visible's cache-miss path, which
+        requests a fresh async decode.
+        """
+        if not file_path:
+            return
+        self._measured_widths.pop(_path_key(file_path), None)
+        idx = self._index_for_path(file_path)
+        if idx >= 0:
+            cell = self._cells.get(idx)
+            if cell is not None:
+                self._clear_cell_thumbnail(cell)
+                cell.setText("…")
+        self._reload_visible()
+
     def current_index(self) -> int:
         return self._pending_index if self._pending_index >= 0 else self._current_index
 
@@ -605,9 +625,13 @@ class FilmStripBar(QFrame):
         if viewer is None or not hasattr(viewer, "image_cache"):
             return False
         try:
-            thumb = viewer.image_cache.get_grid(path)
+            # In-memory tiers only: get_grid()/get_thumbnail() fall through to the
+            # disk cache (SQLite read + JPEG decode) and this runs on the UI thread
+            # for every visible cell on each navigation. Disk-tier misses return
+            # False so the caller falls back to the async thumbnail load path.
+            thumb = viewer.image_cache.get_grid_memory_only(path)
             if thumb is None:
-                thumb = viewer.image_cache.get_thumbnail(path)
+                thumb = viewer.image_cache.get_thumbnail_memory_only(path)
         except Exception:
             return False
         if thumb is None:

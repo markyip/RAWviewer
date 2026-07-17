@@ -74,12 +74,50 @@ def main() -> int:
         t1, t2 = read_as_shot_temperature(img), read_as_shot_temperature(img)
         check("as-shot temperature deterministic", t1 == t2)
 
-        # resetting to defaults deletes the sidecar
+        # resetting to defaults deletes the sidecar (when nothing foreign remains)
         clean = dict(DEFAULT_ADJUSTMENTS)
         clean[AS_SHOT_TEMP_KEY] = 5500.0
         clean["Temperature"] = 5500.0
         write_xmp_adjustments_for_file(img, clean)
         check("default adjustments delete sidecar", not os.path.isfile(resolve_xmp_path(img)))
+
+        # Identity tone-curve serial must count as default (Reset / clear).
+        from raw_adjustments import is_default_adjustments, tone_curve_serial_is_active
+
+        ident = dict(DEFAULT_ADJUSTMENTS)
+        ident[AS_SHOT_TEMP_KEY] = 5500.0
+        ident["Temperature"] = 5500.0
+        ident[TONE_CURVE_SERIAL_KEY] = "0,0;255,255"
+        check("identity serial not active", not tone_curve_serial_is_active(ident[TONE_CURVE_SERIAL_KEY]))
+        check("identity serial is_default", is_default_adjustments(ident))
+        write_xmp_adjustments_for_file(img, ident)
+        check("identity curve does not keep sidecar", not os.path.isfile(resolve_xmp_path(img)))
+
+        # Merge write must preserve foreign Lightroom crs fields.
+        xmp = resolve_xmp_path(img)
+        with open(xmp, "w", encoding="utf-8") as f:
+            f.write(
+                '<?xml version="1.0" encoding="UTF-8"?>\n'
+                '<x:xmpmeta xmlns:x="adobe:ns:meta/">\n'
+                '<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">\n'
+                '<rdf:Description rdf:about="" '
+                'xmlns:crs="http://adobe.com/camera-raw-settings/1.0/" '
+                'crs:GrainAmount="25" crs:LookTable="1"/>\n'
+                "</rdf:RDF></x:xmpmeta>\n"
+            )
+        adj2 = dict(DEFAULT_ADJUSTMENTS)
+        adj2[AS_SHOT_TEMP_KEY] = 5500.0
+        adj2["Exposure2012"] = 0.5
+        write_xmp_adjustments_for_file(img, adj2)
+        text = open(xmp, encoding="utf-8").read()
+        check("merge keeps GrainAmount", "GrainAmount" in text and "25" in text)
+        check("merge keeps LookTable", "LookTable" in text)
+        check("merge writes Exposure2012", "Exposure2012" in text)
+        back2 = load_adjustments_for_file(img)
+        check(
+            "merge round-trip Exposure",
+            abs(float(back2.get("Exposure2012", 0)) - 0.5) < 0.01,
+        )
     finally:
         shutil.rmtree(tmpd, ignore_errors=True)
 
