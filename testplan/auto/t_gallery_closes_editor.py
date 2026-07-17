@@ -67,12 +67,13 @@ def main() -> int:
         "getattr(self, \"_adjust_overlay_visible\", False)" in src,
     )
     check(
-        "_show_gallery_view still closes the panel via _set_adjust_panel_visible(False)",
-        "self._set_adjust_panel_visible(False)" in src,
+        "_show_gallery_view closes the panel via _close_adjust_panel_from_ui "
+        "(restores browse workflow; plain setVisible(False) left RAW mode stuck)",
+        "self._close_adjust_panel_from_ui()" in src,
     )
 
     hide_idx = src.find("single_view_container.hide()")
-    close_idx = src.find("_set_adjust_panel_visible(False)")
+    close_idx = src.find("_close_adjust_panel_from_ui()")
     check(
         "editor is closed before single_view_container is hidden",
         -1 not in (hide_idx, close_idx) and close_idx < hide_idx,

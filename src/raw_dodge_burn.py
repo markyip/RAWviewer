@@ -292,6 +292,52 @@ def stamp_brush(
     return (x0, y0, x1, y1)
 
 
+def erase_brush(
+    mask: DodgeBurnMask,
+    cx: float,
+    cy: float,
+    radius: float,
+    strength: float,
+    *,
+    luminance: Optional[np.ndarray] = None,
+    edge_assist: bool = True,
+    luma_tol: float = 0.10,
+) -> tuple[int, int, int, int]:
+    """Pull mask values toward zero under a soft circular brush.
+
+    ``strength`` is 0..~1 per stamp (caller scales by flow × pressure): at 1.0
+    the center is fully cleared in one stamp; lower values erase gradually.
+    Same edge-assist gating as ``stamp_brush`` when enabled.
+    """
+    h, w = mask.data.shape
+    r = max(1.0, float(radius))
+    x0 = max(0, int(cx - r - 1))
+    x1 = min(w, int(cx + r + 2))
+    y0 = max(0, int(cy - r - 1))
+    y1 = min(h, int(cy + r + 2))
+    if x1 <= x0 or y1 <= y0:
+        return (x0, y0, x1, y1)
+
+    falloff = circular_brush_falloff(y0, y1, x0, x1, cx, cy, r)
+
+    if (
+        edge_assist
+        and luminance is not None
+        and luminance.shape[:2] == (h, w)
+    ):
+        falloff = falloff * _edge_assist_gate(
+            luminance, y0, x0, y1, x1, cx, cy, luma_tol=luma_tol
+        )
+
+    # Multiplicative erase toward zero: factor 1 at edge, (1-strength) at center.
+    amount = np.clip(falloff * float(strength), 0.0, 1.0)
+    factor = (1.0 - amount).astype(np.float32)
+    region = mask.data[y0:y1, x0:x1]
+    region *= factor
+    mask.touch()
+    return (x0, y0, x1, y1)
+
+
 def edge_snap_region(
     mask: DodgeBurnMask,
     luminance: np.ndarray,

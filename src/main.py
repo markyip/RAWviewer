@@ -863,7 +863,8 @@ safe_print("Basic imports done, importing PyQt6...", flush=True)
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QLabel, QFileDialog, QSplitter,
                              QMessageBox, QScrollArea, QSizePolicy, QPushButton, QDialog, QSplashScreen, QInputDialog,
-                             QLineEdit, QStackedLayout, QGraphicsOpacityEffect, QMenu, QStatusBar, QScrollBar)
+                             QLineEdit, QStackedLayout, QGraphicsOpacityEffect, QMenu, QStatusBar, QScrollBar,
+                             QLayout)
 from PyQt6.QtCore import Qt, pyqtSignal, pyqtSlot, QPoint, QEvent, QSettings, QSize, QRect, QObject, QRunnable, QThreadPool, QTimer, QPropertyAnimation, QEasingCurve, QUrl
 from PyQt6.QtGui import (QPixmap, QImage, QAction, QKeySequence, QShortcut, QDragEnterEvent, QDropEvent, QCursor, QIcon,
                          QTransform, QRegion, QPainter, QColor, QPen, QDesktopServices)
@@ -8586,6 +8587,9 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 if editing_features_enabled():
                     self.gpu_view.colorPickRequested.connect(self._on_wb_color_picked)
                     self.gpu_view.dodgeBurnStroke.connect(self._on_dodge_burn_stroke)
+                    self.gpu_view.dodgeBurnBrushSizeWheel.connect(
+                        self._on_dodge_burn_brush_size_wheel
+                    )
                     self.gpu_view.cropInsetsChanged.connect(self._on_crop_insets_live)
                     self.gpu_view.cropEditingFinished.connect(
                         lambda: None
@@ -8979,7 +8983,9 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self.search_bottom_button.hide()
         left_buttons_layout.addWidget(self.search_bottom_button, 0, alignment=Qt.AlignmentFlag.AlignVCenter)
 
-        # Search panel: in-row width animation (v2.1 layout — avoids overlay blocking Open)
+        # Search panel: floated onto status_bar_widget (see construction below).
+        # Must not join left_buttons_layout — in-row width animation reflows
+        # trailing status icons every frame.
         self.search_expand_container = QWidget()
         self.search_expand_container.setFixedHeight(28)
         self.search_expand_container.setSizePolicy(
@@ -8989,6 +8995,13 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self.search_expand_container.setMaximumWidth(0)
         self.search_expand_layout = QStackedLayout(self.search_expand_container)
         self.search_expand_layout.setContentsMargins(0, 0, 0, 0)
+        # Width animation clips a fixed-size field; layout must not fight setFixedWidth.
+        try:
+            self.search_expand_layout.setSizeConstraint(
+                QLayout.SizeConstraint.SetNoConstraint
+            )
+        except Exception:
+            pass
 
         self.gallery_search_panel = QWidget()
         self.gallery_search_panel.setFixedHeight(28)
@@ -9063,9 +9076,10 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self._search_panel_target_width_idle = 310
         self._search_panel_expanded = False
         self._search_panel_animation = None
-        left_buttons_layout.addWidget(
-            self.search_expand_container, 0, alignment=Qt.AlignmentFlag.AlignVCenter
-        )
+        self._search_panel_anim_content_width = 0
+        self._pending_search_index_corpus = None
+        # Floated onto status_bar_widget after the bar is built — must NOT live
+        # in left_buttons_layout or opening search reflows the trailing icons.
         self.search_expand_container.hide()
         # Index progress in the search field only after the user opens search (not folder load).
         self._gallery_search_show_index_progress = False
@@ -9207,6 +9221,13 @@ class RAWImageViewer(SessionMixin, QMainWindow):
 
         self.status_bar_widget = status_widget
         self.left_buttons_widget = left_buttons_widget
+
+        # Search field overlays the status bar to the right of the search
+        # button so left/right chrome keep a fixed footprint (no icon flicker).
+        if getattr(self, "search_expand_container", None) is not None:
+            self.search_expand_container.setParent(status_widget)
+            self.search_expand_container.raise_()
+            self.search_expand_container.hide()
 
         # Add custom widget to status bar
         self.status_bar.addPermanentWidget(status_widget, 1)
@@ -10100,6 +10121,9 @@ class RAWImageViewer(SessionMixin, QMainWindow):
 
     def _apply_gallery_search_input_width(self, width: int, *, progress: bool = False) -> None:
         """Apply search-field width; pin min=max whenever progress or idle-expanded."""
+        # Pinning mid-slide fights overlay geometry and looks like a halfway pause.
+        if self._search_panel_animation_running():
+            return
         inp = getattr(self, "gallery_search_input", None)
         if inp is None:
             return
@@ -10166,6 +10190,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
 
         busy = self._is_gallery_search_indexing_active()
         panel_visible = self._gallery_search_panel_is_visible()
+        animating = self._search_panel_animation_running()
         inp = getattr(self, "gallery_search_input", None)
         if inp is not None:
             if has_msg:
@@ -10175,9 +10200,10 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 self._search_panel_target_width = self._gallery_search_status_panel_width(
                     self._gallery_search_status_full
                 )
-                if panel_visible:
+                # Defer pinning until the open/close slide finishes.
+                if panel_visible and not animating:
                     self._apply_gallery_search_input_width(w, progress=True)
-            elif panel_visible:
+            elif panel_visible and not animating:
                 self._reset_gallery_search_panel_width()
             self._apply_gallery_search_status_placeholder()
             self._sync_gallery_search_input_editable()
@@ -10192,7 +10218,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             return
 
         if not has_msg:
-            self._reset_gallery_search_panel_width()
+            if not animating:
+                self._reset_gallery_search_panel_width()
         else:
             self._search_panel_target_width = self._gallery_search_status_panel_width(
                 self._gallery_search_status_full
@@ -10226,21 +10253,109 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         h = max(btn.height(), 28)
         return origin.x() + btn.width() + gap, origin.y(), h
 
+    def _place_search_expand_overlay(self, width: int) -> None:
+        """Position the floating search strip; width 0 hides it.
+
+        Does not touch left_buttons / right_status layouts — that in-row
+        maximumWidth animation was what made trailing icons flicker.
+
+        Open/close animate a clip mask over a fixed full-width field so
+        layout never reflows mid-slide (the old per-frame resize caused the
+        halfway-pause look on collapse).
+        """
+        container = getattr(self, "search_expand_container", None)
+        host = getattr(self, "status_bar_widget", None)
+        if container is None or host is None:
+            return
+        reveal_w = max(0, int(width))
+        anchor = self._search_expand_overlay_anchor()
+        if anchor is None:
+            if reveal_w <= 0:
+                try:
+                    container.clearMask()
+                except Exception:
+                    pass
+                container.hide()
+            return
+        x, y, h = anchor
+        trailing = getattr(self, "right_status_trailing", None)
+        max_w = None
+        if trailing is not None and trailing.isVisible():
+            try:
+                right_limit = trailing.mapTo(host, QPoint(0, 0)).x() - 8
+                max_w = max(0, int(right_limit) - int(x))
+            except Exception:
+                max_w = None
+        if max_w is None:
+            max_w = max(0, host.width() - int(x) - 8)
+
+        content_w = int(getattr(self, "_search_panel_anim_content_width", 0) or 0)
+        if content_w <= 0:
+            content_w = int(getattr(self, "_search_panel_target_width", 310) or 310)
+        content_w = min(max(1, content_w), int(max_w) if max_w > 0 else content_w)
+        reveal_w = min(reveal_w, content_w)
+
+        panel = getattr(self, "gallery_search_panel", None)
+        inp = getattr(self, "gallery_search_input", None)
+        if reveal_w > 0 or bool(getattr(self, "_search_panel_expanded", False)):
+            if panel is not None:
+                panel.setFixedHeight(int(h))
+                panel.setFixedWidth(int(content_w))
+            if inp is not None:
+                inp.setFixedHeight(min(28, int(h)))
+                inp.setFixedWidth(max(140, int(content_w) - 10))
+
+        # Footprint stays at full content width; mask reveals/hides.
+        geo_w = content_w if reveal_w > 0 else 0
+        container.setGeometry(int(x), int(y), int(geo_w), int(h))
+        container.setFixedHeight(int(h))
+        container.setFixedWidth(int(geo_w) if geo_w > 0 else 0)
+        if reveal_w > 0:
+            if container.parent() is not host:
+                container.setParent(host)
+            try:
+                container.setMask(QRegion(0, 0, int(reveal_w), int(h)))
+            except Exception:
+                pass
+            container.show()
+            container.raise_()
+        else:
+            try:
+                container.clearMask()
+            except Exception:
+                pass
+            container.hide()
+
     def _apply_search_expand_overlay_geometry(
         self, width: int, *, expanded: bool | None = None
     ) -> None:
-        """Resize the in-layout search strip (legacy name kept for callers)."""
+        """Resize/place the floating search strip (legacy name kept for callers)."""
         if expanded is None:
             expanded = int(width) > 0
         if int(width) > 0:
             self._search_panel_target_width = int(width)
         self._set_search_panel_expanded(bool(expanded), animate=False)
 
+    def _search_panel_animation_running(self) -> bool:
+        anim = getattr(self, "_search_panel_animation", None)
+        if anim is None:
+            return False
+        try:
+            from PyQt6.QtCore import QAbstractAnimation
+
+            return anim.state() == QAbstractAnimation.State.Running
+        except Exception:
+            return True
+
     def _sync_search_expand_overlay(self) -> None:
-        expanded = bool(getattr(self, "_search_panel_expanded", False))
-        self._set_search_panel_expanded(
-            expanded,
-            animate=False,
+        # Re-anchor after status-bar relayout; never interrupt an in-flight slide.
+        if self._search_panel_animation_running():
+            return
+        if not getattr(self, "_search_panel_expanded", False):
+            self._place_search_expand_overlay(0)
+            return
+        self._place_search_expand_overlay(
+            int(getattr(self, "_search_panel_target_width", 310) or 310)
         )
 
     def _schedule_search_expand_overlay_sync(self, delay_ms: int = 0) -> None:
@@ -10254,17 +10369,29 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         timer.start(max(0, int(delay_ms)))
 
     def _apply_search_expand_container_width(self, target: int, *, animate: bool = False) -> None:
-        """Resize the in-layout search strip; skip redundant updates."""
+        """Resize the floating search strip; skip redundant updates."""
         if not hasattr(self, "search_expand_container") or self.search_expand_container is None:
             return
         target = max(0, int(target))
         expanded = target > 0
         container = self.search_expand_container
-        current_w = container.maximumWidth() if container.isVisible() else 0
+        current_w = container.width() if container.isVisible() else 0
         if (
             current_w == target
             and bool(getattr(self, "_search_panel_expanded", False)) == expanded
         ):
+            return
+        if not animate and self._search_panel_animation_running():
+            if target > 0:
+                self._search_panel_target_width = target
+                # Extend the in-flight slide instead of restarting (avoids pause).
+                anim = getattr(self, "_search_panel_animation", None)
+                if anim is not None:
+                    try:
+                        if int(target) > int(anim.endValue()):
+                            anim.setEndValue(int(target))
+                    except Exception:
+                        pass
             return
         if target > 0:
             self._search_panel_target_width = target
@@ -10318,55 +10445,150 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 self._search_panel_target_width = int(
                     getattr(self, "_search_panel_target_width_idle", 310) or 310
                 )
-        target = self._search_panel_target_width if expanded else 0
+        target = int(self._search_panel_target_width if expanded else 0)
+        was_expanded = bool(getattr(self, "_search_panel_expanded", False))
         self._search_panel_expanded = bool(expanded)
         container = self.search_expand_container
 
         if not expanded:
-            self._release_gallery_search_panel_width()
+            # Don't release child widths until the collapse slide finishes —
+            # releasing mid-setup reflows the field and causes a halfway hitch.
             if hasattr(self, "gallery_search_input") and self.gallery_search_input is not None:
                 try:
                     self.gallery_search_input.clearFocus()
                 except Exception:
                     pass
-            if not self._is_gallery_search_indexing_active():
-                self._reset_gallery_search_to_idle()
 
         if expanded:
-            container.show()
+            # Child min-width must not fight the 0→target slide.
+            self._release_gallery_search_panel_width()
+            if hasattr(self, "search_expand_layout") and hasattr(self, "gallery_search_panel"):
+                try:
+                    self.search_expand_layout.setCurrentWidget(self.gallery_search_panel)
+                except Exception:
+                    pass
+
+        # Visible footprint is full content width; reveal amount is the mask.
+        content_now = int(getattr(self, "_search_panel_anim_content_width", 0) or 0)
+        if content_now <= 0:
+            content_now = int(
+                getattr(self, "_search_panel_target_width", 310) or 310
+            )
+        current_w = content_now if (container.isVisible() and was_expanded) else 0
+        if (
+            was_expanded == bool(expanded)
+            and (
+                (expanded and current_w == target)
+                or (not expanded and not container.isVisible())
+            )
+            and not self._search_panel_animation_running()
+        ):
+            if not expanded:
+                self._search_panel_anim_content_width = 0
+                self._place_search_expand_overlay(0)
+            return
 
         anim = getattr(self, "_search_panel_animation", None)
         if anim is not None:
+            try:
+                anim.finished.disconnect()
+            except Exception:
+                pass
             try:
                 anim.stop()
             except Exception:
                 pass
             self._search_panel_animation = None
 
+        # Clip-reveal: keep the field laid out at the final width for the whole slide.
+        if expanded:
+            self._search_panel_anim_content_width = max(1, int(target))
+        else:
+            self._search_panel_anim_content_width = max(1, int(content_now))
+
         if not animate:
-            container.setMinimumWidth(target)
-            container.setMaximumWidth(target)
-            if not expanded:
-                container.hide()
+            if expanded:
+                self._search_panel_anim_content_width = max(1, int(target))
+                self._place_search_expand_overlay(target)
+                self._search_panel_anim_content_width = 0
+                self._reapply_gallery_search_panel_width_from_status()
+                self._place_search_expand_overlay(target)
+                try:
+                    self.search_expand_container.clearMask()
+                except Exception:
+                    pass
+            else:
+                self._search_panel_anim_content_width = 0
+                self._place_search_expand_overlay(0)
+                self._release_gallery_search_panel_width()
+                if not self._is_gallery_search_indexing_active():
+                    self._reset_gallery_search_to_idle()
+                QTimer.singleShot(0, self._restore_keyboard_focus)
+            self._run_pending_search_index_after_expand()
             return
 
-        panel_anim = QPropertyAnimation(container, b"maximumWidth")
-        panel_anim.setDuration(180)
-        panel_anim.setStartValue(container.maximumWidth())
-        panel_anim.setEndValue(target)
-        panel_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
-        container.setMinimumWidth(0)
+        from PyQt6.QtCore import QVariantAnimation
+
+        start_w = current_w if was_expanded or container.isVisible() else 0
+        if expanded and start_w <= 0:
+            # Seed a zero-reveal mask so the first frame has a valid anchor.
+            self._place_search_expand_overlay(0)
+            start_w = 0
+        elif not expanded and start_w <= 0:
+            start_w = int(self._search_panel_anim_content_width)
+
+        panel_anim = QVariantAnimation(self)
+        panel_anim.setDuration(200)
+        panel_anim.setStartValue(int(start_w))
+        panel_anim.setEndValue(int(target))
+        panel_anim.setEasingCurve(QEasingCurve.Type.InOutCubic)
+        panel_anim.valueChanged.connect(
+            lambda v: self._place_search_expand_overlay(int(v))
+        )
         self._search_panel_animation = panel_anim
 
-        def _finish():
-            container.setMinimumWidth(target)
-            container.setMaximumWidth(target)
+        def _finish(exp=bool(expanded), tgt=int(target)):
             self._search_panel_animation = None
-            if not expanded:
-                container.hide()
+            if exp:
+                final = max(
+                    int(tgt),
+                    int(getattr(self, "_search_panel_target_width", tgt) or tgt),
+                )
+                self._search_panel_target_width = final
+                self._search_panel_anim_content_width = final
+                self._place_search_expand_overlay(final)
+                self._search_panel_anim_content_width = 0
+                self._reapply_gallery_search_panel_width_from_status()
+                final = int(
+                    getattr(self, "_search_panel_target_width", final) or final
+                )
+                self._place_search_expand_overlay(final)
+                try:
+                    self.search_expand_container.clearMask()
+                except Exception:
+                    pass
+                self._run_pending_search_index_after_expand()
+            else:
+                self._search_panel_anim_content_width = 0
+                self._place_search_expand_overlay(0)
+                self._release_gallery_search_panel_width()
+                if not self._is_gallery_search_indexing_active():
+                    self._reset_gallery_search_to_idle()
+                QTimer.singleShot(0, self._restore_keyboard_focus)
 
         panel_anim.finished.connect(_finish)
         panel_anim.start()
+
+    def _run_pending_search_index_after_expand(self) -> None:
+        """Start indexing only after the open slide finishes (avoids mid-slide relayout)."""
+        corpus = getattr(self, "_pending_search_index_corpus", None)
+        self._pending_search_index_corpus = None
+        if corpus is None:
+            return
+        if not corpus:
+            self._set_gallery_search_status("No images available for semantic search")
+            return
+        self._start_user_semantic_indexing(corpus)
 
     def _is_semantic_index_ready(self, corpus_files):
         now = time.time()
@@ -11534,6 +11756,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         if self._search_panel_expanded:
             logger.info("[SEARCH][BUTTON] expanded -> collapse panel")
             safe_print("[SEARCH_DEBUG] Collapsing search panel.")
+            self._pending_search_index_corpus = None
             if self._is_gallery_search_indexing_active():
                 self._gallery_search_user_collapsed_while_busy = True
             self._gallery_search_user_wants_semantic = False
@@ -11554,15 +11777,13 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             "[SEARCH][BUTTON] collapsed -> expand and request semantic (corpus=%d)",
             len(corpus_files),
         )
+        # Indexing/status text must wait until the open slide finishes — otherwise
+        # placeholder/width updates mid-animation create the halfway-pause look.
+        self._pending_search_index_corpus = list(corpus_files or [])
         self._set_search_panel_expanded(True, animate=True)
-        self._set_gallery_search_input_visible(animate=True)
+        # Keep the width animation alone — a second expand via
+        # gallery-search input-visible would restart it and snap icons.
         self._sync_gallery_search_input_editable()
-
-        if not corpus_files:
-            self._set_gallery_search_status("No images available for semantic search")
-            return
-
-        self._start_user_semantic_indexing(corpus_files)
 
     def _build_semantic_index_current_folder(self):
         # Legacy menu path retained for compatibility; use same gallery button flow.
@@ -17093,6 +17314,22 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             )
         from raw_adjustments import editing_features_enabled
 
+        # Editor-open: show Adjust-relevant shortcuts (H/M are browse-only).
+        if getattr(self, "_adjust_overlay_visible", False):
+            lines = [
+                "E / Esc — Close Adjust panel",
+                "Space / Double-click — Toggle fit-to-window / 100% zoom",
+                "Trackpad Pinch / Ctrl+Scroll — Smooth zoom in/out",
+                "Dodge/Burn armed: two-finger scroll — Brush Size",
+                "D / B / X — Arm Dodge / Burn / Eraser (again to disarm)",
+                "O — Toggle Mask overlay (when a brush tool is armed)",
+                "← / → — Nudge focused slider (or previous/next when none focused)",
+                "J — Show/hide highlight/shadow clipping",
+                "G — Cycle composition guide",
+                "F — Show/hide focus point",
+            ]
+            return "\n".join(lines)
+
         lines = [
             "Space / Double-click — Toggle fit-to-window / 100% zoom",
             "Trackpad Pinch / Ctrl+Scroll — Smooth zoom in/out",
@@ -20263,9 +20500,21 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 self._set_search_panel_expanded(False, animate=False)
             self._maybe_maximize_brightness_for_adjust(True)
         bar = self._filmstrip_bar()
-        if self._adjust_overlay_visible and self._single_view_has_display_image():
+        if self._adjust_overlay_visible:
+            # Opening: always show the panel. Do not gate on a display image —
+            # opening from embedded-JPEG browse toggles RAW first and can
+            # briefly clear on-screen pixels; the old gate fell through to the
+            # close branch and left _adjust_overlay_visible stuck True with a
+            # hidden panel (editor unreachable).
+            # Hide floating browse overlays — Adjust has its own histogram.
             panel.setVisible(True)
             self.single_image_histogram.hide()
+            self._map_hidden_for_adjust = bool(
+                getattr(self, "_map_overlay_visible", False)
+            )
+            if self._map_hidden_for_adjust:
+                self._map_overlay_visible = False
+                self._clear_location_map()
             # Give the adjust panel its preferred width so slider values
             # aren't clipped (panel min-width alone isn't enough under QSplitter).
             splitter = getattr(self, "single_view_splitter", None)
@@ -20310,6 +20559,10 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             panel.setVisible(False)
             if getattr(self, "_histogram_overlay_visible", False):
                 self.single_image_histogram.show()
+            if getattr(self, "_map_hidden_for_adjust", False):
+                self._map_hidden_for_adjust = False
+                self._map_overlay_visible = True
+                self._sync_location_map()
             if not self._adjust_overlay_visible:
                 self._adjust_preview_base_rgb = None
                 self._adjust_preview_base_rgb_fast = None
@@ -20328,6 +20581,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 container._raise_single_view_layers()
         self._last_status_signature = None
         self.update_status_bar()
+        if hasattr(self, "shortcuts_hint_button"):
+            self.shortcuts_hint_button.setToolTip(self._keyboard_shortcuts_tooltip())
         QTimer.singleShot(0, self._restore_keyboard_focus)
 
     def _adjust_maximize_brightness_enabled(self) -> bool:
@@ -20638,6 +20893,10 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         Esc used to call ``_set_adjust_panel_visible(False)`` only, which left
         ``use_embedded_jpeg_workflow=False`` behind — the next gallery click
         then loaded in RAW mode. E-toggle already restored; share that path.
+
+        Gallery close sets ``view_mode`` to gallery *before* this runs, so
+        ``toggle_raw_jpeg_workflow()`` (which no-ops outside single view)
+        cannot restore the setting — write it directly in that case.
         """
         if not getattr(self, "_adjust_overlay_visible", False):
             return
@@ -20650,8 +20909,21 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             self._adjust_forced_raw_workflow = False
             settings = self.get_settings()
             use_embedded = settings.value("use_embedded_jpeg_workflow", True, type=bool)
-            if not use_embedded:
+            if use_embedded:
+                return
+            if getattr(self, "view_mode", "single") == "single":
                 self.toggle_raw_jpeg_workflow()
+                return
+            # Already left single view (e.g. Esc→gallery): flip the setting
+            # without a single-view reload.
+            settings.setValue("use_embedded_jpeg_workflow", True)
+            try:
+                from common_image_loader import invalidate_libraw_consistent_preview_settings
+
+                invalidate_libraw_consistent_preview_settings()
+            except Exception:
+                pass
+            self._update_raw_toggle_button_state()
 
     def _sync_adjust_panel_for_current_file(self, *, force: bool = False) -> None:
         panel = getattr(self, "single_image_adjust_panel", None)
@@ -21200,6 +21472,25 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         if panel is None or gv is None or not hasattr(gv, "set_dodge_burn_brush_radius"):
             return
         gv.set_dodge_burn_brush_radius(panel.dodge_burn_brush_radius())
+        if hasattr(gv, "set_dodge_burn_brush_flow"):
+            gv.set_dodge_burn_brush_flow(panel.dodge_burn_brush_strength())
+
+    def _on_dodge_burn_brush_size_wheel(self, wheel_delta: int) -> None:
+        """Trackpad/wheel while Dodge/Burn is armed → Brush Size, not navigate."""
+        panel = getattr(self, "single_image_adjust_panel", None)
+        if panel is None or panel.dodge_burn_mode() is None:
+            return
+        if hasattr(panel, "nudge_dodge_burn_brush_size"):
+            panel.nudge_dodge_burn_brush_size(int(wheel_delta))
+        else:
+            # Fallback if panel build is older than this hook.
+            slider = getattr(panel, "_db_size_slider", None)
+            if slider is None:
+                return
+            amount = 8 if wheel_delta > 0 else -8
+            slider.setValue(
+                max(slider.minimum(), min(slider.maximum(), slider.value() + amount))
+            )
 
     def _on_xmp_preset_applied(self) -> None:
         """Drop per-image local mask when a global XMP look is applied."""
@@ -21400,6 +21691,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             from raw_dodge_burn import (
                 DodgeBurnMask,
                 edge_snap_region,
+                erase_brush,
                 stamp_brush,
             )
             from perf_metrics import perf_mark
@@ -21481,16 +21773,31 @@ class RAWImageViewer(SessionMixin, QMainWindow):
 
             edge_on = bool(panel.dodge_burn_edge_assist())
             t_stamp = time.perf_counter()
-            bbox = stamp_brush(
-                mask,
-                mx,
-                my,
-                radius,
-                delta,
-                dodge=(mode == "dodge"),
-                luminance=luma,
-                edge_assist=edge_on,
-            )
+            if mode == "erase":
+                # Flow × pressure → erase amount (1.0 clears center in one stamp).
+                erase_amt = panel.dodge_burn_brush_strength() * max(
+                    0.05, float(pressure)
+                )
+                bbox = erase_brush(
+                    mask,
+                    mx,
+                    my,
+                    radius,
+                    erase_amt,
+                    luminance=luma,
+                    edge_assist=edge_on,
+                )
+            else:
+                bbox = stamp_brush(
+                    mask,
+                    mx,
+                    my,
+                    radius,
+                    delta,
+                    dodge=(mode == "dodge"),
+                    luminance=luma,
+                    edge_assist=edge_on,
+                )
             stamp_ms = (time.perf_counter() - t_stamp) * 1000.0
             perf_acc = getattr(self, "_dodge_burn_stroke_perf", None)
             if isinstance(perf_acc, dict):
@@ -21509,7 +21816,10 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                     mw=mw,
                 )
             self._dodge_burn_stroke_active = True
-            panel.set_dodge_burn_mask_present(True)
+            if mask.is_empty:
+                panel.set_dodge_burn_mask_present(False)
+            else:
+                panel.set_dodge_burn_mask_present(True)
 
             # Keep Show Mask overlay in sync while painting (throttled).
             if panel.dodge_burn_show_mask():
@@ -21942,6 +22252,34 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 pass
 
         threading.Thread(target=_worker, daemon=True).start()
+
+    def _apply_dodge_burn_mask_from_adj(self, adj: dict | None) -> None:
+        """Restore the in-memory dodge/burn mask from an adjustments dict.
+
+        Undo / file load push sliders via ``set_adjustments``, but the live
+        mask lives on the main window (``_dodge_burn_mask``). Without this,
+        Ctrl/Cmd+Z restored slider state then ``_on_adjust_panel_editing_finished``
+        re-serialized the still-current painted mask and undo looked broken.
+        """
+        from raw_dodge_burn import MASK_KEY, deserialize_mask
+
+        serial = str((adj or {}).get(MASK_KEY, "") or "").strip()
+        mask = None
+        if serial and not serial.startswith("mem:"):
+            try:
+                mask = deserialize_mask(serial)
+            except Exception:
+                mask = None
+        if mask is not None and getattr(mask, "is_empty", False):
+            mask = None
+        self._dodge_burn_mask = mask
+        self._dodge_burn_luma_guide = None
+        self._dodge_burn_mask_shape_cache_key = None
+        self._dodge_burn_mask_shape_cached = None
+        panel = getattr(self, "single_image_adjust_panel", None)
+        if panel is not None:
+            panel.set_dodge_burn_mask_present(mask is not None)
+        self._sync_dodge_burn_mask_overlay()
 
     def _on_adjust_panel_editing_finished(self, adj: dict) -> None:
         path = getattr(self, "current_file_path", None)
@@ -27564,9 +27902,17 @@ class RAWImageViewer(SessionMixin, QMainWindow):
     def _shortcut_blocked_by_text_input(self) -> bool:
         focused = self.focusWidget()
         from PyQt6.QtWidgets import QLineEdit, QTextEdit, QPlainTextEdit
-        return bool(
-            focused and isinstance(focused, (QLineEdit, QTextEdit, QPlainTextEdit))
-        )
+
+        if not focused or not isinstance(focused, (QLineEdit, QTextEdit, QPlainTextEdit)):
+            return False
+        # Locked/read-only search field (indexing) must not swallow E / Esc /
+        # nav shortcuts — otherwise the editor looks unreachable after search.
+        try:
+            if focused.isReadOnly():
+                return False
+        except Exception:
+            pass
+        return True
 
     def _is_widget_in_main_window(self, obj) -> bool:
         from PyQt6.QtWidgets import QWidget
@@ -27612,6 +27958,9 @@ class RAWImageViewer(SessionMixin, QMainWindow):
     def _shortcut_activate_histogram(self) -> None:
         if getattr(self, "view_mode", "") != "single":
             return
+        if getattr(self, "_adjust_overlay_visible", False):
+            # Editor already has an in-panel histogram; floating H overlay is browse-only.
+            return
         if self._shortcut_blocked_by_text_input():
             return
         self._histogram_overlay_visible = not getattr(
@@ -27630,6 +27979,9 @@ class RAWImageViewer(SessionMixin, QMainWindow):
 
     def _shortcut_activate_location_map(self) -> None:
         if getattr(self, "view_mode", "") != "single":
+            return
+        if getattr(self, "_adjust_overlay_visible", False):
+            # Map overlay fights the Adjust panel layout; browse-only.
             return
         if self._shortcut_blocked_by_text_input():
             return
@@ -27756,18 +28108,22 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             if hasattr(self, "status_bar"):
                 self.status_bar.showMessage("Nothing to undo for this image", 2500)
             return
-        
+
         old_adj = history.pop()
-        
+
         self._disable_undo_tracking = True
         try:
             panel = getattr(self, "single_image_adjust_panel", None)
             if panel is not None:
                 panel.set_adjustments(old_adj)
+            # Mask is not a panel slider — restore the live buffer before
+            # editing_finished re-serializes whatever is in _dodge_burn_mask.
+            self._apply_dodge_burn_mask_from_adj(old_adj)
+            if panel is not None:
                 self._on_adjust_panel_editing_finished(old_adj)
         finally:
             self._disable_undo_tracking = False
-        
+
         if hasattr(self, "status_bar"):
             self.status_bar.showMessage("Undo applied", 2500)
 
@@ -27868,6 +28224,21 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 panel = getattr(self, "single_image_adjust_panel", None)
                 if panel is not None:
                     panel.toggle_dodge_burn_show_mask()
+                    return True
+            if key == Qt.Key.Key_D and not ctrl_or_cmd:
+                panel = getattr(self, "single_image_adjust_panel", None)
+                if panel is not None and hasattr(panel, "set_dodge_burn_mode"):
+                    panel.set_dodge_burn_mode("dodge")
+                    return True
+            if key == Qt.Key.Key_B and not ctrl_or_cmd:
+                panel = getattr(self, "single_image_adjust_panel", None)
+                if panel is not None and hasattr(panel, "set_dodge_burn_mode"):
+                    panel.set_dodge_burn_mode("burn")
+                    return True
+            if key == Qt.Key.Key_X and not ctrl_or_cmd:
+                panel = getattr(self, "single_image_adjust_panel", None)
+                if panel is not None and hasattr(panel, "set_dodge_burn_mode"):
+                    panel.set_dodge_burn_mode("erase")
                     return True
 
         if key == Qt.Key.Key_Escape:
@@ -28642,6 +29013,15 @@ class RAWImageViewer(SessionMixin, QMainWindow):
 
     def _on_gpu_wheel_navigate(self, direction: int):
         """Plain wheel while fit-to-window navigates images (legacy parity)."""
+        panel = getattr(self, "single_image_adjust_panel", None)
+        if (
+            panel is not None
+            and getattr(self, "_adjust_overlay_visible", False)
+            and panel.dodge_burn_mode() is not None
+        ):
+            # Safety net: D&B should have consumed the wheel in GpuImageView.
+            self._on_dodge_burn_brush_size_wheel(120 if direction < 0 else -120)
+            return
         import time
         now = time.monotonic()
         last = float(getattr(self, "_last_wheel_nav_ts", 0.0))
@@ -30892,6 +31272,16 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 
                 # Only navigate if image is fit-to-window (not zoomed)
                 if hasattr(self, 'fit_to_window') and self.fit_to_window:
+                    # Dodge/Burn armed: scroll changes brush size, not image.
+                    panel = getattr(self, "single_image_adjust_panel", None)
+                    if (
+                        panel is not None
+                        and getattr(self, "_adjust_overlay_visible", False)
+                        and panel.dodge_burn_mode() is not None
+                        and abs(vertical_delta) > 0
+                    ):
+                        self._on_dodge_burn_brush_size_wheel(int(vertical_delta))
+                        return True
                     # In fit-to-window mode: only use vertical wheel for navigation
                     # Horizontal wheel is disabled for navigation
                     if abs(vertical_delta) > 0:

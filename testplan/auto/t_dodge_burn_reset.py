@@ -37,11 +37,18 @@ def main() -> int:
         def set_dodge_burn_mask_present(self, present):
             self.mask_present_calls.append(present)
 
+        def dodge_burn_show_mask(self):
+            return False
+
     def make_mock(*, mask):
         m = type("M", (), {})()
         m._dodge_burn_mask = mask
         m.single_image_adjust_panel = FakePanel()
+        m.gpu_view = None
         m._on_adjust_panel_reset = mainmod.RAWImageViewer._on_adjust_panel_reset.__get__(m)
+        m._sync_dodge_burn_mask_overlay = (
+            mainmod.RAWImageViewer._sync_dodge_burn_mask_overlay.__get__(m)
+        )
         return m
 
     # 1. A painted mask must be cleared by reset.

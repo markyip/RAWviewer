@@ -61,6 +61,26 @@ def main() -> int:
     burned = apply_dodge_burn(img, mask_b, 1.75)
     check("burn darkens center", burned[50, 75, 0] < img[50, 75, 0])
 
+    # 2b. Eraser pulls dodge/burn toward zero
+    from raw_dodge_burn import erase_brush
+
+    mask_e = DodgeBurnMask.empty(100, 150)
+    stamp_brush(mask_e, 75, 50, 20, 0.5, dodge=True)
+    before = float(mask_e.data[50, 75])
+    erase_brush(mask_e, 75, 50, 20, 0.6)
+    after = float(mask_e.data[50, 75])
+    check(
+        "erase reduces |mask| toward zero",
+        abs(after) < abs(before),
+        f"before={before:.3f} after={after:.3f}",
+    )
+    erase_brush(mask_e, 75, 50, 20, 1.0)
+    check(
+        "full-strength erase clears brush center",
+        abs(float(mask_e.data[50, 75])) < 1e-4,
+        f"center={float(mask_e.data[50, 75]):.5f}",
+    )
+
     # 3. Repeated same-sign strokes accumulate (brush builds up like a real tool)
     mask_acc = DodgeBurnMask.empty(100, 150)
     stamp_brush(mask_acc, 75, 50, 20, 0.1, dodge=True)

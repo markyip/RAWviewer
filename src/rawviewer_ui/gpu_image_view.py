@@ -476,6 +476,9 @@ class GpuImageView(QGraphicsView):
     # host's cue to edge-snap the touched region and trigger the exact
     # (worker-thread) re-render.
     dodgeBurnStroke = pyqtSignal(QPointF, float, bool)
+    # Vertical wheel/trackpad delta while D&B is armed — host nudges Brush Size
+    # instead of navigating images.
+    dodgeBurnBrushSizeWheel = pyqtSignal(int)
     # Crop overlay: insets changed / drag finished (CropLeft/Right/Top/Bottom).
     cropInsetsChanged = pyqtSignal(float, float, float, float)
     cropEditingFinished = pyqtSignal()
@@ -538,7 +541,9 @@ class GpuImageView(QGraphicsView):
         )
         self._brush_cursor_item.hide()
         self._dodge_burn_brush_radius = 40.0
+        self._dodge_burn_brush_flow = 0.55
         self._brush_cursor_pixmap_r = -1.0
+        self._brush_cursor_pixmap_flow = -1.0
         self._scene.addItem(self._brush_cursor_item)
 
         # Opt-in RGB→OpenGL paint path (RAWVIEWER_GPU_GL_TEX=1): skips QPixmap.
@@ -1619,6 +1624,14 @@ class GpuImageView(QGraphicsView):
     def set_dodge_burn_brush_radius(self, radius_px: float) -> None:
         """Brush radius in *display/scene* pixels (matches the Size slider)."""
         self._dodge_burn_brush_radius = max(2.0, float(radius_px))
+        self._refresh_brush_cursor_placement()
+
+    def set_dodge_burn_brush_flow(self, flow: float) -> None:
+        """Per-stroke flow 0..1 — drives preview opacity (matches Brush Flow)."""
+        self._dodge_burn_brush_flow = max(0.05, min(1.0, float(flow)))
+        self._refresh_brush_cursor_placement()
+
+    def _refresh_brush_cursor_placement(self) -> None:
         center = None
         if not self._brush_cursor_item.pixmap().isNull():
             off = self._brush_cursor_item.offset()
@@ -1633,10 +1646,15 @@ class GpuImageView(QGraphicsView):
             self._sync_brush_cursor_at_view_center()
 
     def _ensure_brush_cursor_pixmap(self) -> None:
-        """Build a soft radial preview matching ``circular_brush_falloff``."""
+        """Soft radial preview: size from radius, opacity from flow. No hard ring."""
         r = float(getattr(self, "_dodge_burn_brush_radius", 40.0))
-        # Rebuild when radius moves by >=0.5px (avoids thrashing on tiny slides).
-        if abs(r - float(getattr(self, "_brush_cursor_pixmap_r", -1.0))) < 0.5:
+        flow = float(getattr(self, "_dodge_burn_brush_flow", 0.55))
+        # Rebuild when radius moves by >=0.5px or flow by >=2%.
+        if (
+            abs(r - float(getattr(self, "_brush_cursor_pixmap_r", -1.0))) < 0.5
+            and abs(flow - float(getattr(self, "_brush_cursor_pixmap_flow", -1.0)))
+            < 0.02
+        ):
             if not self._brush_cursor_item.pixmap().isNull():
                 return
         try:
@@ -1647,17 +1665,11 @@ class GpuImageView(QGraphicsView):
             size = 2 * ri + 1
             falloff = circular_brush_falloff(0, size, 0, size, float(ri), float(ri), r)
             rgba = np.zeros((size, size, 4), dtype=np.uint8)
-            # Soft white fill with alpha = falloff (center opaque-ish, edge 0).
+            # Soft white fill; peak alpha scales with Brush Flow so the preview
+            # matches how strong each stamp will land.
+            peak_alpha = 40.0 + flow * 160.0  # ~48 at flow 0.05 … ~200 at 1.0
             rgba[..., 0:3] = 255
-            rgba[..., 3] = np.clip(falloff * 150.0, 0, 255).astype(np.uint8)
-            # Thin size ring near the nominal radius for readability.
-            yy, xx = np.mgrid[0:size, 0:size].astype(np.float32)
-            dist = np.sqrt((xx - ri) ** 2 + (yy - ri) ** 2)
-            ring = np.clip(1.0 - np.abs(dist - r) / 1.25, 0.0, 1.0)
-            rgba[..., 3] = np.maximum(
-                rgba[..., 3],
-                np.clip(ring * 200.0, 0, 255).astype(np.uint8),
-            )
+            rgba[..., 3] = np.clip(falloff * peak_alpha, 0, 255).astype(np.uint8)
             rgba = np.ascontiguousarray(rgba)
             qimg = QImage(
                 rgba.data,
@@ -1668,10 +1680,12 @@ class GpuImageView(QGraphicsView):
             ).copy()
             self._brush_cursor_item.setPixmap(QPixmap.fromImage(qimg))
             self._brush_cursor_pixmap_r = r
+            self._brush_cursor_pixmap_flow = flow
         except Exception:
             # Fallback: empty — cursor still hidden OS-side while armed.
             self._brush_cursor_item.setPixmap(QPixmap())
             self._brush_cursor_pixmap_r = -1.0
+            self._brush_cursor_pixmap_flow = -1.0
 
     def _place_brush_cursor(self, scene_pt: QPointF) -> None:
         self._ensure_brush_cursor_pixmap()
@@ -2055,7 +2069,16 @@ class GpuImageView(QGraphicsView):
     def wheelEvent(self, event) -> None:
         delta = event.angleDelta().y()
         if delta == 0:
+            delta = event.pixelDelta().y()
+        if delta == 0:
             super().wheelEvent(event)
+            return
+        # Dodge/Burn armed: two-finger scroll changes Brush Size, not image.
+        if getattr(self, "_dodge_burn_mode", False) and not (
+            event.modifiers() & Qt.KeyboardModifier.ControlModifier
+        ):
+            self.dodgeBurnBrushSizeWheel.emit(int(delta))
+            event.accept()
             return
         ctrl = bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
         if ctrl:

@@ -710,6 +710,15 @@ class ImageAdjustPanelWidget(QWidget):
                 padding: 10px 14px;
                 min-height: 22px;
             }}
+            /* setMenu() draws a native caret; on dark chrome it reads as a
+               stray white speck on the right. Hide it — whole button still opens the menu. */
+            QPushButton#adjust_export_btn::menu-indicator {{
+                image: none;
+                width: 0px;
+                height: 0px;
+                padding: 0px;
+                border: none;
+            }}
             QPushButton#adjust_export_btn:hover {{
                 background: {theme.rgba(theme.EMBER_RGB, 110)};
                 color: {theme.INK};
@@ -879,9 +888,19 @@ class ImageAdjustPanelWidget(QWidget):
         header.addWidget(reset_btn)
         layout.addLayout(header)
 
-        hint = QLabel("E — hide · drag sliders · click value to reset")
+        hint = QLabel(
+            "E / Esc — close · D/B/X brush tools · two-finger scroll = Brush Size"
+        )
         hint.setStyleSheet(f"color: {theme.INK_FAINT}; font-size: 10px;")
         hint.setWordWrap(True)
+        hint.setToolTip(
+            "While Adjust is open:\n"
+            "• E or Esc closes the editor (restores browse RAW/JPEG mode)\n"
+            "• D / B / X arm Dodge / Burn / Eraser (press again to disarm)\n"
+            "• With a brush tool armed, two-finger scroll changes Brush Size "
+            "(Ctrl+scroll still zooms)\n"
+            "• Brush Flow changes how opaque the brush preview looks"
+        )
         layout.addWidget(hint)
 
         self._tone_curve_row = None
@@ -1286,11 +1305,25 @@ class ImageAdjustPanelWidget(QWidget):
         db_mode_lbl.setStyleSheet(f"color: {theme.INK}; font-size: 11px;")
         db_mode_lbl.setMinimumWidth(78)
         db_row.addWidget(db_mode_lbl)
-        self._dodge_btn = QPushButton("Dodge")
-        self._burn_btn = QPushButton("Burn")
+        self._dodge_btn = QPushButton("Dodge (D)")
+        self._burn_btn = QPushButton("Burn (B)")
+        self._erase_btn = QPushButton("Eraser (X)")
         for btn, tip in (
-            (self._dodge_btn, "Brush to brighten — soft falloff, edge-snaps on release"),
-            (self._burn_btn, "Brush to darken — soft falloff, edge-snaps on release"),
+            (
+                self._dodge_btn,
+                "Dodge (D) — brush to brighten; soft falloff, edge-snaps on release.\n"
+                "Two-finger scroll changes Brush Size; Ctrl+scroll zooms.",
+            ),
+            (
+                self._burn_btn,
+                "Burn (B) — brush to darken; soft falloff, edge-snaps on release.\n"
+                "Two-finger scroll changes Brush Size; Ctrl+scroll zooms.",
+            ),
+            (
+                self._erase_btn,
+                "Eraser (X) — remove dodge/burn paint under the brush.\n"
+                "Two-finger scroll changes Brush Size; Ctrl+scroll zooms.",
+            ),
         ):
             btn.setObjectName("adjust_db_btn")
             btn.setCheckable(True)
@@ -1300,6 +1333,7 @@ class ImageAdjustPanelWidget(QWidget):
             db_row.addWidget(btn, 1)
         self._dodge_btn.toggled.connect(lambda on: self._on_dodge_burn_toggled(self._dodge_btn, on))
         self._burn_btn.toggled.connect(lambda on: self._on_dodge_burn_toggled(self._burn_btn, on))
+        self._erase_btn.toggled.connect(lambda on: self._on_dodge_burn_toggled(self._erase_btn, on))
         db_container_layout.addLayout(db_row)
 
         db_actions_row = QHBoxLayout()
@@ -1316,13 +1350,15 @@ class ImageAdjustPanelWidget(QWidget):
         self._db_clear_btn.clicked.connect(self.dodge_burn_clear_requested.emit)
         db_actions_row.addWidget(self._db_clear_btn, 1)
 
-        self._db_show_mask_btn = QPushButton("Show Mask (O)")
+        self._db_show_mask_btn = QPushButton("Mask")
         self._db_show_mask_btn.setObjectName("adjust_db_show_mask_btn")
         self._db_show_mask_btn.setCheckable(True)
         self._db_show_mask_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._db_show_mask_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self._db_show_mask_btn.setEnabled(False)
         self._db_show_mask_btn.setToolTip(
-            "Overlay the dodge/burn mask (red = dodge, blue = burn). Shortcut: O"
+            "Overlay the dodge/burn mask (red = dodge, blue = burn).\n"
+            "Available after selecting Dodge (D), Burn (B), or Eraser (X). Shortcut: O"
         )
         self._db_show_mask_btn.toggled.connect(self.dodgeBurnMaskToggled.emit)
         db_actions_row.addWidget(self._db_show_mask_btn, 1)
@@ -1351,6 +1387,11 @@ class ImageAdjustPanelWidget(QWidget):
         self._db_size_slider.setRange(8, 400)
         self._db_size_slider.setValue(80)
         self._db_size_slider.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._db_size_slider.setToolTip(
+            "Brush diameter in pixels.\n"
+            "With Dodge/Burn armed: two-finger scroll up/down also changes size "
+            "(does not navigate images). Ctrl+scroll still zooms."
+        )
         self._db_size_slider.valueChanged.connect(
             lambda _v: self.dodge_burn_brush_changed.emit()
         )
@@ -1370,7 +1411,8 @@ class ImageAdjustPanelWidget(QWidget):
         self._db_strength_slider.setValue(55)
         self._db_strength_slider.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._db_strength_slider.setToolTip(
-            "Per-stroke flow (low = build up gradually; high = stronger each pass)"
+            "Per-stroke flow (low = build up gradually; high = stronger each pass).\n"
+            "Also sets how opaque the on-image brush preview looks."
         )
         self._db_strength_slider.valueChanged.connect(
             lambda _v: self.dodge_burn_brush_changed.emit()
@@ -2567,38 +2609,112 @@ class ImageAdjustPanelWidget(QWidget):
     def _on_dodge_burn_toggled(self, btn: QPushButton, checked: bool) -> None:
         if self._block_emit:
             return
-        other = self._burn_btn if btn is self._dodge_btn else self._dodge_btn
-        if checked and other.isChecked():
+        others = [
+            b
+            for b in (self._dodge_btn, self._burn_btn, self._erase_btn)
+            if b is not btn
+        ]
+        if checked:
             self._block_emit = True
             try:
-                other.setChecked(False)
+                for other in others:
+                    if other.isChecked():
+                        other.setChecked(False)
             finally:
                 self._block_emit = False
-        mode = None
-        if self._dodge_btn.isChecked():
-            mode = "dodge"
-        elif self._burn_btn.isChecked():
-            mode = "burn"
+        mode = self.dodge_burn_mode()
+        self._sync_dodge_burn_mask_button_enabled(mode is not None)
         self.dodge_burn_mode_changed.emit(mode)
+
+    def _sync_dodge_burn_mask_button_enabled(self, armed: bool) -> None:
+        """Mask overlay is only available while a brush tool is selected."""
+        btn = getattr(self, "_db_show_mask_btn", None)
+        if btn is None:
+            return
+        btn.setEnabled(bool(armed))
+        if not armed and btn.isChecked():
+            self._block_emit = True
+            try:
+                btn.setChecked(False)
+            finally:
+                self._block_emit = False
+            self.dodgeBurnMaskToggled.emit(False)
 
     def dodge_burn_mode(self) -> str | None:
         if self._dodge_btn.isChecked():
             return "dodge"
         if self._burn_btn.isChecked():
             return "burn"
+        if getattr(self, "_erase_btn", None) is not None and self._erase_btn.isChecked():
+            return "erase"
         return None
 
+    def set_dodge_burn_mode(self, mode: str | None) -> None:
+        """Arm Dodge/Burn/Eraser from a shortcut (D/B/X) or disarm when mode is None."""
+        want = (mode or "").strip().lower()
+        if want in ("eraser", "erase"):
+            want = "erase"
+        if want not in ("dodge", "burn", "erase", ""):
+            return
+        dodge_on = want == "dodge"
+        burn_on = want == "burn"
+        erase_on = want == "erase"
+        erase_btn = getattr(self, "_erase_btn", None)
+        cur_dodge = self._dodge_btn.isChecked()
+        cur_burn = self._burn_btn.isChecked()
+        cur_erase = bool(erase_btn is not None and erase_btn.isChecked())
+        if cur_dodge == dodge_on and cur_burn == burn_on and cur_erase == erase_on:
+            # Same mode again → toggle off.
+            if want:
+                dodge_on = burn_on = erase_on = False
+        self._block_emit = True
+        try:
+            self._dodge_btn.setChecked(dodge_on)
+            self._burn_btn.setChecked(burn_on)
+            if erase_btn is not None:
+                erase_btn.setChecked(erase_on)
+        finally:
+            self._block_emit = False
+        armed = dodge_on or burn_on or erase_on
+        self._sync_dodge_burn_mask_button_enabled(armed)
+        out = "dodge" if dodge_on else ("burn" if burn_on else ("erase" if erase_on else None))
+        self.dodge_burn_mode_changed.emit(out)
+
     def disarm_dodge_burn(self) -> None:
-        """Uncheck both tool buttons without emitting (e.g. on file switch)."""
+        """Uncheck brush tool buttons (e.g. on file switch / crop)."""
+        was_armed = self.dodge_burn_mode() is not None
         self._block_emit = True
         try:
             self._dodge_btn.setChecked(False)
             self._burn_btn.setChecked(False)
+            erase_btn = getattr(self, "_erase_btn", None)
+            if erase_btn is not None:
+                erase_btn.setChecked(False)
         finally:
             self._block_emit = False
+        self._sync_dodge_burn_mask_button_enabled(False)
+        if was_armed:
+            self.dodge_burn_mode_changed.emit(None)
 
     def dodge_burn_brush_radius(self) -> float:
         return float(self._db_size_slider.value())
+
+    def nudge_dodge_burn_brush_size(self, wheel_delta: int) -> None:
+        """Adjust Brush Size from a trackpad/wheel delta (positive = larger)."""
+        slider = getattr(self, "_db_size_slider", None)
+        if slider is None or not wheel_delta:
+            return
+        dy = int(wheel_delta)
+        if abs(dy) >= 120:
+            amount = (dy // 120) * 8
+        else:
+            # Trackpad pixel deltas: ~1 size unit per 4px of scroll.
+            amount = int(round(dy / 4.0))
+        if amount == 0:
+            amount = 1 if dy > 0 else -1
+        slider.setValue(
+            max(slider.minimum(), min(slider.maximum(), slider.value() + amount))
+        )
 
     def dodge_burn_brush_strength(self) -> float:
         """0..1: per-stamp delta at the brush center before pressure scaling."""
@@ -2615,6 +2731,8 @@ class ImageAdjustPanelWidget(QWidget):
         return bool(self._db_show_mask_btn.isChecked())
 
     def toggle_dodge_burn_show_mask(self) -> None:
+        if not self._db_show_mask_btn.isEnabled():
+            return
         self._db_show_mask_btn.toggle()
 
     def _update_slider_label(self, key: str, fmt: Callable[[float], str]) -> None:
