@@ -47,6 +47,50 @@ trap 'rm -rf "$WORK"' EXIT
 [ -f "$ENV/lib/libjpeg.8.dylib" ] || { echo "missing libjpeg: pixi add libjpeg-turbo"; exit 1; }
 [ -n "$RAWPY_DIR" ] || { echo "rawpy not found in env"; exit 1; }
 
+# macOS kills (exit 137 / Killed: 9) processes that load dylibs whose ad-hoc
+# signature was invalidated by install_name_tool. Always re-sign rawpy's
+# native libs before any `import rawpy`, and restore the stock LibRaw if a
+# previous OpenMP swap left the env unusable.
+_resign_rawpy_dylibs() {
+  local f
+  shopt -s nullglob
+  for f in "$RAWPY_DIR"/*.dylib; do
+    if ! codesign -f -s - "$f" >/dev/null 2>&1; then
+      echo "[WARNING] codesign failed for $f"
+    fi
+  done
+  shopt -u nullglob
+}
+
+_rawpy_import_ok() {
+  # Swallow stdout; surface kill/crash via exit status only.
+  "$ENV/bin/python3" -c "import rawpy" >/dev/null 2>&1
+}
+
+_ensure_rawpy_importable() {
+  _resign_rawpy_dylibs
+  if _rawpy_import_ok; then
+    return 0
+  fi
+  if [ -f "$RAWPY_DIR/libraw_r.25.dylib.orig" ]; then
+    echo "[WARNING] rawpy cannot load (often Killed: 9 after unsigned dylib edits)."
+    echo "          Restoring stock LibRaw from libraw_r.25.dylib.orig ..."
+    cp -f "$RAWPY_DIR/libraw_r.25.dylib.orig" "$RAWPY_DIR/libraw_r.25.dylib"
+    _resign_rawpy_dylibs
+  fi
+  if ! _rawpy_import_ok; then
+    echo "[ERROR] rawpy still cannot import after re-sign/restore."
+    echo "  macOS 'Killed: 9' here usually means an invalid code signature on a"
+    echo "  dylib under: $RAWPY_DIR"
+    echo "  Try: codesign -f -s - $RAWPY_DIR/*.dylib"
+    echo "  Or:  pixi install   # recreate env, then re-run this script"
+    exit 1
+  fi
+  echo "[OK] rawpy import restored."
+}
+
+_ensure_rawpy_importable
+
 # Sanity: only swap into the LibRaw version rawpy expects.
 "$ENV/bin/python3" - << EOF
 import rawpy
@@ -90,6 +134,9 @@ if [ "$SKIP_COMPILE" = "1" ] && [ -f "$CACHED_DYLIB" ]; then
 elif [ "$SKIP_COMPILE" = "1" ] && [ -f "$RAWPY_DIR/libraw_r.25.dylib.omp" ]; then
   echo "Reusing previous OpenMP build: $RAWPY_DIR/libraw_r.25.dylib.omp"
   cp -f "$RAWPY_DIR/libraw_r.25.dylib.omp" "$CACHED_DYLIB"
+elif [ -f "$CACHED_DYLIB" ]; then
+  # Prefer cache so packaging does not depend on libraw.org every run.
+  echo "Using cached OpenMP LibRaw: $CACHED_DYLIB"
 else
   build_libraw
 fi
@@ -141,11 +188,18 @@ cp -f "$STAGE/libraw_r.25.dylib" "$RAWPY_DIR/libraw_r.25.dylib"
 
 codesign -f -s - "$RAWPY_DIR/libraw_r.25.dylib" "$RAWPY_DIR/libjpeg.8.dylib" >/dev/null 2>&1 || true
 [ -f "$RAWPY_DIR/libomp.dylib" ] && codesign -f -s - "$RAWPY_DIR/libomp.dylib" >/dev/null 2>&1 || true
+# Cover sibling sonames macOS may load (unsigned → Killed: 9 on next import).
+_resign_rawpy_dylibs
 
-"$ENV/bin/python3" - << 'EOF'
+if ! "$ENV/bin/python3" - << 'EOF'
 import rawpy
 print("rawpy loads OK, libraw", rawpy.libraw_version)
 EOF
+then
+  echo "[ERROR] rawpy failed to import after OpenMP LibRaw install (exit $?)."
+  echo "  Re-sign: codesign -f -s - $RAWPY_DIR/*.dylib"
+  exit 1
+fi
 
 echo "LibRaw OpenMP install names:"
 otool -L "$RAWPY_DIR/libraw_r.25.dylib" | sed 's/^/  /'

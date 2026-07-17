@@ -20,11 +20,11 @@ RAWviewer 3.0 turns the viewer into a complete **cull-and-develop** tool: a full
 - **Local tools:** **Dodge & Burn** with soft circular stamps, Edge Assist, and mask overlay; **Heal (H)** inpainting for dust/smudge removal. Both work in Lite and Full.
 - **Effects & detail:** vignette (Amount/Midpoint), dehaze, sharpness, chroma noise reduction with selectable method.
 - **Looks:** **Creative LUT** (`.cube` drag-drop + managed library) and managed **XMP presets** — import, apply, remove.
-- **Export** to JPEG / WebP / 16-bit TIFF with a progress dialog and cancel; **AI denoise** on export only (Full; [SCUNet](https://github.com/cszn/SCUNet) `scunet_color_real_psnr` by Kai Zhang et al., Apache-2.0 — not applied during Adjust preview).
+- **Export** to JPEG / WebP / 16-bit TIFF with a progress dialog and cancel; **AI denoise** on export only (**Windows Full**; [SCUNet](https://github.com/cszn/SCUNet) `scunet_color_real_psnr` by Kai Zhang et al., Apache-2.0 — not applied during Adjust preview). **macOS packaged apps omit PyTorch**, so the SCUNet export menu items are hidden there; standard JPEG / WebP / TIFF export still works on Mac.
 - A new **Adjust button** in the single-view bar opens the editor (mirrors the **E** shortcut, highlights while active).
 
 #### ⭐ Star ratings
-- Rate **1–5** with the number keys (**0** clears) or the clickable stars in single view; bookmark toggle stays **↑**.
+- Rate **1–5** with the number keys (**0** clears) or the clickable stars in single view. **↑ no longer bookmarks** (gallery ↑ scrolls; Compare ↑ still promotes the candidate). Narrow the gallery with the bottom **rating-filter stars**.
 - Ratings persist to **XMP** and appear as gallery tile badges; filter the gallery to **rating ≥ N**, combinable with the bookmark filter.
 
 #### ⚡ Faster than 2.5 (verified cold suite)
@@ -521,7 +521,7 @@ RAWviewer 3.0 是一個重大版本，帶來了全面整合的**編輯功能**�
 - 相鄰內嵌 JPEG 預先載入、方向性／懸停圖庫預先載入，以及 RAF/3FR 跳過過於積極的完整去馬賽克相鄰載入。
 
 #### ⭐ 星級評分
-- 單張檢視：可點擊的 **1–5 星**（取代原本 UI 中的書籤星號）。鍵盤 **1–5** 評分；**0** 清除。書籤切換仍為 **↑**。
+- 單張檢視：可點擊的 **1–5 星**（取代原本 UI 中的書籤星號）。鍵盤 **1–5** 評分；**0** 清除。**↑ 不再切換書籤**（圖庫用星級篩選）。
 - 評分會儲存到 **XMP** 附屬檔案中。
 - 圖庫：縮圖上顯示評分標記；可篩選 **星級 ≥ N**；可與書籤篩選條件合併使用。
 

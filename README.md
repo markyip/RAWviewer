@@ -34,7 +34,7 @@
 ## What it does
 
 - **Browse at shooting speed.** Open a folder of RAWs and flick through full-screen previews with the arrow keys — no import, no catalog, no waiting.
-- **Cull with your fingers, not your mouse.** **↑** keeps a shot, **↓** moves it to a Discard folder, **0–5** sets a star rating, **C** compares similar frames side by side with synchronized zoom.
+- **Cull with your fingers, not your mouse.** **1–5** rates a keeper, **↓** moves it to a Discard folder, **0** clears the rating, **C** compares similar frames side by side with synchronized zoom.
 - **Find any photo.** Type a place (`tokyo`), a camera (`sony`), or a year (`2024`) in gallery search. The Full edition also understands plain descriptions like `sunset on beach` — all offline.
 - **Develop without touching your files.** Press **E** for the Adjust panel: exposure, white balance, crop, dodge & burn, healing, LUTs. Every edit is saved to an XMP sidecar; your RAW is never modified.
 
@@ -51,7 +51,7 @@
 ## New in 3.0
 
 - **Much faster than 2.5** — cold Windows suite (cache cleared each run): gallery ready **~2.9×** sooner (**8.6s → 3.0s** Lite); RAW full-res navigation median **~1.6–1.7×** sooner (**0.95s → 0.57s** Lite / **0.60s** Full+GPU). Lite and Full both beat 2.5 on these cull paths — see [`RELEASE_NOTES.md`](RELEASE_NOTES.md)
-- **Adjust panel** — develop RAWs non-destructively: tone, white-balance presets, crop, dodge & burn, healing, vignette/dehaze, creative LUTs, and savable presets; export JPEG / WebP / 16-bit TIFF (**Full** also offers export-only **AI denoise** via SCUNet)
+- **Adjust panel** — develop RAWs non-destructively: tone, white-balance presets, crop, dodge & burn, healing, vignette/dehaze, creative LUTs, and savable presets; export JPEG / WebP / 16-bit TIFF (**Windows Full** also offers export-only **AI denoise** via SCUNet; not in the macOS `.app` — see [Lite or Full?](#lite-or-full))
 - **Star ratings** — rate 1–5 with the number keys; filter the gallery by minimum rating
 - **Nikon High Efficiency (HE/HE*) files** now open for browsing and culling
 - **Smaller Lite edition** for machines where install size matters
@@ -97,9 +97,8 @@ Open any folder of photos (drag it onto the window, or double-click a photo). Th
 |-----|--------|
 | **← / →** | Previous / next photo |
 | **Space** or double-click | Fit ↔ 100% zoom |
-| **↑** | Bookmark a keeper |
+| **0–5** | Star rating (0 clears; bottom stars work too) |
 | **↓** | Move to Discard folder |
-| **0–5** | Star rating (0 clears) |
 | **C** | Compare selected photos side by side |
 | **E** | Open the Adjust (develop) panel |
 | **Esc** | Back to gallery |
@@ -117,15 +116,15 @@ Open a folder (menu, drag-and-drop, or double-click a photo). Scroll the **galle
 | **Pinch** / **Ctrl+scroll** | Zoom in or out |
 | **←** / **→** | Previous / next image |
 | **Scroll wheel** | Previous / next (single view, fit mode) |
-| **↑** | Bookmark / unbookmark (bottom **star** in single view too) |
+| **0–5** | Star rating (**0** clears; bottom stars in single view too) |
 | **↓** | Move to Discard folder |
 | **Delete** | Delete image(s) |
-| **Esc** | Gallery: clear selection → exit bookmark filter · Single view: back to gallery |
+| **Esc** | Gallery: clear selection → exit filters · Single view: back to gallery |
 | **Ctrl/Cmd+click** | Gallery: toggle selection |
 | **Shift+click** | Gallery: select range (visible order) |
+| **↑** | Gallery: scroll up · Compare: promote candidate |
 | **C** | Toggle Compare mode on/off (requires multiple images selected) |
 | **E** | Show / hide **Adjust** panel |
-| **0–5** | Star rating (**0** clears) |
 | **G** | Cycle composition guide |
 | **H** | Show / hide histogram |
 | **J** | Toggle highlight/shadow clipping overlay |
@@ -133,7 +132,7 @@ Open a folder (menu, drag-and-drop, or double-click a photo). Scroll the **galle
 | **F** | Show / hide focus overlay (supported files) |
 | **M** | Show / hide GPS map overlay (single view, geotagged photos) |
 
-**Gallery bookmarks:** click the outline **star** (nothing selected) to show bookmarked shots only; gold star = filter on. With photos selected, **↑** or the star toggles bookmarks on the selection.
+**Gallery rating filter:** use the bottom **stars** to show only photos rated N★ and above.
 
 **Single-view workflow toggle:** switch between **Embedded JPEG (Fast)** and **RAW (High Quality)** rendering. **Recovery preview (P)** shows half-res shadow/highlight recovery for judging extreme contrast.
 
@@ -207,7 +206,7 @@ Both editions have the complete viewer: gallery, culling, Compare, star ratings,
 | | Lite | Full |
 |---|:--:|:--:|
 | Everything above — browse, cull, rate, compare, develop, export | ✅ | ✅ |
-| Export-time AI denoise (SCUNet) | — | ✅ |
+| Export-time AI denoise (SCUNet) | — | ✅ Windows only |
 | Search by describing the photo (`sunset on beach`) | — | ✅ |
 | Find photos with people (`has:face`) | — | ✅ |
 | Install size | ~500 MB | ~1.5 GB+ |
@@ -216,6 +215,8 @@ Both editions have the complete viewer: gallery, culling, Compare, star ratings,
 **Pick Lite** for a lean install and cull-by-eye workflow. **Pick Full** if you want to search your library in everyday language — still 100% offline once its models are installed.
 
 On Windows, the installer offers **Full (CUDA)** for NVIDIA graphics cards, **Full (DirectML)** for everything else, and **Lite**.
+
+**macOS limitation — AI denoise:** Packaged macOS Full/Lite apps **do not include PyTorch**, so the Export menu’s **JPEG / TIFF + AI denoise (SCUNet)** items are hidden. Standard JPEG / WebP / 16-bit TIFF export still works. SCUNet export currently needs `torch` + `spandrel` (CUDA or Apple MPS); an ONNX/Core ML path is not shipped yet. Windows Full builds that include torch show the options and can download the ~69 MB weights on first use.
 
 ---
 
@@ -311,6 +312,7 @@ To clear cache: **`scripts\Launch\bat\clear_cache.bat`** (Windows) · **`scripts
 | `bash: command not found` | Type `cd `, drag the extracted folder onto Terminal, press Return, then run the command again |
 | Can't read Desktop/Documents | System Settings → Privacy → **Full Disk Access** → add RAWviewer |
 | Search says models missing (**Full**) | Open gallery search and click **Download** when prompted (needs internet once) |
+| No **AI denoise** in Export menu (**Full**) | Expected on macOS `.app` builds (PyTorch not bundled). Use Windows Full, or standard JPEG/WebP/TIFF export on Mac. See [Lite or Full?](#lite-or-full) |
 | Download failed (SSL / certificate error) | On a corporate VPN or proxy, add your organization's root certificate to **Keychain Access** and set it to **Always Trust** |
 | Need to uninstall completely | Use **`Uninstall RAWviewer.command`** from the release zip — not Trash alone |
 | Uninstall scripts missing | Re-download the release zip from [Releases](https://github.com/markyip/RAWviewer/releases/latest); scripts are inside the extracted folder |
@@ -343,6 +345,7 @@ Rule of thumb: **if it can ship in Full, it counts as feasible** even when Lite 
 **Current limits (not aspirational):**
 - **Cold gallery tiles** for never-opened-in-Adjust edits may still show embedded JPEG (edited **badge** + save-bake cover the common path). Same root as row 1.
 - **Nikon HE-NEF**: Adjust disabled; embedded JPEG browse only (row 9).
+- **SCUNet AI denoise export**: Windows Full only in release builds. macOS `.app` excludes PyTorch, so the Export menu hides those items (standard JPEG/WebP/TIFF still works).
 
 ---
 
@@ -360,11 +363,11 @@ Build scripts, environment variables, memory tuning, and architecture notes: **[
 
 RAWviewer stands on excellent open-source work, including:
 
-- **AI denoise model:** [SCUNet](https://github.com/cszn/SCUNet) `scunet_color_real_psnr` by **Kai Zhang et al.** (Apache-2.0) — export-only neural noise reduction ([paper](https://doi.org/10.1007/s11633-023-1466-0); weights from [KAIR](https://github.com/cszn/KAIR/releases/tag/v1.0))
+- **AI denoise model:** [SCUNet](https://github.com/cszn/SCUNet) `scunet_color_real_psnr` by **Kai Zhang et al.** (Apache-2.0) — export-only neural noise reduction on **Windows Full** ([paper](https://doi.org/10.1007/s11633-023-1466-0); weights from [KAIR](https://github.com/cszn/KAIR/releases/tag/v1.0)); not in the macOS `.app` (no bundled PyTorch)
 - **[LibRaw](https://www.libraw.org/)** / **[rawpy](https://github.com/letmaik/rawpy)** — RAW decoding
 - **[MobileCLIP](https://github.com/apple/ml-mobileclip)** (Apple) — on-device photo-description search (Full edition)
 - **[Qt / PyQt6](https://www.riverbankcomputing.com/software/pyqt/)** — application framework
-- **[spandrel](https://github.com/chaiNNer-org/spandrel)** — loads the SCUNet checkpoint for export denoise
+- **[spandrel](https://github.com/chaiNNer-org/spandrel)** — loads the SCUNet checkpoint for export denoise (Windows Full)
 
 ## License
 
