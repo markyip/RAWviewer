@@ -32,6 +32,8 @@ RAWviewer 3.0 turns the viewer into a complete **cull-and-develop** tool: a full
 - Cold gallery thumbnail warmup about **3×** faster; Canon CR3 embedded previews no longer read the whole file.
 - Heavy optional ML imports deferred until after first paint; session restore staggers full decode and prefetch so relaunch feels instant.
 - **GPU demosaic scheduling (Full):** reserve the last heavy decode slot for the on-screen image, preempt neighbor full-decodes when CURRENT is waiting, and release cancelled heavy slots immediately — fixes stalls where neighbor prefetch held `raw_limit=1` and the current file never reached `stages=['full']`.
+- **LibRaw-unsupported RAW (e.g. Nikon HE/HE*):** use the embedded preview for that file only — no longer flips the app-wide workflow to embedded JPEG (which previously disabled GPU demosaic for every later file in the folder).
+- Near neighbors warm a sensor `full` decode under RAW+GPU once the current full is already in flight (slot reservation keeps CURRENT first).
 
 ##### Cold-start suite vs 2.5 (Windows, Jul 2026)
 Same machine, cleared `~/.rawviewer_cache` before **each** test. Gallery: open `DSC00001.ARW` in a 6880-file folder, wait for EXIF sort, hold **Up** 20s. RAW nav: open one file in a 259-file mixed RAW folder, wait for sensor-covering full-res paint, then next (full loop).
@@ -40,9 +42,9 @@ Same machine, cleared `~/.rawviewer_cache` before **each** test. Gallery: open `
 |--------|---------------|----------------|----------------|--------------|-------------|
 | **2.5 Lite** | 8.6s | 1043 | 0.95s | 1.20s | 2.70s |
 | **3.0 Lite** | **3.0s** (~2.9×) | 938 | **0.57s** (~1.7×) | 0.74s | 1.83s |
-| **3.0 Full + GPU** | 3.2s (~2.7×) | 940 | **0.51s** (~1.9×) | 0.70s | 1.78s |
+| **3.0 Full + GPU** | 3.2s (~2.7×) | 940 | **0.60s** (~1.6×) | 0.84s | 2.61s |
 
-3.0 Lite already beats 2.5 on gallery open and RAW navigation; Full + GPU demosaic adds a further ~10% on RAW nav median (0 TIMEOUTs on the 259-file loop after the scheduling fix).
+3.0 Lite already beats 2.5 on gallery open and RAW navigation. Full + GPU stays in true LibRaw/GPU demosaic for supported files (164 GPU decodes / 259 in the sample set; HE/HE* use per-file embeds only) with **0 TIMEOUTs** and far fewer preview→full double paints (21/259 vs 215/259 before the scheduling fixes).
 
 #### 🖼️ Gallery loading & scrolling overhaul
 - Main-thread stalls during gallery fill eliminated (worst observed stall **11.7s → <0.6s**): budgeted tile passes, deferred cache-hit delivery, and no per-tile sidecar probes on external drives.

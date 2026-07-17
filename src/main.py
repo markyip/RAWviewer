@@ -7955,12 +7955,9 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         # file's compression (e.g. newer Nikon "High Efficiency" compressed
         # NEF from Z8/Z9/Z6III/Z50II-generation bodies), not a corrupt file --
         # the embedded JPEG preview for the same file typically still decodes
-        # fine, since that doesn't need LibRaw to demosaic anything. The RAW-
-        # mode toggle is a persistent, app-wide setting (not per-file), so
-        # without reverting it here, every subsequent navigation would also
-        # force a full decode and hit this same failure again. Auto-revert to
-        # embedded-JPEG mode and explain accurately instead of showing a
-        # "file is corrupt" dialog for a file that displays just fine.
+        # fine, since that doesn't need LibRaw to demosaic anything. Mark the
+        # path unsupported (per-file) and reload so the embed paints; do not
+        # leave RAW mode for the whole app.
         if clearly_unsupported and is_raw_file(file_path):
             if self._auto_revert_to_embedded_jpeg_workflow(
                 file_path, reason="manager clearly_unsupported"
@@ -7971,7 +7968,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                     pass
                 self.load_raw_image(file_path, force_reload=True)
                 return
-            # Already in embedded-JPEG workflow: a failed LibRaw/full attempt
+            # Already marked unsupported: a failed LibRaw/full attempt
             # must not modal-storm when a prior (or concurrent) embed paint
             # already put usable pixels on screen for this file.
             if self._single_view_pixels_on_screen(file_path):
@@ -20137,9 +20134,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                     os.path.basename(cur or ""),
                 )
                 # HE/HE* (and other LibRaw-unsupported RAW): the small embed may
-                # be the only pixels we will ever get. Auto-revert to embedded
-                # workflow so subsequent navigations paint, and accept this
-                # buffer rather than leaving the previous file on screen.
+                # be the only pixels we will ever get. Mark the path unsupported
+                # so this buffer can paint without leaving RAW mode for other files.
                 if cur and (
                     self._nef_he_compressed(cur)
                     or self._path_marked_libraw_unsupported(cur)
@@ -20757,24 +20753,18 @@ class RAWImageViewer(SessionMixin, QMainWindow):
     def _auto_revert_to_embedded_jpeg_workflow(
         self, file_path: str, *, reason: str = ""
     ) -> bool:
-        """Leave RAW mode for files LibRaw cannot demosaic (HE/HE*, …).
+        """Allow embedded pixels for *this* LibRaw-unsupported file only.
 
-        Returns True when the setting was flipped. Does not reload by itself —
-        callers paint the embed or request a follow-up load.
+        Returns True the first time the path is marked so callers can reload.
+        Does **not** flip the app-wide ``use_embedded_jpeg_workflow`` setting:
+        leaving RAW (High Quality) mode globally after the first HE/HE* NEF
+        silently forced every later ARW/CR3 onto embedded JPEG and starved
+        GPU demosaic for the rest of the folder (and the Full+GPU autotest).
+        Per-file ``_LIBRAW_UNSUPPORTED_PATHS`` already lets
+        ``_suppress_jpeg_interim`` / ``_process_raw_image`` use embeds.
         """
-        settings = self.get_settings()
-        if settings.value("use_embedded_jpeg_workflow", True, type=bool):
-            self._mark_path_libraw_unsupported(file_path)
-            return False
-        settings.setValue("use_embedded_jpeg_workflow", True)
-        try:
-            from common_image_loader import invalidate_libraw_consistent_preview_settings
-
-            invalidate_libraw_consistent_preview_settings()
-        except Exception:
-            pass
+        already = self._path_marked_libraw_unsupported(file_path)
         self._mark_path_libraw_unsupported(file_path)
-        self._update_raw_toggle_button_state()
         msg = (
             f"{os.path.basename(file_path)}: this file's RAW compression isn't "
             f"supported by the current decoder -- showing the embedded preview instead."
@@ -20783,13 +20773,14 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             import logging
 
             logging.getLogger(__name__).info(
-                "[WORKFLOW] Auto-reverted to embedded JPEG for %s (%s)",
+                "[WORKFLOW] Embedded fallback for unsupported RAW %s (%s) "
+                "(RAW mode kept for other files)",
                 os.path.basename(file_path),
                 reason,
             )
         if hasattr(self, "status_bar"):
             self.status_bar.showMessage(msg, 8000)
-        return True
+        return not already
 
     def _editing_supported_for_file(self, file_path: str | None) -> bool:
         """Whether the Adjust panel can produce a true RAW demosaic edit base.
@@ -26523,12 +26514,28 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             from common_image_loader import (
                 embedded_preview_rarely_covers_sensor,
                 use_full_embedded_raw_preview,
+                use_libraw_consistent_preview_first,
             )
 
             if use_full_embedded_raw_preview() and not embedded_preview_rarely_covers_sensor(
                 file_path
             ):
                 stages = stages | {"full"}
+            elif (
+                use_libraw_consistent_preview_first(file_path)
+                and not embedded_preview_rarely_covers_sensor(file_path)
+            ):
+                # RAW High Quality + GPU: warm ±1 sensor demosaic once CURRENT
+                # full is already in flight (urgent prefetch gates on that).
+                # Slot reservation keeps neighbors from starving the on-screen
+                # decode; when it finishes the next demosaic starts immediately.
+                try:
+                    from fast_raw_decode import prefer_gpu_decode_enabled
+
+                    if prefer_gpu_decode_enabled():
+                        stages = stages | {"full"}
+                except Exception:
+                    pass
         return stages, False
 
     def _request_display_buffer_prefetch(

@@ -52,7 +52,7 @@
 
 - **Adjust panel** — develop RAWs non-destructively: tone, white-balance presets, crop, dodge & burn, healing, vignette/dehaze, creative LUTs, and savable presets; export JPEG / WebP / 16-bit TIFF (**Full** also offers export-only **AI denoise** via SCUNet)
 - **Star ratings** — rate 1–5 with the number keys; filter the gallery by minimum rating
-- **Measurably faster than 2.5** — cold suite on Windows: gallery ready **~2.9×** sooner (8.6s → 3.0s Lite); RAW full-res navigation median **~1.7–1.9×** sooner (0.95s → 0.57s Lite / **0.51s** Full+GPU). Details in [`RELEASE_NOTES.md`](RELEASE_NOTES.md)
+- **Measurably faster than 2.5** — cold suite on Windows: gallery ready **~2.9×** sooner (8.6s → 3.0s Lite); RAW full-res navigation median **~1.6–1.7×** sooner (0.95s → **0.57s** Lite / **0.60s** Full+GPU). Details in [`RELEASE_NOTES.md`](RELEASE_NOTES.md)
 - **Nikon High Efficiency (HE/HE*) files** now open for browsing and culling
 - **Smaller Lite edition** for machines where install size matters
 

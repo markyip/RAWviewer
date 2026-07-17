@@ -52,7 +52,7 @@
 
 - **Adjust 面板** — 非破壞顯影：色調、白平衡預設、裁切、Dodge & Burn、修復筆刷、暈影／去霧、Creative LUT 與可儲存的預設；匯出 JPEG／WebP／16 位元 TIFF（**完整版**另提供僅於匯出時套用的 **AI 降噪**，使用 SCUNet）
 - **星級評分** — 用數字鍵 1–5 評分；圖庫可依最低星級篩選
-- **經實測比 2.5 更快** — Windows 冷啟動套件：圖庫就緒約 **2.9×**（8.6 秒 → Lite 3.0 秒）；RAW 全解析度導航中位數約 **1.7–1.9×**（0.95 秒 → Lite 0.57 秒／**Full+GPU 0.51 秒**）。細節見 [`RELEASE_NOTES.zh-TW.md`](RELEASE_NOTES.zh-TW.md)
+- **經實測比 2.5 更快** — Windows 冷啟動套件：圖庫就緒約 **2.9×**（8.6 秒 → Lite 3.0 秒）；RAW 全解析度導航中位數約 **1.6–1.7×**（0.95 秒 → Lite **0.57 秒**／Full+GPU **0.60 秒**）。細節見 [`RELEASE_NOTES.zh-TW.md`](RELEASE_NOTES.zh-TW.md)
 - **Nikon 高效率（HE/HE\*）檔案**現可瀏覽與篩片
 - **更精簡的 Lite 版**，適合在意安裝大小的機器
 
