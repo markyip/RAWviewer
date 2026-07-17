@@ -35,8 +35,8 @@
 </p>
 
 <p align="center">
-  <img src="docs/images/adjust.jpg" alt="Adjust 面板——直方圖、色調滑桿與曲線在相片旁" width="900">
-  <br><em>Adjust 面板：非破壞顯影，寫入 XMP</em>
+  <img src="docs/images/adjust.jpg" alt="Adjust 面板與前後對比分割檢視——直方圖、色調滑桿與曲線在相片旁" width="900">
+  <br><em>Adjust 面板（前後對比分割）：非破壞顯影，寫入 XMP</em>
 </p>
 
 ## 3.0 新功能

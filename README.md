@@ -35,8 +35,8 @@
 </p>
 
 <p align="center">
-  <img src="docs/images/adjust.jpg" alt="Adjust panel — histogram, tone sliders, and tone curve beside the photo" width="900">
-  <br><em>The Adjust panel: develop non-destructively, saved to XMP</em>
+  <img src="docs/images/adjust.jpg" alt="Adjust panel with a before/after split view — histogram, tone sliders, and tone curve beside the photo" width="900">
+  <br><em>The Adjust panel with before/after split: develop non-destructively, saved to XMP</em>
 </p>
 
 ## New in 3.0
