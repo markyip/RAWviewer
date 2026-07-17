@@ -1706,30 +1706,7 @@ def _gpu_demosaic_backend_in_use() -> bool:
 
 
 def raw_load_limit_aligned_to_gpu(base_limit: int) -> int:
-    """Cap concurrent heavy RAW work to GPU demosaic concurrency -- MPS only.
-
-    Stress-test measurement (bench/logs/gpu-conc3-stress-nav.log, 400-file
-    nav autotest): full-pipeline decode averaged 328.6ms/file, of which GPU
-    demosaic itself was only 66.8ms -- the remaining ~262ms (~80%) is LibRaw
-    unpack (file decode), which is CPU-only and never touches the GPU/VRAM
-    (see fast_raw_decode.py's "100-400ms, CPU-bound, not offloadable"
-    docstring). Clamping the *admission* limit for the whole heavy task
-    (unpack + demosaic) down to the small VRAM-sized GPU semaphore
-    (gpu_decode_concurrency(), 2-3 on CUDA) throttled that CPU-bound unpack
-    stage to 2-3-way parallelism -- far below what it got from the LibRaw
-    process pool in CPU-only mode (cpu_count-1 workers, torn down here
-    because a GPU backend is in use; see _gpu_demosaic_backend_in_use). That
-    made GPU-mode batch throughput converge with CPU-only despite GPU
-    demosaic being ~5x faster per file.
-
-    The GPU-touching work is already independently gated by
-    gpu_raw_processor's own semaphore/lock around just the demosaic call
-    (try_gpu_decode_from_unpacked), so this admission clamp is redundant on
-    CUDA/CuPy, where VRAM is a separate resource from host RAM. It stays for
-    MPS: Apple Silicon's unified memory means unconsumed mosaics/float
-    workspaces from over-admitted heavy tasks show up directly as host RSS
-    growth, a real constraint the CUDA/CuPy backends don't share.
-    """
+    """Cap concurrent heavy RAW work to GPU demosaic concurrency when active."""
     limit = max(1, int(base_limit or 1))
     try:
         import sys as _sys
@@ -1738,8 +1715,6 @@ def raw_load_limit_aligned_to_gpu(base_limit: int) -> int:
         if mod is None:
             return limit
         if not _gpu_demosaic_backend_in_use():
-            return limit
-        if mod.detect_gpu_backend() != "pytorch_mps":
             return limit
         gpu_n = int(mod.gpu_decode_concurrency())
         return max(1, min(limit, gpu_n))
