@@ -8504,6 +8504,9 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             self.single_image_adjust_panel.dodge_burn_clear_requested.connect(
                 self._on_dodge_burn_clear_requested
             )
+            self.single_image_adjust_panel.spot_heal_clear_requested.connect(
+                self._on_spot_heal_clear_requested
+            )
             self.single_image_adjust_panel.dodgeBurnMaskToggled.connect(
                 self._on_dodge_burn_mask_toggled
             )
@@ -8564,6 +8567,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             self._adjust_hist_sync_timer.setSingleShot(True)
             self._adjust_hist_sync_timer.timeout.connect(self._sync_single_image_histogram)
         self._dodge_burn_mask = None
+        self._spot_heal_mask = None
         self._dodge_burn_stroke_active = False
         self._dodge_burn_stroke_baseline = None
         self._dodge_burn_mask_at_stroke_start = None
@@ -17320,8 +17324,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 "E / Esc — Close Adjust panel",
                 "Space / Double-click — Toggle fit-to-window / 100% zoom",
                 "Trackpad Pinch / Ctrl+Scroll — Smooth zoom in/out",
-                "Dodge/Burn armed: two-finger scroll — Brush Size",
-                "D / B / X — Arm Dodge / Burn / Eraser (again to disarm)",
+                "Dodge/Burn/Heal armed: two-finger scroll — Brush Size",
+                "D / B / X / H — Arm Dodge / Burn / Eraser / Heal (again to disarm)",
                 "O — Toggle Mask overlay (when a brush tool is armed)",
                 "← / → — Nudge focused slider (or previous/next when none focused)",
                 "J — Show/hide highlight/shadow clipping",
@@ -20941,6 +20945,15 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             panel.set_adjustments(loaded_adj)
             self._dodge_burn_mask = deserialize_mask(loaded_adj.get(MASK_KEY, ""))
             self._dodge_burn_luma_guide = None
+            try:
+                from raw_spot_heal import MASK_KEY as HEAL_MASK_KEY
+                from raw_spot_heal import deserialize_mask as deserialize_heal_mask
+
+                self._spot_heal_mask = deserialize_heal_mask(
+                    loaded_adj.get(HEAL_MASK_KEY, "")
+                )
+            except Exception:
+                self._spot_heal_mask = None
             self._sync_dodge_burn_mask_overlay()
             self._adjust_panel_loaded_norm = norm
             self._pending_adjust_preview = dict(panel.get_adjustments())
@@ -21464,7 +21477,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             gv.set_dodge_burn_mode(mode is not None)
             if mode is not None:
                 self._sync_dodge_burn_brush_cursor()
-            self._apply_adjust_panel_preview()
+        self._sync_dodge_burn_mask_overlay()
 
     def _sync_dodge_burn_brush_cursor(self) -> None:
         panel = getattr(self, "single_image_adjust_panel", None)
@@ -21496,9 +21509,12 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         """Drop per-image local mask when a global XMP look is applied."""
         self._dodge_burn_mask = None
         self._dodge_burn_luma_guide = None
+        self._spot_heal_mask = None
         panel = getattr(self, "single_image_adjust_panel", None)
         if panel is not None:
             panel.set_dodge_burn_mask_present(False)
+            if hasattr(panel, "set_spot_heal_mask_present"):
+                panel.set_spot_heal_mask_present(False)
         self._sync_dodge_burn_mask_overlay()
 
     def _on_looks_drop_rejected(self, message: str) -> None:
@@ -21593,23 +21609,24 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             panel.set_crop_insets(0.0, 0.0, 0.0, 0.0, emit=not panel.is_crop_mode())
 
     def _on_dodge_burn_mask_toggled(self, show: bool) -> None:
-        gv = getattr(self, "gpu_view", None)
-        if gv is not None:
-            gv.set_dodge_burn_mask_overlay(getattr(self, "_dodge_burn_mask", None), show)
+        self._sync_dodge_burn_mask_overlay()
 
     def _on_adjust_panel_reset(self) -> None:
         """The panel's Reset button rebuilds a clean adjustments dict, but
-        the dodge/burn mask itself lives here (self._dodge_burn_mask), not
-        in that dict -- _dodge_burn_overlay_adj() re-injects it into every
-        render regardless of what the panel says, so a full Reset silently
-        left a previously painted mask in place. Clear it here too."""
-        if getattr(self, "_dodge_burn_mask", None) is None:
+        local masks live here (not in that dict) and must be cleared too."""
+        had_db = getattr(self, "_dodge_burn_mask", None) is not None
+        had_heal = getattr(self, "_spot_heal_mask", None) is not None
+        if not had_db and not had_heal:
             return
         self._dodge_burn_mask = None
         self._dodge_burn_luma_guide = None
+        self._spot_heal_mask = None
         panel = getattr(self, "single_image_adjust_panel", None)
         if panel is not None:
-            panel.set_dodge_burn_mask_present(False)
+            if had_db:
+                panel.set_dodge_burn_mask_present(False)
+            if had_heal and hasattr(panel, "set_spot_heal_mask_present"):
+                panel.set_spot_heal_mask_present(False)
         self._sync_dodge_burn_mask_overlay()
 
     def _on_dodge_burn_clear_requested(self) -> None:
@@ -21625,6 +21642,26 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         if panel is not None:
             self._on_adjust_panel_editing_finished(panel.get_adjustments())
 
+    def _on_spot_heal_clear_requested(self) -> None:
+        if getattr(self, "_spot_heal_mask", None) is None:
+            return
+        self._spot_heal_mask = None
+        panel = getattr(self, "single_image_adjust_panel", None)
+        if panel is not None and hasattr(panel, "set_spot_heal_mask_present"):
+            panel.set_spot_heal_mask_present(False)
+        self._sync_dodge_burn_mask_overlay()
+        self._apply_adjust_panel_preview(full_quality=True)
+        if panel is not None:
+            self._on_adjust_panel_editing_finished(panel.get_adjustments())
+
+    def _active_local_mask_for_overlay(self):
+        """Mask shown by the Mask overlay: heal when Heal is armed, else dodge/burn."""
+        panel = getattr(self, "single_image_adjust_panel", None)
+        mode = panel.dodge_burn_mode() if panel is not None else None
+        if mode == "heal":
+            return getattr(self, "_spot_heal_mask", None)
+        return getattr(self, "_dodge_burn_mask", None)
+
     def _sync_dodge_burn_mask_overlay(self) -> None:
         """Push current mask (or empty) to the view when Show Mask is on."""
         gv = getattr(self, "gpu_view", None)
@@ -21632,7 +21669,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             return
         panel = getattr(self, "single_image_adjust_panel", None)
         show = bool(panel is not None and panel.dodge_burn_show_mask())
-        gv.set_dodge_burn_mask_overlay(getattr(self, "_dodge_burn_mask", None), show)
+        gv.set_dodge_burn_mask_overlay(self._active_local_mask_for_overlay(), show)
 
     def _dodge_burn_mask_shape(self) -> tuple[int, int] | None:
         """Canonical (H, W) the mask is painted at: post-geometry edit frame.
@@ -21673,11 +21710,68 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self._dodge_burn_mask_shape_cached = shape
         return shape
 
+    def _on_spot_heal_stroke(self, pt, pressure: float, is_end: bool) -> None:
+        """Paint heal coverage; run full inpaint preview on stroke end."""
+        panel = getattr(self, "single_image_adjust_panel", None)
+        if panel is None:
+            return
+        mask_shape = self._dodge_burn_mask_shape()
+        if mask_shape is None:
+            return
+        try:
+            from raw_spot_heal import HealMask, stamp_heal_brush
+
+            mh, mw = mask_shape
+            mask = getattr(self, "_spot_heal_mask", None)
+            if mask is None or mask.data.shape != (mh, mw):
+                mask = HealMask.empty(mh, mw)
+                self._spot_heal_mask = mask
+
+            mx, my = self._map_adjust_display_point_to_buffer(pt, mw, mh)
+            disp = self._adjust_display_pixel_size()
+            disp_w = disp[0] if disp is not None else mw
+            sx = mw / max(1, disp_w)
+            radius = max(2.0, panel.dodge_burn_brush_radius() * sx)
+            strength = panel.dodge_burn_brush_strength() * max(0.05, float(pressure))
+            stamp_heal_brush(mask, mx, my, radius, strength)
+            if hasattr(panel, "set_spot_heal_mask_present"):
+                panel.set_spot_heal_mask_present(not mask.is_empty)
+
+            # Live: show green coverage while painting so the user sees
+            # what will be filled (even if Mask is off). Restore Mask
+            # preference on stroke end.
+            gv = getattr(self, "gpu_view", None)
+            if gv is not None:
+                now = time.perf_counter()
+                last = float(getattr(self, "_heal_mask_overlay_last", 0.0) or 0.0)
+                if is_end or (now - last) >= 0.05:
+                    self._heal_mask_overlay_last = now
+                    wanted = bool(panel.dodge_burn_show_mask())
+                    gv.set_dodge_burn_mask_overlay(
+                        mask, True if not is_end else wanted
+                    )
+
+            if is_end:
+                self._sync_dodge_burn_mask_overlay()
+                self._apply_adjust_panel_preview(full_quality=True)
+                self._on_adjust_panel_editing_finished(panel.get_adjustments())
+                if hasattr(self, "status_bar") and self.status_bar:
+                    self.status_bar.showMessage("Heal applied", 2000)
+        except Exception:
+            import logging
+
+            logging.getLogger(__name__).warning(
+                "[SPOT_HEAL] stroke handling failed", exc_info=True
+            )
+
     def _on_dodge_burn_stroke(self, pt, pressure: float, is_end: bool) -> None:
         panel = getattr(self, "single_image_adjust_panel", None)
         if panel is None:
             return
         mode = panel.dodge_burn_mode()
+        if mode == "heal":
+            self._on_spot_heal_stroke(pt, pressure, is_end)
+            return
         mask_shape = self._dodge_burn_mask_shape()
         if mode is None or mask_shape is None:
             if is_end:
@@ -21694,6 +21788,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 erase_brush,
                 stamp_brush,
             )
+            from raw_spot_heal import erase_heal_brush
             from perf_metrics import perf_mark
 
             mh, mw = mask_shape
@@ -21787,6 +21882,12 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                     luminance=luma,
                     edge_assist=edge_on,
                 )
+                # Also erase heal coverage under the same brush.
+                heal = getattr(self, "_spot_heal_mask", None)
+                if heal is not None and heal.data.shape == (mh, mw):
+                    erase_heal_brush(heal, mx, my, radius, erase_amt)
+                    if panel is not None and hasattr(panel, "set_spot_heal_mask_present"):
+                        panel.set_spot_heal_mask_present(not heal.is_empty)
             else:
                 bbox = stamp_brush(
                     mask,
@@ -22080,13 +22181,13 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             self._apply_adjust_panel_preview(full_quality=dirty_full_quality)
 
     def _dodge_burn_overlay_adj(self, adj: dict) -> dict:
-        """Fold main.py's dodge/burn mask state into an adjustments dict.
+        """Fold main.py's local-mask state into an adjustments dict.
 
-        The mask lives in main.py (painted via the GPU view), not on any
-        panel widget -- ``panel.get_adjustments()`` has no way to include
-        it. Preview/export paths inject a live mask object plus a cheap
-        fingerprint for stage-cache keys; XMP save serializes PNG separately
-        (see ``_on_adjust_panel_editing_finished``).
+        Dodge/burn and spot-heal masks live in main.py (painted via the GPU
+        view), not on any panel widget -- ``panel.get_adjustments()`` has no
+        way to include them. Preview/export paths inject a live mask object
+        plus a cheap fingerprint for stage-cache keys; XMP save serializes
+        PNG separately (see ``_on_adjust_panel_editing_finished``).
         """
         from raw_dodge_burn import (
             DEFAULT_STRENGTH,
@@ -22095,6 +22196,11 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             STRENGTH_KEY,
             mask_stage_fingerprint,
         )
+        from raw_spot_heal import (
+            MASK_KEY as HEAL_MASK_KEY,
+            MASK_OBJ_KEY as HEAL_MASK_OBJ_KEY,
+        )
+        from raw_spot_heal import mask_stage_fingerprint as heal_fingerprint
 
         mask = getattr(self, "_dodge_burn_mask", None)
         if mask is not None and not mask.is_empty:
@@ -22107,6 +22213,17 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 adj = dict(adj)
                 adj.pop(MASK_KEY, None)
                 adj.pop(MASK_OBJ_KEY, None)
+
+        heal = getattr(self, "_spot_heal_mask", None)
+        if heal is not None and not heal.is_empty:
+            adj = dict(adj)
+            adj[HEAL_MASK_OBJ_KEY] = heal
+            adj[HEAL_MASK_KEY] = heal_fingerprint(heal)
+        else:
+            if HEAL_MASK_KEY in adj or HEAL_MASK_OBJ_KEY in adj:
+                adj = dict(adj)
+                adj.pop(HEAL_MASK_KEY, None)
+                adj.pop(HEAL_MASK_OBJ_KEY, None)
         return adj
 
     def _apply_adjust_panel_preview(self, *, full_quality: bool = False) -> None:
@@ -22281,6 +22398,25 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             panel.set_dodge_burn_mask_present(mask is not None)
         self._sync_dodge_burn_mask_overlay()
 
+    def _apply_spot_heal_mask_from_adj(self, adj: dict | None) -> None:
+        """Restore the in-memory spot-heal mask from an adjustments dict."""
+        from raw_spot_heal import MASK_KEY, deserialize_mask
+
+        serial = str((adj or {}).get(MASK_KEY, "") or "").strip()
+        mask = None
+        if serial and not serial.startswith("mem:"):
+            try:
+                mask = deserialize_mask(serial)
+            except Exception:
+                mask = None
+        if mask is not None and getattr(mask, "is_empty", False):
+            mask = None
+        self._spot_heal_mask = mask
+        panel = getattr(self, "single_image_adjust_panel", None)
+        if panel is not None and hasattr(panel, "set_spot_heal_mask_present"):
+            panel.set_spot_heal_mask_present(mask is not None)
+        self._sync_dodge_burn_mask_overlay()
+
     def _on_adjust_panel_editing_finished(self, adj: dict) -> None:
         path = getattr(self, "current_file_path", None)
         if not path:
@@ -22299,6 +22435,11 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 STRENGTH_KEY,
                 serialize_mask,
             )
+            from raw_spot_heal import (
+                MASK_KEY as HEAL_MASK_KEY,
+                MASK_OBJ_KEY as HEAL_MASK_OBJ_KEY,
+            )
+            from raw_spot_heal import serialize_mask as serialize_heal_mask
 
             if not getattr(self, "_disable_undo_tracking", False):
                 if not hasattr(self, "_undo_stack"):
@@ -22314,12 +22455,19 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             # fingerprint via _dodge_burn_overlay_adj (no encode per slider).
             adj = dict(adj)
             adj.pop(MASK_OBJ_KEY, None)
+            adj.pop(HEAL_MASK_OBJ_KEY, None)
             mask = getattr(self, "_dodge_burn_mask", None)
             if mask is not None and not mask.is_empty:
                 adj[MASK_KEY] = serialize_mask(mask)
                 adj.setdefault(STRENGTH_KEY, DEFAULT_STRENGTH)
             else:
                 adj.pop(MASK_KEY, None)
+
+            heal = getattr(self, "_spot_heal_mask", None)
+            if heal is not None and not heal.is_empty:
+                adj[HEAL_MASK_KEY] = serialize_heal_mask(heal)
+            else:
+                adj.pop(HEAL_MASK_KEY, None)
 
             write_xmp_adjustments_for_file(path, adj)
         except Exception as exc:
@@ -22960,18 +23108,26 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             )
         # adj comes straight from the panel's export_requested signal, which
         # (like every other adjustments snapshot) has no knowledge of the
-        # dodge/burn mask -- without this, exported files would silently
-        # drop any dodge/burn brush work. See _dodge_burn_overlay_adj.
+        # dodge/burn / heal masks -- without this, exported files would
+        # silently drop local brush work. See _dodge_burn_overlay_adj.
         # Export may run in a process pool, so replace the live mask object
         # with a PNG serial the worker can pickle/deserialize.
         try:
             from raw_dodge_burn import MASK_KEY, MASK_OBJ_KEY, serialize_mask
+            from raw_spot_heal import (
+                MASK_KEY as HEAL_MASK_KEY,
+                MASK_OBJ_KEY as HEAL_MASK_OBJ_KEY,
+            )
+            from raw_spot_heal import serialize_mask as serialize_heal_mask
 
             adj = self._dodge_burn_overlay_adj(adj)
             adj = dict(adj)
             mask_obj = adj.pop(MASK_OBJ_KEY, None)
             if mask_obj is not None and not getattr(mask_obj, "is_empty", True):
                 adj[MASK_KEY] = serialize_mask(mask_obj)
+            heal_obj = adj.pop(HEAL_MASK_OBJ_KEY, None)
+            if heal_obj is not None and not getattr(heal_obj, "is_empty", True):
+                adj[HEAL_MASK_KEY] = serialize_heal_mask(heal_obj)
         except Exception:
             pass
         pool = getattr(getattr(self, "image_manager", None), "_process_pool", None)
@@ -27959,7 +28115,13 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         if getattr(self, "view_mode", "") != "single":
             return
         if getattr(self, "_adjust_overlay_visible", False):
-            # Editor already has an in-panel histogram; floating H overlay is browse-only.
+            # QShortcut owns H — arm Heal here (browse histogram is a no-op
+            # while Adjust is open; see Local Heal tool).
+            if self._shortcut_blocked_by_text_input():
+                return
+            panel = getattr(self, "single_image_adjust_panel", None)
+            if panel is not None and hasattr(panel, "set_dodge_burn_mode"):
+                panel.set_dodge_burn_mode("heal")
             return
         if self._shortcut_blocked_by_text_input():
             return
@@ -28119,6 +28281,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             # Mask is not a panel slider — restore the live buffer before
             # editing_finished re-serializes whatever is in _dodge_burn_mask.
             self._apply_dodge_burn_mask_from_adj(old_adj)
+            self._apply_spot_heal_mask_from_adj(old_adj)
             if panel is not None:
                 self._on_adjust_panel_editing_finished(old_adj)
         finally:
@@ -28239,6 +28402,11 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 panel = getattr(self, "single_image_adjust_panel", None)
                 if panel is not None and hasattr(panel, "set_dodge_burn_mode"):
                     panel.set_dodge_burn_mode("erase")
+                    return True
+            if key == Qt.Key.Key_H and not ctrl_or_cmd:
+                panel = getattr(self, "single_image_adjust_panel", None)
+                if panel is not None and hasattr(panel, "set_dodge_burn_mode"):
+                    panel.set_dodge_burn_mode("heal")
                     return True
 
         if key == Qt.Key.Key_Escape:

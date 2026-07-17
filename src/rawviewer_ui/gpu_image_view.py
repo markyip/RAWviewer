@@ -748,22 +748,36 @@ class GpuImageView(QGraphicsView):
         import numpy as np
         import cv2
 
-        # mask.data is float32 [-MASK_CLIP, MASK_CLIP]
+        # mask.data is float32. Dodge/burn uses [-MASK_CLIP, MASK_CLIP]
+        # (red/blue). Spot heal uses [0, 1] coverage (green).
         h, w = mask.data.shape
         overlay = np.zeros((h, w, 4), dtype=np.uint8)
 
-        # Red for Dodge (positive), Blue for Burn (negative)
-        pos_mask = mask.data > 0
-        overlay[pos_mask, 0] = 255  # R
-        overlay[pos_mask, 3] = np.clip(
-            mask.data[pos_mask] / 1.5 * 180.0 + 40.0, 0, 255
-        ).astype(np.uint8)
+        try:
+            from raw_spot_heal import HealMask
 
-        neg_mask = mask.data < 0
-        overlay[neg_mask, 2] = 255  # B
-        overlay[neg_mask, 3] = np.clip(
-            -mask.data[neg_mask] / 1.5 * 180.0 + 40.0, 0, 255
-        ).astype(np.uint8)
+            is_heal = isinstance(mask, HealMask)
+        except Exception:
+            is_heal = False
+
+        if is_heal:
+            cov = np.clip(mask.data, 0.0, 1.0)
+            on = cov > 0.02
+            overlay[on, 1] = 220  # G
+            overlay[on, 3] = np.clip(cov[on] * 200.0 + 40.0, 0, 255).astype(np.uint8)
+        else:
+            # Red for Dodge (positive), Blue for Burn (negative)
+            pos_mask = mask.data > 0
+            overlay[pos_mask, 0] = 255  # R
+            overlay[pos_mask, 3] = np.clip(
+                mask.data[pos_mask] / 1.5 * 180.0 + 40.0, 0, 255
+            ).astype(np.uint8)
+
+            neg_mask = mask.data < 0
+            overlay[neg_mask, 2] = 255  # B
+            overlay[neg_mask, 3] = np.clip(
+                -mask.data[neg_mask] / 1.5 * 180.0 + 40.0, 0, 255
+            ).astype(np.uint8)
 
         if self._img_w > 0 and self._img_h > 0 and (w != self._img_w or h != self._img_h):
             overlay = cv2.resize(

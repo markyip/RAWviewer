@@ -736,7 +736,16 @@ def parse_tone_curve_pv2012_from_xmp(xmp_path: str) -> str:
 
 def parse_dodge_burn_mask_from_xmp(xmp_path: str) -> str:
     """Read the custom DodgeBurnMask child element -> base64 PNG string."""
-    if not xmp_path or not os.path.isfile(xmp_path):
+    return _parse_crs_child_text_from_xmp(xmp_path, "DodgeBurnMask")
+
+
+def parse_spot_heal_mask_from_xmp(xmp_path: str) -> str:
+    """Read the custom SpotHealMask child element -> base64 PNG string."""
+    return _parse_crs_child_text_from_xmp(xmp_path, "SpotHealMask")
+
+
+def _parse_crs_child_text_from_xmp(xmp_path: str, local_name: str) -> str:
+    if not xmp_path or not os.path.isfile(xmp_path) or not local_name:
         return ""
     try:
         tree = ET.parse(xmp_path)
@@ -746,12 +755,11 @@ def parse_dodge_burn_mask_from_xmp(xmp_path: str) -> str:
             for child in desc:
                 tag = child.tag
                 local_key = tag.split("}")[-1] if "}" in tag else tag.split(":")[-1]
-                if local_key == "DodgeBurnMask" and child.text:
+                if local_key == local_name and child.text:
                     return child.text.strip()
     except Exception:
         pass
     return ""
-
 
 def parse_creative_lut_name_from_xmp(xmp_path: str) -> str:
     """Read crs:CreativeLUTName (string basename of a managed .cube)."""
@@ -820,6 +828,11 @@ def load_adjustments_from_xmp(xmp_path: str) -> Dict[str, float]:
     mask_serial = parse_dodge_burn_mask_from_xmp(xmp_path)
     if mask_serial:
         adj[MASK_KEY] = mask_serial
+    from raw_spot_heal import MASK_KEY as HEAL_MASK_KEY
+
+    heal_serial = parse_spot_heal_mask_from_xmp(xmp_path)
+    if heal_serial:
+        adj[HEAL_MASK_KEY] = heal_serial
     from raw_lut import LUT_NAME_KEY, LUT_SPACE_DEFAULT, LUT_SPACE_KEY
 
     lut_name = parse_creative_lut_name_from_xmp(xmp_path)
@@ -920,6 +933,7 @@ def is_default_adjustments(adj: Dict[str, float] | None) -> bool:
     if not adj:
         return True
     from raw_dodge_burn import MASK_KEY
+    from raw_spot_heal import MASK_KEY as HEAL_MASK_KEY
     from raw_lut import LUT_AMOUNT_KEY, LUT_NAME_KEY
     from raw_tone_curve import CHANNEL_CURVE_KEYS, TONE_CURVE_SERIAL_KEY
 
@@ -933,6 +947,17 @@ def is_default_adjustments(adj: Dict[str, float] | None) -> bool:
             return False
     if str(adj.get(MASK_KEY, "") or "").strip():
         return False
+    if str(adj.get(HEAL_MASK_KEY, "") or "").strip():
+        return False
+    # Live paint injects mask objects without a PNG serial yet — still non-default.
+    try:
+        from raw_dodge_burn import MASK_OBJ_KEY
+        from raw_spot_heal import MASK_OBJ_KEY as HEAL_MASK_OBJ_KEY
+
+        if adj.get(MASK_OBJ_KEY) is not None or adj.get(HEAL_MASK_OBJ_KEY) is not None:
+            return False
+    except Exception:
+        pass
     lut_name = str(adj.get(LUT_NAME_KEY, "") or "").strip()
     try:
         lut_amt = float(adj.get(LUT_AMOUNT_KEY, 0.0) or 0.0)
@@ -1083,6 +1108,7 @@ _OUR_CRS_CHILD_LOCALS = frozenset(
         "ToneCurvePV2012Green",
         "ToneCurvePV2012Blue",
         "DodgeBurnMask",
+        "SpotHealMask",
         "CreativeLUTName",
         "CreativeLUTWorkingSpace",
     }
@@ -1302,6 +1328,13 @@ def _write_xmp_adjustments_locked(xmp_path: str, adj: Dict[str, float]) -> None:
     if mask_serial:
         db = ET.SubElement(desc, f"{{{CRS_NS}}}DodgeBurnMask")
         db.text = mask_serial
+
+    from raw_spot_heal import MASK_KEY as HEAL_MASK_KEY
+
+    heal_serial = str(merged.get(HEAL_MASK_KEY, "") or "")
+    if heal_serial:
+        heal = ET.SubElement(desc, f"{{{CRS_NS}}}SpotHealMask")
+        heal.text = heal_serial
 
     from raw_lut import (
         LUT_AMOUNT_KEY,
@@ -1587,6 +1620,18 @@ def _apply_adjustments_to_srgb_core(img: np.ndarray, merged: dict[str, float]) -
         if mask is not None:
             stops = float(merged.get(_db_strength_key, _db_default_strength))
             img = apply_dodge_burn(img, mask, stops)
+
+    # 2c. Spot heal (cv2.inpaint) — same rationale as dodge/burn above.
+    from raw_spot_heal import MASK_KEY as _heal_mask_key
+
+    heal_serial = str(merged.get(_heal_mask_key, "") or "")
+    if heal_serial:
+        from raw_spot_heal import _deserialize_mask_cached as _heal_deserialize
+        from raw_spot_heal import apply_spot_heal
+
+        heal_mask = _heal_deserialize(heal_serial)
+        if heal_mask is not None:
+            img = apply_spot_heal(img, heal_mask)
 
     # 3. Contrast
     contrast_val = float(merged.get("Contrast2012", 0.0))

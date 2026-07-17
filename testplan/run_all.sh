@@ -44,6 +44,7 @@ run "adjust copy paste shortcuts" testplan/auto/t_adjust_copy_paste_shortcuts.py
 run "adjust workflow restore" testplan/auto/t_adjust_workflow_restore.py
 run "dodge & burn reset" testplan/auto/t_dodge_burn_reset.py
 run "dodge & burn undo" testplan/auto/t_dodge_burn_undo.py
+run "spot heal" testplan/auto/t_spot_heal.py
 run "dodge & burn brush wheel" testplan/auto/t_dodge_burn_brush_wheel.py
 run "filmstrip hidden in editor" testplan/auto/t_filmstrip_editor_hidden.py
 run "search bar animation" testplan/auto/t_search_bar_animation.py

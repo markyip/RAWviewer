@@ -19,6 +19,8 @@ from raw_dodge_burn import DEFAULT_STRENGTH as _DB_DEFAULT_STRENGTH
 from raw_dodge_burn import MASK_KEY as _DB_MASK_KEY
 from raw_dodge_burn import STRENGTH_KEY as _DB_STRENGTH_KEY
 from raw_dodge_burn import resolve_mask_from_adj as _resolve_db_mask
+from raw_spot_heal import MASK_KEY as _HEAL_MASK_KEY
+from raw_spot_heal import resolve_mask_from_adj as _resolve_heal_mask
 from raw_pv2012 import apply_pv2012_tone_rgb
 from raw_tone_curve import TONE_CURVE_SERIAL_KEY
 
@@ -207,6 +209,7 @@ def process_linear_edit_buffer(
     img = apply_geometry(img, merged)
 
     mask = _resolve_db_mask(merged)
+    heal_mask = _resolve_heal_mask(merged)
     do_denoise = chroma_denoise if chroma_denoise is not None else chroma_denoise_enabled()
     nr_amount = float(merged.get("ColorNoiseReduction", 0.0))
     luma_nr_amount = float(merged.get("LuminanceNoiseReduction", 0.0))
@@ -216,11 +219,10 @@ def process_linear_edit_buffer(
     # (no cross-row dependency), so splitting rows across threads gives
     # identical output computed concurrently -- numpy releases the GIL for
     # arrays this size (same rationale as _apply_adjustments_to_srgb_banded
-    # in raw_adjustments.py). Denoise (real spatial radius) and dodge/burn
-    # (its mask needs its own per-band slicing, not implemented here) fall
-    # back to the single-threaded path below, same as that precedent.
+    # in raw_adjustments.py). Denoise (real spatial radius), dodge/burn, and
+    # spot heal (spatial inpaint) fall back to the single-threaded path.
     n_workers = _linear_pipeline_worker_count(img.shape[0])
-    if mask is None and not denoise_active and n_workers > 1:
+    if mask is None and heal_mask is None and not denoise_active and n_workers > 1:
         return _process_linear_edit_buffer_banded(img, merged, n_workers)
 
     return _process_linear_edit_tail(img, merged, preview=preview, chroma_denoise=chroma_denoise)
@@ -250,6 +252,14 @@ def _process_linear_edit_tail(
 
         stops = float(merged.get(_DB_STRENGTH_KEY, _DB_DEFAULT_STRENGTH))
         img = apply_dodge_burn(img, mask, stops)
+
+    # Spot heal (cv2.inpaint): after local exposure so the fill samples the
+    # already-exposed neighborhood; before denoise/tone.
+    heal_mask = _resolve_heal_mask(merged)
+    if heal_mask is not None:
+        from raw_spot_heal import apply_spot_heal
+
+        img = apply_spot_heal(img, heal_mask)
 
     do_denoise = chroma_denoise if chroma_denoise is not None else chroma_denoise_enabled()
     nr_amount = float(merged.get("ColorNoiseReduction", 0.0))
@@ -329,6 +339,7 @@ _PRE_TONE_KEYS = (
     "DenoiseMethod",
     _DB_MASK_KEY,
     _DB_STRENGTH_KEY,
+    _HEAL_MASK_KEY,
     # Geometry runs at the head of the pipeline (before WB), so any transform
     # change invalidates pre_tone and everything chained to it.
     "CropAngle",
@@ -470,6 +481,12 @@ def process_linear_edit_buffer_staged(
 
                 stops = float(merged.get(_DB_STRENGTH_KEY, _DB_DEFAULT_STRENGTH))
                 img = apply_dodge_burn(img, mask, stops)
+
+            heal_mask = _resolve_heal_mask(merged)
+            if heal_mask is not None:
+                from raw_spot_heal import apply_spot_heal
+
+                img = apply_spot_heal(img, heal_mask)
 
             do_denoise = chroma_denoise if chroma_denoise is not None else chroma_denoise_enabled()
             nr_amount = float(merged.get("ColorNoiseReduction", 0.0))

@@ -611,6 +611,7 @@ class ImageAdjustPanelWidget(QWidget):
     auto_straighten_requested = pyqtSignal()
     dodge_burn_mode_changed = pyqtSignal(object)
     dodge_burn_clear_requested = pyqtSignal()
+    spot_heal_clear_requested = pyqtSignal()
     dodgeBurnMaskToggled = pyqtSignal(bool)
     dodge_burn_brush_changed = pyqtSignal()  # size/flow changed — refresh brush cursor
     # Fired when an XMP preset is applied so the host can drop per-image local
@@ -889,14 +890,14 @@ class ImageAdjustPanelWidget(QWidget):
         layout.addLayout(header)
 
         hint = QLabel(
-            "E / Esc — close · D/B/X brush tools · two-finger scroll = Brush Size"
+            "E / Esc — close · D/B/X/H brush tools · two-finger scroll = Brush Size"
         )
         hint.setStyleSheet(f"color: {theme.INK_FAINT}; font-size: 10px;")
         hint.setWordWrap(True)
         hint.setToolTip(
             "While Adjust is open:\n"
             "• E or Esc closes the editor (restores browse RAW/JPEG mode)\n"
-            "• D / B / X arm Dodge / Burn / Eraser (press again to disarm)\n"
+            "• D / B / X / H arm Dodge / Burn / Eraser / Heal (press again to disarm)\n"
             "• With a brush tool armed, two-finger scroll changes Brush Size "
             "(Ctrl+scroll still zooms)\n"
             "• Brush Flow changes how opaque the brush preview looks"
@@ -1308,6 +1309,7 @@ class ImageAdjustPanelWidget(QWidget):
         self._dodge_btn = QPushButton("Dodge (D)")
         self._burn_btn = QPushButton("Burn (B)")
         self._erase_btn = QPushButton("Eraser (X)")
+        self._heal_btn = QPushButton("Heal (H)")
         for btn, tip in (
             (
                 self._dodge_btn,
@@ -1321,7 +1323,7 @@ class ImageAdjustPanelWidget(QWidget):
             ),
             (
                 self._erase_btn,
-                "Eraser (X) — remove dodge/burn paint under the brush.\n"
+                "Eraser (X) — remove dodge/burn or heal paint under the brush.\n"
                 "Two-finger scroll changes Brush Size; Ctrl+scroll zooms.",
             ),
         ):
@@ -1335,6 +1337,34 @@ class ImageAdjustPanelWidget(QWidget):
         self._burn_btn.toggled.connect(lambda on: self._on_dodge_burn_toggled(self._burn_btn, on))
         self._erase_btn.toggled.connect(lambda on: self._on_dodge_burn_toggled(self._erase_btn, on))
         db_container_layout.addLayout(db_row)
+
+        heal_row = QHBoxLayout()
+        heal_row.setSpacing(6)
+        heal_mode_lbl = QLabel("Heal")
+        heal_mode_lbl.setStyleSheet(f"color: {theme.INK}; font-size: 11px;")
+        heal_mode_lbl.setMinimumWidth(78)
+        heal_row.addWidget(heal_mode_lbl)
+        self._heal_btn.setObjectName("adjust_db_btn")
+        self._heal_btn.setCheckable(True)
+        self._heal_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._heal_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self._heal_btn.setToolTip(
+            "Heal (H) — brush to remove smudges / dust (OpenCV inpaint at full strength).\n"
+            "Only Brush Size and Brush Flow apply; Effect Strength is for Dodge/Burn only.\n"
+            "Paint the defect; release to fill from neighbors.\n"
+            "Two-finger scroll changes Brush Size; Ctrl+scroll zooms."
+        )
+        self._heal_btn.toggled.connect(lambda on: self._on_dodge_burn_toggled(self._heal_btn, on))
+        heal_row.addWidget(self._heal_btn, 1)
+        self._heal_clear_btn = QPushButton("Clear Heal")
+        self._heal_clear_btn.setObjectName("adjust_db_clear_btn")
+        self._heal_clear_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._heal_clear_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self._heal_clear_btn.setToolTip("Erase the spot-heal mask for this image")
+        self._heal_clear_btn.setEnabled(False)
+        self._heal_clear_btn.clicked.connect(self.spot_heal_clear_requested.emit)
+        heal_row.addWidget(self._heal_clear_btn, 1)
+        db_container_layout.addLayout(heal_row)
 
         db_actions_row = QHBoxLayout()
         db_actions_row.setSpacing(6)
@@ -1357,8 +1387,8 @@ class ImageAdjustPanelWidget(QWidget):
         self._db_show_mask_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         self._db_show_mask_btn.setEnabled(False)
         self._db_show_mask_btn.setToolTip(
-            "Overlay the dodge/burn mask (red = dodge, blue = burn).\n"
-            "Available after selecting Dodge (D), Burn (B), or Eraser (X). Shortcut: O"
+            "Overlay the active brush mask (red/blue = dodge/burn, green = heal).\n"
+            "Turns on automatically when a brush tool is armed. Shortcut: O"
         )
         self._db_show_mask_btn.toggled.connect(self.dodgeBurnMaskToggled.emit)
         db_actions_row.addWidget(self._db_show_mask_btn, 1)
@@ -1370,9 +1400,9 @@ class ImageAdjustPanelWidget(QWidget):
         self._db_edge_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._db_edge_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         self._db_edge_btn.setToolTip(
-            "Keep brush paint on the subject under the cursor — flood-fills "
+            "Keep dodge/burn paint on the subject under the cursor — flood-fills "
             "within similar luminance so strokes stop at subject edges "
-            "instead of spilling onto neighbors"
+            "instead of spilling onto neighbors (not used by Heal)"
         )
         db_actions_row.addWidget(self._db_edge_btn, 1)
         db_container_layout.addLayout(db_actions_row)
@@ -1412,7 +1442,8 @@ class ImageAdjustPanelWidget(QWidget):
         self._db_strength_slider.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._db_strength_slider.setToolTip(
             "Per-stroke flow (low = build up gradually; high = stronger each pass).\n"
-            "Also sets how opaque the on-image brush preview looks."
+            "Also sets how opaque the on-image brush preview looks.\n"
+            "In Heal mode this is the only intensity control (Effect Strength is off)."
         )
         self._db_strength_slider.valueChanged.connect(
             lambda _v: self.dodge_burn_brush_changed.emit()
@@ -1422,7 +1453,10 @@ class ImageAdjustPanelWidget(QWidget):
 
         # Stops-per-mask-unit (persisted as DodgeBurnStrength). Distinct from
         # Brush Flow, which only controls per-stroke accumulation while painting.
-        db_mask_str_row = QHBoxLayout()
+        # Heal mode disables this row — inpaint always runs at full strength.
+        self._db_mask_strength_row = QWidget()
+        db_mask_str_row = QHBoxLayout(self._db_mask_strength_row)
+        db_mask_str_row.setContentsMargins(0, 0, 0, 0)
         db_mask_str_row.setSpacing(6)
         db_mask_str_lbl = QLabel("Effect Strength")
         db_mask_str_lbl.setStyleSheet(f"color: {theme.INK}; font-size: 11px;")
@@ -1432,9 +1466,13 @@ class ImageAdjustPanelWidget(QWidget):
         # 0.50–3.00 stops in 0.05 steps → slider 10–60
         self._db_mask_strength_slider.setRange(10, 60)
         self._db_mask_strength_slider.setValue(int(round(DB_DEFAULT_STRENGTH * 20.0)))
+        # While Heal is armed the slider is forced to max for display; this
+        # holds the previous dodge/burn stops so leaving Heal restores them.
+        self._db_mask_strength_saved_for_heal: int | None = None
         self._db_mask_strength_slider.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._db_mask_strength_slider.setToolTip(
-            "How many stops of exposure the painted mask applies at full strength"
+            "How many stops of exposure the painted dodge/burn mask applies at full strength.\n"
+            "Not used by Heal (inpaint always runs at full strength)."
         )
         self._db_mask_strength_value = AdjustValueLabel()
         self._db_mask_strength_value.setProperty("class", "adjust_slider_value")
@@ -1445,7 +1483,7 @@ class ImageAdjustPanelWidget(QWidget):
         self._db_mask_strength_slider.sliderReleased.connect(self._on_slider_released)
         db_mask_str_row.addWidget(self._db_mask_strength_slider, 1)
         db_mask_str_row.addWidget(self._db_mask_strength_value)
-        db_container_layout.addLayout(db_mask_str_row)
+        db_container_layout.addWidget(self._db_mask_strength_row)
         self.sect_local.add_widget(db_container)
 
         self._build_looks_section(self.sect_lut)
@@ -2205,6 +2243,12 @@ class ImageAdjustPanelWidget(QWidget):
         as_shot = current.get(AS_SHOT_TEMP_KEY)
         # Local paint stays per-image (same as copy/paste settings).
         preset.pop(MASK_KEY, None)
+        try:
+            from raw_spot_heal import MASK_KEY as HEAL_MASK_KEY
+
+            preset.pop(HEAL_MASK_KEY, None)
+        except Exception:
+            pass
         preset.pop(AS_SHOT_TEMP_KEY, None)
         merged = dict(DEFAULT_ADJUSTMENTS)
         merged.update(preset)
@@ -2343,6 +2387,14 @@ class ImageAdjustPanelWidget(QWidget):
         from raw_dodge_burn import MASK_KEY as _db_mask_key
 
         self.set_dodge_burn_mask_present(bool(str((adj or {}).get(_db_mask_key, "") or "")))
+        try:
+            from raw_spot_heal import MASK_KEY as _heal_mask_key
+
+            self.set_spot_heal_mask_present(
+                bool(str((adj or {}).get(_heal_mask_key, "") or ""))
+            )
+        except Exception:
+            pass
         self._block_emit = True
         try:
             merged = dict(DEFAULT_ADJUSTMENTS)
@@ -2552,7 +2604,16 @@ class ImageAdjustPanelWidget(QWidget):
         else:
             out["ColorNoiseReduction"] = 0.0
         if hasattr(self, "_db_mask_strength_slider"):
-            out[DB_STRENGTH_KEY] = float(self._db_mask_strength_slider.value()) / 20.0
+            # Heal mode forces the Effect Strength slider to max for display
+            # only — persist the pre-Heal dodge/burn value so Heal strokes
+            # do not rewrite DodgeBurnStrength.
+            saved = getattr(self, "_db_mask_strength_saved_for_heal", None)
+            if self.dodge_burn_mode() == "heal" and saved is not None:
+                out[DB_STRENGTH_KEY] = float(saved) / 20.0
+            else:
+                out[DB_STRENGTH_KEY] = (
+                    float(self._db_mask_strength_slider.value()) / 20.0
+                )
         else:
             out[DB_STRENGTH_KEY] = float(DB_DEFAULT_STRENGTH)
         lens_btn = getattr(self, "_lens_correction_btn", None)
@@ -2611,8 +2672,13 @@ class ImageAdjustPanelWidget(QWidget):
             return
         others = [
             b
-            for b in (self._dodge_btn, self._burn_btn, self._erase_btn)
-            if b is not btn
+            for b in (
+                self._dodge_btn,
+                self._burn_btn,
+                self._erase_btn,
+                getattr(self, "_heal_btn", None),
+            )
+            if b is not None and b is not btn
         ]
         if checked:
             self._block_emit = True
@@ -2624,21 +2690,85 @@ class ImageAdjustPanelWidget(QWidget):
                 self._block_emit = False
         mode = self.dodge_burn_mode()
         self._sync_dodge_burn_mask_button_enabled(mode is not None)
+        self._sync_local_controls_for_mode(mode)
         self.dodge_burn_mode_changed.emit(mode)
 
     def _sync_dodge_burn_mask_button_enabled(self, armed: bool) -> None:
-        """Mask overlay is only available while a brush tool is selected."""
+        """Mask overlay is available while a brush tool is selected.
+
+        Default on when arming a tool so paint coverage is visible immediately
+        (especially important for Heal). Turning the tool off clears Mask.
+        """
         btn = getattr(self, "_db_show_mask_btn", None)
         if btn is None:
             return
         btn.setEnabled(bool(armed))
-        if not armed and btn.isChecked():
+        if not armed:
+            if btn.isChecked():
+                self._block_emit = True
+                try:
+                    btn.setChecked(False)
+                finally:
+                    self._block_emit = False
+                self.dodgeBurnMaskToggled.emit(False)
+            return
+        if not btn.isChecked():
             self._block_emit = True
             try:
-                btn.setChecked(False)
+                btn.setChecked(True)
             finally:
                 self._block_emit = False
-            self.dodgeBurnMaskToggled.emit(False)
+            self.dodgeBurnMaskToggled.emit(True)
+
+    def _sync_local_controls_for_mode(self, mode: str | None) -> None:
+        """Heal only uses Size/Flow — Effect Strength is dodge/burn stops.
+
+        While Heal is armed the Effect Strength row is grayed out and forced
+        to maximum (visual cue that heal always runs full-strength). The
+        previous dodge/burn stops value is restored when leaving Heal so
+        only Dodge/Burn honor that slider.
+        """
+        heal = mode == "heal"
+        row = getattr(self, "_db_mask_strength_row", None)
+        slider = getattr(self, "_db_mask_strength_slider", None)
+        val_lbl = getattr(self, "_db_mask_strength_value", None)
+        if row is not None:
+            row.setEnabled(not heal)
+        if slider is not None:
+            if heal:
+                if getattr(self, "_db_mask_strength_saved_for_heal", None) is None:
+                    self._db_mask_strength_saved_for_heal = int(slider.value())
+                max_v = int(slider.maximum())
+                if slider.value() != max_v:
+                    slider.blockSignals(True)
+                    slider.setValue(max_v)
+                    slider.blockSignals(False)
+                stops = float(max_v) / 20.0
+                if val_lbl is not None:
+                    val_lbl.setText(f"{stops:.2f}")
+                tip = (
+                    "Heal always inpaints at full strength — only Brush Size "
+                    "and Brush Flow apply. Effect Strength is for Dodge/Burn."
+                )
+            else:
+                saved = getattr(self, "_db_mask_strength_saved_for_heal", None)
+                if saved is not None:
+                    self._db_mask_strength_saved_for_heal = None
+                    slider.blockSignals(True)
+                    slider.setValue(int(saved))
+                    slider.blockSignals(False)
+                    stops = float(saved) / 20.0
+                    if val_lbl is not None:
+                        val_lbl.setText(f"{stops:.2f}")
+                tip = (
+                    "How many stops of exposure the painted dodge/burn mask "
+                    "applies at full strength.\n"
+                    "Not used by Heal (inpaint always runs at full strength)."
+                )
+            slider.setToolTip(tip)
+        edge = getattr(self, "_db_edge_btn", None)
+        if edge is not None:
+            edge.setEnabled(not heal)
 
     def dodge_burn_mode(self) -> str | None:
         if self._dodge_btn.isChecked():
@@ -2647,37 +2777,59 @@ class ImageAdjustPanelWidget(QWidget):
             return "burn"
         if getattr(self, "_erase_btn", None) is not None and self._erase_btn.isChecked():
             return "erase"
+        if getattr(self, "_heal_btn", None) is not None and self._heal_btn.isChecked():
+            return "heal"
         return None
 
     def set_dodge_burn_mode(self, mode: str | None) -> None:
-        """Arm Dodge/Burn/Eraser from a shortcut (D/B/X) or disarm when mode is None."""
+        """Arm Dodge/Burn/Eraser/Heal from a shortcut (D/B/X/H) or disarm."""
         want = (mode or "").strip().lower()
         if want in ("eraser", "erase"):
             want = "erase"
-        if want not in ("dodge", "burn", "erase", ""):
+        if want not in ("dodge", "burn", "erase", "heal", ""):
             return
         dodge_on = want == "dodge"
         burn_on = want == "burn"
         erase_on = want == "erase"
+        heal_on = want == "heal"
         erase_btn = getattr(self, "_erase_btn", None)
+        heal_btn = getattr(self, "_heal_btn", None)
         cur_dodge = self._dodge_btn.isChecked()
         cur_burn = self._burn_btn.isChecked()
         cur_erase = bool(erase_btn is not None and erase_btn.isChecked())
-        if cur_dodge == dodge_on and cur_burn == burn_on and cur_erase == erase_on:
+        cur_heal = bool(heal_btn is not None and heal_btn.isChecked())
+        if (
+            cur_dodge == dodge_on
+            and cur_burn == burn_on
+            and cur_erase == erase_on
+            and cur_heal == heal_on
+        ):
             # Same mode again → toggle off.
             if want:
-                dodge_on = burn_on = erase_on = False
+                dodge_on = burn_on = erase_on = heal_on = False
         self._block_emit = True
         try:
             self._dodge_btn.setChecked(dodge_on)
             self._burn_btn.setChecked(burn_on)
             if erase_btn is not None:
                 erase_btn.setChecked(erase_on)
+            if heal_btn is not None:
+                heal_btn.setChecked(heal_on)
         finally:
             self._block_emit = False
-        armed = dodge_on or burn_on or erase_on
+        armed = dodge_on or burn_on or erase_on or heal_on
         self._sync_dodge_burn_mask_button_enabled(armed)
-        out = "dodge" if dodge_on else ("burn" if burn_on else ("erase" if erase_on else None))
+        if dodge_on:
+            out = "dodge"
+        elif burn_on:
+            out = "burn"
+        elif erase_on:
+            out = "erase"
+        elif heal_on:
+            out = "heal"
+        else:
+            out = None
+        self._sync_local_controls_for_mode(out)
         self.dodge_burn_mode_changed.emit(out)
 
     def disarm_dodge_burn(self) -> None:
@@ -2690,9 +2842,13 @@ class ImageAdjustPanelWidget(QWidget):
             erase_btn = getattr(self, "_erase_btn", None)
             if erase_btn is not None:
                 erase_btn.setChecked(False)
+            heal_btn = getattr(self, "_heal_btn", None)
+            if heal_btn is not None:
+                heal_btn.setChecked(False)
         finally:
             self._block_emit = False
         self._sync_dodge_burn_mask_button_enabled(False)
+        self._sync_local_controls_for_mode(None)
         if was_armed:
             self.dodge_burn_mode_changed.emit(None)
 
@@ -2726,6 +2882,11 @@ class ImageAdjustPanelWidget(QWidget):
 
     def set_dodge_burn_mask_present(self, present: bool) -> None:
         self._db_clear_btn.setEnabled(bool(present))
+
+    def set_spot_heal_mask_present(self, present: bool) -> None:
+        btn = getattr(self, "_heal_clear_btn", None)
+        if btn is not None:
+            btn.setEnabled(bool(present))
 
     def dodge_burn_show_mask(self) -> bool:
         return bool(self._db_show_mask_btn.isChecked())

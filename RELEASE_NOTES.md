@@ -80,7 +80,7 @@ It is built as a faster **browse / cull** release on top of 2.5: featuring **Fas
 #### 🎨 Adjust: straighten / local / effects / crop
 - **Auto straighten** wired next to Straighten (`AUTO`); fixed Hough segment unpack for OpenCV `(N,4)` shapes; softer thresholds + gradient-orientation fallback.
 - **White-balance presets** dropdown (As Shot from EXIF Kelvin when present; Daylight / Cloudy / Shade / Tungsten / Fluorescent / Flash) above Temp/Tint.
-- **Dodge & Burn** UI (Local: Dodge/Burn, Size, Flow, Clear, Show Mask, Edge Assist) with soft **circular** gaussian stamps, stroke-delta live preview (no hard square blit), and edge-assisted painting.
+- **Dodge & Burn** UI (Local: Dodge/Burn/Eraser/Heal, Size, Flow, Clear, Show Mask, Edge Assist) with soft **circular** gaussian stamps, stroke-delta live preview (no hard square blit), and edge-assisted painting. **Heal (H)** uses OpenCV Telea inpaint for smudge/dust removal (Lite + Full).
 - **Crop overlay** in Transform: interactive dimmed mask + handles; aspect pills Free / Original / 1:1 / 4:3 / 3:2 / 16:9; Apply writes `CropLeft/Right/Top/Bottom` (geometry pipeline already honored these keys).
 - **Vignette** (`PostCropVignetteAmount` / `PostCropVignetteMidpoint`) and **Dehaze** (`Dehaze`) in Detail — display-linear paint-overlay vignette, Lite-safe (cv2/numpy).
 - **Editor chrome**: wider Adjust panel, higher-contrast labels, unified combo style (no separate drop-down button), Tone Curve **Linear** button readable on dark chrome.
