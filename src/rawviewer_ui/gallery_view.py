@@ -891,6 +891,54 @@ class JustifiedGallery(QWidget):
             "offset_px": int(rect.top() - scroll_y),
         }
 
+    def _scroll_anchor_state_for_rebuild(self) -> Optional[dict]:
+        """Capture scroll anchor for aspect/metadata layout rebuilds.
+
+        Prefer the current (or pending entry) image when it is in the viewport
+        or still the entry-scroll target. Pinning the top-left tile lets tiles
+        above grow and shove the photo you returned from single-view out of
+        sight; anchoring to that photo keeps it stable while new thumbs settle
+        off-screen.
+        """
+        scroll = self._scroll_area_widget()
+        items = self._gallery_layout_items
+        if scroll is None or not items:
+            return None
+        sb = scroll.verticalScrollBar()
+        scroll_y = int(sb.value())
+        viewport_h = max(1, int(scroll.viewport().height()))
+
+        preferred = self._entry_anchor_path()
+        if preferred:
+            resolved = self._resolve_gallery_path(preferred)
+            indices = self._path_to_indices.get(resolved) if resolved else None
+            if indices and 0 <= indices[0] < len(items):
+                idx = indices[0]
+                item = items[idx]
+                rect = item["rect"]
+                view_top = scroll_y
+                view_bottom = scroll_y + viewport_h
+                intersects = rect.bottom() > view_top and rect.top() < view_bottom
+                pending = getattr(self, "_pending_scroll_to_path", None)
+                pending_match = False
+                if pending and resolved:
+                    pending_resolved = self._resolve_gallery_path(pending)
+                    pending_match = bool(
+                        pending_resolved and pending_resolved == resolved
+                    )
+                if intersects or pending_match:
+                    if intersects:
+                        offset_px = int(rect.top() - scroll_y)
+                    else:
+                        # Entry scroll not finished yet — keep the target near
+                        # the top of the viewport after rebuild.
+                        offset_px = 12
+                    return {
+                        "file_path": item.get("file_path") or preferred,
+                        "offset_px": offset_px,
+                    }
+        return self._capture_scroll_anchor_state()
+
     def _zoom_scroll_anchor_for_rebuild(self) -> Optional[dict]:
         """Map the zoom-session anchor to build_gallery scroll-restore format."""
         state = self._zoom_anchor_state
@@ -902,7 +950,7 @@ class JustifiedGallery(QWidget):
         return {"file_path": state["file_path"], "offset_px": int(offset)}
 
     def _restore_scroll_anchor_state(self, state: Optional[dict]) -> bool:
-        """Restore scroll so the topmost visible tile stays at the same viewport offset."""
+        """Restore scroll so the anchored tile stays at the same viewport offset."""
         if not state:
             return False
         path = state.get("file_path")
@@ -2609,7 +2657,7 @@ class JustifiedGallery(QWidget):
         if getattr(self, "_is_zooming", False) and self._zoom_anchor_state:
             anchor_state = self._zoom_scroll_anchor_for_rebuild()
         elif self._gallery_layout_items:
-            anchor_state = self._capture_scroll_anchor_state()
+            anchor_state = self._scroll_anchor_state_for_rebuild()
 
         self._building = True
         if self._resize_timer is not None and self._resize_timer.isActive():
@@ -4363,7 +4411,7 @@ class JustifiedGallery(QWidget):
             self._metadata_rebuild_timer.start(400)
             return
 
-        anchor = self._capture_scroll_anchor_state()
+        anchor = self._scroll_anchor_state_for_rebuild()
         changed_paths = set(self._metadata_changed_paths)
         flip_paths = set(getattr(self, "_orientation_flip_paths", None) or ())
         self._metadata_changed_paths.clear()

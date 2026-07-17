@@ -1103,7 +1103,7 @@ class InstallerGUI(QMainWindow):
         
         title = QLabel("Success!")
         title.setObjectName("title")
-        title.setStyleSheet(f"font-size: 40px; color: {_HIST_G};")
+        title.setStyleSheet(f"font-size: 40px; color: {_EMBER};")
         layout.addWidget(title, alignment=Qt.AlignmentFlag.AlignCenter)
         
         desc = QLabel(self._SUCCESS_DESC_BASE)
