@@ -1,5 +1,7 @@
 # RAWviewer Release Notes
 
+**Language / 語言：** English · [繁體中文](RELEASE_NOTES.zh-TW.md)
+
 
 ## 🚀 Version 3.0.0
 **Release Date: July 14, 2026**

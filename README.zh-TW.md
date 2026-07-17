@@ -56,7 +56,7 @@
 - **Nikon 高效率（HE/HE\*）檔案**現可瀏覽與篩片
 - **更精簡的 Lite 版**，適合在意安裝大小的機器
 
-完整變更說明：[`RELEASE_NOTES.md`](RELEASE_NOTES.md)
+完整變更說明：[`RELEASE_NOTES.zh-TW.md`](RELEASE_NOTES.zh-TW.md)
 
 ---
 
