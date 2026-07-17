@@ -6508,9 +6508,15 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 return
             from image_load_manager import Priority as _Priority
 
+            # On-screen image: CURRENT so GPU raw_limit reservation cannot let
+            # neighbor PRELOAD full starve this demosaic.
+            prio = _Priority.CURRENT
+            cur = getattr(self, "current_file_path", None)
+            if cur and _norm_path(cur) != _norm_path(file_path):
+                prio = _Priority.BACKGROUND
             self.image_manager.load_image(
                 file_path,
-                priority=_Priority.BACKGROUND,
+                priority=prio,
                 cancel_existing=False,
                 use_full_resolution=True,
                 stages={"full"},
@@ -18224,7 +18230,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 return
         except Exception:
             pass
-        self._queue_sensor_full_decode(fp, priority_current=False, force=force)
+        self._queue_sensor_full_decode(fp, priority_current=True, force=force)
 
     def _queue_sensor_full_decode(
         self, file_path: str, *, priority_current: bool = True, force: bool = False,
@@ -26821,6 +26827,11 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         Wider radius preload stays gated by ``_should_defer_nav_preload`` so
         TTFR is not starved; the immediate next/prev images are what make the
         first arrow-key press feel instant.
+
+        When the current RAW still needs a sensor-covering full decode, defer
+        this until that full is queued/in-flight — otherwise neighbor ``full``
+        PRELOAD tasks can occupy the only GPU raw_limit slot and the current
+        image never reaches stages=['full'].
         """
         flag = os.environ.get("RAWVIEWER_NAV_PRELOAD_DISPLAY", "1").strip().lower()
         if flag not in ("1", "true", "yes", "on"):
@@ -26833,6 +26844,19 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             return
         if len(self.image_files) <= 1:
             return
+        cur = getattr(self, "current_file_path", None)
+        if cur and self._needs_full_resolution_upgrade(cur):
+            try:
+                if not self.image_manager.has_active_full_stage_for_path(cur):
+                    # Ensure CURRENT full is queued before neighbor PRELOAD full
+                    # can occupy the only GPU raw_limit slot.
+                    self._flush_deferred_sensor_full_decode(cur)
+                    from PyQt6.QtCore import QTimer
+
+                    QTimer.singleShot(200, self._queue_urgent_neighbor_prefetch)
+                    return
+            except Exception:
+                pass
         from image_load_manager import Priority
 
         zoomed = self._single_view_is_zoomed_in()

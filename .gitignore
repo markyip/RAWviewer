@@ -204,3 +204,7 @@ pyqt-*-panel*.html
 project-review-*.md
 UPCOMING_FEATURES.md
 /poc/
+
+# Local perf bench artifacts
+bench/
+

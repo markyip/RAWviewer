@@ -12,6 +12,10 @@ measurably different instants. Every display_pixmap() call during a
 navigation is recorded (not just the final full-res one) so
 paints-per-navigation quantifies low-res->high-res flashing.
 
+RAW mode (RAWVIEWER_AUTOTEST_RAW_MODE=1): wait until a sensor-covering
+full-res paint is on screen for the *current* image, then navigate to the
+next — never advance on preview / half-size alone.
+
 Env vars:
   RAWVIEWER_AUTOTEST_COUNT   default: full folder length (one complete
                              loop back to the starting image).
@@ -318,6 +322,10 @@ def run_nav_autotest(viewer, *, safe_print, image_covers_sensor_resolution):
         produce a sensor-covering buffer). If nothing is still in flight,
         accept the last paint as final rather than burning the hard ceiling;
         if a decode is still running, keep waiting.
+
+        RAW (High Quality) mode never settles early: half-size / preview paints
+        must not trigger navigation — wait for a sensor-covering full-res paint
+        (or the hard timeout).
         """
         if not state["waiting"]:
             return
@@ -325,6 +333,11 @@ def run_nav_autotest(viewer, *, safe_print, image_covers_sensor_resolution):
         if not state["paints_this_nav"] or not cur_path:
             return
         if _manager_busy_for(cur_path):
+            settle_timer.start(int(settle_idle_s * 1000))
+            return
+        if raw_mode:
+            # Pipeline briefly idle between preview and full demosaic is common;
+            # keep waiting for sensor-covering pixels.
             settle_timer.start(int(settle_idle_s * 1000))
             return
         w, h, paint_elapsed = state["paints_this_nav"][-1]
@@ -345,6 +358,42 @@ def run_nav_autotest(viewer, *, safe_print, image_covers_sensor_resolution):
         QTimer.singleShot(50, advance)
 
     settle_timer.timeout.connect(_on_settle_idle)
+
+    def _navigate_after_full_res():
+        """RAW mode: only leave the current image after full-res was recorded."""
+        if len(state["results"]) >= state["count"]:
+            _finish()
+            return
+        if memprof and (len(state["results"]) == 1 or len(state["results"]) % memprof_every == 0):
+            _mem_snapshot(f"nav#{len(state['results'])}")
+        state["index"] = len(state["results"])
+        state["paints_this_nav"] = []
+        state["waiting"] = True
+        state["nav_start"] = time.time()
+        settle_timer.stop()
+        safe_print(
+            f"[AUTOTEST] full-res ready — navigating to next "
+            f"({len(state['results'])}/{state['count']})",
+            flush=True,
+            force=True,
+        )
+        viewer.navigate_to_next_image()
+        timeout_timer.start(int(timeout_s * 1000))
+
+    def _arm_wait_current():
+        """Start timing the image already on screen (no navigate yet)."""
+        state["paints_this_nav"] = []
+        state["waiting"] = True
+        state["nav_start"] = time.time()
+        settle_timer.stop()
+        timeout_timer.start(int(timeout_s * 1000))
+        cur = getattr(viewer, "current_file_path", None)
+        safe_print(
+            "[AUTOTEST] waiting for full-res render before navigate: "
+            f"{os.path.basename(cur) if cur else '?'}",
+            flush=True,
+            force=True,
+        )
 
     orig_display_pixmap = viewer.display_pixmap
 
@@ -384,7 +433,10 @@ def run_nav_autotest(viewer, *, safe_print, image_covers_sensor_resolution):
                 flush=True,
                 force=True,
             )
-            QTimer.singleShot(50, advance)
+            if raw_mode:
+                QTimer.singleShot(50, _navigate_after_full_res)
+            else:
+                QTimer.singleShot(50, advance)
         except Exception as e:
             safe_print(f"[AUTOTEST] probe error: {e}", flush=True, force=True)
 
@@ -404,7 +456,10 @@ def run_nav_autotest(viewer, *, safe_print, image_covers_sensor_resolution):
             state["waiting"] = False
             settle_timer.stop()
             state["results"].append(("<timeout>", 0, 0, elapsed, n_paints))
-            advance()
+            if raw_mode:
+                QTimer.singleShot(50, _navigate_after_full_res)
+            else:
+                advance()
 
     timeout_timer.timeout.connect(_on_timeout)
 
@@ -450,17 +505,17 @@ def run_nav_autotest(viewer, *, safe_print, image_covers_sensor_resolution):
                 flush=True,
                 force=True,
             )
-            if raw_mode and _enter_raw_mode():
-                # The toggle reloads the current image; let that settle so it
-                # doesn't bleed into the first navigation's measurement.
-                QTimer.singleShot(3000, advance)
+            if raw_mode:
+                toggled = _enter_raw_mode()
+                # Wait for full-res on the current RAW frame, then navigate.
+                delay_ms = 500 if toggled else 0
+                QTimer.singleShot(delay_ms, _arm_wait_current)
             else:
-                if not raw_mode:
-                    safe_print(
-                        "[AUTOTEST] workflow: embedded-JPEG (default preview workflow)",
-                        flush=True,
-                        force=True,
-                    )
+                safe_print(
+                    "[AUTOTEST] workflow: embedded-JPEG (default preview workflow)",
+                    flush=True,
+                    force=True,
+                )
                 advance()
         else:
             QTimer.singleShot(300, _wait_for_folder_then_start)
@@ -523,6 +578,8 @@ def run_nav_autotest(viewer, *, safe_print, image_covers_sensor_resolution):
         heartbeat_timer,
         orig_display_pixmap,
         advance,
+        _navigate_after_full_res,
+        _arm_wait_current,
         _finish,
         _on_timeout,
         _on_settle_idle,

@@ -4,7 +4,7 @@
 
 
 ## 🚀 Version 3.0.0
-**Release Date: July 14, 2026**
+**Release Date: July 17, 2026**
 
 RAWviewer 3.0 turns the viewer into a complete **cull-and-develop** tool: a fully integrated, non-destructive **Adjust / Develop editor**, **star ratings**, and a rebuilt image-loading pipeline that is measurably faster than 2.5 across browsing, zooming, and gallery fill.
 
@@ -29,9 +29,20 @@ RAWviewer 3.0 turns the viewer into a complete **cull-and-develop** tool: a full
 
 #### ⚡ Faster image loading (verified against 2.5)
 - **Fast RAW decode** on by default: half-size and full sensor tiers share one LibRaw unpack, with verified color parity (±1 8-bit LSB on golden ARW/CR3 sets).
-- Benchmarked vs 2.5: full sensor decode about **1.4×** faster (median, 1.3–1.7× on high-end formats); zoom-after-fit roughly **2×** faster; half-size fit browsing **1.2–1.3×** faster.
 - Cold gallery thumbnail warmup about **3×** faster; Canon CR3 embedded previews no longer read the whole file.
 - Heavy optional ML imports deferred until after first paint; session restore staggers full decode and prefetch so relaunch feels instant.
+- **GPU demosaic scheduling (Full):** reserve the last heavy decode slot for the on-screen image, preempt neighbor full-decodes when CURRENT is waiting, and release cancelled heavy slots immediately — fixes stalls where neighbor prefetch held `raw_limit=1` and the current file never reached `stages=['full']`.
+
+##### Cold-start suite vs 2.5 (Windows, Jul 2026)
+Same machine, cleared `~/.rawviewer_cache` before **each** test. Gallery: open `DSC00001.ARW` in a 6880-file folder, wait for EXIF sort, hold **Up** 20s. RAW nav: open one file in a 259-file mixed RAW folder, wait for sensor-covering full-res paint, then next (full loop).
+
+| Config | Gallery ready | Tiles / 20s Up | RAW nav median | RAW nav mean | RAW nav p95 |
+|--------|---------------|----------------|----------------|--------------|-------------|
+| **2.5 Lite** | 8.6s | 1043 | 0.95s | 1.20s | 2.70s |
+| **3.0 Lite** | **3.0s** (~2.9×) | 938 | **0.57s** (~1.7×) | 0.74s | 1.83s |
+| **3.0 Full + GPU** | 3.2s (~2.7×) | 940 | **0.51s** (~1.9×) | 0.70s | 1.78s |
+
+3.0 Lite already beats 2.5 on gallery open and RAW navigation; Full + GPU demosaic adds a further ~10% on RAW nav median (0 TIMEOUTs on the 259-file loop after the scheduling fix).
 
 #### 🖼️ Gallery loading & scrolling overhaul
 - Main-thread stalls during gallery fill eliminated (worst observed stall **11.7s → <0.6s**): budgeted tile passes, deferred cache-hit delivery, and no per-tile sidecar probes on external drives.
@@ -55,6 +66,8 @@ RAWviewer 3.0 turns the viewer into a complete **cull-and-develop** tool: a full
 
 - **Orientation:** cold-open / first-paint orientation bugs (sideways, upside-down, or blank first RAW) fixed.
 - **Navigation races:** rapid arrow-key navigation no longer sticks on a stale image or a cancelled mid-flight decode.
+- **Gallery rebuild scroll:** rebuild/metadata refresh keeps the entry/current image as the scroll anchor instead of jumping to the top-left tile.
+- **GPU full-decode starvation:** cancelled heavy RAW tasks now free the concurrency slot immediately; cache hits no longer treat a ≥1024px preview as a finished sensor decode.
 - **Gallery click zoom:** clicking a gallery thumbnail always lands at Fit-to-Window instead of inheriting the previous view's zoom.
 - **EXIF cache contention:** readers no longer serialize through one global lock (multi-second navigation stalls on large folders fixed).
 - **RAW recovery preview (P):** rawpy edge cases fixed.

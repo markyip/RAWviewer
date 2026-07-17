@@ -1352,6 +1352,7 @@ class ImageLoadManager(QObject):
                         task.cancel()
                         del self._active_tasks[key]
                         self._task_keys_by_path[file_path].discard(key)
+                        self._release_raw_slot_locked(task)
                 if not self._task_keys_by_path[file_path]:
                     self._task_keys_by_path.pop(file_path, None)
         
@@ -1401,6 +1402,21 @@ class ImageLoadManager(QObject):
         with self._queue_lock:
             return bool(self._task_keys_by_path.get(file_path))
 
+    def has_active_full_stage_for_path(self, file_path: str) -> bool:
+        """True when a non-cancelled task for this path includes ``full`` stage."""
+        if not file_path:
+            return False
+        with self._queue_lock:
+            for key in self._task_keys_by_path.get(file_path, ()):
+                task = self._active_tasks.get(key)
+                if (
+                    task is not None
+                    and not task.is_cancelled()
+                    and "full" in (task.stages or set())
+                ):
+                    return True
+        return False
+
     def has_current_priority_work(self, file_path: str) -> bool:
         """True when a CURRENT-priority task for this path is queued or running."""
         if not file_path:
@@ -1416,6 +1432,70 @@ class ImageLoadManager(QObject):
                     return True
         return False
 
+    def cancel_non_current_heavy_raw_except(
+        self, keep_path: Optional[str] = None
+    ) -> int:
+        """Cancel PRELOAD/BACKGROUND RAW ``full`` tasks (free GPU/raw heavy slots).
+
+        Used when the on-screen CURRENT image needs a sensor demosaic but the
+        only heavy slot is held by neighbor prefetch. Returns how many tasks
+        were cancelled.
+        """
+        from common_image_loader import is_raw_file
+
+        keep_norm = None
+        if keep_path:
+            try:
+                keep_norm = os.path.normcase(os.path.abspath(keep_path))
+            except Exception:
+                keep_norm = keep_path
+        cancelled = 0
+        with self._queue_lock:
+            for key, task in list(self._active_tasks.items()):
+                if task is None or task.is_cancelled():
+                    continue
+                if task.priority == Priority.CURRENT:
+                    continue
+                if "full" not in (task.stages or set()):
+                    continue
+                fp = getattr(task, "file_path", None) or ""
+                if not is_raw_file(fp):
+                    continue
+                if keep_norm:
+                    try:
+                        if os.path.normcase(os.path.abspath(fp)) == keep_norm:
+                            continue
+                    except Exception:
+                        if fp == keep_path:
+                            continue
+                task.cancel()
+                self._active_tasks.pop(key, None)
+                if fp and fp in self._task_keys_by_path:
+                    self._task_keys_by_path[fp].discard(key)
+                    if not self._task_keys_by_path[fp]:
+                        self._task_keys_by_path.pop(fp, None)
+                if getattr(task, "_counted_raw_slot", False):
+                    self._active_raw_tasks = max(0, int(self._active_raw_tasks or 0) - 1)
+                    task._counted_raw_slot = False
+                cancelled += 1
+            if cancelled:
+                self._compact_work_queue()
+        return cancelled
+
+    def _release_raw_slot_locked(self, task: Optional["ImageLoadTask"]) -> None:
+        """Drop a heavy RAW slot immediately when cancelling a counted task.
+
+        Must run under ``_queue_lock``. Leaving the counter until ``_task_finished``
+        starves every later ``full`` decode when a cancelled worker is stuck in
+        an uninterruptible GPU/CPU demosaic (observed as 45s nav TIMEOUTs with
+        no ``[PIPE_T] ... stages=['full']`` for the on-screen file).
+        """
+        if task is None:
+            return
+        if getattr(task, "_counted_raw_slot", False):
+            self._active_raw_tasks = max(0, int(self._active_raw_tasks or 0) - 1)
+            task._counted_raw_slot = False
+
     def cancel_task(self, file_path: str):
         """取消任務（非阻塞）"""
         with self._queue_lock:
@@ -1424,6 +1504,7 @@ class ImageLoadManager(QObject):
                 task = self._active_tasks.pop(key, None)
                 if task is not None:
                     task.cancel()
+                    self._release_raw_slot_locked(task)
             self._task_keys_by_path.pop(file_path, None)
             self._compact_work_queue()
 
@@ -1440,6 +1521,7 @@ class ImageLoadManager(QObject):
                 task.cancel()
                 self._active_tasks.pop(key, None)
                 self._task_keys_by_path[file_path].discard(key)
+                self._release_raw_slot_locked(task)
             if not self._task_keys_by_path.get(file_path):
                 self._task_keys_by_path.pop(file_path, None)
             self._compact_work_queue()
@@ -1457,6 +1539,7 @@ class ImageLoadManager(QObject):
                     self._task_keys_by_path[fp].discard(key)
                     if not self._task_keys_by_path[fp]:
                         self._task_keys_by_path.pop(fp, None)
+                self._release_raw_slot_locked(task)
             self._active_raw_tasks = sum(
                 1
                 for t in self._active_tasks.values()
@@ -1848,14 +1931,13 @@ class ImageLoadManager(QObject):
                                 )
                                 return True
                         full_img = cache.get_full_image(file_path)
-                        # Gallery grid tiers (~512px) must not satisfy a RAW-mode
-                        # 'full' stage: they get refused as JPEG interim and — with
-                        # bogus small EXIF sensor dims — never re-queue a real decode.
+                        # Only a sensor-covering buffer satisfies RAW-mode full.
+                        # A bare max-edge >=1024 check previously treated 1920px
+                        # nav previews as done, so load_image returned without
+                        # queuing demosaic and autotest sat until the 45s ceiling.
                         if full_img is not None and hasattr(full_img, "shape"):
                             fh, fw = full_img.shape[:2]
-                            if max(fh, fw) >= 1024 or image_covers_sensor_resolution(
-                                fw, fh, exif_data
-                            ):
+                            if image_covers_sensor_resolution(fw, fh, exif_data):
                                 self._emit_cached_result_later(
                                     self.image_ready, file_path, full_img
                                 )
@@ -1917,9 +1999,23 @@ class ImageLoadManager(QObject):
         if "full" in wanted:
             if is_raw:
                 if use_full_resolution:
-                    full_ok = cache.full_image_cache.get(file_path) is not None
+                    full_img = cache.full_image_cache.get(file_path)
+                    if full_img is None or not hasattr(full_img, "shape"):
+                        full_ok = False
+                    else:
+                        fh, fw = full_img.shape[:2]
+                        full_ok = image_covers_sensor_resolution(
+                            fw, fh, cache.exif_cache.get(file_path)
+                        )
                 elif libraw_first:
-                    full_ok = cache.get_full_image(file_path) is not None
+                    full_img = cache.get_full_image(file_path)
+                    if full_img is None or not hasattr(full_img, "shape"):
+                        full_ok = False
+                    else:
+                        fh, fw = full_img.shape[:2]
+                        full_ok = image_covers_sensor_resolution(
+                            fw, fh, cache.exif_cache.get(file_path)
+                        ) or bool(cache.is_libraw_preview(file_path))
                 else:
                     full_ok = cache.preview_cache.get(file_path) is not None
             else:
@@ -1939,6 +2035,47 @@ class ImageLoadManager(QObject):
 
         from common_image_loader import io_pressure_active, is_raw_file
         pressure = io_pressure_active()
+
+        # If CURRENT full is queued but neighbor heavies hold every raw slot,
+        # cancel those neighbors so the on-screen demosaic can start.
+        try:
+            keep_path = None
+            with self._queue_lock:
+                # Reconcile leaked counters (cancelled workers that never finished).
+                counted = sum(
+                    1
+                    for t in self._active_tasks.values()
+                    if getattr(t, "_counted_raw_slot", False)
+                )
+                if int(self._active_raw_tasks or 0) != counted:
+                    self._active_raw_tasks = counted
+                if int(self._active_raw_tasks or 0) > 0:
+                    tmp = []
+                    while not self._work_queue.empty():
+                        t = self._work_queue.get_nowait()
+                        tmp.append(t)
+                        if (
+                            keep_path is None
+                            and not t.is_cancelled()
+                            and t.priority == Priority.CURRENT
+                            and is_raw_file(t.file_path)
+                            and "full" in (t.stages or set())
+                        ):
+                            keep_path = t.file_path
+                    for t in tmp:
+                        self._work_queue.put(t)
+            if keep_path:
+                n = self.cancel_non_current_heavy_raw_except(keep_path)
+                if n:
+                    import logging
+
+                    logging.getLogger(__name__).info(
+                        "[LOAD] Preempted %d neighbor heavy RAW task(s) for CURRENT full (%s)",
+                        n,
+                        os.path.basename(keep_path),
+                    )
+        except Exception:
+            pass
 
         to_start: list = []  # (task, pool, is_heavy)
         deferred_put: list = []
@@ -1986,7 +2123,36 @@ class ImageLoadManager(QObject):
                         if pre_gpu:
                             heavy_limit = max(heavy_limit, int(pre_gpu))
                     if is_heavy and task.priority != Priority.CURRENT:
-                        heavy_limit = max(1, heavy_limit - 1)
+                        # Only reserve while CURRENT full is waiting or already
+                        # occupying a heavy slot. Unconditional reserve at
+                        # heavy_limit=1 would permanently block neighbor full
+                        # (0 >= 0) after the on-screen decode finishes.
+                        current_heavy_pending = False
+                        for t in self._active_tasks.values():
+                            if (
+                                t is not None
+                                and not t.is_cancelled()
+                                and t.priority == Priority.CURRENT
+                                and is_raw_file(t.file_path)
+                                and "full" in (t.stages or set())
+                            ):
+                                current_heavy_pending = True
+                                break
+                        if not current_heavy_pending:
+                            for deferred in deferred_put:
+                                if (
+                                    not deferred.is_cancelled()
+                                    and deferred.priority == Priority.CURRENT
+                                    and is_raw_file(deferred.file_path)
+                                    and "full" in (deferred.stages or set())
+                                ):
+                                    current_heavy_pending = True
+                                    break
+                        if current_heavy_pending:
+                            # Leave the last heavy slot for CURRENT. At
+                            # heavy_limit=1 this becomes 0 so PRELOAD/BACKGROUND
+                            # full cannot start until CURRENT's demosaic begins.
+                            heavy_limit = max(0, int(heavy_limit) - 1)
                     if is_heavy and provisional_raw >= heavy_limit:
                         deferred_put.append(task)
                         continue
