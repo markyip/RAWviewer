@@ -20744,11 +20744,14 @@ class RAWImageViewer(SessionMixin, QMainWindow):
 
         Last-run log: Fit settle at 3514px → double-click 100% → slider ticks
         painted 640px lite previews with exact_framing, so 100% zoom showed a
-        soft postage stamp until the next ~3s settle.
+        soft postage stamp until the next ~3s settle. Also blocks lite while
+        the WB dropper is armed so pick coords stay on a settled frame.
         """
         if pixmap is None or pixmap.isNull():
             return False
-        if self._single_view_is_fit_mode():
+        gv = getattr(self, "gpu_view", None)
+        picking = bool(gv is not None and gv.is_color_pick_mode())
+        if not picking and self._single_view_is_fit_mode():
             return False
         cur = getattr(self, "current_pixmap", None)
         if cur is None or cur.isNull():
@@ -20756,6 +20759,60 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         cur_max = max(int(cur.width()), int(cur.height()))
         new_max = max(int(pixmap.width()), int(pixmap.height()))
         return cur_max >= 1200 and new_max < int(cur_max * 0.55)
+
+    def _adjust_display_pixel_size(self) -> tuple[int, int] | None:
+        """Width/height of the Adjust frame currently on screen (any tier)."""
+        pm = getattr(self, "current_pixmap", None)
+        if pm is not None and not pm.isNull():
+            return int(pm.width()), int(pm.height())
+        last = getattr(self, "_adjust_last_render", None)
+        if last is not None and last[0] is not None and getattr(last[0], "ndim", 0) == 3:
+            return int(last[0].shape[1]), int(last[0].shape[0])
+        gv = getattr(self, "gpu_view", None)
+        if gv is not None and gv.has_pixmap():
+            try:
+                w, h = gv.image_size()
+                if int(w) > 0 and int(h) > 0:
+                    return int(w), int(h)
+            except Exception:
+                pass
+        return None
+
+    def _map_adjust_display_point_to_buffer(
+        self, pt, buffer_w: int, buffer_h: int
+    ) -> tuple[float, float]:
+        """Display-pixmap point → same-framing buffer (dodge/burn + WB pick)."""
+        from raw_transform import map_display_point_to_buffer
+
+        disp = self._adjust_display_pixel_size()
+        if disp is None:
+            return float(pt.x()), float(pt.y())
+        return map_display_point_to_buffer(
+            float(pt.x()),
+            float(pt.y()),
+            display_w=disp[0],
+            display_h=disp[1],
+            buffer_w=int(buffer_w),
+            buffer_h=int(buffer_h),
+        )
+
+    def _wb_linear_sample_buffer(self, adj: dict | None):
+        """As-shot linear RGB in the same spatial frame as the Adjust display.
+
+        Edit base is pre-geometry; the on-screen preview is post-geometry
+        (unless crop overlay is in uncropped preview). Sample from the
+        geometry-applied linear buffer so click coords match what the user sees.
+        """
+        base = getattr(self, "_adjust_preview_base_rgb", None)
+        if base is None or not hasattr(base, "shape"):
+            return None
+        from raw_edit_pipeline import _linear_float_from_buffer
+        from raw_transform import apply_geometry
+
+        img = _linear_float_from_buffer(base)
+        if getattr(self, "_crop_preview_uncropped", False):
+            return img
+        return apply_geometry(img, adj or {})
 
     def _restore_adjust_hires_before_zoom(self) -> bool:
         """If Fit live-drag left a 640px buffer on screen, restore settle first.
@@ -21271,10 +21328,12 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             # coordinate space (whatever tier is on screen) down to the
             # fixed mask resolution.
             last = getattr(self, "_adjust_last_render", None)
-            disp_w, disp_h = (last[0].shape[1], last[0].shape[0]) if last is not None else (mw, mh)
+            mx, my = self._map_adjust_display_point_to_buffer(pt, mw, mh)
+            disp = self._adjust_display_pixel_size()
+            disp_w = disp[0] if disp is not None else mw
+            disp_h = disp[1] if disp is not None else mh
             sx = mw / max(1, disp_w)
             sy = mh / max(1, disp_h)
-            mx, my = pt.x() * sx, pt.y() * sy
             # Brush size slider is in *display* pixels; convert to mask space.
             radius = max(2.0, panel.dodge_burn_brush_radius() * sx)
             # Per-point delta: brush-strength slider (0..1) * pressure,
@@ -22026,6 +22085,12 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                     3500,
                 )
             return
+        # Settle to edit-base framing before the click so lite 640px coords
+        # cannot be treated as half-res indices; also blocks lite paints
+        # while armed via _should_defer_adjust_preview_paint.
+        self._apply_adjust_panel_preview(full_quality=True)
+        if getattr(self, "_adjust_hires_render", None) is not None:
+            self._restore_adjust_hires_before_zoom()
         gv.set_color_pick_mode(True)
         if hasattr(self, "status_bar"):
             self.status_bar.showMessage(
@@ -22142,29 +22207,46 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self._begin_adjust_editing_session(path)
 
     def _on_wb_color_picked(self, scene_pt) -> None:
-        """Sample the RAW edit base at the clicked point and solve Temperature/Tint."""
+        """Sample as-shot linear RGB under the click and solve Temperature/Tint.
+
+        Uses the geometry-applied edit frame (same framing as the display),
+        with display→buffer scale mapping so lite/settle size mismatches and
+        crop insets do not pick the wrong pixel.
+        """
         panel = getattr(self, "single_image_adjust_panel", None)
-        base = getattr(self, "_adjust_preview_base_rgb", None)
         if panel is not None:
             panel.set_wb_picker_active(False)
-        if panel is None or base is None or not hasattr(base, "shape"):
+        if panel is None:
             return
-        h, w = int(base.shape[0]), int(base.shape[1])
-        cx = int(round(float(scene_pt.x())))
-        cy = int(round(float(scene_pt.y())))
+        adj = panel.get_adjustments()
+        sample = self._wb_linear_sample_buffer(adj)
+        if sample is None or getattr(sample, "ndim", 0) != 3:
+            if hasattr(self, "status_bar"):
+                self.status_bar.showMessage(
+                    "White balance dropper needs a decoded RAW edit base — try again in a moment",
+                    3500,
+                )
+            return
+        h, w = int(sample.shape[0]), int(sample.shape[1])
+        mx, my = self._map_adjust_display_point_to_buffer(scene_pt, w, h)
+        cx = int(round(mx))
+        cy = int(round(my))
         if not (0 <= cx < w and 0 <= cy < h):
+            if hasattr(self, "status_bar"):
+                self.status_bar.showMessage(
+                    "White balance pick was outside the image — try again",
+                    3000,
+                )
             return
 
         from raw_adjustments import solve_white_balance_from_sample, wb_reference_temperature
-        from raw_edit_pipeline import _linear_float_from_buffer
 
         radius = 3
         y0, y1 = max(0, cy - radius), min(h, cy + radius + 1)
         x0, x1 = max(0, cx - radius), min(w, cx + radius + 1)
-        patch = _linear_float_from_buffer(base[y0:y1, x0:x1])
+        patch = sample[y0:y1, x0:x1]
         r, g, b = (float(patch[:, :, i].mean()) for i in range(3))
 
-        adj = panel.get_adjustments()
         ref_temp = wb_reference_temperature(adj)
         temperature, tint = solve_white_balance_from_sample(r, g, b, ref_temp)
         panel.apply_picked_white_balance(temperature, tint)

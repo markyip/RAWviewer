@@ -146,14 +146,18 @@ are solved so that pixel becomes neutral, then applied and saved like a normal
 slider release. Esc (or the button again) cancels an armed pick without
 sampling.
 
-- **Coordinate mapping**: reuses `GpuImageView`'s existing scene-point pattern
-  (same one used for double-click-to-zoom). `GpuImageView.set_color_pick_mode(True)`
-  arms a one-shot crosshair-cursor click that emits `colorPickRequested(QPointF)`
-  in image-pixel coordinates instead of starting a pan/export drag.
-- **Sample source**: averages a 7×7 neighborhood from `_adjust_preview_base_rgb`
-  (the scene-linear, pre-WB edit-base buffer) at the clicked point — not the
-  post-tone-map / post-gamma preview pixmap, so the solve isn't confused by
-  tone-mapping or other slider adjustments already applied.
+- **Coordinate mapping**: `GpuImageView.set_color_pick_mode(True)` arms a
+  one-shot crosshair click that emits `colorPickRequested(QPointF)` in
+  **display-pixmap** image-pixel coordinates. The host maps that point into
+  the as-shot linear sample buffer with the same uniform scale D&B uses
+  (`raw_transform.map_display_point_to_buffer`), and the sample buffer itself
+  is `apply_geometry(edit_base)` so crop / straighten / keystone match what
+  is on screen (uncropped crop-overlay preview skips geometry). Arming the
+  dropper requests a full-quality settle and blocks lite paints while armed.
+- **Sample source**: averages a 7×7 neighborhood from that geometry-framed
+  scene-linear edit buffer (as-shot camera WB, pre Temperature/Tint) — not
+  the post-tone-map / post-gamma preview pixmap, so the solve isn't confused
+  by tone-mapping or other slider adjustments already applied.
 - **Math** (`raw_adjustments.solve_white_balance_from_sample`): an exact inverse of
   `_apply_wb_tint`, not new color science. Temperature scales R/B oppositely
   relative to G, so the R/B ratio depends only on Temperature — solved by

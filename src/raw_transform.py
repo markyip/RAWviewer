@@ -168,3 +168,23 @@ def apply_geometry(img: np.ndarray, adj: dict | None) -> np.ndarray:
         return np.ascontiguousarray(out)
     except Exception:
         return img
+
+
+def map_display_point_to_buffer(
+    x: float,
+    y: float,
+    *,
+    display_w: int,
+    display_h: int,
+    buffer_w: int,
+    buffer_h: int,
+) -> tuple[float, float]:
+    """Scale a display-pixmap point into a same-framing buffer (D&B / WB pick).
+
+    Adjust live-drag may show a 640px lite tier while the sample/mask buffer
+    is half-res or post-geometry; both share the same crop/framing, so a
+    uniform scale is the correct mapping (same approach as dodge/burn strokes).
+    """
+    sx = float(buffer_w) / float(max(1, int(display_w)))
+    sy = float(buffer_h) / float(max(1, int(display_h)))
+    return float(x) * sx, float(y) * sy
