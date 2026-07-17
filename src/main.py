@@ -256,8 +256,8 @@ if _IS_GUI_MAIN_PROCESS:
     except Exception:
         _startup_splash = None
 
-# Force verbose orientation logs for debugging rotation issues
-os.environ["RAWVIEWER_VERBOSE_ORIENTATION_LOGS"] = "1"
+# Orientation verbose logs are opt-in (dev launch scripts set
+# RAWVIEWER_VERBOSE_ORIENTATION_LOGS=1). Release builds stay quiet.
 
 # Global placeholders for lazy-loaded modules
 rawpy: Any = None

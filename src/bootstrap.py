@@ -347,7 +347,7 @@ def _installed_app_icon_path(install_dir: str) -> str | None:
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QLineEdit, QProgressBar, QPlainTextEdit,
-    QStackedWidget, QFileDialog, QFrame, QDialog, QRadioButton
+    QStackedWidget, QFileDialog, QFrame, QDialog, QRadioButton, QCheckBox
 )
 from PyQt6.QtGui import QIcon, QFont, QColor, QPalette
 from PyQt6.QtCore import Qt, pyqtSignal, QObject, QThread
@@ -374,16 +374,87 @@ def _apply_installer_process_icon() -> None:
     if app is not None:
         app.setWindowIcon(icon)
 
+def _user_cache_dir() -> str:
+    return os.path.join(os.path.expanduser("~"), ".rawviewer_cache")
+
+
+def _clear_existing_user_cache(log) -> None:
+    """Wipe photo cache + session so upgrades unlock perf-v2 defaults.
+
+    Does not delete photos, XMP sidecars, or the install directory.
+    """
+    removed_any = False
+
+    def _rm_tree(path: str, label: str) -> None:
+        nonlocal removed_any
+        if not os.path.exists(path):
+            return
+        log(f"Removing {label}: {path}")
+        try:
+            if os.path.isdir(path):
+                shutil.rmtree(path, ignore_errors=True)
+            else:
+                os.remove(path)
+            if not os.path.exists(path):
+                removed_any = True
+            else:
+                log(f"  Warning: could not fully remove {path}")
+        except OSError as exc:
+            log(f"  Warning: could not remove {path}: {exc}")
+
+    log("Clearing existing cache (upgrade / performance reset)...")
+    _rm_tree(_user_cache_dir(), "image/EXIF/semantic/thumbnail cache")
+    local = os.environ.get("LOCALAPPDATA") or ""
+    roaming = os.environ.get("APPDATA") or ""
+    if local:
+        _rm_tree(os.path.join(local, "RAWviewer", "logs"), "runtime logs")
+        _rm_tree(os.path.join(local, "RAWviewer", "cache"), "install cache")
+        _rm_tree(os.path.join(local, "RAWviewer", "CrashDumps"), "crash dumps")
+    if roaming:
+        _rm_tree(os.path.join(roaming, "RAWviewer", "logs"), "roaming logs")
+    reg_path = r"Software\RAWviewer"
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, reg_path):
+            pass
+        _delete_reg_tree(winreg.HKEY_CURRENT_USER, reg_path)
+        removed_any = True
+        log("Removed HKCU\\Software\\RAWviewer session settings")
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        log(f"  Warning: could not clear registry settings: {exc}")
+    if not removed_any:
+        log("No existing cache found — nothing to clear.")
+    else:
+        log("Cache cleared. First launch after install may rebuild thumbnails/index.")
+
+
+def _delete_reg_tree(root, path: str) -> None:
+    """Recursively delete a registry key (winreg.DeleteKey needs empty keys)."""
+    try:
+        with winreg.OpenKey(root, path, 0, winreg.KEY_ALL_ACCESS) as key:
+            while True:
+                try:
+                    sub = winreg.EnumKey(key, 0)
+                except OSError:
+                    break
+                _delete_reg_tree(root, f"{path}\\{sub}")
+        winreg.DeleteKey(root, path)
+    except FileNotFoundError:
+        pass
+
+
 class InstallWorker(QObject):
     finished = pyqtSignal(bool, str)
     log_signal = pyqtSignal(str)
     progress_signal = pyqtSignal(int)
     progress_label_signal = pyqtSignal(str)
 
-    def __init__(self, target_dir, install_mode):
+    def __init__(self, target_dir, install_mode, clear_cache: bool = False):
         super().__init__()
         self.target_dir = os.path.normpath(target_dir)
         self.install_mode = install_mode
+        self.clear_cache = bool(clear_cache)
         self.cancelled = False
 
     def stop(self):
@@ -400,6 +471,13 @@ class InstallWorker(QObject):
     def run(self):
         target_dir = self.target_dir
         try:
+            if self.clear_cache:
+                _clear_existing_user_cache(self.log_signal.emit)
+                self.progress_signal.emit(1)
+                if self._is_cancelled():
+                    self._abort_cancelled()
+                    return
+
             min_bytes = MIN_FREE_BYTES_LITE if self.install_mode == "lite" else MIN_FREE_BYTES
             disk_err = _check_disk_space(target_dir, min_bytes)
             if disk_err:
@@ -460,6 +538,15 @@ class InstallWorker(QObject):
             uninst_src = os.path.join(BUNDLE_DIR, "uninstall.bat")
             if os.path.exists(uninst_src):
                 shutil.copy2(uninst_src, target_dir)
+
+            # Easy-to-find cache wipe next to RAWviewer.exe / uninstall.bat
+            clear_src = os.path.join(BUNDLE_DIR, "clear_cache.bat")
+            if not os.path.isfile(clear_src):
+                clear_src = os.path.join(
+                    BUNDLE_DIR, "scripts", "Launch", "bat", "clear_cache_user.bat"
+                )
+            if os.path.isfile(clear_src):
+                shutil.copy2(clear_src, os.path.join(target_dir, "clear_cache.bat"))
 
             target_exe = os.path.join(target_dir, "RAWviewer.exe")
             launcher_stub_src = os.path.join(BUNDLE_DIR, "RAWviewer.exe")
@@ -858,6 +945,15 @@ class InstallerGUI(QMainWindow):
                 width: 16px;
                 height: 16px;
             }
+            QCheckBox {
+                color: #ffffff;
+                font-family: 'Segoe UI', Arial;
+                font-size: 13px;
+            }
+            QCheckBox::indicator {
+                width: 16px;
+                height: 16px;
+            }
         """)
 
     def init_welcome_page(self):
@@ -895,6 +991,18 @@ class InstallerGUI(QMainWindow):
         options_layout.addWidget(self.radio_directml)
         options_layout.addWidget(self.radio_lite)
         layout.addLayout(options_layout)
+
+        self.clear_cache_cb = QCheckBox(
+            "Clear existing cache (recommended when upgrading from an older version)"
+        )
+        self.clear_cache_cb.setToolTip(
+            "Removes the local photo cache (~/.rawviewer_cache) and session settings "
+            "so v3 can use faster search/index defaults.\n"
+            "Does not delete your photos or XMP sidecars.\n"
+            "Full builds may re-download AI models on first search."
+        )
+        self.clear_cache_cb.setChecked(False)
+        layout.addWidget(self.clear_cache_cb)
         
         path_label = QLabel("Installation Directory:")
         path_label.setStyleSheet("color: #888; font-weight: bold; margin-top: 15px;")
@@ -978,7 +1086,9 @@ class InstallerGUI(QMainWindow):
         self.install_step_label.setText("")
  
         self.thread = QThread()
-        self.worker = InstallWorker(target_dir, mode)
+        self.worker = InstallWorker(
+            target_dir, mode, clear_cache=self.clear_cache_cb.isChecked()
+        )
         self.worker.moveToThread(self.thread)
         self.thread.started.connect(self.worker.run)
         self.worker.finished.connect(self.on_finished)

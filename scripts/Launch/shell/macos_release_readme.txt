@@ -19,6 +19,22 @@ INSTALL
 
 5. Click **Install**, then **Open** in the dialogs.
 
+UPGRADING / CLEAR CACHE (recommended once)
+------------------------------------------
+
+If you used an older RAWviewer before, clear the local cache once so
+search/index can use the newer, faster defaults. This does **not** delete
+your photos or XMP sidecars.
+
+Easiest: double-click **Clear Cache.command**
+(right-click → Open → Open if macOS blocks it).
+
+Or in Terminal (from this folder):
+
+   bash clear_macos_cache.sh
+
+Then reopen RAWviewer; the first folder open may rebuild thumbnails.
+
 SEMANTIC SEARCH (Full builds — first use)
 ---------------------------------------
 

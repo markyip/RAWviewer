@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="icons/appicon-master.png" alt="RAWviewer" width="128">
+  <img src="icons/appicon-master.png" alt="RAWviewer" width="256">
 </p>
 
 <h1 align="center">RAWviewer</h1>
@@ -57,9 +57,10 @@ Full changelog: [`RELEASE_NOTES.md`](RELEASE_NOTES.md)
 
 1. Download **`RAWviewer_Setup.exe`** from [Releases](https://github.com/markyip/RAWviewer/releases/latest).
 2. In the wizard, pick **Full** (adds photo-description search, ~600 MB of models) or **Lite** (smaller). Not sure? See [Lite or Full?](#lite-or-full) below.
-3. Launch **RAWviewer** from the Desktop shortcut.
+3. **Upgrading from an older version?** Optionally check **Clear existing cache** in the installer. That unlocks faster search/index defaults without deleting your photos or XMP files.
+4. Launch **RAWviewer** from the Desktop shortcut.
 
-Common photo formats get an **Open with** entry automatically. Uninstall any time from Settings → Apps.
+Common photo formats get an **Open with** entry automatically. Uninstall any time from Settings → Apps. To clear cache later, run **`clear_cache.bat`** next to `RAWviewer.exe` in the install folder.
 
 ### macOS (13 or newer)
 
@@ -71,7 +72,11 @@ Common photo formats get an **Open with** entry automatically. Uninstall any tim
 bash install_macos_app.sh
 ```
 
-RAWviewer is copied to your Applications folder. This one-time Terminal step is what lets macOS trust the app — after that it opens like any other app. To remove it later, use **`Uninstall RAWviewer.command`** from the same zip (dragging to Trash leaves cache files behind).
+4. **Upgrading?** Clear cache once so search/index can use the newer, faster defaults (does not delete photos or XMP):
+   - Double-click **Clear Cache.command** (right-click → Open → Open if macOS blocks it), or
+   - In Terminal: `bash clear_macos_cache.sh`
+
+RAWviewer is copied to your Applications folder. This one-time Terminal step is what lets macOS trust the app — after that it opens like any other app. To remove it later, use **`Uninstall RAWviewer.command`** from the same zip (dragging to Trash leaves cache files behind). See **Start Here.txt** in the zip for the full checklist.
 
 **Full edition:** the first time you use gallery **Search**, RAWviewer offers a one-time model download (~150 MB, needs internet once). Click **Download** — after that, search is fully offline.
 
@@ -234,6 +239,19 @@ To map an entire album at once, or add locations to photos that don't have GPS, 
 
 RAWviewer never uploads anything. Search, maps, and AI features all run on your computer. The only network use is optional: the one-time AI model download (Full edition) and fetching map tiles when you open the map. A local thumbnail cache speeds up the gallery; it stays on your machine and cleans itself up after 30 days of inactivity.
 
+### Upgrading from an older version
+
+Most caches keep working after an update. Stale thumbnails and EXIF rows refresh **automatically** the first time you reopen a folder (may feel slower once).
+
+**Search / indexing speed** is different: if you already have a `~/.rawviewer_cache` from before v3, RAWviewer keeps the older (safer) performance mode so upgrades stay predictable. To unlock the newer, faster defaults:
+
+1. Quit RAWviewer.
+2. **Windows:** check **Clear existing cache** in the Setup wizard when reinstalling/upgrading, or run **`clear_cache.bat`** next to `RAWviewer.exe`.
+   **macOS:** double-click **Clear Cache.command** from the release zip (or `bash clear_macos_cache.sh`).
+3. Reopen your folder — the first index pass rebuilds cache; after that you get the improved performance.
+
+This clears local cache and session state only — **not** your photos or XMP sidecars. Alternatively set `RAWVIEWER_PERF_V2=1` without wiping cache (advanced).
+
 ---
 
 ## Troubleshooting
@@ -249,8 +267,9 @@ RAWviewer never uploads anything. Search, maps, and AI features all run on your 
 | HDR HEIC/TIFF looks flat or too dark | HDR stills are tone-mapped to standard brightness by design in v3.0 |
 | **P** / **J** no effect | **P**/**J** are RAW/DNG single view only; **P** is fit-only half-res preview |
 | Gallery slow on a huge folder (first open) | Normal — RAWviewer waits for capture-time sorting so gallery order is correct; instant when metadata is cached |
+| Upgraded but search / gallery still feels slow | Run **`clear_cache`** once (see [Upgrading from an older version](#upgrading-from-an-older-version)), then reopen the folder |
 
-To clear the thumbnail cache only: **`scripts\Launch\bat\clear_cache.bat`** (Windows) · **`scripts/Launch/shell/clear_cache.sh`** (Mac)
+To clear cache: **`scripts\Launch\bat\clear_cache.bat`** (Windows) · **`scripts/Launch/shell/clear_cache.sh`** (Mac)
 
 </details>
 
