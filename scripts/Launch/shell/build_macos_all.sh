@@ -70,8 +70,12 @@ if bash "$BUILD_SCRIPT" full "$@"; then
         echo "[✓] Full build succeeded in ${FULL_ELAPSED}s (zip not found — check dist/)"
     fi
 else
+    full_rc=$?
     echo ""
-    echo "[✗] Full build FAILED. Aborting."
+    echo "[✗] Full build FAILED (exit $full_rc). Aborting."
+    echo "    Tip: if you saw 'Killed: 9' during OpenMP LibRaw, re-sign rawpy dylibs:"
+    echo "      codesign -f -s - .pixi/envs/default/lib/python3.12/site-packages/rawpy/*.dylib"
+    echo "    Then re-run: bash scripts/Launch/shell/build_macos_all.sh"
     exit 1
 fi
 

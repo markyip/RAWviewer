@@ -243,12 +243,27 @@ def update_macos_plist(app_path, profile: str = "full"):
         plist['CFBundleVersion'] = VERSION
         
         # Add macOS permission usage descriptions
-        plist['NSDesktopFolderUsageDescription'] = 'RAWviewer needs access to your Desktop to display images.'
-        plist['NSDocumentsFolderUsageDescription'] = 'RAWviewer needs access to your Documents folder to display images.'
-        plist['NSDownloadsFolderUsageDescription'] = 'RAWviewer needs access to your Downloads folder to display images.'
-        plist['NSRemovableVolumesUsageDescription'] = 'RAWviewer needs access to external volumes to display images from cameras or cards.'
-        plist['NSPhotoLibraryUsageDescription'] = 'RAWviewer needs access to your photo library to display images.'
-        plist['NSAppleEventsUsageDescription'] = 'RAWviewer needs to receive file open events from the system.'
+        # (Relevant if/when App Sandbox is enabled; current release is not sandboxed —
+        #  file access follows normal POSIX permissions after the user picks a path.)
+        plist['NSDesktopFolderUsageDescription'] = (
+            'RAWviewer needs access to your Desktop to open and export images.'
+        )
+        plist['NSDocumentsFolderUsageDescription'] = (
+            'RAWviewer needs access to your Documents folder to open and export images.'
+        )
+        plist['NSDownloadsFolderUsageDescription'] = (
+            'RAWviewer needs access to your Downloads folder to open and export images.'
+        )
+        plist['NSRemovableVolumesUsageDescription'] = (
+            'RAWviewer needs access to external volumes to open images from cameras or cards. '
+            'Exporting may require a writable folder (Desktop/Pictures) if the card is read-only.'
+        )
+        plist['NSPhotoLibraryUsageDescription'] = (
+            'RAWviewer needs access to your photo library to display images.'
+        )
+        plist['NSAppleEventsUsageDescription'] = (
+            'RAWviewer uses AppleEvents for native file dialogs when needed.'
+        )
         
         # macOS specific flags
         plist['LSMinimumSystemVersion'] = '13.0'
@@ -510,6 +525,276 @@ def _macos_rawpy_openmp_binaries() -> list[Path]:
         "libjpeg.8.dylib",
     )
     return [p for name in names if (p := rawpy_dir / name).is_file()]
+
+
+def _darwin_real_libintl_candidates(exe_path: Path | None = None) -> list[Path]:
+    """Candidate gettext libintl dylibs that export ``_libintl_bindtextdomain``."""
+    candidates: list[Path] = []
+    # Prefer stable Homebrew cellar paths (avoid `brew --prefix`, which may hit
+    # the network JSON API and fail in offline/CI sandboxes).
+    for prefix in (
+        Path("/opt/homebrew/opt/gettext"),
+        Path("/usr/local/opt/gettext"),
+    ):
+        candidates.append(prefix / "lib" / "libintl.8.dylib")
+    brew = shutil.which("brew")
+    if brew:
+        try:
+            prefix = subprocess.check_output(
+                [brew, "--prefix", "gettext"],
+                text=True,
+                stderr=subprocess.DEVNULL,
+                timeout=5,
+            ).strip()
+            if prefix:
+                candidates.append(Path(prefix) / "lib" / "libintl.8.dylib")
+        except Exception:
+            pass
+    for env_root in (
+        REPO_ROOT / ".pixi" / "envs" / "default",
+        Path(sys.prefix),
+    ):
+        candidates.append(env_root / "lib" / "libintl.8.dylib")
+    if exe_path is not None:
+        # Prefer OpenCV's full gettext over lensfunpy's stub inside the bundle.
+        for hit in sorted(exe_path.rglob("libintl.8.dylib")):
+            if "lensfunpy" in hit.parts:
+                continue
+            if hit.parent.name in ("Frameworks", "Resources") and hit.name == "libintl.8.dylib":
+                continue
+            if "pyexiv2" in hit.parts:
+                continue
+            candidates.append(hit)
+    return candidates
+
+
+def _nm_exports(path: Path, symbol: str) -> bool:
+    if path.is_symlink():
+        try:
+            path = path.resolve(strict=True)
+        except Exception:
+            return False
+    if not path.is_file():
+        return False
+    try:
+        out = subprocess.check_output(
+            ["nm", "-gU", str(path)],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        )
+    except Exception:
+        return False
+    # Exact symbol match only — substring would confuse
+    # ``_g_libintl_bindtextdomain`` with ``_libintl_bindtextdomain``.
+    for line in out.splitlines():
+        parts = line.split()
+        if parts and parts[-1] == symbol:
+            return True
+    return False
+
+
+def _libintl_exports_bindtextdomain(path: Path) -> bool:
+    return _nm_exports(path, "_libintl_bindtextdomain")
+
+
+def _libintl_exports_g_libintl(path: Path) -> bool:
+    return _nm_exports(path, "_g_libintl_bind_textdomain_codeset")
+
+
+def _codesign_adhoc(path: Path) -> None:
+    subprocess.run(
+        ["codesign", "-f", "-s", "-", str(path)],
+        check=False,
+        capture_output=True,
+    )
+
+
+def _dylib_undefined_symbols(path: Path) -> set[str]:
+    try:
+        out = subprocess.check_output(
+            ["nm", "-u", str(path)],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        )
+    except Exception:
+        return set()
+    return {line.strip() for line in out.splitlines() if line.strip()}
+
+
+def _dylib_links_libintl(path: Path) -> bool:
+    try:
+        out = subprocess.check_output(["otool", "-L", str(path)], text=True)
+    except Exception:
+        return False
+    return "libintl" in out
+
+
+def _rewrite_libintl_dep(dylib: Path, new_dep: str) -> None:
+    """Point every libintl dependency on *dylib* at *new_dep*."""
+    try:
+        deps = subprocess.check_output(["otool", "-L", str(dylib)], text=True)
+    except Exception:
+        return
+    changed = False
+    for line in deps.splitlines()[1:]:
+        dep = line.strip().split(" ", 1)[0]
+        if "libintl" not in Path(dep).name:
+            continue
+        if dep == new_dep:
+            continue
+        subprocess.run(
+            ["install_name_tool", "-change", dep, new_dep, str(dylib)],
+            check=False,
+            capture_output=True,
+        )
+        changed = True
+    if changed:
+        _codesign_adhoc(dylib)
+
+
+def _ensure_macos_pyexiv2_libintl_in_app(exe_path: Path) -> None:
+    """Split gettext vs lensfunpy proxy libintl so cv2, lensfun, and pyexiv2 all load.
+
+    Three consumers share the name ``libintl.8.dylib`` but need different ABIs:
+
+    * **Real gettext** (``_libintl_*``): OpenCV ``libgnutls`` / ``libglib``, pyexiv2
+    * **lensfunpy proxy** (``_g_libintl_*``): lensfunpy ``libglib`` (+ Frameworks copy)
+
+    Putting either one alone at ``Contents/Frameworks/libintl.8.dylib`` breaks the
+    other (Lite: missing ``_g_libintl_*``; Full: missing ``_libintl_bindtextdomain``
+    → export / AI denoise UI fails because ``import cv2`` fails).
+
+    Fix:
+    1. Install **real gettext** at Frameworks/Resources ``libintl.8.dylib`` (cv2 default).
+    2. Rewrite every dylib that undefined-refs ``_g_libintl_*`` to load the proxy
+       beside lensfunpy (``@loader_path/...`` or an explicit path under lensfunpy).
+    3. Keep a gettext copy beside ``pyexiv2/lib/libexiv2.dylib`` with ``@loader_path``.
+    """
+    if platform.system() != "Darwin":
+        return
+
+    stub_src: Path | None = None
+    for hit in exe_path.rglob("libintl.8.dylib"):
+        if "lensfunpy" in hit.parts and _libintl_exports_g_libintl(hit):
+            stub_src = hit.resolve() if hit.is_symlink() else hit
+            break
+    if stub_src is None:
+        raise RuntimeError(
+            "lensfunpy proxy libintl.8.dylib not found in app bundle "
+            "(needed by lensfunpy libglib)."
+        )
+
+    gettext_src: Path | None = None
+    for cand in _darwin_real_libintl_candidates(exe_path):
+        if _libintl_exports_bindtextdomain(cand):
+            gettext_src = cand.resolve() if cand.is_symlink() else cand
+            break
+    if gettext_src is None:
+        raise RuntimeError(
+            "Could not find a real gettext libintl.8.dylib for cv2/pyexiv2. "
+            "Install with: brew install gettext"
+        )
+
+    # 1) Top-level @rpath slot = real gettext (OpenCV libgnutls / cv2 glib).
+    for dest in (
+        exe_path / "Contents" / "Frameworks" / "libintl.8.dylib",
+        exe_path / "Contents" / "Resources" / "libintl.8.dylib",
+    ):
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        if dest.exists() or dest.is_symlink():
+            if (
+                not dest.is_symlink()
+                and _libintl_exports_bindtextdomain(dest)
+                and not _libintl_exports_g_libintl(dest)
+            ):
+                pass  # already correct gettext
+            else:
+                dest.unlink()
+                shutil.copy2(gettext_src, dest)
+        else:
+            shutil.copy2(gettext_src, dest)
+        subprocess.run(
+            ["install_name_tool", "-id", "@rpath/libintl.8.dylib", str(dest)],
+            check=False,
+            capture_output=True,
+        )
+        _codesign_adhoc(dest)
+        if not _libintl_exports_bindtextdomain(dest):
+            raise RuntimeError(f"Frameworks libintl missing gettext symbols: {dest}")
+        print(f"[OK] Frameworks/Resources libintl is real gettext: {dest}")
+
+    # 2) Point g_libintl consumers at the lensfunpy proxy, not Frameworks gettext.
+    stub_rel_from_frameworks = Path("lensfunpy") / "__dot__dylibs" / "libintl.8.dylib"
+    # Prefer the real on-disk stub path under the app (handles .dylibs vs __dot__dylibs).
+    stub_in_app = stub_src
+    try:
+        stub_rel_from_frameworks = stub_in_app.relative_to(
+            exe_path / "Contents" / "Frameworks"
+        )
+    except ValueError:
+        pass
+
+    g_consumers = 0
+    for dylib in exe_path.rglob("*"):
+        if not dylib.is_file() or dylib.is_symlink():
+            continue
+        if dylib.suffix not in (".dylib", ".so"):
+            continue
+        if "libintl" in dylib.name:
+            continue
+        if not _dylib_links_libintl(dylib):
+            continue
+        undef = _dylib_undefined_symbols(dylib)
+        if not any(s.startswith("_g_libintl_") for s in undef):
+            continue
+        # Same directory as a proxy copy → @loader_path; else path from Frameworks.
+        local_stub = dylib.parent / "libintl.8.dylib"
+        if local_stub.is_file() and _libintl_exports_g_libintl(local_stub):
+            new_dep = "@loader_path/libintl.8.dylib"
+        else:
+            # Frameworks/libglib-2.0.0.dylib etc.
+            new_dep = f"@loader_path/{stub_rel_from_frameworks.as_posix()}"
+            # If this dylib lives outside Frameworks (e.g. Resources), use absolute
+            # @rpath-style path via rewriting to the stub's directory with loader
+            # relative path when possible.
+            try:
+                rel = stub_in_app.relative_to(dylib.parent)
+                new_dep = f"@loader_path/{rel.as_posix()}"
+            except ValueError:
+                try:
+                    rel = stub_in_app.relative_to(exe_path / "Contents" / "Frameworks")
+                    # Only valid when dylib itself is under Frameworks.
+                    dylib.relative_to(exe_path / "Contents" / "Frameworks")
+                    new_dep = f"@loader_path/{rel.as_posix()}"
+                except ValueError:
+                    new_dep = str(stub_in_app)
+        _rewrite_libintl_dep(dylib, new_dep)
+        g_consumers += 1
+        print(f"[OK] g_libintl consumer → {new_dep}: {dylib.relative_to(exe_path)}")
+    if g_consumers == 0:
+        print("[WARNING] No g_libintl consumers found to rewrite (unexpected).")
+
+    # 3) pyexiv2 keeps a private gettext copy (stable even if Frameworks changes).
+    libexiv2_hits = [
+        p
+        for p in exe_path.rglob("libexiv2.dylib")
+        if "pyexiv2" in p.parts and p.is_file() and not p.is_symlink()
+    ]
+    for libexiv2 in libexiv2_hits:
+        local_intl = libexiv2.parent / "libintl.8.dylib"
+        if local_intl.exists() or local_intl.is_symlink():
+            local_intl.unlink()
+        shutil.copy2(gettext_src, local_intl)
+        subprocess.run(
+            ["install_name_tool", "-id", "@loader_path/libintl.8.dylib", str(local_intl)],
+            check=False,
+            capture_output=True,
+        )
+        _codesign_adhoc(local_intl)
+        _rewrite_libintl_dep(libexiv2, "@loader_path/libintl.8.dylib")
+        if not _libintl_exports_bindtextdomain(local_intl):
+            raise RuntimeError(f"pyexiv2 local libintl missing gettext symbols: {local_intl}")
+        print(f"[OK] pyexiv2 local gettext beside {libexiv2.relative_to(exe_path)}")
 
 
 def _ensure_macos_openmp_libraw_in_app(exe_path: Path) -> None:
@@ -1100,6 +1385,7 @@ def main():
             print("Patching macOS Info.plist...")
             update_macos_plist(str(exe_path), profile=args.profile)
             _prune_built_app(exe_path, args.profile)
+            _ensure_macos_pyexiv2_libintl_in_app(exe_path)
             _ensure_macos_openmp_libraw_in_app(exe_path)
             print("Re-signing macOS app bundle (ad-hoc)...")
             run_command(['codesign', '--force', '--deep', '-s', '-', str(exe_path)])

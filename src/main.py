@@ -2101,16 +2101,47 @@ class _AdjustExportWorker(QRunnable):
             emit_progress(5, "Decoding…")
             logger.info("[EXPORT] Decoding full-resolution edit base…")
             processor = UnifiedImageProcessor()
-            base = processor.decode_raw_edit_base(
-                self.file_path,
-                executor=self.process_pool,
-                use_full_resolution=True,
-                apply_lens_correction=float(self.adj.get("LensCorrectionEnabled", 0.0) or 0.0) > 0.5,
-            )
+            last_decode_err: Exception | None = None
+            try:
+                base = processor.decode_raw_edit_base(
+                    self.file_path,
+                    executor=self.process_pool,
+                    use_full_resolution=True,
+                    apply_lens_correction=float(self.adj.get("LensCorrectionEnabled", 0.0) or 0.0) > 0.5,
+                )
+            except Exception as decode_exc:
+                last_decode_err = decode_exc
+                base = None
+                logger.error(
+                    "[EXPORT] Full-resolution decode raised for %s",
+                    os.path.basename(self.file_path),
+                    exc_info=True,
+                )
             logger.info(
                 "[EXPORT] Full-resolution decode %s",
                 "OK, shape=%s" % (base.shape,) if base is not None else "FAILED (returned None)",
             )
+            if base is None:
+                detail_bits = []
+                try:
+                    if processor.is_libraw_unsupported(self.file_path):
+                        detail_bits.append(
+                            "LibRaw marked this file unsupported (e.g. Nikon HE/HE* NEF, "
+                            "composite DNG, or unrecognized RAW)."
+                        )
+                except Exception:
+                    pass
+                if last_decode_err is not None:
+                    detail_bits.append(str(last_decode_err))
+                detail = (" " + " ".join(detail_bits)) if detail_bits else ""
+                raise RuntimeError(
+                    "Full-resolution RAW decode failed — cannot export."
+                    f"{detail} "
+                    "Adjust preview can still work from half-size or embedded JPEG; "
+                    "export needs a demosaicable RAW. "
+                    "If the app vanished mid-export, the Mac may have run out of memory "
+                    "on a large full-res demosaic."
+                )
             is_nn = self.export_format.endswith("_nn")
             # NN-denoise runs a real tile loop we can track precisely; without
             # it the remaining work (tonemap + encode) is one opaque call, so
@@ -3793,6 +3824,29 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                     "From fit: Space centers on the box; double-click zooms to the click. F = off.",
                     6500,
                 )
+            else:
+                # Always acknowledge the toggle; silent ON with no box looks like
+                # F is broken (common when maker AF/SubjectArea is absent, or when
+                # pyexiv2 failed to load in a packaged build).
+                pyexiv2_ok = False
+                try:
+                    from metadata_backend import has_pyexiv2
+
+                    pyexiv2_ok = bool(has_pyexiv2())
+                except Exception:
+                    pyexiv2_ok = False
+                if pyexiv2_ok:
+                    self.status_bar.showMessage(
+                        "Focus outline ON — no AF / SubjectArea box in this file’s metadata. "
+                        "F = off.",
+                        6500,
+                    )
+                else:
+                    self.status_bar.showMessage(
+                        "Focus outline ON — EXIF engine (pyexiv2) unavailable; "
+                        "maker AF points cannot be read. F = off.",
+                        8000,
+                    )
             self._redraw_single_view_pixmap_without_relayout()
         else:
             self._focus_subject_rect_image = None
@@ -8798,13 +8852,14 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             self._bookmark_star_outline_icon = _qta_icon("fa5s.star", color=theme.INK_FAINT)
         _style_bottom_icon_button(self.batch_mark_indicator)
         self.batch_mark_indicator.clicked.connect(self._on_bookmark_slot_clicked)
-        self.batch_mark_indicator.setToolTip("Bookmarked for opening in another app (↑ to toggle)")
+        self.batch_mark_indicator.setToolTip(
+            "Bookmarks retired — use 1–5 ratings and the gallery rating-filter stars."
+        )
         self.batch_mark_indicator.hide()
 
-        # Single-view rating control: 5 clickable stars replacing the old
-        # single bookmark-star indicator in this view (bookmark toggle stays
-        # keyboard-only there, via ↑; gallery mode's batch_mark_indicator is
-        # unaffected).
+        # Single-view rating control: 5 clickable stars (replaces the old
+        # bookmark star). ↑ is unused in single/gallery for bookmarks;
+        # Compare mode still uses ↑ to promote the candidate.
         self.single_view_rating_stars = QWidget()
         self.single_view_rating_stars.setObjectName("singleViewRatingStars")
         _rating_stars_layout = QHBoxLayout(self.single_view_rating_stars)
@@ -15558,11 +15613,11 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 if getattr(self, "_burst_group_view_active", False):
                     if self._burst_group_compare_plan() is not None:
                         hint = (
-                            "Compare burst group (C) · Share / bookmark "
-                            "(↑ or ★); Ctrl/Cmd+click or Shift+click to select"
+                            "Compare burst group (C) · Rate 0–5 · "
+                            "Share; Ctrl/Cmd+click or Shift+click to select"
                         )
                     else:
-                        hint = "Share / bookmark (↑ or ★); Ctrl/Cmd+click or Shift+click to select"
+                        hint = "Share · Rate 0–5; Ctrl/Cmd+click or Shift+click to select"
                 else:
                     from comparison_mode import CompareEntry
 
@@ -15572,7 +15627,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                     else:
                         hint = "Compare selection (C) · Share · Delete/Down"
             else:
-                hint = "Share — open in editor, Delete/Down bulk actions (↑ toggles bookmark)"
+                hint = "Share — open in editor, Delete/Down bulk actions"
             self.status_bar.showMessage(
                 f"{n} image{'s' if n != 1 else ''} selected — {hint}",
                 5000,
@@ -15841,25 +15896,27 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         return True
 
     def _on_bookmark_slot_clicked(self) -> None:
+        """Legacy bookmark chrome — filter/toggle UI is retired in favor of ratings."""
         vm = getattr(self, "view_mode", "")
         if vm == "single":
-            path = getattr(self, "current_file_path", None)
-            if path:
-                self._gallery_toggle_path_bookmark(path)
+            if hasattr(self, "status_bar") and self.status_bar is not None:
+                self.status_bar.showMessage(
+                    "Rate with 1–5 (0 clears). Bookmarks are no longer used for culling.",
+                    3500,
+                )
             return
         if vm != "gallery":
             return
-        if self._gallery_has_selection():
-            self._gallery_toggle_selected_bookmarks()
-            return
+        # Clear any leftover bookmark filter from older sessions; rating filter
+        # is the supported way to narrow the gallery now.
         if getattr(self, "_gallery_bookmark_filter_active", False):
             self._clear_gallery_bookmark_filter()
             return
-        if not self._gallery_has_bookmarks():
-            return
-        self._gallery_bookmark_filter_active = True
-        self._sync_bookmark_indicator()
-        self._apply_gallery_bookmark_filter()
+        if hasattr(self, "status_bar") and self.status_bar is not None:
+            self.status_bar.showMessage(
+                "Use the bottom stars to filter by rating (bookmarks retired).",
+                3500,
+            )
 
     def _gallery_scope_filter_qualifier(self) -> str:
         """Short qualifier for the active bookmark/rating gallery filter(s), e.g. 'bookmarked, 3★+'."""
@@ -15997,8 +16054,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self._sync_gallery_rating_filter_stars()
         self._sync_gallery_clear_filter_button()
         # The gallery bookmark-filter star is retired: the rating filter
-        # covers "narrow down the gallery" and the ↑ shortcut still toggles
-        # bookmarks on the current image/selection without this button.
+        # covers "narrow down the gallery". ↑ scrolls the gallery (or
+        # promotes in Compare); it no longer toggles bookmarks.
         btn = getattr(self, "batch_mark_indicator", None)
         if btn is not None:
             btn.hide()
@@ -16980,6 +17037,84 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             return parent
         return ""
 
+    def _directory_looks_writable(self, directory: str) -> bool:
+        """Best-effort write probe (POSIX permissions / read-only volumes).
+
+        RAWviewer is not App-Sandboxed, so NSSavePanel does not grant extra TCC
+        power — export still needs a folder the process can create files in
+        (SD cards and camera volumes are often mounted read-only).
+        """
+        directory = (directory or "").strip()
+        if not directory or not os.path.isdir(directory):
+            return False
+        try:
+            if not os.access(directory, os.W_OK):
+                return False
+        except OSError:
+            return False
+        probe = None
+        try:
+            import tempfile
+
+            fd, probe = tempfile.mkstemp(prefix=".rawviewer_wprobe_", dir=directory)
+            os.close(fd)
+            return True
+        except OSError:
+            return False
+        finally:
+            if probe:
+                try:
+                    os.remove(probe)
+                except OSError:
+                    pass
+
+    def _preferred_writable_export_dir(self, preferred: str = "") -> str:
+        """Pick a writable export folder; fall back to Pictures/Desktop/home."""
+        preferred = self._sanitize_dialog_start_dir(preferred)
+        if preferred and self._directory_looks_writable(preferred):
+            return preferred
+        home = os.path.expanduser("~")
+        for candidate in (
+            os.path.join(home, "Pictures"),
+            os.path.join(home, "Desktop"),
+            os.path.join(home, "Downloads"),
+            home,
+        ):
+            if self._directory_looks_writable(candidate):
+                return candidate
+        return preferred or home
+
+    def _export_destination_permission_error(self, output_path: str) -> str | None:
+        """Return a user-facing message if output_path cannot be written, else None."""
+        output_path = (output_path or "").strip()
+        if not output_path:
+            return "No export destination was chosen."
+        parent = os.path.dirname(os.path.abspath(output_path))
+        if not parent:
+            return f"Invalid export path:\n{output_path}"
+        if not os.path.isdir(parent):
+            try:
+                os.makedirs(parent, exist_ok=True)
+            except OSError as exc:
+                return (
+                    f"Cannot create export folder:\n{parent}\n\n{exc}\n\n"
+                    "Choose Desktop, Pictures, or Downloads instead "
+                    "(camera cards / network shares are often read-only)."
+                )
+        if os.path.exists(output_path) and not os.access(output_path, os.W_OK):
+            return (
+                f"Cannot overwrite (permission denied):\n{output_path}\n\n"
+                "Pick another name or folder."
+            )
+        if not self._directory_looks_writable(parent):
+            return (
+                f"Cannot write to this folder (permission denied or read-only volume):\n"
+                f"{parent}\n\n"
+                "Choose Desktop, Pictures, or Downloads. "
+                "SD cards and camera volumes are often mounted read-only."
+            )
+        return None
+
     def _use_qt_file_dialog(self) -> bool:
         """Use the native system file picker by default (Windows Explorer-style dialog).
 
@@ -17135,6 +17270,10 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             panel = ns_save_panel.savePanel()
         if panel is None:
             raise RuntimeError("NSSavePanel could not be created")
+        try:
+            panel.setCanCreateDirectories_(True)
+        except Exception:
+            pass
         return panel
 
     def _save_file_dialog_macos_applescript(
@@ -17185,7 +17324,21 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         if panel.runModal() != 1:  # NSModalResponseOK
             return ""
         url = panel.URL()
-        return url.path() if url is not None else ""
+        if url is None:
+            return ""
+        # Defensive: keep security-scoped access alive for the chosen file URL
+        # (harmless when not sandboxed; required if TCC treats the pick specially).
+        try:
+            url.startAccessingSecurityScopedResource()
+        except Exception:
+            pass
+        try:
+            return str(url.path() or "")
+        finally:
+            # Export writes asynchronously on a worker thread; do not stop
+            # access here. macOS releases scope when the process exits; for
+            # non-sandboxed apps this is a no-op either way.
+            pass
 
     def _save_file_dialog_macos_native(
         self,
@@ -17393,11 +17546,12 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             "Space / Double-click — Toggle fit-to-window / 100% zoom",
             "Trackpad Pinch / Ctrl+Scroll — Smooth zoom in/out",
             "← / → — Previous / next image",
-            "↑ — Bookmark / unbookmark image(s)",
+            "0–5 — Star rating (0 clears; click bottom stars too)",
             "↓ — Move image(s) to Discard folder",
             "Delete — Delete image(s)",
-            "Esc — Gallery: clear selection / exit bookmark filter; single view: back to gallery",
+            "Esc — Gallery: clear selection / exit filters; single view: back to gallery",
             "Gallery: Ctrl/Cmd+click — toggle selection; Shift+click two photos for range",
+            "Gallery: ↑ / ↓ — Scroll (↓ with selection: move selection to Discard)",
             "C — Toggle Compare mode (requires multiple images selected)",
             "H — Show/hide histogram",
             "J — Show/hide highlight (red) and shadow (blue) clipping",
@@ -23300,7 +23454,17 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         nn_suffix = " + AI denoise" if raw_fmt.endswith("_nn") else ""
         fmt = raw_fmt[:-len("_nn")] if raw_fmt.endswith("_nn") else raw_fmt
         base = os.path.splitext(os.path.basename(path))[0]
-        start_dir = os.path.dirname(os.path.abspath(path))
+        # Default next to the RAW when that folder is writable; otherwise jump to
+        # Pictures/Desktop so users browsing a locked SD/camera card don't sit
+        # on a read-only destination and fail after a long full-res decode.
+        source_dir = os.path.dirname(os.path.abspath(path))
+        start_dir = self._preferred_writable_export_dir(source_dir)
+        if start_dir != self._sanitize_dialog_start_dir(source_dir):
+            logger.info(
+                "[EXPORT] Source folder not writable (%s) — defaulting save dialog to %s",
+                source_dir,
+                start_dir,
+            )
 
         if fmt == EXPORT_FORMAT_JPEG:
             default_name = f"{base}_edited.jpg"
@@ -23362,6 +23526,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
 
         if not output_path:
             logger.info("[EXPORT] Save dialog cancelled by user")
+            if hasattr(self, "status_bar"):
+                self.status_bar.showMessage("Export cancelled", 2500)
             return
         logger.info("[EXPORT] Save target chosen: %s", output_path)
         low = output_path.lower()
@@ -23371,6 +23537,12 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             output_path += ".webp"
         elif fmt == EXPORT_FORMAT_TIFF16 and not low.endswith((".tif", ".tiff")):
             output_path += ".tif"
+
+        perm_err = self._export_destination_permission_error(output_path)
+        if perm_err:
+            logger.warning("[EXPORT] Destination not writable: %s", output_path)
+            self.show_error("Export — permission denied", perm_err)
+            return
 
         self._adjust_export_in_progress = True
         # raw_fmt, not fmt: the "_nn" AI-denoise suffix must reach
@@ -23408,15 +23580,16 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         except Exception:
             pass
         pool = getattr(getattr(self, "image_manager", None), "_process_pool", None)
+        # Pass raw_fmt (not fmt) so "_nn" AI-denoise variants reach the worker.
         worker = _AdjustExportWorker(
             path,
             output_path,
             adj,
-            fmt,
+            raw_fmt,
             pool,
             self._adjust_export_signals,
         )
-        logger.info("[EXPORT] Handing off to background worker (format=%s)", fmt)
+        logger.info("[EXPORT] Handing off to background worker (format=%s)", raw_fmt)
         # Modal progress dialog: freezes app interaction for the duration
         # (window-modal), offers Cancel (polled between export stages and
         # between AI-denoise tiles, so it lands within ~2s), and is dismissed
@@ -23508,10 +23681,16 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             if hasattr(self, "status_bar"):
                 name = os.path.basename(source_path)
                 if err is not None:
-                    self.status_bar.showMessage(
-                        f"Export of {name} failed (while viewing another image): {err}",
-                        7000,
-                    )
+                    if type(err).__name__ != "ExportCancelled":
+                        msg = str(err) or repr(err)
+                        self.status_bar.showMessage(
+                            f"Export of {name} failed (while viewing another image): {msg}",
+                            7000,
+                        )
+                        try:
+                            self.show_error("Export failed", f"{name}: {msg}")
+                        except Exception:
+                            pass
                 else:
                     self.status_bar.showMessage(
                         f"Exported {name} to {os.path.basename(output_path)}"
@@ -23520,13 +23699,39 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                     )
             return
         if err is not None:
-            if hasattr(self, "status_bar"):
-                if type(err).__name__ == "ExportCancelled":
+            if type(err).__name__ == "ExportCancelled":
+                if hasattr(self, "status_bar"):
                     self.status_bar.showMessage("Export cancelled", 4000)
-                else:
-                    self.status_bar.showMessage(f"Export failed: {err}", 7000)
+                return
+            msg = str(err) or repr(err)
+            if isinstance(err, (PermissionError, OSError)) and getattr(err, "errno", None) in (
+                13,
+                1,
+                30,  # EROFS
+            ):
+                msg = (
+                    f"{msg}\n\n"
+                    "The export folder may be read-only (SD card / camera volume / "
+                    "network share). Choose Desktop, Pictures, or Downloads and try again."
+                )
+            elif isinstance(err, PermissionError) or (
+                isinstance(err, OSError) and "Permission" in msg
+            ):
+                msg = (
+                    f"{msg}\n\n"
+                    "Choose a writable folder (Desktop, Pictures, or Downloads) and try again."
+                )
+            if hasattr(self, "status_bar"):
+                self.status_bar.showMessage(f"Export failed: {msg}", 7000)
+            try:
+                self.show_error("Export failed", msg)
+            except Exception:
+                pass
             return
         fmt = (export_format or "tiff16").strip().lower()
+        # Strip "_nn" for the success label.
+        if fmt.endswith("_nn"):
+            fmt = fmt[: -len("_nn")]
         labels = {
             "tiff16": "16-bit TIFF",
             "jpeg": "JPEG",
@@ -28584,15 +28789,17 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             self._compare_handle_promote()
             return
         if vm == "single":
-            p = getattr(self, "current_file_path", None)
-            if p:
-                self._gallery_toggle_path_bookmark(p)
+            # Single view uses star ratings (0–5 / bottom stars); ↑ is unused here.
+            if hasattr(self, "status_bar") and self.status_bar is not None:
+                self.status_bar.showMessage(
+                    "Rate with 1–5 (0 clears). ↑ is not used in single view.",
+                    3500,
+                )
             return
         if vm != "gallery":
             return
-        if self._gallery_has_selection():
-            self._gallery_toggle_selected_bookmarks()
-            return
+        # Gallery: ↑ scrolls only. Bookmarks are retired (no filter UI); use
+        # bottom rating stars to narrow the grid.
         self._scroll_gallery_vertical(-1)
 
     def _shortcut_activate_gallery_down(self) -> None:
