@@ -4,87 +4,63 @@
 ## 🚀 Version 3.0.0
 **Release Date: July 14, 2026**
 
-RAWviewer 3.0 is a major release that brings fully integrated **editing functions** and introduces a **new image loading logic** for incredible speed. We conducted multiple testing to check the speed improvement compared to version 2.5, confirming significant performance gains across various camera formats. 
+RAWviewer 3.0 turns the viewer into a complete **cull-and-develop** tool: a fully integrated, non-destructive **Adjust / Develop editor**, **star ratings**, and a rebuilt image-loading pipeline that is measurably faster than 2.5 across browsing, zooming, and gallery fill.
 
-It is built as a faster **browse / cull** release on top of 2.5: featuring **Fast RAW decode**, star ratings with XMP, Nikon HE/HE* handling, a shared darkroom theme, and dozens of navigation / gallery reliability fixes.
+### ✨ New features
 
-### 🚀 Key Feature Highlights
-
-#### 🎨 Full Editing Functions
+#### 🎨 Adjust / Develop editor (E)
 > [!WARNING]
-> **Disclaimer:** The editing feature is currently experimental. We cannot guarantee compatibility with all camera models, especially newly released models.
-- The **Adjust / Develop editing panel** is now fully integrated and on by default for all users.
-- Includes tone curve, lens correction, detail, chroma denoise, dodge/burn, and PV2012-style develops.
-- Editing actions are non-destructive and save directly to **XMP** sidecars. Saved edits render inside the **Adjust panel**; browse surfaces (gallery tiles, single-view previews, RAW view) show the original pixels (`RAWVIEWER_SIDECAR_ADJUST=1` to opt into edited browse rendering).
-- **Auto WB**: Added automatic white balance estimation.
-- **Hover-focusable sliders**: Adjust sliders now accept keyboard input (`+`/`-` or arrows) when hovered.
-- **Export Progress with Cancel**: Modal dialog with progress bar and cancel support for baked exports.
-- **Accurate Edited Previews**: Enhanced accuracy for edited previews and constrained sidecar saving to RAW-only.
-- **Slider Paint Crash Fix**: Fixed a startup crash related to AdjustSlider hover-focus initialization.
-
-#### ⚡ Updated Image Loading Logic & Verified Speed
-- **Fast RAW decode** is on by default (`RAWVIEWER_FAST_RAW_DECODE=1`): half-size and full sensor tiers share one unpack; verified color parity with the previous pipeline (±1 8-bit LSB on golden ARW/CR3 sets).
-- **EDR Support Removed:** macOS EDR (Extended Dynamic Range) support has been removed at this stage. The new, highly optimized image loading pipeline is not compatible with EDR, causing very slow image decoding and loading. To maintain high-speed browsing and editing performance, EDR has been disabled.
-- **Multiple testing verified**: Extensive benchmarking against version 2.5 confirms massive speed improvements:
-  - **Full sensor decode:** about **1.4×** faster (median); high-end formats in the **1.3–1.7×** range where Fast RAW applies.
-  - **Zoom after fit** (reuse the fit-view unpack): roughly **2×** faster than a cold full rawpy decode.
-  - **Half-size fit-view browsing:** about **1.2–1.3×** faster on typical ARW sets; throughput up around **+30%**.
-- Cold gallery thumbnail warmup ~3× faster; Canon CR3 embedded previews no longer read the whole file; EXIF cache no longer serializes every reader through one global lock (multi-second nav stalls fixed).
-- Heavy optional ML imports deferred until after first paint (~0.9s less startup freeze).
-- Neighbor embedded-JPEG prefetch, directional / hover gallery prefetch, and RAF/3FR skip of eager full demosaic neighbors.
+> **Disclaimer:** Editing is currently experimental. Compatibility with every camera model — especially newly released bodies — is not guaranteed.
+- Non-destructive develops saved to **XMP sidecars**; your RAW files are never modified. Browse surfaces show original pixels by default (`RAWVIEWER_SIDECAR_ADJUST=1` to render saved edits in browse).
+- **Tone & color:** exposure/contrast/highlights/shadows/whites/blacks, point + parametric **tone curve** (RGB and per-channel), **HSL color mixer**, saturation/vibrance.
+- **White balance:** As Shot (from EXIF Kelvin when present), presets (Daylight / Cloudy / Shade / Tungsten / Fluorescent / Flash), eyedropper, and **Auto WB** estimation.
+- **Transform:** interactive **crop overlay** with aspect presets (Free / Original / 1:1 / 4:3 / 3:2 / 16:9), **straighten with Auto**, keystone perspective, optional lens correction.
+- **Local tools:** **Dodge & Burn** with soft circular stamps, Edge Assist, and mask overlay; **Heal (H)** inpainting for dust/smudge removal. Both work in Lite and Full.
+- **Effects & detail:** vignette (Amount/Midpoint), dehaze, sharpness, chroma noise reduction with selectable method.
+- **Looks:** **Creative LUT** (`.cube` drag-drop + managed library) and managed **XMP presets** — import, apply, remove.
+- **Export** to JPEG / WebP / 16-bit TIFF with a progress dialog and cancel; **AI denoise** export path (Full, realPLKSR model).
+- A new **Adjust button** in the single-view bar opens the editor (mirrors the **E** shortcut, highlights while active).
 
 #### ⭐ Star ratings
-- Single view: clickable **1–5 stars** (replaces the old UI bookmark star there). Keyboard **1–5** rate; **0** clears. Bookmark toggle remains **↑**.
-- Ratings persist to **XMP** sidecars.
-- Gallery: rating badges on tiles; filter to **rating ≥ N**; can combine with bookmark filter.
+- Rate **1–5** with the number keys (**0** clears) or the clickable stars in single view; bookmark toggle stays **↑**.
+- Ratings persist to **XMP** and appear as gallery tile badges; filter the gallery to **rating ≥ N**, combinable with the bookmark filter.
 
-#### 📷 Format & decode reliability
-- **Nikon HE / HE\*** NEF: detect, avoid spurious “unsupported or corrupt” dialogs, open via embedded JPEG.
-- Cold-open / first-paint orientation fixes (sideways / upside-down / blank first RAW).
-- Rapid-navigation races (stuck on stale image, cancelled mid-flight decode).
-- RAW recovery preview (**P**) and EDR path rawpy bugs fixed.
-- **Zoom-on-click Fixes**: Fixed a bug class where clicking a gallery thumbnail could land on a zoomed-in image inherited from the previous view. Gallery clicks now guarantee settling at Fit-to-Window.
-- **Worker Pool Starvation**: Sidecar applies no longer starve the gallery thumbnail worker pool.
-- **Edit-base decoding**: Deduplicated concurrent edit-base decodes and fixed stale in-flight guards.
-- **Edit / load perf (post-3.0)**: Corrected-WB files stay on the fast EA edit-base path (no AHD fallback); unpack stash LRU; half-size edit-base cache; Adjust live-drag uses a 640px base + lite PV2012 (full quality on slider release); optional sidecar browse apply is progressive (preview interim then full).
-- **Adjust zoom vs lite preview (post-3.0)**: While Adjust is open, Fit may paint a 640px live-drag tier, but zooming to 100% restores the half-res settle buffer and does not queue a browse-path sensor decode; lite frames are not painted over a zoomed sharper buffer.
-- **Effects refinements (post-3.0)**: Vignette uses LR Amount sign + paint-overlay falloff with Midpoint; Chroma NR Amount slider; Dodge/Burn Effect Strength (stops) separate from Brush Flow; identity tone curves no longer block Reset.
-- **XMP presets (post-3.0)**: Managed `.xmp` library in Adjust (alongside Creative LUT).
-- **Tile EXIF parses**: Stopped unnecessary per-tile RAW EXIF parses during edited-preview delivery to improve speed.
-
-#### 🎨 Polish
-- Shared **darkroom** color palette (`theme.py`) for widgets and chrome.
-- Gallery disk-cache default flipped toward **JPEG** tiles (WebP remains available).
-- Culling zoom glitches, Windows taskbar flicker on startup, discarded-photo-never-returns, and slow gallery multi-select fixes.
-
-#### 📦 Lite packaging (精簡 B)
-- **Lite keeps Adjust** (CPU Fast RAW + editor) but **omits PyTorch / kornia** — no GPU demosaic and no AI denoise export in Lite.
-- Windows Lite pixi payload skips `torch` / `torchvision` / `kornia` so install size stays near the ~500 MB class instead of dragging CUDA wheels.
-- Lite runtime default: `RAWVIEWER_PREFER_GPU_DECODE=0`. Full (CUDA) still prefers GPU demosaic when the backend is present.
-
-#### 🎨 App icon
-- New darkroom flat icon: 2×2 gallery tiles + Adjust tone-curve tile (EMBER accent). Hi-res `icons/appicon.png` (2048²) for splash/README; platform `.icns`/`.ico` for the app; simplified `favicon.ico` for small sizes.
+#### ⚡ Faster image loading (verified against 2.5)
+- **Fast RAW decode** on by default: half-size and full sensor tiers share one LibRaw unpack, with verified color parity (±1 8-bit LSB on golden ARW/CR3 sets).
+- Benchmarked vs 2.5: full sensor decode about **1.4×** faster (median, 1.3–1.7× on high-end formats); zoom-after-fit roughly **2×** faster; half-size fit browsing **1.2–1.3×** faster.
+- Cold gallery thumbnail warmup about **3×** faster; Canon CR3 embedded previews no longer read the whole file.
+- Heavy optional ML imports deferred until after first paint; session restore staggers full decode and prefetch so relaunch feels instant.
 
 #### 🖼️ Gallery loading & scrolling overhaul
-- **Main-thread stalls eliminated**: cache-hit thumbnail delivery is deferred off the scheduling loop, tile-fill passes run under a 50ms budget (12ms while a scroll gesture is live), and the per-tile sidecar/EXIF probe that cost ~0.5s per tile on external volumes is gone. Worst UI stall during gallery fill: **11.7s → <0.6s**.
-- **Anchor-first entry**: opening the gallery on a mid-folder image loads the rows around that image first instead of the top of the gallery.
-- **GPU decode no longer starves tiles**: the MPS demosaic throttle (`raw_limit=1`) is suspended while gallery view is active; GPU RAW decode is off by default on macOS (`RAWVIEWER_PREFER_GPU_DECODE=1` to opt in).
-- **Input parity**: mouse-wheel notches accelerate with spin rate and trackpad scrolling has a configurable gain, so both traverse like holding the Down key (`RAWVIEWER_WHEEL_GAIN` / `RAWVIEWER_WHEEL_FAST_GAIN` / `RAWVIEWER_TRACKPAD_GAIN`).
-- Tile badges (★ rating / burst ×N / edited ✎) appear together with the thumbnail instead of floating on empty tiles.
-- Benchmark harness: `RAWVIEWER_GALLERY_AUTOTEST=1` measures rendered tiles during a 20s scripted key-scroll (~1,240 tiles/20s on a 2,052-ARW folder, cold cache within 5% of warm).
+- Main-thread stalls during gallery fill eliminated (worst observed stall **11.7s → <0.6s**): budgeted tile passes, deferred cache-hit delivery, and no per-tile sidecar probes on external drives.
+- **Anchor-first entry:** opening the gallery on a mid-folder image fills the rows around that image first.
+- Mouse-wheel and trackpad scrolling traverse like key-hold navigation, with configurable gains.
+- Tile badges (★ rating / burst ×N / edited ✎) appear together with the thumbnail.
 
-#### 🔍 Semantic search (macOS)
-- Core ML MultiArray / CVPixelBuffer paths use bulk `memmove` instead of per-element ObjC loops (with safe fallback).
-- Index logs split warm-thumbnail vs encode throughput: `[INDEX][SPEED] Phase split: warm=… encode=…`.
+#### 📷 Formats
+- **Nikon High Efficiency (HE / HE\*) NEF** now open for browsing, culling, and rating via the embedded JPEG — no more spurious "unsupported or corrupt" dialogs. RAW develop stays disabled for HE files until a decoder exists.
 
-#### 🎨 Adjust: straighten / local / effects / crop
-- **Auto straighten** wired next to Straighten (`AUTO`); fixed Hough segment unpack for OpenCV `(N,4)` shapes; softer thresholds + gradient-orientation fallback.
-- **White-balance presets** dropdown (As Shot from EXIF Kelvin when present; Daylight / Cloudy / Shade / Tungsten / Fluorescent / Flash) above Temp/Tint.
-- **Dodge & Burn** UI (Local: Dodge/Burn/Eraser/Heal, Size, Flow, Clear, Show Mask, Edge Assist) with soft **circular** gaussian stamps, stroke-delta live preview (no hard square blit), and edge-assisted painting. **Heal (H)** uses OpenCV Telea inpaint for smudge/dust removal (Lite + Full).
-- **Crop overlay** in Transform: interactive dimmed mask + handles; aspect pills Free / Original / 1:1 / 4:3 / 3:2 / 16:9; Apply writes `CropLeft/Right/Top/Bottom` (geometry pipeline already honored these keys).
-- **Vignette** (`PostCropVignetteAmount` / `PostCropVignetteMidpoint`) and **Dehaze** (`Dehaze`) in Detail — display-linear paint-overlay vignette, Lite-safe (cv2/numpy).
-- **Editor chrome**: wider Adjust panel, higher-contrast labels, unified combo style (no separate drop-down button), Tone Curve **Linear** button readable on dark chrome.
-- **XMP presets**: import / apply / remove managed `.xmp` files (same library chrome as Creative LUT).
+#### 📦 Lite edition, slimmer
+- **Lite keeps the full Adjust editor** (CPU Fast RAW) but omits PyTorch / kornia — install stays in the ~500 MB class.
+- Full (CUDA) still prefers GPU demosaic when the backend is present.
+
+#### 🎨 Design
+- New **darkroom app icon** (gallery tiles + tone-curve tile) with hi-res splash assets.
+- Shared darkroom color palette across all widgets and chrome.
+- macOS release builds ship an **OpenMP-enabled LibRaw** for parallel decodes.
+
+### 🔧 Fixes since 2.5
+
+- **Orientation:** cold-open / first-paint orientation bugs (sideways, upside-down, or blank first RAW) fixed.
+- **Navigation races:** rapid arrow-key navigation no longer sticks on a stale image or a cancelled mid-flight decode.
+- **Gallery click zoom:** clicking a gallery thumbnail always lands at Fit-to-Window instead of inheriting the previous view's zoom.
+- **EXIF cache contention:** readers no longer serialize through one global lock (multi-second navigation stalls on large folders fixed).
+- **RAW recovery preview (P):** rawpy edge cases fixed.
+- **Culling & UI polish:** culling zoom glitches, Windows taskbar flicker on startup, discarded-photo-never-returns, and slow gallery multi-select all fixed.
+
+### ⚠️ Breaking change: macOS EDR removed
+
+The 2.5 macOS EDR (HDR display) path is **removed in 3.0** — it was incompatible with the new fast loading pipeline and made RAW decoding very slow. HDR stills (HEIC/HEIF/AVIF/HDR TIFF) are tone-mapped to SDR. Restoring EDR without regressing speed is tracked under Known Issues.
 
 ### Environment variables (new / notable)
 
@@ -92,15 +68,15 @@ It is built as a faster **browse / cull** release on top of 2.5: featuring **Fas
 |----------|---------|--------|
 | `RAWVIEWER_FAST_RAW_DECODE` | `1` | Fast RAW path; `0` falls back toward rawpy |
 | `RAWVIEWER_USE_PROCESS_POOL` | auto | Force LibRaw process pool on/off |
-| `RAWVIEWER_SIDECAR_ADJUST` | `0` | Apply saved XMP edit sliders to browse/full-res pixels (requires editing enabled). Default off: browse shows original; edits render in Adjust. When on, CURRENT full loads use progressive interim→full apply |
+| `RAWVIEWER_SIDECAR_ADJUST` | `0` | Apply saved XMP edit sliders to browse/full-res pixels (requires editing enabled). Default off: browse shows original; edits render in Adjust |
 | `RAWVIEWER_UNPACK_STASH_SLOTS` | `3` | How many LibRaw unpack mosaics to keep for half→full / A↔B revisit (1–8) |
 
 ### Recommended test after upgrade
 
-1. **Existing users (recommended once):** clear cache after installing v3, then reopen your folder. Thumbnail/EXIF rows refresh automatically over time, but older installs stay on the legacy search/index performance mode until you clear cache (or set `RAWVIEWER_PERF_V2=1`). **Windows:** check **Clear existing cache** in Setup (or run `clear_cache.bat` next to `RAWviewer.exe`). **macOS:** use **Clear Cache.command** / `clear_macos_cache.sh` from the release zip. This does not delete photos or XMP.
+1. **Existing users (recommended once):** clear cache after installing v3, then reopen your folder. Older installs stay on the legacy search/index performance mode until you clear cache (or set `RAWVIEWER_PERF_V2=1`). **Windows:** check **Clear existing cache** in Setup (or run `clear_cache.bat` next to `RAWviewer.exe`). **macOS:** use **Clear Cache.command** / `clear_macos_cache.sh` from the release zip. This does not delete photos or XMP.
 2. Open a mix of ARW / CR3 / NEF (including HE\*): arrow through, zoom to 100%, confirm orientation.
 3. Rate with **1–5**, filter gallery by stars, confirm sidecars.
-4. Open Adjust (**E**): try WB presets, Crop (Transform), Dodge/Burn with Edge Assist, Vignette/Midpoint/Dehaze; after a Fit slider drag, double-click 100% and confirm status stays on the half-res settle size (not 640×427).
+4. Open Adjust (**E** or the sliders button): try WB presets, Crop, Dodge/Burn, Heal, Vignette/Dehaze, a Creative LUT; save and confirm the XMP sidecar appears next to the RAW.
 
 ### ⚠️ Known Issues & Remaining Work (feasibility ranked)
 
@@ -116,8 +92,6 @@ Rule of thumb: **if it can ship in Full, it counts as feasible** even when Lite 
 | 6 | **Restore macOS EDR alongside Fast RAW** | **Low–Medium** | L | Previously conflicted with the fast load pipeline; needs a non-regressing design |
 | 7 | **VLM-assisted auto adjust** | **Low–Medium** | L | Product + model/API scope; not blocked by editor plumbing alone |
 | 8 | **Edit Nikon HE/HE\* NEF as RAW** | **Low** | L+ | LibRaw cannot unpack HE mosaics today → browse-only by design until a decoder exists |
-
-**Shipped this pass:** HSL correctness (UI on), Creative LUT (`.cube` drag-drop + manage), editor-aligned browse caches on Adjust save (RAW-only; companion JPEG never gets RAW XMP), **macOS release OpenMP LibRaw** (`build_macos.sh` installs standalone `libomp` LibRaw before PyInstaller; build fails if the `.app` still points at torch’s `libomp` or lacks OpenMP).
 
 **Still true today (bugs / limits, not roadmap fluff):**
 - **Cold gallery tiles** for never-opened-in-Adjust edits may still show embedded JPEG (edited **badge** + save-bake cover the common path). Same root as row 1 above.
