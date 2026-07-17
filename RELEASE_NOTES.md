@@ -38,7 +38,7 @@ RAWviewer 3.0 turns the viewer into a complete **cull-and-develop** tool: a full
 - Near neighbors warm a sensor `full` decode under RAW+GPU once the current full is already in flight (slot reservation keeps CURRENT first). CUDA demosaic concurrency stays at the adaptive default (typically **2** on RTX-class GPUs); raising it further did not improve the mixed-format suite.
 
 ##### Cold-start suite vs 2.5 (Windows, Jul 2026)
-Same machine, cleared `~/.rawviewer_cache` before **each** test. Gallery: open `DSC00001.ARW` in a 6880-file folder, wait for EXIF sort, hold **Up** 20s. RAW nav: open one file in a 259-file mixed RAW folder, wait for sensor-covering full-res paint, then next (full loop).
+Same machine, cleared `~/.rawviewer_cache` before **each** test. Gallery: open one RAW in a ~6900-file folder, wait for EXIF sort, hold **Up** 20s. RAW nav: open one file in a ~260-file mixed-format RAW folder, wait for sensor-covering full-res paint, then next (full loop).
 
 | Config | Gallery ready | vs 2.5 | RAW nav median | vs 2.5 |
 |--------|---------------|--------|----------------|--------|

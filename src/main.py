@@ -162,6 +162,10 @@ if _IS_GUI_MAIN_PROCESS:
                         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("markyip.rawviewer.app.1")
                     except Exception:
                         pass
+                # Apply branded icon immediately (taskbar / Alt+Tab); window sets it again later.
+                _early_icon = _branded_icon_resource_path()
+                if _early_icon:
+                    self.setWindowIcon(QIcon(_early_icon))
                 self.viewer = None
                 self.pending_files = []
 
@@ -8342,7 +8346,11 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             icon_path = png_path
 
         if icon_path:
-            self.setWindowIcon(QIcon(icon_path))
+            _win_icon = QIcon(icon_path)
+            self.setWindowIcon(_win_icon)
+            _app = QApplication.instance()
+            if _app is not None:
+                _app.setWindowIcon(_win_icon)
 
         # Calculate minimum width for 5 images at 4:3 aspect ratio
         # Each image: height=200px, width=200*(4/3)=267px

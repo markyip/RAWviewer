@@ -175,41 +175,50 @@ class CustomTitleBar(QFrame):
         self.icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.icon_label.setStyleSheet("background-color: transparent; border: none;")
         
-        # Load favicon - try multiple paths
-        if getattr(sys, 'frozen', False):
-            base_path = sys._MEIPASS
+        # Load branded favicon / appicon (repo icons/ in dev; _MEIPASS when frozen).
+        # widgets.py lives at src/rawviewer_app/ — do NOT use that as the icons root.
+        if getattr(sys, "frozen", False):
+            bases = [getattr(sys, "_MEIPASS", ""), os.path.dirname(sys.executable)]
         else:
-            base_path = os.path.dirname(os.path.abspath(__file__))
-        
-        icon_paths = [
-            os.path.join(base_path, "icons", "favicon.ico"),
-            os.path.join(base_path, "icons", "appicon.ico"),
-            os.path.join(base_path, "icons", "appicon.png"),
-            os.path.join(base_path, "favicon.ico"),
-            os.path.join(base_path, "appicon.ico"),
-            os.path.join(os.getcwd(), "icons", "favicon.ico"),
-            os.path.join(os.getcwd(), "favicon.ico"),
-            os.path.join(os.path.dirname(os.path.abspath(__file__)), "icons", "favicon.ico"),
-            os.path.join(os.path.dirname(os.path.abspath(__file__)), "favicon.ico"),
-            "icons/favicon.ico",
-            "icons/appicon.ico",
-            "favicon.ico",
-            "appicon.ico"
-        ]
-        
+            repo_root = os.path.abspath(
+                os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..")
+            )
+            bases = [repo_root, os.getcwd()]
+
+        icon_paths: list[str] = []
+        for base in bases:
+            if not base:
+                continue
+            icon_paths.extend(
+                [
+                    os.path.join(base, "icons", "favicon.ico"),
+                    os.path.join(base, "icons", "favicon.png"),
+                    os.path.join(base, "icons", "appicon.ico"),
+                    os.path.join(base, "icons", "appicon.png"),
+                ]
+            )
+
         icon_loaded = False
         for icon_path in icon_paths:
-            if os.path.exists(icon_path):
-                try:
-                    icon = QIcon(icon_path)
-                    pixmap = icon.pixmap(24, 24)
-                    if not pixmap.isNull():
-                        self.icon_label.setPixmap(pixmap)
-                        icon_loaded = True
-                        break
-                except Exception:
-                    continue
-        
+            if not os.path.isfile(icon_path):
+                continue
+            try:
+                icon = QIcon(icon_path)
+                pixmap = icon.pixmap(24, 24)
+                if pixmap.isNull() and icon_path.lower().endswith((".png", ".ico")):
+                    pixmap = QPixmap(icon_path).scaled(
+                        24,
+                        24,
+                        Qt.AspectRatioMode.KeepAspectRatio,
+                        Qt.TransformationMode.SmoothTransformation,
+                    )
+                if not pixmap.isNull():
+                    self.icon_label.setPixmap(pixmap)
+                    icon_loaded = True
+                    break
+            except Exception:
+                continue
+
         if not icon_loaded:
             # Fallback to 'R' if favicon not found
             self.icon_label.setText("R")
