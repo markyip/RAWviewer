@@ -46,8 +46,8 @@ In **gallery view**, drag the **size slider** in the bottom bar to change thumbn
 | **E** | Show / hide **Adjust** panel (XMP develop; experimental) |
 | **0–5** | Star rating (**0** clears) |
 | **G** | Cycle composition guide |
-| **H** | Show / hide histogram (browse; in Adjust, **H** arms **Heal**) |
-| **J** | Toggle highlight/shadow clipping overlay (RAW single view) |
+| **H** | Show / hide histogram |
+| **J** | Toggle highlight/shadow clipping overlay |
 | **P** | Toggle RAW recovery preview — half-res shadow/highlight recovery (RAW/DNG, session only; fit-only) |
 | **F** | Show / hide focus overlay (supported files) |
 | **M** | Show / hide GPS map overlay (single view, geotagged photos; hidden by default on launch) |
@@ -63,9 +63,24 @@ In **gallery view**, drag the **size slider** in the bottom bar to change thumbn
 * **G** — Cycle composition grid guide on both panes
 * **C** / **Esc** — Exit Compare mode
 
+**Adjust (editor) shortcuts** — while the Adjust panel is open (**E**):
+
+| Key | Action |
+|-----|--------|
+| **E** / **Esc** | Close Adjust (returns to browse RAW/JPEG mode) |
+| **D** / **B** / **X** / **H** | Arm **Dodge** / **Burn** / **Eraser** / **Heal** (press again to disarm) |
+| **O** | Toggle **Mask** overlay (when a brush tool is armed) |
+| **Two-finger scroll** | Change **Brush Size** when a brush is armed (**Ctrl+scroll** still zooms) |
+| **←** / **→** | Nudge the focused slider (or previous/next image if none focused) |
+| **Ctrl/Cmd+Z** | Undo last edit step |
+| **Space** / **Double-click** | Fit / 100% zoom |
+| **J** / **G** / **F** | Clipping / composition guide / focus overlay (same as browse) |
+
+Notes: **Effect Strength** applies only to Dodge/Burn; Heal uses **Size** and **Flow** at full inpaint strength. Browse-only keys (**M**, **P**, histogram **H**) do not apply while Adjust is open — **H** arms Heal instead.
+
 **Gallery bookmarks:** Click the outline **star** (nothing selected) to show bookmarked shots only; gold star = filter on. With photos selected, **↑** or the star toggles bookmarks on the selection.
 
-**Search:** gallery search icon — `camera:sony`, `iso<800`, … (**Full** also accepts `sunset on beach`). **Share:** bottom **Share / Open** button, or drag gallery / film-strip thumbnails out.
+**Search:** gallery search icon — type plain metadata (`tokyo`, `sony`, `2024`) or filters like `camera:sony` / `iso<800` (**Full** also accepts `sunset on beach`). **Share:** bottom **Share / Open** button, or drag gallery / film-strip thumbnails out.
 
 Search syntax → [Advanced reference](#advanced-reference).
 
@@ -79,7 +94,7 @@ Both editions share the same **viewer, culling, bookmarks, ratings, Compare, GPS
 |---|:--:|:--:|
 | Gallery, film strip, zoom, histogram, bookmarks, culling, Compare (**C**) | ✅ | ✅ |
 | Star ratings (**0–5**) + XMP | ✅ | ✅ |
-| Metadata / place search (`camera:`, `iso:`, `date:`, `city:`, …) | ✅ | ✅ |
+| Metadata / place search (plain text or `camera:` / `iso:` / `city:` …) | ✅ | ✅ |
 | **Adjust** panel (**E**) — tone, WB, crop, D&B, Heal, LUT, vignette/dehaze, XMP | ✅ | ✅ |
 | Export (JPEG / WebP / TIFF16) from Adjust | ✅ | ✅ |
 | Plain-language AI search (`sunset on beach`) | — | ✅ |
@@ -101,7 +116,7 @@ Windows installer: choose **Full (CUDA)**, **Full (DirectML)**, or **Lite**. mac
 
 In **single-image view**, press **M** to toggle an interactive tile-based map card. The card opens immediately with a **Loading map…** state while tiles fetch (no popup on photos without GPS). A **coordinate badge** on the map shows lat/lon; click it to open **Google Maps** in your browser.
 
-Bundled offline databases (`cities500.csv.gz` and `landmarks.csv.gz`, 100,000+ locations) are used during **background indexing** to resolve GPS coordinates into city, region, and country names. These power **gallery search** — search `city:tokyo`, `country:jp`, or similar — with no internet required.
+Bundled offline databases (`cities500.csv.gz` and `landmarks.csv.gz`, 100,000+ locations) are used during **background indexing** to resolve GPS coordinates into city, region, and country names. These power **gallery search** — type a place name like `tokyo` or `Taipei`, or use filters such as `city:tokyo` / `country:jp` — with no internet required.
 
 For a dedicated **cluster map** across an entire album and **geotagging photos missing GPS**, see **[LocateIt](https://github.com/markyip/LocateIt)**: open a folder, see where shots were taken on a map, drag-drop to assign coordinates, and save back to JPEG or RAW.
 
@@ -148,11 +163,17 @@ To clear thumbnails only: **`scripts\Launch\bat\clear_cache.bat`** (Windows) · 
 
 On **macOS** and **Windows**, HDR **HEIC / HEIF / AVIF** and HDR **TIFF** are tone-mapped to SDR for browse speed. **v3.0 removed macOS EDR** so the Fast RAW load path stays fast (see [`RELEASE_NOTES.md`](RELEASE_NOTES.md)).
 
-**Workflow toggle** (single view): switch between **Embedded JPEG (Fast)** and **RAW (High Quality)**.
+**Nikon HE / HE\* NEF:** LibRaw cannot demosaic High Efficiency compression today. RAWviewer still opens these files via the **embedded JPEG** (browse / cull works; no spurious “unsupported or corrupt” dialog). **Adjust / RAW develop is disabled** for HE/HE\* until a decoder exists — same limitation as JPEG/HEIC (browse-only). Lossless / standard NEF demosaic and edit as usual.
+
+---
+
+## Single-view tools
+
+**Workflow toggle:** switch between **Embedded JPEG (Fast)** and **RAW (High Quality)**.
 
 **Recovery preview (**P**):** half-res shadow/highlight recovery for judging extreme contrast — session only, does not replace full-res view.
 
-**Adjust (**E**):** non-destructive develops to XMP. By default, **browse surfaces show original pixels**; edits render inside the Adjust panel (`RAWVIEWER_SIDECAR_ADJUST=1` to apply saved edits in browse). Editing is experimental — camera coverage is not guaranteed for every new body.
+**Adjust (**E**):** non-destructive develops to XMP. By default, **browse surfaces show original pixels**; edits render inside the Adjust panel (`RAWVIEWER_SIDECAR_ADJUST=1` to apply saved edits in browse). Editing is experimental — camera coverage is not guaranteed for every new body. See **Adjust (editor) shortcuts** above.
 
 ---
 
@@ -177,7 +198,7 @@ On **macOS** and **Windows**, HDR **HEIC / HEIF / AVIF** and HDR **TIFF** are to
 | AI search missing after install (**Full**) | Open gallery **Search** → accept the download prompt |
 | RAWviewer not in Open with | Re-run the installer (repair), or reinstall |
 | Leftover cache after uninstall | Run **`uninstall.bat`** again, or delete `%USERPROFILE%\.rawviewer_cache` manually |
-| Out of memory during AI indexing | See [Automatic memory tuning](#automatic-memory-tuning); use **Lite** on 8 GB PCs or set `RAWVIEWER_MEMORY_TIER_AUTO=0` and lower workers manually |
+| Out of memory during AI indexing | See [Automatic memory tuning](#automatic-memory-tuning) under [For developers](#for-developers); use **Lite** on 8 GB PCs or set `RAWVIEWER_MEMORY_TIER_AUTO=0` and lower workers manually |
 | App slow or exits after reopening last folder | On 8 GB PCs, use **Lite** or set `RAWVIEWER_DISABLE_SESSION_RESTORE=1` |
 | RAW always shows demosaic, not embedded JPEG | Switch to **Embedded JPEG workflow** |
 | Crash | Enable file logging with `RAWVIEWER_FILE_LOG=1`, then check the install folder |
@@ -193,7 +214,7 @@ On **macOS** and **Windows**, HDR **HEIC / HEIF / AVIF** and HDR **TIFF** are to
 | Download failed (SSL / certificate error) | On a corporate VPN or proxy, add your organization’s root certificate to **Keychain Access** and set it to **Always Trust** |
 | Need to uninstall completely | Use **`uninstall_macos_app.sh`** or **`Uninstall RAWviewer.command`** from the release zip — not Trash alone |
 | Uninstall scripts missing | Re-download the release zip from [Releases](https://github.com/markyip/RAWviewer/releases/latest); scripts are inside the extracted folder |
-| macOS “out of memory” / heavy swap during indexing | See [Automatic memory tuning](#automatic-memory-tuning). On 8 GB Macs, prefer **Lite** or wait for indexing to finish before opening gallery on huge folders |
+| macOS “out of memory” / heavy swap during indexing | See [Automatic memory tuning](#automatic-memory-tuning) under [For developers](#for-developers). On 8 GB Macs, prefer **Lite** or wait for indexing to finish before opening gallery on huge folders |
 | Killed on relaunch (`Killed: 9` / exit 137 in Terminal) | Try **Lite**, `RAWVIEWER_DISABLE_SESSION_RESTORE=1`, or `RAWVIEWER_ENABLE_SEMANTIC_SEARCH=0` |
 | Gallery still stutters on a huge folder | Run **`clear_cache.sh`** and reopen the folder |
 | Gallery button slow on huge folder (first open) | Normal — waits for EXIF capture-time sort so gallery order is correct; instant when metadata is cached |
@@ -210,22 +231,74 @@ More detail: [`scripts/Launch/README.md`](scripts/Launch/README.md)
 
 ### Gallery search syntax
 
-Separate words with spaces. Use `key:value` filters:
+Separate words with spaces. **Prefixes are optional for most metadata** — if a token appears in indexed fields (place, camera, lens, filename, or a date-like `2024` / `2024-05`), it filters without `key:`. Use `key:value` when you want to force a field, run comparisons, or combine with other constraints.
 
 | Kind | Example |
 |------|---------|
-| Free text + filter | `jet takeoff camera:sony iso<800` *(Full: free text uses AI)* |
-| Camera / lens | `camera:canon` · `lens:70-200` |
-| ISO / year | `iso<=800` · `year>=2024` |
-| Place | `city:tokyo` · `country:jp` |
-| File name | `filename:_dsc` |
+| Place | `tokyo` · `Taipei` · `hong kong` · `city:tokyo` · `country:jp` |
+| Camera / lens | `sony` · `canon` · `70-200` · `camera:canon` · `lens:70-200` |
+| File name | `_dsc` · `IMG_1234` · `filename:_dsc` |
+| Date | `2024` · `2024-05` · `date:2024-05` |
+| ISO / year (comparison) | `iso<=800` · `iso under 800` · `year>=2024` |
 | Format | `format:raw` · `format:jpeg` · `format:cr3` |
-| Date | `date:2024-05` |
 | GPS / faces | `has:gps` · `has:face` · `no:face` *(face filters: Full only)* |
+| Free text + filter | `jet takeoff camera:sony iso<800` *(Full: unmatched free text uses AI)* |
 
 **Face vs semantic search:** `face`, `people`, `person`, etc. use stored face counts (`has:face`), not the neural search.
 
 **Indexing:** On **Full** builds, semantic search and face counts run in the background on large folders (metadata + AI first, faces after). The **search field stays read-only** until indexing completes for your profile (**Lite:** metadata; **Full:** metadata, embeddings, and face scan when enabled). When you **open a different folder**, indexing and prefetch from the previous folder are cancelled so work does not continue in the background for the old album (**v2.5.0**).
+
+### MobileCLIP models (Full — AI search)
+
+| Platform | When downloaded | Change variant (Windows) |
+|----------|-----------------|--------------------------|
+| **Windows Full** | During setup (~600 MB) | Set `RAWVIEWER_MOBILECLIP_VARIANT` to `s0`, `s2`, `b`, or `l14` |
+| **macOS Full** | First gallery search (~150 MB) | Dev helper: `python scripts/download_mobileclip_coreml.py --out-dir models/mobileclip2_coreml` |
+
+**Lite builds** do not use MobileCLIP models.
+
+### Focus overlay (`F`) by brand
+
+| Brand | Support |
+|-------|---------|
+| Canon CR2/CR3, Nikon NEF, Sony ARW, Olympus ORF, Panasonic RW2 | Yes (maker AF) |
+| JPEG / TIFF / HEIF | Sometimes (EXIF SubjectArea) |
+| Fujifilm RAF, Hasselblad 3FR, Pentax PEF, Samsung SRW, Sigma X3F | No |
+| Typical Adobe DNG | Usually no |
+
+Requires **pyexiv2** for maker-note AF on RAW.
+
+### macOS version support
+
+| Your Mac | Official `.zip` | Build from source |
+|----------|-----------------|-------------------|
+| macOS 13 Ventura (Intel) | ✅ | `build_macos_full.sh` or Pixi |
+| macOS 13 Ventura (Apple Silicon) | ✅ | Use **`build_macos_full.sh`** (Pixi needs 14+) |
+| macOS 14 Sonoma+ | ✅ | Pixi or `build_macos.sh` |
+| macOS 12 Monterey or older | ❌ | ❌ |
+
+### Upcoming / remaining work
+
+Tracked in [`RELEASE_NOTES.md`](RELEASE_NOTES.md) (v3.0 Known Issues & Remaining Work).
+
+**Windows HDR / restore Mac EDR safely** — v2.5 shipped macOS EDR; **3.0 removed it** so Fast RAW stays fast. A future path would use HDR-capable displays without regressing browse speed.
+
+**Remaining work (feasibility high → low):**
+1. **Cold-folder edited tile regen** — save-from-Adjust already bakes editor-aligned thumbs; optional full `SIDECAR_ADJUST` for never-opened edits.
+2. **Broader local masks** — gradients / clone stamp (Dodge/Burn + Heal + crop already ship).
+3. **DNG export** — real writer.
+4. **ML subject masks** — Full only.
+5. **Windows HDR / restore Mac EDR safely**.
+6. **VLM-assisted adjust** — large product/model scope.
+7. **HE-NEF RAW edit** — blocked until a decoder exists (browse-only today).
+
+**Shipped in 3.0:** Fast RAW vs 2.5, Adjust panel (HSL, Creative LUT, WB presets, crop, D&B + Heal, vignette/dehaze, XMP presets), OpenMP LibRaw in macOS packages, star ratings, burst / Compare (**C**), Lite without torch, gallery loading overhaul. GPU **viewport** on by default (`RAWVIEWER_GPU_VIEW=0` to disable).
+
+---
+
+## For developers
+
+Scripts and build matrix: [`scripts/Launch/README.md`](scripts/Launch/README.md)
 
 ### Automatic memory tuning
 
@@ -264,26 +337,6 @@ export RAWVIEWER_IDLE_DISPLAY_PREFETCH=0
 
 Semantic batch/chunk size for AI indexing is **auto-tuned separately** on first index pass (Core ML on macOS, ONNX on Windows); results are cached under `~/.rawviewer_cache/semantic_batch_tuning.json`.
 
-### MobileCLIP models (Full — AI search)
-
-| Platform | When downloaded | Change variant (Windows) |
-|----------|-----------------|--------------------------|
-| **Windows Full** | During setup (~600 MB) | Set `RAWVIEWER_MOBILECLIP_VARIANT` to `s0`, `s2`, `b`, or `l14` |
-| **macOS Full** | First gallery search (~150 MB) | Dev helper: `python scripts/download_mobileclip_coreml.py --out-dir models/mobileclip2_coreml` |
-
-**Lite builds** do not use MobileCLIP models.
-
-### Focus overlay (`F`) by brand
-
-| Brand | Support |
-|-------|---------|
-| Canon CR2/CR3, Nikon NEF, Sony ARW, Olympus ORF, Panasonic RW2 | Yes (maker AF) |
-| JPEG / TIFF / HEIF | Sometimes (EXIF SubjectArea) |
-| Fujifilm RAF, Hasselblad 3FR, Pentax PEF, Samsung SRW, Sigma X3F | No |
-| Typical Adobe DNG | Usually no |
-
-Requires **pyexiv2** for maker-note AF on RAW.
-
 ### Environment variables
 
 <details>
@@ -316,38 +369,6 @@ Requires **pyexiv2** for maker-note AF on RAW.
 Full list and dev defaults: [`scripts/Launch/README.md`](scripts/Launch/README.md), [`docs/macos-sharing-v21-v22.md`](docs/macos-sharing-v21-v22.md).
 
 </details>
-
-### macOS version support
-
-| Your Mac | Official `.zip` | Build from source |
-|----------|-----------------|-------------------|
-| macOS 13 Ventura (Intel) | ✅ | `build_macos_full.sh` or Pixi |
-| macOS 13 Ventura (Apple Silicon) | ✅ | Use **`build_macos_full.sh`** (Pixi needs 14+) |
-| macOS 14 Sonoma+ | ✅ | Pixi or `build_macos.sh` |
-| macOS 12 Monterey or older | ❌ | ❌ |
-
-### Upcoming / remaining work
-
-Tracked in [`RELEASE_NOTES.md`](RELEASE_NOTES.md) (v3.0 Known Issues & Remaining Work).
-
-**Windows HDR / restore Mac EDR safely** — v2.5 shipped macOS EDR; **3.0 removed it** so Fast RAW stays fast. A future path would use HDR-capable displays without regressing browse speed.
-
-**Remaining work (feasibility high → low):**
-1. **Cold-folder edited tile regen** — save-from-Adjust already bakes editor-aligned thumbs; optional full `SIDECAR_ADJUST` for never-opened edits.
-2. **Broader local masks** — gradients / clone stamp (Dodge/Burn + Heal + crop already ship).
-3. **DNG export** — real writer.
-4. **ML subject masks** — Full only.
-5. **Windows HDR / restore Mac EDR safely**.
-6. **VLM-assisted adjust** — large product/model scope.
-7. **HE-NEF RAW edit** — blocked until a decoder exists (browse-only today).
-
-**Shipped in 3.0:** Fast RAW vs 2.5, Adjust panel (HSL, Creative LUT, WB presets, crop, D&B + Heal, vignette/dehaze, XMP presets), OpenMP LibRaw in macOS packages, star ratings, burst / Compare (**C**), Lite without torch, gallery loading overhaul. GPU **viewport** on by default (`RAWVIEWER_GPU_VIEW=0` to disable).
-
----
-
-## For developers
-
-Scripts and build matrix: [`scripts/Launch/README.md`](scripts/Launch/README.md)
 
 ### Quick start
 
