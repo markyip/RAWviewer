@@ -19,7 +19,12 @@
 <p align="center">Free · Open source (MIT) · Works offline — your photos never leave your machine</p>
 
 <p align="center">
+  <img src="https://img.shields.io/github/v/release/markyip/RAWviewer?style=flat-square&labelColor=2b2925&color=96897a&label=version" alt="Latest version">
   <img src="https://img.shields.io/github/downloads/markyip/RAWviewer/total?style=flat-square&labelColor=2b2925&color=d9691e&label=downloads" alt="Total downloads">
+  <img src="https://img.shields.io/badge/license-MIT-96897a?style=flat-square&labelColor=2b2925" alt="License: MIT">
+  <a href="https://www.buymeacoffee.com/markyip">
+    <img src="https://img.shields.io/badge/buy%20me%20a%20coffee-☕-d9a441?style=flat-square&labelColor=2b2925" alt="Buy Me a Coffee">
+  </a>
 </p>
 
 **Language / 語言：** [English](README.md) · [繁體中文](README.zh-TW.md)

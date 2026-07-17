@@ -19,7 +19,12 @@
 <p align="center">免費 · 開放原始碼（MIT）· 離線運作——相片絕不離開你的電腦</p>
 
 <p align="center">
+  <img src="https://img.shields.io/github/v/release/markyip/RAWviewer?style=flat-square&labelColor=2b2925&color=96897a&label=版本" alt="最新版本">
   <img src="https://img.shields.io/github/downloads/markyip/RAWviewer/total?style=flat-square&labelColor=2b2925&color=d9691e&label=下載次數" alt="總下載次數">
+  <img src="https://img.shields.io/badge/授權-MIT-96897a?style=flat-square&labelColor=2b2925" alt="授權：MIT">
+  <a href="https://www.buymeacoffee.com/markyip">
+    <img src="https://img.shields.io/badge/請我喝咖啡-☕-d9a441?style=flat-square&labelColor=2b2925" alt="Buy Me a Coffee">
+  </a>
 </p>
 
 **Language / 語言：** [English](README.md) · [繁體中文](README.zh-TW.md)
