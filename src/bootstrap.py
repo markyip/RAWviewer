@@ -798,7 +798,7 @@ class InstallerGUI(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("RAWviewer Setup")
-        self.setFixedSize(650, 500)
+        self.setFixedSize(650, 560)
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
 
@@ -959,6 +959,7 @@ class InstallerGUI(QMainWindow):
                 color: {_INK};
                 font-family: 'Segoe UI', Arial;
                 font-size: 13px;
+                min-height: 22px;
             }}
             QRadioButton::indicator {{
                 width: 16px;
@@ -968,13 +969,15 @@ class InstallerGUI(QMainWindow):
                 background: {_SURFACE};
             }}
             QRadioButton::indicator:checked {{
-                border: 4px solid {_EMBER};
-                background: {_INK};
+                border-radius: 8px;
+                border: 1px solid {_EMBER};
+                background: {_EMBER};
             }}
             QCheckBox {{
                 color: {_INK};
                 font-family: 'Segoe UI', Arial;
                 font-size: 13px;
+                min-height: 22px;
             }}
             QCheckBox::indicator {{
                 width: 16px;
