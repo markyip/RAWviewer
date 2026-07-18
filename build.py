@@ -906,6 +906,25 @@ def _prune_built_app(exe_path: Path, profile: str) -> None:
         print(f"  Pruning Qt6 translations from: {qt_translations_dir}")
         shutil.rmtree(qt_translations_dir, ignore_errors=True)
 
+    # 4. Prune tcl/tk runtime if a hook slipped it past the tkinter excludes
+    #    (~12 MB: only reachable via PIL.ImageTk, which the app never imports),
+    #    and package dist-info metadata dirs (never read at runtime).
+    for rel in ("Resources/_tcl_data", "Resources/_tk_data", "Resources/tcl8"):
+        leftover = exe_path / "Contents" / rel
+        if leftover.exists():
+            print(f"  Pruning tcl/tk leftover: {leftover}")
+            shutil.rmtree(leftover, ignore_errors=True)
+    for area in ("Resources", "Frameworks"):
+        base = exe_path / "Contents" / area
+        if not base.exists():
+            continue
+        for lib in base.glob("libt[ck]l*.dylib"):
+            print(f"  Pruning tcl/tk dylib: {lib}")
+            lib.unlink(missing_ok=True)
+        for info in base.glob("*.dist-info"):
+            print(f"  Pruning dist-info: {info}")
+            shutil.rmtree(info, ignore_errors=True)
+
 
 def main():
     parser = argparse.ArgumentParser(description="Build RAWviewer executable")
@@ -1247,6 +1266,12 @@ def main():
             # ran. Must stay bundled. See docs/EDIT_PIPELINE.md "Installer size".
             "--exclude-module", "pyqtgraph",
             "--exclude-module", "hf_xet",
+            # tkinter is only reachable via PIL.ImageTk (unused) but drags
+            # libtcl/libtk + _tcl_data/tcl8 (~12MB) into the bundle.
+            "--exclude-module", "tkinter",
+            "--exclude-module", "_tkinter",
+            "--exclude-module", "setuptools",
+            "--exclude-module", "PyObjCTest",
         ])
         # OpenMP LibRaw siblings (standalone libomp + libjpeg). build_macos.sh
         # installs these via scripts/build_libraw_openmp.sh before packaging.
@@ -1325,6 +1350,9 @@ def main():
             "--exclude-module", "send2trash",
             "--exclude-module", "exifread",
             "--exclude-module", "hf_xet",
+            "--exclude-module", "tkinter",
+            "--exclude-module", "_tkinter",
+            "--exclude-module", "setuptools",
         ])
         
         add_data_args.append('--add-data "src;src"')
