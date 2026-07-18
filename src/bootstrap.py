@@ -432,6 +432,50 @@ def _clear_existing_user_cache(log) -> None:
         log("Cache cleared. First launch after install may rebuild thumbnails/index.")
 
 
+def _kill_running_app_processes(target_dir: str, log) -> None:
+    """Terminate running RAWviewer processes before touching the install dir.
+
+    A live pixi.exe / pythonw.exe from a previous launch holds open handles
+    inside the install tree, which made upgrades fail partway (WinError 183
+    on the _launcher copytree after rmtree silently failed, then access
+    denied on .pixi DLLs during cleanup). Kill by NAME only for RAWviewer.exe
+    (unambiguous); pixi/python/pythonw are killed strictly by executable
+    PATH under the install dir so unrelated Python apps are never touched.
+    The Setup process itself has a different image name and lives outside
+    target_dir, so it is never a casualty.
+    """
+    log("Stopping running RAWviewer instances...")
+    flags = subprocess.CREATE_NO_WINDOW
+    try:
+        subprocess.run(
+            ["taskkill", "/F", "/IM", "RAWviewer.exe", "/T"],
+            capture_output=True,
+            creationflags=flags,
+            timeout=15,
+        )
+    except Exception:
+        pass
+    # PowerShell path-scoped kill: single quotes in the dir are doubled for
+    # PS single-quoted string escaping.
+    ps_dir = os.path.normpath(target_dir).rstrip("\\").replace("'", "''")
+    ps_cmd = (
+        "Get-Process pixi,python,pythonw -ErrorAction SilentlyContinue | "
+        f"Where-Object {{ $_.Path -like '{ps_dir}\\*' }} | "
+        "Stop-Process -Force -ErrorAction SilentlyContinue"
+    )
+    try:
+        subprocess.run(
+            ["powershell", "-NoProfile", "-Command", ps_cmd],
+            capture_output=True,
+            creationflags=flags,
+            timeout=30,
+        )
+    except Exception as exc:
+        log(f"  Warning: could not scan for running processes: {exc}")
+    # Give the OS a moment to release file handles from the killed processes.
+    time.sleep(1.0)
+
+
 def _delete_reg_tree(root, path: str) -> None:
     """Recursively delete a registry key (winreg.DeleteKey needs empty keys)."""
     try:
@@ -474,6 +518,14 @@ class InstallWorker(QObject):
     def run(self):
         target_dir = self.target_dir
         try:
+            # Kill anything still running out of the install dir FIRST --
+            # open handles from a live pixi/pythonw break the file copies
+            # below (WinError 183 / access denied on upgrade installs).
+            _kill_running_app_processes(target_dir, self.log_signal.emit)
+            if self._is_cancelled():
+                self._abort_cancelled()
+                return
+
             if self.clear_cache:
                 _clear_existing_user_cache(self.log_signal.emit)
                 self.progress_signal.emit(1)
@@ -561,7 +613,12 @@ class InstallWorker(QObject):
                     launcher_runtime_dst = os.path.join(target_dir, "_launcher")
                     if os.path.isdir(launcher_runtime_dst):
                         shutil.rmtree(launcher_runtime_dst, ignore_errors=True)
-                    shutil.copytree(launcher_runtime_src, launcher_runtime_dst)
+                    # dirs_exist_ok: if the rmtree above silently failed on a
+                    # still-held handle, overwrite in place instead of dying
+                    # with WinError 183 ("file already exists").
+                    shutil.copytree(
+                        launcher_runtime_src, launcher_runtime_dst, dirs_exist_ok=True
+                    )
             else:
                 self.log_signal.emit(
                     "Warning: launcher stub missing from installer; creating launcher.vbs fallback."
