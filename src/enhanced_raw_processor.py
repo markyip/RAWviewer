@@ -50,7 +50,32 @@ RAW_EXIF_SENSOR_META_VER = 11
 
 from image_load_manager import yield_if_current_task_active
 
-_rawpy_global_lock = threading.Lock()
+def _rawpy_unpack_concurrency() -> int:
+    """Concurrent in-process rawpy/LibRaw contexts allowed through the global gate.
+
+    Default 1 preserves the historical fully-serialized behavior. LibRaw is
+    documented thread-safe per-context (each rawpy.imread creates an
+    independent decoder), and stress measurement shows unpack is ~80% of
+    per-file decode cost while GPU mode has no process pool — so on CUDA
+    boxes the global lock, not GPU speed, caps sustained-navigation
+    throughput at ~1/unpack_time. RAWVIEWER_UNPACK_CONCURRENCY=2..4 turns
+    the gate into a bounded semaphore for A/B testing that hypothesis; every
+    site that used to take the lock takes the same shared gate, so there is
+    never a mixed lock/semaphore state. Each concurrent unpack holds a
+    ~2 bytes/sensor-pixel uint16 mosaic resident, so keep this small.
+    """
+    raw = os.environ.get("RAWVIEWER_UNPACK_CONCURRENCY", "").strip()
+    try:
+        return max(1, min(4, int(raw))) if raw else 1
+    except ValueError:
+        return 1
+
+
+_rawpy_global_lock = (
+    threading.Lock()
+    if _rawpy_unpack_concurrency() == 1
+    else threading.BoundedSemaphore(_rawpy_unpack_concurrency())
+)
 _heavy_fallback_semaphore = threading.Semaphore(8)
 
 # RAW formats where the lock-free byte-scan extractor reliably yields a correctly
