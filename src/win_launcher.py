@@ -13,6 +13,22 @@ def _install_dir() -> str:
     return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
+def _suppress_launcher_window() -> None:
+    """Hide any console / bootloader window the short-lived stub may flash."""
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+
+        user32 = ctypes.windll.user32
+        kernel32 = ctypes.windll.kernel32
+        hwnd = kernel32.GetConsoleWindow()
+        if hwnd:
+            user32.ShowWindow(hwnd, 0)  # SW_HIDE
+    except Exception:
+        pass
+
+
 def _show_error(message: str) -> None:
     try:
         import ctypes
@@ -28,6 +44,7 @@ def _show_error(message: str) -> None:
 
 
 def main() -> int:
+    _suppress_launcher_window()
     install_dir = _install_dir()
     pixi_exe = os.path.join(install_dir, "_internal", "pixi", "pixi.exe")
     if not os.path.isfile(pixi_exe):
@@ -48,6 +65,14 @@ def main() -> int:
         | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
         | getattr(subprocess, "CREATE_NO_WINDOW", 0)
     )
+    startupinfo = None
+    try:
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        startupinfo.wShowWindow = 0  # SW_HIDE
+    except Exception:
+        startupinfo = None
+
     try:
         subprocess.Popen(
             cmd,
@@ -57,6 +82,7 @@ def main() -> int:
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            startupinfo=startupinfo,
         )
     except OSError as exc:
         _show_error(f"Could not start RAWviewer:\n\n{exc}")

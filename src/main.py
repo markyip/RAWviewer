@@ -109,12 +109,170 @@ def _branded_icon_resource_path() -> str | None:
     return None
 
 
+# Stable ID for taskbar grouping / pinning. Must be set once before windows appear;
+# do not change it later (versioned IDs break the branded icon).
+_WINDOWS_APP_USER_MODEL_ID = "markyip.rawviewer.app.1"
+# Compact splash — full-res appicon.png is 2k+ and looks huge as QSplashScreen.
+_SPLASH_DISPLAY_MAX_PX = 280
+
+
+def _set_windows_app_user_model_id() -> None:
+    if sys.platform != "win32":
+        return
+    try:
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+            _WINDOWS_APP_USER_MODEL_ID
+        )
+    except Exception:
+        pass
+
+
+def _load_branded_qicon() -> "QIcon | None":
+    """Load multi-resolution branded icon for window / taskbar chrome."""
+    from PyQt6.QtCore import Qt
+    from PyQt6.QtGui import QIcon, QPixmap
+
+    path = _branded_icon_resource_path()
+    if not path:
+        return None
+    icon = QIcon(path)
+    # Ensure common taskbar sizes exist when the source is a single PNG.
+    if path.lower().endswith(".png"):
+        pix = QPixmap(path)
+        if not pix.isNull():
+            for edge in (16, 24, 32, 48, 64, 128, 256):
+                icon.addPixmap(
+                    pix.scaled(
+                        edge,
+                        edge,
+                        Qt.AspectRatioMode.KeepAspectRatio,
+                        Qt.TransformationMode.SmoothTransformation,
+                    )
+                )
+    if icon.isNull():
+        return None
+    return icon
+
+
+def _apply_windows_native_window_icon(widget, ico_path: str | None = None) -> None:
+    """Push .ico into the HWND so the taskbar shows it on frameless windows."""
+    if sys.platform != "win32" or widget is None:
+        return
+    path = ico_path or resource_path(os.path.join("icons", "appicon.ico"))
+    if not path or not os.path.isfile(path):
+        return
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        user32 = ctypes.windll.user32
+        WM_SETICON = 0x0080
+        ICON_SMALL = 0
+        ICON_BIG = 1
+        IMAGE_ICON = 1
+        LR_LOADFROMFILE = 0x0010
+        LR_DEFAULTSIZE = 0x0040
+
+        hwnd = int(widget.winId())
+        if not hwnd:
+            return
+
+        LoadImageW = user32.LoadImageW
+        LoadImageW.argtypes = [
+            wintypes.HINSTANCE,
+            wintypes.LPCWSTR,
+            wintypes.UINT,
+            ctypes.c_int,
+            ctypes.c_int,
+            wintypes.UINT,
+        ]
+        LoadImageW.restype = wintypes.HANDLE
+
+        # Explicit small + large sizes; LR_DEFAULTSIZE alone is unreliable across DPI.
+        hicon_small = LoadImageW(None, path, IMAGE_ICON, 16, 16, LR_LOADFROMFILE)
+        hicon_big = LoadImageW(None, path, IMAGE_ICON, 256, 256, LR_LOADFROMFILE)
+        if not hicon_big:
+            hicon_big = LoadImageW(
+                None, path, IMAGE_ICON, 0, 0, LR_LOADFROMFILE | LR_DEFAULTSIZE
+            )
+        if hicon_small:
+            user32.SendMessageW(hwnd, WM_SETICON, ICON_SMALL, hicon_small)
+        if hicon_big:
+            user32.SendMessageW(hwnd, WM_SETICON, ICON_BIG, hicon_big)
+    except Exception:
+        pass
+
+
+def _make_splash_pixmap():
+    """Build a compact splash pixmap from the branded icon (or a text fallback)."""
+    from PyQt6.QtGui import QPixmap, QColor, QPainter, QPen, QIcon
+    from PyQt6.QtCore import Qt
+
+    max_edge = _SPLASH_DISPLAY_MAX_PX
+    icon_path = _splash_icon_resource_path()
+    pixmap = QPixmap()
+    if icon_path:
+        if icon_path.lower().endswith(".png"):
+            pixmap = QPixmap(icon_path)
+        else:
+            pixmap = QIcon(icon_path).pixmap(max_edge, max_edge)
+            if pixmap.isNull():
+                pixmap = QPixmap(icon_path)
+    if pixmap.isNull():
+        pixmap = QPixmap(max_edge, max_edge)
+        pixmap.fill(QColor(*theme.VOID_RGB))
+        painter = QPainter(pixmap)
+        painter.setPen(QPen(QColor(*theme.INK_RGB), 3))
+        font = painter.font()
+        font.setPointSize(28)
+        font.setBold(True)
+        painter.setFont(font)
+        painter.drawText(pixmap.rect(), Qt.AlignmentFlag.AlignCenter, "RAW")
+        painter.end()
+        return pixmap
+    if pixmap.width() > max_edge or pixmap.height() > max_edge:
+        pixmap = pixmap.scaled(
+            max_edge,
+            max_edge,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+    return pixmap
+
+
 def _splash_icon_resource_path() -> str | None:
     """Prefer hi-res PNG for startup splash; fall back to platform icon."""
     png = resource_path(os.path.join("icons", "appicon.png"))
     if os.path.exists(png):
         return png
     return _branded_icon_resource_path()
+
+
+def _is_windows_installed_app() -> bool:
+    """True for the Windows installer layout (Pixi under _internal; not sys.frozen)."""
+    if sys.platform != "win32":
+        return False
+    root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    return os.path.isfile(os.path.join(root_dir, "_internal", "pixi", "pixi.exe"))
+
+
+def _should_show_startup_splash() -> bool:
+    """Show Qt splash for packaged / installed launches (skip bare `python src/main.py`).
+
+    RAWVIEWER_SHOW_SPLASH=0 (or false/no/off) is an explicit opt-out that wins
+    even for frozen/installed launches -- otherwise it's opt-in-only for the
+    bare dev-run path below.
+    """
+    if not _IS_GUI_MAIN_PROCESS:
+        return False
+    flag = os.environ.get("RAWVIEWER_SHOW_SPLASH", "").strip().lower()
+    if flag in ("0", "false", "no", "off"):
+        return False
+    if getattr(sys, "frozen", False):
+        return True
+    if _is_windows_installed_app():
+        return True
+    return flag in ("1", "true", "yes", "on")
 
 
 # PyInstaller Splash Screen: Helper to close the boot-time splash
@@ -156,16 +314,11 @@ if _IS_GUI_MAIN_PROCESS:
             def __init__(self, argv):
                 super().__init__(argv)
                 # Set explicit AppUserModelID on Windows so the taskbar groups and shows the app icon correctly
-                if sys.platform == "win32":
-                    try:
-                        import ctypes
-                        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("markyip.rawviewer.app.1")
-                    except Exception:
-                        pass
+                _set_windows_app_user_model_id()
                 # Apply branded icon immediately (taskbar / Alt+Tab); window sets it again later.
-                _early_icon = _branded_icon_resource_path()
-                if _early_icon:
-                    self.setWindowIcon(QIcon(_early_icon))
+                _early_icon = _load_branded_qicon()
+                if _early_icon is not None:
+                    self.setWindowIcon(_early_icon)
                 self.viewer = None
                 self.pending_files = []
 
@@ -206,46 +359,20 @@ if _IS_GUI_MAIN_PROCESS:
         if not _temp_app:
             _temp_app = RAWApplication(sys.argv)
 
-        # Prefer hi-res PNG splash (2048 master); fall back to .icns/.ico.
-        _icon_path = _splash_icon_resource_path()
-        if _icon_path:
-            from PyQt6.QtGui import QIcon
-            _splash_max = 1024
-            if _icon_path.lower().endswith(".png"):
-                _splash_pixmap = QPixmap(_icon_path)
-            else:
-                _splash_pixmap = QIcon(_icon_path).pixmap(_splash_max, _splash_max)
-                if _splash_pixmap.isNull():
-                    _splash_pixmap = QPixmap(_icon_path)
-            if not _splash_pixmap.isNull() and (
-                _splash_pixmap.width() > _splash_max
-                or _splash_pixmap.height() > _splash_max
-            ):
-                _splash_pixmap = _splash_pixmap.scaled(
-                    _splash_max,
-                    _splash_max,
-                    Qt.AspectRatioMode.KeepAspectRatio,
-                    Qt.TransformationMode.SmoothTransformation,
-                )
-        else:
-            _splash_pixmap = QPixmap(400, 400)
-            _splash_pixmap.fill(QColor(*theme.VOID_RGB))
-            _painter = QPainter(_splash_pixmap)
-            _painter.setPen(QPen(QColor(*theme.INK_RGB), 4))
-            _font = _painter.font()
-            _font.setPointSize(48)
-            _font.setBold(True)
-            _painter.setFont(_font)
-            _painter.drawText(
-                _splash_pixmap.rect(), Qt.AlignmentFlag.AlignCenter, "RAW"
-            )
-            _painter.end()
+        # Compact branded splash (full-res PNG is far too large as QSplashScreen).
+        _splash_pixmap = _make_splash_pixmap()
 
-        if getattr(sys, 'frozen', False):
-            _splash_flags = Qt.WindowType.FramelessWindowHint
+        if _should_show_startup_splash():
+            # SplashScreen keeps it out of the taskbar; Tool avoids an Alt+Tab entry.
+            _splash_flags = (
+                Qt.WindowType.SplashScreen
+                | Qt.WindowType.FramelessWindowHint
+                | Qt.WindowType.Tool
+            )
             if sys.platform != "darwin":
                 _splash_flags |= Qt.WindowType.WindowStaysOnTopHint
             _startup_splash = QSplashScreen(_splash_pixmap, _splash_flags)
+            _startup_splash.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
             _startup_splash.showMessage(
                 "Starting RAWviewer...",
                 Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignCenter,
@@ -1066,17 +1193,22 @@ def _dismiss_startup_splash(app, main_window=None, splash=None) -> None:
         pass
     for sp in splash_widgets:
         try:
-            flags = sp.windowFlags()
-            flags &= ~Qt.WindowType.WindowStaysOnTopHint
-            sp.setWindowFlags(flags)
+            # Hide first. Never call setWindowFlags() while visible — Qt recreates
+            # the HWND and flashes a brief empty popup on Windows.
             sp.hide()
             if main_window is not None:
                 try:
                     sp.finish(main_window)
                 except Exception:
                     pass
-            sp.close()
-            sp.deleteLater()
+            try:
+                sp.close()
+            except Exception:
+                pass
+            try:
+                sp.deleteLater()
+            except Exception:
+                pass
         except Exception:
             pass
     _startup_splash = None
@@ -1087,15 +1219,7 @@ def _dismiss_startup_splash(app, main_window=None, splash=None) -> None:
             pass
     if main_window is not None:
         try:
-            # _schedule_startup_splash_dismiss calls this 5x (immediate + 4
-            # delayed retries) to cover macOS's laggy QSplashScreen.finish().
-            # Once the window is already visible+active (true on Windows
-            # after the very first call -- it doesn't have the macOS lag),
-            # repeating show()/raise_()/activateWindow() is a no-op for the
-            # window itself but still fires real focus/Z-order events, which
-            # is a known trigger for Windows' taskbar auto-hide to flicker
-            # on a frameless window. Only actually re-poke it when it isn't
-            # already in the state we want.
+            # Avoid repeated show/raise/activate on Windows (taskbar flicker).
             if not (main_window.isVisible() and main_window.isActiveWindow()):
                 main_window.show()
                 main_window.raise_()
@@ -1123,11 +1247,20 @@ def _dismiss_startup_splash(app, main_window=None, splash=None) -> None:
 
 
 def _schedule_startup_splash_dismiss(app, main_window, splash) -> None:
-    """Dismiss splash now and again after event-loop ticks (macOS can lag finish())."""
+    """Dismiss splash after the main window has been shown/painted."""
     _dismiss_startup_splash(app, main_window, splash)
-    for delay_ms in (0, 50, 150, 400):
+    if sys.platform == "darwin":
+        # macOS can lag QSplashScreen.finish(); retry a few times.
+        for delay_ms in (0, 50, 150, 400):
+            QTimer.singleShot(
+                delay_ms,
+                lambda mw=main_window, a=app: _dismiss_startup_splash(a, mw, None),
+            )
+    else:
+        # One deferred sweep only — enough to catch a stuck splash without
+        # repeatedly poking Z-order (which flashes on Windows).
         QTimer.singleShot(
-            delay_ms,
+            120,
             lambda mw=main_window, a=app: _dismiss_startup_splash(a, mw, None),
         )
 
@@ -8332,25 +8465,15 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         """)
         
         # Set icon based on platform and available files
-        icon_path = None
-        # Use resource_path to find icons, ensuring it works when bundled
-        ico_path = resource_path(os.path.join('icons', 'appicon.ico'))
-        icns_path = resource_path(os.path.join('icons', 'appicon.icns'))
-        png_path = resource_path(os.path.join('icons', 'appicon.png'))
-
-        if platform.system() == 'Windows' and os.path.exists(ico_path):
-            icon_path = ico_path
-        elif platform.system() == 'Darwin' and os.path.exists(icns_path):
-            icon_path = icns_path
-        elif os.path.exists(png_path):
-            icon_path = png_path
-
-        if icon_path:
-            _win_icon = QIcon(icon_path)
+        _win_icon = _load_branded_qicon()
+        if _win_icon is not None:
             self.setWindowIcon(_win_icon)
             _app = QApplication.instance()
             if _app is not None:
                 _app.setWindowIcon(_win_icon)
+        if platform.system() == "Windows":
+            # Frameless windows often need a native WM_SETICON for the taskbar.
+            _apply_windows_native_window_icon(self)
 
         # Calculate minimum width for 5 images at 4:3 aspect ratio
         # Each image: height=200px, width=200*(4/3)=267px
@@ -9518,6 +9641,9 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         super().showEvent(event)
         if platform.system() == "Darwin":
             self._apply_macos_titlebar_appearance()
+        elif platform.system() == "Windows":
+            # HWND is valid after show; frameless taskbar icon needs WM_SETICON.
+            _apply_windows_native_window_icon(self)
         QTimer.singleShot(0, self._restore_keyboard_focus)
 
     def create_menu_bar(self):
@@ -33141,11 +33267,7 @@ def main():
 
     # On Windows, the installed app runs inside a Pixi virtual environment (so sys.frozen is False),
     # but we can detect it by checking if "_internal/pixi/pixi.exe" exists in the root directory.
-    is_installed = False
-    if sys.platform == "win32":
-        root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        if os.path.exists(os.path.join(root_dir, "_internal", "pixi", "pixi.exe")):
-            is_installed = True
+    is_installed = _is_windows_installed_app()
 
     if (getattr(sys, "frozen", False) or is_installed) and not is_lite_build():
         os.environ.setdefault("RAWVIEWER_ENABLE_SEMANTIC_SEARCH", "1")
@@ -33273,30 +33395,29 @@ def main():
                 splash.showMessage("Initializing core components...", Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignCenter, Qt.GlobalColor.white)
                 app.processEvents()
                 safe_print("Splash screen updated", flush=True)
-            elif getattr(sys, 'frozen', False):
-                # Fallback splash if top-level creation failed
-                icon_path_fallback = _branded_icon_resource_path()
-                if icon_path_fallback:
-                    splash_pixmap = QPixmap(icon_path_fallback)
-                    if splash_pixmap.width() > 512:
-                        splash_pixmap = splash_pixmap.scaled(512, 512, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
-                else:
-                    splash_pixmap = QPixmap(400, 400)
-                    splash_pixmap.fill(QColor(*theme.VOID_RGB))
-                    painter = QPainter(splash_pixmap)
-                    painter.setPen(QPen(QColor(*theme.INK_RGB), 4))
-                    font = painter.font()
-                    font.setPointSize(48)
-                    font.setBold(True)
-                    painter.setFont(font)
-                    painter.drawText(splash_pixmap.rect(), Qt.AlignmentFlag.AlignCenter, "RAW")
-                    painter.end()
-                
+            elif _should_show_startup_splash():
+                # Fallback splash if top-level creation failed (frozen or Windows installed).
+                splash_pixmap = _make_splash_pixmap()
                 splash = QSplashScreen(
                     splash_pixmap,
-                    Qt.WindowType.FramelessWindowHint
+                    (
+                        Qt.WindowType.SplashScreen
+                        | Qt.WindowType.FramelessWindowHint
+                        | Qt.WindowType.Tool
+                    )
                     if sys.platform == "darwin"
-                    else (Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.FramelessWindowHint),
+                    else (
+                        Qt.WindowType.SplashScreen
+                        | Qt.WindowType.FramelessWindowHint
+                        | Qt.WindowType.Tool
+                        | Qt.WindowType.WindowStaysOnTopHint
+                    ),
+                )
+                splash.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+                splash.showMessage(
+                    "Starting RAWviewer...",
+                    Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignCenter,
+                    Qt.GlobalColor.white,
                 )
                 splash.show()
                 app.processEvents()
@@ -33310,11 +33431,10 @@ def main():
         finally:
             # 4. Continue with initialization
             if is_windows:
-                safe_print("  [Windows] Setting AppUserModelID...", flush=True)
-                from release_update import APP_VERSION
-
-                myappid = f"RAWviewer.{APP_VERSION}"
-                ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
+                # Keep the same AppUserModelID set at process start (do not
+                # overwrite with a versioned ID — that drops the taskbar icon).
+                safe_print("  [Windows] Ensuring AppUserModelID...", flush=True)
+                _set_windows_app_user_model_id()
                 safe_print("  [Windows] AppUserModelID set", flush=True)
 
             # Set application properties
@@ -33323,6 +33443,9 @@ def main():
             app = _qt_app()
             app.setApplicationName("RAWviewer")
             app.setApplicationVersion(APP_VERSION)
+            _brand_icon = _load_branded_qicon()
+            if _brand_icon is not None:
+                app.setWindowIcon(_brand_icon)
 
             # Create and show main window
             safe_print("Creating RAWImageViewer...", flush=True)
@@ -33348,6 +33471,14 @@ def main():
             
             # Show main window and close splash screen
             viewer.show()
+            if is_windows:
+                _apply_windows_native_window_icon(viewer)
+            # Paint the main window under the splash before dismissing, so the
+            # splash does not uncover an empty desktop flash.
+            try:
+                app.processEvents()
+            except Exception:
+                pass
             QTimer.singleShot(0, viewer._restore_keyboard_focus)
             _schedule_startup_splash_dismiss(app, viewer, splash)
             safe_print("Splash screen closed, main window displayed", flush=True)
