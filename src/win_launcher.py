@@ -60,9 +60,15 @@ def main() -> int:
         cmd.append("--")
         cmd.extend(file_args)
 
+    # CREATE_NO_WINDOW only, never DETACHED_PROCESS: the two are mutually
+    # exclusive (CREATE_NO_WINDOW is IGNORED when DETACHED_PROCESS is set),
+    # and a detached pixi has no console for its console-subsystem children
+    # (env-activation cmd.exe) to inherit -- Windows then allocates a fresh
+    # VISIBLE console for them, which was the "unbranded window flashes
+    # before the splash" bug. With CREATE_NO_WINDOW alone, pixi owns an
+    # invisible console that every child inherits silently.
     creationflags = (
-        getattr(subprocess, "DETACHED_PROCESS", 0)
-        | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
         | getattr(subprocess, "CREATE_NO_WINDOW", 0)
     )
     startupinfo = None
