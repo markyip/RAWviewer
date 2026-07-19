@@ -81,6 +81,9 @@ debug_*.py
 *_debug_*.bat
 *_debug_*.sh
 *_debug_*.md
+# Opt-in troubleshooting launcher (installed next to RAWviewer.exe)
+!run_with_debug_log.bat
+!scripts/Launch/windows/run_with_debug_log.bat
 DEBUG_*.md
 *_OPTIMIZATION.md
 *_CLEANUP_FIX.md
