@@ -431,6 +431,60 @@ def _runtime_log_dir() -> str:
     return os.path.join(app_data, "RAWviewer", "logs")
 
 
+def _debug_log_marker_path() -> str:
+    if os.name == "nt":
+        app_data = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+    else:
+        app_data = os.path.expanduser("~")
+    return os.path.join(app_data, "RAWviewer", "enable_debug_log")
+
+
+_FILE_LOG_ARGV_FLAGS = frozenset(
+    {"--file-log", "--debug-log", "/file-log", "/debug-log"}
+)
+
+
+def _consume_file_log_argv() -> bool:
+    """Strip --file-log/--debug-log from argv; return True if present.
+
+    Must run before startup treats argv[1] as an image/folder path.
+    """
+    if len(sys.argv) <= 1:
+        return False
+    kept = [sys.argv[0]]
+    found = False
+    for arg in sys.argv[1:]:
+        if arg.strip().lower() in _FILE_LOG_ARGV_FLAGS:
+            found = True
+            continue
+        kept.append(arg)
+    if found:
+        sys.argv[:] = kept
+    return found
+
+
+def _file_logging_requested() -> bool:
+    """True when durable file logs should be written (explicit opt-in only).
+
+    RAWVIEWER_DEBUG alone does not create log files — that would grow disk use
+    and persist paths/metadata. Use RAWVIEWER_FILE_LOG=1, --file-log, or the
+    LocalAppData enable_debug_log marker when diagnosing freezes.
+    """
+    if os.environ.get("RAWVIEWER_FILE_LOG", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    ):
+        return True
+    try:
+        if os.path.isfile(_debug_log_marker_path()):
+            return True
+    except OSError:
+        pass
+    return False
+
+
 def _redirect_stdio_to_file_if_needed():
     try:
         # Opt-in only: do not create log folders/files in normal releases.
@@ -468,10 +522,23 @@ _redirect_stdio_to_file_if_needed()
 def _enable_fatal_crash_dump_if_needed():
     """
     Enable low-level fatal crash dumps (access violation/segfault) very early.
-    This catches crashes that bypass Python exception handlers.
+    Opt-in only: normal launches must not open running dump files under
+    LocalAppData (size + path leakage). Enable via RAWVIEWER_FATAL_DUMP=1,
+    file-log env/marker, or --file-log on argv (checked before setup_logging).
     """
     try:
-        if os.environ.get("RAWVIEWER_FATAL_DUMP", "1").strip().lower() in ("0", "false", "no", "off"):
+        dump_flag = os.environ.get("RAWVIEWER_FATAL_DUMP", "").strip().lower()
+        if dump_flag in ("0", "false", "no", "off"):
+            return
+        argv_file_log = any(
+            str(a).strip().lower() in _FILE_LOG_ARGV_FLAGS for a in sys.argv[1:]
+        )
+        enabled = (
+            dump_flag in ("1", "true", "yes", "on")
+            or _file_logging_requested()
+            or argv_file_log
+        )
+        if not enabled:
             return
         import signal
         import faulthandler
@@ -1438,6 +1505,14 @@ class FocusGallerySwitchFilter(logging.Filter):
 def setup_logging():
     """Setup logging configuration with file and console handlers"""
     try:
+        # Honor --file-log before anything treats argv as a photo path.
+        if _consume_file_log_argv():
+            os.environ["RAWVIEWER_FILE_LOG"] = "1"
+            os.environ.setdefault("RAWVIEWER_VERBOSE_INFO_LOGS", "1")
+            os.environ.setdefault("RAWVIEWER_FOCUS_GALLERY_SWITCH", "1")
+            os.environ.setdefault("RAWVIEWER_REDIRECT_STDIO", "1")
+            os.environ.setdefault("RAWVIEWER_FATAL_DUMP", "1")
+
         # Configure logging
         log_format = '%(asctime)s - %(levelname)s - [%(name)s:%(lineno)d] - %(message)s'
         date_format = '%Y-%m-%d %H:%M:%S'
@@ -1474,20 +1549,18 @@ def setup_logging():
             # Windowed builds can have no stdout; keep logging silent unless file logging is enabled.
             root_logger.addHandler(logging.NullHandler())
 
-        # Optional file logging (opt-in) to avoid creating a logs folder in normal releases.
-        enable_file_log = os.environ.get("RAWVIEWER_FILE_LOG", "").strip() in ("1", "true", "True", "YES", "yes")
-        if is_dev:
-            enable_file_log = True
+        # File logging: explicit opt-in only (RAWVIEWER_FILE_LOG / --file-log /
+        # enable_debug_log marker). Never auto-write session logs for privacy
+        # and disk size — console/stream handlers remain for interactive runs.
+        enable_file_log = _file_logging_requested()
 
         if enable_file_log:
             log_dir = _runtime_log_dir()
             os.makedirs(log_dir, exist_ok=True)
 
-            if is_dev:
-                log_file = os.path.join(log_dir, 'rawviewer_dev.log')
-            else:
-                timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-                log_file = os.path.join(log_dir, f'rawviewer_{timestamp}.log')
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            log_file = os.path.join(log_dir, f'rawviewer_{timestamp}.log')
+            latest_file = os.path.join(log_dir, 'rawviewer_latest.log')
 
             file_handler = logging.FileHandler(log_file, encoding='utf-8', mode='w')
             file_handler.setLevel(logging.DEBUG)
@@ -1497,6 +1570,23 @@ def setup_logging():
                 file_handler.addFilter(FocusGallerySwitchFilter())
             root_logger.addHandler(file_handler)
 
+            # Easy-to-find alias for support: always the current session.
+            try:
+                latest_handler = logging.FileHandler(
+                    latest_file, encoding='utf-8', mode='w'
+                )
+                latest_handler.setLevel(logging.DEBUG)
+                latest_handler.setFormatter(formatter)
+                latest_handler.addFilter(NoisyInfoFilter(verbose_info))
+                if focus_gallery_switch:
+                    latest_handler.addFilter(FocusGallerySwitchFilter())
+                root_logger.addHandler(latest_handler)
+            except OSError:
+                latest_file = None
+
+            root_logger.info("[LOG] File logging enabled: %s", log_file)
+            if latest_file:
+                root_logger.info("[LOG] Latest session alias: %s", latest_file)
             return log_file
 
         return None
@@ -1511,7 +1601,7 @@ def setup_logging():
         # Try to write to a fallback log file
         try:
             # Only attempt fallback file logging if explicitly enabled.
-            if os.environ.get("RAWVIEWER_FILE_LOG", "").strip() in ("1", "true", "True", "YES", "yes"):
+            if _file_logging_requested():
                 fallback_log = os.path.join(_runtime_log_dir(), 'error.log')
                 os.makedirs(os.path.dirname(fallback_log), exist_ok=True)
                 with open(fallback_log, 'a', encoding='utf-8') as f:
@@ -2466,6 +2556,9 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self._gallery_load_tracking = {}  # Track loading status
         self._gallery_load_start_time = None  # Track loading start time
         self._loading_from_gallery = False  # Flag for gallery loading
+        # Gallery→single: allow embedded JPEG until idle upgrade / next non-gallery load
+        # (survives clearing _loading_from_gallery mid-load).
+        self._gallery_entry_accept_embedded = False
         self._loading_from_filmstrip = False  # Flag for filmstrip loading
         self._gallery_selected_paths = set()  # normpath keys for multi-select in gallery
         self._gallery_selection_anchor = None  # normpath key for Shift+click range
@@ -10846,7 +10939,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         signals = SemanticIndexPrepSignals()
         self._semantic_index_prep_signals = signals
         
-        signals.done.connect(lambda coverage, pending, face_pending: self._on_semantic_index_prep_done(corpus_files, coverage, pending, face_pending))
+        signals.done.connect(lambda coverage, pending, face_pending, extract_pending=None: self._on_semantic_index_prep_done(corpus_files, coverage, pending, face_pending))
         signals.error.connect(self._on_semantic_index_prep_error)
         
         worker = _SemanticIndexPrepWorker(corpus_files, index, signals)
@@ -11900,7 +11993,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         signals = SemanticIndexPrepSignals()
         self._semantic_index_prep_signals = signals
         signals.done.connect(
-            lambda coverage, pending, face_pending: self._on_user_semantic_prep_done(
+            lambda coverage, pending, face_pending, extract_pending=None: self._on_user_semantic_prep_done(
                 corpus_files, coverage, pending, face_pending
             )
         )
@@ -12740,7 +12833,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         signals = SemanticIndexPrepSignals()
         self._semantic_index_prep_signals = signals
         
-        signals.done.connect(lambda coverage, pending, face_pending: self._on_semantic_index_resume_prep_done(folder, corpus_files, coverage, pending, face_pending))
+        signals.done.connect(lambda coverage, pending, face_pending, extract_pending=None: self._on_semantic_index_resume_prep_done(folder, corpus_files, coverage, pending, face_pending))
         signals.error.connect(self._on_semantic_index_prep_error)
         
         worker = _SemanticIndexPrepWorker(corpus_files, index, signals)
@@ -13423,6 +13516,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         if self.view_mode == 'single':
             logger.info("[VIEW_MODE] Switching from single to gallery mode")
             self._disable_raw_recovery()
+            self._gallery_entry_accept_embedded = False
             self.view_mode = 'gallery'
             try:
                 if hasattr(self, "_resume_indexing_timer") and self._resume_indexing_timer:
@@ -13439,6 +13533,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             self.view_mode = 'single'
             self._adopt_gallery_navigation_path()
             self._loading_from_gallery = True
+            self._gallery_entry_accept_embedded = True
         
         logger.info("[VIEW_MODE] Mode changed, calling view method (elapsed: 0.000s)")
         if self.view_mode == 'gallery':
@@ -13864,6 +13959,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
 
     def _show_gallery_view(self):
         """Show gallery view - based on reference code"""
+        self._gallery_entry_accept_embedded = False
         self._stop_animations()
         import logging
         import os
@@ -16617,6 +16713,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         
         # Mark that we're loading from gallery view - this will trigger full resolution load
         self._loading_from_gallery = True
+        self._gallery_entry_accept_embedded = True
         # Reset the GPU view's OWN fit state BEFORE painting the instant tile:
         # the legacy variables below only cover the QLabel route. If the user
         # left the previous single image zoomed (fit_mode False), the tile
@@ -19106,6 +19203,9 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                     self._finish_gallery_to_single_without_redisplay(requested_file_path)
                     self._on_single_view_content_displayed()
                     return
+            else:
+                # Non-gallery loads (nav / filmstrip / Adjust) resume RAW JPEG suppression.
+                self._gallery_entry_accept_embedded = False
 
             logger.info("[LOAD] File exists, proceeding with load")
             safe_print(f"[PERF] Loading image: {os.path.basename(requested_file_path)}")
@@ -19594,8 +19694,11 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 # Allow embedded JPEG first frame (libraw_fit = False) if:
                 # 1. Progressive RAW load is explicitly set
                 # 2. A fast-open token is active (cold opens should paint in milliseconds)
+                # 3. Gallery → single (always embedded-first to cut demosaic pressure,
+                #    even when RAW HQ or Adjust previously forced LibRaw)
                 libraw_fit = (
-                    use_libraw_consistent_preview_first(requested_file_path)
+                    (not from_gallery)
+                    and use_libraw_consistent_preview_first(requested_file_path)
                     and is_raw_file(requested_file_path)
                     and not preserve_zoom_navigation
                     and not force_full_res_for_dng
@@ -19604,7 +19707,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                     and (not nav_fit_browse or workflow_toggle)
                 )
                 libraw_nav_fit = (
-                    use_libraw_consistent_preview_first(requested_file_path)
+                    (not from_gallery)
+                    and use_libraw_consistent_preview_first(requested_file_path)
                     and is_raw
                     and nav_fit_browse
                     and not preserve_zoom_navigation
@@ -19629,6 +19733,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                     else None
                 )
                 # Single-view RAW: preview + EXIF first; full decode in a separate task.
+                # Gallery entry always takes this path for RAW (never LibRaw-first).
                 preview_first_stages = (
                     is_raw
                     and getattr(self, "view_mode", "single") == "single"
@@ -19638,14 +19743,23 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                     and not libraw_fit
                     and not libraw_nav_fit
                     and not force_full_res_for_dng
-                    and not from_gallery
                     and not (nav_single_step and preserve_zoom_navigation)
                     and not workflow_toggle
+                ) or (
+                    from_gallery
+                    and is_raw
+                    and not preserve_zoom_navigation
+                    and not force_full_res_for_dng
                 )
                 if libraw_nav_fit and cached_exif:
                     load_stages = {"full"}
                     request_full_res = False
-                if preview_first_stages:
+                if from_gallery and is_raw and not preserve_zoom_navigation:
+                    # Non-raw first paint from gallery — thumbnail/exif only.
+                    load_stages = {"thumbnail", "exif"}
+                    request_full_res = False
+                    preview_first_stages = True
+                if preview_first_stages and load_stages is None:
                     # Fast-open / cold single-view: paint embedded preview first;
                     # full exiftool metadata runs in the BACKGROUND exif task below.
                     load_stages = {"thumbnail"}
@@ -19655,7 +19769,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                     f"[LOAD] ImageLoadManager — use_full_resolution={request_full_res}, "
                     f"stages={load_stages or 'default'}, preserve_nav_zoom={preserve_zoom_navigation}, "
                     f"libraw_consistent_fit={libraw_fit}, force_dng_full_res={force_full_res_for_dng}, "
-                    f"preview_first_stages={preview_first_stages}"
+                    f"preview_first_stages={preview_first_stages}, from_gallery={from_gallery}"
                 )
                 
                 if self._loading_from_gallery:
@@ -19676,12 +19790,22 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                     ),
                 )
                 if preview_first_stages:
-                    self._schedule_deferred_sensor_full_after_first_paint(
-                        requested_file_path
-                    )
-                    self._schedule_deferred_full_exif_after_first_paint(
-                        requested_file_path
-                    )
+                    # Gallery entry: idle full only — do not kick sensor/LibRaw
+                    # demosaic in the same breath as the first embedded paint.
+                    if from_gallery:
+                        self._schedule_idle_full_decode_after_nav_preview(
+                            requested_file_path
+                        )
+                        self._schedule_deferred_full_exif_after_first_paint(
+                            requested_file_path
+                        )
+                    else:
+                        self._schedule_deferred_sensor_full_after_first_paint(
+                            requested_file_path
+                        )
+                        self._schedule_deferred_full_exif_after_first_paint(
+                            requested_file_path
+                        )
                 logger.info("[LOAD] Image load requested via ImageLoadManager")
             except Exception as manager_error:
                 logger.error(f"[LOAD] Failed to request image load: {manager_error}", exc_info=True)
@@ -19865,7 +19989,16 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         interim keeps its own equivalent-framing tier) and only for files
         LibRaw can actually decode (unsupported files keep their embedded
         fallback, which is all they have).
+
+        Exception: gallery → single always allows embedded/gallery tiers so the
+        first paint does not wait on demosaic (RAW HQ / Adjust must not starve
+        that transition). ``_gallery_entry_accept_embedded`` outlives the brief
+        ``_loading_from_gallery`` flag cleared mid-load.
         """
+        if getattr(self, "_loading_from_gallery", False) or getattr(
+            self, "_gallery_entry_accept_embedded", False
+        ):
+            return False
         path = file_path or getattr(self, "current_file_path", None)
         if not path:
             return False
@@ -27593,7 +27726,10 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         if not getattr(gj, "_first_thumb_ready_after_set", False):
             return True
         active = len(getattr(gj, "_active_tasks", {}) or {})
-        threshold = _env_int("RAWVIEWER_GALLERY_INDEX_DEFER_ACTIVE", 16, minimum=1)
+        # Default 1: any in-flight gallery thumb work should defer INDEX prep —
+        # the old default of 16 let metadata prep start mid-fill and then freeze
+        # the UI when the done slot re-scanned thousands of paths.
+        threshold = _env_int("RAWVIEWER_GALLERY_INDEX_DEFER_ACTIVE", 1, minimum=1)
         return active >= threshold
 
     def _should_defer_metadata_index_for_gallery(self) -> bool:
@@ -27778,17 +27914,25 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self._semantic_index_prep_signals = signals
         
         signals.done.connect(
-            lambda coverage, pending, face_pending: self._on_metadata_index_prep_done(
-                folder, corpus_files, coverage, pending, face_pending
+            lambda coverage, pending, face_pending, extract_pending=None: self._on_metadata_index_prep_done(
+                folder, corpus_files, coverage, pending, face_pending, extract_pending
             )
         )
         signals.error.connect(self._on_semantic_index_prep_error)
         
-        worker = _SemanticIndexPrepWorker(corpus_files, index, signals)
+        worker = _SemanticIndexPrepWorker(
+            corpus_files, index, signals, metadata_only=True
+        )
         _get_bg_thread_pool().start(worker)
 
     def _on_metadata_index_prep_done(
-        self, folder, corpus_files, coverage, pending, face_pending
+        self,
+        folder,
+        corpus_files,
+        coverage,
+        pending,
+        face_pending,
+        extract_pending=None,
     ):
         self._semantic_index_prep_in_progress = False
         if getattr(self, "current_folder", None) != folder:
@@ -27796,37 +27940,35 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             
         import logging
         logger = logging.getLogger(__name__)
-        index = self._get_semantic_index()
-        try:
-            extract_pending = (
-                index.get_metadata_extraction_pending_paths(pending) if pending else []
-            )
-        except Exception:
-            extract_pending = list(pending or [])
+        # extract_pending MUST come from the background worker. Re-scanning
+        # thousands of paths here freezes gallery tile paint (measured ~11s on
+        # a 6880-file folder after Pending scan completed off-thread).
+        if extract_pending is None:
+            extract_pending = []
         logger.info(
             "[INDEX] Background metadata prep done. Broad pending=%d, need EXIF extract=%d",
             len(pending or []),
-            len(extract_pending),
+            len(extract_pending or []),
         )
 
         self._metadata_index_prep_complete = True
-        self._metadata_index_extract_pending_count = len(extract_pending)
+        self._metadata_index_extract_pending_count = len(extract_pending or [])
 
-        if not pending:
+        if not extract_pending:
             self._metadata_index_run_done = True
-            logger.info("[INDEX] No pending metadata files. Index is up to date.")
+            if not pending:
+                logger.info("[INDEX] No pending metadata files. Index is up to date.")
+            else:
+                logger.info(
+                    "[INDEX] Metadata-only pass: nothing to extract; skipping index worker (no ONNX probe)"
+                )
+            # Always finish the silent-metadata chain (marks session complete /
+            # unlocks search). Do not leave this to a later embedding scan.
+            self._finish_silent_metadata_without_worker(corpus_files)
             if getattr(self, "_gallery_search_user_wants_semantic", False):
                 QTimer.singleShot(
                     0, lambda: self._start_user_semantic_indexing(corpus_files)
                 )
-            return
-
-        if not extract_pending:
-            self._metadata_index_run_done = True
-            logger.info(
-                "[INDEX] Metadata-only pass: nothing to extract; skipping index worker (no ONNX probe)"
-            )
-            self._finish_silent_metadata_without_worker(corpus_files)
             return
 
         self._metadata_index_deferred_corpus = corpus_files

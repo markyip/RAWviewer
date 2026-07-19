@@ -42,8 +42,8 @@ if exist "%~dp0..\..\..\.rawviewer_cold_start" (
 
 set RAWVIEWER_VERBOSE_INFO_LOGS=1
 set RAWVIEWER_VERBOSE_CONSOLE=0
-set RAWVIEWER_FILE_LOG=1
-set RAWVIEWER_FATAL_DUMP=1
+REM Durable file / fatal-dump logs are opt-in (privacy + disk). Use
+REM run_with_debug_log.bat or set RAWVIEWER_FILE_LOG=1 when diagnosing.
 set RAWVIEWER_PROGRESSIVE_RAW_LOAD=1
 set RAWVIEWER_NAV_PRELOAD_DISPLAY=1
 set RAWVIEWER_AUTO_METADATA_INDEX=1
@@ -131,7 +131,7 @@ if %EXIT_CODE% EQU 0 (
     echo Application exited normally ^(code: %EXIT_CODE%^)
 ) else (
     echo Application exited with error code: %EXIT_CODE%
-    echo Check logs in src\logs\ and %%LOCALAPPDATA%%\RAWviewer\logs.
+    echo For a durable log, relaunch with run_with_debug_log.bat or set RAWVIEWER_FILE_LOG=1.
 )
 echo ========================================
 echo.

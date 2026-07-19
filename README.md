@@ -302,7 +302,8 @@ To clear cache: **`scripts\Launch\windows\clear_cache.bat`** (Windows) · **`scr
 | Out of memory during AI indexing | Use **Standard** on 8 GB PCs, or see [memory tuning](docs/DEVELOPING.md#automatic-memory-tuning) |
 | Low-RAM PC OOMs when relaunch restores the last folder | Restoring the last folder/file is **intentional**. On 8 GB PCs under pressure, use **Standard**, or opt out with `RAWVIEWER_DISABLE_SESSION_RESTORE=1` |
 | RAW always shows demosaic, not embedded JPEG | Switch to **Embedded JPEG workflow** |
-| Crash | Enable file logging with `RAWVIEWER_FILE_LOG=1`, then check the install folder |
+| Crash | Normal runs do **not** write session logs. Enable file logging with `RAWVIEWER_FILE_LOG=1` or **`run_with_debug_log.bat`**, then check `%LOCALAPPDATA%\RAWviewer\logs\` |
+| Need a freeze / gallery log from the **installed** app | Double-click **`run_with_debug_log.bat`** next to `RAWviewer.exe` (or from the repo root). Reproduce the issue, quit, then send `%LOCALAPPDATA%\RAWviewer\logs\rawviewer_latest.log` |
 
 </details>
 

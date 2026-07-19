@@ -46,7 +46,9 @@ class SemanticIndexSignals(QObject):
 
 class SemanticIndexPrepSignals(QObject):
     """Signal carrier for background semantic index prep (coverage + pending checks)."""
-    done = pyqtSignal(object, object, int)        # coverage dict, pending list, face_pending count
+    # coverage dict, pending list, face_pending count, extract_pending list
+    # extract_pending is computed off the UI thread — never re-scan on the slot.
+    done = pyqtSignal(object, object, int, object)
     error = pyqtSignal(str)                       # error message
 
 class ReleaseUpdateCheckSignals(QObject):

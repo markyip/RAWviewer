@@ -38,24 +38,47 @@ class _ReleaseUpdateCheckWorker(QRunnable):
             pass
 
 class _SemanticIndexPrepWorker(QRunnable):
-    """Background task to prepare semantic index build (coverage & pending scans)."""
-    def __init__(self, corpus_files, index, signals):
+    """Background task to prepare semantic/metadata index (coverage & pending scans).
+
+    All path/stat/DB work stays here — the UI-thread ``done`` slot must not
+    re-run ``get_metadata_extraction_pending_paths`` on thousands of files
+    (observed ~10s+ freezes during gallery fill on large folders).
+    """
+
+    def __init__(self, corpus_files, index, signals, *, metadata_only: bool = False):
         super().__init__()
         self.corpus_files = corpus_files
         self.index = index
         self.signals = signals
+        self.metadata_only = bool(metadata_only)
 
     def run(self):
         try:
             coverage = self.index.get_index_coverage(self.corpus_files)
-            pending = self.index.get_pending_paths(self.corpus_files)
-            face_pending = 0
-            if not pending:
-                face_pending = self.index.get_face_pending_count(self.corpus_files)
+            if self.metadata_only:
+                # Silent metadata pass: only files missing/changed EXIF rows.
+                # Skipping get_pending_paths avoids a multi-10s scan of every
+                # file that merely lacks semantic embeddings (Plus CUDA +
+                # large folders were freezing gallery tile paint for this).
+                extract_pending = self.index.get_metadata_extraction_pending_paths(
+                    self.corpus_files
+                )
+                pending = list(extract_pending)
+                face_pending = 0
+            else:
+                pending = self.index.get_pending_paths(self.corpus_files)
+                extract_pending = self.index.get_metadata_extraction_pending_paths(
+                    pending if pending else self.corpus_files
+                )
+                face_pending = 0
+                if not pending:
+                    face_pending = self.index.get_face_pending_count(self.corpus_files)
             try:
                 from PyQt6 import sip
                 if not sip.isdeleted(self.signals):
-                    self.signals.done.emit(coverage, pending, face_pending)
+                    self.signals.done.emit(
+                        coverage, pending, face_pending, extract_pending
+                    )
             except Exception:
                 pass
         except Exception as e:

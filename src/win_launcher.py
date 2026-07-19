@@ -55,12 +55,37 @@ def main() -> int:
         return 1
 
     child_env = os.environ.copy()
+    # Strip launcher-only flags; enable durable file logs for freeze diagnosis.
+    passthrough_args: list[str] = []
+    for arg in sys.argv[1:]:
+        low = arg.strip().lower()
+        if low in ("--file-log", "--debug-log", "/file-log", "/debug-log"):
+            child_env["RAWVIEWER_FILE_LOG"] = "1"
+            child_env["RAWVIEWER_REDIRECT_STDIO"] = "1"
+            child_env["RAWVIEWER_VERBOSE_INFO_LOGS"] = "1"
+            child_env["RAWVIEWER_FOCUS_GALLERY_SWITCH"] = "1"
+            child_env.setdefault("RAWVIEWER_FATAL_DUMP", "1")
+            child_env.setdefault("RAWVIEWER_DEBUG", "1")
+            continue
+        passthrough_args.append(arg)
+
+    # Marker file also enables logging without a special bat.
+    marker = os.path.join(
+        os.environ.get("LOCALAPPDATA") or os.path.expanduser("~"),
+        "RAWviewer",
+        "enable_debug_log",
+    )
+    if os.path.isfile(marker):
+        child_env["RAWVIEWER_FILE_LOG"] = "1"
+        child_env["RAWVIEWER_REDIRECT_STDIO"] = "1"
+        child_env["RAWVIEWER_VERBOSE_INFO_LOGS"] = "1"
+        child_env["RAWVIEWER_FOCUS_GALLERY_SWITCH"] = "1"
+        child_env.setdefault("RAWVIEWER_FATAL_DUMP", "1")
 
     cmd = [pixi_exe, "run", "start-windowless"]
-    file_args = [arg for arg in sys.argv[1:] if arg]
-    if file_args:
+    if passthrough_args:
         cmd.append("--")
-        cmd.extend(file_args)
+        cmd.extend(passthrough_args)
 
     # CREATE_NO_WINDOW only, never DETACHED_PROCESS: the two are mutually
     # exclusive (CREATE_NO_WINDOW is IGNORED when DETACHED_PROCESS is set),

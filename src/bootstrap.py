@@ -685,6 +685,17 @@ class InstallWorker(QObject):
             if os.path.isfile(clear_src):
                 shutil.copy2(clear_src, os.path.join(target_dir, "clear_cache.bat"))
 
+            # Debug-log launcher for freeze / gallery troubleshooting
+            debug_log_src = os.path.join(BUNDLE_DIR, "run_with_debug_log.bat")
+            if not os.path.isfile(debug_log_src):
+                debug_log_src = os.path.join(
+                    BUNDLE_DIR, "scripts", "Launch", "windows", "run_with_debug_log.bat"
+                )
+            if os.path.isfile(debug_log_src):
+                shutil.copy2(
+                    debug_log_src, os.path.join(target_dir, "run_with_debug_log.bat")
+                )
+
             target_exe = os.path.join(target_dir, "RAWviewer.exe")
             launcher_stub_src = os.path.join(BUNDLE_DIR, "RAWviewer.exe")
             launcher_runtime_src = os.path.join(BUNDLE_DIR, "_launcher")
