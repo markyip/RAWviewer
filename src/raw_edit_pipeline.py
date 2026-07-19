@@ -842,15 +842,10 @@ def export_adjusted_tiff16(
     output_path: str,
     *,
     embed_xmp_path: Optional[str] = None,
-    nn_denoise: bool = False,
 ) -> None:
     """Bake adjustments to 16-bit sRGB TIFF; optionally embed XMP packet."""
     processed = _process_for_export(rgb_linear, adj)
     out = linear_to_export_uint16_srgb(processed, adj)
-    if nn_denoise:
-        from raw_nn_denoise import denoise_display_uint16
-
-        out = denoise_display_uint16(out)
     _write_16bit_rgb_tiff(output_path, out, embed_xmp_path=embed_xmp_path)
 
 
@@ -860,15 +855,10 @@ def export_adjusted_jpeg(
     output_path: str,
     *,
     quality: int = 92,
-    nn_denoise: bool = False,
 ) -> None:
     """Bake adjustments to 8-bit JPEG."""
     processed = _process_for_export(rgb_linear, adj)
     out = linear_to_display_uint8(processed, adj)
-    if nn_denoise:
-        from raw_nn_denoise import denoise_display_uint8
-
-        out = denoise_display_uint8(out)
     from PIL import Image
 
     im = Image.fromarray(out, mode="RGB")
@@ -894,15 +884,10 @@ def export_adjusted_webp(
     output_path: str,
     *,
     quality: int = 88,
-    nn_denoise: bool = False,
 ) -> None:
     """Bake adjustments to 8-bit WebP."""
     processed = _process_for_export(rgb_linear, adj)
     out = linear_to_display_uint8(processed, adj)
-    if nn_denoise:
-        from raw_nn_denoise import denoise_display_uint8
-
-        out = denoise_display_uint8(out)
     from PIL import Image
 
     im = Image.fromarray(out, mode="RGB")
@@ -934,43 +919,17 @@ def export_adjusted_image(
     cancel_check=None,
     progress_cb=None,
 ) -> None:
-    """Dispatch baked export (TIFF16 / JPEG / WebP; "_nn" suffix = AI denoise).
-
-    The "<fmt>_nn" variants run SCUNet real_psnr export denoise
-    (raw_nn_denoise.py) on the display-referred buffer just before encoding.
-    Export-only: inference is too slow for live preview and is never applied
-    during Adjust browsing.
-    """
+    """Dispatch baked export (TIFF16 / JPEG / WebP)."""
     fmt = (export_format or EXPORT_FORMAT_TIFF16).strip().lower()
-    nn = fmt.endswith("_nn")
-    if nn:
-        fmt = fmt[: -len("_nn")]
     if rgb_linear is None:
         raise RuntimeError("Full-resolution RAW decode failed")
     if cancel_check is not None and cancel_check():
         raise ExportCancelled()
-    if nn:
-        from raw_nn_denoise import set_cancel_check, set_progress_cb
-
-        set_cancel_check(cancel_check)
-        set_progress_cb(progress_cb)
-    try:
-        if fmt == EXPORT_FORMAT_JPEG:
-            export_adjusted_jpeg(rgb_linear, adj, output_path, nn_denoise=nn)
-        elif fmt == EXPORT_FORMAT_WEBP:
-            export_adjusted_webp(rgb_linear, adj, output_path, nn_denoise=nn)
-        else:
-            export_adjusted_tiff16(
-                rgb_linear, adj, output_path, embed_xmp_path=embed_xmp_path,
-                nn_denoise=nn,
-            )
-    except Exception as e:
-        if type(e).__name__ == "NNDenoiseCancelled":
-            raise ExportCancelled() from e
-        raise
-    finally:
-        if nn:
-            from raw_nn_denoise import set_cancel_check, set_progress_cb
-
-            set_cancel_check(None)
-            set_progress_cb(None)
+    if fmt == EXPORT_FORMAT_JPEG:
+        export_adjusted_jpeg(rgb_linear, adj, output_path)
+    elif fmt == EXPORT_FORMAT_WEBP:
+        export_adjusted_webp(rgb_linear, adj, output_path)
+    else:
+        export_adjusted_tiff16(
+            rgb_linear, adj, output_path, embed_xmp_path=embed_xmp_path,
+        )

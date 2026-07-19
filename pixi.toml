@@ -52,10 +52,9 @@ huggingface_hub = "*"
 requests = "*"
 certifi = "*"
 pillow-heif = "*"
-# Default PyPI torch (macOS MPS / CPU). Windows overrides below to CUDA wheels.
-torch = ">=2.2.2, <3"
-kornia = ">=0.8.3, <0.9"
-spandrel = ">=0.4.2, <0.5"
+# Torch-free GPU pipeline: demosaic runs on CuPy (Windows CUDA) or CPU Fast
+# RAW (cv2). torch/kornia are no longer installed; an external torch+cu12x
+# found by torch_provider (BYO) can still serve the legacy kornia path.
 
 
 # Windows semantic search (MobileCLIP ONNX). Default for `pixi install` / `pixi run`.
@@ -63,9 +62,9 @@ spandrel = ">=0.4.2, <0.5"
 # - Installer variants: build scripts swap this to onnxruntime-directml for DirectML builds
 #   (see scripts/Launch/bat/build_windows_directml.bat and build.py --windows-accel).
 [target.win-64.pypi-dependencies]
-# CUDA demosaic / kornia path: PyPI's default Windows torch is CPU-only.
-# The cu124 wheel is ~2.3–2.4 GB by itself (bundled NVIDIA libs).
-torch = { version = ">=2.5.1, <3", index = "https://download.pytorch.org/whl/cu124" }
+# CUDA demosaic without torch: CuPy + the CUDA 12 runtime component wheels
+# (~100 MB + runtime libs vs ~2.4 GB for the cu124 torch wheel).
+cupy-cuda12x = ">=13.0"
 # Prefer DirectML for MobileCLIP ONNX — do NOT also install onnxruntime-gpu
 # (a second CUDA stack, often +0.5–1.5 GB on top of torch).
 onnxruntime-directml = ">=1.18.0"

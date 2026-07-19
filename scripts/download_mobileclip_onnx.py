@@ -21,7 +21,8 @@ RETRY_DELAY_SEC = 3
 
 VISION_PCT_END = 57
 TEXT_PCT_END = 96
-DENOISE_PCT_END = 99
+# SCUNet denoise removed; tokenizer takes the final stage span.
+DENOISE_PCT_END = TEXT_PCT_END
 
 
 def _human_bytes(num_bytes: int) -> str:
@@ -160,22 +161,6 @@ def main() -> int:
         import shutil
 
         shutil.rmtree(MODELS_DIR / "onnx")
-
-    denoise_model_path = MODELS_DIR.parent / "scunet_color_real_psnr.pth"
-    if not denoise_model_path.exists():
-        def _fetch_denoise_model():
-            print("[INFO] Fetching AI denoise model (SCUNet real_psnr)", flush=True)
-            _download_url_with_progress(
-                "https://github.com/cszn/KAIR/releases/download/v1.0/scunet_color_real_psnr.pth",
-                denoise_model_path,
-                stage_start=TEXT_PCT_END,
-                stage_end=DENOISE_PCT_END,
-                emit=emit_installer_progress,
-            )
-
-        rc = _download_with_retry("denoise model", _fetch_denoise_model)
-        if rc != 0:
-            return rc
 
     tokenizer_path = MODELS_DIR / "bpe_simple_vocab_16e6.txt.gz"
     if not tokenizer_path.exists():

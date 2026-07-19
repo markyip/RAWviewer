@@ -717,6 +717,16 @@ def _cupy_gamma_lut() -> Any:
     return _GAMMA_LUT_CUPY
 
 
+# R-sample position (row, col) inside the 2x2 Bayer tile per pattern string;
+# B is always at the opposite corner. Non-Bayer layouts (X-Trans) stay on CPU.
+CUPY_BAYER_PHASE: dict = {
+    "RGGB": (0, 0),
+    "GRBG": (0, 1),
+    "GBRG": (1, 0),
+    "BGGR": (1, 1),
+}
+
+
 def gpu_demosaic_cupy_unpacked(unpacked, cancel_check: Optional[Callable[[], bool]] = None, return_linear: bool = False) -> np.ndarray:
     """
     GPU-accelerated demosaicing implementation using CuPy.
@@ -745,50 +755,55 @@ def gpu_demosaic_cupy_unpacked(unpacked, cancel_check: Optional[Callable[[], boo
 
     _abort_if_cancelled()
 
-    if unpacked.pat_str != "RGGB":
-        raise ValueError(f"CuPy demosaic currently only supports RGGB, got {unpacked.pat_str}")
+    phase = CUPY_BAYER_PHASE.get(unpacked.pat_str)
+    if phase is None:
+        raise ValueError(
+            f"CuPy demosaic supports Bayer patterns {sorted(CUPY_BAYER_PHASE)}, "
+            f"got {unpacked.pat_str}"
+        )
+    r_y, r_x = phase
 
     # Pre-allocate output RGB image on GPU
     rgb_gpu = cupy.zeros((h, w, 3), dtype=cupy.float32)
-    
-    # Simple CUDA kernel for bilinear demosaicing on pre-normalized and WB-scaled array
+
+    # Bilinear Bayer demosaic on the pre-normalized, WB-scaled array.
+    # (ry, rx) is the position of the R sample in the 2x2 tile; B sits at the
+    # opposite corner and the two G samples fill the remaining diagonal, which
+    # covers all four patterns (RGGB/BGGR/GRBG/GBRG) with one kernel.
     demosaic_kernel = cupy.ElementwiseKernel(
-        'raw float32 raw_data, int32 h, int32 w',
+        'raw float32 raw_data, int32 h, int32 w, int32 ry, int32 rx',
         'raw float32 rgb_out',
         '''
         int y = i / w;
         int x = i % w;
         if (y < 1 || y >= h - 1 || x < 1 || x >= w - 1) return;
-        
+
+        int py = y & 1;
+        int px = x & 1;
         float r = 0, g = 0, b = 0;
-        
-        // Simple RGGB bayer interpolation
-        if (y % 2 == 0) {
-            if (x % 2 == 0) {
-                // R pixel
-                r = raw_data[i];
-                g = (raw_data[i-1] + raw_data[i+1] + raw_data[i-w] + raw_data[i+w]) * 0.25f;
-                b = (raw_data[i-w-1] + raw_data[i-w+1] + raw_data[i+w-1] + raw_data[i+w+1]) * 0.25f;
-            } else {
-                // G pixel (R row)
-                r = (raw_data[i-1] + raw_data[i+1]) * 0.5f;
-                g = raw_data[i];
-                b = (raw_data[i-w] + raw_data[i+w]) * 0.5f;
-            }
+
+        if (py == ry && px == rx) {
+            // R pixel
+            r = raw_data[i];
+            g = (raw_data[i-1] + raw_data[i+1] + raw_data[i-w] + raw_data[i+w]) * 0.25f;
+            b = (raw_data[i-w-1] + raw_data[i-w+1] + raw_data[i+w-1] + raw_data[i+w+1]) * 0.25f;
+        } else if (py == 1 - ry && px == 1 - rx) {
+            // B pixel
+            r = (raw_data[i-w-1] + raw_data[i-w+1] + raw_data[i+w-1] + raw_data[i+w+1]) * 0.25f;
+            g = (raw_data[i-1] + raw_data[i+1] + raw_data[i-w] + raw_data[i+w]) * 0.25f;
+            b = raw_data[i];
         } else {
-            if (x % 2 == 0) {
-                // G pixel (B row)
-                r = (raw_data[i-w] + raw_data[i+w]) * 0.5f;
-                g = raw_data[i];
-                b = (raw_data[i-1] + raw_data[i+1]) * 0.5f;
+            // G pixel: R neighbors are horizontal when this is an R row
+            g = raw_data[i];
+            if (py == ry) {
+                r = (raw_data[i-1] + raw_data[i+1]) * 0.5f;
+                b = (raw_data[i-w] + raw_data[i+w]) * 0.5f;
             } else {
-                // B pixel
-                r = (raw_data[i-w-1] + raw_data[i-w+1] + raw_data[i+w-1] + raw_data[i+w+1]) * 0.25f;
-                g = (raw_data[i-1] + raw_data[i+1] + raw_data[i-w] + raw_data[i+w]) * 0.25f;
-                b = raw_data[i];
+                r = (raw_data[i-w] + raw_data[i+w]) * 0.5f;
+                b = (raw_data[i-1] + raw_data[i+1]) * 0.5f;
             }
         }
-        
+
         rgb_out[i * 3 + 0] = r;
         rgb_out[i * 3 + 1] = g;
         rgb_out[i * 3 + 2] = b;
@@ -802,7 +817,7 @@ def gpu_demosaic_cupy_unpacked(unpacked, cancel_check: Optional[Callable[[], boo
     # collapses to a single element (i=0), which hits the border guard above
     # and returns immediately: the kernel silently demosaiced nothing but a
     # black frame. Every pixel must be visited, so size=h*w.
-    demosaic_kernel(raw_norm, h, w, rgb_gpu, size=h * w)
+    demosaic_kernel(raw_norm, h, w, r_y, r_x, rgb_gpu, size=h * w)
 
     _abort_if_cancelled()
 
@@ -874,20 +889,14 @@ def try_gpu_decode_from_unpacked(
         except Exception:
             retain_device = False
 
-    if backend == "cupy" and unpacked.pat_str != "RGGB":
-        logger.warning(
-            "GPU Processor: CuPy demosaic only supports RGGB; trying PyTorch for %s.",
+    if backend == "cupy" and unpacked.pat_str not in CUPY_BAYER_PHASE:
+        # Non-Bayer layout (e.g. X-Trans): torch can't demosaic it either
+        # (kornia is Bayer-only) — go straight to the CPU path.
+        logger.debug(
+            "GPU Processor: CuPy demosaic has no kernel for %s; using CPU path.",
             unpacked.pat_str,
         )
-        if _HAS_TORCH:
-            if torch.cuda.is_available():
-                backend = "pytorch_cuda"
-            elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-                backend = "pytorch_mps"
-            else:
-                return None
-        else:
-            return None
+        return None
 
     # PyTorch backends run under the bounded semaphore (parallel decodes,
     # streams overlap upload/compute); CuPy keeps the hard lock -- see the

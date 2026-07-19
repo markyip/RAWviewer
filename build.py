@@ -28,9 +28,8 @@ _WINDOWS_LITE_PIXI_SKIP = (
     "torch",
     "torchvision",
     "kornia",
-    # SCUNet export loader — depends on torch; keeping it on Lite silently
-    # re-pulls a ~400–700 MB torch wheel via pip and defeats the Lite skip.
-    "spandrel",
+    # CuPy GPU demosaic is CUDA-edition-only; Standard keeps CPU Fast RAW.
+    "cupy-cuda12x",
 )
 # opencv-python-headless was in this skip list -- correct while cv2 was only
 # used by the (Lite-excluded) semantic search preprocessing, but the
@@ -40,7 +39,7 @@ _WINDOWS_LITE_PIXI_SKIP = (
 # the Lite pixi manifest would make every Adjust panel control crash with
 # ModuleNotFoundError on first use. See docs/EDIT_PIPELINE.md "Installer size".
 # torch/kornia stay skipped: Lite is browse + light Adjust on CPU; Full ships
-# CUDA demosaic (and optional SCUNet export denoise) separately.
+# CUDA demosaic separately.
 
 
 def write_app_version() -> None:
@@ -443,14 +442,15 @@ def _prepare_windows_pixi_manifest(accel: str, *, profile: str = "full") -> Path
         )
     elif accel == "cuda_byo":
         # Plus CUDA that reuses an external torch+cu12x — same lean deps as
-        # DirectML (no torch wheel). kornia/spandrel are installed later with
+        # DirectML (no torch wheel). kornia is installed later with
         # pip --no-deps against the external site-packages.
         raw = raw.replace("onnxruntime-gpu", "onnxruntime-directml")
         byo_skip = (
             "torch",
             "torchvision",
             "kornia",
-            "spandrel",
+            # External torch serves the demosaic; skip the CuPy stack too.
+            "cupy-cuda12x",
         )
         kept_lines = []
         for line in raw.splitlines():
@@ -464,13 +464,13 @@ def _prepare_windows_pixi_manifest(accel: str, *, profile: str = "full") -> Path
         )
     elif accel == "directml":
         # Semantic search on DirectML; demosaic stays CPU Fast RAW (no 2.4 GB
-        # cu124 torch). Drop torch / torchvision / kornia / spandrel.
+        # cu124 torch). Drop torch / torchvision / kornia / cupy.
         raw = raw.replace("onnxruntime-gpu", "onnxruntime-directml")
         directml_skip = (
             "torch",
             "torchvision",
             "kornia",
-            "spandrel",
+            "cupy-cuda12x",
         )
         kept_lines = []
         for line in raw.splitlines():

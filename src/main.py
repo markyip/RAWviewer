@@ -2287,18 +2287,10 @@ class _AdjustExportWorker(QRunnable):
                     "If the app vanished mid-export, the Mac may have run out of memory "
                     "on a large full-res demosaic."
                 )
-            is_nn = self.export_format.endswith("_nn")
-            # NN-denoise runs a real tile loop we can track precisely; without
-            # it the remaining work (tonemap + encode) is one opaque call, so
-            # the bar just steps to a "working" milestone rather than faking
-            # granularity nothing backs.
-            decode_done_pct = 35 if is_nn else 70
-            emit_progress(decode_done_pct, "AI denoising…" if is_nn else "Encoding…")
-
-            def nn_tile_progress(done: int, total: int) -> None:
-                span = 90 - decode_done_pct
-                pct = decode_done_pct + int(span * done / max(total, 1))
-                emit_progress(pct, "AI denoising…")
+            # Remaining work (tonemap + encode) is one opaque call, so the bar
+            # steps to a "working" milestone rather than faking granularity
+            # nothing backs.
+            emit_progress(70, "Encoding…")
 
             export_adjusted_image(
                 self.export_format,
@@ -2307,7 +2299,6 @@ class _AdjustExportWorker(QRunnable):
                 adj=self.adj,
                 embed_xmp_path=embed_xmp,
                 cancel_check=self.cancel_event.is_set,
-                progress_cb=nn_tile_progress if is_nn else None,
             )
             emit_progress(100, "Done")
             logger.info("[EXPORT] export_adjusted_image() completed without raising")
@@ -23561,37 +23552,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             EXPORT_FORMAT_WEBP,
         )
 
-        # "<fmt>_nn" = AI-denoise variant (see export_adjusted_image); the
-        # suffix rides along in export_format for the pipeline dispatch, but
-        # filename/filter/extension logic keys off the base format.
         raw_fmt = (export_format or EXPORT_FORMAT_TIFF16).strip().lower()
-        if raw_fmt.endswith("_nn"):
-            try:
-                from raw_nn_denoise import model_filename, nn_denoise_weights_present
-                if not nn_denoise_weights_present():
-                    from PyQt6.QtWidgets import QDialog
-                    from rawviewer_ui.denoise_download_dialog import DenoiseModelDownloadDialog
-                    dest_dir = os.environ.get("LOCALAPPDATA", "")
-                    if dest_dir:
-                        dest_path = os.path.join(
-                            dest_dir, "RAWviewer", "models", model_filename()
-                        )
-                    else:
-                        dest_path = os.path.join(
-                            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                            "models",
-                            model_filename(),
-                        )
-
-                    dialog = DenoiseModelDownloadDialog(dest_path=dest_path, parent=self)
-                    if dialog.exec() != QDialog.DialogCode.Accepted:
-                        return
-            except Exception as e:
-                logger.error("[EXPORT] Error checking/downloading denoise model: %s", e)
-                return
-
-        nn_suffix = " + AI denoise" if raw_fmt.endswith("_nn") else ""
-        fmt = raw_fmt[:-len("_nn")] if raw_fmt.endswith("_nn") else raw_fmt
+        fmt = raw_fmt
         base = os.path.splitext(os.path.basename(path))[0]
         # Default next to the RAW when that folder is writable; otherwise jump to
         # Pictures/Desktop so users browsing a locked SD/camera card don't sit
@@ -23607,15 +23569,15 @@ class RAWImageViewer(SessionMixin, QMainWindow):
 
         if fmt == EXPORT_FORMAT_JPEG:
             default_name = f"{base}_edited.jpg"
-            dialog_title = "Export JPEG" + nn_suffix
+            dialog_title = "Export JPEG"
             file_filter = "JPEG (*.jpg *.jpeg)"
         elif fmt == EXPORT_FORMAT_WEBP:
             default_name = f"{base}_edited.webp"
-            dialog_title = "Export WebP" + nn_suffix
+            dialog_title = "Export WebP"
             file_filter = "WebP (*.webp)"
         else:
             default_name = f"{base}_edited.tif"
-            dialog_title = "Export 16-bit TIFF" + nn_suffix
+            dialog_title = "Export 16-bit TIFF"
             file_filter = "TIFF (*.tif *.tiff)"
 
         if fmt == EXPORT_FORMAT_JPEG:
@@ -23684,8 +23646,6 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             return
 
         self._adjust_export_in_progress = True
-        # raw_fmt, not fmt: the "_nn" AI-denoise suffix must reach
-        # export_adjusted_image's dispatch.
         self._adjust_export_format = raw_fmt
         panel = getattr(self, "single_image_adjust_panel", None)
         if panel is not None and hasattr(panel, "set_export_enabled"):
@@ -23719,7 +23679,6 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         except Exception:
             pass
         pool = getattr(getattr(self, "image_manager", None), "_process_pool", None)
-        # Pass raw_fmt (not fmt) so "_nn" AI-denoise variants reach the worker.
         worker = _AdjustExportWorker(
             path,
             output_path,
@@ -23868,9 +23827,6 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 pass
             return
         fmt = (export_format or "tiff16").strip().lower()
-        # Strip "_nn" for the success label.
-        if fmt.endswith("_nn"):
-            fmt = fmt[: -len("_nn")]
         labels = {
             "tiff16": "16-bit TIFF",
             "jpeg": "JPEG",

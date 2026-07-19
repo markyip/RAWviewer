@@ -1538,21 +1538,6 @@ class ImageAdjustPanelWidget(QWidget):
             "WebP (baked)",
             lambda: self._request_export("webp"),
         )
-        try:
-            from raw_nn_denoise import nn_denoise_available
-
-            if nn_denoise_available():
-                export_menu.addSeparator()
-                export_menu.addAction(
-                    "JPEG + AI denoise (SCUNet)",
-                    lambda: self._request_export("jpeg_nn"),
-                )
-                export_menu.addAction(
-                    "16-bit TIFF + AI denoise (SCUNet)",
-                    lambda: self._request_export("tiff16_nn"),
-                )
-        except Exception:
-            pass
         export_btn.setMenu(export_menu)
         export_btn.setToolTip("Export baked image (TIFF / JPEG / WebP)")
         layout.addWidget(export_btn)

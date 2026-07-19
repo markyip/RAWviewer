@@ -52,18 +52,36 @@ def import_gpu_backend_on_main_thread(
         except Exception:
             pass
 
+    def _cupy_usable() -> bool:
+        """True when the torch-free CuPy demosaic backend can serve decodes."""
+        try:
+            import cupy  # noqa: F401
+
+            return bool(cupy.cuda.runtime.getDeviceCount() > 0)
+        except Exception:
+            return False
+
     try:
         # Split stages so processEvents can run between the two heavy imports.
         # gpu_raw_processor re-imports torch/kornia at module scope; those are
         # cache hits once the lines below have finished.
+        torch_ok = False
         try:
             import torch  # noqa: F401
 
             if not torch.cuda.is_available():
                 raise RuntimeError("torch imported but CUDA is unavailable")
+            torch_ok = True
         except Exception:
-            # External BYO provider may have been removed — notify and bundle.
-            try:
+            # Torch-free install: CuPy carries GPU demosaic on its own —
+            # never offer the multi-GB torch "repair" download when the
+            # intended backend is already present.
+            if _cupy_usable():
+                logger.info(
+                    "[GPU] torch unavailable; using torch-free CuPy demosaic backend."
+                )
+            else:
+                # External BYO provider may have been removed — notify and bundle.
                 from torch_provider import ensure_torch_for_gpu, load_provider
 
                 prov = load_provider()
@@ -76,15 +94,15 @@ def import_gpu_backend_on_main_thread(
 
                         if not torch.cuda.is_available():
                             raise RuntimeError("bundled torch has no CUDA")
+                        torch_ok = True
                     else:
                         raise
                 else:
                     raise
-            except Exception:
-                raise
 
-        _pump()
-        import kornia  # noqa: F401
+        if torch_ok:
+            _pump()
+            import kornia  # noqa: F401
 
         _pump()
         import gpu_raw_processor  # noqa: F401 -- wires decode + cupy probe

@@ -413,7 +413,7 @@ def install_bundled_torch_into_pixi(
     *,
     log: Optional[Callable[[str], None]] = None,
 ) -> TorchProvider:
-    """Download cu124 torch (+ kornia/spandrel) into the local Pixi env."""
+    """Download cu124 torch (+ kornia) into the local Pixi env (legacy BYO path)."""
 
     def _log(msg: str) -> None:
         if log:
@@ -447,7 +447,6 @@ def install_bundled_torch_into_pixi(
             "install",
             "--upgrade",
             "kornia>=0.8.3,<0.9",
-            "spandrel>=0.4.2,<0.5",
         ],
     ]
     for cmd in cmds:
@@ -506,7 +505,7 @@ def install_byo_sidecar_packages(
     *,
     log: Optional[Callable[[str], None]] = None,
 ) -> None:
-    """Install kornia/spandrel into Pixi without pulling a second torch."""
+    """Install kornia into Pixi without pulling a second torch."""
 
     def _log(msg: str) -> None:
         if log:
@@ -526,7 +525,7 @@ def install_byo_sidecar_packages(
     ).rstrip(os.pathsep)
     env["RAWVIEWER_TORCH_SITE_PACKAGES"] = external.site_packages
 
-    _log("Installing kornia/spandrel (--no-deps) against external torch...")
+    _log("Installing kornia (--no-deps) against external torch...")
     cmd_no_deps = [
         py,
         "-m",
@@ -536,7 +535,6 @@ def install_byo_sidecar_packages(
         "--no-deps",
         "kornia>=0.8.3,<0.9",
         "kornia_rs",
-        "spandrel>=0.4.2,<0.5",
     ]
     cmd_small = [
         py,
@@ -544,8 +542,6 @@ def install_byo_sidecar_packages(
         "pip",
         "install",
         "--upgrade",
-        "einops",
-        "safetensors",
         "packaging",
     ]
     for cmd in (cmd_no_deps, cmd_small):
@@ -634,6 +630,6 @@ def ensure_torch_for_gpu(
                 "RAWviewer — GPU libraries",
                 "Could not download PyTorch into the RAWviewer environment.\n\n"
                 f"{exc}\n\n"
-                "GPU demosaic / SCUNet will stay disabled; CPU Fast RAW still works.",
+                "GPU demosaic will stay disabled; CPU Fast RAW still works.",
             )
         return False
