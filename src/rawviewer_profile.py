@@ -10,8 +10,12 @@ import time
 # Gallery / navigation prefetch shared by Standard and Plus.
 # Previously Lite-only — that made Plus packaged builds feel slower when scrolling.
 # Applied before RAM-tier defaults so low-RAM caps do not kneecap gallery fill.
-# When semantic/face indexing is active, gallery_idle_load_priority() already
-# demotes idle preload to BACKGROUND so these batches do not starve the UI.
+#
+# Do NOT set RAWVIEWER_GALLERY_IDLE_PRELOAD_PRIORITY here. Leaving it unset lets
+# gallery_idle_load_priority() use PRELOAD_NEXT for snappy gallery fill, and only
+# demote to BACKGROUND while the ILM indexing throttle is actually engaged
+# (heavy semantic/face work). Feature flags alone must not keep idle preload
+# stuck on BACKGROUND — that made Plus gallery feel permanently slow.
 SHARED_SCROLL_PREFETCH_DEFAULTS: dict[str, str] = {
     "RAWVIEWER_NAV_PRELOAD_ADAPTIVE": "1",
     "RAWVIEWER_NAV_PRELOAD_NEAR": "4",
@@ -27,7 +31,6 @@ SHARED_SCROLL_PREFETCH_DEFAULTS: dict[str, str] = {
     "RAWVIEWER_ADJACENT_PRELOAD_PREV": "6",
     "RAWVIEWER_GALLERY_IDLE_PRELOAD_BATCH": "120",
     "RAWVIEWER_GALLERY_IDLE_PRELOAD_MS": "180",
-    "RAWVIEWER_GALLERY_IDLE_PRELOAD_PRIORITY": "preload_next",
     "RAWVIEWER_PREVIEW_CACHE_ADAPTIVE": "1",
 }
 
@@ -385,14 +388,22 @@ def gallery_idle_preload_ms(*, default_full: int = 250) -> int:
 
 
 def indexing_loads_compete() -> bool:
-    """True when semantic or face indexing may flood the load queue at BACKGROUND priority."""
-    if is_lite_build():
-        return False
-    sem = os.environ.get("RAWVIEWER_ENABLE_SEMANTIC_SEARCH", "0").strip().lower()
-    semantic_on = sem in ("1", "true", "yes", "on")
-    face = os.environ.get("RAWVIEWER_ENABLE_FACE_SCAN", "1").strip().lower()
-    face_on = face in ("1", "true", "yes", "on")
-    return semantic_on or face_on
+    """True only while heavy semantic/face work is actively throttling the load pool.
+
+    Important: do not key off RAWVIEWER_ENABLE_SEMANTIC_SEARCH / FACE_SCAN alone.
+    Those stay on for Plus even when indexing is idle; that previously forced
+    gallery idle preload to BACKGROUND permanently and made scrolling feel slow.
+    """
+    try:
+        from image_load_manager import get_image_load_manager
+
+        mgr = get_image_load_manager()
+        active = getattr(mgr, "indexing_throttle_active", None)
+        if callable(active):
+            return bool(active())
+    except Exception:
+        pass
+    return False
 
 
 def gallery_idle_load_priority():
@@ -406,6 +417,6 @@ def gallery_idle_load_priority():
         return Priority.PRELOAD_PREV
     if raw in ("preload_next", "preload", "high", "next"):
         return Priority.PRELOAD_NEXT
-    if not indexing_loads_compete():
-        return Priority.PRELOAD_NEXT
-    return Priority.BACKGROUND
+    if indexing_loads_compete():
+        return Priority.BACKGROUND
+    return Priority.PRELOAD_NEXT

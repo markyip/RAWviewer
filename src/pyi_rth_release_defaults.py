@@ -3,8 +3,9 @@ import os
 import sys
 
 os.environ.setdefault("RAWVIEWER_GPU_VIEW", "1")
-# Match launch_dev_full.sh so packaged Full builds use perf-v2 search/index paths.
+# Match launch_dev.sh / launch_dev_full.sh packaged ↔ dev search/index paths.
 os.environ.setdefault("RAWVIEWER_PERF_V2", "1")
+os.environ.setdefault("RAWVIEWER_AUTO_METADATA_INDEX", "1")
 
 # GPU demosaic preference must match platform launch scripts:
 # - Windows Full: prefer CUDA/CuPy when present (launch_dev.bat sets 1 for CUDA editions).

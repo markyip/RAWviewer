@@ -33469,9 +33469,16 @@ def main():
     if (getattr(sys, "frozen", False) or is_installed) and not is_lite_build():
         os.environ.setdefault("RAWVIEWER_ENABLE_SEMANTIC_SEARCH", "1")
         os.environ.setdefault("RAWVIEWER_ENABLE_FACE_SCAN", "1")
+        os.environ.setdefault("RAWVIEWER_AUTO_METADATA_INDEX", "1")
+        os.environ.setdefault("RAWVIEWER_PERF_V2", "1")
         os.environ.setdefault("RAWVIEWER_GPU_VIEW", "1")
+        if sys.platform == "darwin":
+            os.environ.setdefault("RAWVIEWER_PREFER_GPU_DECODE", "0")
     elif getattr(sys, "frozen", False) or is_installed:
         os.environ.setdefault("RAWVIEWER_GPU_VIEW", "1")
+        os.environ.setdefault("RAWVIEWER_AUTO_METADATA_INDEX", "1")
+        if sys.platform == "darwin":
+            os.environ.setdefault("RAWVIEWER_PREFER_GPU_DECODE", "0")
 
     # One-line dump so packaged .app vs launch_dev.sh configs are easy to compare.
     try:

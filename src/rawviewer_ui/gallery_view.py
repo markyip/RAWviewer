@@ -187,35 +187,21 @@ def _min_layout_pixmap_dim() -> int:
     return _env_int("RAWVIEWER_GALLERY_MIN_LAYOUT_PIXMAP_DIM", 384, minimum=128)
 
 
-def _indexing_loads_compete() -> bool:
-    """True when semantic/face indexing may flood the load queue at BACKGROUND priority."""
-    sem = os.environ.get("RAWVIEWER_ENABLE_SEMANTIC_SEARCH", "0").strip().lower() in (
-        "1",
-        "true",
-        "yes",
-        "on",
-    )
-    face = os.environ.get("RAWVIEWER_ENABLE_FACE_SCAN", "1").strip().lower() in (
-        "1",
-        "true",
-        "yes",
-        "on",
-    )
-    return sem or face
-
-
 def _gallery_idle_load_priority() -> Priority:
-    """Queue priority for off-screen gallery thumbnail idle preload."""
-    raw = os.environ.get("RAWVIEWER_GALLERY_IDLE_PRELOAD_PRIORITY", "").strip().lower()
-    if raw in ("background", "low"):
-        return Priority.BACKGROUND
-    if raw in ("preload_prev", "prev"):
-        return Priority.PRELOAD_PREV
-    if raw in ("preload_next", "preload", "high", "next"):
+    """Queue priority for off-screen gallery thumbnail idle preload.
+
+    Delegates to rawviewer_profile so Plus only demotes while the ILM indexing
+    throttle is actually engaged (not merely because AI features are enabled).
+    """
+    try:
+        from rawviewer_profile import gallery_idle_load_priority
+
+        return gallery_idle_load_priority()
+    except Exception:
+        raw = os.environ.get("RAWVIEWER_GALLERY_IDLE_PRELOAD_PRIORITY", "").strip().lower()
+        if raw in ("background", "low"):
+            return Priority.BACKGROUND
         return Priority.PRELOAD_NEXT
-    if not _indexing_loads_compete():
-        return Priority.PRELOAD_NEXT
-    return Priority.BACKGROUND
 
 
 def _thumbnail_data_to_base_pixmap(thumbnail_data) -> Optional[QPixmap]:
@@ -384,6 +370,9 @@ class JustifiedGallery(QWidget):
         # same idea as dt-scaled game-loop integration).
         self._wheel_decay_per_tick = 0.2
         self._wheel_last_tick_t = 0.0
+        # Timestamp of the last native momentum-phase wheel event (macOS trackpad
+        # decay). Motion from momentum must not push the settle timer out forever.
+        self._native_momentum_t = 0.0
         # Input gain: keys / wheel / trackpad share rawviewer_ui.gallery_scroll
         # so arrow-key singleStep*N stays aligned with wheel/trackpad feel.
         from rawviewer_ui.gallery_scroll import (
@@ -715,6 +704,12 @@ class JustifiedGallery(QWidget):
             return
         self._last_load_visible_request_ts = now
         self._load_timer.start(max(1, int(delay_ms)))
+
+    def _momentum_scroll_active(self) -> bool:
+        """True while motion comes from the wheel smoothing timer or native trackpad momentum."""
+        if self._wheel_timer.isActive():
+            return True
+        return (time.time() - self._native_momentum_t) < 0.05
 
     def _is_actively_scrolling(self) -> bool:
         """True during an in-progress scroll gesture (trackpad, wheel, or scrollbar)."""
@@ -2328,6 +2323,11 @@ class JustifiedGallery(QWidget):
                     return False
                 pixel = event.pixelDelta()
                 angle = event.angleDelta()
+                try:
+                    if event.phase() == Qt.ScrollPhase.ScrollMomentum:
+                        self._native_momentum_t = time.time()
+                except Exception:
+                    pass
                 if not pixel.isNull() and pixel.y() != 0:
                     if abs(self._trackpad_gain - 1.0) < 0.01:
                         # Unity gain: let QScrollArea handle natively (smoother on macOS).
@@ -2392,6 +2392,10 @@ class JustifiedGallery(QWidget):
         if abs(self._wheel_accum_px) < 1.0:
             self._wheel_timer.stop()
             self._wheel_accum_px = 0.0
+            # An interim settle may have consumed the pending timer; make sure a
+            # real (non-momentum) settle still fires now that motion has ended.
+            if self._scroll_settle_timer is not None:
+                self._scroll_settle_timer.start(120)
             return
 
         # Exponential decay of the remaining distance, scaled by MEASURED
@@ -2430,6 +2434,8 @@ class JustifiedGallery(QWidget):
             sb.setValue(sb.minimum() if step < 0 else sb.maximum())
             self._wheel_accum_px = 0.0
             self._wheel_timer.stop()
+            if self._scroll_settle_timer is not None:
+                self._scroll_settle_timer.start(120)
             return
 
         sb.setValue(new_val)
@@ -2496,12 +2502,27 @@ class JustifiedGallery(QWidget):
             self._load_timer.start(interval)
 
         # Debounce: after scrolling stops, force a final load near thumb position.
-        if self._scroll_settle_timer.isActive():
-            self._scroll_settle_timer.stop()
-        self._scroll_settle_timer.start(120)
+        # Momentum motion (wheel smoothing timer ticks, native trackpad momentum)
+        # must NOT keep pushing the settle timer out — that starved
+        # _on_scroll_settled for the whole decay and left tiles blank until the
+        # very end. During momentum, let a pending timer fire (~every 120ms) so
+        # interim loads fill tiles while content is still moving.
+        if self._momentum_scroll_active():
+            if not self._scroll_settle_timer.isActive():
+                self._scroll_settle_timer.start(120)
+        else:
+            if self._scroll_settle_timer.isActive():
+                self._scroll_settle_timer.stop()
+            self._scroll_settle_timer.start(120)
 
     def _on_scroll_settled(self):
         """Called after scroll events stop; load thumbnails around thumb position."""
+        if self._momentum_scroll_active():
+            # Interim pass mid-momentum: fill visible tiles now instead of waiting
+            # for the decay tail, but leave scroll-speed state and layout alone
+            # (a rebuild here would jump the content under the user).
+            self.load_visible_images()
+            return
         # When the user stops scrolling, treat as "not scrolling fast" so we actually schedule work.
         self._is_scrolling_fast = False
         self._current_scroll_speed = 0

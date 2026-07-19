@@ -18,7 +18,6 @@ import hashlib
 import json
 import sys
 import gzip
-import tempfile
 import threading
 import concurrent.futures
 from io import BytesIO
@@ -3693,23 +3692,87 @@ class SemanticImageIndex:
         return result
 
     @staticmethod
-    def _detect_face_count(file_path: str, preloaded_im: Optional[PilImage] = None) -> int:
-        def _run_vision(path: str) -> Optional[int]:
-            try:
-                import Foundation  # type: ignore[import-not-found]
-                import Vision  # type: ignore[import-not-found]
+    def _pil_to_cvpixelbuffer_bgra(im: PilImage, Quartz):
+        """Build a BGRA CVPixelBuffer from a PIL image (no temp files)."""
+        rgb = im.convert("RGB")
+        width, height = rgb.size
+        if width <= 0 or height <= 0:
+            raise RuntimeError("invalid face-scan image size")
+        status, pixel_buffer = Quartz.CVPixelBufferCreate(
+            None,
+            int(width),
+            int(height),
+            Quartz.kCVPixelFormatType_32BGRA,
+            {
+                Quartz.kCVPixelBufferCGImageCompatibilityKey: True,
+                Quartz.kCVPixelBufferCGBitmapContextCompatibilityKey: True,
+            },
+            None,
+        )
+        if status != 0 or pixel_buffer is None:
+            raise RuntimeError(f"Failed to create CVPixelBuffer: status {status}")
+        rgba = np.asarray(rgb, dtype=np.uint8)
+        bgra = np.empty((height, width, 4), dtype=np.uint8)
+        bgra[..., 0] = rgba[..., 2]
+        bgra[..., 1] = rgba[..., 1]
+        bgra[..., 2] = rgba[..., 0]
+        bgra[..., 3] = 255
+        Quartz.CVPixelBufferLockBaseAddress(pixel_buffer, 0)
+        try:
+            bytes_per_row = int(Quartz.CVPixelBufferGetBytesPerRow(pixel_buffer))
+            base = Quartz.CVPixelBufferGetBaseAddress(pixel_buffer)
+            if not copy_bgra_into_cvpixelbuffer(
+                base, bytes_per_row, bgra, height=height, width=width
+            ):
+                buf = base.as_buffer(bytes_per_row * height)
+                row_bytes = width * 4
+                for y in range(height):
+                    start = y * bytes_per_row
+                    buf[start : start + row_bytes] = bgra[y].tobytes()
+        finally:
+            Quartz.CVPixelBufferUnlockBaseAddress(pixel_buffer, 0)
+        return pixel_buffer
 
-                url = Foundation.NSURL.fileURLWithPath_(path)
+    @staticmethod
+    def _vision_face_count_from_pil(im: PilImage) -> Optional[int]:
+        """Apple Vision face count from an in-memory PIL image (no temp JPEG)."""
+        try:
+            import Foundation  # type: ignore[import-not-found]
+            import Quartz  # type: ignore[import-not-found]
+            import Vision  # type: ignore[import-not-found]
+            import objc  # type: ignore[import-not-found]
+        except Exception:
+            return None
+
+        try:
+            with objc.autorelease_pool():
                 request = Vision.VNDetectFaceRectanglesRequest.alloc().init()
-                handler = Vision.VNImageRequestHandler.alloc().initWithURL_options_(url, None)
+                # Prefer CVPixelBuffer — avoids disk I/O and JPEG re-encode.
+                try:
+                    pixel_buffer = SemanticImageIndex._pil_to_cvpixelbuffer_bgra(im, Quartz)
+                    handler = Vision.VNImageRequestHandler.alloc().initWithCVPixelBuffer_options_(
+                        pixel_buffer, None
+                    )
+                except Exception:
+                    # In-memory JPEG via NSData if pixel-buffer path fails.
+                    buf = BytesIO()
+                    im.convert("RGB").save(buf, format="JPEG", quality=90)
+                    payload = buf.getvalue()
+                    ns_data = Foundation.NSData.dataWithBytes_length_(payload, len(payload))
+                    if ns_data is None:
+                        return None
+                    handler = Vision.VNImageRequestHandler.alloc().initWithData_options_(
+                        ns_data, None
+                    )
                 ok, err = handler.performRequests_error_([request], None)
                 if not ok or err is not None:
                     return None
                 return len(request.results() or [])
-            except Exception:
-                return None
+        except Exception:
+            return None
 
-        tmp_path = ""
+    @staticmethod
+    def _detect_face_count(file_path: str, preloaded_im: Optional[PilImage] = None) -> int:
         try:
             if preloaded_im is not None:
                 im = preloaded_im
@@ -3717,97 +3780,102 @@ class SemanticImageIndex:
                 im = _load_index_source_image(
                     file_path, max_size=SemanticImageIndex.face_detection_max_edge(), qt_decode=False
                 )
-            
-            if sys.platform != "darwin":
-                # 1. Try OpenCV YuNet (Ultra-Lightweight, extremely fast, highly accurate)
-                try:
-                    import cv2
-                    import numpy as np
 
-                    img_bgr = cv2.cvtColor(np.array(im), cv2.COLOR_RGB2BGR)
-                    return _yunet_detect_faces_bgr(img_bgr)
-                except Exception as yn_err:
-                    import logging
-                    logging.getLogger(__name__).debug(f"[VISION] OpenCV YuNet failed on {file_path}, trying OpenCV DNN: {yn_err}")
+            if sys.platform == "darwin":
+                count = SemanticImageIndex._vision_face_count_from_pil(im)
+                return int(count or 0)
 
-                # 2. Windows fallback using OpenCV DNN Face Detector
-                try:
-                    import cv2
-                    import numpy as np
-                    import os
-                    import threading
-                    
-                    global _FACE_DETECTOR_NET
-                    global _FACE_DETECTOR_LOCK
-                    if '_FACE_DETECTOR_NET' not in globals():
-                        _FACE_DETECTOR_NET = None
-                        _FACE_DETECTOR_LOCK = threading.Lock()
+            # 1. Try OpenCV YuNet (Ultra-Lightweight, extremely fast, highly accurate)
+            try:
+                import cv2
 
-                    if _FACE_DETECTOR_NET is None:
-                        with _FACE_DETECTOR_LOCK:
-                            if _FACE_DETECTOR_NET is None:
-                                models_dir = os.path.expanduser("~/.rawviewer_cache/models")
-                                os.makedirs(models_dir, exist_ok=True)
-                                
-                                prototxt_path = os.path.join(models_dir, "deploy.prototxt")
-                                caffemodel_path = os.path.join(models_dir, "res10_300x300_ssd_iter_140000.caffemodel")
-                                
-                                if not os.path.exists(prototxt_path):
-                                    import logging
-                                    logging.getLogger(__name__).info("[VISION] Downloading DNN face detector prototxt...")
-                                    from ssl_certs import urlretrieve
+                img_bgr = cv2.cvtColor(np.array(im), cv2.COLOR_RGB2BGR)
+                return _yunet_detect_faces_bgr(img_bgr)
+            except Exception as yn_err:
+                import logging
 
-                                    urlretrieve(
-                                        "https://raw.githubusercontent.com/opencv/opencv/master/samples/dnn/face_detector/deploy.prototxt",
-                                        prototxt_path,
-                                    )
-                                if not os.path.exists(caffemodel_path):
-                                    import logging
-                                    logging.getLogger(__name__).info("[VISION] Downloading DNN face detector weights...")
-                                    from ssl_certs import urlretrieve
+                logging.getLogger(__name__).debug(
+                    f"[VISION] OpenCV YuNet failed on {file_path}, trying OpenCV DNN: {yn_err}"
+                )
 
-                                    urlretrieve(
-                                        "https://raw.githubusercontent.com/opencv/opencv_3rdparty/dnn_samples_face_detector_20170830/res10_300x300_ssd_iter_140000.caffemodel",
-                                        caffemodel_path,
-                                    )
-                                _FACE_DETECTOR_NET = cv2.dnn.readNetFromCaffe(prototxt_path, caffemodel_path)
-                                _apply_opencv_dnn_acceleration(_FACE_DETECTOR_NET)
-                    
-                    # Convert PIL image to BGR for OpenCV DNN
-                    img_bgr = np.array(im.convert('RGB'))[:, :, ::-1].copy()
-                    
-                    # Prepare input blob and perform forward pass
-                    blob = cv2.dnn.blobFromImage(cv2.resize(img_bgr, (600, 600)), 1.0, (600, 600), (104.0, 177.0, 123.0))
-                    
+            # 2. Windows fallback using OpenCV DNN Face Detector
+            try:
+                import cv2
+                import threading
+
+                global _FACE_DETECTOR_NET
+                global _FACE_DETECTOR_LOCK
+                if "_FACE_DETECTOR_NET" not in globals():
+                    _FACE_DETECTOR_NET = None
+                    _FACE_DETECTOR_LOCK = threading.Lock()
+
+                if _FACE_DETECTOR_NET is None:
                     with _FACE_DETECTOR_LOCK:
-                        _FACE_DETECTOR_NET.setInput(blob)
-                        detections = _FACE_DETECTOR_NET.forward()
-                    
-                    face_count = 0
-                    for i in range(detections.shape[2]):
-                        confidence = detections[0, 0, i, 2]
-                        if confidence > 0.85:  # 85% confidence threshold
-                            face_count += 1
-                            
-                    return face_count
-                except Exception as e:
-                    import logging
-                    logging.getLogger(__name__).warning(f"[VISION] OpenCV DNN face detection fallback error on {file_path}: {e}")
-                    return 0
+                        if _FACE_DETECTOR_NET is None:
+                            models_dir = os.path.expanduser("~/.rawviewer_cache/models")
+                            os.makedirs(models_dir, exist_ok=True)
 
-            with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
-                tmp_path = tmp.name
-            im.save(tmp_path, "JPEG", quality=90)
-            fallback = _run_vision(tmp_path)
-            return int(fallback or 0)
+                            prototxt_path = os.path.join(models_dir, "deploy.prototxt")
+                            caffemodel_path = os.path.join(
+                                models_dir, "res10_300x300_ssd_iter_140000.caffemodel"
+                            )
+
+                            if not os.path.exists(prototxt_path):
+                                import logging
+
+                                logging.getLogger(__name__).info(
+                                    "[VISION] Downloading DNN face detector prototxt..."
+                                )
+                                from ssl_certs import urlretrieve
+
+                                urlretrieve(
+                                    "https://raw.githubusercontent.com/opencv/opencv/master/samples/dnn/face_detector/deploy.prototxt",
+                                    prototxt_path,
+                                )
+                            if not os.path.exists(caffemodel_path):
+                                import logging
+
+                                logging.getLogger(__name__).info(
+                                    "[VISION] Downloading DNN face detector weights..."
+                                )
+                                from ssl_certs import urlretrieve
+
+                                urlretrieve(
+                                    "https://raw.githubusercontent.com/opencv/opencv_3rdparty/dnn_samples_face_detector_20170830/res10_300x300_ssd_iter_140000.caffemodel",
+                                    caffemodel_path,
+                                )
+                            _FACE_DETECTOR_NET = cv2.dnn.readNetFromCaffe(
+                                prototxt_path, caffemodel_path
+                            )
+                            _apply_opencv_dnn_acceleration(_FACE_DETECTOR_NET)
+
+                img_bgr = np.array(im.convert("RGB"))[:, :, ::-1].copy()
+                blob = cv2.dnn.blobFromImage(
+                    cv2.resize(img_bgr, (600, 600)),
+                    1.0,
+                    (600, 600),
+                    (104.0, 177.0, 123.0),
+                )
+
+                with _FACE_DETECTOR_LOCK:
+                    _FACE_DETECTOR_NET.setInput(blob)
+                    detections = _FACE_DETECTOR_NET.forward()
+
+                face_count = 0
+                for i in range(detections.shape[2]):
+                    confidence = detections[0, 0, i, 2]
+                    if confidence > 0.85:
+                        face_count += 1
+                return face_count
+            except Exception as e:
+                import logging
+
+                logging.getLogger(__name__).warning(
+                    f"[VISION] OpenCV DNN face detection fallback error on {file_path}: {e}"
+                )
+                return 0
         except Exception:
             return 0
-        finally:
-            if tmp_path:
-                try:
-                    os.unlink(tmp_path)
-                except Exception:
-                    pass
 
     def _lookup_index_rows(self, file_path: str, st: Optional[os.stat_result] = None) -> List[sqlite3.Row]:
         canonical = self._canonical_path(file_path)

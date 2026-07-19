@@ -1218,6 +1218,10 @@ class ImageLoadManager(QObject):
         if saved_raw is not None:
             self._raw_load_limit = saved_raw
 
+    def indexing_throttle_active(self) -> bool:
+        """True while semantic/face heavy work has engaged the ILM throttle."""
+        return int(getattr(self, "_indexing_throttle_depth", 0) or 0) > 0
+
     def enter_semantic_indexing_throttle(self) -> None:
         """Lower gallery/preload concurrency while semantic or face indexing runs."""
         lock = getattr(self, "_indexing_throttle_lock", None)

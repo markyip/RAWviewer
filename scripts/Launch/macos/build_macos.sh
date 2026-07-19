@@ -126,6 +126,21 @@ ensure_openmp_libraw() {
         echo "[WARNING] scripts/libraw/build_libraw_openmp.sh missing; macOS package will use stock single-threaded LibRaw."
         return 0
     fi
+    # Fast path: rawpy already carries the standalone OpenMP install. Re-running
+    # the installer rewrites/re-signs the dylibs (mtime bumps), which invalidates
+    # PyInstaller's Analysis cache and forces a full COLLECT/BUNDLE recopy on
+    # every incremental build. Force a re-install with RAWVIEWER_LIBRAW_OPENMP_FORCE=1.
+    if [ "${RAWVIEWER_LIBRAW_OPENMP_FORCE:-0}" != "1" ]; then
+        local rawpy_libraw
+        rawpy_libraw="$(find "$REPO_ROOT/.pixi/envs/default/lib" -path '*/site-packages/rawpy/libraw_r.25.dylib' 2>/dev/null | head -1 || true)"
+        if [ -n "$rawpy_libraw" ] \
+           && otool -L "$rawpy_libraw" 2>/dev/null | grep -q '@loader_path/libomp\.dylib' \
+           && [ -f "$(dirname "$rawpy_libraw")/libomp.dylib" ] \
+           && [ -f "$(dirname "$rawpy_libraw")/libjpeg.8.dylib" ]; then
+            echo "[INFO] OpenMP LibRaw already installed in rawpy (standalone libomp); skipping re-install."
+            return 0
+        fi
+    fi
     echo "Installing OpenMP LibRaw for release packaging (standalone libomp)..."
     LIBRAW_CACHE="$REPO_ROOT/.cache/libraw_openmp/libraw_r.25.dylib"
     if [ -f "$LIBRAW_CACHE" ]; then
