@@ -1,4 +1,4 @@
-"""Deferred, thread-safe import of the torch/kornia-based GPU decode backend.
+"""Deferred, thread-safe import of the GPU decode backend (CuPy and/or torch).
 
 PyTorch's OpenMP runtime must be initialized on the main/GUI thread: doing it
 for the first time on a background QRunnable thread causes __kmp_abort_process
@@ -8,15 +8,14 @@ main thread got there first -- correct, but it paid torch+kornia's ~0.9s
 import cost before the window could even be constructed, on every launch,
 whether or not GPU decode is ever used for that image.
 
-This module makes the import lazy (triggered once after first paint / session
-restore quiet) while preserving the safety guarantee: background decode
-threads never import the GPU backend themselves. They call
-wait_for_gpu_backend_ready() and either wait for the main thread to finish
-importing it, or fall back to CPU decode if that takes unexpectedly long.
+Product Windows CUDA installs are torch-free (CuPy). Optional torch/kornia may
+still be present in a developer environment or on macOS (MPS). This module
+never downloads a multi-GB torch wheel as a "repair" — missing GPU libs simply
+leave demosaic on CPU Fast RAW.
 
 The import itself still runs on the main thread (OpenMP constraint), but
 callers can pass a ``pump`` callback (typically QApplication.processEvents)
-between torch and kornia so paints/timers can flush mid-import.
+between heavy stages so paints/timers can flush mid-import.
 """
 import threading
 from typing import Callable, Optional
@@ -42,7 +41,7 @@ def import_gpu_backend_on_main_thread(
 
     logger = logging.getLogger(__name__)
     t0 = time.perf_counter()
-    logger.info("[GPU] Importing torch/kornia backend on main thread...")
+    logger.info("[GPU] Importing GPU demosaic backend on main thread...")
 
     def _pump() -> None:
         if pump is None:
@@ -52,68 +51,49 @@ def import_gpu_backend_on_main_thread(
         except Exception:
             pass
 
-    def _cupy_usable() -> bool:
-        """True when the torch-free CuPy demosaic backend can serve decodes."""
+    try:
+        # Prefer CuPy (torch-free Windows CUDA product path). Optional torch/
+        # kornia is for macOS MPS or a local dev env that still has them.
+        cupy_ok = False
         try:
             import cupy  # noqa: F401
 
-            return bool(cupy.cuda.runtime.getDeviceCount() > 0)
+            if cupy.cuda.runtime.getDeviceCount() > 0:
+                cupy_ok = True
+                logger.info("[GPU] CuPy CUDA demosaic backend available.")
         except Exception:
-            return False
+            pass
 
-    try:
-        # Split stages so processEvents can run between the two heavy imports.
-        # gpu_raw_processor re-imports torch/kornia at module scope; those are
-        # cache hits once the lines below have finished.
-        import sys as _sys
+        _pump()
 
         torch_ok = False
         try:
             import torch  # noqa: F401
 
-            # CUDA-or-repair applies to Windows only: on macOS torch without
-            # CUDA is the normal state (MPS), and offering a multi-GB CUDA
-            # torch download there is never right.
-            if _sys.platform == "win32" and not torch.cuda.is_available():
-                raise RuntimeError("torch imported but CUDA is unavailable")
-            torch_ok = True
+            if torch.cuda.is_available() or (
+                hasattr(torch.backends, "mps") and torch.backends.mps.is_available()
+            ):
+                torch_ok = True
+                logger.info("[GPU] Optional torch GPU backend available.")
         except Exception:
-            # Torch-free install: CuPy carries GPU demosaic on its own —
-            # never offer the multi-GB torch "repair" download when the
-            # intended backend is already present.
-            if _cupy_usable():
-                logger.info(
-                    "[GPU] torch unavailable; using torch-free CuPy demosaic backend."
-                )
-            else:
-                # External BYO provider may have been removed — notify and bundle.
-                from torch_provider import ensure_torch_for_gpu, load_provider
-
-                prov = load_provider()
-                if prov.is_external or prov.mode in ("none", "bundled"):
-                    logger.warning(
-                        "[GPU] torch/CUDA unavailable; attempting provider repair..."
-                    )
-                    if ensure_torch_for_gpu(notify=True):
-                        import torch  # noqa: F401
-
-                        if not torch.cuda.is_available():
-                            raise RuntimeError("bundled torch has no CUDA")
-                        torch_ok = True
-                    else:
-                        raise
-                else:
-                    raise
+            pass
 
         if torch_ok:
             _pump()
-            import kornia  # noqa: F401
+            try:
+                import kornia  # noqa: F401
+            except Exception:
+                logger.debug("[GPU] kornia not importable; torch path limited", exc_info=True)
+
+        if not cupy_ok and not torch_ok:
+            logger.info(
+                "[GPU] No CuPy/torch CUDA/MPS backend; demosaic stays on CPU Fast RAW."
+            )
 
         _pump()
-        import gpu_raw_processor  # noqa: F401 -- wires decode + cupy probe
+        import gpu_raw_processor  # noqa: F401 -- wires decode + backend probe
 
         try:
-            # Align load manager with GPU reality: process-pool vs CUDA/MPS slots.
             from image_load_manager import apply_gpu_decode_profile_to_manager
 
             apply_gpu_decode_profile_to_manager()

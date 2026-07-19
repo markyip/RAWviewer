@@ -118,11 +118,11 @@ docs/windows-gallery-performance-investigation.md
 .hf_cache_mobileclip/
 artifacts/mobileclip2_coreml/
 
-# Bundled MobileCLIP2 Core ML (large); export with scripts/export_mobileclip2_coreml.py --for-app
+# Bundled MobileCLIP2 Core ML (large); export with scripts/models/export_mobileclip2_coreml.py --for-app
 models/mobileclip2_coreml/**
 !models/mobileclip2_coreml/.gitkeep
 
-# Bundled MobileCLIP2 ONNX (large); download with scripts/download_mobileclip_onnx.py
+# Bundled MobileCLIP2 ONNX (large); download with scripts/models/download_mobileclip_onnx.py
 models/mobileclip_onnx/
 !models/mobileclip_onnx/.gitkeep
 

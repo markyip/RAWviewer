@@ -1267,7 +1267,7 @@ class MobileCLIPCoreMLBackend:
     encoder. Until a tokenizer asset is present, the backend reports unavailable
     rather than silently falling back to metadata-only results.
 
-    Exported MobileCLIP2 models (see ``scripts/export_mobileclip2_coreml.py``)
+    Exported MobileCLIP2 models (see ``scripts/models/export_mobileclip2_coreml.py``)
     expose the image encoder as FLOAT32 MultiArray ``[1,3,256,256]`` in NCHW
     pixel scale ``[0,1]``. Apple-shipped MobileCLIP S2 bundles use MLFeatureTypeImage;
     ``encode_image`` supports both via model introspection.
@@ -2872,39 +2872,27 @@ class SemanticImageIndex:
         self._backfill_file_signatures()
 
     def _ensure_model(self):
-        if self._model is not None:
-            return self._model
-        try:
-            from sentence_transformers import SentenceTransformer
-        except ImportError as exc:
-            raise RuntimeError(
-                "Semantic search requires 'sentence-transformers'. "
-                "Install dependencies with: pip install -r requirements.txt"
-            ) from exc
-        self._model = SentenceTransformer(self.model_name)
-        return self._model
+        # Legacy SentenceTransformer path removed — product builds use MobileCLIP
+        # (ONNX / Core ML) only. Keep a clear error if model_name is non-mobileclip.
+        raise RuntimeError(
+            f"Semantic search model {self.model_name!r} is not supported. "
+            "Install MobileCLIP ONNX/Core ML assets (Plus edition)."
+        )
 
     @staticmethod
     def semantic_backend_available() -> bool:
         if not semantic_embeddings_enabled():
             return False
-        if resolve_mobileclip_backend().available():
-            return True
-        try:
-            import sentence_transformers  # noqa: F401
-            return True
-        except Exception:
-            return False
+        return resolve_mobileclip_backend().available()
 
     def semantic_backend_error(self) -> str:
         if self.model_name.startswith("mobileclip-"):
             backend = self._mobileclip_backend or resolve_mobileclip_backend()
             return backend.availability_error()
-        try:
-            self._ensure_model()
-            return ""
-        except Exception as exc:
-            return str(exc)
+        return (
+            f"Semantic search model {self.model_name!r} is not supported. "
+            "Plus edition requires MobileCLIP ONNX/Core ML assets."
+        )
 
     def mobileclip_supports_hub_download(self) -> bool:
         if not self.model_name.startswith("mobileclip-"):

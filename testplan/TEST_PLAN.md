@@ -30,7 +30,7 @@ absent, so the plan runs on any machine.
 
 | Suite | Covers |
 |---|---|
-| `scripts/fast_raw_decode_parity_gate.py` | fast decode color parity vs rawpy (±1 8-bit LSB, half + full), split-unpack byte identity, GPU-vs-CPU color agreement, WB embedded-JPEG sanity trigger/residual on known-misparsed bodies |
+| `scripts/test/fast_raw_decode_parity_gate.py` | fast decode color parity vs rawpy (±1 8-bit LSB, half + full), split-unpack byte identity, GPU-vs-CPU color agreement, WB embedded-JPEG sanity trigger/residual on known-misparsed bodies |
 | `t_wb_sanity.py` | WB model-verdict cache: clean model measured once then skipped (0ms), misparsed model corrected per file, model-key disambiguation (matrix+dims+black+white) |
 
 Golden set: `/Volumes/Development/Manchester/DSC01089.ARW` +
@@ -55,8 +55,8 @@ For app-level numbers, use the uniform `[PERF]` log channel instead:
 
 ```bash
 RAWVIEWER_PERF=1 pixi run python src/main.py 2>&1 | tee /tmp/run.log
-pixi run python scripts/perf_report.py /tmp/run.log
-pixi run python scripts/perf_report.py --compare baseline.log new.log
+pixi run python scripts/bench/perf_report.py /tmp/run.log
+pixi run python scripts/bench/perf_report.py --compare baseline.log new.log
 ```
 
 Metrics emitted (see `src/perf_metrics.py` for the canonical list): `unpack`,
@@ -80,5 +80,5 @@ Run after significant display/editing changes:
 
 - `run_all.sh --fast` — before every commit touching `src/`
 - `run_all.sh` (full) — before pushing decode/edit-pipeline changes; after
-  `pixi install` / LibRaw rebuild (`scripts/build_libraw_openmp.sh`)
+  `pixi install` / LibRaw rebuild (`scripts/libraw/build_libraw_openmp.sh`)
 - Manual checklist — before tagging a release

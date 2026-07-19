@@ -55,25 +55,6 @@ def main() -> int:
         return 1
 
     child_env = os.environ.copy()
-    # Propagate external torch site-packages so Pixi children / process-pool
-    # workers resolve the same CUDA BYO provider as the GUI process.
-    try:
-        cfg = os.path.join(install_dir, "torch_provider.json")
-        if os.path.isfile(cfg):
-            import json
-
-            with open(cfg, encoding="utf-8") as f:
-                data = json.load(f)
-            if str(data.get("mode") or "") == "external":
-                sp = str(data.get("site_packages") or "").strip()
-                if sp and os.path.isdir(sp):
-                    child_env["RAWVIEWER_TORCH_SITE_PACKAGES"] = sp
-                    prev = child_env.get("PYTHONPATH", "")
-                    child_env["PYTHONPATH"] = (
-                        sp if not prev else sp + os.pathsep + prev
-                    )
-    except Exception:
-        pass
 
     cmd = [pixi_exe, "run", "start-windowless"]
     file_args = [arg for arg in sys.argv[1:] if arg]

@@ -7,11 +7,11 @@ A vs machine B) instead of eyeballing ad-hoc log strings:
 
     [PERF] metric=decode_full_cpu ms=412.3 file=IMG_0042.CR3 mp=32.7
 
-Aggregate a log with ``scripts/perf_report.py``:
+Aggregate a log with ``scripts/bench/perf_report.py``:
 
     RAWVIEWER_PERF=1 pixi run python src/main.py 2>&1 | tee /tmp/run.log
-    pixi run python scripts/perf_report.py /tmp/run.log
-    pixi run python scripts/perf_report.py --compare baseline.log new.log
+    pixi run python scripts/bench/perf_report.py /tmp/run.log
+    pixi run python scripts/bench/perf_report.py --compare baseline.log new.log
 
 Metrics are ON by default (they are one logging call each); set
 RAWVIEWER_PERF=0 to silence. The old scattered tags ([NAVTIME], [DECODE_T],

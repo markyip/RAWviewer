@@ -134,7 +134,19 @@ def detect_gpu_backend() -> str:
         logger.info(f"GPU Processor: Using backend override '{_GPU_BACKEND}' from RAWVIEWER_GPU_BACKEND.")
         return _GPU_BACKEND
 
-    # 1. Check for PyTorch (CUDA / Apple Silicon MPS)
+    # 1. CuPy first (Windows Plus CUDA product path). Prefer it over an
+    # accidental torch on PYTHONPATH so leftover BYO configs cannot steal
+    # the backend. Override with RAWVIEWER_GPU_BACKEND=pytorch_cuda if needed.
+    if _HAS_CUPY:
+        try:
+            if cupy.cuda.Device().id >= 0:
+                _GPU_BACKEND = "cupy"
+                logger.info("GPU Processor: CuPy CUDA backend detected.")
+                return _GPU_BACKEND
+        except Exception:
+            pass
+
+    # 2. Optional PyTorch (CUDA / Apple Silicon MPS) for macOS or local dev.
     if _HAS_TORCH:
         if torch.cuda.is_available():
             _GPU_BACKEND = "pytorch_cuda"
@@ -144,17 +156,6 @@ def detect_gpu_backend() -> str:
             _GPU_BACKEND = "pytorch_mps"
             logger.info("GPU Processor: PyTorch MPS (Apple Silicon) backend detected.")
             return _GPU_BACKEND
-
-    # 2. Check for CuPy (NVIDIA CUDA)
-    if _HAS_CUPY:
-        try:
-            # Try creating a device context to ensure CUDA driver is working
-            if cupy.cuda.Device().id >= 0:
-                _GPU_BACKEND = "cupy"
-                logger.info("GPU Processor: CuPy CUDA backend detected.")
-                return _GPU_BACKEND
-        except Exception:
-            pass
 
     _GPU_BACKEND = "cpu_only"
     return _GPU_BACKEND
@@ -705,6 +706,7 @@ def _gpu_demosaic_pytorch_body(
 
 
 _GAMMA_LUT_CUPY: Optional[Any] = None
+_CUPY_DEMOSAIC_KERNEL: Optional[Any] = None
 
 
 def _cupy_gamma_lut() -> Any:
@@ -725,6 +727,58 @@ CUPY_BAYER_PHASE: dict = {
     "GBRG": (1, 0),
     "BGGR": (1, 1),
 }
+
+
+def _cupy_demosaic_kernel() -> Any:
+    """Cached ElementwiseKernel — compile once per process, not per frame."""
+    global _CUPY_DEMOSAIC_KERNEL
+    if _CUPY_DEMOSAIC_KERNEL is not None:
+        return _CUPY_DEMOSAIC_KERNEL
+    # Bilinear Bayer demosaic on the pre-normalized, WB-scaled array.
+    # (ry, rx) is the position of the R sample in the 2x2 tile; B sits at the
+    # opposite corner and the two G samples fill the remaining diagonal, which
+    # covers all four patterns (RGGB/BGGR/GRBG/GBRG) with one kernel.
+    _CUPY_DEMOSAIC_KERNEL = cupy.ElementwiseKernel(
+        'raw float32 raw_data, int32 h, int32 w, int32 ry, int32 rx',
+        'raw float32 rgb_out',
+        '''
+        int y = i / w;
+        int x = i % w;
+        if (y < 1 || y >= h - 1 || x < 1 || x >= w - 1) return;
+
+        int py = y & 1;
+        int px = x & 1;
+        float r = 0, g = 0, b = 0;
+
+        if (py == ry && px == rx) {
+            // R pixel
+            r = raw_data[i];
+            g = (raw_data[i-1] + raw_data[i+1] + raw_data[i-w] + raw_data[i+w]) * 0.25f;
+            b = (raw_data[i-w-1] + raw_data[i-w+1] + raw_data[i+w-1] + raw_data[i+w+1]) * 0.25f;
+        } else if (py == 1 - ry && px == 1 - rx) {
+            // B pixel
+            r = (raw_data[i-w-1] + raw_data[i-w+1] + raw_data[i+w-1] + raw_data[i+w+1]) * 0.25f;
+            g = (raw_data[i-1] + raw_data[i+1] + raw_data[i-w] + raw_data[i+w]) * 0.25f;
+            b = raw_data[i];
+        } else {
+            // G pixel: R neighbors are horizontal when this is an R row
+            g = raw_data[i];
+            if (py == ry) {
+                r = (raw_data[i-1] + raw_data[i+1]) * 0.5f;
+                b = (raw_data[i-w] + raw_data[i+w]) * 0.5f;
+            } else {
+                r = (raw_data[i-w] + raw_data[i+w]) * 0.5f;
+                b = (raw_data[i-1] + raw_data[i+1]) * 0.5f;
+            }
+        }
+
+        rgb_out[i * 3 + 0] = r;
+        rgb_out[i * 3 + 1] = g;
+        rgb_out[i * 3 + 2] = b;
+        ''',
+        'demosaic_kernel'
+    )
+    return _CUPY_DEMOSAIC_KERNEL
 
 
 def gpu_demosaic_cupy_unpacked(unpacked, cancel_check: Optional[Callable[[], bool]] = None, return_linear: bool = False) -> np.ndarray:
@@ -766,51 +820,8 @@ def gpu_demosaic_cupy_unpacked(unpacked, cancel_check: Optional[Callable[[], boo
     # Pre-allocate output RGB image on GPU
     rgb_gpu = cupy.zeros((h, w, 3), dtype=cupy.float32)
 
-    # Bilinear Bayer demosaic on the pre-normalized, WB-scaled array.
-    # (ry, rx) is the position of the R sample in the 2x2 tile; B sits at the
-    # opposite corner and the two G samples fill the remaining diagonal, which
-    # covers all four patterns (RGGB/BGGR/GRBG/GBRG) with one kernel.
-    demosaic_kernel = cupy.ElementwiseKernel(
-        'raw float32 raw_data, int32 h, int32 w, int32 ry, int32 rx',
-        'raw float32 rgb_out',
-        '''
-        int y = i / w;
-        int x = i % w;
-        if (y < 1 || y >= h - 1 || x < 1 || x >= w - 1) return;
+    demosaic_kernel = _cupy_demosaic_kernel()
 
-        int py = y & 1;
-        int px = x & 1;
-        float r = 0, g = 0, b = 0;
-
-        if (py == ry && px == rx) {
-            // R pixel
-            r = raw_data[i];
-            g = (raw_data[i-1] + raw_data[i+1] + raw_data[i-w] + raw_data[i+w]) * 0.25f;
-            b = (raw_data[i-w-1] + raw_data[i-w+1] + raw_data[i+w-1] + raw_data[i+w+1]) * 0.25f;
-        } else if (py == 1 - ry && px == 1 - rx) {
-            // B pixel
-            r = (raw_data[i-w-1] + raw_data[i-w+1] + raw_data[i+w-1] + raw_data[i+w+1]) * 0.25f;
-            g = (raw_data[i-1] + raw_data[i+1] + raw_data[i-w] + raw_data[i+w]) * 0.25f;
-            b = raw_data[i];
-        } else {
-            // G pixel: R neighbors are horizontal when this is an R row
-            g = raw_data[i];
-            if (py == ry) {
-                r = (raw_data[i-1] + raw_data[i+1]) * 0.5f;
-                b = (raw_data[i-w] + raw_data[i+w]) * 0.5f;
-            } else {
-                r = (raw_data[i-w] + raw_data[i+w]) * 0.5f;
-                b = (raw_data[i-1] + raw_data[i+1]) * 0.5f;
-            }
-        }
-
-        rgb_out[i * 3 + 0] = r;
-        rgb_out[i * 3 + 1] = g;
-        rgb_out[i * 3 + 2] = b;
-        ''',
-        'demosaic_kernel'
-    )
-    
     # Both raw_data and rgb_out are declared `raw` (manual indexing with
     # negative/row-stride offsets), so CuPy has no non-raw array argument to
     # infer the loop size from -- without an explicit `size`, the launch

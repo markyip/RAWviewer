@@ -15,7 +15,7 @@ Two fixes went into the embedded-preview grid-thumbnail path:
      object for both, since each open is a full LibRaw parse.
 
 Uses the same real golden ARW already relied on elsewhere in this suite
-(scripts/fast_raw_decode_parity_gate.py) so this only runs where that file
+(scripts/test/fast_raw_decode_parity_gate.py) so this only runs where that file
 is actually present; skips (not fails) otherwise, matching this repo's
 convention for machine-local golden fixtures.
 """

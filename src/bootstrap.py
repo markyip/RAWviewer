@@ -22,7 +22,7 @@ PIXI_DOWNLOAD_URL = (
 )
 DOWNLOAD_RETRIES = 3
 RETRY_DELAY_SEC = 3
-MIN_FREE_BYTES = 3 * 1024 * 1024 * 1024  # ~3 GiB for pixi env + models (full)
+MIN_FREE_BYTES = 2 * 1024 * 1024 * 1024  # ~2 GiB for pixi env + models (Plus)
 MIN_FREE_BYTES_LITE = 1024 * 1024 * 1024  # ~1 GiB for lite (no AI models)
 INSTALLER_PROGRESS_PREFIX = "@RAWVIEWER_PROGRESS"
 MODEL_DOWNLOAD_PROGRESS_START = 5
@@ -587,42 +587,10 @@ class InstallWorker(QObject):
                     self._abort_cancelled()
                     return
 
+            # Full (DirectML / CUDA+CuPy) needs headroom for pixi + ~600 MB models;
+            # CUDA no longer downloads a multi-GB torch wheel.
             min_bytes = MIN_FREE_BYTES_LITE if self.install_mode == "lite" else MIN_FREE_BYTES
-            # CUDA may reuse an existing torch — probe before requiring ~3 GiB free
-            # for a full cu124 download.
-            cuda_external = None
             effective_mode = self.install_mode
-            if self.install_mode == "cuda":
-                try:
-                    # Prefer the copy that ships with the installer payload; fall
-                    # back to the live tree when running bootstrap from source.
-                    sys.path.insert(0, os.path.join(BUNDLE_DIR, "src"))
-                    from torch_provider import (  # type: ignore
-                        discover_external_torch,
-                        save_provider,
-                        install_byo_sidecar_packages,
-                        TorchProvider,
-                    )
-
-                    cuda_external = discover_external_torch(log=self.log_signal.emit)
-                    if cuda_external is not None:
-                        effective_mode = "cuda-byo"
-                        min_bytes = MIN_FREE_BYTES_LITE + 512 * 1024 * 1024
-                        self.log_signal.emit(
-                            "CUDA profile will reuse your existing PyTorch "
-                            f"{cuda_external.torch_version} (no torch download)."
-                        )
-                    else:
-                        self.log_signal.emit(
-                            "No usable external PyTorch CUDA 12.x found — "
-                            "RAWviewer will download torch into its own environment."
-                        )
-                except Exception as exc:
-                    self.log_signal.emit(
-                        f"External PyTorch probe failed ({exc}); will download bundled torch."
-                    )
-                    cuda_external = None
-                    effective_mode = "cuda"
 
             disk_err = _check_disk_space(target_dir, min_bytes)
             if disk_err:
@@ -641,31 +609,33 @@ class InstallWorker(QObject):
             self.log_signal.emit("Copying core files...")
             # Copy the selected variant of pixi.toml to the target folder
             manifest_name = f"pixi-{effective_mode}.toml"
-            if effective_mode == "cuda-byo":
-                manifest_name = "pixi-cuda-byo.toml"
             manifest_source = os.path.join(BUNDLE_DIR, manifest_name)
             if not os.path.isfile(manifest_source):
-                # Dev / older payload: map BYO onto DirectML-sized deps.
-                if effective_mode == "cuda-byo":
-                    manifest_source = os.path.join(BUNDLE_DIR, "pixi-directml.toml")
-                else:
-                    manifest_source = os.path.join(
-                        BUNDLE_DIR, f"pixi-{self.install_mode}.toml"
-                    )
+                manifest_source = os.path.join(
+                    BUNDLE_DIR, f"pixi-{self.install_mode}.toml"
+                )
             if not os.path.isfile(manifest_source):
                 manifest_source = os.path.join(BUNDLE_DIR, "pixi.toml")
             shutil.copy2(manifest_source, os.path.join(target_dir, "pixi.toml"))
 
-            # Lite / DirectML / CUDA-BYO must not reuse a previous bundled CUDA
-            # Pixi env — leftover torch+cu124 alone is ~2.4 GB+.
-            if self.install_mode in ("lite", "directml") or effective_mode == "cuda-byo":
-                pixi_env_root = os.path.join(target_dir, ".pixi")
-                if os.path.isdir(pixi_env_root):
-                    self.log_signal.emit(
-                        f"{effective_mode} install: clearing previous Pixi environment "
-                        "(drops leftover CUDA packages)..."
-                    )
-                    shutil.rmtree(pixi_env_root, ignore_errors=True)
+            # Always clear a previous Pixi env on reinstall: leftover torch+cu124
+            # (~2.4 GB+) or a mismatched CuPy/DirectML stack must not linger.
+            pixi_env_root = os.path.join(target_dir, ".pixi")
+            if os.path.isdir(pixi_env_root):
+                self.log_signal.emit(
+                    f"{effective_mode} install: clearing previous Pixi environment..."
+                )
+                shutil.rmtree(pixi_env_root, ignore_errors=True)
+
+            # Drop stale BYO config from older installers (external torch binding).
+            for stale in ("torch_provider.json",):
+                stale_path = os.path.join(target_dir, stale)
+                if os.path.isfile(stale_path):
+                    try:
+                        os.remove(stale_path)
+                        self.log_signal.emit(f"Removed obsolete {stale}")
+                    except OSError:
+                        pass
 
             src_dir = os.path.join(target_dir, "src")
             if os.path.exists(src_dir):
@@ -710,7 +680,7 @@ class InstallWorker(QObject):
             clear_src = os.path.join(BUNDLE_DIR, "clear_cache.bat")
             if not os.path.isfile(clear_src):
                 clear_src = os.path.join(
-                    BUNDLE_DIR, "scripts", "Launch", "bat", "clear_cache_user.bat"
+                    BUNDLE_DIR, "scripts", "Launch", "windows", "clear_cache_user.bat"
                 )
             if os.path.isfile(clear_src):
                 shutil.copy2(clear_src, os.path.join(target_dir, "clear_cache.bat"))
@@ -783,9 +753,9 @@ class InstallWorker(QObject):
 
             self.progress_signal.emit(5)
 
-            if effective_mode == "cuda-byo":
+            if effective_mode == "cuda":
                 self.log_signal.emit(
-                    "Downloading Python dependencies (without PyTorch — using yours)..."
+                    "Downloading Python dependencies (CuPy CUDA demosaic, no PyTorch)..."
                 )
             else:
                 self.log_signal.emit(
@@ -806,45 +776,8 @@ class InstallWorker(QObject):
                 self.finished.emit(False, "")
                 return
 
-            # Bind torch provider: external BYO or bundled CUDA.
-            if self.install_mode == "cuda":
-                try:
-                    sys.path.insert(0, os.path.join(target_dir, "src"))
-                    from torch_provider import (  # type: ignore
-                        TorchProvider,
-                        save_provider,
-                        install_byo_sidecar_packages,
-                    )
-
-                    if effective_mode == "cuda-byo" and cuda_external is not None:
-                        install_byo_sidecar_packages(
-                            target_dir, cuda_external, log=self.log_signal.emit
-                        )
-                        save_provider(cuda_external, target_dir)
-                        self.log_signal.emit(
-                            f"Registered external PyTorch at {cuda_external.site_packages}"
-                        )
-                    else:
-                        # Bundled: torch came from pixi; record + prune *.lib
-                        _prune_torch_link_libs(target_dir, self.log_signal.emit)
-                        bundled_py = os.path.join(
-                            target_dir, ".pixi", "envs", "default", "python.exe"
-                        )
-                        save_provider(
-                            TorchProvider(
-                                mode="bundled",
-                                python_exe=bundled_py if os.path.isfile(bundled_py) else "",
-                                validated_at=time.strftime("%Y-%m-%dT%H:%M:%S"),
-                            ),
-                            target_dir,
-                        )
-                except Exception as exc:
-                    self.log_signal.emit(f"Warning: torch provider setup: {exc}")
-            elif self.install_mode not in ("lite", "directml"):
-                _prune_torch_link_libs(target_dir, self.log_signal.emit)
-            else:
-                # DirectML / Lite: no torch expected
-                pass
+            # Safety: if a leftover torch wheel somehow remains, drop link-time *.lib.
+            _prune_torch_link_libs(target_dir, self.log_signal.emit)
 
             self.progress_signal.emit(MODEL_DOWNLOAD_PROGRESS_START)
 
@@ -872,7 +805,7 @@ class InstallWorker(QObject):
                         self.log_signal.emit(label)
 
                 models_code = _run_subprocess_with_retry(
-                    [pixi_exe, "run", "python", "-u", "scripts/download_mobileclip_onnx.py"],
+                    [pixi_exe, "run", "python", "-u", "scripts/models/download_mobileclip_onnx.py"],
                     target_dir,
                     self.log_signal.emit,
                     "AI model download",
@@ -1253,8 +1186,7 @@ class InstallerGUI(QMainWindow):
             "Plus — DirectML (AI search; ~1.5–2 GB + ~600 MB models; CPU demosaic)"
         )
         self.radio_cuda = QRadioButton(
-            "Plus — NVIDIA CUDA (AI search + GPU demosaic; prefers existing torch+cu12x, "
-            "else ~3–4 GB + ~600 MB models)"
+            "Plus — NVIDIA CUDA (AI search + CuPy GPU demosaic; ~1.5–2 GB + ~600 MB models)"
         )
 
         # Default Standard: lean install for most users.

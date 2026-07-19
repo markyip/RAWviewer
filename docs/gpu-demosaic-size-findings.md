@@ -3,7 +3,7 @@
 **Date:** 2026-07-19  
 **Hardware:** NVIDIA GeForce RTX 4070 · `torch 2.6.0+cu124`  
 **Method:** RAW HQ (`RAWVIEWER_AUTOTEST_RAW_MODE=1`); clear `~/.rawviewer_cache` + `HKCU\Software\RAWviewer` between every run.  
-**Harness:** `scripts/run_gpu_vs_cpu_demosaic_justification_bench.ps1`  
+**Harness:** `scripts/bench/run_gpu_vs_cpu_demosaic_justification_bench.ps1`  
 **Raw report:** `bench/logs/gpu_vs_cpu_demosaic_report_20260719_022103.txt`
 
 ---
@@ -120,25 +120,23 @@ PyTorch’s Windows **cu124 wheel does not use the CUDA Toolkit install** as its
    - verifies `import kornia` / demosaic smoke test,
    - records the chosen prefix in a local config (no silent fallback to a broken env).
 
-**Implemented (2026-07-19):** CUDA Full installer now **probes first** via
-`torch_provider.discover_external_torch()`. If a torch 2.x + CUDA 12.x install
-is found, it installs `pixi-cuda-byo` (no torch wheel), writes
-`torch_provider.json`, and binds that site-packages at launch. If the external
-provider later disappears, `ensure_torch_for_gpu()` notifies the user and
-downloads cu124 into the local Pixi env. Bundled install still runs only when
-no external provider passes validation.
+**Rolled back (2026-07-19):** Automatic BYO torch was removed. Plus CUDA now
+ships **CuPy** (`cupy-cuda12x`) for demosaic — no external torch probe, no
+`pixi-cuda-byo` manifest, no runtime `torch_provider` binding or multi-GB
+repair download. Semantic search stays on ONNX DirectML / Core ML (torch-free).
 
-Do **not** blindly honor a generic “CUDA on PATH” as a substitute for the torch wheel.
+Do **not** treat a generic “CUDA on PATH” or a user conda torch as a substitute
+for the product demosaic stack.
 
 ---
 
 ## 4. Product implications (from this review)
 
-1. **CUDA Full stays opt-in** — speedup is real but modest vs ~6× disk.  
-2. **Safe prune:** drop `torch/lib/*.lib` (~770 MB) in the installer post-step (**implemented** in `bootstrap._prune_torch_link_libs`).  
-3. **Do not** chase per-DLL cherry-picks without a dedicated compatibility test matrix.  
-4. **Reuse existing torch** is a possible advanced feature; **reuse CUDA Toolkit alone** is not a substitute for the wheel.  
-5. Longer-term size wins: SCUNet→ONNX/DirectML; optional non-torch demosaic rewrite — not “trim torch/lib to only our Python calls.”
+1. **CUDA Plus stays opt-in** — demosaic speedup is real but modest; prefer DirectML for most AI-search users.  
+2. **Torch-free CUDA path:** ship **CuPy** instead of cu124 torch (~multi-GB saved).  
+3. **Do not** auto-BYO external torch (ABI / support risk; rolled back).  
+4. **Safe prune** of `torch/lib/*.lib` remains useful only if a leftover torch wheel is present.  
+5. Semantic search stays on **ORT DirectML / Core ML** — independent of demosaic backend.
 
 ---
 
@@ -192,11 +190,11 @@ Wall-clock improved ~**1.3×** vs serialized unpack (prefetch benefits more than
 | Risk | Breakage when kornia/spandrel need an op you stripped; support burden |
 | Saving | Uncertain; `torch_cuda.dll` alone is ~900 MB and hard to carve |
 
-**Verdict:** **Poor ROI** for an app installer vs Option A or “CUDA opt-in + DirectML default.” Prefer prune `*.lib` + optional BYO-torch later.
+**Verdict:** **Poor ROI** for an app installer vs CuPy torch-free demosaic + DirectML search.
 
-### Option C — Keep stock torch, shrink elsewhere (chosen near-term)
+### Option C — Keep stock torch, shrink elsewhere (superseded)
 
-1. Prune `*.lib` (~0.7–0.8 GB) — **done**.  
-2. DirectML Full default; CUDA Full opt-in.  
-3. Improve CPU Fast RAW concurrency so Lite/DirectML stay competitive (above).  
-4. Optional later: SCUNet→ONNX/DirectML; BYO existing `torch+cu12x` env.
+1. Prune `*.lib` (~0.7–0.8 GB) — still useful if a leftover torch wheel appears.  
+2. DirectML Plus default for search; CUDA Plus opt-in for demosaic.  
+3. CPU Fast RAW concurrency improvements (above).  
+4. **Superseded:** Windows Plus CUDA now uses **CuPy**; automatic BYO torch was **rolled back**.

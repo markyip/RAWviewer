@@ -7,7 +7,7 @@ interpreter) so workers stay lightweight:
 
     RAWVIEWER_USE_PROCESS_POOL=1 \\
     RAWVIEWER_PROCESS_POOL_PYTHON="$(pwd)/.pixi/envs/default/bin/python" \\
-      ./scripts/Launch/shell/launch_dev_full.sh
+      ./scripts/Launch/macos/launch_dev_full.sh
 
 Dev (non-frozen) launches already use the interpreter as ``sys.executable``;
 this module is the documented spawn target for frozen macOS packages and for

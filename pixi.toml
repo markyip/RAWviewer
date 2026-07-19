@@ -1,6 +1,6 @@
 [workspace]
 name = "rawviewer"
-version = "3.0.0"
+version = "3.0.1"
 description = "RAWviewer - Professional RAW Image Viewer with Semantic Search"
 authors = ["Mark Yip"]
 channels = ["conda-forge"]
@@ -53,8 +53,8 @@ requests = "*"
 certifi = "*"
 pillow-heif = "*"
 # Torch-free GPU pipeline: demosaic runs on CuPy (Windows CUDA) or CPU Fast
-# RAW (cv2). torch/kornia are no longer installed; an external torch+cu12x
-# found by torch_provider (BYO) can still serve the legacy kornia path.
+# RAW (cv2). PyTorch is not a product dependency; optional torch in a local
+# env can still serve the legacy kornia path when present.
 
 
 # Windows semantic search (MobileCLIP ONNX). Default for `pixi install` / `pixi run`.

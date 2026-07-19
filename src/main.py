@@ -1,20 +1,12 @@
 import sys
 # pyright: reportOptionalMemberAccess=false
 import os
-# Safety net only: the REAL fix is scripts/build_libraw_openmp.sh retargeting
+# Safety net only: the REAL fix is scripts/libraw/build_libraw_openmp.sh retargeting
 # the custom LibRaw to torch's libomp so exactly one OpenMP runtime loads
 # (two runtimes = OMP Error #15 abort, or with this flag, possible crashes /
 # silently wrong results). This flag keeps envs that haven't re-run the build
 # script bootable; a properly built env never exercises it.
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
-
-# Prefer an external torch+cu12x (CUDA BYO) before any GPU import.
-try:
-    from torch_provider import apply_at_startup
-
-    apply_at_startup()
-except Exception:
-    pass
 
 # Darkroom chrome palette (see theme.py). Zero-dependency module (no PyQt
 # imports), safe this early -- needed before PyQt6 import below because the
@@ -22,12 +14,9 @@ except Exception:
 # other local import in this file.
 import theme
 
-# torch/kornia are no longer imported eagerly here (that used to cost ~0.9s
-# before the window could even be constructed, on every launch). Import
-# ordering safety is now handled by torch_bootstrap: the main thread imports
-# the GPU backend right after the window is shown, and background decode
-# threads wait for that instead of ever importing it themselves. See
-# torch_bootstrap.py for the full rationale.
+# GPU demosaic backends (CuPy / optional torch) are deferred until after the
+# window is shown — see torch_bootstrap.import_gpu_backend_on_main_thread().
+# Background decode threads wait for that instead of importing on their own.
 import platform
 import ctypes
 import time
@@ -1329,18 +1318,12 @@ def _lazy_import_heavy_modules(splash=None):
     except Exception:
         pass
     
-    # GPU RAW backend (torch/kornia) import is deferred until right after the
-    # window is shown -- see torch_bootstrap.import_gpu_backend_on_main_thread()
-    # in main(). Background decode threads wait on that instead of importing
-    # it here, so the ~0.9s torch+kornia import no longer blocks first paint.
+    # GPU RAW backend import is deferred until after the window is shown
+    # (torch_bootstrap). Semantic search is also deferred: importing
+    # semantic_search.py pulls a large ONNX/Core ML stack that is unused on
+    # Standard and unused on Plus until the user opens Search — keep it off
+    # the splash critical path (_get_semantic_index imports on first use).
 
-    _update_splash("Loading AI search engine...")
-    try:
-        from semantic_search import SemanticImageIndex as _SemanticImageIndex
-        SemanticImageIndex = _SemanticImageIndex
-    except Exception as e:
-        safe_print(f"  - semantic_search: WARNING - {e}", flush=True)
-        
     _update_splash("Loading core architecture...")
     from image_cache import get_image_cache as _get_image_cache, initialize_cache as _initialize_cache
     get_image_cache = _get_image_cache
@@ -9772,10 +9755,17 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             )
 
     def _get_semantic_index(self):
+        global SemanticImageIndex
         if SemanticImageIndex is None:
-            raise RuntimeError(
-                "Semantic search module is unavailable. Please ensure dependencies are installed."
-            )
+            try:
+                from semantic_search import SemanticImageIndex as _SemanticImageIndex
+
+                SemanticImageIndex = _SemanticImageIndex
+            except Exception as exc:
+                raise RuntimeError(
+                    "Semantic search module is unavailable. "
+                    "Please ensure Plus-edition dependencies are installed."
+                ) from exc
         if self._semantic_index is None:
             self._semantic_index = SemanticImageIndex()
             if getattr(self, "_pending_abort_semantic_index", False):
@@ -13530,6 +13520,11 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         if hasattr(self.image_manager, "set_gallery_view_active"):
             self.image_manager.set_gallery_view_active(False)
         self._suppress_single_manager_callbacks = False
+        # Gallery entry aborts/defers CuPy import; resume once back in single view.
+        try:
+            self._schedule_deferred_gpu_backend_import(reason="fallback")
+        except Exception:
+            pass
         try:
             from PyQt6.QtCore import QTimer
             self._pause_semantic_indexing_deferred()
@@ -13878,6 +13873,9 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         logger = logging.getLogger(__name__)
         self._suppress_single_manager_callbacks = True
         try:
+            # Session restore may still be staging full decode / CuPy import;
+            # abort that before raising gallery concurrency or tiles starve.
+            self._abort_session_restore_heavy_for_gallery()
             self._defer_background_indexing_for_gallery()
             if hasattr(self, "image_manager") and self.image_manager is not None:
                 mgr = self.image_manager
@@ -26952,6 +26950,34 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         )
         QTimer.singleShot(full_delay_ms, self._run_post_session_restore_full_decode)
 
+    def _abort_session_restore_heavy_for_gallery(self) -> None:
+        """Drop session-restore staging when the user switches to gallery.
+
+        Gallery tiles share the load pool; continuing deferred full decode /
+        nav preload (or a forever-retry timer) starves visible-tile fill.
+        Clearing the defer flags also unblocks idle CuPy import scheduling
+        once the gallery is no longer active.
+        """
+        if not (
+            getattr(self, "_session_restore_defer_preload", False)
+            or getattr(self, "_session_restore_staged_scheduled", False)
+        ):
+            return
+        import logging
+
+        logging.getLogger(__name__).info(
+            "[SESSION] Aborting staged restore loads for gallery entry"
+        )
+        self._session_restore_defer_preload = False
+        self._session_restore_staged_scheduled = False
+        self._session_restore_full_decode_allowed = False
+        timer = getattr(self, "_gpu_backend_import_timer", None)
+        if timer is not None:
+            try:
+                timer.stop()
+            except Exception:
+                pass
+
     def _run_post_session_restore_full_decode(self) -> None:
         import logging
 
@@ -26959,12 +26985,10 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         if not self._session_restore_burst_active():
             return
         if getattr(self, "view_mode", "single") == "gallery":
-            # Gallery tile loads share the ImageLoadManager pool; a 30+ MP full
-            # decode here starves visible-tile fill. Retry after the gallery quiets.
-            logger.info(
-                "[SESSION] Deferring full decode: gallery view active"
-            )
-            QTimer.singleShot(2000, self._run_post_session_restore_full_decode)
+            # User left single view — do not keep retrying a 30+ MP full decode
+            # every 2s (that competed with gallery tile fill). Abort staging;
+            # single-view will decode normally on the next gallery→single.
+            self._abort_session_restore_heavy_for_gallery()
             return
         self._session_restore_full_decode_allowed = True
         logger.info(
@@ -26984,14 +27008,11 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         logger = logging.getLogger(__name__)
         if not getattr(self, "_session_restore_defer_preload", False):
             return
+        if getattr(self, "view_mode", "single") == "gallery":
+            self._abort_session_restore_heavy_for_gallery()
+            return
         self._session_restore_defer_preload = False
         self._session_restore_staged_scheduled = False
-        try:
-            lm = getattr(self, "image_manager", None)
-            if lm is not None and hasattr(lm, "exit_gallery_warmup_throttle"):
-                lm.exit_gallery_warmup_throttle()
-        except Exception:
-            pass
         logger.info("[SESSION] Starting deferred nav preload after session restore")
         self._start_preloading()
         self._schedule_idle_display_prefetch()
@@ -27002,7 +27023,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         except Exception:
             pass
         # Full decode + neighbor preload have landed — now it's safe to pay
-        # the main-thread torch import without starving those timers.
+        # the main-thread CuPy/torch import without starving those timers.
         self._schedule_deferred_gpu_backend_import(reason="post_session_restore")
 
     def _schedule_deferred_gpu_backend_import(self, *, reason: str = "fallback") -> None:
@@ -27095,20 +27116,15 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             QTimer.singleShot(retry_ms, self._try_import_gpu_backend)
             return
         # A view switch (esp. single -> gallery) queues a burst of main-thread
-        # work; a 6-8s torch import landing right then freezes the gallery
-        # before any tile can paint (observed: import fired 1s after gallery
-        # entry, tiles blocked for the full import). Wait for switch quiet and
-        # for the gallery's visible-tile fill to drain.
+        # work; a multi-second CuPy/torch import landing then freezes the
+        # gallery (observed: only a handful of tiles paint, then UI stalls
+        # for the full import). Gallery thumbs use CPU paths — never import
+        # the GPU demosaic backend while gallery is active.
         switch_ts = float(getattr(self, "_last_view_mode_switch_ts", 0.0) or 0.0)
         if switch_ts > 0.0 and (time.monotonic() - switch_ts) * 1000.0 < nav_quiet_ms:
             QTimer.singleShot(retry_ms, self._try_import_gpu_backend)
             return
-        gj = getattr(self, "gallery_justified", None)
-        if (
-            getattr(self, "view_mode", "single") == "gallery"
-            and gj is not None
-            and len(getattr(gj, "_active_tasks", ()) or ()) > 0
-        ):
+        if getattr(self, "view_mode", "single") == "gallery":
             QTimer.singleShot(retry_ms, self._try_import_gpu_backend)
             return
         if torch_bootstrap is None:
@@ -33195,7 +33211,7 @@ def main():
 
     # Cap OpenMP threads before rawpy/LibRaw loads. LibRaw decodes are
     # OpenMP-parallel on Windows (rawpy wheel ships vcomp140) and on macOS
-    # via scripts/build_libraw_openmp.sh; with 2 concurrent RAW workers an
+    # via scripts/libraw/build_libraw_openmp.sh; with 2 concurrent RAW workers an
     # uncapped pool (all cores each) starves the GUI thread (observed as a
     # full app freeze on M1). Half the cores, clamped to 2..8, keeps most of
     # the per-decode speedup while leaving headroom for the GUI and the

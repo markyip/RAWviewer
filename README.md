@@ -51,7 +51,7 @@
 ## New in 3.0
 
 - **Much faster than 2.5** — cold Windows suite (cache cleared each run): gallery ready **~2.7–2.9×** sooner (**8.6s → ~3s**); RAW full-res navigation median **~1.6–1.7×** sooner (**0.95s → ~0.6s**). Standard and Plus share the same 3.0 pipeline and both beat 2.5 on cull paths — see [`RELEASE_NOTES.md`](RELEASE_NOTES.md)
-- **Adjust panel** — develop RAWs non-destructively: tone, white-balance presets, crop, dodge & burn, healing, vignette/dehaze, creative LUTs, and savable presets; export JPEG / WebP / 16-bit TIFF (**Windows Plus** also offers export-only **AI denoise** via SCUNet; not in the macOS `.app` — see [Standard or Plus?](#standard-or-plus))
+- **Adjust panel** — develop RAWs non-destructively: tone, white-balance presets, crop, dodge & burn, healing, vignette/dehaze, creative LUTs, and savable presets; export JPEG / WebP / 16-bit TIFF
 - **Star ratings** — rate 1–5 with the number keys; filter the gallery by minimum rating
 - **Nikon High Efficiency (HE/HE*) files** now open for browsing and culling
 - **Lean Standard edition** for machines where install size matters
@@ -208,16 +208,19 @@ Both editions have the complete viewer: gallery, culling, Compare, star ratings,
 | Everything above — browse, cull, rate, compare, develop, export | ✅ | ✅ | ✅ |
 | Search by describing the photo (`sunset on beach`) | — | ✅ | ✅ |
 | Find photos with people (`has:face`) | — | ✅ | ✅ |
-| GPU demosaic (NVIDIA) | — | — (CPU Fast RAW) | ✅ |
-| Export-time AI denoise (SCUNet) | — | — | ✅ Windows only |
-| Install size (approx.) | ~0.8–1 GB | ~1.5–2 GB + ~600 MB models | ~3–4 GB + ~600 MB models |
+| RAW demosaic | CPU Fast RAW | CPU Fast RAW | **CuPy** GPU (NVIDIA) |
+| Install size (approx.) | ~0.8–1 GB | ~1.5–2 GB + ~600 MB models | ~1.5–2 GB + ~600 MB models |
 | Comfortable with | 8 GB RAM | 16 GB RAM | 16 GB RAM + NVIDIA |
 
-**Pick Standard** for a lean install and cull-by-eye workflow. **Pick Plus (DirectML)** for AI search without the CUDA torch wheel. **Pick Plus (CUDA)** only when you want NVIDIA GPU demosaic / SCUNet — most of that footprint is PyTorch’s ~2.3–2.4 GB cu124 package, not app code.
+**DirectML is for AI search, not demosaic.** On Windows Plus, photo-description search uses ONNX Runtime with DirectML in both Plus editions. Plus (DirectML) and Standard decode RAW with **CPU Fast RAW**; only Plus (CUDA) adds **CuPy** GPU demosaic.
 
-On Windows, the installer offers **Standard**, **Plus (DirectML)**, and **Plus (CUDA)**.
+**CuPy is one frame at a time** (serialized), but a single RAW HQ demosaic is still typically **~1.25–1.4×** faster than CPU Fast RAW on a modern NVIDIA GPU — enough to notice when arrow-keying through high-quality RAW, not a multi-fold leap.
 
-**macOS limitation — AI denoise:** Packaged macOS Standard/Plus apps **do not include PyTorch**, so the Export menu’s **JPEG / TIFF + AI denoise (SCUNet)** items are hidden. Standard JPEG / WebP / 16-bit TIFF export still works. SCUNet export currently needs `torch` + `spandrel` (CUDA or Apple MPS); an ONNX/Core ML path is not shipped yet. Windows Plus builds that include torch show the options and can download the ~69 MB weights on first use.
+**Pick Standard** for a lean install and cull-by-eye. **Pick Plus (DirectML)** for AI search (recommended default on most PCs). **Pick Plus (CUDA)** only if you have NVIDIA and want the modest RAW HQ demosaic speedup (no multi-GB PyTorch wheel).
+
+On Windows, the installer offers **Standard**, **Plus (DirectML)**, and **Plus (CUDA)**. On macOS, Plus uses Core ML for search and CPU Fast RAW for demosaic (no CuPy path).
+
+**Semantic search** does not need PyTorch.
 
 
 ## Cameras & formats
@@ -280,7 +283,7 @@ This clears local cache and session state only — **not** your photos or XMP si
 | Gallery slow on a huge folder (first open) | Normal — RAWviewer waits for capture-time sorting so gallery order is correct; instant when metadata is cached |
 | Upgraded but search / gallery still feels slow | Run **`clear_cache`** once (see [Upgrading from an older version](#upgrading-from-an-older-version)), then reopen the folder |
 
-To clear cache: **`scripts\Launch\bat\clear_cache.bat`** (Windows) · **`scripts/Launch/shell/clear_cache.sh`** (Mac)
+To clear cache: **`scripts\Launch\windows\clear_cache.bat`** (Windows) · **`scripts/Launch/macos/clear_cache.sh`** (Mac)
 
 </details>
 
@@ -290,14 +293,14 @@ To clear cache: **`scripts\Launch\bat\clear_cache.bat`** (Windows) · **`scripts
 | Problem | What to do |
 |---------|------------|
 | SmartScreen warning | More info → Run anyway |
-| Slow AI search (**Plus**) | Prefer **DirectML** on most PCs; use **CUDA** only with NVIDIA + CUDA |
+| Slow AI search (**Plus**) | AI search already uses DirectML on both Plus editions — edition choice does not speed up search. For RAW HQ browse speed on NVIDIA, try **Plus (CUDA)** (~1.25–1.4× demosaic vs CPU) |
 | Installer stuck on "Downloading models" (**Plus**) | Models (~600 MB) can take several minutes. Check firewall, VPN, or proxy if it fails — browsing still works; open gallery **Search** later to retry |
 | Opened Setup again instead of the app | Launch **RAWviewer** from the Desktop shortcut — not **`RAWviewer_Setup.exe`** |
 | AI search missing after install (**Plus**) | Open gallery **Search** → accept the download prompt |
 | RAWviewer not in Open with | Re-run the installer (repair), or reinstall |
 | Leftover cache after uninstall | Run **`uninstall.bat`** again, or delete `%USERPROFILE%\.rawviewer_cache` manually |
 | Out of memory during AI indexing | Use **Standard** on 8 GB PCs, or see [memory tuning](docs/DEVELOPING.md#automatic-memory-tuning) |
-| App slow or exits after reopening last folder | On 8 GB PCs, use **Standard** or set `RAWVIEWER_DISABLE_SESSION_RESTORE=1` |
+| Low-RAM PC OOMs when relaunch restores the last folder | Restoring the last folder/file is **intentional**. On 8 GB PCs under pressure, use **Standard**, or opt out with `RAWVIEWER_DISABLE_SESSION_RESTORE=1` |
 | RAW always shows demosaic, not embedded JPEG | Switch to **Embedded JPEG workflow** |
 | Crash | Enable file logging with `RAWVIEWER_FILE_LOG=1`, then check the install folder |
 
@@ -312,12 +315,12 @@ To clear cache: **`scripts\Launch\bat\clear_cache.bat`** (Windows) · **`scripts
 | `bash: command not found` | Type `cd `, drag the extracted folder onto Terminal, press Return, then run the command again |
 | Can't read Desktop/Documents | System Settings → Privacy → **Full Disk Access** → add RAWviewer |
 | Search says models missing (**Plus**) | Open gallery search and click **Download** when prompted (needs internet once) |
-| No **AI denoise** in Export menu (**Plus**) | Expected on macOS `.app` builds (PyTorch not bundled). Use Windows Plus, or standard JPEG/WebP/TIFF export on Mac. See [Standard or Plus?](#standard-or-plus) |
+| No **AI denoise** in Export menu | Expected — export-time SCUNet denoise was removed in 3.0.1; use Adjust chroma NR + JPEG/WebP/TIFF export. |
 | Download failed (SSL / certificate error) | On a corporate VPN or proxy, add your organization's root certificate to **Keychain Access** and set it to **Always Trust** |
 | Need to uninstall completely | Use **`Uninstall RAWviewer.command`** from the release zip — not Trash alone |
 | Uninstall scripts missing | Re-download the release zip from [Releases](https://github.com/markyip/RAWviewer/releases/latest); scripts are inside the extracted folder |
 | "Out of memory" / heavy swap during indexing | On 8 GB Macs, prefer **Lite** or wait for indexing to finish; see [memory tuning](docs/DEVELOPING.md#automatic-memory-tuning) |
-| Killed on relaunch (`Killed: 9` in Terminal) | Try **Standard**, `RAWVIEWER_DISABLE_SESSION_RESTORE=1`, or `RAWVIEWER_ENABLE_SEMANTIC_SEARCH=0` |
+| Killed on relaunch (`Killed: 9` in Terminal) | Session restore (reopen last folder) is **by design**. On 8 GB Macs under jetsam pressure, try **Standard**, `RAWVIEWER_DISABLE_SESSION_RESTORE=1` (opt-out), or `RAWVIEWER_ENABLE_SEMANTIC_SEARCH=0` |
 | Gallery still stutters on a huge folder | Run **`clear_cache.sh`** and reopen the folder |
 
 </details>
@@ -345,13 +348,24 @@ Rule of thumb: **if it can ship in Plus, it counts as feasible** even when Stand
 **Current limits (not aspirational):**
 - **Cold gallery tiles** for never-opened-in-Adjust edits may still show embedded JPEG (edited **badge** + save-bake cover the common path). Same root as row 1.
 - **Nikon HE-NEF**: Adjust disabled; embedded JPEG browse only (row 9).
-- **SCUNet AI denoise export**: Windows Plus only in release builds. macOS `.app` excludes PyTorch, so the Export menu hides those items (standard JPEG/WebP/TIFF still works).
 
 ---
 
 ## For developers
 
-Build scripts, environment variables, memory tuning, and architecture notes: **[docs/DEVELOPING.md](docs/DEVELOPING.md)**. Pull requests welcome.
+Build scripts, environment variables, memory tuning, and architecture notes: **[docs/DEVELOPING.md](docs/DEVELOPING.md)**. Launch helpers live under **[`scripts/Launch/`](scripts/Launch/README.md)** (`windows/` · `macos/` · `macos/release/`). Pull requests welcome.
+
+### Build from source (summary)
+
+| Platform | Command | Output |
+|----------|---------|--------|
+| **Windows** | `scripts\Launch\windows\build_windows.bat` | `dist/RAWviewer_Setup.exe` (wizard: Standard / Plus DirectML / Plus CUDA) |
+| **macOS Plus** | `./scripts/Launch/macos/build_macos_full.sh` | `dist/RAWviewer.app` + release zip |
+| **macOS Standard** | `./scripts/Launch/macos/build_macos_lite.sh` | `dist/RAWviewer_Lite.app` + release zip |
+
+Day-to-day without packaging: `pixi install && pixi run start`, or `scripts\Launch\windows\run_debug.bat menu` / `./scripts/Launch/macos/launch_dev_full.sh`.
+
+**Plus (CUDA)** installs `cupy-cuda12x` for GPU demosaic (serialized, typically ~1.25–1.4× vs CPU Fast RAW; no multi-GB PyTorch). **Plus (DirectML)** and **Standard** use CPU Fast RAW. On Windows, AI search uses ONNX DirectML in both Plus editions; macOS Plus uses Core ML.
 
 ## Support
 
@@ -363,11 +377,11 @@ Build scripts, environment variables, memory tuning, and architecture notes: **[
 
 RAWviewer stands on excellent open-source work, including:
 
-- **AI denoise model:** [SCUNet](https://github.com/cszn/SCUNet) `scunet_color_real_psnr` by **Kai Zhang et al.** (Apache-2.0) — export-only neural noise reduction on **Windows Plus** ([paper](https://doi.org/10.1007/s11633-023-1466-0); weights from [KAIR](https://github.com/cszn/KAIR/releases/tag/v1.0)); not in the macOS `.app` (no bundled PyTorch)
 - **[LibRaw](https://www.libraw.org/)** / **[rawpy](https://github.com/letmaik/rawpy)** — RAW decoding
 - **[MobileCLIP](https://github.com/apple/ml-mobileclip)** (Apple) — on-device photo-description search (Plus edition)
 - **[Qt / PyQt6](https://www.riverbankcomputing.com/software/pyqt/)** — application framework
-- **[spandrel](https://github.com/chaiNNer-org/spandrel)** — loads the SCUNet checkpoint for export denoise (Windows Plus)
+- **[CuPy](https://cupy.dev/)** — optional NVIDIA GPU demosaic on Windows Plus (CUDA)
+- **[onnxruntime](https://onnxruntime.ai/)** — MobileCLIP ONNX inference (Windows Plus)
 
 ## License
 

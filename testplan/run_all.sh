@@ -70,7 +70,7 @@ if [ "$FAST" = "0" ]; then
   # run immediately after).
   run "perf baseline" testplan/auto/t_perf_baseline.py
   run "wb sanity (golden)" testplan/auto/t_wb_sanity.py
-  run "color parity gate (golden)" scripts/fast_raw_decode_parity_gate.py
+  run "color parity gate (golden)" scripts/test/fast_raw_decode_parity_gate.py
 fi
 
 echo ""

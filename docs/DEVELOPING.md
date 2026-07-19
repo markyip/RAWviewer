@@ -15,27 +15,28 @@ pixi run start          # full profile (default)
 
 | Task | Script |
 |------|--------|
-| Run (full) | `scripts\Launch\bat\launch_dev_full.bat` |
-| Run (lite) | `scripts\Launch\bat\launch_dev_lite.bat` |
-| Build Full installers | `scripts\Launch\bat\build_windows_full.bat` (CUDA) or `build_windows_full.bat directml` |
-| Build Lite installer | `scripts\Launch\bat\build_windows_lite.bat` |
-| Build both Full backends | `scripts\Launch\bat\build_windows_all.bat` |
+| Run (Plus / full) | `scripts\Launch\windows\launch_dev_full.bat` |
+| Run (Standard / lite) | `scripts\Launch\windows\launch_dev_lite.bat` |
+| Run (DirectML-like) | `scripts\Launch\windows\launch_dev_directml.bat` |
+| Run (CUDA-like) | `scripts\Launch\windows\launch_dev_cuda.bat` |
+| Debug menu | `scripts\Launch\windows\run_debug.bat menu` |
+| Build installer | `scripts\Launch\windows\build_windows.bat` → `dist/RAWviewer_Setup.exe` |
 
 **macOS**
 
 | Task | Script |
 |------|--------|
-| Run (full) | `./scripts/Launch/shell/launch_dev_full.sh` |
-| Run (lite) | `./scripts/Launch/shell/launch_dev_lite.sh` |
-| Build Full | `./scripts/Launch/shell/build_macos_full.sh` → `dist/RAWviewer.app` |
-| Build Lite | `./scripts/Launch/shell/build_macos_lite.sh` → `dist/RAWviewer_Lite.app` |
+| Run (full) | `./scripts/Launch/macos/launch_dev_full.sh` |
+| Run (lite) | `./scripts/Launch/macos/launch_dev_lite.sh` |
+| Build Full | `./scripts/Launch/macos/build_macos_full.sh` → `dist/RAWviewer.app` |
+| Build Lite | `./scripts/Launch/macos/build_macos_lite.sh` → `dist/RAWviewer_Lite.app` |
 
 Build outputs:
 
 | Profile | Windows | macOS |
 |---------|---------|-------|
-| **Full / Unified** | `dist/RAWviewer_Setup.exe` (includes Full & Lite options) | `dist/RAWviewer-v3.0-macOS.zip` |
-| **Lite** | (Select Lite option in `RAWviewer_Setup.exe`) | `dist/RAWviewer-v3.0-macOS-Lite.zip` |
+| **Unified / Plus+Standard** | `dist/RAWviewer_Setup.exe` (wizard picks edition) | `dist/RAWviewer-v3.0-macOS.zip` |
+| **Standard only (macOS)** | — | `dist/RAWviewer-v3.0-macOS-Lite.zip` |
 
 Dependencies are in `pixi.toml`. Packaging scripts use a local `rawviewer_env/` venv when building release artifacts.
 
@@ -43,14 +44,13 @@ Dependencies are in `pixi.toml`. Packaging scripts use a local `rawviewer_env/` 
 
 **Windows**
 ```batch
-scripts\Launch\bat\build_windows_full.bat
-scripts\Launch\bat\build_windows_lite.bat
+scripts\Launch\windows\build_windows.bat
 ```
 
 **macOS**
 ```bash
-./scripts/Launch/shell/build_macos_full.sh
-./scripts/Launch/shell/build_macos_lite.sh
+./scripts/Launch/macos/build_macos_full.sh
+./scripts/Launch/macos/build_macos_lite.sh
 # or: pixi install && pixi run python build.py --profile full
 ```
 
@@ -124,7 +124,7 @@ Semantic batch/chunk size for AI indexing is **auto-tuned separately** on first 
 | `RAWVIEWER_IDLE_DISPLAY_PREFETCH=0` | Disable idle neighbor prefetch in single view |
 | `RAWVIEWER_SESSION_RESTORE_DEFER_PRELOAD=1` | **Default.** After relaunch, delay full decode and neighbor prefetch (see v2.4.1 release notes) |
 | `RAWVIEWER_SESSION_RESTORE_FULL_DECODE_DELAY_MS` | Milliseconds to wait after first paint before full decode on session restore (default `2500`) |
-| `RAWVIEWER_DISABLE_SESSION_RESTORE=1` | Do not reopen the last folder/file on launch |
+| `RAWVIEWER_DISABLE_SESSION_RESTORE=1` | Opt out of the normal feature that reopens the last folder/file on launch (useful for cold benches / low-RAM edge cases) |
 
 Full list and dev defaults: [`scripts/Launch/README.md`](../scripts/Launch/README.md), [`docs/macos-sharing-v21-v22.md`](macos-sharing-v21-v22.md).
 
@@ -133,7 +133,7 @@ Full list and dev defaults: [`scripts/Launch/README.md`](../scripts/Launch/READM
 | Platform | When downloaded | Change variant (Windows) |
 |----------|-----------------|--------------------------|
 | **Windows Full** | During setup (~600 MB) | Set `RAWVIEWER_MOBILECLIP_VARIANT` to `s0`, `s2`, `b`, or `l14` |
-| **macOS Full** | First gallery search (~150 MB) | Dev helper: `python scripts/download_mobileclip_coreml.py --out-dir models/mobileclip2_coreml` |
+| **macOS Full** | First gallery search (~150 MB) | Dev helper: `python scripts/models/download_mobileclip_coreml.py --out-dir models/mobileclip2_coreml` |
 
 **Lite builds** do not use MobileCLIP models.
 

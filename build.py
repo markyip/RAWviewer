@@ -4,7 +4,7 @@ Build script for RAW Image Viewer Windows/macOS executable
 Handles dependency installation and executable creation.
 """
 
-VERSION = "3.0.0"
+VERSION = "3.0.1"
 
 import os
 import subprocess
@@ -121,7 +121,7 @@ def _should_use_project_venv_for_build() -> bool:
     """
     Prefer ./rawviewer_env so ``pip install`` / PyInstaller do not hit system Python limits.
 
-    - macOS: always (matches ``scripts/Launch/shell/build_macos.sh``; Homebrew 3.14 may block pip without an
+    - macOS: always (matches ``scripts/Launch/macos/build_macos.sh``; Homebrew 3.14 may block pip without an
       ``EXTERNALLY-MANAGED`` file under ``sys.prefix``).
     - Linux: when PEP 668 marker is present.
     Set ``RAWVIEWER_USE_SYSTEM_PYTHON_BUILD=1`` to skip and use the current interpreter.
@@ -145,7 +145,7 @@ def ensure_project_venv_and_reexec() -> None:
     """
     Create ./rawviewer_env if needed and re-exec this script with that interpreter.
 
-    Skips when already using ./rawviewer_env (e.g. ``scripts/Launch/shell/build_macos.sh``) or when
+    Skips when already using ./rawviewer_env (e.g. ``scripts/Launch/macos/build_macos.sh``) or when
     ``RAWVIEWER_USE_SYSTEM_PYTHON_BUILD=1``.
     """
     if not _should_use_project_venv_for_build():
@@ -172,7 +172,7 @@ def ensure_project_venv_and_reexec() -> None:
         if rc != 0 or not vpy.is_file():
             print(
                 "[ERROR] Could not create ./rawviewer_env. From the repo root try:\n"
-                "  ./scripts/Launch/shell/build_macos.sh\n"
+                "  ./scripts/Launch/macos/build_macos.sh\n"
                 "or:  python3 -m venv rawviewer_env && ./rawviewer_env/bin/python3 -m pip install -U pip && "
                 "./rawviewer_env/bin/python3 build.py"
             )
@@ -414,9 +414,9 @@ def _prepare_windows_pixi_manifest(accel: str, *, profile: str = "full") -> Path
     The bundled bootstrap always copies this file as `pixi.toml`.
 
     Size notes (approximate installed footprint, excluding MobileCLIP ~600 MB):
-      - Lite: no torch / ORT / HF — ~0.8–1 GB
-      - Full DirectML: ORT-DirectML + models, no CUDA torch — ~1.5–2 GB
-      - Full CUDA: torch+cu124 (~2.4 GB) dominates — ~3–4 GB (+ models)
+      - Lite: no ORT / HF / CuPy — ~0.8–1 GB
+      - Full DirectML: ORT-DirectML + models, CPU demosaic — ~1.5–2 GB
+      - Full CUDA: cupy-cuda12x (+ CUDA runtime wheels) — ~1.5–2 GB (+ models)
     """
     src = REPO_ROOT / "pixi.toml"
     raw = src.read_text(encoding="utf-8")
@@ -433,38 +433,14 @@ def _prepare_windows_pixi_manifest(accel: str, *, profile: str = "full") -> Path
             "Professional RAW Image Viewer (Standard — browse, cull, Adjust; no AI search)",
         )
     elif accel == "cuda":
-        # Torch already ships CUDA. Keep onnxruntime-directml (from pixi.toml)
-        # so we do not double-pay for onnxruntime-gpu's CUDA redistributables.
+        # CuPy demosaic + DirectML ORT for MobileCLIP (avoid a second CUDA EP stack).
         raw = raw.replace("onnxruntime-gpu", "onnxruntime-directml")
         raw = raw.replace(
             "Professional RAW Image Viewer with Semantic Search",
-            "Professional RAW Image Viewer (Plus CUDA — AI search + GPU demosaic)",
-        )
-    elif accel == "cuda_byo":
-        # Plus CUDA that reuses an external torch+cu12x — same lean deps as
-        # DirectML (no torch wheel). kornia is installed later with
-        # pip --no-deps against the external site-packages.
-        raw = raw.replace("onnxruntime-gpu", "onnxruntime-directml")
-        byo_skip = (
-            "torch",
-            "torchvision",
-            "kornia",
-            # External torch serves the demosaic; skip the CuPy stack too.
-            "cupy-cuda12x",
-        )
-        kept_lines = []
-        for line in raw.splitlines():
-            if any(token in line for token in byo_skip):
-                continue
-            kept_lines.append(line)
-        raw = "\n".join(kept_lines) + "\n"
-        raw = raw.replace(
-            "Professional RAW Image Viewer with Semantic Search",
-            "Professional RAW Image Viewer (Plus CUDA — external PyTorch)",
+            "Professional RAW Image Viewer (Plus CUDA — AI search + CuPy GPU demosaic)",
         )
     elif accel == "directml":
-        # Semantic search on DirectML; demosaic stays CPU Fast RAW (no 2.4 GB
-        # cu124 torch). Drop torch / torchvision / kornia / cupy.
+        # Semantic search on DirectML; demosaic stays CPU Fast RAW (no CuPy).
         raw = raw.replace("onnxruntime-gpu", "onnxruntime-directml")
         directml_skip = (
             "torch",
@@ -488,8 +464,6 @@ def _prepare_windows_pixi_manifest(accel: str, *, profile: str = "full") -> Path
     tmp_dir.mkdir(parents=True, exist_ok=True)
     if lite:
         suffix = "lite"
-    elif accel == "cuda_byo":
-        suffix = "cuda-byo"
     else:
         suffix = accel
     out = tmp_dir / f"pixi-{suffix}.toml"
@@ -576,7 +550,7 @@ def _macos_rawpy_openmp_binaries() -> list[Path]:
     """OpenMP LibRaw runtime files that must ship beside rawpy in the .app.
 
     Official macOS packages exclude torch, so LibRaw must use a standalone
-    ``libomp.dylib`` under ``@loader_path`` (see scripts/build_libraw_openmp.sh
+    ``libomp.dylib`` under ``@loader_path`` (see scripts/libraw/build_libraw_openmp.sh
     with ``RAWVIEWER_LIBRAW_OPENMP_STANDALONE=1``). Explicitly pass them to
     PyInstaller so dependency tracing cannot drop the sibling dylibs.
     """
@@ -889,7 +863,7 @@ def _ensure_macos_openmp_libraw_in_app(exe_path: Path) -> None:
     if "libomp.dylib" not in deps:
         raise RuntimeError(
             "Packaged LibRaw does not link libomp — OpenMP decode inactive. "
-            "Run scripts/build_libraw_openmp.sh before packaging."
+            "Run scripts/libraw/build_libraw_openmp.sh before packaging."
         )
     libomp_hits = list(exe_path.rglob("libomp.dylib"))
     if not libomp_hits:
@@ -1251,19 +1225,16 @@ def main():
         add_data_args.append('--add-data "uninstall.bat;."')
         add_data_args.append('--add-data "scripts;scripts"')
         
-        # Prepare all three variants of pixi.toml for the unified installer
+        # Prepare installer pixi.toml variants (CUDA+CuPy, DirectML, Lite).
         cuda_manifest = _prepare_windows_pixi_manifest("cuda", profile="full")
-        cuda_byo_manifest = _prepare_windows_pixi_manifest("cuda_byo", profile="full")
         dml_manifest = _prepare_windows_pixi_manifest("directml", profile="full")
         lite_manifest = _prepare_windows_pixi_manifest("directml", profile="lite")
         
         cuda_str = str(cuda_manifest).replace("\\", "/")
-        cuda_byo_str = str(cuda_byo_manifest).replace("\\", "/")
         dml_str = str(dml_manifest).replace("\\", "/")
         lite_str = str(lite_manifest).replace("\\", "/")
         
         add_data_args.append(f'--add-data "{cuda_str};."')
-        add_data_args.append(f'--add-data "{cuda_byo_str};."')
         add_data_args.append(f'--add-data "{dml_str};."')
         add_data_args.append(f'--add-data "{lite_str};."')
         
@@ -1274,7 +1245,7 @@ def main():
         add_data_args.append(f'--add-data "{launcher_exe.resolve()};."')
         add_data_args.append(f'--add-data "{launcher_runtime.resolve()};_launcher"')
         print(f"[INFO] Windows installer output: dist\\{app_bundle_name}.exe")
-        print("[INFO] Bundling Windows manifests (CUDA, CUDA-BYO, DirectML, Lite).")
+        print("[INFO] Bundling Windows manifests (CUDA+CuPy, DirectML, Lite).")
     add_data_arg_str = " ".join(add_data_args)
 
     src_path = os.path.abspath('src')
@@ -1347,7 +1318,7 @@ def main():
             "--exclude-module", "PyObjCTest",
         ])
         # OpenMP LibRaw siblings (standalone libomp + libjpeg). build_macos.sh
-        # installs these via scripts/build_libraw_openmp.sh before packaging.
+        # installs these via scripts/libraw/build_libraw_openmp.sh before packaging.
         for bin_path in _macos_rawpy_openmp_binaries():
             cmd_base.extend(["--add-binary", f"{bin_path}:rawpy"])
             print(f"[INFO] Bundling OpenMP LibRaw binary: {bin_path.name}")

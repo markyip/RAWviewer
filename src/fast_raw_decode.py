@@ -39,7 +39,7 @@ gamma=(2.222, 4.5), user_flip=0, highlight_mode=clip):
 Verified: the demosaic-free half-size reference path below matches
 ``rawpy.postprocess(half_size=True, ...)`` within +/-1 8-bit LSB on 100% of
 pixels across Sony ARW + 12 Canon CR3 golden files (run
-``scripts/fast_raw_decode_parity_gate.py``). Highlights included.
+``scripts/test/fast_raw_decode_parity_gate.py``). Highlights included.
 
 Scope guards: Bayer 2x2 / 3-color / uint16 sensors only — X-Trans, Foveon,
 monochrome, linear DNG, float DNG and 4-color CFAs all return None and fall

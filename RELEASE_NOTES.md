@@ -3,6 +3,22 @@
 **Language / 語言：** English · [繁體中文](RELEASE_NOTES.zh-TW.md)
 
 
+## 🚀 Version 3.0.1
+**Release Date: July 19, 2026**
+
+### What’s new for you
+
+- **Smaller Windows Plus (CUDA)** — GPU demosaic now uses **CuPy** instead of a multi-GB PyTorch install. Expect roughly **1.5–2 GB** (+ MobileCLIP models), similar to Plus (DirectML).
+- **Clearer edition names** — **Standard**, **Plus (DirectML)**, and **Plus (CUDA)** in the installer and UI.
+- **Faster launch** — the app reaches the first screen sooner (AI search libraries load only when you open Search).
+- **Export change** — export-time **SCUNet AI denoise** is removed. Use Adjust chroma noise reduction, then export JPEG / WebP / TIFF as usual.
+
+### Upgrade
+
+Install over 3.0.0. Optionally clear cache once (Setup checkbox or `clear_cache.bat` / **Clear Cache.command**).
+
+---
+
 ## 🚀 Version 3.0.0
 **Release Date: July 18, 2026**
 
@@ -20,7 +36,7 @@ RAWviewer 3.0 turns the viewer into a complete **cull-and-develop** tool: a full
 - **Local tools:** **Dodge & Burn** with soft circular stamps, Edge Assist, and mask overlay; **Heal (H)** inpainting for dust/smudge removal. Both work in Lite and Full.
 - **Effects & detail:** vignette (Amount/Midpoint), dehaze, sharpness, chroma noise reduction with selectable method.
 - **Looks:** **Creative LUT** (`.cube` drag-drop + managed library) and managed **XMP presets** — import, apply, remove.
-- **Export** to JPEG / WebP / 16-bit TIFF with a progress dialog and cancel; **AI denoise** on export only (**Windows Full**; [SCUNet](https://github.com/cszn/SCUNet) `scunet_color_real_psnr` by Kai Zhang et al., Apache-2.0 — not applied during Adjust preview). **macOS packaged apps omit PyTorch**, so the SCUNet export menu items are hidden there; standard JPEG / WebP / TIFF export still works on Mac.
+- **Export** to JPEG / WebP / 16-bit TIFF with a progress dialog and cancel.
 - A new **Adjust button** in the single-view bar opens the editor (mirrors the **E** shortcut, highlights while active).
 
 #### ⭐ Star ratings
@@ -28,7 +44,7 @@ RAWviewer 3.0 turns the viewer into a complete **cull-and-develop** tool: a full
 - Ratings persist to **XMP** and appear as gallery tile badges; filter the gallery to **rating ≥ N**, combinable with the bookmark filter.
 
 #### ⚡ Faster than 2.5 (verified cold suite)
-**Headline vs 2.5 Lite on the same Windows machine (cache cleared before every run):** gallery ready **8.6s → ~3s (~2.7–2.9× faster)**; RAW full-res navigation median **0.95s → ~0.6s (~1.6–1.7× faster)**. **Lite and Full share the same 3.0 loading pipeline** and both beat 2.5 on the paths that matter for culling; Full adds GPU demosaic (and export-time AI denoise on Windows) at comparable speed on these tests.
+**Headline vs 2.5 Lite on the same Windows machine (cache cleared before every run):** gallery ready **8.6s → ~3s (~2.7–2.9× faster)**; RAW full-res navigation median **0.95s → ~0.6s (~1.6–1.7× faster)**. **Lite and Full share the same 3.0 loading pipeline** and both beat 2.5 on the paths that matter for culling; Full can add GPU demosaic (CuPy on Windows CUDA builds) at comparable speed on these tests.
 
 - **Fast RAW decode** on by default: half-size and full sensor tiers share one LibRaw unpack, with verified color parity (±1 8-bit LSB on golden ARW/CR3 sets).
 - Cold gallery thumbnail warmup about **3×** faster; Canon CR3 embedded previews no longer read the whole file.
@@ -52,7 +68,7 @@ Run-to-run variance between Lite (CPU Fast RAW) and Full (GPU demosaic on suppor
 | **2.5 Lite** | 1.20s | 2.70s | 1043 |
 | **3.0 Lite & Full** | **~0.7–0.8s** | **~1.8–2.6s** | **~940** |
 
-**Bottom line:** upgrading from 2.5 to 3.0 is a clear speed win for folder open → gallery and for RAW high-quality browsing. Choose **Lite** for the smallest install, or **Full** for GPU demosaic plus export-time AI denoise — culling speed is in the same ballpark on these paths. Full keeps true LibRaw/GPU demosaic for supported files (164 GPU decodes / 259 in the sample set; HE/HE* use per-file embeds only) with **0 TIMEOUTs** after the scheduling fixes.
+**Bottom line:** upgrading from 2.5 to 3.0 is a clear speed win for folder open → gallery and for RAW high-quality browsing. Choose **Standard** for the smallest install, or **Plus** for AI search (and CuPy GPU demosaic on Windows CUDA). Culling speed is in the same ballpark on these paths.
 
 #### 🖼️ Gallery loading & scrolling overhaul
 - Main-thread stalls during gallery fill eliminated (worst observed stall **11.7s → <0.6s**): budgeted tile passes, deferred cache-hit delivery, and no per-tile sidecar probes on external drives.
@@ -169,7 +185,7 @@ Some users saw **some vertical shots correct and others sideways** in the galler
 - **Cache version bump** (`sensor_meta_ver` 9) — Forces refresh of outdated EXIF metadata on upgrade.
 - **Thumbnail load repair** — When a cached gallery thumbnail's pixels don't match container orientation, it is corrected or dropped instead of reused.
 
-**If thumbnails still look wrong once:** Run **`scripts/Launch/shell/clear_cache.sh`** (macOS) or **`clear_cache.bat`** (Windows), then reopen the folder. This clears mixed old/new cache in one step.
+**If thumbnails still look wrong once:** Run **`scripts/Launch/macos/clear_cache.sh`** (macOS) or **`clear_cache.bat`** (Windows), then reopen the folder. This clears mixed old/new cache in one step.
 
 ### Single-image view — rotation unlike gallery
 
@@ -428,7 +444,7 @@ Unified 2.2 release — search, gallery, film strip, frameless window polish, RA
 **Platform & docs**
 - **macOS share under Qt6**: Default dev/shipping path uses Qt menu + `performWithItems_`; picker fallback and AirDrop/Finder behavior documented in `docs/macos-sharing-v21-v22.md`.
 - **Folder sort**: Production uses EXIF / probe / birth / mtime only; Windows Shell `DateTaken` POC removed.
-- **`clear_cache.bat` / `clear_cache.sh`**: Full dev/session reset; repo-root `clear_cache.bat` forwards to `scripts/Launch/bat/clear_cache.bat`.
+- **`clear_cache.bat` / `clear_cache.sh`**: Full dev/session reset; repo-root `clear_cache.bat` forwards to `scripts/Launch/windows/clear_cache.bat`.
 - **Windows share helper** (sources retained): .NET `WindowsShareHelper.exe` for WinRT share in dev builds.
 - **Launch scripts**: macOS build/test workflow in `scripts/Launch/README.md`; version aligned across `build.py`, `pixi.toml`, and `QApplication`.
 - **Environment**: `activation.env` with `PYTHONNOUSERSITE=1` to prevent global package leaks and splash issues.

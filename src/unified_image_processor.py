@@ -1750,7 +1750,7 @@ class UnifiedImageProcessor:
             
             # Fast full-res decode: LibRaw unpack + cv2 SIMD pixel math with
             # exact LibRaw color parity (see src/fast_raw_decode.py; gate:
-            # scripts/fast_raw_decode_parity_gate.py). 1.4-1.7x faster than
+            # scripts/test/fast_raw_decode_parity_gate.py). 1.4-1.7x faster than
             # the rawpy LINEAR path below with better demosaic quality (EA
             # vs bilinear). Returns None for unsupported sensors (X-Trans,
             # ...) or mismatched params -- everything below is the unchanged

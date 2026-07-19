@@ -447,12 +447,11 @@ class SessionMixin:
                             "(full decode ~0.8s later; "
                             "RAWVIEWER_SESSION_RESTORE_DEFER_PRELOAD=0 to disable)"
                         )
-                        try:
-                            lm = getattr(self, "image_manager", None)
-                            if lm is not None and hasattr(lm, "enter_gallery_warmup_throttle"):
-                                lm.enter_gallery_warmup_throttle()
-                        except Exception:
-                            pass
+                        # Do NOT call enter_gallery_warmup_throttle here: that API
+                        # is gallery-entry only. Nesting it under session restore
+                        # made the real gallery enter a no-op (depth>1) and let
+                        # session exit_gallery_warmup_throttle drop concurrency
+                        # mid tile-fill after single→gallery.
                         self.load_folder_images(folder, start_file=file)
                         return True
                     except (PermissionError, OSError) as e:
