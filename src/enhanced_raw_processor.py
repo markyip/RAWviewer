@@ -53,28 +53,52 @@ from image_load_manager import yield_if_current_task_active
 def _rawpy_unpack_concurrency() -> int:
     """Concurrent in-process rawpy/LibRaw contexts allowed through the global gate.
 
-    Default 1 preserves the historical fully-serialized behavior. LibRaw is
-    documented thread-safe per-context (each rawpy.imread creates an
-    independent decoder), and stress measurement shows unpack is ~80% of
-    per-file decode cost while GPU mode has no process pool — so on CUDA
-    boxes the global lock, not GPU speed, caps sustained-navigation
-    throughput at ~1/unpack_time. RAWVIEWER_UNPACK_CONCURRENCY=2..4 turns
-    the gate into a bounded semaphore for A/B testing that hypothesis; every
-    site that used to take the lock takes the same shared gate, so there is
-    never a mixed lock/semaphore state. Each concurrent unpack holds a
-    ~2 bytes/sensor-pixel uint16 mosaic resident, so keep this small.
+    LibRaw is documented thread-safe per-context (each ``rawpy.imread`` creates
+    an independent decoder). Unpack is typically ~80% of CPU Fast RAW cost; a
+    fully serialized gate therefore caps sustained navigation at ~1/unpack_time
+    even when ImageLoadManager has spare worker slots.
+
+    Default is adaptive (not hard-coded 1):
+      - explicit ``RAWVIEWER_UNPACK_CONCURRENCY=1..4`` always wins
+      - else 3 on ≥12 logical CPUs, 2 on ≥6, else 1
+      - soft RAM caps: <10 GB → 1; <16 GB → max 2
+
+    Each concurrent unpack holds ~2 bytes/sensor-pixel of uint16 mosaic, so the
+    ceiling stays at 4. Every call site shares this one gate (never a mixed
+    Lock/Semaphore state).
     """
     raw = os.environ.get("RAWVIEWER_UNPACK_CONCURRENCY", "").strip()
+    if raw:
+        try:
+            return max(1, min(4, int(raw)))
+        except ValueError:
+            return 1
+
+    cpu = os.cpu_count() or 4
+    if cpu >= 12:
+        default = 3
+    elif cpu >= 6:
+        default = 2
+    else:
+        default = 1
     try:
-        return max(1, min(4, int(raw))) if raw else 1
-    except ValueError:
-        return 1
+        import psutil
+
+        ram_gb = float(psutil.virtual_memory().total) / (1024.0 ** 3)
+        if ram_gb < 10.0:
+            default = 1
+        elif ram_gb < 16.0:
+            default = min(default, 2)
+    except Exception:
+        pass
+    return default
 
 
+_UNPACK_CONCURRENCY = _rawpy_unpack_concurrency()
 _rawpy_global_lock = (
     threading.Lock()
-    if _rawpy_unpack_concurrency() == 1
-    else threading.BoundedSemaphore(_rawpy_unpack_concurrency())
+    if _UNPACK_CONCURRENCY == 1
+    else threading.BoundedSemaphore(_UNPACK_CONCURRENCY)
 )
 _heavy_fallback_semaphore = threading.Semaphore(8)
 

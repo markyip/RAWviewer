@@ -1,4 +1,4 @@
-"""Gallery scroll benchmark harness (RAWVIEWER_GALLERY_AUTOTEST=1 only).
+﻿"""Gallery scroll benchmark harness (RAWVIEWER_GALLERY_AUTOTEST=1 only).
 
 Flow (mirrors the manual repro: open file -> gallery button -> hold Up/Down):
   1. Wait for the single-view first render.
@@ -218,7 +218,7 @@ def run_gallery_autotest(viewer, *, safe_print) -> None:
         sort_ready = _exif_sort_ready()
         if not sort_ready:
             # v2.5: toggle is a no-op until capture-time sort finishes.
-            # v3: still enters on provisional order — try toggle below anyway.
+            # v3: still enters on provisional order ??try toggle below anyway.
             if state["enter_attempts"] % 25 == 0:
                 safe_print(
                     f"[GALLERYTEST] waiting for EXIF sort (files={n_files} "
@@ -259,9 +259,9 @@ def run_gallery_autotest(viewer, *, safe_print) -> None:
                     force=True,
                 )
             QTimer.singleShot(200, _try_enter_gallery)
-        elif time.time() - harness_t0 > 180.0:
+        elif time.time() - harness_t0 > float(os.environ.get("RAWVIEWER_GALLERY_AUTOTEST_FIRST_RENDER_WAIT", "180")):
             safe_print(
-                "[GALLERYTEST] TIMEOUT waiting for first render (180s)",
+                "[GALLERYTEST] TIMEOUT waiting for first render",
                 flush=True,
                 force=True,
             )

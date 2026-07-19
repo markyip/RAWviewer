@@ -8,4 +8,7 @@ os.environ.setdefault("RAWVIEWER_PERF_V2", "1")
 # setdefault'd RAWVIEWER_PREFER_GPU_DECODE=0 in pyi_rth_profile_defaults
 # (runs before this hook), so this only applies to Full / unset profiles.
 os.environ.setdefault("RAWVIEWER_PREFER_GPU_DECODE", "1")
-os.environ.setdefault("RAWVIEWER_USE_PROCESS_POOL", "0")
+# Do NOT force RAWVIEWER_USE_PROCESS_POOL=0 here. When GPU demosaic is actually
+# in use, common_image_loader.use_raw_process_pool() / ImageLoadManager already
+# disable the LibRaw process pool. Forcing "0" previously killed multi-core CPU
+# Fast RAW (Lite / DirectML / PREFER_GPU=0) even on 8+ core Windows boxes.

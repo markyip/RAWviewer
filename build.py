@@ -28,6 +28,9 @@ _WINDOWS_LITE_PIXI_SKIP = (
     "torch",
     "torchvision",
     "kornia",
+    # SCUNet export loader — depends on torch; keeping it on Lite silently
+    # re-pulls a ~400–700 MB torch wheel via pip and defeats the Lite skip.
+    "spandrel",
 )
 # opencv-python-headless was in this skip list -- correct while cv2 was only
 # used by the (Lite-excluded) semantic search preprocessing, but the
@@ -79,15 +82,22 @@ def sync_version_artifacts() -> None:
 
 def write_build_profile(profile: str) -> None:
     profile = profile.strip().lower()
+    if profile in ("standard", "std"):
+        profile = "lite"
+    elif profile in ("plus",):
+        profile = "full"
     if profile not in ("full", "lite"):
         raise ValueError(f"Unknown build profile: {profile}")
     path = REPO_ROOT / "src" / "build_profile.py"
     path.write_text(
-        '"""Baked at build time by build.py (--profile full|lite). Dev default: full."""\n\n'
+        '"""Baked at build time by build.py (--profile full|plus|lite|standard).\n'
+        "Internal ids: lite = Standard edition, full = Plus edition.\n"
+        '"""\n\n'
         f'PROFILE = "{profile}"\n',
         encoding="utf-8",
     )
-    print(f"[INFO] Build profile: {profile} -> {path}")
+    edition = "Standard" if profile == "lite" else "Plus"
+    print(f"[INFO] Build profile: {profile} ({edition}) -> {path}")
 
 
 def _project_venv_python() -> Path:
@@ -184,7 +194,8 @@ def run_command(cmd):
 
 
 def _macos_app_bundle_name(profile: str = "full") -> str:
-    if profile.strip().lower() == "lite":
+    # Filesystem names kept stable for upgrades; display names are Standard/Plus.
+    if profile.strip().lower() in ("lite", "standard"):
         return "RAWviewer_Lite"
     return "RAWviewer"
 
@@ -230,13 +241,13 @@ def update_macos_plist(app_path, profile: str = "full"):
             plist['CFBundleDocumentTypes'].append(doc_type)
             
         bundle_name = _macos_app_bundle_name(profile)
-        is_lite = profile.strip().lower() == "lite"
-        # Set a unique Bundle Identifier
+        is_standard = profile.strip().lower() in ("lite", "standard")
+        # Bundle IDs kept stable (lite → Standard, default → Plus).
         plist['CFBundleIdentifier'] = (
-            'com.markyip.rawviewer.lite' if is_lite else 'com.markyip.rawviewer'
+            'com.markyip.rawviewer.lite' if is_standard else 'com.markyip.rawviewer'
         )
         plist['CFBundleName'] = bundle_name
-        plist['CFBundleDisplayName'] = 'RAWviewer Lite' if is_lite else 'RAW Image Viewer'
+        plist['CFBundleDisplayName'] = 'RAWviewer' if is_standard else 'RAWviewer Plus'
         plist['CFBundleExecutable'] = bundle_name
         plist['CFBundlePackageType'] = 'APPL'
         plist['CFBundleShortVersionString'] = VERSION
@@ -402,6 +413,11 @@ def _prepare_windows_pixi_manifest(accel: str, *, profile: str = "full") -> Path
     """
     Create a backend-specific pixi.toml copy for Windows installer payload.
     The bundled bootstrap always copies this file as `pixi.toml`.
+
+    Size notes (approximate installed footprint, excluding MobileCLIP ~600 MB):
+      - Lite: no torch / ORT / HF — ~0.8–1 GB
+      - Full DirectML: ORT-DirectML + models, no CUDA torch — ~1.5–2 GB
+      - Full CUDA: torch+cu124 (~2.4 GB) dominates — ~3–4 GB (+ models)
     """
     src = REPO_ROOT / "pixi.toml"
     raw = src.read_text(encoding="utf-8")
@@ -415,17 +431,67 @@ def _prepare_windows_pixi_manifest(accel: str, *, profile: str = "full") -> Path
         raw = "\n".join(kept_lines) + "\n"
         raw = raw.replace(
             "Professional RAW Image Viewer with Semantic Search",
-            "Professional RAW Image Viewer (Lite — browse, cull, Adjust; no AI/GPU demosaic)",
+            "Professional RAW Image Viewer (Standard — browse, cull, Adjust; no AI search)",
         )
     elif accel == "cuda":
-        raw = raw.replace("onnxruntime-directml", "onnxruntime-gpu")
-    elif accel == "directml":
+        # Torch already ships CUDA. Keep onnxruntime-directml (from pixi.toml)
+        # so we do not double-pay for onnxruntime-gpu's CUDA redistributables.
         raw = raw.replace("onnxruntime-gpu", "onnxruntime-directml")
+        raw = raw.replace(
+            "Professional RAW Image Viewer with Semantic Search",
+            "Professional RAW Image Viewer (Plus CUDA — AI search + GPU demosaic)",
+        )
+    elif accel == "cuda_byo":
+        # Plus CUDA that reuses an external torch+cu12x — same lean deps as
+        # DirectML (no torch wheel). kornia/spandrel are installed later with
+        # pip --no-deps against the external site-packages.
+        raw = raw.replace("onnxruntime-gpu", "onnxruntime-directml")
+        byo_skip = (
+            "torch",
+            "torchvision",
+            "kornia",
+            "spandrel",
+        )
+        kept_lines = []
+        for line in raw.splitlines():
+            if any(token in line for token in byo_skip):
+                continue
+            kept_lines.append(line)
+        raw = "\n".join(kept_lines) + "\n"
+        raw = raw.replace(
+            "Professional RAW Image Viewer with Semantic Search",
+            "Professional RAW Image Viewer (Plus CUDA — external PyTorch)",
+        )
+    elif accel == "directml":
+        # Semantic search on DirectML; demosaic stays CPU Fast RAW (no 2.4 GB
+        # cu124 torch). Drop torch / torchvision / kornia / spandrel.
+        raw = raw.replace("onnxruntime-gpu", "onnxruntime-directml")
+        directml_skip = (
+            "torch",
+            "torchvision",
+            "kornia",
+            "spandrel",
+        )
+        kept_lines = []
+        for line in raw.splitlines():
+            if any(token in line for token in directml_skip):
+                continue
+            kept_lines.append(line)
+        raw = "\n".join(kept_lines) + "\n"
+        raw = raw.replace(
+            "Professional RAW Image Viewer with Semantic Search",
+            "Professional RAW Image Viewer (Plus DirectML — AI search; CPU demosaic)",
+        )
     else:
         raise ValueError(f"Unsupported Windows acceleration backend: {accel}")
     tmp_dir = REPO_ROOT / "build" / "_pixi_variants"
     tmp_dir.mkdir(parents=True, exist_ok=True)
-    suffix = "lite" if lite else accel
+    if lite:
+        suffix = "lite"
+    elif accel == "cuda_byo":
+        suffix = "cuda-byo"
+    else:
+        suffix = accel
     out = tmp_dir / f"pixi-{suffix}.toml"
     out.write_text(raw, encoding="utf-8")
     return out
@@ -936,9 +1002,9 @@ def main():
     )
     parser.add_argument(
         "--profile",
-        choices=["full", "lite"],
+        choices=["full", "plus", "lite", "standard"],
         default=os.environ.get("RAWVIEWER_BUILD_PROFILE", "full").strip().lower() or "full",
-        help="Build profile: full (AI search + face) or lite (viewing + EXIF/GPS search only).",
+        help="Edition: full/plus (AI search) or lite/standard (browse & Adjust). Default: full/plus.",
     )
     parser.add_argument(
         "--keep-dist",
@@ -951,6 +1017,10 @@ def main():
         help="Write app_version.py and sync pixi.toml from VERSION; exit without building.",
     )
     args = parser.parse_args()
+    if args.profile in ("standard", "std"):
+        args.profile = "lite"
+    elif args.profile == "plus":
+        args.profile = "full"
     if args.profile not in ("full", "lite"):
         args.profile = "full"
 
@@ -1183,14 +1253,17 @@ def main():
         
         # Prepare all three variants of pixi.toml for the unified installer
         cuda_manifest = _prepare_windows_pixi_manifest("cuda", profile="full")
+        cuda_byo_manifest = _prepare_windows_pixi_manifest("cuda_byo", profile="full")
         dml_manifest = _prepare_windows_pixi_manifest("directml", profile="full")
         lite_manifest = _prepare_windows_pixi_manifest("directml", profile="lite")
         
         cuda_str = str(cuda_manifest).replace("\\", "/")
+        cuda_byo_str = str(cuda_byo_manifest).replace("\\", "/")
         dml_str = str(dml_manifest).replace("\\", "/")
         lite_str = str(lite_manifest).replace("\\", "/")
         
         add_data_args.append(f'--add-data "{cuda_str};."')
+        add_data_args.append(f'--add-data "{cuda_byo_str};."')
         add_data_args.append(f'--add-data "{dml_str};."')
         add_data_args.append(f'--add-data "{lite_str};."')
         
@@ -1201,7 +1274,7 @@ def main():
         add_data_args.append(f'--add-data "{launcher_exe.resolve()};."')
         add_data_args.append(f'--add-data "{launcher_runtime.resolve()};_launcher"')
         print(f"[INFO] Windows installer output: dist\\{app_bundle_name}.exe")
-        print("[INFO] Bundling all Windows environment manifests (CUDA, DirectML, and Lite).")
+        print("[INFO] Bundling Windows manifests (CUDA, CUDA-BYO, DirectML, Lite).")
     add_data_arg_str = " ".join(add_data_args)
 
     src_path = os.path.abspath('src')

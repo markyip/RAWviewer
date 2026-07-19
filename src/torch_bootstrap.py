@@ -56,7 +56,32 @@ def import_gpu_backend_on_main_thread(
         # Split stages so processEvents can run between the two heavy imports.
         # gpu_raw_processor re-imports torch/kornia at module scope; those are
         # cache hits once the lines below have finished.
-        import torch  # noqa: F401
+        try:
+            import torch  # noqa: F401
+
+            if not torch.cuda.is_available():
+                raise RuntimeError("torch imported but CUDA is unavailable")
+        except Exception:
+            # External BYO provider may have been removed — notify and bundle.
+            try:
+                from torch_provider import ensure_torch_for_gpu, load_provider
+
+                prov = load_provider()
+                if prov.is_external or prov.mode in ("none", "bundled"):
+                    logger.warning(
+                        "[GPU] torch/CUDA unavailable; attempting provider repair..."
+                    )
+                    if ensure_torch_for_gpu(notify=True):
+                        import torch  # noqa: F401
+
+                        if not torch.cuda.is_available():
+                            raise RuntimeError("bundled torch has no CUDA")
+                    else:
+                        raise
+                else:
+                    raise
+            except Exception:
+                raise
 
         _pump()
         import kornia  # noqa: F401

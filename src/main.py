@@ -8,6 +8,14 @@ import os
 # script bootable; a properly built env never exercises it.
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
+# Prefer an external torch+cu12x (CUDA BYO) before any GPU import.
+try:
+    from torch_provider import apply_at_startup
+
+    apply_at_startup()
+except Exception:
+    pass
+
 # Darkroom chrome palette (see theme.py). Zero-dependency module (no PyQt
 # imports), safe this early -- needed before PyQt6 import below because the
 # fallback splash-screen drawing code runs at module scope, ahead of any
@@ -11755,7 +11763,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
 
         Lite intentionally ships without AI search (no bundled models, no
         indexing overhead) — never suggest the enable flag there. The env-var
-        hint is only for Full builds / dev runs where the flag is simply off.
+        hint is only for Plus builds / dev runs where the flag is simply off.
         """
         try:
             from rawviewer_profile import is_lite_build
@@ -11765,9 +11773,9 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             lite = False
         if lite:
             return (
-                "Lite: EXIF, filename & place search — no AI",
-                "Lite searches EXIF metadata, filenames, and GPS places.\n"
-                "Install the Full version for AI semantic search.",
+                "Standard: EXIF, filename & place search — no AI",
+                "Standard searches EXIF metadata, filenames, and GPS places.\n"
+                "Install Plus for AI semantic search.",
             )
         return (
             "EXIF, filename & place search — AI off",

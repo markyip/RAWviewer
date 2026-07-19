@@ -35,7 +35,7 @@
 
 - **Browse at shooting speed.** Open a folder of RAWs and flick through full-screen previews with the arrow keys — no import, no catalog, no waiting.
 - **Cull with your fingers, not your mouse.** **1–5** rates a keeper, **↓** moves it to a Discard folder, **0** clears the rating, **C** compares similar frames side by side with synchronized zoom.
-- **Find any photo.** Type a place (`tokyo`), a camera (`sony`), or a year (`2024`) in gallery search. The Full edition also understands plain descriptions like `sunset on beach` — all offline.
+- **Find any photo.** Type a place (`tokyo`), a camera (`sony`), or a year (`2024`) in gallery search. The Plus edition also understands plain descriptions like `sunset on beach` — all offline.
 - **Develop without touching your files.** Press **E** for the Adjust panel: exposure, white balance, crop, dodge & burn, healing, LUTs. Every edit is saved to an XMP sidecar; your RAW is never modified.
 
 <p align="center">
@@ -50,11 +50,11 @@
 
 ## New in 3.0
 
-- **Much faster than 2.5** — cold Windows suite (cache cleared each run): gallery ready **~2.7–2.9×** sooner (**8.6s → ~3s**); RAW full-res navigation median **~1.6–1.7×** sooner (**0.95s → ~0.6s**). Lite and Full share the same 3.0 pipeline and both beat 2.5 on cull paths — see [`RELEASE_NOTES.md`](RELEASE_NOTES.md)
-- **Adjust panel** — develop RAWs non-destructively: tone, white-balance presets, crop, dodge & burn, healing, vignette/dehaze, creative LUTs, and savable presets; export JPEG / WebP / 16-bit TIFF (**Windows Full** also offers export-only **AI denoise** via SCUNet; not in the macOS `.app` — see [Lite or Full?](#lite-or-full))
+- **Much faster than 2.5** — cold Windows suite (cache cleared each run): gallery ready **~2.7–2.9×** sooner (**8.6s → ~3s**); RAW full-res navigation median **~1.6–1.7×** sooner (**0.95s → ~0.6s**). Standard and Plus share the same 3.0 pipeline and both beat 2.5 on cull paths — see [`RELEASE_NOTES.md`](RELEASE_NOTES.md)
+- **Adjust panel** — develop RAWs non-destructively: tone, white-balance presets, crop, dodge & burn, healing, vignette/dehaze, creative LUTs, and savable presets; export JPEG / WebP / 16-bit TIFF (**Windows Plus** also offers export-only **AI denoise** via SCUNet; not in the macOS `.app` — see [Standard or Plus?](#standard-or-plus))
 - **Star ratings** — rate 1–5 with the number keys; filter the gallery by minimum rating
 - **Nikon High Efficiency (HE/HE*) files** now open for browsing and culling
-- **Smaller Lite edition** for machines where install size matters
+- **Lean Standard edition** for machines where install size matters
 
 Full changelog: [`RELEASE_NOTES.md`](RELEASE_NOTES.md)
 
@@ -65,7 +65,7 @@ Full changelog: [`RELEASE_NOTES.md`](RELEASE_NOTES.md)
 ### Windows
 
 1. Download **`RAWviewer_Setup.exe`** from [Releases](https://github.com/markyip/RAWviewer/releases/latest).
-2. In the wizard, pick **Full** (adds photo-description search, ~600 MB of models) or **Lite** (smaller). Not sure? See [Lite or Full?](#lite-or-full) below.
+2. In the wizard, pick **Plus** (adds photo-description search, ~600 MB of models) or **Standard** (smaller). Not sure? See [Standard or Plus?](#standard-or-plus) below.
 3. **Upgrading from an older version?** Optionally check **Clear existing cache** in the installer. That unlocks faster search/index defaults without deleting your photos or XMP files.
 4. Launch **RAWviewer** from the Desktop shortcut.
 
@@ -73,7 +73,7 @@ Common photo formats get an **Open with** entry automatically. Uninstall any tim
 
 ### macOS (13 or newer)
 
-1. Download the macOS zip (**Full** or **Lite**) from [Releases](https://github.com/markyip/RAWviewer/releases/latest) and double-click to extract it.
+1. Download the macOS zip (**Plus** or **Standard**) from [Releases](https://github.com/markyip/RAWviewer/releases/latest) and double-click to extract it.
 2. Open **Terminal** (Spotlight → type "Terminal"), type `cd ` (with a space), drag the extracted folder onto the Terminal window, and press Return.
 3. Run the installer and follow the two dialogs (**Install**, then **Open**):
 
@@ -87,7 +87,7 @@ bash install_macos_app.sh
 
 RAWviewer is copied to your Applications folder. This one-time Terminal step is what lets macOS trust the app — after that it opens like any other app. To remove it later, use **`Uninstall RAWviewer.command`** from the same zip (dragging to Trash leaves cache files behind). See **Start Here.txt** in the zip for the full checklist.
 
-**Full edition:** the first time you use gallery **Search**, RAWviewer offers a one-time model download (~150 MB, needs internet once). Click **Download** — after that, search is fully offline.
+**Plus edition:** the first time you use gallery **Search**, RAWviewer offers a one-time model download (~150 MB, needs internet once). Click **Download** — after that, search is fully offline.
 
 ### Your first ten minutes
 
@@ -188,37 +188,37 @@ Open gallery search and type words separated by spaces. **No special syntax need
 | Date | `2024` · `2024-05` · `date:2024-05` |
 | ISO / year (comparison) | `iso<=800` · `iso under 800` · `year>=2024` |
 | Format | `format:raw` · `format:jpeg` · `format:cr3` |
-| GPS / faces | `has:gps` · `has:face` · `no:face` *(face filters: Full only)* |
-| Free text + filter | `jet takeoff camera:sony iso<800` *(Full: unmatched free text uses AI)* |
+| GPS / faces | `has:gps` · `has:face` · `no:face` *(face filters: Plus only)* |
+| Free text + filter | `jet takeoff camera:sony iso<800` *(Plus: unmatched free text uses AI)* |
 
 Place names work offline: a built-in database of 100,000+ cities and landmarks resolves your photos' GPS into searchable places during background indexing.
 
-The search field stays read-only until indexing of the current folder completes. On Full builds, semantic and face indexing run in the background; switching folders cancels indexing for the old one.
+The search field stays read-only until indexing of the current folder completes. On Plus builds, semantic and face indexing run in the background; switching folders cancels indexing for the old one.
 
 </details>
 
 ---
 
-## Lite or Full?
+## Standard or Plus?
 
 Both editions have the complete viewer: gallery, culling, Compare, star ratings, bookmarks, GPS map, metadata search, and the Adjust develop panel with export (JPEG / WebP / 16-bit TIFF).
 
-| | Lite | Full |
-|---|:--:|:--:|
-| Everything above — browse, cull, rate, compare, develop, export | ✅ | ✅ |
-| Export-time AI denoise (SCUNet) | — | ✅ Windows only |
-| Search by describing the photo (`sunset on beach`) | — | ✅ |
-| Find photos with people (`has:face`) | — | ✅ |
-| Install size | ~500 MB | ~1.5 GB+ |
-| Comfortable with | 8 GB RAM | 16 GB RAM |
+| | Standard | Plus (DirectML) | Plus (CUDA) |
+|---|:--:|:--:|:--:|
+| Everything above — browse, cull, rate, compare, develop, export | ✅ | ✅ | ✅ |
+| Search by describing the photo (`sunset on beach`) | — | ✅ | ✅ |
+| Find photos with people (`has:face`) | — | ✅ | ✅ |
+| GPU demosaic (NVIDIA) | — | — (CPU Fast RAW) | ✅ |
+| Export-time AI denoise (SCUNet) | — | — | ✅ Windows only |
+| Install size (approx.) | ~0.8–1 GB | ~1.5–2 GB + ~600 MB models | ~3–4 GB + ~600 MB models |
+| Comfortable with | 8 GB RAM | 16 GB RAM | 16 GB RAM + NVIDIA |
 
-**Pick Lite** for a lean install and cull-by-eye workflow. **Pick Full** if you want to search your library in everyday language — still 100% offline once its models are installed.
+**Pick Standard** for a lean install and cull-by-eye workflow. **Pick Plus (DirectML)** for AI search without the CUDA torch wheel. **Pick Plus (CUDA)** only when you want NVIDIA GPU demosaic / SCUNet — most of that footprint is PyTorch’s ~2.3–2.4 GB cu124 package, not app code.
 
-On Windows, the installer offers **Full (CUDA)** for NVIDIA graphics cards, **Full (DirectML)** for everything else, and **Lite**.
+On Windows, the installer offers **Standard**, **Plus (DirectML)**, and **Plus (CUDA)**.
 
-**macOS limitation — AI denoise:** Packaged macOS Full/Lite apps **do not include PyTorch**, so the Export menu’s **JPEG / TIFF + AI denoise (SCUNet)** items are hidden. Standard JPEG / WebP / 16-bit TIFF export still works. SCUNet export currently needs `torch` + `spandrel` (CUDA or Apple MPS); an ONNX/Core ML path is not shipped yet. Windows Full builds that include torch show the options and can download the ~69 MB weights on first use.
+**macOS limitation — AI denoise:** Packaged macOS Standard/Plus apps **do not include PyTorch**, so the Export menu’s **JPEG / TIFF + AI denoise (SCUNet)** items are hidden. Standard JPEG / WebP / 16-bit TIFF export still works. SCUNet export currently needs `torch` + `spandrel` (CUDA or Apple MPS); an ONNX/Core ML path is not shipped yet. Windows Plus builds that include torch show the options and can download the ~69 MB weights on first use.
 
----
 
 ## Cameras & formats
 
@@ -248,7 +248,7 @@ To map an entire album at once, or add locations to photos that don't have GPS, 
 
 ## Your photos stay yours
 
-RAWviewer never uploads anything. Search, maps, and AI features all run on your computer. The only network use is optional: the one-time AI model download (Full edition) and fetching map tiles when you open the map. A local thumbnail cache speeds up the gallery; it stays on your machine and cleans itself up after 30 days of inactivity.
+RAWviewer never uploads anything. Search, maps, and AI features all run on your computer. The only network use is optional: the one-time AI model download (Plus edition) and fetching map tiles when you open the map. A local thumbnail cache speeds up the gallery; it stays on your machine and cleans itself up after 30 days of inactivity.
 
 ### Upgrading from an older version
 
@@ -267,7 +267,7 @@ This clears local cache and session state only — **not** your photos or XMP si
 
 ## Troubleshooting
 
-**Requirements:** Windows 10+ · macOS 13+ · 8 GB RAM (16 GB+ recommended for Full with large folders).
+**Requirements:** Windows 10+ · macOS 13+ · 8 GB RAM (16 GB+ recommended for Plus with large folders).
 
 <details>
 <summary><strong>All platforms</strong></summary>
@@ -290,14 +290,14 @@ To clear cache: **`scripts\Launch\bat\clear_cache.bat`** (Windows) · **`scripts
 | Problem | What to do |
 |---------|------------|
 | SmartScreen warning | More info → Run anyway |
-| Slow AI search (**Full**) | Prefer **DirectML** on most PCs; use **CUDA** only with NVIDIA + CUDA |
-| Installer stuck on "Downloading models" (**Full**) | Models (~600 MB) can take several minutes. Check firewall, VPN, or proxy if it fails — browsing still works; open gallery **Search** later to retry |
+| Slow AI search (**Plus**) | Prefer **DirectML** on most PCs; use **CUDA** only with NVIDIA + CUDA |
+| Installer stuck on "Downloading models" (**Plus**) | Models (~600 MB) can take several minutes. Check firewall, VPN, or proxy if it fails — browsing still works; open gallery **Search** later to retry |
 | Opened Setup again instead of the app | Launch **RAWviewer** from the Desktop shortcut — not **`RAWviewer_Setup.exe`** |
-| AI search missing after install (**Full**) | Open gallery **Search** → accept the download prompt |
+| AI search missing after install (**Plus**) | Open gallery **Search** → accept the download prompt |
 | RAWviewer not in Open with | Re-run the installer (repair), or reinstall |
 | Leftover cache after uninstall | Run **`uninstall.bat`** again, or delete `%USERPROFILE%\.rawviewer_cache` manually |
-| Out of memory during AI indexing | Use **Lite** on 8 GB PCs, or see [memory tuning](docs/DEVELOPING.md#automatic-memory-tuning) |
-| App slow or exits after reopening last folder | On 8 GB PCs, use **Lite** or set `RAWVIEWER_DISABLE_SESSION_RESTORE=1` |
+| Out of memory during AI indexing | Use **Standard** on 8 GB PCs, or see [memory tuning](docs/DEVELOPING.md#automatic-memory-tuning) |
+| App slow or exits after reopening last folder | On 8 GB PCs, use **Standard** or set `RAWVIEWER_DISABLE_SESSION_RESTORE=1` |
 | RAW always shows demosaic, not embedded JPEG | Switch to **Embedded JPEG workflow** |
 | Crash | Enable file logging with `RAWVIEWER_FILE_LOG=1`, then check the install folder |
 
@@ -311,13 +311,13 @@ To clear cache: **`scripts\Launch\bat\clear_cache.bat`** (Windows) · **`scripts
 | macOS blocks the app ("damaged" / won't open) | In the extracted folder, run `bash install_macos_app.sh` (see install steps above) |
 | `bash: command not found` | Type `cd `, drag the extracted folder onto Terminal, press Return, then run the command again |
 | Can't read Desktop/Documents | System Settings → Privacy → **Full Disk Access** → add RAWviewer |
-| Search says models missing (**Full**) | Open gallery search and click **Download** when prompted (needs internet once) |
-| No **AI denoise** in Export menu (**Full**) | Expected on macOS `.app` builds (PyTorch not bundled). Use Windows Full, or standard JPEG/WebP/TIFF export on Mac. See [Lite or Full?](#lite-or-full) |
+| Search says models missing (**Plus**) | Open gallery search and click **Download** when prompted (needs internet once) |
+| No **AI denoise** in Export menu (**Plus**) | Expected on macOS `.app` builds (PyTorch not bundled). Use Windows Plus, or standard JPEG/WebP/TIFF export on Mac. See [Standard or Plus?](#standard-or-plus) |
 | Download failed (SSL / certificate error) | On a corporate VPN or proxy, add your organization's root certificate to **Keychain Access** and set it to **Always Trust** |
 | Need to uninstall completely | Use **`Uninstall RAWviewer.command`** from the release zip — not Trash alone |
 | Uninstall scripts missing | Re-download the release zip from [Releases](https://github.com/markyip/RAWviewer/releases/latest); scripts are inside the extracted folder |
 | "Out of memory" / heavy swap during indexing | On 8 GB Macs, prefer **Lite** or wait for indexing to finish; see [memory tuning](docs/DEVELOPING.md#automatic-memory-tuning) |
-| Killed on relaunch (`Killed: 9` in Terminal) | Try **Lite**, `RAWVIEWER_DISABLE_SESSION_RESTORE=1`, or `RAWVIEWER_ENABLE_SEMANTIC_SEARCH=0` |
+| Killed on relaunch (`Killed: 9` in Terminal) | Try **Standard**, `RAWVIEWER_DISABLE_SESSION_RESTORE=1`, or `RAWVIEWER_ENABLE_SEMANTIC_SEARCH=0` |
 | Gallery still stutters on a huge folder | Run **`clear_cache.sh`** and reopen the folder |
 
 </details>
@@ -328,14 +328,14 @@ To clear cache: **`scripts\Launch\bat\clear_cache.bat`** (Windows) · **`scripts
 
 Project directions and remaining work that are **not** tied to a particular release. Release notes cover shipped features only.
 
-Rule of thumb: **if it can ship in Full, it counts as feasible** even when Lite must omit it (size / no ML).
+Rule of thumb: **if it can ship in Plus, it counts as feasible** even when Standard must omit it (size / no ML).
 
 | Rank | Item | Feasibility | Effort | Notes |
 |------|------|-------------|--------|-------|
 | 1 | **Cold-folder edited tile regen** (`SIDECAR_ADJUST` / edited-preview opt-in) | **High** | M | Save-from-Adjust already bakes editor-aligned thumb/grid/preview; cold folders still show embedded JPEG until next Adjust visit |
 | 2 | **General local masks** (gradient / radial / second brush beyond D&B) | **Medium–High** | L | D&B + crop already ship; extend private mask schema / UI |
 | 3 | **DNG export / round-trip** | **Medium** | L | Writer removed 2026-07; needs a real DNG path, not a stub |
-| 4 | **Object / subject ML masks** | **Medium** | L | Full-only (model size); Lite stays brush/geometry |
+| 4 | **Object / subject ML masks** | **Medium** | L | Plus-only (model size); Standard stays brush/geometry |
 | 5 | **Windows HDR display path** | **Medium** | L | macOS EDR was removed for Fast RAW perf; Windows still SDR tone-map |
 | 6 | **Restore macOS EDR alongside Fast RAW** | **Low–Medium** | L | Previously conflicted with the fast load pipeline; needs a non-regressing design |
 | 7 | **VLM-assisted auto adjust** | **Low–Medium** | L | Product + model/API scope (e.g. local Ollama); not blocked by editor plumbing alone |
@@ -345,7 +345,7 @@ Rule of thumb: **if it can ship in Full, it counts as feasible** even when Lite 
 **Current limits (not aspirational):**
 - **Cold gallery tiles** for never-opened-in-Adjust edits may still show embedded JPEG (edited **badge** + save-bake cover the common path). Same root as row 1.
 - **Nikon HE-NEF**: Adjust disabled; embedded JPEG browse only (row 9).
-- **SCUNet AI denoise export**: Windows Full only in release builds. macOS `.app` excludes PyTorch, so the Export menu hides those items (standard JPEG/WebP/TIFF still works).
+- **SCUNet AI denoise export**: Windows Plus only in release builds. macOS `.app` excludes PyTorch, so the Export menu hides those items (standard JPEG/WebP/TIFF still works).
 
 ---
 
@@ -363,11 +363,11 @@ Build scripts, environment variables, memory tuning, and architecture notes: **[
 
 RAWviewer stands on excellent open-source work, including:
 
-- **AI denoise model:** [SCUNet](https://github.com/cszn/SCUNet) `scunet_color_real_psnr` by **Kai Zhang et al.** (Apache-2.0) — export-only neural noise reduction on **Windows Full** ([paper](https://doi.org/10.1007/s11633-023-1466-0); weights from [KAIR](https://github.com/cszn/KAIR/releases/tag/v1.0)); not in the macOS `.app` (no bundled PyTorch)
+- **AI denoise model:** [SCUNet](https://github.com/cszn/SCUNet) `scunet_color_real_psnr` by **Kai Zhang et al.** (Apache-2.0) — export-only neural noise reduction on **Windows Plus** ([paper](https://doi.org/10.1007/s11633-023-1466-0); weights from [KAIR](https://github.com/cszn/KAIR/releases/tag/v1.0)); not in the macOS `.app` (no bundled PyTorch)
 - **[LibRaw](https://www.libraw.org/)** / **[rawpy](https://github.com/letmaik/rawpy)** — RAW decoding
-- **[MobileCLIP](https://github.com/apple/ml-mobileclip)** (Apple) — on-device photo-description search (Full edition)
+- **[MobileCLIP](https://github.com/apple/ml-mobileclip)** (Apple) — on-device photo-description search (Plus edition)
 - **[Qt / PyQt6](https://www.riverbankcomputing.com/software/pyqt/)** — application framework
-- **[spandrel](https://github.com/chaiNNer-org/spandrel)** — loads the SCUNet checkpoint for export denoise (Windows Full)
+- **[spandrel](https://github.com/chaiNNer-org/spandrel)** — loads the SCUNet checkpoint for export denoise (Windows Plus)
 
 ## License
 

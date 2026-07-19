@@ -10,7 +10,7 @@ Scripts for local development and packaging. All paths assume the **repository r
 |--------|---------|
 | [`bat/run_debug.bat`](bat/run_debug.bat) | Run `src/main.py` with debug logging and `rawviewer_env` if present (full profile) |
 | [`bat/clear_cache.bat`](bat/clear_cache.bat) | Wipe memory/disk image caches, semantic index DB, logs, and QSettings (full fresh start) |
-| [`bat/build_windows.bat`](bat/build_windows.bat) | Build unified Windows installer (`RAWviewer_Setup.exe` containing Full-CUDA, Full-DirectML, and Lite profiles) |
+| [`bat/build_windows.bat`](bat/build_windows.bat) | Build unified Windows installer (`RAWviewer_Setup.exe` containing Plus-CUDA, Plus-DirectML, and Standard profiles) |
 | [`bat/build_windows_all.bat`](bat/build_windows_all.bat) | Legacy/wrapper: Redirects to `build_windows.bat` |
 | [`bat/build_windows_full.bat`](bat/build_windows_full.bat) | Legacy/wrapper: Redirects to `build_windows.bat` |
 | [`bat/build_windows_lite.bat`](bat/build_windows_lite.bat) | Legacy/wrapper: Redirects to `build_windows.bat` |
@@ -24,12 +24,12 @@ Scripts for local development and packaging. All paths assume the **repository r
 
 | Profile | Installer artifact |
 |---------|-------------------|
-| Unified (CUDA / DirectML / Lite) | `dist/RAWviewer_Setup.exe` |
+| Unified (Plus CUDA / Plus DirectML / Standard) | `dist/RAWviewer_Setup.exe` |
 
 **End-user install (Windows):**
 
 1. Run **`RAWviewer_Setup.exe`** from [Releases](https://github.com/markyip/RAWviewer/releases/latest).
-2. Choose **Full — CUDA**, **Full — DirectML**, or **Lite** in the wizard; stay online for runtime and (Full) AI model downloads.
+2. Choose **Plus — CUDA**, **Plus — DirectML**, or **Standard** in the wizard; stay online for runtime and (Plus) AI model downloads.
 3. Launch **`RAWviewer.exe`** or the Desktop shortcut — not **`RAWviewer_Setup.exe`** (installer/repair only).
 
 Default install folder: `%LOCALAPPDATA%\RAWviewer`. Setup registers **Open with** for common photo formats.
@@ -80,7 +80,7 @@ Official macOS release only; there is no Linux build or installer.
 | [`shell/clear_cache.sh`](shell/clear_cache.sh) | Wipe image/EXIF/semantic caches, logs, and QSettings (full fresh start) |
 | [`shell/uninstall_macos_app.sh`](shell/uninstall_macos_app.sh) | Remove `.app` from Applications + user cache, logs, and preferences |
 | [`shell/build_macos_full.sh`](shell/build_macos_full.sh) | macOS **full** build → `dist/RAWviewer.app` + release zip |
-| [`shell/build_macos_lite.sh`](shell/build_macos_lite.sh) | macOS **lite** build → `dist/RAWviewer_Lite.app` + release zip |
+| [`shell/build_macos_lite.sh`](shell/build_macos_lite.sh) | macOS **Standard** (lite profile) build → `dist/RAWviewer_Lite.app` + release zip |
 | [`shell/build_macos.sh`](shell/build_macos.sh) | Underlying build script; accepts `full` or `lite` as first argument |
 | [`shell/test_builds.sh`](shell/test_builds.sh) | Smoke test profile resolution + optional `dist/` artifact check |
 
@@ -88,8 +88,8 @@ Official macOS release only; there is no Linux build or installer.
 
 | Profile | App bundle | Release zip |
 |---------|------------|-------------|
-| Full | `dist/RAWviewer.app` | `dist/RAWviewer-v{VERSION}-macOS.zip` |
-| Lite | `dist/RAWviewer_Lite.app` | `dist/RAWviewer-v{VERSION}-macOS-Lite.zip` |
+| Plus | `dist/RAWviewer.app` | `dist/RAWviewer-v{VERSION}-macOS.zip` |
+| Standard | `dist/RAWviewer_Lite.app` | `dist/RAWviewer-v{VERSION}-macOS-Lite.zip` |
 
 ```bash
 chmod +x scripts/Launch/shell/*.sh
@@ -164,8 +164,8 @@ RAWVIEWER_TEST_PYEXIV2=0 RAWVIEWER_TEST_SEMANTIC=0 ./scripts/Launch/shell/launch
 | Variable | Default | Notes |
 |----------|---------|--------|
 | `RAWVIEWER_GPU_VIEW` | `1` (release default) | OpenGL single-image viewport; set `0` for legacy scroll view |
-| `RAWVIEWER_PREFER_GPU_DECODE` | `1` in Full/debug launch scripts; `0` Lite / pixi day-to-day | Prefer PyTorch CUDA/MPS (or CuPy) demosaic for Fast RAW. Lite omits torch. |
-| `RAWVIEWER_GPU_CUDA_GL` | `1` in Full debug launch scripts; `0` Lite / app default | Keep RGB on CUDA and upload via CUDA↔GL (Phase 2c) |
+| `RAWVIEWER_PREFER_GPU_DECODE` | `1` in Plus/debug launch scripts; `0` Standard / pixi day-to-day | Prefer PyTorch CUDA/MPS (or CuPy) demosaic for Fast RAW. Standard omits torch. |
+| `RAWVIEWER_GPU_CUDA_GL` | `1` in Plus debug launch scripts; `0` Standard / app default | Keep RGB on CUDA and upload via CUDA↔GL (Phase 2c) |
 | `RAWVIEWER_DISABLE_EDR` | `0` | macOS: set `1` to disable EDR viewport and force SDR HDR tone mapping |
 | `RAWVIEWER_SHARE_MENU` | `1` | Qt menu of `NSSharingService` targets (reliable under Qt6) |
 | `RAWVIEWER_ENABLE_SEMANTIC_SEARCH` | `1` | Semantic search on |

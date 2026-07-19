@@ -1159,7 +1159,13 @@ class ImageLoadManager(QObject):
             self._raw_load_limit = saved_raw
 
     def enter_gallery_warmup_throttle(self) -> None:
-        """Lower worker/RAW concurrency while gallery tiles are first painting."""
+        """Raise worker/RAW concurrency while gallery tiles are first painting.
+
+        Single-view GPU demosaic alignment often leaves ``_raw_load_limit`` at
+        1–3. The previous ``min(6, _raw_load_limit)`` therefore *kept* that
+        GPU cap during gallery entry instead of restoring volume parallelism —
+        a regression when switching single→gallery with CUDA demosaic on.
+        """
         self._gallery_warmup_throttle_depth = (
             int(getattr(self, "_gallery_warmup_throttle_depth", 0) or 0) + 1
         )
@@ -1169,15 +1175,32 @@ class ImageLoadManager(QObject):
         self._warmup_saved_current_threads = self._current_thread_pool.maxThreadCount()
         warmed_max = _env_int("RAWVIEWER_GALLERY_WARMUP_MAX_WORKERS", 24, minimum=2)
         self._thread_pool.setMaxThreadCount(
-            min(warmed_max, self._warmup_saved_max_threads)
+            min(warmed_max, max(self._warmup_saved_max_threads, warmed_max))
         )
         # Warmup is CURRENT-heavy: raise CURRENT pool toward the warmup budget
         # (baseline CURRENT is intentionally small for single-view).
         bg_cap = self._thread_pool.maxThreadCount()
         self._apply_current_pool_limit(min(warmed_max, bg_cap))
         self._warmup_saved_raw_limit = self._raw_load_limit
-        self._raw_load_limit = min(6, int(self._raw_load_limit or 6))
+        pre_gpu = getattr(self, "_pre_gpu_raw_limit", None)
+        try:
+            pre_gpu_n = int(pre_gpu) if pre_gpu is not None else 0
+        except (TypeError, ValueError):
+            pre_gpu_n = 0
+        # Prefer the pre-GPU volume limit (often cpu_count-based) over the
+        # GPU-aligned single-view cap so thumbnail admission is not serialized.
+        base = pre_gpu_n if pre_gpu_n > 0 else int(self._raw_load_limit or 6)
+        self._raw_load_limit = max(6, min(32, base))
+        import logging
 
+        logging.getLogger(__name__).info(
+            "[LOAD] Gallery warmup throttle ON (workers=%d current=%d raw_limit=%d; was raw_limit=%s pre_gpu=%s)",
+            self._thread_pool.maxThreadCount(),
+            self._current_thread_pool.maxThreadCount(),
+            self._raw_load_limit,
+            self._warmup_saved_raw_limit,
+            pre_gpu_n or "n/a",
+        )
     def exit_gallery_warmup_throttle(self) -> None:
         depth = int(getattr(self, "_gallery_warmup_throttle_depth", 0) or 0)
         if depth <= 0:

@@ -13,6 +13,9 @@ LITE_PREFETCH_DEFAULTS: dict[str, str] = {
     # Lite omits torch/kornia; keep CPU Fast RAW (cv2 EA). Full may setdefault
     # PREFER_GPU_DECODE=1 via pyi_rth_release_defaults after this hook.
     "RAWVIEWER_PREFER_GPU_DECODE": "0",
+    # CPU Fast RAW: allow overlapping LibRaw unpacks (see enhanced_raw_processor).
+    # Explicit so Lite does not inherit a stale UNPACK=1 from older launch scripts.
+    "RAWVIEWER_UNPACK_CONCURRENCY": "2",
     "RAWVIEWER_NAV_PRELOAD_ADAPTIVE": "1",
     "RAWVIEWER_NAV_PRELOAD_NEAR": "4",
     "RAWVIEWER_NAV_PRELOAD_DISPLAY": "1",
@@ -49,6 +52,7 @@ MEMORY_TIER_DEFAULTS: dict[str, dict[str, str]] = {
         "RAWVIEWER_IDLE_DISPLAY_PREFETCH": "0",
         "RAWVIEWER_LOAD_MAX_WORKERS": "8",
         "RAWVIEWER_RAW_LOAD_LIMIT": "2",
+        "RAWVIEWER_UNPACK_CONCURRENCY": "1",
         "RAWVIEWER_FILMSTRIP_PREFETCH_RADIUS": "12",
         "RAWVIEWER_NAV_PRELOAD_RADIUS_MAX": "6",
         "RAWVIEWER_GALLERY_PREFETCH_SCREENS": "3",
@@ -102,13 +106,18 @@ MEMORY_TIER_DEFAULTS: dict[str, dict[str, str]] = {
 
 
 def resolved_profile() -> str:
+    """Return canonical internal profile: ``lite`` (Standard) or ``full`` (Plus).
+
+    Accepts aliases: ``standard`` → lite, ``plus`` → full.
+    """
     env = os.environ.get("RAWVIEWER_BUILD_PROFILE", "").strip().lower()
+    env = _canonicalize_profile(env)
     if env in ("lite", "full"):
         return env
     try:
         from build_profile import PROFILE as baked
 
-        profile = str(baked).strip().lower()
+        profile = _canonicalize_profile(str(baked).strip().lower())
         if profile in ("lite", "full"):
             return profile
     except Exception:
@@ -116,8 +125,31 @@ def resolved_profile() -> str:
     return "full"
 
 
+def _canonicalize_profile(value: str) -> str:
+    v = (value or "").strip().lower()
+    if v in ("standard", "std"):
+        return "lite"
+    if v in ("plus",):
+        return "full"
+    return v
+
+
 def is_lite_build() -> bool:
+    """True for the Standard edition (legacy internal id: lite)."""
     return resolved_profile() == "lite"
+
+
+def is_standard_build() -> bool:
+    return is_lite_build()
+
+
+def is_plus_build() -> bool:
+    return resolved_profile() == "full"
+
+
+def edition_display_name() -> str:
+    """User-facing edition name: Standard or Plus."""
+    return "Standard" if is_lite_build() else "Plus"
 
 
 def apply_profile_runtime_defaults() -> None:

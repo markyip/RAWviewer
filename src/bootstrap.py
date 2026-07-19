@@ -68,6 +68,60 @@ def _human_bytes(num_bytes: int) -> str:
     return f"{num_bytes} B"
 
 
+def _directory_size_bytes(root: str) -> int:
+    """Sum on-disk file sizes under ``root`` (skips unreadable entries)."""
+    total = 0
+    if not root or not os.path.isdir(root):
+        return 0
+    for dirpath, _dirnames, filenames in os.walk(root):
+        for name in filenames:
+            try:
+                total += os.path.getsize(os.path.join(dirpath, name))
+            except OSError:
+                continue
+    return total
+
+
+def _estimated_size_kb(root: str) -> int:
+    """Windows Apps list ``EstimatedSize`` is a DWORD of kilobytes."""
+    return max(1, int(_directory_size_bytes(root) // 1024))
+
+
+def _prune_torch_link_libs(target_dir: str, log) -> None:
+    """Remove PyTorch ``*.lib`` files that are only needed for compiling extensions.
+
+    The cu124 wheel ships ~0.7–0.8 GB of static import libraries under
+    ``torch/lib`` (e.g. ``dnnl.lib``). RAWviewer never links against them at
+    runtime; deleting them shrinks CUDA Full installs without changing demosaic.
+    """
+    site = os.path.join(
+        target_dir, ".pixi", "envs", "default", "Lib", "site-packages", "torch", "lib"
+    )
+    if not os.path.isdir(site):
+        return
+    removed = 0
+    freed = 0
+    try:
+        for name in os.listdir(site):
+            if not name.lower().endswith(".lib"):
+                continue
+            path = os.path.join(site, name)
+            try:
+                freed += os.path.getsize(path)
+                os.remove(path)
+                removed += 1
+            except OSError as exc:
+                log(f"Could not remove {name}: {exc}")
+    except OSError as exc:
+        log(f"Torch lib prune skipped: {exc}")
+        return
+    if removed:
+        log(
+            f"Pruned {removed} torch link libraries ({_human_bytes(freed)}) "
+            "— not required at runtime."
+        )
+
+
 def _check_disk_space(path: str, min_bytes: int = MIN_FREE_BYTES) -> str | None:
     """Return a user-facing error when the target drive is too full."""
     try:
@@ -534,6 +588,42 @@ class InstallWorker(QObject):
                     return
 
             min_bytes = MIN_FREE_BYTES_LITE if self.install_mode == "lite" else MIN_FREE_BYTES
+            # CUDA may reuse an existing torch — probe before requiring ~3 GiB free
+            # for a full cu124 download.
+            cuda_external = None
+            effective_mode = self.install_mode
+            if self.install_mode == "cuda":
+                try:
+                    # Prefer the copy that ships with the installer payload; fall
+                    # back to the live tree when running bootstrap from source.
+                    sys.path.insert(0, os.path.join(BUNDLE_DIR, "src"))
+                    from torch_provider import (  # type: ignore
+                        discover_external_torch,
+                        save_provider,
+                        install_byo_sidecar_packages,
+                        TorchProvider,
+                    )
+
+                    cuda_external = discover_external_torch(log=self.log_signal.emit)
+                    if cuda_external is not None:
+                        effective_mode = "cuda-byo"
+                        min_bytes = MIN_FREE_BYTES_LITE + 512 * 1024 * 1024
+                        self.log_signal.emit(
+                            "CUDA profile will reuse your existing PyTorch "
+                            f"{cuda_external.torch_version} (no torch download)."
+                        )
+                    else:
+                        self.log_signal.emit(
+                            "No usable external PyTorch CUDA 12.x found — "
+                            "RAWviewer will download torch into its own environment."
+                        )
+                except Exception as exc:
+                    self.log_signal.emit(
+                        f"External PyTorch probe failed ({exc}); will download bundled torch."
+                    )
+                    cuda_external = None
+                    effective_mode = "cuda"
+
             disk_err = _check_disk_space(target_dir, min_bytes)
             if disk_err:
                 self.log_signal.emit(disk_err)
@@ -550,10 +640,32 @@ class InstallWorker(QObject):
 
             self.log_signal.emit("Copying core files...")
             # Copy the selected variant of pixi.toml to the target folder
-            manifest_source = os.path.join(BUNDLE_DIR, f"pixi-{self.install_mode}.toml")
+            manifest_name = f"pixi-{effective_mode}.toml"
+            if effective_mode == "cuda-byo":
+                manifest_name = "pixi-cuda-byo.toml"
+            manifest_source = os.path.join(BUNDLE_DIR, manifest_name)
+            if not os.path.isfile(manifest_source):
+                # Dev / older payload: map BYO onto DirectML-sized deps.
+                if effective_mode == "cuda-byo":
+                    manifest_source = os.path.join(BUNDLE_DIR, "pixi-directml.toml")
+                else:
+                    manifest_source = os.path.join(
+                        BUNDLE_DIR, f"pixi-{self.install_mode}.toml"
+                    )
             if not os.path.isfile(manifest_source):
                 manifest_source = os.path.join(BUNDLE_DIR, "pixi.toml")
             shutil.copy2(manifest_source, os.path.join(target_dir, "pixi.toml"))
+
+            # Lite / DirectML / CUDA-BYO must not reuse a previous bundled CUDA
+            # Pixi env — leftover torch+cu124 alone is ~2.4 GB+.
+            if self.install_mode in ("lite", "directml") or effective_mode == "cuda-byo":
+                pixi_env_root = os.path.join(target_dir, ".pixi")
+                if os.path.isdir(pixi_env_root):
+                    self.log_signal.emit(
+                        f"{effective_mode} install: clearing previous Pixi environment "
+                        "(drops leftover CUDA packages)..."
+                    )
+                    shutil.rmtree(pixi_env_root, ignore_errors=True)
 
             src_dir = os.path.join(target_dir, "src")
             if os.path.exists(src_dir):
@@ -671,9 +783,14 @@ class InstallWorker(QObject):
 
             self.progress_signal.emit(5)
 
-            self.log_signal.emit(
-                "Downloading Python dependencies. This may take several minutes..."
-            )
+            if effective_mode == "cuda-byo":
+                self.log_signal.emit(
+                    "Downloading Python dependencies (without PyTorch — using yours)..."
+                )
+            else:
+                self.log_signal.emit(
+                    "Downloading Python dependencies. This may take several minutes..."
+                )
             pixi_code = _run_subprocess_with_retry(
                 [pixi_exe, "install", "-v"],
                 target_dir,
@@ -689,12 +806,52 @@ class InstallWorker(QObject):
                 self.finished.emit(False, "")
                 return
 
+            # Bind torch provider: external BYO or bundled CUDA.
+            if self.install_mode == "cuda":
+                try:
+                    sys.path.insert(0, os.path.join(target_dir, "src"))
+                    from torch_provider import (  # type: ignore
+                        TorchProvider,
+                        save_provider,
+                        install_byo_sidecar_packages,
+                    )
+
+                    if effective_mode == "cuda-byo" and cuda_external is not None:
+                        install_byo_sidecar_packages(
+                            target_dir, cuda_external, log=self.log_signal.emit
+                        )
+                        save_provider(cuda_external, target_dir)
+                        self.log_signal.emit(
+                            f"Registered external PyTorch at {cuda_external.site_packages}"
+                        )
+                    else:
+                        # Bundled: torch came from pixi; record + prune *.lib
+                        _prune_torch_link_libs(target_dir, self.log_signal.emit)
+                        bundled_py = os.path.join(
+                            target_dir, ".pixi", "envs", "default", "python.exe"
+                        )
+                        save_provider(
+                            TorchProvider(
+                                mode="bundled",
+                                python_exe=bundled_py if os.path.isfile(bundled_py) else "",
+                                validated_at=time.strftime("%Y-%m-%dT%H:%M:%S"),
+                            ),
+                            target_dir,
+                        )
+                except Exception as exc:
+                    self.log_signal.emit(f"Warning: torch provider setup: {exc}")
+            elif self.install_mode not in ("lite", "directml"):
+                _prune_torch_link_libs(target_dir, self.log_signal.emit)
+            else:
+                # DirectML / Lite: no torch expected
+                pass
+
             self.progress_signal.emit(MODEL_DOWNLOAD_PROGRESS_START)
 
             success_note = ""
             if self.install_mode == "lite":
                 self.log_signal.emit(
-                    "Lite install: skipping AI models (no semantic search or face detection)."
+                    "Standard install: skipping AI models (no semantic search or face detection)."
                 )
                 self.progress_label_signal.emit("Finishing setup...")
                 self.progress_signal.emit(100)
@@ -809,6 +966,8 @@ oLink2.Save
                 install_date = time.strftime("%Y%m%d")
                 uninst_path = os.path.join(target_dir, "uninstall.bat")
                 silent_cmd = f'"{uninst_path}"'
+                # Settings → Apps shows blank size without EstimatedSize (KB).
+                est_kb = _estimated_size_kb(target_dir)
                 with winreg.CreateKey(winreg.HKEY_CURRENT_USER, key_path) as key:
                     winreg.SetValueEx(key, "DisplayName", 0, winreg.REG_SZ, "RAWviewer")
                     winreg.SetValueEx(key, "DisplayIcon", 0, winreg.REG_SZ, icon_path)
@@ -818,9 +977,13 @@ oLink2.Save
                     winreg.SetValueEx(key, "InstallLocation", 0, winreg.REG_SZ, target_dir)
                     winreg.SetValueEx(key, "Publisher", 0, winreg.REG_SZ, "Mark Yip")
                     winreg.SetValueEx(key, "InstallDate", 0, winreg.REG_SZ, install_date)
+                    winreg.SetValueEx(key, "EstimatedSize", 0, winreg.REG_DWORD, est_kb)
                     winreg.SetValueEx(key, "NoModify", 0, winreg.REG_DWORD, 1)
                     winreg.SetValueEx(key, "NoRepair", 0, winreg.REG_DWORD, 1)
                     winreg.SetValueEx(key, "WindowsInstaller", 0, winreg.REG_DWORD, 0)
+                self.log_signal.emit(
+                    f"Registered uninstaller (EstimatedSize={_human_bytes(est_kb * 1024)})."
+                )
                 result = ctypes.wintypes.DWORD()
                 ctypes.windll.user32.SendMessageTimeoutW(
                     0xFFFF, 0x001A, 0, "Environment", 0x0002, 1000, ctypes.byref(result)
@@ -1071,30 +1234,37 @@ class InstallerGUI(QMainWindow):
         
         desc_text = (
             "RAWviewer helps you review and cull RAW and JPEG photos quickly.\n\n"
-            "Choose your installation profile and acceleration backend below. "
-            "Full versions require internet access to download dependencies and models."
+            "Choose your edition below. "
+            "Plus editions require internet access to download dependencies and AI models."
         )
         desc = QLabel(desc_text)
         desc.setObjectName("desc")
         desc.setWordWrap(True)
         layout.addWidget(desc)
 
-        options_label = QLabel("Installation Options:")
+        options_label = QLabel("Edition:")
         options_label.setStyleSheet(f"color: {_INK_MUTED}; font-weight: bold; margin-top: 15px;")
         layout.addWidget(options_label)
 
-        self.radio_cuda = QRadioButton("Full — NVIDIA GPU (CUDA Acceleration, downloads ~600MB models)")
-        self.radio_directml = QRadioButton("Full — Default GPU (DirectML Acceleration, downloads ~600MB models)")
-        self.radio_lite = QRadioButton("Lite — High Performance (No AI search, no downloading models)")
+        self.radio_lite = QRadioButton(
+            "Standard — Browse & Adjust (~0.8–1 GB; no AI search)"
+        )
+        self.radio_directml = QRadioButton(
+            "Plus — DirectML (AI search; ~1.5–2 GB + ~600 MB models; CPU demosaic)"
+        )
+        self.radio_cuda = QRadioButton(
+            "Plus — NVIDIA CUDA (AI search + GPU demosaic; prefers existing torch+cu12x, "
+            "else ~3–4 GB + ~600 MB models)"
+        )
 
-        # Set default to DirectML (most compatible across all devices)
-        self.radio_directml.setChecked(True)
+        # Default Standard: lean install for most users.
+        self.radio_lite.setChecked(True)
 
         options_layout = QVBoxLayout()
         options_layout.setSpacing(6)
-        options_layout.addWidget(self.radio_cuda)
-        options_layout.addWidget(self.radio_directml)
         options_layout.addWidget(self.radio_lite)
+        options_layout.addWidget(self.radio_directml)
+        options_layout.addWidget(self.radio_cuda)
         layout.addLayout(options_layout)
 
         self.clear_cache_cb = QCheckBox(
@@ -1104,7 +1274,7 @@ class InstallerGUI(QMainWindow):
             "Removes the local photo cache (~/.rawviewer_cache) and session settings "
             "so v3 can use faster search/index defaults.\n"
             "Does not delete your photos or XMP sidecars.\n"
-            "Full builds may re-download AI models on first search."
+            "Plus builds may re-download AI models on first search."
         )
         self.clear_cache_cb.setChecked(False)
         layout.addWidget(self.clear_cache_cb)
