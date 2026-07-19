@@ -1,21 +1,18 @@
-"""Build profile (full vs lite) and lite performance defaults."""
+"""Build profile (full vs lite) and shared scroll / RAM-tier defaults."""
 
 from __future__ import annotations
 
 import json
 import os
+import sys
 import time
 
-LITE_PREFETCH_DEFAULTS: dict[str, str] = {
-    "RAWVIEWER_ENABLE_SEMANTIC_SEARCH": "0",
-    "RAWVIEWER_ENABLE_FACE_SCAN": "0",
-    "RAWVIEWER_AUTO_METADATA_INDEX": "1",
-    # Lite omits torch/kornia; keep CPU Fast RAW (cv2 EA). Full may setdefault
-    # PREFER_GPU_DECODE=1 via pyi_rth_release_defaults after this hook.
-    "RAWVIEWER_PREFER_GPU_DECODE": "0",
-    # CPU Fast RAW: allow overlapping LibRaw unpacks (see enhanced_raw_processor).
-    # Explicit so Lite does not inherit a stale UNPACK=1 from older launch scripts.
-    "RAWVIEWER_UNPACK_CONCURRENCY": "2",
+# Gallery / navigation prefetch shared by Standard and Plus.
+# Previously Lite-only — that made Plus packaged builds feel slower when scrolling.
+# Applied before RAM-tier defaults so low-RAM caps do not kneecap gallery fill.
+# When semantic/face indexing is active, gallery_idle_load_priority() already
+# demotes idle preload to BACKGROUND so these batches do not starve the UI.
+SHARED_SCROLL_PREFETCH_DEFAULTS: dict[str, str] = {
     "RAWVIEWER_NAV_PRELOAD_ADAPTIVE": "1",
     "RAWVIEWER_NAV_PRELOAD_NEAR": "4",
     "RAWVIEWER_NAV_PRELOAD_DISPLAY": "1",
@@ -32,11 +29,31 @@ LITE_PREFETCH_DEFAULTS: dict[str, str] = {
     "RAWVIEWER_GALLERY_IDLE_PRELOAD_MS": "180",
     "RAWVIEWER_GALLERY_IDLE_PRELOAD_PRIORITY": "preload_next",
     "RAWVIEWER_PREVIEW_CACHE_ADAPTIVE": "1",
+}
+
+# Standard (lite) edition feature gates + CPU Fast RAW defaults.
+LITE_FEATURE_DEFAULTS: dict[str, str] = {
+    "RAWVIEWER_ENABLE_SEMANTIC_SEARCH": "0",
+    "RAWVIEWER_ENABLE_FACE_SCAN": "0",
+    "RAWVIEWER_AUTO_METADATA_INDEX": "1",
+    # Lite omits torch/kornia; keep CPU Fast RAW (cv2 EA). Full may setdefault
+    # PREFER_GPU_DECODE=1 via pyi_rth_release_defaults after this hook (Windows).
+    "RAWVIEWER_PREFER_GPU_DECODE": "0",
+    # CPU Fast RAW: allow overlapping LibRaw unpacks (see enhanced_raw_processor).
+    "RAWVIEWER_UNPACK_CONCURRENCY": "2",
     "RAWVIEWER_MEMORY_PREVIEW_MAX": "2304",
+}
+
+# Backward-compatible alias (tests / callers may still import this name).
+LITE_PREFETCH_DEFAULTS: dict[str, str] = {
+    **SHARED_SCROLL_PREFETCH_DEFAULTS,
+    **LITE_FEATURE_DEFAULTS,
 }
 
 
 # RAM-tier defaults (setdefault at startup). Opt out: RAWVIEWER_MEMORY_TIER_AUTO=0
+# Indexing / decode concurrency only — do not undercut SHARED_SCROLL_PREFETCH_DEFAULTS
+# gallery idle batch / filmstrip radius (those made Plus feel slower than Standard).
 MEMORY_TIER_DEFAULTS: dict[str, dict[str, str]] = {
     # ≤8 GB MacBook Air class — avoid OOM during semantic index + large folders
     "low": {
@@ -49,15 +66,12 @@ MEMORY_TIER_DEFAULTS: dict[str, dict[str, str]] = {
         "RAWVIEWER_MEMORY_PREVIEW_MAX": "1280",
         "RAWVIEWER_PREVIEW_CACHE_ITEMS": "8",
         "RAWVIEWER_PREVIEW_CACHE_ITEMS_MAX": "12",
-        "RAWVIEWER_IDLE_DISPLAY_PREFETCH": "0",
         "RAWVIEWER_LOAD_MAX_WORKERS": "8",
         "RAWVIEWER_RAW_LOAD_LIMIT": "2",
         "RAWVIEWER_UNPACK_CONCURRENCY": "1",
-        "RAWVIEWER_FILMSTRIP_PREFETCH_RADIUS": "12",
         "RAWVIEWER_NAV_PRELOAD_RADIUS_MAX": "6",
         "RAWVIEWER_GALLERY_PREFETCH_SCREENS": "3",
         "RAWVIEWER_GALLERY_ENTRY_PREFETCH_RADIUS": "16",
-        "RAWVIEWER_GALLERY_IDLE_PRELOAD_BATCH": "40",
         "RAWVIEWER_GALLERY_WARMUP_MAX_WORKERS": "6",
     },
     # 10–12 GB unified memory
@@ -71,11 +85,9 @@ MEMORY_TIER_DEFAULTS: dict[str, dict[str, str]] = {
         "RAWVIEWER_IDLE_DISPLAY_PREFETCH_QUEUE_CAP": "10",
         "RAWVIEWER_LOAD_MAX_WORKERS": "12",
         "RAWVIEWER_RAW_LOAD_LIMIT": "3",
-        "RAWVIEWER_FILMSTRIP_PREFETCH_RADIUS": "20",
         "RAWVIEWER_NAV_PRELOAD_RADIUS_MAX": "8",
-        "RAWVIEWER_GALLERY_IDLE_PRELOAD_BATCH": "72",
     },
-    # 16 GB — conservative defaults to avoid jetsam during semantic + face indexing
+    # 16 GB — conservative index workers to avoid jetsam during semantic + face
     "balanced": {
         "RAWVIEWER_SEMANTIC_PREP_WORKERS": "3",
         "RAWVIEWER_SEMANTIC_BATCH_MAX": "32",
@@ -87,12 +99,9 @@ MEMORY_TIER_DEFAULTS: dict[str, dict[str, str]] = {
         "RAWVIEWER_MEMORY_PREVIEW_MAX": "1536",
         "RAWVIEWER_PREVIEW_CACHE_ITEMS": "8",
         "RAWVIEWER_PREVIEW_CACHE_ITEMS_MAX": "12",
-        "RAWVIEWER_IDLE_DISPLAY_PREFETCH": "0",
         "RAWVIEWER_LOAD_MAX_WORKERS": "8",
         "RAWVIEWER_RAW_LOAD_LIMIT": "2",
         "RAWVIEWER_GALLERY_WARMUP_MAX_WORKERS": "6",
-        "RAWVIEWER_GALLERY_IDLE_PRELOAD_BATCH": "48",
-        "RAWVIEWER_FILMSTRIP_PREFETCH_RADIUS": "16",
         "RAWVIEWER_NAV_PRELOAD_RADIUS_MAX": "6",
     },
     # 24 GB — near stock full defaults
@@ -152,10 +161,17 @@ def edition_display_name() -> str:
     return "Standard" if is_lite_build() else "Plus"
 
 
+def apply_shared_scroll_prefetch_defaults() -> None:
+    """Gallery/nav prefetch for both Standard and Plus (setdefault; env wins)."""
+    for key, value in SHARED_SCROLL_PREFETCH_DEFAULTS.items():
+        os.environ.setdefault(key, value)
+
+
 def apply_profile_runtime_defaults() -> None:
+    apply_shared_scroll_prefetch_defaults()
     if not is_lite_build():
         return
-    for key, value in LITE_PREFETCH_DEFAULTS.items():
+    for key, value in LITE_FEATURE_DEFAULTS.items():
         os.environ.setdefault(key, value)
 
 
@@ -194,7 +210,11 @@ def classify_memory_tier(total_ram_gb: float | None) -> str:
 def memory_tier_defaults(tier: str | None = None) -> dict[str, str]:
     if tier is None:
         tier = classify_memory_tier(system_total_ram_gb())
-    return dict(MEMORY_TIER_DEFAULTS.get(tier, {}))
+    defaults = dict(MEMORY_TIER_DEFAULTS.get(tier, {}))
+    if sys.platform == "darwin":
+        # Apple Vision face detection is lightweight; keep enabled on low-RAM Macs.
+        defaults.pop("RAWVIEWER_ENABLE_FACE_SCAN", None)
+    return defaults
 
 
 def _memory_tier_note_path() -> str:
@@ -245,7 +265,7 @@ def memory_tier_startup_summary() -> str:
 
 
 def apply_runtime_defaults() -> str:
-    """Lite profile + RAM-tier defaults (call before heavy imports)."""
+    """Shared scroll prefetch + edition gates + RAM-tier defaults."""
     apply_profile_runtime_defaults()
     return apply_memory_tier_defaults()
 

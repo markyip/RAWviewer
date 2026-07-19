@@ -17,6 +17,42 @@ from pathlib import Path
 
 # Repository root (directory containing this script)
 REPO_ROOT = Path(__file__).resolve().parent
+_BUILD_T0 = time.time()
+
+
+def _build_elapsed() -> float:
+    return time.time() - _BUILD_T0
+
+
+def _build_log(step: str) -> None:
+    print(f"[BUILD][{_build_elapsed():.1f}s] {step}")
+
+
+def _env_flag(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _using_pixi_build_env() -> bool:
+    """True when build.py runs inside the repo's pixi default env."""
+    try:
+        exe = Path(sys.executable).resolve()
+        pixi_env = (REPO_ROOT / ".pixi" / "envs" / "default").resolve()
+        return str(exe).startswith(str(pixi_env))
+    except OSError:
+        return False
+
+
+def _build_skip_deps() -> bool:
+    if _env_flag("RAWVIEWER_BUILD_SKIP_DEPS"):
+        return True
+    # build_macos.sh uses pixi with a locked env; pip --upgrade every run is wasted time.
+    if _using_pixi_build_env() and _env_flag("RAWVIEWER_USE_SYSTEM_PYTHON_BUILD"):
+        return True
+    return False
+
+
+def _build_incremental() -> bool:
+    return _env_flag("RAWVIEWER_BUILD_INCREMENTAL")
 
 _WINDOWS_LITE_PIXI_SKIP = (
     "huggingface_hub",
@@ -293,6 +329,12 @@ def update_macos_plist(app_path, profile: str = "full"):
 def install_dependencies(windows_accel: str = "cuda", *, profile: str = "full"):
     """Install required dependencies"""
     lite = profile.strip().lower() == "lite"
+    if _build_skip_deps():
+        _build_log(
+            "Skipping pip install (pixi/locked env or RAWVIEWER_BUILD_SKIP_DEPS=1)"
+        )
+        return True
+
     print("Installing/upgrading dependencies...")
     system_name = platform.system()
     dependencies = [
@@ -990,6 +1032,16 @@ def main():
         action="store_true",
         help="Write app_version.py and sync pixi.toml from VERSION; exit without building.",
     )
+    parser.add_argument(
+        "--skip-deps",
+        action="store_true",
+        help="Skip pip install/upgrade (fast rebuild when the env is already ready).",
+    )
+    parser.add_argument(
+        "--incremental",
+        action="store_true",
+        help="Keep PyInstaller build/ cache for faster rebuilds.",
+    )
     args = parser.parse_args()
     if args.profile in ("standard", "std"):
         args.profile = "lite"
@@ -1002,6 +1054,11 @@ def main():
         sync_version_artifacts()
         print(f"[SUCCESS] Version artifacts synced to {VERSION}")
         sys.exit(0)
+
+    if args.skip_deps:
+        os.environ["RAWVIEWER_BUILD_SKIP_DEPS"] = "1"
+    if args.incremental:
+        os.environ["RAWVIEWER_BUILD_INCREMENTAL"] = "1"
 
     ensure_project_venv_and_reexec()
 
@@ -1043,7 +1100,10 @@ def main():
         print("[ERROR] PyQt6 not available after installation")
         sys.exit(1)
 
-    # Clean previous builds
+    # Clean previous builds (skip build/ wipe for incremental PyInstaller runs).
+    incremental = _build_incremental()
+    if incremental:
+        _build_log("Incremental build: keeping PyInstaller cache in build/")
     print("Cleaning previous builds...")
     windows_target_setup = (
         "RAWviewer_Setup"
@@ -1073,7 +1133,7 @@ def main():
         time.sleep(1)
     
     # Clean build directory
-    if os.path.exists('build'):
+    if os.path.exists('build') and not incremental:
         try:
             print("Cleaning build directory...")
             shutil.rmtree('build')
@@ -1082,6 +1142,8 @@ def main():
             print("  Continuing anyway...")
         except Exception as e:
             print(f"[WARNING] Error cleaning build directory: {e}")
+    elif os.path.exists('build') and incremental:
+        _build_log("Reusing existing build/ directory")
     
     # Clean dist directory (try to delete specific files first)
     if os.path.exists('dist'):
@@ -1121,7 +1183,9 @@ def main():
                             except Exception as e:
                                 print(f"[WARNING] Could not delete {name}: {e}")
                 elif platform.system() == "Darwin":
-                    for bundle in ("RAWviewer.app", "RAWviewer_Lite.app"):
+                    target_bundle = _macos_app_bundle_name(args.profile) + ".app"
+                    bundles = [target_bundle] if incremental else ("RAWviewer.app", "RAWviewer_Lite.app")
+                    for bundle in bundles:
                         candidate = os.path.join("dist", bundle)
                         if os.path.exists(candidate):
                             try:
@@ -1147,13 +1211,16 @@ def main():
                         except Exception as e:
                             print(f"[WARNING] Could not delete {exe_name}: {e}")
 
-                # Try to remove the entire dist directory
-                try:
-                    shutil.rmtree('dist')
-                except PermissionError:
-                    print("[WARNING] Some files in dist directory are locked, but continuing...")
-                except Exception as e:
-                    print(f"[WARNING] Could not fully clean dist directory: {e}")
+                # Full clean only — incremental keeps release zips / other dist artifacts.
+                if not incremental:
+                    try:
+                        shutil.rmtree('dist')
+                    except PermissionError:
+                        print("[WARNING] Some files in dist directory are locked, but continuing...")
+                    except Exception as e:
+                        print(f"[WARNING] Could not fully clean dist directory: {e}")
+                else:
+                    _build_log("Keeping other dist/ outputs (incremental)")
         except Exception as e:
             print(f"[WARNING] Error cleaning dist directory: {e}")
 
@@ -1252,6 +1319,7 @@ def main():
     
     cmd_base = [
         sys.executable, "-m", "PyInstaller",
+        "--noconfirm",
         "--windowed",
         "--paths", src_path,
         "--hidden-import", "rawviewer_ui.gallery_view",
@@ -1442,9 +1510,11 @@ def main():
         cmd_base.append("src/main.py")
 
     print(f"Running: {' '.join(cmd_base)}")
+    _build_log("Starting PyInstaller")
     if not run_command(cmd_base):
         print("[ERROR] Build failed.")
         sys.exit(1)
+    _build_log("PyInstaller finished")
     if platform.system() == 'Windows':
         exe_path = Path("dist") / f"{app_bundle_name}.exe"
     elif platform.system() == 'Darwin':
@@ -1459,8 +1529,15 @@ def main():
             _prune_built_app(exe_path, args.profile)
             _ensure_macos_pyexiv2_libintl_in_app(exe_path)
             _ensure_macos_openmp_libraw_in_app(exe_path)
-            print("Re-signing macOS app bundle (ad-hoc)...")
-            run_command(['codesign', '--force', '--deep', '-s', '-', str(exe_path)])
+            if _env_flag("RAWVIEWER_BUILD_FAST_SIGN"):
+                print("Re-signing macOS app (executable only, fast)...")
+                macos_exe = exe_path / "Contents" / "MacOS" / app_bundle_name
+                if macos_exe.is_file():
+                    run_command(["codesign", "--force", "-s", "-", str(macos_exe)])
+                run_command(["codesign", "--force", "-s", "-", str(exe_path)])
+            else:
+                print("Re-signing macOS app bundle (ad-hoc)...")
+                run_command(["codesign", "--force", "--deep", "-s", "-", str(exe_path)])
             print("Clearing macOS quarantine attribute...")
             run_command(['xattr', '-cr', str(exe_path)])
     else:

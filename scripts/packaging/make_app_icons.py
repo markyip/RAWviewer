@@ -47,6 +47,33 @@ def clean_rounded_icon(im: Image.Image) -> Image.Image:
     return Image.fromarray(a, "RGBA")
 
 
+def _macos_icon_background(im: Image.Image) -> tuple[int, int, int]:
+    """Pick the dark plate color used outside the pre-rounded artwork."""
+    arr = np.array(im.convert("RGBA"))
+    opaque = arr[:, :, 3] > 200
+    if not opaque.any():
+        return (29, 22, 18)
+    rgb = arr[opaque, :3].astype(np.float32)
+    lum = rgb.mean(axis=1)
+    dark = rgb[lum <= np.percentile(lum, 25)]
+    if len(dark) == 0:
+        dark = rgb
+    return tuple(int(v) for v in dark.mean(axis=0))
+
+
+def flatten_macos_dock_icon(im: Image.Image) -> Image.Image:
+    """Fill a square canvas so macOS Dock does not show a white halo.
+
+    App Store / Dock icons must be full-bleed squares. Pre-rounded artwork with
+    transparent corners gets a light fringe once macOS applies its squircle mask.
+    """
+    cleaned = clean_rounded_icon(im.convert("RGBA"))
+    bg = _macos_icon_background(cleaned)
+    canvas = Image.new("RGBA", cleaned.size, (*bg, 255))
+    canvas.alpha_composite(cleaned)
+    return canvas
+
+
 def write_png_ico(path: Path, src: Image.Image, sizes: list[int]) -> None:
     images = [
         clean_rounded_icon(src.resize((s, s), Image.Resampling.LANCZOS)) for s in sizes
@@ -70,6 +97,7 @@ def write_png_ico(path: Path, src: Image.Image, sizes: list[int]) -> None:
 
 
 def build_icns(master: Image.Image, out_icns: Path) -> None:
+    dock_master = flatten_macos_dock_icon(master)
     iconset = REPO / "build" / "appicon.iconset"
     if iconset.exists():
         shutil.rmtree(iconset)
@@ -87,7 +115,7 @@ def build_icns(master: Image.Image, out_icns: Path) -> None:
         ("icon_512x512@2x.png", 1024),
     ]
     for name, size in pairs:
-        clean_rounded_icon(master.resize((size, size), Image.Resampling.LANCZOS)).save(
+        dock_master.resize((size, size), Image.Resampling.LANCZOS).save(
             iconset / name
         )
     subprocess.run(

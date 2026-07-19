@@ -3694,15 +3694,11 @@ class SemanticImageIndex:
 
     @staticmethod
     def _detect_face_count(file_path: str, preloaded_im: Optional[PilImage] = None) -> int:
-        if sys.platform == "darwin":
+        def _run_vision(path: str) -> Optional[int]:
             try:
                 import Foundation  # type: ignore[import-not-found]
                 import Vision  # type: ignore[import-not-found]
-            except Exception:
-                pass
 
-        def _run_vision(path: str) -> Optional[int]:
-            try:
                 url = Foundation.NSURL.fileURLWithPath_(path)
                 request = Vision.VNDetectFaceRectanglesRequest.alloc().init()
                 handler = Vision.VNImageRequestHandler.alloc().initWithURL_options_(url, None)

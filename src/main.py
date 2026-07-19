@@ -33468,9 +33468,30 @@ def main():
 
     if (getattr(sys, "frozen", False) or is_installed) and not is_lite_build():
         os.environ.setdefault("RAWVIEWER_ENABLE_SEMANTIC_SEARCH", "1")
+        os.environ.setdefault("RAWVIEWER_ENABLE_FACE_SCAN", "1")
         os.environ.setdefault("RAWVIEWER_GPU_VIEW", "1")
     elif getattr(sys, "frozen", False) or is_installed:
         os.environ.setdefault("RAWVIEWER_GPU_VIEW", "1")
+
+    # One-line dump so packaged .app vs launch_dev.sh configs are easy to compare.
+    try:
+        from rawviewer_profile import edition_display_name, resolved_profile
+
+        _cfg = (
+            f"edition={edition_display_name()}({resolved_profile()}) "
+            f"frozen={bool(getattr(sys, 'frozen', False))} "
+            f"semantic={os.environ.get('RAWVIEWER_ENABLE_SEMANTIC_SEARCH', '0')} "
+            f"face={os.environ.get('RAWVIEWER_ENABLE_FACE_SCAN', '1')} "
+            f"gpu_decode={os.environ.get('RAWVIEWER_PREFER_GPU_DECODE', '') or 'auto'} "
+            f"gpu_view={os.environ.get('RAWVIEWER_GPU_VIEW', '1')} "
+            f"perf_v2={os.environ.get('RAWVIEWER_PERF_V2', '0')} "
+            f"gallery_idle_batch={os.environ.get('RAWVIEWER_GALLERY_IDLE_PRELOAD_BATCH', 'default')} "
+            f"load_workers={os.environ.get('RAWVIEWER_LOAD_MAX_WORKERS', 'default')}"
+        )
+        logger.info("[PROFILE] runtime config: %s", _cfg)
+        safe_print(f"[PROFILE] runtime config: {_cfg}", flush=True)
+    except Exception:
+        pass
 
     # Print to console immediately (before logging might be ready)
     safe_print("main() function called", flush=True)

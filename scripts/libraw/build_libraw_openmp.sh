@@ -91,15 +91,25 @@ _ensure_rawpy_importable() {
 
 _ensure_rawpy_importable
 
+mkdir -p "$CACHE_DIR"
+CACHED_DYLIB="$CACHE_DIR/libraw_r.25.dylib"
+
+# Fast path for repeat packaging: standalone OpenMP LibRaw already installed.
+if [ "$STANDALONE" = "1" ] && [ -f "$CACHED_DYLIB" ] && [ -f "$RAWPY_DIR/libomp.dylib" ]; then
+  if otool -L "$RAWPY_DIR/libraw_r.25.dylib" 2>/dev/null | grep -q '@loader_path/libomp.dylib'; then
+    if _rawpy_import_ok; then
+      echo "[OK] OpenMP LibRaw already installed (standalone); skipping rebuild."
+      exit 0
+    fi
+  fi
+fi
+
 # Sanity: only swap into the LibRaw version rawpy expects.
 "$ENV/bin/python3" - << EOF
 import rawpy
 v = rawpy.libraw_version
 assert v[:2] == (0, 22), f"rawpy links LibRaw {v}; update LIBRAW_VERSION + soname in this script"
 EOF
-
-mkdir -p "$CACHE_DIR"
-CACHED_DYLIB="$CACHE_DIR/libraw_r.25.dylib"
 
 build_libraw() {
   cd "$WORK"

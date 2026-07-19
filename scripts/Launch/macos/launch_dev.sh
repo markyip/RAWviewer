@@ -50,7 +50,10 @@ export QT_LOGGING_RULES="${QT_LOGGING_RULES:-qt.pointer.dispatch=false}"
 # File picker: macOS uses Finder via AppleScript/NSOpenPanel. Qt UI: RAWVIEWER_QT_FILE_DIALOG=1
 # Semantic search (CLIP embeddings). Off by default in app; enable for dev like run_debug.bat.
 export RAWVIEWER_ENABLE_SEMANTIC_SEARCH="${RAWVIEWER_ENABLE_SEMANTIC_SEARCH:-1}"
+export RAWVIEWER_ENABLE_FACE_SCAN="${RAWVIEWER_ENABLE_FACE_SCAN:-1}"
 export RAWVIEWER_AUTO_METADATA_INDEX="${RAWVIEWER_AUTO_METADATA_INDEX:-1}"
+# Plus vs Standard: use launch_dev_full.sh when comparing to a Plus .app
+# (semantic/face on). Gallery scroll prefetch defaults are shared across editions.
 # Semantic index: auto-tune batch/chunk (Core ML + ONNX). RAM tier auto: RAWVIEWER_MEMORY_TIER_AUTO=1 (default)
 # export RAWVIEWER_MEMORY_TIER_AUTO=0
 # export RAWVIEWER_SEMANTIC_BATCH_AUTO=0

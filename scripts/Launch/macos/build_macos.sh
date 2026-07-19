@@ -59,6 +59,8 @@ if [ "$USE_PIXI" = "1" ]; then
     echo "Pixi environment detected. Using Pixi to build for identical performance and dependencies..."
     PYTHON_BIN="pixi run python"
     export RAWVIEWER_USE_SYSTEM_PYTHON_BUILD=1
+    # Pixi lockfile already pins deps — skip pip --upgrade on every packaging run.
+    export RAWVIEWER_BUILD_SKIP_DEPS=1
 else
     VENV_DIR="$REPO_ROOT/rawviewer_env"
     PYTHON_BIN="$VENV_DIR/bin/python3"
@@ -125,6 +127,10 @@ ensure_openmp_libraw() {
         return 0
     fi
     echo "Installing OpenMP LibRaw for release packaging (standalone libomp)..."
+    LIBRAW_CACHE="$REPO_ROOT/.cache/libraw_openmp/libraw_r.25.dylib"
+    if [ -f "$LIBRAW_CACHE" ]; then
+        export RAWVIEWER_LIBRAW_OPENMP_SKIP_COMPILE=1
+    fi
     RAWVIEWER_LIBRAW_OPENMP_STANDALONE=1 \
       bash "$REPO_ROOT/scripts/libraw/build_libraw_openmp.sh"
 }
@@ -172,15 +178,27 @@ verify_openmp_in_app() {
 
 ensure_openmp_libraw
 
-echo "Cleaning previous builds..."
-chmod -R u+w build dist 2>/dev/null || true
-rm -rf build || true
-chmod -R u+w dist 2>/dev/null || true
-rm -rf dist || true
-rm -f *.spec
+# Incremental rebuild: keep PyInstaller analysis cache in build/ (much faster).
+# Full clean: RAWVIEWER_BUILD_INCREMENTAL=0 ./scripts/Launch/macos/build_macos.sh
+INCREMENTAL="${RAWVIEWER_BUILD_INCREMENTAL:-1}"
+if [ "$INCREMENTAL" = "1" ]; then
+    echo "Incremental build enabled (set RAWVIEWER_BUILD_INCREMENTAL=0 for a full clean rebuild)."
+    export RAWVIEWER_BUILD_INCREMENTAL=1
+    # Only remove the previous app bundle, not PyInstaller's build/ cache.
+    chmod -R u+w dist 2>/dev/null || true
+    rm -rf "dist/${APP_BUNDLE}" 2>/dev/null || true
+    rm -f *.spec 2>/dev/null || true
+else
+    echo "Cleaning previous builds (full)..."
+    chmod -R u+w build dist 2>/dev/null || true
+    rm -rf build || true
+    chmod -R u+w dist 2>/dev/null || true
+    rm -rf dist || true
+    rm -f *.spec
+fi
 
 echo "Building RAWviewer (${PROFILE})..."
-if $PYTHON_BIN build.py --profile "$PROFILE"; then
+if $PYTHON_BIN build.py --profile "$PROFILE" ${INCREMENTAL:+--incremental} ${RAWVIEWER_BUILD_SKIP_DEPS:+--skip-deps}; then
     echo ""
     echo "[SUCCESS] Build completed!"
     echo ""
