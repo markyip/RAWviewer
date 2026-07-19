@@ -65,11 +65,16 @@ def import_gpu_backend_on_main_thread(
         # Split stages so processEvents can run between the two heavy imports.
         # gpu_raw_processor re-imports torch/kornia at module scope; those are
         # cache hits once the lines below have finished.
+        import sys as _sys
+
         torch_ok = False
         try:
             import torch  # noqa: F401
 
-            if not torch.cuda.is_available():
+            # CUDA-or-repair applies to Windows only: on macOS torch without
+            # CUDA is the normal state (MPS), and offering a multi-GB CUDA
+            # torch download there is never right.
+            if _sys.platform == "win32" and not torch.cuda.is_available():
                 raise RuntimeError("torch imported but CUDA is unavailable")
             torch_ok = True
         except Exception:

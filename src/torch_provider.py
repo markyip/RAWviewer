@@ -571,7 +571,11 @@ def ensure_torch_for_gpu(
     """Ensure a working CUDA torch is importable; repair by bundling if needed.
 
     Returns True when ``import torch`` + CUDA looks usable after this call.
+    Windows-only: the CUDA BYO/bundled provider concept does not exist on
+    macOS/Linux — never probe, notify, or download there.
     """
+    if sys.platform != "win32":
+        return False
 
     def _log(msg: str) -> None:
         if log:
