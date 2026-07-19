@@ -21,16 +21,18 @@ import os
 import sys
 
 
-# Embedded previews + metadata almost always live in the first few MB of a
-# RAW container. Tune with RAWVIEWER_RAWPY_WARM_MB (0 disables warming).
+# LibRaw's open/parse reads only the container headers (a few hundred KB), so
+# the warm read must stay SMALL. 8MB was ~30x I/O amplification: with several
+# workers hitting one external drive it collapsed thumbnail production from
+# ~20/s to ~2/s and the gallery read as frozen on BOTH platforms (2026-07-20).
+# Measured sweet spot on the same folder: 1MB keeps production at ~18/s while
+# holding main-thread stall p95 at 146ms vs 560ms with warming off.
+# Tune with RAWVIEWER_RAWPY_WARM_MB (0 disables).
 #
-# Default ON only for macOS: the GIL starvation this mitigates was measured
-# there (trackpad momentum keeps the event loop visibly busy, external-volume
-# opens hold the GIL 40-450ms). On Windows the extra 8MB read per open
-# amplified folder-scan I/O enough to stall gallery loading (reported on
-# 2026-07-20), so it stays off unless explicitly enabled for testing.
+# Default ON only for macOS, where the GIL starvation was measured; Windows
+# stays off (unverified there) unless explicitly enabled for testing.
 def _warm_bytes() -> int:
-    default_mb = "8" if sys.platform == "darwin" else "0"
+    default_mb = "1" if sys.platform == "darwin" else "0"
     try:
         mb = float(os.environ.get("RAWVIEWER_RAWPY_WARM_MB", default_mb) or default_mb)
     except ValueError:

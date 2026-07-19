@@ -3878,11 +3878,13 @@ class JustifiedGallery(QWidget):
 
         frame_mismatch = self._any_visible_tile_frame_mismatch(file_path, pixmap)
 
-        # Avoid heavy per-widget pixmap work during very fast scrolling; visible tiles are
-        # filled on settle via load_visible_images. Tile geometry is already recorded above.
-        if self._is_scrolling_fast:
-            return
-
+        # Fast scroll used to drop completed thumbnails entirely (fill on settle).
+        # That was masked while GIL stalls throttled the scroll rate; with the
+        # stalls fixed, sustained scrolling keeps _is_scrolling_fast true the
+        # whole time and NOTHING painted until keys/momentum stopped — the
+        # gallery read as frozen (2026-07-20, macOS + Windows). Applies are
+        # batched and budget-bounded in _drain_tile_applies, so paint through
+        # fast mode instead of skipping.
         if frame_mismatch:
             if _orient_debug_enabled():
                 logger.info(
@@ -3964,6 +3966,11 @@ class JustifiedGallery(QWidget):
             self._pending_thumb_ready.clear()
             return
         batch = _tile_apply_batch_size()
+        # Smaller bites while fast-scrolling so paints can't eat scroll frames,
+        # but never zero — skipping entirely left the gallery blank for the
+        # whole gesture once GIL stalls stopped throttling the scroll rate.
+        if self._is_scrolling_fast:
+            batch = max(2, batch // 4)
         count = 0
         # First: coalesce deferred thumbnail_ready payloads (was one singleShot each).
         while self._pending_thumb_ready and count < batch:
@@ -3975,15 +3982,9 @@ class JustifiedGallery(QWidget):
         while self._pending_tile_applies and count < batch:
             file_path = next(iter(self._pending_tile_applies))
             del self._pending_tile_applies[file_path]
-            # Skip while fast-scrolling: tiles are filled on settle via load_visible_images.
-            if self._is_scrolling_fast:
-                continue
             self._apply_tile_pixmap_now(file_path)
             count += 1
-        if (
-            self._pending_thumb_ready
-            or (self._pending_tile_applies and not self._is_scrolling_fast)
-        ):
+        if self._pending_thumb_ready or self._pending_tile_applies:
             self._tile_apply_timer.start(0)
 
     def on_task_completed(self, file_path):

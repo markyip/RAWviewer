@@ -2,4 +2,4 @@
 Internal ids: lite = Standard edition, full = Plus edition.
 """
 
-PROFILE = "full"
+PROFILE = "lite"
