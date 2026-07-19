@@ -6,6 +6,7 @@
 
 import io
 import os
+from rawpy_gil import rawpy_imread_warm
 import threading
 import time
 from datetime import datetime
@@ -1478,7 +1479,7 @@ def get_image_aspect_ratio(file_path: str) -> float:
         try:
             import rawpy
             # 只讀取 Metadata，不處理圖像
-            with rawpy.imread(file_path) as raw:
+            with rawpy_imread_warm(file_path) as raw:
                 sizes = raw.sizes
                 # Use iwidth and iheight as they already account for orientation (rotation)
                 # sizes.iwidth and iheight are internal dimensions after rotation

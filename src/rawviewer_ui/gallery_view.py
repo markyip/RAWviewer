@@ -4134,7 +4134,13 @@ class JustifiedGallery(QWidget):
         try:
             from image_cache import get_image_cache
 
-            get_image_cache().put_exif(file_path, exif_data)
+            cache = get_image_cache()
+            # Workers put_exif to the memory cache before emitting exif_ready;
+            # re-putting here made the UI thread take the exif disk-write lock
+            # (caught mid-stall in trackpad scroll profiling). Persist only
+            # records the memory cache doesn't already hold.
+            if cache.get_exif_memory_only(file_path) is not exif_data:
+                cache.put_exif(file_path, exif_data)
         except Exception:
             pass
         

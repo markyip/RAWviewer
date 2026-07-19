@@ -33426,6 +33426,19 @@ def main():
     import logging
     import traceback
 
+    # GIL responsiveness: thumbnail/metadata workers run long pure-Python
+    # stretches (TIFF preview scans, orientation probes) that hold the GIL for
+    # the full 5ms default switch interval each; with 8+ workers the Qt event
+    # loop gets starved and trackpad scrolling stutters (measured >1s main-thread
+    # stalls). A shorter interval trades a little worker throughput for UI
+    # latency. Override with RAWVIEWER_GIL_SWITCH_MS (0 disables).
+    try:
+        _gil_ms = float(os.environ.get("RAWVIEWER_GIL_SWITCH_MS", "2") or "2")
+        if _gil_ms > 0:
+            sys.setswitchinterval(_gil_ms / 1000.0)
+    except Exception:
+        pass
+
     # Cap OpenMP threads before rawpy/LibRaw loads. LibRaw decodes are
     # OpenMP-parallel on Windows (rawpy wheel ships vcomp140) and on macOS
     # via scripts/libraw/build_libraw_openmp.sh; with 2 concurrent RAW workers an

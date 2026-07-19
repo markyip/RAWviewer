@@ -6,6 +6,7 @@
 """
 
 import os
+from rawpy_gil import rawpy_imread_warm
 from collections import OrderedDict
 
 import numpy as np
@@ -122,7 +123,7 @@ def decode_raw_file(file_path: str, params: Dict[str, Any]) -> np.ndarray:
     import rawpy
     from enhanced_raw_processor import _rawpy_global_lock, _heavy_fallback_semaphore
     with _rawpy_global_lock:
-        raw_ctx = rawpy.imread(file_path)
+        raw_ctx = rawpy_imread_warm(file_path)
     with raw_ctx as raw:
         with _heavy_fallback_semaphore:
             return raw.postprocess(**params)
@@ -580,7 +581,7 @@ class UnifiedImageProcessor:
 
                     if rgb_image is None:
                         with _rawpy_global_lock:
-                            raw_ctx = rawpy.imread(file_path)
+                            raw_ctx = rawpy_imread_warm(file_path)
                         with raw_ctx as raw:
                             cam_mul_for_scale = list(raw.camera_whitebalance or [])
                             with _heavy_fallback_semaphore:
@@ -796,7 +797,7 @@ class UnifiedImageProcessor:
         try:
             from enhanced_raw_processor import _rawpy_global_lock
             with _rawpy_global_lock:
-                with rawpy.imread(file_path) as raw:
+                with rawpy_imread_warm(file_path) as raw:
                     max_size_val = self._raw_thumbnail_extract_max_size(
                         None, allow_heavy_fallback=True
                     )
@@ -966,7 +967,7 @@ class UnifiedImageProcessor:
                 import rawpy
 
                 with _rawpy_global_lock:
-                    with rawpy.imread(file_path) as raw:
+                    with rawpy_imread_warm(file_path) as raw:
                         rgb = raw.postprocess(
                             half_size=True,
                             use_camera_wb=True,
@@ -1127,7 +1128,7 @@ class UnifiedImageProcessor:
                     import rawpy
                     from enhanced_raw_processor import _rawpy_global_lock, _heavy_fallback_semaphore
                     with _rawpy_global_lock:
-                        raw_ctx = rawpy.imread(file_path)
+                        raw_ctx = rawpy_imread_warm(file_path)
                     with raw_ctx as raw:
                         with _heavy_fallback_semaphore:
                             thumbnail = raw.postprocess(**params)
@@ -1161,7 +1162,7 @@ class UnifiedImageProcessor:
 
                     from enhanced_raw_processor import _rawpy_global_lock
                     with _rawpy_global_lock:
-                        with rawpy.imread(file_path) as raw:
+                        with rawpy_imread_warm(file_path) as raw:
                             exif_data = self.exif_extractor.build_minimal_raw_exif(
                                 file_path, raw
                             )
@@ -1918,7 +1919,7 @@ class UnifiedImageProcessor:
                 with _rawpy_global_lock:
                     if _load_task_cancelled():
                         return None
-                    raw_ctx = rawpy.imread(file_path)
+                    raw_ctx = rawpy_imread_warm(file_path)
                 with raw_ctx as raw:
                     if _load_task_cancelled():
                         return None
@@ -2285,7 +2286,7 @@ class UnifiedImageProcessor:
         try:
             from enhanced_raw_processor import _rawpy_global_lock
             with _rawpy_global_lock:
-                with rawpy.imread(file_path) as raw:
+                with rawpy_imread_warm(file_path) as raw:
                     # 1. Extract EXIF (verified with rawpy sensor sizes)
                     exif = self.exif_extractor.extract_exif_data(file_path, raw_object=raw)
                 

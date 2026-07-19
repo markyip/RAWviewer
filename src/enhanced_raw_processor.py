@@ -11,6 +11,8 @@ import threading
 import warnings
 import numpy as np
 import rawpy
+
+from rawpy_gil import rawpy_imread_warm
 import exifread
 import sys
 from typing import Optional, Dict, Any, Tuple, Union
@@ -337,7 +339,7 @@ def probe_effective_raw_orientation(
             return int(orientation or 1)
         yield_if_current_task_active()
         with _rawpy_global_lock:
-            with rawpy.imread(file_path) as raw:
+            with rawpy_imread_warm(file_path) as raw:
                 return probe_effective_raw_orientation(file_path, raw)
     except Exception:
         if orientation <= 1:
@@ -377,7 +379,7 @@ def _orientation_from_embedded_preview(
         else:
             yield_if_current_task_active()
             with _rawpy_global_lock:
-                with rawpy.imread(file_path) as raw:
+                with rawpy_imread_warm(file_path) as raw:
                     thumb = raw.extract_thumb()
         if thumb is None or thumb.format != rawpy.ThumbFormat.JPEG:
             return 1
@@ -828,7 +830,7 @@ class ThumbnailExtractor(QObject):
                     # tile / single-view decode -> total decode-pipeline deadlock.
                     # The outer yield above (before the lock) is the safe place to
                     # defer background work to the foreground.
-                    with rawpy.imread(file_path) as raw:
+                    with rawpy_imread_warm(file_path) as raw:
                         thumb = self._extract_from_raw_obj(raw, file_path, max_size)
         except Exception as e:
             import logging
@@ -1257,7 +1259,7 @@ class EXIFExtractor(QObject):
                     else:
                         yield_if_current_task_active()
                         with _rawpy_global_lock:
-                            with rawpy.imread(file_path) as raw:
+                            with rawpy_imread_warm(file_path) as raw:
                                 sizes = raw.sizes
                                 original_width = sizes.width
                                 original_height = sizes.height
@@ -1536,7 +1538,7 @@ class OptimizedRAWProcessor(QObject):
         try:
             yield_if_current_task_active()
             with _rawpy_global_lock:
-                raw_ctx = rawpy.imread(file_path)
+                raw_ctx = rawpy_imread_warm(file_path)
             with raw_ctx as raw:
                 params = self.get_optimized_processing_params(file_path, exif_data)
                 with _heavy_fallback_semaphore:
@@ -1555,7 +1557,7 @@ class OptimizedRAWProcessor(QObject):
         try:
             yield_if_current_task_active()
             with _rawpy_global_lock:
-                raw_ctx = rawpy.imread(file_path)
+                raw_ctx = rawpy_imread_warm(file_path)
             with raw_ctx as raw:
                 # Quality processing parameters
                 params = {

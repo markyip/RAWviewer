@@ -14,6 +14,14 @@ Env:
   RAWVIEWER_GALLERY_AUTOTEST_GALLERY_WAIT  max seconds waiting for gallery
      entry after first render (default 600). Needed for large cold folders
      on builds that gate the Gallery button on EXIF sort (v2.5).
+  RAWVIEWER_GALLERY_AUTOTEST_INPUT  keys|trackpad (default: keys). trackpad
+     synthesizes native-style QWheelEvents on the gallery viewport at 120Hz:
+     repeated gestures of ScrollBegin -> drag ScrollUpdates -> ScrollMomentum
+     decay -> ScrollEnd, plus a main-thread stall monitor. Extra summary line:
+     [GALLERYTEST] STALLS count/max/p95/total (gaps >25ms in an 8ms heartbeat)
+     and per-sample visible-blank-tile counts in the timeline.
+  RAWVIEWER_GALLERY_AUTOTEST_DRAG_PX_S  drag speed for trackpad mode
+     (default 2500 px/s).
 
 Metrics:
   rendered_tiles = distinct images that were on screen WITH pixels at some
@@ -42,6 +50,11 @@ def run_gallery_autotest(viewer, *, safe_print) -> None:
     )
     if direction not in ("up", "down"):
         direction = "up"
+    input_mode = (
+        os.environ.get("RAWVIEWER_GALLERY_AUTOTEST_INPUT", "keys").strip().lower()
+        or "keys"
+    )
+    drag_px_s = float(os.environ.get("RAWVIEWER_GALLERY_AUTOTEST_DRAG_PX_S", "2500"))
 
     harness_t0 = time.time()
     state = {
@@ -54,6 +67,13 @@ def run_gallery_autotest(viewer, *, safe_print) -> None:
         "first_render_s": None,
         "gallery_ready_s": None,
         "enter_attempts": 0,
+        "stall_gaps": [],  # (t_offset, gap_ms) for heartbeat gaps > 25ms
+        "hb_last": 0.0,
+        "wheel_phase": "idle",  # idle | drag | momentum
+        "wheel_phase_t0": 0.0,
+        "wheel_velocity": 0.0,  # px/s, momentum decay state
+        "wheel_last_t": 0.0,
+        "gestures": 0,
     }
 
     key_timer = QTimer(viewer)
@@ -109,21 +129,119 @@ def run_gallery_autotest(viewer, *, safe_print) -> None:
             return
         state["polls"] += 1
         widgets = getattr(g, "_visible_widgets", {})
+        blank_now = 0
         for w in list(widgets.values()):
             try:
                 pm = w.pixmap()
                 if pm is not None and not pm.isNull() and w.file_path:
                     state["rendered"].add(w.file_path)
+                elif w.file_path:
+                    blank_now += 1
             except Exception:
                 pass
         if state["polls"] % 10 == 0:
             state["samples"].append(
-                (round(time.time() - state["t0"], 1), len(state["rendered"]))
+                (
+                    round(time.time() - state["t0"], 1),
+                    len(state["rendered"]),
+                    blank_now,
+                )
+            )
+
+    def _send_wheel(dy: float, phase) -> None:
+        from PyQt6.QtCore import QPoint, QPointF, Qt
+        from PyQt6.QtGui import QWheelEvent
+
+        g = _gallery()
+        sa = getattr(g, "_scroll_area", None) if g is not None else None
+        vp = sa.viewport() if sa is not None else None
+        if vp is None:
+            return
+        pos = QPointF(vp.width() / 2.0, vp.height() / 2.0)
+        gpos = QPointF(vp.mapToGlobal(QPoint(int(pos.x()), int(pos.y()))))
+        d = int(round(dy))
+        ev = QWheelEvent(
+            pos,
+            gpos,
+            QPoint(0, d),
+            QPoint(0, d),
+            Qt.MouseButton.NoButton,
+            Qt.KeyboardModifier.NoModifier,
+            phase,
+            False,
+            Qt.MouseEventSource.MouseEventSynthesizedByApplication,
+        )
+        QApplication.sendEvent(vp, ev)
+
+    def _wheel_tick():
+        """120Hz synthetic trackpad: drag 0.6s -> momentum decay -> idle 0.5s."""
+        from PyQt6.QtCore import Qt
+
+        if not _in_gallery():
+            key_timer.stop()
+            _quit_app("not_in_gallery_during_wheel")
+            return
+        now = time.time()
+        if now - state["t0"] >= duration_s and state["wheel_phase"] == "idle":
+            key_timer.stop()
+            QTimer.singleShot(2000, _finish)
+            return
+        dt = min(0.05, max(0.001, now - (state["wheel_last_t"] or now)))
+        state["wheel_last_t"] = now
+        phase = state["wheel_phase"]
+        phase_elapsed = now - state["wheel_phase_t0"]
+        sign = 1.0 if direction == "up" else -1.0
+        if phase == "idle":
+            if phase_elapsed >= 0.5:
+                state["wheel_phase"] = "drag"
+                state["wheel_phase_t0"] = now
+                state["gestures"] += 1
+                _send_wheel(0, Qt.ScrollPhase.ScrollBegin)
+        elif phase == "drag":
+            _send_wheel(sign * drag_px_s * dt, Qt.ScrollPhase.ScrollUpdate)
+            state["presses"] += 1
+            if phase_elapsed >= 0.6:
+                state["wheel_phase"] = "momentum"
+                state["wheel_phase_t0"] = now
+                state["wheel_velocity"] = drag_px_s
+        elif phase == "momentum":
+            state["wheel_velocity"] *= 0.955  # ~2.3x decay per 0.15s at 120Hz
+            dy = sign * state["wheel_velocity"] * dt
+            if abs(dy) < 1.0:
+                _send_wheel(0, Qt.ScrollPhase.ScrollEnd)
+                state["wheel_phase"] = "idle"
+                state["wheel_phase_t0"] = now
+            else:
+                _send_wheel(dy, Qt.ScrollPhase.ScrollMomentum)
+                state["presses"] += 1
+
+    def _heartbeat():
+        now = time.time()
+        last = state["hb_last"]
+        state["hb_last"] = now
+        if last <= 0.0 or state["t0"] <= 0.0:
+            return
+        gap_ms = (now - last) * 1000.0
+        if gap_ms > 25.0:
+            state["stall_gaps"].append(
+                (round(now - state["t0"], 2), round(gap_ms, 1))
             )
 
     def _finish():
         _poll()
         poll_timer.stop()
+        gaps = sorted(g for _, g in state["stall_gaps"])
+        if input_mode == "trackpad":
+            total = sum(gaps)
+            p95 = gaps[int(len(gaps) * 0.95)] if gaps else 0.0
+            worst = state["stall_gaps"] and max(state["stall_gaps"], key=lambda x: x[1])
+            safe_print(
+                f"[GALLERYTEST] STALLS count={len(gaps)} max_ms={gaps[-1] if gaps else 0} "
+                f"p95_ms={p95} total_ms={round(total)} worst_at={worst} "
+                f"gestures={state['gestures']}",
+                flush=True,
+                force=True,
+            )
         n = len(state["rendered"])
         safe_print(
             f"[GALLERYTEST] DONE presses={state['presses']} rendered_tiles={n} "
@@ -166,7 +284,34 @@ def run_gallery_autotest(viewer, *, safe_print) -> None:
         state["started"] = True
         state["gallery_ready_s"] = round(time.time() - harness_t0, 3)
         state["t0"] = time.time()
-        key_timer.timeout.connect(_press)
+        if input_mode == "trackpad":
+            from PyQt6.QtCore import Qt as _Qt
+
+            # Periodic all-thread stack dumps: when the main thread is stalled,
+            # the dump names the blocking frame (py-spy needs root on macOS).
+            dump_path = os.environ.get("RAWVIEWER_GALLERY_AUTOTEST_STACK_DUMP", "")
+            if dump_path:
+                import faulthandler
+
+                state["stack_dump_fh"] = open(dump_path, "w")
+                faulthandler.dump_traceback_later(
+                    0.4, repeat=True, file=state["stack_dump_fh"]
+                )
+            state["wheel_phase_t0"] = state["t0"]
+            wheel_hz = float(
+                os.environ.get("RAWVIEWER_GALLERY_AUTOTEST_WHEEL_HZ", "120")
+            )
+            key_timer.setInterval(max(1, int(round(1000.0 / max(1.0, wheel_hz)))))
+            key_timer.setTimerType(_Qt.TimerType.PreciseTimer)
+            key_timer.timeout.connect(_wheel_tick)
+            hb_timer = QTimer(viewer)
+            hb_timer.setInterval(8)
+            hb_timer.setTimerType(_Qt.TimerType.PreciseTimer)
+            hb_timer.timeout.connect(_heartbeat)
+            hb_timer.start()
+            state["hb_timer"] = hb_timer  # keep alive
+        else:
+            key_timer.timeout.connect(_press)
         poll_timer.timeout.connect(_poll)
         key_timer.start()
         poll_timer.start()

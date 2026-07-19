@@ -6,6 +6,7 @@ Applies Exposure, Contrast, Highlights, Shadows, Whites, Blacks, Temp, Tint, Sat
 from __future__ import annotations
 
 import os
+from rawpy_gil import rawpy_imread_warm
 import tempfile
 import threading
 import xml.etree.ElementTree as ET
@@ -673,7 +674,7 @@ def read_as_shot_temperature(image_path: str) -> float:
             from enhanced_raw_processor import _rawpy_global_lock
 
             with _rawpy_global_lock:
-                raw_ctx = rawpy.imread(image_path)
+                raw_ctx = rawpy_imread_warm(image_path)
             with raw_ctx as raw:
                 cam = np.array(raw.camera_whitebalance[:3], dtype=np.float64)
                 day = np.array(raw.daylight_whitebalance[:3], dtype=np.float64)
