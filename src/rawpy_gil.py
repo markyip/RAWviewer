@@ -18,15 +18,23 @@ buffers are retained, cold-I/O amplification is capped at WARM_BYTES.
 """
 
 import os
+import sys
 
 
 # Embedded previews + metadata almost always live in the first few MB of a
 # RAW container. Tune with RAWVIEWER_RAWPY_WARM_MB (0 disables warming).
+#
+# Default ON only for macOS: the GIL starvation this mitigates was measured
+# there (trackpad momentum keeps the event loop visibly busy, external-volume
+# opens hold the GIL 40-450ms). On Windows the extra 8MB read per open
+# amplified folder-scan I/O enough to stall gallery loading (reported on
+# 2026-07-20), so it stays off unless explicitly enabled for testing.
 def _warm_bytes() -> int:
+    default_mb = "8" if sys.platform == "darwin" else "0"
     try:
-        mb = float(os.environ.get("RAWVIEWER_RAWPY_WARM_MB", "8") or "8")
+        mb = float(os.environ.get("RAWVIEWER_RAWPY_WARM_MB", default_mb) or default_mb)
     except ValueError:
-        mb = 8.0
+        mb = float(default_mb)
     return max(0, int(mb * 1024 * 1024))
 
 
