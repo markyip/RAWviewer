@@ -38,6 +38,11 @@ pause_if_interactive() {
 }
 
 export RAWVIEWER_VERBOSE_ORIENTATION_LOGS=1
+# Core ML compute units (optional):
+#   RAWVIEWER_COREML_COMPUTE_UNITS       — both index + search (unless split defaults apply)
+#   RAWVIEWER_COREML_COMPUTE_UNITS_INDEX — image encoder / indexing only
+#   RAWVIEWER_COREML_COMPUTE_UNITS_SEARCH — text encoder / semantic search only
+# On macOS 26+ beta the app defaults to index=all, search=cpu (MPSGraph text crash).
 export RAWVIEWER_DEBUG=1
 # macOS NSSharingServicePicker is AppKit; pointer on the sheet has no Qt window (harmless).
 # Default share UI is a Qt menu of NSSharingService targets (v2.2 Qt6). Native popover is opt-in.

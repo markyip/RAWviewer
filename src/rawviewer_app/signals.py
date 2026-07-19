@@ -33,6 +33,12 @@ class SemanticSearchResortSignals(QObject):
     ready = pyqtSignal(int, str, list, object, bool, dict)  # token, query, ranked_paths, hits, used_semantic, bulk_meta
 
 
+class SemanticSearchQuerySignals(QObject):
+    """Signal carrier for background gallery semantic search."""
+    ready = pyqtSignal(int, str, object)  # token, query, result dict
+    error = pyqtSignal(int, str, str)  # token, query, error message
+
+
 class WebpDecodeSignals(QObject):
     """Signal carrier for background animated WebP frame decode."""
     ready = pyqtSignal(int, str, list, list)  # token, file_path, QImage frames, durations ms

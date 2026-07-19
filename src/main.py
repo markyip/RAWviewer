@@ -1115,6 +1115,16 @@ def _macos_apply_ns_text_completion_off(node) -> None:
                 getattr(node, setter.replace(":", "_"))(value)
         except Exception:
             pass
+    try:
+        if node.respondsToSelector_("setFocusRingType:"):
+            try:
+                import AppKit  # type: ignore[import-not-found]
+
+                node.setFocusRingType_(AppKit.NSFocusRingTypeNone)
+            except Exception:
+                node.setFocusRingType_(1)  # NSFocusRingTypeNone
+    except Exception:
+        pass
 
 
 def _macos_disable_line_edit_system_completion(line_edit) -> None:
@@ -1985,6 +1995,7 @@ from rawviewer_app.signals import (
     ReleaseUpdateCheckSignals,
     SemanticIndexPrepSignals,
     SemanticIndexSignals,
+    SemanticSearchQuerySignals,
     SemanticSearchResortSignals,
     WebpDecodeSignals,
 )
@@ -9360,7 +9371,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 outline: none;
             }}
             QLineEdit:focus {{
-                border: 1px solid {theme.RAISED_HI};
+                border: 1px solid {theme.EMBER};
                 outline: none;
             }}
         """
@@ -12252,171 +12263,235 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 5000,
             )
             return
-        try:
-            index = self._get_semantic_index()
-            base_files = self._gallery_search_base_files()
-            if not base_files:
-                return
-            if self._semantic_search_backup_files is None:
-                self._semantic_search_backup_files = list(
-                    self._semantic_search_corpus_files
-                    if self._semantic_search_corpus_files
-                    else getattr(self, "image_files", []) or []
-                )
-            if getattr(self, "_semantic_indexing_in_progress", False):
-                progress = (
-                    getattr(self, "_gallery_search_status_full", "") or ""
-                ).strip()
-                if progress:
-                    self.status_bar.showMessage(
-                        f"Searching while indexing — {progress}",
-                        4500,
-                    )
-                else:
-                    self.status_bar.showMessage(
-                        "Searching while indexing — EXIF/metadata filters apply now; "
-                        "semantic ranking improves as indexing continues.",
-                        4500,
-                    )
-            else:
-                self.status_bar.showMessage("Running search...")
-            # Avoid forced synchronous event pumping here; it can trigger re-entrant
-            # gallery work and make search feel janky on large folders.
-            
-            sort_newest = self.get_sort_preference()
-            metadata_hits, semantic_query = index.search_metadata_text(
-                query, base_files, top_k=max(1, len(base_files)), sort_newest=sort_newest
+        base_files = self._gallery_search_base_files()
+        if not base_files:
+            return
+        if self._semantic_search_backup_files is None:
+            self._semantic_search_backup_files = list(
+                self._semantic_search_corpus_files
+                if self._semantic_search_corpus_files
+                else getattr(self, "image_files", []) or []
             )
-            from semantic_search import semantic_embeddings_enabled
-
-            used_semantic_backend = False
-            if not semantic_query:
-                hits = metadata_hits
-            elif not semantic_embeddings_enabled():
-                hits = metadata_hits
-                if not hits:
-                    self.status_bar.showMessage(
-                        "No matches — this build supports metadata filters only "
-                        "(e.g. camera:sony iso<800 city:tokyo).",
-                        6000,
-                    )
-            elif not index.semantic_backend_available():
-                hits = []
+        if getattr(self, "_semantic_indexing_in_progress", False):
+            progress = (
+                getattr(self, "_gallery_search_status_full", "") or ""
+            ).strip()
+            if progress:
                 self.status_bar.showMessage(
-                    f"Semantic backend unavailable: {index.semantic_backend_error()}",
-                    5000,
+                    f"Searching while indexing — {progress}",
+                    4500,
                 )
             else:
-                # EXIF/GPS/loose metadata terms are hard filters. Only the files
-                # that survived those filters are eligible for semantic ranking.
-                metadata_candidate_paths = [h.file_path for h in metadata_hits]
-                if semantic_query and not metadata_candidate_paths:
-                    metadata_candidate_paths = list(base_files)
-                hits = index.search_text(
-                    semantic_query,
-                    metadata_candidate_paths,
-                    top_k=min(500, len(base_files)),
-                    min_score=0.20,
+                self.status_bar.showMessage(
+                    "Searching while indexing — EXIF/metadata filters apply now; "
+                    "semantic ranking improves as indexing continues.",
+                    4500,
                 )
-                used_semantic_backend = True
-            if not hits:
-                self.image_files = []
-                self._semantic_search_result_paths = []
-                self.current_file_index = -1
-                self.current_file_path = None
-                backend_missing = bool(semantic_query) and not index.semantic_backend_available()
-                empty_msg = (
-                    "Semantic search unavailable"
-                    if backend_missing
-                    else (
-                        "No matching bookmarked images"
-                        if getattr(self, "_gallery_bookmark_filter_active", False)
-                        else "No matching images"
+        else:
+            self.status_bar.showMessage("Running search...")
+
+        token = getattr(self, "_semantic_search_query_generation", 0) + 1
+        self._semantic_search_query_generation = token
+
+        signals = getattr(self, "_semantic_search_query_signals", None)
+        if signals is None:
+            signals = SemanticSearchQuerySignals()
+            signals.ready.connect(self._apply_semantic_search_query_result)
+            signals.error.connect(self._on_semantic_search_query_error)
+            self._semantic_search_query_signals = signals
+
+        index = self._get_semantic_index()
+        sort_newest = self.get_sort_preference()
+
+        class _SemanticSearchQueryWorker(QRunnable):
+            def run(self_inner):
+                try:
+                    metadata_hits, semantic_query = index.search_metadata_text(
+                        query,
+                        base_files,
+                        top_k=max(1, len(base_files)),
+                        sort_newest=sort_newest,
                     )
-                )
-                self._switch_to_gallery_for_search()
-                if hasattr(self, "gallery_justified") and self.gallery_justified:
-                    self.gallery_justified.clear_thumbnail_widgets()
-                    self.gallery_justified.set_images([])
-                    self.gallery_justified.show_empty_message(empty_msg)
-                self._sync_gallery_scrollbar_policy()
-                if hasattr(self, "status_counter_label"):
-                    self._update_gallery_counter()
-                if not backend_missing:
-                    self.status_bar.showMessage("No matching images", 3000)
-                self._last_semantic_query = query
+                    from semantic_search import semantic_embeddings_enabled
+
+                    used_semantic_backend = False
+                    status_message = ""
+                    hits = metadata_hits
+                    if not semantic_query:
+                        hits = metadata_hits
+                    elif not semantic_embeddings_enabled():
+                        hits = metadata_hits
+                        if not hits:
+                            status_message = (
+                                "No matches — this build supports metadata filters only "
+                                "(e.g. camera:sony iso<800 city:tokyo)."
+                            )
+                    elif not index.semantic_backend_available():
+                        hits = []
+                        status_message = (
+                            f"Semantic backend unavailable: {index.semantic_backend_error()}"
+                        )
+                    else:
+                        metadata_candidate_paths = [h.file_path for h in metadata_hits]
+                        if semantic_query and not metadata_candidate_paths:
+                            metadata_candidate_paths = list(base_files)
+                        hits = index.search_text(
+                            semantic_query,
+                            metadata_candidate_paths,
+                            top_k=min(500, len(base_files)),
+                            min_score=0.20,
+                        )
+                        used_semantic_backend = True
+
+                    result = {
+                        "hits": hits,
+                        "semantic_query": semantic_query,
+                        "used_semantic_backend": used_semantic_backend,
+                        "sort_newest": sort_newest,
+                        "status_message": status_message,
+                        "backend_missing": bool(semantic_query)
+                        and not index.semantic_backend_available(),
+                    }
+                    try:
+                        from PyQt6 import sip
+
+                        if not sip.isdeleted(signals):
+                            signals.ready.emit(token, query, result)
+                    except Exception:
+                        pass
+                except Exception as exc:
+                    try:
+                        from PyQt6 import sip
+
+                        if not sip.isdeleted(signals):
+                            signals.error.emit(token, query, str(exc))
+                    except Exception:
+                        pass
+
+        _get_bg_thread_pool().start(_SemanticSearchQueryWorker())
+
+    def _on_semantic_search_query_error(self, token: int, query: str, message: str) -> None:
+        if token != getattr(self, "_semantic_search_query_generation", None):
+            return
+        if hasattr(self, "gallery_search_input") and self.gallery_search_input is not None:
+            current = (self.gallery_search_input.text() or "").strip()
+            if current and current != (query or "").strip():
+                return
+        QMessageBox.warning(self, "Semantic Search", message)
+
+    def _apply_semantic_search_query_result(self, token: int, query: str, result: dict) -> None:
+        if token != getattr(self, "_semantic_search_query_generation", None):
+            return
+        if hasattr(self, "gallery_search_input") and self.gallery_search_input is not None:
+            current = (self.gallery_search_input.text() or "").strip()
+            if current and current != (query or "").strip():
                 return
 
-            ranked_paths = [h.file_path for h in hits]
-            pending_capture_sort = used_semantic_backend and len(ranked_paths) > 1
-            if pending_capture_sort:
-                self._last_semantic_query = query
-                self._schedule_semantic_search_resort(
-                    query,
-                    ranked_paths,
-                    hits,
-                    used_semantic_backend,
-                    sort_newest,
-                )
-            if not ranked_paths:
-                self.image_files = []
-                self._semantic_search_result_paths = []
-                self.current_file_index = -1
-                self.current_file_path = None
-                self._switch_to_gallery_for_search()
-                empty_msg = (
+        hits = result.get("hits") or []
+        semantic_query = result.get("semantic_query")
+        used_semantic_backend = bool(result.get("used_semantic_backend"))
+        sort_newest = bool(result.get("sort_newest"))
+        status_message = str(result.get("status_message") or "")
+        backend_missing = bool(result.get("backend_missing"))
+
+        if status_message:
+            self.status_bar.showMessage(status_message, 6000 if "metadata filters only" in status_message else 5000)
+
+        if not hits:
+            self.image_files = []
+            self._semantic_search_result_paths = []
+            self.current_file_index = -1
+            self.current_file_path = None
+            empty_msg = (
+                "Semantic search unavailable"
+                if backend_missing
+                else (
                     "No matching bookmarked images"
                     if getattr(self, "_gallery_bookmark_filter_active", False)
                     else "No matching images"
                 )
-                if getattr(self, "_gallery_bookmark_filter_active", False):
-                    self._apply_gallery_bookmark_filter()
-                    if hasattr(self, "gallery_justified") and self.gallery_justified:
-                        self.gallery_justified.show_empty_message(empty_msg)
-                elif hasattr(self, "gallery_justified") and self.gallery_justified:
-                    self.gallery_justified.clear_thumbnail_widgets()
-                    self.gallery_justified.set_images([])
-                    self.gallery_justified.show_empty_message(empty_msg)
-                    self._sync_gallery_scrollbar_policy()
-                    self._update_gallery_counter()
-                self.status_bar.showMessage(empty_msg, 3000)
-                self._last_semantic_query = query
-                return
-
-            self.image_files = ranked_paths
-            self._semantic_search_result_paths = list(ranked_paths)
-            self.current_file_index = 0
-            self.current_file_path = self.image_files[0]
-
+            )
             self._switch_to_gallery_for_search()
+            if hasattr(self, "gallery_justified") and self.gallery_justified:
+                self.gallery_justified.clear_thumbnail_widgets()
+                self.gallery_justified.set_images([])
+                self.gallery_justified.show_empty_message(empty_msg)
+            self._sync_gallery_scrollbar_policy()
+            if hasattr(self, "status_counter_label"):
+                self._update_gallery_counter()
+            if not backend_missing and not status_message:
+                self.status_bar.showMessage("No matching images", 3000)
+            self._last_semantic_query = query
+            return
+
+        ranked_paths = [h.file_path for h in hits]
+        pending_capture_sort = used_semantic_backend and len(ranked_paths) > 1
+        if pending_capture_sort:
+            self._last_semantic_query = query
+            self._schedule_semantic_search_resort(
+                query,
+                ranked_paths,
+                hits,
+                used_semantic_backend,
+                sort_newest,
+            )
+        if not ranked_paths:
+            self.image_files = []
+            self._semantic_search_result_paths = []
+            self.current_file_index = -1
+            self.current_file_path = None
+            self._switch_to_gallery_for_search()
+            empty_msg = (
+                "No matching bookmarked images"
+                if getattr(self, "_gallery_bookmark_filter_active", False)
+                else "No matching images"
+            )
             if getattr(self, "_gallery_bookmark_filter_active", False):
                 self._apply_gallery_bookmark_filter()
-            else:
-                self._update_gallery_counter()
                 if hasattr(self, "gallery_justified") and self.gallery_justified:
-                    self.gallery_justified.hide_empty_message()
+                    self.gallery_justified.show_empty_message(empty_msg)
+            elif hasattr(self, "gallery_justified") and self.gallery_justified:
+                self.gallery_justified.clear_thumbnail_widgets()
+                self.gallery_justified.set_images([])
+                self.gallery_justified.show_empty_message(empty_msg)
                 self._sync_gallery_scrollbar_policy()
-                self._update_gallery_view()
-
-            top = max(hits, key=lambda h: h.score) if hits else None
-            effective_n = len(self._gallery_effective_files())
-            if used_semantic_backend and top is not None:
-                if getattr(self, "_gallery_bookmark_filter_active", False):
-                    message = (
-                        f"Search: {effective_n} bookmarked match"
-                        f"{'es' if effective_n != 1 else ''}"
-                        f" | top score {top.score:.3f}"
-                    )
-                else:
-                    message = f"Semantic search: {len(ranked_paths)} result(s) | top score {top.score:.3f}"
-            elif getattr(self, "_gallery_bookmark_filter_active", False):
-                message = f"EXIF search: {effective_n} bookmarked match{'es' if effective_n != 1 else ''}"
-            else:
-                message = f"EXIF search: {len(ranked_paths)} result(s)"
-            self.status_bar.showMessage(message, 5000)
+                self._update_gallery_counter()
+            self.status_bar.showMessage(empty_msg, 3000)
             self._last_semantic_query = query
-        except Exception as e:
-            QMessageBox.warning(self, "Semantic Search", str(e))
+            return
+
+        self.image_files = ranked_paths
+        self._semantic_search_result_paths = list(ranked_paths)
+        self.current_file_index = 0
+        self.current_file_path = self.image_files[0]
+
+        self._switch_to_gallery_for_search()
+        if getattr(self, "_gallery_bookmark_filter_active", False):
+            self._apply_gallery_bookmark_filter()
+        else:
+            self._update_gallery_counter()
+            if hasattr(self, "gallery_justified") and self.gallery_justified:
+                self.gallery_justified.hide_empty_message()
+            self._sync_gallery_scrollbar_policy()
+            self._update_gallery_view()
+
+        top = max(hits, key=lambda h: h.score) if hits else None
+        effective_n = len(self._gallery_effective_files())
+        if used_semantic_backend and top is not None:
+            if getattr(self, "_gallery_bookmark_filter_active", False):
+                message = (
+                    f"Search: {effective_n} bookmarked match"
+                    f"{'es' if effective_n != 1 else ''}"
+                    f" | top score {top.score:.3f}"
+                )
+            else:
+                message = f"Semantic search: {len(ranked_paths)} result(s) | top score {top.score:.3f}"
+        elif getattr(self, "_gallery_bookmark_filter_active", False):
+            message = f"EXIF search: {effective_n} bookmarked match{'es' if effective_n != 1 else ''}"
+        else:
+            message = f"EXIF search: {len(ranked_paths)} result(s)"
+        self.status_bar.showMessage(message, 5000)
+        self._last_semantic_query = query
 
     def _schedule_semantic_search_resort(
         self,

@@ -10,6 +10,7 @@ MVP goals:
 from __future__ import annotations
 
 import os
+import platform
 import re
 import sqlite3
 import time
@@ -796,13 +797,91 @@ def _log_face_backend_once(backend_id: int, target_id: int, cv2_module=None) -> 
         logger.info("[ACCEL] Face DNN backend selected: backend_id=%s target_id=%s (%s)", backend_id, target_id, e)
 
 
-def _coreml_compute_units():
+_COREML_COMPUTE_UNITS_WARNED = False
+
+
+def _macos_version_major() -> int:
+    if sys.platform != "darwin":
+        return 0
+    try:
+        ver = platform.mac_ver()[0]
+        if not ver:
+            return 0
+        return int(str(ver).split(".")[0])
+    except Exception:
+        return 0
+
+
+def _coreml_compute_units_setting_for_indexing() -> str:
+    """Compute units for the image encoder (indexing)."""
+    env_index = os.environ.get("RAWVIEWER_COREML_COMPUTE_UNITS_INDEX")
+    if env_index is not None and env_index.strip():
+        return env_index.strip().lower()
+    env_val = os.environ.get("RAWVIEWER_COREML_COMPUTE_UNITS")
+    if env_val is not None and env_val.strip():
+        return env_val.strip().lower()
+    return "all"
+
+
+def _coreml_compute_units_setting_for_search() -> str:
+    """Compute units for the text encoder (semantic search queries)."""
+    env_search = os.environ.get("RAWVIEWER_COREML_COMPUTE_UNITS_SEARCH")
+    if env_search is not None and env_search.strip():
+        return env_search.strip().lower()
+    # macOS 26+ beta: text encoder hits MPSGraph SDPA crash; image indexing is stable on GPU.
+    if _macos_version_major() >= 26:
+        return "cpu"
+    env_val = os.environ.get("RAWVIEWER_COREML_COMPUTE_UNITS")
+    if env_val is not None and env_val.strip():
+        return env_val.strip().lower()
+    return "all"
+
+
+def _coreml_compute_units_setting(role: str = "index") -> str:
+    if role == "search":
+        return _coreml_compute_units_setting_for_search()
+    return _coreml_compute_units_setting_for_indexing()
+
+
+def _log_coreml_compute_units_profile_once() -> None:
+    global _COREML_COMPUTE_UNITS_WARNED
+    if _COREML_COMPUTE_UNITS_WARNED:
+        return
+    _COREML_COMPUTE_UNITS_WARNED = True
+
+    import logging
+
+    logger = logging.getLogger(__name__)
+    macos_major = _macos_version_major()
+    index_cu = _coreml_compute_units_setting_for_indexing()
+    search_cu = _coreml_compute_units_setting_for_search()
+
+    if macos_major >= 26 and index_cu != search_cu:
+        logger.warning(
+            "[ACCEL] macOS %d+: Core ML split mode index=%s search=%s "
+            "(text encoder MPSGraph instability on beta). "
+            "Override with RAWVIEWER_COREML_COMPUTE_UNITS_INDEX / _SEARCH.",
+            macos_major,
+            index_cu,
+            search_cu,
+        )
+    elif macos_major >= 26 and search_cu in ("all", "gpu", "ane"):
+        logger.warning(
+            "[ACCEL] RAWVIEWER_COREML_COMPUTE_UNITS_SEARCH=%s on macOS %d+ beta may crash "
+            "during semantic search.",
+            search_cu,
+            macos_major,
+        )
+
+
+def _coreml_compute_units(role: str = "index"):
     """Core ML compute-unit preference for MobileCLIP on macOS."""
     import CoreML  # type: ignore[import-not-found]
 
-    raw = os.environ.get("RAWVIEWER_COREML_COMPUTE_UNITS", "all").strip().lower()
+    raw = _coreml_compute_units_setting(role)
     mapping = {
         "cpu": CoreML.MLComputeUnitsCPUOnly,
+        "cpuonly": CoreML.MLComputeUnitsCPUOnly,
         "gpu": CoreML.MLComputeUnitsCPUAndGPU,
         "ane": CoreML.MLComputeUnitsCPUAndNeuralEngine,
         "all": CoreML.MLComputeUnitsAll,
@@ -826,7 +905,12 @@ def log_inference_acceleration_profile(force: bool = False) -> None:
     parts: List[str] = []
 
     if sys.platform == "darwin":
-        parts.append("semantic=Core ML (Apple GPU/ANE when available)")
+        index_cu = _coreml_compute_units_setting_for_indexing()
+        search_cu = _coreml_compute_units_setting_for_search()
+        if index_cu == search_cu:
+            parts.append(f"semantic=Core ML compute_units={index_cu}")
+        else:
+            parts.append(f"semantic=Core ML index={index_cu} search={search_cu}")
     else:
         try:
             available = _ort_get_available_providers()
@@ -1504,12 +1588,13 @@ class MobileCLIPCoreMLBackend:
         self._Foundation = Foundation
         self._Quartz = Quartz
         self._objc = objc
+        _log_coreml_compute_units_profile_once()
 
         with _COREML_PREDICTION_LOCK:
             if self._image_model is not None and self._text_model is not None:
                 return
 
-            def _load_one(path: str):
+            def _load_one(path: str, role: str):
                 url = Foundation.NSURL.fileURLWithPath_(path)
                 
                 # Persistent cache for compiled models to avoid O(seconds) re-compilation
@@ -1523,7 +1608,10 @@ class MobileCLIPCoreMLBackend:
                     mtime = 0
                 
                 h = hashlib.md5(f"{path}_{mtime}".encode()).hexdigest()
-                compiled_path = os.path.join(cache_dir, f"{os.path.basename(path)}_{h}.mlmodelc")
+                cu = _coreml_compute_units_setting(role)
+                compiled_path = os.path.join(
+                    cache_dir, f"{os.path.basename(path)}_{h}_{cu}.mlmodelc"
+                )
                 compiled_url = Foundation.NSURL.fileURLWithPath_(compiled_path)
                 
                 if not os.path.exists(compiled_path):
@@ -1541,7 +1629,7 @@ class MobileCLIPCoreMLBackend:
 
                 config = CoreML.MLModelConfiguration.alloc().init()
                 try:
-                    config.setComputeUnits_(_coreml_compute_units())
+                    config.setComputeUnits_(_coreml_compute_units(role))
                 except Exception:
                     pass
                 model, load_error = CoreML.MLModel.modelWithContentsOfURL_configuration_error_(
@@ -1553,8 +1641,10 @@ class MobileCLIPCoreMLBackend:
                     raise RuntimeError(f"Failed to load Core ML model: {load_error}")
                 return model
 
-            self._image_model = _load_one(self.image_model_path)
-            self._text_model = _load_one(self.text_model_path)
+            if self._image_model is None:
+                self._image_model = _load_one(self.image_model_path, "index")
+            if self._text_model is None:
+                self._text_model = _load_one(self.text_model_path, "search")
 
     @staticmethod
     def _native_feature_name(model, direction: str) -> str:
@@ -5122,11 +5212,15 @@ class SemanticImageIndex:
                                 )
                                 sem_accel_detail = f"ONNX providers=[{', '.join(selected)}]"
                             elif isinstance(backend, MobileCLIPCoreMLBackend):
-                                cu = os.environ.get(
-                                    "RAWVIEWER_COREML_COMPUTE_UNITS", "all"
-                                ).strip().lower()
-                                sem_gpu_accel = cu not in ("cpu", "cpuonly")
-                                sem_accel_detail = f"CoreML compute_units={cu}"
+                                index_cu = _coreml_compute_units_setting_for_indexing()
+                                search_cu = _coreml_compute_units_setting_for_search()
+                                sem_gpu_accel = index_cu not in ("cpu", "cpuonly")
+                                if index_cu == search_cu:
+                                    sem_accel_detail = f"CoreML compute_units={index_cu}"
+                                else:
+                                    sem_accel_detail = (
+                                        f"CoreML index={index_cu} search={search_cu}"
+                                    )
                             else:
                                 sem_accel_detail = backend.__class__.__name__
                         else:
