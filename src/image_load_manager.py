@@ -2239,6 +2239,17 @@ _global_manager: Optional[ImageLoadManager] = None
 _manager_lock = threading.Lock()
 
 
+def peek_image_load_manager() -> Optional[ImageLoadManager]:
+    """Return the manager if already constructed; never create one.
+
+    Cache sizing and other early-startup helpers must use this. Calling
+    ``get_image_load_manager()`` from inside ``ImageCache`` / manager
+    construction re-enters the singleton lock and deadlocks (splash hang
+    after clear-cache / cold start).
+    """
+    return _global_manager
+
+
 def get_image_load_manager(max_workers: int = 4) -> ImageLoadManager:
     """獲取全局圖像加載管理器實例（函數級單例模式）
 

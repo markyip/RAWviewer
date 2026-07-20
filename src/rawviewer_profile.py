@@ -393,11 +393,18 @@ def indexing_loads_compete() -> bool:
     Important: do not key off RAWVIEWER_ENABLE_SEMANTIC_SEARCH / FACE_SCAN alone.
     Those stay on for Plus even when indexing is idle; that previously forced
     gallery idle preload to BACKGROUND permanently and made scrolling feel slow.
+
+    Must not *create* the ImageLoadManager: ``ImageCache`` sizing calls this
+    during construction, and the manager's own ``__init__`` calls
+    ``get_image_cache`` — a create-here path deadlocks the singleton lock and
+    leaves the splash stuck after a cold start / clear-cache.
     """
     try:
-        from image_load_manager import get_image_load_manager
+        from image_load_manager import peek_image_load_manager
 
-        mgr = get_image_load_manager()
+        mgr = peek_image_load_manager()
+        if mgr is None:
+            return False
         active = getattr(mgr, "indexing_throttle_active", None)
         if callable(active):
             return bool(active())
