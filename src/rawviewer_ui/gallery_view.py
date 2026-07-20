@@ -304,6 +304,13 @@ class JustifiedGallery(QWidget):
         self._gallery_generation = 0
         self._active_tasks = {}  # path -> (started_ts, Priority)
         self._thumb_fail_counts: Dict[str, int] = {}
+        # Negative memo for the synchronous global-cache base fetch. A cold
+        # section jump has no cached thumbnails, and the failed disk/SQLite
+        # lookup costs ~5ms per tile — re-paying it for the same leading tiles
+        # on every 16ms budget pass starved the rest of the viewport (blank
+        # tiles until an input event triggered extra passes). Remember misses
+        # briefly; async production clears the entry on thumbnail_ready.
+        self._base_fetch_miss_ts: Dict[str, float] = {}
         self._metadata_cache = {}
         # Thumbnail cache: base + per-bucket scaled
         self._thumbnail_cache = LRUCache(10000)
@@ -1980,6 +1987,7 @@ class JustifiedGallery(QWidget):
             pass
         # Drop the remembered aspect so a re-decode (e.g. after on-disk rotation) re-measures.
         self._measured_raw_aspects.pop(file_path, None)
+        self._base_fetch_miss_ts.pop(file_path, None)
         # Clearing the cache alone doesn't repaint an already-visible tile --
         # it's still showing the old QPixmap set the last time this widget
         # was laid out. Force it back through the cache-miss path (which
@@ -3293,7 +3301,6 @@ class JustifiedGallery(QWidget):
                     is_fast_cache = True
                     scaled_key = fast_key
 
-            expected_logical = QSize(rect.width(), rect.height())
             if cached_scaled and not cached_scaled.isNull():
                 # A scaled entry is rect-shaped by construction, so its orientation is the
                 # rect's — if the measured pixels say the image is portrait but this scaled
@@ -3313,7 +3320,15 @@ class JustifiedGallery(QWidget):
                 if stale_crop:
                     self._thumbnail_cache.remove(scaled_key)
                     cached_scaled = None
-                elif self._pixmap_logical_size(cached_scaled, dpr) == expected_logical:
+                elif cached_scaled.size() == physical_size:
+                    # Compare PHYSICAL pixel sizes. Reconstructing the logical size
+                    # via round(px / dpr) disagrees with the int(rect * dpr) used to
+                    # build the pixmap on fractional DPR (125%/150% Windows): e.g.
+                    # rect 311x207 @1.25 -> pixmap 388x258 -> round back = 310x206.
+                    # That off-by-one rejected every cached scaled tile, so each
+                    # visible pass re-scaled the same leading tiles, exhausted the
+                    # pass budget, and never reached the rest of the viewport after
+                    # a section jump (black gallery + infinite 16ms reschedule).
                     w.setPixmap(cached_scaled)
                     w.setText("")
                     if not cached_scaled.isNull() and not self._first_thumb_ready_after_set:
@@ -3327,6 +3342,13 @@ class JustifiedGallery(QWidget):
                 if not base:
                     # Avoid main thread SQLite lock contention/stutter by skipping synchronous fetches during active scrolls
                     if is_scrolling:
+                        pass
+                    elif (
+                        time.time() - self._base_fetch_miss_ts.get(path, 0.0)
+                    ) < 2.0:
+                        # Recently missed: the async thumbnail task will deliver.
+                        # Re-fetching every 16ms pass cost ~5ms/tile and starved
+                        # the rest of the viewport after a cold section jump.
                         pass
                     else:
                         try:
@@ -3347,6 +3369,8 @@ class JustifiedGallery(QWidget):
                                 base = None
                         except Exception as e:
                             logger.debug(f"Sync adaptive mipmap fetch failed for {path}: {e}")
+                        if base is None:
+                            self._base_fetch_miss_ts[path] = time.time()
                 
                 if base is not None and not base.isNull():
                     # Tile geometry must follow the oriented pixels, exactly like the
@@ -3857,6 +3881,7 @@ class JustifiedGallery(QWidget):
                         pixmap = existing
         pixmap = self._store_oriented_base_pixmap(file_path, pixmap)
         self._thumb_fail_counts.pop(file_path, None)
+        self._base_fetch_miss_ts.pop(file_path, None)
         if not self._first_thumb_ready_after_set:
             self._first_thumb_ready_after_set = True
             self._end_gallery_load_warmup_throttle()

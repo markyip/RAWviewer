@@ -16413,22 +16413,33 @@ class RAWImageViewer(SessionMixin, QMainWindow):
 
             if not is_raw_file(file_path):
                 return False
-            xmp_path = resolve_xmp_path(file_path)
-            if not xmp_path or not os.path.isfile(xmp_path):
-                return False
-            try:
-                mtime = os.path.getmtime(xmp_path)
-            except OSError:
-                return False
             memo = getattr(self, "_gallery_edited_memo", None)
             if memo is None:
                 self._gallery_edited_memo = {}
                 memo = self._gallery_edited_memo
+            # TTL short-circuit BEFORE any disk stat: load_visible_images calls
+            # this per tile per pass, and even the isfile+getmtime pair costs
+            # 1-3ms on external volumes — enough to eat the pass budget and
+            # starve tile fill after a section jump. External sidecar changes
+            # surface within the TTL; in-app edits invalidate the memo directly.
+            now = time.time()
             hit = memo.get(file_path)
+            if hit is not None and len(hit) >= 3 and (now - hit[2]) < 2.0:
+                return bool(hit[1])
+            xmp_path = resolve_xmp_path(file_path)
+            if not xmp_path or not os.path.isfile(xmp_path):
+                memo[file_path] = (None, False, now)
+                return False
+            try:
+                mtime = os.path.getmtime(xmp_path)
+            except OSError:
+                memo[file_path] = (None, False, now)
+                return False
             if hit is not None and hit[0] == mtime:
+                memo[file_path] = (mtime, hit[1], now)
                 return bool(hit[1])
             edited = not is_default_adjustments(load_adjustments_from_xmp(xmp_path))
-            memo[file_path] = (mtime, edited)
+            memo[file_path] = (mtime, edited, now)
             return edited
         except Exception:
             return False
