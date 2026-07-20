@@ -4,7 +4,7 @@
 
 
 ## 🚀 Version 3.0.1
-**Release Date: July 19, 2026**
+**Release Date: July 20, 2026**
 
 ### What’s new for you
 
@@ -12,6 +12,21 @@
 - **Clearer edition names** — **Standard**, **Plus (DirectML)**, and **Plus (CUDA)** in the installer and UI.
 - **Faster launch** — the app reaches the first screen sooner (AI search libraries load only when you open Search).
 - **Export change** — export-time **SCUNet AI denoise** is removed. Use Adjust chroma noise reduction, then export JPEG / WebP / TIFF as usual.
+
+### Fixes and improvements
+
+- **Stable gallery scrolling & loading:**
+  - Resolved UI freezes and trackpad stuttering during fast gallery scrolling.
+  - Fixed scrolling stalls and black/blank thumbnail holes when jumping between sections on high-resolution displays (e.g., Windows scaled at 125%/150%).
+  - Optimized folder scanning and thumbnail checks to prevent temporary system pauses when viewing photos on slower external drives.
+  - Fixed gallery loading stalls or frozen thumbnails on certain computers.
+- **Reliability:**
+  - Fixed a deadlock issue when rebuilding the image cache.
+  - Fixed the gallery jumping back to the top of the folder after bulk-deleting or moving photos; the screen now remains anchored to neighboring photos.
+  - Fixed semantic search crashes on macOS 26+ beta releases.
+  - Improved macOS Plus features, including better Dock icon integration, gallery consistency, and face scanning.
+- **Usability & diagnostics:**
+  - Gallery images now open using embedded previews first for immediate display.
 
 ### Upgrade
 
