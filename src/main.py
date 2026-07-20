@@ -16644,6 +16644,32 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 self.current_file_index = -1
                 self.current_file_path = None
 
+    def _surviving_anchor_after_removal(self, removed_paths) -> Optional[str]:
+        """Nearest file that will still exist after removing *removed_paths*.
+
+        The scroll anchor passed to _sync_gallery_to_folder_files must be a
+        surviving file: anchoring on a deleted path can never resolve, the
+        scroll-to-file retries exhaust, and the gallery lands at the top.
+        Prefers the first file after the earliest removed one (reading order),
+        falling back to the nearest one before it.
+        """
+        removed = {os.path.normpath(p) for p in removed_paths if p}
+        files = list(getattr(self, "image_files", None) or [])
+        first = None
+        for i, f in enumerate(files):
+            if os.path.normpath(f) in removed:
+                first = i
+                break
+        if first is None:
+            return None
+        for f in files[first:]:
+            if os.path.normpath(f) not in removed:
+                return f
+        for f in reversed(files[:first]):
+            if os.path.normpath(f) not in removed:
+                return f
+        return None
+
     def _after_gallery_bulk_file_removal(self, anchor_path: Optional[str] = None) -> None:
         self._clear_gallery_selection()
         self._refresh_filmstrip_bookmark_visuals()
@@ -16685,7 +16711,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self._stop_slideshow()
         if not self._confirm_bulk_deletion(len(paths), discard=False):
             return
-        anchor = paths[0]
+        anchor = self._surviving_anchor_after_removal(paths)
         from send2trash import send2trash
 
         from image_cache import get_image_cache
@@ -16727,7 +16753,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         from image_cache import get_image_cache
 
         cache = get_image_cache()
-        anchor = paths[0]
+        anchor = self._surviving_anchor_after_removal(paths)
         moved = 0
         errors = 0
         for file_path in list(paths):
