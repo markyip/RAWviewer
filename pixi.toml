@@ -81,6 +81,7 @@ pyobjc-framework-Cocoa = "*"
 pyobjc-framework-Quartz = "*"
 pyobjc-framework-CoreML = "*"
 pyobjc-framework-Vision = "*"
+onnxruntime = "*"
 
 [target.osx-64.pypi-dependencies]
 pyexiv2 = ">=2.15.4"
@@ -88,3 +89,4 @@ pyobjc-framework-Cocoa = "*"
 pyobjc-framework-Quartz = "*"
 pyobjc-framework-CoreML = "*"
 pyobjc-framework-Vision = "*"
+onnxruntime = "*"
