@@ -1476,6 +1476,23 @@ def main():
             "--exclude-module", "tkinter",
             "--exclude-module", "_tkinter",
             "--exclude-module", "setuptools",
+            # Torch-free era heavies: the bootstrapper's hidden-imports of the
+            # UI modules otherwise sweep these into the setup exe (~1.2 GB vs
+            # ~100 MB). The installed app gets them via pixi at install time.
+            "--exclude-module", "cupy",
+            "--exclude-module", "cupy_backends",
+            "--exclude-module", "cupyx",
+            "--exclude-module", "fastrlock",
+            "--exclude-module", "cv2",
+            "--exclude-module", "kornia",
+            "--exclude-module", "kornia_rs",
+            "--exclude-module", "sympy",
+            "--exclude-module", "mpmath",
+            "--exclude-module", "networkx",
+            "--exclude-module", "lensfunpy",
+            "--exclude-module", "pillow_heif",
+            "--exclude-module", "tifffile",
+            "--exclude-module", "huggingface_hub",
         ])
         
         add_data_args.append('--add-data "src;src"')
