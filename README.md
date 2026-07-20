@@ -345,6 +345,8 @@ Rule of thumb: **if it can ship in Plus, it counts as feasible** even when Stand
 | 7 | **VLM-assisted auto adjust** | **Low–Medium** | L | Product + model/API scope (e.g. local Ollama); not blocked by editor plumbing alone |
 | 8 | **Google Drive browse / edit / XMP sync** | **Medium** | L | Local cache sync (download → existing pipeline → upload XMP/export); OAuth + virtual folder session |
 | 9 | **Edit Nikon HE/HE\* NEF as RAW** | **Low** | L+ | LibRaw cannot unpack HE mosaics today → browse-only by design until a decoder exists |
+| 10 | **HDR Merge** | **High** | M | Align exposures, de-ghost, and merge highlights/shadows via Exposure Fusion |
+| 11 | **Panorama Stitching / HDR Panorama** | **Medium** | L | Feature matching, homography warping, and tiled multi-band blending |
 
 **Current limits (not aspirational):**
 - **Cold gallery tiles** for never-opened-in-Adjust edits may still show embedded JPEG (edited **badge** + save-bake cover the common path). Same root as row 1.
