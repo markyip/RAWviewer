@@ -264,25 +264,16 @@ def _process_linear_edit_tail(
     do_denoise = chroma_denoise if chroma_denoise is not None else chroma_denoise_enabled()
     nr_amount = float(merged.get("ColorNoiseReduction", 0.0))
     method = int(float(merged.get("DenoiseMethod", 0.0)))
+    if nr_amount > 1e-4:
+        img = apply_chroma_denoise(
+            img, strength=min(1.5, nr_amount / 100.0 * 1.25), method=method, preview=preview
+        )
+    elif do_denoise and not preview:
+        img = apply_chroma_denoise(img, method=method, preview=False)
 
-    restormer_model_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "models", "restormer.onnx")
-    use_restormer = not preview and os.environ.get("RAWVIEWER_EXPORT_RESTORMER_ONNX", "1") == "1" and os.path.exists(restormer_model_path)
-
-    if use_restormer and (nr_amount > 1e-4 or do_denoise):
-        from onnx_restormer import RestormerONNX
-        restormer = RestormerONNX(restormer_model_path)
-        img = restormer.process(img)
-    else:
-        if nr_amount > 1e-4:
-            img = apply_chroma_denoise(
-                img, strength=min(1.5, nr_amount / 100.0 * 1.25), method=method, preview=preview
-            )
-        elif do_denoise and not preview:
-            img = apply_chroma_denoise(img, method=method, preview=False)
-
-        luma_nr_amount = float(merged.get("LuminanceNoiseReduction", 0.0))
-        if luma_nr_amount > 1e-4:
-            img = apply_luma_denoise(img, strength=luma_nr_amount / 100.0, method=method, preview=preview)
+    luma_nr_amount = float(merged.get("LuminanceNoiseReduction", 0.0))
+    if luma_nr_amount > 1e-4:
+        img = apply_luma_denoise(img, strength=luma_nr_amount / 100.0, method=method, preview=preview)
 
     if not uses_recovery_tone_map(merged):
         img = apply_pv2012_tone_rgb(img, merged)
