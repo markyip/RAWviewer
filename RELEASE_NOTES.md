@@ -3,12 +3,21 @@
 **Language / 語言：** English · [繁體中文](RELEASE_NOTES.zh-TW.md)
 
 
-## 🚀 Version 3.0.2 (Unreleased)
+## 🚀 Version 3.0.2
+**Release Date: July 21, 2026**
 
 ### What's new for you
 
-- **AI denoise is back — and faster than before.** SCUNet real-image noise reduction returns via **ONNX Runtime** instead of PyTorch, so it no longer needs the multi-GB torch install that got it removed in 3.0.1. Runs in **fp16** on DirectML — about **25x faster per tile** than an fp32 export, with no measurable quality loss. Applies automatically on export/full-quality renders when noise reduction is enabled in Adjust.
+- **AI denoise is back — and faster than before.** SCUNet real-image noise reduction returns via **ONNX Runtime** instead of PyTorch, so it no longer needs the multi-GB torch install that got it removed in 3.0.1. Runs in **fp16** on DirectML — about **25x faster per tile** than an fp32 export, with no measurable quality loss.
+- **AI Denoise is now an explicit export choice, not automatic.** The Export menu has a new **AI Denoise (Restormer/SCUNet)** submenu with its own 16-bit TIFF / JPEG / WebP entries — pick one to export with AI denoise; the plain format entries below still use whatever Chroma NR method is set in Noise Reduction, unchanged. One click now fully specifies both the format and whether AI denoise runs, instead of a separate checkbox you could forget to set.
+- **AI denoise export can now be cancelled, and shows real progress.** Previously, cancelling mid-export while AI denoise was running did nothing — the pass had no way to be interrupted and reported no progress for the whole (often multi-minute) span, which looked like a hang. Export now shows live "Denoising (AI)…" progress and responds to Cancel immediately.
 - **Plus-only, downloads with the other AI models** (~100 MB, bundled into the existing ~600 MB AI model download — now ~700 MB total). Standard keeps the existing chroma/luma noise reduction; no change there.
+
+### Fixes
+
+- **Brush action hotfix:** Dodge, Burn, and Eraser no longer disarm themselves when moving the pointer from the Adjust panel onto the photo. The tool now stays armed from the moment you click it until the pointer has genuinely left the image after being on it — not on every incidental hover near an edge or letterbox margin.
+- Scroll-wheel photo navigation is disabled while the Adjust panel is open, so an unrelated scroll action (adjusting a slider, brush size, etc.) can no longer accidentally flip to a different photo mid-edit.
+- The app process now identifies itself as "RAWviewer" in Task Manager instead of the generic "Python".
 
 ---
 
