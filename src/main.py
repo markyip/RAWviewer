@@ -21084,6 +21084,13 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         if gv is not None and hasattr(gv, "set_export_drag_enabled"):
             # Drag-out + share fight crop/D&B gestures while editing.
             gv.set_export_drag_enabled(not bool(visible))
+        if gv is not None and hasattr(gv, "_wheel_navigate_in_fit"):
+            # Plain scroll normally navigates prev/next in fit mode (browse
+            # convenience) -- while Adjust is open, other wheel-driven actions
+            # (slider hover, brush size when D&B isn't the active tool, etc.)
+            # could bubble up and silently flip to a different photo mid-edit.
+            # Disabled for the editing session, restored on close.
+            gv._wheel_navigate_in_fit = not bool(visible)
         if self._adjust_overlay_visible:
             if self._raw_recovery_preview_active():
                 self._disable_raw_recovery()
