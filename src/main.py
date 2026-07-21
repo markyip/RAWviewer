@@ -2267,6 +2267,7 @@ class _AdjustExportWorker(QRunnable):
         export_format: str,
         process_pool: Any,
         signals: _AdjustExportSignals,
+        use_ai_denoise: bool = False,
     ):
         super().__init__()
         self.file_path = file_path
@@ -2275,6 +2276,10 @@ class _AdjustExportWorker(QRunnable):
         self.export_format = export_format
         self.process_pool = process_pool
         self.signals = signals
+        # Export-only, not persisted to the XMP sidecar (see write_xmp_
+        # adjustments_for_file(self.adj) below -- self.adj is what gets
+        # written, so this stays a separate attribute, not an adj key).
+        self.use_ai_denoise = bool(use_ai_denoise)
         # Set from the export progress dialog's Cancel button (main thread);
         # polled between export stages and between NN-denoise tiles.
         import threading as _threading
@@ -2383,6 +2388,7 @@ class _AdjustExportWorker(QRunnable):
                 adj=self.adj,
                 embed_xmp_path=embed_xmp,
                 cancel_check=self.cancel_event.is_set,
+                use_ai_denoise=self.use_ai_denoise,
             )
             emit_progress(100, "Done")
             logger.info("[EXPORT] export_adjusted_image() completed without raising")
@@ -23771,7 +23777,9 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 3500,
             )
 
-    def _on_adjust_panel_export_requested(self, export_format: str, adj: dict) -> None:
+    def _on_adjust_panel_export_requested(
+        self, export_format: str, adj: dict, use_ai_denoise: bool = False
+    ) -> None:
         logger = logging.getLogger(__name__)
         path = getattr(self, "current_file_path", None)
         if not path:
@@ -23929,6 +23937,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             raw_fmt,
             pool,
             self._adjust_export_signals,
+            use_ai_denoise=use_ai_denoise,
         )
         logger.info("[EXPORT] Handing off to background worker (format=%s)", raw_fmt)
         # Modal progress dialog: freezes app interaction for the duration

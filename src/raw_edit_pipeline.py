@@ -191,6 +191,7 @@ def process_linear_edit_buffer(
     *,
     preview: bool = False,
     chroma_denoise: Optional[bool] = None,
+    use_ai_denoise: bool = False,
 ) -> np.ndarray:
     """
     Scene-linear uint16/float → adjusted scene-linear float32.
@@ -229,7 +230,9 @@ def process_linear_edit_buffer(
     if mask is None and heal_mask is None and not denoise_active and n_workers > 1:
         return _process_linear_edit_buffer_banded(img, merged, n_workers)
 
-    return _process_linear_edit_tail(img, merged, preview=preview, chroma_denoise=chroma_denoise)
+    return _process_linear_edit_tail(
+        img, merged, preview=preview, chroma_denoise=chroma_denoise, use_ai_denoise=use_ai_denoise
+    )
 
 
 def _process_linear_edit_tail(
@@ -237,6 +240,7 @@ def _process_linear_edit_tail(
     merged: dict[str, float],
     *,
     preview: bool,
+    use_ai_denoise: bool = False,
     chroma_denoise: Optional[bool],
 ) -> np.ndarray:
     """WB -> exposure -> dodge/burn -> denoise -> PV2012 tone on a (possibly banded) buffer."""
@@ -272,10 +276,17 @@ def _process_linear_edit_tail(
     restormer_model_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "models", "restormer.onnx")
     restormer_enabled_env = os.environ.get("RAWVIEWER_EXPORT_RESTORMER_ONNX", "1") == "1"
     restormer_model_present = os.path.exists(restormer_model_path)
-    use_restormer = not preview and restormer_enabled_env and restormer_model_present
+    # AI denoise is export-only and opt-in: the Adjust panel's Chroma NR
+    # dropdown (Bilateral/Guided/Off) always applies as selected, live in
+    # preview and by default at export -- use_ai_denoise (set by the Export
+    # menu's "AI Denoise" toggle) is what additionally switches the export
+    # pass over to Restormer/SCUNet instead of the legacy method. It used to
+    # silently override the chosen method on every export whenever the model
+    # was present, with no UI control and no way to tell it had happened.
+    use_restormer = not preview and use_ai_denoise and restormer_enabled_env and restormer_model_present
 
     global _restormer_availability_logged
-    if not preview and not _restormer_availability_logged:
+    if not preview and use_ai_denoise and not _restormer_availability_logged:
         _restormer_availability_logged = True
         if not restormer_enabled_env:
             logger.info("[DENOISE] AI denoise (Restormer/SCUNet ONNX) disabled via RAWVIEWER_EXPORT_RESTORMER_ONNX=0")
@@ -816,12 +827,15 @@ def _chroma_denoise_for_export(adj: dict[str, float]) -> bool:
     return float((adj or {}).get("ColorNoiseReduction", 0.0)) > 0 or chroma_denoise_enabled()
 
 
-def _process_for_export(rgb_linear: np.ndarray, adj: dict[str, float]) -> np.ndarray:
+def _process_for_export(
+    rgb_linear: np.ndarray, adj: dict[str, float], *, use_ai_denoise: bool = False
+) -> np.ndarray:
     return process_linear_edit_buffer(
         rgb_linear,
         adj,
         preview=False,
         chroma_denoise=_chroma_denoise_for_export(adj),
+        use_ai_denoise=use_ai_denoise,
     )
 
 
@@ -873,9 +887,10 @@ def export_adjusted_tiff16(
     output_path: str,
     *,
     embed_xmp_path: Optional[str] = None,
+    use_ai_denoise: bool = False,
 ) -> None:
     """Bake adjustments to 16-bit sRGB TIFF; optionally embed XMP packet."""
-    processed = _process_for_export(rgb_linear, adj)
+    processed = _process_for_export(rgb_linear, adj, use_ai_denoise=use_ai_denoise)
     out = linear_to_export_uint16_srgb(processed, adj)
     _write_16bit_rgb_tiff(output_path, out, embed_xmp_path=embed_xmp_path)
 
@@ -886,9 +901,10 @@ def export_adjusted_jpeg(
     output_path: str,
     *,
     quality: int = 92,
+    use_ai_denoise: bool = False,
 ) -> None:
     """Bake adjustments to 8-bit JPEG."""
-    processed = _process_for_export(rgb_linear, adj)
+    processed = _process_for_export(rgb_linear, adj, use_ai_denoise=use_ai_denoise)
     out = linear_to_display_uint8(processed, adj)
     from PIL import Image
 
@@ -915,9 +931,10 @@ def export_adjusted_webp(
     output_path: str,
     *,
     quality: int = 88,
+    use_ai_denoise: bool = False,
 ) -> None:
     """Bake adjustments to 8-bit WebP."""
-    processed = _process_for_export(rgb_linear, adj)
+    processed = _process_for_export(rgb_linear, adj, use_ai_denoise=use_ai_denoise)
     out = linear_to_display_uint8(processed, adj)
     from PIL import Image
 
@@ -949,6 +966,7 @@ def export_adjusted_image(
     embed_xmp_path: Optional[str] = None,
     cancel_check=None,
     progress_cb=None,
+    use_ai_denoise: bool = False,
 ) -> None:
     """Dispatch baked export (TIFF16 / JPEG / WebP)."""
     fmt = (export_format or EXPORT_FORMAT_TIFF16).strip().lower()
@@ -957,10 +975,10 @@ def export_adjusted_image(
     if cancel_check is not None and cancel_check():
         raise ExportCancelled()
     if fmt == EXPORT_FORMAT_JPEG:
-        export_adjusted_jpeg(rgb_linear, adj, output_path)
+        export_adjusted_jpeg(rgb_linear, adj, output_path, use_ai_denoise=use_ai_denoise)
     elif fmt == EXPORT_FORMAT_WEBP:
-        export_adjusted_webp(rgb_linear, adj, output_path)
+        export_adjusted_webp(rgb_linear, adj, output_path, use_ai_denoise=use_ai_denoise)
     else:
         export_adjusted_tiff16(
-            rgb_linear, adj, output_path, embed_xmp_path=embed_xmp_path,
+            rgb_linear, adj, output_path, embed_xmp_path=embed_xmp_path, use_ai_denoise=use_ai_denoise,
         )

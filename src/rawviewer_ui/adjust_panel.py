@@ -7,6 +7,7 @@ from typing import Callable, Dict
 
 from PyQt6.QtCore import QRectF, Qt, QSettings, QSize, QTimer, pyqtSignal
 from PyQt6.QtGui import (
+    QAction,
     QColor,
     QCursor,
     QDragEnterEvent,
@@ -593,7 +594,7 @@ class ImageAdjustPanelWidget(QWidget):
     editing_finished = pyqtSignal(dict)
     preview_changed = pyqtSignal(dict)
     reset_requested = pyqtSignal()
-    export_requested = pyqtSignal(str, dict)  # format id, adjustments
+    export_requested = pyqtSignal(str, dict, bool)  # format id, adjustments, use_ai_denoise
     recovery_baseline_requested = pyqtSignal()
     wb_picker_toggled = pyqtSignal(bool)  # True: arm the WB dropper; False: cancel
     compare_toggled = pyqtSignal(bool)  # True: show compare-with-original split view
@@ -1526,6 +1527,24 @@ class ImageAdjustPanelWidget(QWidget):
             }}
             """
         )
+        self._ai_denoise_action = None
+        try:
+            from onnx_restormer import restormer_model_path
+
+            if os.path.exists(restormer_model_path()):
+                ai_denoise_action = QAction("AI Denoise (Restormer/SCUNet)", export_menu)
+                ai_denoise_action.setCheckable(True)
+                ai_denoise_action.setChecked(True)
+                ai_denoise_action.setToolTip(
+                    "Applies at export only, in place of the Chroma NR method above.\n"
+                    "Uncheck to export with the Chroma NR method selected in Noise Reduction instead."
+                )
+                export_menu.addAction(ai_denoise_action)
+                export_menu.addSeparator()
+                self._ai_denoise_action = ai_denoise_action
+        except Exception:
+            self._ai_denoise_action = None
+
         export_menu.addAction(
             "16-bit TIFF (baked)",
             lambda: self._request_export("tiff16"),
@@ -3007,7 +3026,8 @@ class ImageAdjustPanelWidget(QWidget):
             self._block_emit = False
 
     def _request_export(self, export_format: str) -> None:
-        self.export_requested.emit(export_format, self.get_adjustments())
+        use_ai_denoise = bool(self._ai_denoise_action.isChecked()) if self._ai_denoise_action is not None else False
+        self.export_requested.emit(export_format, self.get_adjustments(), use_ai_denoise)
 
     def _on_slider_value_changed(self, key: str, fmt: Callable[[float], str]) -> None:
         if self._block_emit:
