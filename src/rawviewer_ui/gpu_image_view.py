@@ -26,7 +26,7 @@ import sys
 from typing import Any
 
 from PyQt6.QtCore import Qt, QRect, QRectF, QPoint, QPointF, pyqtSignal, QEvent, QMimeData, QUrl
-from PyQt6.QtGui import QKeyEvent, QPixmap, QPainter, QColor, QPen, QDrag, QBrush, QImage
+from PyQt6.QtGui import QKeyEvent, QPixmap, QPainter, QColor, QPen, QDrag, QBrush, QImage, QTransform
 from PyQt6.QtWidgets import (
     QGraphicsView,
     QGraphicsScene,
@@ -538,6 +538,7 @@ class GpuImageView(QGraphicsView):
         self._mask_item = QGraphicsPixmapItem()
         self._mask_item.setOpacity(0.45)
         self._mask_item.setZValue(5)
+        self._mask_item.setTransformationMode(Qt.TransformationMode.SmoothTransformation)
         self._mask_item.hide()
         self._mask_overlay_wanted = False
         self._mask_overlay_mask = None
@@ -789,12 +790,10 @@ class GpuImageView(QGraphicsView):
                 -mask.data[neg_mask] / 1.5 * 180.0 + 40.0, 0, 255
             ).astype(np.uint8)
 
-        if self._img_w > 0 and self._img_h > 0 and (w != self._img_w or h != self._img_h):
-            overlay = cv2.resize(
-                overlay, (self._img_w, self._img_h), interpolation=cv2.INTER_LINEAR
-            )
-
-        # QImage does not own the numpy buffer — copy before the array drops.
+        # Keep the overlay at the mask's own (usually much lower) resolution
+        # and let the graphics item scale it up on the GPU instead of
+        # cv2.resize-ing a full-display-size buffer on every stroke sample —
+        # that resize was the dominant cost behind brush lag with Show Mask on.
         overlay = np.ascontiguousarray(overlay)
         qimg = QImage(
             overlay.data,
@@ -805,6 +804,12 @@ class GpuImageView(QGraphicsView):
         ).copy()
         self._mask_item.setPixmap(QPixmap.fromImage(qimg))
         self._mask_item.setOffset(0, 0)
+        if self._img_w > 0 and self._img_h > 0 and (w != self._img_w or h != self._img_h):
+            self._mask_item.setTransform(
+                QTransform().scale(self._img_w / w, self._img_h / h)
+            )
+        else:
+            self._mask_item.setTransform(QTransform())
         if not self._mask_item.isVisible():
             self._mask_item.show()
 
