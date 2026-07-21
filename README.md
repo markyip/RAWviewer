@@ -65,7 +65,7 @@ Full changelog: [`RELEASE_NOTES.md`](RELEASE_NOTES.md)
 ### Windows
 
 1. Download **`RAWviewer_Setup.exe`** from [Releases](https://github.com/markyip/RAWviewer/releases/latest).
-2. In the wizard, pick **Plus** (adds photo-description search, ~600 MB of models) or **Standard** (smaller). Not sure? See [Standard or Plus?](#standard-or-plus) below.
+2. In the wizard, pick **Plus** (adds photo-description search and AI noise reduction, ~700 MB of models) or **Standard** (smaller). Not sure? See [Standard or Plus?](#standard-or-plus) below.
 3. **Upgrading from an older version?** Optionally check **Clear existing cache** in the installer. That unlocks faster search/index defaults without deleting your photos or XMP files.
 4. Launch **RAWviewer** from the Desktop shortcut.
 
@@ -208,11 +208,14 @@ Both editions have the complete viewer: gallery, culling, Compare, star ratings,
 | Everything above — browse, cull, rate, compare, develop, export | ✅ | ✅ | ✅ |
 | Search by describing the photo (`sunset on beach`) | — | ✅ | ✅ |
 | Find photos with people (`has:face`) | — | ✅ | ✅ |
+| AI noise reduction (Adjust panel export) | Chroma/luma NR | **SCUNet AI denoise** | **SCUNet AI denoise** |
 | RAW demosaic | CPU Fast RAW | CPU Fast RAW | **CuPy** GPU (NVIDIA) |
-| Install size (approx.) | ~0.8–1 GB | ~1.5–2 GB + ~600 MB models | ~1.5–2 GB + ~600 MB models |
+| Install size (approx.) | ~0.8–1 GB | ~1.5–2 GB + ~700 MB models | ~1.5–2 GB + ~700 MB models |
 | Comfortable with | 8 GB RAM | 16 GB RAM | 16 GB RAM + NVIDIA |
 
-**DirectML is for AI search, not demosaic.** On Windows Plus, photo-description search uses ONNX Runtime with DirectML in both Plus editions. Plus (DirectML) and Standard decode RAW with **CPU Fast RAW**; only Plus (CUDA) adds **CuPy** GPU demosaic.
+**DirectML is for AI search and denoise, not demosaic.** On Windows Plus, photo-description search and AI noise reduction both use ONNX Runtime with DirectML in both Plus editions. Plus (DirectML) and Standard decode RAW with **CPU Fast RAW**; only Plus (CUDA) adds **CuPy** GPU demosaic.
+
+**AI noise reduction** runs a real-image denoise model (SCUNet) via ONNX Runtime — no PyTorch required. It downloads with the other AI models on Plus installs (~100 MB) and applies automatically on export/full-quality renders when noise reduction is enabled in Adjust; Standard keeps the existing chroma/luma noise reduction.
 
 **CuPy is one frame at a time** (serialized), but a single RAW HQ demosaic is still typically **~1.25–1.4×** faster than CPU Fast RAW on a modern NVIDIA GPU — enough to notice when arrow-keying through high-quality RAW, not a multi-fold leap.
 
@@ -294,7 +297,7 @@ To clear cache: **`scripts\Launch\windows\clear_cache.bat`** (Windows) · **`scr
 |---------|------------|
 | SmartScreen warning | More info → Run anyway |
 | Slow AI search (**Plus**) | AI search already uses DirectML on both Plus editions — edition choice does not speed up search. For RAW HQ browse speed on NVIDIA, try **Plus (CUDA)** (~1.25–1.4× demosaic vs CPU) |
-| Installer stuck on "Downloading models" (**Plus**) | Models (~600 MB) can take several minutes. Check firewall, VPN, or proxy if it fails — browsing still works; open gallery **Search** later to retry |
+| Installer stuck on "Downloading models" (**Plus**) | Models (~700 MB) can take several minutes. Check firewall, VPN, or proxy if it fails — browsing still works; open gallery **Search** later to retry |
 | Opened Setup again instead of the app | Launch **RAWviewer** from the Desktop shortcut — not **`RAWviewer_Setup.exe`** |
 | AI search missing after install (**Plus**) | Open gallery **Search** → accept the download prompt |
 | RAWviewer not in Open with | Re-run the installer (repair), or reinstall |

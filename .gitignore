@@ -129,6 +129,20 @@ models/mobileclip2_coreml/**
 models/mobileclip_onnx/
 !models/mobileclip_onnx/.gitkeep
 
+# SCUNet denoise checkpoint + its ONNX export (large); export with scripts/models/export_scunet_onnx.py
+models/scunet_color_real_psnr.pth
+models/restormer.onnx
+
+# NAFNet denoise checkpoint(s) + ONNX export(s) (large); export with scripts/models/export_nafnet_onnx.py
+models/NAFNet-SIDD-width32.pth
+models/NAFNet-SIDD-width64.pth
+models/nafnet.onnx
+models/nafnet_width64.onnx
+
+# Restormer denoise checkpoint + its ONNX export (large); export with scripts/models/export_restormer_onnx.py
+models/restormer_real_denoising.pth
+models/restormer_true.onnx
+
 # Test RAW files
 !DSC00738.ARW
 !DSC_4526.NEF

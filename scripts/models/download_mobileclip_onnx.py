@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-Download MobileCLIP2-B ONNX models for bundling into RAWviewer.
+Download MobileCLIP2-B ONNX models and the SCUNet AI denoise ONNX for
+bundling into RAWviewer.
 
 Installer progress: @RAWVIEWER_PROGRESS pct=N message=Downloading... N%
 Verbose details go to [INFO] log lines only.
@@ -16,13 +17,13 @@ from pathlib import Path
 
 REPO_ID = "plhery/mobileclip2-onnx"
 MODELS_DIR = Path(__file__).resolve().parents[2] / "models" / "mobileclip_onnx"
+DENOISE_MODEL_URL = "https://github.com/markyip/RAWviewer/releases/download/denoise-model-v1/restormer.onnx"
 DOWNLOAD_RETRIES = 3
 RETRY_DELAY_SEC = 3
 
 VISION_PCT_END = 57
 TEXT_PCT_END = 96
-# SCUNet denoise removed; tokenizer takes the final progress span.
-DENOISE_PCT_END = TEXT_PCT_END
+DENOISE_PCT_END = 99
 
 
 def _human_bytes(num_bytes: int) -> str:
@@ -162,6 +163,24 @@ def main() -> int:
 
         shutil.rmtree(MODELS_DIR / "onnx")
 
+    denoise_model_path = MODELS_DIR.parent / "restormer.onnx"
+    if not denoise_model_path.exists():
+        def _fetch_denoise_model():
+            print("[INFO] Fetching AI denoise model (SCUNet, fp16 ONNX)", flush=True)
+            _download_url_with_progress(
+                DENOISE_MODEL_URL,
+                denoise_model_path,
+                stage_start=TEXT_PCT_END,
+                stage_end=DENOISE_PCT_END,
+                emit=emit_installer_progress,
+            )
+
+        rc = _download_with_retry("denoise model", _fetch_denoise_model)
+        if rc != 0:
+            return rc
+    else:
+        emit_installer_progress(DENOISE_PCT_END)
+
     tokenizer_path = MODELS_DIR / "bpe_simple_vocab_16e6.txt.gz"
     if not tokenizer_path.exists():
         def _fetch_tokenizer():
@@ -181,7 +200,7 @@ def main() -> int:
         emit_installer_progress(100)
 
     emit_installer_progress(100)
-    print("[SUCCESS] MobileCLIP2 models and tokenizer ready.", flush=True)
+    print("[SUCCESS] MobileCLIP2 models, denoise model, and tokenizer ready.", flush=True)
     return 0
 
 

@@ -587,7 +587,7 @@ class InstallWorker(QObject):
                     self._abort_cancelled()
                     return
 
-            # Full (DirectML / CUDA+CuPy) needs headroom for pixi + ~600 MB models;
+            # Full (DirectML / CUDA+CuPy) needs headroom for pixi + ~700 MB models;
             # CUDA no longer downloads a multi-GB torch wheel.
             min_bytes = MIN_FREE_BYTES_LITE if self.install_mode == "lite" else MIN_FREE_BYTES
             effective_mode = self.install_mode
@@ -801,7 +801,7 @@ class InstallWorker(QObject):
                 self.progress_signal.emit(100)
             else:
                 self.log_signal.emit(
-                    "Downloading AI models (~600 MB). This may take several minutes..."
+                    "Downloading AI models (~700 MB). This may take several minutes..."
                 )
                 self.progress_label_signal.emit("Downloading... 0%")
                 self._model_download_log_pct = -1
@@ -1194,10 +1194,10 @@ class InstallerGUI(QMainWindow):
             "Standard — Browse & Adjust (~0.8–1 GB; no AI search)"
         )
         self.radio_directml = QRadioButton(
-            "Plus — DirectML (AI search; ~1.5–2 GB + ~600 MB models; CPU demosaic)"
+            "Plus — DirectML (AI search + denoise; ~1.5–2 GB + ~700 MB models; CPU demosaic)"
         )
         self.radio_cuda = QRadioButton(
-            "Plus — NVIDIA CUDA (AI search + CuPy GPU demosaic; ~1.5–2 GB + ~600 MB models)"
+            "Plus — NVIDIA CUDA (AI search + denoise + CuPy GPU demosaic; ~1.5–2 GB + ~700 MB models)"
         )
 
         # Default Standard: lean install for most users.

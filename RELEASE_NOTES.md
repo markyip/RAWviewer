@@ -3,6 +3,15 @@
 **Language / 語言：** English · [繁體中文](RELEASE_NOTES.zh-TW.md)
 
 
+## 🚀 Version 3.0.2 (Unreleased)
+
+### What's new for you
+
+- **AI denoise is back — and faster than before.** SCUNet real-image noise reduction returns via **ONNX Runtime** instead of PyTorch, so it no longer needs the multi-GB torch install that got it removed in 3.0.1. Runs in **fp16** on DirectML — about **25x faster per tile** than an fp32 export, with no measurable quality loss. Applies automatically on export/full-quality renders when noise reduction is enabled in Adjust.
+- **Plus-only, downloads with the other AI models** (~100 MB, bundled into the existing ~600 MB AI model download — now ~700 MB total). Standard keeps the existing chroma/luma noise reduction; no change there.
+
+---
+
 ## 🚀 Version 3.0.1
 **Release Date: July 20, 2026**
 
