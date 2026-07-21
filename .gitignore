@@ -153,6 +153,9 @@ models/restormer_true.onnx
 *.tar.gz
 *.dmg
 *.exe
+# Bundled build/install-time tool, not a distribution artifact (rebrands the
+# pixi-installed python.exe/pythonw.exe so Task Manager shows "RAWviewer").
+!scripts/tools/rcedit-x64.exe
 
 # Documentation that should be in releases
 *_TESTING_GUIDE.md

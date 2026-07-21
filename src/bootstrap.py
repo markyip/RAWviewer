@@ -122,6 +122,60 @@ def _prune_torch_link_libs(target_dir: str, log) -> None:
         )
 
 
+def _patch_python_exe_branding(target_dir: str, log) -> None:
+    """Rebrand the pixi-installed python.exe/pythonw.exe so Task Manager shows
+    "RAWviewer" instead of "Python".
+
+    RAWviewer.exe (the launcher stub) spawns ``pixi run pythonw src/main.py``
+    and exits immediately -- the long-running process Windows actually tracks
+    is that unmodified interpreter binary. Task Manager's "Name" column reads
+    the exe's embedded FileDescription resource, not the filename or the
+    script it's running, so renaming/copying the file changes nothing; only
+    patching that resource does. Uses rcedit (bundled under
+    scripts/tools/rcedit-x64.exe, MIT-licensed, https://github.com/electron/rcedit)
+    on the two interpreter binaries pixi just installed. Best-effort: a
+    missing rcedit or a patch failure only affects this cosmetic label, never
+    blocks the install.
+    """
+    rcedit = os.path.join(BUNDLE_DIR, "scripts", "tools", "rcedit-x64.exe")
+    if not os.path.isfile(rcedit):
+        return
+    icon_path = os.path.join(BUNDLE_DIR, "icons", "appicon.ico")
+    env_dir = os.path.join(target_dir, ".pixi", "envs", "default")
+    patched = 0
+    for exe_name in ("python.exe", "pythonw.exe"):
+        exe_path = os.path.join(env_dir, exe_name)
+        if not os.path.isfile(exe_path):
+            continue
+        cmd = [
+            rcedit, exe_path,
+            "--set-version-string", "FileDescription", "RAWviewer",
+            "--set-version-string", "ProductName", "RAWviewer",
+            "--set-version-string", "InternalName", "RAWviewer",
+            "--set-version-string", "OriginalFilename", exe_name,
+        ]
+        if os.path.isfile(icon_path):
+            cmd.extend(["--set-icon", icon_path])
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                timeout=30,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            if result.returncode == 0:
+                patched += 1
+            else:
+                log(
+                    f"Could not rebrand {exe_name} for Task Manager: "
+                    f"{result.stderr.decode(errors='replace').strip() or result.returncode}"
+                )
+        except Exception as exc:
+            log(f"Could not rebrand {exe_name} for Task Manager: {exc}")
+    if patched:
+        log(f"Rebranded {patched} interpreter executable(s) for Task Manager display.")
+
+
 def _check_disk_space(path: str, min_bytes: int = MIN_FREE_BYTES) -> str | None:
     """Return a user-facing error when the target drive is too full."""
     try:
@@ -789,6 +843,8 @@ class InstallWorker(QObject):
 
             # Safety: if a leftover torch wheel somehow remains, drop link-time *.lib.
             _prune_torch_link_libs(target_dir, self.log_signal.emit)
+
+            _patch_python_exe_branding(target_dir, self.log_signal.emit)
 
             self.progress_signal.emit(MODEL_DOWNLOAD_PROGRESS_START)
 
