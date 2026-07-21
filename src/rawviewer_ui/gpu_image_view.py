@@ -510,6 +510,13 @@ class GpuImageView(QGraphicsView):
         self._edr_initialized = False
         self.file_path = None
         self._dodge_burn_mode = False
+        # True once the pointer has landed on the image at least once since
+        # the tool was armed. Guards _maybe_emit_brush_tool_left_image so
+        # arming (D/B/X, or clicking the tool button) while the cursor is
+        # still over the Adjust panel / letterbox margin can't immediately
+        # disarm itself on the very next mouse-move -- only a genuine
+        # "was on the image, now isn't" transition should disarm.
+        self._dodge_burn_confirmed_on_image = False
         self._crop_mode = False
         self._export_drag_enabled = True
         self._drag_start_pos = None
@@ -1626,6 +1633,7 @@ class GpuImageView(QGraphicsView):
         instead of panning or driving the compare divider."""
         self._dodge_burn_mode = bool(enabled)
         if self._dodge_burn_mode:
+            self._dodge_burn_confirmed_on_image = False
             self.set_crop_mode(False)
             # Hide OS cursor — the circular brush preview is the hit target.
             self.viewport().setCursor(Qt.CursorShape.BlankCursor)
@@ -1817,6 +1825,12 @@ class GpuImageView(QGraphicsView):
             return
         if view_pos is not None and self._view_pos_on_image(view_pos):
             return
+        if not getattr(self, "_dodge_burn_confirmed_on_image", False):
+            # Never disarm before the pointer has landed on the image at
+            # least once since arming -- see the flag's definition in
+            # __init__ for why (avoids a spurious disarm on the very first
+            # move/press after toggling the tool on).
+            return
         self.brushToolLeftImage.emit()
 
     # --------------------------------------------------------- compare split
@@ -1906,6 +1920,7 @@ class GpuImageView(QGraphicsView):
                     self._maybe_emit_brush_tool_left_image(view_pos)
                     event.accept()
                     return
+                self._dodge_burn_confirmed_on_image = True
                 self._dodge_burn_painting = True
                 pt = self._clamped_scene_point(view_pos)
                 self._place_brush_cursor(pt)
@@ -1952,7 +1967,10 @@ class GpuImageView(QGraphicsView):
             painting = (event.buttons() & Qt.MouseButton.LeftButton) and getattr(
                 self, "_dodge_burn_painting", False
             )
-            if not painting and not self._view_pos_on_image(view_pos):
+            on_image = self._view_pos_on_image(view_pos)
+            if on_image:
+                self._dodge_burn_confirmed_on_image = True
+            if not painting and not on_image:
                 self._maybe_emit_brush_tool_left_image(view_pos)
                 event.accept()
                 return
@@ -2116,10 +2134,11 @@ class GpuImageView(QGraphicsView):
         view_pos = event.position().toPoint()
         etype = event.type()
         painting = getattr(self, "_dodge_burn_painting", False)
-        if (
+        if self._view_pos_on_image(view_pos):
+            self._dodge_burn_confirmed_on_image = True
+        elif (
             etype == _QEvent.Type.TabletMove
             and not painting
-            and not self._view_pos_on_image(view_pos)
         ):
             self._maybe_emit_brush_tool_left_image(view_pos)
             event.accept()
