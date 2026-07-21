@@ -1527,23 +1527,36 @@ class ImageAdjustPanelWidget(QWidget):
             }}
             """
         )
-        self._ai_denoise_action = None
+        # AI Denoise is its own submenu of format choices, not a separate
+        # checkbox you set before picking a format below -- the export click
+        # itself is the whole action (format + whether AI denoise runs),
+        # consistent with every other item in this menu.
+        self._ai_denoise_menu = None
         try:
             from onnx_restormer import restormer_model_path
 
             if os.path.exists(restormer_model_path()):
-                ai_denoise_action = QAction("AI Denoise (Restormer/SCUNet)", export_menu)
-                ai_denoise_action.setCheckable(True)
-                ai_denoise_action.setChecked(True)
-                ai_denoise_action.setToolTip(
-                    "Applies at export only, in place of the Chroma NR method above.\n"
-                    "Uncheck to export with the Chroma NR method selected in Noise Reduction instead."
+                ai_menu = QMenu("AI Denoise (Restormer/SCUNet)", export_menu)
+                ai_menu.setStyleSheet(export_menu.styleSheet())
+                ai_tip = (
+                    "Uses AI (Restormer/SCUNet) instead of the Chroma NR method "
+                    "above, for this export only."
                 )
-                export_menu.addAction(ai_denoise_action)
+                for label, fmt in (
+                    ("16-bit TIFF (baked)", "tiff16"),
+                    ("JPEG (baked)", "jpeg"),
+                    ("WebP (baked)", "webp"),
+                ):
+                    act = ai_menu.addAction(
+                        label,
+                        lambda _checked=False, f=fmt: self._request_export(f, True),
+                    )
+                    act.setToolTip(ai_tip)
+                export_menu.addMenu(ai_menu)
                 export_menu.addSeparator()
-                self._ai_denoise_action = ai_denoise_action
+                self._ai_denoise_menu = ai_menu
         except Exception:
-            self._ai_denoise_action = None
+            self._ai_denoise_menu = None
 
         export_menu.addAction(
             "16-bit TIFF (baked)",
@@ -3025,9 +3038,8 @@ class ImageAdjustPanelWidget(QWidget):
         finally:
             self._block_emit = False
 
-    def _request_export(self, export_format: str) -> None:
-        use_ai_denoise = bool(self._ai_denoise_action.isChecked()) if self._ai_denoise_action is not None else False
-        self.export_requested.emit(export_format, self.get_adjustments(), use_ai_denoise)
+    def _request_export(self, export_format: str, use_ai_denoise: bool = False) -> None:
+        self.export_requested.emit(export_format, self.get_adjustments(), bool(use_ai_denoise))
 
     def _on_slider_value_changed(self, key: str, fmt: Callable[[float], str]) -> None:
         if self._block_emit:
