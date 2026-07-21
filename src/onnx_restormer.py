@@ -73,11 +73,18 @@ class RestormerONNX:
         rgb_linear: np.ndarray,
         tile_size: int = 512,
         tile_overlap: int = 64,
-        progress_callback=None
+        progress_callback=None,
+        cancel_check=None,
     ) -> np.ndarray:
         """
         Process a full-resolution RGB image using overlapping tiles.
         rgb_linear: (H, W, 3) float32 array in [0, 1] (scene linear or similar)
+
+        cancel_check: optional no-arg callable polled once per tile (a full
+        image can be 50-200+ tiles; without this, Cancel during export had
+        no way to interrupt an in-progress AI denoise pass). Raises
+        raw_edit_pipeline.ExportCancelled when it returns True -- the
+        existing export worker already catches that by name.
         """
         if self._session is None:
             self._init_session()
@@ -100,6 +107,11 @@ class RestormerONNX:
 
         for y in h_idx_list:
             for x in w_idx_list:
+                if cancel_check is not None and cancel_check():
+                    from raw_edit_pipeline import ExportCancelled
+
+                    raise ExportCancelled()
+
                 # Extract tile and pad if necessary
                 tile = rgb_linear[y:y+tile_size, x:x+tile_size, :]
                 th, tw, _ = tile.shape

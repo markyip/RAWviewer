@@ -2378,8 +2378,14 @@ class _AdjustExportWorker(QRunnable):
                 )
             # Remaining work (tonemap + encode) is one opaque call, so the bar
             # steps to a "working" milestone rather than faking granularity
-            # nothing backs.
+            # nothing backs -- except AI denoise, which is 50-200+ ONNX tiles
+            # on a full-res photo and previously reported no progress at all
+            # for that whole span (looked hung) and ignored Cancel entirely.
             emit_progress(70, "Encoding…")
+
+            def _denoise_progress(frac: float) -> None:
+                pct = 70 + int(max(0.0, min(1.0, frac)) * 25)
+                emit_progress(pct, "Denoising (AI)…")
 
             export_adjusted_image(
                 self.export_format,
@@ -2388,6 +2394,7 @@ class _AdjustExportWorker(QRunnable):
                 adj=self.adj,
                 embed_xmp_path=embed_xmp,
                 cancel_check=self.cancel_event.is_set,
+                progress_cb=_denoise_progress,
                 use_ai_denoise=self.use_ai_denoise,
             )
             emit_progress(100, "Done")

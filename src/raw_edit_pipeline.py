@@ -192,6 +192,8 @@ def process_linear_edit_buffer(
     preview: bool = False,
     chroma_denoise: Optional[bool] = None,
     use_ai_denoise: bool = False,
+    cancel_check=None,
+    progress_cb=None,
 ) -> np.ndarray:
     """
     Scene-linear uint16/float → adjusted scene-linear float32.
@@ -231,7 +233,13 @@ def process_linear_edit_buffer(
         return _process_linear_edit_buffer_banded(img, merged, n_workers)
 
     return _process_linear_edit_tail(
-        img, merged, preview=preview, chroma_denoise=chroma_denoise, use_ai_denoise=use_ai_denoise
+        img,
+        merged,
+        preview=preview,
+        chroma_denoise=chroma_denoise,
+        use_ai_denoise=use_ai_denoise,
+        cancel_check=cancel_check,
+        progress_cb=progress_cb,
     )
 
 
@@ -242,6 +250,8 @@ def _process_linear_edit_tail(
     preview: bool,
     use_ai_denoise: bool = False,
     chroma_denoise: Optional[bool],
+    cancel_check=None,
+    progress_cb=None,
 ) -> np.ndarray:
     """WB -> exposure -> dodge/burn -> denoise -> PV2012 tone on a (possibly banded) buffer."""
     img = _apply_wb_tint(img, merged)
@@ -304,7 +314,12 @@ def _process_linear_edit_tail(
         logger.info("[DENOISE] Using AI denoise (Restormer/SCUNet ONNX) for this export")
         from onnx_restormer import RestormerONNX
         restormer = RestormerONNX(restormer_model_path)
-        img = restormer.process(img)
+
+        def _denoise_progress(frac: float) -> None:
+            if progress_cb is not None:
+                progress_cb(frac)
+
+        img = restormer.process(img, cancel_check=cancel_check, progress_callback=_denoise_progress)
     else:
         if nr_amount > 1e-4:
             img = apply_chroma_denoise(
@@ -828,7 +843,12 @@ def _chroma_denoise_for_export(adj: dict[str, float]) -> bool:
 
 
 def _process_for_export(
-    rgb_linear: np.ndarray, adj: dict[str, float], *, use_ai_denoise: bool = False
+    rgb_linear: np.ndarray,
+    adj: dict[str, float],
+    *,
+    use_ai_denoise: bool = False,
+    cancel_check=None,
+    progress_cb=None,
 ) -> np.ndarray:
     return process_linear_edit_buffer(
         rgb_linear,
@@ -836,6 +856,8 @@ def _process_for_export(
         preview=False,
         chroma_denoise=_chroma_denoise_for_export(adj),
         use_ai_denoise=use_ai_denoise,
+        cancel_check=cancel_check,
+        progress_cb=progress_cb,
     )
 
 
@@ -888,9 +910,13 @@ def export_adjusted_tiff16(
     *,
     embed_xmp_path: Optional[str] = None,
     use_ai_denoise: bool = False,
+    cancel_check=None,
+    progress_cb=None,
 ) -> None:
     """Bake adjustments to 16-bit sRGB TIFF; optionally embed XMP packet."""
-    processed = _process_for_export(rgb_linear, adj, use_ai_denoise=use_ai_denoise)
+    processed = _process_for_export(
+        rgb_linear, adj, use_ai_denoise=use_ai_denoise, cancel_check=cancel_check, progress_cb=progress_cb
+    )
     out = linear_to_export_uint16_srgb(processed, adj)
     _write_16bit_rgb_tiff(output_path, out, embed_xmp_path=embed_xmp_path)
 
@@ -902,9 +928,13 @@ def export_adjusted_jpeg(
     *,
     quality: int = 92,
     use_ai_denoise: bool = False,
+    cancel_check=None,
+    progress_cb=None,
 ) -> None:
     """Bake adjustments to 8-bit JPEG."""
-    processed = _process_for_export(rgb_linear, adj, use_ai_denoise=use_ai_denoise)
+    processed = _process_for_export(
+        rgb_linear, adj, use_ai_denoise=use_ai_denoise, cancel_check=cancel_check, progress_cb=progress_cb
+    )
     out = linear_to_display_uint8(processed, adj)
     from PIL import Image
 
@@ -932,9 +962,13 @@ def export_adjusted_webp(
     *,
     quality: int = 88,
     use_ai_denoise: bool = False,
+    cancel_check=None,
+    progress_cb=None,
 ) -> None:
     """Bake adjustments to 8-bit WebP."""
-    processed = _process_for_export(rgb_linear, adj, use_ai_denoise=use_ai_denoise)
+    processed = _process_for_export(
+        rgb_linear, adj, use_ai_denoise=use_ai_denoise, cancel_check=cancel_check, progress_cb=progress_cb
+    )
     out = linear_to_display_uint8(processed, adj)
     from PIL import Image
 
@@ -975,10 +1009,17 @@ def export_adjusted_image(
     if cancel_check is not None and cancel_check():
         raise ExportCancelled()
     if fmt == EXPORT_FORMAT_JPEG:
-        export_adjusted_jpeg(rgb_linear, adj, output_path, use_ai_denoise=use_ai_denoise)
+        export_adjusted_jpeg(
+            rgb_linear, adj, output_path,
+            use_ai_denoise=use_ai_denoise, cancel_check=cancel_check, progress_cb=progress_cb,
+        )
     elif fmt == EXPORT_FORMAT_WEBP:
-        export_adjusted_webp(rgb_linear, adj, output_path, use_ai_denoise=use_ai_denoise)
+        export_adjusted_webp(
+            rgb_linear, adj, output_path,
+            use_ai_denoise=use_ai_denoise, cancel_check=cancel_check, progress_cb=progress_cb,
+        )
     else:
         export_adjusted_tiff16(
-            rgb_linear, adj, output_path, embed_xmp_path=embed_xmp_path, use_ai_denoise=use_ai_denoise,
+            rgb_linear, adj, output_path, embed_xmp_path=embed_xmp_path,
+            use_ai_denoise=use_ai_denoise, cancel_check=cancel_check, progress_cb=progress_cb,
         )
