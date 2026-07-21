@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import threading
 from typing import Optional
 
 import numpy as np
+
+logger = logging.getLogger(__name__)
+_restormer_availability_logged = False
 
 from raw_adjustments import (
     DEFAULT_ADJUSTMENTS,
@@ -266,9 +270,27 @@ def _process_linear_edit_tail(
     method = int(float(merged.get("DenoiseMethod", 0.0)))
 
     restormer_model_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "models", "restormer.onnx")
-    use_restormer = not preview and os.environ.get("RAWVIEWER_EXPORT_RESTORMER_ONNX", "1") == "1" and os.path.exists(restormer_model_path)
+    restormer_enabled_env = os.environ.get("RAWVIEWER_EXPORT_RESTORMER_ONNX", "1") == "1"
+    restormer_model_present = os.path.exists(restormer_model_path)
+    use_restormer = not preview and restormer_enabled_env and restormer_model_present
+
+    global _restormer_availability_logged
+    if not preview and not _restormer_availability_logged:
+        _restormer_availability_logged = True
+        if not restormer_enabled_env:
+            logger.info("[DENOISE] AI denoise (Restormer/SCUNet ONNX) disabled via RAWVIEWER_EXPORT_RESTORMER_ONNX=0")
+        elif not restormer_model_present:
+            logger.warning(
+                "[DENOISE] AI denoise model not found at %s -- falling back to legacy chroma/luma "
+                "noise reduction. Run scripts/models/download_mobileclip_onnx.py (Plus install step) "
+                "to fetch it.",
+                restormer_model_path,
+            )
+        else:
+            logger.info("[DENOISE] AI denoise model found at %s", restormer_model_path)
 
     if use_restormer and (nr_amount > 1e-4 or do_denoise):
+        logger.info("[DENOISE] Using AI denoise (Restormer/SCUNet ONNX) for this export")
         from onnx_restormer import RestormerONNX
         restormer = RestormerONNX(restormer_model_path)
         img = restormer.process(img)
