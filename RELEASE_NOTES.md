@@ -3,6 +3,21 @@
 **Language / 語言：** English · [繁體中文](RELEASE_NOTES.zh-TW.md)
 
 
+## 🚀 Version 3.0.2
+**Release Date: July 21, 2026**
+
+### Fixes
+
+- **Brush action hotfix:** Dodge, Burn, and Eraser no longer disarm themselves when moving the pointer from the Adjust panel onto the photo. The tool now stays armed from the moment you click it until the pointer has genuinely left the image after being on it — not on every incidental hover near an edge or letterbox margin.
+- Scroll-wheel photo navigation is disabled while the Adjust panel is open, so an unrelated scroll action (adjusting a slider, brush size, etc.) can no longer accidentally flip to a different photo mid-edit.
+- The app process now identifies itself as "RAWviewer" in Task Manager instead of the generic "Python".
+
+### Upgrade
+
+Install over 3.0.1. No cache clear needed for this update.
+
+---
+
 ## 🚀 Version 3.0.1
 **Release Date: July 20, 2026**
 
