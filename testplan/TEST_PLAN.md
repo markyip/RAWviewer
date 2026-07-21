@@ -25,6 +25,7 @@ absent, so the plan runs on any machine.
 | `t_xmp_roundtrip.py` | Sidecar persistence (`raw_adjustments.py`) | write→load round-trip exact for tone sliders, WB, HSL, NR method, lens toggle, tone curve; default adjustments delete the sidecar; as-shot temperature memoized & deterministic |
 | `t_slider_specs.py` | Adjust panel specs | `value_to_slider`/`slider_to_value` are inverses at min/default/max for every spec; ranges sane |
 | `t_cache_semantics.py` | `UnifiedImageProcessor` caches | sidecar-adjusted memo: hit is identical object, sidecar edit invalidates, half-size result never served for a full-res request (`image_covers_sensor_resolution` gate); unpack stash consumed exactly once |
+| `t_macos_open_dialog.py` | macOS Open File/Folder (`main.py`) | unbundled launch skips `NSOpenPanel` (hangs on macOS 27 beta), packaged `.app` keeps it; AppleScript fallback wraps the picker in `tell application "Finder"` with `activate` first and compiles via `osacompile`; start-dir quotes escaped. Live hang probe opt-in via `RAWVIEWER_TEST_NSPANEL_PROBE=1` |
 
 ### 2. Golden-file suites (need sample RAWs; skip otherwise)
 

@@ -11,6 +11,16 @@
 - **Brush action hotfix:** Dodge, Burn, and Eraser no longer disarm themselves when moving the pointer from the Adjust panel onto the photo. The tool now stays armed from the moment you click it until the pointer has genuinely left the image after being on it — not on every incidental hover near an edge or letterbox margin.
 - Scroll-wheel photo navigation is disabled while the Adjust panel is open, so an unrelated scroll action (adjusting a slider, brush size, etc.) can no longer accidentally flip to a different photo mid-edit.
 - The app process now identifies itself as "RAWviewer" in Task Manager instead of the generic "Python".
+- **Painting with Mask on is no longer slow.** The mask overlay now repaints only the area under the brush instead of rebuilding the whole overlay on every stroke sample.
+- **Exposure, Temperature, and Tint respond instantly again on photos with dodge/burn or heal work.** The zero-latency slider path was silently disabled on exactly those photos, forcing every slider nudge to wait for a full multi-second re-render.
+- **Opening a photo with saved edits is roughly twice as fast.** It no longer runs two full-quality renders back to back, and shows a "Loading previous edit…" overlay until the edit is actually on screen.
+- The **Mask** button is now labelled **Mask (M)** and toggles with <kbd>M</kbd>. It stays available whenever the photo has mask work — you no longer have to arm a brush just to inspect it — and it no longer switches itself back on after you deliberately hide it.
+- Clearing dodge/burn or heal now updates the photo immediately instead of waiting for an unrelated action.
+- **Edge Assist is more accurate:** it now adapts its tolerance to image noise, stops at strong edges rather than only similar tones, and recognises colour boundaries between areas of the same brightness.
+
+### Known issues
+
+- **macOS 27 beta — Open File / Open Folder can hang.** On macOS 27.0 beta (build `26A5388g`), the system's native open panel can hang the app indefinitely. This is an OS-level change, not a RAWviewer regression: it reproduces in a minimal AppKit script with no Qt and no RAWviewer code, where `NSOpenPanel.alloc().init()` simply never returns for a process without a real app-bundle identity, and it is not avoidable by adjusting the app's activation policy. Nothing in RAWviewer's folder-opening code has changed since v2.5, and the failure began the day after the macOS 27.0 update. Running RAWviewer from source now detects this and uses a Finder-based picker instead. Whether the packaged app is affected on this beta is still being verified; if Open hangs, force-quit and reopen. Drag-and-drop of a folder or image onto the window is unaffected.
 
 ### Upgrade
 
