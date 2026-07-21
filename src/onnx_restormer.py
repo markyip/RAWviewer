@@ -1,10 +1,46 @@
 """Restormer ONNX export denoise engine with tiled processing."""
 
+import logging
 import os
 import sys
 from typing import Optional
 
 import numpy as np
+
+DENOISE_MODEL_URL = "https://github.com/markyip/RAWviewer/releases/download/denoise-model-v1/restormer.onnx"
+
+
+def restormer_model_path() -> str:
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "models", "restormer.onnx")
+
+
+def ensure_restormer_model_downloaded() -> bool:
+    """Best-effort fetch of the AI denoise model if it's missing.
+
+    This is the model-installation gap fix: the installer's post-install
+    download step (scripts/models/download_mobileclip_onnx.py) fetches this
+    model, but the *separate*, narrower in-app "AI models missing -- click
+    Download" recovery path (gallery Search -> download_semantic_backend_assets
+    -> MobileCLIPONNXBackend.download_assets) only ever fetched the MobileCLIP
+    search assets, never this. If the install-time download failed (network
+    blip) and the user recovered via that in-app prompt, the denoise model
+    would stay silently, permanently missing with no further retry path.
+    Called from download_semantic_backend_assets() so both entry points now
+    cover it. Non-fatal: returns False on failure, never raises.
+    """
+    model_path = restormer_model_path()
+    if os.path.exists(model_path):
+        return True
+    try:
+        from ssl_certs import urlretrieve
+
+        urlretrieve(DENOISE_MODEL_URL, model_path, timeout=180)
+        return os.path.exists(model_path)
+    except Exception:
+        logging.getLogger(__name__).warning(
+            "[DENOISE] Failed to download AI denoise model from %s", DENOISE_MODEL_URL, exc_info=True
+        )
+        return False
 
 
 class RestormerONNX:

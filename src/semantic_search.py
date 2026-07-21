@@ -2996,6 +2996,15 @@ class SemanticImageIndex:
             backend = self._mobileclip_backend or resolve_mobileclip_backend()
             path = backend.download_assets(progress_callback=progress_callback)
             self._mobileclip_backend = backend
+            # Best-effort: also close the gap on the AI denoise model, which
+            # this path previously never fetched -- see
+            # onnx_restormer.ensure_restormer_model_downloaded for why.
+            try:
+                from onnx_restormer import ensure_restormer_model_downloaded
+
+                ensure_restormer_model_downloaded()
+            except Exception:
+                pass
             return path
         raise RuntimeError("This semantic backend has no downloadable assets")
 
