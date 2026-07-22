@@ -42,8 +42,7 @@ os.environ["RAWVIEWER_WB_SANITY"] = "0"
 os.environ["RAWVIEWER_GPU_BACKEND"] = "cpu_only"
 
 DEFAULT_SAMPLE_GLOBS = [
-    "/Volumes/Development/Manchester/DSC01089.ARW",
-    "/Volumes/Development/Development/Canon_Sample/*.[cC][rR]3",
+    p for p in os.environ.get("RAWVIEWER_TEST_SAMPLES", "").split(os.pathsep) if p
 ]
 
 

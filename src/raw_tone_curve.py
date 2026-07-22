@@ -149,7 +149,14 @@ def _lookup_lut(y: np.ndarray, lut: np.ndarray) -> np.ndarray:
     yi = np.clip(y.astype(np.float32), 0.0, 1.0) * (_LUT_SIZE - 1)
     lo = np.floor(yi).astype(np.int32)
     hi = np.minimum(lo + 1, _LUT_SIZE - 1)
-    frac = yi - lo
+    # float32 - int32 promotes to float64 under NumPy's rules, which used to
+    # make this return a float64 buffer (2x the bytes) and -- because the
+    # result flows on through the tone stage -- silently forced every
+    # DOWNSTREAM stage (dehaze, saturation, detail, LUT, clips) to run in
+    # float64 too. Keeping the subtraction in float32 halves the memory
+    # traffic of the whole back half of the pipeline; the 65536-entry LUT is
+    # far finer than the 8-bit output needs, so precision is unaffected.
+    frac = yi - lo.astype(np.float32)
     return lut[lo] * (1.0 - frac) + lut[hi] * frac
 
 

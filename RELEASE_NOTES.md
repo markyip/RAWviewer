@@ -4,7 +4,7 @@
 
 
 ## 🚀 Version 3.0.2
-**Release Date: July 21, 2026**
+**Release Date: July 22, 2026**
 
 ### What's new for you
 
@@ -13,11 +13,28 @@
 - **AI denoise export can now be cancelled, and shows real progress.** Previously, cancelling mid-export while AI denoise was running did nothing — the pass had no way to be interrupted and reported no progress for the whole (often multi-minute) span, which looked like a hang. Export now shows live "Denoising (AI)…" progress and responds to Cancel immediately.
 - **Plus-only, downloads with the other AI models** (~100 MB, bundled into the existing ~600 MB AI model download — now ~700 MB total). Standard keeps the existing chroma/luma noise reduction; no change there.
 
-### Fixes
+### ✨ Smoother & Faster Editing
 
-- **Brush action hotfix:** Dodge, Burn, and Eraser no longer disarm themselves when moving the pointer from the Adjust panel onto the photo. The tool now stays armed from the moment you click it until the pointer has genuinely left the image after being on it — not on every incidental hover near an edge or letterbox margin.
-- Scroll-wheel photo navigation is disabled while the Adjust panel is open, so an unrelated scroll action (adjusting a slider, brush size, etc.) can no longer accidentally flip to a different photo mid-edit.
-- The app process now identifies itself as "RAWviewer" in Task Manager instead of the generic "Python".
+- **Much faster slider adjustments:** Dragging sliders for Exposure, Temperature, Denoise, Vignette, and Dodge/Burn is now silky-smooth. The editing pipeline now uses multi-core CPU acceleration across all edit layers, so even heavily retouched photos respond instantly.
+- **Faster photo loading:** Opening photos with saved edits is roughly twice as fast. It shows a quick "Loading previous edit…" overlay so you know the app is working without waiting for redundant preview renders.
+
+### 🖌️ Smarter Dodge & Burn Brush
+
+- **Natural, spot-free brush strokes:** Brushing over a photo now paints a smooth, continuous layer. Pausing or slowing down your mouse mid-stroke will no longer leave accidental dark or bright blotches.
+- **Fixed brush disarming:** Dodge, Burn, and Eraser tools stay reliably active when moving your mouse between the Adjust panel and the image canvas.
+- **Faster mask overlay:** Turning on the mask overlay (<kbd>M</kbd>) now paints under your brush with zero lag, instead of re-rendering the whole photo overlay on every stroke.
+- **Smarter Edge Assist:** Edge Assist automatically adapts to image noise, follows sharp object contours, and recognizes color boundaries between regions of equal brightness.
+
+### 🎯 Controls & UI Refinements
+
+- **No accidental scroll/zoom jumps while editing:** Mouse scrolling over the photo is disabled while the Adjust panel is open, preventing accidental photo jumps or getting stuck at 35% zoom mid-edit. (`Ctrl + Scroll` to zoom and scrolling to adjust brush size remain fully active).
+- **Inspect masks anytime with <kbd>M</kbd>:** The **Mask (M)** button is now labelled **Mask (M)** and toggles with <kbd>M</kbd>. It stays available whenever a photo has dodge/burn or heal edits — you can toggle it anytime without needing to pick up a brush first.
+- **Instant mask clear updates:** Clearing dodge/burn or heal work updates the image immediately.
+- **Proper app name in Task Manager:** RAWviewer now clearly identifies itself as "RAWviewer" in your system's Task Manager / Activity Monitor instead of "Python".
+
+### Upgrade
+
+Install over 3.0.1. No cache clear needed for this update.
 
 ---
 

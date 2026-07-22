@@ -17,6 +17,7 @@ import theme
 # GPU demosaic backends (CuPy / optional torch) are deferred until after the
 # window is shown — see torch_bootstrap.import_gpu_backend_on_main_thread().
 # Background decode threads wait for that instead of importing on their own.
+import math
 import platform
 import ctypes
 import time
@@ -2020,6 +2021,50 @@ from rawviewer_app.viewer.session_mixin import SessionMixin
 
 class _AdjustEditBaseSignals(QObject):
     finished = pyqtSignal(str, object, bool, str)  # file_path, ndarray|None, lens_profile_available, lens_profile_name
+
+
+class _AdjustMaskLoadSignals(QObject):
+    # generation, file_path, dodge/burn mask|None, heal mask|None
+    finished = pyqtSignal(int, str, object, object)
+
+
+class _AdjustMaskLoadWorker(QRunnable):
+    """Decode the (often multi-MB PNG) dodge/burn + heal mask blobs off the
+    UI thread -- base64 + cv2.imdecode at edit-base resolution is the slow
+    part of opening the Adjust panel for a file with existing local edits,
+    not the (cheap) XMP XML parse that already ran synchronously."""
+
+    def __init__(
+        self,
+        generation: int,
+        file_path: str,
+        db_serial: str,
+        heal_serial: str,
+        signals: _AdjustMaskLoadSignals,
+    ):
+        super().__init__()
+        self.generation = generation
+        self.file_path = file_path
+        self.db_serial = db_serial
+        self.heal_serial = heal_serial
+        self.signals = signals
+
+    def run(self) -> None:
+        db_mask = None
+        heal_mask = None
+        try:
+            from raw_dodge_burn import deserialize_mask as deserialize_db_mask
+
+            db_mask = deserialize_db_mask(self.db_serial)
+        except Exception:
+            db_mask = None
+        try:
+            from raw_spot_heal import deserialize_mask as deserialize_heal_mask
+
+            heal_mask = deserialize_heal_mask(self.heal_serial)
+        except Exception:
+            heal_mask = None
+        self.signals.finished.emit(self.generation, self.file_path, db_mask, heal_mask)
 
 
 class _AdjustPreviewSignals(QObject):
@@ -8619,6 +8664,15 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         # Initialize loading overlay for single view
         self.loading_overlay = LoadingOverlay(self)
         self.loading_overlay.hide()
+        # Separate instance for "applying a saved edit". It deliberately does
+        # NOT share self.loading_overlay: that one is hidden from ~30 call
+        # sites across the image-load pipeline (display_pixmap,
+        # on_manager_*_ready, _begin_adjust_editing_session, ...), several of
+        # which fire while entering the editor -- sharing it meant this
+        # overlay was torn down within milliseconds of being shown, long
+        # before the edit render it announces had finished.
+        self.edit_loading_overlay = LoadingOverlay(self)
+        self.edit_loading_overlay.hide()
         
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
@@ -8849,6 +8903,9 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             )
             self._adjust_edit_base_signals = _AdjustEditBaseSignals()
             self._adjust_edit_base_signals.finished.connect(self._on_adjust_edit_base_ready)
+            self._adjust_mask_load_signals = _AdjustMaskLoadSignals()
+            self._adjust_mask_load_signals.finished.connect(self._on_adjust_mask_load_ready)
+            self._adjust_mask_load_gen = 0
             self._adjust_preview_gen = 0
             self._adjust_preview_busy = False
             self._adjust_preview_dirty = False
@@ -17482,6 +17539,21 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         raw = os.environ.get("RAWVIEWER_QT_FILE_DIALOG", "").strip().lower()
         return raw in {"1", "true", "yes", "on"}
 
+    def _macos_nsopenpanel_reliable(self) -> bool:
+        """False when NSOpenPanel/NSSavePanel construction is unsafe to try.
+
+        A bare ``python3 main.py`` Terminal launch (``sys.frozen`` unset --
+        no real .app bundle/Info.plist/bundle identifier) was observed via
+        py-spy to sometimes hang *indefinitely* inside
+        ``NSOpenPanel.alloc().init()`` on newer macOS instead of returning
+        nil -- not consistently, so the try/except fallback to AppleScript
+        cannot save us; a hang never raises. The built .app (``sys.frozen``
+        True) has real bundle identity and does not hit this, so only skip
+        NSPanel there when NOT frozen -- go straight to the AppleScript
+        dialog, which is reliable everywhere.
+        """
+        return bool(getattr(sys, "frozen", False))
+
     def _prepare_for_modal_dialog(self) -> None:
         """Bring the main window forward so native file dialogs are not hidden behind it."""
         try:
@@ -17497,7 +17569,23 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             pass
 
     def _create_macos_open_panel(self):
-        """Return an NSOpenPanel instance (can fail when Qt owns NSApplication)."""
+        """Return an NSOpenPanel instance (can fail when Qt owns NSApplication).
+
+        A ``nil`` result here (not an exception) means the window-server /
+        open-and-save-panel XPC service refused to hand back a panel --
+        which it can do for a process that isn't NSApplicationActivationPolicy
+        Regular / frontmost, the default state for a bare ``python3 main.py``
+        Terminal launch. A forced-foreground retry was tried here and made
+        things worse: forcing activation mid-attempt causes the retried
+        alloc().init() to hang indefinitely (observed via py-spy: stuck
+        inside this call after activation, never returning nil or raising)
+        instead of the plain attempt's fast nil-return -- likely because
+        forcing activation kicks off real window-server/XPC machinery that
+        needs the run loop pumping, which nothing does on this synchronous
+        Qt-thread call stack. Fail fast on the first nil instead so the
+        (working) AppleScript fallback in ``_open_file_dialog_macos_native``
+        takes over quickly.
+        """
         import objc
 
         ns_open_panel = objc.lookUpClass("NSOpenPanel")
@@ -17527,8 +17615,19 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 f' default location (POSIX file "{_applescript_escape(start)}")'
             )
 
+        # A bare top-level "activate" (no tell-application context) does not
+        # reliably bring this dialog forward -- confirmed live: the osascript
+        # process was up and running with "activate" in the script, but the
+        # picker stayed invisible (no crash, no timeout, just never seen).
+        # Running "choose file" inside an explicit `tell application "Finder"`
+        # block makes Finder itself own + activate the dialog, which is the
+        # reliable form of this trick (Finder is always a proper foreground
+        # GUI app, unlike the bare osascript process).
         script = (
-            f'choose file{type_clause} with prompt "Open Image"{location_clause}\n'
+            'tell application "Finder"\n'
+            "    activate\n"
+            f'    choose file{type_clause} with prompt "Open Image"{location_clause}\n'
+            "end tell\n"
             "return POSIX path of result"
         )
         return _run_applescript(script)
@@ -17541,7 +17640,10 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 f' default location (POSIX file "{_applescript_escape(start)}")'
             )
         script = (
-            f'choose folder with prompt "Open Folder"{location_clause}\n'
+            'tell application "Finder"\n'
+            "    activate\n"
+            f'    choose folder with prompt "Open Folder"{location_clause}\n'
+            "end tell\n"
             "return POSIX path of result"
         )
         return _run_applescript(script)
@@ -17551,6 +17653,11 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         import logging
 
         logger = logging.getLogger(__name__)
+        if not self._macos_nsopenpanel_reliable():
+            logger.info(
+                "Skipping NSOpenPanel (unbundled dev launch), using AppleScript choose file"
+            )
+            return self._open_file_dialog_macos_applescript(last_dir)
         try:
             return self._open_file_dialog_macos_nsopenpanel(last_dir)
         except Exception as exc:
@@ -17564,6 +17671,11 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         import logging
 
         logger = logging.getLogger(__name__)
+        if not self._macos_nsopenpanel_reliable():
+            logger.info(
+                "Skipping NSOpenPanel (unbundled dev launch), using AppleScript choose folder"
+            )
+            return self._open_folder_dialog_macos_applescript(last_dir)
         try:
             return self._open_folder_dialog_macos_nsopenpanel(last_dir)
         except Exception as exc:
@@ -17617,7 +17729,12 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         return url.path() if url is not None else ""
 
     def _create_macos_save_panel(self):
-        """Return an NSSavePanel instance (can fail when Qt owns NSApplication)."""
+        """Return an NSSavePanel instance (can fail when Qt owns NSApplication).
+
+        See ``_create_macos_open_panel`` for why this fails fast on a nil
+        result instead of retrying with forced foreground activation --
+        the retry was observed to hang indefinitely rather than fail fast.
+        """
         import objc
 
         ns_save_panel = objc.lookUpClass("NSSavePanel")
@@ -17646,8 +17763,11 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         if default_name:
             name_clause = f' default name "{_applescript_escape(default_name)}"'
         script = (
-            f'choose file name with prompt "{_applescript_escape(prompt)}"'
+            'tell application "Finder"\n'
+            "    activate\n"
+            f'    choose file name with prompt "{_applescript_escape(prompt)}"'
             f"{name_clause}{location_clause}\n"
+            "end tell\n"
             "return POSIX path of result"
         )
         return _run_applescript(script)
@@ -17707,6 +17827,11 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         import logging
 
         logger = logging.getLogger(__name__)
+        if not self._macos_nsopenpanel_reliable():
+            logger.info(
+                "Skipping NSSavePanel (unbundled dev launch), using AppleScript choose file name"
+            )
+            return self._save_file_dialog_macos_applescript(default_dir, default_name, prompt)
         try:
             return self._save_file_dialog_macos_nssavepanel(
                 default_dir, default_name, prompt, file_types
@@ -17725,8 +17850,11 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             f' default location (POSIX file "{_applescript_escape(start)}")'
         )
         script = (
-            'choose file of type {"com.apple.application-bundle", "app"} '
+            'tell application "Finder"\n'
+            "    activate\n"
+            '    choose file of type {"com.apple.application-bundle", "app"} '
             f'with prompt "Choose Editing App"{location_clause}\n'
+            "end tell\n"
             "return POSIX path of result"
         )
         return _run_applescript(script)
@@ -17770,6 +17898,11 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 options=QFileDialog.Option.DontUseNativeDialog,
             )
             return app_path or ""
+        if not self._macos_nsopenpanel_reliable():
+            logger.info(
+                "Skipping NSOpenPanel app chooser (unbundled dev launch), using AppleScript"
+            )
+            return self._choose_macos_editing_app_applescript(start_dir)
         try:
             return self._choose_macos_editing_app_nsopenpanel(start_dir)
         except Exception as exc:
@@ -17890,7 +18023,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 "Trackpad Pinch / Ctrl+Scroll — Smooth zoom in/out",
                 "Dodge/Burn/Heal armed: two-finger scroll — Brush Size",
                 "D / B / X / H — Arm Dodge / Burn / Eraser / Heal (again to disarm)",
-                "O — Toggle Mask overlay (when a brush tool is armed)",
+                "M — Toggle Mask overlay (armed, or an existing dodge/burn/heal edit)",
                 "← / → — Nudge focused slider (or previous/next when none focused)",
                 "J — Show/hide highlight/shadow clipping",
                 "G — Cycle composition guide",
@@ -21172,6 +21305,9 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             if gv is not None and gv.is_dodge_burn_mode():
                 gv.set_dodge_burn_mode(False)
                 gv.set_dodge_burn_mask_overlay(None, False)
+            # Leaving the editor: no in-flight edit render matters any more.
+            if getattr(self, "_adjust_loading_edit_norm", None) is not None:
+                self._set_edit_loading_overlay(None)
             panel.setVisible(False)
             if getattr(self, "_histogram_overlay_visible", False):
                 self.single_image_histogram.show()
@@ -21544,26 +21680,48 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         norm = _norm_path(path)
         if not force and norm == getattr(self, "_adjust_panel_loaded_norm", None):
             return
+        db_serial = ""
+        heal_serial = ""
+        has_edit = False
         try:
-            from raw_adjustments import load_adjustments_for_file
-            from raw_dodge_burn import MASK_KEY, deserialize_mask
+            from raw_adjustments import is_default_adjustments, load_adjustments_for_file
+            from raw_dodge_burn import MASK_KEY
+            from raw_spot_heal import MASK_KEY as HEAL_MASK_KEY
 
+            # XML parse only -- cheap. The mask blobs (base64 + PNG, at edit
+            # base resolution, can be multi-MB) are decoded further below on
+            # a worker thread. That decode alone isn't the reason opening an
+            # edited image is slow, though -- the dominant cost (measured:
+            # 2.8-5.5s on a 32MP file) is the full adjustment render itself
+            # (WB/tone/curves/denoise/dodge-burn) kicked off below, whether
+            # or not the file has a dodge/burn or heal mask at all.
             loaded_adj = load_adjustments_for_file(path)
+            has_edit = not is_default_adjustments(loaded_adj)
             panel.set_adjustments(loaded_adj)
-            self._dodge_burn_mask = deserialize_mask(loaded_adj.get(MASK_KEY, ""))
-            self._dodge_burn_luma_guide = None
-            try:
-                from raw_spot_heal import MASK_KEY as HEAL_MASK_KEY
-                from raw_spot_heal import deserialize_mask as deserialize_heal_mask
-
-                self._spot_heal_mask = deserialize_heal_mask(
-                    loaded_adj.get(HEAL_MASK_KEY, "")
-                )
-            except Exception:
-                self._spot_heal_mask = None
-            self._sync_dodge_burn_mask_overlay()
             self._adjust_panel_loaded_norm = norm
             self._pending_adjust_preview = dict(panel.get_adjustments())
+            self._dodge_burn_luma_guide = None
+
+            db_serial = str(loaded_adj.get(MASK_KEY, "") or "")
+            heal_serial = str(loaded_adj.get(HEAL_MASK_KEY, "") or "")
+            # Always clear the PREVIOUS file's mask objects synchronously,
+            # even when this file has its own mask to decode -- the actual
+            # decode happens async further below (off the UI thread), and
+            # without this clear, a render kicked off before that finishes
+            # (e.g. _apply_adjust_panel_preview a few lines down, on a
+            # cached edit base) would silently paint with the prior file's
+            # stale mask instead of no mask / a "not yet loaded" state. That
+            # was a real correctness bug, not just a missing loading
+            # indicator: db_apply/db=1 was observed on the very first
+            # preview render for a freshly-navigated file, before the async
+            # decode could possibly have completed -- only explainable by a
+            # leftover mask object from whichever file was open before.
+            self._dodge_burn_mask = None
+            self._spot_heal_mask = None
+            panel.set_dodge_burn_mask_present(False)
+            if hasattr(panel, "set_spot_heal_mask_present"):
+                panel.set_spot_heal_mask_present(False)
+            self._sync_dodge_burn_mask_overlay()
         except Exception:
             # Do NOT swallow silently: a failure here leaves the panel showing
             # default sliders for a file that has a sidecar -- the exact
@@ -21577,6 +21735,29 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             )
         if panel.isVisible():
             self._request_adjust_edit_base(path)
+            # Applying a saved edit means a full adjustment render (measured
+            # 2.8-5.5s on a 32MP file) before the photo on screen reflects
+            # the sidecar -- show an overlay over the image for that window
+            # so it doesn't look like a stall / like the edit was lost.
+            # Cleared in _on_adjust_preview_ready once a render that actually
+            # carries this file's local masks lands -- NOT merely the first
+            # render, which is kicked off below while the mask decode is
+            # still in flight and therefore shows the photo without the
+            # brushwork. Must also clear when the new file has NO edit,
+            # otherwise the flag/overlay from a previously-loaded edited
+            # file would linger with nothing left to dismiss it.
+            self._adjust_loading_edit_wants_db = bool(db_serial)
+            self._adjust_loading_edit_wants_heal = bool(heal_serial)
+            # While a mask decode is in flight, suppress the full-quality
+            # render that would otherwise fire here (and in
+            # _on_adjust_edit_base_ready): it cannot include the masks yet,
+            # so its multi-second result is thrown away the moment
+            # _on_adjust_mask_load_ready lands and re-renders. Opening an
+            # edited image was paying for TWO full renders back to back
+            # (observed 5545ms then 2804ms on one file). The mask handler
+            # clears this and issues the single render that counts.
+            self._adjust_mask_load_pending = bool(db_serial or heal_serial)
+            self._set_edit_loading_overlay(norm if has_edit else None)
             if (
                 getattr(self, "_adjust_preview_base_rgb", None) is not None
                 and norm == getattr(self, "_adjust_edit_base_path", None)
@@ -21594,7 +21775,122 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                     panel.set_lens_correction_available(has_profile, profile_name)
                 except Exception:
                     pass
-                self._apply_adjust_panel_preview(full_quality=True)
+                if not getattr(self, "_adjust_mask_load_pending", False):
+                    self._apply_adjust_panel_preview(full_quality=True)
+
+        if db_serial or heal_serial:
+            self._adjust_mask_load_gen = (
+                int(getattr(self, "_adjust_mask_load_gen", 0)) + 1
+            )
+            gen = self._adjust_mask_load_gen
+            worker = _AdjustMaskLoadWorker(
+                gen, path, db_serial, heal_serial, self._adjust_mask_load_signals
+            )
+            _get_bg_thread_pool().start(worker)
+
+    def _set_edit_loading_overlay(self, norm: str | None) -> None:
+        """Show/hide the "applying saved edit" overlay over the photo.
+
+        ``norm`` is the normalized path the overlay is waiting on (None to
+        hide). Tracked so a late render for a file the user already
+        navigated away from cannot dismiss a newer file's overlay.
+        """
+        self._adjust_loading_edit_norm = norm
+        if norm is None:
+            self._adjust_loading_edit_wants_db = False
+            self._adjust_loading_edit_wants_heal = False
+            # Also release the render suppressor here (panel close, edit-base
+            # failure, navigating to an unedited file, render complete). A
+            # stuck-True flag would silently suppress every future
+            # full-quality render for this session.
+            self._adjust_mask_load_pending = False
+        overlay = getattr(self, "edit_loading_overlay", None)
+        if overlay is None:
+            return
+        if norm is None:
+            overlay.hide_loading()
+            return
+        overlay.setGeometry(self.rect())
+        overlay.show_loading("Loading previous edit…")
+        overlay.raise_()
+        # Paint it now: the caller keeps running synchronous panel setup
+        # (_begin_adjust_editing_session, filmstrip hide, ...) before it
+        # yields to the event loop, so without this the overlay would not
+        # appear until well after the work it is announcing has started.
+        app = _qt_app()
+        if app is not None:
+            app.processEvents()
+
+    def _render_reflects_loaded_edit(self, adj_used) -> bool:
+        """True when a finished render already carried the file's local masks.
+
+        The first render after entering the editor is submitted while the
+        mask PNG decode is still on a worker thread, so it paints the photo
+        WITHOUT the brushwork -- dismissing the loading overlay on it would
+        drop the overlay before the edit is actually on screen. Renders pick
+        the masks up via _dodge_burn_overlay_adj, which injects the live mask
+        objects, so their presence is what marks a render as complete.
+        """
+        if adj_used is None:
+            return False
+        from raw_dodge_burn import MASK_OBJ_KEY
+        from raw_spot_heal import MASK_OBJ_KEY as HEAL_MASK_OBJ_KEY
+
+        if getattr(self, "_adjust_loading_edit_wants_db", False):
+            if adj_used.get(MASK_OBJ_KEY) is None:
+                return False
+        if getattr(self, "_adjust_loading_edit_wants_heal", False):
+            if adj_used.get(HEAL_MASK_OBJ_KEY) is None:
+                return False
+        return True
+
+    def _on_adjust_mask_load_ready(
+        self, generation: int, file_path: str, db_mask, heal_mask
+    ) -> None:
+        """Background decode of the dodge/burn + heal mask blobs landed.
+
+        Fills in the actual mask objects (superseded by a later open/nav if
+        ``generation``/``file_path`` no longer match) and re-renders once,
+        since the preview kicked off while this was still in flight ran
+        without the local-edit masks baked in. Does NOT touch the "Loading
+        previous edit..." status message -- that's owned by
+        _on_adjust_preview_ready (cleared once the actual render this mask
+        feeds into lands), since mask decode is typically much faster than
+        the full adjustment render and clearing here could dismiss the
+        message while the render is still genuinely in flight.
+        """
+        if int(generation) != int(getattr(self, "_adjust_mask_load_gen", 0)):
+            return
+        if _norm_path(file_path) != _norm_path(getattr(self, "current_file_path", "") or ""):
+            return
+        # Masks are in hand: renders may proceed again (they were suppressed
+        # while this decode was in flight to avoid a throwaway full render).
+        self._adjust_mask_load_pending = False
+        self._dodge_burn_mask = db_mask
+        self._spot_heal_mask = heal_mask
+        # Reconcile what the overlay is still waiting for with what actually
+        # decoded: a blob that failed to decode (or came back empty) will
+        # never appear in a render, so leaving the flag set would strand the
+        # loading overlay forever.
+        if getattr(self, "_adjust_loading_edit_norm", None) is not None:
+            self._adjust_loading_edit_wants_db = (
+                db_mask is not None and not db_mask.is_empty
+            )
+            self._adjust_loading_edit_wants_heal = (
+                heal_mask is not None and not heal_mask.is_empty
+            )
+        panel = getattr(self, "single_image_adjust_panel", None)
+        if panel is not None:
+            panel.set_dodge_burn_mask_present(
+                db_mask is not None and not db_mask.is_empty
+            )
+            if hasattr(panel, "set_spot_heal_mask_present"):
+                panel.set_spot_heal_mask_present(
+                    heal_mask is not None and not heal_mask.is_empty
+                )
+        self._sync_dodge_burn_mask_overlay()
+        if panel is not None and panel.isVisible():
+            self._apply_adjust_panel_preview(full_quality=True)
 
     def _refresh_adjust_panel_for_navigation(self, file_path: str | None = None) -> None:
         """Reload XMP sliders and edit base when the current file changes with panel open."""
@@ -21924,6 +22220,10 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 self.status_bar.showMessage(
                     f"Skipped {os.path.basename(file_path)} (not editable)", 3000
                 )
+            # No render will follow for this file, so nothing else would ever
+            # dismiss an "applying saved edit" overlay raised for it.
+            if norm == getattr(self, "_adjust_loading_edit_norm", None):
+                self._set_edit_loading_overlay(None)
             # (norm already matches current_file_path -- checked above.)
             if self._adjust_panel_active() and self.image_files and len(self.image_files) > 1:
                 self.navigate_to_next_image()
@@ -21933,8 +22233,12 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self._adjust_preview_base_rgb_fast = _make_fast_preview_base(base)
         if panel is not None and panel.isVisible():
             self._pending_adjust_preview = dict(panel.get_adjustments())
-            self._apply_adjust_panel_preview(full_quality=True)
-            
+            # See _sync_adjust_panel_for_current_file: skip while the mask
+            # decode is still running, otherwise this render lands without
+            # the brushwork and is immediately superseded.
+            if not getattr(self, "_adjust_mask_load_pending", False):
+                self._apply_adjust_panel_preview(full_quality=True)
+
             # Kick off compare pre-render asynchronously
             geo = None
             try:
@@ -22036,7 +22340,28 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         ) != getattr(self, "_adjust_last_render_norm", None):
             return False
         try:
-            keys = set(adj) | set(last_adj)
+            # Fold in the same local-mask keys the render path injects via
+            # _dodge_burn_overlay_adj. panel.get_adjustments() never carries
+            # them, but the cached last_adj (a snapshot of what was submitted
+            # to the worker) always does -- so without this the diff below
+            # trips on _dodge_burn_mask_obj / _dodge_burn_mask_v1 (None vs a
+            # value) and bails on EVERY tick for any image with a dodge/burn
+            # or heal mask, silently disabling the zero-latency path exactly
+            # where the full render is slowest (measured 2.8-5.5s).
+            # The mask objects themselves are skipped: identity is not
+            # meaningful to compare and str()-ing one renders its whole
+            # ndarray. The cheap mem:HxW:vN fingerprint beside them already
+            # encodes shape + mutation version, so a mask edited since the
+            # cached render still correctly fails the comparison and falls
+            # through to a real re-render.
+            try:
+                adj = self._dodge_burn_overlay_adj(adj)
+            except Exception:
+                pass
+            from raw_dodge_burn import MASK_OBJ_KEY as _DB_MASK_OBJ_KEY
+            from raw_spot_heal import MASK_OBJ_KEY as _HEAL_MASK_OBJ_KEY
+
+            keys = (set(adj) | set(last_adj)) - {_DB_MASK_OBJ_KEY, _HEAL_MASK_OBJ_KEY}
             for k in keys:
                 if k in self._INSTANT_GAIN_KEYS:
                     continue
@@ -22156,7 +22481,15 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self._sync_dodge_burn_mask_overlay()
 
     def _on_brush_tool_left_image(self) -> None:
-        """Disarm Dodge/Burn/Eraser/Heal when the cursor leaves the photo."""
+        """Disarm Dodge/Burn/Eraser/Heal when the cursor leaves the photo.
+
+        Only fires once the cursor has actually landed on the image at
+        least once since arming (see gpu_image_view's
+        ``_dodge_burn_confirmed_on_image`` / ``_maybe_emit_brush_tool_left_image``)
+        -- arming from the toolbar or a hotkey while the cursor is still
+        over the panel/elsewhere does not disarm on the next stray move;
+        only a genuine on-image -> off-image transition does.
+        """
         panel = getattr(self, "single_image_adjust_panel", None)
         if panel is not None and hasattr(panel, "disarm_dodge_burn"):
             if panel.dodge_burn_mode() is not None:
@@ -22437,7 +22770,12 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         if panel is not None:
             panel.set_dodge_burn_mask_present(False)
         self._sync_dodge_burn_mask_overlay()
-        self._apply_adjust_panel_preview(full_quality=True)
+        # _on_adjust_panel_editing_finished already re-renders at full
+        # quality; calling _apply_adjust_panel_preview here too raced with
+        # it (the redundant in-flight request could tag the real one as
+        # stale via the dirty-generation check in _on_adjust_preview_ready,
+        # discarding its painted frame until an unrelated action requested
+        # another render).
         if panel is not None:
             self._on_adjust_panel_editing_finished(panel.get_adjustments())
 
@@ -22449,7 +22787,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         if panel is not None and hasattr(panel, "set_spot_heal_mask_present"):
             panel.set_spot_heal_mask_present(False)
         self._sync_dodge_burn_mask_overlay()
-        self._apply_adjust_panel_preview(full_quality=True)
+        # See _on_dodge_burn_clear_requested: skip the redundant direct
+        # preview call, _on_adjust_panel_editing_finished already renders.
         if panel is not None:
             self._on_adjust_panel_editing_finished(panel.get_adjustments())
 
@@ -22608,12 +22947,20 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             sy = mh / max(1, disp_h)
             # Brush size slider is in *display* pixels; convert to mask space.
             radius = max(2.0, panel.dodge_burn_brush_radius() * sx)
-            # Per-point delta: brush-strength slider (0..1) * pressure,
-            # scaled so a short drag is still clearly visible after the
-            # full-quality settle (scene-linear + tone). Was 0.12 — too
-            # subtle once live uint8 patches were replaced by the real
-            # pipeline render.
-            delta = panel.dodge_burn_brush_strength() * max(0.05, float(pressure)) * 0.28
+            strength_val = panel.dodge_burn_brush_strength()
+
+            # Distance-based flow scaling: if the pointer barely moved since the last stamp point,
+            # scale down delta to prevent stationary hesitation hot-spots.
+            last_pt = getattr(self, "_dodge_burn_last_stamp_pt", None)
+            dist_factor = 1.0
+            if last_pt is not None:
+                dist = math.hypot(mx - last_pt[0], my - last_pt[1])
+                if dist < 0.25 * radius:
+                    dist_factor = max(0.15, dist / (0.25 * radius))
+            self._dodge_burn_last_stamp_pt = (mx, my)
+
+            delta = strength_val * max(0.05, float(pressure)) * 0.28 * dist_factor
+            max_stroke_cap = max(0.05, strength_val * max(0.05, float(pressure)) * 0.75)
 
             # Snapshot baseline once per stroke so live preview applies only
             # this stroke's mask delta (never re-bakes prior strokes into a
@@ -22630,6 +22977,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 self._dodge_burn_stroke_pixmap = None
                 self._dodge_burn_mask_at_stroke_start = mask.data.copy()
                 self._dodge_burn_stroke_dirty = None
+                self._dodge_burn_last_stamp_pt = (mx, my)
                 self._dodge_burn_stroke_perf = {
                     "n": 0,
                     "stamp_sum": 0.0,
@@ -22638,11 +22986,17 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                     "patch_max": 0.0,
                 }
 
-            # Edge-assist guide: cache luminance for the stroke so each stamp
-            # stays O(brush area). Rebuild when the edit-base shape changes.
+            # Edge-assist guide: cache luminance + chroma for the stroke so
+            # each stamp stays O(brush area). Rebuild when the edit-base
+            # shape changes. Chroma is a cheap opponent-color pair (R-Y,
+            # B-Y), not a full colorspace conversion -- only relative
+            # distances matter for the similarity gate in
+            # raw_dodge_burn._edge_assist_gate.
             luma = getattr(self, "_dodge_burn_luma_guide", None)
+            chroma_guide = getattr(self, "_dodge_burn_chroma_guide", None)
             if luma is None or getattr(luma, "shape", None) != (mh, mw):
                 luma = None
+                chroma_guide = None
                 try:
                     base = getattr(self, "_adjust_preview_base_rgb", None)
                     if base is not None and hasattr(base, "shape"):
@@ -22660,10 +23014,16 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                             + 0.7152 * b[..., 1]
                             + 0.0722 * b[..., 2]
                         ).astype(np.float32)
+                        chroma_guide = np.stack(
+                            [b[..., 0] - luma, b[..., 2] - luma], axis=-1
+                        ).astype(np.float32)
                         self._dodge_burn_luma_guide = luma
+                        self._dodge_burn_chroma_guide = chroma_guide
                 except Exception:
                     luma = None
+                    chroma_guide = None
                     self._dodge_burn_luma_guide = None
+                    self._dodge_burn_chroma_guide = None
 
             edge_on = bool(panel.dodge_burn_edge_assist())
             t_stamp = time.perf_counter()
@@ -22679,8 +23039,11 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                     radius,
                     erase_amt,
                     luminance=luma,
+                    chroma=chroma_guide,
                     edge_assist=edge_on,
                 )
+                if panel is not None and hasattr(panel, "set_dodge_burn_mask_present"):
+                    panel.set_dodge_burn_mask_present(not mask.is_empty)
                 # Also erase heal coverage under the same brush.
                 heal = getattr(self, "_spot_heal_mask", None)
                 if heal is not None and heal.data.shape == (mh, mw):
@@ -22696,7 +23059,10 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                     delta,
                     dodge=(mode == "dodge"),
                     luminance=luma,
+                    chroma=chroma_guide,
                     edge_assist=edge_on,
+                    stroke_baseline=getattr(self, "_dodge_burn_mask_at_stroke_start", None),
+                    max_stroke_delta=max_stroke_cap,
                 )
             stamp_ms = (time.perf_counter() - t_stamp) * 1000.0
             perf_acc = getattr(self, "_dodge_burn_stroke_perf", None)
@@ -22710,10 +23076,10 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                     "db_stamp",
                     stamp_ms,
                     getattr(self, "current_file_path", None),
-                    r=float(radius),
-                    edge=1 if edge_on else 0,
-                    mh=mh,
-                    mw=mw,
+                    w=mw,
+                    h=mh,
+                    mode=mode,
+                    edge_assist=edge_on,
                 )
             self._dodge_burn_stroke_active = True
             if mask.is_empty:
@@ -22723,20 +23089,28 @@ class RAWImageViewer(SessionMixin, QMainWindow):
 
             # Keep Show Mask overlay in sync while painting (throttled).
             if panel.dodge_burn_show_mask():
+                prev_dirty = getattr(self, "_dodge_burn_mask_overlay_dirty", None)
+                bx0, by0, bx1, by1 = bbox
+                if prev_dirty is not None:
+                    bx0 = min(bx0, prev_dirty[0])
+                    by0 = min(by0, prev_dirty[1])
+                    bx1 = max(bx1, prev_dirty[2])
+                    by1 = max(by1, prev_dirty[3])
+                self._dodge_burn_mask_overlay_dirty = (bx0, by0, bx1, by1)
                 now = time.perf_counter()
                 last = float(getattr(self, "_dodge_burn_mask_overlay_last", 0.0) or 0.0)
                 if is_end or (now - last) >= 0.05:
                     self._dodge_burn_mask_overlay_last = now
+                    overlay_dirty = self._dodge_burn_mask_overlay_dirty
+                    self._dodge_burn_mask_overlay_dirty = None
                     gv = getattr(self, "gpu_view", None)
                     if gv is not None:
-                        gv.update_dodge_burn_mask(mask)
+                        gv.update_dodge_burn_mask(mask, dirty_bbox=overlay_dirty)
 
             baseline = getattr(self, "_dodge_burn_stroke_baseline", None)
             mask_start = getattr(self, "_dodge_burn_mask_at_stroke_start", None)
             if baseline is not None and mask_start is not None:
                 import cv2
-
-                from raw_dodge_burn import circular_brush_falloff
 
                 t_patch = time.perf_counter()
                 x0, y0, x1, y1 = bbox
@@ -22858,6 +23232,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 self._dodge_burn_stroke_pixmap = None
                 self._dodge_burn_mask_at_stroke_start = None
                 self._dodge_burn_stroke_dirty = None
+                self._dodge_burn_last_stamp_pt = None
                 luminance = getattr(self, "_dodge_burn_luma_guide", None)
                 if luminance is None or getattr(luminance, "shape", None) != (mh, mw):
                     luminance = None
@@ -22994,6 +23369,19 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 ):
                     self._pending_browse_bake_path = None
                     self._persist_editor_aligned_browse_caches(file_path)
+        # This generation is the accepted (non-superseded) render for the
+        # current file. Drop the "Loading previous edit..." overlay only once
+        # the render that landed actually carried this file's local masks --
+        # the first render is submitted while the mask decode is still in
+        # flight, so dismissing on it would hide the overlay while the photo
+        # on screen is still missing the brushwork. A failed render (array
+        # None) also releases the overlay so it cannot get stuck.
+        if _norm_path(file_path) == getattr(self, "_adjust_loading_edit_norm", None):
+            submitted_map = getattr(self, "_adjust_preview_submitted_adj", None)
+            if array is None or self._render_reflects_loaded_edit(
+                (submitted_map or {}).get(generation)
+            ):
+                self._set_edit_loading_overlay(None)
         if getattr(self, "_adjust_preview_dirty", False):
             self._apply_adjust_panel_preview(full_quality=dirty_full_quality)
 
@@ -29047,7 +29435,13 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         if getattr(self, "view_mode", "") != "single":
             return
         if getattr(self, "_adjust_overlay_visible", False):
-            # Map overlay fights the Adjust panel layout; browse-only.
+            # QShortcut owns M — toggle the brush Mask overlay here instead
+            # (map overlay fights the Adjust panel layout; browse-only there).
+            if self._shortcut_blocked_by_text_input():
+                return
+            panel = getattr(self, "single_image_adjust_panel", None)
+            if panel is not None and hasattr(panel, "toggle_dodge_burn_show_mask"):
+                panel.toggle_dodge_burn_show_mask()
             return
         if self._shortcut_blocked_by_text_input():
             return
@@ -29289,7 +29683,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                             if hasattr(self, "status_bar") and self.status_bar:
                                 self.status_bar.showMessage("No edit settings to paste", 2000)
                         return True
-            if key == Qt.Key.Key_O and not ctrl_or_cmd:
+            if key == Qt.Key.Key_M and not ctrl_or_cmd:
                 panel = getattr(self, "single_image_adjust_panel", None)
                 if panel is not None:
                     panel.toggle_dodge_burn_show_mask()
@@ -30441,6 +30835,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         # Update loading overlay geometry to cover the window
         if hasattr(self, 'loading_overlay') and self.loading_overlay:
             self.loading_overlay.setGeometry(self.rect())
+        if getattr(self, "edit_loading_overlay", None) is not None:
+            self.edit_loading_overlay.setGeometry(self.rect())
         container = getattr(self, "single_view_container", None)
         if container is not None and hasattr(container, "_layout_filmstrip"):
             container._layout_filmstrip()
@@ -32370,18 +32766,19 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                         self.update_status_bar()
                     return True
                 
-                # Only navigate if image is fit-to-window (not zoomed)
-                if hasattr(self, 'fit_to_window') and self.fit_to_window:
-                    # Dodge/Burn armed: scroll changes brush size, not image.
+                # Editor mode: block plain wheel events over image area
+                if getattr(self, "_adjust_overlay_visible", False):
                     panel = getattr(self, "single_image_adjust_panel", None)
                     if (
                         panel is not None
-                        and getattr(self, "_adjust_overlay_visible", False)
                         and panel.dodge_burn_mode() is not None
                         and abs(vertical_delta) > 0
                     ):
                         self._on_dodge_burn_brush_size_wheel(int(vertical_delta))
-                        return True
+                    return True
+
+                # Browse mode: Only navigate if image is fit-to-window (not zoomed)
+                if hasattr(self, 'fit_to_window') and self.fit_to_window:
                     # In fit-to-window mode: only use vertical wheel for navigation
                     # Horizontal wheel is disabled for navigation
                     if abs(vertical_delta) > 0:

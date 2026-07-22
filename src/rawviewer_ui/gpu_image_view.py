@@ -26,7 +26,7 @@ import sys
 from typing import Any
 
 from PyQt6.QtCore import Qt, QRect, QRectF, QPoint, QPointF, pyqtSignal, QEvent, QMimeData, QUrl
-from PyQt6.QtGui import QKeyEvent, QPixmap, QPainter, QColor, QPen, QDrag, QBrush, QImage
+from PyQt6.QtGui import QKeyEvent, QPixmap, QPainter, QColor, QPen, QDrag, QBrush, QImage, QTransform
 from PyQt6.QtWidgets import (
     QGraphicsView,
     QGraphicsScene,
@@ -538,6 +538,7 @@ class GpuImageView(QGraphicsView):
         self._mask_item = QGraphicsPixmapItem()
         self._mask_item.setOpacity(0.45)
         self._mask_item.setZValue(5)
+        self._mask_item.setTransformationMode(Qt.TransformationMode.SmoothTransformation)
         self._mask_item.hide()
         self._mask_overlay_wanted = False
         self._mask_overlay_mask = None
@@ -741,11 +742,46 @@ class GpuImageView(QGraphicsView):
         self.update_dodge_burn_mask(mask)
         self._mask_item.show()
 
-    def update_dodge_burn_mask(self, mask) -> None:
+    @staticmethod
+    def _dodge_burn_overlay_rgba(data, is_heal: bool):
+        """uint8 RGBA overlay for a (sub-)region of mask.data (float32)."""
+        import numpy as np
+
+        h, w = data.shape
+        overlay = np.zeros((h, w, 4), dtype=np.uint8)
+        if is_heal:
+            cov = np.clip(data, 0.0, 1.0)
+            on = cov > 0.02
+            overlay[on, 1] = 220  # G
+            overlay[on, 3] = np.clip(cov[on] * 200.0 + 40.0, 0, 255).astype(np.uint8)
+        else:
+            # Red for Dodge (positive), Blue for Burn (negative)
+            pos_mask = data > 0
+            overlay[pos_mask, 0] = 255  # R
+            overlay[pos_mask, 3] = np.clip(
+                data[pos_mask] / 1.5 * 180.0 + 40.0, 0, 255
+            ).astype(np.uint8)
+
+            neg_mask = data < 0
+            overlay[neg_mask, 2] = 255  # B
+            overlay[neg_mask, 3] = np.clip(
+                -data[neg_mask] / 1.5 * 180.0 + 40.0, 0, 255
+            ).astype(np.uint8)
+        return overlay
+
+    def update_dodge_burn_mask(self, mask, dirty_bbox=None) -> None:
         """Refresh the red/blue mask overlay when Show Mask is on.
 
         Callers may invoke this during painting even if the item was just
         shown; skip only when the user has Show Mask off.
+
+        ``dirty_bbox`` (x0, y0, x1, y1, mask-pixel coords) lets a live brush
+        stroke repaint only the touched region instead of rebuilding +
+        re-uploading the full mask-resolution RGBA buffer on every throttled
+        tick -- that full rebuild (even after dropping the old cv2.resize-to-
+        display-size step) was still O(full mask image) per tick, not O(brush
+        area) like the actual stamping code, and was the remaining cause of
+        brush lag with Show Mask on for large edit-base resolutions.
         """
         if not getattr(self, "_mask_overlay_wanted", False):
             return
@@ -753,15 +789,10 @@ class GpuImageView(QGraphicsView):
         if mask is None or getattr(mask, "is_empty", True):
             self._mask_item.hide()
             self._mask_item.setPixmap(QPixmap())
+            self._mask_overlay_shape = None
             return
 
-        import numpy as np
-        import cv2
-
-        # mask.data is float32. Dodge/burn uses [-MASK_CLIP, MASK_CLIP]
-        # (red/blue). Spot heal uses [0, 1] coverage (green).
         h, w = mask.data.shape
-        overlay = np.zeros((h, w, 4), dtype=np.uint8)
 
         try:
             from raw_spot_heal import HealMask
@@ -770,41 +801,68 @@ class GpuImageView(QGraphicsView):
         except Exception:
             is_heal = False
 
-        if is_heal:
-            cov = np.clip(mask.data, 0.0, 1.0)
-            on = cov > 0.02
-            overlay[on, 1] = 220  # G
-            overlay[on, 3] = np.clip(cov[on] * 200.0 + 40.0, 0, 255).astype(np.uint8)
+        cur_pixmap = self._mask_item.pixmap()
+        can_incremental = (
+            dirty_bbox is not None
+            and getattr(self, "_mask_overlay_shape", None) == (h, w)
+            and getattr(self, "_mask_overlay_is_heal", None) == is_heal
+            and cur_pixmap is not None
+            and not cur_pixmap.isNull()
+        )
+
+        if can_incremental:
+            x0, y0, x1, y1 = dirty_bbox
+            pad = 2
+            x0 = max(0, int(x0) - pad)
+            y0 = max(0, int(y0) - pad)
+            x1 = min(w, int(x1) + pad)
+            y1 = min(h, int(y1) + pad)
+            if x1 <= x0 or y1 <= y0:
+                return
+            patch = self._dodge_burn_overlay_rgba(mask.data[y0:y1, x0:x1], is_heal)
+            import numpy as np
+
+            patch = np.ascontiguousarray(patch)
+            qimg = QImage(
+                patch.data,
+                patch.shape[1],
+                patch.shape[0],
+                patch.strides[0],
+                QImage.Format.Format_RGBA8888,
+            ).copy()
+            pm = cur_pixmap
+            painter = QPainter(pm)
+            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Source)
+            painter.drawImage(x0, y0, qimg)
+            painter.end()
+            self._mask_item.setPixmap(pm)
         else:
-            # Red for Dodge (positive), Blue for Burn (negative)
-            pos_mask = mask.data > 0
-            overlay[pos_mask, 0] = 255  # R
-            overlay[pos_mask, 3] = np.clip(
-                mask.data[pos_mask] / 1.5 * 180.0 + 40.0, 0, 255
-            ).astype(np.uint8)
+            overlay = self._dodge_burn_overlay_rgba(mask.data, is_heal)
+            import numpy as np
 
-            neg_mask = mask.data < 0
-            overlay[neg_mask, 2] = 255  # B
-            overlay[neg_mask, 3] = np.clip(
-                -mask.data[neg_mask] / 1.5 * 180.0 + 40.0, 0, 255
-            ).astype(np.uint8)
+            # Keep the overlay at the mask's own (usually much lower)
+            # resolution and let the graphics item scale it up via
+            # QTransform instead of cv2.resize-ing a full-display-size
+            # buffer -- that resize was the original dominant cost here.
+            overlay = np.ascontiguousarray(overlay)
+            qimg = QImage(
+                overlay.data,
+                overlay.shape[1],
+                overlay.shape[0],
+                overlay.strides[0],
+                QImage.Format.Format_RGBA8888,
+            ).copy()
+            self._mask_item.setPixmap(QPixmap.fromImage(qimg))
+            self._mask_overlay_shape = (h, w)
+            self._mask_overlay_is_heal = is_heal
 
-        if self._img_w > 0 and self._img_h > 0 and (w != self._img_w or h != self._img_h):
-            overlay = cv2.resize(
-                overlay, (self._img_w, self._img_h), interpolation=cv2.INTER_LINEAR
-            )
-
-        # QImage does not own the numpy buffer — copy before the array drops.
-        overlay = np.ascontiguousarray(overlay)
-        qimg = QImage(
-            overlay.data,
-            overlay.shape[1],
-            overlay.shape[0],
-            overlay.strides[0],
-            QImage.Format.Format_RGBA8888,
-        ).copy()
-        self._mask_item.setPixmap(QPixmap.fromImage(qimg))
         self._mask_item.setOffset(0, 0)
+        if self._img_w > 0 and self._img_h > 0 and (w != self._img_w or h != self._img_h):
+            self._mask_item.setTransform(
+                QTransform().scale(self._img_w / w, self._img_h / h)
+            )
+        else:
+            self._mask_item.setTransform(QTransform())
         if not self._mask_item.isVisible():
             self._mask_item.show()
 
@@ -2185,12 +2243,14 @@ class GpuImageView(QGraphicsView):
             return
 
         # Plain wheel (no Control Modifier)
+        if not getattr(self, "_wheel_navigate_in_fit", True):
+            # Editor / Adjust panel mode: disable plain wheel scrolling over image entirely
+            event.accept()
+            return
+
         if self._fit_mode:
-            if getattr(self, "_wheel_navigate_in_fit", True):
-                # Fit-to-window: navigate images (Qt: delta > 0 = up, delta < 0 = down)
-                self.wheelNavigate.emit(-1 if delta > 0 else 1)
-            else:
-                self.zoom_by(1.25 if delta > 0 else 0.8)
+            # Fit-to-window: navigate images (Qt: delta > 0 = up, delta < 0 = down)
+            self.wheelNavigate.emit(-1 if delta > 0 else 1)
             event.accept()
             return
 

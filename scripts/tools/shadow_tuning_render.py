@@ -14,10 +14,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "src"))
 import cv2  # noqa: E402
 import numpy as np  # noqa: E402
 
-FILES = [
-    "/Volumes/Development/Development/Canon_Sample/398A0208.CR3",  # very deep shadow, moderate noise
-    "/Volumes/Development/Development/Canon_Sample/6J8A0376.CR3",  # higher relative shadow noise
-]
+FILES = [f for f in sys.argv[1:] if os.path.isfile(f)]
 
 SETTINGS = [
     ("default", {}),

@@ -632,6 +632,7 @@ class ImageAdjustPanelWidget(QWidget):
         self._sliders: Dict[str, QSlider] = {}
         self._value_labels: Dict[str, QLabel] = {}
         self._block_emit = False
+        self._mask_user_hidden = False
         self._as_shot_temperature = float(DEFAULT_ADJUSTMENTS["Temperature"])
         self._recovery_baseline = False
         self._current_hsl_color = HSL_COLOR_NAMES[0]
@@ -1381,7 +1382,7 @@ class ImageAdjustPanelWidget(QWidget):
         self._db_clear_btn.clicked.connect(self.dodge_burn_clear_requested.emit)
         db_actions_row.addWidget(self._db_clear_btn, 1)
 
-        self._db_show_mask_btn = QPushButton("Mask")
+        self._db_show_mask_btn = QPushButton("Mask (M)")
         self._db_show_mask_btn.setObjectName("adjust_db_show_mask_btn")
         self._db_show_mask_btn.setCheckable(True)
         self._db_show_mask_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
@@ -1389,9 +1390,9 @@ class ImageAdjustPanelWidget(QWidget):
         self._db_show_mask_btn.setEnabled(False)
         self._db_show_mask_btn.setToolTip(
             "Overlay the active brush mask (red/blue = dodge/burn, green = heal).\n"
-            "Turns on automatically when a brush tool is armed. Shortcut: O"
+            "Turns on automatically when a brush tool is armed. Shortcut: M"
         )
-        self._db_show_mask_btn.toggled.connect(self.dodgeBurnMaskToggled.emit)
+        self._db_show_mask_btn.toggled.connect(self._on_mask_btn_toggled)
         db_actions_row.addWidget(self._db_show_mask_btn, 1)
 
         self._db_edge_btn = QPushButton("Edge Assist")
@@ -2421,6 +2422,7 @@ class ImageAdjustPanelWidget(QWidget):
         self._emit_preview_and_save()
 
     def set_adjustments(self, adj: Dict[str, float]) -> None:
+        self._mask_user_hidden = False
         self.disarm_dodge_burn()
         from raw_dodge_burn import MASK_KEY as _db_mask_key
 
@@ -2732,31 +2734,40 @@ class ImageAdjustPanelWidget(QWidget):
         self.dodge_burn_mode_changed.emit(mode)
 
     def _sync_dodge_burn_mask_button_enabled(self, armed: bool) -> None:
-        """Mask overlay is available while a brush tool is selected.
+        """Mask overlay is available while a brush tool is armed, and stays
+        available afterward if a previously-painted dodge/burn/heal mask
+        still has data (e.g. a loaded edit) so the user can inspect it
+        without re-arming a tool.
 
         Default on when arming a tool so paint coverage is visible immediately
-        (especially important for Heal). Turning the tool off clears Mask.
+        (especially important for Heal).
         """
         btn = getattr(self, "_db_show_mask_btn", None)
         if btn is None:
             return
-        btn.setEnabled(bool(armed))
-        if not armed:
+        has_data = bool(
+            getattr(self, "_db_mask_has_data", False)
+            or getattr(self, "_heal_mask_has_data", False)
+        )
+        available = bool(armed or has_data)
+        btn.setEnabled(available)
+        # setChecked below fires the button's own `toggled` signal, which
+        # _on_mask_btn_toggled already forwards to dodgeBurnMaskToggled --
+        # no need (and no longer any need) to emit it again here.
+        if not available:
             if btn.isChecked():
                 self._block_emit = True
                 try:
                     btn.setChecked(False)
                 finally:
                     self._block_emit = False
-                self.dodgeBurnMaskToggled.emit(False)
             return
-        if not btn.isChecked():
+        if armed and not btn.isChecked() and not self._mask_user_hidden:
             self._block_emit = True
             try:
                 btn.setChecked(True)
             finally:
                 self._block_emit = False
-            self.dodgeBurnMaskToggled.emit(True)
 
     def _sync_local_controls_for_mode(self, mode: str | None) -> None:
         """Heal only uses Size/Flow — Effect Strength is dodge/burn stops.
@@ -2920,11 +2931,23 @@ class ImageAdjustPanelWidget(QWidget):
 
     def set_dodge_burn_mask_present(self, present: bool) -> None:
         self._db_clear_btn.setEnabled(bool(present))
+        self._db_mask_has_data = bool(present)
+        self._sync_dodge_burn_mask_button_enabled(self.dodge_burn_mode() is not None)
 
     def set_spot_heal_mask_present(self, present: bool) -> None:
         btn = getattr(self, "_heal_clear_btn", None)
         if btn is not None:
             btn.setEnabled(bool(present))
+        self._heal_mask_has_data = bool(present)
+        self._sync_dodge_burn_mask_button_enabled(self.dodge_burn_mode() is not None)
+
+    def _on_mask_btn_toggled(self, checked: bool) -> None:
+        """Track explicit user clicks (not programmatic setChecked calls)
+        so arming a brush tool doesn't force Mask back on after the user
+        deliberately turned it off."""
+        if not self._block_emit:
+            self._mask_user_hidden = not checked
+        self.dodgeBurnMaskToggled.emit(bool(checked))
 
     def dodge_burn_show_mask(self) -> bool:
         return bool(self._db_show_mask_btn.isChecked())

@@ -122,6 +122,7 @@ def _edge_assist_gate(
     cy: float,
     *,
     luma_tol: float = 0.10,
+    chroma: Optional[np.ndarray] = None,
 ) -> np.ndarray:
     """Per-pixel [0,1] weight: keep paint on the seed's connected subject.
 
@@ -132,22 +133,82 @@ def _edge_assist_gate(
     even when the far side happens to share a similar tone.
 
     Steps:
-      1. Soft luma similarity to the brush-center seed (smooth falloff)
-      2. Binary connected component of similar pixels, grown from the seed
-      3. Soften the region mask so stamp edges aren't a hard cut
+      1. Soft luma similarity to the brush-center seed (smooth falloff),
+         with the tolerance widened by the patch's own noise floor so
+         sensor grain doesn't randomly snap connectivity
+      2. Optional chroma similarity (``chroma``: (H,W,2) opponent-color
+         channels) — catches iso-luminance color boundaries (e.g. a red
+         subject against green foliage of similar brightness) a luma-only
+         gate would walk straight through
+      3. A real gradient-magnitude edge stop: pixels sitting on a strong
+         local luminance gradient are excluded from the flood fill outright,
+         even if their raw luma still falls inside the (noise-widened)
+         tolerance -- stops a thin, high-contrast rim from being bridged
+      4. Binary connected component of the combined similar-pixel mask,
+         grown from the seed via flood fill
+      5. Soften the region mask so stamp edges aren't a hard cut
     """
     patch = luminance[y0:y1, x0:x1].astype(np.float32, copy=False)
     h, w = patch.shape
     seed = _sample_luma(luminance, cx, cy)
-    # Similarity gate (display-linear or scene-linear luma both work; tol is
-    # relative to the local dynamic range).
+
     local_span = float(max(0.08, np.percentile(patch, 90) - np.percentile(patch, 10)))
-    tol = max(float(luma_tol), 0.45 * local_span)
+
+    # Robust local noise estimate (median-absolute-deviation of a Laplacian
+    # response) so a grainy/high-ISO patch widens tolerance instead of the
+    # flood fill randomly fragmenting on sensor noise.
+    noise_sigma = 0.0
+    try:
+        import cv2
+
+        lap = cv2.Laplacian(patch, cv2.CV_32F, ksize=3)
+        noise_sigma = float(np.median(np.abs(lap))) / 0.6745
+    except Exception:
+        noise_sigma = 0.0
+
+    tol = max(float(luma_tol), 0.45 * local_span, 2.5 * noise_sigma)
     diff = np.abs(patch - seed)
     sim = np.clip(1.0 - diff / tol, 0.0, 1.0)
     sim = sim * sim * (3.0 - 2.0 * sim)  # smoothstep
-
     similar = diff <= tol
+
+    # Gradient-magnitude edge stop: a real boundary pixel can still fall
+    # inside a wide (noisy/low-contrast-patch) tolerance window, so block
+    # connectivity through any pixel sitting on a strong local gradient
+    # regardless of its raw luma distance to the seed.
+    try:
+        import cv2
+
+        gx = cv2.Sobel(patch, cv2.CV_32F, 1, 0, ksize=3)
+        gy = cv2.Sobel(patch, cv2.CV_32F, 0, 1, ksize=3)
+        grad_mag = cv2.magnitude(gx, gy)
+        grad_tol = max(0.5 * local_span, 6.0 * noise_sigma + 0.05)
+        similar &= grad_mag <= grad_tol
+    except Exception:
+        pass
+
+    # Chroma similarity: same seed/flood-fill machinery, gated by color
+    # distance instead of luma, so a same-brightness/different-hue boundary
+    # (which the luma test alone cannot see) still breaks connectivity.
+    if chroma is not None and chroma.shape[:2] == luminance.shape[:2]:
+        cpatch = chroma[y0:y1, x0:x1].astype(np.float32, copy=False)
+        ch, cw = chroma.shape[:2]
+        scx = int(np.clip(round(cx), 0, cw - 1))
+        scy = int(np.clip(round(cy), 0, ch - 1))
+        seed_c = chroma[scy, scx]
+        cdiff = np.sqrt(np.sum((cpatch - seed_c) ** 2, axis=-1))
+        c_span = float(
+            max(
+                0.04,
+                np.percentile(cpatch[..., 0], 90) - np.percentile(cpatch[..., 0], 10),
+            )
+        )
+        ctol = max(0.05, 0.6 * c_span)
+        csim = np.clip(1.0 - cdiff / ctol, 0.0, 1.0)
+        csim = csim * csim * (3.0 - 2.0 * csim)
+        sim = sim * csim
+        similar &= cdiff <= ctol
+
     sx = int(np.clip(round(cx), x0, max(x0, x1 - 1))) - x0
     sy = int(np.clip(round(cy), y0, max(y0, y1 - 1))) - y0
     sx = int(np.clip(sx, 0, w - 1))
@@ -245,8 +306,11 @@ def stamp_brush(
     dodge: bool,
     *,
     luminance: Optional[np.ndarray] = None,
+    chroma: Optional[np.ndarray] = None,
     edge_assist: bool = True,
     luma_tol: float = 0.10,
+    stroke_baseline: Optional[np.ndarray] = None,
+    max_stroke_delta: Optional[float] = None,
 ) -> tuple[int, int, int, int]:
     """Add one soft circular stamp to ``mask`` in place.
 
@@ -256,11 +320,10 @@ def stamp_brush(
     overlapping stamps during a slow drag accumulate to the full effect,
     exactly like a real brush).
 
-    When ``luminance`` is provided and ``edge_assist`` is True, the stamp is
-    gated to the seed's connected luma region (flood-fill + soft similarity)
-    so paint stays on the surface under the cursor instead of spilling onto a
-    neighboring subject mid-stroke. Release-time ``edge_snap_region`` still
-    runs for a final guided-filter tidy-up.
+    When ``stroke_baseline`` and ``max_stroke_delta`` are provided, the stroke
+    accumulation is soft-clamped relative to the baseline before this stroke,
+    preventing cursor hesitation or slow movement from creating accidental
+    over-darkened or over-brightened spots.
 
     Returns the touched (x0, y0, x1, y1) bounding box in mask pixel
     coordinates, clamped to the mask bounds, for incremental/edge-snap work.
@@ -282,12 +345,29 @@ def stamp_brush(
         and luminance.shape[:2] == (h, w)
     ):
         falloff = falloff * _edge_assist_gate(
-            luminance, y0, x0, y1, x1, cx, cy, luma_tol=luma_tol
+            luminance, y0, x0, y1, x1, cx, cy, luma_tol=luma_tol, chroma=chroma
         )
 
     delta = falloff * float(strength) * (1.0 if dodge else -1.0)
     region = mask.data[y0:y1, x0:x1]
-    np.clip(region + delta, -MASK_CLIP, MASK_CLIP, out=region)
+
+    if (
+        stroke_baseline is not None
+        and stroke_baseline.shape == mask.data.shape
+        and max_stroke_delta is not None
+        and max_stroke_delta > 0
+    ):
+        base_region = stroke_baseline[y0:y1, x0:x1]
+        cap = float(max_stroke_delta)
+        if dodge:
+            max_allowed = base_region + cap
+            region[...] = np.clip(np.minimum(region + delta, max_allowed), -MASK_CLIP, MASK_CLIP)
+        else:
+            min_allowed = base_region - cap
+            region[...] = np.clip(np.maximum(region + delta, min_allowed), -MASK_CLIP, MASK_CLIP)
+    else:
+        np.clip(region + delta, -MASK_CLIP, MASK_CLIP, out=region)
+
     mask.touch()
     return (x0, y0, x1, y1)
 
@@ -300,6 +380,7 @@ def erase_brush(
     strength: float,
     *,
     luminance: Optional[np.ndarray] = None,
+    chroma: Optional[np.ndarray] = None,
     edge_assist: bool = True,
     luma_tol: float = 0.10,
 ) -> tuple[int, int, int, int]:
@@ -326,7 +407,7 @@ def erase_brush(
         and luminance.shape[:2] == (h, w)
     ):
         falloff = falloff * _edge_assist_gate(
-            luminance, y0, x0, y1, x1, cx, cy, luma_tol=luma_tol
+            luminance, y0, x0, y1, x1, cx, cy, luma_tol=luma_tol, chroma=chroma
         )
 
     # Multiplicative erase toward zero: factor 1 at edge, (1-strength) at center.

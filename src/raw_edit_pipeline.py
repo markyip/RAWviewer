@@ -21,9 +21,11 @@ from raw_adjustments import (
 from raw_chroma_denoise import apply_chroma_denoise, apply_luma_denoise, chroma_denoise_enabled
 from raw_dodge_burn import DEFAULT_STRENGTH as _DB_DEFAULT_STRENGTH
 from raw_dodge_burn import MASK_KEY as _DB_MASK_KEY
+from raw_dodge_burn import MASK_OBJ_KEY as _DB_MASK_OBJ_KEY
 from raw_dodge_burn import STRENGTH_KEY as _DB_STRENGTH_KEY
 from raw_dodge_burn import resolve_mask_from_adj as _resolve_db_mask
 from raw_spot_heal import MASK_KEY as _HEAL_MASK_KEY
+from raw_spot_heal import MASK_OBJ_KEY as _HEAL_MASK_OBJ_KEY
 from raw_spot_heal import resolve_mask_from_adj as _resolve_heal_mask
 from raw_pv2012 import apply_pv2012_tone_rgb
 from raw_tone_curve import TONE_CURVE_SERIAL_KEY
@@ -165,14 +167,22 @@ def _tone_map_for_display(img: np.ndarray, merged: dict[str, float]) -> np.ndarr
     return _tone_map_clip_display(img)
 
 
-def _apply_display_stage(img: np.ndarray, merged: dict[str, float]) -> np.ndarray:
+def _apply_display_stage(
+    img: np.ndarray,
+    merged: dict[str, float],
+    *,
+    y_range: tuple[int, int] | None = None,
+    total_h: int | None = None,
+) -> np.ndarray:
     """Tone map → sat/vib → HSL → detail (display-linear float [0, 1])."""
     from raw_detail_enhance import apply_detail_enhancements
     from raw_hsl import apply_hsl_adjustments
 
     display = _tone_map_for_display(img, merged)
     if merged:
-        display = _apply_display_color_adjustments(display, merged, preview=False)
+        display = _apply_display_color_adjustments(
+            display, merged, preview=False, y_range=y_range, total_h=total_h
+        )
         display = apply_hsl_adjustments(display, merged)
     display = apply_detail_enhancements(display, merged)
     return display
@@ -215,22 +225,11 @@ def process_linear_edit_buffer(
 
     img = apply_geometry(img, merged)
 
-    mask = _resolve_db_mask(merged)
-    heal_mask = _resolve_heal_mask(merged)
-    do_denoise = chroma_denoise if chroma_denoise is not None else chroma_denoise_enabled()
-    nr_amount = float(merged.get("ColorNoiseReduction", 0.0))
-    luma_nr_amount = float(merged.get("LuminanceNoiseReduction", 0.0))
-    denoise_active = nr_amount > 1e-4 or (do_denoise and not preview) or luma_nr_amount > 1e-4
-
-    # Row-band parallelism: WB, exposure and PV2012 tone are all elementwise
-    # (no cross-row dependency), so splitting rows across threads gives
-    # identical output computed concurrently -- numpy releases the GIL for
-    # arrays this size (same rationale as _apply_adjustments_to_srgb_banded
-    # in raw_adjustments.py). Denoise (real spatial radius), dodge/burn, and
-    # spot heal (spatial inpaint) fall back to the single-threaded path.
     n_workers = _linear_pipeline_worker_count(img.shape[0])
-    if mask is None and heal_mask is None and not denoise_active and n_workers > 1:
-        return _process_linear_edit_buffer_banded(img, merged, n_workers)
+    if n_workers > 1:
+        return _process_linear_edit_buffer_banded(
+            img, merged, n_workers, preview=preview, chroma_denoise=chroma_denoise
+        )
 
     return _process_linear_edit_tail(
         img,
@@ -338,22 +337,26 @@ def _process_linear_edit_tail(
 
 
 def _process_linear_edit_buffer_banded(
-    img: np.ndarray, merged: dict[str, float], n_workers: int
+    img: np.ndarray,
+    merged: dict[str, float],
+    n_workers: int,
+    *,
+    preview: bool = False,
+    chroma_denoise: Optional[bool] = None,
 ) -> np.ndarray:
-    """Row-band parallel version of process_linear_edit_buffer's WB/exposure/tone tail.
-
-    Only called when denoise is inactive and no dodge/burn mask is set (see
-    caller), so every stage in ``_process_linear_edit_tail`` is purely
-    elementwise -- bands need no padding, unlike the detail-enhance blur
-    stages in raw_adjustments._apply_adjustments_to_srgb_banded.
-    """
+    """Row-band parallel version of process_linear_edit_buffer's WB/exposure/denoise/tone tail."""
     from raw_adjustments import band_ranges, banded_executor
 
-    bands = band_ranges(img.shape[0], n_workers)
+    # 16px overlap pad handles bilateral / guided filter radii (up to r=12) and spot heal
+    bands = band_ranges(img.shape[0], n_workers, pad_px=16)
 
     def _process_band(band):
-        y0, y1, _pt, _pb = band
-        return _process_linear_edit_tail(img[y0:y1], merged, preview=True, chroma_denoise=False)
+        y0, y1, pad_top, pad_bot = band
+        src = img[y0 - pad_top : y1 + pad_bot]
+        out = _process_linear_edit_tail(
+            src, merged, preview=preview, chroma_denoise=chroma_denoise
+        )
+        return out[pad_top : pad_top + (y1 - y0)]
 
     results = list(banded_executor().map(_process_band, bands))
     return np.concatenate(results, axis=0)
@@ -405,8 +408,10 @@ _PRE_TONE_KEYS = (
     "LuminanceNoiseReduction",
     "DenoiseMethod",
     _DB_MASK_KEY,
+    _DB_MASK_OBJ_KEY,
     _DB_STRENGTH_KEY,
     _HEAL_MASK_KEY,
+    _HEAL_MASK_OBJ_KEY,
     # Geometry runs at the head of the pipeline (before WB), so any transform
     # change invalidates pre_tone and everything chained to it.
     *_TRANSFORM_KEYS,
@@ -464,15 +469,20 @@ def _stage_key(merged: dict, keys: tuple) -> tuple:
                 ""
                 if k in ("CreativeLUTName", "CreativeLUTWorkingSpace")
                 or str(k).endswith("Mask")
+                or "Mask" in str(k)
                 or "Curve" in str(k)
                 else 0.0
             )
             continue
+        if hasattr(v, "version") and hasattr(v, "data"):
+            # Live DodgeBurnMask or HealMask object: O(1) version fingerprint!
+            h, w = v.data.shape[:2]
+            parts.append(f"mem:{int(h)}x{int(w)}:v{int(v.version)}")
+            continue
         if isinstance(v, str):
-            # Dodge/burn mask serials are multi-MB base64 PNGs — hash so
-            # stage-key compares stay O(1) and don't pin giant strings in
-            # the cache dict (still invalidates whenever the mask changes).
-            if len(v) > 256 or str(k).endswith("Mask") or k.endswith("Curve") or "Curve" in str(k):
+            if v.startswith("mem:"):
+                parts.append(v)
+            elif len(v) > 256 or str(k).endswith("Mask") or "Mask" in str(k) or k.endswith("Curve") or "Curve" in str(k):
                 import hashlib
 
                 parts.append(hashlib.sha1(v.encode("utf-8", errors="replace")).hexdigest())
@@ -722,6 +732,8 @@ def _apply_display_color_adjustments(
     merged: dict[str, float],
     *,
     preview: bool = False,
+    y_range: tuple[int, int] | None = None,
+    total_h: int | None = None,
 ) -> np.ndarray:
     """Saturation / vibrance / vignette / dehaze in display-linear space.
 
@@ -745,7 +757,7 @@ def _apply_display_color_adjustments(
             merged.get(VIGNETTE_MIDPOINT_KEY, VIGNETTE_MIDPOINT_DEFAULT)
             or VIGNETTE_MIDPOINT_DEFAULT
         )
-        out = apply_vignette(out, vignette, midpoint=midpoint)
+        out = apply_vignette(out, vignette, midpoint=midpoint, y_range=y_range, total_h=total_h)
     return out
 
 
@@ -779,27 +791,22 @@ def _apply_display_stage_banded(
     recovery path downsamples the whole image via cv2.resize and isn't
     row-independent). Reuses raw_adjustments._BAND_PAD_PX -- same blur radii,
     same padding math as _apply_adjustments_to_srgb_banded.
-
-    Vignette and dehaze are whole-frame effects (radial center / atmospheric
-    light). Applying them inside a row band re-centers the vignette on each
-    strip and yields large preview/export mismatches — fall back to the
-    single-pass path when either is active.
     """
     from raw_adjustments import _BAND_PAD_PX, band_ranges, banded_executor
-    from raw_effects import DEHAZE_KEY, VIGNETTE_KEY
+    from raw_effects import DEHAZE_KEY
 
-    if (
-        abs(float(merged.get(VIGNETTE_KEY, 0.0) or 0.0)) > 1e-3
-        or abs(float(merged.get(DEHAZE_KEY, 0.0) or 0.0)) > 1e-3
-    ):
+    if abs(float(merged.get(DEHAZE_KEY, 0.0) or 0.0)) > 1e-3:
         return _apply_display_stage(img, merged)
 
-    bands = band_ranges(img.shape[0], n_workers, pad_px=_BAND_PAD_PX)
+    total_h = img.shape[0]
+    bands = band_ranges(total_h, n_workers, pad_px=_BAND_PAD_PX)
 
     def _process_band(band):
         y0, y1, pad_top, pad_bot = band
         src = img[y0 - pad_top : y1 + pad_bot]
-        out = _apply_display_stage(src, merged)
+        out = _apply_display_stage(
+            src, merged, y_range=(y0 - pad_top, y1 + pad_bot), total_h=total_h
+        )
         return out[pad_top : pad_top + (y1 - y0)]
 
     import cv2
