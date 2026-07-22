@@ -9,9 +9,12 @@
 ### What's new for you
 
 - **Non-Destructive JPEG & WebP Editing Support:** You can now open and edit JPEG, WebP, PNG, TIFF, and BMP images in the Adjust panel (<kbd>E</kbd>) with full non-destructive XMP sidecar persistence. Adjust Exposure, Contrast, Relative White Balance, Curves, HSL, Vignette, Denoise, Dodge & Burn, Spot Heal, and Geometry transforms without modifying your original files.
+- **HDR Merge, Panorama & Panorama HDR Stitching:** Multi-select photos in Gallery view and right-click to launch **🌄 Standard Panorama**, **☀️ HDR Merge**, or **🌅 Panorama HDR Merge**. Features handheld MTB exposure alignment, Highlight/Shadow/Midtone weight tuning, and automatic rectangular border auto-cropping.
+- **Camera Color Calibration & Auto EXIF Inheritance:** Click **"Calibrate Camera from Color Checker..."** in the Adjust panel to sample 24 patch colors, calculate RGB curves, White Balance offsets, and HSL deltas. Calibrated color science is bound to your camera model's EXIF metadata (`Make` & `Model`), automatically applying to all future photos from that camera model without needing manual XMP or 3D LUT exports.
 - **Anamorphic Lens Desqueeze:** Added dedicated Anamorphic Desqueeze controls in the Transform section of the Adjust panel. Easily un-squeeze footage captured with anamorphic lenses using standard factors: **1.33x**, **1.5x**, **1.6x**, and **2.0x**.
 - **Apply Edits to Burst Photo Groups:** When viewing a photo stack from a burst sequence, click the new **"Apply to Burst Group (N photos)"** button in the Adjust panel to apply fundamental tone, color, and noise adjustments across all member photos in the burst group at once while preserving individual crop and local retouching masks.
 - **Context-Aware Export Format Options:** The Export menu dynamically adapts to your source file format. Editing RAW files offers 16-bit TIFF, JPEG, and WebP exports; editing JPEG or WebP files restricts output formats to JPEG and WebP.
+- **Installer Setup UI Refinements:** Setup radio buttons clearly present edition capabilities (`Browse + Basic Adjustment`, `AI search + denoise`, `GPU RAW processing`).
 
 ### Upgrade
 

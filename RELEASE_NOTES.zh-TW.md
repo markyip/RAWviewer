@@ -8,6 +8,30 @@
 
 ### 使用者可見變更
 
+- **非破壞性 JPEG 與 WebP 影像編輯支援：** 現已支援在 Adjust 調整面板（快捷鍵 <kbd>E</kbd>）中開啟並編輯 JPEG、WebP、PNG、TIFF 及 BMP 圖檔，並完整支援非破壞性 .xmp 側邊欄檔儲存。可隨心調整曝光、對比、相對色溫/色調、色調曲線、HSL、邊角消退、降噪、Dodge & Burn 筆刷、Spot Heal 補丁及幾何變形，完全不更動原始圖檔。
+- **HDR 合成、全景拼接與 HDR 全景拼接：** 在圖庫檢視中多選相片並點擊右鍵選單即可啟動 **「🌄 Standard Panorama」**、**「☀️ HDR Merge」** 或 **「🌅 Panorama HDR Merge」**。支援手持拍攝 MTB 曝光自動對齊、亮部/暗部/中間調權重微調，以及畫面邊緣扭曲自動裁切（Auto-crop）。
+- **色卡相機色彩校正與 EXIF 自動綁定：** 點擊 Adjust 面板中的 **「🎯 Calibrate Camera from Color Checker...」**，即可自動抽樣 24 色卡色塊、計算 RGB 曲線、白平衡偏移與 HSL 參數。校正結果會自動與相機的 EXIF 廠牌與機型（Make & Model）綁定並儲存於本機。日後只要開啟該相機拍攝的相片，RAWviewer 都會自動載入該相機專屬的校正色彩，無須手動匯出或匯入 XMP／3D LUT 檔。
+- **變形鏡頭反壓平（Anamorphic Lens Desqueeze）：** 在 Adjust 面板的 Transform 幾何區段新增專屬變形鏡頭反壓平選單。提供常見壓平比例：**1.33x**、**1.5x**、**1.6x** 及 **2.0x**，實時進行畫面寬度解壓平預覽與匯出。
+- **連拍影像組一鍵套用編輯：** 檢視連拍組影像時，Adjust 面板會自動顯示 **「Apply to Burst Group (N photos)」** 按鈕。點擊即可將基礎色調、白平衡、顏色與降噪參數一鍵同步套用至連拍組內的所有相片，同時保留每張相片各自獨立的裁切與局部編修遮罩。
+- **動態適應性匯出格式選單：** 匯出選單會根據目前編輯的檔案格式自動調整。編輯 RAW 檔時提供 16-bit TIFF、JPEG 及 WebP 匯出；編輯 JPEG 或 WebP 檔時自動隱藏 16-bit TIFF，限制僅匯出為 JPEG 及 WebP 格式。
+- **安裝介面文字精簡化：** RAWviewer Setup 安裝精靈單選按鈕清晰呈現版本功能（Browse + Basic Adjustment、AI search + denoise、GPU RAW processing）。
+
+### 升級說明
+
+覆蓋安裝 3.0.2 即可，本次更新不需要清除快取。
+
+---
+
+# RAWviewer 發布說明
+
+**Language / 語言：** [English](RELEASE_NOTES.md) · 繁體中文
+
+
+## 🚀 版本 3.1.0
+**發布日期：2026 年 7 月 22 日**
+
+### 使用者可見變更
+
 - **非破壞性 JPEG 與 WebP 影像編輯支援：** 現已支援在 Adjust 調整面板（快捷鍵 <kbd>E</kbd>）中開啟並編輯 JPEG、WebP、PNG、TIFF 及 BMP 圖檔，並完整支援非破壞性 `.xmp` 側邊欄檔儲存。可隨心調整曝光、對比、相對色溫/色調、色調曲線、HSL、邊角消退、降噪、Dodge & Burn 筆刷、Spot Heal 補丁及幾何變形，完全不更動原始圖檔。
 - **變形鏡頭反壓平（Anamorphic Lens Desqueeze）：** 在 Adjust 面板的 Transform 幾何區段新增專屬變形鏡頭反壓平選單。提供常見壓平比例：**1.33x**、**1.5x**、**1.6x** 及 **2.0x**，實時進行畫面寬度解壓平預覽與匯出。
 - **連拍影像組一鍵套用編輯：** 檢視連拍組影像時，Adjust 面板會自動顯示 **「Apply to Burst Group (N photos)」** 按鈕。點擊即可將基礎色調、白平衡、顏色與降噪參數一鍵同步套用至連拍組內的所有相片，同時保留每張相片各自獨立的裁切與局部編修遮罩。
