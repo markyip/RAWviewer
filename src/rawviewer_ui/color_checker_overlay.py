@@ -113,7 +113,7 @@ class ColorCheckerOverlay(QWidget):
         painter.drawPolygon(polygon)
 
         # Draw 6x4 patch grid lines inside polygon
-        grid_pen = QPen(QColor(theme.EMBER_BRIGHT), 1, Qt.PenStyle.DashLine)
+        grid_pen = QPen(QColor(theme.EMBER), 1, Qt.PenStyle.DashLine)
         painter.setPen(grid_pen)
 
         # Draw 4 corner handle circles
@@ -122,7 +122,7 @@ class ColorCheckerOverlay(QWidget):
             r = self._handle_radius * (1.3 if is_active else 1.0)
             
             painter.setPen(QPen(QColor("#FFFFFF"), 2))
-            painter.setBrush(QBrush(QColor(theme.EMBER_BRIGHT if is_active else theme.EMBER)))
+            painter.setBrush(QBrush(QColor(theme.EMBER if is_active else theme.EMBER_DIM)))
             painter.drawEllipse(pt, r, r)
 
         painter.end()
