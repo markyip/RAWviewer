@@ -511,10 +511,29 @@ class UnifiedImageProcessor:
         use_full_resolution: bool = False,
         apply_lens_correction: bool = False,
     ) -> Optional[np.ndarray]:
-        from common_image_loader import dng_prefers_embedded_preview_first
+        from common_image_loader import dng_prefers_embedded_preview_first, is_raw_file
         from raw_tone_recovery import edit_base_decode_params
 
         try:
+            if not is_raw_file(file_path):
+                try:
+                    import cv2
+                    img = cv2.imread(file_path, cv2.IMREAD_COLOR)
+                    if img is not None:
+                        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+                        try:
+                            exif = self.exif_extractor.extract_exif_data(file_path)
+                            orient = int((exif or {}).get("orientation", 1) or 1)
+                        except Exception:
+                            orient = 1
+                            exif = None
+                        if orient != 1:
+                            img = self._apply_orientation_correction(img, orient, exif)
+                        return img
+                except Exception as exc:
+                    logger.warning("Failed to decode raster edit base for %s: %s", file_path, exc)
+                    return None
+
             exif_data = self.exif_extractor.extract_exif_data(file_path)
             half_size = not use_full_resolution
             # Browse-brightness decode (Blend highlights, no exp_shift) with

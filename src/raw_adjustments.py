@@ -300,16 +300,18 @@ SLIDER_SPECS: tuple[SliderSpec, ...] = (
 
 
 def resolve_xmp_path(image_path: str) -> str:
-    """Sidecar path next to the image (Lightroom-style basename.xmp)."""
+    """Sidecar path next to the image (Lightroom-style basename.xmp or image.ext.xmp)."""
     if not image_path:
-        return ""
-    from common_image_loader import is_raw_file
-    if not is_raw_file(image_path):
         return ""
     companion = image_path + ".xmp"
     if os.path.isfile(companion):
         return companion
-    return os.path.splitext(image_path)[0] + ".xmp"
+    from common_image_loader import is_raw_file
+    if is_raw_file(image_path):
+        stem_xmp = os.path.splitext(image_path)[0] + ".xmp"
+        if os.path.isfile(stem_xmp):
+            return stem_xmp
+    return companion
 
 
 def editing_features_enabled() -> bool:
@@ -1859,3 +1861,30 @@ def _kelvin_to_rgb(k: float) -> tuple[float, float, float]:
             b = max(0.0, min(255.0, b))
             
     return r / 255.0, g / 255.0, b / 255.0
+
+
+EXCLUDED_BURST_GROUP_KEYS = frozenset({
+    "CropAngle",
+    "PerspectiveVertical",
+    "PerspectiveHorizontal",
+    "CropLeft",
+    "CropRight",
+    "CropTop",
+    "CropBottom",
+    "AnamorphicRatio",
+    "LensCorrectionEnabled",
+    "DodgeBurnStrength",
+})
+
+
+def fundamental_adjustments_for_burst(adj: dict) -> dict:
+    """Return a copy of adj containing only fundamental/basic parameters.
+
+    Excludes geometry, straighten, keystone, crop insets, anamorphic desqueeze,
+    lens correction, and local brush/heal mask properties so burst-group
+    batch application does not overwrite individual photo framing or strokes.
+    """
+    if not adj:
+        return {}
+    return {k: v for k, v in adj.items() if k not in EXCLUDED_BURST_GROUP_KEYS}
+

@@ -618,6 +618,8 @@ class ImageAdjustPanelWidget(QWidget):
     # Fired when an XMP preset is applied so the host can drop per-image local
     # state (dodge/burn mask) that should not ride along with a global look.
     xmp_preset_applied = pyqtSignal()
+    # Fired when user requests applying fundamental edits to an entire burst group (adj, member_paths).
+    apply_burst_group_requested = pyqtSignal(dict, list)
     # User dropped files that are not .cube / .xmp onto the Looks panel.
     looks_drop_rejected = pyqtSignal(str)
     # Crop overlay (Transform): enter/exit mode, aspect lock, apply/cancel/reset.
@@ -1575,6 +1577,40 @@ class ImageAdjustPanelWidget(QWidget):
         export_btn.setToolTip("Export baked image (TIFF / JPEG / WebP)")
         layout.addWidget(export_btn)
         self._export_btn = export_btn
+
+        # Burst group batch edit button (shown when active image belongs to a burst group)
+        self._burst_group_btn = QPushButton("Apply to Burst Group")
+        self._burst_group_btn.setObjectName("adjust_burst_group_btn")
+        self._burst_group_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._burst_group_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self._burst_group_btn.setMinimumHeight(36)
+        self._burst_group_btn.setStyleSheet(
+            f"""
+            QPushButton {{
+                background-color: {theme.SURFACE_ELEVATED};
+                border: 1px solid {theme.EMBER};
+                border-radius: 6px;
+                color: {theme.EMBER};
+                font-size: 12px;
+                font-weight: 600;
+                padding: 4px 8px;
+            }}
+            QPushButton:hover {{
+                background-color: {theme.EMBER_DIM};
+                color: {theme.INK};
+            }}
+            """
+        )
+        self._burst_group_btn.setIcon(_qta_icon_safe("fa5s.layer-group", color=theme.EMBER))
+        self._burst_group_btn.setToolTip(
+            "Apply fundamental adjustments (Exposure, WB, Tone, HSL, Denoise) "
+            "to all photos in this burst group.\n"
+            "Geometry, crop, and local brush strokes are preserved per-photo."
+        )
+        self._burst_group_btn.clicked.connect(self._on_apply_burst_group_clicked)
+        self._burst_group_btn.hide()
+        self._burst_group_members: list[str] = []
+        layout.addWidget(self._burst_group_btn)
 
         layout.addStretch(1)
         self.set_adjustments(dict(DEFAULT_ADJUSTMENTS))
@@ -3103,6 +3139,27 @@ class ImageAdjustPanelWidget(QWidget):
                     val_lbl.setText(spec.format_value(value))
         finally:
             self._block_emit = False
+
+    def set_burst_group_members(self, member_paths: list[str] | None) -> None:
+        """Update the burst group member paths for the active image and sync UI button."""
+        paths = list(member_paths or [])
+        self._burst_group_members = paths
+        btn = getattr(self, "_burst_group_btn", None)
+        if btn is not None:
+            if len(paths) >= 2:
+                btn.setText(f"Apply to Burst Group ({len(paths)} photos)")
+                btn.show()
+            else:
+                btn.hide()
+
+    def _on_apply_burst_group_clicked(self) -> None:
+        if not self._burst_group_members:
+            return
+        from raw_adjustments import fundamental_adjustments_for_burst
+
+        full_adj = self.get_adjustments()
+        fund_adj = fundamental_adjustments_for_burst(full_adj)
+        self.apply_burst_group_requested.emit(fund_adj, list(self._burst_group_members))
 
     def _request_export(self, export_format: str, use_ai_denoise: bool = False) -> None:
         self.export_requested.emit(export_format, self.get_adjustments(), bool(use_ai_denoise))

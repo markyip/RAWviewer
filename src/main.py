@@ -8886,6 +8886,9 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             self.single_image_adjust_panel.xmp_preset_applied.connect(
                 self._on_xmp_preset_applied
             )
+            self.single_image_adjust_panel.apply_burst_group_requested.connect(
+                self._on_apply_burst_group_requested
+            )
             self.single_image_adjust_panel.looks_drop_rejected.connect(
                 self._on_looks_drop_rejected
             )
@@ -21475,12 +21478,10 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         return not already
 
     def _editing_supported_for_file(self, file_path: str | None) -> bool:
-        """Whether the Adjust panel can produce a true RAW demosaic edit base.
+        """Whether the Adjust panel supports editing for this file.
 
-        Unsupported: non-RAW (JPEG/HEIC/TIFF/…), animated images, and RAW that
-        LibRaw cannot demosaic (HE/HE* NEF, X-Trans fallbacks, linear / composite
-        DNG panoramas, …). Embedded-JPEG substitutes are browse-only — the
-        editor requires scene-linear demosaic, not a camera JPEG.
+        Supported: RAW files and standard raster images (JPEG, WebP, PNG, TIFF, BMP).
+        Unsupported: animated images (GIF/APNG), video files, and unreadable formats.
         """
         if not file_path:
             return False
@@ -21490,6 +21491,9 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         except Exception:
             pass
         try:
+            ext = os.path.splitext(file_path)[1].lower()
+            if ext in (".jpg", ".jpeg", ".webp", ".png", ".tif", ".tiff", ".bmp"):
+                return True
             if not is_raw_file(file_path):
                 return False
             from common_image_loader import dng_prefers_embedded_preview_first
@@ -22145,7 +22149,9 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             self._adjust_preview_base_rgb = None
             self._adjust_preview_base_rgb_fast = None
             self._adjust_edit_base_path = None
+            self._sync_adjust_panel_burst_members("")
             return
+        self._sync_adjust_panel_burst_members(file_path)
         norm = _norm_path(file_path)
         if (
             norm == getattr(self, "_adjust_edit_base_path", None)
@@ -22154,20 +22160,13 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             return
         if getattr(self, "_adjust_edit_base_loading_norm", None) == norm:
             return
-        if not is_raw_file(file_path):
-            base = self.image_cache.get_full_image(file_path)
-            if base is not None and hasattr(base, "shape"):
-                self._adjust_preview_base_rgb = base
-                self._adjust_edit_base_path = norm
-                self._apply_adjust_panel_preview(full_quality=True)
-            return
         self._adjust_edit_base_loading_norm = norm
         self._adjust_preview_base_rgb = None
         self._adjust_preview_base_rgb_fast = None
         self._adjust_edit_base_path = None
         if hasattr(self, "status_bar"):
             self.status_bar.showMessage(
-                f"Loading RAW for editing: {os.path.basename(file_path)}…", 0
+                f"Loading image for editing: {os.path.basename(file_path)}…", 0
             )
         pool = getattr(getattr(self, "image_manager", None), "_process_pool", None)
         panel = getattr(self, "single_image_adjust_panel", None)
@@ -23762,6 +23761,55 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             except Exception:
                 pass
         QTimer.singleShot(0, self._restore_keyboard_focus)
+
+    def _sync_adjust_panel_burst_members(self, file_path: str) -> None:
+        """Sync burst group members to the adjust panel when viewing an image."""
+        panel = getattr(self, "single_image_adjust_panel", None)
+        if panel is None or not file_path:
+            return
+        members = self._burst_members_for_path(file_path)
+        if not members:
+            norm = _norm_path(file_path)
+            for group in getattr(self, "_burst_groups", []) or []:
+                norm_group = [_norm_path(p) for p in group]
+                if norm in norm_group:
+                    members = list(group)
+                    break
+        panel.set_burst_group_members(members)
+
+    def _on_apply_burst_group_requested(
+        self, fund_adj: dict, member_paths: list[str]
+    ) -> None:
+        """Apply fundamental edits to all member images in a burst group."""
+        if not member_paths or not fund_adj:
+            return
+        from raw_adjustments import load_adjustments_for_file, write_xmp_adjustments_for_file
+        from image_cache import get_image_cache
+
+        count = 0
+        cache = get_image_cache()
+        for path in member_paths:
+            if not path or not os.path.exists(path):
+                continue
+            try:
+                current_adj = load_adjustments_for_file(path) or {}
+                merged = dict(current_adj)
+                merged.update(fund_adj)
+                write_xmp_adjustments_for_file(path, merged)
+                cache.invalidate_file(path)
+                self._invalidate_gallery_edited_memo(path)
+                count += 1
+            except Exception as err:
+                logging.getLogger(__name__).warning(
+                    "Failed to update burst group XMP for %s: %s", path, err
+                )
+
+        if hasattr(self, "status_bar") and self.status_bar:
+            self.status_bar.showMessage(
+                f"Applied basic adjustments to all {count} photos in burst group", 4000
+            )
+        if getattr(self, "view_mode", "single") == "gallery":
+            self._update_gallery_view()
 
     def _persist_editor_aligned_browse_caches(self, path: str) -> None:
         """Downscale the just-rendered Adjust frame into thumbnail/preview cache.
