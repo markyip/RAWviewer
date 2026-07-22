@@ -22152,6 +22152,9 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             self._sync_adjust_panel_burst_members("")
             return
         self._sync_adjust_panel_burst_members(file_path)
+        panel = getattr(self, "single_image_adjust_panel", None)
+        if panel is not None:
+            panel.set_is_raw_file(is_raw_file(file_path))
         norm = _norm_path(file_path)
         if (
             norm == getattr(self, "_adjust_edit_base_path", None)

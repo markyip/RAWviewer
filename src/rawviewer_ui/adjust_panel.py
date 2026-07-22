@@ -1497,86 +1497,10 @@ class ImageAdjustPanelWidget(QWidget):
         export_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         export_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         export_btn.setMinimumHeight(40)
-        export_menu = QMenu(export_btn)
-        # Bare QMenu renders with OS-native chrome, clashing with the app's
-        # frameless dark-chrome dialogs (see release_update_dialog.py) -- the
-        # only other QMenu-style popup in the app. Match those tokens.
-        export_menu.setStyleSheet(
-            f"""
-            QMenu {{
-                background-color: {theme.SURFACE};
-                border: 1px solid {theme.LINE};
-                border-radius: 8px;
-                padding: 4px;
-                color: {theme.INK};
-                font-size: 12px;
-            }}
-            QMenu::item {{
-                padding: 6px 20px 6px 12px;
-                border-radius: 5px;
-                background-color: transparent;
-            }}
-            QMenu::item:selected {{
-                background-color: {theme.EMBER_DIM};
-                color: {theme.INK};
-            }}
-            QMenu::item:disabled {{
-                color: {theme.INK_FAINT};
-            }}
-            QMenu::separator {{
-                height: 1px;
-                background-color: {theme.LINE};
-                margin: 4px 8px;
-            }}
-            """
-        )
-        # AI Denoise is its own submenu of format choices, not a separate
-        # checkbox you set before picking a format below -- the export click
-        # itself is the whole action (format + whether AI denoise runs),
-        # consistent with every other item in this menu.
-        self._ai_denoise_menu = None
-        try:
-            from onnx_scunet import scunet_model_path
-
-            if os.path.exists(scunet_model_path()):
-                ai_menu = QMenu("AI Denoise (SCUNet)", export_menu)
-                ai_menu.setStyleSheet(export_menu.styleSheet())
-                ai_tip = (
-                    "Uses AI (SCUNet) instead of the Chroma NR method "
-                    "above, for this export only."
-                )
-                for label, fmt in (
-                    ("16-bit TIFF (baked)", "tiff16"),
-                    ("JPEG (baked)", "jpeg"),
-                    ("WebP (baked)", "webp"),
-                ):
-                    act = ai_menu.addAction(
-                        label,
-                        lambda _checked=False, f=fmt: self._request_export(f, True),
-                    )
-                    act.setToolTip(ai_tip)
-                export_menu.addMenu(ai_menu)
-                export_menu.addSeparator()
-                self._ai_denoise_menu = ai_menu
-        except Exception:
-            self._ai_denoise_menu = None
-
-        export_menu.addAction(
-            "16-bit TIFF (baked)",
-            lambda: self._request_export("tiff16"),
-        )
-        export_menu.addAction(
-            "JPEG (baked)",
-            lambda: self._request_export("jpeg"),
-        )
-        export_menu.addAction(
-            "WebP (baked)",
-            lambda: self._request_export("webp"),
-        )
-        export_btn.setMenu(export_menu)
-        export_btn.setToolTip("Export baked image (TIFF / JPEG / WebP)")
         layout.addWidget(export_btn)
         self._export_btn = export_btn
+        self._is_raw_file = True
+        self._rebuild_export_menu()
 
         # Burst group batch edit button (shown when active image belongs to a burst group)
         self._burst_group_btn = QPushButton("Apply to Burst Group")
@@ -1587,7 +1511,7 @@ class ImageAdjustPanelWidget(QWidget):
         self._burst_group_btn.setStyleSheet(
             f"""
             QPushButton {{
-                background-color: {theme.SURFACE_ELEVATED};
+                background-color: {theme.SURFACE};
                 border: 1px solid {theme.EMBER};
                 border-radius: 6px;
                 color: {theme.EMBER};
@@ -3302,6 +3226,86 @@ class ImageAdjustPanelWidget(QWidget):
         btn = getattr(self, "_export_btn", None)
         if btn is not None:
             btn.setEnabled(bool(enabled))
+
+    def set_is_raw_file(self, is_raw: bool) -> None:
+        """Update export options based on whether the active image is RAW or raster (JPEG/WebP)."""
+        is_raw = bool(is_raw)
+        if getattr(self, "_is_raw_file", True) == is_raw:
+            return
+        self._is_raw_file = is_raw
+        self._rebuild_export_menu()
+
+    def _rebuild_export_menu(self) -> None:
+        export_btn = getattr(self, "_export_btn", None)
+        if export_btn is None:
+            return
+        is_raw = getattr(self, "_is_raw_file", True)
+
+        export_menu = QMenu(export_btn)
+        export_menu.setStyleSheet(
+            f"""
+            QMenu {{
+                background-color: {theme.SURFACE};
+                border: 1px solid {theme.LINE};
+                border-radius: 8px;
+                padding: 4px;
+                color: {theme.INK};
+                font-size: 12px;
+            }}
+            QMenu::item {{
+                padding: 6px 20px 6px 12px;
+                border-radius: 5px;
+                background-color: transparent;
+            }}
+            QMenu::item:selected {{
+                background-color: {theme.EMBER_DIM};
+                color: {theme.INK};
+            }}
+            QMenu::item:disabled {{
+                color: {theme.INK_FAINT};
+            }}
+            QMenu::separator {{
+                height: 1px;
+                background-color: {theme.LINE};
+                margin: 4px 8px;
+            }}
+            """
+        )
+        formats = [("JPEG (baked)", "jpeg"), ("WebP (baked)", "webp")]
+        if is_raw:
+            formats.insert(0, ("16-bit TIFF (baked)", "tiff16"))
+
+        try:
+            from onnx_scunet import scunet_model_path
+
+            if os.path.exists(scunet_model_path()):
+                ai_menu = QMenu("AI Denoise (SCUNet)", export_menu)
+                ai_menu.setStyleSheet(export_menu.styleSheet())
+                ai_tip = (
+                    "Uses AI (SCUNet) instead of the Chroma NR method "
+                    "above, for this export only."
+                )
+                for label, fmt in formats:
+                    act = ai_menu.addAction(
+                        label,
+                        lambda _checked=False, f=fmt: self._request_export(f, True),
+                    )
+                    act.setToolTip(ai_tip)
+                export_menu.addMenu(ai_menu)
+                export_menu.addSeparator()
+        except Exception:
+            pass
+
+        for label, fmt in formats:
+            export_menu.addAction(
+                label,
+                lambda _checked=False, f=fmt: self._request_export(f, False),
+            )
+        export_btn.setMenu(export_menu)
+        if is_raw:
+            export_btn.setToolTip("Export baked image (TIFF / JPEG / WebP)")
+        else:
+            export_btn.setToolTip("Export baked image (JPEG / WebP)")
 
 
 
