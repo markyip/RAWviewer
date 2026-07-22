@@ -332,8 +332,6 @@ To clear cache: **`scripts\Launch\windows\clear_cache.bat`** (Windows) · **`scr
 
 Project directions and remaining work that are **not** tied to a particular release. Release notes cover shipped features only.
 
-Rule of thumb: **if it can ship in Plus, it counts as feasible** even when Standard must omit it (size / no ML).
-
 ### 🛠️ In Active Development (Development Branch / Worktree)
 
 | Item | Status | Notes |
