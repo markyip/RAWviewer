@@ -517,6 +517,9 @@ class GpuImageView(QGraphicsView):
         # disarm itself on the very next mouse-move -- only a genuine
         # "was on the image, now isn't" transition should disarm.
         self._dodge_burn_confirmed_on_image = False
+        # Hold-to-paint: True while a brush hotkey is physically held (paint
+        # gate, decoupled from the persistent _dodge_burn_mode context).
+        self._db_key_held = False
         self._crop_mode = False
         self._export_drag_enabled = True
         self._drag_start_pos = None
@@ -1700,9 +1703,52 @@ class GpuImageView(QGraphicsView):
             self._brush_cursor_item.show()
             self._sync_brush_cursor_at_view_center()
         else:
+            # Exiting the context also closes any in-progress hold-stroke.
+            self.end_key_paint()
             self._brush_cursor_item.hide()
             self.viewport().unsetCursor()
             self.setMouseTracking(False)
+
+    def begin_key_paint(self) -> None:
+        """Hold-to-paint: a brush hotkey went down.
+
+        Opens the key-driven paint gate. Painting itself is decoupled from the
+        brush *context* (``_dodge_burn_mode``, which drives the cursor preview
+        and wheel-to-resize and persists across holds): this only controls
+        whether pointer movement stamps. If the pointer is already over the
+        image, stamp immediately so a stationary tap leaves a single dab.
+        """
+        if not self._dodge_burn_mode or not self._has_pixmap:
+            return
+        self._db_key_held = True
+        # The pointer is deliberately on the image for a hold; never let the
+        # leave-image auto-disarm fire mid-hold.
+        self._dodge_burn_confirmed_on_image = True
+        from PyQt6.QtGui import QCursor
+
+        view_pos = self.viewport().mapFromGlobal(QCursor.pos())
+        if self._view_pos_on_image(view_pos):
+            pt = self._clamped_scene_point(view_pos)
+            self._place_brush_cursor(pt)
+            self._dodge_burn_painting = True
+            # No button is down, so Force Touch pressure is unavailable here by
+            # design (accepted trade-off) -- stamp at full strength.
+            self.dodgeBurnStroke.emit(pt, 1.0, False)
+
+    def end_key_paint(self) -> None:
+        """Hotkey released (or focus lost): close any active hold-stroke.
+
+        Idempotent -- safe to call when no hold is in progress, which is what
+        the focus-loss safety net relies on.
+        """
+        self._db_key_held = False
+        if getattr(self, "_dodge_burn_painting", False):
+            self._dodge_burn_painting = False
+            from PyQt6.QtGui import QCursor
+
+            view_pos = self.viewport().mapFromGlobal(QCursor.pos())
+            pt = self._clamped_scene_point(view_pos)
+            self.dodgeBurnStroke.emit(pt, 1.0, True)
 
     def set_dodge_burn_brush_radius(self, radius_px: float) -> None:
         """Brush radius in *display/scene* pixels (matches the Size slider)."""
@@ -2022,20 +2068,36 @@ class GpuImageView(QGraphicsView):
     def mouseMoveEvent(self, event) -> None:
         if self._dodge_burn_mode and self._has_pixmap:
             view_pos = event.position().toPoint()
-            painting = (event.buttons() & Qt.MouseButton.LeftButton) and getattr(
+            button_painting = (event.buttons() & Qt.MouseButton.LeftButton) and getattr(
                 self, "_dodge_burn_painting", False
             )
+            key_held = getattr(self, "_db_key_held", False)
             on_image = self._view_pos_on_image(view_pos)
             if on_image:
                 self._dodge_burn_confirmed_on_image = True
-            if not painting and not on_image:
+            # A held brush key keeps the tool live even off-image (the stroke
+            # just doesn't stamp until the pointer is back over the photo), so
+            # a mid-hold excursion must not trip the leave-image auto-disarm.
+            if not button_painting and not key_held and not on_image:
                 self._maybe_emit_brush_tool_left_image(view_pos)
                 event.accept()
                 return
             pt = self._clamped_scene_point(view_pos)
             self._place_brush_cursor(pt)
-            if painting:
+            if button_painting:
                 self.dodgeBurnStroke.emit(pt, self._mouse_stroke_pressure(event), False)
+                event.accept()
+                return
+            if key_held and on_image:
+                # Starts the stroke on first on-image move when the key went
+                # down off-image; the host captures the undo baseline on the
+                # first non-end stamp, so this stays one undo unit per hold.
+                self._dodge_burn_painting = True
+                self.dodgeBurnStroke.emit(pt, 1.0, False)
+                event.accept()
+                return
+            if key_held:
+                # Held but off-image: keep the tool live, stamp nothing.
                 event.accept()
                 return
         host = self.parentWidget()

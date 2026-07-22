@@ -2224,6 +2224,19 @@ class _AdjustCompareOriginalWorker(QRunnable):
 # (overlay scales original to match).
 _ADJUST_FAST_PREVIEW_MAX_EDGE = 640
 
+# Prototype: hold-to-paint brush control. When on, a brush hotkey (D/B/X/H) held
+# down paints while the pointer sweeps -- no click needed -- and painting stops
+# on release. The panel tool buttons stay as the persistent "brush context"
+# (cursor preview + wheel-to-resize) decoupled from the held-key paint gate.
+# Default off so the shipped click-drag flow is unchanged; enable with
+# RAWVIEWER_HOLD_TO_PAINT=1 to trial the feel.
+HOLD_TO_PAINT = os.environ.get("RAWVIEWER_HOLD_TO_PAINT", "").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
+
 
 def _make_fast_preview_base(base: Any) -> Any:
     """
@@ -8953,6 +8966,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self._dodge_burn_stroke_active = False
         self._dodge_burn_stroke_baseline = None
         self._dodge_burn_mask_at_stroke_start = None
+        # Hold-to-paint: which brush tool's hotkey is currently held (or None).
+        self._brush_key_held = None
         self._dodge_burn_stroke_dirty = None
         self._crop_preview_uncropped = False
         self._crop_working_insets = (0.0, 0.0, 0.0, 0.0)
@@ -22495,6 +22510,57 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 self._sync_dodge_burn_brush_cursor()
         self._sync_dodge_burn_mask_overlay()
 
+    def _handle_brush_key_down(self, mode: str) -> bool:
+        """Route a brush hotkey (D/B/X/H) press.
+
+        Legacy: tap toggles the tool armed/disarmed. Hold-to-paint: the held
+        key force-selects its tool (never toggles off -- release does that) and
+        opens the paint gate, so sweeping the pointer paints without a click.
+        Returns True if handled.
+        """
+        panel = getattr(self, "single_image_adjust_panel", None)
+        if panel is None or not hasattr(panel, "set_dodge_burn_mode"):
+            return False
+        if not HOLD_TO_PAINT:
+            panel.set_dodge_burn_mode(mode)
+            return True
+        # Multi-key: last key wins. A different brush key pressed mid-hold ends
+        # the current stroke before the new tool takes over; releasing back to
+        # the first key does not resume it.
+        gv = getattr(self, "gpu_view", None)
+        if getattr(self, "_brush_key_held", None) not in (None, mode):
+            if gv is not None and hasattr(gv, "end_key_paint"):
+                gv.end_key_paint()
+        self._brush_key_held = mode
+        panel.set_dodge_burn_mode(mode, toggle=False)
+        if gv is not None and hasattr(gv, "begin_key_paint"):
+            gv.begin_key_paint()
+        return True
+
+    def _handle_brush_key_up(self, mode: str) -> bool:
+        """Route a brush hotkey release: close the hold-stroke for that key."""
+        if not HOLD_TO_PAINT:
+            return False
+        if getattr(self, "_brush_key_held", None) != mode:
+            # A superseded key (multi-key last-wins) -- its stroke already ended.
+            return False
+        self._brush_key_held = None
+        gv = getattr(self, "gpu_view", None)
+        if gv is not None and hasattr(gv, "end_key_paint"):
+            gv.end_key_paint()
+        return True
+
+    def _abort_hold_to_paint(self) -> None:
+        """Focus-loss safety net: a held key's release can be lost when focus
+        moves (Cmd-Tab, a modal, Mission Control). Since release is the only
+        way to stop painting in this model, force the stroke closed."""
+        if not HOLD_TO_PAINT or not getattr(self, "_brush_key_held", None):
+            return
+        self._brush_key_held = None
+        gv = getattr(self, "gpu_view", None)
+        if gv is not None and hasattr(gv, "end_key_paint"):
+            gv.end_key_paint()
+
     def _on_brush_tool_left_image(self) -> None:
         """Disarm Dodge/Burn/Eraser/Heal when the cursor leaves the photo.
 
@@ -22505,6 +22571,11 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         over the panel/elsewhere does not disarm on the next stray move;
         only a genuine on-image -> off-image transition does.
         """
+        # Hold-to-paint keeps the tool as a persistent context (so the user can
+        # move to the panel to resize the brush and come back); leaving the
+        # image must not disarm it. Exit is via the panel button instead.
+        if HOLD_TO_PAINT:
+            return
         panel = getattr(self, "single_image_adjust_panel", None)
         if panel is not None and hasattr(panel, "disarm_dodge_burn"):
             if panel.dodge_burn_mode() is not None:
@@ -30024,25 +30095,14 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 if panel is not None:
                     panel.toggle_dodge_burn_show_mask()
                     return True
-            if key == Qt.Key.Key_D and not ctrl_or_cmd:
-                panel = getattr(self, "single_image_adjust_panel", None)
-                if panel is not None and hasattr(panel, "set_dodge_burn_mode"):
-                    panel.set_dodge_burn_mode("dodge")
-                    return True
-            if key == Qt.Key.Key_B and not ctrl_or_cmd:
-                panel = getattr(self, "single_image_adjust_panel", None)
-                if panel is not None and hasattr(panel, "set_dodge_burn_mode"):
-                    panel.set_dodge_burn_mode("burn")
-                    return True
-            if key == Qt.Key.Key_X and not ctrl_or_cmd:
-                panel = getattr(self, "single_image_adjust_panel", None)
-                if panel is not None and hasattr(panel, "set_dodge_burn_mode"):
-                    panel.set_dodge_burn_mode("erase")
-                    return True
-            if key == Qt.Key.Key_H and not ctrl_or_cmd:
-                panel = getattr(self, "single_image_adjust_panel", None)
-                if panel is not None and hasattr(panel, "set_dodge_burn_mode"):
-                    panel.set_dodge_burn_mode("heal")
+            brush_mode = {
+                Qt.Key.Key_D: "dodge",
+                Qt.Key.Key_B: "burn",
+                Qt.Key.Key_X: "erase",
+                Qt.Key.Key_H: "heal",
+            }.get(key)
+            if brush_mode is not None and not ctrl_or_cmd:
+                if self._handle_brush_key_down(brush_mode):
                     return True
 
         if key == Qt.Key.Key_Escape:
@@ -32950,6 +33010,21 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 if app is not None and app.activeWindow() is self:
                     if self._handle_app_shortcut(event):
                         return True
+
+        if HOLD_TO_PAINT and event.type() == QEvent.Type.KeyRelease:
+            if not event.isAutoRepeat() and not self._shortcut_blocked_by_text_input():
+                brush_mode = {
+                    Qt.Key.Key_D: "dodge",
+                    Qt.Key.Key_B: "burn",
+                    Qt.Key.Key_X: "erase",
+                    Qt.Key.Key_H: "heal",
+                }.get(event.key())
+                if brush_mode is not None and self._handle_brush_key_up(brush_mode):
+                    return True
+
+        # Losing window focus can swallow a brush key's release; close the hold.
+        if HOLD_TO_PAINT and event.type() == QEvent.Type.WindowDeactivate:
+            self._abort_hold_to_paint()
 
         # Film strip hot zone: pointer events hit child widgets, not the overlay itself.
         if event.type() in (

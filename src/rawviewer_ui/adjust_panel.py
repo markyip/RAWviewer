@@ -2942,8 +2942,13 @@ class ImageAdjustPanelWidget(QWidget):
             return "heal"
         return None
 
-    def set_dodge_burn_mode(self, mode: str | None) -> None:
-        """Arm Dodge/Burn/Eraser/Heal from a shortcut (D/B/X/H) or disarm."""
+    def set_dodge_burn_mode(self, mode: str | None, toggle: bool = True) -> None:
+        """Arm Dodge/Burn/Eraser/Heal from a shortcut (D/B/X/H) or disarm.
+
+        ``toggle=False`` force-selects ``mode`` without the "same key again
+        turns it off" behaviour -- used by hold-to-paint, where a held key must
+        always arm its own tool (releasing, not re-pressing, is what stops it).
+        """
         want = (mode or "").strip().lower()
         if want in ("eraser", "erase"):
             want = "erase"
@@ -2965,8 +2970,8 @@ class ImageAdjustPanelWidget(QWidget):
             and cur_erase == erase_on
             and cur_heal == heal_on
         ):
-            # Same mode again → toggle off.
-            if want:
+            # Same mode again → toggle off (unless the caller force-selects).
+            if want and toggle:
                 dodge_on = burn_on = erase_on = heal_on = False
         self._block_emit = True
         try:
