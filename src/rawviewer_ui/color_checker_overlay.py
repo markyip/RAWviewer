@@ -4,18 +4,21 @@ from __future__ import annotations
 
 from typing import List, Tuple, Optional
 
-from PyQt6.QtCore import Qt, Signal, QPointF, QRectF
+from PyQt6.QtCore import Qt, pyqtSignal, QPointF, QRectF
 from PyQt6.QtGui import QColor, QCursor, QFont, QPainter, QPen, QBrush, QPolygonF
 from PyQt6.QtWidgets import QWidget
 
-import rawviewer_ui.theme as theme
+try:
+    import rawviewer_ui.theme as theme
+except ModuleNotFoundError:
+    import theme as theme
 
 
 class ColorCheckerOverlay(QWidget):
     """Overlay widget for selecting the 4 corners of a 24-patch ColorChecker chart."""
 
-    corners_changed = Signal(list)  # List[Tuple[float, float]] in normalized [0, 1] coordinates
-    calibration_confirmed = Signal(list)  # List[Tuple[float, float]] in pixel coordinates
+    corners_changed = pyqtSignal(list)  # List[Tuple[float, float]] in normalized [0, 1] coordinates
+    calibration_confirmed = pyqtSignal(list)  # List[Tuple[float, float]] in pixel coordinates
 
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)

@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from typing import List, Dict, Any, Optional
 
-from PyQt6.QtCore import Qt, Signal
+from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QCursor, QFont, QIcon, QPixmap
 from PyQt6.QtWidgets import (
     QCheckBox,
@@ -21,7 +21,10 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-import rawviewer_ui.theme as theme
+try:
+    import rawviewer_ui.theme as theme
+except ModuleNotFoundError:
+    import theme as theme
 
 
 class HDRPanoramaDialog(QDialog):

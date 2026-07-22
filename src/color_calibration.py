@@ -28,7 +28,7 @@ COLORCHECKER_24_REF = np.array([
 
 def get_camera_profile_path() -> str:
     """Path to stored camera model profiles JSON file in user app directory."""
-    app_dir = os.path.join(os.path.expanduser("~"), ".gemini", "antigravity-ide")
+    app_dir = os.path.join(os.path.expanduser("~"), ".rawviewer")
     os.makedirs(app_dir, exist_ok=True)
     return os.path.join(app_dir, "camera_profiles.json")
 
@@ -137,6 +137,89 @@ def get_camera_profile(
         return None
 
 
+def delete_camera_profile(
+    make: str,
+    model: str,
+    iso: Optional[int] = None,
+) -> bool:
+    """Remove a stored profile, reverting this camera to the LibRaw baseline.
+
+    Deletes the exact ISO-specific key when ``iso`` is given, otherwise the
+    general key for the model. Returns True if an entry was actually removed.
+    Without this there is no way out of a bad calibration short of hand-editing
+    camera_profiles.json, while ``apply_camera_profile_defaults`` keeps applying
+    it to every future shot from the same body.
+    """
+    key = normalize_camera_key(make, model, iso=iso)
+    path = get_camera_profile_path()
+    if not os.path.isfile(path):
+        return False
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            registry = json.load(f)
+    except Exception as exc:
+        logger.warning("Could not read camera profile registry for delete: %s", exc)
+        return False
+
+    if key not in registry:
+        return False
+    registry.pop(key, None)
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(registry, f, indent=2)
+        logger.info("Deleted camera calibration profile key: %s", key)
+        return True
+    except Exception as exc:
+        logger.error("Failed to delete camera profile: %s", exc)
+        return False
+
+
+def describe_camera_profile(
+    make: str,
+    model: str,
+    iso: Optional[int] = None,
+) -> Optional[str]:
+    """Short human label for the profile that would apply, or None.
+
+    Used by the Adjust panel so an auto-applied profile is visible rather than
+    a silent colour shift the user cannot attribute.
+    """
+    prof = get_camera_profile(make, model, iso=iso)
+    if not prof:
+        return None
+    name = f"{prof.get('make', make) or ''} {prof.get('model', model) or ''}".strip()
+    prof_iso = prof.get("iso")
+    if prof_iso:
+        return f"{name or 'Camera'} (ISO {prof_iso})"
+    return name or "Camera"
+
+
+def has_factory_color_profile(file_path: str) -> Optional[bool]:
+    """Whether LibRaw has a real colour matrix for this file's camera.
+
+    True  -> LibRaw ships a camera-specific matrix; calibrating overrides
+             colour science that is already working.
+    False -> no matrix (all zeros); the file decodes but gets generic colour,
+             which is the case manual calibration genuinely helps.
+    None  -> could not be determined (unreadable / non-RAW); caller should not
+             draw a conclusion either way.
+
+    Note ``color_matrix`` is unset (all zeros) even on fully supported bodies --
+    only ``rgb_xyz_matrix`` is a reliable signal.
+    """
+    try:
+        import rawpy
+
+        with rawpy.imread(file_path) as raw:
+            mat = np.asarray(raw.rgb_xyz_matrix, dtype=np.float64)
+    except Exception as exc:
+        logger.debug("Could not read rgb_xyz_matrix for %s: %s", file_path, exc)
+        return None
+    if mat.size == 0:
+        return None
+    return bool(np.any(np.abs(mat) > 1e-6))
+
+
 def extract_patch_colors(
     image: np.ndarray,
     corners: List[Tuple[float, float]],
@@ -219,19 +302,66 @@ def validate_and_detect_color_checker(
     return True, "", sampled
 
 
+def _srgb_encode_0_255(rgb_0_255: np.ndarray) -> np.ndarray:
+    """Scene-linear 0-255 -> sRGB display-encoded 0-255 (sRGB OETF)."""
+    lin = np.clip(np.asarray(rgb_0_255, dtype=np.float32) / 255.0, 0.0, 1.0)
+    enc = np.where(lin <= 0.0031308, lin * 12.92, 1.055 * np.power(lin, 1.0 / 2.4) - 0.055)
+    return (enc * 255.0).astype(np.float32)
+
+
+def _srgb_decode_0_255(rgb_0_255: np.ndarray) -> np.ndarray:
+    """sRGB display-encoded 0-255 -> scene-linear 0-255 (inverse OETF)."""
+    enc = np.clip(np.asarray(rgb_0_255, dtype=np.float32) / 255.0, 0.0, 1.0)
+    lin = np.where(enc <= 0.04045, enc / 12.92, np.power((enc + 0.055) / 1.055, 2.4))
+    return (lin * 255.0).astype(np.float32)
+
+
+def _normalize_exposure(sampled: np.ndarray) -> np.ndarray:
+    """Scale scene-linear patches so the white patch matches the reference white.
+
+    The edit base is a scene-linear decode with no auto-brightening, so the
+    chart's white patch lands wherever the exposure happened to put it (on the
+    test CR3: 81/255 against a 243/255 reference, a 2.84x gap). Without this,
+    the same camera calibrates differently from a darker vs brighter frame of
+    the same chart, and every colour delta is dominated by exposure rather
+    than by the camera's colour response.
+    """
+    white_lin = float(np.mean(sampled[18]))
+    ref_white_lin = float(np.mean(_srgb_decode_0_255(COLORCHECKER_24_REF[18])))
+    if white_lin <= 1e-3:
+        return sampled
+    return sampled * (ref_white_lin / white_lin)
+
+
 def calibrate_camera_curves_and_hsl(
     sampled_rgb: List[Tuple[float, float, float]],
     wb_mode: str = "auto",  # "auto" (all 6 neutral patches), "white_19", "neutral_22"
 ) -> Dict[str, Any]:
-    """Calculate calibrated RGB curves, White Balance shift, and HSL deltas from 24 patches."""
+    """Calculate White Balance shift and HSL deltas from 24 scene-linear patches.
+
+    ``sampled_rgb`` is scene-linear 0-255 (see ``decode_raw_edit_base``). Each
+    output is derived in the space it is *applied* in, which is not the same
+    space for all of them:
+
+    * Temperature / Tint -> applied in the scene-linear WB stage
+      (``raw_edit_pipeline._apply_wb_tint``), so solved on linear ratios here.
+    * HSL hue/sat/lum -> applied after the tone map, in display space, so
+      solved on sRGB-encoded values against the sRGB reference chart.
+
+    Deriving HSL on linear values against sRGB references biased every band the
+    same way (measured on a neutral, correctly-exposed Canon CR3: lum +5.8 to
+    +18.4 across all 8 bands, saturation -2.2 to -9.8, for a camera that needs
+    almost no correction).
+    """
     if len(sampled_rgb) != 24:
         raise ValueError(f"Expected 24 sampled RGB patches, got {len(sampled_rgb)}")
 
     sampled = np.array(sampled_rgb, dtype=np.float32)
 
-    # 1. Neutral Gray Ramp Calibration (Patches 18-23, 0-indexed)
+    # 1. Neutral Gray Ramp Calibration (Patches 18-23, 0-indexed).
+    # Stays scene-linear: WB is a ratio between channels and is applied in the
+    # linear stage, so encoding first would skew it.
     gray_sampled = sampled[18:24]
-    gray_ref = COLORCHECKER_24_REF[18:24]
 
     # White Balance calculation from neutral patches
     if wb_mode == "white_19":
@@ -249,29 +379,12 @@ def calibrate_camera_curves_and_hsl(
     temp_shift = round((1.0 - r_ratio) * 2000.0, 1)
     tint_shift = round((1.0 - (g_val / ((float(samp_wb[0]) + float(samp_wb[2])) * 0.5 + 1e-4))) * 50.0, 1)
 
-    # Calculate RGB Curves (cubic spline control points normalized 0.0 - 1.0)
-    # Control points at x = 0.0, 0.2, 0.4, 0.6, 0.8, 1.0
-    curve_r = [[0.0, 0.0], [0.2, 0.2], [0.4, 0.4], [0.6, 0.6], [0.8, 0.8], [1.0, 1.0]]
-    curve_g = [[0.0, 0.0], [0.2, 0.2], [0.4, 0.4], [0.6, 0.6], [0.8, 0.8], [1.0, 1.0]]
-    curve_b = [[0.0, 0.0], [0.2, 0.2], [0.4, 0.4], [0.6, 0.6], [0.8, 0.8], [1.0, 1.0]]
+    # 2. HSL Color Patch Shifts (Patches 0-17).
+    # Exposure-normalise, then sRGB-encode: HSL is applied post-tone-map, so the
+    # deltas must be measured in that same display space (see docstring).
+    display = _srgb_encode_0_255(_normalize_exposure(sampled))
 
-    for i in range(6):
-        x = float(gray_sampled[5 - i, 1] / 255.0)  # Green channel as brightness reference
-        target = float(gray_ref[5 - i, 0] / 255.0)
-        
-        r_target = float(gray_ref[5 - i, 0] / 255.0)
-        g_target = float(gray_ref[5 - i, 1] / 255.0)
-        b_target = float(gray_ref[5 - i, 2] / 255.0)
-
-        curve_r[i] = [round(x, 3), round(min(1.0, max(0.0, r_target)), 3)]
-        curve_g[i] = [round(x, 3), round(min(1.0, max(0.0, g_target)), 3)]
-        curve_b[i] = [round(x, 3), round(min(1.0, max(0.0, b_target)), 3)]
-
-    # 2. HSL Color Patch Shifts (Patches 0-17)
     color_bands = ["Red", "Orange", "Yellow", "Green", "Aqua", "Blue", "Purple", "Magenta"]
-    hue_shifts = {b: 0.0 for b in color_bands}
-    sat_shifts = {b: 0.0 for b in color_bands}
-    lum_shifts = {b: 0.0 for b in color_bands}
 
     # Map color patches to HSL bands
     patch_band_map = {
@@ -280,27 +393,43 @@ def calibrate_camera_curves_and_hsl(
         12: "Blue", 13: "Green", 14: "Red", 15: "Yellow", 16: "Magenta", 17: "Aqua"
     }
 
+    # Accumulate per band, then average. Bands do not get equal patch counts on
+    # a 24-patch chart (Red/Blue/Yellow have 3 each, Magenta only 1), so summing
+    # made a band's correction scale with how often it appears on the chart.
+    acc: Dict[str, List[Tuple[float, float, float]]] = {b: [] for b in color_bands}
+
     for idx, band in patch_band_map.items():
-        s_rgb = np.uint8([[sampled[idx]]])
+        s_rgb = np.uint8([[np.clip(display[idx], 0, 255)]])
         r_rgb = np.uint8([[COLORCHECKER_24_REF[idx]]])
-        
+
         s_hsv = cv2.cvtColor(s_rgb, cv2.COLOR_RGB2HSV)[0, 0]
         r_hsv = cv2.cvtColor(r_rgb, cv2.COLOR_RGB2HSV)[0, 0]
 
+        # OpenCV 8-bit hue is 0-179 and wraps; take the shorter way round so a
+        # red patch straddling 0/180 can't produce a ~180 degree "correction".
         dh = float(r_hsv[0]) - float(s_hsv[0])
+        if dh > 90.0:
+            dh -= 180.0
+        elif dh < -90.0:
+            dh += 180.0
         ds = (float(r_hsv[1]) - float(s_hsv[1])) / 255.0 * 20.0
         dl = (float(r_hsv[2]) - float(s_hsv[2])) / 255.0 * 20.0
+        acc[band].append((dh, ds, dl))
 
-        hue_shifts[band] = round(hue_shifts[band] + dh * 0.5, 1)
-        sat_shifts[band] = round(sat_shifts[band] + ds * 0.5, 1)
-        lum_shifts[band] = round(lum_shifts[band] + dl * 0.5, 1)
+    hue_shifts = {b: 0.0 for b in color_bands}
+    sat_shifts = {b: 0.0 for b in color_bands}
+    lum_shifts = {b: 0.0 for b in color_bands}
+    for band, deltas in acc.items():
+        if not deltas:
+            continue
+        arr = np.array(deltas, dtype=np.float32)
+        hue_shifts[band] = round(float(arr[:, 0].mean()) * 0.5, 1)
+        sat_shifts[band] = round(float(arr[:, 1].mean()) * 0.5, 1)
+        lum_shifts[band] = round(float(arr[:, 2].mean()) * 0.5, 1)
 
     return {
         "temperature_shift": temp_shift,
         "tint_shift": tint_shift,
-        "curve_r": curve_r,
-        "curve_g": curve_g,
-        "curve_b": curve_b,
         "hsl_hue": hue_shifts,
         "hsl_sat": sat_shifts,
         "hsl_lum": lum_shifts,

@@ -8,7 +8,7 @@ from typing import List, Tuple, Optional, Dict, Any
 
 import cv2
 import numpy as np
-from PyQt6.QtCore import Qt, QPointF, pyqtSignal
+from PyQt6.QtCore import Qt, QPointF, QRectF, pyqtSignal
 from PyQt6.QtGui import QColor, QCursor, QFont, QImage, QPainter, QPen, QBrush, QPixmap, QPolygonF
 from PyQt6.QtWidgets import (
     QComboBox,
@@ -27,13 +27,46 @@ try:
 except ModuleNotFoundError:
     import theme as theme
 from color_calibration import (
-    extract_patch_colors,
     validate_and_detect_color_checker,
     calibrate_camera_curves_and_hsl,
     save_camera_profile,
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _to_uint8_rgb(img: np.ndarray) -> np.ndarray:
+    """Normalize an edit-base buffer to 8-bit RGB.
+
+    The adjust-panel base is 16-bit (0-65535) and other callers may pass
+    float 0-1; sampling and the sRGB ColorChecker references both assume
+    0-255, so rescale rather than clip (clipping blows 16-bit data to white).
+    """
+    if img is None or img.size == 0 or img.dtype == np.uint8:
+        return img
+    if img.dtype == np.uint16:
+        return (img.astype(np.float32) / 257.0).clip(0, 255).astype(np.uint8)
+    if img.dtype in (np.float32, np.float64):
+        scale = 255.0 if float(img.max()) <= 1.0 else 1.0
+        return (img * scale).clip(0, 255).astype(np.uint8)
+    return img.clip(0, 255).astype(np.uint8)
+
+
+_SRGB_ENCODE_LUT = np.clip(
+    np.where(
+        (np.arange(256) / 255.0) <= 0.0031308,
+        (np.arange(256) / 255.0) * 12.92,
+        1.055 * np.power(np.arange(256) / 255.0, 1.0 / 2.4) - 0.055,
+    )
+    * 255.0,
+    0,
+    255,
+).astype(np.uint8)
+
+
+def _srgb_encode_uint8(img: np.ndarray) -> np.ndarray:
+    """Scene-linear uint8 -> display sRGB uint8, via LUT (display only)."""
+    return _SRGB_ENCODE_LUT[img]
 
 
 class ColorCheckerPreviewCanvas(QWidget):
@@ -62,18 +95,17 @@ class ColorCheckerPreviewCanvas(QWidget):
     def _numpy_to_pixmap(self, img: np.ndarray) -> QPixmap:
         if img is None or img.size == 0:
             return QPixmap()
-        
-        if img.dtype != np.uint8:
-            if img.dtype in (np.float32, np.float64):
-                if img.max() <= 1.0:
-                    img = (img * 255.0).clip(0, 255).astype(np.uint8)
-                else:
-                    img = img.clip(0, 255).astype(np.uint8)
-            else:
-                img = img.clip(0, 255).astype(np.uint8)
-        
-        img = np.ascontiguousarray(img)
-        self.image = img
+
+        # self.image stays scene-linear (calibrate_camera_curves_and_hsl does
+        # its own exposure-normalise + sRGB encode and expects linear input),
+        # but the *displayed* pixmap must be gamma-encoded or the chart is far
+        # too dark to align corners against -- on the Canon test frame the
+        # white patch sits at 81/255 linear, so the whole scene reads near
+        # black without this.
+        img = _to_uint8_rgb(img)
+        self.image = np.ascontiguousarray(img)
+        self.display_image = np.ascontiguousarray(_srgb_encode_uint8(img))
+        img = self.display_image
 
         h, w = img.shape[:2]
         if img.ndim == 3:
@@ -89,8 +121,15 @@ class ColorCheckerPreviewCanvas(QWidget):
         try:
             import cv2.mcc as mcc
             detector = mcc.CCheckerDetector.create()
-            img_bgr = cv2.cvtColor(self.image, cv2.COLOR_RGB2BGR) if self.image.ndim == 3 else self.image
-            success = detector.process(img_bgr, mcc.MCC24)
+            # Detect on the display-encoded copy: MCC's patch models assume a
+            # normally-rendered image, not a scene-linear one.
+            src = getattr(self, "display_image", self.image)
+            img_bgr = cv2.cvtColor(src, cv2.COLOR_RGB2BGR) if src.ndim == 3 else src
+            # process(image[, nc]) -- nc is the NUMBER OF CHARTS to look for,
+            # not a chart type. Passing mcc.MCC24 here asked for nc=0 (the
+            # enum's value), so detection could never succeed. Ask for a few
+            # candidates; only the first is used.
+            success = detector.process(img_bgr, 3)
             if success:
                 checkers = detector.getListColorChecker()
                 if checkers and len(checkers) > 0:
@@ -211,9 +250,17 @@ class ColorCalibrationDialog(QDialog):
         model: str,
         iso: Optional[int] = None,
         parent: Optional[QWidget] = None,
+        has_factory_profile: Optional[bool] = None,
     ):
         super().__init__(parent)
-        self.image = image
+        # True  -> LibRaw ships a colour matrix for this body; calibrating
+        #          overrides colour science that already works.
+        # False -> generic colour (new/unprofiled body); calibration helps most.
+        # None  -> unknown; say nothing rather than guess.
+        self.has_factory_profile = has_factory_profile
+        # Sample from the same 8-bit buffer the canvas displays, so the corner
+        # pins the user places map 1:1 onto the pixels that get averaged.
+        self.image = _to_uint8_rgb(image)
         self.make = make or "Camera"
         self.model = model or "Model"
         self.iso = iso
@@ -272,6 +319,31 @@ class ColorCalibrationDialog(QDialog):
         sub_lbl.setStyleSheet(f"color: {theme.INK_FAINT}; font-size: 11px;")
         layout.addWidget(sub_lbl)
 
+        # Advisory, not a gate: a factory-profiled body can still need
+        # calibration (mixed lighting, an aging chart), but the user should
+        # know they are overriding working colour science rather than filling
+        # a gap. Unprofiled bodies are where this feature genuinely helps.
+        if self.has_factory_profile is not None:
+            if self.has_factory_profile:
+                note = (
+                    "⚠️ LibRaw has a factory colour profile for this camera. "
+                    "Calibrating overrides it for every photo from this body "
+                    "that has no XMP sidecar — you can remove it later from the "
+                    "Adjust panel."
+                )
+                colour = theme.EMBER
+            else:
+                note = (
+                    "This camera has no factory colour profile in LibRaw, so it "
+                    "currently decodes with generic colour. Calibration should "
+                    "noticeably improve it."
+                )
+                colour = theme.INK_FAINT
+            note_lbl = QLabel(note)
+            note_lbl.setWordWrap(True)
+            note_lbl.setStyleSheet(f"color: {colour}; font-size: 11px;")
+            layout.addWidget(note_lbl)
+
         # Canvas Widget
         self.canvas = ColorCheckerPreviewCanvas(self.image, self)
         layout.addWidget(self.canvas, 1)
@@ -324,9 +396,10 @@ class ColorCalibrationDialog(QDialog):
         cancel_btn.clicked.connect(self.reject)
         ctrl_box.addWidget(cancel_btn)
 
-        apply_btn = QPushButton("Calibrate & Save Camera Profile", self)
+        # "&&" -- a single & is a Qt mnemonic and renders as "Calibrate _Save".
+        apply_btn = QPushButton("Calibrate && Save Camera Profile", self)
         apply_btn.setMinimumHeight(34)
-        apply_btn.setMinimumWidth(180)
+        apply_btn.setMinimumWidth(230)
         apply_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         apply_btn.setStyleSheet(
             f"""

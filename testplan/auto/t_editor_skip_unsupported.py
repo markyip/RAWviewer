@@ -32,6 +32,9 @@ def main() -> int:
         def set_lens_correction_available(self, *a):
             pass
 
+        def set_camera_profile_active(self, *a, **k):
+            pass
+
     class SB:
         def showMessage(self, *a, **k):
             pass
@@ -46,7 +49,12 @@ def main() -> int:
         m.status_bar = SB()
         m._nav_calls = []
         m.navigate_to_next_image = lambda: m._nav_calls.append(1)
-        for name in ("_on_adjust_edit_base_ready", "_adjust_panel_active"):
+        for name in (
+            "_on_adjust_edit_base_ready",
+            "_adjust_panel_active",
+            "_refresh_camera_profile_banner",
+            "_camera_identity_for_file",
+        ):
             setattr(m, name, getattr(mainmod.RAWImageViewer, name).__get__(m))
         return m
 

@@ -8868,6 +8868,9 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             self.single_image_adjust_panel.lens_correction_toggled.connect(
                 self._on_adjust_lens_correction_toggled
             )
+            self.single_image_adjust_panel.camera_profile_removed.connect(
+                self._on_camera_profile_removed
+            )
             self.single_image_adjust_panel.dodge_burn_mode_changed.connect(
                 self._on_dodge_burn_mode_changed
             )
@@ -22206,6 +22209,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         panel = getattr(self, "single_image_adjust_panel", None)
         if panel is not None:
             panel.set_lens_correction_available(has_lens_profile, lens_profile_name)
+            self._refresh_camera_profile_banner(panel, norm)
         if base is None or not hasattr(base, "shape"):
             # Silent handling: an edit-base decode failure used to just show
             # a 5s error and leave the editor stuck on the broken file (no
@@ -25087,6 +25091,72 @@ class RAWImageViewer(SessionMixin, QMainWindow):
 
         _get_bg_thread_pool().start(StitchTask())
 
+    def _camera_identity_for_file(self, path: str) -> tuple[str, str, int | None]:
+        """(make, model, iso) from EXIF, or ("", "", None) if unreadable."""
+        try:
+            from exif_extractor import ExifExtractor
+
+            exif = ExifExtractor().extract_exif_data(path)
+        except Exception:
+            return ("", "", None)
+        make = str((exif or {}).get("Make", "") or "").strip()
+        model = str((exif or {}).get("Model", "") or "").strip()
+        iso_val = None
+        try:
+            raw_iso = (exif or {}).get("ISOSpeedRatings") or (exif or {}).get("ISO")
+            if raw_iso:
+                iso_val = int(raw_iso)
+        except Exception:
+            pass
+        return (make, model, iso_val)
+
+    def _refresh_camera_profile_banner(self, panel: Any, path: str) -> None:
+        """Show the panel banner when a saved profile is auto-applied to this file.
+
+        Mirrors apply_camera_profile_defaults' own condition: the profile is
+        only applied when the image has no XMP sidecar, so a file the user has
+        already edited must not claim a profile is in effect.
+        """
+        try:
+            from color_calibration import describe_camera_profile
+            from raw_adjustments import resolve_xmp_path
+
+            xmp = resolve_xmp_path(path)
+            if xmp and os.path.isfile(xmp):
+                panel.set_camera_profile_active("")
+                return
+            make, model, iso_val = self._camera_identity_for_file(path)
+            if not (make or model):
+                panel.set_camera_profile_active("")
+                return
+            label = describe_camera_profile(make, model, iso=iso_val)
+            panel.set_camera_profile_active(
+                label or "", make=make, model=model, iso=iso_val
+            )
+        except Exception:
+            try:
+                panel.set_camera_profile_active("")
+            except Exception:
+                pass
+
+    def _on_camera_profile_removed(self) -> None:
+        """Re-decode defaults after a saved camera profile was deleted."""
+        path = getattr(self, "current_file_path", None)
+        if not path:
+            return
+        panel = getattr(self, "single_image_adjust_panel", None)
+        if panel is None:
+            return
+        try:
+            from raw_adjustments import load_adjustments_for_file
+
+            panel.set_adjustments(load_adjustments_for_file(path))
+        except Exception:
+            pass
+        self._apply_adjust_panel_preview(full_quality=True)
+        if hasattr(self, "status_bar") and self.status_bar:
+            self.status_bar.showMessage("Camera profile removed", 3000)
+
     def _on_calibrate_camera_requested(self) -> None:
         """Launch interactive camera color calibration dialog for ColorChecker targets."""
         target_path = getattr(self, "file_path", None)
@@ -25123,7 +25193,16 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                     self.status_bar.showMessage("Failed to load image buffer for calibration.", 4000)
                 return
 
-            dlg = ColorCalibrationDialog(img, make, model, iso=iso_val, parent=self)
+            try:
+                from color_calibration import has_factory_color_profile
+
+                factory = has_factory_color_profile(target_path)
+            except Exception:
+                factory = None
+
+            dlg = ColorCalibrationDialog(
+                img, make, model, iso=iso_val, parent=self, has_factory_profile=factory
+            )
             if dlg.exec() == QDialog.DialogCode.Accepted and dlg.calibrated_profile:
                 profile = dlg.calibrated_profile
                 panel = getattr(self, "single_image_adjust_panel", None)
@@ -25136,6 +25215,10 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                         cur_tint = panel._sliders.get("Tint")
                         if cur_tint:
                             cur_tint.setValue(cur_tint.value() + int(profile["tint_shift"]))
+
+                    # Surface the just-saved profile immediately, so the banner
+                    # and its Remove button are available without a reload.
+                    self._refresh_camera_profile_banner(panel, target_path)
 
                 camera_name = f"{make} {model}".strip() or "Camera"
                 iso_label = f" (ISO {iso_val})" if iso_val else ""

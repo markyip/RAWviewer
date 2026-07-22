@@ -602,6 +602,9 @@ class ImageAdjustPanelWidget(QWidget):
     # baked in (see main.py._on_adjust_lens_correction_toggled) -- unlike other
     # toggles, this needs a full re-decode, not just a preview-pipeline rerun.
     lens_correction_toggled = pyqtSignal(bool)
+    # A saved camera calibration profile was deleted; the host re-reads the
+    # image's defaults so the preview drops the profile's colour shift.
+    camera_profile_removed = pyqtSignal()
     # "dodge" / "burn" / None (disarmed) -- see main.py._on_dodge_burn_mode_changed.
     # True while the user is interacting with a Transform slider (straighten/
     # perspective); the host shows an alignment grid overlay for the duration.
@@ -908,6 +911,35 @@ class ImageAdjustPanelWidget(QWidget):
             "• Brush Flow changes how opaque the brush preview looks"
         )
         layout.addWidget(hint)
+
+        # Camera calibration profile banner. A saved profile is applied
+        # automatically to every image from the same body that has no XMP
+        # sidecar (raw_adjustments.apply_camera_profile_defaults), so without
+        # this the user sees an unexplained colour shift and has no way back.
+        self._camera_profile_row = QWidget()
+        cp_row = QHBoxLayout(self._camera_profile_row)
+        cp_row.setContentsMargins(0, 2, 0, 2)
+        cp_row.setSpacing(6)
+        self._camera_profile_lbl = QLabel("")
+        self._camera_profile_lbl.setStyleSheet(
+            f"color: {theme.EMBER}; font-size: 10px;"
+        )
+        self._camera_profile_lbl.setWordWrap(True)
+        cp_row.addWidget(self._camera_profile_lbl, 1)
+        self._camera_profile_reset_btn = QPushButton("Remove")
+        self._camera_profile_reset_btn.setObjectName("adjust_reset_btn")
+        self._camera_profile_reset_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._camera_profile_reset_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self._camera_profile_reset_btn.setToolTip(
+            "Delete this saved camera calibration profile and revert to the "
+            "LibRaw baseline colour for this camera"
+        )
+        self._camera_profile_reset_btn.clicked.connect(
+            self._on_camera_profile_remove_clicked
+        )
+        cp_row.addWidget(self._camera_profile_reset_btn)
+        self._camera_profile_row.setVisible(False)
+        layout.addWidget(self._camera_profile_row)
 
         self._tone_curve_row = None
 
@@ -2612,6 +2644,56 @@ class ImageAdjustPanelWidget(QWidget):
         else:
             btn = getattr(self, "_lens_correction_btn", None)
             self._set_lens_correction_checked(btn is not None and btn.isChecked())
+
+    def set_camera_profile_active(
+        self, label: str = "", make: str = "", model: str = "", iso: int | None = None
+    ) -> None:
+        """Show which saved calibration profile is auto-applied to this image.
+
+        Pass an empty ``label`` to hide the banner. ``make``/``model``/``iso``
+        identify the registry entry the Remove button deletes.
+        """
+        self._camera_profile_key = (make, model, iso)
+        row = getattr(self, "_camera_profile_row", None)
+        lbl = getattr(self, "_camera_profile_lbl", None)
+        if lbl is not None:
+            lbl.setText(f"Camera profile applied — {label}" if label else "")
+        if row is not None:
+            row.setVisible(bool(label))
+
+    def _on_camera_profile_remove_clicked(self) -> None:
+        make, model, iso = getattr(self, "_camera_profile_key", ("", "", None))
+        if not (make or model):
+            return
+        from PyQt6.QtWidgets import QMessageBox
+
+        if QMessageBox.question(
+            self,
+            "Remove Camera Profile",
+            f"Remove the saved calibration profile for {make} {model}"
+            f"{f' (ISO {iso})' if iso else ''}?\n\n"
+            "Images from this camera will go back to the LibRaw baseline "
+            "colour. Edits already saved to an XMP sidecar are not affected.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        ) != QMessageBox.StandardButton.Yes:
+            return
+
+        try:
+            from color_calibration import delete_camera_profile
+
+            # Drop the ISO-specific entry first; fall back to the general one
+            # so a profile saved without an ISO is still removable from a shot
+            # that happens to carry one.
+            removed = delete_camera_profile(make, model, iso=iso)
+            if not removed and iso is not None:
+                removed = delete_camera_profile(make, model, iso=None)
+        except Exception:
+            removed = False
+
+        if removed:
+            self.set_camera_profile_active("")
+            self.camera_profile_removed.emit()
 
     def _on_lens_correction_toggled(self, checked: bool) -> None:
         if self._block_emit:

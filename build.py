@@ -362,7 +362,8 @@ def install_dependencies(windows_accel: str = "cuda", *, profile: str = "full"):
         # every profile (lite and full) and every platform, or Adjust panel
         # controls crash on first use once packaged. See
         # docs/EDIT_PIPELINE.md "Installer size".
-        'opencv-python-headless',
+        # contrib build: cv2.mcc powers ColorChecker Auto-Detect (see pixi.toml).
+        'opencv-contrib-python-headless',
         'tifffile',
         'lensfunpy',
     ]
