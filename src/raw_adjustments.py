@@ -873,6 +873,29 @@ def load_adjustments_for_file(image_path: str) -> Dict[str, float]:
         adj.update(parsed)
     if not has_xmp_temp:
         adj["Temperature"] = as_shot
+    if not (xmp_path and os.path.isfile(xmp_path)):
+        try:
+            from color_calibration import get_camera_profile
+            from exif_extractor import ExifExtractor
+            exif = ExifExtractor().extract_exif_data(image_path)
+            make = str((exif or {}).get("Make", "") or "").strip()
+            model = str((exif or {}).get("Model", "") or "").strip()
+            if make or model:
+                prof = get_camera_profile(make, model)
+                if prof:
+                    if "temperature_shift" in prof:
+                        adj["Temperature"] = float(adj.get("Temperature", as_shot)) + float(prof["temperature_shift"])
+                    if "tint_shift" in prof:
+                        adj["Tint"] = float(adj.get("Tint", 0.0)) + float(prof["tint_shift"])
+                    for band in ["Red", "Orange", "Yellow", "Green", "Aqua", "Blue", "Purple", "Magenta"]:
+                        if "hsl_hue" in prof and band in prof["hsl_hue"]:
+                            adj[f"Hue{band}"] = float(prof["hsl_hue"][band])
+                        if "hsl_sat" in prof and band in prof["hsl_sat"]:
+                            adj[f"Sat{band}"] = float(prof["hsl_sat"][band])
+                        if "hsl_lum" in prof and band in prof["hsl_lum"]:
+                            adj[f"Lum{band}"] = float(prof["hsl_lum"][band])
+        except Exception:
+            pass
     return adj
 
 

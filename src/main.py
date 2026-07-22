@@ -8910,6 +8910,9 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             self.single_image_adjust_panel.reset_requested.connect(
                 self._on_adjust_panel_reset
             )
+            self.single_image_adjust_panel.calibrate_requested.connect(
+                self._on_calibrate_camera_requested
+            )
             self._adjust_edit_base_signals = _AdjustEditBaseSignals()
             self._adjust_edit_base_signals.finished.connect(self._on_adjust_edit_base_ready)
             self._adjust_mask_load_signals = _AdjustMaskLoadSignals()
@@ -25083,6 +25086,64 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                     )
 
         _get_bg_thread_pool().start(StitchTask())
+
+    def _on_calibrate_camera_requested(self) -> None:
+        """Handle camera color calibration from ColorChecker target."""
+        target_path = getattr(self, "file_path", None)
+        if not target_path or not os.path.isfile(target_path):
+            if hasattr(self, "status_bar") and self.status_bar:
+                self.status_bar.showMessage("Please open an image containing a ColorChecker target first.", 4000)
+            return
+
+        try:
+            from exif_extractor import ExifExtractor
+            from color_calibration import extract_patch_colors, calibrate_camera_curves_and_hsl, save_camera_profile
+            from unified_image_processor import UnifiedImageProcessor
+
+            exif = ExifExtractor().extract_exif_data(target_path)
+            make = str((exif or {}).get("Make", "") or "").strip()
+            model = str((exif or {}).get("Model", "") or "").strip()
+
+            proc = UnifiedImageProcessor()
+            img = proc.decode_raw_edit_base(target_path, use_full_resolution=False)
+            if img is None:
+                if hasattr(self, "status_bar") and self.status_bar:
+                    self.status_bar.showMessage("Failed to load image buffer for calibration.", 4000)
+                return
+
+            h, w = img.shape[:2]
+            corners = [(w * 0.2, h * 0.3), (w * 0.8, h * 0.3), (w * 0.8, h * 0.7), (w * 0.2, h * 0.7)]
+            sampled = extract_patch_colors(img, corners)
+
+            if not sampled or len(sampled) != 24:
+                if hasattr(self, "status_bar") and self.status_bar:
+                    self.status_bar.showMessage("Could not sample ColorChecker patches.", 4000)
+                return
+
+            profile = calibrate_camera_curves_and_hsl(sampled)
+            save_camera_profile(make, model, profile)
+
+            panel = getattr(self, "single_image_adjust_panel", None)
+            if panel is not None:
+                if "temperature_shift" in profile:
+                    cur_temp = panel._sliders.get("Temperature")
+                    if cur_temp:
+                        cur_temp.setValue(cur_temp.value() + int(profile["temperature_shift"]))
+
+            from PyQt6.QtWidgets import QMessageBox
+            camera_name = f"{make} {model}".strip() or "Camera"
+            QMessageBox.information(
+                self,
+                "Camera Color Calibration Complete",
+                f"Successfully calibrated and saved color profile for {camera_name}!\n\n"
+                f"All future photos from this camera model will automatically receive this calibrated baseline color science without needing manual XMP or 3D LUT exports.",
+            )
+            if hasattr(self, "status_bar") and self.status_bar:
+                self.status_bar.showMessage(f"Calibrated profile saved for {camera_name}", 4000)
+
+        except Exception as exc:
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.warning(self, "Calibration Error", f"Failed to calibrate camera profile: {exc}")
 
     def _valid_open_target_paths(self, paths: List[str]) -> List[str]:
         raw_in = list(paths)

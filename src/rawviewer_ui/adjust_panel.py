@@ -628,6 +628,7 @@ class ImageAdjustPanelWidget(QWidget):
     crop_apply_requested = pyqtSignal()
     crop_cancel_requested = pyqtSignal()
     crop_reset_requested = pyqtSignal()
+    calibrate_requested = pyqtSignal()
 
     def __init__(self, parent=None, histogram_widget=None):
         super().__init__(parent)
@@ -1491,6 +1492,32 @@ class ImageAdjustPanelWidget(QWidget):
         self.sect_local.add_widget(db_container)
 
         self._build_looks_section(self.sect_lut)
+
+        self._calibrate_btn = QPushButton("🎯 Calibrate Camera from Color Checker...")
+        self._calibrate_btn.setObjectName("adjust_calibrate_btn")
+        self._calibrate_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._calibrate_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self._calibrate_btn.setMinimumHeight(34)
+        self._calibrate_btn.setStyleSheet(
+            f"""
+            QPushButton {{
+                background-color: {theme.SURFACE};
+                border: 1px solid {theme.LINE};
+                border-radius: 6px;
+                color: {theme.INK};
+                font-size: 11px;
+                font-weight: 500;
+                padding: 4px 8px;
+            }}
+            QPushButton:hover {{
+                background-color: {theme.EMBER_DIM};
+                color: {theme.INK};
+                border-color: {theme.EMBER};
+            }}
+            """
+        )
+        self._calibrate_btn.clicked.connect(self.calibrate_requested.emit)
+        self.sect_color.add_widget(self._calibrate_btn)
 
         export_btn = QPushButton("Export")
         export_btn.setObjectName("adjust_export_btn")
