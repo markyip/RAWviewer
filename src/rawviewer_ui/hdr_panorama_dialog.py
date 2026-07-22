@@ -9,27 +9,23 @@ from PyQt6.QtCore import Qt, Signal
 from PyQt6.QtGui import QColor, QCursor, QFont, QIcon, QPixmap
 from PyQt6.QtWidgets import (
     QCheckBox,
-    QComboBox,
     QDialog,
-    QFrame,
     QGroupBox,
     QHBoxLayout,
     QLabel,
     QListWidget,
     QListWidgetItem,
     QPushButton,
-    QScrollArea,
     QSlider,
     QVBoxLayout,
     QWidget,
 )
 
 import rawviewer_ui.theme as theme
-from raw_stitching import is_perfect_square_grid
 
 
 class HDRPanoramaDialog(QDialog):
-    """Dialog for configuring HDR weights, Panorama layout (1D vs 2D Grid), and image selection."""
+    """Dialog for configuring HDR weights, Panorama auto-crop, and image selection."""
 
     def __init__(
         self,
@@ -48,7 +44,7 @@ class HDRPanoramaDialog(QDialog):
             "hdr_panorama": "Panorama HDR Merge",
         }
         self.setWindowTitle(title_map.get(self.mode, "Stitch & Merge"))
-        self.setMinimumSize(560, 520)
+        self.setMinimumSize(540, 480)
         self.setStyleSheet(
             f"""
             QDialog {{
@@ -91,14 +87,6 @@ class HDRPanoramaDialog(QDialog):
                 margin: -5px 0;
                 border-radius: 7px;
             }}
-            QComboBox {{
-                background-color: {theme.SURFACE};
-                color: {theme.INK};
-                border: 1px solid {theme.LINE};
-                border-radius: 4px;
-                padding: 4px 8px;
-                font-size: 12px;
-            }}
             """
         )
 
@@ -115,29 +103,9 @@ class HDRPanoramaDialog(QDialog):
         header_lbl.setStyleSheet(f"color: {theme.INK};")
         layout.addWidget(header_lbl)
 
-        # 1. Layout Mode Selection (1D Row vs 2D Grid)
         n = len(self.image_paths)
-        is_sq, r, c = is_perfect_square_grid(n)
 
-        if self.mode in ("panorama", "hdr_panorama"):
-            layout_box = QGroupBox("Panorama Layout", self)
-            layout_box_layout = QHBoxLayout(layout_box)
-
-            layout_box_layout.addWidget(QLabel("Stitching Topology:"))
-            self.layout_combo = QComboBox(self)
-            self.layout_combo.addItem("↔️ Single Row / Column (1D)", "1d")
-
-            if is_sq:
-                self.layout_combo.addItem(f"▦ Grid Matrix ({r}x{c} 2D)", "2d")
-                self.layout_combo.setCurrentIndex(1)
-            else:
-                self.layout_combo.addItem(f"▦ Grid Matrix (Disabled — requires 4 or 9 photos, got {n})", "1d")
-                self.layout_combo.model().item(1).setEnabled(False)
-
-            layout_box_layout.addWidget(self.layout_combo, 1)
-            layout.addWidget(layout_box)
-
-        # 2. HDR Weight Tuning Section (for HDR and HDR Panorama)
+        # 1. HDR Weight Tuning Section (for HDR and HDR Panorama)
         if self.mode in ("hdr", "hdr_panorama"):
             hdr_box = QGroupBox("HDR Exposure Weights", self)
             hdr_layout = QVBoxLayout(hdr_box)
@@ -187,7 +155,7 @@ class HDRPanoramaDialog(QDialog):
 
             layout.addWidget(hdr_box)
 
-        # 3. Selected Images List
+        # 2. Selected Images List
         img_box = QGroupBox(f"Selected Photos ({n})", self)
         img_layout = QVBoxLayout(img_box)
 
@@ -214,13 +182,21 @@ class HDRPanoramaDialog(QDialog):
         img_layout.addWidget(self.img_list)
         layout.addWidget(img_box, 1)
 
-        # 4. Alignment & Anti-Ghosting Options
+        # 3. Stitching Options
+        opt_box = QVBoxLayout()
+        self.crop_cb = QCheckBox("Auto-crop warped black borders (Maintain rectangular frame)", self)
+        self.crop_cb.setChecked(True)
+        self.crop_cb.setStyleSheet(f"color: {theme.INK}; font-size: 12px;")
+        opt_box.addWidget(self.crop_cb)
+
         self.align_cb = QCheckBox("Auto-align handheld exposures (MTB)", self)
         self.align_cb.setChecked(True)
         self.align_cb.setStyleSheet(f"color: {theme.INK}; font-size: 12px;")
-        layout.addWidget(self.align_cb)
+        opt_box.addWidget(self.align_cb)
 
-        # 5. Dialog Buttons
+        layout.addLayout(opt_box)
+
+        # 4. Dialog Buttons
         btn_row = QHBoxLayout()
         btn_row.addStretch()
 
@@ -265,11 +241,9 @@ class HDRPanoramaDialog(QDialog):
 
         layout.addLayout(btn_row)
 
-    def get_layout_mode(self) -> str:
-        """Returns '1d' or '2d'."""
-        if hasattr(self, "layout_combo"):
-            return str(self.layout_combo.currentData() or "1d")
-        return "1d"
+    def should_auto_crop(self) -> bool:
+        """Returns True if auto-cropping warped borders is enabled."""
+        return self.crop_cb.isChecked()
 
     def get_hdr_weights(self) -> Dict[str, float]:
         """Returns dict of highlight, shadow, midtone weight multipliers."""

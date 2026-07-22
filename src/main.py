@@ -24964,16 +24964,6 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             )
             stitch_menu.addAction(hdr_act)
 
-            grid_act = QAction("▦ Grid Panorama (2x2 / 3x3)...", self)
-            if n in (4, 9):
-                grid_act.triggered.connect(
-                    lambda _checked=False, ps=list(paths): self._open_hdr_panorama_dialog("panorama_2d", ps)
-                )
-            else:
-                grid_act.setEnabled(False)
-                grid_act.setToolTip("Grid Panorama requires a perfect square count (4 or 9 photos).")
-            stitch_menu.addAction(grid_act)
-
             hdr_pano_act = QAction("🌅 Panorama HDR Merge...", self)
             hdr_pano_act.triggered.connect(
                 lambda _checked=False, ps=list(paths): self._open_hdr_panorama_dialog("hdr_panorama", ps)
@@ -25000,13 +24990,13 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 self.status_bar.showMessage("Stitching requires at least 2 active images.", 4000)
             return
 
-        layout_mode = dlg.get_layout_mode()
+        auto_crop = dlg.should_auto_crop()
         weights = dlg.get_hdr_weights()
 
-        self._start_hdr_panorama_worker(mode, active_paths, layout_mode, weights)
+        self._start_hdr_panorama_worker(mode, active_paths, auto_crop, weights)
 
     def _start_hdr_panorama_worker(
-        self, mode: str, paths: List[str], layout_mode: str, weights: dict
+        self, mode: str, paths: List[str], auto_crop: bool, weights: dict
     ) -> None:
         """Run stitching in a background thread."""
         if hasattr(self, "status_bar") and self.status_bar:
@@ -25037,10 +25027,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 if hasattr(self, "status_bar") and self.status_bar:
                     self.status_bar.showMessage(f"{msg} ({pct}%)", 0)
 
-            clean_mode = "panorama" if mode == "panorama_2d" else mode
-            eff_layout = "2d" if mode == "panorama_2d" else layout_mode
-
-            if clean_mode == "hdr":
+            if mode == "hdr":
                 aligned, _ = align_hdr_images(images)
                 res_img = merge_hdr_exposure_fusion(
                     aligned,
@@ -25049,17 +25036,17 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                     midtone_weight=weights.get("midtone", 1.0),
                 )
                 res = StitchResult(success=True, image=res_img)
-            elif clean_mode == "panorama":
-                res = stitch_panorama(images, paths=valid_paths, layout_mode=eff_layout, progress_callback=update_progress)
+            elif mode == "panorama":
+                res = stitch_panorama(images, paths=valid_paths, auto_crop=auto_crop, progress_callback=update_progress)
             else:
-                res = merge_hdr_panorama(images, paths=valid_paths, layout_mode=eff_layout, weights=weights, progress_callback=update_progress)
+                res = merge_hdr_panorama(images, paths=valid_paths, weights=weights, auto_crop=auto_crop, progress_callback=update_progress)
 
             if not res.success or res.image is None:
                 return False, res.error_message or "Stitching failed", res.rejected_paths
 
             import cv2, time
             first_dir = os.path.dirname(valid_paths[0])
-            prefix = "HDR" if clean_mode == "hdr" else ("Pano_HDR" if clean_mode == "hdr_panorama" else "Panorama")
+            prefix = "HDR" if mode == "hdr" else ("Pano_HDR" if mode == "hdr_panorama" else "Panorama")
             timestamp = time.strftime("%Y%m%d_%H%M%S")
             out_name = f"{prefix}_{timestamp}.tif"
             out_path = os.path.join(first_dir, out_name)

@@ -1,4 +1,4 @@
-"""HDR, Panorama (1D Row & 2D Grid), and HDR Panorama stitching engine for RAWviewer."""
+"""HDR and Panorama stitching engine for RAWviewer."""
 
 from __future__ import annotations
 
@@ -13,18 +13,6 @@ import cv2
 import numpy as np
 
 logger = logging.getLogger(__name__)
-
-
-def is_perfect_square_grid(n: int) -> tuple[bool, int, int]:
-    """Check if n is a valid grid count (capped at 9 max for 2D Grid Panorama: N in {4, 9}).
-    
-    Returns (is_valid, rows, cols).
-    """
-    if n == 4:
-        return True, 2, 2
-    if n == 9:
-        return True, 3, 3
-    return False, 0, 0
 
 
 @dataclass
@@ -57,6 +45,39 @@ def align_hdr_images(images: List[np.ndarray]) -> Tuple[List[np.ndarray], bool]:
     except Exception as exc:
         logger.warning("MTB HDR alignment failed: %s", exc)
         return images, False
+
+
+def crop_panorama_borders(img: np.ndarray) -> np.ndarray:
+    """Crop out black/transparent border regions from a warped panorama to leave a clean rectangular frame."""
+    if img is None or img.size == 0:
+        return img
+    try:
+        if img.ndim == 3:
+            gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY if img.shape[2] == 3 else cv2.COLOR_BGR2GRAY)
+        else:
+            gray = img
+        _, thresh = cv2.threshold(gray, 1, 255, cv2.THRESH_BINARY)
+        contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not contours:
+            return img
+        x, y, w, h = cv2.boundingRect(contours[0])
+        cropped = img[y:y+h, x:x+w]
+        
+        # Inner bounding refinement for jagged warping edges
+        sub_gray = gray[y:y+h, x:x+w]
+        row_min = np.min(sub_gray, axis=1)
+        col_min = np.min(sub_gray, axis=0)
+        valid_rows = np.where(row_min > 0)[0]
+        valid_cols = np.where(col_min > 0)[0]
+        if len(valid_rows) > 0 and len(valid_cols) > 0:
+            r_start, r_end = valid_rows[0], valid_rows[-1] + 1
+            c_start, c_end = valid_cols[0], valid_cols[-1] + 1
+            if (r_end - r_start) > h * 0.5 and (c_end - c_start) > w * 0.5:
+                cropped = cropped[r_start:r_end, c_start:c_end]
+        return cropped
+    except Exception as exc:
+        logger.warning("Auto-crop panorama borders failed: %s", exc)
+        return img
 
 
 def estimate_ev_offsets(images: List[np.ndarray]) -> List[float]:
@@ -171,10 +192,10 @@ def merge_hdr_exposure_fusion(
 def stitch_panorama(
     images: List[np.ndarray],
     paths: Optional[List[str]] = None,
-    layout_mode: str = "1d",
+    auto_crop: bool = True,
     progress_callback: Optional[Callable[[int, str], None]] = None,
 ) -> StitchResult:
-    """Stitch images into a panorama (supporting 1D single row or 2D grid layout)."""
+    """Stitch images into a linear panorama with automatic rectangular border cropping."""
     if not images or len(images) < 2:
         return StitchResult(
             success=False,
@@ -183,15 +204,6 @@ def stitch_panorama(
 
     n = len(images)
     paths = paths or [f"Image {i+1}" for i in range(n)]
-
-    if layout_mode == "2d":
-        is_square, rows, cols = is_perfect_square_grid(n)
-        if not is_square:
-            return StitchResult(
-                success=False,
-                error_message=f"2D Grid Panorama requires a perfect square image count (4 or 9). Got {n} images.",
-                rejected_paths=paths,
-            )
 
     if progress_callback:
         progress_callback(10, "Detecting features & matching keypoints…")
@@ -208,13 +220,6 @@ def stitch_panorama(
 
     try:
         stitcher = cv2.Stitcher_create(cv2.Stitcher_PANORAMA)
-        if layout_mode == "2d":
-            try:
-                import cv2.detail as detail
-                seam_finder = detail.GraphCutSeamFinder(detail.GraphCutSeamFinder_COST_COLOR)
-                stitcher.setSeamFinder(seam_finder)
-            except Exception:
-                pass
 
         if progress_callback:
             progress_callback(40, "Estimating camera poses & homography…")
@@ -222,8 +227,12 @@ def stitch_panorama(
         status, stitched = stitcher.stitch(prep_imgs)
 
         if status == cv2.Stitcher_OK and stitched is not None and stitched.size > 0:
+            if auto_crop:
+                if progress_callback:
+                    progress_callback(85, "Auto-cropping warped black borders…")
+                stitched = crop_panorama_borders(stitched)
             if progress_callback:
-                progress_callback(90, "Finalizing panorama blend…")
+                progress_callback(95, "Finalizing panorama blend…")
             return StitchResult(
                 success=True,
                 image=stitched,
@@ -255,8 +264,8 @@ def stitch_panorama(
 def merge_hdr_panorama(
     images: List[np.ndarray],
     paths: List[str],
-    layout_mode: str = "1d",
     weights: Optional[Dict[str, float]] = None,
+    auto_crop: bool = True,
     progress_callback: Optional[Callable[[int, str], None]] = None,
 ) -> StitchResult:
     """Combined Panorama HDR processing: fuses bracketed exposures then stitches panels."""
@@ -275,10 +284,7 @@ def merge_hdr_panorama(
         progress_callback(10, "Aligning HDR exposure brackets…")
 
     n = len(images)
-    if layout_mode == "2d" and n in (8, 18, 27):
-        group_size = n // 4 if n == 8 else n // 9
-    else:
-        group_size = 2 if n % 2 == 0 else 3
+    group_size = 2 if n % 2 == 0 else 3
 
     panels = []
     panel_paths = []
@@ -305,6 +311,6 @@ def merge_hdr_panorama(
     return stitch_panorama(
         panels,
         paths=panel_paths,
-        layout_mode=layout_mode,
+        auto_crop=auto_crop,
         progress_callback=progress_callback,
     )
