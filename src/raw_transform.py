@@ -31,6 +31,7 @@ TRANSFORM_KEYS = (
     "CropRight",
     "CropTop",
     "CropBottom",
+    "AnamorphicRatio",
 )
 
 # Keystone strength at slider 100: the far edge shrinks by this fraction.
@@ -41,7 +42,18 @@ def has_geometry(adj: dict | None) -> bool:
     if not adj:
         return False
     try:
-        return any(abs(float(adj.get(k, 0.0) or 0.0)) > 1e-4 for k in TRANSFORM_KEYS)
+        if any(abs(float(adj.get(k, 0.0) or 0.0)) > 1e-4 for k in (
+            "CropAngle",
+            "PerspectiveVertical",
+            "PerspectiveHorizontal",
+            "CropLeft",
+            "CropRight",
+            "CropTop",
+            "CropBottom",
+        )):
+            return True
+        ratio = float(adj.get("AnamorphicRatio", 1.0) or 1.0)
+        return abs(ratio - 1.0) > 1e-4
     except Exception:
         return False
 
@@ -181,6 +193,15 @@ def apply_geometry(
             y1 = ch - int(ch * bi)
             if x1 - x0 >= 8 and y1 - y0 >= 8:
                 out = out[y0:y1, x0:x1]
+
+        # Anamorphic lens desqueeze: stretch width by ratio (1.33x, 1.5x, 1.6x, 2.0x).
+        ratio = float(adj.get("AnamorphicRatio", 1.0) or 1.0)
+        if abs(ratio - 1.0) > 1e-4 and ratio > 0.1:
+            ch, cw = out.shape[:2]
+            new_w = max(1, int(round(cw * ratio)))
+            interp = cv2.INTER_NEAREST if preview else (cv2.INTER_AREA if ratio < 1.0 else cv2.INTER_CUBIC)
+            out = cv2.resize(out, (new_w, ch), interpolation=interp)
+
         return np.ascontiguousarray(out)
     except Exception:
         return img

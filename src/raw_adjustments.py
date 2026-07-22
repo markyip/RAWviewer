@@ -78,6 +78,8 @@ DEFAULT_ADJUSTMENTS: Dict[str, float] = {
     "CropRight": 0.0,
     "CropTop": 0.0,
     "CropBottom": 0.0,
+    # Anamorphic lens desqueeze factor (1.0 = Off, 1.33 = 1.33x, 1.5 = 1.5x, 1.6 = 1.6x, 2.0 = 2.0x).
+    "AnamorphicRatio": 1.0,
     # Dodge & burn stops-per-mask-unit (see raw_dodge_burn.py). The mask
     # itself (a base64 PNG blob, potentially large) is NOT a plain numeric
     # attribute -- it's stored as its own XMP child element, mirroring
@@ -116,6 +118,13 @@ WB_PRESETS: tuple[tuple[str, float | None], ...] = (
     ("Flash", 5500.0),
 )
 CHROMA_NR_ON_VALUE = 50.0
+ANAMORPHIC_DESQUEEZE_PRESETS: tuple[tuple[str, float], ...] = (
+    ("Off (1.0x)", 1.0),
+    ("1.33x", 1.33),
+    ("1.5x", 1.5),
+    ("1.6x", 1.6),
+    ("2.0x", 2.0),
+)
 RECOVERY_BASELINE_KEY = "_recovery_baseline"
 # UI hints when recovery look is on (local S/H recovery ≈ these PV2012 readouts).
 RECOVERY_BASELINE_SHADOWS2012 = 40.0

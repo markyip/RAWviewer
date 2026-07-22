@@ -1803,6 +1803,32 @@ class ImageAdjustPanelWidget(QWidget):
             action_row.addWidget(btn, 1)
         self._crop_action_wrap.setVisible(False)
         layout.addWidget(self._crop_action_wrap)
+
+        # Anamorphic Desqueeze dropdown
+        from raw_adjustments import ANAMORPHIC_DESQUEEZE_PRESETS
+
+        anamorphic_row = QHBoxLayout()
+        anamorphic_row.setSpacing(6)
+        ana_lbl = QLabel("Anamorphic")
+        ana_lbl.setStyleSheet(f"color: {theme.INK}; font-size: 11px;")
+        ana_lbl.setMinimumWidth(78)
+        anamorphic_row.addWidget(ana_lbl)
+
+        self._anamorphic_combo = QComboBox()
+        self._anamorphic_combo.setObjectName("adjust_nr_combo")
+        self._anamorphic_combo.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._anamorphic_combo.setToolTip(
+            "Anamorphic lens desqueeze (1.33x, 1.5x, 1.6x, 2.0x) — stretches image width to restore natural proportions."
+        )
+        for label, val in ANAMORPHIC_DESQUEEZE_PRESETS:
+            self._anamorphic_combo.addItem(label, val)
+        self._anamorphic_combo.currentIndexChanged.connect(self._on_anamorphic_changed)
+        anamorphic_row.addWidget(self._anamorphic_combo, 1)
+
+        ana_wrap = QWidget()
+        ana_wrap.setLayout(anamorphic_row)
+        layout.addWidget(ana_wrap)
+
         sect.add_widget(wrap)
         self._crop_active = False
         self._crop_insets = (0.0, 0.0, 0.0, 0.0)
@@ -2499,6 +2525,18 @@ class ImageAdjustPanelWidget(QWidget):
                 self._db_mask_strength_slider.blockSignals(False)
                 if hasattr(self, "_db_mask_strength_value"):
                     self._db_mask_strength_value.setText(f"{stops:.2f}")
+            if hasattr(self, "_anamorphic_combo"):
+                ratio = float(merged.get("AnamorphicRatio", 1.0) or 1.0)
+                idx = 0
+                for i in range(self._anamorphic_combo.count()):
+                    if abs(float(self._anamorphic_combo.itemData(i) or 1.0) - ratio) < 1e-3:
+                        idx = i
+                        break
+                self._anamorphic_combo.blockSignals(True)
+                try:
+                    self._anamorphic_combo.setCurrentIndex(idx)
+                finally:
+                    self._anamorphic_combo.blockSignals(False)
             self._sync_wb_preset_combo(float(merged.get("Temperature", self._as_shot_temperature)))
             # Refresh "As Shot" label with the file's Kelvin when known.
             combo = getattr(self, "_wb_preset_combo", None)
@@ -2660,6 +2698,11 @@ class ImageAdjustPanelWidget(QWidget):
         out["LensCorrectionEnabled"] = (
             1.0 if lens_btn is not None and lens_btn.isChecked() else 0.0
         )
+        if hasattr(self, "_anamorphic_combo"):
+            data = self._anamorphic_combo.currentData()
+            out["AnamorphicRatio"] = float(data) if data is not None else 1.0
+        else:
+            out["AnamorphicRatio"] = 1.0
         if self._tone_curve_row is not None:
             self._channel_curve_cache[self._current_curve_channel] = (
                 self._tone_curve_row.serialized_points()
@@ -3093,6 +3136,11 @@ class ImageAdjustPanelWidget(QWidget):
         if index > 0 and hasattr(self, "_chroma_nr_amount_slider"):
             if self._chroma_nr_amount_slider.value() < 1:
                 self._chroma_nr_amount_slider.setValue(int(CHROMA_NR_ON_VALUE))
+        self._emit_preview_and_save()
+
+    def _on_anamorphic_changed(self, index: int) -> None:
+        if self._block_emit:
+            return
         self._emit_preview_and_save()
 
     def _sync_chroma_nr_amount_row_visible(self) -> None:
