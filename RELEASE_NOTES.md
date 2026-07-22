@@ -6,23 +6,24 @@
 ## 🚀 Version 3.0.2
 **Release Date: July 21, 2026**
 
-### Fixes
+### ✨ Smoother & Faster Editing
 
-- **Brush action hotfix:** Dodge, Burn, and Eraser no longer disarm themselves when moving the pointer from the Adjust panel onto the photo. The tool now stays armed from the moment you click it until the pointer has genuinely left the image after being on it — not on every incidental hover near an edge or letterbox margin.
-- **Dodge / Burn flow fine-tuning:** Introduced per-stroke baseline capping and displacement-based flow scaling, preventing accidental dark or bright hot-spots when the cursor pauses or moves slowly over a single spot.
-- **Disabled plain mouse wheel scrolling in Editor view:** Fixed an issue where mouse scrolling over the image while editing accidentally zoomed to 35% and could not zoom back out. Plain wheel events over the photo are now consumed while editing (`Ctrl + Wheel` zoom and D&B brush sizing remain functional).
-- **Pipeline-wide multi-core acceleration & $O(1)$ mask fingerprints:** Replaced multi-megabyte string hashing during slider drag ticks with $O(1)$ mask version fingerprints, and enabled row-band multithreading with 16px halo padding when Denoise, Dodge/Burn/Heal masks, or Vignette effects are active.
-- The app process now identifies itself as "RAWviewer" in Task Manager instead of the generic "Python".
-- **Painting with Mask on is no longer slow.** The mask overlay now repaints only the area under the brush instead of rebuilding the whole overlay on every stroke sample.
-- **Exposure, Temperature, and Tint respond instantly again on photos with dodge/burn or heal work.** The zero-latency slider path was silently disabled on exactly those photos, forcing every slider nudge to wait for a full multi-second re-render.
-- **Opening a photo with saved edits is roughly twice as fast.** It no longer runs two full-quality renders back to back, and shows a "Loading previous edit…" overlay until the edit is actually on screen.
-- The **Mask** button is now labelled **Mask (M)** and toggles with <kbd>M</kbd>. It stays available whenever the photo has mask work — you no longer have to arm a brush just to inspect it — and it no longer switches itself back on after you deliberately hide it.
-- Clearing dodge/burn or heal now updates the photo immediately instead of waiting for an unrelated action.
-- **Edge Assist is more accurate:** it now adapts its tolerance to image noise, stops at strong edges rather than only similar tones, and recognises colour boundaries between areas of the same brightness.
+- **Much faster slider adjustments:** Dragging sliders for Exposure, Temperature, Denoise, Vignette, and Dodge/Burn is now silky-smooth. The editing pipeline now uses multi-core CPU acceleration across all edit layers, so even heavily retouched photos respond instantly.
+- **Faster photo loading:** Opening photos with saved edits is roughly twice as fast. It shows a quick "Loading previous edit…" overlay so you know the app is working without waiting for redundant preview renders.
 
-### Known issues
+### 🖌️ Smarter Dodge & Burn Brush
 
-- **macOS 27 beta — Open File / Open Folder can hang.** On macOS 27.0 beta (build `26A5388g`), the system's native open panel can hang the app indefinitely. This is an OS-level change, not a RAWviewer regression: it reproduces in a minimal AppKit script with no Qt and no RAWviewer code, where `NSOpenPanel.alloc().init()` simply never returns for a process without a real app-bundle identity, and it is not avoidable by adjusting the app's activation policy. Nothing in RAWviewer's folder-opening code has changed since v2.5, and the failure began the day after the macOS 27.0 update. Running RAWviewer from source now detects this and uses a Finder-based picker instead. Whether the packaged app is affected on this beta is still being verified; if Open hangs, force-quit and reopen. Drag-and-drop of a folder or image onto the window is unaffected.
+- **Natural, spot-free brush strokes:** Brushing over a photo now paints a smooth, continuous layer. Pausing or slowing down your mouse mid-stroke will no longer leave accidental dark or bright blotches.
+- **Fixed brush disarming:** Dodge, Burn, and Eraser tools stay reliably active when moving your mouse between the Adjust panel and the image canvas.
+- **Faster mask overlay:** Turning on the mask overlay (<kbd>M</kbd>) now paints under your brush with zero lag, instead of re-rendering the whole photo overlay on every stroke.
+- **Smarter Edge Assist:** Edge Assist automatically adapts to image noise, follows sharp object contours, and recognizes color boundaries between regions of equal brightness.
+
+### 🎯 Controls & UI Refinements
+
+- **No accidental scroll/zoom jumps while editing:** Mouse scrolling over the photo is disabled while the Adjust panel is open, preventing accidental photo jumps or getting stuck at 35% zoom mid-edit. (`Ctrl + Scroll` to zoom and scrolling to adjust brush size remain fully active).
+- **Inspect masks anytime with <kbd>M</kbd>:** The **Mask (M)** button is now labelled **Mask (M)** and toggles with <kbd>M</kbd>. It stays available whenever a photo has dodge/burn or heal edits — you can toggle it anytime without needing to pick up a brush first.
+- **Instant mask clear updates:** Clearing dodge/burn or heal work updates the image immediately.
+- **Proper app name in Task Manager:** RAWviewer now clearly identifies itself as "RAWviewer" in your system's Task Manager / Activity Monitor instead of "Python".
 
 ### Upgrade
 
