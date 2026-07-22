@@ -24948,7 +24948,154 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 )
                 menu.addAction(copy_action)
 
+        if n >= 2:
+            menu.addSeparator()
+            stitch_menu = QMenu("🌌 Stitch & Merge", menu)
+
+            pano_act = QAction("🌄 Standard Panorama...", self)
+            pano_act.triggered.connect(
+                lambda _checked=False, ps=list(paths): self._open_hdr_panorama_dialog("panorama", ps)
+            )
+            stitch_menu.addAction(pano_act)
+
+            hdr_act = QAction("☀️ HDR Merge...", self)
+            hdr_act.triggered.connect(
+                lambda _checked=False, ps=list(paths): self._open_hdr_panorama_dialog("hdr", ps)
+            )
+            stitch_menu.addAction(hdr_act)
+
+            grid_act = QAction("▦ Grid Panorama (2x2 / 3x3)...", self)
+            if n in (4, 9):
+                grid_act.triggered.connect(
+                    lambda _checked=False, ps=list(paths): self._open_hdr_panorama_dialog("panorama_2d", ps)
+                )
+            else:
+                grid_act.setEnabled(False)
+                grid_act.setToolTip("Grid Panorama requires a perfect square count (4 or 9 photos).")
+            stitch_menu.addAction(grid_act)
+
+            hdr_pano_act = QAction("🌅 Panorama HDR Merge...", self)
+            hdr_pano_act.triggered.connect(
+                lambda _checked=False, ps=list(paths): self._open_hdr_panorama_dialog("hdr_panorama", ps)
+            )
+            stitch_menu.addAction(hdr_pano_act)
+
+            menu.addMenu(stitch_menu)
+
         self._exec_share_anchor_menu(menu)
+
+    def _open_hdr_panorama_dialog(self, mode: str, paths: List[str]) -> None:
+        """Launch the HDR / Panorama tuning dialog and process selected images."""
+        if not paths or len(paths) < 2:
+            return
+        from rawviewer_ui.hdr_panorama_dialog import HDRPanoramaDialog
+
+        dlg = HDRPanoramaDialog(paths, mode=mode, parent=self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        active_paths = dlg.get_active_image_paths()
+        if not active_paths or len(active_paths) < 2:
+            if hasattr(self, "status_bar") and self.status_bar:
+                self.status_bar.showMessage("Stitching requires at least 2 active images.", 4000)
+            return
+
+        layout_mode = dlg.get_layout_mode()
+        weights = dlg.get_hdr_weights()
+
+        self._start_hdr_panorama_worker(mode, active_paths, layout_mode, weights)
+
+    def _start_hdr_panorama_worker(
+        self, mode: str, paths: List[str], layout_mode: str, weights: dict
+    ) -> None:
+        """Run stitching in a background thread."""
+        if hasattr(self, "status_bar") and self.status_bar:
+            self.status_bar.showMessage("Preparing images for stitching…", 0)
+
+        def worker_fn():
+            from unified_image_processor import UnifiedImageProcessor
+            from raw_stitching import (
+                merge_hdr_exposure_fusion,
+                merge_hdr_panorama,
+                stitch_panorama,
+                align_hdr_images,
+                StitchResult,
+            )
+            processor = UnifiedImageProcessor()
+            images = []
+            valid_paths = []
+            for p in paths:
+                base = processor.decode_raw_edit_base(p, use_full_resolution=False)
+                if base is not None:
+                    images.append(base)
+                    valid_paths.append(p)
+
+            if len(images) < 2:
+                return False, "Failed to decode edit base for selected photos.", valid_paths
+
+            def update_progress(pct, msg):
+                if hasattr(self, "status_bar") and self.status_bar:
+                    self.status_bar.showMessage(f"{msg} ({pct}%)", 0)
+
+            clean_mode = "panorama" if mode == "panorama_2d" else mode
+            eff_layout = "2d" if mode == "panorama_2d" else layout_mode
+
+            if clean_mode == "hdr":
+                aligned, _ = align_hdr_images(images)
+                res_img = merge_hdr_exposure_fusion(
+                    aligned,
+                    highlight_weight=weights.get("highlight", 1.0),
+                    shadow_weight=weights.get("shadow", 1.0),
+                    midtone_weight=weights.get("midtone", 1.0),
+                )
+                res = StitchResult(success=True, image=res_img)
+            elif clean_mode == "panorama":
+                res = stitch_panorama(images, paths=valid_paths, layout_mode=eff_layout, progress_callback=update_progress)
+            else:
+                res = merge_hdr_panorama(images, paths=valid_paths, layout_mode=eff_layout, weights=weights, progress_callback=update_progress)
+
+            if not res.success or res.image is None:
+                return False, res.error_message or "Stitching failed", res.rejected_paths
+
+            import cv2, time
+            first_dir = os.path.dirname(valid_paths[0])
+            prefix = "HDR" if clean_mode == "hdr" else ("Pano_HDR" if clean_mode == "hdr_panorama" else "Panorama")
+            timestamp = time.strftime("%Y%m%d_%H%M%S")
+            out_name = f"{prefix}_{timestamp}.tif"
+            out_path = os.path.join(first_dir, out_name)
+
+            if res.image.dtype == np.uint8:
+                save_img = cv2.cvtColor(res.image, cv2.COLOR_RGB2BGR)
+            elif res.image.dtype == np.uint16:
+                save_img = cv2.cvtColor(res.image, cv2.COLOR_RGB2BGR)
+            else:
+                save_img = cv2.cvtColor((np.clip(res.image, 0.0, 1.0) * 65535.0).astype(np.uint16), cv2.COLOR_RGB2BGR)
+
+            cv2.imwrite(out_path, save_img)
+            return True, out_path, []
+
+        from PyQt6.QtCore import QRunnable
+        class StitchTask(QRunnable):
+            def __init__(task_self):
+                super().__init__()
+            def run(task_self):
+                success, msg, rejected = worker_fn()
+                if success:
+                    if hasattr(self, "status_bar") and self.status_bar:
+                        self.status_bar.showMessage(f"Successfully created {os.path.basename(msg)}", 4000)
+                    self._update_gallery_view()
+                    self._open_file(msg)
+                else:
+                    if hasattr(self, "status_bar") and self.status_bar:
+                        self.status_bar.showMessage(f"Stitching Error: {msg}", 6000)
+                    from PyQt6.QtWidgets import QMessageBox
+                    QMessageBox.warning(
+                        self,
+                        "Stitching / Alignment Failure",
+                        f"Stitching failed:\n{msg}\n\nPlease verify that the selected photos overlap sufficiently and have minimal camera movement.",
+                    )
+
+        _get_bg_thread_pool().start(StitchTask())
 
     def _valid_open_target_paths(self, paths: List[str]) -> List[str]:
         raw_in = list(paths)
