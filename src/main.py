@@ -25112,9 +25112,13 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             except Exception:
                 pass
 
-            proc = UnifiedImageProcessor()
-            img = proc.decode_raw_edit_base(target_path, use_full_resolution=False)
+            img = getattr(self, "_adjust_preview_base_rgb", None)
             if img is None:
+                img = self._ensure_adjust_preview_base(target_path)
+            if img is None:
+                proc = UnifiedImageProcessor()
+                img = proc.decode_raw_edit_base(target_path, use_full_resolution=False)
+            if img is None or not hasattr(img, "shape"):
                 if hasattr(self, "status_bar") and self.status_bar:
                     self.status_bar.showMessage("Failed to load image buffer for calibration.", 4000)
                 return

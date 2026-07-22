@@ -62,6 +62,19 @@ class ColorCheckerPreviewCanvas(QWidget):
     def _numpy_to_pixmap(self, img: np.ndarray) -> QPixmap:
         if img is None or img.size == 0:
             return QPixmap()
+        
+        if img.dtype != np.uint8:
+            if img.dtype in (np.float32, np.float64):
+                if img.max() <= 1.0:
+                    img = (img * 255.0).clip(0, 255).astype(np.uint8)
+                else:
+                    img = img.clip(0, 255).astype(np.uint8)
+            else:
+                img = img.clip(0, 255).astype(np.uint8)
+        
+        img = np.ascontiguousarray(img)
+        self.image = img
+
         h, w = img.shape[:2]
         if img.ndim == 3:
             bytes_per_line = 3 * w
