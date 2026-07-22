@@ -341,6 +341,7 @@ Project directions and remaining work that are **not** tied to a particular rele
 | **Manual Distortion Correction** (barrel / pincushion) | **In Progress** | Manual slider to correct optical barrel and pincushion lens distortion |
 | **HDR Merge** | **Planned / PoC** | Align exposures, de-ghost, and merge highlights/shadows via Exposure Fusion |
 | **Panorama Stitching / HDR Panorama** | **Planned / PoC** | Feature matching, homography warping, and tiled multi-band blending |
+| **Focus Stacking** | **Planned / PoC** | Alignment, high-frequency focus measurement, and multi-band pyramid fusion for extended DoF |
 
 ### 🔮 Planned Future Roadmap (Not Yet in Worktree)
 
