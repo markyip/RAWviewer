@@ -314,7 +314,9 @@ class ColorCalibrationDialog(QDialog):
         layout.addWidget(header_lbl)
 
         sub_lbl = QLabel(
-            "Drag the 4 corner handles over your 24-patch ColorChecker chart, or click Auto-Detect."
+            "Drag the 4 corner handles over your 24-patch ColorChecker chart, or click Auto-Detect.\n"
+            "The chart must be evenly lit and square-on — a shadow or falloff across the patches is "
+            "measured as camera colour error and baked into the profile."
         )
         sub_lbl.setStyleSheet(f"color: {theme.INK_FAINT}; font-size: 11px;")
         layout.addWidget(sub_lbl)
@@ -420,6 +422,16 @@ class ColorCalibrationDialog(QDialog):
 
         layout.addLayout(ctrl_box)
 
+        source_lbl = QLabel(
+            "No chart? DPReview's studio comparison scene is shot under controlled, "
+            "even studio lighting with a ColorChecker Classic in frame, and its RAW "
+            "files are downloadable per camera body — a reliable calibration source "
+            "when you don't own a chart."
+        )
+        source_lbl.setWordWrap(True)
+        source_lbl.setStyleSheet(f"color: {theme.INK_FAINT}; font-size: 10px;")
+        layout.addWidget(source_lbl)
+
         # Attempt initial auto-detection
         self.canvas.auto_detect()
 
@@ -428,7 +440,11 @@ class ColorCalibrationDialog(QDialog):
             QMessageBox.information(
                 self,
                 "Auto-Detect Chart",
-                "OpenCV could not auto-locate the ColorChecker chart. Please manually drag the 4 corner handles over the chart.",
+                "OpenCV could not auto-locate the ColorChecker chart. Please manually drag the "
+                "4 corner handles over the chart.\n\n"
+                "Auto-detection is most reliable on an evenly lit, square-on chart. If you don't "
+                "have one, DPReview's studio comparison scene includes a ColorChecker Classic "
+                "under controlled studio lighting, with downloadable RAW files per camera body.",
             )
 
     def _on_apply_calibration(self) -> None:
@@ -439,7 +455,13 @@ class ColorCalibrationDialog(QDialog):
             QMessageBox.warning(
                 self,
                 "Color Checker Target Not Detected",
-                err_msg or "No valid 24-patch ColorChecker chart was detected within the 4 corners.",
+                (err_msg or "No valid 24-patch ColorChecker chart was detected within the 4 corners.")
+                + "\n\nA usable calibration frame needs the chart evenly lit, square-on to the "
+                "camera, and free of glare — uneven lighting is indistinguishable from camera "
+                "colour error and would be baked into the profile.\n\n"
+                "If you don't have a chart, DPReview's studio comparison scene is shot under "
+                "controlled studio lighting with a ColorChecker Classic in frame, and its RAW "
+                "files can be downloaded for most camera bodies.",
             )
             return
 
