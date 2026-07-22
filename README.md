@@ -339,7 +339,8 @@ Rule of thumb: **if it can ship in Plus, it counts as feasible** even when Stand
 | Item | Status | Notes |
 |------|--------|-------|
 | **AI Denoise & Enhance on Export** (Restormer ONNX / Real-ESRGAN 2×) | **In Progress** | Tiled ONNX-powered AI denoising and 2× upscaling for Plus edition export (`src/onnx_restormer.py`) |
-| **Manual Geometry, Anamorphic Desqueeze & Perspective Transform** (barrel/pincushion, 1.33x–2.0x anamorphic, vertical/horizontal) | **In Progress** | Manual sliders for barrel/pincushion distortion, anamorphic lens desqueezing (1.33x/1.5x/1.8x/2.0x), and vertical/horizontal perspective transformation |
+| **Anamorphic Lens Desqueeze** | **In Progress** | Preset selector for fixed desqueeze ratios (1.33× / 1.5× / 1.6× / 2.0×) to restore squeezed anamorphic imagery |
+| **Manual Distortion Correction** (barrel / pincushion) | **In Progress** | Manual slider to correct optical barrel and pincushion lens distortion |
 | **HDR Merge** | **Planned / PoC** | Align exposures, de-ghost, and merge highlights/shadows via Exposure Fusion |
 | **Panorama Stitching / HDR Panorama** | **Planned / PoC** | Feature matching, homography warping, and tiled multi-band blending |
 
