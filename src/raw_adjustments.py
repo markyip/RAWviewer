@@ -880,8 +880,15 @@ def load_adjustments_for_file(image_path: str) -> Dict[str, float]:
             exif = ExifExtractor().extract_exif_data(image_path)
             make = str((exif or {}).get("Make", "") or "").strip()
             model = str((exif or {}).get("Model", "") or "").strip()
+            iso_val = None
+            try:
+                raw_iso = (exif or {}).get("ISOSpeedRatings") or (exif or {}).get("ISO")
+                if raw_iso:
+                    iso_val = int(raw_iso)
+            except Exception:
+                pass
             if make or model:
-                prof = get_camera_profile(make, model)
+                prof = get_camera_profile(make, model, iso=iso_val)
                 if prof:
                     if "temperature_shift" in prof:
                         adj["Temperature"] = float(adj.get("Temperature", as_shot)) + float(prof["temperature_shift"])

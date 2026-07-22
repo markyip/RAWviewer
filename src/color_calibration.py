@@ -33,13 +33,18 @@ def get_camera_profile_path() -> str:
     return os.path.join(app_dir, "camera_profiles.json")
 
 
-def normalize_camera_key(make: str, model: str) -> str:
-    """Generate normalized lookup key from camera Make & Model."""
-    raw = f"{make or ''}_{model or ''}".strip().lower()
+def normalize_camera_key(make: str, model: str, iso: Optional[int] = None) -> str:
+    """Generate normalized lookup key from camera Make, Model, and optional ISO level."""
+    make_clean = (make or "").strip().lower()
+    model_clean = (model or "").strip().lower()
+    raw = f"{make_clean}_{model_clean}".strip("_")
     cleaned = "".join(c if c.isalnum() else "_" for c in raw)
     while "__" in cleaned:
         cleaned = cleaned.replace("__", "_")
-    return cleaned.strip("_") or "unknown_camera"
+    base_key = cleaned.strip("_") or "unknown_camera"
+    if iso is not None and iso > 0:
+        return f"{base_key}_iso{iso}"
+    return base_key
 
 
 def _sanitize_for_json(obj: Any) -> Any:
@@ -52,9 +57,14 @@ def _sanitize_for_json(obj: Any) -> Any:
     return obj
 
 
-def save_camera_profile(make: str, model: str, profile_data: Dict[str, Any]) -> bool:
-    """Save calibrated profile data for a specific camera model."""
-    key = normalize_camera_key(make, model)
+def save_camera_profile(
+    make: str,
+    model: str,
+    profile_data: Dict[str, Any],
+    iso: Optional[int] = None,
+) -> bool:
+    """Save calibrated profile data for a specific camera model and optional ISO level."""
+    key = normalize_camera_key(make, model, iso=iso)
     path = get_camera_profile_path()
     registry = {}
     if os.path.isfile(path):
@@ -67,28 +77,61 @@ def save_camera_profile(make: str, model: str, profile_data: Dict[str, Any]) -> 
     clean_data = _sanitize_for_json(profile_data)
     clean_data["make"] = make
     clean_data["model"] = model
+    clean_data["iso"] = iso
     registry[key] = clean_data
 
     try:
         with open(path, "w", encoding="utf-8") as f:
             json.dump(registry, f, indent=2)
-        logger.info("Saved camera calibration profile for %s %s -> key: %s", make, model, key)
+        logger.info("Saved camera calibration profile for %s %s (ISO %s) -> key: %s", make, model, iso, key)
         return True
     except Exception as exc:
         logger.error("Failed to save camera profile: %s", exc)
         return False
 
 
-def get_camera_profile(make: str, model: str) -> Optional[Dict[str, Any]]:
-    """Retrieve calibrated profile data for a camera model if available."""
-    key = normalize_camera_key(make, model)
+def get_camera_profile(
+    make: str,
+    model: str,
+    iso: Optional[int] = None,
+) -> Optional[Dict[str, Any]]:
+    """Retrieve calibrated profile data.
+    
+    Order of preference:
+    1. Exact ISO match (e.g. sony_ilce_7rm4_iso400)
+    2. Closest ISO match for this camera model
+    3. General camera profile fallback (sony_ilce_7rm4)
+    """
+    base_key = normalize_camera_key(make, model, iso=None)
     path = get_camera_profile_path()
     if not os.path.isfile(path):
         return None
     try:
         with open(path, "r", encoding="utf-8") as f:
             registry = json.load(f)
-        return registry.get(key)
+
+        # 1. Exact ISO match
+        if iso is not None and iso > 0:
+            exact_key = f"{base_key}_iso{iso}"
+            if exact_key in registry:
+                return registry[exact_key]
+
+            # 2. Closest ISO match for this camera model
+            iso_keys = [k for k in registry if k.startswith(f"{base_key}_iso")]
+            if iso_keys:
+                iso_pairs = []
+                for k in iso_keys:
+                    try:
+                        k_iso = int(k.split("_iso")[-1])
+                        iso_pairs.append((abs(k_iso - iso), k))
+                    except ValueError:
+                        pass
+                if iso_pairs:
+                    iso_pairs.sort(key=lambda x: x[0])
+                    return registry[iso_pairs[0][1]]
+
+        # 3. General fallback
+        return registry.get(base_key)
     except Exception as exc:
         logger.warning("Error reading camera profile registry: %s", exc)
         return None
@@ -132,6 +175,48 @@ def extract_patch_colors(
             sampled.append((float(mean_rgb[0]), float(mean_rgb[1]), float(mean_rgb[2])))
 
     return sampled
+
+
+def validate_and_detect_color_checker(
+    image: np.ndarray,
+    corners: Optional[List[Tuple[float, float]]] = None,
+) -> Tuple[bool, str, List[Tuple[float, float, float]]]:
+    """Validate whether a valid 24-patch ColorChecker chart is present in the specified region.
+    
+    Returns (is_valid, error_message, sampled_patches).
+    """
+    if image is None or image.size == 0:
+        return False, "Invalid or empty image buffer for color calibration.", []
+
+    if not corners or len(corners) != 4:
+        return False, "Please select the 4 corners bounding the ColorChecker chart.", []
+
+    sampled = extract_patch_colors(image, corners)
+    if not sampled or len(sampled) != 24:
+        return False, "Could not sample 24 patches from the selected region.", []
+
+    # 1. Check Color & Luminance Variance across all 24 patches
+    lums = [0.2126 * p[0] + 0.7152 * p[1] + 0.0722 * p[2] for p in sampled]
+    std_lum = float(np.std(lums))
+    if std_lum < 15.0:
+        return (
+            False,
+            "No ColorChecker chart detected in the selected area (insufficient patch color variation).\n\n"
+            "Please align the 4 corner handles over a valid 24-patch ColorChecker chart.",
+            [],
+        )
+
+    # 2. Check Gray Ramp Monotonicity (Row 4, Patches 19-24)
+    gray_lums = lums[18:24]
+    if not (gray_lums[0] > gray_lums[3] > gray_lums[5]):
+        return (
+            False,
+            "Chart validation failed: Selected area neutral gray scale does not match a standard ColorChecker layout.\n\n"
+            "Please ensure the 4 corners accurately enclose the 24 patches with white on the bottom-left.",
+            [],
+        )
+
+    return True, "", sampled
 
 
 def calibrate_camera_curves_and_hsl(

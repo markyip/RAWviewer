@@ -25097,7 +25097,12 @@ class RAWImageViewer(SessionMixin, QMainWindow):
 
         try:
             from exif_extractor import ExifExtractor
-            from color_calibration import extract_patch_colors, calibrate_camera_curves_and_hsl, save_camera_profile
+            from color_calibration import (
+                extract_patch_colors,
+                validate_and_detect_color_checker,
+                calibrate_camera_curves_and_hsl,
+                save_camera_profile,
+            )
             from unified_image_processor import UnifiedImageProcessor
 
             exif = ExifExtractor().extract_exif_data(target_path)
@@ -25113,15 +25118,30 @@ class RAWImageViewer(SessionMixin, QMainWindow):
 
             h, w = img.shape[:2]
             corners = [(w * 0.2, h * 0.3), (w * 0.8, h * 0.3), (w * 0.8, h * 0.7), (w * 0.2, h * 0.7)]
-            sampled = extract_patch_colors(img, corners)
-
-            if not sampled or len(sampled) != 24:
+            
+            # Run validation & detection check
+            valid, err_msg, sampled = validate_and_detect_color_checker(img, corners)
+            if not valid or not sampled:
+                from PyQt6.QtWidgets import QMessageBox
+                QMessageBox.warning(
+                    self,
+                    "Color Checker Target Not Detected",
+                    err_msg or "No valid 24-patch ColorChecker chart was detected in the selected region.",
+                )
                 if hasattr(self, "status_bar") and self.status_bar:
-                    self.status_bar.showMessage("Could not sample ColorChecker patches.", 4000)
+                    self.status_bar.showMessage("Calibration rejected: No valid ColorChecker target found.", 4000)
                 return
 
+            iso_val = None
+            try:
+                raw_iso = (exif or {}).get("ISOSpeedRatings") or (exif or {}).get("ISO")
+                if raw_iso:
+                    iso_val = int(raw_iso)
+            except Exception:
+                pass
+
             profile = calibrate_camera_curves_and_hsl(sampled)
-            save_camera_profile(make, model, profile)
+            save_camera_profile(make, model, profile, iso=iso_val)
 
             panel = getattr(self, "single_image_adjust_panel", None)
             if panel is not None:
@@ -25132,14 +25152,15 @@ class RAWImageViewer(SessionMixin, QMainWindow):
 
             from PyQt6.QtWidgets import QMessageBox
             camera_name = f"{make} {model}".strip() or "Camera"
+            iso_label = f" (ISO {iso_val})" if iso_val else ""
             QMessageBox.information(
                 self,
                 "Camera Color Calibration Complete",
-                f"Successfully calibrated and saved color profile for {camera_name}!\n\n"
-                f"All future photos from this camera model will automatically receive this calibrated baseline color science without needing manual XMP or 3D LUT exports.",
+                f"Successfully calibrated and saved color profile for {camera_name}{iso_label}!\n\n"
+                f"All future photos from this camera model matching ISO {iso_val or 'range'} will automatically receive this calibrated baseline color science without needing manual XMP or 3D LUT exports.",
             )
             if hasattr(self, "status_bar") and self.status_bar:
-                self.status_bar.showMessage(f"Calibrated profile saved for {camera_name}", 4000)
+                self.status_bar.showMessage(f"Calibrated profile saved for {camera_name}{iso_label}", 4000)
 
         except Exception as exc:
             from PyQt6.QtWidgets import QMessageBox
