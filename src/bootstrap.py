@@ -1247,13 +1247,13 @@ class InstallerGUI(QMainWindow):
         layout.addWidget(options_label)
 
         self.radio_lite = QRadioButton(
-            "Standard — Browse & Adjust (~800 MB; no AI search)"
+            "Standard — Browse + Basic Adjustment; CPU RAW processing"
         )
         self.radio_directml = QRadioButton(
-            "Plus — DirectML (AI search + denoise; ~1.5 GB + ~700 MB models; CPU demosaic)"
+            "Plus — DirectML (AI search + denoise; CPU RAW processing)"
         )
         self.radio_cuda = QRadioButton(
-            "Plus — NVIDIA CUDA (AI search + denoise + CuPy GPU demosaic; ~1.5 GB + ~700 MB models)"
+            "Plus — NVIDIA CUDA (AI search + denoise; GPU RAW processing)"
         )
 
         # Default Standard: lean install for most users.
