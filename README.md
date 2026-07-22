@@ -334,20 +334,27 @@ Project directions and remaining work that are **not** tied to a particular rele
 
 Rule of thumb: **if it can ship in Plus, it counts as feasible** even when Standard must omit it (size / no ML).
 
+### 🛠️ In Active Development (Development Branch / Worktree)
+
+| Item | Status | Notes |
+|------|--------|-------|
+| **AI Denoise & Enhance on Export** (Restormer ONNX / Real-ESRGAN 2×) | **In Progress** | Tiled ONNX-powered AI denoising and 2× upscaling for Plus edition export (`src/onnx_restormer.py`) |
+| **Manual Geometry, Anamorphic Desqueeze & Perspective Transform** (barrel/pincushion, 1.33x–2.0x anamorphic, vertical/horizontal) | **In Progress** | Manual sliders for barrel/pincushion distortion, anamorphic lens desqueezing (1.33x/1.5x/1.8x/2.0x), and vertical/horizontal perspective transformation |
+| **HDR Merge** | **Planned / PoC** | Align exposures, de-ghost, and merge highlights/shadows via Exposure Fusion |
+| **Panorama Stitching / HDR Panorama** | **Planned / PoC** | Feature matching, homography warping, and tiled multi-band blending |
+
+### 🔮 Planned Future Roadmap (Not Yet in Worktree)
+
 | Rank | Item | Feasibility | Effort | Notes |
 |------|------|-------------|--------|-------|
 | 1 | **Cold-folder edited tile regen** (`SIDECAR_ADJUST` / edited-preview opt-in) | **High** | M | Save-from-Adjust already bakes editor-aligned thumb/grid/preview; cold folders still show embedded JPEG until next Adjust visit |
 | 2 | **General local masks** (gradient / radial / second brush beyond D&B) | **Medium–High** | L | D&B + crop already ship; extend private mask schema / UI |
-| 3 | **DNG export / round-trip** | **Medium** | L | Writer removed 2026-07; needs a real DNG path, not a stub |
-| 4 | **Object / subject ML masks** | **Medium** | L | Plus-only (model size); Standard stays brush/geometry |
-| 5 | **Windows HDR display path** | **Medium** | L | macOS EDR was removed for Fast RAW perf; Windows still SDR tone-map |
-| 6 | **Restore macOS EDR alongside Fast RAW** | **Low–Medium** | L | Previously conflicted with the fast load pipeline; needs a non-regressing design |
-| 7 | **VLM-assisted auto adjust** | **Low–Medium** | L | Product + model/API scope (e.g. local Ollama); not blocked by editor plumbing alone |
-| 8 | **Google Drive browse / edit / XMP sync** | **Medium** | L | Local cache sync (download → existing pipeline → upload XMP/export); OAuth + virtual folder session |
-| 9 | **Edit Nikon HE/HE\* NEF as RAW** | **Low** | L+ | LibRaw cannot unpack HE mosaics today → browse-only by design until a decoder exists |
-| 10 | **HDR Merge** | **High** | M | Align exposures, de-ghost, and merge highlights/shadows via Exposure Fusion |
-| 11 | **Panorama Stitching / HDR Panorama** | **Medium** | L | Feature matching, homography warping, and tiled multi-band blending |
-| 12 | **Automatic Lens Distortion Correction** (barrel / pincushion) | **High** | M | Geometry correction via Lensfun database camera/lens/focal-length profile matching |
+| 3 | **Object / subject ML masks** | **Medium** | L | Plus-only (model size); Standard stays brush/geometry |
+| 4 | **Windows HDR display path** | **Medium** | L | macOS EDR was removed for Fast RAW perf; Windows still SDR tone-map |
+| 5 | **Restore macOS EDR alongside Fast RAW** | **Low–Medium** | L | Previously conflicted with the fast load pipeline; needs a non-regressing design |
+| 6 | **VLM-assisted auto adjust** | **Low–Medium** | L | Product + model/API scope (e.g. local Ollama); not blocked by editor plumbing alone |
+| 7 | **Google Drive browse / edit / XMP sync** | **Medium** | L | Local cache sync (download → existing pipeline → upload XMP/export); OAuth + virtual folder session |
+| 8 | **Edit Nikon HE/HE\* NEF as RAW** | **Low** | L+ | LibRaw cannot unpack HE mosaics today → browse-only by design until a decoder exists |
 
 **Current limits (not aspirational):**
 - **Cold gallery tiles** for never-opened-in-Adjust edits may still show embedded JPEG (edited **badge** + save-bake cover the common path). Same root as row 1.
