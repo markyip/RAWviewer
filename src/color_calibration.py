@@ -220,7 +220,8 @@ def validate_and_detect_color_checker(
 
 
 def calibrate_camera_curves_and_hsl(
-    sampled_rgb: List[Tuple[float, float, float]]
+    sampled_rgb: List[Tuple[float, float, float]],
+    wb_mode: str = "auto",  # "auto" (all 6 neutral patches), "white_19", "neutral_22"
 ) -> Dict[str, Any]:
     """Calculate calibrated RGB curves, White Balance shift, and HSL deltas from 24 patches."""
     if len(sampled_rgb) != 24:
@@ -232,15 +233,21 @@ def calibrate_camera_curves_and_hsl(
     gray_sampled = sampled[18:24]
     gray_ref = COLORCHECKER_24_REF[18:24]
 
-    # Calculate White Balance Temperature/Tint shift from white patch #19
-    w_samp = gray_sampled[0]  # White patch
-    g_val = max(1e-3, w_samp[1])
-    r_ratio = w_samp[0] / g_val
-    b_ratio = w_samp[2] / g_val
-    
+    # White Balance calculation from neutral patches
+    if wb_mode == "white_19":
+        samp_wb = gray_sampled[0]
+    elif wb_mode == "neutral_22":
+        samp_wb = gray_sampled[3]
+    else:  # "auto": robust average across all 6 neutral gray patches
+        samp_wb = np.mean(gray_sampled, axis=0)
+
+    g_val = max(1e-3, float(samp_wb[1]))
+    r_ratio = float(samp_wb[0]) / g_val
+    b_ratio = float(samp_wb[2]) / g_val
+
     # Calculate WB Temperature shift (in Kelvin) and Tint shift
     temp_shift = round((1.0 - r_ratio) * 2000.0, 1)
-    tint_shift = round((1.0 - (g_val / ((w_samp[0] + w_samp[2]) * 0.5 + 1e-4))) * 50.0, 1)
+    tint_shift = round((1.0 - (g_val / ((float(samp_wb[0]) + float(samp_wb[2])) * 0.5 + 1e-4))) * 50.0, 1)
 
     # Calculate RGB Curves (cubic spline control points normalized 0.0 - 1.0)
     # Control points at x = 0.0, 0.2, 0.4, 0.6, 0.8, 1.0
