@@ -2243,12 +2243,14 @@ class GpuImageView(QGraphicsView):
             return
 
         # Plain wheel (no Control Modifier)
+        if not getattr(self, "_wheel_navigate_in_fit", True):
+            # Editor / Adjust panel mode: disable plain wheel scrolling over image entirely
+            event.accept()
+            return
+
         if self._fit_mode:
-            if getattr(self, "_wheel_navigate_in_fit", True):
-                # Fit-to-window: navigate images (Qt: delta > 0 = up, delta < 0 = down)
-                self.wheelNavigate.emit(-1 if delta > 0 else 1)
-            else:
-                self.zoom_by(1.25 if delta > 0 else 0.8)
+            # Fit-to-window: navigate images (Qt: delta > 0 = up, delta < 0 = down)
+            self.wheelNavigate.emit(-1 if delta > 0 else 1)
             event.accept()
             return
 

@@ -309,6 +309,8 @@ def stamp_brush(
     chroma: Optional[np.ndarray] = None,
     edge_assist: bool = True,
     luma_tol: float = 0.10,
+    stroke_baseline: Optional[np.ndarray] = None,
+    max_stroke_delta: Optional[float] = None,
 ) -> tuple[int, int, int, int]:
     """Add one soft circular stamp to ``mask`` in place.
 
@@ -318,14 +320,10 @@ def stamp_brush(
     overlapping stamps during a slow drag accumulate to the full effect,
     exactly like a real brush).
 
-    When ``luminance`` is provided and ``edge_assist`` is True, the stamp is
-    gated to the seed's connected luma+chroma+gradient region (flood-fill +
-    soft similarity, see ``_edge_assist_gate``) so paint stays on the surface
-    under the cursor instead of spilling onto a neighboring subject mid-
-    stroke. ``chroma`` (optional (H,W,2) opponent-color guide, same frame as
-    ``luminance``) extends the gate to iso-luminance color boundaries.
-    Release-time ``edge_snap_region`` still runs for a final guided-filter
-    tidy-up.
+    When ``stroke_baseline`` and ``max_stroke_delta`` are provided, the stroke
+    accumulation is soft-clamped relative to the baseline before this stroke,
+    preventing cursor hesitation or slow movement from creating accidental
+    over-darkened or over-brightened spots.
 
     Returns the touched (x0, y0, x1, y1) bounding box in mask pixel
     coordinates, clamped to the mask bounds, for incremental/edge-snap work.
@@ -352,7 +350,24 @@ def stamp_brush(
 
     delta = falloff * float(strength) * (1.0 if dodge else -1.0)
     region = mask.data[y0:y1, x0:x1]
-    np.clip(region + delta, -MASK_CLIP, MASK_CLIP, out=region)
+
+    if (
+        stroke_baseline is not None
+        and stroke_baseline.shape == mask.data.shape
+        and max_stroke_delta is not None
+        and max_stroke_delta > 0
+    ):
+        base_region = stroke_baseline[y0:y1, x0:x1]
+        cap = float(max_stroke_delta)
+        if dodge:
+            max_allowed = base_region + cap
+            region[...] = np.clip(np.minimum(region + delta, max_allowed), -MASK_CLIP, MASK_CLIP)
+        else:
+            min_allowed = base_region - cap
+            region[...] = np.clip(np.maximum(region + delta, min_allowed), -MASK_CLIP, MASK_CLIP)
+    else:
+        np.clip(region + delta, -MASK_CLIP, MASK_CLIP, out=region)
+
     mask.touch()
     return (x0, y0, x1, y1)
 

@@ -9,7 +9,9 @@
 ### Fixes
 
 - **Brush action hotfix:** Dodge, Burn, and Eraser no longer disarm themselves when moving the pointer from the Adjust panel onto the photo. The tool now stays armed from the moment you click it until the pointer has genuinely left the image after being on it — not on every incidental hover near an edge or letterbox margin.
-- Scroll-wheel photo navigation is disabled while the Adjust panel is open, so an unrelated scroll action (adjusting a slider, brush size, etc.) can no longer accidentally flip to a different photo mid-edit.
+- **Dodge / Burn flow fine-tuning:** Introduced per-stroke baseline capping and displacement-based flow scaling, preventing accidental dark or bright hot-spots when the cursor pauses or moves slowly over a single spot.
+- **Disabled plain mouse wheel scrolling in Editor view:** Fixed an issue where mouse scrolling over the image while editing accidentally zoomed to 35% and could not zoom back out. Plain wheel events over the photo are now consumed while editing (`Ctrl + Wheel` zoom and D&B brush sizing remain functional).
+- **Pipeline-wide multi-core acceleration & $O(1)$ mask fingerprints:** Replaced multi-megabyte string hashing during slider drag ticks with $O(1)$ mask version fingerprints, and enabled row-band multithreading with 16px halo padding when Denoise, Dodge/Burn/Heal masks, or Vignette effects are active.
 - The app process now identifies itself as "RAWviewer" in Task Manager instead of the generic "Python".
 - **Painting with Mask on is no longer slow.** The mask overlay now repaints only the area under the brush instead of rebuilding the whole overlay on every stroke sample.
 - **Exposure, Temperature, and Tint respond instantly again on photos with dodge/burn or heal work.** The zero-latency slider path was silently disabled on exactly those photos, forcing every slider nudge to wait for a full multi-second re-render.

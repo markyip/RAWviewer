@@ -20,6 +20,9 @@ def apply_vignette(
     img: np.ndarray,
     amount: float,
     midpoint: float = VIGNETTE_MIDPOINT_DEFAULT,
+    *,
+    y_range: tuple[int, int] | None = None,
+    total_h: int | None = None,
 ) -> np.ndarray:
     """Post-crop vignette matching Lightroom Amount / Midpoint polarity.
 
@@ -36,15 +39,17 @@ def apply_vignette(
     if abs(a) < 1e-3 or img is None or img.ndim != 3:
         return img
     h, w = img.shape[:2]
-    if h < 2 or w < 2:
+    if h < 1 or w < 2:
         return img
 
     mid = float(np.clip(midpoint, 0.0, 100.0))
+    full_h = total_h if (total_h is not None and total_h >= h) else h
+    y_start = y_range[0] if (y_range is not None and len(y_range) == 2) else 0
+    y_end = y_start + h
+
     # Radius normalized so image corners are 1.0 (edge midpoints ≈ 0.71).
-    # The previous half-axis ellipse left corners at √2, so Midpoint=100 still
-    # painted a huge band from the long edges inward.
-    yy, xx = np.ogrid[0:h, 0:w]
-    cy = (h - 1) * 0.5
+    yy, xx = np.ogrid[y_start:y_end, 0:w]
+    cy = (full_h - 1) * 0.5
     cx = (w - 1) * 0.5
     corner_r = max(np.hypot(cx, cy), 1.0)
     r = (np.hypot(xx - cx, yy - cy) / corner_r).astype(np.float32)

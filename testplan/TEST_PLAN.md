@@ -34,9 +34,7 @@ absent, so the plan runs on any machine.
 | `scripts/test/fast_raw_decode_parity_gate.py` | fast decode color parity vs rawpy (±1 8-bit LSB, half + full), split-unpack byte identity, GPU-vs-CPU color agreement, WB embedded-JPEG sanity trigger/residual on known-misparsed bodies |
 | `t_wb_sanity.py` | WB model-verdict cache: clean model measured once then skipped (0ms), misparsed model corrected per file, model-key disambiguation (matrix+dims+black+white) |
 
-Golden set: `/Volumes/Development/Manchester/DSC01089.ARW` +
-`/Volumes/Development/Development/Canon_Sample/*.CR3|NEF` (includes the
-EOS R6 Mark III misparse regression files `683A*.CR3`).
+Golden set: `samples/*.ARW` + `samples/*.CR3|NEF` (includes Canon/Sony/Nikon test assets).
 
 ### 3. Performance regression (`t_perf_baseline.py`)
 

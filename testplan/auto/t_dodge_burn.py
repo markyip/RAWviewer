@@ -81,13 +81,21 @@ def main() -> int:
         f"center={float(mask_e.data[50, 75]):.5f}",
     )
 
-    # 3. Repeated same-sign strokes accumulate (brush builds up like a real tool)
+    # 3. Repeated same-sign stamps accumulate, capped by stroke_baseline within single stroke
     mask_acc = DodgeBurnMask.empty(100, 150)
     stamp_brush(mask_acc, 75, 50, 20, 0.1, dodge=True)
     v1 = float(mask_acc.data[50, 75])
     stamp_brush(mask_acc, 75, 50, 20, 0.1, dodge=True)
     v2 = float(mask_acc.data[50, 75])
     check("repeated stamps accumulate", v2 > v1, f"v1={v1:.3f} v2={v2:.3f}")
+
+    # 3b. Per-stroke capping prevents infinite accumulation during cursor hesitation
+    mask_cap = DodgeBurnMask.empty(100, 150)
+    base = mask_cap.data.copy()
+    for _ in range(20):
+        stamp_brush(mask_cap, 75, 50, 20, 0.1, dodge=True, stroke_baseline=base, max_stroke_delta=0.25)
+    v_capped = float(mask_cap.data[50, 75])
+    check("per-stroke capping prevents hot-spotting", abs(v_capped - 0.25) < 1e-4, f"v_capped={v_capped:.4f}")
 
     # 4. Mask value clipped, never explodes with many strokes
     mask_clip = DodgeBurnMask.empty(20, 20)

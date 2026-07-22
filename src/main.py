@@ -17,6 +17,7 @@ import theme
 # GPU demosaic backends (CuPy / optional torch) are deferred until after the
 # window is shown — see torch_bootstrap.import_gpu_backend_on_main_thread().
 # Background decode threads wait for that instead of importing on their own.
+import math
 import platform
 import ctypes
 import time
@@ -22933,12 +22934,20 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             sy = mh / max(1, disp_h)
             # Brush size slider is in *display* pixels; convert to mask space.
             radius = max(2.0, panel.dodge_burn_brush_radius() * sx)
-            # Per-point delta: brush-strength slider (0..1) * pressure,
-            # scaled so a short drag is still clearly visible after the
-            # full-quality settle (scene-linear + tone). Was 0.12 — too
-            # subtle once live uint8 patches were replaced by the real
-            # pipeline render.
-            delta = panel.dodge_burn_brush_strength() * max(0.05, float(pressure)) * 0.28
+            strength_val = panel.dodge_burn_brush_strength()
+
+            # Distance-based flow scaling: if the pointer barely moved since the last stamp point,
+            # scale down delta to prevent stationary hesitation hot-spots.
+            last_pt = getattr(self, "_dodge_burn_last_stamp_pt", None)
+            dist_factor = 1.0
+            if last_pt is not None:
+                dist = math.hypot(mx - last_pt[0], my - last_pt[1])
+                if dist < 0.25 * radius:
+                    dist_factor = max(0.15, dist / (0.25 * radius))
+            self._dodge_burn_last_stamp_pt = (mx, my)
+
+            delta = strength_val * max(0.05, float(pressure)) * 0.28 * dist_factor
+            max_stroke_cap = max(0.05, strength_val * max(0.05, float(pressure)) * 0.75)
 
             # Snapshot baseline once per stroke so live preview applies only
             # this stroke's mask delta (never re-bakes prior strokes into a
@@ -22955,6 +22964,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 self._dodge_burn_stroke_pixmap = None
                 self._dodge_burn_mask_at_stroke_start = mask.data.copy()
                 self._dodge_burn_stroke_dirty = None
+                self._dodge_burn_last_stamp_pt = (mx, my)
                 self._dodge_burn_stroke_perf = {
                     "n": 0,
                     "stamp_sum": 0.0,
@@ -23019,6 +23029,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                     chroma=chroma_guide,
                     edge_assist=edge_on,
                 )
+                if panel is not None and hasattr(panel, "set_dodge_burn_mask_present"):
+                    panel.set_dodge_burn_mask_present(not mask.is_empty)
                 # Also erase heal coverage under the same brush.
                 heal = getattr(self, "_spot_heal_mask", None)
                 if heal is not None and heal.data.shape == (mh, mw):
@@ -23036,6 +23048,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                     luminance=luma,
                     chroma=chroma_guide,
                     edge_assist=edge_on,
+                    stroke_baseline=getattr(self, "_dodge_burn_mask_at_stroke_start", None),
+                    max_stroke_delta=max_stroke_cap,
                 )
             stamp_ms = (time.perf_counter() - t_stamp) * 1000.0
             perf_acc = getattr(self, "_dodge_burn_stroke_perf", None)
@@ -23049,10 +23063,10 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                     "db_stamp",
                     stamp_ms,
                     getattr(self, "current_file_path", None),
-                    r=float(radius),
-                    edge=1 if edge_on else 0,
-                    mh=mh,
-                    mw=mw,
+                    w=mw,
+                    h=mh,
+                    mode=mode,
+                    edge_assist=edge_on,
                 )
             self._dodge_burn_stroke_active = True
             if mask.is_empty:
@@ -23084,8 +23098,6 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             mask_start = getattr(self, "_dodge_burn_mask_at_stroke_start", None)
             if baseline is not None and mask_start is not None:
                 import cv2
-
-                from raw_dodge_burn import circular_brush_falloff
 
                 t_patch = time.perf_counter()
                 x0, y0, x1, y1 = bbox
@@ -23207,6 +23219,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 self._dodge_burn_stroke_pixmap = None
                 self._dodge_burn_mask_at_stroke_start = None
                 self._dodge_burn_stroke_dirty = None
+                self._dodge_burn_last_stamp_pt = None
                 luminance = getattr(self, "_dodge_burn_luma_guide", None)
                 if luminance is None or getattr(luminance, "shape", None) != (mh, mw):
                     luminance = None
@@ -32737,18 +32750,19 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                         self.update_status_bar()
                     return True
                 
-                # Only navigate if image is fit-to-window (not zoomed)
-                if hasattr(self, 'fit_to_window') and self.fit_to_window:
-                    # Dodge/Burn armed: scroll changes brush size, not image.
+                # Editor mode: block plain wheel events over image area
+                if getattr(self, "_adjust_overlay_visible", False):
                     panel = getattr(self, "single_image_adjust_panel", None)
                     if (
                         panel is not None
-                        and getattr(self, "_adjust_overlay_visible", False)
                         and panel.dodge_burn_mode() is not None
                         and abs(vertical_delta) > 0
                     ):
                         self._on_dodge_burn_brush_size_wheel(int(vertical_delta))
-                        return True
+                    return True
+
+                # Browse mode: Only navigate if image is fit-to-window (not zoomed)
+                if hasattr(self, 'fit_to_window') and self.fit_to_window:
                     # In fit-to-window mode: only use vertical wheel for navigation
                     # Horizontal wheel is disabled for navigation
                     if abs(vertical_delta) > 0:
